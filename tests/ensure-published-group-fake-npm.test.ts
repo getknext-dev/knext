@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,6 +32,7 @@ import {
  */
 
 const REAL_PATH = process.env.PATH;
+const FAKE_NPM_MARKER = 'FAKE-NPM-9999.9999.9999';
 
 function fakeNpmScript(): string {
   // Reads two env knobs the individual tests set:
@@ -40,6 +42,11 @@ function fakeNpmScript(): string {
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
+
+if (argv[0] === '--version') {
+  process.stdout.write('${FAKE_NPM_MARKER}\\n');
+  process.exit(0);
+}
 
 if (argv[0] === 'view') {
   const target = argv[1]; // "<pkg>@<version>" or "<pkg>" (reachability probe)
@@ -101,6 +108,18 @@ beforeEach(() => {
   writeFileSync(npmPath, fakeNpmScript());
   chmodSync(npmPath, 0o755);
   process.env.PATH = `${binDir}${process.platform === 'win32' ? ';' : ':'}${REAL_PATH}`;
+
+  // Round-3 review (macOS): a real npm on PATH can shadow the fake one under
+  // some shells. Fail LOUDLY here, before any test's own assertions run,
+  // rather than silently exercising a real registry call.
+  const probe = spawnSync('npm', ['--version'], { encoding: 'utf8' });
+  const stdout = (probe.stdout ?? '').trim();
+  if (stdout !== FAKE_NPM_MARKER) {
+    throw new Error(
+      `fake npm is NOT first on PATH — 'npm --version' returned ${JSON.stringify(stdout)} ` +
+        `instead of ${JSON.stringify(FAKE_NPM_MARKER)} (stderr: ${probe.stderr ?? ''})`,
+    );
+  }
 
   pkgDir = mkdtempSync(join(tmpdir(), 'knext-fake-npm-pkg-'));
   writeFileSync(

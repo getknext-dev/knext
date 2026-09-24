@@ -198,6 +198,22 @@ export function fixedGroupProblems(manifests, fixedGroup) {
 /** Total poll budget for a single member's `--post` read (#1364 finding 1): ~5 minutes. */
 export const POST_POLL_MAX_MS = 5 * 60 * 1000;
 
+/**
+ * `runPost`'s actual poll budget: `POST_POLL_MAX_MS`, overridable ONLY by
+ * `VERIFY_POST_POLL_MAX_MS` — a test-only knob (#1364 round 3). Its purpose is
+ * narrow: let a PROCESS-LEVEL `--post` test (a fake npm on PATH, driving the
+ * real `runPost()` wiring end-to-end, not just `pollViewVersion` in
+ * isolation) fail FAST on a target version that never resolves, instead of
+ * the real ~5-minute budget. Production never sets this var, so the default
+ * is unchanged. See `tests/verify-published-group-post-e2e.test.ts`.
+ */
+function postPollMaxMs() {
+  const raw = process.env.VERIFY_POST_POLL_MAX_MS;
+  if (raw === undefined) return POST_POLL_MAX_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : POST_POLL_MAX_MS;
+}
+
 /** Capped exponential backoff for the `--post` poll — slower-growing than a quick retry, deliberately. */
 export function defaultPostPollBackoffMs(attempt) {
   return Math.min(15_000, 2_000 * 2 ** attempt);
@@ -326,6 +342,16 @@ function publishableDirs() {
 }
 
 /**
+ * Per-call timeout for every `npm view` spawn below (#1364 round 3, optional
+ * ask). `spawnSync`'s own `timeout` sends SIGTERM and sets `run.error`
+ * (ETIMEDOUT) — already the same "not ok" path each caller already takes for
+ * any other spawn error, so a hung npm process degrades exactly like a 404
+ * rather than stalling the whole `--post` job (which otherwise has no other
+ * bound on a single call within `pollViewVersion`'s own multi-minute budget).
+ */
+const NPM_SPAWN_TIMEOUT_MS = 30_000;
+
+/**
  * `npm view <name> version` → the version string, or null when npm exits
  * non-zero. Exported so a test can drive the real spawnSync + exit-code
  * boundary against a fake `npm` on PATH (mirrors `ensure-published-group.mjs`'s
@@ -335,7 +361,7 @@ export function npmViewVersion(name, registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', name, 'version', '--registry', registry],
-    { cwd: REPO_ROOT, encoding: 'utf8' },
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: NPM_SPAWN_TIMEOUT_MS },
   );
   if (run.error || run.status !== 0) return null;
   return run.stdout.trim();
@@ -352,7 +378,12 @@ export function npmResolvesAtVersion(name, version, registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', `${name}@${version}`, 'version', '--registry', registry],
-    { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: NPM_SPAWN_TIMEOUT_MS,
+    },
   );
   return !run.error && run.status === 0;
 }
@@ -361,7 +392,7 @@ export function npmProbe(registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', REACHABILITY_PROBE, 'version', '--registry', registry],
-    { cwd: REPO_ROOT, encoding: 'utf8' },
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: NPM_SPAWN_TIMEOUT_MS },
   );
   return !run.error && run.status === 0;
 }
@@ -449,6 +480,7 @@ async function runPost() {
         name,
         resolvesAtTarget: (n) => npmResolvesAtVersion(n, targetVersion, registry),
         sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        maxTotalMs: postPollMaxMs(),
       });
       // Once confirmed at the target, no need for a second read. Otherwise a
       // SINGLE best-effort plain `npm view <name> version` names whatever it
