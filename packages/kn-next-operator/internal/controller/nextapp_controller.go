@@ -779,6 +779,57 @@ func deepHealthPath(nextApp *appsv1alpha1.NextApp) string {
 	return readinessProbePath(nextApp) + "/deep"
 }
 
+// buildWritableVolumes renders the emptyDir volumes + mounts the app
+// container needs to keep working under readOnlyRootFilesystem (#1332).
+// Returns (nil, nil) when the root stays writable — the pre-#1332 rendering,
+// byte-identical.
+//
+// Two writable paths are provisioned, both audited against the ACTUAL
+// runtime write behaviour rather than assumed:
+//
+//   - /tmp: a universal scratch dir. Standard defense-in-depth practice, and
+//     cheap insurance against any as-yet-uncatalogued temp-file write (e.g. a
+//     native addon spilling to disk) in either build shape.
+//   - `.next/standalone/.next/cache/images`, STANDALONE SHAPE ONLY (build !=
+//     "vinext" — turbopack/webpack/unset all emit that same tree, mirroring
+//     the containerCommand branch above): Next's own built-in image optimizer
+//     writes optimized variants there at request time (image-cache-sync.ts /
+//     ADR-0006 then syncs them to the object store) — the one runtime write
+//     under the app root that is NOT fail-open. It lives at
+//     `/app/.next/standalone/.next/cache/images` per the shipped recipe
+//     (Dockerfile.standalone.hbs, WORKDIR /app). The vinext single-executable
+//     shape's own image optimizer (vinext-image-optimizer.ts) never touches
+//     local disk, so it needs no second mount.
+//
+// Deliberately NOT mounted: the baked V8/Node compile-cache directory
+// (`.next/standalone/.next/compile-cache`, NODE_COMPILE_CACHE). V8's handling
+// of an unwritable cache dir is fail-open (compile-cache-health.ts,
+// __tests__/compile-cache-volume-fallback.test.ts) — it silently falls back
+// to serving the baked, already-populated entries read-only rather than
+// erroring, so a read-only root costs no correctness there, only the (already
+// rare) chance of caching a NEW entry discovered at runtime.
+func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool) ([]corev1.Volume, []corev1.VolumeMount) {
+	if !readOnlyRootFS {
+		return nil, nil
+	}
+
+	const writableVolumeName = "knext-writable"
+	volumes := []corev1.Volume{
+		{Name: writableVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	volumeMounts := []corev1.VolumeMount{
+		{Name: writableVolumeName, MountPath: "/tmp", SubPath: "tmp"},
+	}
+	if nextApp.Spec.Build != "vinext" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      writableVolumeName,
+			MountPath: "/app/.next/standalone/.next/cache/images",
+			SubPath:   "next-image-cache",
+		})
+	}
+	return volumes, volumeMounts
+}
+
 func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) error {
 	// Determine the SHALLOW readiness/liveness probe path (#338).
 	healthPath := readinessProbePath(nextApp)
@@ -928,13 +979,12 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 
 	envVars, envFrom := r.buildKsvcEnv(nextApp)
 
-	// No volumes are mounted into the app container. The PVC-backed bytecode cache
-	// that used to live here is gone — the V8 compile cache is baked into the image
-	// at build time (ADR-0035), so there is nothing to persist across cold starts.
-	// Kept as declared-empty rather than deleted so a future volume has an obvious
-	// seam, and so the ksvc build reads the same on both paths.
-	var volumes []corev1.Volume
-	var volumeMounts []corev1.VolumeMount
+	// readOnlyRootFilesystem (#1332): default-on, same posture as the
+	// image-prewarm job container (image_prewarm.go) and the same
+	// nil-means-true convention as the sibling NetworkPolicy field above.
+	readOnlyRootFS := nextApp.Spec.Security == nil || nextApp.Spec.Security.ReadOnlyRootFilesystem == nil ||
+		*nextApp.Spec.Security.ReadOnlyRootFilesystem
+	volumes, volumeMounts := buildWritableVolumes(nextApp, readOnlyRootFS)
 
 	// ContainerConcurrency default (#377, ADR-0028). Lowered from 100 → 20: a
 	// pod absorbing 100 concurrent requests before Knative added a 2nd replica
@@ -1044,6 +1094,9 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 			Env:          envVars,
 			EnvFrom:      envFrom,
 			VolumeMounts: volumeMounts,
+			SecurityContext: &corev1.SecurityContext{
+				ReadOnlyRootFilesystem: ptr.To(readOnlyRootFS),
+			},
 			Ports: []corev1.ContainerPort{
 				{ContainerPort: 3000},
 			},

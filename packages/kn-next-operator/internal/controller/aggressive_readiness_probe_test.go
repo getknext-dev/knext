@@ -165,7 +165,17 @@ func TestStampedProbesPassKnativeValidation(t *testing.T) {
 		t.Fatalf("after Knative defaulting readiness successThreshold = %d, want the Knative default 1", c.ReadinessProbe.SuccessThreshold)
 	}
 
-	if err := serving.ValidateUserContainer(ctx, c, nil, c.Ports[0]); err != nil {
+	// volumes must be the REAL rendered set (#1332 stamps a readOnlyRootFilesystem
+	// emptyDir + mounts by default): ValidateUserContainer's volumeMount check
+	// cross-references its `volumes` argument by name, so passing nil here would
+	// reject every stamped mount as "no matching volume" regardless of whether the
+	// actual ksvc (which DOES declare them, at Spec.Template.Spec.Volumes) is valid.
+	volumes := map[string]corev1.Volume{}
+	for _, v := range ksvc.Spec.Template.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+
+	if err := serving.ValidateUserContainer(ctx, c, volumes, c.Ports[0]); err != nil {
 		t.Fatalf("Knative rejected the stamped container: %v", err)
 	}
 }

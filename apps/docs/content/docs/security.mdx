@@ -115,6 +115,31 @@ a detector that guessed "enforced" would be worse than none. `kn-next doctor` ru
 read-only detection as a preflight check. Note that flannel is what OrbStack and stock OKE clusters
 run — on those, treat network isolation as absent unless you install a policy-capable CNI.
 
+## Read-only root filesystem
+
+Defense in depth against in-container tampering: knext renders your app's container with a
+**read-only root filesystem** by default.
+
+- **Toggle:** `spec.security.readOnlyRootFilesystem` (`*bool`). `nil` (unset) or `true` renders
+  `readOnlyRootFilesystem: true` on the container (**default-on**); `false` keeps a writable root,
+  the pre-existing behavior.
+- **Your app keeps working.** The few paths a knext runtime actually writes to at request time are
+  provisioned as explicit, writable scratch volumes rather than left on the (now read-only) image
+  filesystem:
+  - `/tmp` — a general scratch directory.
+  - The Next.js image optimizer's on-disk variant cache, for the standalone (Node/Bun) build
+    target. The vinext single-executable build target needs no second volume — its image
+    optimizer never writes to local disk.
+- **What this does not affect:** the baked, build-time code cache your runtime warms into the image
+  stays fully readable; a read-only root only removes the (already rare) ability to add a *new*
+  entry to it at request time, never the ability to read what shipped.
+
+<Callout type="warn">
+**If your own code writes to a path under the app's working directory at runtime** (outside the
+paths above), a read-only root filesystem will reject that write. Either move the write under
+`/tmp`, or set `spec.security.readOnlyRootFilesystem: false` to opt out.
+</Callout>
+
 ## Digest pinning
 
 knext rejects mutable image tags everywhere.
