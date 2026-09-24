@@ -95,6 +95,17 @@ pre-pull, if you enable it — pulls with the same credentials. Leave it out and
 leaves the first pods stuck in `ImagePullBackOff`; adding the secret afterwards does not rescue the
 running revision, so you would have to deploy again. Naming it here is the whole fix.
 
+## Env vars and secrets do not belong in the image
+
+Do not rely on a local `.env`/`.env.production` file to carry secrets to production — it is not
+baked into the runtime image, and it should not be. Configuration reaches the deployed app two
+ways instead:
+
+- **Plain, non-secret values** — `env` in `kn-next.config.ts`, applied straight to the container.
+- **Secrets** — a Kubernetes Secret, referenced from `secrets.envFrom`/`secrets.envMap` in
+  `kn-next.config.ts`. The operator injects it at the container level; it is never written to a
+  file inside the image.
+
 ## The one line that matters most
 
 ```ts
