@@ -1,5 +1,11 @@
 # @getknext/db
 
+## 0.4.3
+
+### Patch Changes
+
+- @getknext/lib@0.4.3
+
 ## 0.4.2
 
 ### Patch Changes
