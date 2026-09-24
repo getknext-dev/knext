@@ -58,7 +58,7 @@ jobs:
           chmod +x actionlint
           ./actionlint -version
 
-      - name: Compute the workflow/composite-action files this diff actually changed
+      - name: Compute the workflow files this diff actually changed
         id: diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -67,17 +67,14 @@ jobs:
           set -euo pipefail
           base="${BASE_SHA}"
           head="${HEAD_SHA}"
-          # #1352 — `.github/actions/**/action.yml`/`.yaml` (composite action
-          # definitions) are linted the same way as workflow files: actionlint
-          # supports them directly. None exist in this repo today, but the
-          # glob is widened now so the gate does not need a second PR the day
-          # one lands.
-          globs=('.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/action.yml' '.github/actions/**/action.yaml')
+          workflow_globs=('.github/workflows/*.yml' '.github/workflows/*.yaml')
+          action_globs=('.github/actions/**/action.yml' '.github/actions/**/action.yaml')
           # A push with no prior commit (`before` all-zeros, first push to a
           # new branch) has nothing to diff against — fall back to lint every
-          # workflow/composite-action file rather than silently linting nothing.
+          # workflow file rather than silently linting nothing.
           if [ -z "${base}" ] || [ "${base}" = "0000000000000000000000000000000000000000" ]; then
-            files="$(git -C . ls-files "${globs[@]}")"
+            changed_workflows="$(git -C . ls-files "${workflow_globs[@]}")"
+            changed_actions="$(git -C . ls-files "${action_globs[@]}")"
           else
             # #1300 review round 4 (finding 3) — no `|| true`: a real `git
             # diff` error (e.g. `base` unresolvable) must fail this step, not
@@ -87,13 +84,32 @@ jobs:
             # only deletes a workflow/composite-action file fails this step
             # with a false "file not found" instead of correctly linting
             # nothing.
-            files="$(git diff --name-only --diff-filter=d "${base}" "${head}" -- "${globs[@]}")"
+            changed_workflows="$(git diff --name-only --diff-filter=d "${base}" "${head}" -- "${workflow_globs[@]}")"
+            changed_actions="$(git diff --name-only --diff-filter=d "${base}" "${head}" -- "${action_globs[@]}")"
           fi
+          # #1397 review — actionlint 1.7.12 REJECTS a composite `action.yml`
+          # passed as a CLI argument outright ("jobs section is missing",
+          # "unexpected key runs": explicit file args are always treated as
+          # WORKFLOW files, never as composite-action manifests — verified
+          # live against the exact pinned binary, not assumed from docs).
+          # `action.yml`/`action.yaml` paths are therefore NEVER added to the
+          # lint list. Instead, when a composite action changed, every
+          # WORKFLOW that consumes ANY local composite action (`uses: ./...`)
+          # is re-linted — that IS how actionlint validates a local composite
+          # action's `uses:` reference (as part of the referencing workflow),
+          # and it is the only way this gate can react to a composite-action
+          # change at all without ever handing actionlint a file type it
+          # rejects.
+          referencing_workflows=""
+          if [ -n "${changed_actions}" ]; then
+            referencing_workflows="$(grep -lE 'uses:[[:space:]]*\./\.github/actions/' .github/workflows/*.y*ml 2>/dev/null || true)"
+          fi
+          files="$(printf '%s\n%s\n' "${changed_workflows}" "${referencing_workflows}" | sed '/^$/d' | sort -u)"
           if [ -z "${files}" ]; then
-            echo "no workflow files changed in this diff — nothing to lint"
+            echo "no workflow files (directly changed, or referencing a changed composite action) — nothing to lint"
             echo "files=" >>"$GITHUB_OUTPUT"
           else
-            echo "changed workflow files:"
+            echo "changed/composite-action-referencing workflow files:"
             echo "${files}"
             {
               echo "files<<ACTIONLINT_FILES_EOF"
