@@ -30,6 +30,35 @@
  *           probe against a package that certainly exists), mirroring
  *           publish-preflight.mjs — an unanswerable question is never a pass.
  *
+ *           #1364 finding 1: `--post` used to read each member with ONE
+ *           `npm view`, no retry. Run 36040935670 (0.4.3) measured why that is
+ *           not enough: `ensure-published-group.mjs` absorbed npm's conflict
+ *           for `core`/`kn-next` (proof they were ACCEPTED) at 18:30:46, but
+ *           `--post`'s single read at 18:32:39 still saw the OLD version —
+ *           npm's own package `time` field shows `core@0.4.3` was not
+ *           COMMITTED (durably visible) until 18:33:00, ~2.5 minutes of
+ *           registry read-after-write lag. `viewVersion` is now polled with
+ *           a generous, bounded budget (`POST_POLL_MAX_MS`, default ~5
+ *           minutes, capped backoff) BEFORE `registryGroupProblems` judges it
+ *           — this is the run's REAL confirmation; `ensure-published-group
+ *           .mjs`'s own poll is deliberately brief and non-gating (it must
+ *           not itself run for minutes on every release). Still fails closed:
+ *           a member that never resolves within the budget is still reported
+ *           missing/incoherent exactly as before.
+ *
+ *           #1364 round 2: the FIRST version of the poll checked `npm view
+ *           <name> version` (no `@version`) and returned as soon as that
+ *           came back NON-NULL. That command reports whatever the `latest`
+ *           dist-tag currently resolves to — during the lag window that is
+ *           the OLD version, exit 0, non-null — so the poll returned on
+ *           round ONE with the stale version and the caller reported it
+ *           incoherent immediately (`elapsed === 0`), reproducing the exact
+ *           bug this file exists to fix. `pollViewVersion` now polls
+ *           `npm view <name>@<targetVersion> version` BY EXIT CODE
+ *           (`npmResolvesAtVersion`, the same shape as `ensure-published-
+ *           group.mjs`'s `npmResolvesAt`) — the only read that answers "did
+ *           THIS publish land", not "does the name resolve to something".
+ *
  * The pure decision logic is exported and unit-tested without a network or a
  * real publish; main() supplies the process spawns.
  *
@@ -166,6 +195,82 @@ export function fixedGroupProblems(manifests, fixedGroup) {
   return problems;
 }
 
+/** Total poll budget for a single member's `--post` read (#1364 finding 1): ~5 minutes. */
+export const POST_POLL_MAX_MS = 5 * 60 * 1000;
+
+/**
+ * `runPost`'s actual poll budget: `POST_POLL_MAX_MS`, overridable ONLY by
+ * `VERIFY_POST_POLL_MAX_MS` — a test-only knob (#1364 round 3). Its purpose is
+ * narrow: let a PROCESS-LEVEL `--post` test (a fake npm on PATH, driving the
+ * real `runPost()` wiring end-to-end, not just `pollViewVersion` in
+ * isolation) fail FAST on a target version that never resolves, instead of
+ * the real ~5-minute budget. Production never sets this var, so the default
+ * is unchanged. See `tests/verify-published-group-post-e2e.test.ts`.
+ */
+function postPollMaxMs() {
+  const raw = process.env.VERIFY_POST_POLL_MAX_MS;
+  if (raw === undefined) return POST_POLL_MAX_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : POST_POLL_MAX_MS;
+}
+
+/** Capped exponential backoff for the `--post` poll — slower-growing than a quick retry, deliberately. */
+export function defaultPostPollBackoffMs(attempt) {
+  return Math.min(15_000, 2_000 * 2 ** attempt);
+}
+
+/**
+ * Poll `resolvesAtTarget(name)` — TRUE iff the registry resolves `name` AT
+ * THE SPECIFIC TARGET VERSION (an `npm view <name>@<version> version`
+ * exit-code check, like `ensure-published-group.mjs`'s `npmResolvesAt`) —
+ * until it is TRUE or the total elapsed time exceeds `maxTotalMs`. Pure —
+ * `resolvesAtTarget` and `sleep` are injected, no network here.
+ *
+ * #1364 round 2: the FIRST version of this function polled `npm view <name>
+ * version` (no `@version`) and returned on ANY non-null result. That command
+ * reports whatever the `latest` dist-tag currently resolves to — during
+ * read-after-write lag that is the OLD version, exit 0, non-null — so the
+ * poll returned on round ONE with the STALE version and the caller reported
+ * it incoherent immediately, `elapsed === 0`, reproducing the exact original
+ * bug this whole file exists to fix. Checking the SPECIFIC target version's
+ * existence (exit-code, not printed text) is the only read that actually
+ * answers "did THIS publish land" rather than "does the name resolve to
+ * something".
+ *
+ * `--post` has no retry of its own otherwise: a single racy read after
+ * `changeset publish` measured ~2.5 minutes of registry read-after-write lag
+ * in production (#1364, run 36040935670) — long enough that
+ * `ensure-published-group.mjs`'s own brief, non-gating confirmation poll
+ * cannot cover it (that poll must stay short; it runs on EVERY release, not
+ * just the rare slow one). This is the run's real, bounded confirmation.
+ *
+ * @param {{
+ *   name: string,
+ *   resolvesAtTarget: (name: string) => boolean,
+ *   sleep: (ms: number) => Promise<void>,
+ *   maxTotalMs?: number,
+ *   backoffMs?: (attempt: number) => number,
+ *   now?: () => number,
+ * }} input
+ * @returns {Promise<boolean>} TRUE once the target version is seen, FALSE if the budget ran out
+ */
+export async function pollViewVersion({
+  name,
+  resolvesAtTarget,
+  sleep,
+  maxTotalMs = POST_POLL_MAX_MS,
+  backoffMs = defaultPostPollBackoffMs,
+  now = Date.now,
+}) {
+  const start = now();
+  for (let attempt = 0; ; attempt++) {
+    if (resolvesAtTarget(name)) return true;
+    const elapsed = now() - start;
+    if (elapsed >= maxTotalMs) return false;
+    await sleep(Math.min(backoffMs(attempt), maxTotalMs - elapsed));
+  }
+}
+
 /**
  * Post-publish: every fixed-group member must resolve, on the registry, to the
  * target version just published. Pure — the registry read is injected.
@@ -236,22 +341,58 @@ function publishableDirs() {
   );
 }
 
-/** `npm view <name> version` → the version string, or null when npm exits non-zero. */
-function npmViewVersion(name, registry) {
+/**
+ * Per-call timeout for every `npm view` spawn below (#1364 round 3, optional
+ * ask). `spawnSync`'s own `timeout` sends SIGTERM and sets `run.error`
+ * (ETIMEDOUT) — already the same "not ok" path each caller already takes for
+ * any other spawn error, so a hung npm process degrades exactly like a 404
+ * rather than stalling the whole `--post` job (which otherwise has no other
+ * bound on a single call within `pollViewVersion`'s own multi-minute budget).
+ */
+const NPM_SPAWN_TIMEOUT_MS = 30_000;
+
+/**
+ * `npm view <name> version` → the version string, or null when npm exits
+ * non-zero. Exported so a test can drive the real spawnSync + exit-code
+ * boundary against a fake `npm` on PATH (mirrors `ensure-published-group.mjs`'s
+ * `npmResolvesAt`).
+ */
+export function npmViewVersion(name, registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', name, 'version', '--registry', registry],
-    { cwd: REPO_ROOT, encoding: 'utf8' },
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: NPM_SPAWN_TIMEOUT_MS },
   );
   if (run.error || run.status !== 0) return null;
   return run.stdout.trim();
 }
 
-function npmProbe(registry) {
+/**
+ * `npm view <name>@<version> version` — TRUE iff npm exited 0 (branch on exit
+ * code, never the printed text — mirrors `ensure-published-group.mjs`'s
+ * `npmResolvesAt`). #1364 round 2: this is the read `pollViewVersion` polls,
+ * because a bare `npm view <name> version` reports the `latest` dist-tag
+ * regardless of whether THIS run's target version is what it points at.
+ */
+export function npmResolvesAtVersion(name, version, registry) {
+  const run = spawnSync(
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    ['view', `${name}@${version}`, 'version', '--registry', registry],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: NPM_SPAWN_TIMEOUT_MS,
+    },
+  );
+  return !run.error && run.status === 0;
+}
+
+export function npmProbe(registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', REACHABILITY_PROBE, 'version', '--registry', registry],
-    { cwd: REPO_ROOT, encoding: 'utf8' },
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: NPM_SPAWN_TIMEOUT_MS },
   );
   return !run.error && run.status === 0;
 }
@@ -314,7 +455,7 @@ function runPre() {
   );
 }
 
-function runPost() {
+async function runPost() {
   const registry = process.env.PUBLISH_PREFLIGHT_REGISTRY || DEFAULT_REGISTRY;
   const config = readChangesetConfig();
   const fixedGroup = config.fixed?.[0] ?? [];
@@ -327,13 +468,35 @@ function runPost() {
   if (typeof targetVersion !== 'string')
     die(`could not read a target version for ${fixedGroup[0]}`);
 
+  // #1364 finding 1: probe reachability ONCE, up front, exactly as before — an
+  // unreachable registry must fail immediately, not after minutes of polling
+  // members that could never have answered. Only when reachable do we spend
+  // the (potentially minutes-long) per-member poll budget.
+  const probeOk = npmProbe(registry);
+  const resolved = new Map();
+  if (probeOk) {
+    for (const name of fixedGroup) {
+      const hitTarget = await pollViewVersion({
+        name,
+        resolvesAtTarget: (n) => npmResolvesAtVersion(n, targetVersion, registry),
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        maxTotalMs: postPollMaxMs(),
+      });
+      // Once confirmed at the target, no need for a second read. Otherwise a
+      // SINGLE best-effort plain `npm view <name> version` names whatever it
+      // currently resolves to (or null) — purely for `registryGroupProblems`'s
+      // diagnostic message; it never re-litigates the poll's own verdict.
+      resolved.set(name, hitTarget ? targetVersion : npmViewVersion(name, registry));
+    }
+  }
+
   let problems;
   try {
     problems = registryGroupProblems({
       members: fixedGroup,
       targetVersion,
-      probeOk: npmProbe(registry),
-      viewVersion: (name) => npmViewVersion(name, registry),
+      probeOk,
+      viewVersion: (name) => resolved.get(name) ?? null,
     });
   } catch (err) {
     if (!(err instanceof RegistryUnreachableError)) throw err;
@@ -349,13 +512,16 @@ function runPost() {
   );
 }
 
-function main() {
+async function main() {
   const mode = process.argv[2];
   if (mode === '--pre') return runPre();
-  if (mode === '--post') return runPost();
+  if (mode === '--post') return await runPost();
   die('usage: verify-published-group.mjs --pre | --post');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
 }
