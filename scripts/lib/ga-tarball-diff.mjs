@@ -7,8 +7,9 @@
  * anything OTHER than version fields, the credential does not cover what
  * ships. This module is the pure decision — packing/CLI plumbing lives in
  * `scripts/ga-tarball-diff.mjs`, and reading the tar stream itself lives in
- * `scripts/lib/tar-inventory.mjs`, so this half is testable without spawning
- * `tar`/`bun` or touching disk.
+ * `scripts/lib/tar-entries.mjs` (via `node-tar`, the same library
+ * `npm`/`pacote` extract with — see that file for why), so this half is
+ * testable without spawning `bun` or touching disk.
  *
  * ALLOWED deltas between an rc tree and its GA counterpart, and nothing else:
  *
