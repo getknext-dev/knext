@@ -208,11 +208,14 @@ describe('#1300: compat-matrix-tracker.mjs owns pinning, on both its branches', 
 describe('#1300: compat-matrix-tracker.mjs refuses to publish a fetch-failure matrix (review finding 3)', () => {
   const scriptText = readFileSync(resolve(REPO_ROOT, 'scripts/compat-matrix-tracker.mjs'), 'utf8');
 
-  it('main() checks looksLikeFetchFailure BEFORE any gh issue/label call', () => {
+  it('main() checks looksLikeFetchFailure UNCONDITIONALLY, before any gh issue/label call', () => {
     const main = scriptText.slice(scriptText.indexOf('function main('));
-    const checkIdx = main.indexOf('looksLikeFetchFailure(');
+    // The exact, unbroken condition — not merely "the string appears before
+    // the first gh call" (a `false && looksLikeFetchFailure(matrix)` mutant
+    // would still satisfy a position-only check while disabling the guard).
+    expect(main).toContain('if (looksLikeFetchFailure(matrix)) {');
+    const checkIdx = main.indexOf('if (looksLikeFetchFailure(matrix)) {');
     const firstGhCallIdx = main.indexOf("gh([\n    'label'");
-    expect(checkIdx).toBeGreaterThan(-1);
     expect(firstGhCallIdx).toBeGreaterThan(-1);
     expect(checkIdx).toBeLessThan(firstGhCallIdx);
   });
