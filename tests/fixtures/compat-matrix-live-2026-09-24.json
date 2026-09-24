@@ -21,9 +21,7 @@
           "passed": 0,
           "failed": 0,
           "notRun": 0,
-          "disqualifiers": [
-            "no-ledger"
-          ],
+          "disqualifiers": ["no-ledger"],
           "eligible": false,
           "unresolved": "no-ledger"
         }
@@ -78,9 +76,7 @@
           "passed": 0,
           "failed": 0,
           "notRun": 0,
-          "disqualifiers": [
-            "no-ledger"
-          ],
+          "disqualifiers": ["no-ledger"],
           "eligible": false,
           "unresolved": "no-ledger"
         }
