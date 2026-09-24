@@ -180,6 +180,20 @@ The native image-optimization codec cannot live *inside* the binary, so knext sh
 the executable in the image and loads it by path; `/_next/image` serves optimized AVIF/WebP exactly
 as it does on a folder deployment. See [image optimization](/docs/image-optimization).
 
+Some server dependencies stay **outside** the nitro bundle and are loaded when the server runs. For
+example, vinext keeps every `@opentelemetry/*` package your app depends on external. On a folder
+deployment those load from `.output/server/node_modules`, which does not exist next to the
+executable, so `kn-next build` bakes them **into** the binary. If one of them cannot be resolved at
+build time, the build still succeeds but prints a warning:
+
+```text
+[knext compile] WARNING: the entry runtime-requires package(s) that do not resolve from … and
+cannot be bundled: <package> — the binary throws if that code path runs
+```
+
+Install the named package as a dependency of your app and rebuild. Otherwise, any request that
+reaches code using that package fails with `Cannot find module '<package>'`.
+
 ## Requirements
 
 ### Your app must be an ES module

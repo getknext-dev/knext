@@ -239,10 +239,12 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
 
     it("injects the guard as the entry’s FIRST import (mutation anchor)", () => {
         // The exact injection statement. Removing it — the mutation — deletes this
-        // substring and reds the test. It must PREPEND to the entry source (`${raw}`
-        // after it), so the guard evaluates before srvx/bun calls Bun.serve.
-        // biome-ignore lint/suspicious/noTemplateCurlyInString: the LITERAL source substring being asserted, not a template
-        const injection = "`import ${JSON.stringify(GUARD_FILE)};\\n${raw}`";
+        // substring and reds the test. It must PREPEND to the entry source (the
+        // #1309-staticized `raw`, after it), so the guard evaluates before srvx/bun
+        // calls Bun.serve.
+        const injection =
+            // biome-ignore lint/suspicious/noTemplateCurlyInString: the LITERAL source substring being asserted, not a template
+            "`import ${JSON.stringify(GUARD_FILE)};\\n${staticized.contents}`";
         expect(src()).toContain(injection);
     });
 
