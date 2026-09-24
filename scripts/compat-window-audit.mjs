@@ -249,8 +249,15 @@ export const CREDENTIAL_CELLS = Object.freeze([
     wired: false,
     workflowFile: 'compat-vinext.yml',
     // compat-vinext.yml has no credential mode yet (#1294 round 2 note), so it
-    // runs compat-run-ledger.mjs but never compat-credential-ref.mjs.
-    extraFiles: Object.freeze(['scripts/compat-run-ledger.mjs']),
+    // runs compat-run-ledger.mjs but never compat-credential-ref.mjs. It also
+    // runs the quarantine ledger (#1321), which reclassifies this cell's
+    // results, so the script and the ledger it reads are frozen for THIS cell
+    // only (named outside the shared e2e-*/deploy-tests-manifest.* roots).
+    extraFiles: Object.freeze([
+      'scripts/compat-run-ledger.mjs',
+      'scripts/compat-vinext-ledger.mjs',
+      'test/compat-vinext-ledger.json',
+    ]),
   }),
 ]);
 
