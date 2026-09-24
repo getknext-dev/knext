@@ -1,6 +1,7 @@
 # ADR-0035: The V8 compile cache is baked into the image at build time
 
-- Status: Accepted
+- Status: Accepted. **Extended by ADR-0059 (2026-09-24, Proposed):** the threat model for running
+  user code during the bake, its network and secret boundaries, and the opt-out.
 - Date: 2026-07-20
 - Deciders: knext architect
 - Related: ADR-0034 (bytecode caching decoupled from the data-cache provider and default-OFF —
