@@ -503,7 +503,9 @@ describe("the deployed Cache-Control rule in the vinext × node image", () => {
         expect(isr.status).toBe(200);
         // vinext's own origin value for this page on Node, measured in this
         // image with both layers off. Anything else means a layer still ran.
-        expect(isr.headers.get("cache-control")).toBe("no-store, must-revalidate");
+        expect(isr.headers.get("cache-control")).toBe(
+            "no-store, must-revalidate",
+        );
     });
 });
 
