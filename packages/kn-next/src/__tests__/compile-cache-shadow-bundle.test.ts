@@ -214,12 +214,24 @@ beforeAll(async () => {
     if (typeof target !== "string") {
         throw new Error(`unmodelled tsup target shape: ${String(target)}`);
     }
+    // tsup accepts strings and RegExps in `external`; esbuild's own `external`
+    // takes only strings, so a RegExp entry is modelled the way tsup does it:
+    // an onResolve that marks matching imports external. Anything else is an
+    // unmodelled shape and fails loudly rather than being silently dropped.
     if (
         !Array.isArray(external) ||
-        external.some((e) => typeof e !== "string")
+        external.some((e) => typeof e !== "string" && !(e instanceof RegExp))
     ) {
-        throw new Error("tsup externals are no longer a string array");
+        throw new Error(
+            "tsup externals are no longer an array of strings and RegExps",
+        );
     }
+    const externalStrings = external.filter(
+        (e): e is string => typeof e === "string",
+    );
+    const externalPatterns = external.filter(
+        (e): e is RegExp => e instanceof RegExp,
+    );
 
     const result = await build({
         absWorkingDir: PKG_ROOT,
@@ -231,7 +243,22 @@ beforeAll(async () => {
         target,
         // Same externals as the shipped build — they resolve from the published
         // package's own dependencies at install time.
-        external: external.map(String),
+        external: externalStrings,
+        plugins: externalPatterns.length
+            ? [
+                  {
+                      name: "tsup-regexp-externals",
+                      setup(b) {
+                          for (const re of externalPatterns) {
+                              b.onResolve({ filter: re }, (args) => ({
+                                  path: args.path,
+                                  external: true,
+                              }));
+                          }
+                      },
+                  },
+              ]
+            : [],
     });
     bundle = result.outputFiles.map((file: OutputFile) => file.text).join("\n");
     expect(bundle.length).toBeGreaterThan(0);
