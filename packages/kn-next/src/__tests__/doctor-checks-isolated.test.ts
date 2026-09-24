@@ -442,6 +442,106 @@ describe("ingressCheck (isolated)", () => {
         expect(r?.status).toBe("fail");
         expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
     });
+
+    // B7 (#1238) gap-fill: the earlier pair only reaches PASS and the
+    // kourier-class/no-reconciler FAIL. Five more branches were never hit:
+    // both infra-error early-returns, the genuine configmap-absent FAIL, and
+    // the two WARN outcomes for a non-kourier or mismatched ingress-class.
+    it("ERROR when the config-network probe itself fails (network-classified stderr)", () => {
+        const [r] = ingressCheck(
+            makeCtx({
+                [NET_KEY]: {
+                    ok: false,
+                    stderr: "connection refused",
+                },
+            }),
+        );
+        expect(r?.status).toBe("error");
+        expect(r?.hint?.trim()).toBeTruthy();
+    });
+
+    it("FAIL when config-network genuinely does not exist (Knative Serving not installed)", () => {
+        const [r] = ingressCheck(
+            makeCtx({
+                [NET_KEY]: {
+                    ok: false,
+                    stderr: 'Error from server (NotFound): "config-network" not found',
+                },
+            }),
+        );
+        expect(r?.status).toBe("fail");
+        expect(r?.detail).toContain("is Knative Serving installed?");
+    });
+
+    it("ERROR when the kourier-reconciler probe itself fails on BOTH namespaces (network-classified)", () => {
+        const [r] = ingressCheck(
+            makeCtx({
+                [NET_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        data: { "ingress-class": KOURIER_INGRESS_CLASS },
+                    }),
+                },
+                [KOURIER_KEY]: {
+                    ok: false,
+                    stderr: "connection refused",
+                },
+                "kubectl get deployment net-kourier-controller -n kourier-system -o json":
+                    {
+                        ok: false,
+                        stderr: "connection refused",
+                    },
+            }),
+        );
+        expect(r?.status).toBe("error");
+        expect(r?.detail).toContain(
+            "kourier-reconciler presence could not be verified",
+        );
+    });
+
+    it("WARN when a Ready kourier reconciler exists but config-network points at a different class", () => {
+        const [r] = ingressCheck(
+            makeCtx({
+                [NET_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        data: {
+                            "ingress-class":
+                                "istio.ingress.networking.knative.dev",
+                        },
+                    }),
+                },
+                [KOURIER_KEY]: {
+                    ok: true,
+                    stdout: singleDeployJson("net-kourier-controller"),
+                },
+            }),
+        );
+        expect(r?.status).toBe("warn");
+        expect(r?.detail).toContain("silently skipped");
+    });
+
+    it("WARN when the class is non-kourier and no kourier reconciler was found at all", () => {
+        const [r] = ingressCheck(
+            makeCtx({
+                [NET_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        data: {
+                            "ingress-class":
+                                "istio.ingress.networking.knative.dev",
+                        },
+                    }),
+                },
+                [KOURIER_KEY]: {
+                    ok: false,
+                    stderr: 'Error from server (NotFound): "x" not found',
+                },
+            }),
+        );
+        expect(r?.status).toBe("warn");
+        expect(r?.detail).toContain("no net-kourier reconciler was found");
+    });
 });
 
 describe("operatorImageCheck (isolated)", () => {
@@ -646,6 +746,132 @@ describe("metricsCheck (isolated)", () => {
         );
         expect(r?.status).toBe("fail");
         expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
+    });
+
+    // B7 (#1238) gap-fill: real branches the earlier PASS/FAIL pair above
+    // never exercised — the two infra-error paths, the legacy config key, the
+    // "unknown protocol" fallback, and the two onUserMetrics outcomes.
+    it("ERROR when the config-observability probe itself fails (network-classified stderr)", () => {
+        const [r] = metricsCheck(
+            makeCtx({
+                [OBS_KEY]: {
+                    ok: false,
+                    stderr: "connection refused",
+                },
+            }),
+        );
+        expect(r?.status).toBe("error");
+        expect(r?.hint?.trim()).toBeTruthy();
+    });
+
+    it("ERROR when the nextapps list probe itself fails (network-classified stderr)", () => {
+        const [r] = metricsCheck(
+            makeCtx({
+                [OBS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        data: { "request-metrics-protocol": "none" },
+                    }),
+                },
+                [NEXTAPPS_KEY]: {
+                    ok: false,
+                    stderr: "connection refused",
+                },
+            }),
+        );
+        expect(r?.status).toBe("error");
+        expect(r?.detail).toContain(
+            "METRICS_PORT overrides could not be verified",
+        );
+    });
+
+    it("PASS-with-unknown-caveat when the configmap doesn't exist at all (NotFound, not infra)", () => {
+        const [r] = metricsCheck(
+            makeCtx({
+                [OBS_KEY]: {
+                    ok: false,
+                    stderr: 'Error from server (NotFound): "x" not found',
+                },
+                [NEXTAPPS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({ items: [] }),
+                },
+            }),
+        );
+        expect(r?.status).toBe("pass");
+        expect(r?.detail).toContain("config-observability not found");
+    });
+
+    it("honours the LEGACY backend-destination key, not just the modern protocol key", () => {
+        const [r] = metricsCheck(
+            makeCtx({
+                [OBS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        data: {
+                            "metrics.request-metrics-backend-destination":
+                                "prometheus",
+                        },
+                    }),
+                },
+                [NEXTAPPS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        items: [
+                            {
+                                metadata: { name: "web", namespace: "demo" },
+                                spec: { env: { METRICS_PORT: "9091" } },
+                            },
+                        ],
+                    }),
+                },
+            }),
+        );
+        expect(r?.status).toBe("fail");
+        expect(r?.detail).toContain("backend-destination");
+    });
+
+    it("WARN (not fail) when :9091 is pinned but the protocol cannot be determined", () => {
+        const [r] = metricsCheck(
+            makeCtx({
+                [OBS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({ data: {} }),
+                },
+                [NEXTAPPS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        items: [
+                            {
+                                metadata: { name: "web", namespace: "demo" },
+                                spec: { env: { METRICS_PORT: "9091" } },
+                            },
+                        ],
+                    }),
+                },
+            }),
+        );
+        expect(r?.status).toBe("warn");
+        expect(r?.detail).toContain("WILL");
+    });
+
+    it("PASS when the backend is an explicit non-prometheus value (neither none nor prometheus)", () => {
+        const [r] = metricsCheck(
+            makeCtx({
+                [OBS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        data: { "request-metrics-protocol": "opencensus" },
+                    }),
+                },
+                [NEXTAPPS_KEY]: {
+                    ok: true,
+                    stdout: JSON.stringify({ items: [] }),
+                },
+            }),
+        );
+        expect(r?.status).toBe("pass");
+        expect(r?.detail).toContain('backend is "opencensus"');
     });
 });
 
