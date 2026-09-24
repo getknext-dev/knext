@@ -12,11 +12,18 @@ name: File-manager platform e2e (nightly / dispatch)
 #                           next/font/google (Geist) served at a real served URL
 #                           (#1284, fixed - no exemption; a font 404 or a leaked
 #                           build-machine path is an ordinary failure)
+#   D. storage-mode leg   - a SECOND NextApp (file-manager-storage) deployed
+#                           object-storage mode against the same in-cluster
+#                           MinIO: served HTML references <bucket-url>/<name>/
+#                           asset URLs, those URLs 200 from MinIO with the
+#                           right content-type, and the served build id equals
+#                           the deploy tag (#1292, closes the #1283 gap
+#                           `platform-e2e.mjs`'s own comment used to call out)
 #
 # NOT covered, by design (each is its own follow-up, never a skip):
 #   - browser-driven UI (the upload form is a client component; no Playwright dep)
-#   - object-storage asset prefix (file-manager Dockerfile builds without
-#     ASSET_PREFIX - tracked in #1283)
+#   - the `mc`-based `minio` storage provider specifically (area D uses the
+#     `s3` provider against the same MinIO - see kn-next.config.storage-e2e.ts)
 #   - rename / delete / download flows: the app has none (upload + list only)
 #
 # BUDGET: one ubuntu-latest job, timeout 45 min, measured ~8-10 min wall (dispatch
@@ -74,6 +81,9 @@ jobs:
       # The harness must be able to see red BEFORE its verdict on the cluster counts.
       - name: Self-test - the checks go red on deliberate defects
         run: node apps/file-manager/scripts/platform-e2e.selftest.mjs
+
+      - name: Self-test - the storage-mode leg's checks go red on deliberate defects
+        run: node apps/file-manager/scripts/storage-mode-e2e.selftest.mjs
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
@@ -230,11 +240,51 @@ jobs:
           export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
           node apps/file-manager/scripts/platform-e2e.mjs
 
+      # D. storage-mode leg (#1292). A SECOND NextApp, storage configured
+      # against the SAME in-cluster MinIO the app-functionality leg already
+      # uses. Reuses the standing cluster/operator/registry/MinIO rather than
+      # a second cluster, so the added cost is one more build+deploy+check,
+      # not another ~8-10min of cluster bring-up.
+      - name: Storage-mode - create the MinIO bucket for the leg
+        run: |
+          set -euo pipefail
+          AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" \
+            aws s3 mb s3://fm-e2e-storage-assets --endpoint-url http://127.0.0.1:9000 --region us-east-1
+
+      - name: Storage-mode - kn-next deploy (object storage against in-cluster MinIO)
+        env:
+          STORAGE_TAG: ${{ github.run_id }}-storage
+          KN_APP_NAMESPACE: ${{ env.APP_NS }}
+        run: |
+          set -euo pipefail
+          cp apps/file-manager/platform-e2e/kn-next.config.storage-e2e.ts apps/file-manager/kn-next.config.ts
+          cd apps/file-manager
+          AWS_ENDPOINT_URL="http://minio.${APP_NS}.svc.cluster.local:9000" \
+          AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" \
+          AWS_DEFAULT_REGION=us-east-1 \
+            node ../../packages/kn-next/dist/cli/kn-next.js deploy \
+              --registry localhost:5001 --namespace "$APP_NS" --tag "$STORAGE_TAG"
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s nextapp/file-manager-storage \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe nextapp file-manager-storage; exit 1)
+
+      - name: Storage-mode - assets served from MinIO, build id matches the deploy tag
+        env:
+          PLATFORM_E2E_BASE_URL: http://127.0.0.1:8080
+          PLATFORM_E2E_NAMESPACE: ${{ env.APP_NS }}
+          STORAGE_APP_NAME: file-manager-storage
+          STORAGE_BUCKET_URL: http://minio.${{ env.APP_NS }}.svc.cluster.local:9000/fm-e2e-storage-assets
+          STORAGE_TAG: ${{ github.run_id }}-storage
+          MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
+        run: |
+          export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
+          node apps/file-manager/scripts/storage-mode-e2e.mjs
+
       - name: Diagnostics on failure
         if: failure()
         run: |
           kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods 2>&1 || true
           kubectl -n "$APP_NS" get nextapp file-manager -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get nextapp file-manager-storage -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
           kubectl -n "$APP_NS" get revision -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .status.conditions[*]}{.type}={.status} {.reason} {.message}{" | "}{end}{"\n"}{end}' 2>&1 || true
           kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
           revs="$(kubectl -n "$APP_NS" get revision -o name --sort-by=.metadata.creationTimestamp)"
