@@ -80,11 +80,11 @@ fi
 # (apps/file-manager/package.json). A floating install would make a red file
 # attributable to a vinext release rather than to knext, which is the same
 # mistake the bun lane made with `bun-version: latest` and had to undo.
-VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-1.0.0-beta.11}"
+VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-1.0.0-beta.12}"
 VITE_VERSION="${KNEXT_VITE_VERSION:-8.2.2}"
 NITRO_VERSION="${KNEXT_NITRO_VERSION:-3.0.260610-beta}"
-# vinext@1.0.0-beta.11 declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
-# (Unchanged from beta.9 — confirmed via `npm view vinext@1.0.0-beta.11 peerDependencies`.)
+# vinext@1.0.0-beta.12 declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
+# (Unchanged from beta.9 — confirmed via `npm view vinext@1.0.0-beta.12 peerDependencies`.)
 # Because the toolchain install pulls this package explicitly, npm enforces that
 # range even though the peer is optional — 0.5.26 does NOT satisfy `^0.5.34`, so
 # every fixture install still aborts with `npm ERESOLVE` (a SECOND conflict edge
