@@ -5,32 +5,45 @@
  * The vinext × bun compiled-exec lane runs the node lane's corpus UNCHANGED —
  * its denominator stays 778 and `tests/compat-vinext-lane.test.ts` forbids it
  * narrowing the shared manifest. So this ledger never removes a test from the
- * run. It RECLASSIFIES after the run: a failure matching a live entry moves from
- * `failures` into `quarantined`, and the shard's `failed` count drops by the
- * files that no longer have a failing case. `passed`, `notRun`, `excluded`,
- * `expectedTotal` and `truncated` are never touched.
+ * run. It RECLASSIFIES after the run, at CASE granularity: every entry carries
+ * a `cases` snapshot (generated from evidence runs by `refresh`), and only those
+ * failing cases move from `failures` into `quarantined`.
+ *
+ *   - a snapshot case that did not fail anywhere in the run → the entry is STALE
+ *     and the run reds (a partial fix cannot stay hidden);
+ *   - a failing case NOT in the snapshot → stays a real failure (a new
+ *     regression in a ledgered file is never absorbed);
+ *   - a file that failed with no case detail (a build/unclassified failure) →
+ *     stays a real failure and is not called stale (no result is not a pass).
+ *
+ * `failed` is only ever DECREASED by the files whose every failing case was
+ * quarantined, from the summary's own count. If a shard reports `failed > 0`
+ * without a matching per-file `failures` list (the no-marker path of
+ * e2e-summary.mjs), nothing is reclassified: without names there is nothing to
+ * match, and rebuilding the count from a missing list would turn a red shard
+ * green.
  *
  * Founder constraints (recorded on #1321), enforced by `validateLedger`:
  *   - at most 15 files per lane;
  *   - every entry is dated: `added` and `expires`, at most 30 days apart, and it
  *     is invalid (the run reds) once today is past `expires`. No version-only
  *     expiry;
- *   - a whole-file entry names the unsupported FEATURE and links the UPSTREAM
- *     issue;
- *   - a flaky entry is per-case, with mixed evidence (a failing and a passing run);
- *   - a ledgered failure that stops failing reds the run (`staleEntries`), so the
- *     ledger only ever shrinks on evidence.
+ *   - an `unsupported` entry names the unsupported FEATURE and links the
+ *     UPSTREAM issue;
+ *   - a `flaky` entry carries mixed evidence (a failing and a passing run).
  *
  * Deliberately NOT named `e2e-*` and NOT under `test/deploy-tests-manifest.*`:
- * those patterns are the shared half of every cell's compat-window fingerprint,
- * and matching them would reset the node lanes' 14-night windows for a change
- * that only concerns the vinext lane.
+ * those patterns are the shared half of every cell's compat-window fingerprint.
+ * The bun-vinext cell declares both files in its own `extraFiles`.
  *
  * CLI (dependency-free, plain Node):
- *   node scripts/compat-vinext-ledger.mjs apply  --ledger <json> --summary <shard-summary.json>
- *     validates the ledger, rewrites the summary in place (exit 1 if invalid)
- *   node scripts/compat-vinext-ledger.mjs report --ledger <json> --summaries <dir>
- *     validates, fails on stale entries, prints the published number (exit 1 on either)
+ *   apply   --ledger <json> --summary <shard-summary.json>
+ *           validates the ledger, rewrites the summary in place (exit 1 if invalid)
+ *   report  --ledger <json> --summaries <dir>
+ *           validates, fails on stale entries, prints the published number
+ *   refresh --ledger <json> --summaries <run-dir> [--summaries <run-dir> …]
+ *           regenerates every entry's `cases` snapshot as the cases that failed
+ *           in EVERY given run that reported case names for that file
  */
 import { appendFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -86,25 +99,21 @@ export function validateLedger(ledger, ctx) {
       );
     if (!CLASSES.includes(e.class))
       out.push(`${at}: unknown class ${JSON.stringify(e.class)} (allowed: ${CLASSES.join(', ')})`);
-    if (e.scope !== 'file' && e.scope !== 'cases')
-      out.push(`${at}: scope must be "file" or "cases"`);
-    if (e.scope === 'cases' && !nonEmpty(e.cases))
-      out.push(`${at}: a per-case entry must list its cases`);
-    if (e.scope === 'file') {
+    if (!nonEmpty(e.cases))
+      out.push(`${at}: cases must list the failing case snapshot (regenerate it with \`refresh\`)`);
+    else if (new Set(e.cases).size !== e.cases.length) out.push(`${at}: cases has duplicates`);
+    if (e.class === 'unsupported') {
       if (typeof e.feature !== 'string' || !e.feature.trim())
-        out.push(`${at}: a whole-file entry must name the unsupported feature`);
+        out.push(`${at}: an unsupported entry must name the unsupported feature`);
       if (typeof e.upstream !== 'string' || !UPSTREAM_RE.test(e.upstream))
-        out.push(`${at}: a whole-file entry must link its upstream issue`);
+        out.push(`${at}: an unsupported entry must link its upstream issue`);
     } else if (e.upstream !== undefined && !UPSTREAM_RE.test(String(e.upstream))) {
       out.push(`${at}: upstream must be an issue or pull request URL`);
     }
     if (!nonEmpty(e.evidence?.fail))
       out.push(`${at}: evidence.fail must list at least one failing run`);
-    if (e.class === 'flaky') {
-      if (e.scope !== 'cases') out.push(`${at}: a flaky entry must be per-case`);
-      if (!nonEmpty(e.evidence?.pass) || !nonEmpty(e.evidence?.fail))
-        out.push(`${at}: a flaky entry needs mixed evidence (a failing run AND a passing run)`);
-    }
+    if (e.class === 'flaky' && (!nonEmpty(e.evidence?.pass) || !nonEmpty(e.evidence?.fail)))
+      out.push(`${at}: a flaky entry needs mixed evidence (a failing run AND a passing run)`);
     if (e.added === undefined) out.push(`${at}: missing added date`);
     else if (!isDate(e.added)) out.push(`${at}: added is not a YYYY-MM-DD date`);
     if (e.expires === undefined)
@@ -125,56 +134,73 @@ export function validateLedger(ledger, ctx) {
 }
 
 /**
- * Reclassify one shard summary. Pure: returns a new object. Idempotent: an
- * already-applied summary has no remaining matching failures.
+ * Reclassify one shard summary at case granularity. Pure (returns a new
+ * object) and idempotent. Fails closed: a summary whose `failures` list does
+ * not account for its `failed` count is returned unreclassified, with the
+ * reason in `ledgerSkipped`.
  * @param {any} summary
  * @param {any[]} entries
  */
 export function applyLedger(summary, entries) {
+  const failed = summary.failed ?? 0;
+  const listed = Array.isArray(summary.failures) ? summary.failures : null;
+  const prior = summary.quarantined ?? [];
+  if (failed > 0 && (!listed || listed.length !== failed)) {
+    return {
+      ...summary,
+      quarantined: prior,
+      ledgerSkipped:
+        `failed=${failed} but the summary lists ${listed ? listed.length : 'no'} per-file failures; ` +
+        'nothing can be matched by name, so nothing was reclassified',
+    };
+  }
   const byTest = new Map(entries.map((e) => [e.test, e]));
-  const quarantined = [...(summary.quarantined ?? [])];
+  const quarantined = [...prior];
   const failures = [];
-  for (const f of summary.failures ?? []) {
+  let removed = 0;
+  for (const f of listed ?? []) {
     const e = byTest.get(f.file);
-    if (!e) {
-      failures.push(f);
+    const cases = f.cases ?? [];
+    if (!e || cases.length === 0) {
+      failures.push(f); // not ledgered, or a file-level failure with no case detail
       continue;
     }
-    const cases = f.cases ?? [];
-    const matched = e.scope === 'file' ? cases : cases.filter((c) => e.cases.includes(c));
-    const rest = e.scope === 'file' ? [] : cases.filter((c) => !e.cases.includes(c));
-    if (matched.length > 0 || e.scope === 'file') {
+    const matched = cases.filter((c) => e.cases.includes(c));
+    const rest = cases.filter((c) => !e.cases.includes(c));
+    if (matched.length > 0) {
       const rec = { file: f.file, cases: matched, class: e.class };
       if (e.upstream) rec.upstream = e.upstream;
       quarantined.push(rec);
     }
-    if (e.scope === 'cases' && (rest.length > 0 || cases.length === 0))
-      failures.push({ ...f, cases: rest });
+    if (rest.length > 0) failures.push({ ...f, cases: rest });
+    else removed += 1;
   }
-  return { ...summary, failures, failed: failures.length, quarantined };
+  return { ...summary, failures, failed: failed - removed, quarantined };
 }
 
 /**
- * Entries (or per-case parts) that matched no failure anywhere in the run.
- * A file that did not run (notRunFiles) is never called stale: no result is
- * not a pass.
+ * Snapshot cases that did not fail anywhere in the run. A file that did not run
+ * (notRunFiles), or failed with no case detail, is not called stale: no result
+ * is not a pass.
  * @param {any[]} summaries applied shard summaries
  * @param {any[]} entries
  */
 export function staleEntries(summaries, entries) {
   const q = summaries.flatMap((s) => s.quarantined ?? []);
   const notRun = new Set(summaries.flatMap((s) => s.notRunFiles ?? []));
+  const noDetail = new Set(
+    summaries.flatMap((s) =>
+      (s.failures ?? []).filter((f) => !(f.cases ?? []).length).map((f) => f.file),
+    ),
+  );
+  const skipped = summaries.some((s) => s.ledgerSkipped);
   const out = [];
+  if (skipped) return out; // an unreclassified shard cannot prove anything passed
   for (const e of entries) {
-    if (notRun.has(e.test)) continue;
-    const hits = q.filter((r) => r.file === e.test);
-    if (e.scope === 'file') {
-      if (hits.length === 0) out.push({ test: e.test });
-    } else {
-      const seenCases = new Set(hits.flatMap((r) => r.cases));
-      const missing = e.cases.filter((c) => !seenCases.has(c));
-      if (missing.length) out.push({ test: e.test, cases: missing });
-    }
+    if (notRun.has(e.test) || noDetail.has(e.test)) continue;
+    const seen = new Set(q.filter((r) => r.file === e.test).flatMap((r) => r.cases));
+    const missing = e.cases.filter((c) => !seen.has(c));
+    if (missing.length) out.push({ test: e.test, cases: missing });
   }
   return out;
 }
@@ -182,9 +208,8 @@ export function staleEntries(summaries, entries) {
 /** The published number: passed / failed / quarantined files over the unchanged total. */
 export function publishedNumber(summaries) {
   const sum = (k) => summaries.reduce((n, s) => n + (s[k] ?? 0), 0);
-  const quarantined = new Set(summaries.flatMap((s) => (s.quarantined ?? []).map((r) => r.file)));
-  // A file with a quarantined case AND a remaining failing case counts once, as failed.
   const stillFailing = new Set(summaries.flatMap((s) => (s.failures ?? []).map((f) => f.file)));
+  const quarantined = new Set(summaries.flatMap((s) => (s.quarantined ?? []).map((r) => r.file)));
   const q = [...quarantined].filter((f) => !stillFailing.has(f)).length;
   const passed = sum('passed');
   const failed = sum('failed');
@@ -192,9 +217,52 @@ export function publishedNumber(summaries) {
   return { passed, failed, quarantined: q, notRun, total: passed + failed + q + notRun };
 }
 
-function arg(argv, name) {
-  const i = argv.indexOf(`--${name}`);
-  return i >= 0 ? argv[i + 1] : undefined;
+/**
+ * Regenerate every entry's `cases` snapshot: the cases that failed in EVERY
+ * given run that reported case names for that file. A case failing in only some
+ * runs is left out on purpose — it stays a real failure rather than a hidden one.
+ * @param {any} ledger
+ * @param {any[][]} runs one array of (unapplied) shard summaries per run
+ * @returns {{ ledger: any, errors: string[] }}
+ */
+export function refreshSnapshots(ledger, runs) {
+  const errors = [];
+  const entries = ledger.entries.map((e) => {
+    const perRun = runs
+      .map((summaries) =>
+        summaries
+          .flatMap((s) => s.failures ?? [])
+          .filter((f) => f.file === e.test && (f.cases ?? []).length),
+      )
+      .filter((fs) => fs.length > 0)
+      .map((fs) => new Set(fs.flatMap((f) => f.cases)));
+    if (perRun.length === 0) {
+      errors.push(`${e.test}: no given run reports failing cases for it; it cannot be ledgered`);
+      return e;
+    }
+    const cases = [...perRun[0]].filter((c) => perRun.every((s) => s.has(c))).sort();
+    if (cases.length === 0) {
+      errors.push(
+        `${e.test}: no case failed in every run; it cannot be ledgered at case granularity`,
+      );
+      return e;
+    }
+    return { ...e, cases };
+  });
+  return { ledger: { ...ledger, entries }, errors };
+}
+
+function args(argv, name) {
+  const out = [];
+  for (let i = 0; i < argv.length; i += 1) if (argv[i] === `--${name}`) out.push(argv[i + 1]);
+  return out;
+}
+
+function readSummaries(dir) {
+  return readdirSync(dir, { recursive: true })
+    .map(String)
+    .filter((f) => /compat-suite-summary-.*\.json$/.test(f))
+    .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')));
 }
 
 function loadLedger(path) {
@@ -209,12 +277,28 @@ function loadLedger(path) {
 
 function main(argv) {
   const [cmd] = argv;
-  const ledgerPath = arg(argv, 'ledger');
-  if (!ledgerPath || (cmd !== 'apply' && cmd !== 'report')) {
+  const [ledgerPath] = args(argv, 'ledger');
+  if (!ledgerPath || !['apply', 'report', 'refresh'].includes(cmd)) {
     console.error(
-      'usage: compat-vinext-ledger.mjs apply --ledger <json> --summary <file> | report --ledger <json> --summaries <dir>',
+      'usage: compat-vinext-ledger.mjs apply --ledger <json> --summary <file> | report --ledger <json> --summaries <dir> | refresh --ledger <json> --summaries <run-dir>…',
     );
     return 2;
+  }
+  if (cmd === 'refresh') {
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    const runs = args(argv, 'summaries').map(readSummaries);
+    if (runs.length === 0 || runs.some((r) => r.length === 0)) {
+      console.error(
+        '::error::refresh needs at least one --summaries <run-dir> holding shard summaries',
+      );
+      return 1;
+    }
+    const { ledger: next, errors } = refreshSnapshots(ledger, runs);
+    for (const e of errors) console.error(`::error::vinext quarantine ledger — ${e}`);
+    if (errors.length) return 1;
+    writeFileSync(ledgerPath, `${JSON.stringify(next, null, 2)}\n`);
+    console.log(`refreshed ${next.entries.length} case snapshot(s) from ${runs.length} run(s)`);
+    return 0;
   }
   const { ledger, errors } = loadLedger(ledgerPath);
   if (errors.length) {
@@ -222,22 +306,21 @@ function main(argv) {
     return 1;
   }
   if (cmd === 'apply') {
-    const path = arg(argv, 'summary');
+    const [path] = args(argv, 'summary');
     const before = JSON.parse(readFileSync(path, 'utf8'));
     const after = applyLedger(before, ledger.entries);
     writeFileSync(path, `${JSON.stringify(after, null, 2)}\n`);
+    if (after.ledgerSkipped)
+      console.error(`::warning::vinext quarantine ledger — ${after.ledgerSkipped}`);
     for (const r of after.quarantined)
-      console.log(`quarantined (${r.class}) ${r.file}${r.upstream ? ` — ${r.upstream}` : ''}`);
-    console.log(
-      `shard ${after.shard}: failed ${before.failed} -> ${after.failed}, quarantined ${after.quarantined.length}`,
-    );
+      console.log(
+        `quarantined (${r.class}) ${r.file} [${r.cases.join(' | ')}]${r.upstream ? ` — ${r.upstream}` : ''}`,
+      );
+    console.log(`shard ${after.shard}: failed ${before.failed} -> ${after.failed}`);
     return 0;
   }
-  const dir = arg(argv, 'summaries');
-  const summaries = readdirSync(dir, { recursive: true })
-    .map(String)
-    .filter((f) => /compat-suite-summary-.*\.json$/.test(f))
-    .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')));
+  const [dir] = args(argv, 'summaries');
+  const summaries = readSummaries(dir);
   if (summaries.length === 0) {
     console.error(
       '::error::vinext quarantine ledger — no shard summaries found; nothing is not green',
@@ -252,7 +335,7 @@ function main(argv) {
   const stale = staleEntries(summaries, ledger.entries);
   for (const s of stale) {
     console.error(
-      `::error::stale quarantine entry — ${s.test}${s.cases ? ` (cases: ${s.cases.join(' | ')})` : ''} did not fail in this run; remove it from ${ledgerPath}`,
+      `::error::stale quarantine entry — ${s.test} (cases: ${s.cases.join(' | ')}) did not fail in this run; remove them from ${ledgerPath} or refresh the snapshot`,
     );
   }
   return stale.length ? 1 : 0;
