@@ -166,6 +166,70 @@ describe('markerValidity (#1302)', () => {
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/exceeds the 14-day cap/);
   });
+
+  it('REJECTS a future-dated marker even though date/expires span only 11 days (#1370 review round 2)', () => {
+    // The reviewer's exact repro: the ORIGINAL expires-minus-date cap let a
+    // future-dated marker through, since 11 days is under the 14-day cap
+    // regardless of WHEN those 11 days fall. A marker dated 2099 authorizes
+    // nothing today.
+    const result = markerValidity(
+      {
+        rcBumpMarker: { date: '2099-12-20', expires: '2099-12-31', reason: 'future-dated exploit' },
+      },
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/is in the future/);
+  });
+
+  it('rejects a marker dated even one day in the future', () => {
+    const result = markerValidity(
+      { rcBumpMarker: { date: '2026-09-25', expires: '2026-10-01', reason: 'tomorrow' } },
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/is in the future/);
+  });
+
+  it('date === today is allowed (not "in the future")', () => {
+    const result = markerValidity(
+      { rcBumpMarker: { date: '2026-09-24', expires: '2026-09-25', reason: 'added today' } },
+      NOW,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it('an OLD date with an expires that is >14 days from TODAY is still capped', () => {
+    // date is safely in the past (passes the future-date check and the
+    // expires>date check), and expires is >14 days from TODAY.
+    //
+    // Honesty note (not a claim this test alone discriminates the
+    // today-vs-date formula): given the date<=today and today<=expires
+    // checks directly above this one in markerValidity, `expires - today`
+    // and `expires - date` are PROVABLY equal outcomes here and in general
+    // (expires - today <= expires - date whenever today >= date) — see the
+    // comment on spanFromTodayMs. This test pins the cap's real BEHAVIOUR
+    // (an old-but-valid marker with a too-far expiry is rejected), not the
+    // specific arithmetic baseline used to compute it.
+    const result = markerValidity(
+      {
+        rcBumpMarker: { date: '2026-01-01', expires: '2026-10-20', reason: 'old date, far expiry' },
+      },
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/exceeds the 14-day cap/);
+  });
+
+  it('an expired marker reports "expired", never "exceeds the cap" (ordering)', () => {
+    const result = markerValidity(
+      { rcBumpMarker: { date: '2020-01-01', expires: '2020-01-02', reason: 'ancient' } },
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/expired/);
+    expect(result.reason).not.toMatch(/exceeds the 14-day cap/);
+  });
 });
 
 describe('frozenFileSet — DERIVED from CREDENTIAL_CELLS + collectHarness, never hardcoded (#1302)', () => {

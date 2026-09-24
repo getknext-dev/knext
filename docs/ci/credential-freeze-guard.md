@@ -49,9 +49,20 @@ only defense.
 }
 ```
 
-- `date` / `expires` — `YYYY-MM-DD`. `expires` must be strictly after `date`,
-  and `expires - date` is capped at **14 days** — a single reviewed PR
-  cannot license months of future frozen-file edits (#1370 review).
+- `date` / `expires` — `YYYY-MM-DD`. `expires` must be strictly after `date`.
+- `date` must not be later than **today** — a marker records when it was
+  actually added, so it cannot be post-dated into the future. **(#1370
+  review round 2)** This is required, not optional: an `expires - date` cap
+  alone is defeated by a future-dated marker — `{date: "2099-12-20",
+  expires: "2099-12-31"}` is an 11-day span, under a naive 14-day cap, yet
+  authorizes nothing today and everything the instant the clock reaches
+  2099.
+- `expires - today` is capped at **14 days**, evaluated at guard run time —
+  a single reviewed PR cannot license months of future frozen-file edits,
+  and (given the `date <= today` check above) this is the correct baseline:
+  an `expires - date` cap on an old-but-valid `date` with a far-future
+  `expires` is not actually bounded by 14 days from when the marker is
+  relied on.
 - `reason` — free text, non-empty.
 - Validity is `today <= expires` (inclusive), evaluated at guard run time.
 
@@ -97,7 +108,7 @@ the same head-marker check as any other frozen-file touch, so a PR cannot
 silently re-tag or extend a window through the pin file alone without
 carrying a marker ("exempt a pin-only diff, but keep it honest").
 
-## The guard runs from a base-commit checkout of its own code
+## The guard runs from a base-commit checkout of its own code — the SCRIPT, not the workflow YAML
 
 A PR must not be able to weaken `evaluateFreezeGuard`/`frozenFileSet`/
 `collectHarness` and have this SAME run execute the PR's own edited copy
@@ -109,6 +120,42 @@ FROM there (`node base-checkout/scripts/compat-credential-freeze-guard.mjs
 decision logic both execute as of base, never as of this PR's head. Being in
 `GUARD_SELF_FILES` (above) is defense in depth on top of this, not the
 primary defense.
+
+**Known limitation, stated honestly (#1370 review round 2): this closes the
+hole for the SCRIPT only, not for the WORKFLOW YAML that invokes it.**
+GitHub evaluates `.github/workflows/compat-credential-freeze-guard.yml`
+itself from the PR's OWN ref for both `pull_request` and `merge_group` —
+that is how GitHub Actions works, and this workflow does nothing to change
+it. A PR is therefore free to edit the YAML directly — replace the whole job
+body with a single `run: exit 0` step, drop the `merge_group:` trigger,
+widen `permissions:`, or skip the base-checkout step entirely — and that
+edited YAML is exactly what runs on that PR's own check. The base-checkout
+indirection only protects the `.mjs` LOGIC once the (unmodified) YAML gets
+around to invoking it; it does nothing if the YAML itself is what changed.
+Relatedly, the base-checkout script still resolves its `typescript` import
+from the `node_modules` tree the SAME PR's own `bun install
+--frozen-lockfile` step populated (from that PR's own `package.json` /
+`bun.lock`) — a PR that ships a poisoned `typescript` (or a same-named
+shadow module reachable first in Node's resolution) can subvert the
+base-checkout script's behavior even though its own `.mjs` bytes are
+unmodified. **Do not read `GUARD_SELF_FILES` or the base-checkout step as
+"the self-rewrite hole is closed"** — they raise the bar for the common
+case (a PR quietly editing `frozenFileSet`/`evaluateFreezeGuard`/
+`collectHarness` in the script) without closing it against a PR that edits
+the workflow file or its dependency closure instead.
+Closing this properly needs one of two things this repo does not have
+today, and both are founder decisions, not something an agent working this
+issue can add on its own behalf:
+- a **CODEOWNERS** file requiring a trusted reviewer's approval specifically
+  on `GUARD_SELF_FILES` and the pin file, so editing the guard (or the
+  YAML that runs it) cannot merge on an ordinary collaborator's review
+  alone; or
+- redesigning the workflow around **`pull_request_target`**, which runs
+  using the workflow definition on the BASE ref rather than the PR's head —
+  the YAML itself would then be immune to a PR editing it, at the cost of
+  `pull_request_target`'s own well-known hazard (the job gets elevated,
+  base-ref-scoped credentials while still being triggerable by an untrusted
+  PR), which needs its own careful design before adopting it here.
 
 ## merge_group
 

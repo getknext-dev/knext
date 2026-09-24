@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
+
+const EXEC_TIMEOUT_MS = 10_000;
 
 /**
  * Wiring tests for `.github/workflows/compat-credential-freeze-guard.yml`
@@ -125,11 +129,73 @@ describe('injection safety: PR-controlled values flow through env:, never inline
   });
 });
 
-describe('the base-commit diff uses three-dot notation (#1370 review)', () => {
-  it('git diff --name-only uses BASE_SHA...HEAD_SHA, not a two-dot range', () => {
+describe('the base-commit diff uses three-dot notation AND --no-renames (#1370 review, round 2)', () => {
+  it('git diff --no-renames --name-only uses BASE_SHA...HEAD_SHA, not a two-dot range', () => {
     const { text } = load();
-    expect(text).toMatch(/git diff --name-only "\$\{BASE_SHA\}\.\.\.\$\{HEAD_SHA\}"/);
+    expect(text).toMatch(/git diff --no-renames --name-only "\$\{BASE_SHA\}\.\.\.\$\{HEAD_SHA\}"/);
   });
+
+  it('--no-renames is present — without it, a renamed frozen file evades the guard (round 2 repro)', () => {
+    const { text } = load();
+    const diffLine = text
+      .split('\n')
+      .find((l) => l.includes('git diff') && l.includes('--name-only'));
+    expect(diffLine, 'diff line not found').toBeTruthy();
+    expect(diffLine).toContain('--no-renames');
+  });
+});
+
+describe('rename-evasion mechanism, proved against real git (#1370 review round 2)', () => {
+  it('WITHOUT --no-renames, git diff --name-only on a pure rename shows only the NEW path — the old (frozen) path vanishes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-rename-'));
+    try {
+      // -c commit.gpgsign=false: this repo's/runner's global git config may
+      // set commit.gpgsign=true, which hangs `git commit` waiting on a
+      // passphrase in a non-interactive test run.
+      const run = (args: string[]) =>
+        execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        });
+      run(['init', '-q']);
+      run(['config', 'user.email', 'test@example.com']);
+      run(['config', 'user.name', 'Test']);
+      // A big-enough file for git's similarity heuristic to call this a
+      // rename rather than an unrelated delete+add.
+      const body = Array.from({ length: 40 }, (_, i) => `line ${i} of the frozen script\n`).join(
+        '',
+      );
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      writeFileSync(join(dir, 'scripts/e2e-cleanup.sh'), body);
+      run(['add', '.']);
+      run(['commit', '-q', '-m', 'base']);
+      const baseSha = run(['rev-parse', 'HEAD']).trim();
+
+      // The reviewer's exact repro.
+      run(['mv', 'scripts/e2e-cleanup.sh', 'scripts/e2e-cleanup-x.sh']);
+      run(['add', '-A']);
+      run(['commit', '-q', '-m', 'rename']);
+      const headSha = run(['rev-parse', 'HEAD']).trim();
+
+      const withRenames = run(['diff', '--name-only', `${baseSha}...${headSha}`])
+        .trim()
+        .split('\n');
+      const withoutRenames = run(['diff', '--no-renames', '--name-only', `${baseSha}...${headSha}`])
+        .trim()
+        .split('\n');
+
+      // The vulnerable shape: rename detection on, the frozen old path is
+      // simply absent — this is what let the pre-round-2 workflow miss it.
+      expect(withRenames).not.toContain('scripts/e2e-cleanup.sh');
+      // The fix: --no-renames reports it as delete-of-old + add-of-new, so
+      // the frozen path IS in the list the guard's CLI receives.
+      expect(withoutRenames).toContain('scripts/e2e-cleanup.sh');
+      expect(withoutRenames).toContain('scripts/e2e-cleanup-x.sh');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe('the freeze state is read at BASE, the marker at HEAD (#1302, amended #1370)', () => {

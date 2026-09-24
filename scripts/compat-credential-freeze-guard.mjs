@@ -35,8 +35,9 @@
  * itself in the frozen set, so a PR authorized only by a marker it ADDS in
  * the SAME diff could never pass a base-pin check, since base never has the
  * marker the PR is introducing). `pin.rcBumpMarker: { date, expires, reason }`
- * (all YYYY-MM-DD / free text, `expires - date` capped at 14 days — see
- * `markerValidity`) lives in the SAME reviewed-PR pin file ADR-0056 already
+ * (all YYYY-MM-DD / free text; `date` must not be in the future, and
+ * `expires - today` is capped at 14 days — see `markerValidity`) lives in
+ * the SAME reviewed-PR pin file ADR-0056 already
  * requires for an rcTag bump — same social-process authorization as the tag
  * itself (a founder pushes the tag, then a REVIEWED PR bumps the file; here,
  * the marker is EVIDENCE that review happened for touching frozen files
@@ -85,9 +86,18 @@ export const PIN_FILE = '.github/compat-credential-ref.json';
  * harness cells it is not part of — but small and closed, and paired with
  * the workflow running THIS script from a base-commit checkout
  * (`.github/workflows/compat-credential-freeze-guard.yml`'s "base-checkout"
- * step) so a PR editing these files locally never gets to execute its own
- * edited copy against itself in the first place; being frozen here is
- * defense in depth on top of that, not the only defense.
+ * step) so a PR editing THIS SCRIPT never gets to execute its own edited
+ * copy against itself in the first place; being frozen here is defense in
+ * depth on top of that, not the only defense.
+ *
+ * SCOPE, stated honestly (#1370 review round 2): the base-checkout only
+ * protects the .mjs LOGIC. It does nothing for the WORKFLOW YAML itself —
+ * GitHub evaluates that from the PR's own ref regardless, so a PR can still
+ * replace the job body wholesale (e.g. a single `run: exit 0` step) or drop
+ * the base-checkout step entirely, and that edited YAML is what runs on its
+ * own PR. See docs/ci/credential-freeze-guard.md's "known limitation"
+ * section — closing that needs CODEOWNERS or a pull_request_target
+ * redesign, both founder decisions.
  */
 export const GUARD_SELF_FILES = Object.freeze([
   'scripts/compat-credential-freeze-guard.mjs',
@@ -152,24 +162,47 @@ export function markerValidity(pin, now) {
       reason: 'rcBumpMarker.expires must be strictly after rcBumpMarker.date',
     };
   }
-  // Cap the window a single marker can authorize (review round on #1370):
-  // an unbounded expires would let one reviewed PR quietly license months of
-  // future frozen-file edits. 14 days matches ADR-0056's own credential-night
-  // cadence unit.
-  const MAX_MARKER_SPAN_DAYS = 14;
-  const spanMs = Date.parse(`${expires}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`);
-  const spanDays = spanMs / (24 * 60 * 60 * 1000);
-  if (spanDays > MAX_MARKER_SPAN_DAYS) {
+  const today = now.toISOString().slice(0, 10);
+  // A marker cannot be dated ahead of when it is actually being evaluated
+  // (#1370 review round 2): the ORIGINAL 14-day cap was `expires - date`,
+  // which a future-dated marker defeats trivially — `{date: 2099-12-20,
+  // expires: 2099-12-31}` is an 11-day span, under the cap, but authorizes
+  // nothing today and everything the instant the clock reaches 2099. `date`
+  // is meant to record when the reviewed PR actually added the marker, so it
+  // can never be later than `now`.
+  if (date > today) {
     return {
       valid: false,
-      reason: `rcBumpMarker spans ${spanDays} days (date=${date}, expires=${expires}), which exceeds the ${MAX_MARKER_SPAN_DAYS}-day cap`,
+      reason: `rcBumpMarker.date (${date}) is in the future (today is ${today}) — a marker cannot be dated ahead of when it was added`,
     };
   }
-  const today = now.toISOString().slice(0, 10);
+  // Expired check BEFORE the span cap: an expired marker's expires-minus-today
+  // is negative, which is not what "exceeds the cap" should ever report.
   if (today > expires) {
     return {
       valid: false,
       reason: `rcBumpMarker expired on ${expires} (today is ${today})`,
+    };
+  }
+  // Cap the window a single marker can authorize, measured from TODAY, not
+  // from `date` (#1370 review round 2). NOTE, for honesty: given the two
+  // checks directly above (date <= today, today <= expires), this bound is
+  // PROVABLY equivalent in outcome to the original `expires - date` cap —
+  // algebraically, `expires - today <= expires - date` whenever
+  // `today >= date`, so nothing currently reachable can make the two
+  // formulas disagree. It is kept measured from `today` anyway because that
+  // is the invariant actually meant ("how far does this authorization reach
+  // from NOW") and because it stays correct on its own if a future edit ever
+  // touches the date<=today check above without touching this line — the
+  // `expires - date` form only stayed safe by riding on that other check.
+  // 14 days matches ADR-0056's own credential-night cadence unit.
+  const MAX_MARKER_SPAN_DAYS = 14;
+  const spanFromTodayMs = Date.parse(`${expires}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`);
+  const spanFromTodayDays = spanFromTodayMs / (24 * 60 * 60 * 1000);
+  if (spanFromTodayDays > MAX_MARKER_SPAN_DAYS) {
+    return {
+      valid: false,
+      reason: `rcBumpMarker.expires (${expires}) is ${spanFromTodayDays} days from today (${today}), which exceeds the ${MAX_MARKER_SPAN_DAYS}-day cap`,
     };
   }
   return { valid: true, reason: `valid through ${expires}` };
