@@ -23,13 +23,15 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const HELPER_SPEC = 'tests/nightly-alert-issue.test.ts';
-const HELPER_SUBJECT = resolve(REPO_ROOT, 'scripts/lib/nightly-alert-issue.mjs');
-
 const POLICY_SPEC = 'tests/nightly-alert-pin-policy.test.ts';
-const ACTION_PIN_WORKFLOW = resolve(
-  REPO_ROOT,
-  '.github/workflows/action-pin-resolution-nightly.yml',
-);
+
+const PROOF = {
+  subjects: {
+    helper: 'scripts/lib/nightly-alert-issue.mjs',
+    actionPinWorkflow: '.github/workflows/action-pin-resolution-nightly.yml',
+    policyTest: 'tests/nightly-alert-pin-policy.test.ts',
+  },
+};
 
 const RUNNER_HELPER = resolveSpecRunner(REPO_ROOT, HELPER_SPEC);
 const RUNNER_POLICY = resolveSpecRunner(REPO_ROOT, POLICY_SPEC);
@@ -45,7 +47,8 @@ function specPasses(runner, spec) {
 const MUTATIONS = [
   {
     label: 'nightly-alert-issue.mjs: reintroduce a `gh issue pin` call on create',
-    kind: 'helper',
+    subject: 'helper',
+    spec: HELPER_SPEC,
     anchor: '  return { number, created: true };',
     replacement:
       "  gh(['issue', 'pin', String(number), '--repo', repo]);\n  return { number, created: true };",
@@ -53,20 +56,22 @@ const MUTATIONS = [
   {
     label:
       'nightly-alert-issue.mjs: stop finding an EXISTING issue by exact title (always creates)',
-    kind: 'helper',
+    subject: 'helper',
+    spec: HELPER_SPEC,
     anchor: 'const existing = issues.find((i) => i.title === title);',
     replacement: 'const existing = undefined;',
   },
   {
     label: 'nightly-alert-issue.mjs: drop --limit 100 from the list call',
-    kind: 'helper',
+    subject: 'helper',
+    spec: HELPER_SPEC,
     anchor: "    '--limit',\n    '100',\n    '--json',\n    'number,title',",
     replacement: "'--json',\n    'number,title',",
   },
   {
     label: 'action-pin-resolution-nightly.yml: reintroduce an inline `gh issue pin` call',
-    kind: 'policy-workflow',
-    subject: ACTION_PIN_WORKFLOW,
+    subject: 'actionPinWorkflow',
+    spec: POLICY_SPEC,
     anchor: 'TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs',
     replacement:
       'new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"\n          gh issue pin "${new_url##*/}" --repo "${GITHUB_REPOSITORY}" || true',
@@ -74,16 +79,16 @@ const MUTATIONS = [
   {
     label:
       'nightly-alert-issue.mjs: the SCRIPT itself (not just the workflow) pins directly, bypassing the tracker exception',
-    kind: 'policy-script',
-    subject: HELPER_SUBJECT,
+    subject: 'helper',
+    spec: POLICY_SPEC,
     anchor: '  return { number, created: true };',
     replacement:
       "  gh(['issue', 'pin', String(number), '--repo', repo]);\n  return { number, created: true };",
   },
   {
     label: 'PIN_ALLOWLIST: widen the allowlist to excuse a second, arbitrary file',
-    kind: 'policy-test-self',
-    subject: resolve(REPO_ROOT, 'tests/nightly-alert-pin-policy.test.ts'),
+    subject: 'policyTest',
+    spec: POLICY_SPEC,
     anchor: "const PIN_ALLOWLIST = new Set(['scripts/compat-matrix-tracker.mjs']);",
     replacement:
       "const PIN_ALLOWLIST = new Set(['scripts/compat-matrix-tracker.mjs', 'scripts/lib/nightly-alert-issue.mjs']);",
@@ -107,14 +112,12 @@ console.log('   ok baseline green\n');
 const decorative = [];
 for (const m of MUTATIONS) {
   console.log(`── mutation: ${m.label}`);
-  const subjectPath = m.kind === 'helper' ? HELPER_SUBJECT : m.subject;
-  const spec = m.kind === 'helper' ? HELPER_SPEC : POLICY_SPEC;
-  const runner = m.kind === 'helper' ? RUNNER_HELPER : RUNNER_POLICY;
+  const runner = m.spec === HELPER_SPEC ? RUNNER_HELPER : RUNNER_POLICY;
 
-  const snap = snapshot(subjectPath);
+  const snap = snapshot(resolve(REPO_ROOT, PROOF.subjects[m.subject]));
   try {
     mutate(snap, m.anchor, m.replacement);
-    if (specPasses(runner, spec)) {
+    if (specPasses(runner, m.spec)) {
       console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       decorative.push(m.label);
     } else {
@@ -124,8 +127,8 @@ for (const m of MUTATIONS) {
   } finally {
     restore(snap);
   }
-  if (!specPasses(runner, spec)) {
-    console.error(`   FATAL: ${spec} did not go green again after restore`);
+  if (!specPasses(runner, m.spec)) {
+    console.error(`   FATAL: ${m.spec} did not go green again after restore`);
     process.exit(1);
   }
 }

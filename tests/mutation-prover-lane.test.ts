@@ -300,7 +300,7 @@ describe('#685 the nightly workflow exists and is scheduled, NOT a PR gate', () 
   });
 });
 
-describe('#685 the lane carries the pinned-issue alert (#670: a nightly needs an owner)', () => {
+describe('#685/#1347 the lane carries an idempotent, NEVER-PINNED alert (#670: a nightly needs an owner)', () => {
   it('has an alert job scoped to a FAILED scheduled run', () => {
     const text = read(WORKFLOW_PATH);
     expect(/github\.event_name == 'schedule'/.test(text)).toBe(true);
@@ -312,15 +312,23 @@ describe('#685 the lane carries the pinned-issue alert (#670: a nightly needs an
     expect(/issues:\s*write/.test(read(WORKFLOW_PATH))).toBe(true);
   });
 
-  it('is IDEMPOTENT: one pinned issue, commented on rather than duplicated', () => {
+  it('is IDEMPOTENT: delegates to the shared never-pinning helper (#1347), not an inline gh issue pin', () => {
+    // #1347: this workflow used to inline its own `gh issue list`/`create`/
+    // `comment`/`pin` block, racing 8 OTHER nightlies for GitHub's hard
+    // 3-pinned-issue cap. It now routes through
+    // `scripts/lib/nightly-alert-issue.mjs`'s `ensureAlertIssue` (idempotency
+    // and the --limit 100 dedup lookup are proven there, in
+    // `tests/nightly-alert-issue.test.ts`; the NEVER-PINS property is proven
+    // repo-wide, including for THIS file, by `tests/nightly-alert-pin-policy.test.ts`)
+    // — asserted here as a local regression pin so a reviewer reading only
+    // this describe block still sees the real shape, not a stale one.
     const text = read(WORKFLOW_PATH);
-    expect(/gh issue list/.test(text)).toBe(true);
-    const limit = text.match(/gh issue list[\s\S]*?--limit\s+(\d+)/);
-    expect(limit, 'the lookup must pass an explicit --limit').toBeTruthy();
-    expect(Number((limit as RegExpMatchArray)[1])).toBeGreaterThanOrEqual(100);
-    expect(/gh issue comment/.test(text)).toBe(true);
-    expect(/gh issue create/.test(text)).toBe(true);
-    expect(/gh issue pin/.test(text)).toBe(true);
+    expect(text).toContain('nightly-alert-issue.mjs');
+    // Strip full-line `#` comments first — the migration note explaining
+    // this history literally says "used to `gh issue pin`", which must not
+    // itself trip the "no real invocation" check.
+    const withoutComments = text.replace(/^\s*#.*$/gm, '');
+    expect(/gh issue pin/.test(withoutComments)).toBe(false);
     expect(
       text.match(/title=['"]([^'"$]+)['"]/),
       'a fixed literal title is the dedup key',
