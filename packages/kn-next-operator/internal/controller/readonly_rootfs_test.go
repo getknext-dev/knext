@@ -148,7 +148,7 @@ func TestBuildDesiredKsvcReadOnlyRootFilesystemMounts(t *testing.T) {
 				if m.MountPath == "/tmp" {
 					foundTmp = true
 				}
-				if m.MountPath == "/app/.next/standalone/.next/cache/images" {
+				if m.MountPath == "/app/.next/standalone/.next/cache" {
 					foundImageCache = true
 				}
 			}

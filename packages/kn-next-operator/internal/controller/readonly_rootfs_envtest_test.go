@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -90,12 +91,18 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 			mountPaths = append(mountPaths, m.MountPath)
 		}
 		Expect(mountPaths).To(ContainElement("/tmp"))
-		Expect(mountPaths).To(ContainElement("/app/.next/standalone/.next/cache/images"))
+		Expect(mountPaths).To(ContainElement("/app/.next/standalone/.next/cache"))
 
 		By("passing Knative's own webhook defaulting + validation, not just this repo's rendering")
+		// Filtered to ErrorLevel (the documented pattern, apis.FieldError doc
+		// comment): Knative's Validate legitimately returns a non-nil
+		// FieldError carrying ONLY warnings when the container's own
+		// SecurityContext leaves allowPrivilegeEscalation/capabilities/
+		// runAsNonRoot/seccompProfile unset — informational, not a rejection
+		// (the live admission webhook admits it, proven separately on kind).
 		fetched := ksvc.DeepCopy()
 		fetched.SetDefaults(ctx)
-		Expect(fetched.Validate(ctx)).To(BeNil())
+		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
 	})
 
 	It("skips the standalone image-cache mount for the vinext single-executable shape", func() {
@@ -114,7 +121,7 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 			mountPaths = append(mountPaths, m.MountPath)
 		}
 		Expect(mountPaths).To(ContainElement("/tmp"))
-		Expect(mountPaths).NotTo(ContainElement("/app/.next/standalone/.next/cache/images"))
+		Expect(mountPaths).NotTo(ContainElement("/app/.next/standalone/.next/cache"))
 	})
 
 	It("disables it and drops the volumes/mounts on explicit spec.security.readOnlyRootFilesystem: false", func() {
@@ -130,8 +137,11 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 		Expect(c.VolumeMounts).To(BeEmpty())
 		Expect(ksvc.Spec.Template.Spec.Volumes).To(BeEmpty())
 
+		// See the sibling case above: filtered to ErrorLevel — the container's
+		// own SecurityContext still leaves the OTHER hardening fields unset,
+		// which is a Knative warning, not a rejection.
 		fetched := ksvc.DeepCopy()
 		fetched.SetDefaults(ctx)
-		Expect(fetched.Validate(ctx)).To(BeNil())
+		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
 	})
 })
