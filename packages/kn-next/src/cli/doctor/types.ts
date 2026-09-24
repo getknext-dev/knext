@@ -129,6 +129,20 @@ export interface DoctorDeps {
      * pass. Defaults to 30s; tests inject 0 to pin the exhausted path.
      */
     appImageProbeBudgetMs?: number;
+    /**
+     * Reads `knext-node-entry.mjs` from the CURRENT directory, or undefined
+     * when it does not exist there — feeds the node-entry-staleness check
+     * (#1356). Defaults to the real cwd file read; tests inject fixtures.
+     */
+    readNodeEntryFile?: () => string | undefined;
+    /**
+     * Reads the PACKAGED `knext-node-entry.mjs.hbs` template — the "current"
+     * marker to compare a scaffolded app's own copy against (#1356). Defaults
+     * to the real installed-package template read (via `templateRoot()`);
+     * tests inject a fixed string so the check does not depend on this
+     * template's own marker value changing over time.
+     */
+    readNodeEntryTemplate?: () => string | undefined;
 }
 
 /**

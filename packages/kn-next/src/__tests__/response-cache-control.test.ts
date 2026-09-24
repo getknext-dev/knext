@@ -77,6 +77,135 @@ describe("cacheControlMiddleware: the srvx middleware for vinext on Node", () =>
     });
 });
 
+describe("normalizeResponse — immutable headers fall back to REBUILDING the Response (#1356)", () => {
+    // Duck-typed fake: `headers.set` throws exactly as a real immutable
+    // `Headers` instance does (Response.redirect(), Response.error(), and —
+    // the realistic app shape — a proxied `fetch()` Response under Node/undici,
+    // proven for real further down against a REAL Node http round-trip). This
+    // fast in-process case pins the FALLBACK LOGIC itself deterministically,
+    // independent of any one runtime's Headers-immutability quirks.
+    function immutableHeaders(entries: Record<string, string>) {
+        const real = new Headers(entries);
+        return {
+            get: (name: string) => real.get(name),
+            set: () => {
+                throw new TypeError("immutable");
+            },
+            // `new Headers(this)` (the rebuild path) iterates entries — must
+            // behave like a real Headers for that to copy correctly.
+            [Symbol.iterator]: () => real[Symbol.iterator](),
+            entries: () => real.entries(),
+            forEach: (fn: (v: string, k: string) => void) => real.forEach(fn),
+        };
+    }
+
+    function immutableResponse(
+        body: string,
+        init: {
+            status?: number;
+            statusText?: string;
+            headers: Record<string, string>;
+        },
+    ) {
+        return {
+            body,
+            status: init.status ?? 200,
+            statusText: init.statusText ?? "",
+            headers: immutableHeaders(init.headers),
+        };
+    }
+
+    it("rewrites cache-control by REBUILDING the response when headers.set throws, preserving status/statusText/other headers", () => {
+        const fake = immutableResponse("payload", {
+            status: 206,
+            statusText: "Partial Content",
+            headers: {
+                "cache-control": ISR,
+                "content-type": "text/plain",
+                "x-custom": "kept",
+            },
+        });
+        // biome-ignore lint/suspicious/noExplicitAny: intentionally duck-typed, not a real Response
+        const out = normalizeResponse(req(), fake as any) as Response;
+        expect(out).not.toBe(fake); // a NEW Response, not the same (immutable) object
+        expect(out.headers.get("cache-control")).toBe(DEPLOY);
+        expect(out.status).toBe(206);
+        expect(out.statusText).toBe("Partial Content");
+        expect(out.headers.get("content-type")).toBe("text/plain");
+        expect(out.headers.get("x-custom")).toBe("kept");
+    });
+
+    it("does not touch the response at all when the value needs no rewrite (skips the throw path entirely)", () => {
+        const fake = immutableResponse("payload", {
+            headers: { "cache-control": DEPLOY },
+        });
+        // biome-ignore lint/suspicious/noExplicitAny: intentionally duck-typed
+        const out = normalizeResponse(req(), fake as any);
+        expect(out).toBe(fake); // untouched — already the deploy value, headers.set is never called
+    });
+
+    it("REAL Node fetch(): a genuinely immutable proxied Response gets its Cache-Control rewritten, body intact", async () => {
+        // Node/undici's fetch() Response headers carry `guard: "immutable"` —
+        // this is the actual #1356 shape ("a proxied fetch() Response"), proven
+        // against the real API rather than a duck-typed fake. Spawned under a
+        // REAL `node` process: bun's own fetch() does NOT enforce this guard
+        // (measured), so this bug is invisible if only ever exercised under bun.
+        const script = `
+import { createServer } from "node:http";
+import { normalizeResponse } from ${JSON.stringify(
+            resolve(
+                dirname(fileURLToPath(import.meta.url)),
+                "../adapters/response-cache-control.mjs",
+            ),
+        )};
+
+const server = createServer((req, res) => {
+    res.writeHead(200, { "cache-control": "s-maxage=2, stale-while-revalidate=31535998" });
+    res.end("upstream-body");
+});
+await new Promise((r) => server.listen(0, r));
+const port = server.address().port;
+const upstream = await fetch(\`http://127.0.0.1:\${port}/\`);
+
+// Confirm the precondition: this IS genuinely immutable under Node.
+let threw = false;
+try { upstream.headers.set("cache-control", "x"); } catch { threw = true; }
+if (!threw) { console.error("PRECONDITION FAILED: fetch() headers were not immutable"); process.exit(2); }
+
+const out = normalizeResponse({ method: "GET", url: "http://x/isr" }, upstream);
+const body = await out.text();
+console.log(JSON.stringify({
+    isSameObject: out === upstream,
+    cacheControl: out.headers.get("cache-control"),
+    body,
+    status: out.status,
+}));
+server.close();
+`;
+        const r = spawnSync("node", ["--input-type=module", "-e", script], {
+            encoding: "utf8",
+            // Importing response-cache-control.mjs ALSO installs the
+            // node:http preload patch (module header, cache-control-
+            // normalize.cjs's side effect). Left on, that patch rewrites the
+            // SERVER's own res.writeHead() call before it ever leaves the
+            // process — the fetch() client below would then receive an
+            // ALREADY-deployed value, `normalizeResponse` would see
+            // `next === value` and never call `headers.set` at all, and this
+            // test would pass for the wrong reason (nothing to fall back
+            // from). Off, so the server ships the true origin value and this
+            // test exercises normalizeResponse's OWN fallback, not the
+            // preload's.
+            env: { ...process.env, KNEXT_CACHE_CONTROL_NORMALIZE: "0" },
+        });
+        expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+        const result = JSON.parse(r.stdout.trim());
+        expect(result.isSameObject).toBe(false); // rebuilt, not the immutable original
+        expect(result.cacheControl).toBe(DEPLOY);
+        expect(result.body).toBe("upstream-body"); // body was never consumed by the rebuild
+        expect(result.status).toBe(200);
+    });
+});
+
 describe("the built dist resolves the rule from wherever tsup put the importer", () => {
     // Measured trap: when two ESM entries share this code, tsup hoists it into
     // a `dist/chunk-*.js` at the dist ROOT, where the relative
