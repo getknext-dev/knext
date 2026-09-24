@@ -34,7 +34,11 @@
  *   - a `flaky` entry carries mixed evidence (a failing and a passing run, at
  *     least three runs in all), expires within 14 days, and at most 5 files may
  *     be flaky. Its stale rule is exempted per run (a pass is expected); the
- *     14-day expiry is what bounds it;
+ *     14-day expiry is what bounds it. `report --history-runs N` additionally
+ *     judges each flaky entry over a WINDOW of the lane's own last N
+ *     informative runs (this one plus its history): three failures in a row
+ *     reds the run (broken, not flaky), three passes in a row reds it (stale).
+ *     This is what stops a permanent regression hiding until the 14-day expiry;
  *   - evidence is per run with that run's failing cases, and every snapshot case
  *     must be covered by every failing evidence run — a snapshot cannot grow
  *     past its evidence; an unsupported entry needs at least two failing runs.
@@ -43,17 +47,69 @@
  * those patterns are the shared half of every cell's compat-window fingerprint.
  * The bun-vinext cell declares both files in its own `extraFiles`.
  *
+ * ## The flaky window's history (#1355 review findings 1 and 3)
+ * "Informative" history is restricted to completed runs of THIS workflow, on
+ * `main`, whose shard summaries all carry the DEFAULT `nextjsRef` (a summary's
+ * own `ref` field — the same thing a dispatch with a custom ref would change).
+ * That covers both the scheduled runs and a workflow_dispatch rerun with
+ * default inputs, without needing to parse dispatch inputs back out of the
+ * GitHub API. A run that is cancelled, still running, uploaded no summaries
+ * (artifactless), used a custom ref, or is missing a shard is simply NOT
+ * informative — it contributes 'none' and history keeps looking further back
+ * (backfill) rather than treating it as a for/against data point.
+ * Fetching a candidate run's summaries can fail on an auth/API error (a
+ * token scope problem, a transient 401/403/5xx from `gh`); that is a WARNING
+ * and the run is skipped, but `MAX_CONSECUTIVE_HISTORY_SKIPS` such skips in a
+ * row is fail-CLOSED (the `report` command errors out) rather than silently
+ * degrading to an ever-smaller window. Only `GITHUB_REPOSITORY` being unset,
+ * or the initial `gh run list` itself failing, degrades softly to "the window
+ * check was skipped, the flaky expiry still bounds every entry" — once
+ * candidates are in hand, a string of unreadable ones is a signal, not noise.
+ *
+ * The lane is WEEKLY (`compat-vinext.yml`'s schedule), while the flaky expiry
+ * is 14 days — about two scheduled runs. A `report --history-runs 3` window
+ * therefore usually has at most one or two informative scheduled runs before
+ * an entry expires on its own; the window mostly matters for entries whose
+ * evidence keeps getting refreshed past 14 days, or ones exercised by an
+ * on-demand `workflow_dispatch` in between schedules. If that turns out to be
+ * too thin to catch a permanent regression before expiry, a flaky-lane-only
+ * dispatch cadence (e.g. a `17 7 * * 3` mid-week run of JUST the flaky files)
+ * would close the gap — proposed here, NOT implemented; it needs its own
+ * shard-count and cost tradeoff.
+ *
  * CLI (dependency-free, plain Node):
  *   apply   --ledger <json> --summary <shard-summary.json>
  *           validates the ledger, rewrites the summary in place (exit 1 if invalid)
- *   report  --ledger <json> --summaries <dir>
- *           validates, fails on stale entries, prints the published number
+ *   report  --ledger <json> --summaries <dir> [--history-runs N]
+ *           validates, fails on stale entries (and, with --history-runs, a
+ *           broken/stale flaky window), prints the published number
  *   refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir> [...]
  *           (at least two runs) regenerates every entry's `cases` snapshot as the
  *           cases that failed in EVERY run (a run where the file passed empties
  *           it, so the entry is refused) and writes the per-run evidence used
+ *   verify  --ledger <json>
+ *           re-derives every entry from the runs its evidence cites (each run's
+ *           branch, workflow path, ref and full shard set checked via `gh api`)
+ *           and fails on any mismatch, an unfetchable run, or an incomplete
+ *           shard set (a missing shard is NEVER counted as a pass). ADVISORY
+ *           ONLY — `compat-vinext-ledger-verify.yml` is not a required check,
+ *           so it cannot by itself block a merge; treat a red run there as a
+ *           signal to fix the ledger, not as a gate. Every evidence run cited
+ *           is downloaded from GitHub Actions artifacts, which are retained
+ *           90 days: an entry whose evidence ages past that can no longer be
+ *           verified (or refreshed from the SAME runs) and needs a fresh
+ *           `refresh` against current runs before its next renewal.
  */
-import { appendFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  appendFileSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -65,6 +121,17 @@ export const CLASSES = ['unsupported', 'flaky'];
 export const FLAKY_FILE_CAP = 5;
 export const FLAKY_MAX_EXPIRY_DAYS = 14;
 export const FLAKY_MIN_EVIDENCE_RUNS = 3;
+/** A flaky entry failing, or passing, this many informative runs in a row is not flaky. */
+export const FLAKY_WINDOW = 3;
+/** The lane's workflow: its name (for `gh run list`) and its checked-out path (for `gh api`). */
+export const LANE_WORKFLOW = 'compat-vinext.yml';
+export const LANE_WORKFLOW_PATH = `.github/workflows/${LANE_WORKFLOW}`;
+/** The pinned ref this lane's credentialed runs use (`compat-vinext.yml`'s default input). */
+export const DEFAULT_NEXTJS_REF = 'v16.2.0';
+/** Every shard must be present for a run to inform the flaky window or `verify`. */
+export const EXPECTED_SHARD_TOTAL = 16;
+/** Consecutive per-run history fetch failures (auth/API errors) before `report` fails closed. */
+export const MAX_CONSECUTIVE_HISTORY_SKIPS = 3;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UPSTREAM_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+$/;
@@ -373,6 +440,276 @@ export function skippedWarnings(summaries) {
     .map((s) => `shard ${s.shard}: ${s.ledgerSkipped}`);
 }
 
+/**
+ * A run is informative for the flaky window (or citable by `verify`) only if
+ * every one of its shard summaries is present, `builder:vinext`, and used the
+ * DEFAULT nextjsRef — a custom-ref dispatch, or a run missing shards, is not
+ * evidence either way (never a "pass").
+ * @param {any[]} summaries one run's shard summaries (applied or not)
+ * @returns {boolean}
+ */
+export function isCompleteDefaultRun(summaries) {
+  return (
+    Array.isArray(summaries) &&
+    summaries.length === EXPECTED_SHARD_TOTAL &&
+    summaries.every((s) => s.builder === 'vinext' && s.ref === DEFAULT_NEXTJS_REF)
+  );
+}
+
+/**
+ * How one flaky entry's snapshot cases fared in one run: 'fail' when any of
+ * them failed (whether still in `failures` or already `quarantined`), 'pass'
+ * when the file ran and none did, 'none' when the run says nothing (the file
+ * did not run, failed with no case detail, or a shard skipped reclassification).
+ * @param {any[]} summaries one run's shard summaries, applied or not
+ * @param {any} e
+ */
+function flakyStatus(summaries, e) {
+  if (summaries.length === 0) return 'none';
+  if (summaries.some((s) => s.ledgerSkipped)) return 'none';
+  if (summaries.some((s) => (s.notRunFiles ?? []).includes(e.test))) return 'none';
+  const rows = summaries.flatMap((s) => [...(s.failures ?? []), ...(s.quarantined ?? [])]);
+  const mine = rows.filter((r) => r.file === e.test);
+  if (mine.some((r) => !(r.cases ?? []).length)) return 'none';
+  const failed = new Set(mine.flatMap((r) => r.cases));
+  return e.cases.some((c) => failed.has(c)) ? 'fail' : 'pass';
+}
+
+/**
+ * Judge each flaky entry over its last FLAKY_WINDOW informative runs (oldest
+ * first; the current run last). All failing: it is broken, not flaky, and must
+ * be reclassified. All passing: it is stale and must be removed. The per-run
+ * stale rule does not apply to flaky entries (a single pass is expected); this
+ * window is what stops a permanent regression hiding until expiry.
+ * @param {any[]} entries
+ * @param {any[][]} runs one array of shard summaries per run, oldest first
+ * @returns {{ broken: {test: string, runs: number}[], stale: {test: string, runs: number}[] }}
+ */
+export function flakyWindow(entries, runs) {
+  const broken = [];
+  const stale = [];
+  for (const e of entries) {
+    if (e.class !== 'flaky') continue;
+    const informative = runs.map((r) => flakyStatus(r, e)).filter((st) => st !== 'none');
+    const last = informative.slice(-FLAKY_WINDOW);
+    if (last.length < FLAKY_WINDOW) continue;
+    if (last.every((st) => st === 'fail')) broken.push({ test: e.test, runs: last.length });
+    else if (last.every((st) => st === 'pass')) stale.push({ test: e.test, runs: last.length });
+  }
+  return { broken, stale };
+}
+
+/** True for errors that plausibly come from `gh`'s own auth/API layer, not a local bug. */
+export function isAuthOrApiError(err) {
+  const msg = String(err?.message ?? err ?? '');
+  return /\b(401|403|429|5\d\d)\b|authenticat|rate.?limit|could not resolve|gh: /i.test(msg);
+}
+
+/**
+ * The lane's previous runs on `main`, newest first, excluding the current
+ * one — CANDIDATES only (any status/conclusion); `collectHistory` decides
+ * which are informative and backfills past the rest. `exec` runs `gh`.
+ * @param {(args: string[]) => string} exec
+ * @param {{ repo: string, currentRunId?: string, limit: number }} opts
+ * @returns {{ id: string, status: string }[]}
+ */
+export function previousRunCandidates(exec, { repo, currentRunId, limit }) {
+  const out = exec([
+    'run',
+    'list',
+    '--workflow',
+    LANE_WORKFLOW,
+    '--branch',
+    'main',
+    '--repo',
+    repo,
+    '--limit',
+    String(limit),
+    '--json',
+    'databaseId,status',
+  ]);
+  return /** @type {{databaseId: number, status: string}[]} */ (JSON.parse(out))
+    .filter((r) => String(r.databaseId) !== String(currentRunId))
+    .map((r) => ({ id: String(r.databaseId), status: r.status }));
+}
+
+/** Download one run's lane shard summaries into `dir`. */
+export function downloadRun(exec, { repo, runId, dir }) {
+  exec([
+    'run',
+    'download',
+    runId,
+    '--repo',
+    repo,
+    '--pattern',
+    'compat-vinext-summary-*',
+    '--dir',
+    dir,
+  ]);
+}
+
+/**
+ * Collect up to `want` INFORMATIVE history runs (oldest first) by walking the
+ * lane's candidates newest-first and backfilling past anything uninformative:
+ * a run that is not yet completed, uploaded no summaries (artifactless), used
+ * a non-default ref, or is missing a shard, is skipped WITHOUT counting
+ * against the failure budget below — it simply is not evidence.
+ *
+ * An auth/API error fetching one run's summaries is a WARNING (that run is
+ * skipped); `MAX_CONSECUTIVE_HISTORY_SKIPS` such errors IN A ROW fail closed
+ * (throw), rather than silently returning an ever-smaller window. Any other
+ * error (a bug, a malformed response) is not swallowed at all.
+ * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string}[], fetchSummaries: (id: string) => any[] }} deps
+ * @param {{ repo: string, currentRunId?: string, want: number }} opts
+ * @returns {{ history: any[][], warnings: string[] }}
+ */
+export function collectHistory(deps, { repo, currentRunId, want }) {
+  const candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
+  const history = [];
+  const warnings = [];
+  let consecutiveSkips = 0;
+  for (const c of candidates) {
+    if (history.length >= want) break;
+    if (c.status !== 'completed') continue; // cancelled / in-progress: 'none', backfill
+    let summaries;
+    try {
+      summaries = deps.fetchSummaries(c.id);
+    } catch (err) {
+      if (!isAuthOrApiError(err)) throw err;
+      consecutiveSkips += 1;
+      warnings.push(`run ${c.id}: could not be fetched (${err?.message ?? err}); skipped`);
+      if (consecutiveSkips >= MAX_CONSECUTIVE_HISTORY_SKIPS) {
+        throw new Error(
+          `${consecutiveSkips} consecutive history runs could not be fetched (auth/API errors); ` +
+            'failing closed rather than silently narrowing the flaky window',
+        );
+      }
+      continue;
+    }
+    consecutiveSkips = 0;
+    if (summaries.length === 0) continue; // artifactless: 'none', backfill
+    if (!isCompleteDefaultRun(summaries)) continue; // custom ref or missing shard: 'none', backfill
+    history.push(summaries);
+  }
+  return { history: history.reverse(), warnings };
+}
+
+const canonical = (e) =>
+  JSON.stringify({
+    cases: [...(e.cases ?? [])].sort(),
+    fail: [...(e.evidence?.fail ?? [])]
+      .map((r) => ({ run: String(r.run), cases: [...(r.cases ?? [])].sort() }))
+      .sort((a, b) => a.run.localeCompare(b.run)),
+    pass: [...(e.evidence?.pass ?? [])].map(String).sort(),
+  });
+
+/**
+ * Re-derive every entry from the runs it lists and compare. Catches evidence
+ * that is invented (the run does not exist), cited from another lane, cited
+ * from a non-`main`/wrong-workflow run, cited with a custom ref, missing a
+ * shard (never counted as a pass), or that does not say what the entry
+ * claims, e.g. an unsupported entry relabelled flaky with a "passing" run
+ * where the file actually failed.
+ * @param {any} ledger
+ * @param {(runId: string) => { meta: { headBranch: string, path: string }, summaries: any[] }} fetchRun
+ * @returns {string[]}
+ */
+export function verifyEvidence(ledger, fetchRun) {
+  const errors = [];
+  // One fetch per distinct run: several entries usually cite the same runs.
+  const cache = new Map();
+  const fetchOnce = (id) => {
+    if (!cache.has(id)) {
+      try {
+        cache.set(id, { ok: true, value: fetchRun(id) });
+      } catch (error) {
+        cache.set(id, { ok: false, error });
+      }
+    }
+    const hit = cache.get(id);
+    if (!hit.ok) throw hit.error;
+    return hit.value;
+  };
+  for (const e of ledger.entries) {
+    const ids = [
+      ...(e.evidence?.fail ?? []).map((r) => String(r.run)),
+      ...(e.evidence?.pass ?? []).map(String),
+    ];
+    const runs = [];
+    for (const id of ids) {
+      let result;
+      try {
+        result = fetchOnce(id);
+      } catch (err) {
+        errors.push(`${e.test}: evidence run ${id} could not be fetched (${err?.message ?? err})`);
+        continue;
+      }
+      const { meta, summaries } = result;
+      if (meta?.headBranch !== 'main') {
+        errors.push(
+          `${e.test}: evidence run ${id} is not on main (head_branch=${meta?.headBranch})`,
+        );
+        continue;
+      }
+      if (meta?.path !== LANE_WORKFLOW_PATH) {
+        errors.push(
+          `${e.test}: evidence run ${id} is not a ${LANE_WORKFLOW} run (path=${meta?.path})`,
+        );
+        continue;
+      }
+      if (!summaries.length || summaries.some((x) => x.builder !== 'vinext')) {
+        errors.push(`${e.test}: evidence run ${id} is not a vinext-lane run`);
+        continue;
+      }
+      if (summaries.length < EXPECTED_SHARD_TOTAL) {
+        errors.push(
+          `${e.test}: evidence run ${id} is missing shard summaries (${summaries.length}/${EXPECTED_SHARD_TOTAL}); a missing shard is never counted as a pass`,
+        );
+        continue;
+      }
+      if (!summaries.every((s) => s.ref === DEFAULT_NEXTJS_REF)) {
+        errors.push(`${e.test}: evidence run ${id} did not use the default nextjsRef`);
+        continue;
+      }
+      runs.push({ id, summaries });
+    }
+    if (runs.length !== ids.length) continue;
+    const { ledger: derived, errors: refreshErrors } = refreshSnapshots(
+      { entries: [e] },
+      runs,
+      e.refreshed ?? '',
+    );
+    if (refreshErrors.length) {
+      errors.push(...refreshErrors.map((m) => `${m} (re-derived from its listed runs)`));
+      continue;
+    }
+    if (canonical(derived.entries[0]) !== canonical(e))
+      errors.push(
+        `${e.test}: cases/evidence does not match what refresh derives from the runs it lists (${ids.join(', ')}) — regenerate it with \`refresh\``,
+      );
+  }
+  return errors;
+}
+
+const gh = (a) => execFileSync('gh', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+/** Fetch runs into a temp dir, read their summaries, and always remove the dir. */
+function withRuns(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'knext-vinext-ledger-'));
+  try {
+    return fn(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** One run's `head_branch` and checked-out workflow `path`, via `gh api`. */
+function runMeta(repo, runId) {
+  const raw = gh(['api', `repos/${repo}/actions/runs/${runId}`]);
+  const parsed = JSON.parse(raw);
+  return { headBranch: parsed.head_branch, path: parsed.path };
+}
+
 function args(argv, name) {
   const out = [];
   for (let i = 0; i < argv.length; i += 1) if (argv[i] === `--${name}`) out.push(argv[i + 1]);
@@ -399,9 +736,9 @@ function loadLedger(path) {
 function main(argv) {
   const [cmd] = argv;
   const [ledgerPath] = args(argv, 'ledger');
-  if (!ledgerPath || !['apply', 'report', 'refresh'].includes(cmd)) {
+  if (!ledgerPath || !['apply', 'report', 'refresh', 'verify'].includes(cmd)) {
     console.error(
-      'usage: compat-vinext-ledger.mjs apply --ledger <json> --summary <file> | report --ledger <json> --summaries <dir> | refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir>…',
+      'usage: compat-vinext-ledger.mjs apply --ledger <json> --summary <file> | report --ledger <json> --summaries <dir> [--history-runs N] | refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir>… | verify --ledger <json>',
     );
     return 2;
   }
@@ -431,6 +768,24 @@ function main(argv) {
   if (errors.length) {
     for (const e of errors) console.error(`::error::vinext quarantine ledger — ${e}`);
     return 1;
+  }
+  if (cmd === 'verify') {
+    const repo = process.env.GITHUB_REPOSITORY;
+    if (!repo) {
+      console.error('::error::verify needs GITHUB_REPOSITORY (owner/name) and a gh token');
+      return 1;
+    }
+    const failures = withRuns((root) =>
+      verifyEvidence(ledger, (id) => {
+        const dir = join(root, id);
+        downloadRun(gh, { repo, runId: id, dir });
+        return { meta: runMeta(repo, id), summaries: readSummaries(dir) };
+      }),
+    );
+    for (const f of failures) console.error(`::error::vinext quarantine ledger — ${f}`);
+    if (failures.length === 0)
+      console.log(`verified ${ledger.entries.length} ledger entries against their listed runs`);
+    return failures.length ? 1 : 0;
   }
   if (cmd === 'apply') {
     const [path] = args(argv, 'summary');
@@ -467,9 +822,72 @@ function main(argv) {
       `::error::stale quarantine entry — ${s.test} (cases: ${s.cases.join(' | ')}) did not fail in this run; remove them from ${ledgerPath} or refresh the snapshot`,
     );
   }
-  return stale.length ? 1 : 0;
+  const window = flakyHistory(argv, ledger, summaries);
+  for (const b of window.broken)
+    console.error(
+      `::error::flaky entry is broken, not flaky — ${b.test} failed its snapshot case in ${b.runs} consecutive informative runs; reclassify it as unsupported (with its upstream issue) or fix it`,
+    );
+  for (const st of window.stale)
+    console.error(
+      `::error::stale flaky entry — ${st.test} passed ${st.runs} consecutive informative runs; remove it from ${ledgerPath}`,
+    );
+  return stale.length || window.broken.length || window.stale.length ? 1 : 0;
+}
+
+/**
+ * The flaky window for `report --history-runs N`: this run plus the lane's
+ * last N informative runs on main (see `collectHistory`). `GITHUB_REPOSITORY`
+ * being unset, or the initial run listing failing outright, degrades SOFTLY
+ * to a warning (window skipped, 14-day flaky expiry still bounds every
+ * entry) — `collectHistory` itself fails CLOSED on a run of unreadable
+ * candidates (see its doc comment), and that error is deliberately NOT
+ * caught here.
+ */
+function flakyHistory(argv, ledger, current) {
+  const [n] = args(argv, 'history-runs');
+  if (!n || !ledger.entries.some((e) => e.class === 'flaky')) return { broken: [], stale: [] };
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!repo) {
+    console.error(
+      `::warning::vinext quarantine ledger — flaky history unavailable (GITHUB_REPOSITORY is not set); the window check was skipped, the ${FLAKY_MAX_EXPIRY_DAYS}-day flaky expiry still bounds every flaky entry`,
+    );
+    return { broken: [], stale: [] };
+  }
+  let candidates;
+  try {
+    candidates = previousRunCandidates(gh, {
+      repo,
+      currentRunId: process.env.GITHUB_RUN_ID,
+      limit: Number(n) * 4 + 10,
+    });
+  } catch (err) {
+    console.error(
+      `::warning::vinext quarantine ledger — flaky history unavailable (${err?.message ?? err}); the window check was skipped, the ${FLAKY_MAX_EXPIRY_DAYS}-day flaky expiry still bounds every flaky entry`,
+    );
+    return { broken: [], stale: [] };
+  }
+  const { history, warnings } = withRuns((root) =>
+    collectHistory(
+      {
+        list: () => candidates,
+        fetchSummaries: (id) => {
+          const dir = join(root, id);
+          downloadRun(gh, { repo, runId: id, dir });
+          return readSummaries(dir);
+        },
+      },
+      { repo, currentRunId: process.env.GITHUB_RUN_ID, want: Number(n) },
+    ),
+  );
+  for (const w of warnings) console.error(`::warning::vinext quarantine ledger — ${w}`);
+  return flakyWindow(ledger.entries, [...history, current]);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exit(main(process.argv.slice(2)));
+  try {
+    process.exit(main(process.argv.slice(2)));
+  } catch (err) {
+    console.error(`::error::vinext quarantine ledger — ${err?.message ?? err}`);
+    process.exit(1);
+  }
 }
