@@ -77,7 +77,7 @@ on:
         description: 'Bun version for the bun lane (oven-sh/setup-bun spec: latest | canary | e.g. 1.3.2). Dispatch-only; the weekly schedule uses the pinned stable (setup-bun fallback).'
         required: false
         type: string
-        default: '1.4.0'
+        default: '1.4.2'
       # #188 path 2 — the edge-sandbox fetch investigation knob. The bun lane
       # is deterministically red on middleware-fetches-with-any-http-method
       # (6/6 runs) while node is green on identical infra, and neither the
@@ -104,7 +104,7 @@ on:
     # slot from the node cron so the two credential lanes never contend for the
     # same runner window, and DISTINCT from it as a lane key: the KNEXT_RUNTIME
     # expression below maps THIS cron (and only this cron) to `bun`, so the node
-    # cron above stays node. bun-standalone runs on the pinned stable Bun 1.4.0
+    # cron above stays node. bun-standalone runs on the pinned stable Bun 1.4.2
     # (the setup-bun fallback); its acceptance target is
     # docs/compat/window-bun-lane.md (14 consecutive scheduled bun nights on one
     # unchanged harness AND one unchanged Bun build). The weekly Sunday bun cron
@@ -335,7 +335,7 @@ jobs:
       - name: Setup Bun (knext workspace)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
 
       - name: Install knext deps
         working-directory: knext
@@ -455,7 +455,7 @@ jobs:
         with:
           # LOCKSTEP: keep byte-identical to the deploy-tests `Setup Bun (bun
           # lane only)` step. Bumping one alone reds compat-bun-lane-lockstep.
-          bun-version: ${{ github.event.inputs.bun-version || '1.4.0' }}
+          bun-version: ${{ github.event.inputs.bun-version || '1.4.2' }}
 
       - name: Fingerprint the frozen compat-window set
         run: |
@@ -471,7 +471,7 @@ jobs:
           # formula — the live node streak is never reset.
           #
           # cr-1179 #1: the Bun read here is the LANE's Bun, installed by the
-          # step immediately above from the SAME `inputs.bun-version || '1.4.0'`
+          # step immediately above from the SAME `inputs.bun-version || '1.4.2'`
           # expression the deploy-tests shards install from — not the hardcoded
           # workspace pin. `tests/compat-bun-lane-lockstep.test.ts` reds if those
           # two expressions ever diverge, so bumping the lane pin cannot move the
@@ -860,7 +860,7 @@ jobs:
           # remaining red files are Bun-version-gated). On the weekly schedule
           # github.event.inputs is empty, so the fallback below IS the weekly
           # lane's version. #187 review follow-up: that fallback is PINNED to
-          # the current Bun stable (1.4.0 — the version the bun-lane baseline
+          # the current Bun stable (1.4.2; the bun-lane baseline
           # and the ≤1.3.x keep-alive/edge-sandbox attributions were measured
           # on). `latest` floated: a red weekly right after a new Bun release
           # could be a brand-new-Bun regression misattributed to knext. Bump
@@ -871,7 +871,7 @@ jobs:
           # workflow edit; the OBSERVED `bun --version` is captured into the
           # shard summary below — the requested spec here is not attributable
           # evidence on its own.
-          bun-version: ${{ github.event.inputs.bun-version || '1.4.0' }}
+          bun-version: ${{ github.event.inputs.bun-version || '1.4.2' }}
 
       # #147 (the Upload-workspace OOM fix, Option A) — the compat-workspace
       # artifact ships SOURCE ONLY (no node_modules; shipping it OOM'd the upload,

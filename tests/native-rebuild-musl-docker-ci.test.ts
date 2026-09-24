@@ -9,7 +9,7 @@ import { auditBlockingGate } from './helpers/blocking-gate';
  * asserts it has one, and that the wiring actually reaches it.
  *
  * `tests/e2e-native-rebuild-musl.docker-e2e.test.ts` executes the real script
- * inside the pinned `oven/bun:1.4.0-alpine` image — a source-contract scan
+ * inside the pinned `oven/bun:1.4.2-alpine` image — a source-contract scan
  * (`tests/compat-bun-lane-compiled-exec.test.ts`) can only prove the anchor
  * strings exist, not that the behaviour they describe actually happens. It is
  * wired into the existing `sigterm-drain-shipped` job (already docker-capable

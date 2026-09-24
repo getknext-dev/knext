@@ -111,7 +111,7 @@ jobs:
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
       
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -265,7 +265,7 @@ jobs:
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -315,11 +315,11 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
           # PINNED, and now at 1.4.0 (was '1.3.14', #754/#807). The platform runs
           # bun 1.4: the root bun.lock is lockfileVersion 3, which 1.3.x cannot
           # parse at all, and all three container images are already
-          # oven/bun:1.4.0-alpine. The 1.3 lane that used to run here is gone
+          # oven/bun:1.4.2-alpine. The 1.3 lane that used to run here is gone
           # deliberately — see #882. Still PINNED rather than `latest`: the
           # mid-day 1.4.0 release is exactly the unpinned-toolchain drift this
           # repo pins images and actions against. Guarded by
@@ -424,7 +424,7 @@ jobs:
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -486,7 +486,7 @@ jobs:
       # #1230 round 6: the ONLY thing that proves scripts/e2e-native-rebuild-musl.sh
       # actually fixes what it claims to (musl sharp/libvips siblings, the
       # ROOT-escape guard) is running it for real, inside the SAME pinned
-      # oven/bun:1.4.0-alpine image the compat harness's bun lane boots — a
+      # oven/bun:1.4.2-alpine image the compat harness's bun lane boots — a
       # source-contract text scan cannot prove any of these three defects are
       # fixed, only that the anchor strings exist. This job already has docker
       # (every GitHub-hosted ubuntu-latest runner does) and Node+bun already set
@@ -529,7 +529,7 @@ jobs:
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -922,7 +922,7 @@ jobs:
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -1012,7 +1012,7 @@ jobs:
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
 
       - name: Install dependencies
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
@@ -1227,7 +1227,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
           # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       - name: Install example dependencies
@@ -1329,7 +1329,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
           # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       # examples/bun-exec is OUTSIDE the pnpm workspace (own bun.lock, pins the
@@ -1416,7 +1416,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
           # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       - name: Install example dependencies
@@ -1485,7 +1485,7 @@ jobs:
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -1540,7 +1540,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
           # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       - name: Install dependencies

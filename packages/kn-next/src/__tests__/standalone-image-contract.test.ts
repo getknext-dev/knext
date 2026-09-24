@@ -133,7 +133,7 @@ describe("Dockerfile.standalone.hbs — ADR-0055 image-owned start contract", ()
     it("pins BOTH base images by digest (bun via oven/bun, node via node:22), reusing the repo's pins", () => {
         // The exact digests already pinned elsewhere in the repo — reused, not invented.
         expect(dockerfile).toContain(
-            "oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb",
+            "oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f",
         );
         expect(dockerfile).toContain(
             "node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32",

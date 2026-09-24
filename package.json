@@ -1,7 +1,7 @@
 {
   "name": "knative-next-monorepo",
   "private": true,
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
@@ -32,7 +32,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",
     "@turbo/gen": "^2.8.10",
-    "@types/bun": "^1.4.0",
+    "@types/bun": "^1.4.2",
     "@types/node": "^25.3.0",
     "happy-dom": "^20.0.11",
     "ioredis": "^6.0.0",

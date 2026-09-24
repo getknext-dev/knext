@@ -44,7 +44,14 @@ import {
     it,
     mock,
 } from "bun:test";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+    cpSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -117,6 +124,8 @@ function stageFixtureImage(opts: {
         | "node-entry-index-only"
         | "none";
     encoding?: "utf-8" | "utf16le";
+    /** Plant these exact bytes as `app/server` (a REAL compiled exec). */
+    serverBytes?: Buffer;
 }): void {
     const fixtureRoot = tmp();
     const appDir = join(fixtureRoot, "app");
@@ -134,7 +143,9 @@ function stageFixtureImage(opts: {
         ? `export const __assetPrefix = ${JSON.stringify(opts.assetPrefixLiteral)};`
         : "// no assetPrefix literal here";
     const noLiteral = "// re-exports from split chunks, no literal here";
-    if (shape === "compiled-binary") {
+    if (opts.serverBytes) {
+        writeFileSync(join(appDir, "server"), opts.serverBytes);
+    } else if (shape === "compiled-binary") {
         writeEncoded(join(appDir, "server"), embed, encoding);
     } else if (shape === "node-entry-index-only") {
         const serverDir = join(appDir, ".output", "server");
@@ -453,4 +464,82 @@ describe("verifyBuiltImageLockstep — ASSET_PREFIX embedding (storage mode) —
         });
         expect(result).toEqual({ ok: true });
     });
+});
+/**
+ * A REAL `bun build --compile` exec, not a hand-encoded fixture (#1310). The
+ * fixtures above hand-write UTF-16LE; this compiles an entry with the RUNNING
+ * Bun and scans what it actually produced. Measured on Bun 1.4.2
+ * (darwin-arm64): WITHOUT `--bytecode`, an entry containing U+2019 is stored
+ * UTF-16LE ONLY — the UTF-8/Latin-1 needle is absent — so this case fails
+ * closed unless the UTF-16LE search is live. (With `--bytecode` the constant
+ * pool adds a Latin-1 copy, which is why this case compiles without it.)
+ */
+describe("verifyBuiltImageLockstep — a REAL compiled exec from the running Bun (#1310)", () => {
+    const PREFIX = "https://cdn.example.com/my-app-real-compile";
+
+    function compileReal(): Buffer {
+        const dir = tmp();
+        const entry = join(dir, "entry.js");
+        const out = join(dir, "server");
+        writeFileSync(
+            entry,
+            `/*! Copyright (c) Example — it’s licensed */\nexport const assetPrefix = ${JSON.stringify(PREFIX)};\nconsole.log(assetPrefix.length, "’");\n`,
+        );
+        const r = Bun.spawnSync([
+            process.execPath,
+            "build",
+            "--compile",
+            "--minify",
+            entry,
+            "--outfile",
+            out,
+        ]);
+        if (r.exitCode !== 0) {
+            throw new Error(
+                `bun build --compile failed: ${r.stderr.toString()}`,
+            );
+        }
+        return readFileSync(out);
+    }
+
+    it(`finds the prefix in a real exec compiled by Bun ${Bun.version} — UTF-16LE-only on >=1.4.2`, () => {
+        const bytes = compileReal();
+        const utf8 = bytes.includes(Buffer.from(PREFIX, "utf-8"));
+        const utf16 = bytes.includes(Buffer.from(PREFIX, "utf16le"));
+        // Measured layout: 1.4.0 Latin-1, 1.4.2 UTF-16LE only. Pinning it here
+        // is what makes this case a proof of the UTF-16 branch, not a pass
+        // through the UTF-8 one.
+        const MEASURED: Record<string, { utf8: boolean; utf16: boolean }> = {
+            "1.4.0": { utf8: true, utf16: false },
+            "1.4.2": { utf8: false, utf16: true },
+        };
+        const measured = MEASURED[Bun.version];
+        if (measured) expect({ utf8, utf16 }).toEqual(measured);
+        stageFixtureImage({ staticId: "deploytag-9", serverBytes: bytes });
+        expect(
+            verifyBuiltImageLockstep({
+                taggedRef: "reg/app:deploytag-9",
+                expectedId: "deploytag-9",
+                assetPrefix: PREFIX,
+            }),
+        ).toEqual({ ok: true });
+    }, 60_000);
+
+    it("and still fails closed on that real exec when the configured prefix differs", () => {
+        stageFixtureImage({
+            staticId: "deploytag-9",
+            serverBytes: compileReal(),
+        });
+        expect(
+            verifyBuiltImageLockstep({
+                taggedRef: "reg/app:deploytag-9",
+                expectedId: "deploytag-9",
+                assetPrefix: "https://cdn.example.com/some-other-app",
+            }),
+        ).toEqual({
+            ok: false,
+            reason: "asset-prefix-not-embedded",
+            siblings: [],
+        });
+    }, 60_000);
 });
