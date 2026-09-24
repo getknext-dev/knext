@@ -63,15 +63,21 @@ const NODE_WEBPACK_CRON = '17 22 * * *';
 const BUN_WEBPACK_CRON = '47 23 * * *';
 const crons = wf.on.schedule.map((s) => s.cron);
 
-/** The GHA context for a schedule or a dispatch. */
-function scheduleCtx(cron: string) {
+/** The GHA context for a schedule or a dispatch (one type, so both fit `allContexts`). */
+type Ctx = {
+  github: {
+    event_name: string;
+    event: { schedule?: string; inputs?: Record<string, string> | null };
+  };
+};
+function scheduleCtx(cron: string): Ctx {
   return { github: { event_name: 'schedule', event: { schedule: cron, inputs: null } } };
 }
-function dispatchCtx(inputs: Record<string, string>) {
+function dispatchCtx(inputs: Record<string, string>): Ctx {
   return { github: { event_name: 'workflow_dispatch', event: { inputs } } };
 }
 
-function resolveAll(ctx: Record<string, unknown>) {
+function resolveAll(ctx: Ctx) {
   const read = (key: string) => String(evaluate(exprBody(wf.env[key]), ctx) ?? '');
   return {
     runtime: read('KNEXT_RUNTIME'),
@@ -87,7 +93,7 @@ function expectedLane(runtime: string, builder: string) {
 }
 
 /** Every event context the workflow can see: each cron, plus every dispatch combination. */
-function allContexts(): { label: string; ctx: Record<string, unknown> }[] {
+function allContexts(): { label: string; ctx: Ctx }[] {
   const out = crons.map((c) => ({ label: `schedule '${c}'`, ctx: scheduleCtx(c) }));
   for (const runtime of ['node', 'bun']) {
     for (const builder of ['turbopack', 'webpack']) {
