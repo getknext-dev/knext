@@ -2,15 +2,17 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 
 /**
  * S1 / #545 — the COMPAT-WINDOW FINGERPRINT.
@@ -68,6 +70,7 @@ afterAll(() => {
 function makeFixture(): { repoRoot: string; tarballsDir: string } {
   const root = tempDir('knext-fp-repo-');
   mkdirSync(join(root, '.github/workflows'), { recursive: true });
+  mkdirSync(join(root, '.github'), { recursive: true });
   mkdirSync(join(root, 'scripts'), { recursive: true });
   mkdirSync(join(root, 'test'), { recursive: true });
   writeFileSync(join(root, '.github/workflows/test-e2e-deploy.yml'), 'name: Compat suite\n');
@@ -80,6 +83,12 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
     join(root, 'test/deploy-tests-manifest.knext.json'),
     `${JSON.stringify({ version: 2, rules: { exclude: [] } }, null, 2)}\n`,
   );
+  // #1294 round 3: the default lane ('node') declares these in
+  // CREDENTIAL_CELLS.extraFiles — a declared-but-missing entry is a hard
+  // error, so every fixture used against the default lane needs them present.
+  writeFileSync(join(root, 'scripts/compat-credential-ref.mjs'), 'export const noop = 1;\n');
+  writeFileSync(join(root, 'scripts/compat-run-ledger.mjs'), 'export const noop = 1;\n');
+  writeFileSync(join(root, '.github/compat-credential-ref.json'), '{"rcTag":null}\n');
 
   const tarballsDir = tempDir('knext-fp-tarballs-');
   for (const [name, version] of [
@@ -565,4 +574,733 @@ describe('compat-window fingerprint — wired into the scheduled run', () => {
     const ledger = workflow.slice(workflow.indexOf('shard-ledger:'));
     expect(ledger).toContain('windowFingerprint');
   });
+
+  // #1294 round 5 — the fingerprint script now imports `typescript` to parse
+  // JS (a REAL parser, not a hand tokenizer). `typescript` is a root
+  // devDependency, installed by the workspace `bun install`, so that install
+  // step must run BEFORE the fingerprint step or the import fails closed
+  // with Node's own module-not-found error — a real but unfriendly failure
+  // this test exists to make unnecessary by verifying the step ORDER, not
+  // just that an install step exists somewhere in the file. This is a
+  // regression guard: a future reorder (e.g. moving the fingerprint step
+  // earlier to shave a few seconds) would silently reintroduce the failure.
+  it('"Install knext deps" (the bun install that provides typescript) runs BEFORE the fingerprint step', () => {
+    const installIdx = workflow.indexOf('name: Install knext deps');
+    const fingerprintIdx = workflow.indexOf('name: Fingerprint the frozen compat-window set');
+    expect(installIdx, 'Install knext deps step not found').toBeGreaterThan(-1);
+    expect(fingerprintIdx, 'Fingerprint step not found').toBeGreaterThan(-1);
+    expect(installIdx).toBeLessThan(fingerprintIdx);
+  });
+});
+
+/**
+ * #1294 — PER-CELL WORKFLOW ENTRY.
+ *
+ * Before this, the `harness` workflow-file entry was hardcoded to
+ * `.github/workflows/test-e2e-deploy.yml` for every lane. The vinext cells
+ * actually run from `.github/workflows/compat-vinext.yml`, so an edit there
+ * NEVER moved the vinext cells' fingerprint — a changed harness could carry a
+ * 14-night window, which violates ADR-0056 D3.
+ */
+describe('compat-window fingerprint — each cell hashes the workflow that actually executes it (#1294)', () => {
+  const VINEXT_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/compat-vinext.yml');
+
+  function fingerprintLane(
+    repoRoot: string,
+    tarballsDir: string,
+    lane: string,
+  ): { fingerprint: string; components: Record<string, string>; files: { path: string }[] } {
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        repoRoot,
+        '--tarballs-dir',
+        tarballsDir,
+        '--lane',
+        lane,
+        '--json',
+        '--files',
+      ],
+      { encoding: 'utf8' },
+    );
+    return JSON.parse(out);
+  }
+
+  /** A fixture carrying BOTH real-world workflow files, so a lane's harness set is attributable. */
+  function makeMultiWorkflowFixture(): { repoRoot: string; tarballsDir: string } {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, '.github/workflows/compat-vinext.yml'),
+      'name: Compat suite — vinext single-executable axis\n',
+    );
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-deploy-vinext.sh'),
+      '#!/usr/bin/env bash\necho vinext-deploy\n',
+    );
+    chmodSync(join(repoRoot, 'scripts/e2e-deploy-vinext.sh'), 0o755);
+    return { repoRoot, tarballsDir };
+  }
+
+  it('names the real repo files: node/bun cells hash test-e2e-deploy.yml, the vinext cells hash compat-vinext.yml', () => {
+    for (const lane of ['node', 'bun']) {
+      const tarballsDir = tempDir('knext-fp-cellreal-');
+      packFixtureTarball(tarballsDir, 'core', '0.3.0');
+      const result = fingerprintLane(REPO_ROOT, tarballsDir, lane);
+      const workflows = result.files.filter((f) => f.path.startsWith('.github/workflows/'));
+      expect(workflows.map((f) => f.path)).toEqual(['.github/workflows/test-e2e-deploy.yml']);
+    }
+    for (const lane of ['bun-vinext']) {
+      const tarballsDir = tempDir('knext-fp-cellreal-');
+      packFixtureTarball(tarballsDir, 'core', '0.3.0');
+      const result = fingerprintLane(REPO_ROOT, tarballsDir, lane);
+      const workflows = result.files.filter((f) => f.path.startsWith('.github/workflows/'));
+      expect(workflows.map((f) => f.path)).toEqual(['.github/workflows/compat-vinext.yml']);
+    }
+  });
+
+  it('an unknown lane is a hard error, never a silent fallback to some workflow', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    expect(() => fingerprintLane(repoRoot, tarballsDir, 'not-a-real-lane')).toThrow();
+  });
+
+  it('a lane with no workflow wired yet (node-webpack) is a hard error, not a guess', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    expect(() => fingerprintLane(repoRoot, tarballsDir, 'node-webpack')).toThrow();
+  });
+
+  // THE mutation named in the exit criteria: editing `compat-vinext.yml` moves
+  // the vinext cells' fingerprint and NOT the turbopack (node/bun) cells', and
+  // vice versa for `test-e2e-deploy.yml`.
+  it('editing compat-vinext.yml moves the vinext-lane fingerprint and NOT the turbopack lanes', () => {
+    const { repoRoot, tarballsDir } = makeMultiWorkflowFixture();
+    const before = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    writeFileSync(
+      join(repoRoot, '.github/workflows/compat-vinext.yml'),
+      'name: Compat suite — vinext single-executable axis\n# edited\n',
+    );
+
+    const after = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    expect(after.vinext).not.toBe(before.vinext);
+    expect(after.node).toBe(before.node);
+    expect(after.bun).toBe(before.bun);
+  });
+
+  it('and vice versa: editing test-e2e-deploy.yml moves the turbopack lanes and NOT the vinext lane', () => {
+    const { repoRoot, tarballsDir } = makeMultiWorkflowFixture();
+    const before = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    writeFileSync(
+      join(repoRoot, '.github/workflows/test-e2e-deploy.yml'),
+      'name: Compat suite\n# edited\n',
+    );
+
+    const after = {
+      node: fingerprintLane(repoRoot, tarballsDir, 'node').fingerprint,
+      bun: fingerprintLane(repoRoot, tarballsDir, 'bun').fingerprint,
+      vinext: fingerprintLane(repoRoot, tarballsDir, 'bun-vinext').fingerprint,
+    };
+
+    expect(after.node).not.toBe(before.node);
+    expect(after.bun).not.toBe(before.bun);
+    expect(after.vinext).toBe(before.vinext);
+  });
+
+  it('sanity: the two real workflow files in this checkout are not byte-identical', () => {
+    // If they ever became identical, the test above would pass for the wrong
+    // reason — pin this so that regression is visible here first.
+    expect(readFileSync(WORKFLOW, 'utf8')).not.toBe(readFileSync(VINEXT_WORKFLOW, 'utf8'));
+  });
+});
+
+/**
+ * #1294 round 2 — a lifecycle script's LOCAL dependency closure (imports,
+ * requires, dynamic import()s, and shell `source`/`.`) is part of the frozen
+ * harness set, followed TRANSITIVELY and regardless of filename convention.
+ *
+ * Round 1 fixed this for shell (`scripts/e2e-deploy.sh` sources
+ * `scripts/lib/e2e-state-snapshot.sh`) with a directory-pattern root scoped to
+ * `e2e-*`-prefixed files. That pattern went blind the moment a REAL sourced
+ * file broke the naming convention: `scripts/e2e-preflight.mjs` imports
+ * `./lib/knext-closure.mjs` and `./lib/workspace-protocol.mjs`, neither
+ * `e2e-`-prefixed, so the pattern-based root never saw them — the same gap
+ * class, one level less naming-dependent. The closure fixes the CLASS: it
+ * reaches every file an entry script actually imports or sources, however
+ * it is named.
+ */
+describe('compat-window fingerprint — the entry scripts’ import/source closure is part of the frozen harness (#1294 round 2, #1280)', () => {
+  it('a newly-SOURCED scripts/lib/*.sh file moves the digest with no script edit to the entry point itself', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/helper.sh'), '#!/usr/bin/env bash\necho v1\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-deploy.sh'),
+      '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/lib/helper.sh"\necho deploy\n',
+    );
+    const before = fingerprint(repoRoot, tarballsDir);
+    writeFileSync(join(repoRoot, 'scripts/lib/helper.sh'), '#!/usr/bin/env bash\necho v2\n');
+    const after = fingerprint(repoRoot, tarballsDir);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+    // Attributable: the closure adds exactly the one sourced file, no matter
+    // that its name carries no `e2e-` prefix.
+    expect(after.counts.harness).toBe(before.counts.harness);
+  });
+
+  it('a newly-IMPORTED scripts/lib/*.mjs file (no e2e- prefix) moves the digest — the exact #1294 round-2 gap', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/knext-closure.mjs'), 'export const x = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "import { x } from './lib/knext-closure.mjs';\nexport const y = x;\n",
+    );
+    const before = fingerprint(repoRoot, tarballsDir);
+    writeFileSync(join(repoRoot, 'scripts/lib/knext-closure.mjs'), 'export const x = 2;\n');
+    const after = fingerprint(repoRoot, tarballsDir);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+    expect(after.counts.harness).toBe(before.counts.harness);
+  });
+
+  it('a scripts/lib/ file that NOTHING references is not swept in (the closure follows references, not a directory pattern)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/unreferenced.sh'), '#!/usr/bin/env bash\n');
+    const before = fingerprint(repoRoot, tarballsDir);
+    writeFileSync(
+      join(repoRoot, 'scripts/lib/unreferenced.sh'),
+      '#!/usr/bin/env bash\necho changed\n',
+    );
+    const after = fingerprint(repoRoot, tarballsDir);
+    expect(after.fingerprint).toBe(before.fingerprint);
+  });
+
+  it('a fixture with no scripts/lib/ at all still fingerprints (no entry references it)', () => {
+    // Every OTHER makeFixture()-based test in this file relies on this: none of
+    // them create scripts/lib/, and none of them may start failing because of
+    // an unrelated closure that has nothing to do with what they test.
+    const { repoRoot, tarballsDir } = makeFixture();
+    expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+  });
+
+  it('a REFERENCED-but-missing file is a hard error, never a silently shrunk closure', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "import { x } from './lib/does-not-exist.mjs';\nexport const y = x;\n",
+    );
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow();
+  });
+
+  // #1294 round 3 (jev 0.90) — a regex over RAW source cannot tell a comment
+  // or an unrelated string from genuine import syntax. Either makes the WHOLE
+  // fingerprint hard-error on a file that imports nothing missing at all,
+  // which would break the entire nightly window on one spurious failure.
+  it('a COMMENT mentioning an import-like path to a nonexistent file neither errors nor adds a dependency', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "// see: import x from './nonexistent-thing'\n/* also require('./nonexistent-thing-2') */\nexport const y = 1;\n",
+    );
+    const before = fingerprint(repoRoot, tarballsDir);
+    expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    // The comment text moves the DIGESTED file's own bytes (it's still part of
+    // e2e-summary.mjs, which is frozen), but harness COUNT must not grow — no
+    // phantom dependency was added.
+    expect(fingerprint(repoRoot, tarballsDir).counts.harness).toBe(before.counts.harness);
+  });
+
+  it('a STRING LITERAL whose body looks like import syntax neither errors nor adds a dependency', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const msg = "from \'./nonexistent-thing\'";\nconst msg2 = "require(\'./nonexistent-thing-2\')";\nexport const y = msg + msg2;\n',
+    );
+    const before = fingerprint(repoRoot, tarballsDir);
+    expect(before.counts.harness).toBeGreaterThan(0);
+  });
+
+  it('a GENUINE import right after a decoy comment is still caught (comment-stripping does not eat real syntax)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "// import x from './nonexistent-thing'\nimport { real } from './lib/real.mjs';\nexport const y = real;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  // #1294 round 4 (jev 0.69, the hand-tokenizer's ORIGINAL regex-literal
+  // hole) — a regex containing a quote character (`/'/`, or `/[\"']/g`) got
+  // its quote misread as a fresh STRING START by round 4's hand-rolled
+  // regex-tracking. Found on the real repo:
+  // `scripts/e2e-preflight.mjs`'s own
+  // `/EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)` regex, whose embedded `"`
+  // was misread as a string start that then consumed 1500+ real characters
+  // hunting for a closing quote. Round 5 replaced the hand tokenizer
+  // entirely with `ts.createSourceFile` — a REAL parser handles a regex
+  // literal's contents correctly by construction, so these fixtures are now
+  // regression tests for the OLD bug class rather than exercises of hand-
+  // rolled regex-tracking logic that no longer exists.
+  it('a regex literal containing a quote character does not corrupt scanning, and a genuine import right after it is still caught', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const stripQuote = /'/;\nconst charClass = /[\\\"']/g;\nimport { real } from './lib/real.mjs';\nexport const y = real + String(stripQuote) + String(charClass);\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  it('a REGEX after `=` (operand position) containing a quote is scanned correctly — the exact e2e-preflight.mjs shape', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const hint = /EUNSUPPORTEDPROTOCOL|Unsupported URL Type "workspace:/.test(out)\n' +
+        "  ? ' — the tarball smells like a workspace: dep'\n" +
+        "  : '';\n" +
+        "import { real } from './lib/real.mjs';\n" +
+        'export const y = real + hint;\n',
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  it('a DIVISION (not a regex) after an identifier is NOT misread as a regex start', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const half = total / 2;\nimport { real } from './lib/real.mjs';\nexport const y = real + half;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  // #1294 round 5 (jev 0.90, THE main finding) — `isRegexPosition` (the hand
+  // tokenizer's regex/division heuristic) treated JS KEYWORDS the same as
+  // identifiers/operands, so `return /'/.test(s)` misread the regex's `'` as
+  // a STRING START exactly like the round-4 bug it was supposed to fix — a
+  // `require()` right after it silently vanished, `directLocalDeps`
+  // returning `[]` with NO error at all. A real parser has no such
+  // ambiguity: `return` is a `ReturnStatement`, `/'/`  is unambiguously a
+  // `RegularExpressionLiteral` regardless of what token precedes it.
+  it('a regex after a KEYWORD (e.g. `return`) is not misread as a string, and the following require() is still caught', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "function checkIt(s) {\n  return /'/.test(s);\n}\nconst { real } = require('./lib/real.cjs');\nexport const y = real + checkIt('x');\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.cjs');
+  });
+
+  // #1294 round 5 (jev 0.90) — a NESTED template literal
+  // (`` `${a ? `'` : ""}` ``) was never modelled by the hand tokenizer at
+  // all: its inner backtick either terminated the outer template early or
+  // confused the quote-tracking state, either way risking the SAME
+  // silently-dropped-dependency failure for whatever followed. A real
+  // parser treats the whole thing as one `TemplateExpression` node whose
+  // substitution is itself a `ConditionalExpression` containing two nested
+  // template literals — nesting depth is not special-cased, it falls out of
+  // the grammar.
+  it('a NESTED template literal does not corrupt scanning, and a following import() is still caught', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const nested = `${true ? `\'` : ""}`;\n' +
+        "export async function load() {\n  const { real } = await import('./lib/real.mjs');\n  return real + nested;\n}\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  // #1294 round 5 — a require()/import() whose specifier is NOT a string
+  // literal (a computed path) might be relative, and there is no static way
+  // to know. Silently finding zero specs there — which `ts.isStringLiteralLike`
+  // naturally would, by construction, if this weren't checked explicitly —
+  // would reopen the "silently unfrozen dependency" failure mode one layer
+  // up. This is a HARD ERROR, never a guess.
+  it('require()/import() with a NON-LITERAL specifier is a hard error, not a silent skip', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const dynamicPath = './lib/real.cjs';\nconst { real } = require(dynamicPath);\nexport const y = real;\n",
+    );
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/NON-LITERAL specifier/);
+  });
+
+  // The residual half of the above: `require.resolve(x)` is a RESOLVE call,
+  // never a module load that adds a dependency to this closure, so a
+  // non-literal argument to IT must NOT trip the fail-closed check —
+  // `scripts/e2e-preflight.mjs`'s real `require.resolve(ADAPTER_SUBPATH)`
+  // depends on this being true.
+  it('require.resolve(x) with a non-literal argument does NOT trip the fail-closed check (it is not a module load)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const SUBPATH = '@getknext/core/adapter';\nconst adapterPath = require.resolve(SUBPATH);\nconst { real } = require('./lib/real.cjs');\nexport const y = real + adapterPath;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.cjs');
+  });
+
+  // Fail CLOSED: a file that does not PARSE at all (an unterminated regex or
+  // string literal, among other syntax errors) is a hard error — refusing
+  // to scan a recovered-but-possibly-wrong best-effort AST — rather than a
+  // silent guess. `ts.createSourceFile` is deliberately ERROR-TOLERANT (it
+  // powers editor tooling, which must produce SOME AST for a file mid-edit),
+  // so this checks `ts.transpileModule`'s syntax diagnostics FIRST and
+  // throws before ever walking the recovered tree.
+  it('an unterminated regex-looking construct is a hard error (the file does not parse)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const bad = /unterminated\nimport { x } from './does-not-matter.mjs';\n",
+    );
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/does not parse as JavaScript/);
+  });
+
+  it('an unterminated string literal is a hard error (the file does not parse)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const bad = "unterminated\nexport const y = 1;\n',
+    );
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/does not parse as JavaScript/);
+  });
+
+  it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {
+    const tarballsDir = tempDir('knext-fp-lib-real-');
+    packFixtureTarball(tarballsDir, 'core', '0.3.0');
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', REPO_ROOT, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/e2e-state-snapshot.sh');
+    expect(harness).toContain('scripts/lib/knext-closure.mjs');
+    expect(harness).toContain('scripts/lib/workspace-protocol.mjs');
+  });
+});
+
+/**
+ * #1294 round 3 — the DECLARED `extraFiles` (files a lane EXECUTES via
+ * subprocess or READS directly, not `import`ed/`source`d) must actually land
+ * in the frozen harness. `scripts/compat-credential-ref.mjs` and
+ * `.github/compat-credential-ref.json` run/are-read only on the node/bun
+ * (turbopack) lanes' credential-ref job; `scripts/compat-run-ledger.mjs` runs
+ * on every lane that has a workflow wired at all.
+ */
+describe('compat-window fingerprint — declared credential-run extraFiles land in the harness (#1294 round 3)', () => {
+  function harnessFor(lane: string): string[] {
+    const tarballsDir = tempDir('knext-fp-extra-');
+    packFixtureTarball(tarballsDir, 'core', '0.3.0');
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        REPO_ROOT,
+        '--tarballs-dir',
+        tarballsDir,
+        '--lane',
+        lane,
+        '--json',
+        '--files',
+      ],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
+    return parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+  }
+
+  it('node lane: compat-credential-ref.mjs, the RC pin JSON, and compat-run-ledger.mjs are all in the harness', () => {
+    const harness = harnessFor('node');
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
+    expect(harness).toContain('scripts/compat-run-ledger.mjs');
+    expect(harness).toContain('.github/compat-credential-ref.json');
+  });
+
+  it('bun lane: same declared extras as node (both run the credential-ref job)', () => {
+    const harness = harnessFor('bun');
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
+    expect(harness).toContain('.github/compat-credential-ref.json');
+  });
+
+  it('bun-vinext lane: compat-run-ledger.mjs is frozen, and so is compat-credential-ref.mjs — TRANSITIVELY, via run-ledger.mjs importing it (#1294 round 4), even though this lane never runs the credential-ref RESOLUTION step directly', () => {
+    const harness = harnessFor('bun-vinext');
+    expect(harness).toContain('scripts/compat-run-ledger.mjs');
+    // Round 4: compat-run-ledger.mjs imports `./compat-credential-ref.mjs`
+    // (for COMPAT_MODES / isRcRef), so it is a REAL dependency of a file
+    // this lane genuinely runs — freezing it is correct, not accidental
+    // over-inclusion. bun-vinext still does NOT declare it directly in
+    // CREDENTIAL_CELLS.extraFiles (it never runs the resolve step), which is
+    // what the RC pin JSON assertion below distinguishes.
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
+    // The RC pin JSON is read only by the resolve step this lane never runs,
+    // and nothing imports a JSON file, so it stays correctly absent.
+    expect(harness).not.toContain('.github/compat-credential-ref.json');
+  });
+
+  it('editing compat-credential-ref.mjs moves the node-lane fingerprint (it is genuinely frozen, not just listed)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const before = fingerprint(repoRoot, tarballsDir).fingerprint;
+    writeFileSync(join(repoRoot, 'scripts/compat-credential-ref.mjs'), 'export const noop = 2;\n');
+    expect(fingerprint(repoRoot, tarballsDir).fingerprint).not.toBe(before);
+  });
+
+  it('a lane whose declared extraFiles entry is missing from disk is a hard error', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    rmSync(join(repoRoot, 'scripts/compat-credential-ref.mjs'));
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow();
+  });
+
+  // #1294 round 4 (jev 0.75, the main finding): a declared extra's OWN
+  // imports were never followed — `compat-run-ledger.mjs` imports
+  // `./compat-credential-ref.mjs`, and that import was invisible to the
+  // digest on a lane that declares run-ledger.mjs but not credential-ref.mjs
+  // directly (bun-vinext). Extras now feed into the SAME closure walk as
+  // every other entry point, so this is fixed for every lane, not just the
+  // one example that surfaced it.
+  it('an extraFiles entry that itself IMPORTS another file freezes that file too', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/extra-dep.mjs'), 'export const v = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/compat-run-ledger.mjs'),
+      "import { v } from './lib/extra-dep.mjs';\nexport const noop = v;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/extra-dep.mjs');
+
+    // And it is GENUINELY frozen, not just present: editing the transitive
+    // dependency moves the digest.
+    const before = fingerprint(repoRoot, tarballsDir).fingerprint;
+    writeFileSync(join(repoRoot, 'scripts/lib/extra-dep.mjs'), 'export const v = 2;\n');
+    expect(fingerprint(repoRoot, tarballsDir).fingerprint).not.toBe(before);
+  });
+
+  it('names the real scripts/compat-credential-ref.mjs in the bun-vinext harness — the exact round-4 gap, on the real repo', () => {
+    const tarballsDir = tempDir('knext-fp-extra-transitive-');
+    packFixtureTarball(tarballsDir, 'core', '0.3.0');
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        REPO_ROOT,
+        '--tarballs-dir',
+        tarballsDir,
+        '--lane',
+        'bun-vinext',
+        '--json',
+        '--files',
+      ],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
+  });
+});
+
+/**
+ * #1294 round 2 — SCANNING TEST, INDEPENDENTLY REIMPLEMENTED: every file a
+ * top-level `scripts/e2e-*` entry script reaches via shell `source`/`. ` OR a
+ * JS `import`/`require`/`import()`, TRANSITIVELY, must be present in the
+ * frozen harness set. Deliberately does NOT call into
+ * `directLocalDeps`/`closureFrom` from `compat-window-fingerprint.mjs` — a
+ * scan that shares its own implementation with the thing it is checking would
+ * go green the same way the thing it checks is wrong. It reads the REAL
+ * `scripts/e2e-*` sources with its own parser and cross-checks the reachable
+ * set against what `computeFingerprint` actually swept in, for BOTH lane
+ * families (node/bun → test-e2e-deploy.yml, bun-vinext → compat-vinext.yml —
+ * the entry-point set itself does not vary by lane, only the workflow entry
+ * does). A referenced file the closure misses — a shell `source`, OR a `.mjs`
+ * `import` with no `e2e-` prefix, at any depth — goes RED here.
+ */
+describe('compat-window fingerprint — scanning: every file an e2e-* entry script reaches (source OR import) is in the harness', () => {
+  /** Direct local (`./…`) dependencies of one file — shell `source`/`.` and JS import/require/import(). */
+  function directDeps(absPath: string): string[] {
+    const src = readFileSync(absPath, 'utf8');
+    const dir = dirname(absPath);
+    const specs = new Set<string>();
+    if (/\.(mjs|cjs|js)$/.test(absPath)) {
+      for (const re of [
+        /\bfrom\s+['"](\.\.?\/[^'"]+)['"]/g,
+        /\brequire\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
+        /\bimport\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g,
+        /^\s*import\s+['"](\.\.?\/[^'"]+)['"]/gm,
+      ]) {
+        for (const m of src.matchAll(re)) specs.add(m[1]);
+      }
+    } else {
+      for (const re of [
+        /^\s*\.\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+        /^\s*source\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+      ]) {
+        for (const m of src.matchAll(re)) specs.add(`./${m[1]}`);
+      }
+    }
+    const resolved: string[] = [];
+    for (const spec of specs) {
+      const base = resolve(dir, spec);
+      const candidates = /\.[a-z]+$/.test(spec)
+        ? [base]
+        : [base, `${base}.mjs`, `${base}.js`, `${base}.cjs`];
+      const hit = candidates.find((c) => existsSync(c));
+      if (hit) resolved.push(hit);
+    }
+    return resolved;
+  }
+
+  /** Full transitive closure, repo-relative paths, of the given entry files. */
+  function closure(entryAbsPaths: string[]): string[] {
+    const seen = new Set(entryAbsPaths);
+    const queue = [...entryAbsPaths];
+    while (queue.length > 0) {
+      // biome-ignore lint/style/noNonNullAssertion: queue.length checked above
+      const current = queue.shift()!;
+      for (const dep of directDeps(current)) {
+        if (!seen.has(dep)) {
+          seen.add(dep);
+          queue.push(dep);
+        }
+      }
+    }
+    return [...seen].map((abs) => relative(REPO_ROOT, abs)).sort();
+  }
+
+  const ENTRY_SCRIPTS = readdirSync(resolve(REPO_ROOT, 'scripts')).filter((f) =>
+    /^e2e-[^/]*\.(sh|mjs|cjs|js)$/.test(f),
+  );
+
+  it('the real scripts/e2e-* entry set is non-empty and reaches at least one file outside itself, so this scan is not vacuous', () => {
+    expect(ENTRY_SCRIPTS.length).toBeGreaterThan(0);
+    const reached = closure(ENTRY_SCRIPTS.map((f) => resolve(REPO_ROOT, 'scripts', f)));
+    expect(reached.length).toBeGreaterThan(ENTRY_SCRIPTS.length);
+  });
+
+  it('the reachable closure includes a SOURCED shell helper AND an IMPORTED .mjs helper with no e2e- prefix', () => {
+    const reached = closure(ENTRY_SCRIPTS.map((f) => resolve(REPO_ROOT, 'scripts', f)));
+    expect(reached).toContain('scripts/lib/e2e-state-snapshot.sh');
+    expect(reached).toContain('scripts/lib/knext-closure.mjs');
+  });
+
+  for (const [lane, workflowFile] of [
+    ['node', 'test-e2e-deploy.yml'],
+    ['bun', 'test-e2e-deploy.yml'],
+    ['bun-vinext', 'compat-vinext.yml'],
+  ] as const) {
+    it(`lane "${lane}" (${workflowFile}): every file reachable from the entry scripts is in the frozen harness`, () => {
+      const reached = closure(ENTRY_SCRIPTS.map((f) => resolve(REPO_ROOT, 'scripts', f)));
+
+      const tarballsDir = tempDir('knext-fp-scan-');
+      packFixtureTarball(tarballsDir, 'core', '0.3.0');
+      const out = execFileSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--repo-root',
+          REPO_ROOT,
+          '--tarballs-dir',
+          tarballsDir,
+          '--lane',
+          lane,
+          '--json',
+          '--files',
+        ],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
+      const harness = new Set(
+        parsed.files.filter((f) => f.component === 'harness').map((f) => f.path),
+      );
+
+      for (const path of reached) {
+        expect(
+          harness.has(path),
+          `reachable from an e2e-* entry script, missing from lane "${lane}"'s harness: ${path}`,
+        ).toBe(true);
+      }
+    });
+  }
 });

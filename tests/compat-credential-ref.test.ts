@@ -593,6 +593,11 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
     writeFileSync(join(root, 'scripts/e2e-deploy.sh'), '#!/bin/sh\n');
     chmodSync(join(root, 'scripts/e2e-deploy.sh'), 0o755);
     writeFileSync(join(root, 'test/deploy-tests-manifest.knext.json'), '{}\n');
+    // #1294 round 3: the default lane ('node') declares these in
+    // CREDENTIAL_CELLS.extraFiles.
+    writeFileSync(join(root, 'scripts/compat-credential-ref.mjs'), 'export const noop = 1;\n');
+    writeFileSync(join(root, 'scripts/compat-run-ledger.mjs'), 'export const noop = 1;\n');
+    writeFileSync(join(root, '.github/compat-credential-ref.json'), '{"rcTag":null}\n');
     const tarballs = join(root, 'tarballs');
     mkdirSync(tarballs);
     const pkg = join(root, 'pkgsrc/package');

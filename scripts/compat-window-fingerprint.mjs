@@ -51,9 +51,22 @@
  * gate, PR-time and app-side. Confusing the two is the likeliest way to widen
  * this scope by accident.
  *
+ * PER-CELL WORKFLOW ENTRY (#1294). The harness has exactly one `harness` file
+ * entry — the workflow that EXECUTED — but which *file* that is depends on the
+ * lane: the node and bun (turbopack) cells run from `test-e2e-deploy.yml`, the
+ * vinext cells from `compat-vinext.yml`. Before this, the entry was hardcoded
+ * to `test-e2e-deploy.yml` for every lane, so an edit to `compat-vinext.yml`
+ * never moved the vinext cells' fingerprint — the changed harness could carry
+ * a 14-night window, which violates ADR-0056 D3. `--lane` selects the entry
+ * from the ONE declared table (`CREDENTIAL_CELLS.workflowFile`,
+ * `scripts/compat-window-audit.mjs`), so a new cell or a moved workflow file
+ * cannot silently keep hashing the wrong bytes. Unset, `--lane` defaults to
+ * `node` (`CREDENTIAL_LANE`) — the pre-#1294 behaviour, byte-identical.
+ *
  * Usage:
  *   node scripts/compat-window-fingerprint.mjs \
  *     --repo-root . --tarballs-dir "$GITHUB_WORKSPACE/knext-tarballs" \
+ *     [--lane node|bun|bun-vinext|...] \
  *     [--next-js-dir next.js] [--next-tarball next-prebuilt/next.tgz] \
  *     [--next-ref v16.2.0] \
  *     [--workflow-file knext-executing/.github/workflows/test-e2e-deploy.yml] \
@@ -72,27 +85,270 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+// A REAL parser, not a hand-rolled tokenizer (#1294 round 5). Three
+// successive rounds each found a new hole in a hand-written JS tokenizer
+// (round 3: raw regex over untokenized source; round 4: no regex-literal
+// state, then a staleness bug in the FIX for that; round 5: keywords like
+// `return` treated as operands, and no template-literal awareness) — the
+// review named it directly as the successive-round regression class this
+// repo's own workflow docs warn about. `typescript` is already a root
+// devDependency (used the same way by scripts/lib/parse-validity.mjs,
+// executable-lines.mjs, continuation-attribution.mjs) and is resolved the
+// same way here: a plain static import, so a missing package fails the
+// whole module load loudly (Node's own `ERR_MODULE_NOT_FOUND`) rather than
+// silently guessing — the workflow install step order is verified in
+// tests/compat-window-fingerprint.test.ts and this file's own header notes.
+import ts from 'typescript';
+import { CREDENTIAL_CELLS, CREDENTIAL_LANE } from './compat-window-audit.mjs';
 
 export const SCHEMA = 'knext.compat-window-fingerprint/v1';
 
 /**
- * The frozen HARNESS roots. Each `dir` root is SCANNED (recursively) and
- * filtered by `match`, so the set grows with the tree rather than with edits
- * to this file.
+ * The frozen HARNESS roots that are the SAME for every cell — the shared half
+ * of the digest (ADR-0056 D2 note: narrowing this per cell is an ADR-0039
+ * scope change, left to the founder, not decided here). Each `dir` root is
+ * SCANNED (recursively) and filtered by `match`, so the set grows with the
+ * tree rather than with edits to this file. The per-lane WORKFLOW entry is
+ * NOT here — see `workflowRootForLane` below (#1294).
  *
  * @type {{ kind: 'file' | 'dir', path: string, match?: RegExp }[]}
  */
 export const HARNESS_ROOTS = [
-  { kind: 'file', path: '.github/workflows/test-e2e-deploy.yml' },
   // The lifecycle scripts the reference harness invokes
   // (NEXT_TEST_DEPLOY_SCRIPT_PATH and friends) plus the preflight/summary/ledger
-  // helpers the workflow runs around them.
-  { kind: 'dir', path: 'scripts', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/ },
+  // helpers the workflow runs around them. These are the ENTRY POINTS for the
+  // import/source closure below (#1294 round 2) — not the whole frozen set by
+  // themselves.
+  { kind: 'dir', path: 'scripts', match: /^e2e-[^/]*\.(sh|mjs|cjs|js)$/, isClosureEntry: true },
   // The deploy-tests manifest(s): the exclude ledger that decides what the
   // night actually selected. A second lane manifest is picked up automatically.
   { kind: 'dir', path: 'test', match: /^deploy-tests-manifest\.[^/]*\.json$/ },
 ];
+
+/**
+ * Local (`./…`/`../…`) import specifiers a JS file ACTUALLY imports, via a
+ * REAL parser — never a hand-rolled tokenizer (#1294 round 5).
+ *
+ * Rounds 3 and 4 each found a new hole in a hand-written JS tokenizer: round
+ * 3, a raw regex over UNtokenized source (a comment mentioning import-like
+ * text hard-errored the whole fingerprint); round 4, no regex-literal state
+ * at all (a regex containing a quote character got misread as a string
+ * start), then a staleness bug in the FIX for that. Round 5's review named
+ * the pattern directly — "each round has found a new hole in the hand-rolled
+ * tokenizer, which is the successive-round regression class" — and found two
+ * more: `isRegexPosition` treated JS KEYWORDS (`return`, `typeof`, …) as
+ * operands (so `return /'/.test(s)` mis-scanned exactly like the round-4
+ * bug), and nested TEMPLATE LITERAL interpolation (`` `${a ? `'` : ""}` ``)
+ * was never modelled at all. A hand tokenizer cannot be patched into
+ * soundness one review at a time; a REAL parser handles all of this by
+ * construction, because it is not guessing.
+ *
+ * Extracts specifiers from: `import … from '…'`, `export … from '…'`, bare
+ * `import '…'`, `require('…')`, and dynamic `import('…')` — anywhere in the
+ * file, at any nesting depth, via a full AST walk (`ts.forEachChild`).
+ *
+ * FAILS CLOSED on a NON-LITERAL specifier (round 5: "fail closed on
+ * non-literal specifiers that could be relative"): `require(x)`,
+ * `import(\`./${x}\`)`, `require(cond ? './a' : './b')` are all hard errors.
+ * A computed specifier MIGHT be relative — silently skipping it (as
+ * `ts.isStringLiteralLike` naturally would, by just finding no specs there)
+ * would reopen exactly the "silently unfrozen dependency" failure mode this
+ * whole mechanism exists to close, just moved one layer up. Deliberately
+ * scoped to bare `require(`/`import(` — `require.resolve(x)` is a RESOLVE
+ * call, not a module load that adds a dependency to this closure (and the
+ * real corpus already has one: `scripts/e2e-preflight.mjs`'s
+ * `require.resolve(ADAPTER_SUBPATH)`, a non-literal argument that must NOT
+ * trip this check).
+ *
+ * @param {string} src
+ * @param {string} absPath used for the parser's `fileName` and error text
+ * @returns {string[]} every relative (`./…`/`../…`) specifier found
+ */
+function jsLocalImportSpecifiers(src, absPath) {
+  // `ts.createSourceFile` is ERROR-TOLERANT by design (it powers editor
+  // tooling, which must produce SOME AST for a file mid-edit) — an
+  // unterminated string or regex does not throw, it recovers a best-effort
+  // parse. That is the right behaviour for an editor and the wrong one here:
+  // silently walking a recovered-but-wrong AST is exactly the "guess instead
+  // of refusing" failure mode this whole mechanism exists to close. So parse
+  // TWICE: once via `transpileModule` (the same syntax-only check
+  // `scripts/lib/parse-validity.mjs` already uses elsewhere in this repo)
+  // purely to FAIL CLOSED on any syntax error, then the real walk below.
+  const syntaxErrors = ts
+    .transpileModule(src, {
+      reportDiagnostics: true,
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
+    })
+    .diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error);
+  if (syntaxErrors.length > 0) {
+    const first = ts.flattenDiagnosticMessageText(syntaxErrors[0].messageText, ' ');
+    throw new Error(
+      `compat-window fingerprint: ${absPath} does not parse as JavaScript: ${first}. A file that cannot be parsed cannot be scanned for dependencies — refusing to guess (#1294 round 5).`,
+    );
+  }
+
+  const sourceFile = ts.createSourceFile(
+    absPath,
+    src,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.JS,
+  );
+
+  /** @type {string[]} */
+  const specs = [];
+
+  const isBareRequireCall = (node) =>
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'require';
+  const isDynamicImportCall = (node) =>
+    ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword;
+
+  /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
+  const addSpecifier = (node, callOrDeclNode) => {
+    if (ts.isStringLiteralLike(node)) {
+      specs.push(node.text);
+      return;
+    }
+    const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(
+      callOrDeclNode.getStart(sourceFile),
+    );
+    throw new Error(
+      `compat-window fingerprint: ${absPath}:${lineNumber + 1} references a module with a NON-LITERAL specifier. It might be a relative path, and guessing whether it is one is exactly what this refuses to do — rewrite it as a literal string, or hand-declare the dependency (CREDENTIAL_CELLS.extraFiles) (#1294 round 5).`,
+    );
+  };
+
+  /** @param {ts.Node} node */
+  const visit = (node) => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+      addSpecifier(node.moduleSpecifier, node);
+    } else if (isBareRequireCall(node) || isDynamicImportCall(node)) {
+      const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
+      if (arg) {
+        addSpecifier(arg, node);
+      } else {
+        const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(
+          node.getStart(sourceFile),
+        );
+        throw new Error(
+          `compat-window fingerprint: ${absPath}:${lineNumber + 1} calls ${isBareRequireCall(node) ? 'require()' : 'import()'} with no argument — refusing to guess (#1294 round 5).`,
+        );
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return specs.filter((raw) => /^\.\.?\//.test(raw));
+}
+
+/**
+ * Extract this file's DIRECT local dependencies — never third-party or
+ * `node:`/bare-specifier imports, only files inside the repo (#1294 round 2).
+ *
+ * WHY A CLOSURE, NOT A DIRECTORY PATTERN: `scripts/e2e-preflight.mjs` imports
+ * `./lib/knext-closure.mjs` and `./lib/workspace-protocol.mjs` — neither
+ * carries the `e2e-` prefix a directory-pattern root (`scripts/lib` matched
+ * only `e2e-*`) would need to see them, so editing either left the fingerprint
+ * unchanged: the same gap class the original #1294 fix closed for
+ * `e2e-state-snapshot.sh`, just one level less naming-convention-dependent.
+ * SCANNING is only honest when it reaches everything a script actually
+ * executes, not everything that happens to be named like it does.
+ *
+ * @param {string} absPath
+ * @returns {string[]} resolved absolute paths of files this one directly
+ *   `import`s / `require`s / dynamic-`import()`s (JS) or `source`s / `.`s (sh)
+ */
+function directLocalDeps(absPath) {
+  const src = readFileSync(absPath, 'utf8');
+  const dir = dirname(absPath);
+  /** @type {string[]} */
+  const specs = [];
+
+  if (/\.(mjs|cjs|js)$/.test(absPath)) {
+    specs.push(...jsLocalImportSpecifiers(src, absPath));
+  } else {
+    // Shell: `. "${SCRIPT_DIR}/lib/x.sh"` / `source "${SCRIPT_DIR}/lib/x.sh"`.
+    // The `${VAR}/` prefix is always the SCRIPT'S OWN directory by convention
+    // here (`SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`), so
+    // it resolves the same as a relative import — strip it, resolve from `dir`.
+    const shPatterns = [
+      /^\s*\.\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+      /^\s*source\s+"\$\{[A-Z_]+\}\/([^"]+)"/gm,
+    ];
+    for (const re of shPatterns) {
+      for (const m of src.matchAll(re)) specs.push(`./${m[1]}`);
+    }
+  }
+
+  /** @type {string[]} */
+  const resolved = [];
+  for (const spec of specs) {
+    const base = join(dir, spec);
+    const candidates = /\.[a-z]+$/.test(spec)
+      ? [base]
+      : [base, `${base}.mjs`, `${base}.js`, `${base}.cjs`];
+    const hit = candidates.find((c) => existsSync(c));
+    if (!hit) {
+      throw new Error(
+        `compat-window fingerprint: ${relative(process.cwd(), absPath)} references "${spec}", which does not resolve to a real file. A dependency the frozen set cannot see is a hole in the freeze scope (#1294).`,
+      );
+    }
+    resolved.push(resolve(hit));
+  }
+  return resolved;
+}
+
+/**
+ * BFS the import/source closure from a set of entry files (#1294 round 2).
+ * Returns every file TRANSITIVELY reached, entries included, deduplicated.
+ *
+ * @param {string[]} entryAbsPaths
+ * @returns {string[]} absolute paths, entries + everything they reach
+ */
+function closureFrom(entryAbsPaths) {
+  const seen = new Set(entryAbsPaths);
+  const queue = [...entryAbsPaths];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    for (const dep of directLocalDeps(current)) {
+      if (!seen.has(dep)) {
+        seen.add(dep);
+        queue.push(dep);
+      }
+    }
+  }
+  return [...seen];
+}
+
+/**
+ * The lane's frozen WORKFLOW file, `.github/workflows/<basename>` — the one
+ * `harness` entry whose SOURCE is per-cell (#1294). Reads the single declared
+ * table (`CREDENTIAL_CELLS`, `scripts/compat-window-audit.mjs`) rather than
+ * re-declaring the mapping here, so a cell added there cannot be forgotten
+ * here. An unknown lane, or a known lane with no workflow wired yet
+ * (`workflowFile: null` — the webpack cells today), is a hard error: silently
+ * falling back to SOME workflow would fingerprint bytes that did not run.
+ *
+ * @param {string} lane
+ * @returns {{ kind: 'file', path: string }}
+ */
+export function workflowRootForLane(lane) {
+  const cell = CREDENTIAL_CELLS.find((c) => c.lane === lane);
+  if (!cell) {
+    throw new Error(
+      `compat-window fingerprint: unknown lane "${lane}". Known lanes: ${CREDENTIAL_CELLS.map((c) => c.lane).join(', ')}.`,
+    );
+  }
+  if (!cell.workflowFile) {
+    throw new Error(
+      `compat-window fingerprint: lane "${lane}" has no workflowFile wired in CREDENTIAL_CELLS yet — it cannot be fingerprinted until its credential workflow lands.`,
+    );
+  }
+  return { kind: 'file', path: `.github/workflows/${cell.workflowFile}` };
+}
 
 function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
@@ -125,11 +381,10 @@ function line(component, path, absolute) {
   return `${component}\t${path}\t${mode}\t${sha256(readFileSync(absolute))}`;
 }
 
-/** The harness entry whose bytes come from the EXECUTING commit (ADR-0039 Amendment 1). */
-export const EXECUTING_WORKFLOW = '.github/workflows/test-e2e-deploy.yml';
-
 /**
  * @param {string} repoRoot
+ * @param {string} lane — selects the per-cell workflow entry (#1294),
+ *   `workflowRootForLane`.
  * @param {{ workflowFile?: string | null }} [opts]
  *   `workflowFile` — ADR-0039 Amendment 1 (ADR-0056). A credential night checks
  *   out an RC tag, but GitHub runs the DEFAULT BRANCH's workflow file. The
@@ -138,14 +393,22 @@ export const EXECUTING_WORKFLOW = '.github/workflows/test-e2e-deploy.yml';
  *   unchanged, so identical bytes give a byte-identical digest. A given but
  *   missing file is a hard error, never a fallback to the checkout's copy.
  */
-function collectHarness(repoRoot, opts = {}) {
+function collectHarness(repoRoot, lane, opts = {}) {
+  const roots = [workflowRootForLane(lane), ...HARNESS_ROOTS];
   /** @type {{ component: string, path: string, line: string }[]} */
   const entries = [];
-  for (const root of HARNESS_ROOTS) {
-    const override =
-      root.kind === 'file' && root.path === EXECUTING_WORKFLOW && opts.workflowFile
-        ? resolve(opts.workflowFile)
-        : null;
+  const addedAbs = new Set();
+  /** @type {string[]} entry points for the import/source closure (#1294 round 2) */
+  const closureEntries = [];
+
+  const addEntry = (path, abs) => {
+    if (addedAbs.has(abs)) return;
+    addedAbs.add(abs);
+    entries.push({ component: 'harness', path, line: line('harness', path, abs) });
+  };
+
+  for (const root of roots) {
+    const override = root.kind === 'file' && opts.workflowFile ? resolve(opts.workflowFile) : null;
     const abs = override ?? resolve(repoRoot, root.path);
     if (root.kind === 'file') {
       if (!existsSync(abs)) {
@@ -155,11 +418,7 @@ function collectHarness(repoRoot, opts = {}) {
             : `compat-window fingerprint: frozen harness file ${root.path} is missing. A root that resolves to nothing silently shrinks the frozen set — fix the path or amend the freeze scope (docs/adr/0039).`,
         );
       }
-      entries.push({
-        component: 'harness',
-        path: root.path,
-        line: line('harness', root.path, abs),
-      });
+      addEntry(root.path, abs);
       continue;
     }
     if (!existsSync(abs)) {
@@ -172,10 +431,51 @@ function collectHarness(repoRoot, opts = {}) {
       );
     }
     for (const rel of matched) {
-      const path = `${root.path}/${rel}`;
-      entries.push({ component: 'harness', path, line: line('harness', path, join(abs, rel)) });
+      const fileAbs = resolve(join(abs, rel));
+      addEntry(`${root.path}/${rel}`, fileAbs);
+      if (root.isClosureEntry) closureEntries.push(fileAbs);
     }
   }
+
+  // #1294 round 3: the DECLARED extras — files the lane's workflow EXECUTES
+  // via subprocess (`node knext/scripts/X.mjs` in a `run:` step) or READS
+  // directly (a JSON pin), which the import/source closure cannot discover
+  // on its own because nothing in the top-level closure-entry scripts
+  // references them. `CREDENTIAL_CELLS[lane].extraFiles` is the one declared
+  // table this reads. Fed into `closureEntries` BELOW, not added directly:
+  // round 4 found that a declared extra can itself import something —
+  // `compat-run-ledger.mjs` imports `./compat-credential-ref.mjs` — and a
+  // direct `addEntry` (no closure walk) left that transitive import unfrozen
+  // even on lanes that declare the ledger script but not the credential-ref
+  // one. An extra is exactly as much an entry point as a top-level `e2e-*`
+  // script, so it gets the SAME treatment: one closure walk, not two
+  // half-mechanisms with different reach.
+  const cell = CREDENTIAL_CELLS.find((c) => c.lane === lane);
+  for (const relPath of cell?.extraFiles ?? []) {
+    const abs = resolve(repoRoot, relPath);
+    if (!existsSync(abs)) {
+      throw new Error(
+        `compat-window fingerprint: lane "${lane}" declares extraFiles entry "${relPath}" (CREDENTIAL_CELLS, scripts/compat-window-audit.mjs), which does not exist. A declared-but-missing file is a hole in the freeze scope (#1294).`,
+      );
+    }
+    addEntry(relPath, abs);
+    closureEntries.push(abs);
+  }
+
+  // #1294 round 2 (round 4: now ALSO covers the extras above): follow every
+  // entry point's LOCAL import/require/import() (JS) and source/`.` (sh)
+  // chain, transitively, and freeze whatever it reaches — regardless of
+  // filename convention. A directory-pattern root only sees files whose NAME
+  // matches; a closure sees everything a script actually EXECUTES, which is
+  // the honest claim "the harness is frozen" requires.
+  // `scripts/e2e-preflight.mjs` importing `./lib/knext-closure.mjs` (no
+  // `e2e-` prefix) is exactly the shape round 2 closed; `compat-run-
+  // ledger.mjs` importing `./compat-credential-ref.mjs` (a declared EXTRA
+  // importing another file) is the round-4 shape.
+  for (const abs of closureFrom(closureEntries)) {
+    addEntry(relative(repoRoot, abs), abs);
+  }
+
   return entries;
 }
 
@@ -317,7 +617,7 @@ function collectRuntimeComponent({ runtimeVersion, runtimeRevision }) {
 }
 
 /**
- * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null, workflowFile?: string | null }} options
+ * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null, workflowFile?: string | null, lane?: string }} options
  */
 export function computeFingerprint({
   repoRoot,
@@ -328,8 +628,13 @@ export function computeFingerprint({
   runtimeVersion,
   runtimeRevision,
   workflowFile,
+  // #1294: which cell's workflow entry to hash. Defaults to `CREDENTIAL_LANE`
+  // ('node') — the pre-#1294 caller never passed this, and 'node' resolves to
+  // the same `test-e2e-deploy.yml` entry the un-lane-aware formula always used,
+  // so an un-migrated caller's digest is byte-identical.
+  lane = CREDENTIAL_LANE,
 }) {
-  const harness = collectHarness(repoRoot, { workflowFile });
+  const harness = collectHarness(repoRoot, lane, { workflowFile });
   const { entries: packed, packages } = collectPacked(tarballsDir);
 
   const harnessLines = harness.map((e) => e.line).sort();
@@ -407,6 +712,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       runtimeRevision: arg('runtime-revision', null),
       // ADR-0039 Amendment 1: the workflow file that EXECUTED (github.workflow_sha).
       workflowFile: arg('workflow-file', null),
+      // #1294: which cell's workflow entry to hash — defaults to CREDENTIAL_LANE.
+      lane: arg('lane', CREDENTIAL_LANE),
     });
   } catch (error) {
     console.error(`::error::${error instanceof Error ? error.message : String(error)}`);

@@ -175,6 +175,68 @@ describe('the vinext-axis compat lane exists and is wired to the corpus', () => 
   });
 });
 
+/**
+ * #1294 — the fingerprint step must hash THIS workflow file, not the node
+ * lane's. Before this, `compat-window-fingerprint.mjs` hardcoded
+ * `.github/workflows/test-e2e-deploy.yml` as its only `harness` workflow
+ * entry, so an edit here never moved the digest a credential night would
+ * eventually record for this cell (ADR-0056 D3).
+ */
+describe("the lane fingerprints ITS OWN workflow file, not the node lane's (#1294, ADR-0056 D3)", () => {
+  const workflow = read(LANE);
+
+  it('computes the fingerprint from the SAME packed tarballs the shards use', () => {
+    expect(workflow).toContain('scripts/compat-window-fingerprint.mjs');
+    const step = workflow.slice(workflow.indexOf('scripts/compat-window-fingerprint.mjs'));
+    expect(step).toContain('knext-tarballs');
+  });
+
+  it('passes --lane bun-vinext, the CREDENTIAL_CELLS key whose workflowFile is compat-vinext.yml', () => {
+    const idx = workflow.indexOf('scripts/compat-window-fingerprint.mjs');
+    const step = workflow.slice(idx, idx + 900);
+    expect(step).toContain('--lane bun-vinext');
+  });
+
+  it('checks out the EXECUTING workflow file at github.workflow_sha and points --workflow-file at it (ADR-0039 Amendment 1)', () => {
+    expect(workflow).toContain('sparse-checkout: .github/workflows/compat-vinext.yml');
+    expect(workflow).toContain('ref: ${{ github.workflow_sha }}');
+    const idx = workflow.indexOf('scripts/compat-window-fingerprint.mjs');
+    const step = workflow.slice(idx, idx + 900);
+    expect(step).toContain('--workflow-file');
+    expect(step).toContain('knext-executing/.github/workflows/compat-vinext.yml');
+  });
+
+  it('uploads the fingerprint artifact durably', () => {
+    const idx = workflow.indexOf('Upload the compat-window fingerprint');
+    expect(idx, 'fingerprint artifact upload missing').toBeGreaterThan(-1);
+    const upload = workflow.slice(idx, idx + 400);
+    expect(upload).toMatch(/retention-days:\s*90/);
+  });
+
+  // A mutation-adjacent sanity check: if this lane's fingerprint step ever
+  // reverted to the node lane's `--workflow-file` target, this SCANS for it
+  // rather than trusting the `--lane` flag alone — either would independently
+  // catch the #1294 regression this test exists to close.
+  it("does NOT point --workflow-file at the node lane's checked-out copy", () => {
+    const idx = workflow.indexOf('scripts/compat-window-fingerprint.mjs');
+    const step = workflow.slice(idx, idx + 900);
+    expect(step).not.toContain('knext-executing/.github/workflows/test-e2e-deploy.yml');
+  });
+
+  // #1294 round 5 — same regression guard as the node lane
+  // (tests/compat-window-fingerprint.test.ts): the fingerprint script
+  // imports `typescript` (a root devDependency), so the workspace install
+  // must run before the fingerprint step or the import fails closed with
+  // Node's own module-not-found error.
+  it('"Install knext deps" (the bun install that provides typescript) runs BEFORE the fingerprint step', () => {
+    const installIdx = workflow.indexOf('name: Install knext deps');
+    const fingerprintIdx = workflow.indexOf('name: Fingerprint the frozen compat-window set');
+    expect(installIdx, 'Install knext deps step not found').toBeGreaterThan(-1);
+    expect(fingerprintIdx, 'Fingerprint step not found').toBeGreaterThan(-1);
+    expect(installIdx).toBeLessThan(fingerprintIdx);
+  });
+});
+
 describe('the lane is red-on-fail — no skip, no swallow', () => {
   it('carries no continue-on-error anywhere', () => {
     // Two views, because either alone has a hole: the PARSED view cannot see a
