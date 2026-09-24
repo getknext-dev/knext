@@ -217,9 +217,7 @@ describe('compat-matrix-tracker: ensurePinned (review round 3, finding 2 — Gra
     });
     ensurePinned(gh, REPO, 999);
     const joined = calls.map((c) => c.join(' '));
-    expect(joined.some((c) => c.includes('unpinIssue') && c.some((a) => a.includes('I_300')))).toBe(
-      false,
-    );
+    expect(joined.some((c) => c.includes('unpinIssue') && c.includes('I_300'))).toBe(false);
   });
 
   it('is a no-op when the target issue is already pinned (checked via gh issue view, not the pinnedIssues list)', () => {

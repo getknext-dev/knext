@@ -70,8 +70,19 @@ export const CREDENTIAL_RESET_LABEL = 'credential-reset';
  * Render one cell's row. `entry` is `matrix.cells[lane]`, the `auditWindow`
  * result for that lane at `scope: 'credential'` — see compat-window-audit.mjs.
  *
+ * The `entry` type here is DELIBERATELY narrowed to only the fields this
+ * function reads (`met`, `requiredNights`, `current.nights`,
+ * `current.restartCause`), not `ReturnType<typeof auditWindow>`'s full shape
+ * (`nights`, `streaks`, `longest`, `restartsByCause`, ...). A caller building
+ * a real `matrix.cells[lane]` object (the CLI, fed from `compat-window-
+ * audit.mjs --fetch --matrix --json`) still gets the full shape structurally
+ * — TS accepts a wider object where a narrower type is expected — but a TEST
+ * fixture that only needs to exercise the fields this function actually uses
+ * no longer has to fabricate nine unused properties just to satisfy the
+ * checker (`tests/compat-matrix-tracker.test.ts`'s `entry()` helper).
+ *
  * @param {{runtime: string, builder: string, lane: string, wired: boolean}} cell
- * @param {ReturnType<typeof import('./compat-window-audit.mjs').auditWindow>} entry
+ * @param {{met: boolean, requiredNights: number, current: {nights: number, restartCause: string|null}}} entry
  */
 export function formatCellRow(cell, entry) {
   const status = cell.wired ? (entry.met ? 'MET' : 'not met') : 'UNWIRED';
