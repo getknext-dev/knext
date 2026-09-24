@@ -86,29 +86,24 @@ const NAMED_EXCEPTIONS: { path: string; reason: string }[] = [
 /**
  * DATED exceptions (#1294 round 4, jev 0.75) — real, temporary tech debt,
  * each with a clock and a tracking issue, so it CANNOT quietly become
- * permanent the way a plain comment-only exception can.
+ * permanent the way a plain comment-only exception can. `activeExemptions`
+ * (scripts/lib/dated-exemptions.mjs) is the SAME shared reader the
+ * prover-lane and coverage exemptions use: an unknown key throws, `expires`
+ * is required, and a lapsed entry simply stops appearing in the active set.
  *
- * `scripts/e2e-deploy-vinext.sh:342` references `scripts/patch-vinext-3197.mjs`
- * via `${KNEXT_REPO_ROOT}`. That file is being DELETED by PR #1311 (tracked
- * in issue #1309, "migrate vinext 1.0.0-beta.8 → 1.0.0-beta.11"), concurrent
- * work on a sibling branch at the time this exception was written — so it is
- * deliberately NOT declared in any lane's frozen closure. `activeExemptions`
- * (scripts/lib/dated-exemptions.mjs) is the SAME shared reader the prover-lane
- * and coverage exemptions use: an unknown key throws, `expires` is required,
- * and a lapsed entry simply stops appearing in the active set — so this goes
- * red on its own once `expires` passes, with NO fallback that reads "not
- * excused" as "fine" (the two tests below assert that directly: the exception
- * must point at a real file AND must not still exist once #1311 has landed).
+ * CURRENTLY EMPTY (#1294 round 6): the one entry this held —
+ * `scripts/patch-vinext-3197.mjs`, exempted while PR #1311 (issue #1309,
+ * "migrate vinext 1.0.0-beta.8 → 1.0.0-beta.11") was in flight on a sibling
+ * branch — was removed once #1311 actually landed on `main` and deleted that
+ * file. The removal is itself proof the mechanism works: the red-on-delete
+ * guard this file's own tests carried ("once the file is deleted, remove the
+ * exception") is exactly what fired in CI and is why this entry is gone
+ * rather than quietly stale. Left declared (empty) as the place a FUTURE
+ * dated exception belongs — the fixture-based tests below exercise the
+ * mechanism directly, so it does not need a live subject to stay tested.
  */
-const DATED_EXCEPTIONS = [
-  {
-    path: 'scripts/patch-vinext-3197.mjs',
-    justification:
-      'Being deleted by PR #1311 (tracked in issue #1309, "migrate vinext 1.0.0-beta.8 → 1.0.0-beta.11"); not declared in the frozen closure since it is going away regardless of this branch.',
-    added: '2026-09-24',
-    expires: '2026-10-15',
-  },
-];
+const DATED_EXCEPTIONS: { path: string; justification: string; added: string; expires: string }[] =
+  [];
 
 function activeDatedExceptionPaths(now = new Date()): Set<string> {
   return activeExemptions(DATED_EXCEPTIONS, { field: 'path', now });
@@ -312,38 +307,57 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
     }
   });
 
-  it('the DATED exception (patch-vinext-3197.mjs) is well-formed, active, and points at a real file — for now', () => {
-    // `activeExemptions` itself throws on a malformed entry (unknown key,
-    // missing `expires`, short justification), so calling it IS the
-    // well-formedness assertion.
-    const active = activeDatedExceptionPaths();
-    expect(active.has('scripts/patch-vinext-3197.mjs')).toBe(true);
+  // #1294 round 6 — DATED_EXCEPTIONS is empty right now (its one real
+  // subject was removed once #1311 landed and deleted the file it excused),
+  // so these exercise `activeExemptions`'s lifecycle directly against a
+  // SYNTHETIC fixture entry rather than a real, time-bound repo file: a
+  // fixture cannot go stale the way a real subject can, and the mechanism
+  // needs no live subject to stay tested.
+  it('activeExemptions: a well-formed dated exception (fixture) is active before its expiry and points at a real file', () => {
+    const fixture = [
+      {
+        path: 'scripts/compat-window-fingerprint.mjs',
+        justification:
+          'fixture entry for the dated-exemption mechanism test — not a real exception.',
+        added: '2026-01-01',
+        expires: '2099-01-01',
+      },
+    ];
+    const active = activeExemptions(fixture, { field: 'path', now: new Date('2026-06-01') });
+    expect(active.has('scripts/compat-window-fingerprint.mjs')).toBe(true);
     for (const path of active) {
-      expect(existsSync(resolve(REPO_ROOT, path)), `dated exception ${path} does not exist`).toBe(
+      expect(existsSync(resolve(REPO_ROOT, path)), `fixture exception ${path} does not exist`).toBe(
         true,
       );
     }
   });
 
-  it('the DATED exception goes INACTIVE once its expiry has passed — the clock actually fires', () => {
-    const afterExpiry = new Date('2026-10-16T00:00:00Z');
-    const active = activeDatedExceptionPaths(afterExpiry);
-    expect(active.has('scripts/patch-vinext-3197.mjs')).toBe(false);
+  it('activeExemptions: the SAME fixture entry goes INACTIVE once its expiry has passed — the clock actually fires', () => {
+    const fixture = [
+      {
+        path: 'scripts/compat-window-fingerprint.mjs',
+        justification:
+          'fixture entry for the dated-exemption mechanism test — not a real exception.',
+        added: '2026-01-01',
+        expires: '2026-06-01',
+      },
+    ];
+    const active = activeExemptions(fixture, { field: 'path', now: new Date('2026-06-02') });
+    expect(active.has('scripts/compat-window-fingerprint.mjs')).toBe(false);
   });
 
-  it('once scripts/patch-vinext-3197.mjs is actually deleted, its dated exception must be removed too (not left pointing at nothing)', () => {
-    // This is the "or when the file is deleted and the exception still
-    // exists" half of round 4's ask: today the file still exists (PR #1311 is
-    // concurrent, not yet landed on this branch), so this documents the
-    // invariant and passes; the moment #1311 lands here, `existsSync` below
-    // goes false and this test goes RED until DATED_EXCEPTIONS is edited to
-    // drop the now-dead entry — the same "no fallback that reads 'not excused'
-    // as 'fine'" property `activeExemptions`'s own header promises, applied at
-    // the file-existence layer rather than only the clock layer.
+  // The "or when the file is deleted and the exception still exists" half of
+  // round 4's ask, kept GENERAL (over whatever DATED_EXCEPTIONS holds at any
+  // given time) rather than tied to one now-gone subject: this is exactly
+  // the guard that fired in CI once PR #1311 deleted
+  // scripts/patch-vinext-3197.mjs while its exception was still declared —
+  // proof the check works, not dead weight now that the array is empty. A
+  // future dated exception added here is covered automatically.
+  it('every currently-declared dated exception (if any) still points at a real file', () => {
     for (const { path } of DATED_EXCEPTIONS) {
       expect(
         existsSync(resolve(REPO_ROOT, path)),
-        `${path}'s dated exception is still declared, but the file is gone — remove the exception (it was deleted by PR #1311 / issue #1309)`,
+        `${path}'s dated exception is still declared, but the file is gone — remove the exception`,
       ).toBe(true);
     }
   });
