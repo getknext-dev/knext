@@ -43,11 +43,13 @@ name: Retracted figures still published (nightly)
 # retracted cannot go on being published uncorrected on a cited issue.
 
 on:
-  # 05:41 UTC — offset from the compat nightly (03:17), the docs closure
+  # 05:53 UTC — offset from the compat nightly (03:17), the docs closure
   # nightly (04:23) and the action-pin nightly (05:11), so the signal jobs do
-  # not queue behind each other.
+  # not queue behind each other. #1301: moved from 05:41, which collided
+  # (same UTC minute) with image-pin-resolution-nightly.yml (which keeps
+  # 05:41 — see docs/ci/capacity-budget.md).
   schedule:
-    - cron: '41 5 * * *'
+    - cron: '53 5 * * *'
   # Manual re-runs after posting a correction.
   workflow_dispatch: {}
 

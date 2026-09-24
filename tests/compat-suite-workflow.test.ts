@@ -1038,11 +1038,22 @@ describe('compat-suite shard chromium install is non-fatal (test-e2e-deploy.yml,
 // These guards lock in BOTH halves so a regression cannot silently return to 0/0.
 
 describe('compat-suite runs REAL deploy tests (test-e2e-deploy.yml, #147 A3-3)', () => {
-  it('points NEXT_EXTERNAL_TESTS_FILTERS at the knext v2 manifest', () => {
+  it('points NEXT_EXTERNAL_TESTS_FILTERS at the knext v2 manifest (via the #1301 KNEXT_DEPLOY_MANIFEST decision)', () => {
+    // #1301 — the filename is no longer hardcoded here: it flows through the
+    // single workflow-level KNEXT_DEPLOY_MANIFEST decision (smoke vs
+    // credential manifest), so both this step and "Compute excluded count
+    // from manifest" agree. See tests/ci-capacity-budget.test.ts for the
+    // decision's own coverage (default resolves to the real manifest, smoke
+    // dispatch-only, exactly one hardcoded literal).
     const block = deployTestsJobBlock();
     expect(
-      /NEXT_EXTERNAL_TESTS_FILTERS\s*:[^\n]*deploy-tests-manifest\.knext\.json/.test(block),
-      'the run step must filter via the knext deploy manifest',
+      /NEXT_EXTERNAL_TESTS_FILTERS\s*:[^\n]*env\.KNEXT_DEPLOY_MANIFEST/.test(block),
+      'the run step must filter via the KNEXT_DEPLOY_MANIFEST decision',
+    ).toBe(true);
+    const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+    expect(
+      /KNEXT_DEPLOY_MANIFEST:.*deploy-tests-manifest\.knext\.json/.test(raw),
+      'the KNEXT_DEPLOY_MANIFEST decision must resolve to the real knext manifest by default',
     ).toBe(true);
   });
 

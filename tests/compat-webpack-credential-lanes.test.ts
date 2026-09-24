@@ -209,11 +209,38 @@ describe('webpack credential crons (#1245)', () => {
     }
   });
 
-  it('no concurrency group anywhere in the credential workflow — a cancelled pending run would reset a window', () => {
-    expect(wf.concurrency, 'workflow-level concurrency').toBeUndefined();
+  it('no JOB-level concurrency anywhere in the credential workflow — a cancelled pending run would reset a window', () => {
     for (const [name, job] of Object.entries(wf.jobs)) {
       expect(job.concurrency, `job ${name} concurrency`).toBeUndefined();
     }
+  });
+
+  it('the #1301 workflow-level concurrency group can NEVER share a group across scheduled runs', () => {
+    // #1301 added a workflow-level concurrency group for BRANCH DISPATCHES
+    // ONLY — full coverage lives in tests/ci-capacity-budget.test.ts. What
+    // this file's own premise ("a cancelled pending run would reset a
+    // window") requires is narrower and re-asserted here: every `schedule`
+    // trigger (every credential AND early-warning cron, including the two
+    // webpack ones this file is about) must resolve to a group keyed on
+    // github.run_id, which by construction no other run — scheduled or
+    // dispatched — can ever share. Cancellation itself must also be gated to
+    // workflow_dispatch, never unconditional.
+    const concurrency = wf.concurrency as
+      | { group?: unknown; 'cancel-in-progress'?: unknown }
+      | undefined;
+    expect(concurrency, 'workflow-level concurrency block').toBeDefined();
+    const group = String(concurrency?.group ?? '');
+    expect(group, 'the schedule branch of the group must be run_id-scoped').toMatch(
+      /github\.run_id/,
+    );
+    const cancelExpr =
+      typeof concurrency?.['cancel-in-progress'] === 'string'
+        ? (concurrency['cancel-in-progress'] as string).replace(/\s+/g, ' ').trim()
+        : concurrency?.['cancel-in-progress'];
+    expect(
+      cancelExpr,
+      'cancel-in-progress must be gated on workflow_dispatch — an unconditional cancel could reset a credential window',
+    ).toBe("${{ github.event_name == 'workflow_dispatch' }}");
   });
 });
 
