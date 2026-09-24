@@ -383,6 +383,149 @@ describe('the resolver never speaks registry auth itself (#670c regression guard
   });
 });
 
+describe("checkPullable's only network egress is the injected exec/crane (#1211 item 1)", () => {
+  // #1211's review of #670c: the prior guard above is a NON-EXHAUSTIVE literal
+  // scan (`/v2/`, `realm`, `www-authenticate`, `Basic`) — a hand-rolled
+  // registry client using a bare `fetch` with none of those literals would
+  // evade it (jev 0.14 when filed: shipped code does nothing of the kind, so
+  // this hardens the INVARIANT rather than fixes a live defect). This block
+  // asserts the stronger claim directly, two ways:
+  //
+  //   1. STATIC — checkPullable's own function body (extracted by brace
+  //      balancing, not the whole file, since listPackageVersions legitimately
+  //      takes an `http` parameter) contains no network PRIMITIVE at all:
+  //      no `fetch(`, no `http.`/`https.` method call, no `XMLHttpRequest`,
+  //      no `net.connect`/`tls.connect`/`WebSocket`, and no dynamic
+  //      `require('http'|'https'|'net'|'tls')` or `import('node:http'|...)`.
+  //      The ONLY call resembling network I/O in the body is `exec(...)`.
+  //   2. DYNAMIC — `global.fetch` is monkey-patched to THROW for the duration
+  //      of a real checkPullable() call with a passing injected `exec`
+  //      double. If checkPullable ever touched it, the call would throw; it
+  //      does not. This is the harder proof for that ONE primitive: a static
+  //      scan can miss an obfuscated call (`globalThis['fe' + 'tch']`), but
+  //      the dynamic patch catches ANY invocation, however it was spelled.
+  //      (node:http/node:https ESM exports are read-only bindings in this
+  //      runtime and cannot be monkey-patched the same way; the static scan
+  //      above is what covers those two.)
+
+  const raw = readFileSync(
+    new URL('../scripts/resolve-scale-test-image.mjs', import.meta.url),
+    'utf8',
+  );
+
+  /**
+   * Extracts the verbatim source of `export async function <name>(...) { ... }`.
+   *
+   * First balances the PARAMETER LIST's parens (from the `(` right after the
+   * function name to its matching `)`), because `checkPullable`'s own
+   * signature destructures an options object — `(ref, { exec = defaultExec,
+   * crane = 'crane' } = {})` — whose braces would otherwise be mistaken for
+   * the function BODY's opening brace by a naive "first `{` after the
+   * signature" scan, truncating the extraction at the destructuring's own
+   * `}` long before the real body. Only after the parameter list closes does
+   * this look for the body's opening `{` and balance braces from there.
+   */
+  function extractFunctionSource(source: string, name: string): string {
+    const sigIdx = source.indexOf(`export async function ${name}(`);
+    if (sigIdx < 0) throw new Error(`could not find the signature of ${name}`);
+    const parenOpenIdx = source.indexOf('(', sigIdx);
+    let parenDepth = 0;
+    let parenCloseIdx = -1;
+    for (let i = parenOpenIdx; i < source.length; i++) {
+      if (source[i] === '(') parenDepth++;
+      else if (source[i] === ')') {
+        parenDepth--;
+        if (parenDepth === 0) {
+          parenCloseIdx = i;
+          break;
+        }
+      }
+    }
+    if (parenCloseIdx < 0) throw new Error(`could not balance the parameter list of ${name}`);
+
+    const openIdx = source.indexOf('{', parenCloseIdx);
+    if (openIdx < 0) throw new Error(`could not find the opening brace of ${name}`);
+    let depth = 0;
+    for (let i = openIdx; i < source.length; i++) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}') {
+        depth--;
+        if (depth === 0) return source.slice(sigIdx, i + 1);
+      }
+    }
+    throw new Error(`unbalanced braces extracting ${name}`);
+  }
+
+  const checkPullableSrc = extractFunctionSource(raw, 'checkPullable');
+
+  it('extraction self-check: the extracted body is non-trivial and balanced (guard non-vacuity)', () => {
+    expect(checkPullableSrc).toContain('export async function checkPullable');
+    expect(checkPullableSrc).toContain('exec(crane');
+    // Balance check: an unbalanced extraction (e.g. stopping at the first
+    // nested `}`) would truncate the body and make every assertion below
+    // pass vacuously on an empty/partial string.
+    const opens = (checkPullableSrc.match(/\{/g) ?? []).length;
+    const closes = (checkPullableSrc.match(/\}/g) ?? []).length;
+    expect(opens).toBe(closes);
+    expect(opens).toBeGreaterThan(1);
+  });
+
+  it("STATIC: checkPullable's own body contains no network primitive other than exec()", () => {
+    const forbidden = [
+      /\bfetch\(/,
+      /\bhttp\.(request|get)\(/,
+      /\bhttps\.(request|get)\(/,
+      /\bXMLHttpRequest\b/,
+      /\bnet\.connect\(/,
+      /\btls\.connect\(/,
+      /\bnew WebSocket\(/,
+      /require\(\s*['"](node:)?(http|https|net|tls)['"]\s*\)/,
+      /import\(\s*['"](node:)?(http|https|net|tls)['"]\s*\)/,
+    ];
+    const hits = forbidden.filter((re) => re.test(checkPullableSrc));
+    expect(
+      hits.map((re) => re.source),
+      `checkPullable's body matched a forbidden network primitive:\n${checkPullableSrc}`,
+    ).toEqual([]);
+  });
+
+  it('STATIC self-check: the forbidden-primitive scan actually fires on a synthetic violation', () => {
+    // Non-vacuity for the scan itself: prove it CAN fail before trusting that
+    // it passed for the right reason.
+    const withFetch = `export async function checkPullable(ref) {\n  await fetch(ref);\n}`;
+    expect(/\bfetch\(/.test(withFetch)).toBe(true);
+  });
+
+  it('DYNAMIC: a real checkPullable() call never invokes global.fetch, even if fetch is reachable and would throw', async () => {
+    // node:http/node:https ESM namespace exports are read-only bindings in
+    // this runtime (assigning `http.request = ...` throws
+    // "Attempted to assign to readonly property"), so this dynamic proof is
+    // scoped to `global.fetch` — a plain, writable property on `globalThis` —
+    // which is also the primitive #670c's actual hand-rolled defect used.
+    // The STATIC scan above independently covers the `http.`/`https.` call
+    // shapes a monkey-patch cannot reach here.
+    const originalFetch = globalThis.fetch;
+    let fetchCalled = false;
+    // @ts-expect-error — intentional monkey-patch for the duration of this test
+    globalThis.fetch = (...args: unknown[]) => {
+      fetchCalled = true;
+      throw new Error(
+        `checkPullable invoked the real global fetch with args: ${JSON.stringify(args)}`,
+      );
+    };
+    try {
+      const manifest = JSON.stringify({ schemaVersion: 2, config: {}, layers: [] });
+      const exec = async () => ({ status: 0, stdout: manifest, stderr: '' });
+      const ref = `ghcr.io/${OWNER}/${REPO}@sha256:${HEX('1')}`;
+      const digest = await checkPullable(ref, { exec });
+      expect(digest).toBe(`sha256:${HEX('1')}`);
+      expect(fetchCalled).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe('resolveScaleTestImage — end to end (injected transport)', () => {
   const newer = `sha256:${HEX('2')}`;
   const older = `sha256:${HEX('1')}`;
@@ -451,10 +594,24 @@ describe('resolveScaleTestImage — end to end (injected transport)', () => {
     ).rejects.toThrow();
   });
 
-  it('honours an explicit override input without touching GHCR', async () => {
+  it('honours an explicit override input without touching the GHCR packages API, but STILL proves pullability via crane (#1211 item 3)', async () => {
+    // #1211 item 3: the override path used to return verbatim with no
+    // pullability proof at all — a human-supplied digest that was never
+    // pushed (typo, wrong owner, wrong digest) would sail through the
+    // resolver and only fail later, inside the scale job's crane copy /
+    // crictl pull, where a real Knative-scale-timing flake ALSO reports
+    // failure (making the two indistinguishable from the job's own output).
+    // The override is documented as "Digest-pinned file-manager image" —
+    // exactly checkPullable's precondition — so it gets the SAME proof the
+    // resolved path always had, via the injected `exec`, never GHCR.
     const override = `ghcr.io/${OWNER}/${REPO}@sha256:${HEX('d')}`;
     const http = async () => {
-      throw new Error('network must not be touched on override');
+      throw new Error('the GHCR packages API must not be touched on override');
+    };
+    let execCalledWith: unknown;
+    const exec = async (crane: string, args: string[]) => {
+      execCalledWith = args;
+      return { status: 0, stdout: JSON.stringify({ schemaVersion: 2 }), stderr: '' };
     };
     const ref = await resolveScaleTestImage({
       input: override,
@@ -463,7 +620,48 @@ describe('resolveScaleTestImage — end to end (injected transport)', () => {
       repo: REPO,
       token: 't',
       http,
+      exec,
     });
     expect(ref).toBe(override);
+    expect(execCalledWith).toEqual(['manifest', override]);
+  });
+
+  it('fails closed when the override is NOT actually pullable — shape is not pullability, even on the human-supplied path', async () => {
+    const override = `ghcr.io/${OWNER}/${REPO}@sha256:${HEX('e')}`;
+    const http = async () => {
+      throw new Error('the GHCR packages API must not be touched on override');
+    };
+    const exec = async () => ({ status: 1, stdout: '', stderr: 'MANIFEST_UNKNOWN' });
+    await expect(
+      resolveScaleTestImage({
+        input: override,
+        registry: REGISTRY,
+        owner: OWNER,
+        repo: REPO,
+        token: 't',
+        http,
+        exec,
+      }),
+    ).rejects.toThrow(/NOT pullable/);
+  });
+
+  it('fails closed when the override is not digest-pinned at all (a tag, not "Digest-pinned…" as documented)', async () => {
+    const http = async () => {
+      throw new Error('the GHCR packages API must not be touched on override');
+    };
+    const exec = async () => {
+      throw new Error('crane must not be invoked for a ref checkPullable already rejects by shape');
+    };
+    await expect(
+      resolveScaleTestImage({
+        input: `ghcr.io/${OWNER}/${REPO}:latest`,
+        registry: REGISTRY,
+        owner: OWNER,
+        repo: REPO,
+        token: 't',
+        http,
+        exec,
+      }),
+    ).rejects.toThrow(/not a digest-pinned reference/);
   });
 });
