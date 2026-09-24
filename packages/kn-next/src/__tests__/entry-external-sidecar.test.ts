@@ -131,6 +131,14 @@ const PURE_LIVE = "KNEXT_1320_PURE_LIVE_SIDECAR_e81a";
 
 function buildApp(): { work: string; exe: string; sidecar: string } {
     const work = temp("knext-1320-");
+    // The binary sits in the app dir, beside the app's package.json (the compat
+    // lane boots it from the app dir). That package.json is load-bearing:
+    // measured, without `autoloadPackageJson` a binary next to one cannot
+    // resolve anything from the sidecar.
+    write(
+        join(work, "package.json"),
+        JSON.stringify({ name: "app", private: true, type: "module" }),
+    );
     const server = join(work, ".output", "server");
     const nm = join(server, "node_modules");
     write(
