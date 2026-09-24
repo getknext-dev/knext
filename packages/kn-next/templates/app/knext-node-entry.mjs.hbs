@@ -65,12 +65,10 @@ import {
   createGracefulShutdown,
   createMetricsState,
   drainPending,
-  METRICS_CONTENT_TYPE,
-  METRICS_MAX_REQUEST_BYTES,
+  metricsRequestListener,
   observeRequest,
   recordStartupComplete,
   rejectMalformedPath,
-  renderMetrics,
   requestErrorResponse,
   resolveBindHost,
   resolveMaxRequestBytes,
@@ -156,20 +154,10 @@ const appServer = {
 };
 
 // ── In-process Prometheus :9464 on node:http ────────────────────────────────
-const metricsHttp = createServer((req, res) => {
-  // Same fixed cap as the bun entry: this listener answers one GET, and the
-  // app's configurable cap must never re-open it.
-  if (Number(req.headers['content-length'] ?? 0) > METRICS_MAX_REQUEST_BYTES) {
-    res.writeHead(413).end();
-    return;
-  }
-  if (req.method === 'GET' && new URL(req.url ?? '/', 'http://x').pathname === '/metrics') {
-    res.writeHead(200, { 'content-type': METRICS_CONTENT_TYPE });
-    res.end(renderMetrics(metrics));
-    return;
-  }
-  res.writeHead(404).end('Not Found');
-});
+// The :9464 listener (runtime-contract.mjs): matches the path as a string,
+// never through the URL parser, and answers 500 rather than exiting on a throw.
+// Same fixed body cap as the bun entry.
+const metricsHttp = createServer(metricsRequestListener(metrics));
 try {
   await new Promise((resolve, reject) => {
     metricsHttp.once('error', reject);

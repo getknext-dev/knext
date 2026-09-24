@@ -644,6 +644,36 @@ export function requestErrorResponse(err) {
   });
 }
 
+// The `:9464` metrics listener for a plain node:http server (the node entry;
+// the bun entry serves the same port through Bun.serve). node:http hands the
+// raw request target through, so it is compared as a string — never given to
+// the URL parser, which throws on targets such as `//`, and a throw here is
+// outside any framework error handling. The try/catch keeps any other failure
+// a 500 rather than an exited process.
+export function metricsRequestListener(state) {
+  return (req, res) => {
+    try {
+      if (Number(req.headers['content-length'] ?? 0) > METRICS_MAX_REQUEST_BYTES) {
+        res.writeHead(413).end();
+        return;
+      }
+      const target = req.url ?? '/';
+      const queryAt = target.indexOf('?');
+      const path = queryAt === -1 ? target : target.slice(0, queryAt);
+      if (req.method === 'GET' && path === '/metrics') {
+        res.writeHead(200, { 'content-type': METRICS_CONTENT_TYPE });
+        res.end(renderMetrics(state));
+        return;
+      }
+      res.writeHead(404).end('Not Found');
+    } catch (err) {
+      console.error('[knext] metrics request failed:', err);
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    }
+  };
+}
+
 // ── (7 / after()) Background-task registry, anchored on globalThis ──────────
 // ADR-0027: a runtime seam's mutable state MUST live on globalThis via a
 // namespaced Symbol.for key, never a bare module-level `let` — a bundler may

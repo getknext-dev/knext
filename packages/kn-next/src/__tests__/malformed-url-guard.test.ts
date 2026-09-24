@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../../..");
 const HARNESS = join(HERE, "fixtures/malformed-url-harness.mjs");
+const METRICS_HARNESS = join(HERE, "fixtures/metrics-listener-harness.mjs");
 
 /** Every copy of the runtime contract a vinext app ships. */
 const CONTRACTS = [
@@ -290,9 +291,10 @@ function boot(
     bin: string,
     srvx: string,
     extraEnv: Record<string, string> = {},
+    harness = HARNESS,
 ): Promise<Booted> {
     return new Promise((resolveBoot, rejectBoot) => {
-        const child = spawn(bin, [HARNESS], {
+        const child = spawn(bin, [harness], {
             env: {
                 ...process.env,
                 CONTRACT,
@@ -446,6 +448,118 @@ describe("control: without the guard and the error handler", () => {
     }, 60_000);
 });
 
+// ── the node metrics listener: plain node:http, outside srvx ────────────────
+/** Request targets node:http accepts but a URL parser may not. */
+const ODD_TARGETS = [
+    "//",
+    "///",
+    "//metrics",
+    "/%",
+    "/%2/",
+    "http://[",
+    "http://",
+    "/metrics#x",
+];
+
+describe("metricsRequestListener (the node entry's :9464 listener)", () => {
+    it("answers 500 instead of throwing when rendering fails", () => {
+        let status = 0;
+        let ended = false;
+        const res = {
+            headersSent: false,
+            writeHead(code: number) {
+                status = code;
+                return res;
+            },
+            end() {
+                ended = true;
+                return res;
+            },
+        };
+        const origError = console.error;
+        console.error = () => {};
+        try {
+            // A null state makes renderMetrics throw.
+            expect(() =>
+                contract.metricsRequestListener(null)(
+                    { method: "GET", url: "/metrics", headers: {} },
+                    res,
+                ),
+            ).not.toThrow();
+        } finally {
+            console.error = origError;
+        }
+        expect({ status, ended }).toEqual({ status: 500, ended: true });
+    });
+
+    it("survives odd request targets and keeps serving /metrics", async () => {
+        const srv = await boot("node", "", {}, METRICS_HARNESS);
+        try {
+            expect((await rawGet(srv.port, "/metrics")).status).toBe(200);
+            for (const target of ODD_TARGETS) {
+                const res = await rawGet(srv.port, target);
+                expect({ target, answered: res.status > 0 }).toEqual({
+                    target,
+                    answered: true,
+                });
+                await sleep(100);
+                expect(srv.exited()).toBeNull();
+                expect((await rawGet(srv.port, "/metrics")).status).toBe(200);
+            }
+            expect((await rawGet(srv.port, "/metrics?x=1")).status).toBe(200);
+            expect((await rawGet(srv.port, "/other")).status).toBe(404);
+        } finally {
+            srv.stop();
+        }
+    }, 60_000);
+
+    it("control: the previous `new URL(req.url)` handler exits on a `//` target", async () => {
+        const srv = await boot(
+            "node",
+            "",
+            { KNEXT_HARNESS_OLD_METRICS: "1" },
+            METRICS_HARNESS,
+        );
+        try {
+            await rawGet(srv.port, "//");
+            await sleep(500);
+            expect(srv.exited()).not.toBeNull();
+        } finally {
+            srv.stop();
+        }
+    }, 60_000);
+
+    it("no shipped node:http handler parses the request target with new URL", () => {
+        // Scanned, not enumerated: every tracked file that creates a node:http
+        // server in shipped code (templates, the in-repo apps, the core
+        // adapters) must not hand req.url to the URL parser.
+        const out = spawnSync(
+            "git",
+            [
+                "grep",
+                "-lE",
+                "createServer\\(",
+                "--",
+                "packages/kn-next/templates",
+                "packages/kn-next/src/adapters",
+                "turbo/generators/templates",
+                "apps/file-manager/*.mjs",
+                "apps/docs/*.mjs",
+                "examples/bun-exec/*.mjs",
+            ],
+            { cwd: REPO_ROOT, encoding: "utf8" },
+        );
+        const files = out.stdout.split("\n").filter(Boolean);
+        expect(files.length).toBeGreaterThan(0);
+        const offenders = files.filter((f) =>
+            /new URL\(\s*req\.url/.test(
+                readFileSync(join(REPO_ROOT, f), "utf8"),
+            ),
+        );
+        expect(offenders).toEqual([]);
+    });
+});
+
 // ── wiring: every shipped entry and contract copy ────────────────────────────
 
 /** The text of `export function <name>(…) {…}` up to its closing brace at column 0. */
@@ -462,6 +576,7 @@ describe("every contract copy carries the same guard and error handler", () => {
         "rejectMalformedPath",
         "isDecodablePath",
         "requestErrorResponse",
+        "metricsRequestListener",
     ]) {
         const ref = functionSource(reference, name);
         it(`the template defines ${name}`, () => {
