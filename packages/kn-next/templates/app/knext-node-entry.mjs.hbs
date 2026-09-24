@@ -1,4 +1,4 @@
-// KNEXT_NODE_ENTRY_MARKER: 2
+// KNEXT_NODE_ENTRY_MARKER: 3
 // Bump this whenever this file's runtime behavior changes (a Cache-Control
 // rule, a header, a new env var it reads). `kn-next doctor` compares this
 // number against the copy scaffolded into an app's own directory — an app
@@ -69,7 +69,9 @@ import {
   METRICS_MAX_REQUEST_BYTES,
   observeRequest,
   recordStartupComplete,
+  rejectMalformedPath,
   renderMetrics,
+  requestErrorResponse,
   resolveBindHost,
   resolveMaxRequestBytes,
   waitUntil,
@@ -108,6 +110,9 @@ const appSrvx = serve({
   maxRequestBodySize: REQUEST_CAP.bytes,
   gracefulShutdown: false,
   silent: true,
+  // Any throw on the request path becomes a plain 500 (runtime-contract.mjs),
+  // never an exited process or Bun's development error page.
+  error: requestErrorResponse,
   middleware: [
     // Outermost, so every response below passes through it.
     cacheControlMiddleware(process.env),
@@ -130,6 +135,10 @@ const appSrvx = serve({
         metrics.inflight--;
       }
     },
+    // Malformed request paths answer 400 here, before h3 decodes them (see
+    // runtime-contract.mjs). Inside the counting middleware, so they are
+    // counted as 4xx.
+    rejectMalformedPath,
     async (req, next) => {
       const optimized = await handleImageRequest(req, {
         fetchSource: (path) => nitro.fetch(new Request(new URL(path, req.url))),
@@ -196,7 +205,7 @@ console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
 // marker at least lets an operator correlate a running pod's behavior
 // against a specific scaffold generation from `kubectl logs` alone, without
 // needing shell access to the app's source tree.
-console.log('NODE_ENTRY_MARKER:2');
+console.log('NODE_ENTRY_MARKER:3');
 // Which compile cache this process is using — the image-baked one unless
 // something injected NODE_COMPILE_CACHE over it. `none` means V8 compiles
 // every module from source on this boot.
