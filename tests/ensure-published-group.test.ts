@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import {
   ensureGroupPublished,
   GroupStillIncoherentError,
+  isAlreadyPublishedConflict,
+  pollResolves,
   RegistryUnreachableError,
 } from '../scripts/ensure-published-group.mjs';
 
@@ -226,5 +228,179 @@ describe('ensureGroupPublished — fail closed', () => {
         maxAttempts: 3,
       }),
     ).rejects.toBeInstanceOf(RegistryUnreachableError);
+  });
+});
+
+describe('isAlreadyPublishedConflict — the exact #1360 wording', () => {
+  it('absorbs npm E409 "Cannot publish over previously staged version" (the real production message)', () => {
+    // Verbatim from release run 36040935670 (0.4.3) — the exact bug report.
+    const result = {
+      ok: false,
+      stderr:
+        'npm error code E409\n' +
+        'npm error 409 Conflict - PUT https://registry.npmjs.org/@getknext%2fcore - ' +
+        'Cannot publish over previously staged version "0.4.3".\n' +
+        'npm error A complete log of this run can be found in: /home/runner/.npm/_logs/x-debug-0.log',
+    };
+    expect(isAlreadyPublishedConflict(result)).toBe(true);
+  });
+
+  it('still absorbs the older E403 "cannot publish over the previously published versions" wording', () => {
+    const result = {
+      ok: false,
+      stderr:
+        'npm error code E403\n' +
+        'npm error 403 403 Forbidden - PUT https://registry.npmjs.org/@getknext%2flib - ' +
+        'You cannot publish over the previously published versions: 0.5.0.',
+    };
+    expect(isAlreadyPublishedConflict(result)).toBe(true);
+  });
+
+  it('does NOT absorb a real E409 that is not the version-conflict shape', () => {
+    // A 409 for a different reason (hypothetical) must stay a real failure —
+    // the match is on the specific "cannot publish over" / "staged|published
+    // version" wording, never the bare status code.
+    const result = {
+      ok: false,
+      stderr:
+        'npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/@getknext%2fcore - ' +
+        'a transient registry lock, try again later.',
+    };
+    expect(isAlreadyPublishedConflict(result)).toBe(false);
+  });
+
+  it('does NOT absorb an ok result, or one with no stderr/message at all', () => {
+    expect(
+      isAlreadyPublishedConflict({
+        ok: true,
+        stderr: 'Cannot publish over previously staged version',
+      }),
+    ).toBe(false);
+    expect(isAlreadyPublishedConflict(undefined)).toBe(false);
+    expect(isAlreadyPublishedConflict({ ok: false })).toBe(false);
+  });
+});
+
+describe('pollResolves — retries a single registry read before giving up', () => {
+  it('returns true as soon as resolves() flips, without exhausting maxAttempts', async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const ok = await pollResolves({
+      name: '@getknext/core',
+      version: TARGET,
+      resolves: () => {
+        calls += 1;
+        return calls >= 2; // false, then true
+      },
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+      maxAttempts: 5,
+    });
+    expect(ok).toBe(true);
+    expect(calls).toBe(2);
+    expect(sleeps.length).toBe(1); // slept once, between attempt 1 and 2
+  });
+
+  it('returns false after exhausting maxAttempts, never oversleeping past the last attempt', async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const ok = await pollResolves({
+      name: '@getknext/core',
+      version: TARGET,
+      resolves: () => {
+        calls += 1;
+        return false;
+      },
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+      maxAttempts: 3,
+    });
+    expect(ok).toBe(false);
+    expect(calls).toBe(3);
+    expect(sleeps.length).toBe(2); // no sleep after the LAST attempt
+  });
+});
+
+describe('ensureGroupPublished — #1360 regression: an absorbed conflict is TERMINAL', () => {
+  // The exact observed shape: all four members were genuinely published
+  // upstream, but read-after-write lag made ALL of them look "missing" at
+  // round 0. Every re-publish hit the benign conflict (proof-of-publication).
+  // core and kn-next then lagged on `npm view` WORSE than lib/db — past what
+  // used to be the OLD final re-check — and the run wrongly reported them
+  // incoherent even though the conflict had already proven they were on the
+  // registry. Once absorbed, a member must never re-enter "missing" no matter
+  // how long ITS OWN registry-read lag runs — even past every retry round.
+  it('does not fail the group when an absorbed member never resolves via npm view within the whole retry budget', async () => {
+    const neverResolves = new Set(['@getknext/core', 'kn-next']); // #1360's stuck pair
+    const publishCalls: string[] = [];
+    const result = await ensureGroupPublished({
+      members: MEMBERS,
+      targetVersion: TARGET,
+      probe: () => true,
+      // Every member is "missing" at every read UNTIL its own publish attempt
+      // has run (matching the observed log: the upstream publish step had
+      // already shipped all four, but round-0 reads saw none of them). After
+      // absorption, lib/db's lag clears; core/kn-next's NEVER does.
+      resolves: (name: string) => publishCalls.includes(name) && !neverResolves.has(name),
+      publish: (name: string) => {
+        publishCalls.push(name);
+        // Every member was already shipped upstream — every publish attempt
+        // hits the immutable-version conflict, this run's exact wording.
+        return {
+          ok: false,
+          stderr:
+            'npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/x - ' +
+            `Cannot publish over previously staged version "${TARGET}".`,
+        };
+      },
+      sleep: async () => {},
+      maxAttempts: 6,
+    });
+
+    // Every member absorbed exactly once (never re-hammered) and the whole
+    // group is reported published — no throw, even though core/kn-next NEVER
+    // resolved via `resolves()` at any point in the run.
+    expect(new Set(publishCalls)).toEqual(new Set(MEMBERS));
+    expect(publishCalls.filter((c) => c === '@getknext/core').length).toBe(1);
+    expect(publishCalls.filter((c) => c === 'kn-next').length).toBe(1);
+    expect(result.published.sort()).toEqual([...MEMBERS].sort());
+    // The best-effort confirmation poll ran but could not confirm the two
+    // stuck members — reported honestly, not silently dropped.
+    expect(result.confirmed).not.toContain('@getknext/core');
+    expect(result.confirmed).not.toContain('kn-next');
+    expect(result.confirmed).toContain('@getknext/lib');
+    expect(result.confirmed).toContain('@getknext/db');
+  });
+
+  it('polls before deciding a member is missing, so brief lag never triggers an unnecessary publish/conflict round-trip', async () => {
+    // core is ALREADY published upstream but the first registry read lags;
+    // the SECOND read (inside the inner poll, same round) sees it. No publish
+    // call should ever happen for core.
+    let coreReadCount = 0;
+    const publishCalls: string[] = [];
+    const result = await ensureGroupPublished({
+      members: MEMBERS,
+      targetVersion: TARGET,
+      probe: () => true,
+      resolves: (name: string) => {
+        if (name === '@getknext/core') {
+          coreReadCount += 1;
+          return coreReadCount >= 2; // lag clears on the 2nd read
+        }
+        return true; // everyone else present immediately
+      },
+      publish: (name: string) => {
+        publishCalls.push(name);
+        return { ok: true, stderr: '' };
+      },
+      sleep: async () => {},
+      maxAttempts: 5,
+    });
+
+    expect(publishCalls).toEqual([]); // never published — the lag cleared inside the poll
+    expect(result.published).toEqual([]);
+    expect(coreReadCount).toBeGreaterThanOrEqual(2);
   });
 });
