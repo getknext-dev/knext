@@ -14,7 +14,7 @@
  * @getknext/core internals and sharp as no-ops. srvx is the real package.
  */
 import { afterAll, describe, expect, it } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
     copyFileSync,
     existsSync,
@@ -34,11 +34,19 @@ const REPO_ROOT = resolve(HERE, "../../../..");
 const tmp = mkdtempSync(join(tmpdir(), "knext-warm-ctx-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
+/** A new directory under `tmp` (removed with it in afterAll). */
+let freshDirs = 0;
+const freshDir = (prefix: string) => {
+    const d = join(tmp, `${prefix}-${++freshDirs}`);
+    mkdirSync(d);
+    return d;
+};
+
 /** How long the warm route's after() work takes — longer than a bare exit. */
 const AFTER_MS = 600;
 
 function writeApp(entryTemplate: string, contractPath: string): string {
-    const dir = mkdtempSync(join(tmp, "app-"));
+    const dir = freshDir("app");
     const w = (rel: string, text: string) => {
         mkdirSync(dirname(join(dir, rel)), { recursive: true });
         writeFileSync(join(dir, rel), text);
@@ -177,9 +185,6 @@ function run(
     });
 }
 
-const bunOnPath =
-    spawnSync("bun", ["--version"], { encoding: "utf8" }).status === 0;
-
 describe("warm-path after() work is drained", () => {
     it("node entry: the image bake waits for a warm route's after() before exiting", async () => {
         const dir = writeApp(
@@ -231,17 +236,18 @@ describe("warm-path after() work is drained", () => {
         ],
     ];
     for (const [entry, contract] of BUN_ENTRIES) {
-        it.skipIf(!bunOnPath)(
-            `${entry}: SIGTERM right after the warm drains its after() work`,
-            async () => {
-                const r = await run("bun", writeApp(entry, contract), {}, true);
-                expect(r.out).toContain("WARMED:/warm-after status=200");
-                expect({ code: r.code, afterRan: r.marker }).toEqual({
-                    code: 0,
-                    afterRan: true,
-                });
-            },
-            60_000,
-        );
+        it(`${entry}: SIGTERM right after the warm drains its after() work`, async () => {
+            const r = await run(
+                process.execPath,
+                writeApp(entry, contract),
+                {},
+                true,
+            );
+            expect(r.out).toContain("WARMED:/warm-after status=200");
+            expect({ code: r.code, afterRan: r.marker }).toEqual({
+                code: 0,
+                afterRan: true,
+            });
+        }, 60_000);
     }
 });

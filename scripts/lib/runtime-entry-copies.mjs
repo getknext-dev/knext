@@ -113,7 +113,7 @@ export const DIVERGENT = {
       'this copy by one script from the same hunks. The recorded divergence is still ONLY the ' +
       'image intercept; leaving the wrap out here would have kept the one entry the alpine e2e ' +
       'compiles dropping `after()` work on shutdown.',
-    sha256: 'd504869f2cbaa4e7a3e2c50f707123791b630ddb7e479bddcc824906cb024d6f',
+    sha256: '9c2fdb39aff97740eaf69690c6743ee099dd0a7569a874b89ee2df7c955ba6a9',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:

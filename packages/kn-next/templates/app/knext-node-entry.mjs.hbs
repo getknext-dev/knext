@@ -1,4 +1,4 @@
-// KNEXT_NODE_ENTRY_MARKER: 2
+// KNEXT_NODE_ENTRY_MARKER: 4
 // Bump this whenever this file's runtime behavior changes (a Cache-Control
 // rule, a header, a new env var it reads). `kn-next doctor` compares this
 // number against the copy scaffolded into an app's own directory — an app
@@ -196,7 +196,7 @@ console.log(`LISTENING:${appServer.port} METRICS:${metricsServer.port}`);
 // marker at least lets an operator correlate a running pod's behavior
 // against a specific scaffold generation from `kubectl logs` alone, without
 // needing shell access to the app's source tree.
-console.log('NODE_ENTRY_MARKER:2');
+console.log('NODE_ENTRY_MARKER:4');
 // Which compile cache this process is using — the image-baked one unless
 // something injected NODE_COMPILE_CACHE over it. `none` means V8 compiles
 // every module from source on this boot.
@@ -246,6 +246,10 @@ if (process.env.KNEXT_EAGER_WARM !== '0' || BAKE) {
         const res = await runWithExecutionContext(EXECUTION_CONTEXT, () =>
           nitro.fetch(new Request(`http://127.0.0.1:${appServer.port}${path}`)),
         );
+        // Read the body to its end, as a live response is: vinext settles a warm
+        // route's after() work only once its response body has been consumed, so an
+        // unread body leaves that work pending and the drain would wait it out.
+        await res.arrayBuffer().catch(() => {});
         allOk &&= res.status >= 200 && res.status < 300;
         console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - warmT0}`);
       } catch (err) {
