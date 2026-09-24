@@ -11,6 +11,13 @@
 > official-suite row below — read it before repeating the claim. The guard test now **requires**
 > that row to cite its run ID + pinned ref + "N passed / 0 failed" result; an evidence-less ✅
 > fails CI. See **Maintenance & honesty** below.
+>
+> **New apps scaffolded by knext pin a newer Next.js release (16.3.x) than the `v16.2.0` measured
+> above.** Next 16.3.0 introduced a confirmed upstream Turbopack + `adapterPath` +
+> `output:'standalone'` regression (#1372) that breaks every harness deploy under Turbopack, so
+> re-measuring against the shipped pin today would zero out both Turbopack-credentialed rows
+> rather than show real progress. See `.github/compat-credentialed-next-version.json` (#1376) for
+> the tracked divergence; the credentialed numbers move forward once that regression has a fix.
 
 ## Legend
 
