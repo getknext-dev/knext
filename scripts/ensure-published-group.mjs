@@ -105,8 +105,22 @@ export function defaultBackoffMs(attempt) {
 /** Thrown when the group is STILL incoherent after the bounded retries. */
 export class GroupStillIncoherentError extends Error {}
 
-/** A bare `x.y.z` with optional semver prerelease/build metadata. */
-const SEMVER_SRC = '\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?';
+/**
+ * A bare `x.y.z` with optional semver prerelease/build metadata.
+ *
+ * #1364 round 2: each identifier is `[0-9A-Za-z-]+`, and `.` ONLY appears
+ * BETWEEN identifiers (`(?:\.[0-9A-Za-z-]+)*`) — never inside the character
+ * class an identifier itself matches. The earlier `[0-9A-Za-z.-]+` shape put
+ * `.` inside that class, so it greedily swallowed a sentence-ending period
+ * too: "previously published versions: 1.0.0-rc.1." captured
+ * "1.0.0-rc.1." (WITH the trailing dot) instead of "1.0.0-rc.1", which never
+ * equals `targetVersion` and so was never absorbed — a real prerelease
+ * conflict silently treated as unverifiable and never absorbed. Requiring an
+ * identifier after each `.` is what makes the greedy engine stop BEFORE a
+ * dot that isn't followed by another identifier.
+ */
+const SEMVER_SRC =
+  '\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?';
 
 /**
  * Extract the version npm's conflict message names, from either wording:

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   ensureGroupPublished,
+  extractConflictVersion,
   fixedGroupVersionMismatches,
   GroupStillIncoherentError,
   isAlreadyPublishedConflict,
@@ -312,6 +313,37 @@ describe('isAlreadyPublishedConflict — the exact #1360 wording, version-scoped
     ).toBe(false);
     expect(isAlreadyPublishedConflict(undefined, '0.4.3')).toBe(false);
     expect(isAlreadyPublishedConflict({ ok: false }, '0.4.3')).toBe(false);
+  });
+});
+
+describe('extractConflictVersion — #1364 round 2: a trailing sentence period must not join the version', () => {
+  it('does NOT swallow the sentence-ending period after a prerelease version (403 wording)', () => {
+    // The exact bug: the old character-class shape put `.` INSIDE what an
+    // identifier could match, so it greedily consumed the sentence period
+    // too — "1.0.0-rc.1." (wrong) instead of "1.0.0-rc.1" (right).
+    const text =
+      'npm error 403 403 Forbidden - You cannot publish over the previously published versions: 1.0.0-rc.1.';
+    expect(extractConflictVersion(text)).toBe('1.0.0-rc.1');
+  });
+
+  it('does NOT swallow the sentence-ending period after build metadata', () => {
+    const text =
+      'npm error 403 403 Forbidden - You cannot publish over the previously published versions: 1.0.0+abc.';
+    expect(extractConflictVersion(text)).toBe('1.0.0+abc');
+  });
+
+  it('a prerelease version WITH multiple dot-separated identifiers still parses correctly, quoted (409 wording)', () => {
+    const text = 'Cannot publish over previously staged version "2.0.0-alpha.beta.1".';
+    expect(extractConflictVersion(text)).toBe('2.0.0-alpha.beta.1');
+  });
+
+  it('#1364 round 2 end-to-end: a real prerelease conflict IS absorbed once the trailing period is excluded', () => {
+    const result = {
+      ok: false,
+      stderr:
+        'npm error 403 403 Forbidden - You cannot publish over the previously published versions: 1.0.0-rc.1.',
+    };
+    expect(isAlreadyPublishedConflict(result, '1.0.0-rc.1')).toBe(true);
   });
 });
 

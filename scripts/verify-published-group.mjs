@@ -46,6 +46,19 @@
  *           a member that never resolves within the budget is still reported
  *           missing/incoherent exactly as before.
  *
+ *           #1364 round 2: the FIRST version of the poll checked `npm view
+ *           <name> version` (no `@version`) and returned as soon as that
+ *           came back NON-NULL. That command reports whatever the `latest`
+ *           dist-tag currently resolves to — during the lag window that is
+ *           the OLD version, exit 0, non-null — so the poll returned on
+ *           round ONE with the stale version and the caller reported it
+ *           incoherent immediately (`elapsed === 0`), reproducing the exact
+ *           bug this file exists to fix. `pollViewVersion` now polls
+ *           `npm view <name>@<targetVersion> version` BY EXIT CODE
+ *           (`npmResolvesAtVersion`, the same shape as `ensure-published-
+ *           group.mjs`'s `npmResolvesAt`) — the only read that answers "did
+ *           THIS publish land", not "does the name resolve to something".
+ *
  * The pure decision logic is exported and unit-tested without a network or a
  * real publish; main() supplies the process spawns.
  *
@@ -191,9 +204,22 @@ export function defaultPostPollBackoffMs(attempt) {
 }
 
 /**
- * Poll `viewVersion(name)` until it returns non-null (or any value at all —
- * the caller judges it) or the total elapsed time exceeds `maxTotalMs`. Pure —
- * `viewVersion` and `sleep` are injected, no network here.
+ * Poll `resolvesAtTarget(name)` — TRUE iff the registry resolves `name` AT
+ * THE SPECIFIC TARGET VERSION (an `npm view <name>@<version> version`
+ * exit-code check, like `ensure-published-group.mjs`'s `npmResolvesAt`) —
+ * until it is TRUE or the total elapsed time exceeds `maxTotalMs`. Pure —
+ * `resolvesAtTarget` and `sleep` are injected, no network here.
+ *
+ * #1364 round 2: the FIRST version of this function polled `npm view <name>
+ * version` (no `@version`) and returned on ANY non-null result. That command
+ * reports whatever the `latest` dist-tag currently resolves to — during
+ * read-after-write lag that is the OLD version, exit 0, non-null — so the
+ * poll returned on round ONE with the STALE version and the caller reported
+ * it incoherent immediately, `elapsed === 0`, reproducing the exact original
+ * bug this whole file exists to fix. Checking the SPECIFIC target version's
+ * existence (exit-code, not printed text) is the only read that actually
+ * answers "did THIS publish land" rather than "does the name resolve to
+ * something".
  *
  * `--post` has no retry of its own otherwise: a single racy read after
  * `changeset publish` measured ~2.5 minutes of registry read-after-write lag
@@ -204,17 +230,17 @@ export function defaultPostPollBackoffMs(attempt) {
  *
  * @param {{
  *   name: string,
- *   viewVersion: (name: string) => string | null,
+ *   resolvesAtTarget: (name: string) => boolean,
  *   sleep: (ms: number) => Promise<void>,
  *   maxTotalMs?: number,
  *   backoffMs?: (attempt: number) => number,
  *   now?: () => number,
  * }} input
- * @returns {Promise<string | null>} the version once seen, or null if the budget ran out
+ * @returns {Promise<boolean>} TRUE once the target version is seen, FALSE if the budget ran out
  */
 export async function pollViewVersion({
   name,
-  viewVersion,
+  resolvesAtTarget,
   sleep,
   maxTotalMs = POST_POLL_MAX_MS,
   backoffMs = defaultPostPollBackoffMs,
@@ -222,10 +248,9 @@ export async function pollViewVersion({
 }) {
   const start = now();
   for (let attempt = 0; ; attempt++) {
-    const version = viewVersion(name);
-    if (version !== null) return version;
+    if (resolvesAtTarget(name)) return true;
     const elapsed = now() - start;
-    if (elapsed >= maxTotalMs) return null;
+    if (elapsed >= maxTotalMs) return false;
     await sleep(Math.min(backoffMs(attempt), maxTotalMs - elapsed));
   }
 }
@@ -316,6 +341,22 @@ export function npmViewVersion(name, registry) {
   return run.stdout.trim();
 }
 
+/**
+ * `npm view <name>@<version> version` — TRUE iff npm exited 0 (branch on exit
+ * code, never the printed text — mirrors `ensure-published-group.mjs`'s
+ * `npmResolvesAt`). #1364 round 2: this is the read `pollViewVersion` polls,
+ * because a bare `npm view <name> version` reports the `latest` dist-tag
+ * regardless of whether THIS run's target version is what it points at.
+ */
+export function npmResolvesAtVersion(name, version, registry) {
+  const run = spawnSync(
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    ['view', `${name}@${version}`, 'version', '--registry', registry],
+    { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  return !run.error && run.status === 0;
+}
+
 export function npmProbe(registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
@@ -404,14 +445,16 @@ async function runPost() {
   const resolved = new Map();
   if (probeOk) {
     for (const name of fixedGroup) {
-      resolved.set(
+      const hitTarget = await pollViewVersion({
         name,
-        await pollViewVersion({
-          name,
-          viewVersion: (n) => npmViewVersion(n, registry),
-          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-        }),
-      );
+        resolvesAtTarget: (n) => npmResolvesAtVersion(n, targetVersion, registry),
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      });
+      // Once confirmed at the target, no need for a second read. Otherwise a
+      // SINGLE best-effort plain `npm view <name> version` names whatever it
+      // currently resolves to (or null) — purely for `registryGroupProblems`'s
+      // diagnostic message; it never re-litigates the poll's own verdict.
+      resolved.set(name, hitTarget ? targetVersion : npmViewVersion(name, registry));
     }
   }
 

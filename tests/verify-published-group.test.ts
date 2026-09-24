@@ -155,24 +155,48 @@ describe('registryGroupProblems — post-publish, the whole group must have land
   });
 });
 
-describe('pollViewVersion — the #1364 finding-1 bounded confirmation poll', () => {
-  it('returns the version as soon as viewVersion resolves, without waiting out the full budget', async () => {
+describe('pollViewVersion — the #1364 finding-1 bounded confirmation poll (round 2: target-scoped)', () => {
+  it('returns true as soon as resolvesAtTarget flips, without waiting out the full budget', async () => {
     let calls = 0;
     const sleeps: number[] = [];
-    const version = await pollViewVersion({
+    const hit = await pollViewVersion({
       name: '@getknext/core',
-      viewVersion: () => {
+      resolvesAtTarget: () => {
         calls += 1;
-        return calls >= 3 ? '0.4.3' : null; // lags twice, then present
+        return calls >= 3; // false, false, true
       },
       sleep: async (ms: number) => {
         sleeps.push(ms);
       },
       maxTotalMs: 60_000,
     });
-    expect(version).toBe('0.4.3');
+    expect(hit).toBe(true);
     expect(calls).toBe(3);
     expect(sleeps.length).toBe(2);
+  });
+
+  it('#1364 round 2 — THE REPLAYED BUG: a stale OLD version at every read (non-null, exit 0) must NOT be read as success', async () => {
+    // The exact defect: the round-1 shape polled a bare `npm view <name>
+    // version`, which reports whatever `latest` currently resolves to. During
+    // lag that is the OLD version — non-null, npm exit 0 — so a poll that
+    // only checked "did SOMETHING come back" returned on round ONE with
+    // elapsed=0, reproducing the original false-red immediately. Simulate
+    // exactly that: `resolvesAtTarget` (the name@TARGET exit-code check)
+    // stays false for several rounds (the stale version keeps answering the
+    // untargeted probe, but never the targeted one), then flips true once the
+    // target version is actually live.
+    let attempts = 0;
+    const hit = await pollViewVersion({
+      name: '@getknext/core',
+      resolvesAtTarget: () => {
+        attempts += 1;
+        return attempts >= 4; // stale @ 0.4.2 for 3 rounds, then 0.4.3 lands
+      },
+      sleep: async () => {},
+      maxTotalMs: 60_000,
+    });
+    expect(hit).toBe(true);
+    expect(attempts).toBe(4); // did NOT stop early on the stale-but-non-null read
   });
 
   it('#1364 finding 1: a real production shape — the exact ~2.5 minute lag observed in run 36040935670, using the DEFAULT backoff', async () => {
@@ -181,15 +205,14 @@ describe('pollViewVersion — the #1364 finding-1 bounded confirmation poll', ()
     // an instant `sleep` that advances it by exactly the requested amount:
     // this exercises pollViewVersion's REAL elapsed-time gating (it compares
     // `now() - start`), not a parallel bookkeeping variable the function never
-    // reads — the earlier draft of this test only advanced its OWN counter and
-    // never actually drove the function's budget check.
+    // reads.
     let clock = 0;
     let calls = 0;
-    const version = await pollViewVersion({
+    const hit = await pollViewVersion({
       name: '@getknext/core',
-      viewVersion: () => {
+      resolvesAtTarget: () => {
         calls += 1;
-        return clock >= 134_000 ? '0.4.3' : null;
+        return clock >= 134_000;
       },
       sleep: async (ms: number) => {
         clock += ms;
@@ -200,16 +223,16 @@ describe('pollViewVersion — the #1364 finding-1 bounded confirmation poll', ()
       // 134s comfortably inside the ~5-minute budget, not just that SOME
       // budget would eventually work.
     });
-    expect(version).toBe('0.4.3');
+    expect(hit).toBe(true);
     expect(calls).toBeGreaterThan(1);
     expect(clock).toBeLessThan(POST_POLL_MAX_MS);
   });
 
-  it('#1364 finding 1: fails (returns null) when the version NEVER appears within the budget — must not hang forever either', async () => {
+  it('#1364 finding 1: fails (returns false) when the target version NEVER appears within the budget — must not hang forever either', async () => {
     let clock = 0;
-    const version = await pollViewVersion({
+    const hit = await pollViewVersion({
       name: '@getknext/core',
-      viewVersion: () => null, // never resolves
+      resolvesAtTarget: () => false, // stuck at some other version forever
       sleep: async (ms: number) => {
         clock += ms;
       },
@@ -217,21 +240,21 @@ describe('pollViewVersion — the #1364 finding-1 bounded confirmation poll', ()
       maxTotalMs: 20_000,
       backoffMs: () => 5_000,
     });
-    expect(version).toBeNull();
+    expect(hit).toBe(false);
     // Never overshoots the budget by more than one backoff step.
     expect(clock).toBeLessThanOrEqual(20_000);
   });
 
-  it('never sleeps at all when the very first read already resolves', async () => {
+  it('never sleeps at all when the very first read already resolves at the target', async () => {
     let slept = false;
-    const version = await pollViewVersion({
+    const hit = await pollViewVersion({
       name: '@getknext/core',
-      viewVersion: () => '0.4.3',
+      resolvesAtTarget: () => true,
       sleep: async () => {
         slept = true;
       },
     });
-    expect(version).toBe('0.4.3');
+    expect(hit).toBe(true);
     expect(slept).toBe(false);
   });
 });
