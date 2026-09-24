@@ -867,8 +867,8 @@ async function main() {
         .sort();
       expect(lanes).toEqual(['bun-webpack', 'node-webpack']);
       for (const r of webpackRows) {
-        // Never credentialed by this PR: a ✅ here would need the full evidence
-        // contract below AND 14 banked credential nights, neither of which exists.
+        // A ✅ here is held to the run-evidence contract below (verified-once);
+        // "credentialed" additionally needs 14 banked RC nights (the audit).
         expect(r.evidence).toMatch(/\.github\/workflows\/test-e2e-deploy\.yml/);
       }
     });
