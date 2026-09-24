@@ -95,6 +95,24 @@ pre-pull, if you enable it — pulls with the same credentials. Leave it out and
 leaves the first pods stuck in `ImagePullBackOff`; adding the secret afterwards does not rescue the
 running revision, so you would have to deploy again. Naming it here is the whole fix.
 
+## Env vars and secrets — `.env.production` is not how production gets them
+
+A local `.env`/`.env.production` file behaves differently for the two kinds of value Next.js reads
+from it, and neither behavior means "put secrets there":
+
+- **`NEXT_PUBLIC_*` values are inlined into the client JavaScript bundle at build time.** They ship
+  to every browser that loads the app and are readable by anyone — never put a secret behind a
+  `NEXT_PUBLIC_` prefix, in `.env.production` or anywhere else.
+- **Plain (non-`NEXT_PUBLIC_`) values are server-side only, and knext's runtime image never carries
+  a baked `.env.production` for the server to read them from at boot.** If you are used to Next
+  reading server-side config from that file at runtime, stop relying on it here — deploy it and the
+  value is simply absent. Move it to `kn-next.config.ts` instead:
+
+- **Plain, non-secret values** — `env` in `kn-next.config.ts`, applied straight to the container.
+- **Secrets** — a Kubernetes Secret, referenced from `secrets.envFrom`/`secrets.envMap` in
+  `kn-next.config.ts`. The operator injects it at the container level; it is never written to a
+  file inside the image.
+
 ## The one line that matters most
 
 ```ts

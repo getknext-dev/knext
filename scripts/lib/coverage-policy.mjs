@@ -335,14 +335,50 @@ export const PER_PATH_THRESHOLDS = {
  * the ratchet convention. Raw floors are left unchanged (77 / 79.0): both
  * measure comfortably above them already, and raising them is not this
  * batch's target.
+ *
+ * ## Ratchet: coverage batch B7 (#1238) — doctor checks + the kubectl seam
+ *
+ * `doctor/kubectl.ts`'s `kubectlRunner` and `schema/kubectl-capture.ts`'s
+ * `captureKubectl` — the two production `spawnSync("kubectl", …)` wrappers —
+ * were NEVER exercised as themselves: every doctor/preflight/deploy test that
+ * touches them injects a fake `kubectl` function or `mock.module`s the wrapper
+ * away entirely, for good reason (hermetic, no real cluster/registry). New
+ * `kubectl-seam.test.ts` mocks `node:child_process`'s `spawnSync` instead — the
+ * real OS boundary — so the wrappers' own status/stdout/stderr mapping and
+ * `captureKubectl`'s fallback to `r.error?.message` when kubectl never
+ * produced stderr (a genuine, previously-uncovered branch) both run for real.
+ * `doctor-checks-isolated.test.ts` gained real gaps in `metricsCheck` (both
+ * infra-error early-returns, the legacy `metrics.request-metrics-backend-
+ * destination` key, the "cannot determine" fallback, and both `onUserMetrics`
+ * outcomes) and `ingressCheck` (the config-network probe error, the genuine
+ * configmap-NotFound FAIL, the kourier-probe infra error, and both WARN
+ * outcomes — class-mismatch and no-reconciler-found). All new assertions are
+ * behavioural (status/detail/hint on the real verdict), not padding — three
+ * mutation-proved directly: dropping `captureKubectl`'s `r.error` fallback,
+ * flipping `metricsCheck`'s `always`-collision port-exclusion condition, and
+ * neutering `ingressCheck`'s class-mismatch WARN branch each reds one or more
+ * of the new assertions (`git checkout --` restores after each proof).
+ *
+ * Full local suite (466 test files; the same pre-existing environment-only
+ * failures as B2–B4 — `tests/scaffold-pack-contents.test.ts`, the compat-
+ * window-fingerprint execution-scan's node-webpack lane, and the bun-exec e2e
+ * srvx-close pair, none touching doctor/kubectl-capture or their tests),
+ * measured with `dist/` built for kn-next + lib + db:
+ *
+ *   - global:                  honest 93.70% → **94.04% (9597/10205)**, raw 79.85% (11480/14377)
+ *   - packages/kn-next/src/**: honest 93.75% → **94.13% (8717/9261)**, raw 79.84% (10465/13107)
+ *
+ * Floors move to 94.0 (both) — the measured value rounded DOWN to 0.5, per the
+ * ratchet convention. Raw floors are left unchanged (77 / 79.0): both measure
+ * comfortably above them already, and raising them is not this batch's target.
  */
 export const HONEST_THRESHOLDS = {
-  lines: 93.5,
+  lines: 94.0,
 };
 
 export const HONEST_PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
-    lines: 93.5,
+    lines: 94.0,
   },
 };
 
