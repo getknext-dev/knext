@@ -271,12 +271,67 @@ describe("extractNodeEntryMarker", () => {
     });
 });
 
+/** The only config shape this check ever proceeds past skip for. */
+const VINEXT_NODE_CONFIG = {
+    build: "vinext",
+    runtime: "node",
+} as unknown as KnativeNextConfig;
+
 describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
-    it("SKIP when the app directory has no knext-node-entry.mjs at all", () => {
-        const [r] = nodeEntryStalenessCheck(
+    it("SKIP when kn-next.config.ts is not vinext + node (default-standalone: no build/runtime at all)", async () => {
+        const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
                 {
+                    loadAppConfig: async () =>
+                        ({}) as unknown as KnativeNextConfig,
+                    // If this ran, it would find a scaffolded (inert) copy and WARN —
+                    // proving the config gate, not the file reader, is what skips it.
+                    readNodeEntryFile: () => NO_MARKER,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("skip");
+        expect(r?.id).toBe("node-entry-staleness");
+        expect(r?.detail).toContain("vinext");
+    });
+
+    it("SKIP when kn-next.config.ts is build: 'vinext' but runtime is absent (defaults to bun, ADR-0058)", async () => {
+        const [r] = await nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    loadAppConfig: async () =>
+                        ({ build: "vinext" }) as unknown as KnativeNextConfig,
+                    readNodeEntryFile: () => NO_MARKER,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("skip");
+    });
+
+    it("SKIP when no kn-next.config.ts could be loaded at all", async () => {
+        const [r] = await nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    loadAppConfig: async () => undefined,
+                    readNodeEntryFile: () => NO_MARKER,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("skip");
+    });
+
+    it("SKIP when the app directory has no knext-node-entry.mjs at all", async () => {
+        const [r] = await nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    loadAppConfig: async () => VINEXT_NODE_CONFIG,
                     readNodeEntryFile: () => undefined,
                     readNodeEntryTemplate: () => CURRENT_MARKER,
                 },
@@ -286,11 +341,12 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.id).toBe("node-entry-staleness");
     });
 
-    it("SKIP when the packaged template itself carries no marker (defensive — never guess)", () => {
-        const [r] = nodeEntryStalenessCheck(
+    it("SKIP when the packaged template itself carries no marker (defensive — never guess)", async () => {
+        const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
                 {
+                    loadAppConfig: async () => VINEXT_NODE_CONFIG,
                     readNodeEntryFile: () => CURRENT_MARKER,
                     readNodeEntryTemplate: () => NO_MARKER,
                 },
@@ -299,11 +355,12 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.status).toBe("skip");
     });
 
-    it("PASS when the app's marker matches the packaged template's", () => {
-        const [r] = nodeEntryStalenessCheck(
+    it("PASS when the app's marker matches the packaged template's", async () => {
+        const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
                 {
+                    loadAppConfig: async () => VINEXT_NODE_CONFIG,
                     readNodeEntryFile: () => CURRENT_MARKER,
                     readNodeEntryTemplate: () => CURRENT_MARKER,
                 },
@@ -313,11 +370,12 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.detail).toContain("marker 2");
     });
 
-    it("WARN naming the exact fix when the app's marker is OLDER than the packaged template's", () => {
-        const [r] = nodeEntryStalenessCheck(
+    it("WARN naming the exact fix when the app's marker is OLDER than the packaged template's", async () => {
+        const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
                 {
+                    loadAppConfig: async () => VINEXT_NODE_CONFIG,
                     readNodeEntryFile: () => STALE_MARKER_1,
                     readNodeEntryTemplate: () => CURRENT_MARKER,
                 },
@@ -326,16 +384,18 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.status).toBe("warn");
         expect(r?.detail).toContain("marker 1");
         expect(r?.detail).toContain("marker 2");
+        expect(r?.detail).not.toContain("#1353");
         // The exact fix: copy the current entry.
         expect(r?.hint).toContain("kn-next create --force");
         expect(r?.hint).toContain("knext-node-entry.mjs");
     });
 
-    it("WARN (never a silent pass) when the app's copy predates the marker entirely", () => {
-        const [r] = nodeEntryStalenessCheck(
+    it("WARN (never a silent pass) when the app's copy predates the marker entirely", async () => {
+        const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
                 {
+                    loadAppConfig: async () => VINEXT_NODE_CONFIG,
                     readNodeEntryFile: () => NO_MARKER,
                     readNodeEntryTemplate: () => CURRENT_MARKER,
                 },
@@ -346,13 +406,56 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.hint).toBeTruthy();
     });
 
-    it("uses the REAL cwd/template readers by default when no deps are injected (does not throw)", () => {
-        // No readNodeEntryFile/readNodeEntryTemplate override — exercises the
-        // real fs-backed defaults. The test cwd almost certainly has no
-        // knext-node-entry.mjs, so this should SKIP, not throw or crash.
-        const [r] = nodeEntryStalenessCheck(makeCtx({}));
+    it("uses the REAL cwd/config/template readers by default when no deps are injected (does not throw)", async () => {
+        // No overrides at all — exercises the real fs-backed defaults. The
+        // test cwd almost certainly has no kn-next.config.ts, so this should
+        // SKIP, not throw or crash.
+        const [r] = await nodeEntryStalenessCheck(makeCtx({}));
         expect(r?.id).toBe("node-entry-staleness");
         expect(["skip", "pass", "warn"]).toContain(r?.status);
+    });
+
+    it("the SHIPPED templates/app/knext-node-entry.mjs.hbs template has a marker this check can parse", () => {
+        // Guards against the check silently degrading to a permanent SKIP: if
+        // the marker comment is ever deleted from the real template,
+        // defaultReadTemplateEntry's caller treats that as "packaged template
+        // is incomplete" and skips forever rather than warning anyone. Read
+        // the real shipped file directly (not through a mocked reader).
+        const templatePath = join(
+            HERE,
+            "..",
+            "..",
+            "templates",
+            "app",
+            "knext-node-entry.mjs.hbs",
+        );
+        const text = readFileSync(templatePath, "utf8");
+        expect(extractNodeEntryMarker(text)).toBeDefined();
+    });
+
+    it("the shipped template's header marker and its own startup-log marker agree", () => {
+        // node-entry-staleness.ts diagnoses staleness from the header comment
+        // (KNEXT_NODE_ENTRY_MARKER); the running process separately logs
+        // NODE_ENTRY_MARKER:<n> at boot so a marker can be read from
+        // `kubectl logs` alone, without shell access to the source tree
+        // (see the template's own comment). The two are two independent
+        // literals in the same file — assert they cannot drift apart.
+        const templatePath = join(
+            HERE,
+            "..",
+            "..",
+            "templates",
+            "app",
+            "knext-node-entry.mjs.hbs",
+        );
+        const text = readFileSync(templatePath, "utf8");
+        const headerMarker = extractNodeEntryMarker(text);
+        const logLineMatch = /console\.log\('NODE_ENTRY_MARKER:(\d+)'\)/.exec(
+            text,
+        );
+        expect(headerMarker).toBeDefined();
+        expect(logLineMatch).not.toBeNull();
+        expect(String(headerMarker)).toBe(logLineMatch?.[1] ?? "<no match>");
     });
 });
 

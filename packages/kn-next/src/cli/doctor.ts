@@ -118,7 +118,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
 
     checks.push(...kubectlValidationCheck(ctx));
     checks.push(...(await storageModeCheck(ctx)));
-    checks.push(...nodeEntryStalenessCheck(ctx));
+    checks.push(...(await nodeEntryStalenessCheck(ctx)));
     checks.push(...crdCheck(ctx));
     checks.push(...crdSchemaCheck(ctx));
     checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage
