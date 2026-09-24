@@ -251,7 +251,18 @@ rejected by the validating webhook on create and on any update that introduces
 the conflict (no silent precedence). CRs that already carried the conflict
 before this rule are grandfathered (ratcheted): they keep reconciling,
 `spec.database` wins, and the operator records a Warning event naming the
-ignored `envMap` entry. Every other env var is fair game.
+ignored `envMap` entry.
+
+An `envMap` name can also collide with a **platform-managed system variable**
+(e.g. `HOSTNAME`, `NODE_ENV`, or a conditionally-injected one like
+`STORAGE_PROVIDER` when `spec.storage` is set). The platform's own value
+always wins — the colliding `envMap` entry is ignored, never appended
+alongside it. This is surfaced two ways: a Warning event
+(`kubectl describe nextapp <name>`) and an `EnvMapCollision` status condition
+naming every ignored entry (`True` while a collision exists, `False`
+otherwise) — check either with `kubectl get nextapp <name> -o
+jsonpath='{.status.conditions[?(@.type=="EnvMapCollision")]}'`. Every
+non-colliding env var is fair game.
 
 ### `database` (Optional)
 Binds the app's Postgres. The only mode is **binding** (`secretRef`): bring

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -144,6 +145,7 @@ func computeStatusVerdict(
 	rev revisionCheck,
 	ic imageCacheState,
 	np netpolEnforcementState,
+	droppedEnvMapNames []string,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -359,6 +361,43 @@ func computeStatusVerdict(
 			ObservedGeneration: app.Generation,
 			Reason:             "NotDeferred",
 			Message:            "Kafka revalidation not deferred",
+		})
+	}
+
+	// EnvMapCollision (#1288): non-fatal surface of spec.secrets.envMap
+	// entries buildKsvcEnv DROPPED because their name collides with an
+	// operator-injected system env var. Before this, the collision was
+	// resolved by kubelet's last-wins duplicate-env semantics with NO signal
+	// anywhere that it happened — a Ready=True app silently running on
+	// whichever value append-order happened to put last. droppedEnvMapNames
+	// is already sorted (buildKsvcEnv iterates envMap in sorted key order).
+	if len(droppedEnvMapNames) > 0 {
+		message := fmt.Sprintf(
+			"spec.secrets.envMap defines the following name(s), already managed by "+
+				"operator-injected system env (which always wins): %s. Ignored — no action "+
+				"needed unless the operator's own value is not what you intended.",
+			strings.Join(droppedEnvMapNames, ", "),
+		)
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionEnvMapCollision,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonEnvVarIgnored,
+			Message:            message,
+		})
+		// Transition-gated (the #98 no-op contract): fire only when the
+		// dropped set actually CHANGES, never on every converged reconcile.
+		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionEnvMapCollision)
+		if prev == nil || prev.Message != message {
+			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, ReasonEnvVarIgnored, message})
+		}
+	} else {
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionEnvMapCollision,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             "NoCollision",
+			Message:            "No spec.secrets.envMap entry collides with operator-managed system env",
 		})
 	}
 
