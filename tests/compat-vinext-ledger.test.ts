@@ -22,31 +22,63 @@
  *   - the real ledger file is valid today;
  *   - the workflow applies and reconciles the ledger, and the ledger lives
  *     OUTSIDE the file patterns the compat-window fingerprint freezes for
- *     every cell.
+ *     every cell;
+ *   - the flaky window: informative-run filtering (branch/workflow/ref/shard
+ *     completeness), backfill past uninformative runs, and fail-closed
+ *     behaviour on a run of unfetchable history (#1355 review finding 1/3);
+ *   - `verify`: branch/workflow/ref/shard-completeness re-derivation, so a
+ *     relabelled or invented entry cannot escape via a bad citation (#1355
+ *     review finding 2), and its advisory (non-required) wiring.
  */
 
-import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { afterAll, describe, expect, it } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLedger, renderTable } from '../scripts/compat-run-ledger.mjs';
 import {
   applyLedger,
   CLASSES,
+  collectHistory,
+  DEFAULT_NEXTJS_REF,
+  downloadRun,
+  EXPECTED_SHARD_TOTAL,
   FLAKY_FILE_CAP,
   FLAKY_MAX_EXPIRY_DAYS,
+  flakyHistory,
+  flakyWindow,
+  isAuthOrApiError,
+  isCompleteDefaultRun,
+  isNoArtifactError,
   LEDGER_FILE_CAP,
+  MAX_CONSECUTIVE_HISTORY_SKIPS,
   MAX_EXPIRY_DAYS,
+  previousRunCandidates,
   publishedNumber,
+  readSummaries,
   refreshSnapshots,
   skippedWarnings,
   staleEntries,
   validateLedger,
+  verifyEvidence,
 } from '../scripts/compat-vinext-ledger.mjs';
+
+// Some fixtures below create a fresh mkdtemp PER FETCH inside a `fetchSummaries`
+// closure (collectHistory can call it more than once) rather than once up front,
+// so they cannot be paired with an inline `finally`. Register each one here and
+// remove them all in a single afterAll (#880/#939 — a temp dir outside the repo
+// that is never removed still leaks, one directory per run, forever).
+const dynamicTempDirs: string[] = [];
+afterAll(() => {
+  for (const d of dynamicTempDirs) rmSync(d, { recursive: true, force: true });
+});
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LEDGER_PATH = 'test/compat-vinext-ledger.json';
 const WORKFLOW = '.github/workflows/compat-vinext.yml';
+const VERIFY_WORKFLOW = '.github/workflows/compat-vinext-ledger-verify.yml';
 const read = (rel: string) => readFileSync(resolve(repoRoot, rel), 'utf8');
 
 const TODAY = '2026-09-24';
@@ -246,6 +278,18 @@ const navEntry = (cases: string[]) =>
     evidence: { fail: [{ run: '1', cases }], pass: ['2', '3'] },
     expires: '2026-10-08',
   });
+
+// A full 16-shard run (EXPECTED_SHARD_TOTAL), all default-ref by default. Shard 1 carries the
+// interesting failures/passes; the other 15 are plain clean shards.
+const fullRun = (
+  over: Record<string, unknown> = {},
+  shardOver: Record<string, unknown> = {},
+): Any[] => [
+  summary({ shard: '1/16', ...shardOver, ...over }),
+  ...Array.from({ length: 15 }, (_, i) =>
+    summary({ shard: `${i + 2}/16`, failed: 0, failures: [], ...over }),
+  ),
+];
 
 describe('applyLedger: case-level reclassification, never narrowing', () => {
   it('quarantines the snapshot cases and removes the file from failed when nothing else fails', () => {
@@ -492,6 +536,654 @@ describe('refreshSnapshots: the snapshot is generated from evidence', () => {
   });
 });
 
+describe('flakyWindow: a flaky entry is judged over the last three runs', () => {
+  const failRun = () => [applyLedger(summary(), [navEntry(['hash'])])];
+  const passRun = () => {
+    const s = summary({ failed: 2 });
+    s.failures = s.failures.filter((f: Any) => f.file !== NAV);
+    return [s];
+  };
+  const flaky = navEntry(['hash']);
+
+  it('three failures in a row is broken, not flaky', () => {
+    const v = flakyWindow([flaky], [failRun(), failRun(), failRun()]);
+    expect(v.broken).toEqual([{ test: NAV, runs: 3 }]);
+    expect(v.stale).toEqual([]);
+  });
+
+  it('three passes in a row is stale', () => {
+    const v = flakyWindow([flaky], [passRun(), passRun(), passRun()]);
+    expect(v.stale).toEqual([{ test: NAV, runs: 3 }]);
+    expect(v.broken).toEqual([]);
+  });
+
+  it('a mixed window is neither; only the LAST three informative runs count', () => {
+    expect(flakyWindow([flaky], [failRun(), passRun(), failRun()])).toEqual({
+      broken: [],
+      stale: [],
+    });
+  });
+
+  it('fewer than three informative runs gives no verdict', () => {
+    expect(flakyWindow([flaky], [failRun(), failRun()])).toEqual({ broken: [], stale: [] });
+  });
+
+  it('ignores unsupported entries (their stale rule is per run)', () => {
+    const unsupported = entry({ test: NAV, cases: ['hash'] });
+    expect(flakyWindow([unsupported], [failRun(), failRun(), failRun()])).toEqual({
+      broken: [],
+      stale: [],
+    });
+  });
+});
+
+describe('isCompleteDefaultRun: a run is informative only complete and on the default ref', () => {
+  it('accepts a full 16-shard default-ref run', () => {
+    expect(isCompleteDefaultRun(fullRun())).toBe(true);
+  });
+
+  it('rejects a run missing a shard (never counted as a pass)', () => {
+    expect(isCompleteDefaultRun(fullRun().slice(0, 15))).toBe(false);
+  });
+
+  it('rejects a custom-ref run', () => {
+    expect(isCompleteDefaultRun(fullRun({ ref: 'v16.3.0-canary' }))).toBe(false);
+  });
+
+  it('rejects an artifactless run (no summaries)', () => {
+    expect(isCompleteDefaultRun([])).toBe(false);
+  });
+
+  it('EXPECTED_SHARD_TOTAL matches the lane shard count', () => {
+    expect(EXPECTED_SHARD_TOTAL).toBe(16);
+  });
+
+  it('DEFAULT_NEXTJS_REF matches the fixture summaries’ ref field', () => {
+    expect(DEFAULT_NEXTJS_REF).toBe(summary().ref);
+  });
+});
+
+describe('isAuthOrApiError: distinguishes gh auth/API failures from other errors', () => {
+  it('recognizes common gh auth/API failure text', () => {
+    for (const msg of [
+      'HTTP 401: Bad credentials',
+      'HTTP 403: rate limit exceeded',
+      'gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN',
+      'HTTP 500: Internal Server Error',
+    ])
+      expect(isAuthOrApiError(new Error(msg))).toBe(true);
+  });
+
+  it('does not treat an ordinary error as an auth/API error', () => {
+    expect(isAuthOrApiError(new Error('ENOENT: no such file or directory'))).toBe(false);
+  });
+});
+
+describe('collectHistory: backfill past uninformative runs, fail closed on repeated auth errors', () => {
+  const candidate = (id: string, status = 'completed') => ({ id, status });
+
+  it('backfills past a cancelled, artifactless, and custom-ref run to reach `want`', () => {
+    const list = () => [
+      candidate('10', 'cancelled'), // uninformative: not completed — must not even be fetched
+      candidate('9'), // artifactless: empty summaries
+      candidate('8'), // custom ref
+      candidate('7'), // good
+      candidate('6'), // good
+    ];
+    const fetchSummaries = (id: string) => {
+      if (id === '10') throw new Error('a cancelled run must never be fetched');
+      if (id === '9') return [];
+      if (id === '8') return fullRun({ ref: 'v16.3.0-canary' });
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 2 },
+    );
+    expect(history.length).toBe(2);
+    expect(warnings).toEqual([]);
+  });
+
+  it('a run missing shards is treated the same as artifactless: uninformative, backfilled', () => {
+    const list = () => [candidate('10'), candidate('9')];
+    const fetchSummaries = (id: string) =>
+      id === '10' ? fullRun().slice(0, 10) : fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const { history } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 1 },
+    );
+    expect(history.length).toBe(1);
+  });
+
+  it('an auth/API error fetching one run is a warning and that run is skipped', () => {
+    const list = () => [candidate('10'), candidate('9')];
+    const fetchSummaries = (id: string) => {
+      if (id === '10') throw new Error('HTTP 401: Bad credentials');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 1 },
+    );
+    expect(history.length).toBe(1);
+    expect(warnings.join()).toMatch(/run 10.*401/);
+  });
+
+  it(`fails CLOSED after ${MAX_CONSECUTIVE_HISTORY_SKIPS} consecutive auth/API errors, not silently narrowing`, () => {
+    const list = () => Array.from({ length: 10 }, (_, i) => candidate(String(10 - i)));
+    const fetchSummaries = () => {
+      throw new Error('HTTP 403: rate limit exceeded');
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 2 }),
+    ).toThrow(/consecutive/);
+  });
+
+  it('a non-auth error is never swallowed', () => {
+    const list = () => [candidate('10')];
+    const fetchSummaries = () => {
+      throw new Error('unexpected: JSON.parse failed');
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+    ).toThrow(/unexpected/);
+  });
+
+  it('a successful step resets the consecutive counter, so alternating skips never fail closed', () => {
+    // skip, SUCCESS (resets), skip, skip: 3 skip EVENTS total, but never 3 IN A ROW.
+    // Without the reset, this sequence would wrongly hit the threshold and throw.
+    const list = () => [
+      candidate('13'),
+      candidate('12'),
+      candidate('11'),
+      candidate('10'),
+      candidate('9'),
+    ];
+    const fetchSummaries = (id: string) => {
+      if (id === '13' || id === '11' || id === '10') throw new Error('HTTP 401: Bad credentials');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '14', want: 10 }, // > candidates, so the walk never breaks early
+    );
+    expect(history.length).toBe(2);
+    expect(warnings.length).toBe(3);
+  });
+
+  it('WITHOUT the reset (proof the above test is discriminating): 3 skips with one success between them would still throw if the reset were missing', () => {
+    // This is the same fixture as above but demonstrates why the reset test
+    // matters: a naive re-implementation without `budget.reset()` throws
+    // here. We assert the mutation-provable anchor exists and is exercised,
+    // not the buggy behaviour itself (that would defeat the point).
+    let sawReset = false;
+    const list = () => [candidate('13'), candidate('12'), candidate('11')];
+    const fetchSummaries = (id: string) => {
+      if (id === '12') sawReset = true; // the success in the middle
+      if (id === '13' || id === '11') throw new Error('HTTP 401: Bad credentials');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '14', want: 5 }),
+    ).not.toThrow();
+    expect(sawReset).toBe(true);
+  });
+
+  it('a listing auth/API failure is FATAL, not a soft skip — there is nothing to fall back to (#1363 round-3 finding 2)', () => {
+    const list = () => {
+      throw new Error('HTTP 401: Bad credentials');
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    // collectHistory is only ever called when there's a flaky entry to judge,
+    // so a listing failure means the window CANNOT be judged at all — this
+    // must throw (reddening the run), never warn-and-exit-0. A prior version
+    // treated this as one soft skip with zero candidates, so it could never
+    // reach the 3-consecutive threshold and every such run silently passed.
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+    ).toThrow(/could not list.*401/);
+  });
+
+  it('a non-auth listing error is never swallowed either', () => {
+    const list = () => {
+      throw new Error('unexpected: JSON.parse failed');
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+    ).toThrow(/unexpected/);
+  });
+
+  it('a "no artifact" failure downloading a run is NOT an auth/API error: skipped, not warned, not a fail-closed contributor', () => {
+    const list = () => [candidate('10'), candidate('9')];
+    const fetchSummaries = (id: string) => {
+      if (id === '10')
+        throw new Error(
+          'Command failed: gh run download 10 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno artifact matches any of the names or patterns provided',
+        );
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 1 },
+    );
+    expect(history.length).toBe(1);
+    expect(warnings).toEqual([]); // no-artifact is silent backfill, not a warning-worthy skip
+  });
+
+  it(`a run of ${MAX_CONSECUTIVE_HISTORY_SKIPS} consecutive "no artifact" failures does NOT fail closed (they are not skips at all)`, () => {
+    const list = () => Array.from({ length: 10 }, (_, i) => candidate(String(10 - i)));
+    const fetchSummaries = (id: string) => {
+      if (Number(id) > 5)
+        throw new Error('no artifact matches any of the names or patterns provided');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+    ).not.toThrow();
+  });
+
+  it('a "no artifact" skip resets a PRIOR auth-error streak too, not just its own', () => {
+    // skip(auth,1), skip(auth,2), no-artifact (must reset to 0), skip(auth,1):
+    // only reaches 1 if the no-artifact skip resets the streak. Without that
+    // reset, the streak would be 3 and this would throw.
+    const list = () => [
+      candidate('13'),
+      candidate('12'),
+      candidate('11'),
+      candidate('10'),
+      candidate('9'),
+    ];
+    const fetchSummaries = (id: string) => {
+      if (id === '13' || id === '12' || id === '10') throw new Error('HTTP 401: Bad credentials');
+      if (id === '11') throw new Error('no artifact matches any of the names or patterns provided');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '14', want: 1 }),
+    ).not.toThrow();
+  });
+
+  it('`since` excludes history runs created before it (a run cannot be evidence for an entry that did not exist yet)', () => {
+    const list = () => [
+      { id: '10', status: 'completed', createdAt: '2026-09-01T00:00:00Z' }, // too old
+      { id: '9', status: 'completed', createdAt: '2026-09-20T00:00:00Z' }, // ok
+    ];
+    const fetchSummaries = (id: string) => {
+      if (id === '10') throw new Error('must never be fetched: predates `since`');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    const { history } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 1, since: '2026-09-10T00:00:00Z' },
+    );
+    expect(history.length).toBe(1);
+  });
+});
+
+describe('isNoArtifactError: distinguishes "nothing to see here" from a real gh failure', () => {
+  it('recognizes the real gh CLI message for a missing/expired artifact', () => {
+    expect(
+      isNoArtifactError(
+        new Error(
+          'Command failed: gh run download 10 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno artifact matches any of the names or patterns provided',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('recognizes the SECOND real gh CLI message (a 0-artifact run, live from gh run download 33965643199)', () => {
+    expect(
+      isNoArtifactError(
+        new Error(
+          'Command failed: gh run download 33965643199 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno valid artifacts found to download',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('catches an unseen-but-same-shaped variant, not just the two literal strings (whack-a-mole resistance)', () => {
+    expect(isNoArtifactError(new Error('no artifacts available for download'))).toBe(true);
+  });
+
+  it('does not treat an auth/API error as a no-artifact error', () => {
+    expect(isNoArtifactError(new Error('HTTP 401: Bad credentials'))).toBe(false);
+  });
+
+  it('a no-artifact message is never ALSO classified as an auth/API error', () => {
+    const msg =
+      'Command failed: gh run download 10 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno artifact matches any of the names or patterns provided';
+    expect(isNoArtifactError(new Error(msg))).toBe(true);
+    expect(isAuthOrApiError(new Error(msg))).toBe(false);
+  });
+});
+
+describe('downloadRun against a REAL gh failure (a fake gh binary, not a mocked return value)', () => {
+  // #1355 round-2 finding 1: the bug was in how the string thrown by a REAL
+  // `gh run download` failure gets classified, not in any mocked stand-in for
+  // it. This drives the real `downloadRun` + `readSummaries` through a fake
+  // `gh` EXECUTABLE that reproduces gh's actual exit code and stderr text.
+  const fakeGh = (behavior: 'no-artifact' | 'no-valid-artifact' | 'ok') => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-'));
+    const script = join(dir, 'gh');
+    const body =
+      behavior === 'no-artifact'
+        ? '#!/bin/sh\necho "no artifact matches any of the names or patterns provided" 1>&2\nexit 1\n'
+        : behavior === 'no-valid-artifact'
+          ? '#!/bin/sh\necho "no valid artifacts found to download" 1>&2\nexit 1\n'
+          : '#!/bin/sh\n# args: run download <id> --repo <r> --pattern <p> --dir <dir> ($9)\nmkdir -p "$9"\necho "{}" > "$9/compat-suite-summary-1.json"\nexit 0\n';
+    writeFileSync(script, body);
+    chmodSync(script, 0o755);
+    return { dir, script };
+  };
+  const realExec = (bin: string) => (args: string[]) =>
+    execFileSync(bin, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+  it('a real "no artifact" gh failure is classified by isNoArtifactError, not swallowed as a generic throw', () => {
+    const { dir, script } = fakeGh('no-artifact');
+    const outDir = join(dir, 'out');
+    try {
+      let threw: unknown;
+      try {
+        downloadRun(realExec(script), { repo: 'o/r', runId: '999', dir: outDir });
+      } catch (err) {
+        threw = err;
+      }
+      expect(threw).toBeDefined();
+      expect(isNoArtifactError(threw)).toBe(true);
+      expect(isAuthOrApiError(threw)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the SECOND real "no valid artifacts found to download" gh failure (a 0-artifact run) is also classified, not swallowed', () => {
+    const { dir, script } = fakeGh('no-valid-artifact');
+    const outDir = join(dir, 'out');
+    try {
+      let threw: unknown;
+      try {
+        downloadRun(realExec(script), { repo: 'o/r', runId: '33965643199', dir: outDir });
+      } catch (err) {
+        threw = err;
+      }
+      expect(threw).toBeDefined();
+      expect(isNoArtifactError(threw)).toBe(true);
+      expect(isAuthOrApiError(threw)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('collectHistory, wired to the REAL downloadRun + readSummaries, backfills past a real "no valid artifacts" run too', () => {
+    const { dir: noValidDir, script: noValidScript } = fakeGh('no-valid-artifact');
+    const { dir: okDir, script: okScript } = fakeGh('ok');
+    try {
+      const list = () => [
+        { id: '10', status: 'completed' }, // 0-artifact run: the SECOND gh wording
+        { id: '9', status: 'completed' },
+      ];
+      const fetchSummaries = (id: string) => {
+        const outDir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-run-'));
+        dynamicTempDirs.push(outDir);
+        const script = id === '10' ? noValidScript : okScript;
+        downloadRun(realExec(script), { repo: 'o/r', runId: id, dir: outDir });
+        return readSummaries(outDir);
+      };
+      expect(() =>
+        collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+      ).not.toThrow();
+    } finally {
+      rmSync(noValidDir, { recursive: true, force: true });
+      rmSync(okDir, { recursive: true, force: true });
+    }
+  });
+
+  it('collectHistory, wired to the REAL downloadRun + readSummaries, backfills past a real "no artifact" run', () => {
+    const { dir: noArtifactDir, script: noArtifactScript } = fakeGh('no-artifact');
+    const { dir: okDir, script: okScript } = fakeGh('ok');
+    try {
+      const list = () => [
+        { id: '10', status: 'completed' }, // will hit the real no-artifact gh
+        { id: '9', status: 'completed' }, // will hit the real ok gh
+      ];
+      const fetchSummaries = (id: string) => {
+        const outDir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-run-'));
+        dynamicTempDirs.push(outDir);
+        const script = id === '10' ? noArtifactScript : okScript;
+        downloadRun(realExec(script), { repo: 'o/r', runId: id, dir: outDir });
+        return readSummaries(outDir);
+      };
+      // The 'ok' script writes `{}`, which is not a full/complete default run
+      // (isCompleteDefaultRun rejects it), so `want` stays unmet — the point
+      // here is that collectHistory does NOT throw on the real no-artifact run.
+      expect(() =>
+        collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+      ).not.toThrow();
+    } finally {
+      rmSync(noArtifactDir, { recursive: true, force: true });
+      rmSync(okDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('flakyHistory: end-to-end CLI glue against a REAL gh on PATH (#1355 round-2 finding 3)', () => {
+  // `gh` is invoked internally via `execFileSync('gh', …)`, not injected, so
+  // proving the `since` filter is actually wired from the ledger's flaky
+  // entries through to `collectHistory` needs a real `gh` on PATH, not a
+  // re-implementation of flakyHistory's internals.
+  it('never downloads a candidate created before the oldest flaky entry’s refreshed/added date', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-path-'));
+    const log = join(dir, 'calls.log');
+    const script = join(dir, 'gh');
+    // run list -> two candidates: one BEFORE `since` (2026-09-01), one AFTER
+    // (2026-09-20). run download -> logs the run id it was asked for, then
+    // fails with "no artifact" (cheapest way to make every download a no-op
+    // that still proves whether it was ATTEMPTED at all).
+    writeFileSync(
+      script,
+      [
+        '#!/bin/sh',
+        `echo "$@" >> "${log}"`,
+        'if [ "$1" = "run" ] && [ "$2" = "list" ]; then',
+        '  echo \'[{"databaseId":20,"status":"completed","createdAt":"2026-09-20T00:00:00Z"},{"databaseId":10,"status":"completed","createdAt":"2026-09-01T00:00:00Z"}]\'',
+        '  exit 0',
+        'fi',
+        'if [ "$1" = "run" ] && [ "$2" = "download" ]; then',
+        '  echo "no artifact matches any of the names or patterns provided" 1>&2',
+        '  exit 1',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(script, 0o755);
+    const oldPath = process.env.PATH;
+    const oldRepo = process.env.GITHUB_REPOSITORY;
+    const oldRunId = process.env.GITHUB_RUN_ID;
+    process.env.PATH = `${dir}:${oldPath}`;
+    process.env.GITHUB_REPOSITORY = 'o/r';
+    process.env.GITHUB_RUN_ID = '999';
+    try {
+      const flaky = navEntry(['hash']);
+      flaky.added = '2026-09-15'; // since = 2026-09-15T00:00:00Z: run 10 predates it, run 20 doesn't
+      flaky.refreshed = undefined;
+      const argv = ['report', '--ledger', LEDGER_PATH, '--summaries', 'x', '--history-runs', '3'];
+      flakyHistory(argv, ledger([flaky]), [summary({ failed: 0, failures: [] })]);
+      const log_contents = readFileSync(log, 'utf8');
+      expect(log_contents).toMatch(/run download 20/);
+      expect(log_contents).not.toMatch(/run download 10\b/);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldRepo === undefined) delete process.env.GITHUB_REPOSITORY;
+      else process.env.GITHUB_REPOSITORY = oldRepo;
+      if (oldRunId === undefined) delete process.env.GITHUB_RUN_ID;
+      else process.env.GITHUB_RUN_ID = oldRunId;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('previousRunCandidates / downloadRun: raw gh glue for the flaky window history', () => {
+  it('lists this workflow’s runs on main, excluding the current run, any status, WITH createdAt (for the `since` date filter)', () => {
+    const calls: string[][] = [];
+    const exec = (a: string[]) => {
+      calls.push(a);
+      return JSON.stringify([
+        { databaseId: 30, status: 'completed', createdAt: '2026-09-24T00:00:00Z' },
+        { databaseId: 29, status: 'cancelled', createdAt: '2026-09-23T00:00:00Z' },
+        { databaseId: 28, status: 'completed', createdAt: '2026-09-22T00:00:00Z' },
+      ]);
+    };
+    expect(previousRunCandidates(exec, { repo: 'o/r', currentRunId: '30', limit: 5 })).toEqual([
+      { id: '29', status: 'cancelled', createdAt: '2026-09-23T00:00:00Z' },
+      { id: '28', status: 'completed', createdAt: '2026-09-22T00:00:00Z' },
+    ]);
+    expect(calls[0]).toEqual(
+      expect.arrayContaining(['run', 'list', '--workflow', 'compat-vinext.yml']),
+    );
+    expect(calls[0]).toEqual(expect.arrayContaining(['--branch', 'main', '--repo', 'o/r']));
+    expect(calls[0]).toContain('databaseId,status,createdAt');
+  });
+
+  it('downloads only the lane’s shard summaries for a run', () => {
+    const calls: string[][] = [];
+    downloadRun(
+      (a: string[]) => {
+        calls.push(a);
+        return '';
+      },
+      { repo: 'o/r', runId: '28', dir: '/tmp/x' },
+    );
+    expect(calls[0]).toEqual([
+      'run',
+      'download',
+      '28',
+      '--repo',
+      'o/r',
+      '--pattern',
+      'compat-vinext-summary-*',
+      '--dir',
+      '/tmp/x',
+    ]);
+  });
+});
+
+describe('verifyEvidence: every entry re-derives from the branch/workflow/ref/shard-checked runs it lists', () => {
+  const vinextRun = (over: Record<string, unknown> = {}) => fullRun(over);
+  const meta = (over: Record<string, unknown> = {}) => ({
+    headBranch: 'main',
+    path: WORKFLOW,
+    ...over,
+  });
+  const RUNS: Record<string, Any> = {
+    '101': {
+      meta: meta(),
+      summaries: vinextRun({
+        failures: [{ file: SHELLS, kind: 'assertion', cases: ['a', 'b', 'c'] }],
+      }),
+    },
+    '102': {
+      meta: meta(),
+      summaries: vinextRun({ failures: [{ file: SHELLS, kind: 'assertion', cases: ['a', 'b'] }] }),
+    },
+    '103': { meta: meta(), summaries: vinextRun({ failed: 0, failures: [] }) },
+    '104': {
+      meta: meta(),
+      summaries: vinextRun({ failures: [{ file: NAV, kind: 'timeout', cases: ['hash'] }] }),
+    },
+    '105': { meta: meta(), summaries: vinextRun({ failed: 0, failures: [] }) },
+    '106': { meta: meta(), summaries: vinextRun({ failed: 0, failures: [] }) },
+    '107': {
+      meta: meta({ path: '.github/workflows/test-e2e-deploy.yml' }),
+      summaries: vinextRun({ failures: [{ file: NAV, kind: 'timeout', cases: ['hash'] }] }),
+    },
+    '108': {
+      meta: meta({ headBranch: 'feature/x' }),
+      summaries: vinextRun({ failures: [{ file: NAV, kind: 'timeout', cases: ['hash'] }] }),
+    },
+    '109': { meta: meta(), summaries: vinextRun().slice(0, 15) }, // missing a shard
+    '110': { meta: meta(), summaries: vinextRun({ ref: 'v16.3.0-canary' }) }, // custom ref
+  };
+  const fetchRun = (id: string) => {
+    if (!RUNS[id]) throw new Error(`run ${id} not found`);
+    return RUNS[id];
+  };
+  const shells = entry({
+    evidence: {
+      fail: [
+        { run: '101', cases: ['a', 'b', 'c'] },
+        { run: '102', cases: ['a', 'b'] },
+      ],
+    },
+  });
+  const nav = navEntry(['hash']);
+  nav.evidence = { fail: [{ run: '104', cases: ['hash'] }], pass: ['105', '106'] };
+
+  it('a ledger generated by refresh from its listed runs verifies clean', () => {
+    expect(verifyEvidence(ledger([shells, nav]), fetchRun)).toEqual([]);
+  });
+
+  it('an unsupported entry relabelled flaky with an INVENTED pass run is caught', () => {
+    const relabel = {
+      ...shells,
+      class: 'flaky',
+      evidence: { fail: shells.evidence.fail, pass: ['999'] },
+    };
+    expect(verifyEvidence(ledger([relabel]), fetchRun).join()).toMatch(/999/);
+  });
+
+  it('relabelled flaky citing a REAL run where the file failed as a pass is caught', () => {
+    const relabel = {
+      ...shells,
+      class: 'flaky',
+      evidence: { fail: [shells.evidence.fail[0]], pass: ['102', '103'] },
+    };
+    expect(verifyEvidence(ledger([relabel]), fetchRun).join()).toMatch(/does not match/);
+  });
+
+  it('a hand-edited snapshot or evidence list is caught', () => {
+    expect(verifyEvidence(ledger([{ ...shells, cases: ['a'] }]), fetchRun).join()).toMatch(
+      /does not match/,
+    );
+  });
+
+  it('fetches each run once even when several entries cite it', () => {
+    const seen: string[] = [];
+    const counting = (id: string) => {
+      seen.push(id);
+      return fetchRun(id);
+    };
+    const shells2 = { ...shells, test: 'test/e2e/other/other.test.ts' };
+    verifyEvidence(ledger([shells, shells2]), counting);
+    expect(seen.sort()).toEqual(['101', '102']);
+  });
+
+  it('a run from a different workflow path cannot be cited', () => {
+    const other = navEntry(['hash']);
+    other.evidence = { fail: [{ run: '107', cases: ['hash'] }], pass: ['105', '106'] };
+    expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(/not a .*run \(path=/);
+  });
+
+  it('a run whose head_branch is not main cannot be cited', () => {
+    const other = navEntry(['hash']);
+    other.evidence = { fail: [{ run: '108', cases: ['hash'] }], pass: ['105', '106'] };
+    expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(/not on main/);
+  });
+
+  it('a run missing a shard cannot be cited — a missing shard is never a pass', () => {
+    const other = navEntry(['hash']);
+    other.evidence = { fail: [{ run: '104', cases: ['hash'] }], pass: ['109', '106'] };
+    expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(/missing shard summaries/);
+  });
+
+  it('a custom-ref run cannot be cited', () => {
+    const other = navEntry(['hash']);
+    other.evidence = { fail: [{ run: '104', cases: ['hash'] }], pass: ['110', '106'] };
+    expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(/default nextjsRef/);
+  });
+});
+
 describe('report repeats every skipped-shard warning', () => {
   it('lists each shard whose reclassification was skipped', () => {
     const skipped = applyLedger(summary({ shard: '3/16', failures: undefined }), []);
@@ -578,5 +1270,32 @@ describe('workflow wiring', () => {
     expect(rec).toBeDefined();
     expect(rec.run).toContain('scripts/compat-vinext-ledger.mjs report');
     expect(rec['continue-on-error']).toBeUndefined();
+  });
+
+  it('the reconcile step reads the lane’s own previous runs (flaky window) with a read-only token', () => {
+    const rec = steps('shard-ledger').find((st) => /quarantine ledger/i.test(st.name ?? ''));
+    expect(rec.run).toMatch(/--history-runs \d+/);
+    expect(rec.env?.GH_TOKEN).toBe('${{ github.token }}');
+    expect(wf.jobs['shard-ledger'].permissions).toEqual({ contents: 'read', actions: 'read' });
+  });
+
+  it('a PR that touches the ledger re-derives every entry from its listed runs, ADVISORY only', () => {
+    const verify = (Bun as Any).YAML.parse(read(VERIFY_WORKFLOW)) as Any;
+    const paths = verify.on.pull_request.paths as string[];
+    expect(paths).toContain('test/compat-vinext-ledger.json');
+    expect(paths).toContain('scripts/compat-vinext-ledger.mjs');
+    expect(verify.permissions).toEqual({ contents: 'read', actions: 'read' });
+    const job = Object.values(verify.jobs)[0] as Any;
+    const step = job.steps.find((st: Any) => /compat-vinext-ledger\.mjs verify/.test(st.run ?? ''));
+    expect(step).toBeDefined();
+    expect(step.run).toContain('--ledger test/compat-vinext-ledger.json');
+    expect(step.env?.GH_TOKEN).toBe('${{ github.token }}');
+    expect(JSON.stringify(verify)).not.toContain('continue-on-error');
+    // Advisory: documented as non-required, and its job name says so too —
+    // nothing here can assert branch-protection config from repo files, so
+    // the workflow's own text is where that claim has to live and be caught
+    // by a review if it ever silently became a required check.
+    expect(verify.name).toMatch(/advisory/i);
+    expect(job.name).toMatch(/not a required check/i);
   });
 });

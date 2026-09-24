@@ -864,6 +864,11 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Read-only: checkout, this run's artifacts, and the lane's own previous
+    # runs' shard summaries (the flaky window's history).
+    permissions:
+      contents: read
+      actions: read
     outputs:
       red_detail: ${{ steps.ledger.outputs.red_detail }}
     steps:
@@ -896,10 +901,17 @@ jobs:
       # Reconcile the quarantine ledger over the WHOLE run: publish passed /
       # failed / quarantined over the unchanged total, and fail if any ledgered
       # failure did not fail anywhere (a stale entry must be removed), so the
-      # ledger only ever shrinks on evidence.
+      # ledger only ever shrinks on evidence. Flaky entries are additionally
+      # judged over this run plus the lane's own last 3 informative runs on
+      # main (schedule or default-ref dispatch, all 16 shards present): 3
+      # failures in a row reds (broken, not flaky), 3 passes in a row reds
+      # (stale). History that cannot be read is a warning, not a red — see
+      # compat-vinext-ledger.mjs's module doc for the full fail-closed rule.
       - name: Reconcile the vinext quarantine ledger
         if: always()
-        run: node knext/scripts/compat-vinext-ledger.mjs report --ledger knext/test/compat-vinext-ledger.json --summaries summaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node knext/scripts/compat-vinext-ledger.mjs report --ledger knext/test/compat-vinext-ledger.json --summaries summaries --history-runs 3
 
       - name: Upload the run ledger (vinext axis)
         if: always()
