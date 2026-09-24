@@ -79,6 +79,7 @@ function parseSpecifierList(list) {
  *   exports: Map<string, string[]>,
  *   imports: { from: string, names: Map<string, string> }[],
  *   literalCalls: Map<string, Set<string>>,
+ *   nonLiteralCallees: Set<string>,
  *   unrecognizedBinding: boolean,
  * }}
  */
@@ -155,12 +156,26 @@ export function analyzeServerModule(src) {
         literalCalls.set(m[1], set);
     }
 
+    // Callees also called with anything but ONE string literal (`__require(n)`,
+    // `r(a + b)`, a template with `${…}`): their specifier is only known at
+    // runtime, so nothing can embed it. The caller flags these on require
+    // bindings. In minified output a one-letter callee can be a shadowed inner
+    // parameter; that can only over-report (a warning), never hide a require.
+    const nonLiteralCallees = new Set();
+    // Sticky, positioned at each call's `(`: no per-call copy of a multi-MB bundle.
+    const literalArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
+    for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}\\(`, "g"))) {
+        literalArgRe.lastIndex = m.index + m[0].length;
+        if (!literalArgRe.test(src)) nonLiteralCallees.add(m[1]);
+    }
+
     return {
         aliases: [...aliases],
         requireBindings: [...requireBindings],
         exports: exportsMap,
         imports,
         literalCalls,
+        nonLiteralCallees,
         unrecognizedBinding: aliasCalls > recognized,
     };
 }

@@ -194,9 +194,12 @@ function listServerOutputModules(dir) {
  *    Every require binding is wrapped to load these from the bundle.
  *  - `unresolved`: literals passed to a RECOGNISED require binding (local, or
  *    imported from the module that defines it) that are not embedded.
+ *  - `dynamic`: modules calling a recognised require binding with a
+ *    non-literal specifier (`__require(name)`): what it loads is known only at
+ *    runtime, so it cannot be embedded.
  *  - `unrecognized`: modules with a `createRequire(import.meta.url)` shape the
  *    analysis could not see through.
- *  `unresolved` and `unrecognized` warn, or fail the build under
+ *  `unresolved`, `dynamic` and `unrecognized` warn, or fail the build under
  *  KNEXT_COMPILE_STRICT_REQUIRES=1.
  */
 function planRuntimeRequires() {
@@ -224,6 +227,7 @@ function planRuntimeRequires() {
     }
 
     const unresolved = new Map();
+    const dynamic = [];
     const unrecognized = [];
     for (const [path, analysis] of modules) {
         if (analysis.unrecognizedBinding) unrecognized.push(name(path));
@@ -239,6 +243,7 @@ function planRuntimeRequires() {
             }
         }
         for (const callee of requireNames) {
+            if (analysis.nonLiteralCallees.has(callee)) dynamic.push(name(path));
             for (const spec of analysis.literalCalls.get(callee) ?? []) {
                 if (embed.has(spec)) continue;
                 const users = unresolved.get(spec) ?? new Set();
@@ -247,7 +252,13 @@ function planRuntimeRequires() {
             }
         }
     }
-    return { modules, embed, unresolved, unrecognized };
+    return {
+        modules,
+        embed,
+        unresolved,
+        dynamic: [...new Set(dynamic)].sort(),
+        unrecognized,
+    };
 }
 
 /**
@@ -434,7 +445,16 @@ const externalSidecar = {
 };
 
 const PLAN = planRuntimeRequires();
-if (STRICT_REQUIRES && (PLAN.unresolved.size > 0 || PLAN.unrecognized.length > 0)) {
+const DYNAMIC_MESSAGE =
+    "a runtime require called with a non-literal package name (e.g. `__require(name)`) in " +
+    `${PLAN.dynamic.join(", ")} — whatever it loads cannot be bundled`;
+if (
+    STRICT_REQUIRES &&
+    (PLAN.unresolved.size > 0 || PLAN.dynamic.length > 0 || PLAN.unrecognized.length > 0)
+) {
+    if (PLAN.dynamic.length > 0) {
+        console.error(`[knext compile] ${DYNAMIC_MESSAGE} (KNEXT_COMPILE_STRICT_REQUIRES=1)`);
+    }
     if (PLAN.unresolved.size > 0) {
         console.error(
             "[knext compile] the server output runtime-requires package(s) that do not resolve " +
@@ -482,6 +502,12 @@ if (PLAN.unresolved.size > 0) {
         "[knext compile] WARNING: the server output runtime-requires package(s) that do not " +
             `resolve and cannot be bundled: ${describeSpecs(PLAN.unresolved)} — the binary ` +
             "throws if that code path runs (set KNEXT_COMPILE_STRICT_REQUIRES=1 to fail the build instead)",
+    );
+}
+if (PLAN.dynamic.length > 0) {
+    console.warn(
+        `[knext compile] WARNING: ${DYNAMIC_MESSAGE}; the binary throws if it resolves a package ` +
+            "that is not beside it (set KNEXT_COMPILE_STRICT_REQUIRES=1 to fail the build instead)",
     );
 }
 if (PLAN.unrecognized.length > 0) {

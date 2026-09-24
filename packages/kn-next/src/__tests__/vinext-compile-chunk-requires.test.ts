@@ -71,7 +71,12 @@ function cjsPackage(nm: string, name: string, body: string): void {
     write(join(nm, name, "lib", "main.js"), body);
 }
 
-type Shape = { multi: boolean; minify: boolean; missing?: boolean };
+type Shape = {
+    multi: boolean;
+    minify: boolean;
+    missing?: boolean;
+    dynamic?: boolean;
+};
 
 /**
  * Build a nitro-shaped `.output/server` with real rolldown: CommonJS modules
@@ -88,9 +93,14 @@ async function rolldownOutput(
         join(src, "m.cjs"),
         `module.exports = () => { try { return require("${MISSING}"); } catch { return "absent"; } };\n`,
     );
-    const missingUse = shape.missing
-        ? '+ ":" + (await import("./cm.mjs")).default()'
-        : "";
+    // `require(name)`: rolldown emits `__require(name)`, a specifier known only
+    // at runtime.
+    write(join(src, "d.cjs"), "module.exports = (name) => require(name);\n");
+    const missingUse =
+        (shape.missing ? '+ ":" + (await import("./cm.mjs")).default()' : "") +
+        (shape.dynamic
+            ? '+ ":" + typeof (await import("./cd.mjs")).default'
+            : "");
     if (shape.multi) {
         // Dynamic imports force separate chunks, so rolldown hoists the
         // require binding into chunks/rolldown-runtime.mjs.
@@ -107,6 +117,10 @@ async function rolldownOutput(
             'import m from "./m.cjs"; export default m;\n',
         );
         write(
+            join(src, "cd.mjs"),
+            'import d from "./d.cjs"; export default d;\n',
+        );
+        write(
             join(src, "index.mjs"),
             "(async () => {\n" +
                 '  const out = (await import("./ca.mjs")).default() + "+" + (await import("./cb.mjs")).default()' +
@@ -119,6 +133,9 @@ async function rolldownOutput(
             join(src, "index.mjs"),
             'import a from "./a.cjs"; import b from "./b.cjs";\n' +
                 (shape.missing ? 'import m from "./m.cjs";\n' : "") +
+                (shape.dynamic
+                    ? 'import d from "./d.cjs";\nglobalThis.d = d;\n'
+                    : "") +
                 `console.log("RESULT:" + a() + "+" + b()${shape.missing ? ' + ":" + m()' : ""});\n`,
         );
     }
@@ -269,4 +286,47 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             expect(build.stderr).toContain("KNEXT_COMPILE_STRICT_REQUIRES=1");
         }, 120_000);
     }
+
+    for (const [label, shape] of [
+        ["multi chunk", { multi: true, minify: false, dynamic: true }],
+        ["multi chunk, minified", { multi: true, minify: true, dynamic: true }],
+        [
+            "single chunk, minified",
+            { multi: false, minify: true, dynamic: true },
+        ],
+    ] as [string, Shape][]) {
+        it(`${label}: warns, naming the module, on a require with a non-literal package name`, async () => {
+            const { work, server } = await rolldownOutput(shape);
+            const build = compile(work, server);
+            expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+            expect(build.stderr).toContain(
+                "runtime require called with a non-literal package name",
+            );
+            expect(build.stderr).toContain(
+                shape.multi ? "chunks/" : "index.mjs",
+            );
+        }, 120_000);
+
+        it(`${label}: fails the build on it under KNEXT_COMPILE_STRICT_REQUIRES=1`, async () => {
+            const { work, server } = await rolldownOutput(shape);
+            const build = compile(work, server, {
+                KNEXT_COMPILE_STRICT_REQUIRES: "1",
+            });
+            expect(build.status).not.toBe(0);
+            expect(build.stderr).toContain(
+                "runtime require called with a non-literal package name",
+            );
+        }, 120_000);
+    }
+
+    it("does not flag the literal-only outputs (no false positive on real rolldown shapes)", async () => {
+        for (const [, shape] of SHAPES) {
+            const { work, server } = await rolldownOutput(shape);
+            const build = compile(work, server, {
+                KNEXT_COMPILE_STRICT_REQUIRES: "1",
+            });
+            expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+            expect(build.stderr).not.toContain("non-literal");
+        }
+    }, 240_000);
 });

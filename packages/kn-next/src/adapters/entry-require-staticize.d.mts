@@ -6,6 +6,7 @@ export function analyzeServerModule(src: string): {
     exports: Map<string, string[]>;
     imports: { from: string; names: Map<string, string> }[];
     literalCalls: Map<string, Set<string>>;
+    nonLiteralCallees: Set<string>;
     unrecognizedBinding: boolean;
 };
 
