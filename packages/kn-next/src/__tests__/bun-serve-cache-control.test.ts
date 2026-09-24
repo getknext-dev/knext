@@ -18,6 +18,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
+    copyFileSync,
     mkdirSync,
     mkdtempSync,
     realpathSync,
@@ -237,6 +238,37 @@ describe("vinext-compile bakes it into the executable", () => {
             child.kill("SIGKILL");
         }
     }
+
+    it("refuses to compile (fail closed) when the normalization module is missing beside it", () => {
+        // A copy of the compile script with every sibling it needs EXCEPT the
+        // install module: the script must exit non-zero, naming what is missing.
+        const alone = realpathSync(
+            mkdtempSync(join(tmpdir(), "knext-1322-cc-missing-")),
+        );
+        temps.push(alone);
+        const here = resolve(import.meta.dir, "../adapters");
+        for (const f of [
+            "vinext-compile.mjs",
+            "entry-require-staticize.mjs",
+            "bun-serve-keepalive-guard.mjs",
+            "sharp-addon-dlopen.mjs",
+        ]) {
+            copyFileSync(join(here, f), join(alone, f));
+        }
+        const r = spawnSync(
+            process.execPath,
+            [
+                join(alone, "vinext-compile.mjs"),
+                "--entry",
+                join(server, "index.mjs"),
+                "--outfile",
+                join(alone, "x"),
+            ],
+            { cwd: alone, encoding: "utf8" },
+        );
+        expect(r.status).not.toBe(0);
+        expect(r.stderr).toContain("Cache-Control normalization is missing");
+    });
 
     it("compiles", () => {
         expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
