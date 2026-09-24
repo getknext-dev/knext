@@ -192,16 +192,20 @@ as it does on a folder deployment. See [image optimization](/docs/image-optimiza
 Some server dependencies stay **outside** the nitro bundle and are loaded when the server runs. For
 example, vinext keeps every `@opentelemetry/*` package your app depends on external. On a folder
 deployment those load from `.output/server/node_modules`, which does not exist next to the
-executable, so `kn-next build` bakes them **into** the binary. If one of them cannot be resolved at
-build time, the build still succeeds but prints a warning:
+executable, so `kn-next build` bakes them **into** the binary. This covers every file of the server
+bundle, including the chunks nitro splits off next to the entry. If one of them cannot be resolved at
+build time, the build still succeeds but prints a warning naming the package and the file that loads
+it:
 
 ```text
-[knext compile] WARNING: the entry runtime-requires package(s) that do not resolve from … and
-cannot be bundled: <package> — the binary throws if that code path runs
+[knext compile] WARNING: the server output runtime-requires package(s) that do not resolve and
+cannot be bundled: <package> (chunks/<file>.mjs) — the binary throws if that code path runs
 ```
 
 Install the named package as a dependency of your app and rebuild. Otherwise, any request that
-reaches code using that package fails with `Cannot find module '<package>'`.
+reaches code using that package fails with `Cannot find module '<package>'`. To make this a build
+failure instead of a warning (for example in CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when you run
+`kn-next build`.
 
 The same applies to packages you list in `serverExternalPackages` and to the packages Next.js keeps
 external by default (for example `typescript`, `sqlite3`, `prisma`). The binary carries a bundled

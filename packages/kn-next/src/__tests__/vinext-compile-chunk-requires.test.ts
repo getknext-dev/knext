@@ -60,7 +60,11 @@ function chunkedOutput(extraChunk?: string): { work: string; server: string } {
     const server = join(work, ".output", "server");
     write(
         join(server, "node_modules", "chunk-dep", "package.json"),
-        JSON.stringify({ name: "chunk-dep", version: "1.0.0", main: "lib/main.js" }),
+        JSON.stringify({
+            name: "chunk-dep",
+            version: "1.0.0",
+            main: "lib/main.js",
+        }),
     );
     write(
         join(server, "node_modules", "chunk-dep", "lib", "main.js"),
@@ -118,11 +122,23 @@ function deployAndRun(
         // Rewrite the DEPLOYED sidecar copy after the compile: only a load from
         // the sidecar can print LIVE.
         write(
-            join(deployed, ".output", "server", "node_modules", "chunk-dep", "lib", "main.js"),
+            join(
+                deployed,
+                ".output",
+                "server",
+                "node_modules",
+                "chunk-dep",
+                "lib",
+                "main.js",
+            ),
             `module.exports = ${JSON.stringify(LIVE)};\n`,
         );
     }
-    return spawnSync(target, [], { cwd: deployed, encoding: "utf8", timeout: 60_000 });
+    return spawnSync(target, [], {
+        cwd: deployed,
+        encoding: "utf8",
+        timeout: 60_000,
+    });
 }
 
 describe("vinext-compile staticizes createRequire externals in nitro chunks (#1314)", () => {
@@ -164,11 +180,15 @@ describe("vinext-compile staticizes createRequire externals in nitro chunks (#13
 
     it("fails the build under KNEXT_COMPILE_STRICT_REQUIRES=1 for the same chunk", () => {
         const { work, server } = chunkedOutput(UNRESOLVABLE_CHUNK);
-        const build = compile(work, server, { KNEXT_COMPILE_STRICT_REQUIRES: "1" });
+        const build = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
         expect(build.status).not.toBe(0);
         expect(`${build.stdout}${build.stderr}`).toContain(
             "chunks/b.mjs runtime-requires package(s)",
         );
-        expect(`${build.stdout}${build.stderr}`).toContain("knext-1314-not-installed");
+        expect(`${build.stdout}${build.stderr}`).toContain(
+            "knext-1314-not-installed",
+        );
     }, 120_000);
 });
