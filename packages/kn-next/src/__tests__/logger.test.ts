@@ -10,7 +10,9 @@ import {
 // observable contract:
 //   - constructs/exports without throwing,
 //   - honors LOG_LEVEL, with a prod default of "info",
-//   - carries the load-bearing `name: "knext"` binding,
+//   - carries the load-bearing `name: "kn-next"` binding (#1369 rename round:
+//     deliberately NOT renamed to "knext" — it is load-bearing for existing
+//     log queries/dashboards, unlike the CLI-surface rename),
 //   - and `createLogger` returns a child that merges extra bindings.
 
 function forceProdEnv() {
@@ -56,9 +58,9 @@ describe("knext logger — instance contract", () => {
         expect(logger.level).toBe("info");
     });
 
-    it('carries the load-bearing name binding ("knext")', async () => {
+    it('carries the load-bearing name binding ("kn-next", deliberately NOT renamed)', async () => {
         const { logger } = await import("../utils/logger");
-        expect(logger.bindings().name).toBe("knext");
+        expect(logger.bindings().name).toBe("kn-next");
     });
 });
 
@@ -81,8 +83,8 @@ describe("knext logger — createLogger child scoping", () => {
         const { createLogger } = await import("../utils/logger");
         const child = createLogger({ module: "deploy" });
         const bindings = child.bindings();
-        // Child keeps the parent's name and adds its own scope.
-        expect(bindings.name).toBe("knext");
+        // Child keeps the parent's name (deliberately still "kn-next") and adds its own scope.
+        expect(bindings.name).toBe("kn-next");
         expect(bindings.module).toBe("deploy");
         expect(() =>
             child.info({ imageTag: "v1.0.0" }, "deploying"),

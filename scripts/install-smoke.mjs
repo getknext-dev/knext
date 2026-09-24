@@ -438,6 +438,25 @@ try {
   if (!/knext|Usage|Options/i.test(npxHelpOut)) {
     finish(FAIL, "npx @getknext/core --help: exit 0 but output lacked 'knext'/'Usage'/'Options'");
   }
+  // rev-1380 round 2: `npx @getknext/core` resolves argv[1] through
+  // node_modules/.bin/kn-next (npm's default-bin picker falls back to the
+  // first bin key alphabetically, since neither `knext` nor `kn-next`
+  // matches the package's own unscoped name `core`) — proven against real
+  // npm 11.9.0. That used to make EVERY `npx @getknext/core` invocation
+  // print the `kn-next` deprecation notice, even though the user never typed
+  // `kn-next`. `printDeprecatedKnNextNoticeIfNeeded` now suppresses it when
+  // `npm_command=exec` (the npx/`npm exec` dispatch signature, also proven
+  // against real npm 11.9.0 — see shared.ts's `isAmbiguousNpxBinDispatch`).
+  // Assert stderr is EMPTY here, not just that stdout looks right — the
+  // notice writes to stderr, so a passing stdout check alone would not have
+  // caught this regression.
+  if ((npxHelp.stderr || '').length > 0) {
+    finish(
+      FAIL,
+      `npx @getknext/core --help wrote to stderr (expected EMPTY): ${JSON.stringify(npxHelp.stderr)} — ` +
+        'the deprecated-alias notice is firing for a user who never typed kn-next',
+    );
+  }
 
   // --- 3a-alias. the alias's OWN shim, which step 3a never touches -----------
   // The check above runs node_modules/.bin/kn-next. Both @getknext/core and the alias

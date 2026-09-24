@@ -36,7 +36,11 @@ describe("logger output parity (prod JSON)", () => {
         expect(lines.length).toBeGreaterThan(0);
         const parsed = JSON.parse(lines[0]);
         expect(parsed.level).toBe(30); // pino numeric level for info
-        expect(parsed.name).toBe("knext");
+        // #1369 rename round: the LOG-LEVEL name binding stays "kn-next" —
+        // it is load-bearing for existing log queries/dashboards, unlike the
+        // CLI-surface rename. Reverted by rev-1380 round 2 review; do not
+        // "fix" this back to "knext".
+        expect(parsed.name).toBe("kn-next");
         expect(parsed.module).toBe("parity");
         expect(parsed.imageTag).toBe("v1.0.0");
         expect(parsed.msg).toBe("hello");

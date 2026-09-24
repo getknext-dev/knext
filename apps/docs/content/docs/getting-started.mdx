@@ -39,9 +39,14 @@ npx @getknext/core --version       # the CLI is on your PATH via node_modules/.b
 
 <Callout type="info">
   The CLI command was renamed from `kn-next` to `knext`. `kn-next` still works
-  as a deprecated alias — same command, same flags — and prints a one-line
-  reminder to switch. Update scripts/CI at your own pace; it is not removed
-  in this release.
+  as a deprecated alias — same command, same flags — and it does not print
+  the reminder on every invocation shape, so do not assume its absence means
+  you already switched. A locally installed `kn-next` run directly (on your
+  PATH, or from an `npm run` script naming it) prints a one-line reminder to
+  switch; `npx`/`npm exec` (including `npx @getknext/core ...`) does NOT,
+  since npm's own bin-resolution for that path is ambiguous between the two
+  names; pnpm's `dlx`/`exec` and Windows `.cmd`/`.ps1` shims don't either.
+  Update scripts/CI at your own pace; it is not removed in this release.
 </Callout>
 
 Two optional packages complete the picture — add them only if you need them:

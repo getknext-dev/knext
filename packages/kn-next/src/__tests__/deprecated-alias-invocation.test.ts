@@ -52,14 +52,14 @@ describe("isDeprecatedAliasInvocation", () => {
 });
 
 describe("printDeprecatedKnNextNoticeIfNeeded", () => {
-    // `writeSync(2, ...)` writes to the REAL process stderr fd — spawning a
-    // child under Bash is how cli-node-runtime.test.ts captures it end-to-end
-    // (real symlinks, real subprocess). In-process, `writeSync` is bound at
-    // import time in shared.ts, so this suite asserts the observable CONTRACT
-    // (the underlying decision, and that the call never throws either way)
-    // rather than re-mocking node:fs, which the repo's own mock-pollution
-    // note (require-isolated-process.ts) warns is unsafe to do lightly.
-    it("the notice condition matches isDeprecatedAliasInvocation exactly (same argv1)", () => {
+    // `writeSync(2, ...)` writes to the REAL process stderr fd by default —
+    // spawning a child under Bash is how cli-node-runtime.test.ts captures
+    // that end-to-end (real symlinks, real subprocess). In-process, the
+    // function now also takes an injectable `write` (the same idiom as
+    // `handleUsageError` above in this file), so the env-gated suppression
+    // below (#1380 rev-1380 round 2) can be asserted directly rather than
+    // only "does not throw".
+    it("the notice condition matches isDeprecatedAliasInvocation exactly (same argv1), with no npm_command set", () => {
         for (const argv1 of [
             "/x/.bin/kn-next",
             "/x/.bin/knext",
@@ -67,12 +67,48 @@ describe("printDeprecatedKnNextNoticeIfNeeded", () => {
             "knext",
             undefined,
         ]) {
-            // Neither branch throws — the notice write is fire-and-forget on
-            // a real fd, so the only thing to assert without a process
-            // boundary is that the decision runs to completion either way.
             expect(() =>
-                printDeprecatedKnNextNoticeIfNeeded(argv1),
+                printDeprecatedKnNextNoticeIfNeeded(argv1, {}),
             ).not.toThrow();
         }
+    });
+
+    it('writes the notice for a direct "kn-next" invocation with no npm_command set', () => {
+        const writes: string[] = [];
+        printDeprecatedKnNextNoticeIfNeeded("/x/.bin/kn-next", {}, (t) =>
+            writes.push(t),
+        );
+        expect(writes).toHaveLength(1);
+        expect(writes[0]).toContain("deprecated");
+    });
+
+    it('writes NOTHING for "knext" (the canonical bin), npm_command notwithstanding', () => {
+        const writes: string[] = [];
+        printDeprecatedKnNextNoticeIfNeeded(
+            "/x/.bin/knext",
+            { npm_command: "exec" },
+            (t) => writes.push(t),
+        );
+        expect(writes).toHaveLength(0);
+    });
+
+    it('#1380: suppresses the notice for "kn-next" argv1 when npm_command === "exec" — the npx/npm-exec bin-pick case, proven against real npm 11.9.0 to resolve argv1 through .bin/kn-next for `npx @getknext/core` regardless of user intent', () => {
+        const writes: string[] = [];
+        printDeprecatedKnNextNoticeIfNeeded(
+            "/x/.bin/kn-next",
+            { npm_command: "exec" },
+            (t) => writes.push(t),
+        );
+        expect(writes).toHaveLength(0);
+    });
+
+    it('does NOT suppress for "kn-next" argv1 under npm_command === "run" — a project script that names kn-next directly still gets the notice', () => {
+        const writes: string[] = [];
+        printDeprecatedKnNextNoticeIfNeeded(
+            "/x/.bin/kn-next",
+            { npm_command: "run" },
+            (t) => writes.push(t),
+        );
+        expect(writes).toHaveLength(1);
     });
 });
