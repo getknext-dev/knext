@@ -66,6 +66,8 @@ const DEBUG_CONTAINER = `knext-vinext-node-e2e-debug-${RUN_ID}`;
 const AFTER_CONTAINER = `knext-vinext-node-e2e-after-${RUN_ID}`;
 const NESTED_CONTAINER = `knext-vinext-node-e2e-nested-${RUN_ID}`;
 const CAP_CONTAINER = `knext-vinext-node-e2e-cap-${RUN_ID}`;
+/** Same image, with the deployed Cache-Control rule switched off. */
+const CC_OFF_CONTAINER = `knext-vinext-node-e2e-ccoff-${RUN_ID}`;
 /** The hardcap container's grace: short, so the force path is observable. */
 const CAP_GRACE_MS = 3000;
 const IMAGE = `knext-vinext-node-e2e:${RUN_ID}`;
@@ -103,6 +105,7 @@ let debugPort = 0;
 let afterPort = 0;
 let nestedPort = 0;
 let capPort = 0;
+let ccOffPort = 0;
 let nitroPreset = "";
 let dockerBuildLog = "";
 
@@ -387,7 +390,8 @@ beforeAll(async () => {
     // 6. Run it twice: once as shipped, once with node's compile-cache
     //    diagnostics on (debug output is noisy, so it gets its own container).
     //    Plus one container per SIGTERM case, since each one ends its container.
-    [port, debugPort, afterPort, nestedPort, capPort] = await freePorts(5);
+    [port, debugPort, afterPort, nestedPort, capPort, ccOffPort] =
+        await freePorts(6);
     startContainer(CONTAINER, port);
     startContainer(DEBUG_CONTAINER, debugPort, [
         "NODE_DEBUG_NATIVE=COMPILE_CACHE",
@@ -397,11 +401,15 @@ beforeAll(async () => {
     startContainer(CAP_CONTAINER, capPort, [
         `SHUTDOWN_GRACE_MS=${CAP_GRACE_MS}`,
     ]);
+    startContainer(CC_OFF_CONTAINER, ccOffPort, [
+        "KNEXT_CACHE_CONTROL_NORMALIZE=0",
+    ]);
     await waitForHealth(CONTAINER, port);
     await waitForHealth(DEBUG_CONTAINER, debugPort);
     await waitForHealth(AFTER_CONTAINER, afterPort);
     await waitForHealth(NESTED_CONTAINER, nestedPort);
     await waitForHealth(CAP_CONTAINER, capPort);
+    await waitForHealth(CC_OFF_CONTAINER, ccOffPort);
 }, 1_800_000);
 
 afterAll(() => {
@@ -410,6 +418,7 @@ afterAll(() => {
     run("docker", ["rm", "--force", AFTER_CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", NESTED_CONTAINER], { timeout: 60_000 });
     run("docker", ["rm", "--force", CAP_CONTAINER], { timeout: 60_000 });
+    run("docker", ["rm", "--force", CC_OFF_CONTAINER], { timeout: 60_000 });
     run("docker", ["rmi", "--force", IMAGE], { timeout: 60_000 });
     if (workDir) rmSync(workDir, { recursive: true, force: true });
     // Five containers and an image take longer to remove than bun's 5s hook
@@ -454,6 +463,48 @@ describe("the vinext × node image serves", () => {
         // `docker exec` + a node boot under linux/amd64 emulation outlives
         // bun's 5s default on a loaded host — measured, with four containers up.
     }, 60_000);
+});
+
+const DEPLOY_CACHE_CONTROL = "public, max-age=0, must-revalidate";
+const ORIGIN_CACHE_CONTROL = "s-maxage=2, stale-while-revalidate=31535998";
+
+describe("the deployed Cache-Control rule in the vinext × node image", () => {
+    // srvx/node writes response headers as a flat array, which the node:http
+    // preload does not rewrite, so this is the entry's Response-level
+    // middleware at work, proven through the shipped image.
+    it("an app-set origin ISR value reaches clients as the deployed value", async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/api/cache-probe`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("cache-control")).toBe(DEPLOY_CACHE_CONTROL);
+    });
+
+    it("an ISR page is served with the deployed value", async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/isr`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("cache-control")).toBe(DEPLOY_CACHE_CONTROL);
+    });
+
+    it("vinext's own deploy switch is on by default in the serving process", async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/api/cache-probe`);
+        expect(
+            ((await res.json()) as { vinextDeploy: unknown }).vinextDeploy,
+        ).toBe("1");
+    });
+
+    it("KNEXT_CACHE_CONTROL_NORMALIZE=0 serves the origin values and leaves vinext's switch unset", async () => {
+        const probe = await fetch(
+            `http://127.0.0.1:${ccOffPort}/api/cache-probe`,
+        );
+        expect(probe.headers.get("cache-control")).toBe(ORIGIN_CACHE_CONTROL);
+        expect(
+            ((await probe.json()) as { vinextDeploy: unknown }).vinextDeploy,
+        ).toBeNull();
+        const isr = await fetch(`http://127.0.0.1:${ccOffPort}/isr`);
+        expect(isr.status).toBe(200);
+        // vinext's own origin value for this page on Node, measured in this
+        // image with both layers off. Anything else means a layer still ran.
+        expect(isr.headers.get("cache-control")).toBe("no-store, must-revalidate");
+    });
 });
 
 describe("the V8 compile cache is baked into the image and LIVE (ADR-0035)", () => {

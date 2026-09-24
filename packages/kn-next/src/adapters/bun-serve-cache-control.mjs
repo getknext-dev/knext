@@ -12,7 +12,8 @@
  * `node:http`. The vinext executable serves through nitro's bun preset →
  * `srvx/bun` → `Bun.serve`, which never touches `node:http`, so it served the
  * origin values. This module applies the SAME pure rule — imported, not
- * copied — to every `Response` a `Bun.serve` `fetch` handler returns.
+ * copied, via `response-cache-control.mjs` — to every `Response` a
+ * `Bun.serve` `fetch` handler returns.
  *
  * Same off switch as the Node runtime: `KNEXT_CACHE_CONTROL_NORMALIZE=0` (for an
  * app fronted by its own shared cache/CDN that should see `s-maxage`).
@@ -27,9 +28,12 @@
  * patch is on `Bun.serve` before `srvx/bun` calls it. This module itself has no
  * side effects, so tests can import it without patching their own process.
  */
-import normalizer from "./cache-control-normalize.cjs";
+import { applyVinextDeployDefault, normalizeResponse } from "./response-cache-control.mjs";
 
-const { normalizeCacheControl } = normalizer;
+// The runtime-agnostic half lives in response-cache-control.mjs (vinext on Node
+// uses it too); re-exported so both seams share one implementation.
+export { applyVinextDeployDefault, normalizeResponse };
+
 const INSTALLED = Symbol.for("knext.bunServeCacheControl.installed");
 
 /**
@@ -39,37 +43,6 @@ const INSTALLED = Symbol.for("knext.bunServeCacheControl.installed");
 export function shouldInstall(env, bun) {
     if (!bun || typeof bun.serve !== "function") return false;
     return !(env && env.KNEXT_CACHE_CONTROL_NORMALIZE === "0");
-}
-
-/**
- * Normalize a response's Cache-Control in place for the request that produced
- * it. Best-effort and never throws: a response with immutable headers keeps its
- * origin value rather than breaking.
- *
- * @param {unknown} request
- * @param {unknown} response
- */
-export function normalizeResponse(request, response) {
-    try {
-        const headers =
-            response && typeof response === "object"
-                ? /** @type {{ headers?: Headers }} */ (response).headers
-                : undefined;
-        if (!headers || typeof headers.get !== "function") return response;
-        const value = headers.get("cache-control");
-        if (value === null) return response;
-        const marker = headers.get("x-nextjs-cache");
-        const rq = /** @type {{ method?: string, url?: string } | undefined} */ (request);
-        const next = normalizeCacheControl(value, {
-            method: rq?.method,
-            url: rq?.url,
-            hasNextCacheMarker: typeof marker === "string" && marker.length > 0,
-        });
-        if (next !== value) headers.set("cache-control", next);
-    } catch {
-        // Immutable headers or a non-Response: leave it.
-    }
-    return response;
 }
 
 /**
@@ -87,34 +60,17 @@ export function wrapFetch(fetchHandler) {
     };
 }
 
-/** A shallow clone of the `Bun.serve` options with `fetch` wrapped. */
+/**
+ * A shallow clone of the `Bun.serve` options with `fetch` wrapped.
+ *
+ * Only responses from `options.fetch` are normalized. Responses from
+ * `Bun.serve`'s `routes` table or its `error` handler are not. That is fine
+ * today because srvx serves everything through `fetch` and sets neither.
+ */
 export function wrapServeOptions(options) {
     if (!options || typeof options !== "object") return options;
     if (typeof options.fetch !== "function") return options;
     return { ...options, fetch: wrapFetch(options.fetch) };
-}
-
-/**
- * Turn vinext's own deploy Cache-Control switch on by default.
- *
- * vinext emits the deploy value for the cacheable responses it computes itself
- * (ISR/SSG pages, `/_next/data`, and the first request for a `fallback: true`
- * page) when `VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1`; it reads the variable on every
- * request. Measured: without it, that fallback first request carries NO
- * Cache-Control at all, which the rule above (it rewrites an existing header)
- * cannot supply. The two layers are complementary: vinext's switch covers
- * responses vinext computes, the rule above covers headers the app sets itself.
- *
- * An explicit value (including `0`) is never overridden, and
- * `KNEXT_CACHE_CONTROL_NORMALIZE=0` leaves it unset, so one knext switch turns
- * both layers off.
- *
- * @param {Record<string, string | undefined>} env
- */
-export function applyVinextDeployDefault(env) {
-    if (!env || env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL !== undefined) return;
-    if (env.KNEXT_CACHE_CONTROL_NORMALIZE === "0") return;
-    env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL = "1";
 }
 
 /** Patch `bun.serve`. Idempotent; a no-op when `shouldInstall` says so. */
