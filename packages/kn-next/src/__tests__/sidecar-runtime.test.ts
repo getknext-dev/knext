@@ -2,8 +2,8 @@
  * sidecar-runtime.mjs: the package resolver the compiled exec uses for its
  * server-externals sidecar, CONFINED to `<dir of the binary>/.output/server/
  * node_modules` (#1320). The compiled binary is built WITHOUT
- * `autoloadPackageJson`, which would let every runtime bare request resolve
- * against process.cwd() and its ancestors; this resolver is what replaces it.
+ * `autoloadPackageJson`, which widens runtime resolution beyond the sidecar;
+ * this resolver is what replaces it.
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
@@ -12,6 +12,7 @@ import {
     mkdtempSync,
     realpathSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -238,6 +239,101 @@ describe("confinement to the sidecar", () => {
         );
     });
 
+    it("rejects relative segments in a request, even when the path would stay inside the sidecar", () => {
+        const { exec, root } = app();
+        pkg(
+            join(root, "good"),
+            { main: "i.js" },
+            { "i.js": "", "sub/x.js": "" },
+        );
+        pkg(join(root, "sibling"), { main: "i.js" }, { "i.js": "" });
+        write(join(dirname(exec), "outside", "esc.js"), "");
+        for (const r of [
+            "good/../../../outside/esc.js",
+            "good/../sibling/i.js",
+            "good/./sub/x.js",
+            "good/sub/../i.js",
+            "@x/../good",
+        ]) {
+            expect(resolveSidecar(r, undefined, root), r).toBeNull();
+            expect(
+                resolveSidecar(r, join(root, "good", "i.js"), root),
+                r,
+            ).toBeNull();
+        }
+        expect(resolveSidecar("good/sub/x.js", undefined, root)).toBe(
+            join(root, "good", "sub", "x.js"),
+        );
+    });
+
+    it("rejects exports targets and pattern substitutions with relative or node_modules segments", () => {
+        const { root } = app();
+        pkg(
+            join(root, "sibling"),
+            { main: "i.js" },
+            { "i.js": "", "x.js": "" },
+        );
+        pkg(
+            join(root, "e"),
+            {
+                exports: {
+                    ".": "./../sibling/x.js",
+                    "./nm": "./node_modules/dep/x.js",
+                    "./f/*": "./dist/*.js",
+                },
+            },
+            { "dist/a.js": "", "node_modules/dep/x.js": "" },
+        );
+        expect(resolveSidecar("e", undefined, root)).toBeNull();
+        expect(resolveSidecar("e/nm", undefined, root)).toBeNull();
+        expect(
+            resolveInPackage(
+                join(root, "e"),
+                "./f/../../sibling/x",
+                REQUIRE_CONDITIONS,
+            ),
+        ).toBeNull();
+        expect(resolveSidecar("e/f/a", undefined, root)).toBe(
+            join(root, "e", "dist", "a.js"),
+        );
+    });
+
+    it("never returns a file whose real path is outside the sidecar (main escaping it, symlinks)", () => {
+        const { exec, root } = app();
+        write(join(dirname(exec), "outside", "m.js"), "");
+        pkg(join(root, "esc-main"), { main: "../../../outside/m.js" }, {});
+        pkg(join(root, "esc-link"), { main: "lib/m.js" }, {});
+        mkdirSync(join(root, "esc-link", "lib"), { recursive: true });
+        symlinkSync(
+            join(dirname(exec), "outside", "m.js"),
+            join(root, "esc-link", "lib", "m.js"),
+        );
+        expect(resolveSidecar("esc-main", undefined, root)).toBeNull();
+        expect(resolveSidecar("esc-link", undefined, root)).toBeNull();
+    });
+
+    it("the hook fails closed for a request with relative segments, from any requester", () => {
+        const { root } = app();
+        pkg(join(root, "good"), { main: "i.js" }, { "i.js": "" });
+        const calls: string[] = [];
+        const M = {
+            _resolveFilename(request: string) {
+                calls.push(request);
+                return `ORIGINAL:${request}`;
+            },
+        };
+        installSidecarResolution(M, root);
+        for (const parent of [
+            { filename: "/$bunfs/root/server" },
+            { filename: join(root, "good", "i.js") },
+        ]) {
+            expect(() =>
+                M._resolveFilename("good/../../../outside/esc.js", parent),
+            ).toThrow(/Cannot find module/);
+        }
+        expect(calls).toEqual([]);
+    });
+
     it("sidecarEntryFile throws (fail closed) when a present package has no resolvable entry", () => {
         const { root } = app();
         pkg(join(root, "broken"), { main: "gone.js" }, {});
@@ -280,7 +376,7 @@ describe("the Module._resolveFilename hook", () => {
         ).toBe(join(root, "typescript", "package.json"));
     });
 
-    it("fails closed for bundled code: a bare request the sidecar lacks never reaches the original (cwd) resolver", () => {
+    it("fails closed for bundled code: a bare request the sidecar lacks never reaches the original resolver", () => {
         const { root } = app();
         const { M, calls } = fakeModule();
         installSidecarResolution(M, root);

@@ -209,9 +209,8 @@ the binary, else from the bundle: typescript
 sidecar): twoslash
 ```
 
-The executable resolves packages **only** from the `.output/server/node_modules` directory next to
-it. It never looks in the working directory or in any parent directory, so a package placed there
-cannot be loaded into your server.
+The executable loads these packages **only** from the `.output/server/node_modules` directory next
+to it.
 
 A package with a native addon (a compiled `.node` file, such as `sqlite3`) can **only** load from
 that directory, and the build warns about it:

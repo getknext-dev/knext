@@ -15,8 +15,8 @@
  * alone cannot help. The fix resolves sidecar packages with its own resolver
  * (sidecar-runtime.mjs), confined to `<dir of the binary>/.output/server/
  * node_modules`, and loads the resulting absolute files. The binary is NOT
- * compiled with `autoloadPackageJson`: that would resolve every runtime bare
- * request against process.cwd() and its ancestors (plantable).
+ * compiled with `autoloadPackageJson`, which widens runtime resolution beyond
+ * the sidecar.
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
@@ -170,12 +170,11 @@ describe("entry-external-sidecar (unit)", () => {
  *  - `fake-pure` (CommonJS) must keep working with the sidecar gone.
  *  - PLANTED copies of every package sit in `<cwd>/node_modules` and
  *    `<cwd>/../node_modules`. Nothing may ever load them: resolution is anchored
- *    at the binary's own `.output/server/node_modules`, never at cwd or its
- *    ancestors (`autoloadPackageJson` would open exactly that hole).
+ *    at the binary's own `.output/server/node_modules` only.
  *
  * Markers rewritten in the sidecar AFTER the compile prove which copy ran:
  * `*_LIVE` can only come from the real file on disk, the original only from
- * the bundle, `PLANTED` only from an attacker-writable directory.
+ * the bundle, `PLANTED` only from outside the sidecar.
  */
 const LIB = "KNEXT_1320_REAL_LIB_TXT_4c1e";
 const PURE = "KNEXT_1320_PURE_MARKER_9b2d";
@@ -290,8 +289,8 @@ function buildApp(): { work: string; exe: string } {
             'catch (e) { console.log("DEP-ERR:" + (e && e.message)); }\n' +
             'try { console.log("RESULT:" + esm.kind + ":" + esm.lib()); }\n' +
             'catch (e) { console.log("RESULT-ERR:" + (e && e.message)); }\n' +
-            // A runtime ESM import() from bundled code: the hook cannot see it,
-            // so this is what `autoloadPackageJson` alone would expose to cwd
+            // A runtime import() from bundled code must not resolve outside the
+            // sidecar either; this case is sensitive to `autoloadPackageJson`
             // (the planted copy has a non-index `main`, which only a
             // package.json-reading resolver can find).
             'import(["fake", "pure"].join("-")).then(\n' +
@@ -341,9 +340,9 @@ function deployAndRun(
             recursive: true,
         });
     }
-    const attacker = temp("knext-1320-cwd-");
-    const cwd = join(attacker, "nested");
-    plant(join(attacker, "node_modules"));
+    const outside = temp("knext-1320-cwd-");
+    const cwd = join(outside, "nested");
+    plant(join(outside, "node_modules"));
     plant(join(cwd, "node_modules"));
     const r = spawnSync(exe, [], {
         cwd,
@@ -375,7 +374,7 @@ describe("vinext-compile loads server externals from the sidecar beside the bina
         expect(out).not.toContain("_LIVE_");
     });
 
-    it("never loads a package planted in cwd or its ancestors, with or without the sidecar", () => {
+    it("never loads a copy placed outside the sidecar (cwd, its parent), with or without the sidecar", () => {
         for (const withSidecar of [true, false]) {
             const out = deployAndRun(app, withSidecar);
             expect(out, `withSidecar=${withSidecar}\n${out}`).not.toContain(

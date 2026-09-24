@@ -315,11 +315,10 @@ const result = await Bun.build({
     bytecode: true,
     compile: {
         outfile: OUTFILE,
-        // NEVER set `autoloadPackageJson` here. It would make every runtime bare
-        // require/import() in the binary resolve against process.cwd() and its
-        // ancestors, a directory anyone with write access there could plant code
-        // in. The sidecar is resolved by sidecar-runtime.mjs instead, confined to
-        // <dir of the binary>/.output/server/node_modules (#1320).
+        // NEVER set `autoloadPackageJson` here: it widens runtime package
+        // resolution beyond the sidecar. The sidecar is resolved by
+        // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
+        // server/node_modules (#1320).
         ...(TARGET ? { target: TARGET } : {}),
     },
 });

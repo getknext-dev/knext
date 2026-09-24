@@ -8,11 +8,8 @@
  * A compiled Bun binary never reads a `package.json` at runtime unless it was
  * compiled with `autoloadPackageJson` (measured, Bun 1.4.2): bare resolution then
  * finds only a default `index.js`, so `typescript` (`main: ./lib/typescript.js`)
- * and every `exports` package fail, even from a real on-disk file. Turning that
- * option on is NOT acceptable: it makes every runtime bare `require`/`import()`
- * in the binary resolve against `process.cwd()/node_modules` and its ancestors,
- * so anyone who can write to the working directory, or any parent of it, could
- * plant code into the server.
+ * and every `exports` package fail, even from a real on-disk file. That option
+ * is not used: it widens runtime package resolution beyond the sidecar.
  *
  * So resolution is done here, by reading `package.json` with `fs`, and only
  * inside the sidecar tree. The result is an ABSOLUTE FILE PATH, which a compiled
@@ -35,7 +32,7 @@
  * Dependency-free (node:fs, node:path, node:module) because it is bundled into
  * the binary.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join, resolve, sep } from "node:path";
 
@@ -69,6 +66,37 @@ export function splitRequest(request) {
     const name = parts.slice(0, n).join("/");
     const rest = parts.slice(n).join("/");
     return { name, subpath: rest ? `./${rest}` : "." };
+}
+
+/**
+ * A request whose every `/`-separated segment is a plain name: no empty, `.` or
+ * `..` segment. Relative segments are never needed to name a package file, and
+ * they are the way out of the sidecar, so they are refused outright.
+ */
+export function isSafeRequest(request) {
+    return request.split("/").every((s) => s !== "" && s !== "." && s !== "..");
+}
+
+/**
+ * An `exports` target Node itself accepts: `./`-relative, with no `.`, `..` or
+ * `node_modules` segment after the leading `.` (the Node.js package-target
+ * rule), so it cannot leave its own package.
+ */
+export function isSafeExportsTarget(target) {
+    if (typeof target !== "string" || !target.startsWith("./")) return false;
+    return target
+        .slice(2)
+        .split(/[\\/]/)
+        .every((s) => s !== "" && s !== "." && s !== ".." && s.toLowerCase() !== "node_modules");
+}
+
+/** Whether `file`'s real path (symlinks resolved) lies inside `root`'s real path. */
+export function isInside(file, root) {
+    try {
+        return realpathSync(file).startsWith(realpathSync(root) + sep);
+    } catch {
+        return false;
+    }
 }
 
 function isFile(p) {
@@ -112,10 +140,12 @@ export function exportsTargets(exp, subpath, conditions) {
             const pre = key.slice(0, i);
             const post = key.slice(i + 1);
             if (subpath.startsWith(pre) && subpath.endsWith(post) && subpath.length >= key.length - 1) {
-                if (pre.length > best) {
+                const sub = subpath.slice(pre.length, subpath.length - post.length);
+                // The substitution must not carry relative segments into the target.
+                if (pre.length > best && sub.split("/").every((s) => s !== "." && s !== "..")) {
                     best = pre.length;
                     entry = map[key];
-                    star = subpath.slice(pre.length, subpath.length - post.length);
+                    star = sub;
                 }
             }
         }
@@ -142,7 +172,7 @@ export function resolveInPackage(pkgDir, subpath, conditions) {
     }
     if (pj.exports !== undefined && pj.exports !== null) {
         for (const t of exportsTargets(pj.exports, subpath, conditions)) {
-            if (!t.startsWith("./")) continue;
+            if (!isSafeExportsTarget(t)) continue;
             const abs = resolve(pkgDir, t);
             if (isFile(abs)) return abs;
         }
@@ -184,12 +214,17 @@ export function findPackageDir(name, fromFile, root) {
     return isFile(join(cand, "package.json")) ? cand : null;
 }
 
-/** Resolve a bare request against the sidecar only, or null. */
+/**
+ * Resolve a bare request against the sidecar only, or null. The final gate:
+ * whatever the package manifest says, the file returned is inside the sidecar
+ * after symlinks are resolved.
+ */
 export function resolveSidecar(request, fromFile, root, conditions = REQUIRE_CONDITIONS) {
-    if (!isBareRequest(request)) return null;
+    if (!isBareRequest(request) || !isSafeRequest(request)) return null;
     const { name, subpath } = splitRequest(request);
     const dir = findPackageDir(name, fromFile, root);
-    return dir ? resolveInPackage(dir, subpath, conditions) : null;
+    const file = dir ? resolveInPackage(dir, subpath, conditions) : null;
+    return file && isInside(file, root) ? file : null;
 }
 
 /** Whether the sidecar at `root` holds package `name` at its top level. */
@@ -209,13 +244,10 @@ export function installSidecarResolution(Module, root = sidecarRoot()) {
         const from = parent && typeof parent.filename === "string" ? parent.filename : undefined;
         const hit = resolveSidecar(request, from, root);
         if (hit) return hit;
-        if (isBareRequest(request) && !(from && from.startsWith(root + sep))) {
-            // Fail CLOSED for code outside the sidecar (the bundled server in
-            // /$bunfs). Bun's compiled resolver would otherwise search
-            // process.cwd()/node_modules and its ancestors for it — measured on
-            // Bun 1.4.2 even WITHOUT autoloadPackageJson, for any request that
-            // needs no package.json (a file subpath, an index.js package) —
-            // which lets anyone who can write there plant code into the server.
+        if (isBareRequest(request) && (!isSafeRequest(request) || !(from && from.startsWith(root + sep)))) {
+            // Fail CLOSED for code outside the sidecar, and for any request with
+            // relative segments: an unresolved bare request is refused here
+            // rather than handed to the default resolver.
             const err = new Error(
                 `Cannot find module '${request}' (the compiled server resolves packages only from ${root})`,
             );
