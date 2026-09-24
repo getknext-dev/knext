@@ -320,15 +320,50 @@ describe('#1300 review round 2, finding 5: credential-recovery (close on green)'
   it('review round 3 (finding 1): the CREDENTIAL-mode test is inlined via github.event.schedule, NEVER env.* (job-level if: does not allow the env context)', () => {
     // Live-proven with actionlint: a job-level `if:` referencing `env.*`
     // makes GitHub reject the WHOLE workflow at parse time — not just this
-    // job, every scheduled compat nightly. The four cron strings this
-    // condition inlines are the SAME four `KNEXT_COMPAT_MODE` itself tests
-    // against in the workflow's top-level `env:` block (kept in lockstep by
-    // eye — both read from the one list of credential crons in
-    // docs/compat-matrix.md).
+    // job, every scheduled compat nightly.
     const job = alertParsed.jobs['credential-recovery'];
     expect(job.if).not.toMatch(/env\./);
-    for (const cron of ['17 1 * * *', '47 5 * * *', '17 22 * * *', '47 23 * * *']) {
-      expect(job.if).toContain(`github.event.schedule == '${cron}'`);
+  });
+
+  it('review round 4 (finding 2): the recovery if: cron set is EQUAL (both directions) to the KNEXT_COMPAT_MODE credential-cron set — not just a subset check', () => {
+    // Round 3's test only asserted the recovery `if:` CONTAINS four specific
+    // literal crons — a one-directional `toContain` check that stays green
+    // if `KNEXT_COMPAT_MODE` grows a FIFTH credential cron (a real, proven
+    // surviving mutant) and recovery silently never learns about it, or if
+    // recovery accretes an extra cron `KNEXT_COMPAT_MODE` doesn't have. This
+    // parses BOTH expressions for their `'H M * * *'` cron literals and
+    // asserts the two SETS are equal — a cron added to one and not the other
+    // fails in either direction.
+    const CRON_RE = /'(\d{1,2} \d{1,2} \* \* \*)'/g;
+    const parseCrons = (expr: string): Set<string> => {
+      const found = new Set<string>();
+      for (const m of expr.matchAll(CRON_RE)) found.add(m[1]);
+      return found;
+    };
+
+    const compatModeMatch = alertText.match(/KNEXT_COMPAT_MODE:\s*\$\{\{(.+?)\}\}/);
+    expect(compatModeMatch, 'KNEXT_COMPAT_MODE env expression must exist').toBeTruthy();
+    const compatModeCrons = parseCrons(compatModeMatch![1]);
+    expect(compatModeCrons.size).toBeGreaterThan(0);
+
+    const job = alertParsed.jobs['credential-recovery'];
+    const recoveryCrons = parseCrons(String(job.if));
+    expect(recoveryCrons.size).toBeGreaterThan(0);
+
+    // Both directions, spelled out rather than relying on one Set-equality
+    // helper, so a failure message names exactly which cron is missing from
+    // which side.
+    for (const cron of compatModeCrons) {
+      expect(
+        recoveryCrons.has(cron),
+        `credential-recovery's if: is missing cron "${cron}" that KNEXT_COMPAT_MODE treats as credential`,
+      ).toBe(true);
+    }
+    for (const cron of recoveryCrons) {
+      expect(
+        compatModeCrons.has(cron),
+        `credential-recovery's if: has cron "${cron}" that KNEXT_COMPAT_MODE does NOT treat as credential`,
+      ).toBe(true);
     }
   });
 

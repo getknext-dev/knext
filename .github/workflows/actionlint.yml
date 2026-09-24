@@ -54,17 +54,24 @@ jobs:
 
       - name: Compute the workflow files this diff actually changed
         id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          head="${{ github.event.pull_request.head.sha || github.sha }}"
+          base="${BASE_SHA}"
+          head="${HEAD_SHA}"
           # A push with no prior commit (`before` all-zeros, first push to a
           # new branch) has nothing to diff against — fall back to lint every
           # workflow file rather than silently linting nothing.
           if [ -z "${base}" ] || [ "${base}" = "0000000000000000000000000000000000000000" ]; then
             files="$(git -C . ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')"
           else
-            files="$(git diff --name-only "${base}" "${head}" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' || true)"
+            # #1300 review round 4 (finding 3) — no `|| true`: a real `git
+            # diff` error (e.g. `base` unresolvable) must fail this step, not
+            # silently fall through to an empty/partial file list that then
+            # reads as "nothing changed, nothing to lint".
+            files="$(git diff --name-only "${base}" "${head}" -- '.github/workflows/*.yml' '.github/workflows/*.yaml')"
           fi
           if [ -z "${files}" ]; then
             echo "no workflow files changed in this diff — nothing to lint"
@@ -81,6 +88,18 @@ jobs:
 
       - name: Run actionlint on the changed workflow files (fails on any finding)
         if: steps.diff.outputs.files != ''
+        # #1300 review round 4 (finding 1) — the file LIST is PR-controlled
+        # (it's the paths in the diff, which a malicious PR could shape,
+        # e.g. a filename containing shell metacharacters or a `$(...)`
+        # sequence). `${{ steps.diff.outputs.files }}` inside `run:` is
+        # GitHub's TEXTUAL substitution, done before the shell ever sees the
+        # script — that makes it a script-injection point, not just a data
+        # value. Passing it via `env:` instead means the shell only ever sees
+        # it as the CONTENTS of `$FILES`, never as script text, and
+        # `xargs -d '\n'` (not the default IFS-whitespace splitting) is what
+        # makes filenames-with-spaces safe too.
+        env:
+          FILES: ${{ steps.diff.outputs.files }}
         run: |
           set -euo pipefail
-          echo "${{ steps.diff.outputs.files }}" | xargs ./actionlint
+          printf '%s\n' "${FILES}" | xargs -d '\n' ./actionlint
