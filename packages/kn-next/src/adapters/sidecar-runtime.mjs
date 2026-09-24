@@ -168,16 +168,17 @@ export function findPackageDir(name, fromFile, root) {
     const top = dirname(root); // .../.output/server
     const inside = typeof fromFile === "string" && fromFile.startsWith(root + sep);
     if (inside) {
+        // fromFile is under root = top/node_modules, so walking up reaches `top`
+        // exactly; stop there. Every candidate is then inside the sidecar.
         let dir = dirname(fromFile);
-        while (dir.startsWith(top)) {
+        for (;;) {
             if (!dir.endsWith(`${sep}node_modules`)) {
                 const cand = join(dir, "node_modules", name);
-                if (cand.startsWith(root + sep) && isFile(join(cand, "package.json"))) return cand;
+                if (isFile(join(cand, "package.json"))) return cand;
             }
-            if (dir === top) break;
+            if (dir === top || dir === dirname(dir)) return null;
             dir = dirname(dir);
         }
-        return null;
     }
     const cand = join(root, name);
     return isFile(join(cand, "package.json")) ? cand : null;

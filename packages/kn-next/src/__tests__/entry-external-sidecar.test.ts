@@ -289,7 +289,15 @@ function buildApp(): { work: string; exe: string } {
             'try { console.log("DEP:" + cjs.dep()); }\n' +
             'catch (e) { console.log("DEP-ERR:" + (e && e.message)); }\n' +
             'try { console.log("RESULT:" + esm.kind + ":" + esm.lib()); }\n' +
-            'catch (e) { console.log("RESULT-ERR:" + (e && e.message)); }\n',
+            'catch (e) { console.log("RESULT-ERR:" + (e && e.message)); }\n' +
+            // A runtime ESM import() from bundled code: the hook cannot see it,
+            // so this is what `autoloadPackageJson` alone would expose to cwd
+            // (the planted copy has a non-index `main`, which only a
+            // package.json-reading resolver can find).
+            'import(["fake", "pure"].join("-")).then(\n' +
+            '  (m) => console.log("DYN:" + (m.marker ?? (m.default && m.default.marker))),\n' +
+            '  (e) => console.log("DYN-ERR:" + (e && (e.code || e.message))),\n' +
+            ");\n",
     );
     const exe = join(work, "knext-1320-exec");
     const build = spawnSync(
