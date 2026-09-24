@@ -104,6 +104,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // 12, was 11 (#1260): the vinext-node-image job installs the workspace
       // and runs its docker e2e via `bun:test` — its own pinned setup-bun.
       'ci.yml': 12,
+      // NEW (#1302): the freeze guard's frozenFileSet() computation needs the
+      // workspace's bun to run scripts/compat-credential-freeze-guard.mjs — a
+      // count RISING is a decision, per the rule above.
+      'compat-credential-freeze-guard.yml': 1,
       'docs-closure-nightly.yml': 1,
       'file-manager-platform-e2e-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
