@@ -213,13 +213,9 @@ applies to:
   runtime. So the harness renders a server route and accepts any complete HTTP response, through
   `KNEXT_WARM_ACCEPT_ANY_STATUS=1` (`scripts/e2e-deploy.sh:591-630`). A connection error still
   fails. It also snapshots and restores the fixture tree around the bake, so that only the
-  compile cache survives (`:617-638`). The product default stays strict 2xx. **(RESOLVED, #1299.)**
-  The knob no longer lives in the shipped bake template — `knext-compile-cache-bake.mjs.hbs` reads
-  no such variable and is unconditionally strict. The harness interprets
-  `KNEXT_WARM_ACCEPT_ANY_STATUS` itself now, in `scripts/e2e-bake-accept.mjs`, a harness-owned
-  wrapper that spawns the shipped driver as a child and re-derives the tolerant verdict from its
-  stdout + exit code — the driver's own bytes, and what a real user's `docker build` runs, are
-  unaffected either way.
+  compile cache survives (`:617-638`). The product default stays strict 2xx. The knob lives in
+  the shipped bake template today (`knext-compile-cache-bake.mjs.hbs:66-70`), which is an open
+  item: #1299 moves it into the harness (see ADR-0059).
 - **Trust assumption, stated:** only lines that begin with Node's own `[compile cache]` prefix
   count, so an app cannot manufacture a hit by logging the phrase mid-line. A process that writes
   a whole line with that prefix could. The code under test is the pinned upstream fixtures plus
@@ -336,8 +332,8 @@ recording as an open item.
       *(#1312)*
 - [ ] Freeze guard as a required check, derived from the fingerprint tables and mutation-proved.
       **rc.1 prerequisite.** *(#1302)*
-- [x] Move `KNEXT_WARM_ACCEPT_ANY_STATUS` out of the shipped template into the harness, keeping
-      the evidence line identical. *(#1299, `scripts/e2e-bake-accept.mjs`)*
+- [ ] Move `KNEXT_WARM_ACCEPT_ANY_STATUS` out of the shipped template into the harness, keeping
+      the evidence line identical. *(#1299)*
 - [ ] v1.0-scope field on `CREDENTIAL_CELLS` / `auditCredentialMatrix`. *(ADR-0058 action item)*
 - [ ] Before vinext × bun gets a window: add the D4 liveness step to `compat-vinext.yml`, a
       credential cron and the `credential-ref` job, and amend ADR-0058.
