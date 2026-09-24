@@ -141,6 +141,23 @@ function buildApp(): { work: string; exe: string; sidecar: string } {
     );
     const server = join(work, ".output", "server");
     const nm = join(server, "node_modules");
+    // nitro writes this manifest beside the traced node_modules (the exact
+    // shape, from a real build); the resolver reads it.
+    write(
+        join(server, "package.json"),
+        JSON.stringify({
+            name: "traced-node-modules",
+            version: "1.0.0",
+            type: "module",
+            private: true,
+            dependencies: {
+                "fake-data": "1.0.0",
+                "fake-esm": "1.0.0",
+                "fake-lib-reader": "1.0.0",
+                "fake-pure": "1.0.0",
+            },
+        }),
+    );
     write(
         join(nm, "fake-esm", "package.json"),
         JSON.stringify({
