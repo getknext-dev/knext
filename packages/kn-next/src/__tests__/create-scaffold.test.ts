@@ -26,6 +26,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+    chmodSync,
     existsSync,
     mkdirSync,
     mkdtempSync,
@@ -642,6 +643,64 @@ describe("kn-next create — the CLI entry (createMain)", () => {
             readFileSync(join(appDir, "package.json"), "utf8"),
         ) as { name?: string };
         expect(pkg.name).toBe("chosen-name");
+    });
+
+    it("scaffolding a REAL app prints the parting next-steps line, not just a file list", async () => {
+        // The success message is the only place a stranger sees `npm install` /
+        // `npm run dev` / `kn-next doctor` / `kn-next deploy` — the exact
+        // commands they need to type next, in order. Assert its presence, not
+        // just that createMain returned 0.
+        const appDir = join(root, "apps", "parting-words");
+        mkdirSync(appDir, { recursive: true });
+        const { code, out } = await capture([appDir]);
+        expect(code).toBe(0);
+        expect(out).toContain("Next steps:");
+        expect(out).toContain("npm install");
+        expect(out).toContain("npm run dev");
+        expect(out).toContain("kn-next doctor");
+        expect(out).toContain("kn-next deploy");
+        expect(out).toContain("npm test");
+    });
+
+    it("--dry-run reports the file list WITHOUT the parting next-steps line (nothing was written)", async () => {
+        const appDir = join(root, "apps", "parting-words-dry");
+        mkdirSync(appDir, { recursive: true });
+        const { out } = await capture([appDir, "--dry-run"]);
+        expect(out).not.toContain("Next steps:");
+    });
+
+    it("a filesystem failure (not a user mistake) still exits 1, surfacing the raw error rather than a UsageError shape", async () => {
+        // #435-454: createMain's catch has TWO branches — a UsageError (name
+        // validation, clobber refusal) gets the friendly one-liner path, but
+        // anything else must still exit 1 and print the underlying reason
+        // directly, not a swallowed "create failed". An unwritable target
+        // directory is the realistic trigger: no cluster call, no special
+        // fixture, just a permission the process does not have.
+        const appDir = join(root, "apps", "no-write");
+        mkdirSync(appDir, { recursive: true });
+        chmodSync(appDir, 0o500);
+        let stillWritable = false;
+        try {
+            writeFileSync(join(appDir, ".probe"), "x");
+            stillWritable = true;
+        } catch {
+            // expected — this is the precondition the test needs
+        }
+        try {
+            if (stillWritable) {
+                throw new Error(
+                    `precondition failed: ${appDir} is still writable after chmod 0500 ` +
+                        `(uid=${process.getuid?.()}) — this test simulates a permission ` +
+                        "failure and is meaningless as root; run the suite as a non-root user.",
+                );
+            }
+            const { code, err } = await capture([appDir]);
+            expect(code).toBe(1);
+            expect(err).toContain("kn-next create:");
+            expect(err.toLowerCase()).toMatch(/eacces|permission/);
+        } finally {
+            chmodSync(appDir, 0o700);
+        }
     });
 });
 
