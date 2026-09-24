@@ -13,13 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import {
-    mkdirSync,
-    mkdtempSync,
-    rmSync,
-    utimesSync,
-    writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KnativeNextConfig } from "../config";
@@ -52,8 +46,10 @@ mock.module("../adapters/standalone-bun-exports", () => ({
 
 const {
     assertCompiledArtifactFresh,
+    buildStampPathFor,
     compileArtifactForDeploy,
     compiledExecPathFor,
+    hashSourceArtifact,
 } = await import("../cli/build-artifact");
 const { UsageError } = await import("../cli/shared");
 
@@ -177,7 +173,7 @@ describe("compiledExecPathFor", () => {
     });
 });
 
-describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard", () => {
+describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1351: content-hash stamp, not mtime)", () => {
     it("THROWS when the exec is MISSING but the source exists", () => {
         standaloneServer();
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(
@@ -188,32 +184,77 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard", (
         );
     });
 
-    it("THROWS when the exec is STALE (older than its source)", () => {
+    it("THROWS when the exec exists but has NO freshness stamp — cannot verify, fail closed", () => {
         standaloneServer();
         const execPath = join(dir, "knext-standalone-exec-linux-x64");
         writeFileSync(execPath, "");
-        const past = new Date(Date.now() - 60_000);
-        utimesSync(execPath, past, past);
-        // Bump the source's mtime to NOW, after the (stale) exec.
-        utimesSync(
-            join(dir, ".next", "standalone", "server.js"),
-            new Date(),
-            new Date(),
-        );
+        // No .buildstamp sidecar written — an exec from before this check
+        // existed, or one copied in from elsewhere.
 
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(
             UsageError,
         );
-        expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/older/i);
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stamp/i);
     });
 
-    it("does NOT throw when the exec is fresh (newer than its source)", () => {
+    it("THROWS when the stamp does not match the source's CURRENT content (stale) — even with a NEWER mtime, the mtime-spoofing case mtime comparison could not catch", () => {
         standaloneServer();
         const execPath = join(dir, "knext-standalone-exec-linux-x64");
-        // Compile AFTER the source — same order a real build follows.
         writeFileSync(execPath, "");
+        writeFileSync(buildStampPathFor(execPath), "not-the-real-hash", "utf8");
+        // Give the exec a mtime far NEWER than the source — under the OLD
+        // mtime check this would have looked fresh. The content-hash stamp
+        // must still catch it: content, not clock, is the ground truth.
+
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(
+            UsageError,
+        );
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stale/i);
+    });
+
+    it("does NOT throw when the stamp matches a hash of the source's CURRENT content", () => {
+        standaloneServer();
+        const execPath = join(dir, "knext-standalone-exec-linux-x64");
+        writeFileSync(execPath, "");
+        const sourcePath = join(dir, ".next", "standalone", "server.js");
+        writeFileSync(
+            buildStampPathFor(execPath),
+            hashSourceArtifact(sourcePath),
+            "utf8",
+        );
 
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).not.toThrow();
+    });
+
+    it("compileArtifactForDeploy writes a stamp assertCompiledArtifactFresh then accepts, end to end", () => {
+        standaloneServer();
+        const execPath = join(dir, "knext-standalone-exec-linux-x64");
+        // The mocked buildStandaloneExecutable only RETURNS a path — it does
+        // not touch the filesystem, so create the exec file the same way the
+        // real compile step would leave it before this test simulates a
+        // --skip-build deploy reading it back.
+        writeFileSync(execPath, "");
+
+        compileArtifactForDeploy(cfg(), dir);
+
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).not.toThrow();
+    });
+
+    it("a source edited AFTER compileArtifactForDeploy ran is caught as stale, even though the exec's mtime is still newer", () => {
+        standaloneServer();
+        const execPath = join(dir, "knext-standalone-exec-linux-x64");
+        writeFileSync(execPath, "");
+        compileArtifactForDeploy(cfg(), dir);
+
+        // Edit the source in place — same mtime relationship a real
+        // `git checkout`/rsync/tarball-extract false-negative would produce
+        // (exec still looks newer), but the CONTENT changed.
+        writeFileSync(
+            join(dir, ".next", "standalone", "server.js"),
+            "// edited after compile",
+        );
+
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stale/i);
     });
 
     it("is a no-op for the node runtime — nothing to compile, nothing to check", () => {

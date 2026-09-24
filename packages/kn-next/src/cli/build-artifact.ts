@@ -18,7 +18,8 @@
  * apply. This module supplies exactly that.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
     BUILDERS,
@@ -164,6 +165,10 @@ export function compileArtifactForDeploy(
             );
         }
         const binaryPath = buildStandaloneExecutable({ cwd, arch });
+        // #1351: stamp the exec with a hash of the server.js it was JUST
+        // compiled from, so a later `--skip-build` deploy can verify it
+        // still matches rather than trusting a filesystem mtime.
+        writeBuildStamp(binaryPath, join(standaloneDir, "server.js"));
         return { compiled: true, binaryPath, healed };
     }
 
@@ -176,6 +181,11 @@ export function compileArtifactForDeploy(
             arch,
             skipViteBuild: true,
         });
+        // #1351: same stamp, for the vinext output this exec was compiled from.
+        writeBuildStamp(
+            binaryPath,
+            join(cwd, ".output", "server", "index.mjs"),
+        );
         return { compiled: true, binaryPath };
     }
 
@@ -215,6 +225,38 @@ export function compiledExecPathFor(
 }
 
 /**
+ * `#1351`: the compiled exec's freshness stamp — a SHA-256 of the SOURCE
+ * artifact's content (`.next/standalone/server.js` / `.output/server/
+ * index.mjs`) that produced it, written to a sidecar file next to the exec
+ * (`<execPath>.buildstamp`) the moment it is compiled. Replaces an mtime
+ * comparison (#1183 round 2): mtime is not a content signal — `git
+ * checkout`, a container `COPY`, an `rsync` without `-t`, or a tarball
+ * extract can all leave a NEWER mtime on an OLDER (or simply DIFFERENT) file
+ * with no actual content change, in either direction. A content hash cannot
+ * be fooled that way: it is wrong only when the content actually differs.
+ */
+export function buildStampPathFor(execPath: string): string {
+    return `${execPath}.buildstamp`;
+}
+
+/** SHA-256 hex digest of a source artifact's current on-disk content. */
+export function hashSourceArtifact(sourcePath: string): string {
+    return createHash("sha256").update(readFileSync(sourcePath)).digest("hex");
+}
+
+/**
+ * Write the freshness stamp for a just-compiled exec, from the source
+ * artifact it was compiled FROM. Called at the one place both `kn-next
+ * build` and `kn-next deploy`/`preview` compile through
+ * (`compileArtifactForDeploy` below) — so a stamp exists for every exec this
+ * CLI itself ever produces, regardless of which command triggered the
+ * compile.
+ */
+function writeBuildStamp(execPath: string, sourcePath: string): void {
+    writeFileSync(buildStampPathFor(execPath), hashSourceArtifact(sourcePath));
+}
+
+/**
  * Fail-closed guard for `kn-next deploy --skip-build`: the ONE path where
  * `compileArtifactForDeploy` above is never called, so nothing here
  * recompiles fresh. Mirrors the BUILD_ID/asset-prefix lock-step guards
@@ -222,12 +264,16 @@ export function compiledExecPathFor(
  * artifact, never a silent reuse.
  *
  * Missing: the exec was never compiled (drop `--skip-build`, or run
- * `kn-next build` first). Stale: the exec's mtime predates the standalone
- * server / vinext output it should have been compiled FROM — an earlier
- * `kn-next build` compiled it, the project was rebuilt since, and the
- * executable was never refreshed. Both throw a `UsageError` naming the
- * one-line fix, the same "actionable, not a stack dump" family as the
- * #1184 fail-fast check above.
+ * `kn-next build` first). Stale (`#1351`): the exec's `.buildstamp` sidecar
+ * — a SHA-256 of the standalone server / vinext output it was compiled FROM
+ * — either does not match a hash of that source's CURRENT content, or does
+ * not exist at all (an exec this check cannot vouch for, e.g. one predating
+ * this stamp or copied in from elsewhere). Both "no stamp" and "stamp
+ * mismatch" fail closed into the same stale-class error — a filesystem
+ * mtime comparison used to stand in for this and was replaced because mtime
+ * is not a content signal (see `buildStampPathFor`'s doc comment). All three
+ * throw a `UsageError` naming the one-line fix, the same "actionable, not a
+ * stack dump" family as the #1184 fail-fast check above.
  *
  * A no-op when this target needs no compile step (node runtime, vinext ×
  * node) or when the source artifact itself does not exist yet — that is a
@@ -250,12 +296,22 @@ export function assertCompiledArtifactFresh(
         );
     }
 
-    const execMtime = statSync(target.execPath).mtimeMs;
-    const sourceMtime = statSync(target.sourcePath).mtimeMs;
-    if (execMtime < sourceMtime) {
+    const stampPath = buildStampPathFor(target.execPath);
+    if (!existsSync(stampPath)) {
         throw new UsageError(
-            `${target.execPath} is OLDER than ${target.sourcePath} — it was compiled from an ` +
-                "earlier build and --skip-build means kn-next will not recompile it.\n\n" +
+            `${target.execPath} has no freshness stamp (${stampPath} is missing) — kn-next ` +
+                `cannot verify it matches the current ${target.sourcePath}, and --skip-build ` +
+                "means it will not recompile.\n\n" +
+                "Drop --skip-build, or run `kn-next build` to recompile it with a verifiable stamp.",
+        );
+    }
+    const stampedHash = readFileSync(stampPath, "utf8").trim();
+    const currentHash = hashSourceArtifact(target.sourcePath);
+    if (stampedHash !== currentHash) {
+        throw new UsageError(
+            `${target.execPath} is STALE — it was compiled from a different version of ` +
+                `${target.sourcePath} than the one currently on disk, and --skip-build means ` +
+                "kn-next will not recompile it.\n\n" +
                 "Drop --skip-build, or run `kn-next build` to refresh the executable before deploying.",
         );
     }
