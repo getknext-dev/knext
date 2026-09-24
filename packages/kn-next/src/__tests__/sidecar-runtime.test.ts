@@ -322,7 +322,7 @@ describe("confinement to the sidecar", () => {
         pkg(join(root, "good"), { main: "i.js" }, { "i.js": "" });
         const calls: string[] = [];
         const M = {
-            _resolveFilename(request: string) {
+            _resolveFilename(request: string, _parent?: unknown) {
                 calls.push(request);
                 return `ORIGINAL:${request}`;
             },
@@ -352,7 +352,7 @@ describe("the Module._resolveFilename hook", () => {
     function fakeModule() {
         const calls: string[] = [];
         const M = {
-            _resolveFilename(request: string) {
+            _resolveFilename(request: string, _parent?: unknown) {
                 calls.push(request);
                 return `ORIGINAL:${request}`;
             },
