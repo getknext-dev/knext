@@ -47,8 +47,8 @@ import {
     rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import {
     findLockfile,
@@ -179,18 +179,39 @@ export function bunCompileTarget(arch: string): string {
 }
 
 /**
- * The shipped compile script, resolved from THIS module rather than by package
- * name: the CLI is bundled to `dist/cli/`, and the script sits in
- * `dist/adapters/`, so a bare specifier would resolve against the consumer's
- * tree instead of ours.
+ * The shipped compile script, resolved from the PACKAGE ROOT (`packageRoot()`,
+ * shared with `create.ts`'s template resolution) — NOT from
+ * `dirname(import.meta.url)/..` (#1339 round-3, jev 0.92 BLOCKER, proven with
+ * tsup + npm pack).
+ *
+ * Making `build-artifact.ts` share this module across build.ts/deploy.ts/
+ * preview.ts gave tsup a THIRD caller for it, and tsup answers "shared by
+ * multiple entries" by hoisting the module into a chunk at the ROOT of
+ * `dist/` (`dist/chunk-<hash>.js`), not under `dist/cli/`. A depth-relative
+ * `dirname(import.meta.url)/../adapters/…` then resolves ONE level too
+ * shallow — `<pkg-root>/adapters/…` instead of `<pkg-root>/dist/adapters/…`
+ * — and `<pkg-root>/adapters/` is not even in the published tarball
+ * (`files: ["dist","templates"]`), so EVERY published build/deploy/preview
+ * that needs to compile the vinext executable fails outright. This is the
+ * exact failure class `packageRoot()`'s own doc comment already names
+ * (`create.ts`'s template resolution hit it once before) — walking up to the
+ * `@getknext/core` package.json is depth-agnostic, so it is correct
+ * regardless of which chunk tsup puts this call in.
+ *
+ * Prefers the BUILT `dist/adapters/vinext-compile.js`; falls back to the
+ * SOURCE `src/adapters/vinext-compile.mjs` when dist has not been built
+ * (running straight from a source checkout, e.g. under `bun test`).
  */
 export function compileScriptPath(): string {
-    return join(
-        dirname(fileURLToPath(import.meta.url)),
-        "..",
-        "adapters",
-        "vinext-compile.js",
-    );
+    const root = packageRoot();
+    const built = join(root, "dist", "adapters", "vinext-compile.js");
+    if (existsSync(built)) return built;
+    const source = join(root, "src", "adapters", "vinext-compile.mjs");
+    if (existsSync(source)) return source;
+    // Neither exists: return the canonical BUILT location anyway, so the
+    // caller's own spawn failure names the expected path rather than an
+    // empty string or a guess.
+    return built;
 }
 
 /** glibc or musl, for a linux host. Injectable so both branches are testable. */
