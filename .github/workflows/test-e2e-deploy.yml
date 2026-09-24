@@ -116,6 +116,20 @@ on:
         required: false
         type: boolean
         default: false
+      # #1300 review round 2 (finding 4) — a dispatch-only, self-contained
+      # simulation of the credential-reset alert mechanics: creates a real,
+      # clearly `[alert-test]`-prefixed issue with the real `credential-reset`
+      # label (proving the label-ensure + create path works live), then
+      # closes it in the SAME run. Never runs on a schedule (guarded by the
+      # `alert-test-dispatch` job's own `if:`, independent of this default),
+      # so it can never fire as a side effect of a real credential night, and
+      # it is a SEPARATE job from `nightly-red-alert` — it does not touch, and
+      # cannot be mistaken for, a real per-cell alert.
+      simulate_red:
+        description: '#1300 — dispatch-only: create + self-close a real, clearly test-labelled [alert-test] credential-reset issue, proving the alert mechanics live. Never runs on schedule.'
+        required: false
+        type: boolean
+        default: false
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
@@ -1707,6 +1721,12 @@ jobs:
             echo "::error::${SUMMARY} is missing — no results is NOT green; the summarize step failed upstream"
             exit 1
           fi
+          # Deliberately single-quoted: this is an embedded `node -e` script,
+          # and its JS string concatenation ("..." + s.shard + ...) is what
+          # the shell linter's heuristic misreads as shell $-interpolation.
+          # Single-quoting is CORRECT here (#1300 review round 3, finding 1:
+          # actionlint installed live surfaced this).
+          # shellcheck disable=SC2016
           node -e '
             const s = require("./" + process.argv[1]);
             console.log(
@@ -2038,9 +2058,41 @@ jobs:
           # per-lane title, so a red on the frozen RC is never folded into the
           # main early-warning thread above (and vice versa). The early-warning
           # titles are unchanged, so their open issues keep their dedup keys.
+          # #1300 (TD2) — name the RESTART CAUSE directly from the signals this
+          # step already has, rather than a generic "it went red". The taxonomy
+          # mirrors compat-window-audit.mjs's own restart-cause vocabulary
+          # (night-unresolved / fingerprint-changed / night-disqualified) so the
+          # reason printed here is never invented independently of the auditor
+          # that actually books the restart.
+          restart_cause='unknown'
+          if [ "${REF_RESULT:-}" = "failure" ] || [ "${REF_RESULT:-}" = "cancelled" ]; then
+            restart_cause="credential-ref resolution ${REF_RESULT:-} (state: ${REF_STATE:-unknown}) — no RC ref could be pinned, so the night is unresolved"
+          elif [ "${BUILD_RESULT:-}" = "failure" ]; then
+            restart_cause="build-next (Prepare) failed — the adapter tarball never reached the shards"
+          elif [ "${SHARDS_RESULT:-}" = "failure" ] || [ "${SHARDS_RESULT:-}" = "cancelled" ]; then
+            # #1300 review round 2 (finding 5) — a shard can fail with ZERO
+            # named test failures: the "Verify boot-mode ledger" step
+            # (scripts/e2e-bytecode-liveness.mjs) fails the shard JOB directly
+            # when bytecode caching wasn't proven live, independent of any
+            # test outcome, so RED_SHARD_DETAIL (sourced from per-CASE test
+            # failures only) is blank on that class of red. Distinguishing it
+            # here means the restart-cause line never claims "see the named
+            # failures below" when there are none to see.
+            if [ -z "$(printf '%s' "${RED_SHARD_DETAIL:-}" | tr -d '[:space:]')" ]; then
+              restart_cause="deploy-tests shards ${SHARDS_RESULT:-} with NO named test failures in the ledger — almost certainly a bytecode-caching-liveness failure (scripts/e2e-bytecode-liveness.mjs: bytecode caching not proven LIVE on every deploy) or another non-test shard-step failure, not a failing test; check the shard job logs, not the ledger"
+            else
+              restart_cause="deploy-tests shards ${SHARDS_RESULT:-} — see the named failures below"
+            fi
+          elif [ "${LEDGER_RESULT:-}" = "failure" ] || [ "${LEDGER_RESULT:-}" = "cancelled" ]; then
+            restart_cause="shard-ledger ${LEDGER_RESULT:-} — attribution/test-count floor tripped (a shard likely went silent, not red)"
+          fi
           if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
             title="Compat CREDENTIAL RED (${KNEXT_LANE}, RC tag)"
-            lane_note="This is the **${KNEXT_LANE} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main."
+            lane_note="This is the **${KNEXT_LANE} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main.
+
+          **Restart cause:** ${restart_cause}
+
+          This per-cell issue is labelled \`credential-reset\`. It is intentionally NOT pinned — with 5+ credentialing lanes, GitHub's 3-pin cap means per-cell pins silently lose visibility past the third. The single aggregate view is the pinned **Compat v1.0 credential matrix tracker** issue, refreshed daily by \`compat-matrix-tracker-nightly.yml\`."
           fi
           body="The scheduled official Next.js deploy-suite run FAILED.
 
@@ -2070,6 +2122,17 @@ jobs:
           touching the quarantine ledger (ADR-0007 graduation addendum, §c: quarantines
           need a final-post-retry failure plus an env-parity audit, never a red-nightly
           reflex)."
+          # #1300 — the credential-reset label. Ensure-first (idempotent,
+          # `--force` never fails if it already exists) rather than assuming a
+          # human pre-created it; a missing label would otherwise make every
+          # `gh issue create --label` call below fail closed on the first
+          # credential red.
+          if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+            gh label create "credential-reset" --repo "${GITHUB_REPOSITORY}" \
+              --color d93f0b \
+              --description "A credential night restarted this cell's v1.0 14-night window" \
+              --force
+          fi
           # Idempotency: exactly-one open alert issue. Comment on it if present,
           # create (+ pin, best-effort) only when absent. #187 follow-up:
           # --limit 100 explicitly — gh defaults to 30, and with >30 open
@@ -2083,9 +2146,124 @@ jobs:
           if [ -n "${existing}" ]; then
             echo "updating existing alert issue #${existing}"
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+              gh issue edit "${existing}" --repo "${GITHUB_REPOSITORY}" --add-label "credential-reset"
+            fi
           else
             echo "creating the alert issue"
-            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
-            new_num="${new_url##*/}"
-            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+            if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" \
+                --label "credential-reset" >/dev/null
+            else
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" >/dev/null
+            fi
+            # #1300 (TD2) — deliberately NOT pinned. Every per-cell/per-lane red
+            # title (up to 5+ across node/bun/node-webpack/bun-webpack/bun-vinext,
+            # plus the two early-warning titles) used to race for GitHub's 3-pin
+            # cap; a failed `gh issue pin` is only a warning, so a red beyond the
+            # third pinned lane went unseen. The ONE pinned surface is now the
+            # aggregate "Compat v1.0 credential matrix tracker" issue
+            # (compat-matrix-tracker-nightly.yml), which every open credential-
+            # reset issue is discoverable from via the `credential-reset` label.
           fi
+
+  # ── #1300 review round 2, finding 4 — dispatch-only alert simulation ───────
+  # Proves the credential-reset alert mechanics (label ensure-create, issue
+  # create, NEVER pin) live, without spamming a real per-cell issue and
+  # without faking anything: every `gh` call below is real, against a real,
+  # unambiguously test-labelled issue that closes itself at the end of this
+  # SAME run. A completely SEPARATE job from `nightly-red-alert` — it shares
+  # no state with it and can never fire on a real credential night (its `if:`
+  # requires BOTH `workflow_dispatch` AND the `simulate_red` input).
+  alert-test-dispatch:
+    name: '[alert-test] dispatch-only credential-reset simulation (#1300)'
+    # `needs: [credential-ref]` — not for its output, but because every job in
+    # this workflow must transitively wait on the lane-attribution marker
+    # published by credential-ref (tests/compat-bun-lane-lockstep.test.ts
+    # "it is published BEFORE any step that can lose the night"). `always()`
+    # so this still runs even if credential-ref itself failed/was cancelled —
+    # the simulation's whole point is to be reachable on demand.
+    needs: [credential-ref]
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.simulate_red == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create a real, clearly test-labelled credential-reset issue, then close it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="[alert-test] Compat CREDENTIAL RED (node, RC tag) — dispatch acceptance check"
+          body="This is a SELF-CLOSING TEST issue, created by a manual \`simulate_red\` dispatch of test-e2e-deploy.yml (#1300 review round 2, finding 4). It proves the credential-reset alert mechanics — label ensure-create, issue create, and (deliberately) never pinning the per-cell issue — work against the real GitHub API, without asserting anything about the actual credential state of any lane.
+
+          Run: ${RUN_URL}
+
+          This issue closes itself at the end of the same run that created it."
+          gh label create "credential-reset" --repo "${GITHUB_REPOSITORY}" \
+            --color d93f0b \
+            --description "A credential night restarted this cell's v1.0 14-night window" \
+            --force
+          new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" --label "credential-reset")"
+          new_num="${new_url##*/}"
+          echo "created test issue #${new_num}"
+          gh issue close "${new_num}" --repo "${GITHUB_REPOSITORY}" \
+            --comment "Simulation complete — closing automatically (#1300 review round 2, finding 4). This never was, and is not meant to represent, a real credential red."
+          echo "::notice::[alert-test] created and closed #${new_num} — see ${RUN_URL}"
+
+  # ── #1300 review round 2, finding 5 — recovery: close what was opened ──────
+  # A credential-reset issue for a lane that has since gone GREEN is a false
+  # positive left standing. On a fully green SCHEDULED credential night, find
+  # this lane's own open credential-reset issue (if any), comment "recovered"
+  # with the green run's link, and close it — symmetric with how
+  # nightly-red-alert opens it.
+  credential-recovery:
+    name: Close the credential-reset issue on recovery (green credential night)
+    needs: [credential-ref, build-next, deploy-tests, shard-ledger]
+    # #1300 review round 3 (finding 1) — `env` is NOT an allowed context for a
+    # job-level `if:` (actionlint: available contexts are github/inputs/needs/
+    # vars — confirmed live: this exact line rejected the WHOLE workflow at
+    # parse time before the fix, which would have killed every compat
+    # nightly, not just this job). `env.KNEXT_COMPAT_MODE` is itself computed
+    # from `github.event.schedule` (see the workflow's top-level `env:`
+    # block), so the four credential-cron strings are inlined here instead —
+    # same four crons, same 'credential' classification, no `env` context.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (github.event.schedule == '17 1 * * *' || github.event.schedule == '47 5 * * *' ||
+       github.event.schedule == '17 22 * * *' || github.event.schedule == '47 23 * * *') &&
+      needs.credential-ref.outputs.state != 'not-cut' &&
+      needs.credential-ref.result == 'success' &&
+      needs.build-next.result == 'success' &&
+      needs.deploy-tests.result == 'success' &&
+      needs.shard-ledger.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Comment "recovered" and close this lane's open credential-reset issue, if any
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Compat CREDENTIAL RED (${KNEXT_LANE}, RC tag)"
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --label "credential-reset" --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -z "${existing}" ]; then
+            echo "no open credential-reset issue for lane ${KNEXT_LANE} — nothing to recover"
+            exit 0
+          fi
+          echo "recovering issue #${existing} for lane ${KNEXT_LANE}"
+          gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" \
+            --body "**Recovered.** This credential night ran green end to end (credential-ref, build-next, all deploy-tests shards, shard-ledger all \`success\`): ${RUN_URL}. Closing — the current streak is what \`docs/compat-matrix.md\`/the pinned matrix tracker now report; re-opens automatically on the next red for this lane."
+          gh issue close "${existing}" --repo "${GITHUB_REPOSITORY}"

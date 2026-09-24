@@ -371,6 +371,34 @@ export const PER_PATH_THRESHOLDS = {
  * Floors move to 94.0 (both) — the measured value rounded DOWN to 0.5, per the
  * ratchet convention. Raw floors are left unchanged (77 / 79.0): both measure
  * comfortably above them already, and raising them is not this batch's target.
+ *
+ * **B6 — scaffolding & schema (#1237).** New behavioural tests for
+ * `cli/create.ts` (the `packageRoot()` corrupt-install throw, the
+ * filesystem-permission-failure catch branch in `createMain`, and the
+ * parting-words next-steps output) and `cli/schema/preflight.ts`
+ * (`readKnownCRDFields`'s two malformed-JSON fallback paths, the
+ * `client-too-old` verdict `preflightCRSchema` returns when a pre-v1.25
+ * kubectl rejects `--validate=strict` at flag parsing, and
+ * `formatPreflightFailure`'s `client-too-old` / `webhook-unavailable`
+ * message bodies). `generators/loadtest-job.ts`, `cli/schema/crd-schema.ts`
+ * and `cli/ci/init-ci-cmd.ts` were already at 0 honest-uncovered lines going
+ * in — the issue's raw-line figures counted bun's per-line under-attribution
+ * of multi-line template-literal/string-concatenation statements (continuation
+ * lines that DO execute but bun's per-line DA record does not mark), not real
+ * gaps; nothing to add there. Full local suite (467 test files; the same
+ * pre-existing environment-only `tests/scaffold-pack-contents.test.ts` `npm
+ * pack --dry-run` timeout as prior batches, unrelated to this area), measured
+ * with `dist/` built for kn-next + lib + db:
+ *
+ *   - global:                  honest 94.04% → **94.24% (9620/10208)**, raw 79.93% (11508/14398)
+ *   - packages/kn-next/src/**: honest 94.13% → **94.34% (8740/9264)**, raw 79.93% (10493/13128)
+ *
+ * Floors HOLD at 94.0 (both) this batch: rounded down to 0.5 per the ratchet
+ * convention, 94.24 / 94.34 do not clear the next 0.5 step (94.5), and 94.34 is
+ * only 0.16 below it — inside shouting distance but not within the 0.1 CI-margin
+ * band this convention rounds an extra step for, so no extra step is taken
+ * either. Raise to 94.5 in a later batch once the measurement clears it with
+ * real headroom, not on this batch's marginal gain.
  */
 export const HONEST_THRESHOLDS = {
   lines: 94.0,

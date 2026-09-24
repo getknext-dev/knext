@@ -220,6 +220,53 @@ describe("tier 1 — the verdict is a server-side dry-run apply", () => {
         expect(msg).toMatch(/webhook/i);
         // Misdiagnosing this as skew sends the user to upgrade the wrong thing.
         expect(msg).not.toMatch(/older than this CLI/i);
+        // The runbook lines: what kubectl said, and where to look next.
+        expect(msg).toContain(
+            "kubectl -n kn-next-operator-system get deploy,pods",
+        );
+        expect(msg).toContain("kn-next doctor");
+    });
+
+    it("a pre-v1.25 client rejecting --validate=strict at flag parsing is BLOCKED, not skew", () => {
+        const { fn } = stubKubectl({
+            apply: {
+                ok: false,
+                stdout: "",
+                stderr: 'invalid argument "strict" for "--validate" flag: unknown validation mode',
+            },
+        });
+        const outcome = preflightCRSchema({ kubectl: fn }, ARGS);
+        expect(outcome.verdict).toBe("blocked");
+        expect(outcome.reason).toBe("client-too-old");
+        // Fail-closed on the disqualified client: no field can be named, but it
+        // must not be reported as skew (that sends the user to upgrade the
+        // wrong thing — the operator/CRD, not their own kubectl).
+        expect(outcome.unknownFields).toEqual([]);
+    });
+
+    it("the client-too-old message names the fix and, when known, the offending client version", () => {
+        const outcome = preflightCRSchema(
+            {
+                kubectl: stubKubectl({
+                    apply: {
+                        ok: false,
+                        stdout: "",
+                        stderr: "unknown flag: --validate",
+                    },
+                }).fn,
+            },
+            ARGS,
+        );
+        expect(outcome.reason).toBe("client-too-old");
+        const bare = formatPreflightFailure(outcome);
+        expect(bare).toMatch(/older than v1\.25/);
+        expect(bare).toContain("kubectl version --client");
+        expect(bare).not.toContain("(v1.20");
+
+        const withVersion = formatPreflightFailure(outcome, {
+            oldClient: "v1.20.4",
+        });
+        expect(withVersion).toContain("(v1.20.4)");
     });
 });
 
@@ -312,6 +359,40 @@ describe("readKnownCRDFields — the shared schema read (doctor uses the same on
         const read = readKnownCRDFields(fn);
         expect(read.source).toBe("openapi-v3");
         expect(read.known?.has("spec.database.roSecretRef")).toBe(true);
+    });
+
+    it("falls through to the CRD tier when the OpenAPI v3 response is not valid JSON", () => {
+        // ok:true but unparsable stdout — a malformed response from the
+        // aggregated discovery endpoint, not a denial. Must degrade to tier 3
+        // rather than crashing or silently reporting `none` with a real CRD read
+        // available.
+        const { fn, calls } = stubKubectl({
+            openapi: { ok: true, stdout: "not json{{{", stderr: "" },
+            crd: {
+                ok: true,
+                stdout: JSON.stringify(crdObject()),
+                stderr: "",
+            },
+        });
+        const read = readKnownCRDFields(fn);
+        expect(read.source).toBe("crd");
+        expect(read.known?.has("spec.database.roSecretRef")).toBe(true);
+        expect(calls.some((c) => c.includes("crd"))).toBe(true);
+    });
+
+    it("reports `none` with a parse-failure note when the CRD response is not valid JSON either", () => {
+        const { fn } = stubKubectl({
+            openapi: {
+                ok: false,
+                stdout: "",
+                stderr: "Error from server (Forbidden): forbidden",
+            },
+            crd: { ok: true, stdout: "{not valid", stderr: "" },
+        });
+        const read = readKnownCRDFields(fn);
+        expect(read.source).toBe("none");
+        expect(read.known).toBeUndefined();
+        expect(read.detail).toMatch(/v1alpha1 structural schema/i);
     });
 
     it("reports `none` (not an empty schema) when both reads are denied", () => {

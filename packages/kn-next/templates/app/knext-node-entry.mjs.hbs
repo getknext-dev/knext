@@ -34,6 +34,15 @@ import { flushCompileCache, getCompileCacheDir } from 'node:module';
 // FAILS OPEN — an image without a loadable sharp serves the original, with one
 // warning — so a missing native addon can never stop the server from booting.
 import { handleImageRequest } from '@getknext/core/internal/vinext-image-optimizer';
+// The deployed Cache-Control rule (`public, max-age=0, must-revalidate` instead
+// of Next's origin `s-maxage=…`), applied to each Response before srvx writes it.
+// The `node:http` preload cannot do it here: srvx/node writes headers as a flat
+// array, which the preload does not rewrite. Off with
+// KNEXT_CACHE_CONTROL_NORMALIZE=0.
+import {
+  applyVinextDeployDefault,
+  cacheControlMiddleware,
+} from '@getknext/core/internal/response-cache-control';
 import { useNitroApp } from 'nitro/app';
 import { serve } from 'srvx/node';
 // vinext's `after()` hands its work to the request's EXECUTION CONTEXT
@@ -66,6 +75,11 @@ const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 const REQUEST_CAP = resolveMaxRequestBytes(process.env);
 const BAKE = process.env.KNEXT_COMPILE_CACHE_BAKE === '1';
 
+// vinext's own deploy Cache-Control switch, on by default (it covers responses
+// vinext computes itself, e.g. a fallback page's first request, which carries no
+// header for the middleware to rewrite). vinext reads it per request.
+applyVinextDeployDefault(process.env);
+
 // biome-ignore lint/correctness/useHookAtTopLevel: useNitroApp() is Nitro's server-app accessor, not a React hook — the "use" prefix is coincidental.
 const nitro = useNitroApp();
 const metrics = createMetricsState();
@@ -86,6 +100,8 @@ const appSrvx = serve({
   gracefulShutdown: false,
   silent: true,
   middleware: [
+    // Outermost, so every response below passes through it.
+    cacheControlMiddleware(process.env),
     // Rate / errors / duration for the :9464 scrape. A throw is recorded as a
     // 5xx and re-thrown, never swallowed.
     async (_req, next) => {
