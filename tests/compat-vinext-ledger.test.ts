@@ -31,7 +31,7 @@
  *     review finding 2), and its advisory (non-required) wiring.
  */
 
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,6 +64,16 @@ import {
   validateLedger,
   verifyEvidence,
 } from '../scripts/compat-vinext-ledger.mjs';
+
+// Some fixtures below create a fresh mkdtemp PER FETCH inside a `fetchSummaries`
+// closure (collectHistory can call it more than once) rather than once up front,
+// so they cannot be paired with an inline `finally`. Register each one here and
+// remove them all in a single afterAll (#880/#939 — a temp dir outside the repo
+// that is never removed still leaks, one directory per run, forever).
+const dynamicTempDirs: string[] = [];
+afterAll(() => {
+  for (const d of dynamicTempDirs) rmSync(d, { recursive: true, force: true });
+});
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LEDGER_PATH = 'test/compat-vinext-ledger.json';
@@ -915,6 +925,7 @@ describe('downloadRun against a REAL gh failure (a fake gh binary, not a mocked 
       ];
       const fetchSummaries = (id: string) => {
         const outDir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-run-'));
+        dynamicTempDirs.push(outDir);
         const script = id === '10' ? noValidScript : okScript;
         downloadRun(realExec(script), { repo: 'o/r', runId: id, dir: outDir });
         return readSummaries(outDir);
@@ -938,6 +949,7 @@ describe('downloadRun against a REAL gh failure (a fake gh binary, not a mocked 
       ];
       const fetchSummaries = (id: string) => {
         const outDir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-run-'));
+        dynamicTempDirs.push(outDir);
         const script = id === '10' ? noArtifactScript : okScript;
         downloadRun(realExec(script), { repo: 'o/r', runId: id, dir: outDir });
         return readSummaries(outDir);
