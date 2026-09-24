@@ -146,6 +146,15 @@ describe('validateLedger: the approved constraints', () => {
     expect(errs(ledger([entry({ evidence: { fail: ['1', '2'] } })])).join()).toMatch(
       /\{ run, cases \}/,
     );
+    const second = { run: '2', cases: ['a', 'b'] };
+    for (const bad of [
+      { run: 'latest', cases: ['a', 'b'] }, // not a numeric run id
+      { run: '1' }, // no cases
+      { run: '1', cases: [] }, // empty cases
+    ])
+      expect(errs(ledger([entry({ evidence: { fail: [bad, second] } })])).join()).toMatch(
+        /\{ run, cases \}/,
+      );
     const dup = {
       fail: [
         { run: '1', cases: ['a', 'b'] },
