@@ -11,12 +11,11 @@ import {
 /**
  * #1211 item 2: the crane checksum/version pin used by
  * `operator-e2e-nightly.yml` (TWO copies — the preflight job and the scale
- * job) and `supply-chain.yml` (the production pin #1210 cross-checked by
- * eye) was guarded only by STEP NAME
- * (`tests/operator-e2e-scale-image-preflight.test.ts`'s `name.includes('Install
- * crane')` checks) — the pin's actual VALUE (version + checksum) had no
- * guard of its own. A silently-drifted or hand-edited checksum on any one
- * copy would pass every existing test.
+ * job), `supply-chain.yml`, and `operator-supply-chain.yml` was guarded
+ * only by STEP NAME (`tests/operator-e2e-scale-image-preflight.test.ts`'s
+ * `name.includes('Install crane')` checks) — the pin's actual VALUE
+ * (version + checksum) had no guard of its own. A silently-drifted or
+ * hand-edited checksum on any one copy would pass every existing test.
  *
  * Two guards, both here:
  *   1. LOCKSTEP (PR-gated) — every CRANE_VERSION/CRANE_SHA256 pair found
@@ -30,17 +29,42 @@ import {
  *      FAILURE, never a pass (the same fail-closed rule as the action-pin and
  *      image-pin nightlies) — proved with an injected transport double, no
  *      live network from this test.
+ *
+ * rev-1390 review hardened `scanCranePins` itself (see
+ * `scripts/lib/crane-pin.mjs`'s own header for the full rationale):
+ *   - BUILT-INS ONLY — no more `yaml` import (a devDependency the nightly
+ *     job never installs, which filed a false RED every night);
+ *   - a download-URL cross-check that FAILS CLOSED on any of: the version
+ *     written as an unresolved `${{ }}` expression, the version/checksum
+ *     split across separate `env:` blocks, or values inlined directly into
+ *     a `run:` step with no named env vars at all — every shape a reviewer
+ *     named as a way a 5th copy could slip the lockstep check unnoticed.
  */
 
 const WORKFLOWS_DIR = resolve(import.meta.dirname, '../.github/workflows');
 
+/** A realistic synthetic "Install crane" step: named env vars AND the
+ * download URL, matching every real copy's shape — required now that
+ * `scanCranePins` cross-checks the two. */
+function syntheticCraneStep(version: string, sha256: string): string {
+  return (
+    'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n' +
+    `          CRANE_VERSION: ${version}\n` +
+    `          CRANE_SHA256: ${sha256}\n` +
+    '        run: |\n' +
+    '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
+    '            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"\n'
+  );
+}
+
 describe('scanCranePins — finds every CRANE_VERSION/CRANE_SHA256 pair', () => {
-  it('finds at least 3 real occurrences (2 in operator-e2e-nightly.yml, 1 in supply-chain.yml) — floor, not a ceiling', () => {
+  it('finds at least 4 real occurrences (2 in operator-e2e-nightly.yml, 1 in supply-chain.yml, 1 in operator-supply-chain.yml) — floor, not a ceiling', () => {
     const pins = scanCranePins(WORKFLOWS_DIR);
-    expect(pins.length).toBeGreaterThanOrEqual(3);
+    expect(pins.length).toBeGreaterThanOrEqual(4);
     const files = new Set(pins.map((p) => p.file));
     expect(files.has('operator-e2e-nightly.yml')).toBe(true);
     expect(files.has('supply-chain.yml')).toBe(true);
+    expect(files.has('operator-supply-chain.yml')).toBe(true);
   });
 
   it('every occurrence has a well-formed version (vX.Y.Z) and a 64-hex sha256', () => {
@@ -51,30 +75,114 @@ describe('scanCranePins — finds every CRANE_VERSION/CRANE_SHA256 pair', () => 
     }
   });
 
-  it('self-test: parses a synthetic step env block', () => {
+  it('self-test: parses a synthetic step env block (with its download URL, per the cross-check)', () => {
     const pins = scanCranePins(WORKFLOWS_DIR, {
-      readSource: () =>
-        'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n          CRANE_VERSION: v9.9.9\n          CRANE_SHA256: ' +
-        'a'.repeat(64) +
-        '\n',
+      readSource: () => syntheticCraneStep('v9.9.9', 'a'.repeat(64)),
       listFiles: () => ['synthetic.yml'],
     });
     expect(pins).toEqual([{ file: 'synthetic.yml', version: 'v9.9.9', sha256: 'a'.repeat(64) }]);
   });
 
-  it('does not match a CRANE_VERSION that is an unresolved GitHub Actions expression, not a real version', () => {
-    // A field named CRANE_VERSION with a value like `${{ inputs.craneVersion }}`
-    // is not a version at all — matching it anyway would report a fake pin
-    // whose "version" the lockstep/upstream checks could never resolve
-    // sensibly against a real release.
+  it('a file with none of the three signals (no pin at all) is silently skipped, not a violation', () => {
     const pins = scanCranePins(WORKFLOWS_DIR, {
-      readSource: () =>
-        'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n          CRANE_VERSION: ${{ inputs.craneVersion }}\n          CRANE_SHA256: ' +
-        'a'.repeat(64) +
-        '\n',
-      listFiles: () => ['synthetic.yml'],
+      readSource: () => 'jobs:\n  p:\n    steps:\n      - run: echo hi\n',
+      listFiles: () => ['unrelated.yml'],
     });
     expect(pins).toEqual([]);
+  });
+
+  describe('rev-1390: the download-URL cross-check catches every named drift shape', () => {
+    it('a CRANE_VERSION written as an unresolved ${{ }} expression is a VIOLATION, not silently dropped', () => {
+      // The version regex correctly refuses to match `${{ inputs.x }}` (it is
+      // not a version), so without the cross-check this file would silently
+      // report ZERO pins — indistinguishable from "no crane step here at
+      // all" — even though the download URL proves a crane install IS
+      // happening, just with an unresolvable pin.
+      const text =
+        'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n' +
+        '          CRANE_VERSION: ${{ inputs.craneVersion }}\n' +
+        `          CRANE_SHA256: ${'a'.repeat(64)}\n` +
+        '        run: |\n' +
+        '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
+        '            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"\n';
+      expect(() =>
+        scanCranePins(WORKFLOWS_DIR, {
+          readSource: () => text,
+          listFiles: () => ['synthetic.yml'],
+        }),
+      ).toThrow(/UNACCOUNTED-FOR/);
+    });
+
+    it('version and checksum split across SEPARATE env blocks — ordinal pairing accepts it, no proximity required', () => {
+      const text =
+        'jobs:\n' +
+        '  a:\n    steps:\n      - name: Install crane (part 1)\n        env:\n' +
+        '          CRANE_VERSION: v9.9.9\n' +
+        '  b:\n    steps:\n      - name: Install crane (part 2)\n        env:\n' +
+        `          CRANE_SHA256: ${'b'.repeat(64)}\n` +
+        '        run: |\n' +
+        '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
+        '            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"\n';
+      const pins = scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      });
+      expect(pins).toEqual([{ file: 'synthetic.yml', version: 'v9.9.9', sha256: 'b'.repeat(64) }]);
+    });
+
+    it('TWO pairs in one file pair by ORDER of appearance (1st version with 1st checksum, 2nd with 2nd) — not by any other correspondence', () => {
+      const text =
+        `${syntheticCraneStep('v1.1.1', 'a'.repeat(64))}\n` +
+        syntheticCraneStep('v2.2.2', 'b'.repeat(64));
+      const pins = scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      });
+      expect(pins).toEqual([
+        { file: 'synthetic.yml', version: 'v1.1.1', sha256: 'a'.repeat(64) },
+        { file: 'synthetic.yml', version: 'v2.2.2', sha256: 'b'.repeat(64) },
+      ]);
+    });
+
+    it('values inlined into run: with NO named env vars at all — the URL-vs-pair count mismatch catches it', () => {
+      const text =
+        'jobs:\n  p:\n    steps:\n      - name: Install crane\n        run: |\n' +
+        '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
+        '            "https://github.com/google/go-containerregistry/releases/download/v9.9.9/go-containerregistry_Linux_x86_64.tar.gz"\n' +
+        `          echo "${'c'.repeat(64)}  /tmp/crane.tar.gz" | sha256sum -c -\n`;
+      expect(() =>
+        scanCranePins(WORKFLOWS_DIR, {
+          readSource: () => text,
+          listFiles: () => ['synthetic.yml'],
+        }),
+      ).toThrow(/UNACCOUNTED-FOR/);
+    });
+
+    it('a 5th copy that names CRANE_VERSION/CRANE_SHA256 correctly but has NO download URL is still a violation (extra pair, no URL)', () => {
+      const text =
+        'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n' +
+        '          CRANE_VERSION: v9.9.9\n' +
+        `          CRANE_SHA256: ${'a'.repeat(64)}\n` +
+        '        run: echo "no curl here"\n';
+      expect(() =>
+        scanCranePins(WORKFLOWS_DIR, {
+          readSource: () => text,
+          listFiles: () => ['synthetic.yml'],
+        }),
+      ).toThrow(/UNACCOUNTED-FOR/);
+    });
+  });
+
+  it('does not match a CRANE_VERSION that is an unresolved GitHub Actions expression as a real pin count (self-test: superseded by the cross-check test above, kept as a direct regression pin on the throw)', () => {
+    expect(() =>
+      scanCranePins(WORKFLOWS_DIR, {
+        readSource: () =>
+          'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n          CRANE_VERSION: ${{ inputs.craneVersion }}\n          CRANE_SHA256: ' +
+          'a'.repeat(64) +
+          '\n        run: |\n          curl ... "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"\n',
+        listFiles: () => ['synthetic.yml'],
+      }),
+    ).toThrow();
   });
 });
 

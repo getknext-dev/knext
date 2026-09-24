@@ -35,17 +35,29 @@ const MUTATIONS = [
   },
   {
     label:
-      'findPinsInDoc: stop requiring the version to look like a real version (accept any string)',
-    anchor:
-      "    typeof doc.CRANE_VERSION === 'string' &&\n    typeof doc.CRANE_SHA256 === 'string' &&\n    /^v?\\d+\\.\\d+\\.\\d+$/.test(doc.CRANE_VERSION)",
-    replacement: "typeof doc.CRANE_VERSION === 'string' && typeof doc.CRANE_SHA256 === 'string'",
+      'scanCraneVersions: stop requiring the version to look like a real version (accept any string, including an unresolved ${{ }} expression)',
+    anchor: '/\\bCRANE_VERSION\\b\\s*[:=]\\s*[\'"]?(v?\\d+\\.\\d+\\.\\d+)[\'"]?/g',
+    replacement: '/\\bCRANE_VERSION\\b\\s*[:=]\\s*[\'"]?(\\S+)[\'"]?/g',
   },
   {
     label:
-      'scanCranePins: stop recursing into nested objects (would miss env: blocks nested under jobs/steps)',
+      'scanCranePins: stop cross-checking the download-URL count against the version/checksum pair count',
+    anchor: 'if (versions.length !== checksums.length || versions.length !== urlCount) {',
+    replacement: 'if (false) {',
+  },
+  {
+    label:
+      'countDownloadUrlOccurrences: match a DIFFERENT URL pattern (breaks the cross-check silently)',
+    anchor: '/go-containerregistry\\/releases\\/download/g',
+    replacement: '/go-containerregistry\\/releases\\/download-typo/g',
+  },
+  {
+    label:
+      'scanCranePins: pair versions/checksums out of ORDER (reverse the checksums before pairing)',
     anchor:
-      "for (const value of Object.values(doc)) {\n    if (value && typeof value === 'object') findPinsInDoc(value, out);\n  }",
-    replacement: '',
+      'for (let i = 0; i < versions.length; i++) {\n      found.push({ file, version: versions[i], sha256: checksums[i] });\n    }',
+    replacement:
+      'const reversed = checksums.slice().reverse();\n    for (let i = 0; i < versions.length; i++) {\n      found.push({ file, version: versions[i], sha256: reversed[i] });\n    }',
   },
   {
     label: 'parseChecksumsTxt: stop throwing on an empty/malformed checksums file',
@@ -75,7 +87,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(9);
+declareMutations(11);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -87,8 +99,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 9) {
-  console.error(`FATAL: declared 9 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 11) {
+  console.error(`FATAL: declared 11 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

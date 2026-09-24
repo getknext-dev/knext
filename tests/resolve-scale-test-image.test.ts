@@ -407,11 +407,145 @@ describe("checkPullable's only network egress is the injected exec/crane (#1211 
   //      (node:http/node:https ESM exports are read-only bindings in this
   //      runtime and cannot be monkey-patched the same way; the static scan
   //      above is what covers those two.)
+  //
+  // HONESTY, SO THE CLAIM IS NOT OVERSTATED (rev-1390 review):
+  //   - the STATIC scan covers only checkPullable's OWN function body text —
+  //     it does not follow calls into any HELPER function checkPullable
+  //     might invoke. Today that is moot (checkPullable calls nothing but
+  //     `exec`), but the scan itself proves nothing about a helper's body;
+  //     if checkPullable is ever refactored to delegate to one, the helper
+  //     needs its own scan, not an assumption this one already covers it.
+  //   - the DYNAMIC check patches `global.fetch` ONLY. It says nothing about
+  //     `node:http`/`node:https`/`node:net`/`node:tls` at runtime (those ESM
+  //     exports are read-only bindings here and cannot be monkey-patched the
+  //     same way) — that half of the claim rests entirely on the STATIC
+  //     regex scan above, not on any dynamic proof.
 
   const raw = readFileSync(
     new URL('../scripts/resolve-scale-test-image.mjs', import.meta.url),
     'utf8',
   );
+
+  /**
+   * A delimiter-BALANCING scanner that skips over string/template literals
+   * and comments — never a bare char-by-char brace/paren count (rev-1390
+   * finding 3). The naive version of this extractor counted EVERY `{`/`}`
+   * in the source, including ones inside a STRING LITERAL — a body
+   * containing e.g. `'}}'.` (a real shape: GitHub Actions `${{ }}`
+   * expression syntax quoted in an error message) closes the "function
+   * body" early, silently truncating the extraction and hiding everything
+   * after it from the STATIC scan below — precisely the failure mode a
+   * later `import('node:https')` added past that point would evade
+   * entirely. This scanner tracks single/double-quoted strings, template
+   * literals (including one level of `${ ... }` interpolation, whose own
+   * braces must NOT count toward the outer delimiter depth), `//` line
+   * comments and `/* *\/` block comments, and only counts `openChar`/
+   * `closeChar` occurrences seen in plain CODE state.
+   *
+   * Not a full JS parser (no regex-literal disambiguation, no nested
+   * interpolation beyond one level) — sufficient for this repo's actual
+   * source, and covered directly by
+   * `describe('findMatchingDelimiter — resists string/comment content
+   * that looks like a delimiter')` below, including the exact `'}}'.`
+   * shape the review named.
+   */
+  function findMatchingDelimiter(
+    source: string,
+    openIdx: number,
+    openChar: string,
+    closeChar: string,
+  ): number {
+    let depth = 0;
+    let state: 'code' | 'sq' | 'dq' | 'template' | 'templateExpr' | 'lineComment' | 'blockComment' =
+      'code';
+    const templateExprDepth: number[] = [];
+    for (let i = openIdx; i < source.length; i++) {
+      const c = source[i];
+      const next = source[i + 1];
+      if (state === 'code') {
+        if (c === '/' && next === '/') {
+          state = 'lineComment';
+          i++;
+          continue;
+        }
+        if (c === '/' && next === '*') {
+          state = 'blockComment';
+          i++;
+          continue;
+        }
+        if (c === "'") {
+          state = 'sq';
+          continue;
+        }
+        if (c === '"') {
+          state = 'dq';
+          continue;
+        }
+        if (c === '`') {
+          state = 'template';
+          continue;
+        }
+        if (c === openChar) depth++;
+        else if (c === closeChar) {
+          depth--;
+          if (depth === 0) return i;
+        }
+        continue;
+      }
+      if (state === 'lineComment') {
+        if (c === '\n') state = 'code';
+        continue;
+      }
+      if (state === 'blockComment') {
+        if (c === '*' && next === '/') {
+          state = 'code';
+          i++;
+        }
+        continue;
+      }
+      if (state === 'sq' || state === 'dq') {
+        if (c === '\\') {
+          i++;
+          continue;
+        }
+        if ((state === 'sq' && c === "'") || (state === 'dq' && c === '"')) state = 'code';
+        continue;
+      }
+      if (state === 'template') {
+        if (c === '\\') {
+          i++;
+          continue;
+        }
+        if (c === '`') {
+          state = 'code';
+          continue;
+        }
+        if (c === '$' && next === '{') {
+          templateExprDepth.push(0);
+          state = 'templateExpr';
+          i++;
+        }
+        continue;
+      }
+      if (state === 'templateExpr') {
+        // Braces inside a `${ ... }` interpolation are real CODE braces —
+        // they must balance against EACH OTHER (so a nested object literal
+        // doesn't end the interpolation early) but must NEVER be counted
+        // toward the outer `depth` this function is balancing.
+        if (c === '{') templateExprDepth[templateExprDepth.length - 1]++;
+        else if (c === '}') {
+          if (templateExprDepth[templateExprDepth.length - 1] === 0) {
+            templateExprDepth.pop();
+            state = 'template';
+          } else {
+            templateExprDepth[templateExprDepth.length - 1]--;
+          }
+        }
+        continue;
+      }
+    }
+    return -1;
+  }
 
   /**
    * Extracts the verbatim source of `export async function <name>(...) { ... }`.
@@ -429,34 +563,85 @@ describe("checkPullable's only network egress is the injected exec/crane (#1211 
     const sigIdx = source.indexOf(`export async function ${name}(`);
     if (sigIdx < 0) throw new Error(`could not find the signature of ${name}`);
     const parenOpenIdx = source.indexOf('(', sigIdx);
-    let parenDepth = 0;
-    let parenCloseIdx = -1;
-    for (let i = parenOpenIdx; i < source.length; i++) {
-      if (source[i] === '(') parenDepth++;
-      else if (source[i] === ')') {
-        parenDepth--;
-        if (parenDepth === 0) {
-          parenCloseIdx = i;
-          break;
-        }
-      }
-    }
+    const parenCloseIdx = findMatchingDelimiter(source, parenOpenIdx, '(', ')');
     if (parenCloseIdx < 0) throw new Error(`could not balance the parameter list of ${name}`);
 
     const openIdx = source.indexOf('{', parenCloseIdx);
     if (openIdx < 0) throw new Error(`could not find the opening brace of ${name}`);
-    let depth = 0;
-    for (let i = openIdx; i < source.length; i++) {
-      if (source[i] === '{') depth++;
-      else if (source[i] === '}') {
-        depth--;
-        if (depth === 0) return source.slice(sigIdx, i + 1);
-      }
-    }
-    throw new Error(`unbalanced braces extracting ${name}`);
+    const closeIdx = findMatchingDelimiter(source, openIdx, '{', '}');
+    if (closeIdx < 0) throw new Error(`unbalanced braces extracting ${name}`);
+    return source.slice(sigIdx, closeIdx + 1);
   }
 
+  describe('findMatchingDelimiter — resists string/comment content that looks like a delimiter', () => {
+    it('a string literal containing "}}" does not close the brace early (the exact rev-1390 shape)', () => {
+      // `'}}'.` is a real shape: a GitHub Actions `${{ }}` expression quoted
+      // inside an error message string — checkPullable's own file has
+      // similar prose. A naive char-count balancer closes at the FIRST `}`
+      // inside the string; this one must not.
+      const src =
+        "function f() {\n  const s = '}}';\n  return s;\n}\nconst AFTER = 'unreached by a broken extractor';\n";
+      const openIdx = src.indexOf('{');
+      const closeIdx = findMatchingDelimiter(src, openIdx, '{', '}');
+      expect(closeIdx).toBeGreaterThan(-1);
+      const extracted = src.slice(0, closeIdx + 1);
+      expect(extracted).toContain('return s;');
+      expect(extracted).not.toContain('AFTER');
+    });
+
+    it('a hidden call AFTER the string-with-braces is still INSIDE the extracted body and visible to a scan', () => {
+      // Reproduces the review's exact concern: a forbidden call
+      // (`import('node:https')`) placed textually AFTER a `'}}'`-bearing
+      // string must still be inside the extraction, not hidden past a
+      // falsely-early close.
+      const src =
+        "function f() {\n  const s = '}}';\n  const mod = import('node:https');\n  return mod;\n}\n";
+      const openIdx = src.indexOf('{');
+      const closeIdx = findMatchingDelimiter(src, openIdx, '{', '}');
+      const extracted = src.slice(0, closeIdx + 1);
+      expect(extracted).toContain("import('node:https')");
+    });
+
+    it('skips block and line comments containing an unbalanced brace', () => {
+      const src =
+        'function f() {\n  // a comment with a stray }\n  /* another } here */\n  return 1;\n}\n';
+      const openIdx = src.indexOf('{');
+      const closeIdx = findMatchingDelimiter(src, openIdx, '{', '}');
+      const extracted = src.slice(0, closeIdx + 1);
+      expect(extracted).toContain('return 1;');
+    });
+
+    it('handles a template literal interpolation whose OWN braces do not count toward the outer depth', () => {
+      const src = 'function f() {\n  const s = `${ { a: 1 } }`;\n  return s;\n}\n';
+      const openIdx = src.indexOf('{');
+      const closeIdx = findMatchingDelimiter(src, openIdx, '{', '}');
+      const extracted = src.slice(0, closeIdx + 1);
+      expect(extracted).toContain('return s;');
+    });
+
+    it('extracts the REAL checkPullable body unchanged by this rewrite (regression, not just synthetic fixtures)', () => {
+      const extracted = extractFunctionSource(raw, 'checkPullable');
+      expect(extracted).toContain('export async function checkPullable');
+      expect(extracted).toContain("exec(crane, ['manifest', ref])");
+    });
+  });
+
   const checkPullableSrc = extractFunctionSource(raw, 'checkPullable');
+
+  /** Shared between the STATIC test and its self-check, so the two can never
+   * drift apart (the self-check proving a DIFFERENT filter than the real
+   * test uses would prove nothing about the real test). */
+  const FORBIDDEN_NETWORK_PRIMITIVES = [
+    /\bfetch\(/,
+    /\bhttp\.(request|get)\(/,
+    /\bhttps\.(request|get)\(/,
+    /\bXMLHttpRequest\b/,
+    /\bnet\.connect\(/,
+    /\btls\.connect\(/,
+    /\bnew WebSocket\(/,
+    /require\(\s*['"](node:)?(http|https|net|tls)['"]\s*\)/,
+    /import\(\s*['"](node:)?(http|https|net|tls)['"]\s*\)/,
+  ];
 
   it('extraction self-check: the extracted body is non-trivial and balanced (guard non-vacuity)', () => {
     expect(checkPullableSrc).toContain('export async function checkPullable');
@@ -471,29 +656,36 @@ describe("checkPullable's only network egress is the injected exec/crane (#1211 
   });
 
   it("STATIC: checkPullable's own body contains no network primitive other than exec()", () => {
-    const forbidden = [
-      /\bfetch\(/,
-      /\bhttp\.(request|get)\(/,
-      /\bhttps\.(request|get)\(/,
-      /\bXMLHttpRequest\b/,
-      /\bnet\.connect\(/,
-      /\btls\.connect\(/,
-      /\bnew WebSocket\(/,
-      /require\(\s*['"](node:)?(http|https|net|tls)['"]\s*\)/,
-      /import\(\s*['"](node:)?(http|https|net|tls)['"]\s*\)/,
-    ];
-    const hits = forbidden.filter((re) => re.test(checkPullableSrc));
+    const hits = FORBIDDEN_NETWORK_PRIMITIVES.filter((re) => re.test(checkPullableSrc));
     expect(
       hits.map((re) => re.source),
       `checkPullable's body matched a forbidden network primitive:\n${checkPullableSrc}`,
     ).toEqual([]);
   });
 
-  it('STATIC self-check: the forbidden-primitive scan actually fires on a synthetic violation', () => {
-    // Non-vacuity for the scan itself: prove it CAN fail before trusting that
-    // it passed for the right reason.
-    const withFetch = `export async function checkPullable(ref) {\n  await fetch(ref);\n}`;
-    expect(/\bfetch\(/.test(withFetch)).toBe(true);
+  it('STATIC self-check: the REAL PIPELINE (extractFunctionSource + the forbidden-primitive filter) actually fires on a synthetic violation — not a bare regex tested in isolation', () => {
+    // rev-1390 finding 4: the prior version of this self-check only asserted
+    // a regex literal matches a hand-written string — it never called
+    // `extractFunctionSource` or filtered with `FORBIDDEN_NETWORK_PRIMITIVES`,
+    // so it proved nothing about whether THIS SUITE's actual scan would
+    // catch a real violation. This version runs the identical two-step
+    // pipeline the STATIC test above uses, against a synthetic FULL FILE —
+    // including the exact rev-1390 finding-3 shape (a `'}}'`-bearing string
+    // BEFORE the forbidden call), so a regression in either the extractor or
+    // the filter is caught here, not just asserted never to have existed.
+    const synthetic =
+      "export async function checkPullable(ref, { exec = defaultExec, crane = 'crane' } = {}) {\n" +
+      "  const decoy = '}}';\n" +
+      '  await fetch(ref);\n' +
+      "  return exec(crane, ['manifest', ref]);\n" +
+      '}\n';
+    const extracted = extractFunctionSource(synthetic, 'checkPullable');
+    expect(extracted).toContain('await fetch(ref)'); // extraction itself must not truncate early
+    const hits = FORBIDDEN_NETWORK_PRIMITIVES.filter((re) => re.test(extracted));
+    expect(
+      hits.length,
+      'the real pipeline failed to catch a synthetic fetch() violation',
+    ).toBeGreaterThan(0);
   });
 
   it('DYNAMIC: a real checkPullable() call never invokes global.fetch, even if fetch is reachable and would throw', async () => {

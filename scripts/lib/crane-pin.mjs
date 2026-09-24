@@ -2,22 +2,53 @@
  * Pure logic for the crane version+checksum pin guard (#1211 item 2).
  *
  * `operator-e2e-nightly.yml` (two copies — the preflight job and the scale
- * job) and `supply-chain.yml` each carry an "Install crane (version +
- * checksum pinned)" step. The PRIOR guard
+ * job), `supply-chain.yml`, and `operator-supply-chain.yml` each carry an
+ * "Install crane (version + checksum pinned)" step. The PRIOR guard
  * (`tests/operator-e2e-scale-image-preflight.test.ts`) only asserted the step
  * NAME exists at the right position — the pin's actual VALUE had no guard,
  * so a hand-edited or drifted `CRANE_SHA256` on any one copy would pass
  * every existing test. #1210's review caught the current copies being
  * byte-identical only by eye.
  *
- * This module is dependency-free ESM, mirroring `scripts/verify-action-pins.mjs`'s
- * shape: pure scan/compare functions here, a thin CLI wrapper elsewhere for
- * the parts that need real `fetch`/filesystem access.
+ * BUILT-INS ONLY, DELIBERATELY (rev-1390 finding 1) — an earlier revision
+ * imported the `yaml` package to parse workflow files into objects, which
+ * is a devDependency: the nightly job that runs `verify-crane-pin.mjs`
+ * installs no dependencies (mirroring `verify-action-pins.mjs`'s own
+ * "dependency-free ESM on the runner's built-in Node" design, so the job
+ * auditing the supply chain cannot itself become part of it), so every
+ * night hit `ERR_MODULE_NOT_FOUND` and filed a false RED issue. This module
+ * now scans raw TEXT with regular expressions, never a YAML parser — which
+ * also removes the "YAML parse failure silently skipped" failure mode the
+ * old `try { parseYaml(...) } catch { continue; }` had: there is no parse
+ * step left to fail.
+ *
+ * TWO INDEPENDENT SIGNALS, CROSS-CHECKED (rev-1390 finding 2) — matching
+ * only `CRANE_VERSION`/`CRANE_SHA256` key occurrences missed several real
+ * drift shapes a reviewer named directly: the version written as an
+ * unresolved `${{ }}` expression (which the version regex correctly refuses
+ * to match, silently dropping that copy from the count instead of flagging
+ * it), the version and checksum split across separate `env:` blocks far
+ * enough apart that a naive proximity window would miss the pairing, or the
+ * values inlined directly into a `curl`/`sha256sum` `run:` step with no
+ * `CRANE_VERSION`/`CRANE_SHA256` names at all. None of those shapes is
+ * individually distinguishable from "this file has no crane pin" by the
+ * `CRANE_VERSION`/`CRANE_SHA256` scan alone. So this module ALSO scans for
+ * the literal download URL host+path
+ * (`go-containerregistry/releases/download`, unconditionally present in
+ * every real "Install crane" step regardless of how the version got there)
+ * and requires the two counts — download-URL occurrences and matched
+ * (version, checksum) pairs — to be EQUAL per file. A mismatch in EITHER
+ * direction throws: more URLs than pairs means some copy's version/checksum
+ * pair went unrecognised (silent drift the whole point of this guard is to
+ * catch); more pairs than URLs would mean this scan is itself
+ * double-counting. Ordinal pairing (i-th `CRANE_VERSION` value with the
+ * i-th `CRANE_SHA256` value, by their order of appearance in the file) is
+ * what makes the "separate env blocks" shape safe to accept: there is no
+ * proximity requirement between them at all.
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parse as parseYaml } from 'yaml';
 
 /**
  * The exact release asset this workflow downloads — the Linux x86_64
@@ -29,32 +60,45 @@ export function filenameForPin() {
   return 'go-containerregistry_Linux_x86_64.tar.gz';
 }
 
-/**
- * Recursively finds every object anywhere in a parsed workflow document that
- * carries BOTH `CRANE_VERSION` and `CRANE_SHA256` string values (an `env:`
- * block on an "Install crane" step, today) — a SCAN, not a fixed-path lookup,
- * so a pin moved to a different job/step shape is still found.
- */
-function findPinsInDoc(doc, out) {
-  if (!doc || typeof doc !== 'object') return;
-  if (
-    typeof doc.CRANE_VERSION === 'string' &&
-    typeof doc.CRANE_SHA256 === 'string' &&
-    /^v?\d+\.\d+\.\d+$/.test(doc.CRANE_VERSION)
-  ) {
-    const version = doc.CRANE_VERSION.startsWith('v') ? doc.CRANE_VERSION : `v${doc.CRANE_VERSION}`;
-    out.push({ version, sha256: doc.CRANE_SHA256.toLowerCase() });
+/** Every real, well-formed `vX.Y.Z` value assigned to `CRANE_VERSION`, in
+ * order of appearance. A value shaped like `${{ ... }}` (an unresolved
+ * GitHub Actions expression) never matches this regex, so it is correctly
+ * absent from the result rather than mis-parsed as a version string. */
+function scanCraneVersions(text) {
+  const re = /\bCRANE_VERSION\b\s*[:=]\s*['"]?(v?\d+\.\d+\.\d+)['"]?/g;
+  const out = [];
+  for (const m of text.matchAll(re)) {
+    out.push(m[1].startsWith('v') ? m[1] : `v${m[1]}`);
   }
-  for (const value of Object.values(doc)) {
-    if (value && typeof value === 'object') findPinsInDoc(value, out);
-  }
+  return out;
+}
+
+/** Every 64-hex value assigned to `CRANE_SHA256`, in order of appearance. */
+function scanCraneChecksums(text) {
+  const re = /\bCRANE_SHA256\b\s*[:=]\s*['"]?([0-9a-f]{64})['"]?/gi;
+  const out = [];
+  for (const m of text.matchAll(re)) out.push(m[1].toLowerCase());
+  return out;
+}
+
+/** How many times the crane release download URL's host+path appears —
+ * present in EVERY real "Install crane" step regardless of how its
+ * version/checksum got there (named env vars, inline literals, a different
+ * variable name entirely). */
+function countDownloadUrlOccurrences(text) {
+  const re = /go-containerregistry\/releases\/download/g;
+  return (text.match(re) ?? []).length;
 }
 
 /**
  * Scans every `.github/workflows/*.yml`/`*.yaml` file for CRANE_VERSION /
- * CRANE_SHA256 pairs. `deps.listFiles`/`deps.readSource` are injectable so
- * the test suite can exercise the parser against a synthetic fixture without
- * touching the real filesystem.
+ * CRANE_SHA256 pairs, TEXT-based (no YAML parser — see the module header).
+ * `deps.listFiles`/`deps.readSource` are injectable so the test suite can
+ * exercise the parser against a synthetic fixture without touching the real
+ * filesystem.
+ *
+ * Throws (fail closed) when a file's download-URL count and matched-pair
+ * count disagree — see the module header for what that catches.
  *
  * @param {string} workflowsDir
  * @param {{ listFiles?: () => string[], readSource?: (file: string) => string }} [deps]
@@ -72,15 +116,29 @@ export function scanCranePins(workflowsDir, deps = {}) {
 
   const found = [];
   for (const file of listFiles()) {
-    let doc;
-    try {
-      doc = parseYaml(readSource(file));
-    } catch {
-      continue; // unparseable YAML is out of scope for this scan
+    const text = readSource(file);
+    const versions = scanCraneVersions(text);
+    const checksums = scanCraneChecksums(text);
+    const urlCount = countDownloadUrlOccurrences(text);
+
+    if (versions.length === 0 && checksums.length === 0 && urlCount === 0) {
+      continue; // no crane pin anywhere in this file
     }
-    const perFile = [];
-    findPinsInDoc(doc, perFile);
-    for (const p of perFile) found.push({ file, ...p });
+
+    if (versions.length !== checksums.length || versions.length !== urlCount) {
+      throw new Error(
+        `${file}: crane pin scan found an UNACCOUNTED-FOR occurrence — ` +
+          `${versions.length} CRANE_VERSION value(s), ${checksums.length} CRANE_SHA256 value(s), ` +
+          `${urlCount} download-URL occurrence(s). All three must match; a mismatch means at least ` +
+          `one copy has a version/checksum shape this scan cannot recognise (an unresolved ` +
+          `\${{ }} expression, an inline literal with no named env var, or a genuinely missing ` +
+          `half of a pair) — #1211 item 2 exists precisely to catch that, not to skip past it.`,
+      );
+    }
+
+    for (let i = 0; i < versions.length; i++) {
+      found.push({ file, version: versions[i], sha256: checksums[i] });
+    }
   }
   return found;
 }
