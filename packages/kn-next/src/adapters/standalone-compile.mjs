@@ -85,7 +85,7 @@ import { isBuiltin } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
-import { computedRequireInventory } from "./computed-require-scan.mjs";
+import { computedRequireInventory, moduleDisposition } from "./computed-require-scan.mjs";
 import {
     DEV_ONLY_STUB_SOURCE,
     resolveExportsUnderNode,
@@ -398,15 +398,26 @@ const standaloneResolver = {
             }
             if (resolved !== undefined) {
                 if (!isAbsolute(resolved)) return undefined;
-                const real = realpathSync(resolved);
-                if (!isInside(real, ROOT)) return { path: a.path, external: true };
-                const disk = onDisk(real);
-                if (!disk) bundledFiles.add(real);
-                return disk ?? undefined;
+                const { real, where } = moduleDisposition(resolved, {
+                    root: ROOT,
+                    diskClosure: DISK_CLOSURE,
+                });
+                if (where === "external") return { path: a.path, external: true };
+                if (where === "disk") return onDisk(real);
+                bundledFiles.add(real);
+                return undefined;
             }
             if (isBareSpecifier(a.path)) {
                 const fallback = nodeConditionTarget(a.path, dirname(a.importer));
-                if (fallback) return onDisk(realpathSync(fallback)) ?? { path: fallback };
+                if (fallback) {
+                    const { real, where } = moduleDisposition(fallback, {
+                        root: ROOT,
+                        diskClosure: DISK_CLOSURE,
+                    });
+                    if (where === "disk") return onDisk(real);
+                    if (where === "bundle") bundledFiles.add(real);
+                    return { path: fallback };
+                }
                 // Not in the traced tree at all (e.g. `critters`, required only
                 // when `optimizeCss` is on). The uncompiled server would throw
                 // at that require if it were ever reached; a runtime require

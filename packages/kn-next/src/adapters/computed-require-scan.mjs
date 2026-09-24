@@ -15,10 +15,30 @@
  */
 import { readFileSync, realpathSync } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
-import { relative } from 'node:path';
+import { isAbsolute, relative } from 'node:path';
 
 /** Characters after which a `/` starts a regex literal rather than a division. */
 const REGEX_PREFIX = new Set([...'(,=:[!&|?{};+-*%<>~^']);
+/** Keywords after which a `/` starts a regex literal (`return /x/.test(s)`). */
+const REGEX_KEYWORDS = new Set([
+  'return', 'typeof', 'case', 'void', 'in', 'of', 'throw', 'yield', 'await', 'else',
+  'delete', 'instanceof', 'new', 'do',
+]);
+
+/** Whether a `/` at `i` starts a regex literal, given the code before it. */
+function slashStartsRegex(src, i, lastSignificant) {
+  if (lastSignificant === '' || REGEX_PREFIX.has(lastSignificant)) return true;
+  if (!/[\w$]/.test(lastSignificant)) return false;
+  let end = i - 1;
+  while (end >= 0 && /\s/.test(src[end])) end--;
+  let start = end;
+  while (start >= 0 && /[\w$]/.test(src[start])) start--;
+  // `x.return / 2` is a property, not the keyword.
+  let before = start;
+  while (before >= 0 && /\s/.test(src[before])) before--;
+  if (src[before] === '.') return false;
+  return REGEX_KEYWORDS.has(src.slice(start + 1, end + 1));
+}
 
 /**
  * `src` with the contents of comments, string literals, template-literal TEXT
@@ -88,7 +108,7 @@ export function maskCommentsAndStrings(src) {
       i++;
       continue;
     }
-    if (c === '/' && (lastSignificant === '' || REGEX_PREFIX.has(lastSignificant))) {
+    if (c === '/' && slashStartsRegex(src, i, lastSignificant)) {
       let k = i + 1;
       let inClass = false;
       while (k < src.length && src[k] !== '\n') {
@@ -223,4 +243,20 @@ export function computedRequireInventory(files, baseDir) {
   }
   rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return Object.fromEntries(rows);
+}
+
+/**
+ * Where the compiled executable takes a resolved module from, judged by its
+ * REAL path: `external` (outside the standalone tree — left as a runtime
+ * require), `disk` (in the disk closure — shared with disk-loaded chunks), or
+ * `bundle` (compiled into the executable).
+ * @param {string} path
+ * @param {{ root: string, diskClosure: Set<string> }} ctx
+ * @returns {{ real: string, where: 'external' | 'disk' | 'bundle' }}
+ */
+export function moduleDisposition(path, { root, diskClosure }) {
+  const real = realpathSync(path);
+  const rel = relative(realpathSync(root), real);
+  if (rel.startsWith('..') || isAbsolute(rel)) return { real, where: 'external' };
+  return { real, where: diskClosure.has(real) ? 'disk' : 'bundle' };
 }
