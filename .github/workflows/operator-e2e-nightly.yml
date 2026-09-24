@@ -23,8 +23,12 @@ name: Operator E2E (nightly / dispatch)
 
 on:
   schedule:
-    # 03:17 UTC daily — off-peak, avoids top-of-hour runner contention.
-    - cron: '17 3 * * *'
+    # 03:29 UTC daily — off-peak. #1301: moved from 03:17, which collided
+    # (same UTC minute) with secret-scan-nightly.yml AND the node credential
+    # cron in test-e2e-deploy.yml (which keeps 03:17 — it is cross-referenced
+    # by docs/compat/window-node-lane.md and several tests, so this workflow
+    # moves instead). See docs/ci/capacity-budget.md.
+    - cron: '29 3 * * *'
   workflow_dispatch:
     inputs:
       scale_test_image:

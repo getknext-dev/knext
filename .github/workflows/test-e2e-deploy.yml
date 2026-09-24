@@ -130,6 +130,20 @@ on:
         required: false
         type: boolean
         default: false
+      # #1301 — branch capacity control: dispatch-only (github.event.inputs is
+      # empty on every `schedule` event, so no cron can ever select this — the
+      # same property `sandboxFetchDebug` relies on), never falls through to a
+      # credential or early-warning night. When true, KNEXT_DEPLOY_MANIFEST
+      # below selects test/deploy-tests-manifest.smoke.knext.json — the SAME
+      # 16-way shard split, a far narrower `rules.include`, and the credential
+      # manifest's exclude/suites ledger copied verbatim (never hand-edited;
+      # see scripts/lib/smoke-manifest.mjs). Targets the measured cost of
+      # routine branch dispatches (docs/ci/capacity-budget.md).
+      smoke:
+        description: '#1301 — dispatch-only: run the 16-shard branch SMOKE selection (test/deploy-tests-manifest.smoke.knext.json) instead of the full credential manifest. Never runs on schedule.'
+        required: false
+        type: boolean
+        default: false
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
@@ -162,6 +176,21 @@ on:
     # 23:47 UTC nightly — the WEBPACK × BUN CREDENTIAL night (#1245). 90 min after
     # the node-webpack night and 90 min before the 01:17 node credential night.
     - cron: '47 23 * * *'
+
+# #1301 — per-branch concurrency for DISPATCHES ONLY. A workflow_dispatch run
+# groups (and cancels a superseded run) by ref, so a second dispatch on the
+# same branch stops paying for the first one's remaining shards (measured:
+# one branch ran 12 full dispatches — ~1.8k job-minutes — in a day). Every
+# OTHER trigger (i.e. every `schedule` — every credential and early-warning
+# cron) gets a group keyed on github.run_id, which by construction no other
+# run can ever share, so no credential/early-warning night is EVER grouped
+# with anything and cancel-in-progress is likewise gated to
+# workflow_dispatch only — cancelling a pending credential run resets its
+# 14-night window (jev 0.83; see docs/ci/capacity-budget.md and
+# tests/ci-concurrency-group.test.ts for the ci.yml precedent this mirrors).
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
@@ -235,6 +264,16 @@ env:
   # AND the weekly bun lane. '1' is the exact value scripts/e2e-deploy.sh
   # gates on. Guard-tested in tests/compat-suite-workflow.test.ts.
   KNEXT_SANDBOX_FETCH_DEBUG: ${{ github.event.inputs.sandboxFetchDebug == 'true' && '1' || '' }}
+  # #1301 — the ONE manifest-filename decision, made once at the workflow
+  # level so both the test-selection step and the "Compute excluded count"
+  # step (which must agree with it, or the reported excluded count would lie)
+  # read the SAME value rather than each hardcoding the filename separately.
+  # github.event.inputs is empty on every `schedule` event, so this always
+  # resolves to the real credential manifest on a cron — never
+  # github.event.schedule-gated, by the same construction as
+  # KNEXT_SANDBOX_FETCH_DEBUG above. tests/ci-capacity-budget.test.ts asserts
+  # this file's name appears hardcoded in exactly this one place.
+  KNEXT_DEPLOY_MANIFEST: ${{ github.event.inputs.smoke == 'true' && 'deploy-tests-manifest.smoke.knext.json' || 'deploy-tests-manifest.knext.json' }}
 
 jobs:
   # ── #850 / ADR-0056: which knext commit does this night test? ──────────────
@@ -839,6 +878,12 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # #1301 — cap concurrent shard jobs at 8 (was unset, i.e. GitHub would
+      # schedule all 16 at once). A full credential run's peak footprint is
+      # now 8 shards + credential-ref + build-next ≈ 10 jobs against the Free
+      # plan's 20 concurrent-job cap, leaving headroom for another lane or
+      # nightly in the same window. See docs/ci/capacity-budget.md.
+      max-parallel: 8
       matrix:
         # #147 A3-3 — 16-way shard (was 4). With full-shard execution
         # (NEXT_TEST_CONTINUE_ON_ERROR below) each shard must finish its WHOLE
@@ -1584,7 +1629,7 @@ jobs:
           # v16.2.0+ get-test-filter.js supports comma-separated manifest
           # MERGING; we deliberately keep the single-file mirror (ADR-0007
           # follow-up records the layering option).
-          NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/deploy-tests-manifest.knext.json
+          NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/${{ env.KNEXT_DEPLOY_MANIFEST }}
           # #147 item 4 — the lane, decided ONCE at the workflow env level
           # (dispatch input / weekly bun cron / node default). run-tests.js and
           # next-deploy.ts spawn children with {...process.env}, so this reaches
@@ -1647,8 +1692,13 @@ jobs:
         if: always()
         id: excl
         working-directory: knext
+        env:
+          # #1301 — read the SAME manifest decision the test-selection step
+          # used (never a second hardcoded literal here), via env rather than
+          # `${{ }}` inline in the script body.
+          KNEXT_DEPLOY_MANIFEST: ${{ env.KNEXT_DEPLOY_MANIFEST }}
         run: |
-          COUNT=$(node -e "console.log(require('./test/deploy-tests-manifest.knext.json').rules.exclude.length)")
+          COUNT=$(node -e "console.log(require('./test/' + process.env.KNEXT_DEPLOY_MANIFEST).rules.exclude.length)")
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
 
       - name: Summarize shard result
