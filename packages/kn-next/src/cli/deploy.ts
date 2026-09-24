@@ -33,6 +33,10 @@ import {
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import {
+    assertCompiledArtifactFresh,
+    compileArtifactForDeploy,
+} from "./build-artifact";
+import {
     renderNextAppCR,
     resolveDigest,
     validateCRImageRef,
@@ -600,6 +604,27 @@ export async function deploy() {
                 );
             }
         }
+
+        // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile
+        // for the standalone-bun target (the DEFAULT since #1183) and for
+        // vinext both do an UNCONDITIONAL `COPY` of a compiled executable
+        // that only `kn-next build` used to produce — `deploy` ran the
+        // project build above and stopped there, so its docker build either
+        // failed the COPY (no such file) or ran a STALE binary left over
+        // from an earlier `kn-next build` in this checkout. Shares the EXACT
+        // compile step `kn-next build` uses (build-artifact.ts). Runs here,
+        // UNCONDITIONALLY, only on the fresh-build leg — never gated on
+        // "does a binary already exist" — so it always recompiles from the
+        // tree the project build just produced and staleness cannot occur on
+        // THIS path by construction. The `--skip-build` leg below instead
+        // fails closed via `assertCompiledArtifactFresh`, since nothing
+        // rebuilds anything there.
+        compileArtifactForDeploy(config, process.cwd());
+    } else {
+        // `--skip-build`: nothing above ran, so nothing recompiled the exec
+        // either. Fail closed rather than silently shipping whatever happens
+        // to be sitting in the checkout — missing or stale, both loud.
+        assertCompiledArtifactFresh(config, process.cwd());
     }
 
     // T2a — the SAME lock-step guarantee on the vinext leg, where the built id

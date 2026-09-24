@@ -17,7 +17,16 @@
  * node_modules/.claude/templates/__tests__/dist — none of those are a real,
  * deployed app config), resolves each one's nearest ancestor `package.json`,
  * and — only when that package's `build` script is `vite build` — asserts the
- * config's source text pins `build: 'vinext'`.
+ * config resolves `build === 'vinext'`.
+ *
+ * IMPORTS the config with `import()`, the exact mechanism `loader.ts`'s
+ * `loadConfig` uses — not a text regex (review finding #2, jev 0.85): the
+ * first version matched `build\s*:\s*['"]vinext['"]` against the raw file
+ * text, which is DECORATIVE — it also matches the explanatory comment this
+ * PR put above each pin (`// build: 'vinext' EXPLICIT — ...`), so deleting
+ * the real key while leaving the comment in place would still pass. Actually
+ * importing the module and reading `config.build` off the evaluated object
+ * cannot be fooled by a comment; the mutation proof below is what pins that.
  *
  * A config with no owning `package.json` (should not happen for a real app)
  * or a `package.json` with no `build` script is left alone: this guard is
@@ -100,6 +109,17 @@ function vinextBuildConfigs(): Finding[] {
     return findings;
 }
 
+/**
+ * Import the config module and read `config.build` off the EVALUATED default
+ * export — the same mechanism `loader.ts`'s `loadConfig` uses. Not a text
+ * regex: a regex over the raw source also matches an explanatory comment
+ * that happens to contain the same text (review finding #2).
+ */
+async function resolvedBuildOf(configPath: string): Promise<unknown> {
+    const mod = (await import(configPath)) as { default?: { build?: unknown } };
+    return mod.default?.build;
+}
+
 describe("#1183 every vite-build in-repo app config pins build: 'vinext'", () => {
     it("finds at least one vite-build config — otherwise this guard is checking nothing", () => {
         // Mutation-proof half 1: if nobody in the repo builds with vite
@@ -107,15 +127,18 @@ describe("#1183 every vite-build in-repo app config pins build: 'vinext'", () =>
         expect(vinextBuildConfigs().length).toBeGreaterThan(0);
     });
 
-    it("every vite-build config pins build: 'vinext' explicitly", () => {
+    it("every vite-build config resolves build === 'vinext' explicitly", async () => {
         const findings = vinextBuildConfigs();
-        const unpinned = findings.filter((f) => {
-            const source = readFileSync(f.configPath, "utf8");
-            return !/build\s*:\s*['"]vinext['"]/.test(source);
-        });
+        const results = await Promise.all(
+            findings.map(async (f) => ({
+                path: relative(REPO_ROOT, f.configPath),
+                build: await resolvedBuildOf(f.configPath),
+            })),
+        );
+        const unpinned = results.filter((r) => r.build !== "vinext");
         expect(
-            unpinned.map((f) => relative(REPO_ROOT, f.configPath)),
-            "these configs build with `vite build` but do not pin `build: 'vinext'` — " +
+            unpinned,
+            "these configs build with `vite build` but do not resolve `build: 'vinext'` — " +
                 "an absent `build` now resolves to the standalone (turbopack) default " +
                 "(#1183), which this app's build script does not produce",
         ).toEqual([]);

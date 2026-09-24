@@ -80,6 +80,14 @@ mock.module("../cli/exec", () => ({
     isEntrypoint: (...a: unknown[]) => isEntrypoint(...a),
 }));
 
+// #1339 review finding #1: deploy() now compiles the standalone-bun/vinext
+// executable via this shared step — stub it, same treatment as every other
+// side-effecting seam here.
+mock.module("../cli/build-artifact", () => ({
+    compileArtifactForDeploy: () => ({ compiled: false }),
+    assertCompiledArtifactFresh: () => {},
+}));
+
 const uploadAssets = mock<AnyFn>(async () => {
     effects.push("upload-assets");
     bucket.push("_next/static/deploytag/chunk.js");

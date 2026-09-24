@@ -133,20 +133,36 @@ describe("kn-next build — bun-exports heal ships on the user build path (#188)
         await expect(build({ skipNextBuild: true })).resolves.toBeUndefined();
     });
 
-    it("build.ts invokes the heal on the post-build path (source contract)", () => {
-        const src = readFileSync(
+    it("build.ts invokes the heal on the post-build path, via the shared compile step (source contract)", () => {
+        // #1339 review finding #1: the heal (and the standalone-bun/vinext
+        // compile) moved into ONE shared step (`build-artifact.ts`'s
+        // `compileArtifactForDeploy`) so `kn-next deploy`/`preview` reuse it
+        // instead of duplicating it. build.ts no longer calls
+        // `healBunExportTargets` directly — it calls the shared step, which
+        // does. Both halves are asserted so this stays a real source
+        // contract, not a rename that quietly stopped checking anything.
+        const buildSrc = readFileSync(
             resolve(import.meta.dirname, "../cli/build.ts"),
             "utf8",
         );
-        expect(src).toContain("healBunExportTargets");
-        // post-build: the heal must come after the next-build step and before
-        // the completion log.
-        // (the CALL — `lastIndexOf` skips the import at the top of the file)
-        expect(src.lastIndexOf("healBunExportTargets(")).toBeGreaterThan(
-            src.indexOf("skipNextBuild"),
+        const artifactSrc = readFileSync(
+            resolve(import.meta.dirname, "../cli/build-artifact.ts"),
+            "utf8",
         );
-        expect(src.lastIndexOf("healBunExportTargets(")).toBeLessThan(
-            src.indexOf("Build complete!"),
+
+        // build.ts calls the shared step, post-build and before completion.
+        expect(buildSrc).toContain("compileArtifactForDeploy(");
+        expect(
+            buildSrc.lastIndexOf("compileArtifactForDeploy("),
+        ).toBeGreaterThan(buildSrc.indexOf("skipNextBuild"));
+        expect(buildSrc.lastIndexOf("compileArtifactForDeploy(")).toBeLessThan(
+            buildSrc.indexOf("Build complete!"),
         );
+        // build.ts must NOT ALSO call the heal directly — that would be the
+        // exact duplication finding #1 asked to remove.
+        expect(buildSrc).not.toContain("healBunExportTargets(");
+
+        // The shared step itself is what actually performs the heal.
+        expect(artifactSrc).toContain("healBunExportTargets(");
     });
 });

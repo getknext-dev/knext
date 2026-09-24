@@ -88,6 +88,14 @@ mock.module("../cli/cr-builder", () => ({
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// #1339 review finding #1: deploy() now compiles the standalone-bun/vinext
+// executable via this shared step — stub it, same treatment as every other
+// side-effecting seam here.
+mock.module("../cli/build-artifact", () => ({
+    compileArtifactForDeploy: () => ({ compiled: false }),
+    assertCompiledArtifactFresh: () => {},
+}));
+
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 mock.module("../cli/gc", () => ({
     runAssetGC: (...a: unknown[]) => runAssetGC(...a),

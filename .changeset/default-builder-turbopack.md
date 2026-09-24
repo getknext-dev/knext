@@ -16,4 +16,4 @@ const config: KnativeNextConfig = {
 
 Apps already on the standalone target (`build: 'turbopack'`/`'webpack'`, or building with `next build`) are unaffected by the `build` change. If you had `runtime` unset there too, it now defaults to `bun` (compiled bytecode) instead of `node` — set `runtime: 'node'` explicitly if you want the uncompiled fallback.
 
-Apps scaffolded by `kn-next create` are unaffected: the scaffold now pins `build: 'vinext'` explicitly, since its `next.config.ts` and `Dockerfile` are still vinext-shaped. A standalone-by-default scaffold is tracked as separate follow-up work.
+Newly scaffolded apps pin `build: 'vinext'` explicitly (`kn-next create`'s templates), since their `next.config.ts` and `Dockerfile` are still vinext-shaped. A standalone-by-default scaffold is tracked as separate follow-up work.
