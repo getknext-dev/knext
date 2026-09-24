@@ -547,6 +547,63 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
+	// #1157 — the operator's `runtime: bun` command override
+	// (`["bun","run","server.js"]`, nextapp_controller.go) replaced the image's
+	// own ENTRYPOINT, and the concern was that the :9464 metrics sidecar died
+	// with it while the scrape wiring (annotation + NetworkPolicy + PodMonitor)
+	// stayed green — dark metrics with nothing red. The boot-level half (does
+	// :9464 actually still SERVE under that forced command) is proven by
+	// standalone-drain.docker-e2e.test.ts against the real shipped image
+	// (ADR-0055's R3 shim closed it). This is the OTHER half, never previously
+	// asserted anywhere: the scrape-annotation VALUE the operator stamps onto
+	// the Knative revision. `DesiredNetworkPolicy` takes no runtime input at
+	// all (see networkpolicy_test.go), so its port grant cannot vary by
+	// construction — but the `prometheus.io/port` annotation IS built inline in
+	// Reconcile, gated only on `Observability.Enabled`, and nothing asserted
+	// its value before this, on any runtime. A regression that made it
+	// runtime-conditional (or silently reverted to the old 9091) would have
+	// passed every existing suite.
+	Context("metrics-scrape annotation parity across the operator's runtime axis (#1157)", func() {
+		It("stamps prometheus.io/port=9464 identically for runtime: bun and runtime: node/absent", func() {
+			bunNN := reconcileOnce("metrics-parity-bun", appsv1alpha1.NextAppSpec{
+				Image:         validImage,
+				Runtime:       "bun",
+				Observability: &appsv1alpha1.ObservabilitySpec{Enabled: true},
+			})
+			nodeNN := reconcileOnce("metrics-parity-node", appsv1alpha1.NextAppSpec{
+				Image:         validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{Enabled: true},
+			})
+
+			bunKsvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, bunNN, bunKsvc)).To(Succeed())
+			nodeKsvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nodeNN, nodeKsvc)).To(Succeed())
+
+			By("confirming this really exercises the bun command-override path")
+			Expect(bunKsvc.Spec.Template.Spec.Containers[0].Command).To(Equal([]string{"bun", "run", "server.js"}),
+				"this test is only meaningful against the operator's forced bun command")
+			Expect(nodeKsvc.Spec.Template.Spec.Containers[0].Command).To(BeEmpty(),
+				"the node axis must leave Command nil (the image's own ENTRYPOINT decides)")
+
+			for _, ksvc := range []*servingv1.Service{bunKsvc, nodeKsvc} {
+				annotations := ksvc.Spec.Template.ObjectMeta.Annotations
+				Expect(annotations).To(HaveKeyWithValue("prometheus.io/scrape", "true"))
+				Expect(annotations).To(HaveKeyWithValue("prometheus.io/port", "9464"),
+					"9464 is the ONLY port the NetworkPolicy grant and the shipped PodMonitor admit "+
+						"(metrics-port-lockstep.test.ts) — any other value scrapes nothing")
+				Expect(annotations).To(HaveKeyWithValue("prometheus.io/path", "/metrics"))
+			}
+
+			By("the two runtimes agreeing byte-for-byte on the scrape annotations")
+			bunAnn := bunKsvc.Spec.Template.ObjectMeta.Annotations
+			nodeAnn := nodeKsvc.Spec.Template.ObjectMeta.Annotations
+			for _, key := range []string{"prometheus.io/scrape", "prometheus.io/port", "prometheus.io/path"} {
+				Expect(bunAnn[key]).To(Equal(nodeAnn[key]), "annotation %q diverges across the runtime axis", key)
+			}
+		})
+	})
+
 	Context("OTel tracing env propagation (#30)", func() {
 		It("does NOT set OTEL_TRACING_ENABLED when tracing is off", func() {
 			nn := reconcileOnce("tracing-off", appsv1alpha1.NextAppSpec{

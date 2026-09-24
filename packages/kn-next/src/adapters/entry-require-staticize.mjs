@@ -15,7 +15,9 @@
  * images ship no `.output/server/node_modules` to fall back on anyway).
  *
  * Measured trigger: vinext 1.0.0-beta.11 auto-adds every `@opentelemetry/*`
- * dependency in the app's package.json to `serverExternalPackages`, so an app
+ * dependency in the app's package.json to `serverExternalPackages` (still true
+ * in 1.0.0-beta.12: `findOpenTelemetryPackages` in
+ * `dist/config/server-external-packages.js` is unchanged), so an app
  * depending on `@opentelemetry/api` (file-manager) got a runtime
  * `__require(\`@opentelemetry/api\`)` from prom-client and 500'd on every
  * request, while the OTel-free compat fixtures stayed green.

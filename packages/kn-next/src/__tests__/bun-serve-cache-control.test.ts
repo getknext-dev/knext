@@ -252,6 +252,10 @@ describe("vinext-compile bakes it into the executable", () => {
             "entry-require-staticize.mjs",
             "bun-serve-keepalive-guard.mjs",
             "sharp-addon-dlopen.mjs",
+            // the sidecar resolver is checked (fail-closed) before this module
+            "sidecar-install.mjs",
+            "sidecar-runtime.mjs",
+            "entry-external-sidecar.mjs",
         ]) {
             copyFileSync(join(here, f), join(alone, f));
         }

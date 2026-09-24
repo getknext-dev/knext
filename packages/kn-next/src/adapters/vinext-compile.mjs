@@ -49,6 +49,14 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+    BUNDLED_PREFIX,
+    hasNativeAddon,
+    isCommonJsEntry,
+    isSidecarCandidate,
+    packageNameOf,
+    sidecarShimSource,
+} from "./entry-external-sidecar.mjs";
 import { staticizeEntryRequires } from "./entry-require-staticize.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
@@ -98,11 +106,27 @@ if (!GUARD_FILE) {
     process.exit(1);
 }
 
+// The sidecar resolver (#1320, sidecar-install.mjs), injected right after the
+// guard so its Module._resolveFilename hook is in place before any bundled
+// module initialises. Fail CLOSED: without it the entry shims silently use the
+// bundled copies and runtime require.resolve calls cannot reach the sidecar.
+const SIDECAR_INSTALL_FILE = [
+    join(compileHere, "sidecar-install.js"),
+    join(compileHere, "sidecar-install.mjs"),
+].find((c) => existsSync(c));
+if (!SIDECAR_INSTALL_FILE) {
+    console.error(
+        "[knext compile] the server-externals sidecar resolver is missing beside vinext-compile " +
+            `(looked for sidecar-install.{js,mjs} in ${compileHere}) — the installed @getknext/core is incomplete`,
+    );
+    process.exit(1);
+}
+
 // The deployed-platform Cache-Control normalization on Bun.serve (#1322,
 // bun-serve-cache-control.mjs): the same rule knext's Node runtime applies, so
 // clients see `public, max-age=0, must-revalidate` rather than the origin's
-// `s-maxage=…`. Injected right after the guard. Fail CLOSED: a binary without
-// it silently diverges from every other knext runtime.
+// `s-maxage=…`. Injected after the sidecar resolver. Fail CLOSED: a binary
+// without it silently diverges from every other knext runtime.
 const CACHE_CONTROL_FILE = [
     join(compileHere, "bun-serve-cache-control-install.js"),
     join(compileHere, "bun-serve-cache-control-install.mjs"),
@@ -159,6 +183,7 @@ const importMetaToCjs = {
             }
             const src =
                 `import ${JSON.stringify(GUARD_FILE)};\n` +
+                `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n` +
                 `import ${JSON.stringify(CACHE_CONTROL_FILE)};\n` +
                 staticized.contents;
             console.log(
@@ -260,14 +285,58 @@ const sharpAddonDlopen = {
     },
 };
 
+/**
+ * Server externals load from the traced sidecar beside the binary when it is
+ * there, and from the bundle otherwise (#1320 — see entry-external-sidecar.mjs).
+ *
+ * Only the ENTRY's own bare imports are redirected: those are exactly the
+ * packages nitro left external (it inlines everything else). A package's
+ * internal imports resolve normally, so the bundled fallback is a normal bundle.
+ */
+const ENTRY_DIR = dirname(ENTRY);
+const SIDECAR_NODE_MODULES = join(ENTRY_DIR, "node_modules");
+const redirected = new Set();
+const bundledEsm = new Set();
+const externalSidecar = {
+    name: "knext-external-sidecar",
+    setup(build) {
+        // The shim's bundled fallback: resolve the real specifier from the entry.
+        build.onResolve({ filter: /^knext-bundled:/ }, (args) => ({
+            path: Bun.resolveSync(args.path.slice(BUNDLED_PREFIX.length), ENTRY_DIR),
+        }));
+        build.onResolve({ filter: /^[^./]/ }, (args) => {
+            if (!args.importer || resolve(args.importer) !== ENTRY) return undefined;
+            if (!isSidecarCandidate(args.path)) return undefined;
+            const pkg = join(SIDECAR_NODE_MODULES, packageNameOf(args.path), "package.json");
+            if (!existsSync(pkg)) return undefined;
+            // Only CommonJS entries: an ESM package's own imports bypass the
+            // sidecar resolver at runtime, so it stays bundled.
+            if (isCommonJsEntry(SIDECAR_NODE_MODULES, args.path) !== true) {
+                bundledEsm.add(args.path);
+                return undefined;
+            }
+            redirected.add(args.path);
+            return { path: args.path, namespace: "knext-sidecar" };
+        });
+        build.onLoad({ filter: /.*/, namespace: "knext-sidecar" }, (args) => ({
+            contents: sidecarShimSource(args.path),
+            loader: "js",
+        }));
+    },
+};
+
 const result = await Bun.build({
     entrypoints: [ENTRY],
     target: "bun",
-    plugins: [importMetaToCjs, sharpAddonDlopen],
+    plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
     minify: true,
     bytecode: true,
     compile: {
         outfile: OUTFILE,
+        // NEVER set `autoloadPackageJson` here: it widens runtime package
+        // resolution beyond the sidecar. The sidecar is resolved by
+        // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
+        // server/node_modules (#1320).
         ...(TARGET ? { target: TARGET } : {}),
     },
 });
@@ -275,6 +344,29 @@ const result = await Bun.build({
 if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
+}
+if (redirected.size > 0) {
+    const specs = [...redirected].sort();
+    console.log(
+        `[knext compile] ${specs.length} server external(s) load from ${SIDECAR_NODE_MODULES} ` +
+            `when it is beside the binary, else from the bundle: ${specs.join(", ")}`,
+    );
+    const natives = [...new Set(specs.map(packageNameOf))].filter((name) =>
+        hasNativeAddon(join(SIDECAR_NODE_MODULES, name)),
+    );
+    if (natives.length > 0) {
+        console.warn(
+            `[knext compile] WARNING: ${natives.join(", ")} ship(s) a native addon, which cannot load ` +
+                "from inside the binary. The binary loads it from .output/server/node_modules, so " +
+                "that directory must be deployed next to the binary (built for the target platform).",
+        );
+    }
+}
+if (bundledEsm.size > 0) {
+    console.log(
+        `[knext compile] ${bundledEsm.size} ES-module server external(s) stay bundled (their own ` +
+            `imports cannot reach the sidecar): ${[...bundledEsm].sort().join(", ")}`,
+    );
 }
 console.log(
     `[knext compile] wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})`,
