@@ -402,8 +402,17 @@ function line(component, path, absolute) {
  *   sparse checkout of `github.workflow_sha`). The entry's path LABEL is
  *   unchanged, so identical bytes give a byte-identical digest. A given but
  *   missing file is a hard error, never a fallback to the checkout's copy.
+ *
+ * Exported (#1302): this is the ONE declared derivation of "which files a
+ * credential night's harness actually executes" — CREDENTIAL_CELLS'
+ * `workflowFile`/`extraFiles` plus the real import/source closure, scanned,
+ * never hand-enumerated. `scripts/compat-credential-freeze-guard.mjs` reuses
+ * it directly (one lane at a time, unioned across every wired-or-not cell
+ * that HAS a workflow file) to derive the frozen-file set a PR must not
+ * silently move while a credential window is live, rather than re-declaring
+ * a second, driftable file list.
  */
-function collectHarness(repoRoot, lane, opts = {}) {
+export function collectHarness(repoRoot, lane, opts = {}) {
   const roots = [workflowRootForLane(lane), ...HARNESS_ROOTS];
   /** @type {{ component: string, path: string, line: string }[]} */
   const entries = [];
