@@ -100,6 +100,11 @@ export default defineConfig([
       // Bun-only ESM, dependency-free like cache-handler; no `.d.ts`.
       'adapters/bun-serve-keepalive-guard':
         'src/adapters/bun-serve-keepalive-guard.mjs',
+      // The Bun.serve deployed Cache-Control normalization (#1322). vinext-compile
+      // injects an `import` of this right after the guard (and fails closed when
+      // it is absent), so it must ship in dist beside vinext-compile.
+      'adapters/bun-serve-cache-control-install':
+        'src/adapters/bun-serve-cache-control-install.mjs',
       // The vinext data-cache adapter FACTORY (#953) — the scaffold's
       // vite.config hands this subpath to `vinext({ cache: { data } })`, and
       // vinext's generated registration module imports it at the app's build

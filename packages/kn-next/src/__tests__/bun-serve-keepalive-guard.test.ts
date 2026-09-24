@@ -242,10 +242,19 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
         // substring and reds the test. It must PREPEND to the entry source (the
         // #1309-staticized `raw`, after it), so the guard evaluates before srvx/bun
         // calls Bun.serve.
-        const injection =
+        // Since #1322 a second injected import (the Bun.serve Cache-Control
+        // normalization) follows it; the guard must stay FIRST.
+        const s = src();
+        const guard =
             // biome-ignore lint/suspicious/noTemplateCurlyInString: the LITERAL source substring being asserted, not a template
-            "`import ${JSON.stringify(GUARD_FILE)};\\n${staticized.contents}`";
-        expect(src()).toContain(injection);
+            "`import ${JSON.stringify(GUARD_FILE)};\\n` +";
+        const next =
+            // biome-ignore lint/suspicious/noTemplateCurlyInString: the LITERAL source substring being asserted, not a template
+            "`import ${JSON.stringify(CACHE_CONTROL_FILE)};\\n` +";
+        expect(s.split(guard).length - 1).toBe(1);
+        expect(s.indexOf(guard)).toBeLessThan(s.indexOf(next));
+        // and the entry's own (staticized) source comes after both injections
+        expect(s.indexOf(next)).toBeLessThan(s.indexOf("staticized.contents;"));
     });
 
     it("the guard-resolution block actually points at THIS guard file", () => {
