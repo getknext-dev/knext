@@ -175,7 +175,13 @@ jobs:
       - name: Preflight — the packed @getknext/core ships the compile script
         run: |
           set -euo pipefail
-          CORE_TGZ="$(ls -1 "${GITHUB_WORKSPACE}"/knext-tarballs/getknext-core-*.tgz | sort | tail -n1)"
+          # find, not ls, for the same reason every other listing in this repo's
+          # workflows uses it: ls's output is meant for humans and mishandles
+          # filenames containing whitespace/newlines/glob metacharacters
+          # (shellcheck SC2012). `-maxdepth 1` keeps the match set identical to
+          # the shell glob `ls` was expanding (this dir is flat); `sort | tail
+          # -n1` is UNCHANGED — same "most recent by name" selection as before.
+          CORE_TGZ="$(find "${GITHUB_WORKSPACE}/knext-tarballs" -maxdepth 1 -name 'getknext-core-*.tgz' -print | sort | tail -n1)"
           # Materialise the listing ONCE, then search the string — never
           # `tar tzf … | grep -q …`. `grep -q` exits on its first match, closes
           # the pipe, and `tar` dies with SIGPIPE (exit 141); under the `pipefail`
