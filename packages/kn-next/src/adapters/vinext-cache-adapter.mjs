@@ -13,7 +13,7 @@
  *    generates a registration module that calls the default export as a
  *    FACTORY: `setDataCacheHandler(factory({ env, options }))` — see
  *    `generateCacheAdaptersModule` in vinext (confirmed unchanged through
- *    1.0.0-beta.11, #1309 — `registerDataCacheHandler(() =>
+ *    1.0.0-beta.12, #1324 — `registerDataCacheHandler(() =>
  *    __vinextDataAdapterFactory({ env, options }))`). Handing it the bare
  *    class throws "Class constructor … cannot be invoked without 'new'", which
  *    vinext CATCHES, warns about once, and silently replaces with its per-pod
@@ -26,7 +26,7 @@
  * every byte of cache behaviour lives in `./cache-handler.js`.
  *
  * ## Interface fit, measured against vinext@1.0.0-beta.8, re-confirmed on
- * 1.0.0-beta.11 (#1309, the scaffold's pin)
+ * 1.0.0-beta.11 (#1309) and 1.0.0-beta.12 (#1324, the scaffold's pin)
  *
  * vinext's `CacheHandler` contract (`vinext/shims/cache-handler`) is
  * `get(key, ctx) → { lastModified, value, cacheState?, cacheControl? } | null`,

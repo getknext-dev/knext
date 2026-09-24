@@ -2,7 +2,8 @@
 
 - **Status:** Accepted (2026-09-23) — encodes two founder decisions recorded on #850 and #1218.
   The **mechanism** lands with this ADR; **cutting a release candidate is a founder action** and
-  none is cut here.
+  none is cut here. **Amended** by Amendment 1 (2026-09-24, Proposed): bytecode-liveness grading
+  (D4), per-cell fingerprint closure (D5), the freeze guard (D6) and the v1.0 cell set (D7).
 - **Amends** ADR-0039 (the frozen set is unchanged in scope — still tarball-inclusive, still not
   narrowed — but its *workflow* entry is now read from the commit that actually executed; see
   ADR-0039 Amendment 1). **Supersedes** the node-lane-only definition in `docs/V1_ROADMAP.md` §3.
@@ -150,3 +151,189 @@ are identical and the digest does not move. This is ADR-0039 Amendment 1.
       change, so it is left to the founder.
 - [ ] `docs/compat-matrix.md`: restate the official-suite row as the per-cell credential once the
       first cell banks 14 RC nights.
+
+## Amendment 1 (2026-09-24): liveness grading, per-cell fingerprint closure, the freeze guard, and the v1.0 cell set
+
+- **Status:** **Proposed (2026-09-24).** Trigger-class (it changes what counts as a credential
+  night), so it needs founder review before merge. D4 and D5 record mechanisms already merged
+  (#1280, #1312). D6 records one that is planned (#1302). D7 records the founder decision on
+  #1295 (see ADR-0058).
+- **Implements:** #1303 (b). **Relates to:** ADR-0039 Amendment 1 (the executing-workflow
+  entry), ADR-0054 Amendment 7 (mandatory bytecode), ADR-0058 (the four-cell v1.0 scope),
+  ADR-0059 (the image bake the node grade exercises).
+
+### Context
+
+The Decision above defines a credential night by ref, mode and fingerprint. Three things have been
+added to that definition since it was accepted, and one decision has changed which cells it
+applies to:
+
+1. **Bytecode caching must be proven live, not configured** (founder, #1218; built in #1280). A
+   night whose server ran without its bytecode mechanism is not a night of the shipped artifact.
+2. **vinext × bun runs from a second workflow.** `compat-vinext.yml` builds and boots the compiled
+   vinext exec, while D3 hashed `test-e2e-deploy.yml` for every lane. An edit to
+   `compat-vinext.yml` therefore moved no fingerprint (#1294).
+3. **D3 left the executing workflow unguarded.** "`test-e2e-deploy.yml` is effectively frozen
+   during a credential window" (Consequences) is a consequence, not a guard. Nothing stops an edit
+   that restarts every cell.
+4. **Founder, 2026-09-24 (#1295, ADR-0058):** v1.0 credentials four cells, and the vinext cells
+   get no window in v1.0.
+
+### Decision
+
+#### D4. A credential night requires bytecode caching proven live on every shard
+
+- **One definition**, in `scripts/e2e-bytecode-liveness.mjs`, shared by the deploy script (per
+  deploy), the workflow (per shard) and the audit (per night). It is keyed on the cell's
+  **runtime**, so a lane wired later inherits it by writing the same evidence lines (`:45-46`).
+- **Bun:** the deploy booted the compiled exec (`mode=compiled-exec`), and the fail-closed
+  build-time verifier passed on that file (`bytecode_verified=true`) (`:150-163`).
+- **Node:** the shipped bake driver succeeded (`compile_cache_bake=ok`), and V8 accepted cached
+  code at boot (`:165-203`). The counts come from the running server's own
+  `NODE_DEBUG_NATIVE=COMPILE_CACHE` output, scoped to modules under the standalone tree, so the
+  supervisor's own modules are excluded (`countNodeCompileCache`, `:100-114`), up to readiness.
+  The constants are:
+  - `NODE_CACHE_ACCEPTED_FLOOR = 100` accepted entries (`:64`);
+  - `NODE_CACHE_HIT_RATIO_FLOOR = 0.5`, where the ratio is accepted / (accepted + missed +
+    rejected) (`:67`).
+
+  Measured on a real Next 16.2 standalone server with the shipped bake and supervisor: baked
+  424 / 0 / 0, unbaked 0 / 425 (`:31-36`). The floors sit far from both ends, so neither a
+  smaller fixture nor a Next.js refactor that moves a few modules flips the verdict. A populated
+  cache directory is **not** evidence, because Node writes one on exit even after a cold boot
+  (`:28-29`).
+- **Where it is enforced:** per shard, the "Verify boot-mode ledger" step fails the job when a
+  shard is not live (`test-e2e-deploy.yml:1727-1743`). Per night, audit rule 7
+  (`compat-window-audit.mjs:481-494`) disqualifies the night when any shard's evidence is
+  missing, is for the wrong runtime, or has `live < deploys` (`isShardBytecodeLive`,
+  `e2e-bytecode-liveness.mjs:248-271`). A non-live night **restarts** the streak. It is not
+  skipped.
+- **The harness warms fixtures that do not answer 2xx.** The upstream fixtures have no health
+  route and are often built to 404 or 500, and a rendered error page still loads the server
+  runtime. So the harness renders a server route and accepts any complete HTTP response, through
+  `KNEXT_WARM_ACCEPT_ANY_STATUS=1` (`scripts/e2e-deploy.sh:591-630`). A connection error still
+  fails. It also snapshots and restores the fixture tree around the bake, so that only the
+  compile cache survives (`:617-638`). The product default stays strict 2xx. The knob lives in
+  the shipped bake template today (`knext-compile-cache-bake.mjs.hbs:66-70`), which is an open
+  item: #1299 moves it into the harness (see ADR-0059).
+- **Trust assumption, stated:** only lines that begin with Node's own `[compile cache]` prefix
+  count, so an app cannot manufacture a hit by logging the phrase mid-line. A process that writes
+  a whole line with that prefix could. The code under test is the pinned upstream fixtures plus
+  knext's own tarballs, so this is a check against knext regressing, not against a hostile
+  fixture (`e2e-bytecode-liveness.mjs:83-89`).
+- **Mutation-proved:** `scripts/mutation-prove-bytecode-liveness.mjs`, 9 of 9 mutations caught
+  (#1280).
+
+#### D5. Each cell's fingerprint hashes its own executing workflow and the full closure it runs
+
+- **One declared table.** `CREDENTIAL_CELLS[*].workflowFile` (`compat-window-audit.mjs:152-161,
+  176-244`) names the workflow that executes each cell: `test-e2e-deploy.yml` for the turbopack
+  cells and `compat-vinext.yml` for vinext × bun. It is `null` for the cells with no workflow yet
+  (both webpack cells, and vinext × node, whose only candidate workflow runs the wrong runtime).
+  `workflowRootForLane` throws on `null` (`compat-window-fingerprint.mjs:338-350`), so an unwired
+  cell cannot be fingerprinted by guessing. D3's executing-workflow override still applies on
+  credential nights.
+- **The closure is extracted by a parser, not a tokenizer.** The `e2e-*` harness scripts are
+  closure entries (`compat-window-fingerprint.mjs:117-122`). Their local JS imports are found
+  with the TypeScript parser (`:102`, `jsLocalImportSpecifiers` at `:168`). A non-literal
+  specifier is **refused** with an error that names the file and line (`:219`), because a guess
+  about whether it is a relative path is exactly what the freeze cannot afford. Three rounds of a
+  hand-written tokenizer each found a new hole (#1294), which is why the parser was chosen.
+- **Declared extras.** `extraFiles` lists the files a cell's run executes by subprocess or reads
+  directly (the RC pin, `compat-run-ledger.mjs`, `compat-credential-ref.mjs`), because no import
+  or `source` statement reaches them (`compat-window-audit.mjs:163-175`). Each extra is walked as
+  a closure entry, so its own imports are frozen too. A declared extra that does not exist is a
+  hard error (`compat-window-fingerprint.mjs:440-458`).
+- **An independent scan keeps the table honest.**
+  `tests/compat-window-fingerprint-execution-scan.test.ts` re-implements the discovery on its own.
+  It scans the real workflow `run:` steps and every harness script for `node`, `bash`,
+  `${SCRIPT_DIR}` and `${KNEXT_REPO_ROOT}` references, and fails when a repo file it finds is
+  neither declared nor on its reasoned, dated exemptions list. Mutation-proved by
+  `scripts/mutation-prove-compat-cell-fingerprint.mjs` (3 of 3 caught, #1312).
+- **Unchanged:** the fingerprint stays tarball-inclusive (ADR-0039). The shared harness roots are
+  still shared by every cell, so a `scripts/e2e-*` change moves every cell's digest. Scoping the
+  harness half per cell is still an ADR-0039 scope question for the founder, as the action item
+  above says.
+
+#### D6. While an RC is pinned, the executing credential inputs are frozen on `main` (planned, #1302)
+
+- A **required check** fails any PR that touches an executing credential workflow
+  (`test-e2e-deploy.yml`, `compat-vinext.yml`), `scripts/e2e-*`, or any other fingerprint input,
+  whenever `.github/compat-credential-ref.json` has a non-null `rcTag`. The one exception is an
+  explicit, dated, founder-approved RC bump.
+- The file set is **derived from the same tables the fingerprint reads** (`workflowFile`,
+  `HARNESS_ROOTS`, `extraFiles` and the closure). It is not a second hand-kept list, so the guard
+  cannot drift from what is actually frozen.
+- When the pin is `null`, the guard is green, because there is no window to protect.
+- **Exit:** mutation-proved in both directions. An edit while frozen goes red, and the same edit
+  with the pin cleared goes green.
+- **Until #1302 merges, this is documented practice, not enforcement,** and rc.1 must not be cut
+  without it.
+
+#### D7. v1.0 windows exist only for the four credentialed cells
+
+- Per ADR-0058, v1.0 is met when node/bun × turbopack/webpack have each banked 14 qualifying
+  credential nights. D2's "every supported cell" now reads "every v1.0-credentialed cell".
+- **vinext × bun and vinext × node get no 14-night window in v1.0.** `compat-vinext.yml` stays
+  weekly and early-warning. It gets no credential cron, its number is published as a measurement,
+  and it does not run the D4 liveness step. It gets a window only once one full run is green or
+  its failures fit a bounded, dated ledger (#1321), and it joins the credential set through an
+  amendment to ADR-0058.
+- The vinext cells **stay in `CREDENTIAL_CELLS`**, because D5's `workflowFile` table is what
+  freezes `compat-vinext.yml`. What changes is the v1.0 verdict. `auditCredentialMatrix` counts
+  every listed cell by default (`compat-window-audit.mjs:763-783`), so it needs a v1.0-scope
+  field. That is an ADR-0058 action item.
+
+### Options considered
+
+| Decision | Option | Verdict |
+|---|---|---|
+| D4 node liveness | **Observed V8 acceptance at boot, with count and ratio floors** | **chosen**: it is the only one that proves the cache was used |
+| | `NODE_COMPILE_CACHE` is set (configuration) | rejected: configured is not live, and the node lane booted with no cache at all before #1280 |
+| | The cache directory is populated | rejected: Node writes the directory on exit, so a cold boot leaves one too |
+| D4 harness warm | **Any complete response on a server route (internal knob), tree restored after** | **chosen** (jev 0.94 on #1259) |
+| | Warm a static asset | rejected: serving a file compiles no server code (jev 0.05) |
+| D5 closure | **Parser-extracted imports + declared extras + an independent scan** | **chosen** |
+| | A hand-kept file list | rejected: it drifts silently, which is how `compat-vinext.yml` went unfrozen |
+| | A hand-written tokenizer | rejected: three review rounds each found a new hole (#1294) |
+| D6 freeze | **A required CI check keyed on the pin** | **chosen** |
+| | A documented convention | rejected: its efficacy is unobservable until it has already failed (`security.md`) |
+| | Branch protection or CODEOWNERS | rejected: it gates who may approve a change, not whether the credential inputs change |
+| D7 vinext windows | **No window until green or bounded** | **chosen (founder)**: a window now would red every night on about 60 deterministic failures |
+
+jev (jev-1.13.0), on a fact sheet with D4–D7: required CI check p = 1.00 (confidence 1.00);
+observed-acceptance liveness p = 1.00 (confidence 1.00). It gave 0.74 that these belong in an
+amendment rather than a new ADR, and 0.90 that the harness knob in the shipped template is worth
+recording as an open item.
+
+### Consequences
+
+- **A green suite on an uncached server is no longer a credential night.** A regression that
+  quietly drops the bake, or boots `server.js` on a Bun cell, restarts the window and reds the
+  shard, which is loud rather than silent.
+- **The liveness floors are frozen inputs.** `e2e-bytecode-liveness.mjs` matches the `e2e-*`
+  harness glob, so lowering a floor moves every cell's fingerprint and restarts the window.
+  Loosening the grade to rescue a streak is visible by construction.
+- **The node grade depends on the image bake contract** (ADR-0059). A change there, such as the
+  network restriction or the framework-only opt-out, has to keep the harness's shipped-driver
+  path producing the same evidence line.
+- **Editing `compat-vinext.yml` moves the vinext × bun fingerprint and not the turbopack ones.**
+  Measured by #1312. It matters now only for the weekly measurement, and later for the v1.x
+  window.
+- **Until D6 lands, one careless merge can restart every cell.** This is why #1302 is an rc.1
+  prerequisite.
+- **The vinext number keeps publishing without a liveness grade.** That is acceptable because it
+  is not a credential. It must gain the D4 step before it can hold a window.
+
+### Action items
+
+- [x] Liveness definition, per-shard step, audit rule 7, and mutation prover. *(#1280)*
+- [x] `workflowFile` table, parser closure, `extraFiles`, execution-scan test, and prover.
+      *(#1312)*
+- [ ] Freeze guard as a required check, derived from the fingerprint tables and mutation-proved.
+      **rc.1 prerequisite.** *(#1302)*
+- [ ] Move `KNEXT_WARM_ACCEPT_ANY_STATUS` out of the shipped template into the harness, keeping
+      the evidence line identical. *(#1299)*
+- [ ] v1.0-scope field on `CREDENTIAL_CELLS` / `auditCredentialMatrix`. *(ADR-0058 action item)*
+- [ ] Before vinext × bun gets a window: add the D4 liveness step to `compat-vinext.yml`, a
+      credential cron and the `credential-ref` job, and amend ADR-0058.
