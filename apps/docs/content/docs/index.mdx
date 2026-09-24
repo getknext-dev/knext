@@ -86,11 +86,12 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 
 ## The pillars
 
-- **Honest claims, verified in the open.** The default build compiles your app with **vinext**
-  (an open-source Vite-based Next.js implementation) into a single executable. knext also ships an
-  adapter on the official Next.js Deployment Adapter API (`@getknext/core/adapter`) — the lane
-  where its 778/778 suite credential was earned — and never blurs which claim covers which path.
-  See [The adapter and the compiled build](/docs/official-adapter).
+- **Honest claims, verified in the open.** The default build (`next build`) uses knext's adapter on
+  the official Next.js Deployment Adapter API (`@getknext/core/adapter`) — the lane where its
+  778/778 suite credential was earned. A selectable **vinext** build (an open-source Vite-based
+  Next.js implementation, compiled into a single executable) is also available, and knext never
+  blurs which claim covers which path. See
+  [The adapter and the compiled build](/docs/official-adapter).
 - **Verified compatibility.** The official `vercel/next.js` deploy-mode e2e suite runs against
   knext nightly: 778 tests, zero failures on Node. See
   [Verified compatibility](/docs/compat-suite).

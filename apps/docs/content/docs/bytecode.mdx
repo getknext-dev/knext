@@ -165,7 +165,7 @@ Both runtimes get a compile cache, built at image build time, via different mech
 | Runtime | Bytecode mechanism |
 |---|---|
 | **Node** (default) | V8 compile cache, populated during the image build and shipped in the image. Read by every pod from its first boot. The vinext build on Node bakes it the same way, and fails the image build if the bake produces no usable cache (see [vinext on Node](/docs/build-pipeline#vinext-on-node)). |
-| **Bun** (`runtime: 'bun'`) | **Whole-bundle bytecode in a compiled executable**: `kn-next build` compiles the server into a Bun single executable with bytecode — the vinext build by default, and `next build`'s standalone server on the standalone target — and fails the build if the bytecode is missing. See [Bun runtime](/docs/bun-runtime). |
+| **Bun** (`runtime: 'bun'`) | **Whole-bundle bytecode in a compiled executable**: `kn-next build` compiles the server into a Bun single executable with bytecode — `next build`'s standalone server on the default (turbopack/webpack) target, and the vinext build on the selectable `build: 'vinext'` target — and fails the build if the bytecode is missing. See [Bun runtime](/docs/bun-runtime). |
 
 <Callout type="warn">
 A Bun bytecode-built image is **Bun-only** — booting it with Node exits 1 with a `FATAL` message

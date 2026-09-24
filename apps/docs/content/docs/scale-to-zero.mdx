@@ -131,8 +131,9 @@ fast boot can't fully show through: the **readiness probe polls on an interval**
 boot is only observed at the next probe tick — the probe cadence is itself a floor under the boot
 win. Treat any specific millisecond figure as environment-dependent, not a guaranteed number — and a
 typical figure is not a worst case: cold starts vary a lot run to run, and an occasional wake can
-take several times the typical one. Size your warm floor against that tail, not the average. Node (with `NODE_COMPILE_CACHE`) remains the default runtime; Bun's
-build-time bytecode is the opt-in for squeezing the boot phase further.
+take several times the typical one. Size your warm floor against that tail, not the average. Bun's
+build-time bytecode (the compiled single executable) is the default runtime; Node (with
+`NODE_COMPILE_CACHE`) is the uncompiled fallback, selectable via `runtime: 'node'`.
 </Callout>
 
 ## Tuning burst response

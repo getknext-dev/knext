@@ -65,13 +65,14 @@ interface Fixture {
 }
 
 /**
- * A minimal vinext app dir: a loadable config (default build = vinext, no
- * storage so nothing shells out to gsutil), a pre-made `.output` so
- * `--skip-next` has an artifact to point the compile at, and a PATH built
- * from scratch — node's own dir + /usr/bin:/bin for `sh`, plus (optionally)
- * a fake `bun`. The ambient PATH never leaks in: a real Bun on the machine
- * must not rescue the "absent" case, and a real Bun must not shadow the
- * fake in the others.
+ * A minimal vinext app dir: a loadable config (build: 'vinext' EXPLICIT —
+ * #1183/ADR-0058 flipped the ambient default to turbopack, which needs no
+ * Bun and would not exercise this suite's detection path; no storage so
+ * nothing shells out to gsutil), a pre-made `.output` so `--skip-next` has an
+ * artifact to point the compile at, and a PATH built from scratch — node's
+ * own dir + /usr/bin:/bin for `sh`, plus (optionally) a fake `bun`. The
+ * ambient PATH never leaks in: a real Bun on the machine must not rescue the
+ * "absent" case, and a real Bun must not shadow the fake in the others.
  */
 function makeVinextApp(bun: FakeBun): Fixture {
     const dir = mkdtempSync(join(tmpdir(), "knext-948-"));
@@ -81,6 +82,7 @@ function makeVinextApp(bun: FakeBun): Fixture {
             "const config = {",
             "  name: 'smoke-app',",
             "  registry: 'us-central1-docker.pkg.dev/demo/repo',",
+            "  build: 'vinext',",
             "};",
             "export default config;",
             "",

@@ -214,8 +214,14 @@ async function runEntrypoint(
 }
 
 describe("#1235 build.ts's isEntrypoint dispatcher — the success path", () => {
-    it("exits 0 and runs the default (vinext) build end to end", async () => {
-        loadConfig.mockResolvedValue({ name: "my-app", registry: "reg" });
+    it("exits 0 and runs a vinext build end to end", async () => {
+        // build: 'vinext' EXPLICIT — #1183/ADR-0058 flipped the ambient
+        // default to turbopack, which does not compile a vinext executable.
+        loadConfig.mockResolvedValue({
+            name: "my-app",
+            registry: "reg",
+            build: "vinext",
+        });
 
         const { exitCode } = await runEntrypoint([
             "--skip-next",
@@ -224,7 +230,7 @@ describe("#1235 build.ts's isEntrypoint dispatcher — the success path", () => 
 
         expect(exitCode).toBe(0);
         expect(loadConfig).toHaveBeenCalledTimes(1);
-        // The default (vinext) shape compiles the single executable.
+        // The vinext shape compiles the single executable.
         expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
         // Neither error handler fired on a clean run.
         expect(handleConfigNotFoundCalls).toEqual([]);

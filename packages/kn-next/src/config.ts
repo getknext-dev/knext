@@ -276,8 +276,10 @@ export interface KnativeNextConfig {
     // and name it here.
     imagePullSecrets?: string[];
     // Runtime for the standalone (turbopack) shape only: 'bun' or 'node'
-    // (default 'node'). It selects which standalone runtime image `kn-next`
-    // stages and boots (`--target standalone-bun`/`standalone-node`).
+    // (default 'bun', #1183/ADR-0058 — the compiled bytecode executable, the
+    // actual ADR-0054 bun-standalone default cell; see DEFAULT_RUNTIME_ID in
+    // artifact-contract.ts). It selects which standalone runtime image
+    // `kn-next` stages and boots (`--target standalone-bun`/`standalone-node`).
     // Irrelevant to the vinext single executable, where the runtime is compiled
     // into the binary and this field is dropped from the emitted CR.
     runtime?: "bun" | "node";
@@ -285,22 +287,29 @@ export interface KnativeNextConfig {
      * Which build system produces the app (Track B2 of the build/runtime
      * separation; see `src/adapters/artifact-contract.ts`).
      *
-     * All three builders below are SELECTABLE (ADR-0054, #1219). `vinext` is
-     * still the DEFAULT (an absent `build` means vinext); the ADR-0054 flip to
-     * bun-standalone is deferred until that axis is credentialed.
+     * All three builders below are SELECTABLE (ADR-0054, #1219). `turbopack`
+     * is the DEFAULT since #1183 (ADR-0058, founder decision 2026-09-24) —
+     * an absent `build` means turbopack, paired with `runtime: "bun"` by
+     * default too (DEFAULT_RUNTIME_ID) — the credentialed v1.0 bun-standalone
+     * cell (compiled bytecode executable). `vinext` was the default before
+     * this and stays selectable, v1.x-credentialed (ADR-0058).
      *
-     * - `vinext` (**default**) — the Vite/rolldown Next reimplementation. Its
-     *   nitro `.output` is compiled WHOLE into a single executable
+     * - `turbopack` (**default**) — Next's own `next build`, emitting
+     *   `.next/standalone`, run by a small supervisor. Pair it with
+     *   `runtime: "bun"` (**default**) or `runtime: "node"` and `kn-next`
+     *   stages and boots the matching standalone runtime image. On
+     *   `runtime: "bun"` the standalone server is compiled into a Bun single
+     *   executable with bytecode (the build fails if the bytecode is
+     *   missing); on `runtime: "node"` it runs uncompiled with the V8
+     *   compile cache. `next build`'s standalone output is the verified
+     *   778/0 official-suite axis.
+     * - `vinext` — the Vite/rolldown Next reimplementation. Its nitro
+     *   `.output` is compiled WHOLE into a single executable
      *   (`bun build --compile --minify --bytecode`, Bun 1.4.0+). `runtime` is
-     *   irrelevant here (the runtime is compiled into the binary).
-     * - `turbopack` — Next's own `next build`, emitting `.next/standalone`, run
-     *   by a small supervisor. SELECTABLE again (ADR-0054): pair it with
-     *   `runtime: "bun"` or `runtime: "node"` and `kn-next` stages and boots the
-     *   matching standalone runtime image. On `runtime: "bun"` the standalone
-     *   server is compiled into a Bun single executable with bytecode (the
-     *   build fails if the bytecode is missing); on `runtime: "node"` it runs
-     *   uncompiled with the V8 compile cache. `next build`'s standalone output
-     *   is the verified 778/0 official-suite axis.
+     *   irrelevant here (the runtime is compiled into the binary). Requires
+     *   this app's own build script to run `vite build`, not `next build` —
+     *   an app whose build script is `vite build` MUST set `build: 'vinext'`
+     *   explicitly (an absent `build` now means turbopack).
      * - `webpack` — `next build --webpack`, emitting the IDENTICAL
      *   `.next/standalone` shape as `turbopack` (#1219): same entry, same
      *   supervisor, same `runtime: "bun"|"node"` choice, same Bun bytecode
@@ -308,8 +317,10 @@ export interface KnativeNextConfig {
      *   bundler `next build` uses to produce that tree.
      *
      * On the WIRE the meanings differ from the config: CR absence permanently
-     * means `turbopack` (ADR-0017), so the CLI resolves this default and
-     * writes `build: "vinext"` into the CR explicitly (see cr-builder.ts).
+     * means `turbopack` (ADR-0017) — which now coincides with the resolved
+     * config default, but the CLI still resolves and writes `build` (and
+     * `runtime`, for the standalone shape) explicitly either way, never
+     * relying on that coincidence (see cr-builder.ts).
      *
      * `build` and `runtime` are INDEPENDENT. `runtime` does not select a build,
      * and `build` does not select a runtime — what connects them is the artifact

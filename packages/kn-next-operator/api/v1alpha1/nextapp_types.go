@@ -166,9 +166,12 @@ type NextAppSpec struct {
 	// changing it later needs a CRD roll rather than a CLI release.
 	//
 	// Additive and optional at v1alpha1 (ADR-0017): absence means "turbopack",
-	// so every CR ever written keeps its exact meaning. That is why the CLI
-	// writes "vinext" EXPLICITLY for its (now default) vinext builds — absence
-	// is permanently reserved for the standalone shape and cannot be re-read.
+	// so every CR ever written keeps its exact meaning. The CLI's own default
+	// builder flipped from "vinext" to "turbopack" in #1183 (ADR-0058), which
+	// now coincides with the wire default — but the CLI still writes the
+	// resolved value EXPLICITLY either way (`cr-builder.ts`), never relying on
+	// that coincidence. Absence is permanently reserved for the standalone
+	// shape and cannot be re-read to mean anything else.
 	//
 	// Order matters for upgrades (#548): a cluster whose CRD predates "vinext"
 	// rejects such a CR under --validate=strict, which the CLI always passes —

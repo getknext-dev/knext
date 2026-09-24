@@ -32,10 +32,13 @@
  * ## Scope
  *
  * This is the seam. The `build` config key it feeds is now live (B2), and BOTH
- * builders are selectable: `turbopack` (`next build` -> `.next/standalone`) and
- * `vinext` (nitro single executable). ADR-0048 had retired turbopack; ADR-0054
- * item 6 (#1167) re-opened it as the verified 778/0 standalone axis, keeping
- * vinext the default until the bun-standalone lane is credentialed.
+ * builders are selectable: `turbopack` (`next build` -> `.next/standalone`),
+ * `vinext` (nitro single executable), and `webpack` (#1219, a second spelling
+ * of the standalone shape). ADR-0048 had retired turbopack; ADR-0054 item 6
+ * (#1167) re-opened it as the verified 778/0 standalone axis, and ADR-0058
+ * (#1183, 2026-09-24) flipped `DEFAULT_BUILDER_ID` to `turbopack` once
+ * node/bun × turbopack banked their v1.0 credential — `vinext` stays
+ * selectable, v1.x-credentialed.
  *
  * The contract was written for two builders so that the second was an
  * implementation of an existing interface rather than a redesign — which is why
@@ -182,10 +185,10 @@ export function explainIncompatibility(
 /**
  * `next build` → `.next/standalone/server.js`, spawned by the supervisor.
  *
- * The all-apps-verified path, and SELECTABLE but not the default — `vinext`
- * holds that (see `DEFAULT_BUILDER_ID`). `node-server.ts` is its runtime half;
- * `STANDALONE_SERVER_PATH` overrides the entry there, and the default below is
- * that same value so the two cannot drift apart silently.
+ * The all-apps-verified path, and the DEFAULT since #1183/ADR-0058 (see
+ * `DEFAULT_BUILDER_ID`) — `vinext` stays selectable. `node-server.ts` is its
+ * runtime half; `STANDALONE_SERVER_PATH` overrides the entry there, and the
+ * default below is that same value so the two cannot drift apart silently.
  */
 export const turbopackBuilder: BuilderAdapter = {
     id: "turbopack",
@@ -199,8 +202,8 @@ export const turbopackBuilder: BuilderAdapter = {
     // on Node, uncompiled with the V8 compile cache; the standalone runtime image +
     // supervisor entrypoint that packages it are staged by `cli/runtime-image.ts`
     // (#1177/#1181, ADR-0055). vinext stays available too (founder-directed) —
-    // both are selectable. NOT yet the default: vinext keeps that until the
-    // bun-standalone lane is credentialed (#1147); DEFAULT_BUILDER_ID below.
+    // both are selectable. THE default since #1183/ADR-0058, once the
+    // bun-standalone lane was credentialed; see DEFAULT_BUILDER_ID below.
     available: true,
     describeArtifact(root: string): BuildArtifact {
         return {
@@ -368,24 +371,27 @@ export const BUILDERS: readonly BuilderAdapter[] = [
 ];
 
 /**
- * What an ABSENT `config.build` means: the vinext single executable. One
- * constant, because the default is load-bearing in three places that must never
+ * What an ABSENT `config.build` means: the standalone (`next build`) shape,
+ * the bun-standalone family ADR-0054 names the v1.0 default. One constant,
+ * because the default is load-bearing in three places that must never
  * disagree — artifact resolution (`build-artifact.ts`), the CR the CLI emits
  * (`cr-builder.ts`, where the resolved value is written explicitly since
  * wire-absence permanently means turbopack), and the asset staging path
  * (`asset-upload.ts`, which sources a different tree per shape).
  *
- * STILL `vinext`, deliberately, even though ADR-0054 names bun-standalone the
- * v1.0 default (#1167). The flip is CREDENTIAL-GATED, not automatic: the
- * bun-standalone axis is verified-once (two 1.4.0 dispatch runs), NOT yet
- * credentialed — the scheduled 14-night lane (#1147) has not banked — and the
- * compiled bytecode-exec of the standalone shape on Bun has only just landed
- * (#1166) and is not yet credentialed either.
- * Shipping an un-credentialed default would forfeit exactly the verified-adapter
- * credential ADR-0054 is protecting. So #1167 makes turbopack/standalone
- * SELECTABLE; changing this constant is a separate follow-up once the lane banks.
+ * FLIPPED to `turbopack` in #1183 (ADR-0058, founder decision 2026-09-24) —
+ * before this, it stayed `vinext` while the bun-standalone axis was
+ * credential-gated. It is now credentialed: node × turbopack and
+ * bun × turbopack are both v1.0-credentialed cells (ADR-0058 §Decision 2),
+ * `next build` standalone output was 778/0 on the official suite, and
+ * `runtime: "bun"` compiles to the ADR-0054 bytecode single executable
+ * (#1225). `vinext` stays selectable (ADR-0058: v1.x-credentialed, not
+ * dropped). See `DEFAULT_RUNTIME_ID` below for the paired runtime default —
+ * a bare config now resolves to the bun × turbopack cell (the compiled
+ * bytecode executable), the actual ADR-0054 "bun-standalone" default, not
+ * node × turbopack.
  */
-export const DEFAULT_BUILDER_ID = "vinext";
+export const DEFAULT_BUILDER_ID = "turbopack";
 
 /** The builders this release can actually run. */
 export const AVAILABLE_BUILDERS: readonly BuilderAdapter[] = BUILDERS.filter(
@@ -394,3 +400,25 @@ export const AVAILABLE_BUILDERS: readonly BuilderAdapter[] = BUILDERS.filter(
 
 /** Every runtime the contract knows about. */
 export const RUNTIMES: readonly RuntimeAdapter[] = [nodeRuntime, bunRuntime];
+
+/**
+ * What an ABSENT `config.runtime` means for the DEFAULT builder — the single
+ * shared constant every `config.runtime ?? …` fallback in the CLI must use
+ * (#1183 PR review finding #5: `validate.ts` and `build.ts` previously
+ * hardcoded "bun" and "node" respectively, silently disagreeing).
+ *
+ * `"bun"`, matching ADR-0054's actual default cell: bun-standalone, packaged
+ * as the compiled `--bytecode` single executable (#1225) — not the uncompiled
+ * node-standalone fallback. A bare `kn-next.config.ts` (no `build`, no
+ * `runtime`) now resolves to `build: "turbopack"` (`DEFAULT_BUILDER_ID`) ×
+ * `runtime: "bun"` (this constant), the credentialed v1.0 default (ADR-0058
+ * §Decision 2). This is ALSO vinext's own absent-runtime default (see
+ * `vinextBuilder.describeArtifact` above — an absent runtime picks the bun
+ * nitro preset), so the constant is consistent across both builders, not
+ * turbopack-specific.
+ *
+ * Explicit `runtime: "node"` is unaffected — this constant only fills the gap
+ * when the config is silent, the same rule `DEFAULT_BUILDER_ID` follows for
+ * `build`.
+ */
+export const DEFAULT_RUNTIME_ID: RuntimeId = "bun";
