@@ -146,6 +146,10 @@ mock.module("../cli/gc", () => ({
 const storageConfig: KnativeNextConfig = {
     name: "my-app",
     registry: "registry.example.com",
+    // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient default
+    // to turbopack, and this suite's whole scenario name is "app-dockerfile +
+    // vinext + storage".
+    build: "vinext",
     storage: {
         provider: "gcs",
         bucket: "my-bucket",

@@ -429,8 +429,13 @@ describe("deploy() skew guard — standalone leg (ADR-0011 / #93)", () => {
  * check FAILS LOUDLY in every branch — including the one that used to skip.
  */
 describe("deploy() skew guard — vinext leg (T2a)", () => {
-    // baseConfig sets no `build`, which resolves to vinext (ADR-0048), and it
-    // HAS a storage block — so the guard's subject exists.
+    // baseConfig sets no `build`, which resolves to turbopack since #1183
+    // (ADR-0058) — this leg needs `build: "vinext"` EXPLICITLY now to reach
+    // the vinext guard rather than the standalone one. It HAS a storage
+    // block — so the guard's subject exists.
+    beforeEach(() =>
+        loadConfig.mockResolvedValue({ ...baseConfig, build: "vinext" }),
+    );
 
     it("PROCEEDS to apply when the built prefix IS the deploy tag", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);

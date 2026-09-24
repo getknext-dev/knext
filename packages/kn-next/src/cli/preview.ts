@@ -29,6 +29,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -380,9 +381,11 @@ export async function defaultBuildAndPush(
     );
     // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
     // (`next: command not found`, exit 127) into plain npm-install guidance.
-    // requireEsm gates the vinext ESM preflight (vinext target only).
+    // requireEsm gates the vinext ESM preflight (vinext target only). Resolved
+    // against DEFAULT_BUILDER_ID, not hardcoded — an absent `build` no longer
+    // means vinext (#1183).
     runProjectBuild({
-        requireEsm: (config.build ?? "vinext") === "vinext",
+        requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
     });
 
     const taggedRef = `${config.registry}/${previewName}:${tag}`;

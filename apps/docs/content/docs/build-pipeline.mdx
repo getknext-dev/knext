@@ -1,15 +1,13 @@
 ---
 title: How your app is built
-description: knext's default build compiles your Next.js app into a single self-contained executable through vinext — vite build, a nitro Bun bundle, then a bytecode-precompiled Bun binary.
+description: knext's default build compiles your Next.js app with next build into a standalone server, run by a small supervisor — the official-adapter-verified target. vinext (a single self-contained executable) stays selectable.
 ---
 
-When you run `kn-next build`, knext turns your Next.js app into **one self-contained executable**
-rather than a folder of JavaScript to be interpreted at boot. That binary — the server, every route
-it reaches, and the Bun runtime, compiled together — is what your image runs directly. This page
-explains the build target, the pipeline that produces it, and what your app has to satisfy to build
-on it.
+When you run `kn-next build`, knext turns your Next.js app into a deployable artifact your image
+runs directly. This page explains the build target, the pipeline that produces it, and what your
+app has to satisfy to build on it.
 
-For the performance numbers and a plain description of the artifact, see
+For the performance numbers and a plain description of the compiled-executable artifact, see
 [the compiled executable](/docs/bun-runtime). For how this relates to the official Next.js adapter,
 see [the adapter and the compiled build](/docs/official-adapter).
 
@@ -17,30 +15,41 @@ see [the adapter and the compiled build](/docs/official-adapter).
 
 knext offers **three** build targets, and you choose between them with the `build` field.
 
-The **default** target compiles your app with [**vinext**](https://vinext.dev), an open-source,
-Vite-based implementation of the Next.js framework, into a single executable. You do not have to
+The **default** target is `next build`'s **standalone** output (`build: 'turbopack'`), run by a
+small supervisor that spawns Next's own `server.js` and drains it gracefully on shutdown. This is
+the target the official Next.js compatibility suite verifies knext against. You do not have to
 configure anything to get it:
 
 ```ts title="kn-next.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
-  // build: 'vinext' is the default — you can state it explicitly, but you don't need to
+  // build: 'turbopack' is the default — you can state it explicitly, but you don't need to
+  // runtime: 'node' is the default runtime for this target; set runtime: 'bun' for the
+  // compiled Bun single-executable variant.
 };
 ```
 
-The second target is `next build`'s **standalone** output, run by a small supervisor that spawns
-Next's own `server.js` and drains it gracefully on shutdown. The official Next.js compatibility
-suite number was earned on this target's standalone output; the supervisor knext wraps it in has
-not itself been run through the suite. Select it with `build: 'turbopack'`, and pick which runtime
-executes it with `runtime`:
+Pick which runtime executes it with `runtime`:
 
 ```ts title="kn-next.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
-  build: 'turbopack',   // next build -> .next/standalone, run by a supervisor
+  build: 'turbopack',   // next build -> .next/standalone, run by a supervisor (the default)
   runtime: 'bun',       // or 'node' (the default runtime for this target)
+};
+```
+
+The second target compiles your app with [**vinext**](https://vinext.dev), an open-source,
+Vite-based implementation of the Next.js framework, into a single executable. Select it explicitly
+with `build: 'vinext'`:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'vinext',
 };
 ```
 
@@ -88,13 +97,13 @@ identically) it decides how the server is packaged:
 
 ### vinext on Node
 
-The vinext target also runs on **Node**. Set `runtime: 'node'` and keep `build` at its default:
+The vinext target also runs on **Node**. Set `build: 'vinext'` explicitly and `runtime: 'node'`:
 
 ```ts title="kn-next.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
-  build: 'vinext',      // the default
+  build: 'vinext',
   runtime: 'node',      // a Node server instead of the Bun executable
 };
 ```

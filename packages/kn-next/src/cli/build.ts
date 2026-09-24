@@ -11,13 +11,14 @@
  *   2. Run `next build` (output:'standalone' set in the app's next.config.ts)
  *   3. Upload static assets to storage (GCS/S3/MinIO)
  *
- * NOTE: the project's own `npm run build` produces the bundle (vinext's
- * `vite build` on the default target, `next build` + output:'standalone' on the
- * selectable turbopack/standalone target — ADR-0054 item 6); for the vinext
- * shape this command then compiles the single executable (ADR-0048 — see step
- * 2c). Since the project owns that script, selecting `build: 'turbopack'` on an
- * app whose script still runs `vite build` produces no `.next/standalone` —
- * that is a hard, fail-fast error below rather than a warning, for the
+ * NOTE: the project's own `npm run build` produces the bundle (`next build`
+ * + output:'standalone' on the default turbopack/standalone target since
+ * #1183 (ADR-0058); vinext's `vite build` on the selectable `build: 'vinext'`
+ * target — ADR-0054 item 6); for the vinext shape this command then compiles
+ * the single executable (ADR-0048 — see step 2c). Since the project owns that
+ * script, selecting `build: 'turbopack'` (or leaving it absent) on an app
+ * whose script still runs `vite build` produces no `.next/standalone` — that
+ * is a hard, fail-fast error below rather than a warning, for the
  * next-standalone shape only (#1184).
  *
  * ADR-0001: build does NOT emit raw Knative/infrastructure manifests. The
@@ -27,6 +28,7 @@
 
 import { existsSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import {
     hasStorage,
@@ -182,15 +184,17 @@ export async function build(options: BuildOptions = {}) {
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {
         log.info(
-            { builder: config.build ?? "vinext" },
+            { builder: config.build ?? DEFAULT_BUILDER_ID },
             "Running the project build...",
         );
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
         // requireEsm gates the vinext ESM preflight: only the vinext target
-        // (the default) needs `"type":"module"`; a node app builds CommonJS fine.
+        // needs `"type":"module"`; a node app builds CommonJS fine. Resolved
+        // against DEFAULT_BUILDER_ID, not hardcoded — an absent `build` no
+        // longer means vinext (#1183).
         runProjectBuild({
-            requireEsm: (config.build ?? "vinext") === "vinext",
+            requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
         });
         log.info("Project build complete");
     }

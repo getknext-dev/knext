@@ -513,9 +513,10 @@ export async function deploy() {
         );
     }
 
-    // The resolved build target (ADR-0048: an absent `build` means vinext).
-    // Resolved once here because the lock-step guard below reads a DIFFERENT
-    // artifact per target — `.next/BUILD_ID` for standalone, the
+    // The resolved build target (#1183/ADR-0058: an absent `build` means
+    // turbopack — the standalone shape — since v1.0; ADR-0048 originally made
+    // it vinext). Resolved once here because the lock-step guard below reads
+    // a DIFFERENT artifact per target — `.next/BUILD_ID` for standalone, the
     // `.output/public/_next/static/<id>/` prefix for vinext.
     const resolvedBuild = config.build ?? DEFAULT_BUILDER_ID;
 
@@ -556,8 +557,10 @@ export async function deploy() {
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
         // (`next: command not found`, exit 127) into plain npm-install guidance.
         // requireEsm gates the vinext ESM preflight (vinext target only).
+        // Reads `resolvedBuild`, not a hardcoded fallback — an absent `build`
+        // no longer means vinext (#1183, DEFAULT_BUILDER_ID is "turbopack").
         runProjectBuild({
-            requireEsm: (config.build ?? "vinext") === "vinext",
+            requireEsm: resolvedBuild === "vinext",
         });
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
@@ -728,9 +731,10 @@ export async function deploy() {
                     // produces. Nothing is inferred at this point.
                     const repoRoot = buildContext;
                     // ADR-0055: select the runtime image by (build, runtime). The
-                    // vinext default uses the scaffolded single-stage Dockerfile
-                    // (argv unchanged); the standalone shape stages the ADR-0055
-                    // multi-stage template into the context and picks a `--target`.
+                    // vinext shape uses the scaffolded single-stage Dockerfile
+                    // (argv unchanged); the standalone shape (the default since
+                    // #1183) stages the ADR-0055 multi-stage template into the
+                    // context and picks a `--target`.
                     const selection = selectRuntimeImage(config, process.cwd());
                     if (selection.kind === "standalone") {
                         stageStandaloneBuildContext({

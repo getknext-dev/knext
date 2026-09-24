@@ -240,7 +240,8 @@ describe("build()", () => {
     });
 
     it("never compiles the standalone executable on the vinext build, even with runtime bun", async () => {
-        loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: undefined }));
+        // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient default.
+        loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: "vinext" }));
         standaloneTree();
 
         await build({ skipNextBuild: true });
@@ -260,12 +261,14 @@ describe("build()", () => {
         expect(uploadAssets).not.toHaveBeenCalled();
     });
 
-    it("compiles the single executable on the default (vinext) build", async () => {
+    it("compiles the single executable on a vinext build", async () => {
         // The load-bearing case: `kn-next deploy` builds an image whose
         // Dockerfile COPYs `knext-exec-linux-x64` from the build context, so a
         // default `kn-next build` that does not produce it emits a build that
         // fails at docker-build time — or worse, dockerizes a stale binary.
-        loadConfig.mockResolvedValue(cfg({ build: undefined }));
+        // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient
+        // default to turbopack.
+        loadConfig.mockResolvedValue(cfg({ build: "vinext" }));
 
         await build({ skipNextBuild: true });
 
@@ -311,7 +314,7 @@ describe("build()", () => {
         expect(uploadAssets).toHaveBeenCalledTimes(1);
     });
 
-    it("does not fail fast on the default (vinext) build when its own artifact is missing", async () => {
+    it("does not fail fast on a vinext build when its own artifact is missing", async () => {
         // vinext's artifact is `.output/server/index.mjs`, produced by
         // `buildVinextExecutable` — which is mocked out here, so the
         // artifact never actually lands on disk. #1184 scopes the hard
@@ -323,18 +326,21 @@ describe("build()", () => {
             join(dir, "package.json"),
             JSON.stringify({ name: "my-app", type: "module" }),
         );
-        loadConfig.mockResolvedValue(cfg({ build: undefined }));
+        // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient
+        // default to turbopack.
+        loadConfig.mockResolvedValue(cfg({ build: "vinext" }));
 
         await expect(build({})).resolves.toBeUndefined();
 
         expect(uploadAssets).toHaveBeenCalledTimes(1);
     });
 
-    it("skips the standalone heal on the default (vinext) build, even with a standalone dir present", async () => {
+    it("skips the standalone heal on a vinext build, even with a standalone dir present", async () => {
         // The directory is created ON PURPOSE: the gate must key on the
         // artifact SHAPE, not on whether a stale standalone tree happens to be
         // lying around from an earlier build.
-        loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: undefined }));
+        // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient default.
+        loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: "vinext" }));
         standaloneTree();
 
         await build({ skipNextBuild: true });

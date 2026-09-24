@@ -6,6 +6,7 @@ import {
     BUILDERS,
     type BuilderAdapter,
     AVAILABLE_BUILDERS as CONTRACT_AVAILABLE,
+    DEFAULT_BUILDER_ID,
     explainIncompatibility,
     RUNTIMES,
     type RuntimeAdapter,
@@ -86,7 +87,9 @@ export function checkPairing(
     runtime: string | undefined,
     contract: PairingContract = SHIPPED_CONTRACT,
 ): string | null {
-    const builder = contract.builders.find((b) => b.id === (build ?? "vinext"));
+    const builder = contract.builders.find(
+        (b) => b.id === (build ?? DEFAULT_BUILDER_ID),
+    );
     const rt = contract.runtimes.find((r) => r.id === (runtime ?? "bun"));
     if (!builder || !rt) return null; // shape/enum errors are reported elsewhere
     // Root is irrelevant to shape compatibility; "." keeps it pure. The runtime

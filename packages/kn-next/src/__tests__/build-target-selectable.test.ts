@@ -11,12 +11,11 @@
  * end-to-end, which nothing did before (cr-1181 noted the unreachability stayed
  * invisible precisely because no test crossed the seam).
  *
- * The default is DELIBERATELY UNCHANGED: vinext stays `DEFAULT_BUILDER_ID`.
- * ADR-0054 makes bun-standalone the v1.0 default, but its 778/0 is
- * verified-once, not credentialed (#1147 lane has not banked), and the compiled
- * bytecode-exec of bun-standalone (#1166) is new and not yet credentialed — so
- * the SELECTABLE target here is the bun/node-standalone. The default-flip is a
- * follow-up gated on credentialing, not this issue.
+ * The default FLIPPED in #1183 (ADR-0058, founder decision 2026-09-24):
+ * `DEFAULT_BUILDER_ID` is now `"turbopack"` (the standalone / bun-standalone
+ * family), pinned by the guard test below. vinext stays selectable (and
+ * remains the v1.x-credentialed builder per ADR-0058), but an absent
+ * `config.build` now resolves to the standalone shape.
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
@@ -64,11 +63,12 @@ describe("#1167 the standalone target is selectable", () => {
         expect(ids).toEqual(["turbopack", "vinext", "webpack"]);
     });
 
-    it("keeps vinext as the default builder — the flip to bun-standalone is credential-gated, not this issue", () => {
-        // Un-credentialed default guard: DEFAULT_BUILDER_ID must NOT flip until
-        // the #1147 lane banks. If someone flips it here this reds, which is the
-        // point — the default change is a separate, gated decision.
-        expect(DEFAULT_BUILDER_ID).toBe("vinext");
+    it("pins turbopack as the default builder (#1183, ADR-0058) — an accidental revert reds here", () => {
+        // Post-flip guard: DEFAULT_BUILDER_ID must stay "turbopack" now that
+        // the bun-standalone family is the credentialed v1.0 default. If
+        // someone reverts this to "vinext" (or anything else) this reds,
+        // which is the point — the default is deliberate, not incidental.
+        expect(DEFAULT_BUILDER_ID).toBe("turbopack");
     });
 
     it("ACCEPTS build=turbopack + runtime=bun (was rejected as retired)", () => {
@@ -167,13 +167,32 @@ describe("#1167 end-to-end reachability: loadConfig -> validateConfig -> selectR
         expect(sel.target).toBe("standalone-node");
     });
 
-    it("the default (vinext) config still routes to the app Dockerfile end-to-end", async () => {
-        // The other half of reachability: activating standalone must not
-        // reroute the default vinext app away from its single-stage Dockerfile.
+    it("the default (bare) config now routes to the standalone Dockerfile end-to-end (#1183)", async () => {
+        // Post-flip: an absent build/runtime resolves to DEFAULT_BUILDER_ID
+        // ("turbopack") and the config.ts-documented default runtime ("node"),
+        // so a bare config reaches the standalone-node stage, not the vinext
+        // single-stage Dockerfile.
+        const config = await loadFixture(
+            `export default {
+                name: "e2e-default",
+                registry: "example.io/team",
+            };`,
+        );
+        expect(() => validateConfig(config)).not.toThrow();
+        const sel = selectRuntimeImage(config, "/app");
+        expect(sel.kind).toBe("standalone");
+        expect(sel.target).toBe("standalone-node");
+        expect(sel.dockerfile).toBe(join("/app", "Dockerfile.standalone"));
+    });
+
+    it("an explicit build='vinext' config still routes to the app Dockerfile end-to-end", async () => {
+        // vinext stays selectable (ADR-0058): naming it explicitly still
+        // reaches its single-stage Dockerfile, unchanged by the default flip.
         const config = await loadFixture(
             `export default {
                 name: "e2e-vinext",
                 registry: "example.io/team",
+                build: "vinext",
             };`,
         );
         expect(() => validateConfig(config)).not.toThrow();

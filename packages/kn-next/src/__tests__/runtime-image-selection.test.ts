@@ -7,10 +7,11 @@
  * deliberately kept OUT of scaffold-emission by the #1177 increment). This
  * suite pins the wiring that selects between them at build/deploy time:
  *
- *   - vinext (build absent or "vinext")  -> the scaffolded app Dockerfile,
+ *   - vinext (build explicitly "vinext") -> the scaffolded app Dockerfile,
  *     no `--target` (single-stage).
- *   - turbopack (standalone shape)       -> the staged standalone template,
- *     `--target standalone-bun` (runtime bun) or `standalone-node` (default).
+ *   - turbopack (build absent or "turbopack" — the default since #1183/
+ *     ADR-0058) -> the staged standalone template, `--target standalone-bun`
+ *     (runtime bun) or `standalone-node` (default runtime).
  *
  * The selection lives at BUILD/DEPLOY time, not create time: `config.build` is
  * authoritative there, it can change after `create`, and `deploy` reads a fixed
@@ -54,11 +55,11 @@ afterAll(() => {
 });
 
 describe("selectRuntimeImage — target selection by (build, runtime)", () => {
-    it("vinext (build absent) -> the scaffolded app Dockerfile, no --target", () => {
+    it("build absent -> the standalone shape (default since #1183/ADR-0058), --target standalone-node", () => {
         const sel = selectRuntimeImage({}, "/app");
-        expect(sel.kind).toBe("app-dockerfile");
-        expect(sel.dockerfile).toBe(join("/app", "Dockerfile"));
-        expect(sel.target).toBeUndefined();
+        expect(sel.kind).toBe("standalone");
+        expect(sel.dockerfile).toBe(join("/app", STANDALONE_DOCKERFILE_NAME));
+        expect(sel.target).toBe("standalone-node");
     });
 
     it("vinext (build explicitly 'vinext') -> app Dockerfile, no --target", () => {

@@ -32,10 +32,13 @@
  * ## Scope
  *
  * This is the seam. The `build` config key it feeds is now live (B2), and BOTH
- * builders are selectable: `turbopack` (`next build` -> `.next/standalone`) and
- * `vinext` (nitro single executable). ADR-0048 had retired turbopack; ADR-0054
- * item 6 (#1167) re-opened it as the verified 778/0 standalone axis, keeping
- * vinext the default until the bun-standalone lane is credentialed.
+ * builders are selectable: `turbopack` (`next build` -> `.next/standalone`),
+ * `vinext` (nitro single executable), and `webpack` (#1219, a second spelling
+ * of the standalone shape). ADR-0048 had retired turbopack; ADR-0054 item 6
+ * (#1167) re-opened it as the verified 778/0 standalone axis, and ADR-0058
+ * (#1183, 2026-09-24) flipped `DEFAULT_BUILDER_ID` to `turbopack` once
+ * node/bun × turbopack banked their v1.0 credential — `vinext` stays
+ * selectable, v1.x-credentialed.
  *
  * The contract was written for two builders so that the second was an
  * implementation of an existing interface rather than a redesign — which is why
@@ -368,24 +371,26 @@ export const BUILDERS: readonly BuilderAdapter[] = [
 ];
 
 /**
- * What an ABSENT `config.build` means: the vinext single executable. One
- * constant, because the default is load-bearing in three places that must never
+ * What an ABSENT `config.build` means: the standalone (`next build`) shape,
+ * the bun-standalone family ADR-0054 names the v1.0 default. One constant,
+ * because the default is load-bearing in three places that must never
  * disagree — artifact resolution (`build-artifact.ts`), the CR the CLI emits
  * (`cr-builder.ts`, where the resolved value is written explicitly since
  * wire-absence permanently means turbopack), and the asset staging path
  * (`asset-upload.ts`, which sources a different tree per shape).
  *
- * STILL `vinext`, deliberately, even though ADR-0054 names bun-standalone the
- * v1.0 default (#1167). The flip is CREDENTIAL-GATED, not automatic: the
- * bun-standalone axis is verified-once (two 1.4.0 dispatch runs), NOT yet
- * credentialed — the scheduled 14-night lane (#1147) has not banked — and the
- * compiled bytecode-exec of the standalone shape on Bun has only just landed
- * (#1166) and is not yet credentialed either.
- * Shipping an un-credentialed default would forfeit exactly the verified-adapter
- * credential ADR-0054 is protecting. So #1167 makes turbopack/standalone
- * SELECTABLE; changing this constant is a separate follow-up once the lane banks.
+ * FLIPPED to `turbopack` in #1183 (ADR-0058, founder decision 2026-09-24) —
+ * before this, it stayed `vinext` while the bun-standalone axis was
+ * credential-gated. It is now credentialed: node × turbopack and
+ * bun × turbopack are both v1.0-credentialed cells (ADR-0058 §Decision 2),
+ * `next build` standalone output was 778/0 on the official suite, and
+ * `runtime: "bun"` compiles to the ADR-0054 bytecode single executable
+ * (#1225). `vinext` stays selectable (ADR-0058: v1.x-credentialed, not
+ * dropped). `config.runtime` itself is unchanged by this flip — absent still
+ * means `"node"` (`config.ts`), so a bare config now resolves to the
+ * node × turbopack cell; pass `runtime: "bun"` for the bun-standalone exec.
  */
-export const DEFAULT_BUILDER_ID = "vinext";
+export const DEFAULT_BUILDER_ID = "turbopack";
 
 /** The builders this release can actually run. */
 export const AVAILABLE_BUILDERS: readonly BuilderAdapter[] = BUILDERS.filter(
