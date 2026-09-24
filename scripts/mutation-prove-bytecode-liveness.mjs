@@ -76,10 +76,48 @@ const MUTATIONS = [
     // #1299 moved this tolerance OUT of SHIPPED_BAKE and into the
     // harness-owned BAKE_ACCEPT wrapper — this mutation moves with it.
     label:
-      'e2e-bake-accept: accepts a connection reset (status=error) under KNEXT_WARM_ACCEPT_ANY_STATUS',
+      'e2e-bake-accept: accepts a connection reset / malformed status under KNEXT_WARM_ACCEPT_ANY_STATUS',
     target: BAKE_ACCEPT,
     spec: SPEC_BAKE_ACCEPT,
-    anchor: '  if (errored.length > 0) {',
+    anchor: '  if (invalid.length > 0) {',
+    replacement: '  if (false) {',
+  },
+  // ── #1377 review: exit code alone is never enough to tolerate ───────────
+  {
+    label: 'e2e-bake-accept: tolerates a signal-killed driver (SIGKILL) as if it exited cleanly',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (signal !== null) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label: "e2e-bake-accept: tolerates ANY non-zero exit code, not just the driver's documented 1",
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (exitCode !== 1) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label: 'e2e-bake-accept: tolerates a crash that never reached the COMPILE_CACHE: flush line',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (!stdout.includes(COMPILE_CACHE_MARKER)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label:
+      'e2e-bake-accept: tolerates ANY stderr, not just the driver\'s own "a warm path did not answer 2xx" marker',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (!stderr.includes(DRIVER_FAILURE_MARKER)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label:
+      'e2e-bake-accept: tolerates an all-2xx WARMED set that still exited non-zero (contradicts the known failure shape)',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (nonTwoXx.length === 0) {',
     replacement: '  if (false) {',
   },
   {
