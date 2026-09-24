@@ -85,6 +85,7 @@ import { isBuiltin } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
+import { computedRequireInventory } from "./computed-require-scan.mjs";
 import {
     DEV_ONLY_STUB_SOURCE,
     resolveExportsUnderNode,
@@ -365,6 +366,8 @@ const DISK_NAMESPACE = "knext-disk";
  *      share one module instance.
  */
 const keptOnDisk = new Set();
+/** Files inside the standalone tree that the executable BUNDLES (not kept on disk). */
+const bundledFiles = new Set();
 
 /** A module in the disk closure resolves to its on-disk twin, not the bundle. */
 function onDisk(real) {
@@ -397,7 +400,9 @@ const standaloneResolver = {
                 if (!isAbsolute(resolved)) return undefined;
                 const real = realpathSync(resolved);
                 if (!isInside(real, ROOT)) return { path: a.path, external: true };
-                return onDisk(real) ?? undefined;
+                const disk = onDisk(real);
+                if (!disk) bundledFiles.add(real);
+                return disk ?? undefined;
             }
             if (isBareSpecifier(a.path)) {
                 const fallback = nodeConditionTarget(a.path, dirname(a.importer));
@@ -464,6 +469,20 @@ console.log(
 );
 if (process.env.KNEXT_STANDALONE_COMPILE_VERBOSE === "1") {
     for (const f of [...keptOnDisk].sort()) console.log(`  kept on disk: ${relative(ROOT, f)}`);
+}
+
+// ── Computed specifiers in the bundle: the disk-closure scan's blind spot ────
+// A computed require/import in BUNDLED code resolves from disk at runtime; if it
+// loads a module the executable also bundled, that module has two instances.
+// These cannot be closed statically, so the compile reports them. The reviewed
+// set for Next's server core is pinned by standalone-computed-requires.test.ts.
+const computedSites = computedRequireInventory(bundledFiles, ROOT);
+const computedTotal = Object.values(computedSites).reduce((a, b) => a + b, 0);
+console.log(
+    `[knext standalone-compile] ${computedTotal} computed require/import site(s) in ${Object.keys(computedSites).length} bundled module(s) resolve at runtime, outside the disk-closure scan (KNEXT_STANDALONE_COMPILE_VERBOSE=1 lists them)`,
+);
+if (process.env.KNEXT_STANDALONE_COMPILE_VERBOSE === "1") {
+    for (const [f, n] of Object.entries(computedSites)) console.log(`  computed: ${f} (${n})`);
 }
 console.log(
     `[knext standalone-compile] wrote ${OUTFILE} (bytecode: verified${TARGET ? `, target: ${TARGET}` : ""})`,
