@@ -24,14 +24,19 @@
  * `package/`, a partial substitution, unexplained binary drift — is a
  * failure, printed with a precise diff.
  *
- * This reads tar streams directly (`scripts/lib/tar-inventory.mjs`) rather
- * than extracting to disk and walking the result — a disk walk cannot see a
- * symlink's target or a file's mode, and a walk rooted at `<dest>/package`
- * never even looks at an entry the tarball placed OUTSIDE `package/`. Every
- * entry, from every tarball, is validated safe (`assertEntrySafe`, in
+ * This reads every entry with `node-tar` (`scripts/lib/tar-entries.mjs`) —
+ * the SAME library `npm`/`pacote` use to extract — in list-only mode, rather
+ * than a hand-written parser (a from-scratch reader disagreed with node-tar
+ * on a crafted tarball in review; that class of parser-differential bug is
+ * eliminated by construction by not having a second parser) or extracting to
+ * disk and walking the result (a disk walk cannot see a symlink's target or
+ * a file's mode, and a walk rooted at `<dest>/package` never even looks at
+ * an entry the tarball placed OUTSIDE `package/`). Every entry, from every
+ * tarball, is validated safe (`assertEntrySafe`, in
  * `scripts/lib/ga-tarball-diff.mjs`) before any comparison runs, so an unsafe
- * entry — an absolute path, a `..` traversal, or a symlink/hardlink target
- * that escapes `package/` — is REJECTED outright, not merely diffed.
+ * entry — an absolute path, a `..` traversal, a duplicate path, or a
+ * symlink/hardlink target that escapes `package/` — is REJECTED outright,
+ * not merely diffed.
  *
  * USAGE
  * -----
@@ -54,7 +59,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareTarEntries, validateVersionPair } from './lib/ga-tarball-diff.mjs';
-import { readTarEntries } from './lib/tar-inventory.mjs';
+import { readTarEntries } from './lib/tar-entries.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -90,14 +95,15 @@ function cleanup() {
 }
 
 /**
- * Read a .tgz's full tar-entry inventory PLUS its package name/version, all
- * in memory — no `tar` binary, no filesystem extraction. Every entry is
+ * Read a .tgz's full tar-entry inventory PLUS its package name/version,
+ * using `node-tar` (the same library `npm`/`pacote` extract with) in
+ * list-only mode — no filesystem extraction. Every entry is
  * `assertEntrySafe`-validated later, inside `compareTarEntries`; this only
  * needs the one legitimate `package/package.json` entry to identify the
  * package.
  */
 function loadTarball(tgzPath) {
-  const entries = readTarEntries(readFileSync(tgzPath));
+  const entries = readTarEntries(tgzPath);
   const pkgEntry = entries.find((e) => e.name === 'package/package.json' && e.type === 'file');
   if (!pkgEntry) {
     throw new Error(`${tgzPath}: no "package/package.json" entry found`);

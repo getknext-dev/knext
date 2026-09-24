@@ -6,13 +6,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
-  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import {
   assertEntrySafe,
   compareTarEntries,
@@ -22,20 +22,18 @@ import {
   substituteVersion,
   validateVersionPair,
 } from '../scripts/lib/ga-tarball-diff.mjs';
-import { readTarEntries } from '../scripts/lib/tar-inventory.mjs';
+import { readTarEntries } from '../scripts/lib/tar-entries.mjs';
 
 /**
  * `scripts/ga-tarball-diff.mjs` (#1306) — the GA-vs-rc tarball diff check.
  *
- * This round fixes six review-reproduced bypasses (jev scores in the review):
+ * ROUND 1 fixed six review-reproduced bypasses (jev scores in the review):
  *
  *   1. (0.87) The old CLI extracted to disk and `readdirSync`-walked the
  *      result, which cannot see a symlink, a file's mode, or an entry OUTSIDE
- *      the extracted `package/` root. `scripts/lib/tar-inventory.mjs` reads
- *      the tar stream directly instead; `compareTarEntries` diffs type, mode,
+ *      the extracted `package/` root. `compareTarEntries` diffs type, mode,
  *      and symlink/hardlink target for EVERY entry, and `assertEntrySafe`
- *      rejects an unsafe entry outright (see the `compareTarEntries` and
- *      `assertEntrySafe` describe blocks, plus the CLI attack-replay test).
+ *      rejects an unsafe entry outright.
  *   2. (0.87) A `@getknext/*` sibling dependency range used to be skipped on
  *      ANY change. It must now equal the rc range with the version
  *      substituted — nothing else (`diffDependencyField` tests).
@@ -52,10 +50,55 @@ import { readTarEntries } from '../scripts/lib/tar-inventory.mjs';
  *      matters everywhere except the `version` value and a sibling range's
  *      value (`diffPackageJson` key-order tests, including `exports`).
  *   6. Version well-formedness + lockstep (`validateVersionPair` tests, plus
- *      a CLI-level lockstep-mismatch test) and a `--rc-ref/--ga-ref` smoke
- *      test that exercises the real `git worktree add`/`remove` lifecycle
- *      without a full `bun install`+build (too slow for a unit suite — see
- *      that test's own comment for why this is the honest scope).
+ *      a CLI-level lockstep-mismatch test).
+ *
+ * ROUND 2 found the round-1 hand-written tar reader (`tar-inventory.mjs`)
+ * itself PARSER-DIFFERENTIAL from `node-tar` — the library `npm`/`pacote`
+ * actually extract with. Rather than patch the hand parser (the exact
+ * successive-round regression class three earlier rounds already lived
+ * through), it is DELETED; `scripts/lib/tar-entries.mjs` now reads every
+ * entry with `node-tar` itself, in list-only mode (never touching disk).
+ * The "adversarial fixtures" describe block below builds each attack raw,
+ * byte-for-byte (mirroring the review's own crafted-tarball approach — this
+ * is the one place that is correct, not `tar -czf` over a staged directory,
+ * because a legitimate tar tool cannot produce these malformed headers):
+ *
+ *   1. (0.87) a bad-checksum entry immediately followed by a checksum-VALID
+ *      duplicate of the same path used to be resolved by "last entry wins"
+ *      (`new Map(entries.map(e => [e.name, e]))`), silently hiding whichever
+ *      copy came first. `readTarEntries` now REJECTS any second occurrence
+ *      of a path outright — proven against both a legitimately-checksummed
+ *      duplicate (node-tar itself raises nothing for that case) and the
+ *      bad-checksum-duplicate shape review round 2's attack A used.
+ *   2. (0.86) an empty-`name` ustar header carrying its real path only in
+ *      `prefix`, retargeted via `type=2`/`linkpath` into a symlink — the old
+ *      hand parser's `if (rawName === '') continue` skipped it entirely
+ *      (silent, not even a diff). `node-tar` does not special-case this away
+ *      either (see `tar-entries.mjs`'s header comment); `assertEntrySafe`
+ *      catches it because the resulting path/linkpath fail the same
+ *      outside-`package/`/absolute-target checks every other entry does.
+ *   3. the PAX `path`/`linkpath` OVERRIDE mechanism itself (not just the
+ *      empty-name/prefix shape) was never exercised by round 1's tests —
+ *      deleting the old parser's pax-record handling would have stayed
+ *      green. Dedicated tests below build a real PAX extended header
+ *      (self-referential-length record, exactly as the tar format requires)
+ *      that retargets a `path` and, separately, a `linkpath`, outside
+ *      `package/`.
+ *   4. the `--rc-ref/--ga-ref` "smoke test" from round 1 never actually
+ *      packed anything (the orphan-commit fixture has no `packages/`
+ *      directories, so `packRef` skips straight past the `bun pm pack`
+ *      call) — its title claimed more than the test did. Renamed to name
+ *      what it verifies: the `git worktree add`/`remove` lifecycle.
+ *
+ * A truncation/NaN-size case is also covered (`size-field truncation`
+ * describe block) — see that block's comment for why it is a
+ * "must never silently pass", not a "must be fixed", case: `node-tar`'s own
+ * header parser silently normalises an unparseable `size` field to `0`
+ * under some conditions, so OUR view is, by construction, identical to what
+ * a real `npm install` would produce; under others (observed directly, not
+ * assumed — this repo's runtime for the CLI is Node, but the test suite
+ * itself runs on Bun) the very same malformed header makes node-tar throw
+ * instead. Both outcomes fail closed; the test accepts either.
  */
 
 const registry: string[] = [];
@@ -523,11 +566,11 @@ describe('readTarEntries (real tar fixtures)', () => {
     symlinkSync('/etc/passwd', join(pkgRoot, 'evil-link'));
     const tgz = packStage(dir, dir, 'x.tgz');
 
-    const entries = readTarEntries(readFileSync(tgz));
+    const entries = readTarEntries(tgz);
     const file = entries.find((e) => e.name === 'package/a.txt');
     const link = entries.find((e) => e.name === 'package/evil-link');
     expect(file?.type).toBe('file');
-    expect(file?.mode & 0o777).toBe(0o644);
+    expect((file?.mode ?? 0) & 0o777).toBe(0o644);
     expect(link?.type).toBe('symlink');
     expect(link?.linkname).toBe('/etc/passwd');
   });
@@ -540,8 +583,203 @@ describe('readTarEntries (real tar fixtures)', () => {
     writeFileSync(join(dir, 'package', 'index.js'), 'ok();');
     const tgz = packStage(dir, dir, 'x.tgz');
 
-    const entries = readTarEntries(readFileSync(tgz));
+    const entries = readTarEntries(tgz);
     expect(entries.some((e) => e.name === 'evil/dist/index.js')).toBe(true);
+  });
+});
+
+// --- adversarial fixtures: parser-differential attacks (review round 2) ----
+//
+// Built RAW, byte-for-byte — a legitimate `tar` tool cannot produce a
+// bad-checksum header, an empty-name-with-prefix header, or a hand-crafted
+// PAX record, so these cannot be built with `tar -czf` the way the rest of
+// this file's fixtures are. This mirrors the review's own crafted-tarball
+// approach precisely because that is the only way to reach these code paths.
+
+/** A raw 512-byte ustar header + its (zero-padded) data, matching the wire format exactly. */
+function rawTarHeader(
+  name: string,
+  data: Buffer,
+  opts: {
+    type?: string;
+    badCksum?: boolean;
+    prefix?: string;
+    mode?: number;
+    link?: string;
+    sizeBytes?: Buffer;
+  } = {},
+): Buffer {
+  const { type = '0', badCksum = false, prefix = '', mode = 0o644, link = '', sizeBytes } = opts;
+  const h = Buffer.alloc(512);
+  h.write(name, 0, 100);
+  h.write(`${mode.toString(8).padStart(7, '0')}\0`, 100);
+  h.write('0000000\0', 108);
+  h.write('0000000\0', 116);
+  if (sizeBytes) sizeBytes.copy(h, 124);
+  else h.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124);
+  h.write('00000000000\0', 136);
+  h.write(type, 156);
+  h.write(link, 157, 100);
+  h.write('ustar\0', 257);
+  h.write('00', 263);
+  h.write(prefix, 345, 155);
+  h.fill(0x20, 148, 156);
+  let sum = 0;
+  for (const b of h) sum += b;
+  if (badCksum) sum += 1;
+  h.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
+  const pad = Buffer.alloc(Math.ceil(data.length / 512) * 512);
+  data.copy(pad);
+  return Buffer.concat([h, pad]);
+}
+
+/** A self-referential-length PAX record ("<len> key=value\n"), per the tar spec. */
+function paxRecord(key: string, value: string): string {
+  const suffix = ` ${key}=${value}\n`;
+  let n = suffix.length + 1;
+  while (`${n}${suffix}`.length !== n) n += 1;
+  return `${n}${suffix}`;
+}
+
+/** A PAX extended-header entry (typeflag 'x') that overrides fields on the NEXT header. */
+function rawPaxHeader(records: Record<string, string>): Buffer {
+  const body = Object.entries(records)
+    .map(([k, v]) => paxRecord(k, v))
+    .join('');
+  return rawTarHeader('PaxHeader/entry', Buffer.from(body, 'utf8'), { type: 'x' });
+}
+
+function writeRawTarGz(dir: string, filename: string, parts: Buffer[]): string {
+  const tgzPath = join(dir, filename);
+  writeFileSync(tgzPath, gzipSync(Buffer.concat([...parts, Buffer.alloc(1024)])));
+  return tgzPath;
+}
+
+describe('readTarEntries: adversarial fixtures (review round 2)', () => {
+  it('rejects a legitimately-checksummed DUPLICATE path rather than silently keeping the last one', () => {
+    const dir = mkFixtureDir('ga-diff-dup-valid-');
+    const evil = Buffer.from('steal()\n');
+    const clean = Buffer.from('safe()\n');
+    const tgz = writeRawTarGz(dir, 'x.tgz', [
+      rawTarHeader('package/dist/index.js', evil),
+      rawTarHeader('package/dist/index.js', clean),
+    ]);
+    expect(() => readTarEntries(tgz)).toThrow(/duplicate/);
+  });
+
+  it('rejects (review attack A shape) a bad-checksum entry followed by a checksum-valid duplicate', () => {
+    const dir = mkFixtureDir('ga-diff-dup-badcksum-');
+    const evil = Buffer.from('steal()\n');
+    const clean = Buffer.from('safe()\n');
+    const tgz = writeRawTarGz(dir, 'x.tgz', [
+      rawTarHeader('package/dist/index.js', evil),
+      rawTarHeader('package/dist/index.js', clean, { badCksum: true }),
+    ]);
+    // Fails closed either way: node-tar's own `strict` throws on the bad
+    // checksum before our duplicate check even runs. The assertion is on
+    // the OUTCOME (throws), not on which of the two guards catches it.
+    expect(() => readTarEntries(tgz)).toThrow();
+  });
+
+  it('rejects (review attack B shape) an empty-name header with a ustar prefix retargeted to a symlink', () => {
+    const dir = mkFixtureDir('ga-diff-empty-name-prefix-');
+    const tgz = writeRawTarGz(dir, 'x.tgz', [
+      rawTarHeader('package/dist/index.js', Buffer.from('safe()\n')),
+      // name='' + prefix='package/dist/index.js' + type=symlink + link=/etc/passwd
+      rawTarHeader('', Buffer.alloc(0), {
+        prefix: 'package/dist/index.js',
+        type: '2',
+        link: '/etc/passwd',
+      }),
+    ]);
+    const entries = readTarEntries(tgz);
+    // node-tar's list() does not itself reject this — assertEntrySafe must.
+    const evil = entries.find((e) => e.type === 'symlink');
+    expect(evil).toBeTruthy();
+    expect(() => assertEntrySafe(evil as never)).toThrow(/absolute/);
+  });
+
+  it('rejects a PAX `path` override that escapes package/', () => {
+    const dir = mkFixtureDir('ga-diff-pax-path-');
+    const tgz = writeRawTarGz(dir, 'x.tgz', [
+      rawPaxHeader({ path: '../../etc/evil-payload' }),
+      rawTarHeader('package/dist/index.js', Buffer.from('payload\n')),
+    ]);
+    const entries = readTarEntries(tgz);
+    const overridden = entries.find((e) => e.name.includes('evil-payload'));
+    expect(overridden?.name).toBe('../../etc/evil-payload');
+    expect(() => assertEntrySafe(overridden as never)).toThrow(/traversal|outside/);
+  });
+
+  it('rejects a PAX `linkpath` override that escapes package/', () => {
+    const dir = mkFixtureDir('ga-diff-pax-linkpath-');
+    const tgz = writeRawTarGz(dir, 'x.tgz', [
+      rawPaxHeader({ linkpath: '../../etc/passwd' }),
+      rawTarHeader('package/dist/link.js', Buffer.alloc(0), { type: '2', link: 'unused' }),
+    ]);
+    const entries = readTarEntries(tgz);
+    const link = entries.find((e) => e.type === 'symlink');
+    expect(link?.linkname).toBe('../../etc/passwd');
+    expect(() => assertEntrySafe(link as never)).toThrow(/escapes/);
+  });
+});
+
+// --- size-field truncation: must still fail closed, even though node-tar ---
+// itself (not just our reader) normalises an unparseable size to 0 under
+// plain Node — verified directly against `node -e` against the installed
+// `node_modules/tar`. Under the Bun runtime these tests actually run on,
+// the SAME malformed header instead makes node-tar throw
+// (`TAR_ENTRY_INVALID: checksum failure`, from its own internal stream
+// chunking) — an even stronger fail-closed outcome, observed directly rather
+// than assumed. Both are acceptable and BOTH are asserted for: this is
+// deliberately NOT a "readTarEntries must reject this" test, because
+// `node_modules/tar/dist/commonjs/header.js`'s `nanUndef` silently turning a
+// `size` field that fails `parseInt(..., 8)` into `undefined` (then `0` on
+// `ReadEntry`) is not a differential — it is exactly what a real
+// `npm install` would do with the same tarball, since it is the same
+// library. What has to hold, on whichever runtime, is that the CONSEQUENCE
+// — a file that should have had content silently becoming empty — never
+// silently PASSES: either the read itself throws, or the empty result still
+// surfaces as an ordinary content mismatch in the tree diff.
+describe('size-field truncation (must fail closed at the diff level)', () => {
+  it('a size field that decodes to NaN never silently passes: readTarEntries throws, or normalises to an empty (size 0) entry', () => {
+    const dir = mkFixtureDir('ga-diff-size-nan-');
+    const spaces = Buffer.alloc(12, 0x20); // an all-blank size field parses to NaN -> undefined -> 0
+    const tgz = writeRawTarGz(dir, 'x.tgz', [
+      rawTarHeader('package/dist/index.js', Buffer.from('export const x=1\n'), {
+        sizeBytes: spaces,
+      }),
+    ]);
+    try {
+      const entries = readTarEntries(tgz);
+      const entry = entries.find((e) => e.name === 'package/dist/index.js');
+      expect(entry?.size).toBe(0);
+      expect(entry?.data?.length).toBe(0);
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+    }
+  });
+
+  it('the truncated-to-empty GA copy never silently matches a non-empty rc copy: read throws, or the tree diff reports it', () => {
+    const dir = mkFixtureDir('ga-diff-size-nan-diff-');
+    const spaces = Buffer.alloc(12, 0x20);
+    const rcTgz = writeRawTarGz(dir, 'rc.tgz', [
+      rawTarHeader('package/dist/index.js', Buffer.from('export const x=1\n')),
+    ]);
+    const gaTgz = writeRawTarGz(dir, 'ga.tgz', [
+      rawTarHeader('package/dist/index.js', Buffer.from('export const x=1\n'), {
+        sizeBytes: spaces,
+      }),
+    ]);
+    try {
+      const rcEntries = readTarEntries(rcTgz);
+      const gaEntries = readTarEntries(gaTgz);
+      const ctx = { rcVersion: '1.0.0-rc.3', gaVersion: '1.0.0', siblingNames: new Set<string>() };
+      const result = compareTarEntries(rcEntries, gaEntries, ctx);
+      expect(result.ok).toBe(false);
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+    }
   });
 });
 
@@ -702,20 +940,21 @@ describe('ga-tarball-diff CLI (fixture tarballs)', () => {
   });
 });
 
-// --- --rc-ref/--ga-ref smoke test -------------------------------------------
+// --- --rc-ref/--ga-ref: git worktree lifecycle (NOT a packing smoke test) --
 
 describe('ga-tarball-diff CLI (--rc-ref/--ga-ref)', () => {
   // A full ref-mode run needs `bun install --frozen-lockfile` + a real build
   // for lib/db/core, which is too slow for a unit suite (minutes, and shells
-  // out to bun). What's tractable — and what review item 6 asks for at
-  // minimum — is proving the real `git worktree add`/`remove` lifecycle
-  // works and leaves nothing behind, using an ORPHAN commit (via
+  // out to bun) — that path is NOT exercised here, and the earlier title on
+  // this test ("packs an empty-tree ref…") overclaimed: the orphan-commit
+  // fixture below has no `packages/` directories, so `packRef` skips
+  // straight past every `bun pm pack` call — this test never packs anything.
+  // What it DOES prove, honestly: the real `git worktree add`/`remove`
+  // lifecycle works and leaves nothing behind, using an ORPHAN commit (via
   // `git commit-tree` against the empty tree, never touching any branch or
-  // the working tree) that has no packages/ directories at all: `packRef`
-  // then skips straight to "no such package dir" for every package and
-  // `run()` reports them all missing — a real git worktree add/remove, exit
-  // 1, no leaked worktree — without a bun build in the loop.
-  it('packs an empty-tree ref via a real git worktree, cleans it up, and reports every package missing', () => {
+  // the working tree) that has no packages/ directories at all — `packRef`
+  // reports every package missing, `run()` exits 1, and no worktree leaks.
+  it('exercises the real git worktree add/remove lifecycle for an empty-tree ref (does not pack — see comment)', () => {
     const repoRoot = resolve(import.meta.dir, '..');
     const emptyTreeSha = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; // the well-known empty-tree hash
     const commitSha = execFileSync(
