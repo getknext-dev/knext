@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { DEFAULT_NEXTJS_REF as LEDGER_DEFAULT_NEXTJS_REF } from '../scripts/compat-vinext-ledger.mjs';
 
 /**
  * NEXTJS credential lockstep (#1376).
@@ -170,40 +171,83 @@ interface NextjsRefOccurrence {
 const TRUSTED_ENV_FALLBACK_LINE =
   /^[ \t]*NEXTJS_REF:[ \t]*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|\s*'([^']+)'\s*\}\}[ \t]*$/;
 
-/** Every `NEXTJS_REF:` YAML key line, at ANY indent (workflow/job/step `env:`). */
+/**
+ * Round 3 (rev-1379, second review pass): a flat, per-line `^\s*NEXTJS_REF:`
+ * anchor missed a `NEXTJS_REF` key that is NOT at the start of its line —
+ * flow-style `env: { NEXTJS_REF: v16.3.3 }` and a quoted key
+ * `"NEXTJS_REF": v16.3.3` both stayed invisible. A TOKEN scan fixes this:
+ * find the literal token `NEXTJS_REF`, followed by an optional closing
+ * quote, followed by the separator — `:` for a YAML key (this scanner),
+ * `=` for a shell assignment (`scanShellNextjsRefAssignments` below) —
+ * ANYWHERE in the text, not just at a line's start. Only the one line that
+ * matches `TRUSTED_ENV_FALLBACK_LINE` in full passes.
+ */
+const NEXTJS_REF_COLON_TOKEN = /\bNEXTJS_REF\b(["']?)[ \t]*:/g;
+
+/** The full source line containing a byte offset — used to re-anchor a
+ * token match against `TRUSTED_ENV_FALLBACK_LINE` and to slice the value
+ * that follows the matched token on that same line. */
+function lineAt(text: string, offset: number): { line: string; lineStart: number } {
+  const lineStart = text.lastIndexOf('\n', offset) + 1;
+  const nl = text.indexOf('\n', offset);
+  const lineEnd = nl === -1 ? text.length : nl;
+  return { line: text.slice(lineStart, lineEnd), lineStart };
+}
+
+/** Every `NEXTJS_REF:` YAML key, at ANY indent and in ANY style — block,
+ * flow (`{ NEXTJS_REF: ... }`), or quoted (`"NEXTJS_REF": ...`). */
 export function scanYamlNextjsRefKeys(text: string, file: string): NextjsRefOccurrence[] {
   const out: NextjsRefOccurrence[] = [];
-  for (const match of text.matchAll(/^[ \t]*NEXTJS_REF:[ \t]*(.*)$/gm)) {
-    const trusted = TRUSTED_ENV_FALLBACK_LINE.exec(match[0]);
+  for (const match of text.matchAll(NEXTJS_REF_COLON_TOKEN)) {
+    const idx = match.index ?? 0;
+    const { line, lineStart } = lineAt(text, idx);
+    const trusted = TRUSTED_ENV_FALLBACK_LINE.exec(line);
     if (trusted) {
       out.push({ file, kind: 'env-fallback', value: trusted[1], trustedForm: true });
+      continue;
+    }
+    const afterMatch = text.slice(idx + match[0].length, lineStart + line.length);
+    const rawValue = afterMatch
+      .trim()
+      .replace(/^['"]/, '')
+      .replace(/['",}]+$/, '')
+      .trim();
+    out.push({ file, kind: 'yaml-key-other', value: rawValue, trustedForm: false });
+  }
+  return out;
+}
+
+/** `NEXTJS_REF=`, in ANY shell-assignment form (`export`, a `$GITHUB_ENV`
+ * write, or a bare unexported assignment), token-scanned the same way as
+ * the YAML-key scanner above — the separator is `=` instead of `:`. */
+export function scanShellNextjsRefAssignments(text: string, file: string): NextjsRefOccurrence[] {
+  const out: NextjsRefOccurrence[] = [];
+  for (const match of text.matchAll(/\bNEXTJS_REF\b(["']?)[ \t]*=/g)) {
+    const idx = match.index ?? 0;
+    const { line, lineStart } = lineAt(text, idx);
+    const beforeToken = line.slice(0, idx - lineStart);
+    const afterMatch = text.slice(idx + match[0].length, lineStart + line.length);
+    const value = afterMatch.match(/^([^\s"']+)/)?.[1];
+    if (/(?:^|[\s;])export[ \t]+$/.test(beforeToken)) {
+      out.push({ file, kind: 'export', value, trustedForm: false });
+    } else if (line.includes('GITHUB_ENV')) {
+      out.push({ file, kind: 'github-env-write', value, trustedForm: false });
     } else {
-      out.push({ file, kind: 'yaml-key-other', value: match[1].trim(), trustedForm: false });
+      // A bare, unexported `NEXTJS_REF=...` — invisible before round 3.
+      out.push({ file, kind: 'yaml-key-other', value, trustedForm: false });
     }
   }
   return out;
 }
 
-/** `export NEXTJS_REF=...` in a `run:` step's shell script. */
+/** `export NEXTJS_REF=...` — a filtered view of `scanShellNextjsRefAssignments`. */
 export function scanExportNextjsRef(text: string, file: string): NextjsRefOccurrence[] {
-  return [...text.matchAll(/^[ \t]*export[ \t]+NEXTJS_REF=([^\s"']+)/gm)].map((m) => ({
-    file,
-    kind: 'export' as const,
-    value: m[1],
-    trustedForm: false,
-  }));
+  return scanShellNextjsRefAssignments(text, file).filter((o) => o.kind === 'export');
 }
 
-/** `NEXTJS_REF=...` written to `$GITHUB_ENV` — excludes lines already caught by `export`. */
+/** `NEXTJS_REF=...` written to `$GITHUB_ENV` — a filtered view; excludes `export` sites. */
 export function scanGithubEnvWrite(text: string, file: string): NextjsRefOccurrence[] {
-  const out: NextjsRefOccurrence[] = [];
-  for (const line of text.split('\n')) {
-    if (!line.includes('NEXTJS_REF=') || !line.includes('GITHUB_ENV')) continue;
-    if (/^[ \t]*export[ \t]+NEXTJS_REF=/.test(line)) continue; // already an export site
-    const value = line.match(/NEXTJS_REF=([^\s"']+)/)?.[1];
-    out.push({ file, kind: 'github-env-write', value, trustedForm: false });
-  }
-  return out;
+  return scanShellNextjsRefAssignments(text, file).filter((o) => o.kind === 'github-env-write');
 }
 
 /**
@@ -231,11 +275,30 @@ export function scanNextjsRefOccurrences(workflowsDir: string): NextjsRefOccurre
     }
     occurrences.push(
       ...scanYamlNextjsRefKeys(text, file),
-      ...scanExportNextjsRef(text, file),
-      ...scanGithubEnvWrite(text, file),
+      // The unified shell scanner, not the two filtered wrappers — its third
+      // (bare, unexported `NEXTJS_REF=...`) case would otherwise be dropped.
+      ...scanShellNextjsRefAssignments(text, file),
     );
   }
   return occurrences;
+}
+
+/**
+ * Every `NEXT_NPM_VERSION="${NEXTJS_REF#v}"` derivation line across
+ * `.github/workflows/**` — the shell-side counterpart to `NEXTJS_REF` itself
+ * (strips the leading `v` to get the bare npm version). Counted, not just
+ * matched-or-not, so a REPLACEMENT with a hardcoded literal (e.g.
+ * `NEXT_NPM_VERSION="16.2.0"`) is caught by the count dropping, not just by
+ * an existence check that a single surviving line would still satisfy.
+ */
+export function countNextNpmVersionDerivations(workflowsDir: string): number {
+  let total = 0;
+  for (const entry of readdirSync(workflowsDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue;
+    const text = readFileSync(resolve(workflowsDir, entry.name), 'utf8');
+    total += [...text.matchAll(/NEXT_NPM_VERSION="\$\{NEXTJS_REF#v\}"/g)].length;
+  }
+  return total;
 }
 
 /** The `vercel/next.js` version `docs/compat-matrix.md`'s intro claims. */
@@ -356,6 +419,39 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
     // Same line also matching `export NEXTJS_REF=` must be attributed to export ONLY.
     expect(scanGithubEnvWrite('export NEXTJS_REF=v8.8.8 >> "$GITHUB_ENV"', 'f.yml')).toEqual([]);
     expect(scanGithubEnvWrite('echo "no assignment here" >> "$GITHUB_ENV"', 'f.yml')).toEqual([]);
+  });
+
+  it('catches flow-style and quoted-key NEXTJS_REF forms, not just a line-start block key (self-test)', () => {
+    // rev-1379 round 3: a per-line `^\s*NEXTJS_REF:` anchor missed both of these.
+    const flowStyle = 'env: { NEXTJS_REF: v16.3.3, OTHER: 1 }';
+    const flowHits = scanYamlNextjsRefKeys(flowStyle, 'f.yml');
+    expect(flowHits).toHaveLength(1);
+    expect(flowHits[0].kind).toBe('yaml-key-other');
+    expect(flowHits[0].trustedForm).toBe(false);
+
+    const quotedKey = '  "NEXTJS_REF": v16.3.3';
+    const quotedHits = scanYamlNextjsRefKeys(quotedKey, 'f.yml');
+    expect(quotedHits).toHaveLength(1);
+    expect(quotedHits[0].kind).toBe('yaml-key-other');
+    expect(quotedHits[0].trustedForm).toBe(false);
+
+    // Both forms together, on the same line, must both be caught (no dedup-by-line).
+    expect(
+      scanYamlNextjsRefKeys('a: { NEXTJS_REF: v1 }, b: { "NEXTJS_REF": v2 }', 'f.yml'),
+    ).toHaveLength(2);
+  });
+
+  it('catches a BARE (unexported, non-$GITHUB_ENV) NEXTJS_REF=... shell assignment (self-test)', () => {
+    // rev-1379 round 3: this form was invisible to both scanExportNextjsRef
+    // (requires `export `) and scanGithubEnvWrite (requires `$GITHUB_ENV`).
+    const hits = scanShellNextjsRefAssignments('    NEXTJS_REF=v16.3.3', 'f.yml');
+    expect(hits).toEqual([
+      { file: 'f.yml', kind: 'yaml-key-other', value: 'v16.3.3', trustedForm: false },
+    ]);
+    // The dedicated export/github-env filtered views must NOT surface it —
+    // only the unified scanner (which scanNextjsRefOccurrences now calls).
+    expect(scanExportNextjsRef('    NEXTJS_REF=v16.3.3', 'f.yml')).toEqual([]);
+    expect(scanGithubEnvWrite('    NEXTJS_REF=v16.3.3', 'f.yml')).toEqual([]);
   });
 
   it('parses the scaffold next pin exactly once (self-test)', () => {
@@ -486,6 +582,27 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
         mdText.includes(pattern as string),
         `docs/compat-matrix.md does not cite ${pattern}`,
       ).toBe(true);
+    });
+  });
+
+  describe('a THIRD copy of the credentialed ref (round-3 finding)', () => {
+    it("scripts/compat-vinext-ledger.mjs's DEFAULT_NEXTJS_REF matches the manifest's credentialedNextRef", () => {
+      // rev-1379 round 3: this constant used to be a hardcoded 'v16.2.0'
+      // literal that neither this test nor the manifest ever saw — a THIRD
+      // copy of the credentialed ref, independent of the workflow scan
+      // above. The script now READS the manifest directly (preferred over a
+      // duplicated assertion), so this test is really asserting the read
+      // wiring stayed intact, not re-deriving the value by hand.
+      const manifest = loadManifest();
+      expect(LEDGER_DEFAULT_NEXTJS_REF).toBe(manifest.credentialedNextRef);
+    });
+
+    it('the NEXT_NPM_VERSION="${NEXTJS_REF#v}" derivation appears exactly 6 times across .github/workflows/**', () => {
+      // An EXACT count, not "at least one": a literal replacement (e.g.
+      // `NEXT_NPM_VERSION="16.2.0"`) would still leave the other 5 derivation
+      // lines matching, so an existence-only check would miss it. A count
+      // that drops below the known-real total is the signal.
+      expect(countNextNpmVersionDerivations(WORKFLOWS_DIR)).toBe(6);
     });
   });
 });
