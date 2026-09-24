@@ -835,6 +835,119 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     expect(harness).toContain('scripts/lib/real.mjs');
   });
 
+  // #1294 round 4 (jev 0.69) — the tokenizer had no REGEX-LITERAL state, so
+  // a regex containing a quote character (`/'/`, or `/[\"']/g`) got its quote
+  // misread as a fresh STRING START, which then hunts for a closing quote
+  // that may not exist for a long stretch — silently mis-scanning the file
+  // and potentially swallowing a REAL import()/require() into the phantom
+  // "string", i.e. dropping a genuine dependency with no error at all. Found
+  // on the real repo: `scripts/e2e-preflight.mjs`'s own
+  // `/EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)` regex, whose embedded `"`
+  // was misread as a string start that then consumed 1500+ real characters
+  // hunting for a closing quote.
+  it('a regex literal containing a quote character does not corrupt scanning, and a genuine import right after it is still caught', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const stripQuote = /'/;\nconst charClass = /[\\\"']/g;\nimport { real } from './lib/real.mjs';\nexport const y = real + String(stripQuote) + String(charClass);\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  it('a REGEX after `=` (operand position) containing a quote is scanned correctly — the exact e2e-preflight.mjs shape', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const hint = /EUNSUPPORTEDPROTOCOL|Unsupported URL Type "workspace:/.test(out)\n' +
+        "  ? ' — the tarball smells like a workspace: dep'\n" +
+        "  : '';\n" +
+        "import { real } from './lib/real.mjs';\n" +
+        'export const y = real + hint;\n',
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  it('a DIVISION (not a regex) after an identifier is NOT misread as a regex start', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/real.mjs'), 'export const real = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const half = total / 2;\nimport { real } from './lib/real.mjs';\nexport const y = real + half;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/real.mjs');
+  });
+
+  // Fail CLOSED: a '/' in operand position that never finds a same-line
+  // closing '/' is a hard error, never a silent guess that could hide a
+  // dependency behind an unterminated "regex".
+  it('an unterminated regex-looking construct (never closes on its own line) is a hard error, not a silent guess', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    // A regex scan is BOUNDED to one line by construction (a regex literal
+    // cannot contain a literal newline), so an incomplete one can only ever
+    // consume up to end-of-line — it can never reach into a LATER line's
+    // real import, which is why this asserts the SPECIFIC error message
+    // rather than a bare `toThrow()`. Disabling the fail-closed throw does
+    // not make this fixture silently succeed (the truncated "regex" still
+    // safely stops at the newline, and the untouched import on the next line
+    // still gets evaluated normally) — it makes the fingerprint throw a
+    // DIFFERENT error instead (the import target does not resolve), which a
+    // bare `toThrow()` cannot distinguish from the guard actually firing. A
+    // message-specific matcher is what makes the mutation-prover's version
+    // of this test non-decorative.
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      "const bad = /unterminated\nimport { x } from './does-not-matter.mjs';\n",
+    );
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/regex-literal start/);
+  });
+
+  // Fail CLOSED: an unterminated string/template literal is ALSO a hard
+  // error rather than a scan that silently runs to end-of-file (or far past
+  // where it should stop) absorbing real code — including real imports —
+  // into a phantom string token.
+  it('an unterminated string literal is a hard error, not a silent guess', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    // Double-quoted, deliberately with NO other `"` anywhere later in the
+    // file: an earlier draft of this test used a single-quoted opener
+    // (`'unterminated`) with a real `import … from '…'` right after it, and
+    // that import's OWN opening `'` "closed" the bad string by accident —
+    // the test passed even with the fail-closed throw disabled, because
+    // nothing about the fixture actually LEFT the string unterminated once
+    // tokenized. This shape has no candidate closing quote anywhere in the
+    // file, so it is genuinely unterminated regardless of what comes after.
+    writeFileSync(
+      join(repoRoot, 'scripts/e2e-summary.mjs'),
+      'const bad = "unterminated\nexport const y = 1;\n',
+    );
+    expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/unterminated .* string literal/);
+  });
+
   it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {
     const tarballsDir = tempDir('knext-fp-lib-real-');
     packFixtureTarball(tarballsDir, 'core', '0.3.0');
@@ -895,10 +1008,18 @@ describe('compat-window fingerprint — declared credential-run extraFiles land 
     expect(harness).toContain('.github/compat-credential-ref.json');
   });
 
-  it('bun-vinext lane: compat-run-ledger.mjs is frozen, but compat-credential-ref.mjs is NOT (no credential mode wired yet)', () => {
+  it('bun-vinext lane: compat-run-ledger.mjs is frozen, and so is compat-credential-ref.mjs — TRANSITIVELY, via run-ledger.mjs importing it (#1294 round 4), even though this lane never runs the credential-ref RESOLUTION step directly', () => {
     const harness = harnessFor('bun-vinext');
     expect(harness).toContain('scripts/compat-run-ledger.mjs');
-    expect(harness).not.toContain('scripts/compat-credential-ref.mjs');
+    // Round 4: compat-run-ledger.mjs imports `./compat-credential-ref.mjs`
+    // (for COMPAT_MODES / isRcRef), so it is a REAL dependency of a file
+    // this lane genuinely runs — freezing it is correct, not accidental
+    // over-inclusion. bun-vinext still does NOT declare it directly in
+    // CREDENTIAL_CELLS.extraFiles (it never runs the resolve step), which is
+    // what the RC pin JSON assertion below distinguishes.
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
+    // The RC pin JSON is read only by the resolve step this lane never runs,
+    // and nothing imports a JSON file, so it stays correctly absent.
     expect(harness).not.toContain('.github/compat-credential-ref.json');
   });
 
@@ -913,6 +1034,60 @@ describe('compat-window fingerprint — declared credential-run extraFiles land 
     const { repoRoot, tarballsDir } = makeFixture();
     rmSync(join(repoRoot, 'scripts/compat-credential-ref.mjs'));
     expect(() => fingerprint(repoRoot, tarballsDir)).toThrow();
+  });
+
+  // #1294 round 4 (jev 0.75, the main finding): a declared extra's OWN
+  // imports were never followed — `compat-run-ledger.mjs` imports
+  // `./compat-credential-ref.mjs`, and that import was invisible to the
+  // digest on a lane that declares run-ledger.mjs but not credential-ref.mjs
+  // directly (bun-vinext). Extras now feed into the SAME closure walk as
+  // every other entry point, so this is fixed for every lane, not just the
+  // one example that surfaced it.
+  it('an extraFiles entry that itself IMPORTS another file freezes that file too', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts/lib/extra-dep.mjs'), 'export const v = 1;\n');
+    writeFileSync(
+      join(repoRoot, 'scripts/compat-run-ledger.mjs'),
+      "import { v } from './lib/extra-dep.mjs';\nexport const noop = v;\n",
+    );
+    const result = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/lib/extra-dep.mjs');
+
+    // And it is GENUINELY frozen, not just present: editing the transitive
+    // dependency moves the digest.
+    const before = fingerprint(repoRoot, tarballsDir).fingerprint;
+    writeFileSync(join(repoRoot, 'scripts/lib/extra-dep.mjs'), 'export const v = 2;\n');
+    expect(fingerprint(repoRoot, tarballsDir).fingerprint).not.toBe(before);
+  });
+
+  it('names the real scripts/compat-credential-ref.mjs in the bun-vinext harness — the exact round-4 gap, on the real repo', () => {
+    const tarballsDir = tempDir('knext-fp-extra-transitive-');
+    packFixtureTarball(tarballsDir, 'core', '0.3.0');
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        REPO_ROOT,
+        '--tarballs-dir',
+        tarballsDir,
+        '--lane',
+        'bun-vinext',
+        '--json',
+        '--files',
+      ],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
+    const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+    expect(harness).toContain('scripts/compat-credential-ref.mjs');
   });
 });
 

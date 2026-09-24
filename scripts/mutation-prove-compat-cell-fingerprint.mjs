@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for the #1294 guards in `tests/compat-window-fingerprint.test.ts`,
- * `tests/compat-vinext-lane.test.ts` and `tests/compat-window-audit.test.ts`:
+ * `tests/compat-vinext-lane.test.ts`, `tests/compat-window-audit.test.ts` and
+ * `tests/compat-credential-ref.test.ts`:
  *
  *   1. PER-CELL WORKFLOW ENTRY — `workflowRootForLane` must resolve each lane's
  *      OWN executing workflow (`compat-vinext.yml` for the vinext cells) from
@@ -33,6 +34,18 @@
  *      `compat-credential-ref.mjs` (and its `extraFiles` siblings) from the
  *      computed closure by disarming the loop that adds them, and the spec
  *      must go RED.
+ *   7. A DECLARED EXTRA'S OWN IMPORTS MUST BE FOLLOWED (round 4, jev 0.75, THE
+ *      main finding): `compat-run-ledger.mjs` imports
+ *      `./compat-credential-ref.mjs`, and extras are now fed into the SAME
+ *      closure walk as every other entry point — disarming just that feed
+ *      (not the direct `addEntry` for the extra itself) must reopen the gap.
+ *   8. THE REGEX/DIVISION DECISION MUST USE THE CURRENT, NOT STALE, LAST
+ *      SIGNIFICANT CHARACTER (round 4, jev 0.69, THE actual tokenizer bug —
+ *      found live in `scripts/e2e-preflight.mjs`'s own
+ *      `const hint = /EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)`).
+ *   9–10. FAIL-CLOSED on an unterminated string OR an unterminated
+ *      regex-looking construct — either must be a hard error, never a silent
+ *      guess that could hide a dependency behind a mis-scanned file.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -43,8 +56,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 5-of-6 from
- *     6-of-6;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 9-of-10 from
+ *     10-of-10;
  *   * judged on EXIT CODES, never on grepped output — vitest/bun:test write
  *     ANSI, and a pass/fail grep over it once certified fourteen decorative
  *     mutations green.
@@ -66,9 +79,10 @@ const SPECS = [
   'tests/compat-vinext-lane.test.ts',
   'tests/compat-window-audit.test.ts',
   'tests/compat-credential-ref.test.ts',
+  'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(6);
+declareMutations(10);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -184,6 +198,54 @@ prove(
   'remove compat-credential-ref.mjs from the closure: disarm the extraFiles loop',
   'for (const relPath of cell?.extraFiles ?? []) {',
   'for (const relPath of []) {',
+);
+
+// 7. THE round-4 main finding's named mutation: stop feeding a declared extra
+//    into the import/source closure walk. `compat-run-ledger.mjs` imports
+//    `./compat-credential-ref.mjs`; on bun-vinext (which declares
+//    run-ledger.mjs but NOT credential-ref.mjs directly) that import is the
+//    ONLY reason credential-ref.mjs is frozen at all. Disarming just the
+//    `closureEntries.push` (leaving the direct `addEntry` for the extra
+//    itself intact) reopens exactly that gap without touching mutation 6's
+//    behaviour.
+prove(
+  "an extraFiles entry's OWN imports stop being followed: disarm closureEntries.push for extras",
+  'addEntry(relPath, abs);\n    closureEntries.push(abs);',
+  'addEntry(relPath, abs);',
+);
+
+// 8. THE round-4 tokenizer fix's core bug, reproduced EXACTLY: revert the
+//    regex/division decision to the STALE `lastSignificant` (set only when a
+//    string/comment/regex token closes) instead of `currentLastSignificant()`
+//    (which also accounts for PENDING code not yet flushed). This is the
+//    precise defect that misread `scripts/e2e-preflight.mjs`'s own
+//    `const hint = /EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)` — the `=`
+//    making it a regex position was still pending, unflushed, so the stale
+//    read saw the PREVIOUS token's operand-like state instead and treated
+//    the regex's embedded `"` as a fresh string start.
+prove(
+  "regex/division decision reverts to STALE lastSignificant (round-4's actual bug)",
+  'isRegexPosition(currentLastSignificant())',
+  'isRegexPosition(lastSignificant)',
+);
+
+// 9. Fail-CLOSED guard: an unterminated string/template literal must be a
+//    hard error, not a scan that silently runs to end-of-file (or far past
+//    where it should stop) absorbing real code — including real imports —
+//    into a phantom string token.
+prove(
+  'unterminated string literal stops being a hard error: silently accept it as closed',
+  'if (!closed) {\n        throw new Error(\n          `compat-window fingerprint: unterminated ${ch} string literal',
+  'if (false) {\n        throw new Error(\n          `compat-window fingerprint: unterminated ${ch} string literal',
+);
+
+// 10. Fail-CLOSED guard, the regex-literal half: a '/' in operand position
+//     that never finds a same-line closing '/' must be a hard error, never a
+//     silent guess about whether it was a regex or a division operator.
+prove(
+  'unterminated regex-looking construct stops being a hard error: silently accept it as closed',
+  "if (!closed) {\n        throw new Error(\n          `compat-window fingerprint: a '/' at offset",
+  "if (false) {\n        throw new Error(\n          `compat-window fingerprint: a '/' at offset",
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

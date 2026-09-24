@@ -128,14 +128,60 @@ export const HARNESS_ROOTS = [
  * @param {string} src
  * @returns {{ type: 'code' | 'comment' | 'string', value: string }[]}
  */
+/**
+ * Does a bare `/` at the CURRENT position start a REGEX LITERAL, or is it a
+ * division/`/=` operator? A tokenizer that never asks this question (#1294
+ * round 4, jev 0.69) mistakes a regex body's quote characters for a STRING
+ * START — `/'/;` (a regex matching one `'`) reads its `'` as opening an
+ * unterminated string that then swallows everything after it, silently
+ * hiding any real `import()`/`require()` later in the file. The standard
+ * lexer heuristic: `/` is DIVISION only when the last significant character
+ * emitted looks like the END of an operand — an identifier/keyword
+ * character, a digit, `)`, or `]`. Anywhere else (start of file, after an
+ * operator, after `(`, `,`, `;`, `:`, `{`, `return`, …) a `/` starts a
+ * regex. `}` is treated as operand-like (favouring division after a
+ * bare-block/object-literal position) — a known, documented approximation;
+ * the genuinely ambiguous residual is caught by the fail-closed check below,
+ * not silently guessed.
+ *
+ * @param {string} lastSignificant the last non-comment, non-whitespace code
+ *   character emitted so far, or `''` at the start of the file
+ */
+function isRegexPosition(lastSignificant) {
+  if (lastSignificant === '') return true;
+  return !/[A-Za-z0-9_$)\]]/.test(lastSignificant);
+}
+
 function tokenizeJs(src) {
-  /** @type {{ type: 'code' | 'comment' | 'string', value: string }[]} */
+  /** @type {{ type: 'code' | 'comment' | 'string' | 'regex', value: string }[]} */
   const tokens = [];
   const n = src.length;
   let i = 0;
   let codeStart = 0;
+  let lastSignificant = '';
+  // The regex/division decision below must reflect the character IMMEDIATELY
+  // preceding the current `/`, including any code not yet flushed (`const
+  // hint = /…/` — the `=` is still pending in `src.slice(codeStart, i)` at
+  // the point of decision, since ordinary code characters advance `i` without
+  // calling `flushCode`). Using the STALE `lastSignificant` from the last
+  // flushed token — as an earlier draft of this function did — reads the
+  // character from the PREVIOUS token instead, and got exactly this file's
+  // own `const hint = /EUNSUPPORTEDPROTOCOL|…"workspace:/.test(out)` wrong:
+  // stale state said "operand position" (division), so the regex's own
+  // embedded `"` was mistaken for a fresh string start, which then consumed
+  // over 1500 characters of real code searching for a closing quote that was
+  // never coming (#1294 round 4).
+  const currentLastSignificant = () => {
+    const pending = src.slice(codeStart, i).trimEnd();
+    return pending.length > 0 ? pending[pending.length - 1] : lastSignificant;
+  };
   const flushCode = (end) => {
-    if (end > codeStart) tokens.push({ type: 'code', value: src.slice(codeStart, end) });
+    if (end > codeStart) {
+      const chunk = src.slice(codeStart, end);
+      tokens.push({ type: 'code', value: chunk });
+      const trimmed = chunk.trimEnd();
+      if (trimmed.length > 0) lastSignificant = trimmed[trimmed.length - 1];
+    }
   };
   while (i < n) {
     const two = src.slice(i, i + 2);
@@ -151,7 +197,12 @@ function tokenizeJs(src) {
     if (two === '/*') {
       flushCode(i);
       const close = src.indexOf('*/', i + 2);
-      const stop = close === -1 ? n : close + 2;
+      if (close === -1) {
+        throw new Error(
+          `compat-window fingerprint: unterminated /* block comment (no matching */). A silently-mis-scanned file can hide a real dependency — refusing to guess (#1294 round 4).`,
+        );
+      }
+      const stop = close + 2;
       tokens.push({ type: 'comment', value: src.slice(i, stop) });
       i = stop;
       codeStart = i;
@@ -161,6 +212,7 @@ function tokenizeJs(src) {
     if (ch === "'" || ch === '"' || ch === '`') {
       flushCode(i);
       let j = i + 1;
+      let closed = false;
       while (j < n) {
         if (src[j] === '\\') {
           j += 2;
@@ -168,13 +220,61 @@ function tokenizeJs(src) {
         }
         if (src[j] === ch) {
           j += 1;
+          closed = true;
           break;
         }
         j += 1;
       }
+      if (!closed) {
+        throw new Error(
+          `compat-window fingerprint: unterminated ${ch} string literal (started at offset ${i}). A silently-mis-scanned file can hide a real dependency — refusing to guess (#1294 round 4).`,
+        );
+      }
       tokens.push({ type: 'string', value: src.slice(i, j) });
       i = j;
       codeStart = i;
+      lastSignificant = ')'; // operand-like: a following `/` is division, not a regex
+      continue;
+    }
+    if (ch === '/' && isRegexPosition(currentLastSignificant())) {
+      flushCode(i);
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < n) {
+        const c = src[j];
+        if (c === '\n') break; // a regex literal cannot contain a literal newline
+        if (c === '\\') {
+          j += 2;
+          continue;
+        }
+        if (c === '[') {
+          inClass = true;
+          j += 1;
+          continue;
+        }
+        if (c === ']') {
+          inClass = false;
+          j += 1;
+          continue;
+        }
+        if (c === '/' && !inClass) {
+          j += 1;
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) {
+        throw new Error(
+          `compat-window fingerprint: a '/' at offset ${i} looks like a regex-literal start (operand position) but never finds a closing '/' on the same line. Refusing to guess whether it is a regex or a division operator — reclassify by hand, or rewrite the code around it (#1294 round 4).`,
+        );
+      }
+      while (j < n && /[a-zA-Z]/.test(src[j])) j += 1; // regex flags
+      tokens.push({ type: 'regex', value: src.slice(i, j) });
+      i = j;
+      codeStart = i;
+      lastSignificant = ')'; // operand-like
       continue;
     }
     i += 1;
@@ -422,22 +522,19 @@ function collectHarness(repoRoot, lane, opts = {}) {
     }
   }
 
-  // #1294 round 2: follow every entry point's LOCAL import/require/import()
-  // (JS) and source/`.` (sh) chain, transitively, and freeze whatever it
-  // reaches — regardless of filename convention. A directory-pattern root
-  // only sees files whose NAME matches; a closure sees everything a script
-  // actually EXECUTES, which is the honest claim "the harness is frozen"
-  // requires. `scripts/e2e-preflight.mjs` importing `./lib/knext-closure.mjs`
-  // (no `e2e-` prefix) is exactly the shape this closes.
-  for (const abs of closureFrom(closureEntries)) {
-    addEntry(relative(repoRoot, abs), abs);
-  }
-
   // #1294 round 3: the DECLARED extras — files the lane's workflow EXECUTES
   // via subprocess (`node knext/scripts/X.mjs` in a `run:` step) or READS
-  // directly (a JSON pin), which the import/source closure above cannot
-  // discover because nothing in the closure-entry scripts references them.
-  // `CREDENTIAL_CELLS[lane].extraFiles` is the one declared table this reads.
+  // directly (a JSON pin), which the import/source closure cannot discover
+  // on its own because nothing in the top-level closure-entry scripts
+  // references them. `CREDENTIAL_CELLS[lane].extraFiles` is the one declared
+  // table this reads. Fed into `closureEntries` BELOW, not added directly:
+  // round 4 found that a declared extra can itself import something —
+  // `compat-run-ledger.mjs` imports `./compat-credential-ref.mjs` — and a
+  // direct `addEntry` (no closure walk) left that transitive import unfrozen
+  // even on lanes that declare the ledger script but not the credential-ref
+  // one. An extra is exactly as much an entry point as a top-level `e2e-*`
+  // script, so it gets the SAME treatment: one closure walk, not two
+  // half-mechanisms with different reach.
   const cell = CREDENTIAL_CELLS.find((c) => c.lane === lane);
   for (const relPath of cell?.extraFiles ?? []) {
     const abs = resolve(repoRoot, relPath);
@@ -447,6 +544,21 @@ function collectHarness(repoRoot, lane, opts = {}) {
       );
     }
     addEntry(relPath, abs);
+    closureEntries.push(abs);
+  }
+
+  // #1294 round 2 (round 4: now ALSO covers the extras above): follow every
+  // entry point's LOCAL import/require/import() (JS) and source/`.` (sh)
+  // chain, transitively, and freeze whatever it reaches — regardless of
+  // filename convention. A directory-pattern root only sees files whose NAME
+  // matches; a closure sees everything a script actually EXECUTES, which is
+  // the honest claim "the harness is frozen" requires.
+  // `scripts/e2e-preflight.mjs` importing `./lib/knext-closure.mjs` (no
+  // `e2e-` prefix) is exactly the shape round 2 closed; `compat-run-
+  // ledger.mjs` importing `./compat-credential-ref.mjs` (a declared EXTRA
+  // importing another file) is the round-4 shape.
+  for (const abs of closureFrom(closureEntries)) {
+    addEntry(relative(repoRoot, abs), abs);
   }
 
   return entries;
