@@ -329,6 +329,50 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
             }
         });
 
+        it("next@16.3.1-canary.16 (still affected — before the upstream fix commit) throws", () => {
+            const dir = tmpAppWithNext("next build", "16.3.1-canary.16");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.1-canary.17 (the upstream fix commit's first canary — does NOT throw, even though patch=1 < FIXED_16_3_PATCH) does NOT throw", () => {
+            const dir = tmpAppWithNext("next build", "16.3.1-canary.17");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).not.toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.1 (stable, no canary suffix — shipped before the fix) still throws", () => {
+            const dir = tmpAppWithNext("next build", "16.3.1");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.2-canary.0 (a later patch's canary — no straddle, wholly affected) throws", () => {
+            const dir = tmpAppWithNext("next build", "16.3.2-canary.0");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
         it("next@16.3.5 (the fix) does NOT throw", () => {
             const dir = tmpAppWithNext("next build", "16.3.5");
             try {
