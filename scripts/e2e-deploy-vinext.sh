@@ -354,6 +354,34 @@ if [ ! -f "${NITRO_ENTRY}" ]; then
   exit 1
 fi
 
+# ── 4b. the build id vinext baked in ──────────────────────────────────────────
+# The harness builds Pages Router data URLs as /_next/data/<BUILD_ID>/<page>.json
+# from the BUILD_ID this script records (read back by scripts/e2e-logs.sh). vinext
+# does NOT write .next/BUILD_ID the way `next build` does: it writes the id to
+# <vite outDir>/server/BUILD_ID (dist/server/BUILD_ID), the same id that names
+# .output/public/_next/static/<buildId>/ and that vinext's own prerender reads
+# back. Reading only .next/BUILD_ID and falling back to the deployment id sent
+# every data request to a build id the server never had: every /_next/data
+# fixture 404'd and was scored as a vinext incompatibility.
+#
+# FAIL CLOSED: no build id file means the harness cannot address this build's
+# data routes, so refuse to boot rather than record a made-up id.
+vinext_build_id() { # <app dir> → the build id, or exit 1 with no output
+  local f
+  for f in "$1/dist/server/BUILD_ID" "$1/.next/BUILD_ID"; do
+    if [ -s "${f}" ]; then
+      tr -d '[:space:]' <"${f}"
+      return 0
+    fi
+  done
+  return 1
+}
+if ! BUILD_ID="$(vinext_build_id "${APP_DIR}")" || [ -z "${BUILD_ID}" ]; then
+  log "ERROR: no build id — neither ${APP_DIR}/dist/server/BUILD_ID (where vinext writes it) nor ${APP_DIR}/.next/BUILD_ID exists and is non-empty; refusing to record a fallback id the server does not serve"
+  exit 1
+fi
+log "build id ${BUILD_ID} (from the vinext build output)"
+
 # ── 5. compile the single executable — knext's SHIPPED script ─────────────────
 # Resolved out of the INSTALLED @getknext/core so this lane exercises the same
 # compile a `kn-next build --target=vinext` user gets. No repo-source fallback:
@@ -435,7 +463,6 @@ fi
 # entry under bun when KNEXT_COMPILE=0. Everything downstream (readiness, metadata,
 # the single stdout URL line) is identical either way.
 PORT="$(free_port)"
-BUILD_ID="$(cat "${APP_DIR}/.next/BUILD_ID" 2>/dev/null || echo "${DEPLOYMENT_ID}")"
 
 if [ "${KNEXT_COMPILE}" != "0" ]; then
   log "booting the compiled binary ${KNEXT_EXEC} on 0.0.0.0:${PORT} (keep-alive guard baked in by vinext-compile: ${GUARD_PRELOAD})"
