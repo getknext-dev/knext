@@ -390,17 +390,21 @@ export function standaloneDockerignore(): string {
 # shipped image at that path; with **/.env.* it does not enter the build
 # context at all, so the COPY never sees it.
 
-# Secrets and local credentials.
+# Secrets and local credentials. Every pattern below carries the same **/
+# prefix, for the same reason: a bare pattern is root-only, and none of
+# these files are guaranteed to sit at the context root (a private key or
+# .npmrc nested under the app directory is exactly as reachable by a
+# wholesale COPY as a nested .env).
 **/.env
 **/.env.*
 !**/.env.example
-*.pem
-*.key
-*.p12
-.npmrc
-.netrc
-kubeconfig
-.kube/
+**/*.pem
+**/*.key
+**/*.p12
+**/.npmrc
+**/.netrc
+**/kubeconfig
+**/.kube/
 
 # Version control and CI.
 .git
@@ -561,12 +565,15 @@ function matchesDockerignore(pattern: string, path: string): boolean {
         const body = hasDoubleStarPrefix ? pattern.slice(3) : pattern;
         const prefix = hasDoubleStarPrefix ? "(?:.*/)?" : "";
         // Segment-wise glob: `.env.*` matches `.env.local`, not `.environment`.
-        const re = new RegExp(
-            `^${prefix}${body
-                .split("*")
-                .map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-                .join("[^/]*")}$`,
-        );
+        const core = body
+            .split("*")
+            .map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+            .join("[^/]*");
+        // Match the pattern itself, OR anything nested under something it
+        // matches — the same "a directory excludes its children" rule the
+        // literal-pattern branch above already applies, extended to a glob
+        // pattern (e.g. `**/.kube` must also exclude `foo/.kube/config`).
+        const re = new RegExp(`^${prefix}${core}(?:/.*)?$`);
         return re.test(path);
     }
     return false;
