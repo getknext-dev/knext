@@ -46,14 +46,18 @@ const AUDIT = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 // biome-ignore format: the anchor scan needs the resolve() call on ONE line
 const SHIPPED_BAKE = resolve(REPO_ROOT, 'packages/kn-next/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs');
 const CHILD_ENV = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/env.ts');
+// #1299 — the harness-only accept-any-status tolerance, moved OUT of
+// SHIPPED_BAKE and into this HARNESS-owned wrapper instead.
+const BAKE_ACCEPT = resolve(REPO_ROOT, 'scripts/e2e-bake-accept.mjs');
 
 const SPEC_RULE = 'tests/bytecode-liveness.test.ts';
 const SPEC_CHAIN = 'tests/bytecode-liveness-chain.test.ts';
 const SPEC_WIRING = 'tests/bytecode-liveness-wiring.test.ts';
 const SPEC_AUDIT = 'tests/compat-window-audit.test.ts';
 const SPEC_STATE = 'tests/e2e-state-snapshot.test.ts';
+const SPEC_BAKE_ACCEPT = 'tests/e2e-bake-accept.test.ts';
 const SNAPSHOT = resolve(REPO_ROOT, 'scripts/lib/e2e-state-snapshot.sh');
-const SPECS = [SPEC_RULE, SPEC_CHAIN, SPEC_WIRING, SPEC_AUDIT, SPEC_STATE];
+const SPECS = [SPEC_RULE, SPEC_CHAIN, SPEC_WIRING, SPEC_AUDIT, SPEC_STATE, SPEC_BAKE_ACCEPT];
 
 /**
  * Table-driven, with literal anchor properties, so the static anchor-drift
