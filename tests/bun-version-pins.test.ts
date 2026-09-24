@@ -191,15 +191,42 @@ function trackedFiles(): string[] {
   return r.stdout.toString().split('\n').filter(Boolean);
 }
 
-/** Files that SELECT an image — never prose (`.md`/`.mdx`) or test fixtures. */
+// #1318 — the pattern-based allowlist above (Dockerfile*/.hbs/workflows/
+// scripts/*.sh) only covered the file SHAPES that existed when it was
+// written. A future image ref in `examples/**/*.sh`, a `.mjs`/`.ts`
+// generator, or a k8s YAML manifest would never match any of those four
+// patterns and would escape the scan entirely — an ENUMERATED allowlist is
+// exactly the "second file gets missed" failure mode this repo's own
+// workflow discipline warns about. SCAN every tracked text file instead, with
+// an EXPLICIT, reasoned exclude list for the two genuine non-selection
+// classes: prose and test fixtures.
+//
+// Verified exhaustively against the real repo (not just reasoned about): a
+// plain `git grep -l oven/bun` over every tracked file turns up exactly the
+// Dockerfile/.hbs/workflow/scripts/*.sh sites already covered, PLUS markdown
+// prose, `.test.ts` fixtures asserting synthetic/historical values (a fake
+// digest, an intentionally-stale version in a regression fixture), and the
+// one HISTORY_EXCLUDES entry below — nothing else. If a new class of file
+// starts referencing `oven/bun`, this scan (not a pattern list) is what
+// catches it.
+const HISTORY_EXCLUDES = new Set<string>([
+  // Records the Bun version a keep-alive bug was OBSERVED FIXED on, on a
+  // specific historical date (`// ... (verified on oven/bun:canary 1.4.0,
+  // 2026-07-02)`) — history the code explains, not a Bun this file selects,
+  // installs, or runs. A `//`-comment reference like this is exactly the
+  // "prose in a code comment" case #1318 calls out as needing an explicit
+  // exclude rather than a parser for every language's comment syntax.
+  'packages/kn-next/src/adapters/bun-keepalive-guard.cjs',
+]);
+
+/** Files that SELECT an image — never prose (`.md`/`.mdx`), test fixtures, or a HISTORY_EXCLUDES entry. */
 function imageBearingFiles(): string[] {
   return trackedFiles().filter(
     (f) =>
       !f.startsWith('.claude/') &&
-      (/(^|\/)Dockerfile[^/]*$/.test(f) ||
-        f.endsWith('.hbs') ||
-        /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f) ||
-        /^scripts\/.*\.sh$/.test(f)),
+      !HISTORY_EXCLUDES.has(f) &&
+      !/\.(md|mdx)$/.test(f) &&
+      !/\.test\.(ts|tsx|js|mjs|cjs)$/.test(f),
   );
 }
 
@@ -244,7 +271,9 @@ describe(`bun lockstep (#1310) — one Bun (${PINNED_BUN}) everywhere it is sele
           // A concrete reference: `oven/bun:<tag>` and/or `@sha256:`. The
           // `oven/bun:*-alpine` wildcard and a bare `oven/bun` ("oven/bun ships
           // bun") are prose. A tag never ends in `.` (sentence punctuation).
-          const isComment = /^\s*#/.test(line);
+          // `#` (shell/YAML) and `//` (JS/TS/CJS — now in scope since the
+          // scan widened past scripts/*.sh to every tracked text file, #1318).
+          const isComment = /^\s*(#|\/\/)/.test(line);
           for (const m of line.matchAll(/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/g)) {
             if (m[0] === 'oven/bun') continue;
             // A comment may NAME the image without its digest, but must name
