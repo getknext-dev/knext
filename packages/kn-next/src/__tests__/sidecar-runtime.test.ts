@@ -208,6 +208,11 @@ describe("confinement to the sidecar", () => {
             { "i.js": "" },
         );
         pkg(join(root, "inside"), { main: "i.js" }, { "i.js": "" });
+        // the lookup itself is confined (not only the final realpath gate)
+        expect(findPackageDir("above", undefined, root)).toBeNull();
+        expect(
+            findPackageDir("above", join(root, "inside", "i.js"), root),
+        ).toBeNull();
         expect(resolveSidecar("above", undefined, root)).toBeNull();
         expect(
             resolveSidecar("above", join(root, "inside", "i.js"), root),
