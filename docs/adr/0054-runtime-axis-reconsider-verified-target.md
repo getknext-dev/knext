@@ -3,7 +3,9 @@
 - **Status:** **Accepted (2026-09-22) — founder decision.** (Was Proposed; the sprint-close gates
   reviewed it SIGN-OFF/ISSUES non-blocking, findings folded in.) **Amended** by Amendment 6
   (2026-09-22) and **Amendment 7 (2026-09-23)** — Amendment 7 retires the uncompiled bun-standalone
-  fallback below and makes the v1.0 surface the full bytecode-cached cell matrix.
+  fallback below and makes the v1.0 surface the full bytecode-cached cell matrix. **Amendment 7's
+  Decision 2 is amended by ADR-0058 (2026-09-24, Proposed):** the six-cell matrix stays the goal,
+  and v1.0 credentials four cells (node/bun × turbopack/webpack).
 - **Supersedes** ADR-0048's *vinext-ONLY* mandate: vinext is no longer the only target. **Amends**
   ADR-0042 (default runtime), ADR-0036 (target matrix); the maintainer must reconcile ADR-0042/0050/
   0051 status lines + `.claude/rules/architecture.md §4` + `CLAUDE.md §3` (not an agent's to edit).

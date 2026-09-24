@@ -1,11 +1,12 @@
 # ADR-0057: Gate an honest line % over executable lines, alongside the raw one
 
-- **Status:** **Proposed (2026-09-23).** Trigger-class: it changes what a CI gate measures. Under
-  the 2026-09-22 workflow amendment, the PR merges on code review, spec review and green CI, and
-  this ADR goes to the sprint-close design review as a flagged item. The review does not block
-  the merge. **Amended** by Amendment 1 (2026-09-23, #1262): pure string-continuation lines are
-  attributed from their statement's first line, under five allowlist rules. It is also
-  Proposed and is on the sprint-close review list (#1259).
+- **Status:** **Accepted (2026-09-24)**, recording the founder decision of 2026-09-23 on #1259:
+  the coverage-to-95% target tracks the **honest** number (see "Acceptance record" below). Was
+  Proposed (2026-09-23). This acceptance PR is itself trigger-class and needs founder review
+  before merge. **Amended** by Amendment 1 (2026-09-23, #1262): pure string-continuation lines
+  are attributed from their statement's first line, under five allowlist rules. Amendment 1 is
+  proposed for acceptance together with this ADR, because the honest floors already rely on it
+  (see the acceptance record).
 - **Implements:** #1248. **Relates to:** #884 (the merged-lcov gate), #871 (bun is the only
   runner), the coverage-to-95% milestone.
 
@@ -104,12 +105,52 @@ jev (calibrated second opinion), run on the evidence above: picked A with confid
 ## Action items
 
 - [x] Classifier + gate wiring + honest floors (#1248).
-- [ ] Sprint-close review: confirm the honest floor becomes the one the 95% milestone tracks.
+- [x] Sprint-close review: confirm the honest floor becomes the one the 95% milestone tracks.
+  Founder decision, 2026-09-23 (#1259). See the acceptance record below.
 - [ ] Re-rank the coverage batches by honest uncovered lines (posted on #1248).
+
+## Acceptance record (2026-09-24)
+
+**Decision (founder, 2026-09-23, #1259): the 95% target tracks the honest number.**
+
+- The **honest** line floors are the ones that climb to 95. Today they are **93.5 global** and
+  **93.5 for `packages/kn-next/src/**`** (`HONEST_THRESHOLDS` and `HONEST_PER_PATH_THRESHOLDS`,
+  `scripts/lib/coverage-policy.mjs:339-345`). They ratchet up, batch by batch, to the measured
+  value rounded down to 0.5, and never down.
+- The **raw** floors stay as a never-lower ratchet: **77 global** (`THRESHOLDS.lines`,
+  `coverage-policy.mjs:70-71`) and **79.0 for core** (`PER_PATH_THRESHOLDS`, `:145-147`). They
+  guard against a regression that the honest classifier might hide, but they are not the target.
+  95% raw is not reachable honestly, because most of the raw gap is formatting (see Context).
+- **Both numbers stay gated on every PR.** Anything that describes coverage, such as a badge, a
+  README line or a milestone, quotes the honest number and names it as such.
+
+How the review's other three questions on #1259 are settled by this acceptance:
+
+- **(2) Thin honest headroom.** The floor has since been ratcheted from 92 to 93.5 through
+  coverage batches and Amendment 1, and it keeps the "measured value rounded down to 0.5" rule.
+  A PR that adds code must add its tests. That is the intended pressure, not a defect.
+- **(3) Lines bun never emits a record for** are still invisible to both numbers. This is
+  accepted as a **known gap** (see Consequences) and is not a blocker: the classifier only ever
+  removes records, so this gap cannot make the honest number read higher than it should.
+- **(4) The differential oracle only proves constructs already in the tree.** This is accepted
+  with the rule already recorded in Consequences: any new erasure rule must check the type slot,
+  not the node kind, and it lands with its own fixture and mutation. The oracle is a regression
+  net, not a proof.
+
+**Amendment 1** is proposed for acceptance together with the ADR: the current 93.5 floors were
+measured with attribution in the gate, so accepting the denominator without it would record a
+floor that the accepted rules cannot reproduce. jev (jev-1.13.0) put "accept with the ADR" at
+0.77 against "keep Proposed" at 0.23, at a confidence of only 0.53. **The founder should confirm
+this point explicitly in review.**
+
+jev, on a fact sheet with the above: 0.75 that the founder decision justifies marking ADR-0057
+Accepted, and 0.84 that questions (3) and (4) belong on record as known gaps rather than as
+blockers.
 
 ## Amendment 1 (2026-09-23): attribute pure string-continuation lines (#1262)
 
-- **Status:** Proposed. Same trigger-class handling as the ADR itself: it is flagged for the
+- **Status:** Proposed; **proposed for acceptance with the ADR (2026-09-24, #1303)**, pending
+  founder confirmation (see the acceptance record above). Same trigger-class handling as the ADR itself: it is flagged for the
   sprint-close design review (#1259) and does not block the merge. Revised in review round 2 of
   #1268, after the adversarial review broke the first version on real bun lcov. The break is
   described under rule 5.
@@ -290,7 +331,8 @@ jev (calibrated second opinion) scores:
 - [x] Next coverage batch: raise the honest floors to the measured value rounded down to 0.5
   (93.0 or above) once core has real headroom. Done in coverage batch B4 (#1235, #1276): measured
   93.22% both scopes, floors raised to 93.0 (`scripts/lib/coverage-policy.mjs`).
-- [ ] Sprint-close design review (#1259): accept or reject this amendment.
+- [ ] Sprint-close design review (#1259): accept or reject this amendment. Proposed for
+  acceptance with the ADR in #1303; founder to confirm.
 - [ ] Re-run the real-bun ground-truth test on every bun upgrade (it runs in CI with the pinned
   bun). If a boundary stops holding, remove it from `BLOCK_BOUNDARIES`. Do not relax the test.
 - [ ] Separately from this amendment, investigate bun's raw over-count: a positive count on an
