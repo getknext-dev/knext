@@ -43,6 +43,27 @@ import { resolve } from 'node:path';
  * to the same manifest value, and requires the docs site to plainly explain
  * (no issue/PR/ADR numbers — `apps/docs/content-hygiene.test.ts` enforces
  * that) that the scaffold ships a newer Next than the credentialed version.
+ *
+ * REVIEW ROUND 3 (rev-1379 round 2) widened the scan again: the round-2 scan
+ * only recognised `NEXTJS_REF` written as a workflow-level env key using the
+ * EXACT `${{ github.event.inputs.nextjsRef || '...' }}` fallback expression —
+ * so a reviewer adding a job-level `env: NEXTJS_REF: v16.3.3` override to
+ * `test-e2e-deploy.yml` stayed green, and `echo "NEXTJS_REF=..." >>
+ * "$GITHUB_ENV"` / `export NEXTJS_REF=...` in a `run:` step were never even
+ * looked at. Any `NEXTJS_REF` assignment is now a site: a `NEXTJS_REF:` YAML
+ * key at ANY indent (job- or step-level `env:`, not just workflow-level), a
+ * `NEXTJS_REF=` write to `$GITHUB_ENV`, or an `export NEXTJS_REF=`. Only ONE
+ * form is trusted — the workflow-level fallback expression — and its value is
+ * checked against the manifest as before. Every other form is, by
+ * construction, not that trusted form, so it is ALWAYS a violation unless the
+ * manifest's `lockstepExceptions` explicitly excuses that exact
+ * file+kind+value — matching the value is never enough on its own to excuse
+ * an unrecognised form.
+ *
+ * Round 3 also stopped hardcoding "16.3.x" in the docs check: the pattern is
+ * now derived from `manifest.shippedNextPin` (`major.minor.x`), checked
+ * against BOTH docs pages, and every `lockstepExceptions` entry must carry a
+ * non-empty `reason`.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -55,9 +76,16 @@ const SCAFFOLD_PACKAGE_JSON_PATH = resolve(
 const COMPAT_MATRIX_MD_PATH = resolve(REPO_ROOT, 'docs/compat-matrix.md');
 const COMPAT_MATRIX_MDX_PATH = resolve(REPO_ROOT, 'apps/docs/content/docs/compat-matrix.mdx');
 
+type NextjsRefSiteKind =
+  | 'dispatch-default'
+  | 'env-fallback'
+  | 'yaml-key-other'
+  | 'github-env-write'
+  | 'export';
+
 interface LockstepException {
   file: string;
-  kind: 'dispatch-default' | 'env-fallback';
+  kind: NextjsRefSiteKind;
   value: string;
   reason: string;
 }
@@ -131,16 +159,60 @@ export function scaffoldNextPin(packageJsonHbs: string): string | undefined {
 
 interface NextjsRefOccurrence {
   file: string;
-  kind: 'dispatch-default' | 'env-fallback';
+  kind: NextjsRefSiteKind;
   value: string | undefined;
+  /** Only 'env-fallback' is a trusted form; every other kind is a violation
+   * on its own existence, regardless of value, unless explicitly excused. */
+  trustedForm: boolean;
+}
+
+/** The ONE trusted `NEXTJS_REF` assignment form, matched on a SINGLE line. */
+const TRUSTED_ENV_FALLBACK_LINE =
+  /^[ \t]*NEXTJS_REF:[ \t]*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|\s*'([^']+)'\s*\}\}[ \t]*$/;
+
+/** Every `NEXTJS_REF:` YAML key line, at ANY indent (workflow/job/step `env:`). */
+export function scanYamlNextjsRefKeys(text: string, file: string): NextjsRefOccurrence[] {
+  const out: NextjsRefOccurrence[] = [];
+  for (const match of text.matchAll(/^[ \t]*NEXTJS_REF:[ \t]*(.*)$/gm)) {
+    const trusted = TRUSTED_ENV_FALLBACK_LINE.exec(match[0]);
+    if (trusted) {
+      out.push({ file, kind: 'env-fallback', value: trusted[1], trustedForm: true });
+    } else {
+      out.push({ file, kind: 'yaml-key-other', value: match[1].trim(), trustedForm: false });
+    }
+  }
+  return out;
+}
+
+/** `export NEXTJS_REF=...` in a `run:` step's shell script. */
+export function scanExportNextjsRef(text: string, file: string): NextjsRefOccurrence[] {
+  return [...text.matchAll(/^[ \t]*export[ \t]+NEXTJS_REF=([^\s"']+)/gm)].map((m) => ({
+    file,
+    kind: 'export' as const,
+    value: m[1],
+    trustedForm: false,
+  }));
+}
+
+/** `NEXTJS_REF=...` written to `$GITHUB_ENV` — excludes lines already caught by `export`. */
+export function scanGithubEnvWrite(text: string, file: string): NextjsRefOccurrence[] {
+  const out: NextjsRefOccurrence[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.includes('NEXTJS_REF=') || !line.includes('GITHUB_ENV')) continue;
+    if (/^[ \t]*export[ \t]+NEXTJS_REF=/.test(line)) continue; // already an export site
+    const value = line.match(/NEXTJS_REF=([^\s"']+)/)?.[1];
+    out.push({ file, kind: 'github-env-write', value, trustedForm: false });
+  }
+  return out;
 }
 
 /**
- * Every `nextjsRef` dispatch-input default and every `NEXTJS_REF` env
- * fallback across `.github/workflows/**`, scanned rather than enumerated —
- * the whole point per the round-2 finding is that a NEW lane (or a moved
- * line in an existing one) must be caught automatically, not by remembering
- * to update a hand-written list of files.
+ * Every `nextjsRef` dispatch-input default AND every `NEXTJS_REF` assignment
+ * (a YAML `env:` key at ANY indent, an `export`, or a `$GITHUB_ENV` write)
+ * across `.github/workflows/**`, scanned rather than enumerated. Round 3
+ * (rev-1379 round 2): a job- or step-level `env: NEXTJS_REF: ...` override,
+ * or a shell-level `export`/`$GITHUB_ENV` assignment, is now caught even
+ * though none of them use the one trusted fallback-expression form.
  */
 export function scanNextjsRefOccurrences(workflowsDir: string): NextjsRefOccurrence[] {
   const occurrences: NextjsRefOccurrence[] = [];
@@ -154,11 +226,14 @@ export function scanNextjsRefOccurrences(workflowsDir: string): NextjsRefOccurre
         file,
         kind: 'dispatch-default',
         value: workflowDispatchNextjsRefDefault(text),
+        trustedForm: true,
       });
     }
-    if (/NEXTJS_REF:\s*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|/.test(text)) {
-      occurrences.push({ file, kind: 'env-fallback', value: workflowNextjsRef(text) });
-    }
+    occurrences.push(
+      ...scanYamlNextjsRefKeys(text, file),
+      ...scanExportNextjsRef(text, file),
+      ...scanGithubEnvWrite(text, file),
+    );
   }
   return occurrences;
 }
@@ -175,6 +250,17 @@ export function docsMatrixMdxNextRef(text: string): string | undefined {
   return hits.length === 1 ? `v${hits[0][1]}` : undefined;
 }
 
+/**
+ * The `major.minor.x` line the docs' divergence explanation must cite,
+ * DERIVED from `manifest.shippedNextPin` rather than hardcoded — a "16.3.x"
+ * string literal in the test would silently go stale the moment the pin
+ * moves to 16.4.x, since nothing would force it to be re-derived.
+ */
+export function shippedMinorPattern(shippedNextPin: string): string | undefined {
+  const m = shippedNextPin.match(/^(\d+)\.(\d+)\./);
+  return m ? `${m[1]}.${m[2]}.x` : undefined;
+}
+
 describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
   it('the manifest exists and is well-formed', () => {
     const manifest = loadManifest();
@@ -185,6 +271,12 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
     expect(manifest.divergenceReason.length).toBeGreaterThan(0);
     expect(manifest.lastReviewed).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(Array.isArray(manifest.lockstepExceptions)).toBe(true);
+    for (const ex of manifest.lockstepExceptions) {
+      expect(
+        ex.reason.length,
+        `lockstepExceptions entry for ${ex.file}/${ex.kind} has no reason: ${JSON.stringify(ex)}`,
+      ).toBeGreaterThan(0);
+    }
   });
 
   it('parses NEXTJS_REF from the real workflow exactly once (self-test)', () => {
@@ -221,6 +313,49 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
     expect(workflowDispatchNextjsRefDefault(ambiguous)).toBeUndefined();
     // Two separate nextjsRef keys in the same file -> ambiguous, refuse.
     expect(workflowDispatchNextjsRefDefault(`${block}\n${block}`)).toBeUndefined();
+  });
+
+  it('classifies every NEXTJS_REF YAML key by form, at any indent (self-test)', () => {
+    const trusted = "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v9.9.9' }}";
+    const jobLevelOverride = "      NEXTJS_REF: 'v8.8.8'"; // a job/step-level override
+    const bareLiteral = '  NEXTJS_REF: v7.7.7'; // no fallback expression at all
+    const hits = scanYamlNextjsRefKeys(
+      [trusted, jobLevelOverride, bareLiteral].join('\n'),
+      'f.yml',
+    );
+    expect(hits).toHaveLength(3);
+    expect(hits[0]).toEqual({
+      file: 'f.yml',
+      kind: 'env-fallback',
+      value: 'v9.9.9',
+      trustedForm: true,
+    });
+    expect(hits[1].kind).toBe('yaml-key-other');
+    expect(hits[1].trustedForm).toBe(false);
+    expect(hits[2].kind).toBe('yaml-key-other');
+    expect(hits[2].trustedForm).toBe(false);
+    // A usage (not an assignment) must never be picked up.
+    expect(scanYamlNextjsRefKeys('  ref: ${{ env.NEXTJS_REF }}', 'f.yml')).toEqual([]);
+    // A key that merely CONTAINS NEXTJS_REF as a substring must not match.
+    expect(scanYamlNextjsRefKeys('  NEXTJS_REF_TESTED: ${{ env.NEXTJS_REF }}', 'f.yml')).toEqual(
+      [],
+    );
+  });
+
+  it('finds `export NEXTJS_REF=` at any indent, never a mere usage (self-test)', () => {
+    expect(scanExportNextjsRef('        export NEXTJS_REF=v8.8.8', 'f.yml')).toEqual([
+      { file: 'f.yml', kind: 'export', value: 'v8.8.8', trustedForm: false },
+    ]);
+    expect(scanExportNextjsRef('echo "using $NEXTJS_REF"', 'f.yml')).toEqual([]);
+  });
+
+  it('finds a `NEXTJS_REF=` write to $GITHUB_ENV, and never double-counts an export line (self-test)', () => {
+    expect(scanGithubEnvWrite('echo "NEXTJS_REF=v8.8.8" >> "$GITHUB_ENV"', 'f.yml')).toEqual([
+      { file: 'f.yml', kind: 'github-env-write', value: 'v8.8.8', trustedForm: false },
+    ]);
+    // Same line also matching `export NEXTJS_REF=` must be attributed to export ONLY.
+    expect(scanGithubEnvWrite('export NEXTJS_REF=v8.8.8 >> "$GITHUB_ENV"', 'f.yml')).toEqual([]);
+    expect(scanGithubEnvWrite('echo "no assignment here" >> "$GITHUB_ENV"', 'f.yml')).toEqual([]);
   });
 
   it('parses the scaffold next pin exactly once (self-test)', () => {
@@ -275,17 +410,25 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
       const occurrences = scanNextjsRefOccurrences(WORKFLOWS_DIR);
       const drifted = occurrences.filter((o) => {
         if (o.value === undefined) return false; // reported by the parse test above
-        if (o.value === manifest.credentialedNextRef) return false;
         const excused = manifest.lockstepExceptions.some(
           (ex) => ex.file === o.file && ex.kind === o.kind && ex.value === o.value,
         );
-        return !excused;
+        if (excused) return false;
+        // The trusted forms (workflow_dispatch default, the one recognised
+        // env-fallback expression) auto-pass on value equality. Every OTHER
+        // form — a job/step-level env override, an export, a $GITHUB_ENV
+        // write — is a violation on its OWN EXISTENCE: matching the value by
+        // coincidence never excuses an unrecognised assignment form, only an
+        // explicit exception does.
+        if (!o.trustedForm) return true;
+        return o.value !== manifest.credentialedNextRef;
       });
       expect(
         drifted,
         `nextjsRef occurrence(s) drifted from credentialedNextRef (${manifest.credentialedNextRef}) ` +
-          `with no matching lockstepExceptions entry: ${JSON.stringify(drifted)}. Either restore the ` +
-          `value, or add a reviewed entry to .github/compat-credentialed-next-version.json's ` +
+          `or use an unrecognised NEXTJS_REF assignment form with no matching lockstepExceptions ` +
+          `entry: ${JSON.stringify(drifted)}. Either restore the value / use the trusted fallback ` +
+          `expression, or add a reviewed entry to .github/compat-credentialed-next-version.json's ` +
           'lockstepExceptions.',
       ).toEqual([]);
     });
@@ -314,13 +457,35 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
       expect(ref).toBe(manifest.credentialedNextRef);
     });
 
-    it('the public docs plainly explain the scaffold ships a newer Next than the credentialed version', () => {
-      const text = readFileSync(COMPAT_MATRIX_MDX_PATH, 'utf8');
+    it('derives the shipped-minor pattern from shippedNextPin rather than a hardcoded literal (self-test)', () => {
+      expect(shippedMinorPattern('16.3.3')).toBe('16.3.x');
+      expect(shippedMinorPattern('9.0.12')).toBe('9.0.x');
+      expect(shippedMinorPattern('not-a-version')).toBeUndefined();
+    });
+
+    it('the public docs plainly explain the scaffold ships a newer Next than the credentialed version, citing the DERIVED minor line', () => {
+      const manifest = loadManifest();
+      const pattern = shippedMinorPattern(manifest.shippedNextPin);
+      expect(
+        pattern,
+        `could not derive a major.minor.x pattern from ${manifest.shippedNextPin}`,
+      ).toBeDefined();
+
+      const mdxText = readFileSync(COMPAT_MATRIX_MDX_PATH, 'utf8');
       // Plain-language, no issue/PR/ADR numbers (apps/docs/content-hygiene.test.ts
       // enforces that repo-wide) — just requires the explanation to exist and to
-      // mention both the "newer" framing and the shipped minor line.
-      expect(text).toMatch(/newer Next\.js release/i);
-      expect(text).toMatch(/16\.3\.x/);
+      // mention both the "newer" framing and the DERIVED shipped-minor line.
+      expect(mdxText).toMatch(/newer Next\.js release/i);
+      expect(
+        mdxText.includes(pattern as string),
+        `compat-matrix.mdx does not cite ${pattern}`,
+      ).toBe(true);
+
+      const mdText = readFileSync(COMPAT_MATRIX_MD_PATH, 'utf8');
+      expect(
+        mdText.includes(pattern as string),
+        `docs/compat-matrix.md does not cite ${pattern}`,
+      ).toBe(true);
     });
   });
 });
