@@ -58,6 +58,31 @@ The connection details come from the environment — `REDIS_URL` and `REDIS_KEY_
 into your pods from the `cache` block of your deploy config (see
 [the operator reference](/docs/operator)); nothing about Redis is hardcoded in your app.
 
+## The Cache-Control header clients see
+
+Next.js marks cacheable pages with directives meant for a shared cache in front of the server, such
+as `s-maxage=2, stale-while-revalidate=31535998` for an ISR page or `s-maxage=31536000` for a
+static one. knext serves your app directly, with no shared cache in between, so the compiled
+executable (the default build) and the standalone server (`build: 'turbopack'` or `'webpack'`, on
+Node or Bun) rewrite those responses to `public, max-age=0, must-revalidate`. That's the header a
+deployed Next.js app returns to browsers. vinext on Node (`runtime: 'node'` with the default build)
+doesn't rewrite them yet, and serves Next.js's original headers.
+The first request for a `fallback: true` page gets the same header rather than `private, no-store`.
+Hashed static assets (`immutable`) and non-`GET`/`HEAD` responses are never changed.
+
+In the compiled executable, two layers produce this header:
+
+- **vinext's own deploy mode** covers the responses vinext builds itself: ISR and static pages,
+  `/_next/data` requests, and the first request for a `fallback: true` page. The executable turns it
+  on by setting `VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1`, unless you've set that variable yourself.
+- **knext's rewrite** covers `s-maxage` headers your own code sets, for example in a route handler
+  or on a redirect.
+
+If you put your own CDN or shared cache in front of knext and want it to see the `s-maxage` values,
+set `KNEXT_CACHE_CONTROL_NORMALIZE=0` in the app's environment. That one switch turns both layers
+off, and the server sends Next.js's original headers. To turn off only vinext's layer, set
+`VINEXT_NEXT_DEPLOY_CACHE_CONTROL=0`.
+
 ## Upgrading an app scaffolded before the cache wiring
 
 Apps created by earlier versions of `kn-next create` wired the cache handler **only** through

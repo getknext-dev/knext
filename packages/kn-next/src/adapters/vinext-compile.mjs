@@ -122,6 +122,23 @@ if (!SIDECAR_INSTALL_FILE) {
     process.exit(1);
 }
 
+// The deployed-platform Cache-Control normalization on Bun.serve (#1322,
+// bun-serve-cache-control.mjs): the same rule knext's Node runtime applies, so
+// clients see `public, max-age=0, must-revalidate` rather than the origin's
+// `s-maxage=…`. Injected after the sidecar resolver. Fail CLOSED: a binary
+// without it silently diverges from every other knext runtime.
+const CACHE_CONTROL_FILE = [
+    join(compileHere, "bun-serve-cache-control-install.js"),
+    join(compileHere, "bun-serve-cache-control-install.mjs"),
+].find((c) => existsSync(c));
+if (!CACHE_CONTROL_FILE) {
+    console.error(
+        "[knext compile] the Bun.serve Cache-Control normalization is missing beside vinext-compile " +
+            `(looked for bun-serve-cache-control-install.{js,mjs} in ${compileHere}) — the installed @getknext/core is incomplete`,
+    );
+    process.exit(1);
+}
+
 /**
  * Injects the keep-alive guard import into the nitro entry AND rewrites
  * `import.meta.*` so `--bytecode`'s CommonJS output can hold it. Both act on the
@@ -167,6 +184,7 @@ const importMetaToCjs = {
             const src =
                 `import ${JSON.stringify(GUARD_FILE)};\n` +
                 `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n` +
+                `import ${JSON.stringify(CACHE_CONTROL_FILE)};\n` +
                 staticized.contents;
             console.log(
                 "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",

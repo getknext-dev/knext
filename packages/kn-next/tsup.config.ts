@@ -104,6 +104,11 @@ export default defineConfig([
       // `import` of this right after the guard, so it too must ship in dist
       // beside vinext-compile (it fails closed when absent).
       'adapters/sidecar-install': 'src/adapters/sidecar-install.mjs',
+      // The Bun.serve deployed Cache-Control normalization (#1322). vinext-compile
+      // injects an `import` of this after the sidecar resolver (and fails closed
+      // when it is absent), so it must ship in dist beside vinext-compile.
+      'adapters/bun-serve-cache-control-install':
+        'src/adapters/bun-serve-cache-control-install.mjs',
       // The vinext data-cache adapter FACTORY (#953) — the scaffold's
       // vite.config hands this subpath to `vinext({ cache: { data } })`, and
       // vinext's generated registration module imports it at the app's build
@@ -179,6 +184,12 @@ export default defineConfig([
       'prom-client',
       'kafkajs',
       '@google-cloud/storage',
+      // bun-serve-cache-control.mjs imports the Cache-Control rule from the CJS
+      // preload, which the CJS pass below ships as its own file. Inlining it here
+      // would turn its lazy `require('node:http')` into an ESM `__require("http")`
+      // that throws under ESM Node (the #948 dist guard); kept as a relative
+      // import, it resolves to the shipped .cjs beside it.
+      /\.\/cache-control-normalize\.cjs$/,
     ],
   },
   // #175 — the deployed-platform Cache-Control preload. It is loaded with
