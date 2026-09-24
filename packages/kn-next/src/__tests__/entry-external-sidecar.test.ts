@@ -22,10 +22,10 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
+    cpSync,
     mkdirSync,
     mkdtempSync,
     realpathSync,
-    renameSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
@@ -233,8 +233,28 @@ function buildApp(): { work: string; exe: string; sidecar: string } {
     return { work, exe, sidecar: nm };
 }
 
-/** Run from a directory that is NOT the app dir: resolution must not ride on cwd. */
-function run(exe: string): string {
+/**
+ * Deploy the way an image does: copy the binary and `.output/` to a DIFFERENT
+ * directory than the one they were built in (Docker builds in one tree and runs
+ * from `/app`). Running in the build tree would let build-time paths mask a
+ * runtime resolution failure. Then run from a third directory, so resolution
+ * cannot ride on cwd either.
+ */
+function deployAndRun(
+    app: { work: string; exe: string },
+    withSidecar: boolean,
+): string {
+    const deployed = temp("knext-1320-deploy-");
+    const exe = join(deployed, "server");
+    cpSync(app.exe, exe);
+    cpSync(join(app.work, "package.json"), join(deployed, "package.json"));
+    cpSync(join(app.work, ".output"), join(deployed, ".output"), {
+        recursive: true,
+    });
+    if (!withSidecar)
+        rmSync(join(deployed, ".output", "server", "node_modules"), {
+            recursive: true,
+        });
     const elsewhere = temp("knext-1320-cwd-");
     const r = spawnSync(exe, [], {
         cwd: elsewhere,
@@ -249,7 +269,7 @@ describe("vinext-compile loads server externals from the sidecar beside the bina
     const app = buildApp();
 
     it("with the sidecar present, an external that needs its real files works (the G8 case)", () => {
-        const out = run(app.exe);
+        const out = deployAndRun(app, true);
         expect(out).toContain(`RESULT:esm:${LIB}`);
         // the pure package came from the real sidecar, not from $bunfs
         expect(out).toContain(`PURE:${PURE_LIVE}`);
@@ -257,15 +277,9 @@ describe("vinext-compile loads server externals from the sidecar beside the bina
     });
 
     it("with the sidecar gone, the bundled copy still serves (no regression for today's images)", () => {
-        const moved = `${app.sidecar}.away`;
-        renameSync(app.sidecar, moved);
-        try {
-            const out = run(app.exe);
-            // the bundled copy: the ORIGINAL marker, compiled in
-            expect(out).toContain(`PURE:${PURE}\n`);
-            expect(out).not.toContain(PURE_LIVE);
-        } finally {
-            renameSync(moved, app.sidecar);
-        }
+        const out = deployAndRun(app, false);
+        // the bundled copy: the ORIGINAL marker, compiled in
+        expect(out).toContain(`PURE:${PURE}\n`);
+        expect(out).not.toContain(PURE_LIVE);
     });
 });
