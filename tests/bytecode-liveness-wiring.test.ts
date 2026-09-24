@@ -145,6 +145,12 @@ describe("the SHIPPED bake driver (the standalone-node image's own), against a r
   }, 90_000);
 });
 
+/**
+ * Bakes DIRECTLY with the shipped driver — no wrapper, no knob interpreted
+ * at all (#1299: the driver reads no such variable any more). `knob`, when
+ * passed, is set on the DRIVER's own env anyway, to prove the driver
+ * IGNORES it rather than merely defaulting it off.
+ */
 function bakeWith(warm: string, knob?: string) {
   const { dir, driver, server } = fakeStandalone();
   port += 1;
@@ -164,35 +170,86 @@ function bakeWith(warm: string, knob?: string) {
   });
 }
 
-describe('the shipped bake driver: strict 2xx by default, accept-any-status only by the internal knob', () => {
+/**
+ * Bakes THROUGH the harness's e2e-bake-accept.mjs wrapper (#1299) — the
+ * `KNEXT_WARM_ACCEPT_ANY_STATUS` interpretation the driver itself used to
+ * do, now happening one process out, against the REAL shipped driver.
+ */
+function bakeThroughWrapper(warm: string, accept?: string) {
+  const { dir, driver, server } = fakeStandalone();
+  port += 1;
+  const wrapper = join(ROOT, 'scripts/e2e-bake-accept.mjs');
+  return spawnSync('node', [wrapper, 'node', driver], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    cwd: dir,
+    env: {
+      PATH: process.env.PATH ?? '',
+      PORT: String(port),
+      HOSTNAME: '127.0.0.1',
+      STANDALONE_SERVER_PATH: server,
+      NODE_COMPILE_CACHE: join(dir, '.cc'),
+      KNEXT_WARM_PATH: warm,
+      ...(accept === undefined ? {} : { KNEXT_WARM_ACCEPT_ANY_STATUS: accept }),
+    },
+  });
+}
+
+describe('the shipped bake driver: UNCONDITIONALLY strict 2xx — no knob anywhere in these bytes (#1299)', () => {
   it('PRODUCT DEFAULT: a 404 and a 500 both fail the bake', () => {
     expect(bakeWith('/not-there').status).not.toBe(0);
     expect(bakeWith('/boom').status).not.toBe(0);
   }, 90_000);
 
-  it('the knob unset-equivalent values stay strict (only "1" loosens)', () => {
-    expect(bakeWith('/not-there', '0').status).not.toBe(0);
-    expect(bakeWith('/not-there', 'true').status).not.toBe(0);
+  it('the driver IGNORES KNEXT_WARM_ACCEPT_ANY_STATUS entirely now — even "1" stays strict', () => {
+    // Pre-#1299 this ("1") would have passed the bake; post-#1299 the
+    // shipped bytes read no such variable at all, so it still fails.
+    expect(bakeWith('/not-there', '1').status).not.toBe(0);
+    expect(bakeWith('/boom', '1').status).not.toBe(0);
   }, 90_000);
 
-  it('with the knob, a 404 or 500 render is a complete response and the bake succeeds', () => {
-    expect(bakeWith('/not-there', '1').status).toBe(0);
-    expect(bakeWith('/boom', '1').status).toBe(0);
+  it('the shipped driver TEMPLATE contains no trace of the knob at all', () => {
+    const template = readFileSync(SHIPPED_BAKE, 'utf8');
+    expect(template).not.toContain('KNEXT_WARM_ACCEPT_ANY_STATUS');
+    expect(template).not.toContain('ACCEPT_ANY_STATUS');
+  });
+});
+
+describe('e2e-bake-accept.mjs (#1299): the tolerance moved HERE, one process out, against the REAL driver', () => {
+  it('with the wrapper + KNEXT_WARM_ACCEPT_ANY_STATUS=1, a 404 or 500 render is tolerated', () => {
+    expect(bakeThroughWrapper('/not-there', '1').status).toBe(0);
+    expect(bakeThroughWrapper('/boom', '1').status).toBe(0);
   }, 90_000);
 
-  it('with the knob, a connection reset STILL fails the bake', () => {
+  it('without the wrapper knob (unset), the wrapper still fails a 404 — no accidental loosening', () => {
+    expect(bakeThroughWrapper('/not-there').status).not.toBe(0);
+  }, 90_000);
+
+  it('the "0"/"true" unset-equivalent values stay strict through the wrapper too (only "1" loosens)', () => {
+    expect(bakeThroughWrapper('/not-there', '0').status).not.toBe(0);
+    expect(bakeThroughWrapper('/not-there', 'true').status).not.toBe(0);
+  }, 90_000);
+
+  it('with the wrapper knob, a connection reset STILL fails the bake', () => {
     // /ok first so the server-ready probe passes; the reset is then a warm-path failure.
-    expect(bakeWith('/ok,/reset', '1').status).not.toBe(0);
-    expect(bakeWith('/ok,/not-there', '1').status).toBe(0);
+    expect(bakeThroughWrapper('/ok,/reset', '1').status).not.toBe(0);
+    expect(bakeThroughWrapper('/ok,/not-there', '1').status).toBe(0);
   }, 90_000);
 
-  it('only the harness sets the knob — the image build never does', () => {
+  it('a fully successful (2xx) bake still exits 0 through the wrapper, knob or no knob', () => {
+    expect(bakeThroughWrapper('/ok').status).toBe(0);
+    expect(bakeThroughWrapper('/ok', '1').status).toBe(0);
+  }, 90_000);
+
+  it('only the harness sets the knob — the image build never does, and the wrapper is what interprets it now', () => {
     expect(once(DEPLOY, 'KNEXT_WARM_ACCEPT_ANY_STATUS=1')).toBe(1);
+    expect(once(DEPLOY, '"${SCRIPT_DIR}/e2e-bake-accept.mjs"')).toBe(1);
     const dockerfile = readFileSync(
       join(ROOT, 'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs'),
       'utf8',
     );
     expect(dockerfile).not.toContain('KNEXT_WARM_ACCEPT_ANY_STATUS');
+    expect(dockerfile).not.toContain('e2e-bake-accept');
     const docs = readFileSync(join(ROOT, 'apps/docs/content/docs/bytecode.mdx'), 'utf8');
     expect(docs).not.toContain('KNEXT_WARM_ACCEPT_ANY_STATUS');
   });
@@ -241,15 +298,15 @@ describe("e2e-deploy.sh — the node lane runs KNEXT's own bake + supervisor, an
     );
   });
 
-  it("bakes with the shipped driver into the image's cache location, before boot", () => {
+  it("bakes with the shipped driver, THROUGH the harness's e2e-bake-accept.mjs wrapper, into the image's cache location, before boot (#1299)", () => {
     expect(once(DEPLOY, 'NODE_CC_DIR="${STANDALONE_APP_DIR}/.next/compile-cache"')).toBe(1);
     expect(
       once(
         DEPLOY,
-        '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
+        '          node "${SCRIPT_DIR}/e2e-bake-accept.mjs" node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
       ),
     ).toBe(1);
-    expect(DEPLOY.indexOf('node "${KNEXT_BAKE_DRIVER}"')).toBeLessThan(
+    expect(DEPLOY.indexOf('node "${SCRIPT_DIR}/e2e-bake-accept.mjs"')).toBeLessThan(
       DEPLOY.indexOf('# ── 4. boot the standalone server'),
     );
   });

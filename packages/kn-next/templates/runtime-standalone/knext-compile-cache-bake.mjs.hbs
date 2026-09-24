@@ -43,7 +43,19 @@
  *
  * Exit 0 only once every warm path answered 2xx and the cache was flushed;
  * exit 1 otherwise, which fails the `docker build` — the same fail-closed
- * contract `Dockerfile.vinext-node.hbs`'s bake enforces.
+ * contract `Dockerfile.vinext-node.hbs`'s bake enforces. UNCONDITIONALLY
+ * strict (#1299) — there is no env-var escape hatch in these shipped bytes.
+ * The official compat harness's fixtures are deliberately built to 404/500
+ * (a rendered 404/500 still exercises the server runtime the cache must
+ * cover), so the harness needs to tolerate a non-2xx warm without failing
+ * the deploy — that tolerance now lives OUTSIDE this file entirely, in
+ * `scripts/e2e-bake-accept.mjs`, a harness-owned wrapper that spawns this
+ * driver as a child and re-derives the tolerant verdict from its stdout +
+ * exit code. This driver does not know that wrapper exists, reads no
+ * variable it sets, and behaves identically whether run directly (a real
+ * user's `docker build`) or through it (a harness night) — see that
+ * script's header for the full design and why the actual baked bytes are
+ * unaffected either way.
  */
 
 import { flushCompileCache, getCompileCacheDir } from "node:module";
@@ -62,12 +74,6 @@ const WARM_PATHS = (process.env.KNEXT_WARM_PATH ?? "/api/health")
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
-
-// INTERNAL, undocumented, and STRICT BY DEFAULT: the image bake requires every
-// warm path to answer 2xx. Only the compatibility harness sets this to "1" -- its
-// fixtures are deliberately built to 404/500, yet a rendered 404/500 still loads
-// the server runtime the cache must cover. A connection error still fails.
-const ACCEPT_ANY_STATUS = process.env.KNEXT_WARM_ACCEPT_ANY_STATUS === "1";
 
 function warmUrl(path) {
     // HOSTNAME may be a bind address like 0.0.0.0; loopback is always
@@ -107,7 +113,7 @@ async function main() {
         const t0 = Date.now();
         try {
             const res = await fetch(warmUrl(path));
-            allOk &&= ACCEPT_ANY_STATUS || (res.status >= 200 && res.status < 300);
+            allOk &&= res.status >= 200 && res.status < 300;
             console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - t0}`);
         } catch (err) {
             allOk = false;

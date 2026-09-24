@@ -612,8 +612,10 @@ if [ "${RUNTIME}" != "bun" ]; then
       # fixtures have no `/` page (404), so pick from the build's own route
       # manifests: `/` when it is a page, else the first STATIC page route (no
       # dynamic segment, no api route, no framework-internal `/_x` route). The
-      # shipped driver runs with its internal accept-any-HTTP-status knob (a
-      # rendered 404/500 still loads the server runtime); a reset still fails.
+      # shipped driver itself is UNCONDITIONALLY strict (#1299) — the harness
+      # tolerates a rendered 404/500 (which still loads the server runtime the
+      # cache must cover) via e2e-bake-accept.mjs below, not via any knob in
+      # the driver's own shipped bytes. A connection reset still fails either way.
       WARM_PATH="$(node -e '
         const fs = require("node:fs"), path = require("node:path");
         const dir = process.argv[1];
@@ -638,6 +640,14 @@ if [ "${RUNTIME}" != "bun" ]; then
       BAKE_STATE_SNAPSHOT="${APP_DIR}/.knext-pre-bake-state.tar"
       snapshot_state "${STANDALONE_APP_DIR}" "${BAKE_STATE_SNAPSHOT}" ".next/compile-cache"
       for WARM_TRY in ${WARM_PATH}; do
+        # e2e-bake-accept.mjs (#1299) is the HARNESS-owned wrapper that
+        # interprets KNEXT_WARM_ACCEPT_ANY_STATUS now — the shipped driver
+        # itself (${KNEXT_BAKE_DRIVER}) no longer reads that variable at all,
+        # and the wrapper strips it from the driver's own child env before
+        # spawning it, so the driver's behaviour is identical to what a real
+        # user's `docker build` runs. The wrapper re-derives the tolerant
+        # verdict from the driver's own stdout + exit code; the compile-cache
+        # bytes it flushes to disk are unaffected either way.
         if (
           cd "${STANDALONE_APP_DIR}"
           PORT="${BAKE_PORT}" HOSTNAME=127.0.0.1 NODE_ENV=production \
@@ -646,7 +656,7 @@ if [ "${RUNTIME}" != "bun" ]; then
             NODE_COMPILE_CACHE="${NODE_CC_DIR}" \
             KNEXT_WARM_PATH="${WARM_TRY}" \
             KNEXT_WARM_ACCEPT_ANY_STATUS=1 \
-          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2
+          node "${SCRIPT_DIR}/e2e-bake-accept.mjs" node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2
         ); then
           NODE_CC_BAKE="ok"
           break

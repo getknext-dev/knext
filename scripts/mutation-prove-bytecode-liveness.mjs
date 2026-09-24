@@ -46,14 +46,18 @@ const AUDIT = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 // biome-ignore format: the anchor scan needs the resolve() call on ONE line
 const SHIPPED_BAKE = resolve(REPO_ROOT, 'packages/kn-next/templates/runtime-standalone/knext-compile-cache-bake.mjs.hbs');
 const CHILD_ENV = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/env.ts');
+// #1299 — the harness-only accept-any-status tolerance, moved OUT of
+// SHIPPED_BAKE and into this HARNESS-owned wrapper instead.
+const BAKE_ACCEPT = resolve(REPO_ROOT, 'scripts/e2e-bake-accept.mjs');
 
 const SPEC_RULE = 'tests/bytecode-liveness.test.ts';
 const SPEC_CHAIN = 'tests/bytecode-liveness-chain.test.ts';
 const SPEC_WIRING = 'tests/bytecode-liveness-wiring.test.ts';
 const SPEC_AUDIT = 'tests/compat-window-audit.test.ts';
 const SPEC_STATE = 'tests/e2e-state-snapshot.test.ts';
+const SPEC_BAKE_ACCEPT = 'tests/e2e-bake-accept.test.ts';
 const SNAPSHOT = resolve(REPO_ROOT, 'scripts/lib/e2e-state-snapshot.sh');
-const SPECS = [SPEC_RULE, SPEC_CHAIN, SPEC_WIRING, SPEC_AUDIT, SPEC_STATE];
+const SPECS = [SPEC_RULE, SPEC_CHAIN, SPEC_WIRING, SPEC_AUDIT, SPEC_STATE, SPEC_BAKE_ACCEPT];
 
 /**
  * Table-driven, with literal anchor properties, so the static anchor-drift
@@ -69,19 +73,64 @@ const MUTATIONS = [
     replacement: 'process.stdout.write(`${basePath}/_next/static/x.js`);',
   },
   {
-    label: 'knext: the shipped bake driver accepts a connection reset under the harness knob',
-    target: SHIPPED_BAKE,
-    spec: SPEC_WIRING,
-    anchor: '            allOk = false;',
-    replacement: '            allOk = allOk && ACCEPT_ANY_STATUS;',
-    commentPrefix: '//',
+    // #1299 moved this tolerance OUT of SHIPPED_BAKE and into the
+    // harness-owned BAKE_ACCEPT wrapper — this mutation moves with it.
+    label:
+      'e2e-bake-accept: accepts a connection reset / malformed status under KNEXT_WARM_ACCEPT_ANY_STATUS',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (invalid.length > 0) {',
+    replacement: '  if (false) {',
+  },
+  // ── #1377 review: exit code alone is never enough to tolerate ───────────
+  {
+    label: 'e2e-bake-accept: tolerates a signal-killed driver (SIGKILL) as if it exited cleanly',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (signal !== null) {',
+    replacement: '  if (false) {',
   },
   {
+    label: "e2e-bake-accept: tolerates ANY non-zero exit code, not just the driver's documented 1",
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (exitCode !== 1) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label: 'e2e-bake-accept: tolerates a crash that never reached the COMPILE_CACHE: flush line',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (!stdout.includes(COMPILE_CACHE_MARKER)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label:
+      'e2e-bake-accept: tolerates ANY stderr, not just the driver\'s own "a warm path did not answer 2xx" marker',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (!stderr.includes(DRIVER_FAILURE_MARKER)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label:
+      'e2e-bake-accept: tolerates an all-2xx WARMED set that still exited non-zero (contradicts the known failure shape)',
+    target: BAKE_ACCEPT,
+    spec: SPEC_BAKE_ACCEPT,
+    anchor: '  if (nonTwoXx.length === 0) {',
+    replacement: '  if (false) {',
+  },
+  {
+    // #1299: the shipped driver's own strict-2xx check is what the PRODUCT
+    // default (no wrapper, no knob) relies on — this used to be defeated by
+    // an env var the driver read itself; now there is no such var in these
+    // bytes at all, so the only way to lose strict-by-default is to weaken
+    // this comparison directly.
     label: 'knext: the PRODUCT default loosens to accept non-2xx (strict-by-default lost)',
     target: SHIPPED_BAKE,
     spec: SPEC_WIRING,
-    anchor: 'process.env.KNEXT_WARM_ACCEPT_ANY_STATUS === "1"',
-    replacement: 'process.env.KNEXT_WARM_ACCEPT_ANY_STATUS !== "0"',
+    anchor: '            allOk &&= res.status >= 200 && res.status < 300;',
+    replacement: '            allOk &&= true;',
     commentPrefix: '//',
   },
   {
@@ -131,10 +180,11 @@ const MUTATIONS = [
     replacement: '',
   },
   {
-    label: "node: skip knext's shipped bake driver",
+    label: "node: skip knext's shipped bake driver (and its e2e-bake-accept.mjs wrapper, #1299)",
     target: DEPLOY,
     spec: SPEC_WIRING,
-    anchor: '          node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
+    anchor:
+      '          node "${SCRIPT_DIR}/e2e-bake-accept.mjs" node "${KNEXT_BAKE_DRIVER}" 2>&1 | tee -a "${APP_DIR}/.knext-bake.out" >&2',
     replacement: '          true',
   },
   {
@@ -288,6 +338,7 @@ const SUBJECTS = [
   snapshot(AUDIT),
   snapshot(SHIPPED_BAKE),
   snapshot(CHILD_ENV),
+  snapshot(BAKE_ACCEPT),
 ];
 
 for (const m of MUTATIONS) prove(m);
