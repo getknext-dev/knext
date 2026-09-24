@@ -80,12 +80,22 @@ gate, not the official suite — the official suite has its own row, own workflo
   workflow**: each shard's final "Fail shard on red results" gate exits 1 when its summary JSON
   carries `failed>0` or `notRun>0` (the run step's `|| true` only swallows the *step* exit so the
   `if: always()` summarize/upload ledger always emits — the *job* verdict is the gate's). A failed
-  *scheduled* run then makes the `nightly-red-alert` job create-or-update a pinned **"Compat
-  nightly RED"** issue carrying the run link (idempotent — one open alert issue, a comment per red
-  night). Both links in the chain are guard-tested in `tests/compat-suite-workflow.test.ts`.
-  Policy: the alert issue opens → triage the shard logs → if the red persists, **flip this row
-  back to ❌ citing the red run**. The matrix guard enforces evidence only in the ✅ direction
-  (evidence IFF ✅), so the honest flip-back is always free.
+  *scheduled* run then makes the `nightly-red-alert` job create-or-update a **per-lane** "Compat
+  nightly RED" / "Compat CREDENTIAL RED (`<lane>`, RC tag)" issue carrying the run link, the
+  named per-shard failures and (for a credential night) the restart cause (idempotent — one open
+  alert issue per lane, a comment per red night). Both links in the chain are guard-tested in
+  `tests/compat-suite-workflow.test.ts`. Policy: the alert issue opens → triage the shard logs →
+  if the red persists, **flip this row back to ❌ citing the red run**. The matrix guard enforces
+  evidence only in the ✅ direction (evidence IFF ✅), so the honest flip-back is always free.
+  **Alerting is per-cell, but pinning is not (#1300, system-designer gate TD2).** GitHub caps a
+  repo at 3 pinned issues, and with 5+ credentialing lanes plus the two early-warning titles, up
+  to 7 distinct alert titles would otherwise race for that cap — a failed `gh issue pin` call is
+  only a warning, so a red on the fourth-or-later lane to first open its issue would silently lose
+  visibility. So per-lane/per-cell credential alert issues (labelled `credential-reset`) are never
+  pinned; the ONE pinned issue is the aggregate **"Compat v1.0 credential matrix tracker"**,
+  refreshed daily (`compat-matrix-tracker-nightly.yml`, `scripts/compat-matrix-tracker.mjs`)
+  regardless of whether last night was red, listing every cell's current streak length and, if it
+  most recently restarted, why.
 - **A credential night requires bytecode caching proven LIVE, in every cell.** Bytecode caching is
   mandatory in every supported runtime×builder cell. A night counts toward a cell's 14-night window
   only if **every shard** proves that **every deploy** had live caching at runtime. Being configured

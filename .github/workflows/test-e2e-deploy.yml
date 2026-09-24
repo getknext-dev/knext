@@ -2038,9 +2038,29 @@ jobs:
           # per-lane title, so a red on the frozen RC is never folded into the
           # main early-warning thread above (and vice versa). The early-warning
           # titles are unchanged, so their open issues keep their dedup keys.
+          # #1300 (TD2) — name the RESTART CAUSE directly from the signals this
+          # step already has, rather than a generic "it went red". The taxonomy
+          # mirrors compat-window-audit.mjs's own restart-cause vocabulary
+          # (night-unresolved / fingerprint-changed / night-disqualified) so the
+          # reason printed here is never invented independently of the auditor
+          # that actually books the restart.
+          restart_cause='unknown'
+          if [ "${REF_RESULT:-}" = "failure" ] || [ "${REF_RESULT:-}" = "cancelled" ]; then
+            restart_cause="credential-ref resolution ${REF_RESULT:-} (state: ${REF_STATE:-unknown}) — no RC ref could be pinned, so the night is unresolved"
+          elif [ "${BUILD_RESULT:-}" = "failure" ]; then
+            restart_cause="build-next (Prepare) failed — the adapter tarball never reached the shards"
+          elif [ "${SHARDS_RESULT:-}" = "failure" ] || [ "${SHARDS_RESULT:-}" = "cancelled" ]; then
+            restart_cause="deploy-tests shards ${SHARDS_RESULT:-} — see the named failures below"
+          elif [ "${LEDGER_RESULT:-}" = "failure" ] || [ "${LEDGER_RESULT:-}" = "cancelled" ]; then
+            restart_cause="shard-ledger ${LEDGER_RESULT:-} — attribution/test-count floor tripped (a shard likely went silent, not red)"
+          fi
           if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
             title="Compat CREDENTIAL RED (${KNEXT_LANE}, RC tag)"
-            lane_note="This is the **${KNEXT_LANE} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main."
+            lane_note="This is the **${KNEXT_LANE} CREDENTIAL night** — it ran against the frozen release-candidate tag pinned in \`.github/compat-credential-ref.json\` (ref: \`${CHECKOUT_REF:-unresolved}\`), not main. A red here RESTARTS this cell's v1.0 14-night window; the fix lands on main and ships in the next RC. If credential-ref is the failed job, the RC ref could not be resolved (resolution state: \`${REF_STATE:-unknown}\`) and nothing was tested — the lane refuses rather than fall back to main.
+
+          **Restart cause:** ${restart_cause}
+
+          This per-cell issue is labelled \`credential-reset\`. It is intentionally NOT pinned — with 5+ credentialing lanes, GitHub's 3-pin cap means per-cell pins silently lose visibility past the third. The single aggregate view is the pinned **Compat v1.0 credential matrix tracker** issue, refreshed daily by \`compat-matrix-tracker-nightly.yml\`."
           fi
           body="The scheduled official Next.js deploy-suite run FAILED.
 
@@ -2070,6 +2090,17 @@ jobs:
           touching the quarantine ledger (ADR-0007 graduation addendum, §c: quarantines
           need a final-post-retry failure plus an env-parity audit, never a red-nightly
           reflex)."
+          # #1300 — the credential-reset label. Ensure-first (idempotent,
+          # `--force` never fails if it already exists) rather than assuming a
+          # human pre-created it; a missing label would otherwise make every
+          # `gh issue create --label` call below fail closed on the first
+          # credential red.
+          if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+            gh label create "credential-reset" --repo "${GITHUB_REPOSITORY}" \
+              --color d93f0b \
+              --description "A credential night restarted this cell's v1.0 14-night window" \
+              --force
+          fi
           # Idempotency: exactly-one open alert issue. Comment on it if present,
           # create (+ pin, best-effort) only when absent. #187 follow-up:
           # --limit 100 explicitly — gh defaults to 30, and with >30 open
@@ -2083,9 +2114,23 @@ jobs:
           if [ -n "${existing}" ]; then
             echo "updating existing alert issue #${existing}"
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+              gh issue edit "${existing}" --repo "${GITHUB_REPOSITORY}" --add-label "credential-reset"
+            fi
           else
             echo "creating the alert issue"
-            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
-            new_num="${new_url##*/}"
-            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+            if [ "${KNEXT_COMPAT_MODE}" = "credential" ]; then
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" \
+                --label "credential-reset" >/dev/null
+            else
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" >/dev/null
+            fi
+            # #1300 (TD2) — deliberately NOT pinned. Every per-cell/per-lane red
+            # title (up to 5+ across node/bun/node-webpack/bun-webpack/bun-vinext,
+            # plus the two early-warning titles) used to race for GitHub's 3-pin
+            # cap; a failed `gh issue pin` is only a warning, so a red beyond the
+            # third pinned lane went unseen. The ONE pinned surface is now the
+            # aggregate "Compat v1.0 credential matrix tracker" issue
+            # (compat-matrix-tracker-nightly.yml), which every open credential-
+            # reset issue is discoverable from via the `credential-reset` label.
           fi
