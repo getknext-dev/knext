@@ -41,13 +41,20 @@ let install: Mod["install"];
 let normalizeResponse: Mod["normalizeResponse"];
 let shouldInstall: Mod["shouldInstall"];
 let wrapFetch: Mod["wrapFetch"];
+let applyVinextDeployDefault: Mod["applyVinextDeployDefault"];
 beforeAll(async () => {
     const prev = process.env.KNEXT_CACHE_CONTROL_NORMALIZE;
     process.env.KNEXT_CACHE_CONTROL_NORMALIZE = "0";
     const mod = await import("../adapters/bun-serve-cache-control.mjs");
     if (prev === undefined) delete process.env.KNEXT_CACHE_CONTROL_NORMALIZE;
     else process.env.KNEXT_CACHE_CONTROL_NORMALIZE = prev;
-    ({ install, normalizeResponse, shouldInstall, wrapFetch } = mod);
+    ({
+        install,
+        normalizeResponse,
+        shouldInstall,
+        wrapFetch,
+        applyVinextDeployDefault,
+    } = mod);
 });
 
 const temps: string[] = [];
@@ -132,6 +139,36 @@ describe("normalizeResponse (the rule, at the Bun.serve seam)", () => {
         const immutable = Response.error();
         expect(() => normalizeResponse(req("GET"), immutable)).not.toThrow();
         expect(normalizeResponse(req("GET"), undefined)).toBeUndefined();
+    });
+});
+
+describe("vinext's own deploy Cache-Control switch is on by default", () => {
+    // vinext only emits the deploy value for responses it computes itself when
+    // VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1 — measured: the first request for a
+    // `fallback: true` page carries NO Cache-Control otherwise, so the knext rule
+    // (which rewrites an existing header) cannot supply it.
+    it("sets it to 1 when unset", () => {
+        const env: Record<string, string | undefined> = {};
+        applyVinextDeployDefault(env);
+        expect(env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL).toBe("1");
+    });
+
+    it("never overrides an explicit value, including 0", () => {
+        for (const v of ["0", "1", ""]) {
+            const env: Record<string, string | undefined> = {
+                VINEXT_NEXT_DEPLOY_CACHE_CONTROL: v,
+            };
+            applyVinextDeployDefault(env);
+            expect(env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL).toBe(v);
+        }
+    });
+
+    it("KNEXT_CACHE_CONTROL_NORMALIZE=0 turns it off too (one switch for both layers)", () => {
+        const env: Record<string, string | undefined> = {
+            KNEXT_CACHE_CONTROL_NORMALIZE: "0",
+        };
+        applyVinextDeployDefault(env);
+        expect(env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL).toBeUndefined();
     });
 });
 
@@ -286,5 +323,75 @@ describe("vinext-compile bakes it into the executable", () => {
         expect(await serveOnce({ KNEXT_CACHE_CONTROL_NORMALIZE: "0" })).toBe(
             ISR,
         );
+    });
+});
+
+describe("the executable turns vinext's deploy switch on by default (lazy fallback)", () => {
+    // Stands in for vinext's lazy-fallback path: at REQUEST time it emits the
+    // deploy header only when VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1 is in the
+    // process env (exactly how vinext's cache-control.js reads it), and no
+    // Cache-Control at all otherwise, as measured on a real fallback: true page.
+    const work = realpathSync(mkdtempSync(join(tmpdir(), "knext-1322-vx-")));
+    temps.push(work);
+    const server = join(work, ".output", "server");
+    mkdirSync(server, { recursive: true });
+    writeFileSync(
+        join(server, "index.mjs"),
+        "const s = Bun.serve({ port: Number(process.env.PORT), fetch() {\n" +
+            '  const on = process.env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL === "1";\n' +
+            `  return new Response("shell", on ? { headers: { "cache-control": ${JSON.stringify(DEPLOY)} } } : {});\n` +
+            '} });\nconsole.log("LISTENING:" + s.port);\n',
+    );
+    const exe = join(work, "knext-1322-vx-exec");
+    const build = spawnSync(
+        process.execPath,
+        [COMPILE, "--entry", join(server, "index.mjs"), "--outfile", exe],
+        { cwd: work, encoding: "utf8" },
+    );
+
+    async function header(env: Record<string, string>): Promise<string | null> {
+        const base: NodeJS.ProcessEnv = { ...process.env, PORT: "0" };
+        delete base.VINEXT_NEXT_DEPLOY_CACHE_CONTROL;
+        delete base.KNEXT_CACHE_CONTROL_NORMALIZE;
+        Object.assign(base, env);
+        const child = spawn(exe, [], { cwd: work, env: base });
+        try {
+            const port = await new Promise<number>((ok, fail) => {
+                let buf = "";
+                child.stdout.on("data", (d) => {
+                    buf += d;
+                    const m = buf.match(/LISTENING:(\d+)/);
+                    if (m) ok(Number(m[1]));
+                });
+                child.on("exit", (c) => fail(new Error(`exited ${c}: ${buf}`)));
+                setTimeout(
+                    () => fail(new Error(`no LISTENING: ${buf}`)),
+                    30_000,
+                );
+            });
+            const r = await fetch(`http://127.0.0.1:${port}/`);
+            await r.text();
+            return r.headers.get("cache-control");
+        } finally {
+            child.kill("SIGKILL");
+        }
+    }
+
+    it("compiles", () => {
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+    });
+
+    it("a response with no origin header gets the deploy header by default", async () => {
+        expect(await header({})).toBe(DEPLOY);
+    });
+
+    it("VINEXT_NEXT_DEPLOY_CACHE_CONTROL=0 is respected", async () => {
+        expect(
+            await header({ VINEXT_NEXT_DEPLOY_CACHE_CONTROL: "0" }),
+        ).toBeNull();
+    });
+
+    it("KNEXT_CACHE_CONTROL_NORMALIZE=0 turns it off too", async () => {
+        expect(await header({ KNEXT_CACHE_CONTROL_NORMALIZE: "0" })).toBeNull();
     });
 });

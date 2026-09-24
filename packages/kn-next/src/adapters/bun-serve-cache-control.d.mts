@@ -12,3 +12,4 @@ export function install(
     bun: { serve?: (...args: never[]) => unknown } | undefined,
     env: Record<string, string | undefined> | undefined,
 ): boolean;
+export function applyVinextDeployDefault(env: Record<string, string | undefined> | undefined): void;

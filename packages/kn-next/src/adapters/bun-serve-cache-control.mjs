@@ -94,6 +94,29 @@ export function wrapServeOptions(options) {
     return { ...options, fetch: wrapFetch(options.fetch) };
 }
 
+/**
+ * Turn vinext's own deploy Cache-Control switch on by default.
+ *
+ * vinext emits the deploy value for the cacheable responses it computes itself
+ * (ISR/SSG pages, `/_next/data`, and the first request for a `fallback: true`
+ * page) when `VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1`; it reads the variable on every
+ * request. Measured: without it, that fallback first request carries NO
+ * Cache-Control at all, which the rule above (it rewrites an existing header)
+ * cannot supply. The two layers are complementary: vinext's switch covers
+ * responses vinext computes, the rule above covers headers the app sets itself.
+ *
+ * An explicit value (including `0`) is never overridden, and
+ * `KNEXT_CACHE_CONTROL_NORMALIZE=0` leaves it unset, so one knext switch turns
+ * both layers off.
+ *
+ * @param {Record<string, string | undefined>} env
+ */
+export function applyVinextDeployDefault(env) {
+    if (!env || env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL !== undefined) return;
+    if (env.KNEXT_CACHE_CONTROL_NORMALIZE === "0") return;
+    env.VINEXT_NEXT_DEPLOY_CACHE_CONTROL = "1";
+}
+
 /** Patch `bun.serve`. Idempotent; a no-op when `shouldInstall` says so. */
 export function install(bun, env) {
     if (!shouldInstall(env, bun)) return false;
