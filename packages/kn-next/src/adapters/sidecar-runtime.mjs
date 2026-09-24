@@ -140,12 +140,14 @@ export function exportsTargets(exp, subpath, conditions) {
             const pre = key.slice(0, i);
             const post = key.slice(i + 1);
             if (subpath.startsWith(pre) && subpath.endsWith(post) && subpath.length >= key.length - 1) {
-                const sub = subpath.slice(pre.length, subpath.length - post.length);
-                // The substitution must not carry relative segments into the target.
-                if (pre.length > best && sub.split("/").every((s) => s !== "." && s !== "..")) {
+                // A substitution carrying `.`/`..` segments cannot escape: requests
+                // with relative segments are refused before resolution
+                // (isSafeRequest), and every substituted target must pass
+                // isSafeExportsTarget.
+                if (pre.length > best) {
                     best = pre.length;
                     entry = map[key];
-                    star = sub;
+                    star = subpath.slice(pre.length, subpath.length - post.length);
                 }
             }
         }
