@@ -21,8 +21,8 @@ import type { NextConfig } from "next";
  *
  * A HISTORICAL NOTE, since it is easy to reintroduce by accident: combining
  * `adapterPath` with `output: 'standalone'` under Turbopack threw `ENOENT:
- * .next/next-server.js.nft.json` at `next build` time on Next 16.3.0
- * (canary.20) through 16.3.4 — a confirmed upstream regression, not a knext
+ * .next/next-server.js.nft.json` at `next build` time on stable Next 16.3.0
+ * through 16.3.4 — a confirmed upstream regression, not a knext
  * defect and not a permanent Turbopack/adapter architecture gap. Fixed
  * upstream in 16.3.5 (pinned below), confirmed by a live local repro of
  * this exact config. See

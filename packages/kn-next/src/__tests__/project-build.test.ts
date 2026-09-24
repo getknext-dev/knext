@@ -258,14 +258,16 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
 
     // --- Boundaries (#1372 close-out: fixed upstream in 16.3.5) ------------
     //
-    // Confirmed window: 16.3.0-canary.20 through 16.3.4 (inclusive) on the
-    // 16.3.x line; 16.2.x was never affected; fixed on the 16.4 canary line
-    // from its very first canary (16.4.0-canary.0, cut 2026-08-21 — AFTER
-    // the upstream fix #97287 merged 2026-08-14, so every 16.4.0 canary
-    // already carries it).
+    // Founder directive: knext supports STABLE Next releases only, so this
+    // guard tests stable-release boundaries, not canary/rc/preview/beta
+    // prereleases. Confirmed window: 16.3.0 through 16.3.4 (stable) on the
+    // 16.3.x line; 16.2.x was never affected; fixed from 16.3.5 onward; 16.4.x
+    // is unaffected by construction (a different minor line). A prerelease
+    // version is a SEPARATE case below ("unverified prerelease"), not a
+    // boundary on this stable range.
     describe("boundaries", () => {
-        it("next@16.3.0-canary.19 (just below the floor) does NOT throw", () => {
-            const dir = tmpAppWithNext("next build", "16.3.0-canary.19");
+        it("next@16.2.9 (confirmed good, just below the affected minor) does NOT throw", () => {
+            const dir = tmpAppWithNext("next build", "16.2.9");
             try {
                 expect(() =>
                     checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
@@ -275,18 +277,7 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
             }
         });
 
-        it("next@16.3.0-canary.20 (exact floor) throws", () => {
-            const dir = tmpAppWithNext("next build", "16.3.0-canary.20");
-            try {
-                expect(() =>
-                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
-                ).toThrow();
-            } finally {
-                rmSync(dir, { recursive: true, force: true });
-            }
-        });
-
-        it("next@16.3.0 (stable final) throws", () => {
+        it("next@16.3.0 (first affected stable release) throws", () => {
             const dir = tmpAppWithNext("next build", "16.3.0");
             try {
                 expect(() =>
@@ -297,52 +288,8 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
             }
         });
 
-        it("next@16.3.4 (last affected patch) throws", () => {
+        it("next@16.3.4 (last affected stable patch) throws", () => {
             const dir = tmpAppWithNext("next build", "16.3.4");
-            try {
-                expect(() =>
-                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
-                ).toThrow();
-            } finally {
-                rmSync(dir, { recursive: true, force: true });
-            }
-        });
-
-        it("next@16.3.1-canary.16 (still affected — before the upstream fix commit) throws", () => {
-            const dir = tmpAppWithNext("next build", "16.3.1-canary.16");
-            try {
-                expect(() =>
-                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
-                ).toThrow();
-            } finally {
-                rmSync(dir, { recursive: true, force: true });
-            }
-        });
-
-        it("next@16.3.1-canary.17 (the upstream fix commit's first canary — does NOT throw, even though patch=1 < FIXED_16_3_PATCH) does NOT throw", () => {
-            const dir = tmpAppWithNext("next build", "16.3.1-canary.17");
-            try {
-                expect(() =>
-                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
-                ).not.toThrow();
-            } finally {
-                rmSync(dir, { recursive: true, force: true });
-            }
-        });
-
-        it("next@16.3.1 (stable, no canary suffix — shipped before the fix) still throws", () => {
-            const dir = tmpAppWithNext("next build", "16.3.1");
-            try {
-                expect(() =>
-                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
-                ).toThrow();
-            } finally {
-                rmSync(dir, { recursive: true, force: true });
-            }
-        });
-
-        it("next@16.3.2-canary.0 (a later patch's canary — no straddle, wholly affected) throws", () => {
-            const dir = tmpAppWithNext("next build", "16.3.2-canary.0");
             try {
                 expect(() =>
                     checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
@@ -374,8 +321,8 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
             }
         });
 
-        it("next@16.4.0-canary.0 (the fixed line's first canary) does NOT throw", () => {
-            const dir = tmpAppWithNext("next build", "16.4.0-canary.0");
+        it("next@16.4.0 (stable, a different minor line) does NOT throw", () => {
+            const dir = tmpAppWithNext("next build", "16.4.0");
             try {
                 expect(() =>
                     checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
@@ -385,8 +332,8 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
             }
         });
 
-        it("next@16.4.0 (stable) does NOT throw", () => {
-            const dir = tmpAppWithNext("next build", "16.4.0");
+        it("next@16.3.3-canary.5 (a PRERELEASE inside the otherwise-affected range) is SKIPPED, not gated — knext supports stable releases only, and does not special-case any prerelease tag", () => {
+            const dir = tmpAppWithNext("next build", "16.3.3-canary.5");
             try {
                 expect(() =>
                     checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),

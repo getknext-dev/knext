@@ -68,8 +68,9 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
     it("package.json builds with plain `next build` (Turbopack default), not vite/vinext", () => {
         // #1372 close-out — `next build` ALONE (ambient Turbopack default,
         // ADR-0058/#1183) was broken for this exact combination — Turbopack +
-        // `adapterPath` + `output:'standalone'` — on Next 16.3.0-canary.20
-        // through 16.3.4 (bisected, getknext-dev/knext#1372). The scaffold
+        // `adapterPath` + `output:'standalone'` — on stable Next 16.3.0
+        // through 16.3.4 (bisected, getknext-dev/knext#1372; the guard tests
+        // stable releases only, not canary/rc/preview/beta prereleases). The scaffold
         // pinned `--webpack` as a workaround for that window. Fixed upstream
         // in 16.3.5 (the scaffold's pin as of this bump, confirmed by a live
         // local repro of this exact config: `next build` exits 0 and writes
