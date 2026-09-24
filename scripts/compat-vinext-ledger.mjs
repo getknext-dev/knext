@@ -73,12 +73,24 @@
  *
  * LISTING candidates in the first place is different from fetching one:
  * `collectHistory` only ever runs when there is a flaky entry to judge, so an
- * auth/API error (`isAuthOrApiError`) listing is FATAL — throws immediately
- * (round-3 finding 2; round-2's fix made a listing failure ONE soft skip
- * with zero candidates, which meant it could never reach the threshold and
- * every such run silently warned and exited 0, i.e. the window was
- * effectively disabled the moment the token broke). Fetching one CANDIDATE's
- * summaries, once listing succeeded, still uses the softer per-run budget:
+ * auth/API error (`isAuthOrApiError`) listing is FATAL — throws immediately,
+ * NEVER retried (round-3 finding 2; round-2's fix made a listing failure ONE
+ * soft skip with zero candidates, which meant it could never reach the
+ * threshold and every such run silently warned and exited 0, i.e. the window
+ * was effectively disabled the moment the token broke). An auth/API failure
+ * is not transient — retrying it just delays the same failure by the backoff
+ * window, so it fails closed on the FIRST attempt.
+ *
+ * A NON-auth listing error (#1365 follow-up, e.g. a transient network blip:
+ * DNS, a connection reset, a `gh` timeout) is different again: this one IS
+ * plausibly transient, so it gets `LISTING_RETRY_ATTEMPTS` total attempts
+ * with exponential backoff (`LISTING_RETRY_BASE_MS * 2^n`) before failing
+ * closed. Still fail-closed at the end — a listing failure that PERSISTS
+ * across every attempt is exactly as fatal as before, just no longer on the
+ * very first blip. Each retry is logged to `warnings` so a run that limped
+ * through a flaky network window is visible, not silently equal to a clean
+ * one. Fetching one CANDIDATE's summaries, once listing succeeded, still
+ * uses the softer per-run budget:
  * an auth/API error there is a WARNING (that run is skipped), and
  * `MAX_CONSECUTIVE_HISTORY_SKIPS` such errors IN A ROW fail closed, rather
  * than silently returning an ever-smaller window; a successful fetch
@@ -166,6 +178,10 @@ export const DEFAULT_NEXTJS_REF = JSON.parse(
 export const EXPECTED_SHARD_TOTAL = 16;
 /** Consecutive per-run history fetch failures (auth/API errors) before `report` fails closed. */
 export const MAX_CONSECUTIVE_HISTORY_SKIPS = 3;
+/** Total attempts (including the first) for a NON-auth history-LISTING error before failing closed (#1365). Auth/API errors are never retried — see collectHistory's doc comment. */
+export const LISTING_RETRY_ATTEMPTS = 3;
+/** Backoff base, doubled per retry: attempt 2 waits this long, attempt 3 waits 2x this. */
+export const LISTING_RETRY_BASE_MS = 500;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UPSTREAM_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+$/;
@@ -609,6 +625,21 @@ export function downloadRun(exec, { repo, runId, dir }) {
 }
 
 /**
+ * A synchronous, real backoff sleep for `collectHistory`'s listing retry
+ * (#1365) — this whole file is synchronous throughout (`execFileSync`), so
+ * `collectHistory` stays synchronous too rather than forcing every existing
+ * call site (production and the whole test suite) to become async just for
+ * this one retry loop. `Atomics.wait` genuinely blocks the calling thread
+ * for `ms`, which Node (unlike browsers) permits on the main thread. Tests
+ * inject `deps.sleep` (a no-op or a recording stub) so the retry-with-backoff
+ * behaviour is provable without a real test suite actually sleeping.
+ * @param {number} ms
+ */
+function defaultSyncSleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
  * One "step" fetching one candidate's summaries — succeeded, was skipped as
  * an auth/API error (consuming the `consecutiveSkips` budget), or is a plain
  * "not informative, keep backfilling" outcome that never touches the budget
@@ -654,12 +685,15 @@ function attemptStep(attempt, label, budget) {
  * retention) is not evidence either, and NOT a skip.
  *
  * `collectHistory` is only ever called when there IS at least one flaky
- * entry to judge (`flakyHistory` checks that first), so LISTING candidates
- * failing on an auth/API error is FATAL (throws immediately) — round-2
- * finding 2: there is nothing to fall back to, and treating a listing
- * failure as one soft skip meant every such failure warned and exited 0,
- * silently disabling the whole window. Any non-auth listing error was
- * already, and remains, never swallowed.
+ * entry to judge (`flakyHistory` checks that first). LISTING candidates
+ * failing on an auth/API error is FATAL, on the FIRST attempt, never
+ * retried — round-2 finding 2: there is nothing to fall back to, and
+ * treating a listing failure as one soft skip meant every such failure
+ * warned and exited 0, silently disabling the whole window. A NON-auth
+ * listing error (#1365 follow-up) gets `LISTING_RETRY_ATTEMPTS` total
+ * attempts with exponential backoff before it, too, fails closed — see the
+ * module doc's "#1365 follow-up" paragraph for why the two are treated
+ * differently.
  *
  * Fetching one CANDIDATE's summaries, once listing succeeded, is different:
  * an auth/API error there is a WARNING (that run is skipped), and
@@ -668,7 +702,7 @@ function attemptStep(attempt, label, budget) {
  * (informative or not) resets that budget to zero. This budget is
  * per-CALL, not persisted across separate invocations of this script — see
  * the module doc.
- * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string, createdAt?: string}[], fetchSummaries: (id: string) => any[] }} deps
+ * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string, createdAt?: string}[], fetchSummaries: (id: string) => any[], sleep?: (ms: number) => void }} deps
  * @param {{ repo: string, currentRunId?: string, want: number, since?: string }} opts
  * @returns {{ history: any[][], warnings: string[] }}
  */
@@ -685,13 +719,40 @@ export function collectHistory(deps, { repo, currentRunId, want, since }) {
     },
     count: () => consecutiveSkips,
   };
+  const sleep = deps.sleep ?? defaultSyncSleep;
   let candidates;
-  try {
-    candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
-  } catch (err) {
-    if (!isAuthOrApiError(err)) throw err;
+  let listErr;
+  for (let attempt = 1; attempt <= LISTING_RETRY_ATTEMPTS; attempt++) {
+    try {
+      candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
+      listErr = undefined;
+      break;
+    } catch (err) {
+      if (isAuthOrApiError(err)) {
+        // Never retried: an expired/invalid token is not transient, and
+        // retrying it would just delay the same failure by the backoff
+        // window instead of surfacing it promptly.
+        throw new Error(
+          `could not list the lane's history runs (${err?.message ?? err}); failing closed — ` +
+            'there is nothing to backfill from and the flaky window cannot be judged',
+        );
+      }
+      listErr = err;
+      if (attempt >= LISTING_RETRY_ATTEMPTS) break;
+      const delayMs = LISTING_RETRY_BASE_MS * 2 ** (attempt - 1);
+      warnings.push(
+        `listing the lane's history runs failed on attempt ${attempt}/${LISTING_RETRY_ATTEMPTS} ` +
+          `(${err?.message ?? err}); retrying after ${delayMs}ms`,
+      );
+      sleep(delayMs);
+    }
+  }
+  if (listErr) {
+    // Persisted across every attempt — fail closed exactly as before, just
+    // not on the very first transient blip.
     throw new Error(
-      `could not list the lane's history runs (${err?.message ?? err}); failing closed — ` +
+      `could not list the lane's history runs after ${LISTING_RETRY_ATTEMPTS} attempts ` +
+        `(${listErr?.message ?? listErr}); failing closed — ` +
         'there is nothing to backfill from and the flaky window cannot be judged',
     );
   }

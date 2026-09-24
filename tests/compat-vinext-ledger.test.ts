@@ -53,6 +53,8 @@ import {
   isCompleteDefaultRun,
   isNoArtifactError,
   LEDGER_FILE_CAP,
+  LISTING_RETRY_ATTEMPTS,
+  LISTING_RETRY_BASE_MS,
   MAX_CONSECUTIVE_HISTORY_SKIPS,
   MAX_EXPIRY_DAYS,
   previousRunCandidates,
@@ -744,14 +746,89 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
     ).toThrow(/could not list.*401/);
   });
 
-  it('a non-auth listing error is never swallowed either', () => {
+  it('a non-auth listing error that PERSISTS across every retry is never swallowed — still fails closed (#1365)', () => {
     const list = () => {
       throw new Error('unexpected: JSON.parse failed');
     };
     const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    // sleep: () => {} — a no-op, not a real delay: this test is about the
+    // eventual fail-closed outcome, not the backoff TIMING (that is pinned
+    // separately below), so it should not cost real wall-clock seconds.
     expect(() =>
-      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+      collectHistory(
+        { list, fetchSummaries, sleep: () => {} },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
     ).toThrow(/unexpected/);
+  });
+
+  it(`a persisting non-auth listing error is retried exactly ${LISTING_RETRY_ATTEMPTS} times total (${LISTING_RETRY_ATTEMPTS - 1} retries) before failing closed, and the failure message says so (#1365)`, () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error('ECONNRESET');
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(new RegExp(`after ${LISTING_RETRY_ATTEMPTS} attempts.*ECONNRESET`));
+    expect(calls).toBe(LISTING_RETRY_ATTEMPTS);
+    // Exponential backoff: base, 2x base, 4x base, ... — one sleep between
+    // each pair of attempts, so ATTEMPTS-1 sleeps total, never one PER
+    // attempt (that would sleep needlessly after the last, doomed attempt).
+    expect(sleeps).toHaveLength(LISTING_RETRY_ATTEMPTS - 1);
+    expect(sleeps).toEqual(
+      Array.from({ length: LISTING_RETRY_ATTEMPTS - 1 }, (_, i) => LISTING_RETRY_BASE_MS * 2 ** i),
+    );
+  });
+
+  it('a listing error that clears on the SECOND attempt (a real transient blip) succeeds — the retry is what makes this NOT red (#1365)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      if (calls === 1) throw new Error('getaddrinfo ENOTFOUND api.github.com');
+      return [candidate('10'), candidate('9')];
+    };
+    const fetchSummaries = (id: string) =>
+      fullRun({
+        shard: '1/16',
+        failed: id === '10' ? 1 : 0,
+        failures: id === '10' ? ['a.spec.ts'] : [],
+      });
+    const sleeps: number[] = [];
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+      { repo: 'o/r', currentRunId: '11', want: 2 },
+    );
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([LISTING_RETRY_BASE_MS]);
+    expect(history).toHaveLength(2);
+    // The blip is visible in warnings — a run that limped through a flaky
+    // network window must not read identically to a clean first-try run
+    // (the same discipline this repo's other retry-with-backoff guards use).
+    expect(warnings.some((w) => /attempt 1.*ENOTFOUND.*retrying/.test(w))).toBe(true);
+  });
+
+  it('an auth/API listing error is NEVER retried — fails closed on the very first attempt (#1365)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error('HTTP 401: Bad credentials');
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(/could not list.*401/);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
   });
 
   it('a "no artifact" failure downloading a run is NOT an auth/API error: skipped, not warned, not a fail-closed contributor', () => {
