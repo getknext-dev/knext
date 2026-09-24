@@ -168,13 +168,13 @@ describe("#309 the compile-cache diagnostic under REAL bun", () => {
         // #932: the `:204 WARNS under bun >=1.4` case is gated on
         // `bunAtLeast14(bunVersionOf(bun))` — below 1.4 it SKIPS, which is
         // correct locally but must never happen in the lane that exists to prove
-        // that half. The CI job pins `bun-version: '1.4.0'`; if that pin is
+        // that half. The CI job pins `bun-version: '1.4.2'`; if that pin is
         // downgraded the hardcap-warn case would vanish green-by-skip while the
         // flag stayed set. This makes the floor an assertion rather than a
         // silent predicate: under the flag, a sub-1.4 bun is a hard FAILURE.
         if (!bunRequired) {
             // Not the gate — the gate is the CI job that sets the flag AND pins
-            // bun 1.4.0 (asserted in tests/compile-cache-health-bun-ci.test.ts).
+            // bun 1.4.2 (asserted in tests/compile-cache-health-bun-ci.test.ts).
             expect(bunRequired).toBe(false);
             return;
         }

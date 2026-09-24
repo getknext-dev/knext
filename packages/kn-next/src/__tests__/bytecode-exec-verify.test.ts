@@ -83,12 +83,13 @@ describe("verifyBytecodeExec — real bun --compile output", () => {
  * only on the input — measured on the same entries (a legal comment holding
  * U+2019, the character a real Next bundle's vendored license notice carries):
  *
- *   - Bun 1.4.0 (the repo pin, and the shipped image): Latin-1, always — no
+ *   - Bun 1.4.0 (the previous repo pin): Latin-1, always — no
  *     input tried stored UTF-16 (legal comments, string literals, `u` regexes,
  *     non-ASCII identifiers, `//!` and `@license` comments; and a real npm
  *     Next 16.2.11 app). The marker appears twice in Latin-1.
- *   - Bun 1.4.2: UTF-16LE for this entry and for that real app. The marker
- *     appears once in Latin-1 (the constant pool) and once in UTF-16 (source).
+ *   - Bun 1.4.2 (the repo pin, and the shipped image, since #1310): UTF-16LE
+ *     for this entry and for that real app. The marker appears once in
+ *     Latin-1 (the constant pool) and once in UTF-16 (source).
  *
  * The verifier must hold under both, so: the REAL-output tests assert the
  * layout the running Bun actually produced (exactly, for a measured version)
@@ -119,6 +120,19 @@ describe("verifyBytecodeExec — real output for an entry like a real Next bundl
         const measured = MEASURED_LAYOUT[Bun.version];
         if (measured) expect(layout).toBe(measured);
     }, 60_000);
+
+    it("the repo's pinned Bun (packageManager) has a MEASURED layout — a pin bump must measure it, not fall through to the unasserted branch", () => {
+        // CI runs on the pin, so without this a bump to an unmeasured Bun
+        // would silently skip the exact-layout assertion above (#1310).
+        const pkg = JSON.parse(
+            readFileSync(
+                join(import.meta.dir, "../../../../package.json"),
+                "utf8",
+            ),
+        ) as { packageManager: string };
+        const pin = pkg.packageManager.replace(/^bun@/, "");
+        expect(MEASURED_LAYOUT[pin]).toBeDefined();
+    });
 
     it("PASSES the bytecode build", async () => {
         expect(verifyBytecodeExec(await compile(true, true), MARKER)).toEqual({

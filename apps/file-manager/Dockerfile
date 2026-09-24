@@ -25,7 +25,7 @@
 # Builder — needs the whole workspace, because the app depends on the local
 # @getknext/* packages and they are consumed as BUILT dist, not source.
 # ---------------------------------------------------------------------------
-FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS builder
+FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS builder
 
 # Node is still required in the BUILD stage: tsup shells out to `tsc` for the
 # .d.ts pass. It does not reach the runtime image. pnpm is gone — `bun install`

@@ -115,7 +115,7 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
     reason:
       'ENVIRONMENT-availability gate (docker daemon reachable), not artifact-gated — same class ' +
       'as the bunAvailable pattern this scanner already treats as non-artifact. Executes ' +
-      'scripts/e2e-native-rebuild-musl.sh for real inside the pinned oven/bun:1.4.0-alpine image ' +
+      'scripts/e2e-native-rebuild-musl.sh for real inside the pinned oven/bun:1.4.2-alpine image ' +
       '(#1230 round 6: ROOT-escape guard, sharp musl sibling load, --user pid-attribution); needs ' +
       'a working docker on the machine, which every CI runner that boots the bun lane already ' +
       'requires (scripts/e2e-deploy.sh itself refuses to run without docker once RUNTIME=bun).',
@@ -125,7 +125,7 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
     reason:
       'Runs the compile-cache diagnostic under a REAL bun; the skips gate on bun AVAILABILITY ' +
       '(and its version), not on a build artifact. LANE-BACKED: the compile-cache-bun-probe job ' +
-      'sets KNEXT_REQUIRE_BUN=1 (a missing bun then FAILS, never skips) and pins bun 1.4.0, and ' +
+      'sets KNEXT_REQUIRE_BUN=1 (a missing bun then FAILS, never skips) and pins bun 1.4.2, and ' +
       'the file itself asserts that floor so the >=1.4 hardcap-warn case cannot silently skip on ' +
       'a pin downgrade. Wiring guarded by tests/compile-cache-health-bun-ci.test.ts.',
   },

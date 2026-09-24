@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
  * boot's `--user` flag (#1230 review, round 6) — text scans cannot prove any
  * of these three defects are actually fixed, only that the anchor strings are
  * present. Each case here EXECUTES the real script inside the SAME pinned
- * `oven/bun:1.4.0-alpine` image the compat harness boots, against a small,
+ * `oven/bun:1.4.2-alpine` image the compat harness boots, against a small,
  * real fixture tree, and asserts on what actually happened on disk / in the
  * container — not on source text.
  *
@@ -25,7 +25,7 @@ import { join, resolve } from 'node:path';
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const NATIVE_REBUILD_SH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 const STANDALONE_BUN_IMAGE =
-  'oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb';
+  'oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f';
 
 const SUITE_TIMEOUT_MS = 240_000; // real `docker pull`/`apk add`/`npm install` under emulation
 setDefaultTimeout(SUITE_TIMEOUT_MS);

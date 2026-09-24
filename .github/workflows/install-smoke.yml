@@ -50,7 +50,7 @@ jobs:
       # consumer would.
       - name: Install bun off-PATH (build/pack only)
         run: |
-          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/bun-packer" bun@1.4.0
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/bun-packer" bun@1.4.2
           echo "KNEXT_BUN=$RUNNER_TEMP/bun-packer/node_modules/.bin/bun" >> "$GITHUB_ENV"
 
       - name: Install workspace dependencies

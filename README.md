@@ -153,7 +153,7 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 
 The Dockerfile uses a **2-stage build** producing a small Alpine image that ships one executable:
 
-1. **Build Stage** – `oven/bun:1.4.0-alpine` runs `vite build` (Vite/rolldown → a Nitro `.output`), then compiles that output into a **single self-contained binary** with `bun build --compile --minify --bytecode`. sharp's native addon is staged beside it into `native/`, with a sha256 manifest derived from the lockfile.
+1. **Build Stage** – `oven/bun:1.4.2-alpine` runs `vite build` (Vite/rolldown → a Nitro `.output`), then compiles that output into a **single self-contained binary** with `bun build --compile --minify --bytecode`. sharp's native addon is staged beside it into `native/`, with a sha256 manifest derived from the lockfile.
 2. **Runtime Stage** – `alpine:3.22` with only `libstdc++` and `libgcc`, running the compiled binary directly. No Node, no npm, no package manager, and no bytecode cache to mount.
 
 Bytecode is compiled **into the binary** at build time, as one unit, so every pod — including the very first cold start — starts from precompiled bytecode rather than parsing and JIT-compiling JavaScript. It needs no volume, no PVC, and no cluster feature flags.

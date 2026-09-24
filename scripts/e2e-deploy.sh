@@ -479,7 +479,7 @@ STANDALONE_ROOT="${APP_DIR}/.next/standalone"
 # cannot execute them at all"), so this MUST run inside the same musl base the
 # image ships, never a glibc-target twin (that would certify a binary nothing
 # ships).
-STANDALONE_BUN_IMAGE="oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb"
+STANDALONE_BUN_IMAGE="oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f"
 if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; then
   if [ -n "${NEXT_ADAPTER_PATH:-}" ]; then
     STANDALONE_COMPILE_JS="$(dirname "${NEXT_ADAPTER_PATH}")/standalone-compile.js"
