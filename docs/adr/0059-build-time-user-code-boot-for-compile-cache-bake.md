@@ -10,7 +10,8 @@
   ADR-0056 Amendment 1 D4 (liveness grading).
 - **Implements:** #1303 (c). **Records:** #1264 / #1271 (standalone-node bake), #1263 / #1273
   (vinext × node bake), #1275 (the sprint-close question this answers), #1297 (validate
-  `healthCheckPath`), #1299 (move the harness-only knob out of the shipped template).
+  `healthCheckPath`), #1299 (move the harness-only knob out of the shipped template), #1327
+  (security: verify whether `.env` files reach built images).
 
 ## Context
 
@@ -49,7 +50,8 @@ tree:
    `.next/standalone/` (Next 16.3, `next/dist/build/index.js`, `writeStandaloneDirectory`), and
    `Dockerfile.standalone.hbs:166` copies that tree into the image. So an app built with a
    populated `.env.production` ships it, and the bake runs with it loaded. This comes from reading
-   Next's source. It has **not** yet been measured in a built knext image.
+   Next's source. It has **not** yet been measured in a built knext image; security #1327 tracks
+   that verification.
 4. **Filesystem: mostly read-only to the bake.** The tree is copied as root
    (`Dockerfile.standalone.hbs:166-176`), and the bake runs as uid 65532 (`:189`), which owns only
    the compile-cache directory (`:186-187`) and `/tmp`. A render that tries to persist state into
@@ -78,19 +80,23 @@ tree:
    (ADR-0056 Amendment 1, D4). The standalone bake is known to cover more than the framework:
    522 entries accepted at boot, 388 of them under `node_modules/next/dist`
    (`Dockerfile.standalone.hbs:203-211`).
-2. **Run the bake with no network.** Both bake `RUN` steps become `RUN --network=none …`. The warm
-   request goes over loopback, which `none` keeps. Anything `register()` tries to reach
-   off-host fails fast. If `register()` blocks on it instead, the warm request waits. The
+2. **Run the bake with no network** *(proposed — not yet implemented; today both bakes have
+   network access, fact 1)*. Target state: both bake `RUN` steps become `RUN --network=none …`.
+   The warm request goes over loopback, which `none` keeps. Anything `register()` tries to reach
+   off-host would fail fast. If `register()` blocks on it instead, the warm request waits. The
    driver's 30-second readiness deadline (`knext-compile-cache-bake.mjs.hbs:79-95`) is only
-   checked between attempts, and its `fetch` has no timeout of its own, so a hung request would
-   stall the build until the HTTP client gives up. The driver therefore gets a per-request
+   checked between attempts, and its `fetch` has no timeout of its own today, so a hung request
+   would stall the build until the HTTP client gives up. The target driver adds a per-request
    timeout, so a blocked `register()` fails the build within the deadline and the error names
-   the bake. Nothing leaves the build host either way.
-3. **Tell user code it is being baked.** Both recipes set `KNEXT_COMPILE_CACHE_BAKE=1` during the
-   bake, and the docs publish it as the contract: *if this is set, do not open connections, run
-   migrations or write state.* The scaffolded `register()` gains the check, so a generated app is
-   safe by construction and an edited one has an obvious place to put it.
-4. **Opt-out is a framework-only bake, not "no bake".** A new config field,
+   the bake. Nothing would leave the build host either way.
+3. **Tell user code it is being baked** *(proposed — not yet implemented for the standalone
+   bake; today only the vinext × node bake sets the marker, fact 6)*. Target state: both recipes
+   set `KNEXT_COMPILE_CACHE_BAKE=1` during the bake, and the docs publish it as the contract:
+   *if this is set, do not open connections, run migrations or write state.* The scaffolded
+   `register()` gains the check, so a generated app is safe by construction and an edited one has
+   an obvious place to put it.
+4. **Opt-out is a framework-only bake, not "no bake"** *(proposed — not yet implemented; no
+   opt-out exists today)*. A new config field,
    `compileCache: { bake: 'app' | 'framework' }` (default `'app'`), selects a driver that loads
    Next's framework modules and **never** imports `server.js` or any app module. This keeps the
    cell bytecode-live without running user code. The earlier framework-only harness bake from
@@ -101,14 +107,15 @@ tree:
    four v1.0 cells' node half). The vinext × node bundle mixes framework and app code in one
    Nitro output, so a framework-only bake is not defined for it yet. That cell is descoped from
    v1.0 (ADR-0058), and its opt-out is left to the amendment that brings it back.
-5. **Secrets never reach the bake.** knext passes no secret as a build-arg and mounts no BuildKit
-   secret into the bake. The bake gets only the env the Dockerfile sets. The `.env` leak in fact
-   3 is closed at the source: the standalone staging step deletes `.env*` from
-   `.next/standalone/` before `docker build`, and a test asserts that no `.env*` file is left
-   under the staged context. Runtime configuration comes from Kubernetes Secrets, as
-   `.claude/rules/security.md` already requires.
-6. **Keep the product bake strict.** The 2xx rule stays the default, and the harness-only
-   accept-any-status knob moves out of the shipped template into the harness (#1299).
+5. **Secrets never reach the bake.** True today for build-args and mounts: knext passes no
+   secret as a build-arg and mounts no BuildKit secret into the bake (fact 2). The `.env` part is
+   *(proposed — not yet implemented)*: first verify whether built images carry `.env` files
+   (security #1327), then close it at the source. Target state: the standalone staging step
+   deletes `.env*` from `.next/standalone/` before `docker build`, and a test asserts that no
+   `.env*` file is left under the staged context. Runtime configuration comes from Kubernetes
+   Secrets, as `.claude/rules/security.md` already requires.
+6. **Keep the product bake strict.** The 2xx rule stays the default (true today). *(Proposed —
+   not yet implemented:)* the harness-only accept-any-status knob moves out of the shipped template into the harness (#1299).
    `healthCheckPath` is validated before it reaches the build: a leading slash is required, and
    commas and whitespace are rejected, because a comma would split `KNEXT_WARM_PATH` (#1297).
 
@@ -157,9 +164,11 @@ liveness floors, and 0.68 that the network restriction and the marker should lan
 - **Import-time code in dependencies still runs at build.** `--network=none` limits what it can
   do, and the framework-only bake avoids it, but the app bake cannot. This residual risk is
   accepted.
-- **The config field is a public schema change** (`kn-next.config.ts`), and it goes through the
-  usual CR and schema preflight, so an older CLI cannot emit it to an operator that does not
-  know it.
+- **The config field is a public `kn-next.config.ts` schema change, and it is build-only.** The
+  compile cache is baked into the image, so the `NextApp` CR carries no compile-cache surface
+  (`cr-builder.ts:47-48`, `:145-147`) and the field never reaches the operator. It is validated
+  by the CLI's config validator only (`validateConfig`, `packages/kn-next/src/cli/validate.ts:232`),
+  not by the CR schema preflight.
 
 ## Action items
 
@@ -170,9 +179,10 @@ liveness floors, and 0.68 that the network restriction and the marker should lan
       so a hung `register()` fails the build instead of stalling it. **Before rc.1.**
 - [ ] Set `KNEXT_COMPILE_CACHE_BAKE=1` on the standalone bake, add the check to the scaffolded
       `register()`, and document the contract on the docs site. **Before rc.1.**
-- [ ] Strip `.env*` from the staged `.next/standalone/` in `stageStandaloneBuildContext`, and add
-      a guard that reds if any `.env*` file is staged. First measure whether a real knext image
-      carries them today (fact 3 comes from reading Next's source only).
+- [ ] Verify whether a real knext image carries `.env` files today (fact 3 comes from reading
+      Next's source only). *(security #1327)* Then strip `.env*` from the staged
+      `.next/standalone/` in `stageStandaloneBuildContext`, and add a guard that reds if any
+      `.env*` file is staged.
 - [ ] Move `KNEXT_WARM_ACCEPT_ANY_STATUS` out of the shipped template. *(#1299)*
 - [ ] Validate `healthCheckPath`. *(#1297)*
 - [ ] Add the `compileCache.bake: 'framework'` opt-out and the framework-only driver, and

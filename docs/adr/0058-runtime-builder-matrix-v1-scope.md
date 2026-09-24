@@ -106,10 +106,10 @@ to ADR-0054 (0.76 vs 0.24, confidence 0.64) and gave editing ADR-0036/0048 in pl
   cells while the vinext cells are still listed and still reported. Keeping them listed matters:
   dropping them from `CREDENTIAL_CELLS` would also drop them from the fingerprint's
   `workflowFile` table (ADR-0056 Amendment 1, D5). jev: 0.91 that this change is needed.
-- **The default builder has to move before GA.** v1.0 cannot ship an uncredentialed default, and
-  today's default is vinext. So #1183 (flip `DEFAULT_BUILDER_ID` to bun-standalone once that cell
-  is credentialed) becomes a v1.0 blocker, not follow-up tech debt. jev: 0.62. This is the least
-  certain claim in this ADR, and it is the one the founder should confirm.
+- **The default builder moves before GA (founder decision, 2026-09-24).** v1.0 cannot ship an
+  uncredentialed default, and today's default is vinext (`artifact-contract.ts:388`). The founder
+  decided on 2026-09-24 to flip `DEFAULT_BUILDER_ID` to turbopack (bun-standalone, per ADR-0054)
+  before v1.0 GA. #1183 is now in the v1.0 milestone as a GA blocker, not follow-up tech debt.
 - **vinext stays selectable in v1.0** as a supported, uncredentialed builder with a published
   number (jev 0.79 that this is consistent with the decision). The user-facing compatibility
   page must say so plainly.
@@ -131,10 +131,12 @@ to ADR-0054 (0.76 vs 0.24, confidence 0.64) and gave editing ADR-0036/0048 in pl
       unmet webpack cell does.
 - [ ] Wire the webpack × {node, bun} credential lanes. *(#1245)*
 - [ ] Run the official suite on the compiled bun-standalone exec. *(#1296, closes #1166)*
-- [ ] Treat the `DEFAULT_BUILDER_ID` flip as a v1.0 GA blocker. *(#1183, founder to confirm)*
+- [ ] Flip `DEFAULT_BUILDER_ID` to turbopack (bun-standalone) before v1.0 GA. *(#1183, v1.0
+      milestone; founder decision 2026-09-24)*
 - [ ] Keep publishing the vinext × bun number weekly, and burn it down through #1320, #1321,
       #1322 and #1323. Credential it through an amendment to this ADR in v1.x.
 - [ ] Give vinext × node a compat runtime arm, then measure it. *(#1260)*
+- [ ] Resolve whether built images carry `.env` files before rc.1 (ADR-0059, security #1327).
 - [ ] Update `docs/V1_ROADMAP.md` §3 and the user-facing compatibility page to the four-cell
       v1.0 scope.
 - [ ] **Maintainer:** `.claude/rules/architecture.md` §4 and `CLAUDE.md` §3 still describe the
