@@ -3,58 +3,61 @@ import type { NextConfig } from "next";
 /**
  * {{ name }} — Next.js options.
  *
- * Deliberately minimal. knext builds this app with vinext (see
- * `vite.config.ts`), which reads your Next config for app-level options —
- * redirects, rewrites, headers, image settings — but does NOT use the
- * webpack/turbopack build pipeline.
+ * Standalone-by-default (ADR-0058, #1183): knext builds this app with plain
+ * `next build` (turbopack). `output: 'standalone'` is what makes that build
+ * emit a self-contained `.next/standalone/server.js` — the knext runtime
+ * image's supervisor (`knext-standalone-entry.mjs`) spawns that server and
+ * drains it on SIGTERM. Deleting `output: 'standalone'` does not fail the
+ * build locally, but `kn-next deploy` has nothing to COPY into the runtime
+ * image and fails loudly instead.
  *
- * Three things that belong in a Next config elsewhere do NOT belong here:
- *
- *   - `output: 'standalone'` — there is no standalone server. The build emits
- *     a Nitro `.output` that gets compiled into a single Bun executable.
- *   - `adapterPath` — the official Next Deployment Adapter hooks are a
- *     turbopack/webpack mechanism. vinext is Vite/rolldown and never calls
- *     them, so pointing at an adapter here would silently do nothing.
- *   - `serverExternalPackages` for `@getknext/lib` — that existed to stop
- *     webpack layering from duplicating module state. There are no webpack
- *     layers here.
- *
- * Bytecode: nothing to configure. `bun build --compile --bytecode` bakes V8
- * bytecode into the binary itself, so there is no `NODE_COMPILE_CACHE`, no
- * cache directory to mount, and no warm-up step. It ships inside the artifact.
- *
- * What DOES still belong here is `assetPrefix`. vinext reads the Next config
- * for app-level options, and this one is knext's own wiring: when object
- * storage is configured, `ASSET_PREFIX` points static assets at the bucket or
- * CDN; when it is not, the empty-string fallback keeps the emitted HTML on
- * relative `/_next/static/...` paths so the app serves its own assets. Deleting
- * it does not fail the build — it silently breaks the no-storage mode.
- *
- * `generateBuildId` is the other piece of knext's own wiring (ADR-0011 skew
- * protection). `kn-next deploy` exports NEXT_DEPLOYMENT_ID = the deploy tag
- * BEFORE the build. vinext reads that env var by itself for `?dpl=` asset
- * suffixing, but the STATIC NAMESPACE (`_next/static/<id>/`) comes from
- * `generateBuildId` — and with no `generateBuildId`, vinext falls back to a
- * random UUID. That UUID is a namespace nothing can resolve: the asset GC
- * protects live builds by the deploy tag it reads off a revision label, so a
- * UUID prefix can never be matched, marked, or reclaimed. Returning null
- * outside `kn-next deploy` (a plain `vite build`) keeps vinext's UUID fallback,
- * so local builds are unchanged. Deleting this line does not fail the build —
- * `kn-next deploy` aborts instead, loudly, which is the point.
+ * `adapterPath` wires the official Next.js Deployment Adapter
+ * (`./next-adapter.ts` → `@getknext/core/adapter`) — this is what injects the
+ * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on (#342),
+ * and what reports build completion back to `kn-next build`. Building with
+ * `next build` and NOT wiring this adapter is a silent correctness gap, not a
+ * build failure — don't delete it.
  */
 const nextConfig: NextConfig = {
+    // Asset prefix is injected by `kn-next deploy` from `kn-next.config.ts`
+    // storage settings. In dev mode (`next dev`) ASSET_PREFIX is unset, so
+    // assets serve locally.
     assetPrefix: process.env.ASSET_PREFIX || "",
+    // #93 skew protection (ADR-0011): pin every client to the build it
+    // loaded — `deploymentId` makes Next append `?dpl=<id>` to asset/RSC
+    // requests. `kn-next deploy` sets NEXT_DEPLOYMENT_ID = the deploy tag;
+    // unset in `next dev` → no pinning.
+    deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
+    // `deploymentId` alone only sets the `?dpl=` query param — it does NOT
+    // name the `_next/static/<BUILD_ID>/` directory, which is otherwise a
+    // random id. The asset-retention GC deletes by the deploy tag, so the
+    // static dir must equal that tag or GC matches nothing. Returning null
+    // in dev falls back to Next's default id.
     generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
-    // NOT the live ISR wiring on this build target (#953). vinext never reads
-    // `cacheHandler` — it is a webpack/turbopack mechanism, like `adapterPath`
-    // above — so for a while every request was a MISS and the provisioned
-    // Redis stayed empty while this line sat here looking like wiring. The
-    // REAL registration is the vinext() plugin's `cache.data` adapter in
-    // vite.config.ts. This option is kept for Next-aware tooling and points at
-    // the same handler, so the two can never drift apart.
+    output: "standalone",
+    // Redis-backed cache handler for Knative (multi-pod consistency).
+    // Falls back to in-memory when REDIS_URL is not set.
     cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,
     // Per-pod memory caches diverge across pods — Redis is the one cache.
     cacheMaxMemorySize: 0,
+    // ADR-0006: next/image optimization via sharp (in deps + the runtime
+    // image). remotePatterns is an EXPLICIT allowlist — empty means local
+    // images only (no open optimizer / SSRF). Add trusted hosts as needed.
+    images: {
+        formats: ["image/avif", "image/webp"],
+        remotePatterns: [],
+    },
+    // The official Next.js Deployment Adapter (top-level since next 16.2).
+    adapterPath: new URL("./next-adapter.ts", import.meta.url).pathname,
+    // #342/#356 (ADR-0031): `instrumentation.ts` is compiled for BOTH the
+    // `nodejs` AND `edge` runtimes. Its Node-only body lives in
+    // `src/instrumentation-node.ts`, loaded via a dynamic import guarded at
+    // RUNTIME — but webpack/turbopack STATICALLY trace that import into the
+    // edge compile too. The load-bearing edge exclusion (an `IgnorePlugin`
+    // replacing `instrumentation-node` with an empty module on the edge
+    // compile ONLY) is PLATFORM-OWNED: the knext adapter's `modifyConfig`
+    // injects it (see `./next-adapter.ts` above). This app deliberately does
+    // NOT hand-write that webpack hook.
 };
 
 export default nextConfig;

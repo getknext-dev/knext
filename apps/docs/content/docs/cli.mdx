@@ -74,6 +74,19 @@ hand, and both are silent failures rather than loud ones:
 unless you pass `--force`. It also refuses when a config file already present would shadow the one
 it writes, rather than emitting a config Next would never read.
 
+By default, `create` scaffolds the **standalone target**: a plain `next build`, `output:
+'standalone'` in `next.config.ts`, and the official Next.js Deployment Adapter wired through
+`adapterPath` — `kn-next build`/`deploy` stage the matching runtime image automatically, so the
+scaffold ships no Dockerfile for it. Pass `--builder vinext` instead to scaffold the compiled
+single-executable target — its own `Dockerfile`, `vite.config.ts`, and `build: 'vinext'` pinned in
+`kn-next.config.ts`. See [the adapter and the compiled build](/docs/official-adapter) for the
+trade-off between the two.
+
+```bash title="shell"
+kn-next create my-app                    # standalone target (default)
+kn-next create my-app --builder vinext   # compiled single-executable target
+```
+
 The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the
 CLI and those packages release together, so a published CLI always scaffolds versions that exist on
 the registry. If the CLI you ran carries a version that was never published (typically a build from

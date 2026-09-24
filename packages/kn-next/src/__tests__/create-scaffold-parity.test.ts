@@ -102,6 +102,25 @@ const CLI_ONLY: Record<string, string> = {
         "the node twin of knext-bun-entry.mjs for runtime: 'node'; the zone app builds only the bun target",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
+    // #1342 (ADR-0058): `kn-next create` defaults to the standalone target —
+    // these four exist ONLY in the CLI tree. `next-adapter.ts.hbs` is the
+    // official Next.js Deployment Adapter re-export the standalone target
+    // wires through `adapterPath` (a webpack/turbopack mechanism vinext never
+    // calls, and the zone template still builds vinext, unaffected by this
+    // change — see the module docblock in create.ts). The three
+    // `*.vinext.hbs` files are `--builder vinext` CONTENT OVERRIDES of the
+    // base `next.config.ts.hbs`/`package.json.hbs`/`kn-next.config.ts.hbs`
+    // (selected by `selectBuilderTemplates` in create.ts, stripped of the
+    // `.vinext` marker before they land in a scaffolded app) — the zone
+    // template has no such override mechanism and no need for one.
+    "next-adapter.ts.hbs":
+        "the standalone target's adapterPath re-export; inert under vinext (Vite/rolldown never calls webpack/turbopack adapter hooks) and the zone template still builds vinext",
+    "next.config.ts.vinext.hbs":
+        "the --builder vinext content override of next.config.ts.hbs; the zone template has no builder flag",
+    "package.json.vinext.hbs":
+        "the --builder vinext content override of package.json.hbs; the zone template has no builder flag",
+    "kn-next.config.ts.vinext.hbs":
+        "the --builder vinext content override of kn-next.config.ts.hbs; the zone template has no builder flag",
 };
 
 // `Dockerfile.standalone.hbs` and `knext-standalone-entry.mjs.hbs` (the

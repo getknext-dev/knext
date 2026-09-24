@@ -3,8 +3,11 @@ title: Getting started
 description: Take a Next.js app from next build to a scale-to-zero Knative service.
 ---
 
-Take an existing Next.js app from `next build` to a scale-to-zero Knative service. knext uses the
-**vinext**, an open-source Vite-based implementation of Next.js, compiled into a single fast executable. (The official Deployment Adapter API remains supported as the suite-verified legacy lane.)
+Take an existing Next.js app from `next build` to a scale-to-zero Knative service. knext's default
+build uses Next.js's own **official Deployment Adapter API** — a plain `next build`, wired through
+`adapterPath`. A selectable **vinext** target — an open-source, Vite-based implementation of
+Next.js, compiled into a single fast executable — is also available; see [the adapter and the
+compiled build](/docs/official-adapter) for the trade-off.
 
 <Callout type="info">
 **Prerequisites.** A Kubernetes cluster with **Knative Serving** installed (don't have one?

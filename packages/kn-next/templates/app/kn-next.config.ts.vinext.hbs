@@ -8,12 +8,15 @@ const config: KnativeNextConfig = {
   // Registry to push the image to (the app name is appended).
   registry: "ghcr.io/<your-user>",
 
-  // This scaffold builds with plain `next build` (turbopack) — see
-  // next.config.ts's `output: 'standalone'` and `adapterPath`. `build` is
-  // left unset: an absent `build` means turbopack (ADR-0058), the same
-  // standalone runtime image `kn-next deploy` stages automatically. Scaffold
-  // with `kn-next create --builder vinext` instead for the compiled
-  // single-executable target (`build: 'vinext'`).
+  // This scaffold builds with vinext (the Vite/rolldown Next reimplementation,
+  // compiled to a single Bun executable) — see vite.config.ts and Dockerfile.
+  // You asked for it explicitly with `kn-next create --builder vinext`.
+  // knext's CLI default is "turbopack" (`next build` -> a standalone runtime
+  // image, ADR-0058) — `kn-next create` (no --builder flag) scaffolds that
+  // shape instead. `build` is pinned here so this app stays internally
+  // consistent with its own vinext-shaped next.config.ts and Dockerfile
+  // rather than silently inheriting the ambient default.
+  build: "vinext",
 
   // Object storage for static assets — OPTIONAL. Without it, your app serves
   // its own static files from the container image, just like `next start`.

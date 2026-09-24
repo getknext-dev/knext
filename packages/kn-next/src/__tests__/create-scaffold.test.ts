@@ -75,7 +75,10 @@ afterEach(() => {
 });
 
 /** Scaffold into `<root>/apps/<name>` (the layout QUICKSTART Step 3 prescribes). */
-function scaffoldApp(name = "hello-knext"): {
+function scaffoldApp(
+    name = "hello-knext",
+    builder?: "default" | "vinext",
+): {
     appDir: string;
     files: Map<string, string>;
 } {
@@ -85,8 +88,16 @@ function scaffoldApp(name = "hello-knext"): {
     writeFileSync(join(root, "package-lock.json"), "{}\n");
     const appDir = join(root, "apps", name);
     mkdirSync(appDir, { recursive: true });
-    const files = writeScaffold({ appDir, name });
+    const files = writeScaffold({ appDir, name, builder });
     return { appDir, files };
+}
+
+/** Same as {@link scaffoldApp}, but for the opt-in vinext target (#1342). */
+function scaffoldVinextApp(name = "hello-knext"): {
+    appDir: string;
+    files: Map<string, string>;
+} {
+    return scaffoldApp(name, "vinext");
 }
 
 /** Top-level *static* import specifiers (dynamic `await import()` excluded). */
@@ -174,13 +185,13 @@ describe("kn-next create — seam-alive instrumentation-node.ts (#352/ADR-0027)"
     });
 });
 
-describe("kn-next create — next.config is minimal under vinext (ADR-0048)", () => {
+describe("kn-next create --builder vinext — next.config is minimal under vinext (ADR-0048)", () => {
     it("does NOT wire turbopack-only machinery", () => {
         // `output: 'standalone'`, `adapterPath` and the @getknext/lib
         // externalisation were all webpack/turbopack mechanisms. vinext is
         // Vite/rolldown and never calls them, so emitting them would ship
         // config that silently does nothing.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
         // Strip comments first. The template EXPLAINS why these keys are gone,
         // so a raw grep would match the explanation and fail on its own prose —
@@ -207,7 +218,7 @@ describe("kn-next create — next.config is minimal under vinext (ADR-0048)", ()
     });
 
     it("still exports a NextConfig, so app-level options have a home", () => {
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
 
         expect(src).toMatch(/NextConfig/);
@@ -215,7 +226,7 @@ describe("kn-next create — next.config is minimal under vinext (ADR-0048)", ()
     });
 
     it("emits no next-adapter.ts — the hooks it wired are never called", () => {
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         expect(existsSync(join(appDir, "next-adapter.ts"))).toBe(false);
     });
 
@@ -224,7 +235,7 @@ describe("kn-next create — next.config is minimal under vinext (ADR-0048)", ()
         // nothing wired `cacheHandler`, so every `kn-next create` app served
         // 200s with no ISR cache and no data cache — full recompute per
         // render, the provisioned Redis unused, and nothing red anywhere.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
         const code = src
             .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -287,9 +298,9 @@ describe("kn-next create — graduated per-app guards ship with the app (#344/#4
     });
 });
 
-describe("kn-next create — the generated package.json is runnable OUTSIDE this monorepo", () => {
+describe("kn-next create --builder vinext — the generated package.json is runnable OUTSIDE this monorepo", () => {
     it("builds with vite/vinext and declares no workspace: protocol deps", () => {
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const raw = readFileSync(join(appDir, "package.json"), "utf8");
         const pkg = JSON.parse(raw) as {
             scripts?: Record<string, string>;
@@ -319,7 +330,7 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
     });
 
     it("declares the packages the generated instrumentation imports", () => {
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const pkg = JSON.parse(
             readFileSync(join(appDir, "package.json"), "utf8"),
         ) as {
@@ -352,7 +363,7 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         // re-provided by a Nitro server entry the app ships. If that entry were
         // missing, the build would still succeed and the pod would fail its
         // probes in the cluster.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
 
         expect(existsSync(join(appDir, "knext-bun-entry.mjs"))).toBe(true);
         expect(existsSync(join(appDir, "runtime-contract.mjs"))).toBe(true);
@@ -368,7 +379,7 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         // artifact with no hand edits. The vite config reads the runtime from
         // kn-next.config.ts (the one source `kn-next build` and `kn-next
         // deploy` also read), so both halves of the preset choice live there.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
 
         const entry = readFileSync(
             join(appDir, "knext-node-entry.mjs"),
@@ -411,7 +422,7 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         // npm the version is whatever a transitive dep dragged in (`srvx` was
         // undeclared, reachable only as nitro's dependency — ^0.11 vs ^0.12).
         // SCANNED, not enumerated: every bare specifier in every file below.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const pkg = JSON.parse(
             readFileSync(join(appDir, "package.json"), "utf8"),
         ) as {
@@ -454,7 +465,7 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         // land in a second chunk re-exporting a symbol declared in no emitted
         // module; the server then 500s on any runtime and `--compile` refuses
         // it. Measured, see docs/benchmarks/EXPERIMENTS.md E9-E10.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
 
         expect(vite).toContain("inlineDynamicImports: true");
@@ -465,7 +476,7 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
         // build emits `.output`, and the image must copy from `.output`. If
         // they disagree the image starts a server that is not there — the #857
         // failure, which exits 0 the whole way.
-        const { appDir } = scaffoldApp("hello-knext");
+        const { appDir } = scaffoldVinextApp("hello-knext");
         const dockerfile = readFileSync(join(appDir, "Dockerfile"), "utf8");
         const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
 
@@ -494,12 +505,12 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
  * check passes on a Dockerfile that cannot build, which is what shipped in the
  * first round. These tests interpret the instruction stream instead.
  */
-describe("kn-next create — the generated Dockerfile ships the compiled binary (ADR-0048)", () => {
+describe("kn-next create --builder vinext — the generated Dockerfile ships the compiled binary (ADR-0048)", () => {
     it("copies a prebuilt binary and runs it directly", () => {
         // No builder stage, no install, no `npm run build`. The binary is built
         // by `kn-next build` outside the image, because cross-compiling inside
         // it would force a Bun toolchain into the runtime layer for nothing.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
 
         expect(df).toMatch(/COPY \$\{BINARY\} \/app\/server/);
@@ -510,7 +521,7 @@ describe("kn-next create — the generated Dockerfile ships the compiled binary 
         // Without `.output/public` beside the binary, the server starts and
         // then 500s every asset request — it logs "no static-asset root found"
         // and keeps serving, so this fails quietly rather than loudly.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
 
         expect(df).toMatch(/COPY \.output\/public/);
@@ -520,7 +531,7 @@ describe("kn-next create — the generated Dockerfile ships the compiled binary 
         // Both halves of the ADR-0048 cleanup: the new shape is present above,
         // and the retired shape is gone. A Dockerfile that still installed node
         // would build an image nothing in it uses.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
 
         expect(df).not.toMatch(/\.next\/standalone/);
@@ -532,7 +543,7 @@ describe("kn-next create — the generated Dockerfile ships the compiled binary 
     it("needs no bytecode cache mount — it is baked into the binary", () => {
         // `bun build --compile --bytecode` puts V8 bytecode inside the
         // executable. There is nothing to warm, mount, or share between pods.
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
 
         expect(df).not.toMatch(/compile-cache/);
@@ -540,7 +551,7 @@ describe("kn-next create — the generated Dockerfile ships the compiled binary 
     });
 
     it("runs as non-root", () => {
-        const { appDir } = scaffoldApp();
+        const { appDir } = scaffoldVinextApp();
         const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
         expect(df).toMatch(/USER 65532:65532/);
     });
@@ -587,11 +598,13 @@ describe("kn-next create — the CLI entry (createMain)", () => {
         }
     }
 
-    it("--help exits 0 and documents the scaffolded guards", async () => {
+    it("--help exits 0 and documents the scaffolded guards and --builder flag", async () => {
         const { code, out } = await capture(["--help"]);
         expect(code).toBe(0);
         expect(out).toContain("kn-next create");
-        expect(out).toContain("standalone-seam-alive");
+        expect(out).toContain("instrumentation-edge-safe");
+        expect(out).toContain("--builder");
+        expect(out).toContain("vinext");
         expect(out).toContain("--dry-run");
     });
 
