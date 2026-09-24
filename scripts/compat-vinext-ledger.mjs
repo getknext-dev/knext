@@ -47,24 +47,45 @@
  * those patterns are the shared half of every cell's compat-window fingerprint.
  * The bun-vinext cell declares both files in its own `extraFiles`.
  *
- * ## The flaky window's history (#1355 review findings 1 and 3)
+ * ## The flaky window's history (#1355 review, both rounds)
  * "Informative" history is restricted to completed runs of THIS workflow, on
- * `main`, whose shard summaries all carry the DEFAULT `nextjsRef` (a summary's
- * own `ref` field — the same thing a dispatch with a custom ref would change).
- * That covers both the scheduled runs and a workflow_dispatch rerun with
- * default inputs, without needing to parse dispatch inputs back out of the
- * GitHub API. A run that is cancelled, still running, uploaded no summaries
- * (artifactless), used a custom ref, or is missing a shard is simply NOT
+ * `main`, created ON OR AFTER the earliest flaky entry's `refreshed`/`added`
+ * date (a run from before any flaky entry existed cannot be evidence for one
+ * — round-2 finding 3), whose shard summaries all carry the DEFAULT
+ * `nextjsRef` (a summary's own `ref` field — the same thing a dispatch with a
+ * custom ref would change). That covers both the scheduled runs and a
+ * workflow_dispatch rerun with default inputs, without needing to parse
+ * dispatch inputs back out of the GitHub API. A run that is cancelled, still
+ * running, too old, used a custom ref, or is missing a shard is simply NOT
  * informative — it contributes 'none' and history keeps looking further back
  * (backfill) rather than treating it as a for/against data point.
- * Fetching a candidate run's summaries can fail on an auth/API error (a
- * token scope problem, a transient 401/403/5xx from `gh`); that is a WARNING
- * and the run is skipped, but `MAX_CONSECUTIVE_HISTORY_SKIPS` such skips in a
- * row is fail-CLOSED (the `report` command errors out) rather than silently
- * degrading to an ever-smaller window. Only `GITHUB_REPOSITORY` being unset,
- * or the initial `gh run list` itself failing, degrades softly to "the window
- * check was skipped, the flaky expiry still bounds every entry" — once
- * candidates are in hand, a string of unreadable ones is a signal, not noise.
+ *
+ * A run whose artifacts are gone — genuinely never uploaded, OR expired past
+ * GitHub's 90-day retention, both look identical: `gh run download` exits
+ * non-zero with "no artifact matches any of the names or patterns provided"
+ * — is likewise just NOT informative (`isNoArtifactError`, round-2 finding
+ * 1). This is NOT an auth/API error and must never be classified as one: the
+ * live bug this fixed was exactly that misclassification, which turned every
+ * artifactless-or-expired history run into an UNCAUGHT throw that reddened
+ * the whole lane, not a graceful backfill.
+ *
+ * Fetching a candidate run's summaries — or LISTING candidates in the first
+ * place (round-2 finding 2: the common real failure, e.g. an expired/invalid
+ * token, happens at `gh run list`, not per-run) — can fail on an auth/API
+ * error (`isAuthOrApiError`: a token scope problem, a transient
+ * 401/403/429/5xx from `gh`); that is a WARNING and the step is skipped, but
+ * `MAX_CONSECUTIVE_HISTORY_SKIPS` such skips IN A ROW (listing and per-run
+ * fetches share the SAME counter) fail CLOSED — the `report` command errors
+ * out — rather than silently degrading to an ever-smaller window. A success
+ * (a fetched, even if uninformative, run) resets the counter; consecutive is
+ * consecutive. Only `GITHUB_REPOSITORY` being unset degrades softly with no
+ * counter at all (there is nothing to list yet). **Not persisted across
+ * separate `report` invocations** — each scheduled/dispatched run of this
+ * workflow starts its counter at zero, so "3 consecutive" bounds a single
+ * run's own history walk, not three separate nights of the lane failing in a
+ * row. Cross-run persistence would need external state this script does not
+ * have (no artifact/ledger field is a safe place to keep it); documented as
+ * a known gap rather than solved here.
  *
  * The lane is WEEKLY (`compat-vinext.yml`'s schedule), while the flaky expiry
  * is 14 days — about two scheduled runs. A `report --history-runs 3` window
@@ -506,12 +527,25 @@ export function isAuthOrApiError(err) {
 }
 
 /**
+ * True when `gh run download` failed because the run simply has no matching
+ * artifact — never uploaded (artifactless), or aged past GitHub's 90-day
+ * retention (both produce the SAME message; `gh` does not distinguish them).
+ * This is NEVER an auth/API error and must be checked FIRST: `gh: ` alone
+ * would otherwise make `isAuthOrApiError` swallow it too, mis-tagging a
+ * routine "nothing to see here" as a warning-worthy skip.
+ */
+export function isNoArtifactError(err) {
+  const msg = String(err?.message ?? err ?? '');
+  return /no artifacts? (found|matches)/i.test(msg);
+}
+
+/**
  * The lane's previous runs on `main`, newest first, excluding the current
- * one — CANDIDATES only (any status/conclusion); `collectHistory` decides
- * which are informative and backfills past the rest. `exec` runs `gh`.
+ * one — CANDIDATES only (any status/conclusion, any age); `collectHistory`
+ * decides which are informative and backfills past the rest. `exec` runs `gh`.
  * @param {(args: string[]) => string} exec
  * @param {{ repo: string, currentRunId?: string, limit: number }} opts
- * @returns {{ id: string, status: string }[]}
+ * @returns {{ id: string, status: string, createdAt: string }[]}
  */
 export function previousRunCandidates(exec, { repo, currentRunId, limit }) {
   const out = exec([
@@ -526,11 +560,11 @@ export function previousRunCandidates(exec, { repo, currentRunId, limit }) {
     '--limit',
     String(limit),
     '--json',
-    'databaseId,status',
+    'databaseId,status,createdAt',
   ]);
-  return /** @type {{databaseId: number, status: string}[]} */ (JSON.parse(out))
+  return /** @type {{databaseId: number, status: string, createdAt: string}[]} */ (JSON.parse(out))
     .filter((r) => String(r.databaseId) !== String(currentRunId))
-    .map((r) => ({ id: String(r.databaseId), status: r.status }));
+    .map((r) => ({ id: String(r.databaseId), status: r.status, createdAt: r.createdAt }));
 }
 
 /** Download one run's lane shard summaries into `dir`. */
@@ -549,45 +583,92 @@ export function downloadRun(exec, { repo, runId, dir }) {
 }
 
 /**
+ * One "step" in the walk — listing candidates, or fetching one candidate's
+ * summaries — succeeded, was skipped as an auth/API error (consuming the
+ * shared `consecutiveSkips` budget), or is a plain "not informative, keep
+ * backfilling" outcome that never touches the budget at all. Centralised so
+ * listing and per-run fetching are classified identically (#1355 round-2
+ * finding 2) and a "no artifact" failure (finding 1) is never miscounted as
+ * an auth/API skip.
+ * @param {() => any} attempt
+ * @param {string} label
+ * @param {{ warnings: string[], bump: () => void, reset: () => void, count: () => number }} budget
+ * @returns {{ ok: true, value: any } | { ok: false }}
+ */
+function attemptStep(attempt, label, budget) {
+  try {
+    const value = attempt();
+    budget.reset(); // gh answered normally: whatever the streak was, it is broken
+    return { ok: true, value };
+  } catch (err) {
+    if (isNoArtifactError(err)) {
+      budget.reset(); // gh answered normally (just "nothing here"); not a communication skip
+      return { ok: false };
+    }
+    if (!isAuthOrApiError(err)) throw err;
+    budget.bump();
+    budget.warnings.push(`${label}: could not be fetched (${err?.message ?? err}); skipped`);
+    if (budget.count() >= MAX_CONSECUTIVE_HISTORY_SKIPS) {
+      throw new Error(
+        `${budget.count()} consecutive history steps could not be fetched (auth/API errors); ` +
+          'failing closed rather than silently narrowing the flaky window',
+      );
+    }
+    return { ok: false };
+  }
+}
+
+/**
  * Collect up to `want` INFORMATIVE history runs (oldest first) by walking the
  * lane's candidates newest-first and backfilling past anything uninformative:
- * a run that is not yet completed, uploaded no summaries (artifactless), used
- * a non-default ref, or is missing a shard, is skipped WITHOUT counting
- * against the failure budget below — it simply is not evidence.
+ * a run that is not yet completed, predates `since` (the earliest flaky
+ * entry's own `refreshed`/`added` date — a run cannot be evidence for an
+ * entry that did not exist yet), used a non-default ref, or is missing a
+ * shard, is skipped WITHOUT counting against the failure budget below — it
+ * simply is not evidence. Likewise a "no artifact" failure downloading a
+ * run's summaries (never uploaded, or aged past 90-day retention) is not
+ * evidence either, and NOT a skip.
  *
- * An auth/API error fetching one run's summaries is a WARNING (that run is
- * skipped); `MAX_CONSECUTIVE_HISTORY_SKIPS` such errors IN A ROW fail closed
- * (throw), rather than silently returning an ever-smaller window. Any other
- * error (a bug, a malformed response) is not swallowed at all.
- * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string}[], fetchSummaries: (id: string) => any[] }} deps
- * @param {{ repo: string, currentRunId?: string, want: number }} opts
+ * An auth/API error — LISTING candidates in the first place, or fetching one
+ * candidate's summaries — is a WARNING (that step is skipped); the two share
+ * ONE `consecutiveSkips` budget, and `MAX_CONSECUTIVE_HISTORY_SKIPS` such
+ * errors IN A ROW fail closed (throw), rather than silently returning an
+ * ever-smaller window. A successful step (informative or not) resets the
+ * budget to zero. Any other error (a bug, a malformed response) is not
+ * swallowed at all. This budget is per-CALL, not persisted across separate
+ * invocations of this script — see the module doc.
+ * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string, createdAt?: string}[], fetchSummaries: (id: string) => any[] }} deps
+ * @param {{ repo: string, currentRunId?: string, want: number, since?: string }} opts
  * @returns {{ history: any[][], warnings: string[] }}
  */
-export function collectHistory(deps, { repo, currentRunId, want }) {
-  const candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
-  const history = [];
+export function collectHistory(deps, { repo, currentRunId, want, since }) {
   const warnings = [];
   let consecutiveSkips = 0;
+  const budget = {
+    warnings,
+    bump: () => {
+      consecutiveSkips += 1;
+    },
+    reset: () => {
+      consecutiveSkips = 0;
+    },
+    count: () => consecutiveSkips,
+  };
+  const listed = attemptStep(
+    () => deps.list({ repo, currentRunId, limit: want * 4 + 10 }),
+    'run list',
+    budget,
+  );
+  const candidates = listed.ok ? listed.value : [];
+  const history = [];
   for (const c of candidates) {
     if (history.length >= want) break;
     if (c.status !== 'completed') continue; // cancelled / in-progress: 'none', backfill
-    let summaries;
-    try {
-      summaries = deps.fetchSummaries(c.id);
-    } catch (err) {
-      if (!isAuthOrApiError(err)) throw err;
-      consecutiveSkips += 1;
-      warnings.push(`run ${c.id}: could not be fetched (${err?.message ?? err}); skipped`);
-      if (consecutiveSkips >= MAX_CONSECUTIVE_HISTORY_SKIPS) {
-        throw new Error(
-          `${consecutiveSkips} consecutive history runs could not be fetched (auth/API errors); ` +
-            'failing closed rather than silently narrowing the flaky window',
-        );
-      }
-      continue;
-    }
-    consecutiveSkips = 0;
-    if (summaries.length === 0) continue; // artifactless: 'none', backfill
+    if (since && c.createdAt && c.createdAt < since) continue; // predates the entry: 'none', backfill
+    const fetched = attemptStep(() => deps.fetchSummaries(c.id), `run ${c.id}`, budget);
+    if (!fetched.ok) continue; // no-artifact or auth/API-skip: 'none', backfill either way
+    const summaries = fetched.value;
+    if (summaries.length === 0) continue; // artifactless (empty, not an error): 'none', backfill
     if (!isCompleteDefaultRun(summaries)) continue; // custom ref or missing shard: 'none', backfill
     history.push(summaries);
   }
@@ -716,7 +797,8 @@ function args(argv, name) {
   return out;
 }
 
-function readSummaries(dir) {
+/** Read every lane shard summary JSON file in `dir` (recursively). */
+export function readSummaries(dir) {
   return readdirSync(dir, { recursive: true })
     .map(String)
     .filter((f) => /compat-suite-summary-.*\.json$/.test(f))
@@ -843,9 +925,14 @@ function main(argv) {
  * candidates (see its doc comment), and that error is deliberately NOT
  * caught here.
  */
-function flakyHistory(argv, ledger, current) {
+// Exported ONLY for its integration test (a fake `gh` binary on PATH,
+// #1355 round-2 finding 1/2/3): `gh` itself is not dependency-injected here
+// the way `previousRunCandidates`/`downloadRun` are, so proving the
+// since/budget wiring end to end needs the real function, not a re-implementation.
+export function flakyHistory(argv, ledger, current) {
   const [n] = args(argv, 'history-runs');
-  if (!n || !ledger.entries.some((e) => e.class === 'flaky')) return { broken: [], stale: [] };
+  const flakyEntries = ledger.entries.filter((e) => e.class === 'flaky');
+  if (!n || flakyEntries.length === 0) return { broken: [], stale: [] };
   const repo = process.env.GITHUB_REPOSITORY;
   if (!repo) {
     console.error(
@@ -853,30 +940,20 @@ function flakyHistory(argv, ledger, current) {
     );
     return { broken: [], stale: [] };
   }
-  let candidates;
-  try {
-    candidates = previousRunCandidates(gh, {
-      repo,
-      currentRunId: process.env.GITHUB_RUN_ID,
-      limit: Number(n) * 4 + 10,
-    });
-  } catch (err) {
-    console.error(
-      `::warning::vinext quarantine ledger — flaky history unavailable (${err?.message ?? err}); the window check was skipped, the ${FLAKY_MAX_EXPIRY_DAYS}-day flaky expiry still bounds every flaky entry`,
-    );
-    return { broken: [], stale: [] };
-  }
+  // A run predating the OLDEST flaky entry's own refreshed/added date cannot
+  // be evidence for it (round-2 finding 3); `collectHistory` filters on this.
+  const since = `${flakyEntries.map((e) => e.refreshed ?? e.added).sort()[0]}T00:00:00Z`;
   const { history, warnings } = withRuns((root) =>
     collectHistory(
       {
-        list: () => candidates,
+        list: (opts) => previousRunCandidates(gh, opts),
         fetchSummaries: (id) => {
           const dir = join(root, id);
           downloadRun(gh, { repo, runId: id, dir });
           return readSummaries(dir);
         },
       },
-      { repo, currentRunId: process.env.GITHUB_RUN_ID, want: Number(n) },
+      { repo, currentRunId: process.env.GITHUB_RUN_ID, want: Number(n), since },
     ),
   );
   for (const w of warnings) console.error(`::warning::vinext quarantine ledger — ${w}`);

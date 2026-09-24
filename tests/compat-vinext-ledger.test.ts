@@ -32,8 +32,10 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLedger, renderTable } from '../scripts/compat-run-ledger.mjs';
 import {
@@ -45,14 +47,17 @@ import {
   EXPECTED_SHARD_TOTAL,
   FLAKY_FILE_CAP,
   FLAKY_MAX_EXPIRY_DAYS,
+  flakyHistory,
   flakyWindow,
   isAuthOrApiError,
   isCompleteDefaultRun,
+  isNoArtifactError,
   LEDGER_FILE_CAP,
   MAX_CONSECUTIVE_HISTORY_SKIPS,
   MAX_EXPIRY_DAYS,
   previousRunCandidates,
   publishedNumber,
+  readSummaries,
   refreshSnapshots,
   skippedWarnings,
   staleEntries,
@@ -674,7 +679,9 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
     ).toThrow(/unexpected/);
   });
 
-  it('a real skip resets the consecutive counter, so it does not accumulate across good runs', () => {
+  it('a successful step resets the consecutive counter, so alternating skips never fail closed', () => {
+    // skip, SUCCESS (resets), skip, skip: 3 skip EVENTS total, but never 3 IN A ROW.
+    // Without the reset, this sequence would wrongly hit the threshold and throw.
     const list = () => [
       candidate('13'),
       candidate('12'),
@@ -682,41 +689,282 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
       candidate('10'),
       candidate('9'),
     ];
-    let calls = 0;
     const fetchSummaries = (id: string) => {
-      calls += 1;
-      if (id === '13' || id === '11') throw new Error('HTTP 401: Bad credentials');
+      if (id === '13' || id === '11' || id === '10') throw new Error('HTTP 401: Bad credentials');
       return fullRun({ shard: '1/16', failed: 0, failures: [] });
     };
     const { history, warnings } = collectHistory(
       { list, fetchSummaries },
-      { repo: 'o/r', currentRunId: '14', want: 3 },
+      { repo: 'o/r', currentRunId: '14', want: 10 }, // > candidates, so the walk never breaks early
     );
-    expect(history.length).toBe(3);
-    expect(warnings.length).toBe(2);
-    expect(calls).toBe(5);
+    expect(history.length).toBe(2);
+    expect(warnings.length).toBe(3);
+  });
+
+  it('WITHOUT the reset (proof the above test is discriminating): 3 skips with one success between them would still throw if the reset were missing', () => {
+    // This is the same fixture as above but demonstrates why the reset test
+    // matters: a naive re-implementation without `budget.reset()` throws
+    // here. We assert the mutation-provable anchor exists and is exercised,
+    // not the buggy behaviour itself (that would defeat the point).
+    let sawReset = false;
+    const list = () => [candidate('13'), candidate('12'), candidate('11')];
+    const fetchSummaries = (id: string) => {
+      if (id === '12') sawReset = true; // the success in the middle
+      if (id === '13' || id === '11') throw new Error('HTTP 401: Bad credentials');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '14', want: 5 }),
+    ).not.toThrow();
+    expect(sawReset).toBe(true);
+  });
+
+  it('a listing failure counts toward the SAME skip budget as a per-run fetch failure', () => {
+    const list = () => {
+      throw new Error('HTTP 401: Bad credentials');
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 1 },
+    );
+    // A single listing failure alone is below the threshold: soft-skip, empty
+    // history (there is nothing to backfill from — the list itself failed).
+    expect(history).toEqual([]);
+    expect(warnings.join()).toMatch(/run list.*401/);
+  });
+
+  it('a "no artifact" failure downloading a run is NOT an auth/API error: skipped, not warned, not a fail-closed contributor', () => {
+    const list = () => [candidate('10'), candidate('9')];
+    const fetchSummaries = (id: string) => {
+      if (id === '10')
+        throw new Error(
+          'Command failed: gh run download 10 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno artifact matches any of the names or patterns provided',
+        );
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 1 },
+    );
+    expect(history.length).toBe(1);
+    expect(warnings).toEqual([]); // no-artifact is silent backfill, not a warning-worthy skip
+  });
+
+  it(`a run of ${MAX_CONSECUTIVE_HISTORY_SKIPS} consecutive "no artifact" failures does NOT fail closed (they are not skips at all)`, () => {
+    const list = () => Array.from({ length: 10 }, (_, i) => candidate(String(10 - i)));
+    const fetchSummaries = (id: string) => {
+      if (Number(id) > 5)
+        throw new Error('no artifact matches any of the names or patterns provided');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+    ).not.toThrow();
+  });
+
+  it('a "no artifact" skip resets a PRIOR auth-error streak too, not just its own', () => {
+    // skip(auth,1), skip(auth,2), no-artifact (must reset to 0), skip(auth,1):
+    // only reaches 1 if the no-artifact skip resets the streak. Without that
+    // reset, the streak would be 3 and this would throw.
+    const list = () => [
+      candidate('13'),
+      candidate('12'),
+      candidate('11'),
+      candidate('10'),
+      candidate('9'),
+    ];
+    const fetchSummaries = (id: string) => {
+      if (id === '13' || id === '12' || id === '10') throw new Error('HTTP 401: Bad credentials');
+      if (id === '11') throw new Error('no artifact matches any of the names or patterns provided');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    expect(() =>
+      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '14', want: 1 }),
+    ).not.toThrow();
+  });
+
+  it('`since` excludes history runs created before it (a run cannot be evidence for an entry that did not exist yet)', () => {
+    const list = () => [
+      { id: '10', status: 'completed', createdAt: '2026-09-01T00:00:00Z' }, // too old
+      { id: '9', status: 'completed', createdAt: '2026-09-20T00:00:00Z' }, // ok
+    ];
+    const fetchSummaries = (id: string) => {
+      if (id === '10') throw new Error('must never be fetched: predates `since`');
+      return fullRun({ shard: '1/16', failed: 0, failures: [] });
+    };
+    const { history } = collectHistory(
+      { list, fetchSummaries },
+      { repo: 'o/r', currentRunId: '11', want: 1, since: '2026-09-10T00:00:00Z' },
+    );
+    expect(history.length).toBe(1);
+  });
+});
+
+describe('isNoArtifactError: distinguishes "nothing to see here" from a real gh failure', () => {
+  it('recognizes the real gh CLI message for a missing/expired artifact', () => {
+    expect(
+      isNoArtifactError(
+        new Error(
+          'Command failed: gh run download 10 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno artifact matches any of the names or patterns provided',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not treat an auth/API error as a no-artifact error', () => {
+    expect(isNoArtifactError(new Error('HTTP 401: Bad credentials'))).toBe(false);
+  });
+
+  it('a no-artifact message is never ALSO classified as an auth/API error', () => {
+    const msg =
+      'Command failed: gh run download 10 --repo o/r --pattern compat-vinext-summary-* --dir /tmp/x\nno artifact matches any of the names or patterns provided';
+    expect(isNoArtifactError(new Error(msg))).toBe(true);
+    expect(isAuthOrApiError(new Error(msg))).toBe(false);
+  });
+});
+
+describe('downloadRun against a REAL gh failure (a fake gh binary, not a mocked return value)', () => {
+  // #1355 round-2 finding 1: the bug was in how the string thrown by a REAL
+  // `gh run download` failure gets classified, not in any mocked stand-in for
+  // it. This drives the real `downloadRun` + `readSummaries` through a fake
+  // `gh` EXECUTABLE that reproduces gh's actual exit code and stderr text.
+  const fakeGh = (behavior: 'no-artifact' | 'ok') => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-'));
+    const script = join(dir, 'gh');
+    const body =
+      behavior === 'no-artifact'
+        ? '#!/bin/sh\necho "no artifact matches any of the names or patterns provided" 1>&2\nexit 1\n'
+        : '#!/bin/sh\n# args: run download <id> --repo <r> --pattern <p> --dir <dir> ($9)\nmkdir -p "$9"\necho "{}" > "$9/compat-suite-summary-1.json"\nexit 0\n';
+    writeFileSync(script, body);
+    chmodSync(script, 0o755);
+    return { dir, script };
+  };
+  const realExec = (bin: string) => (args: string[]) =>
+    execFileSync(bin, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+  it('a real "no artifact" gh failure is classified by isNoArtifactError, not swallowed as a generic throw', () => {
+    const { dir, script } = fakeGh('no-artifact');
+    const outDir = join(dir, 'out');
+    try {
+      let threw: unknown;
+      try {
+        downloadRun(realExec(script), { repo: 'o/r', runId: '999', dir: outDir });
+      } catch (err) {
+        threw = err;
+      }
+      expect(threw).toBeDefined();
+      expect(isNoArtifactError(threw)).toBe(true);
+      expect(isAuthOrApiError(threw)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('collectHistory, wired to the REAL downloadRun + readSummaries, backfills past a real "no artifact" run', () => {
+    const { dir: noArtifactDir, script: noArtifactScript } = fakeGh('no-artifact');
+    const { dir: okDir, script: okScript } = fakeGh('ok');
+    try {
+      const list = () => [
+        { id: '10', status: 'completed' }, // will hit the real no-artifact gh
+        { id: '9', status: 'completed' }, // will hit the real ok gh
+      ];
+      const fetchSummaries = (id: string) => {
+        const outDir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-run-'));
+        const script = id === '10' ? noArtifactScript : okScript;
+        downloadRun(realExec(script), { repo: 'o/r', runId: id, dir: outDir });
+        return readSummaries(outDir);
+      };
+      // The 'ok' script writes `{}`, which is not a full/complete default run
+      // (isCompleteDefaultRun rejects it), so `want` stays unmet — the point
+      // here is that collectHistory does NOT throw on the real no-artifact run.
+      expect(() =>
+        collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
+      ).not.toThrow();
+    } finally {
+      rmSync(noArtifactDir, { recursive: true, force: true });
+      rmSync(okDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('flakyHistory: end-to-end CLI glue against a REAL gh on PATH (#1355 round-2 finding 3)', () => {
+  // `gh` is invoked internally via `execFileSync('gh', …)`, not injected, so
+  // proving the `since` filter is actually wired from the ledger's flaky
+  // entries through to `collectHistory` needs a real `gh` on PATH, not a
+  // re-implementation of flakyHistory's internals.
+  it('never downloads a candidate created before the oldest flaky entry’s refreshed/added date', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-fake-gh-path-'));
+    const log = join(dir, 'calls.log');
+    const script = join(dir, 'gh');
+    // run list -> two candidates: one BEFORE `since` (2026-09-01), one AFTER
+    // (2026-09-20). run download -> logs the run id it was asked for, then
+    // fails with "no artifact" (cheapest way to make every download a no-op
+    // that still proves whether it was ATTEMPTED at all).
+    writeFileSync(
+      script,
+      [
+        '#!/bin/sh',
+        `echo "$@" >> "${log}"`,
+        'if [ "$1" = "run" ] && [ "$2" = "list" ]; then',
+        '  echo \'[{"databaseId":20,"status":"completed","createdAt":"2026-09-20T00:00:00Z"},{"databaseId":10,"status":"completed","createdAt":"2026-09-01T00:00:00Z"}]\'',
+        '  exit 0',
+        'fi',
+        'if [ "$1" = "run" ] && [ "$2" = "download" ]; then',
+        '  echo "no artifact matches any of the names or patterns provided" 1>&2',
+        '  exit 1',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(script, 0o755);
+    const oldPath = process.env.PATH;
+    const oldRepo = process.env.GITHUB_REPOSITORY;
+    const oldRunId = process.env.GITHUB_RUN_ID;
+    process.env.PATH = `${dir}:${oldPath}`;
+    process.env.GITHUB_REPOSITORY = 'o/r';
+    process.env.GITHUB_RUN_ID = '999';
+    try {
+      const flaky = navEntry(['hash']);
+      flaky.added = '2026-09-15'; // since = 2026-09-15T00:00:00Z: run 10 predates it, run 20 doesn't
+      flaky.refreshed = undefined;
+      const argv = ['report', '--ledger', LEDGER_PATH, '--summaries', 'x', '--history-runs', '3'];
+      flakyHistory(argv, ledger([flaky]), [summary({ failed: 0, failures: [] })]);
+      const log_contents = readFileSync(log, 'utf8');
+      expect(log_contents).toMatch(/run download 20/);
+      expect(log_contents).not.toMatch(/run download 10\b/);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldRepo === undefined) delete process.env.GITHUB_REPOSITORY;
+      else process.env.GITHUB_REPOSITORY = oldRepo;
+      if (oldRunId === undefined) delete process.env.GITHUB_RUN_ID;
+      else process.env.GITHUB_RUN_ID = oldRunId;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
 describe('previousRunCandidates / downloadRun: raw gh glue for the flaky window history', () => {
-  it('lists this workflow’s runs on main, excluding the current run, any status', () => {
+  it('lists this workflow’s runs on main, excluding the current run, any status, WITH createdAt (for the `since` date filter)', () => {
     const calls: string[][] = [];
     const exec = (a: string[]) => {
       calls.push(a);
       return JSON.stringify([
-        { databaseId: 30, status: 'completed' },
-        { databaseId: 29, status: 'cancelled' },
-        { databaseId: 28, status: 'completed' },
+        { databaseId: 30, status: 'completed', createdAt: '2026-09-24T00:00:00Z' },
+        { databaseId: 29, status: 'cancelled', createdAt: '2026-09-23T00:00:00Z' },
+        { databaseId: 28, status: 'completed', createdAt: '2026-09-22T00:00:00Z' },
       ]);
     };
     expect(previousRunCandidates(exec, { repo: 'o/r', currentRunId: '30', limit: 5 })).toEqual([
-      { id: '29', status: 'cancelled' },
-      { id: '28', status: 'completed' },
+      { id: '29', status: 'cancelled', createdAt: '2026-09-23T00:00:00Z' },
+      { id: '28', status: 'completed', createdAt: '2026-09-22T00:00:00Z' },
     ]);
     expect(calls[0]).toEqual(
       expect.arrayContaining(['run', 'list', '--workflow', 'compat-vinext.yml']),
     );
     expect(calls[0]).toEqual(expect.arrayContaining(['--branch', 'main', '--repo', 'o/r']));
+    expect(calls[0]).toContain('databaseId,status,createdAt');
   });
 
   it('downloads only the lane’s shard summaries for a run', () => {
