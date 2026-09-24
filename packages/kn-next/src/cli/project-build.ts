@@ -78,8 +78,9 @@ export interface RunProjectBuildOptions {
     /**
      * Whether the resolved build target requires the app to be an ES module.
      * REQUIRED — not defaulted — so every caller is forced by the compiler to
-     * decide. The vinext target (`config.build === "vinext"`, the default)
-     * requires ESM; the node target does not.
+     * decide. The vinext target (`config.build === "vinext"`, selectable
+     * since #1183 — no longer the default) requires ESM; the standalone
+     * (turbopack/webpack) target does not.
      */
     readonly requireEsm: boolean;
     /** App directory to build/preflight in; defaults to the process cwd. */

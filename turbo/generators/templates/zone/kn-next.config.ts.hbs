@@ -8,6 +8,12 @@ const config: KnativeNextConfig = {
   // Registry to push the image to (the app name is appended).
   registry: "ghcr.io/<your-user>",
 
+  // This zone builds with vinext (see vite.config.ts) — pinned explicitly so
+  // it does not inherit the CLI's default, which flipped to "turbopack" in
+  // v1.0 (ADR-0058, #1183). TODO(#1342): a standalone-by-default scaffold is
+  // tracked as separate, design-gated follow-up work.
+  build: "vinext",
+
   // Object storage for static assets; publicUrl is where browsers fetch them.
   storage: {
     provider: "gcs", // "gcs" | "s3" | "minio"

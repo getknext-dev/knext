@@ -14,7 +14,9 @@ combination is tracked separately rather than folded into a single "the suite is
 The most-verified cell today is the **standalone build on the Node runtime**: the main-branch
 nightly most recently observed **778 tests passed, 0 failed**, against Next.js v16.2.0. That is
 current evidence, not a completed credential — see [Verified compatibility](/docs/compat-suite)
-for what credentialing requires and where every cell currently stands.
+for what credentialing requires and where every cell currently stands. Most-verified is not the
+same as default: knext's **default is the standalone build on the Bun runtime** (the compiled
+bytecode executable) — a less-verified cell than Node's, stated plainly in the matrix below.
 </Callout>
 
 ## Legend
@@ -46,9 +48,9 @@ official suite.
 | Streaming / Suspense (incremental flush) | ✅ | Asserts chunk-arrival ordering: the shell marker must land in a strictly earlier chunk than the Suspense payload. |
 | Edge Middleware (edge runtime) | ⛔ | Upstream-gated: edge-runtime middleware is not yet adapter-standardizable on Knative; knext middleware runs on the Node runtime only. |
 | PPR / Cache Components | ⛔ | Upstream-gated: Partial Prerendering / Cache Components are not yet adapter-standardizable. |
-| Official suite — standalone build, **Node** runtime | ✅ | **Selectable, not deprecated.** 778 passed / 0 failed (16 shards, Next.js v16.2.0, deploy mode), most recently observed on the main-branch nightly (early warning — see below for what counts toward a v1.0 credential). Covers Next's deploy-eligible e2e set minus 4 documented architectural exclusions (the ⛔ rows) and a small evidence-backed flaky-quarantine ledger — see [Verified compatibility](/docs/compat-suite). A red nightly withdraws this row. |
-| Official suite — standalone build, **Bun** runtime, compiled executable | ⚠️ | This is the artifact the standalone build ships on Bun: a bytecode single executable, not a folder of JavaScript. It passes the per-PR smoke gate and its own build-time bytecode verification, but the official suite has not yet been run against the compiled executable itself — its evidence does not yet exist at the suite level. |
-| Official suite — `vinext` build, **Bun** runtime (default) | ⚠️ | This is today's default build. Its weekly suite lane runs below the Node cell's pass rate; the remaining gap is tracked on its own bar rather than folded into this row. See [Bun & the compiled executable](/docs/bun-runtime). |
+| Official suite — standalone build, **Node** runtime | ✅ | `build: 'turbopack'`, `runtime: 'node'` — the uncompiled fallback, not the default. 778 passed / 0 failed (16 shards, Next.js v16.2.0, deploy mode), most recently observed on the main-branch nightly (early warning — see below for what counts toward a v1.0 credential). Covers Next's deploy-eligible e2e set minus 4 documented architectural exclusions (the ⛔ rows) and a small evidence-backed flaky-quarantine ledger — see [Verified compatibility](/docs/compat-suite). A red nightly withdraws this row. |
+| Official suite — standalone build, **Bun** runtime, compiled executable (default) | ⚠️ | This is knext's default (`build: 'turbopack'`, `runtime: 'bun'`) — a bytecode single executable, not a folder of JavaScript. It passes the per-PR smoke gate and its own build-time bytecode verification, but the official suite has not yet been run against the compiled executable itself — its evidence does not yet exist at the suite level. The default is therefore the credentialed *builder* on an *uncredentialed runtime cell*; see [Verified compatibility](/docs/compat-suite) for what still needs to land. |
+| Official suite — `vinext` build, **Bun** runtime | ⚠️ | Selectable (`build: 'vinext'`), not the default. Its weekly suite lane runs below the Node cell's pass rate; the remaining gap is tracked on its own bar rather than folded into this row. See [Bun & the compiled executable](/docs/bun-runtime). |
 | Official suite — `vinext` build, **Node** runtime | ⚠️ | Buildable: `kn-next build` produces a Node server and an image that ships the V8 compile cache baked in, proven by a per-PR build-and-boot check. The official suite has not yet been run against this cell. See [vinext on Node](/docs/build-pipeline#vinext-on-node). |
 
 ## v1.0 credentialing

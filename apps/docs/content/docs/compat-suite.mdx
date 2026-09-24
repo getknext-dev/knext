@@ -82,9 +82,9 @@ today, not as a completed v1.0 credential.
 
 | Cell | Most recent evidence | Cadence |
 |---|---|---|
-| Standalone build, **Node** runtime | 778 tests passed, 0 failed, against Next.js v16.2.0 | Nightly (main), early warning |
+| Standalone build, **Node** runtime (default) | 778 tests passed, 0 failed, against Next.js v16.2.0 | Nightly (main), early warning |
 | Standalone build, **Bun** runtime, compiled executable | Not yet run through the official suite — the suite lane still boots the uncompiled server and does not exercise the shipped compiled artifact | — |
-| `vinext` build, **Bun** runtime (default) | Below the Node cell's pass rate; tracked on its own bar, see [Bun & the compiled executable](/docs/bun-runtime) | Weekly |
+| `vinext` build, **Bun** runtime | Selectable, not the default. Below the Node cell's pass rate; tracked on its own bar, see [Bun & the compiled executable](/docs/bun-runtime) | Weekly |
 | `vinext` build, **Node** runtime | Buildable and booted on every PR (GET 200, compile cache baked and accepted); not yet run through the official suite | — |
 
 ## What the claim covers — and what it doesn't

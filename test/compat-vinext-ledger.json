@@ -461,6 +461,32 @@
       "added": "2026-09-24",
       "expires": "2026-10-24",
       "refreshed": "2026-09-24"
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/prefetch-auto/prefetch-auto.test.ts",
+      "class": "flaky",
+      "reason": "intermittent 60 s timeout waiting for the prefetch response on the compiled executable; the same case passes 3/3 under vinext start and the uncompiled nitro bun output",
+      "cases": ["<Link prefetch=\"auto\"> works the same as if prefetch were undefined or null"],
+      "evidence": {
+        "fail": [
+          {
+            "run": "35986509462",
+            "cases": [
+              "<Link prefetch=\"auto\"> works the same as if prefetch were undefined or null"
+            ]
+          },
+          {
+            "run": "36014921283",
+            "cases": [
+              "<Link prefetch=\"auto\"> works the same as if prefetch were undefined or null"
+            ]
+          }
+        ],
+        "pass": ["35995001855", "36001788096"]
+      },
+      "added": "2026-09-24",
+      "expires": "2026-10-08",
+      "refreshed": "2026-09-24"
     }
   ]
 }
