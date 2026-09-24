@@ -192,6 +192,27 @@ export default defineConfig([
       /\.\/cache-control-normalize\.cjs$/,
     ],
   },
+  // The deployed Cache-Control rule as an srvx middleware for vinext on Node
+  // (`./internal/response-cache-control`, imported by knext-node-entry.mjs).
+  // Its OWN pass on purpose: in the pass above it shares code with
+  // bun-serve-cache-control-install, so tsup hoists that code into a
+  // `dist/chunk-*.js` at the dist ROOT, where the relative
+  // `./cache-control-normalize.cjs` import no longer resolves. That broke BOTH
+  // entries under Node with ERR_MODULE_NOT_FOUND (measured), and the installer
+  // is what vinext-compile injects into the compiled executable. Built alone,
+  // each file keeps the import relative to dist/adapters/, beside the .cjs.
+  {
+    entry: {
+      'adapters/response-cache-control': 'src/adapters/response-cache-control.mjs',
+    },
+    format: ['esm'],
+    platform: 'node',
+    target: 'node20',
+    outDir: 'dist',
+    clean: false,
+    sourcemap: true,
+    external: [/\.\/cache-control-normalize\.cjs$/],
+  },
   // #175 — the deployed-platform Cache-Control preload. It is loaded with
   // `node --require` / `bun -r` into the standalone server process, so it MUST
   // be CommonJS (tsup emits `.cjs` for format:cjs under `"type": "module"`).
