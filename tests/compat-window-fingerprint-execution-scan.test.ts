@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -218,37 +219,42 @@ function jsImportRefs(fileText: string, fromDir: string): string[] {
 function harnessFor(lane: string): Set<string> {
   const tarballsDir = mkdtempSync(join(tmpdir(), 'knext-fp-execscan-tb-'));
   const stage = mkdtempSync(join(tmpdir(), 'knext-fp-execscan-pkg-'));
-  const pkgDir = join(stage, 'package');
-  mkdirSync(pkgDir, { recursive: true });
-  writeFileSync(
-    join(pkgDir, 'package.json'),
-    JSON.stringify({ name: '@getknext/core', version: '0.0.0' }),
-  );
-  execFileSync('tar', [
-    'czf',
-    join(tarballsDir, 'getknext-core-0.0.0.tgz'),
-    '-C',
-    stage,
-    'package',
-  ]);
+  try {
+    const pkgDir = join(stage, 'package');
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(
+      join(pkgDir, 'package.json'),
+      JSON.stringify({ name: '@getknext/core', version: '0.0.0' }),
+    );
+    execFileSync('tar', [
+      'czf',
+      join(tarballsDir, 'getknext-core-0.0.0.tgz'),
+      '-C',
+      stage,
+      'package',
+    ]);
 
-  const out = execFileSync(
-    process.execPath,
-    [
-      SCRIPT,
-      '--repo-root',
-      REPO_ROOT,
-      '--tarballs-dir',
-      tarballsDir,
-      '--lane',
-      lane,
-      '--json',
-      '--files',
-    ],
-    { encoding: 'utf8' },
-  );
-  const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
-  return new Set(parsed.files.filter((f) => f.component === 'harness').map((f) => f.path));
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        REPO_ROOT,
+        '--tarballs-dir',
+        tarballsDir,
+        '--lane',
+        lane,
+        '--json',
+        '--files',
+      ],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(out) as { files: { component: string; path: string }[] };
+    return new Set(parsed.files.filter((f) => f.component === 'harness').map((f) => f.path));
+  } finally {
+    rmSync(tarballsDir, { recursive: true, force: true });
+    rmSync(stage, { recursive: true, force: true });
+  }
 }
 
 /** Every `.sh`/`.mjs`/`.cjs`/`.js` file the computed harness for `lane` actually includes, with its text. */
