@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+import { CREDENTIAL_CELLS } from '../scripts/compat-window-audit.mjs';
 
 /**
  * S1 / #545 — the COMPAT-WINDOW FINGERPRINT.
@@ -611,6 +612,39 @@ describe('compat-window fingerprint — wired into the scheduled run', () => {
     expect(fingerprintIdx, 'Fingerprint step not found').toBeGreaterThan(-1);
     expect(installIdx).toBeLessThan(fingerprintIdx);
   });
+
+  // #1316 — the test above only ever read `test-e2e-deploy.yml` (via the
+  // module-level `WORKFLOW` constant), so `compat-vinext.yml` — the OTHER
+  // real `workflowFile` in `CREDENTIAL_CELLS` (#1294's per-cell workflow
+  // entry) — was completely unguarded: a reorder there that put the
+  // fingerprint step before the install step would break the bun-vinext
+  // lane's nightly run and nothing in this suite would notice. SCANNED, not
+  // hand-listed: this reads the actual `workflowFile` values off
+  // `CREDENTIAL_CELLS` (deduped, `null` entries dropped — a cell with no
+  // workflow wired yet, e.g. node-vinext, has nothing to check), so a NEW
+  // lane wired to a NEW workflow file is covered automatically, the same
+  // "scan, don't enumerate" discipline `compat-window-fingerprint.mjs`
+  // itself uses for the frozen set.
+  it('every wired lane workflow in CREDENTIAL_CELLS runs "Install knext deps" BEFORE its fingerprint step', () => {
+    const workflowFiles = [
+      ...new Set(
+        CREDENTIAL_CELLS.map((c) => c.workflowFile).filter((f): f is string => f !== null),
+      ),
+    ];
+    expect(workflowFiles.length).toBeGreaterThan(1);
+    for (const file of workflowFiles) {
+      const path = resolve(REPO_ROOT, '.github/workflows', file);
+      const contents = readFileSync(path, 'utf8');
+      const installIdx = contents.indexOf('name: Install knext deps');
+      const fingerprintIdx = contents.indexOf('name: Fingerprint the frozen compat-window set');
+      expect(installIdx, `${file}: "Install knext deps" step not found`).toBeGreaterThan(-1);
+      expect(fingerprintIdx, `${file}: fingerprint step not found`).toBeGreaterThan(-1);
+      expect(
+        installIdx,
+        `${file}: "Install knext deps" (idx ${installIdx}) must run BEFORE the fingerprint step (idx ${fingerprintIdx})`,
+      ).toBeLessThan(fingerprintIdx);
+    }
+  });
 });
 
 /**
@@ -1043,6 +1077,148 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
     const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
     expect(harness).toContain('scripts/lib/real.cjs');
+  });
+
+  // #1316 — `createRequire`, an aliased `require`, and `module.require` were
+  // all invisible to jsLocalImportSpecifiers: none of them is literally the
+  // identifier `require` called directly, so a relative path reached through
+  // any of them returned [] SILENTLY — the exact "silently unfrozen
+  // dependency" failure mode #1294 round 5 closed for non-literal specifiers,
+  // just reopened one idiom over.
+  describe('aliased require / createRequire / module.require fail closed (#1316)', () => {
+    it('a plain require() alias with a literal relative specifier is recognised and resolved (same base as require())', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const r = require;\nconst { real } = r('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    // An UNTRACKED alias — one this scanner's collect pass never bound to
+    // `require`/`createRequire` — must still fail closed. `passthrough`
+    // returns its argument unchanged at runtime, but that is not something a
+    // static AST walk can know; treating it as safe would be exactly the
+    // silent-omission failure mode this whole mechanism exists to close.
+    it('an UNTRACKED require reference (e.g. passed through a function) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "function passthrough(fn) { return fn; }\nconst r = passthrough(require);\nconst { real } = r('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('module.require(...) with a literal relative specifier is recognised and resolved (same base as require())', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = module.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    it('a createRequire()-derived function called with a relative-looking literal is a hard error (wrong resolution base)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /createRequire\(\)-derived function with the relative-looking specifier/,
+      );
+    });
+
+    it('createRequire() invoked inline (not bound to a tracked local) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst { real } = createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /calls createRequire\(\) without binding it to a tracked local/,
+      );
+    });
+
+    it('a createRequire()-derived function used ONLY for .resolve() on a bare specifier does NOT trip fail-closed (the real scripts\\/e2e-preflight.mjs shape)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nconst SUBPATH = '@getknext/core/adapter';\nconst adapterPath = req.resolve(SUBPATH);\nexport const y = adapterPath;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('a createRequire()-derived function called with a BARE (non-relative) specifier does NOT trip fail-closed', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nconst pkg = req('@getknext/core/adapter');\nexport const y = pkg;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('createRequire referenced but not called (e.g. passed around) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nfunction wrap(fn) { return fn; }\nconst req = wrap(createRequire);\nexport const y = req;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it('a plain require() alias reaching a NON-relative (bare) specifier does NOT trip fail-closed', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const r = require;\nconst pkg = r('node:path');\nexport const y = pkg;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    // The real corpus case (scripts/e2e-preflight.mjs): `const require =
+    // createRequire(...)` SHADOWS the global `require` name with a
+    // createRequire-derived function. This must not itself be a hard error —
+    // only a later CALL through it (already covered above) is.
+    it('`const require = createRequire(...)` (shadowing the global name) is not itself a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst require = createRequire(import.meta.url);\nconst adapterPath = require.resolve('@getknext/core/adapter');\nexport const y = adapterPath;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('module.require(...) with a NON-literal specifier is a hard error, matching bare require()', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const dynamicPath = './lib/real.cjs';\nconst { real } = module.require(dynamicPath);\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/NON-LITERAL specifier/);
+    });
   });
 
   // Fail CLOSED: a file that does not PARSE at all (an unterminated regex or

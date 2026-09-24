@@ -216,6 +216,99 @@ function jsLocalImportSpecifiers(src, absPath) {
   const isDynamicImportCall = (node) =>
     ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword;
 
+  // ── aliased require / createRequire / module.require (#1316) ────────────
+  // The walk above only ever recognises a call whose callee is LITERALLY the
+  // identifier `require`. Three real JS idioms defeat that on purpose or by
+  // accident, and all three previously returned [] SILENTLY — a closure file
+  // reaching a relative path through any of them dropped straight out of the
+  // frozen set with no error at all, the same "silently unfrozen dependency"
+  // failure mode #1294 round 5 closed for non-literal specifiers:
+  //
+  //   const req = createRequire(import.meta.url); req('./x');
+  //   const r = require; r('./x');
+  //   module.require('./x');
+  //
+  // `require`/`module.require` resolve against the FILE'S OWN directory —
+  // same base this scanner already assumes — so a plain alias or
+  // `module.require` is handled exactly like a bare `require()` call once
+  // spotted. `createRequire(...)`, however, binds a NEW require function
+  // resolved against WHATEVER BASE URL its caller supplied — almost always
+  // NOT this file's directory — so this scanner cannot safely resolve a
+  // relative literal reached through it at all; it fails closed rather than
+  // guess wrong. A `createRequire`-derived function used only for `.resolve()`
+  // calls (the one real-corpus case today, scripts/e2e-preflight.mjs) is left
+  // alone — `.resolve()` was never treated as a module load even for plain
+  // `require`, see the note above.
+  //
+  // First pass: collect local bindings `const X = require` (plain alias) and
+  // `const X = createRequire(...)` (foreign-base alias) so the main walk can
+  // tell a governed alias from a stray, untracked reference.
+  /** @type {Set<string>} */
+  const plainRequireAliases = new Set();
+  /** @type {Set<string>} */
+  const createRequireAliases = new Set();
+  const collectAliases = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      const init = node.initializer;
+      if (ts.isIdentifier(init) && init.text === 'require') {
+        plainRequireAliases.add(node.name.text);
+      } else if (
+        ts.isCallExpression(init) &&
+        ts.isIdentifier(init.expression) &&
+        init.expression.text === 'createRequire'
+      ) {
+        createRequireAliases.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, collectAliases);
+  };
+  collectAliases(sourceFile);
+
+  const failClosed = (node, reason) => {
+    const { line: lineNumber } = sourceFile.getLineAndCharacterOfPosition(
+      node.getStart(sourceFile),
+    );
+    throw new Error(
+      `compat-window fingerprint: ${absPath}:${lineNumber + 1} ${reason} — refusing to guess whether it reaches a relative path (#1316).`,
+    );
+  };
+
+  const isResolveCallOn = (node, names) =>
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    names.has(node.expression.expression.text) &&
+    node.expression.name.text === 'resolve';
+  const isModuleDotRequireCall = (node) =>
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === 'module' &&
+    node.expression.name.text === 'require';
+  const isPlainAliasCall = (node) =>
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    plainRequireAliases.has(node.expression.text);
+  const isCreateRequireAliasCall = (node) =>
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    createRequireAliases.has(node.expression.text);
+  const isBareCreateRequireCall = (node) =>
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'createRequire';
+  // `import { createRequire } from 'node:module'` (and the default/namespace
+  // forms) bind the NAME `createRequire`, but the binding site itself never
+  // reaches a relative path — only a later CALL can. Only the import
+  // SPECIFIER's name is exempt here; every other reference is still governed
+  // by the checks below.
+  const isImportBindingName = (node) =>
+    !!node.parent &&
+    ((ts.isImportSpecifier(node.parent) &&
+      (node.parent.name === node || node.parent.propertyName === node)) ||
+      (ts.isImportClause(node.parent) && node.parent.name === node) ||
+      (ts.isNamespaceImport(node.parent) && node.parent.name === node));
+
   /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
   const addSpecifier = (node, callOrDeclNode) => {
     if (ts.isStringLiteralLike(node)) {
@@ -232,8 +325,97 @@ function jsLocalImportSpecifiers(src, absPath) {
 
   /** @param {ts.Node} node */
   const visit = (node) => {
+    const requireLikeResolveCall = isResolveCallOn(
+      node,
+      new Set(['require', ...plainRequireAliases, ...createRequireAliases]),
+    );
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
       addSpecifier(node.moduleSpecifier, node);
+    } else if (requireLikeResolveCall) {
+      // `<require-like>.resolve(...)` is a RESOLVE, not a module load — never
+      // treated as a dependency, matching the pre-#1316 behaviour for plain
+      // `require.resolve`. Do not descend into its argument as a require call.
+    } else if (isModuleDotRequireCall(node) || isPlainAliasCall(node)) {
+      // Same resolution base as a bare `require()` — handle identically.
+      const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
+      if (arg) {
+        addSpecifier(arg, node);
+      } else {
+        failClosed(
+          node,
+          `calls ${isModuleDotRequireCall(node) ? 'module.require()' : 'an aliased require()'} with no argument`,
+        );
+      }
+    } else if (isCreateRequireAliasCall(node)) {
+      // A createRequire()-derived function resolves against a DIFFERENT base
+      // than this file's own directory (whatever base its caller supplied).
+      // A relative-looking literal reached through it cannot be safely
+      // resolved by this scanner's file-relative model — fail closed. A
+      // literal that is clearly NOT relative (a bare package specifier, the
+      // one real-corpus shape) carries no such ambiguity and is left alone.
+      const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
+      if (!arg) {
+        failClosed(node, 'calls a createRequire()-derived function with no argument');
+      } else if (!ts.isStringLiteralLike(arg)) {
+        failClosed(node, 'calls a createRequire()-derived function with a non-literal specifier');
+      } else if (/^\.\.?\//.test(arg.text)) {
+        failClosed(
+          node,
+          `calls a createRequire()-derived function with the relative-looking specifier '${arg.text}', whose resolution base is NOT this file's own directory`,
+        );
+      }
+      // else: a bare specifier via a createRequire alias — no ambiguity, skip.
+    } else if (isBareCreateRequireCall(node) && !ts.isVariableDeclaration(node.parent)) {
+      // `createRequire(...)` invoked inline / chained / passed around rather
+      // than bound to a tracked local — e.g. `createRequire(u)('./x')`. There
+      // is no name to have collected in the alias pass, so this can only be
+      // caught here, at the call site itself.
+      failClosed(
+        node,
+        'calls createRequire() without binding it to a tracked local (e.g. chained or passed directly)',
+      );
+    } else if (
+      ts.isIdentifier(node) &&
+      node.text === 'require' &&
+      !isImportBindingName(node) &&
+      !(node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node) &&
+      !(
+        node.parent &&
+        ts.isPropertyAccessExpression(node.parent) &&
+        node.parent.expression === node
+      ) &&
+      // `module.require` — `require` as the PROPERTY NAME, not the base. The
+      // call site itself is handled by isModuleDotRequireCall; this is just
+      // the generic child-walk revisiting the same identifier node.
+      !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(node.parent && ts.isVariableDeclaration(node.parent) && node.parent.initializer === node) &&
+      !(node.parent && ts.isVariableDeclaration(node.parent) && node.parent.name === node)
+    ) {
+      // A reference to the bare `require` identifier that is none of: the
+      // direct callee of a call (handled above), the base of a property
+      // access like `require.resolve`/`require.cache` (left alone, as
+      // before), the RHS of a tracked `const x = require` alias (handled
+      // above via plainRequireAliases), or a DECLARATION binding a new local
+      // named `require` (e.g. `const require = createRequire(...)`,
+      // tracked above via createRequireAliases — the binding site itself
+      // reaches nothing; only a later call would). Anything else — passed as
+      // an argument, assigned to an object property, used in a ternary, etc.
+      // — is an untracked way to get at `require` this scanner cannot follow.
+      failClosed(
+        node,
+        'references `require` in a form this scanner does not track (not a direct call, `.resolve`/`.cache` access, or a plain `const x = require` alias)',
+      );
+    } else if (
+      ts.isIdentifier(node) &&
+      node.text === 'createRequire' &&
+      !isImportBindingName(node) &&
+      !(node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node)
+    ) {
+      // `createRequire` referenced but not itself the callee of a call (e.g.
+      // imported and reassigned, passed as a higher-order argument). The
+      // call-site cases are handled by isBareCreateRequireCall /
+      // createRequireAliases above; anything else is untracked.
+      failClosed(node, 'references `createRequire` in a form this scanner does not track');
     } else if (isBareRequireCall(node) || isDynamicImportCall(node)) {
       const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
       if (arg) {
