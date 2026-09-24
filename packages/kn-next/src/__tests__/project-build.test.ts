@@ -184,6 +184,35 @@ function tmpAppWithNext(
     return dir;
 }
 
+/**
+ * A workspace layout where `next` is HOISTED to the workspace root's
+ * `node_modules`, not present under the app dir's own `node_modules` — the
+ * common shape for npm/bun workspaces. Returns the APP dir (what a caller
+ * would pass as `cwd`); the workspace root is a temp parent directory the
+ * caller is responsible for cleaning up (removing the app dir alone would
+ * leave the root behind).
+ */
+function tmpHoistedWorkspaceApp(
+    buildScript: string,
+    nextVersion: string,
+): { workspaceRoot: string; appDir: string } {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "knext-turbo-hoist-"));
+    mkdirSync(join(workspaceRoot, "node_modules", "next"), {
+        recursive: true,
+    });
+    writeFileSync(
+        join(workspaceRoot, "node_modules", "next", "package.json"),
+        JSON.stringify({ version: nextVersion }),
+    );
+    const appDir = join(workspaceRoot, "apps", "web");
+    mkdirSync(appDir, { recursive: true });
+    writeFileSync(
+        join(appDir, "package.json"),
+        JSON.stringify({ scripts: { build: buildScript } }),
+    );
+    return { workspaceRoot, appDir };
+}
+
 describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
     it("next@16.3.0 + turbopack + a bare `next build` script throws, naming the fix", () => {
         const dir = tmpAppWithNext("next build", "16.3.0");
@@ -259,14 +288,52 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
         }
     });
 
-    it("an app whose OWN build script already passes --turbopack (explicit) is never blocked", () => {
+    it("an app whose OWN build script explicitly passes --turbopack still throws (NOT an escape hatch — it's the broken config)", () => {
         const dir = tmpAppWithNext("next build --turbopack", "16.3.3");
         try {
-            expect(() =>
-                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
-            ).not.toThrow();
+            let caught: unknown;
+            try {
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack");
+            } catch (err) {
+                caught = err;
+            }
+            expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+            expect((caught as Error).message).toContain("--webpack");
         } finally {
             rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("a HOISTED next (npm/bun workspace, no node_modules/next under the app dir) still resolves and throws", () => {
+        const { workspaceRoot, appDir } = tmpHoistedWorkspaceApp(
+            "next build",
+            "16.3.3",
+        );
+        try {
+            let caught: unknown;
+            try {
+                checkTurbopackAdapterStandaloneRegression(appDir, "turbopack");
+            } catch (err) {
+                caught = err;
+            }
+            expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
+            expect((caught as Error).message).toContain("16.3.3");
+        } finally {
+            rmSync(workspaceRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("a HOISTED next on the confirmed-good version does not throw", () => {
+        const { workspaceRoot, appDir } = tmpHoistedWorkspaceApp(
+            "next build",
+            "16.2.0",
+        );
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(appDir, "turbopack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(workspaceRoot, { recursive: true, force: true });
         }
     });
 

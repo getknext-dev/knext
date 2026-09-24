@@ -3,9 +3,10 @@ import type { NextConfig } from "next";
 /**
  * {{ name }} — Next.js options.
  *
- * Standalone-by-default (ADR-0058, #1183): knext builds this app with plain
- * `next build` (turbopack). `output: 'standalone'` is what makes that build
- * emit a self-contained `.next/standalone/server.js` — the knext runtime
+ * Standalone-by-default: knext builds this app with `next build --webpack`
+ * (see the `build` script in package.json). `output: 'standalone'` is what
+ * makes that build emit a self-contained `.next/standalone/server.js` — the
+ * knext runtime
  * image's supervisor (`knext-standalone-entry.mjs`) spawns that server and
  * drains it on SIGTERM. Deleting `output: 'standalone'` does not fail the
  * build locally, but `kn-next deploy` has nothing to COPY into the runtime
@@ -25,15 +26,16 @@ import type { NextConfig } from "next";
  * Next.js REGRESSION, bisected between 16.2.0 (builds this exact combination
  * fine) and 16.3.0 (already broken); 16.3.3 (pinned below) inherits it. Not a
  * knext defect, and not (as first suspected) a permanent Turbopack/adapter
- * architecture gap — see getknext-dev/knext#1372 for the full trace and the
- * bisection. `--webpack` is not a stopgap hack: node/bun × webpack is an
- * already-credentialed knext build target (ADR-0058), so this pins the
- * scaffold to a path knext verifies end-to-end. `kn-next build`/`deploy`
- * carry the same check for apps that did NOT go through this scaffold
+ * architecture gap. See
+ * https://github.com/getknext-dev/knext/issues/1372 for the full trace and
+ * the bisection. `--webpack` is not a stopgap hack: node/bun × webpack is an
+ * already-verified knext build target, so this pins the scaffold to a path
+ * knext verifies end-to-end. `kn-next build`/`deploy` carry the same check
+ * for apps that did NOT go through this scaffold
  * (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`) — it
  * fails fast with this same explanation rather than the raw ENOENT. Do not
- * "fix" this by dropping `--webpack` without first confirming #1372 is
- * resolved upstream at whatever Next version you are bumping to.
+ * "fix" this by dropping `--webpack` without first confirming the linked
+ * issue is resolved upstream at whatever Next version you are bumping to.
  */
 const nextConfig: NextConfig = {
     // Asset prefix is injected by `kn-next deploy` from `kn-next.config.ts`

@@ -23,6 +23,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
@@ -118,15 +119,23 @@ export interface RunProjectBuildOptions {
  * builder is unaffected by construction (same `next build`, different
  * bundler flag), and the `vinext` target never calls adapter hooks at all;
  * (2) the app's OWN package.json `build` script already passing
- * `--webpack`/`--turbopack` — this CLI does not know or care HOW an app
- * avoided the bug, only that its own script says so.
+ * `--webpack`. `--turbopack` is deliberately NOT an escape hatch — it is the
+ * exact broken configuration this guard exists to catch (explicitly
+ * requesting Turbopack does not un-break it), so a script that names
+ * `--turbopack` still hits the check and gets the guard message instead of
+ * a raw ENOENT.
  *
- * Best-effort on the Next version read: an unreadable/missing
- * `node_modules/next/package.json` (offline install, unusual layout, or a
- * `next` too old to carry `adapterPath` at all) is not itself a guard
- * failure — skip silently rather than block a build this check cannot
- * evaluate. The affected range's upper bound is intentionally OPEN (no
- * confirmed-fixed version yet, per getknext-dev/knext#1372) — update it once
+ * The Next version read resolves through Node's own module resolution
+ * (`createRequire` rooted at the app's package.json), not a hardcoded
+ * `<cwd>/node_modules/next` path — in an npm/bun workspace, Next is commonly
+ * HOISTED to a workspace root several directories above `cwd`, and a naive
+ * `join(cwd, "node_modules", "next", ...)` read silently misses it there,
+ * skipping the guard exactly where a monorepo scaffold is most likely to hit
+ * the regression. Best-effort either way: an unresolvable `next` (offline
+ * install, unusual layout, or a `next` too old to carry `adapterPath` at
+ * all) is not itself a guard failure — skip silently rather than block a
+ * build this check cannot evaluate. The affected range's upper bound is
+ * intentionally OPEN (no confirmed-fixed version yet) — update it once
  * upstream fixes this.
  */
 export function checkTurbopackAdapterStandaloneRegression(
@@ -144,23 +153,21 @@ export function checkTurbopackAdapterStandaloneRegression(
     } catch {
         return;
     }
-    if (
-        typeof buildScript === "string" &&
-        /--(webpack|turbopack)\b/.test(buildScript)
-    ) {
-        // Already opted out of the ambient Turbopack default one way or the
-        // other — nothing to warn about.
+    if (typeof buildScript === "string" && /--webpack\b/.test(buildScript)) {
+        // Already opted out of the ambient Turbopack default — nothing to
+        // warn about. `--turbopack` is NOT checked for here: it is the
+        // broken configuration, not an opt-out of it.
         return;
     }
 
     let nextVersion: string;
     try {
-        const nextPkg = JSON.parse(
-            readFileSync(
-                join(cwd, "node_modules", "next", "package.json"),
-                "utf8",
-            ),
-        ) as { version?: unknown };
+        const nextPkgPath = createRequire(join(cwd, "package.json")).resolve(
+            "next/package.json",
+        );
+        const nextPkg = JSON.parse(readFileSync(nextPkgPath, "utf8")) as {
+            version?: unknown;
+        };
         if (typeof nextPkg.version !== "string") return;
         nextVersion = nextPkg.version;
     } catch {
@@ -179,8 +186,8 @@ export function checkTurbopackAdapterStandaloneRegression(
         `next@${nextVersion} does not build on the turbopack target: it never writes ` +
             "`.next/next-server.js.nft.json` when the official Next.js Deployment Adapter " +
             "(`adapterPath`) is combined with `output:'standalone'` under Turbopack — a " +
-            "confirmed Next.js regression between 16.2.0 and 16.3.0, not a knext defect " +
-            "(getknext-dev/knext#1372 has the full trace).\n\n" +
+            "confirmed Next.js regression between 16.2.0 and 16.3.0, not a knext defect. " +
+            "See https://github.com/getknext-dev/knext/issues/1372 for the full trace.\n\n" +
             "Fix: add `--webpack` to this app's package.json `build` script " +
             '(`"build": "next build --webpack"`) — node/bun x webpack is an already-verified ' +
             "knext build target. `kn-next create`'s own scaffold does this by default.",
