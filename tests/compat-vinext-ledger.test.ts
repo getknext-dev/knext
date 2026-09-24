@@ -35,6 +35,7 @@ import {
   MAX_EXPIRY_DAYS,
   publishedNumber,
   refreshSnapshots,
+  skippedWarnings,
   staleEntries,
   validateLedger,
 } from '../scripts/compat-vinext-ledger.mjs';
@@ -59,7 +60,12 @@ function entry(over: Record<string, unknown> = {}): Any {
     feature: 'PPR fallback shells',
     upstream: 'https://github.com/cloudflare/vinext/issues/1359',
     cases: ['a', 'b'],
-    evidence: { fail: ['35995001855'] },
+    evidence: {
+      fail: [
+        { run: '1', cases: ['a', 'b'] },
+        { run: '2', cases: ['a', 'b', 'c'] },
+      ],
+    },
     added: '2026-09-24',
     expires: '2026-10-24',
     ...over,
@@ -125,15 +131,44 @@ describe('validateLedger: the approved constraints', () => {
       feature: undefined,
       upstream: undefined,
       cases: ['hash'],
-      evidence: { fail: ['1'], pass: ['2'] },
+      evidence: { fail: [{ run: '1', cases: ['hash'] }], pass: ['2'] },
     });
     expect(errs(ledger([flaky]))).toEqual([]);
-    expect(errs(ledger([{ ...flaky, evidence: { fail: ['1'] } }])).join()).toMatch(/mixed/);
+    const failOnly = { fail: [{ run: '1', cases: ['hash'] }] };
+    expect(errs(ledger([{ ...flaky, evidence: failOnly }])).join()).toMatch(/mixed/);
     expect(errs(ledger([{ ...flaky, evidence: { pass: ['2'] } }])).join()).toMatch(/mixed/);
+    const same = { fail: [{ run: '1', cases: ['hash'] }], pass: ['1'] };
+    expect(errs(ledger([{ ...flaky, evidence: same }])).join()).toMatch(/both passed and failed/);
   });
 
-  it('every entry needs failing-run evidence', () => {
+  it('every entry needs failing-run evidence recorded per run, with that run’s cases', () => {
     expect(errs(ledger([entry({ evidence: { fail: [] } })])).join()).toMatch(/evidence/);
+    expect(errs(ledger([entry({ evidence: { fail: ['1', '2'] } })])).join()).toMatch(
+      /\{ run, cases \}/,
+    );
+    const dup = {
+      fail: [
+        { run: '1', cases: ['a', 'b'] },
+        { run: '1', cases: ['a', 'b'] },
+      ],
+    };
+    expect(errs(ledger([entry({ evidence: dup })])).join()).toMatch(/duplicate evidence run/);
+  });
+
+  it('an unsupported entry needs at least two failing evidence runs', () => {
+    const one = { fail: [{ run: '1', cases: ['a', 'b'] }] };
+    expect(errs(ledger([entry({ evidence: one })])).join()).toMatch(/at least two failing runs/);
+  });
+
+  it('rejects snapshot GROWTH: every snapshot case must have failed in every recorded run', () => {
+    // 'c' failed only in run 2 — adding it to the snapshot is growth the evidence does not cover
+    const grown = errs(ledger([entry({ cases: ['a', 'b', 'c'] })])).join();
+    expect(grown).toMatch(/not covered by evidence run 1/);
+    expect(grown).toMatch(/c/);
+    // a case no run ever failed
+    expect(errs(ledger([entry({ cases: ['a', 'z'] })])).join()).toMatch(/not covered/);
+    // shrinking stays allowed
+    expect(errs(ledger([entry({ cases: ['a'] })]))).toEqual([]);
   });
 
   it('rejects an unknown lane or class, a duplicate test, and a corpus-excluded test', () => {
@@ -174,7 +209,7 @@ const navEntry = (cases: string[]) =>
     feature: undefined,
     upstream: undefined,
     cases,
-    evidence: { fail: ['1'], pass: ['2'] },
+    evidence: { fail: [{ run: '1', cases }], pass: ['2'] },
   });
 
 describe('applyLedger: case-level reclassification, never narrowing', () => {
@@ -305,35 +340,111 @@ describe('publishedNumber: passed / failed / quarantined over the unchanged deno
 });
 
 describe('refreshSnapshots: the snapshot is generated from evidence', () => {
-  const run = (cases: string[] | null): Any[] => [
-    summary({
-      failures: cases === null ? [] : [{ file: SHELLS, kind: 'assertion', cases }],
-      failed: cases === null ? 0 : 1,
-    }),
-  ];
+  const REFRESHED = '2026-09-25';
+  const run = (id: string, cases: string[] | null, over: Record<string, unknown> = {}) => ({
+    id,
+    summaries: [
+      summary({
+        failures: cases === null ? [] : [{ file: SHELLS, kind: 'assertion', cases }],
+        failed: cases === null ? 0 : 1,
+        ...over,
+      }),
+    ] as Any[],
+  });
+  const refresh = (l: Any, runs: Any[]) => refreshSnapshots(l, runs, REFRESHED);
 
-  it('keeps the cases that failed in EVERY run that reported cases, sorted', () => {
-    const { ledger: next, errors } = refreshSnapshots(ledger([entry({ cases: ['x'] })]), [
-      run(['b', 'a', 'flaky']),
-      run(['a', 'b']),
+  it('keeps the cases that failed in EVERY run, sorted, and writes the evidence it used', () => {
+    const { ledger: next, errors } = refresh(ledger([entry({ cases: ['x'] })]), [
+      run('11', ['b', 'a', 'flaky']),
+      run('12', ['a', 'b']),
     ]);
     expect(errors).toEqual([]);
-    expect(next.entries[0].cases).toEqual(['a', 'b']);
+    const e = next.entries[0];
+    expect(e.cases).toEqual(['a', 'b']);
+    expect(e.evidence.fail).toEqual([
+      { run: '11', cases: ['a', 'b', 'flaky'] },
+      { run: '12', cases: ['a', 'b'] },
+    ]);
+    expect(e.refreshed).toBe(REFRESHED);
+    expect(e.added).toBe('2026-09-24'); // the expiry window's anchor is not moved by a refresh
+    expect(errs(next)).toEqual([]);
   });
 
-  it('ignores a run with no case detail for the file, and refuses an entry with no evidence', () => {
-    const noDetail: Any[] = [
-      summary({ failures: [{ file: SHELLS, kind: 'unclassified', cases: [] }], failed: 1 }),
-    ];
-    expect(
-      refreshSnapshots(ledger([entry()]), [run(['a']), noDetail]).ledger.entries[0].cases,
-    ).toEqual(['a']);
-    expect(refreshSnapshots(ledger([entry()]), [run(null)]).errors.join()).toMatch(
-      /cannot be ledgered/,
+  it('a run where the file PASSED contributes the empty set: a regression is never laundered in', () => {
+    // run A fails an old case plus a NEW regression; run B passes the file outright
+    const { ledger: next, errors } = refresh(ledger([entry()]), [
+      run('21', ['old', 'REGRESSION']),
+      run('22', null),
+    ]);
+    expect(errors.join()).toMatch(/passed in run 22/);
+    expect(next.entries[0].cases).toEqual(entry().cases); // nothing written for it
+    expect(next.entries[0].cases).not.toContain('REGRESSION');
+  });
+
+  it('refuses a single run, and a run id given twice', () => {
+    expect(refresh(ledger([entry()]), [run('31', ['a'])]).errors.join()).toMatch(
+      /at least two runs/,
     );
-    expect(refreshSnapshots(ledger([entry()]), [run(['a']), run(['b'])]).errors.join()).toMatch(
+    expect(refresh(ledger([entry()]), [run('31', ['a']), run('31', ['a'])]).errors.join()).toMatch(
+      /at least two runs/,
+    );
+  });
+
+  it('skips a run where the file did not run or failed with no case detail — and then needs two others', () => {
+    const noDetail = {
+      id: '43',
+      summaries: [
+        summary({ failures: [{ file: SHELLS, kind: 'unclassified', cases: [] }], failed: 1 }),
+      ] as Any[],
+    };
+    const notRun = run('44', null, { notRunFiles: [SHELLS], notRun: 1 });
+    const ok = refresh(ledger([entry()]), [
+      run('41', ['a']),
+      run('42', ['a', 'b']),
+      noDetail,
+      notRun,
+    ]);
+    expect(ok.errors).toEqual([]);
+    expect(ok.ledger.entries[0].cases).toEqual(['a']);
+    expect(ok.ledger.entries[0].evidence.fail.map((r: Any) => r.run)).toEqual(['41', '42']);
+    expect(refresh(ledger([entry()]), [run('41', ['a']), noDetail, notRun]).errors.join()).toMatch(
+      /at least two failing runs/,
+    );
+  });
+
+  it('refuses an entry whose runs share no failing case', () => {
+    expect(refresh(ledger([entry()]), [run('51', ['a']), run('52', ['b'])]).errors.join()).toMatch(
       /every run/,
     );
+  });
+
+  it('a flaky entry: passing runs become evidence.pass, the snapshot is the failing runs’ common cases', () => {
+    const flaky = navEntry(['hash']);
+    const nav = (id: string, cases: string[] | null) => ({
+      id,
+      summaries: [
+        summary({
+          failures: cases === null ? [] : [{ file: NAV, kind: 'assertion', cases }],
+          failed: cases === null ? 0 : 1,
+        }),
+      ] as Any[],
+    });
+    const { ledger: next, errors } = refresh(ledger([flaky]), [
+      nav('61', ['hash']),
+      nav('62', null),
+    ]);
+    expect(errors).toEqual([]);
+    expect(next.entries[0].evidence).toEqual({
+      fail: [{ run: '61', cases: ['hash'] }],
+      pass: ['62'],
+    });
+  });
+});
+
+describe('report repeats every skipped-shard warning', () => {
+  it('lists each shard whose reclassification was skipped', () => {
+    const skipped = applyLedger(summary({ shard: '3/16', failures: undefined }), []);
+    expect(skippedWarnings([summary(), skipped])).toEqual([`shard 3/16: ${skipped.ledgerSkipped}`]);
   });
 });
 

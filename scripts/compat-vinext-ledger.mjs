@@ -30,7 +30,10 @@
  *     expiry;
  *   - an `unsupported` entry names the unsupported FEATURE and links the
  *     UPSTREAM issue;
- *   - a `flaky` entry carries mixed evidence (a failing and a passing run).
+ *   - a `flaky` entry carries mixed evidence (a failing and a passing run);
+ *   - evidence is per run with that run's failing cases, and every snapshot case
+ *     must be covered by every failing evidence run — a snapshot cannot grow
+ *     past its evidence; an unsupported entry needs at least two failing runs.
  *
  * Deliberately NOT named `e2e-*` and NOT under `test/deploy-tests-manifest.*`:
  * those patterns are the shared half of every cell's compat-window fingerprint.
@@ -41,9 +44,10 @@
  *           validates the ledger, rewrites the summary in place (exit 1 if invalid)
  *   report  --ledger <json> --summaries <dir>
  *           validates, fails on stale entries, prints the published number
- *   refresh --ledger <json> --summaries <run-dir> [--summaries <run-dir> …]
- *           regenerates every entry's `cases` snapshot as the cases that failed
- *           in EVERY given run that reported case names for that file
+ *   refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir> [...]
+ *           (at least two runs) regenerates every entry's `cases` snapshot as the
+ *           cases that failed in EVERY run (a run where the file passed empties
+ *           it, so the entry is refused) and writes the per-run evidence used
  */
 import { appendFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -57,6 +61,7 @@ export const CLASSES = ['unsupported', 'flaky'];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UPSTREAM_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+$/;
 const TEST_PATH_RE = /^test\/.+\.test\.(ts|tsx|js|mjs)$/;
+const RUN_ID_RE = /^\d+$/;
 
 function days(a, b) {
   return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
@@ -65,6 +70,55 @@ const isDate = (d) =>
   typeof d === 'string' && DATE_RE.test(d) && !Number.isNaN(Date.parse(`${d}T00:00:00Z`));
 const nonEmpty = (a) =>
   Array.isArray(a) && a.length > 0 && a.every((x) => typeof x === 'string' && x);
+
+/**
+ * Evidence is recorded per run, with the cases that run failed — written by
+ * `refresh`, never by hand. It is what bounds the snapshot: every snapshot case
+ * must have failed in EVERY recorded failing run, so a snapshot cannot grow past
+ * its evidence (a hand-added case, or one seen in only some runs, is rejected).
+ * @param {any} e
+ * @param {string} at
+ * @returns {string[]}
+ */
+function validateEvidence(e, at) {
+  const out = [];
+  const fail = e.evidence?.fail;
+  if (!Array.isArray(fail) || fail.length === 0) {
+    out.push(`${at}: evidence.fail must list the failing runs (regenerate it with \`refresh\`)`);
+    if (e.class === 'flaky')
+      out.push(`${at}: a flaky entry needs mixed evidence (a failing run AND a passing run)`);
+    return out;
+  }
+  const wellFormed = fail.every(
+    (r) => r && typeof r === 'object' && RUN_ID_RE.test(String(r.run)) && nonEmpty(r.cases),
+  );
+  if (!wellFormed) {
+    out.push(
+      `${at}: every evidence.fail item must be { run, cases } — a run id and the cases it failed`,
+    );
+    return out;
+  }
+  const runs = fail.map((r) => String(r.run));
+  if (new Set(runs).size !== runs.length) out.push(`${at}: duplicate evidence run`);
+  if (e.class === 'flaky') {
+    if (!nonEmpty(e.evidence?.pass))
+      out.push(`${at}: a flaky entry needs mixed evidence (a failing run AND a passing run)`);
+    else if (e.evidence.pass.some((r) => runs.includes(String(r))))
+      out.push(`${at}: an evidence run cannot have both passed and failed`);
+  } else if (runs.length < 2) {
+    out.push(`${at}: an unsupported entry needs at least two failing runs as evidence`);
+  }
+  if (nonEmpty(e.cases)) {
+    for (const r of fail) {
+      const missing = e.cases.filter((c) => !r.cases.includes(c));
+      if (missing.length)
+        out.push(
+          `${at}: snapshot case(s) not covered by evidence run ${r.run} (the snapshot may not grow past its evidence): ${missing.join(' | ')}`,
+        );
+    }
+  }
+  return out;
+}
 
 /**
  * @param {any} ledger
@@ -110,10 +164,7 @@ export function validateLedger(ledger, ctx) {
     } else if (e.upstream !== undefined && !UPSTREAM_RE.test(String(e.upstream))) {
       out.push(`${at}: upstream must be an issue or pull request URL`);
     }
-    if (!nonEmpty(e.evidence?.fail))
-      out.push(`${at}: evidence.fail must list at least one failing run`);
-    if (e.class === 'flaky' && (!nonEmpty(e.evidence?.pass) || !nonEmpty(e.evidence?.fail)))
-      out.push(`${at}: a flaky entry needs mixed evidence (a failing run AND a passing run)`);
+    out.push(...validateEvidence(e, at));
     if (e.added === undefined) out.push(`${at}: missing added date`);
     else if (!isDate(e.added)) out.push(`${at}: added is not a YYYY-MM-DD date`);
     if (e.expires === undefined)
@@ -218,38 +269,86 @@ export function publishedNumber(summaries) {
 }
 
 /**
- * Regenerate every entry's `cases` snapshot: the cases that failed in EVERY
- * given run that reported case names for that file. A case failing in only some
- * runs is left out on purpose — it stays a real failure rather than a hidden one.
+ * Where a file stands in one run: its failing cases, a pass, or no result.
+ * @param {any[]} summaries one run's (unapplied) shard summaries
+ * @param {string} test
+ * @returns {{ state: 'fail', cases: string[] } | { state: 'pass' } | { state: 'none' }}
+ */
+function fileInRun(summaries, test) {
+  if (summaries.some((s) => (s.notRunFiles ?? []).includes(test))) return { state: 'none' };
+  const fs = summaries.flatMap((s) => s.failures ?? []).filter((f) => f.file === test);
+  if (fs.length === 0) return { state: 'pass' };
+  if (fs.some((f) => !(f.cases ?? []).length)) return { state: 'none' }; // no case detail
+  return { state: 'fail', cases: [...new Set(fs.flatMap((f) => f.cases))].sort() };
+}
+
+/**
+ * Regenerate every entry's `cases` snapshot and its evidence from at least two
+ * runs. The snapshot is the INTERSECTION over every run: a run where the file
+ * passed contributes the empty set, so an unsupported entry that passed anywhere
+ * is refused rather than re-snapshotted (a regression can never be laundered in
+ * as "the cases it fails now"). A run where the file did not run, or failed with
+ * no case detail, is not evidence either way and is skipped. For a flaky entry,
+ * passing runs are recorded as `evidence.pass` and the snapshot is the failing
+ * runs' common cases. `refreshed` records the date; `added` (the expiry window's
+ * anchor) is left alone.
  * @param {any} ledger
- * @param {any[][]} runs one array of (unapplied) shard summaries per run
+ * @param {{ id: string, summaries: any[] }[]} runs
+ * @param {string} today
  * @returns {{ ledger: any, errors: string[] }}
  */
-export function refreshSnapshots(ledger, runs) {
+export function refreshSnapshots(ledger, runs, today) {
+  const ids = runs.map((r) => String(r.id));
+  if (runs.length < 2 || new Set(ids).size !== ids.length || !ids.every((i) => RUN_ID_RE.test(i)))
+    return {
+      ledger,
+      errors: [
+        `refresh needs at least two runs with distinct numeric run ids (got ${ids.join(', ') || 'none'})`,
+      ],
+    };
   const errors = [];
   const entries = ledger.entries.map((e) => {
-    const perRun = runs
-      .map((summaries) =>
-        summaries
-          .flatMap((s) => s.failures ?? [])
-          .filter((f) => f.file === e.test && (f.cases ?? []).length),
-      )
-      .filter((fs) => fs.length > 0)
-      .map((fs) => new Set(fs.flatMap((f) => f.cases)));
-    if (perRun.length === 0) {
-      errors.push(`${e.test}: no given run reports failing cases for it; it cannot be ledgered`);
+    const seen = runs.map((r) => ({ run: String(r.id), ...fileInRun(r.summaries, e.test) }));
+    const fail = seen.filter((r) => r.state === 'fail');
+    const pass = seen.filter((r) => r.state === 'pass').map((r) => r.run);
+    if (e.class !== 'flaky' && pass.length) {
+      errors.push(
+        `${e.test}: passed in run ${pass.join(', ')}; a passing run empties the snapshot — remove the entry`,
+      );
       return e;
     }
-    const cases = [...perRun[0]].filter((c) => perRun.every((s) => s.has(c))).sort();
+    if (e.class === 'flaky' ? fail.length < 1 || pass.length < 1 : fail.length < 2) {
+      errors.push(
+        e.class === 'flaky'
+          ? `${e.test}: a flaky entry needs a failing and a passing run among those given`
+          : `${e.test}: needs at least two failing runs with case detail (got ${fail.length}); it cannot be ledgered`,
+      );
+      return e;
+    }
+    const cases = fail[0].cases.filter((c) => fail.every((r) => r.cases.includes(c)));
     if (cases.length === 0) {
       errors.push(
         `${e.test}: no case failed in every run; it cannot be ledgered at case granularity`,
       );
       return e;
     }
-    return { ...e, cases };
+    const evidence = { fail: fail.map((r) => ({ run: r.run, cases: r.cases })) };
+    if (e.class === 'flaky') evidence.pass = pass;
+    return { ...e, cases, evidence, refreshed: today };
   });
   return { ledger: { ...ledger, entries }, errors };
+}
+
+/**
+ * One line per shard whose reclassification was skipped (fail-closed), so the
+ * run-level report repeats what each shard warned.
+ * @param {any[]} summaries applied shard summaries
+ * @returns {string[]}
+ */
+export function skippedWarnings(summaries) {
+  return summaries
+    .filter((s) => s.ledgerSkipped)
+    .map((s) => `shard ${s.shard}: ${s.ledgerSkipped}`);
 }
 
 function args(argv, name) {
@@ -280,20 +379,26 @@ function main(argv) {
   const [ledgerPath] = args(argv, 'ledger');
   if (!ledgerPath || !['apply', 'report', 'refresh'].includes(cmd)) {
     console.error(
-      'usage: compat-vinext-ledger.mjs apply --ledger <json> --summary <file> | report --ledger <json> --summaries <dir> | refresh --ledger <json> --summaries <run-dir>…',
+      'usage: compat-vinext-ledger.mjs apply --ledger <json> --summary <file> | report --ledger <json> --summaries <dir> | refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir>…',
     );
     return 2;
   }
   if (cmd === 'refresh') {
     const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
-    const runs = args(argv, 'summaries').map(readSummaries);
-    if (runs.length === 0 || runs.some((r) => r.length === 0)) {
+    const runs = args(argv, 'run').map((spec) => {
+      const at = String(spec).indexOf('=');
+      return at > 0
+        ? { id: spec.slice(0, at), summaries: readSummaries(spec.slice(at + 1)) }
+        : { id: '', summaries: [] };
+    });
+    if (runs.length < 2 || runs.some((r) => !r.id || r.summaries.length === 0)) {
       console.error(
-        '::error::refresh needs at least one --summaries <run-dir> holding shard summaries',
+        '::error::refresh needs at least two --run <run-id>=<run-dir>, each holding shard summaries',
       );
       return 1;
     }
-    const { ledger: next, errors } = refreshSnapshots(ledger, runs);
+    const today = new Date().toISOString().slice(0, 10);
+    const { ledger: next, errors } = refreshSnapshots(ledger, runs, today);
     for (const e of errors) console.error(`::error::vinext quarantine ledger — ${e}`);
     if (errors.length) return 1;
     writeFileSync(ledgerPath, `${JSON.stringify(next, null, 2)}\n`);
@@ -327,6 +432,8 @@ function main(argv) {
     );
     return 1;
   }
+  for (const w of skippedWarnings(summaries))
+    console.error(`::warning::vinext quarantine ledger — ${w}`);
   const n = publishedNumber(summaries);
   const line = `vinext × bun: ${n.passed} passed / ${n.failed} failed / ${n.quarantined} quarantined (of ${n.total})`;
   console.log(line);
