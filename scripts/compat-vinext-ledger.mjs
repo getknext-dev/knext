@@ -723,11 +723,13 @@ const canonical = (e) =>
  * Re-derive every entry from the runs it lists and compare. Catches evidence
  * that is invented (the run does not exist), cited from another lane, cited
  * from a non-`main`/wrong-workflow run, cited with a custom ref, missing a
- * shard (never counted as a pass), or that does not say what the entry
- * claims, e.g. an unsupported entry relabelled flaky with a "passing" run
- * where the file actually failed.
+ * shard (never counted as a pass), cited from BEFORE the entry's own `added`
+ * date (#1348 — a run cannot be evidence for a quarantine window that did
+ * not exist yet), or that does not say what the entry claims, e.g. an
+ * unsupported entry relabelled flaky with a "passing" run where the file
+ * actually failed.
  * @param {any} ledger
- * @param {(runId: string) => { meta: { headBranch: string, path: string }, summaries: any[] }} fetchRun
+ * @param {(runId: string) => { meta: { headBranch: string, path: string, createdAt?: string }, summaries: any[] }} fetchRun
  * @returns {string[]}
  */
 export function verifyEvidence(ledger, fetchRun) {
@@ -764,6 +766,24 @@ export function verifyEvidence(ledger, fetchRun) {
       if (meta?.headBranch !== 'main') {
         errors.push(
           `${e.test}: evidence run ${id} is not on main (head_branch=${meta?.headBranch})`,
+        );
+        continue;
+      }
+      // #1348 — a run created before the entry's own `added` date cannot be
+      // evidence for it: the quarantine window it is cited from did not
+      // exist yet. Compared as dates (createdAt's first 10 chars,
+      // YYYY-MM-DD) against `added`, which is date-only by design
+      // (validateLedger). Only checked when both are present/well-formed —
+      // an unparseable createdAt is caught by the shape checks below it
+      // instead of silently passing here.
+      if (
+        typeof e.added === 'string' &&
+        typeof meta?.createdAt === 'string' &&
+        meta.createdAt.length >= 10 &&
+        meta.createdAt.slice(0, 10) < e.added
+      ) {
+        errors.push(
+          `${e.test}: evidence run ${id} was created (${meta.createdAt}) before the entry's added date (${e.added}) — a run cannot be evidence for a quarantine window that did not exist yet`,
         );
         continue;
       }
@@ -807,7 +827,98 @@ export function verifyEvidence(ledger, fetchRun) {
   return errors;
 }
 
+/**
+ * The date (YYYY-MM-DD) an entry with `test === testName` FIRST appears in
+ * `ledgerRelPath`'s git history, walked oldest-commit-first — never trusted
+ * from the entry's own `added` field, which a PR could re-date to reset the
+ * 30-day clock (#1348). `execGit` is injected (real CLI: `git`) so this is
+ * testable without a real repo.
+ *
+ * Needs FULL history on `ledgerRelPath` (`--follow`, across renames) — a
+ * shallow checkout (`fetch-depth: 1`, this job's old default) would only
+ * ever see the single most recent commit, making every entry look
+ * "first introduced right now" regardless of its real history.
+ *
+ * Returns null when no commit in the queried history contains this entry —
+ * a caller MUST treat that as "cannot verify" (an error), never as a silent
+ * pass: with a full-history checkout of the ref actually being verified,
+ * this should only happen if the entry is not committed at all.
+ * @param {(args: string[]) => string} execGit
+ * @param {string} ledgerRelPath
+ * @param {string} testName
+ * @returns {string | null}
+ */
+export function deriveAddedFromGitLog(execGit, ledgerRelPath, testName) {
+  let log;
+  try {
+    log = execGit(['log', '--follow', '--format=%H %aI', '--', ledgerRelPath]);
+  } catch {
+    return null;
+  }
+  const commits = log
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const sp = line.indexOf(' ');
+      return { sha: line.slice(0, sp), date: line.slice(sp + 1) };
+    })
+    .reverse(); // oldest first
+  for (const c of commits) {
+    let content;
+    try {
+      content = execGit(['show', `${c.sha}:${ledgerRelPath}`]);
+    } catch {
+      continue; // the file did not exist at this commit (e.g. a rename edge)
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      continue; // not valid JSON at this point in history — keep looking forward
+    }
+    if ((parsed.entries ?? []).some((e) => e.test === testName)) {
+      return c.date.slice(0, 10);
+    }
+  }
+  return null;
+}
+
+/**
+ * Cross-check every entry's self-reported `added` against git history
+ * (#1348): a PR could otherwise invent evidence or silently re-date `added`
+ * to reset the 30-day clock, and nothing short of the commit graph itself
+ * can catch a re-date (the JSON field alone is exactly what would have been
+ * edited). Every entry must resolve to SOME commit (a real one is always
+ * discoverable with a full-history checkout, since the entry's own
+ * introducing commit is part of that history), and the resolved date must
+ * equal `added` exactly — `added` is meant to be set once, at first
+ * introduction, and never move again.
+ * @param {any} ledger
+ * @param {(args: string[]) => string} execGit
+ * @param {string} ledgerRelPath
+ * @returns {string[]}
+ */
+export function verifyAddedDates(ledger, execGit, ledgerRelPath) {
+  const errors = [];
+  for (const e of ledger.entries) {
+    const derived = deriveAddedFromGitLog(execGit, ledgerRelPath, e.test);
+    if (derived === null) {
+      errors.push(
+        `${e.test}: no commit in ${ledgerRelPath}'s git history introduces this entry — added cannot be verified (needs a full-history checkout)`,
+      );
+      continue;
+    }
+    if (derived !== e.added) {
+      errors.push(
+        `${e.test}: added (${e.added}) does not match git history — this entry first appears in a commit dated ${derived}; added must be set once, at first introduction, and never re-dated`,
+      );
+    }
+  }
+  return errors;
+}
+
 const gh = (a) => execFileSync('gh', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const git = (a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 /** Fetch runs into a temp dir, read their summaries, and always remove the dir. */
 function withRuns(fn) {
@@ -819,11 +930,11 @@ function withRuns(fn) {
   }
 }
 
-/** One run's `head_branch` and checked-out workflow `path`, via `gh api`. */
+/** One run's `head_branch`, checked-out workflow `path`, and `created_at` (#1348), via `gh api`. */
 function runMeta(repo, runId) {
   const raw = gh(['api', `repos/${repo}/actions/runs/${runId}`]);
   const parsed = JSON.parse(raw);
-  return { headBranch: parsed.head_branch, path: parsed.path };
+  return { headBranch: parsed.head_branch, path: parsed.path, createdAt: parsed.created_at };
 }
 
 function args(argv, name) {
@@ -892,16 +1003,22 @@ function main(argv) {
       console.error('::error::verify needs GITHUB_REPOSITORY (owner/name) and a gh token');
       return 1;
     }
-    const failures = withRuns((root) =>
+    const evidenceFailures = withRuns((root) =>
       verifyEvidence(ledger, (id) => {
         const dir = join(root, id);
         downloadRun(gh, { repo, runId: id, dir });
         return { meta: runMeta(repo, id), summaries: readSummaries(dir) };
       }),
     );
+    // #1348 — never trust `added` from the JSON field alone; re-derive it
+    // from the ledger file's own git history.
+    const addedFailures = verifyAddedDates(ledger, git, ledgerPath);
+    const failures = [...evidenceFailures, ...addedFailures];
     for (const f of failures) console.error(`::error::vinext quarantine ledger — ${f}`);
     if (failures.length === 0)
-      console.log(`verified ${ledger.entries.length} ledger entries against their listed runs`);
+      console.log(
+        `verified ${ledger.entries.length} ledger entries against their listed runs and git history`,
+      );
     return failures.length ? 1 : 0;
   }
   if (cmd === 'apply') {

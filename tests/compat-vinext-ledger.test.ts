@@ -43,6 +43,7 @@ import {
   CLASSES,
   collectHistory,
   DEFAULT_NEXTJS_REF,
+  deriveAddedFromGitLog,
   downloadRun,
   EXPECTED_SHARD_TOTAL,
   FLAKY_FILE_CAP,
@@ -62,6 +63,7 @@ import {
   skippedWarnings,
   staleEntries,
   validateLedger,
+  verifyAddedDates,
   verifyEvidence,
 } from '../scripts/compat-vinext-ledger.mjs';
 
@@ -1074,6 +1076,10 @@ describe('verifyEvidence: every entry re-derives from the branch/workflow/ref/sh
   const meta = (over: Record<string, unknown> = {}) => ({
     headBranch: 'main',
     path: WORKFLOW,
+    // #1348 — safely AFTER every default entry() fixture's `added`
+    // ('2026-09-24') so the existing "clean verify" tests are unaffected;
+    // overridden per-run below for the before-added test.
+    createdAt: '2026-09-25T00:00:00Z',
     ...over,
   });
   const RUNS: Record<string, Any> = {
@@ -1104,6 +1110,12 @@ describe('verifyEvidence: every entry re-derives from the branch/workflow/ref/sh
     },
     '109': { meta: meta(), summaries: vinextRun().slice(0, 15) }, // missing a shard
     '110': { meta: meta(), summaries: vinextRun({ ref: 'v16.3.0-canary' }) }, // custom ref
+    // #1348 — a real run, correctly on main/this workflow/default ref/full
+    // shard set, but created WELL BEFORE the entry's own `added` date.
+    '111': {
+      meta: meta({ createdAt: '2026-08-01T00:00:00Z' }),
+      summaries: vinextRun({ failures: [{ file: NAV, kind: 'timeout', cases: ['hash'] }] }),
+    },
   };
   const fetchRun = (id: string) => {
     if (!RUNS[id]) throw new Error(`run ${id} not found`);
@@ -1181,6 +1193,151 @@ describe('verifyEvidence: every entry re-derives from the branch/workflow/ref/sh
     const other = navEntry(['hash']);
     other.evidence = { fail: [{ run: '104', cases: ['hash'] }], pass: ['110', '106'] };
     expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(/default nextjsRef/);
+  });
+
+  // #1348 — a run created BEFORE the entry's own `added` date cannot be
+  // evidence for it: the quarantine window did not exist yet when that run
+  // happened.
+  it("a run created before the entry's added date cannot be cited", () => {
+    const other = navEntry(['hash']);
+    other.evidence = { fail: [{ run: '111', cases: ['hash'] }], pass: ['105', '106'] };
+    expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(
+      /before the entry's added date/,
+    );
+  });
+
+  it("a run created ON the entry's added date (same day) IS accepted — the check is inclusive", () => {
+    const other = navEntry(['hash']);
+    other.evidence = {
+      fail: [{ run: '104', cases: ['hash'] }],
+      pass: ['105', '106'],
+    };
+    // meta()'s default createdAt ('2026-09-25') is the day AFTER the
+    // default entry()'s added ('2026-09-24') — this case exercises the
+    // boundary directly by citing a run created exactly on `added`.
+    const sameDayRuns: Record<string, Any> = {
+      ...RUNS,
+      '104': { ...RUNS['104'], meta: meta({ createdAt: `${other.added}T23:59:59Z` }) },
+    };
+    const fetchSameDay = (id: string) => {
+      if (!sameDayRuns[id]) throw new Error(`run ${id} not found`);
+      return sameDayRuns[id];
+    };
+    expect(verifyEvidence(ledger([other]), fetchSameDay).join()).not.toMatch(
+      /before the entry's added date/,
+    );
+  });
+});
+
+describe('deriveAddedFromGitLog: the FIRST commit introducing an entry, never the JSON field (#1348)', () => {
+  const LEDGER_REL_PATH = 'test/compat-vinext-ledger.json';
+
+  // A fake `git` — canned `log --follow --format=%H %aI` output plus
+  // per-SHA `show <sha>:<path>` content, matching the exact two commands
+  // deriveAddedFromGitLog issues (proving the function against its REAL
+  // git-invocation shape, not a hand-simplified stand-in).
+  function fakeGit(
+    commits: { sha: string; date: string }[],
+    contentBySha: Record<string, string>,
+  ): (args: string[]) => string {
+    return (args: string[]) => {
+      if (args[0] === 'log') {
+        return commits.map((c) => `${c.sha} ${c.date}`).join('\n');
+      }
+      if (args[0] === 'show') {
+        const spec = args[1] ?? '';
+        const sha = spec.split(':')[0];
+        if (!(sha in contentBySha)) throw new Error(`fatal: path does not exist in ${sha}`);
+        return contentBySha[sha];
+      }
+      throw new Error(`unexpected git invocation: ${args.join(' ')}`);
+    };
+  }
+
+  it('returns the date of the OLDEST commit (by git log order, newest-first) whose content includes the entry', () => {
+    // git log lists newest first — c3, c2, c1 — the function must walk it
+    // in REVERSE (oldest first) to find the true FIRST introduction.
+    const execGit = fakeGit(
+      [
+        { sha: 'c3', date: '2026-09-24T10:00:00+00:00' },
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' },
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' },
+      ],
+      {
+        c1: JSON.stringify({ entries: [] }),
+        c2: JSON.stringify({ entries: [{ test: SHELLS }] }),
+        c3: JSON.stringify({ entries: [{ test: SHELLS }] }),
+      },
+    );
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-10');
+  });
+
+  it('returns null when no commit in history contains the entry', () => {
+    const execGit = fakeGit([{ sha: 'c1', date: '2026-09-01T10:00:00+00:00' }], {
+      c1: JSON.stringify({ entries: [] }),
+    });
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBeNull();
+  });
+
+  it('returns null when `git log` itself fails (e.g. a shallow checkout with no history at all)', () => {
+    const execGit = () => {
+      throw new Error('fatal: not a git repository');
+    };
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBeNull();
+  });
+
+  it('skips a commit whose content is not valid JSON at that point in history, and keeps looking forward', () => {
+    const execGit = fakeGit(
+      [
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' },
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' },
+      ],
+      {
+        c1: 'not valid json at all',
+        c2: JSON.stringify({ entries: [{ test: SHELLS }] }),
+      },
+    );
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-10');
+  });
+});
+
+describe("verifyAddedDates: every entry's `added` must match its git-derived first-introduction date (#1348)", () => {
+  const LEDGER_REL_PATH = 'test/compat-vinext-ledger.json';
+
+  function fakeGitFor(introducedDate: string, testName: string): (args: string[]) => string {
+    return (args: string[]) => {
+      if (args[0] === 'log') return `c1 ${introducedDate}T10:00:00+00:00`;
+      if (args[0] === 'show') return JSON.stringify({ entries: [{ test: testName }] });
+      throw new Error(`unexpected git invocation: ${args.join(' ')}`);
+    };
+  }
+
+  it('accepts an entry whose added date matches its git-derived first-introduction date', () => {
+    const e = entry({ added: '2026-09-01' });
+    const execGit = fakeGitFor('2026-09-01', e.test);
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH)).toEqual([]);
+  });
+
+  // The exact attack this closes: a PR quietly bumps `added` forward to
+  // reset the 30-day clock, without touching anything git history would
+  // show as "new" — the entry has been in the file since 2026-09-01, but
+  // its `added` field now claims 2026-09-20.
+  it('catches a RE-DATED added field — the entry has been in git history since an earlier commit', () => {
+    const e = entry({ added: '2026-09-20' });
+    const execGit = fakeGitFor('2026-09-01', e.test);
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
+      /does not match git history/,
+    );
+  });
+
+  it('flags an entry with no discoverable introducing commit as unverifiable, never as a silent pass', () => {
+    const e = entry({ added: '2026-09-01' });
+    const execGit = () => {
+      throw new Error('fatal: not a git repository');
+    };
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
+      /cannot be verified/,
+    );
   });
 });
 
