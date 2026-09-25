@@ -43,21 +43,30 @@ const ALLOWED_MINIO_REFS = new Set([
  * for szpg's own review at getknext-dev/knext#1423. Each exemption is scoped
  * to its ONE offending line, not the whole file — a second, different broken
  * ref landing anywhere else in these files must still fail.
+ *
+ * `count` is the EXACT number of times this exact line is expected to occur
+ * in the file — not "at least one". Without a count, copying the exempt line
+ * verbatim into a NEW container (e.g. duplicating the ensure-bucket
+ * initContainer in 55-storage-init.yaml) stays invisible: `isExemptLine`
+ * would happily wave through every copy (#1413 review, round 2).
  */
-const EXEMPTIONS: Array<{ file: string; lineSubstring: string }> = [
+const EXEMPTIONS: Array<{ file: string; lineSubstring: string; count: number }> = [
   {
     file: 'packages/scale-zero-pg/deploy/50-minio.yaml',
     lineSubstring:
       'quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z@sha256:cc144348ad1e4126766279b042804fa4f130da531cc811e91fdbcb12c6bc8881',
+    count: 1,
   },
   {
     file: 'packages/scale-zero-pg/deploy/62-backup.yaml',
     lineSubstring: 'image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned — UNPULLABLE, see #1423',
+    count: 2, // the mirror CronJob (:161) and the prune CronJob (:635)
   },
   {
     file: 'packages/scale-zero-pg/deploy/55-storage-init.yaml',
     lineSubstring:
       'image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned (matches backup mirror) — UNPULLABLE, see #1423',
+    count: 1,
   },
 ];
 
@@ -147,6 +156,20 @@ describe('MinIO image references are lockstep-pinned to the working mirror (#140
           const isPinned = [...ALLOWED_MINIO_REFS].some((allowed) => ref.startsWith(allowed));
           if (!isPinned) offenders.push(`${relPath}: ${ref}`);
         }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('every exemption occurs EXACTLY its declared count, no more, no fewer (#1413 review, round 2)', () => {
+    const offenders: string[] = [];
+    for (const { file, lineSubstring, count } of EXEMPTIONS) {
+      const text = readFileSync(join(ROOT, file), 'utf8');
+      const occurrences = text.split('\n').filter((line) => line.includes(lineSubstring)).length;
+      if (occurrences !== count) {
+        offenders.push(
+          `${file}: expected ${count} occurrence(s) of the exempt line, found ${occurrences}`,
+        );
       }
     }
     expect(offenders).toEqual([]);
