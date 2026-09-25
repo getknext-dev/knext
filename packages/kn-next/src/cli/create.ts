@@ -415,23 +415,52 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
         }
     }
 
+    // #1398: `.gitignore` is the ONE emitted file that must never be
+    // silently clobbered under `--force` — a user's own `.gitignore`
+    // may ignore secrets (a private key, a local override file) knext's
+    // generated one knows nothing about, and overwriting it un-ignores
+    // them. Every other file's `--force` semantics are unchanged (that
+    // is the whole point of the flag: "add knext to an app I already
+    // have"); this is a narrow, named exception, not a general
+    // clobber-avoidance policy. Reaching this point with the file already
+    // present on disk only happens under `--force` — the clash check above
+    // already refused the run otherwise. Removed from the RETURNED map too
+    // (not just skipped on write): the caller (`createMain`) reports file
+    // counts/lists straight off this map's keys, so leaving the key in
+    // would print the false "Created … .gitignore" line for a file this
+    // call never touched (#1398 rev-2). `rmdirSync`-style skip vs. deletion
+    // has to happen before the `dryRun` early return too, so a dry-run
+    // listing is equally honest about what would (not) be written.
+    if (
+        files.has(GITIGNORE_TARGET_KEY) &&
+        existsSync(join(appDir, GITIGNORE_TARGET_KEY))
+    ) {
+        files.delete(GITIGNORE_TARGET_KEY);
+    }
+
     if (opts.dryRun) return files;
 
     for (const [rel, content] of files) {
         const target = join(appDir, rel);
-        // #1398: `.gitignore` is the ONE emitted file that must never be
-        // silently clobbered under `--force` — a user's own `.gitignore`
-        // may ignore secrets (a private key, a local override file) knext's
-        // generated one knows nothing about, and overwriting it un-ignores
-        // them. Every other file's `--force` semantics are unchanged (that
-        // is the whole point of the flag: "add knext to an app I already
-        // have"); this is a narrow, named exception, not a general
-        // clobber-avoidance policy.
-        if (rel === GITIGNORE_TARGET_KEY && existsSync(target)) continue;
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, content, "utf8");
     }
     return files;
+}
+
+/**
+ * Whether a `.gitignore` on disk actually ignores `.env`/`.env.*` (a simple
+ * literal check, not `git check-ignore` — this runs against a USER's own
+ * possibly-uninitialized directory, not a git repo, so the real-check-ignore
+ * helper `scaffold-gitignore.test.ts` uses for the SHIPPED template is not
+ * available here). Deliberately conservative: a line has to actually start
+ * with `.env` (after trimming) to count, so `#.env` (commented out) and
+ * `!.env.example` (a negation) do not.
+ */
+function gitignoreCoversEnv(content: string): boolean {
+    return content
+        .split(/\r?\n/)
+        .some((line) => /^\.env(\..*)?\/?$/.test(line.trim()));
 }
 
 const HELP = `kn-next create — scaffold a knext app with guarded instrumentation
@@ -546,9 +575,33 @@ export async function createMain(argv: string[]): Promise<number> {
             dryRun: values["dry-run"],
         });
         const rels = [...files.keys()].sort();
+        // #1398 rev-2: `writeScaffold` already removes a KEPT `.gitignore`
+        // (an existing one under `--force`) from `files`, so it correctly
+        // never appears in the "Created"/"Would create" count/list above.
+        // Report it honestly instead of staying silent about it: a
+        // pre-existing `.gitignore` on disk that isn't in the returned map
+        // means it was kept, not skipped-because-absent-from-the-scaffold.
+        const gitignoreWasKept =
+            !values["dry-run"] &&
+            !files.has(GITIGNORE_TARGET_KEY) &&
+            existsSync(join(appDir, GITIGNORE_TARGET_KEY));
+        let gitignoreNote = "";
+        if (gitignoreWasKept) {
+            gitignoreNote = `\nKept your existing ${GITIGNORE_TARGET_KEY} (not overwritten).\n`;
+            const existing = readFileSync(
+                join(appDir, GITIGNORE_TARGET_KEY),
+                "utf8",
+            );
+            if (!gitignoreCoversEnv(existing)) {
+                gitignoreNote +=
+                    `WARNING: your existing ${GITIGNORE_TARGET_KEY} does not appear to ignore ` +
+                    `.env / .env.* — secrets in those files could be committed.\n`;
+            }
+        }
         process.stdout.write(
             `${values["dry-run"] ? "Would create" : "Created"} ${rels.length} file(s) in ${appDir}:\n` +
                 `${rels.map((r) => `  ${r}\n`).join("")}` +
+                gitignoreNote +
                 (values["dry-run"] ? "" : partingLine(positionals[0] ?? ".")),
         );
         // #950 honesty check, AFTER the success output so it reads as the last

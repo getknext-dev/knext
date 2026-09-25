@@ -12,7 +12,7 @@
  * render time, so the rendered/written app still gets the real dotfile.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
     existsSync,
@@ -24,7 +24,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadTemplates, renderScaffold, writeScaffold } from "../cli/create";
+import {
+    createMain,
+    loadTemplates,
+    renderScaffold,
+    writeScaffold,
+} from "../cli/create";
 
 /**
  * Real `git check-ignore`, not a substring/regex re-implementation of
@@ -193,6 +198,143 @@ describe("#1398 (rev-1393): --force must not silently clobber a user's own pre-e
             expect(readFileSync(join(dir, ".gitignore"), "utf8")).toContain(
                 "node_modules",
             );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("removes the kept .gitignore from writeScaffold's returned map — it was NOT created", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-gitignore-kept-map-"));
+        try {
+            writeFileSync(join(dir, ".gitignore"), "secrets.local\n", "utf8");
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "acme" }),
+                "utf8",
+            );
+            const files = writeScaffold({
+                appDir: dir,
+                name: "acme",
+                force: true,
+            });
+            expect(files.has(".gitignore")).toBe(false);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("still returns .gitignore in the map when it was actually written", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-gitignore-written-map-"));
+        try {
+            const files = writeScaffold({
+                appDir: dir,
+                name: "acme",
+                force: true,
+            });
+            expect(files.has(".gitignore")).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("#1398 (rev-1393 round 2): createMain's --force output does not falsely claim .gitignore was Created", () => {
+    /** Capture what createMain writes to stdout/stderr for one invocation. */
+    async function capture(
+        argv: string[],
+    ): Promise<{ code: number; out: string; err: string }> {
+        let out = "";
+        let err = "";
+        const outSpy = spyOn(process.stdout, "write").mockImplementation(
+            (chunk) => {
+                out += String(chunk);
+                return true;
+            },
+        );
+        const errSpy = spyOn(process.stderr, "write").mockImplementation(
+            (chunk) => {
+                err += String(chunk);
+                return true;
+            },
+        );
+        try {
+            const code = await createMain(argv);
+            return { code, out, err };
+        } finally {
+            outSpy.mockRestore();
+            errSpy.mockRestore();
+        }
+    }
+
+    it('does not print "Created … .gitignore" when an existing .gitignore was kept under --force', async () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-gitignore-cli-kept-"));
+        try {
+            writeFileSync(join(dir, ".gitignore"), "secrets.local\n", "utf8");
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "acme" }),
+                "utf8",
+            );
+            const { code, out } = await capture([
+                dir,
+                "--name",
+                "acme",
+                "--force",
+            ]);
+            expect(code).toBe(0);
+            // Only the "Created N file(s)" LISTING block (up to the first
+            // blank line) must be free of `.gitignore` — the note that
+            // follows is expected to name it (that's the honest report).
+            const listingBlock = out.split("\n\n")[0] ?? "";
+            expect(listingBlock).not.toContain(".gitignore");
+            expect(out.toLowerCase()).toContain(
+                "kept your existing .gitignore",
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("warns when the kept .gitignore does not ignore .env", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-gitignore-cli-noenv-"));
+        try {
+            writeFileSync(join(dir, ".gitignore"), "*.log\n", "utf8");
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "acme" }),
+                "utf8",
+            );
+            const { code, out } = await capture([
+                dir,
+                "--name",
+                "acme",
+                "--force",
+            ]);
+            expect(code).toBe(0);
+            expect(out.toLowerCase()).toContain(".env");
+            expect(out.toLowerCase()).toMatch(/warn/);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("does NOT warn when the kept .gitignore already ignores .env", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-gitignore-cli-hasenv-"));
+        try {
+            writeFileSync(join(dir, ".gitignore"), ".env\n.env.*\n", "utf8");
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "acme" }),
+                "utf8",
+            );
+            const { code, out } = await capture([
+                dir,
+                "--name",
+                "acme",
+                "--force",
+            ]);
+            expect(code).toBe(0);
+            expect(out.toLowerCase()).not.toMatch(/warn.*\.env|\.env.*warn/);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
