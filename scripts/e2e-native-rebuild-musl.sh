@@ -188,6 +188,12 @@ trap restore_ownership EXIT
 # failure under `set -eu` must not abort with zero diagnostic output (review
 # finding): stderr reaches the caller's log.
 apk add --no-cache python3 make g++ npm su-exec >/dev/null
+# #1425 PROBE (temporary — removed once the exact versions below are pinned):
+# print the ACTUAL resolved NEVRA for each package this run's index gave us,
+# so a real CI run's log (this environment has no docker) can be read back to
+# pin each package by exact version in a follow-up commit.
+echo "[native-rebuild] #1425 probe — resolved apk versions:"
+apk info -v python3 make g++ npm su-exec 2>&1 | sed 's/^/[native-rebuild] #1425 probe:   /'
 
 # #1257 round 7 — an unprivileged user every npm install/ci below is
 # `su-exec`'d to, so install scripts (and anything node-gyp/npm itself runs)
