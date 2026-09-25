@@ -56,7 +56,14 @@ fi
 # of, which would sail through with a plain tag and no digest. Scan the
 # whole (post-pin) manifest for any `image:` value that isn't `@sha256:`-
 # pinned and refuse to hand back an under-pinned manifest.
-unpinned="$(grep -nE '^[[:space:]]*image:[[:space:]]*"?[^"[:space:]]+"?[[:space:]]*$' "$file" | grep -v '@sha256:' || true)"
+#
+# #1413 review round 2: the earlier regex required the line to START with
+# `image:` (after only whitespace), which MISSES the YAML list-item form
+# `- image: repo:tag` (e.g. kourier.yaml's containers list) — an optional
+# `-[[:space:]]*` prefix is now allowed. It also required end-of-line right
+# after the ref, so a trailing `# comment` made the whole line invisible to
+# this scan; the anchor now tolerates an optional trailing comment.
+unpinned="$(grep -nE '^[[:space:]]*(-[[:space:]]*)?image:[[:space:]]*"?[^"[:space:]]+"?[[:space:]]*(#.*)?$' "$file" | grep -v '@sha256:' || true)"
 if [[ -n "$unpinned" ]]; then
   echo "::error::pin-known-images: ${file} still has unpinned (non-@sha256) image reference(s) after pinning — a new/renamed image upstream added is not in image-digest-pins.json:" >&2
   echo "$unpinned" >&2
