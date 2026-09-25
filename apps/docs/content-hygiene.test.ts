@@ -109,6 +109,47 @@ describe('docs content — install & CLI story', () => {
   });
 });
 
+describe('docs content — no stale `kn-next <verb>` command text', () => {
+  // `kn-next` was renamed to `knext` (the deprecated alias still runs, but
+  // every USER-FACING command example must show the canonical name). Only
+  // getting-started.mdx's deprecation callout is allowed to say the bare
+  // word `kn-next` at all — it explains the alias, it does not tell a
+  // reader to type `kn-next <verb>`. Every other page, and every `kn-next`
+  // immediately followed by a CLI verb (a command a reader would copy and
+  // run), is a stale pre-rename example.
+  const CLI_VERBS = [
+    'create',
+    'deploy',
+    'build',
+    'doctor',
+    'status',
+    'db',
+    'rollback',
+    'gc',
+    'preview',
+    'loadtest',
+    'validate',
+    'cleanup',
+  ];
+  const staleVerbCommand = new RegExp(`\\bkn-next\\s+(?:${CLI_VERBS.join('|')})\\b`);
+
+  it('never shows `kn-next <verb>` as a command to run, anywhere in the docs', () => {
+    expect(hits(staleVerbCommand)).toEqual([]);
+  });
+
+  it('mutation control: the guard actually matches the stale form it exists to catch', () => {
+    // Not a doc-content check — proves the regex itself is live, so a typo
+    // in CLI_VERBS/staleVerbCommand above cannot silently make the previous
+    // test pass by matching nothing.
+    expect(staleVerbCommand.test('run `kn-next deploy` first')).toBe(true);
+    expect(staleVerbCommand.test('run `knext deploy` first')).toBe(false);
+    // The deprecation callout's own bare-alias sentence must NOT trip it.
+    expect(staleVerbCommand.test('The CLI command was renamed from `kn-next` to `knext`.')).toBe(
+      false,
+    );
+  });
+});
+
 describe('docs content — CLI reference matches the real verb set', () => {
   const cli = readFileSync(join(DOCS_DIR, 'cli.mdx'), 'utf-8');
 
