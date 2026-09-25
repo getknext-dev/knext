@@ -2,7 +2,7 @@
  * runtime-image-selection — the CLI-selection wiring for ADR-0055.
  *
  * ADR-0055 ships two runtime image shapes: the vinext single-executable image
- * (`templates/app/Dockerfile.hbs`, scaffolded by `kn-next create`) and the
+ * (`templates/app/Dockerfile.hbs`, scaffolded by `knext create`) and the
  * node/bun STANDALONE runtime image (`templates/runtime-standalone/`,
  * deliberately kept OUT of scaffold-emission by the #1177 increment). This
  * suite pins the wiring that selects between them at build/deploy time:

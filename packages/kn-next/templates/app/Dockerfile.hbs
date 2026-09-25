@@ -15,13 +15,13 @@
 # cold-start than a standalone image.
 #
 # Build context is the app root, so `.output/public` resolves. The binary is
-# built OUTSIDE this file — by `kn-next build`, which pins the target triple to
+# built OUTSIDE this file — by `knext build`, which pins the target triple to
 # the image arch — and passed in, because cross-compiling inside the image
 # would force a Bun toolchain into the runtime layer for no benefit.
 #
 # BINARY must be a musl target for this base (`bun-linux-x64-musl` /
 # `bun-linux-arm64-musl`). A glibc binary exits 1 here with no useful message.
-# Overridden by `kn-next deploy` with the arch it built for:
+# Overridden by `knext deploy` with the arch it built for:
 #   docker build --build-arg BINARY=knext-exec-linux-arm64 .
 ARG BINARY=knext-exec-linux-x64
 
@@ -60,7 +60,7 @@ COPY .output/public /app/.output/public
 # native library from a path inside the binary. It is opened by absolute path
 # instead, from a real file next to the executable.
 #
-# `kn-next build` stages the addons for THIS IMAGE's platform (linuxmusl),
+# `knext build` stages the addons for THIS IMAGE's platform (linuxmusl),
 # fetching them at the lockfile-pinned version when the build host runs
 # something else — a mac's own install holds only darwin addons, and shipping
 # those was a boot crash-loop, not a graceful fallback: the generated
@@ -72,7 +72,7 @@ COPY .output/public /app/.output/public
 # path, so flattening the tree breaks it.
 #
 # `native/.integrity.json` travels INSIDE this directory and must not be stripped
-# out: it is the sha256-per-file record `kn-next build` wrote from the lockfile,
+# out: it is the sha256-per-file record `knext build` wrote from the lockfile,
 # and the binary refuses to `dlopen` anything that disagrees with it. Copying the
 # directory ships it — that is why the manifest lives in the tree rather than
 # beside it, so no second COPY line can be forgotten.
@@ -82,7 +82,7 @@ COPY native /app/native
 # the binary still runs, warns, and loads the addon UNVERIFIED (older images must
 # not brick) — which is a state to catch at build time, not to discover in a log.
 RUN test -f /app/native/.integrity.json || { \
-      echo "native/.integrity.json missing — run 'kn-next build' to stage a pinned native tree" >&2; \
+      echo "native/.integrity.json missing — run 'knext build' to stage a pinned native tree" >&2; \
       exit 1; \
     }
 

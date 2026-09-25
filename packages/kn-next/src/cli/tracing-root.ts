@@ -16,7 +16,7 @@
  * outermost one it finds. `deploy.ts` instead hardcoded
  * `resolve(process.cwd(), "../..")` — a claim that every app sits at
  * `apps/<name>`. That is true inside this monorepo and false for an app made by
- * `kn-next create` (#642) in a user's own repo, where the app IS the root and
+ * `knext create` (#642) in a user's own repo, where the app IS the root and
  * the hardcode points two levels ABOVE the project.
  *
  * Choosing the lockfile walk is not a preference for the layout-independent

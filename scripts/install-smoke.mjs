@@ -4,7 +4,8 @@
  *
  * The OUTSIDE-CONSUMER gate. Proves knext works for a user on a fresh machine with
  * plain Node + npm, NO pnpm workspace, NO Bun — exercising BOTH ways a consumer uses
- * knext: (a) the `kn-next` CLI bin, and (b) `import`ing the public app surface
+ * knext: (a) the CLI bin — `knext` (canonical, #1369) and its deprecated `kn-next`
+ * alias, both shipped from @getknext/core — and (b) `import`ing the public app surface
  * (`@getknext/core/adapter`, otel-config, cache-handler, the `KnativeNextConfig` type;
  * `@getknext/lib/clients`, `@getknext/lib/health`, `@getknext/lib/logger`). PK1/#114 declared
  * these exports; PK5/#116 froze the public set. This job CATCHES regressions in either
@@ -362,6 +363,100 @@ try {
   if (!/kn-next|Usage|Options/i.test(helpOut)) {
     finish(FAIL, "kn-next --help: exit 0 but output lacked 'kn-next'/'Usage'/'Options'");
   }
+  // #1369: `kn-next` is now the DEPRECATED alias — a real installed consumer
+  // must see the one-line stderr notice, not just the pure-unit-test proxy
+  // fixture. `helpOut` above concatenates stdout+stderr, so this checks the
+  // stderr stream in isolation instead.
+  if (!/deprecated/i.test(help.stderr || '')) {
+    finish(
+      FAIL,
+      'kn-next --help: expected a deprecation notice on stderr (none found) — a real ' +
+        'installed consumer would not learn to switch to `knext`',
+    );
+  }
+
+  // --- 3a-knext. #1369: the CANONICAL `knext` bin, same package -------------
+  // @getknext/core ships BOTH bins (package.json `bin.knext` + `bin.kn-next`)
+  // — the bare npm name `knext` belongs to someone else, so there is no
+  // separate alias package for it the way there is for `kn-next` (3a-alias
+  // below); `npx knext` is not a thing this gate can prove, only "the
+  // installed @getknext/core package's own `knext` bin works and prints no
+  // deprecation notice".
+  const knextBinPath = join(workDir, 'node_modules', '.bin', 'knext');
+  if (!existsSync(knextBinPath)) {
+    finish(FAIL, `installed canonical bin not found at ${knextBinPath}`);
+  }
+  console.log('[install-smoke] running `node <knext bin> --help` ...');
+  const knextHelp = run('node', [knextBinPath, '--help'], { cwd: workDir });
+  const knextHelpOut = `${knextHelp.stdout || ''}${knextHelp.stderr || ''}`;
+  console.log('----- knext --help (begin) -----');
+  console.log(knextHelpOut.trim());
+  console.log('----- knext --help (end) -------');
+  if (knextHelp.status !== 0) {
+    finish(FAIL, `knext --help exited ${knextHelp.status} (expected 0)`);
+  }
+  if (!/knext|Usage|Options/i.test(knextHelpOut)) {
+    finish(FAIL, "knext --help: exit 0 but output lacked 'knext'/'Usage'/'Options'");
+  }
+  if ((knextHelp.stderr || '').trim() !== '') {
+    finish(
+      FAIL,
+      `knext --help: expected NO stderr output (the canonical bin), got: ${knextHelp.stderr}`,
+    );
+  }
+  if (knextHelp.stdout !== help.stdout) {
+    finish(
+      FAIL,
+      'knext --help and kn-next --help produced DIFFERENT stdout — the alias must be ' +
+        'behaviorally identical, not just similarly named',
+    );
+  }
+
+  // --- 3a-npx. rev-1380 blocker #1: `npx @getknext/core <cmd>` with NO bin
+  // name given — the historically-advertised front door (help.ts, README,
+  // the docs site). npm's default-bin picker only resolves automatically
+  // when every declared bin points at ONE file; a prior round shipped a
+  // SECOND file for `knext` (a thin runtime proxy) and broke this exact
+  // invocation for every consumer, proven against real npm 11.12.1. Both
+  // `bin.knext` and `bin.kn-next` now point at the same dist file — assert
+  // the front door actually works, not just that the two named bins do.
+  console.log('[install-smoke] running `npx @getknext/core --help` (no bin name given) ...');
+  const npxHelp = run('npx', ['--yes', '--offline', '@getknext/core', '--help'], {
+    cwd: workDir,
+  });
+  const npxHelpOut = `${npxHelp.stdout || ''}${npxHelp.stderr || ''}`;
+  console.log('----- npx @getknext/core --help (begin) -----');
+  console.log(npxHelpOut.trim());
+  console.log('----- npx @getknext/core --help (end) -------');
+  if (npxHelp.status !== 0) {
+    finish(
+      FAIL,
+      `npx @getknext/core --help exited ${npxHelp.status} (expected 0) — the advertised front ` +
+        'door is broken for every consumer',
+    );
+  }
+  if (!/knext|Usage|Options/i.test(npxHelpOut)) {
+    finish(FAIL, "npx @getknext/core --help: exit 0 but output lacked 'knext'/'Usage'/'Options'");
+  }
+  // rev-1380 round 2: `npx @getknext/core` resolves argv[1] through
+  // node_modules/.bin/kn-next (npm's default-bin picker falls back to the
+  // first bin key alphabetically, since neither `knext` nor `kn-next`
+  // matches the package's own unscoped name `core`) — proven against real
+  // npm 11.9.0. That used to make EVERY `npx @getknext/core` invocation
+  // print the `kn-next` deprecation notice, even though the user never typed
+  // `kn-next`. `printDeprecatedKnNextNoticeIfNeeded` now suppresses it when
+  // `npm_command=exec` (the npx/`npm exec` dispatch signature, also proven
+  // against real npm 11.9.0 — see shared.ts's `isAmbiguousNpxBinDispatch`).
+  // Assert stderr is EMPTY here, not just that stdout looks right — the
+  // notice writes to stderr, so a passing stdout check alone would not have
+  // caught this regression.
+  if ((npxHelp.stderr || '').length > 0) {
+    finish(
+      FAIL,
+      `npx @getknext/core --help wrote to stderr (expected EMPTY): ${JSON.stringify(npxHelp.stderr)} — ` +
+        'the deprecated-alias notice is firing for a user who never typed kn-next',
+    );
+  }
 
   // --- 3a-alias. the alias's OWN shim, which step 3a never touches -----------
   // The check above runs node_modules/.bin/kn-next. Both @getknext/core and the alias
@@ -711,11 +806,15 @@ try {
   }
 
   // THE regression this block exists to catch: `next build` (ambient Turbopack
-  // default) + `adapterPath` + `output:'standalone'` throws ENOENT on
-  // `.next/next-server.js.nft.json` at next@16.3.3 (getknext-dev/knext#1372, an
-  // upstream Next.js gap, not a knext defect) — the scaffold's `build` script pins
-  // `next build --webpack` to route around it. Mutation-proved: reverting that one
-  // script line to `next build` reproduces this exact failure.
+  // default) + `adapterPath` + `output:'standalone'` threw ENOENT on
+  // `.next/next-server.js.nft.json` on Next 16.3.0-canary.20 through 16.3.4
+  // (getknext-dev/knext#1372, an upstream Next.js gap, not a knext defect) —
+  // the scaffold pinned `next build --webpack` to route around it for that
+  // window. Fixed upstream in 16.3.5 (the scaffold's pin as of the #1372
+  // close-out, confirmed by a live local repro of this exact config), so the
+  // scaffold's `build` script is plain `next build` again — this step is the
+  // real, live proof that combination still builds clean on whatever Next
+  // version the scaffold currently pins.
   const defaultBuild = run('npm', ['run', 'build'], {
     cwd: defaultScaffoldDir,
     stdio: ['ignore', 'inherit', 'inherit'],

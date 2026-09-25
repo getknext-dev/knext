@@ -1,5 +1,5 @@
 /**
- * Result construction + human-table rendering for `kn-next doctor`.
+ * Result construction + human-table rendering for `knext doctor`.
  */
 
 import type { CheckResult, CheckStatus } from "./types";

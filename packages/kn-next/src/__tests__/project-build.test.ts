@@ -214,8 +214,8 @@ function tmpHoistedWorkspaceApp(
 }
 
 describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
-    it("next@16.3.0 + turbopack + a bare `next build` script throws, naming the fix", () => {
-        const dir = tmpAppWithNext("next build", "16.3.0");
+    it("next@16.3.3 + turbopack + a bare `next build` script throws, naming the fix", () => {
+        const dir = tmpAppWithNext("next build", "16.3.3");
         try {
             let caught: unknown;
             try {
@@ -225,7 +225,8 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
             }
             expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
             const message = (caught as Error).message;
-            expect(message).toContain("16.3.0");
+            expect(message).toContain("16.3.3");
+            expect(message).toContain("16.3.5");
             expect(message).toContain("--webpack");
             expect(message).toContain("1372");
         } finally {
@@ -233,7 +234,7 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
         }
     });
 
-    it("next@16.2.0 (confirmed good) does NOT throw", () => {
+    it("next@16.2.0 (confirmed good, well below the affected window) does NOT throw", () => {
         const dir = tmpAppWithNext("next build", "16.2.0");
         try {
             expect(() =>
@@ -244,15 +245,103 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
         }
     });
 
-    it("next@17.0.0 (future major) also throws — the affected range is open-ended", () => {
+    it("next@17.0.0 (future major, well past the fix) does NOT throw — the range is bounded, not open-ended", () => {
         const dir = tmpAppWithNext("next build", "17.0.0");
         try {
             expect(() =>
                 checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
-            ).toThrow();
+            ).not.toThrow();
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
+    });
+
+    // --- Boundaries (#1372 close-out: fixed upstream in 16.3.5) ------------
+    //
+    // Founder directive: knext supports STABLE Next releases only, so this
+    // guard tests stable-release boundaries, not canary/rc/preview/beta
+    // prereleases. Confirmed window: 16.3.0 through 16.3.4 (stable) on the
+    // 16.3.x line; 16.2.x was never affected; fixed from 16.3.5 onward; 16.4.x
+    // is unaffected by construction (a different minor line). A prerelease
+    // version is a SEPARATE case below ("unverified prerelease"), not a
+    // boundary on this stable range.
+    describe("boundaries", () => {
+        it("next@16.2.9 (confirmed good, just below the affected minor) does NOT throw", () => {
+            const dir = tmpAppWithNext("next build", "16.2.9");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).not.toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.0 (first affected stable release) throws", () => {
+            const dir = tmpAppWithNext("next build", "16.3.0");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.4 (last affected stable patch) throws", () => {
+            const dir = tmpAppWithNext("next build", "16.3.4");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.5 (the fix) does NOT throw", () => {
+            const dir = tmpAppWithNext("next build", "16.3.5");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).not.toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.6 (past the fix) does NOT throw", () => {
+            const dir = tmpAppWithNext("next build", "16.3.6");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).not.toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.4.0 (stable, a different minor line) does NOT throw", () => {
+            const dir = tmpAppWithNext("next build", "16.4.0");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).not.toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("next@16.3.3-canary.5 (a PRERELEASE inside the otherwise-affected range) is SKIPPED, not gated — knext supports stable releases only, and does not special-case any prerelease tag", () => {
+            const dir = tmpAppWithNext("next build", "16.3.3-canary.5");
+            try {
+                expect(() =>
+                    checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+                ).not.toThrow();
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
     });
 
     it("the webpack builder is never gated, even on an affected next version", () => {

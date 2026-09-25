@@ -167,22 +167,28 @@ const MUTATIONS = [
     edits: [
       {
         subject: 'scaffoldPkg',
-        anchor: '"next": "16.3.3",',
+        anchor: '"next": "16.3.5",',
         replacement: '"next": "16.4.0",',
       },
       {
         subject: 'manifest',
-        anchor: '"shippedNextPin": "16.3.3",',
+        anchor: '"shippedNextPin": "16.3.5",',
         replacement: '"shippedNextPin": "16.4.0",',
       },
     ],
   },
   {
+    // #1382 review: the real lockstepExceptions array is now empty (the one
+    // former entry, for compat-shipped-pin-early-warning.yml, excused a
+    // literal that file never actually carries — dropped as stale, see
+    // tests/nextjs-credential-lockstep.test.ts's "no unused/stale entries"
+    // guard). So this mutation ADDS a fresh empty-reason entry rather than
+    // gutting an existing one — same guard, still exercised.
     label: 'manifest: add a lockstepExceptions entry with an empty reason',
     subject: 'manifest',
     anchor: '"lockstepExceptions": []',
     replacement:
-      '"lockstepExceptions": [{"file": "x", "kind": "export", "value": "v1", "reason": ""}]',
+      '"lockstepExceptions": [{"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}]',
   },
 
   // ── Round 3, second pass, finding 1: the ledger's THIRD copy of the ref ──

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * kn-next db migrate — the one-shot, writer-only migration runner (ADR-0021 §3).
+ * knext db migrate — the one-shot, writer-only migration runner (ADR-0021 §3).
  *
  * Usage:
- *   kn-next db migrate [--url <dsn>] [--dir <path>] [--migrations <path>]
+ *   knext db migrate [--url <dsn>] [--dir <path>] [--migrations <path>]
  *
  * Applies drizzle-kit-generated migrations against the **writer** `DATABASE_URL`
  * exactly once per deploy — a CI step or a pre-deploy k8s Job — and exits. This
@@ -31,7 +31,7 @@ import { UsageError } from "./shared";
 
 const log = createLogger({ module: "db-migrate" });
 
-/** Parsed `kn-next db migrate` flags (after the `db migrate` words). */
+/** Parsed `knext db migrate` flags (after the `db migrate` words). */
 export interface DbMigrateOptions {
     /** Writer DSN override; defaults downstream to `DATABASE_URL`. */
     url?: string;
@@ -48,7 +48,7 @@ export type MigrateRunner = (opts: {
     migrationsFolder?: string;
 }) => Promise<{ migrationsFolder: string }>;
 
-/** Parse `kn-next db migrate` argv. Fails loud on unknown flags / stray args. */
+/** Parse `knext db migrate` argv. Fails loud on unknown flags / stray args. */
 export function parseDbMigrateArgs(argv: readonly string[]): DbMigrateOptions {
     const out: DbMigrateOptions = {};
     // A value-taking flag must actually carry a value: a trailing `--url`, or one
@@ -58,7 +58,7 @@ export function parseDbMigrateArgs(argv: readonly string[]): DbMigrateOptions {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
             throw new UsageError(
-                `${flag} requires a value (see kn-next db migrate --help)`,
+                `${flag} requires a value (see knext db migrate --help)`,
             );
         }
         return v;
@@ -72,21 +72,21 @@ export function parseDbMigrateArgs(argv: readonly string[]): DbMigrateOptions {
         } else if (a.startsWith("-")) {
             // A typo like `--dsn` must not silently migrate with defaults.
             throw new UsageError(
-                `unknown flag "${a}" (see kn-next db migrate --help)`,
+                `unknown flag "${a}" (see knext db migrate --help)`,
             );
         } else {
             throw new UsageError(
-                `unexpected positional "${a}" — kn-next db migrate takes no positionals (see kn-next db migrate --help)`,
+                `unexpected positional "${a}" — knext db migrate takes no positionals (see knext db migrate --help)`,
             );
         }
     }
     return out;
 }
 
-export const DB_MIGRATE_HELP = `kn-next db migrate — apply pending migrations against the writer, once (ADR-0021 §3)
+export const DB_MIGRATE_HELP = `knext db migrate — apply pending migrations against the writer, once (ADR-0021 §3)
 
 Usage:
-  kn-next db migrate [options]
+  knext db migrate [options]
 
 Runs drizzle-kit-generated migrations against the WRITER DATABASE_URL exactly
 once per deploy (a CI step or a pre-deploy k8s Job), out of the request path.
@@ -107,7 +107,7 @@ const defaultRun: MigrateRunner = async (opts) => {
 };
 
 /**
- * Run `kn-next db migrate`. The engine (`run`) and stdout (`write`) are injected
+ * Run `knext db migrate`. The engine (`run`) and stdout (`write`) are injected
  * so the CLI is testable without a database; production wires the real
  * `@getknext/db` runner and `writeSync(1, …)`. A runner failure PROPAGATES so the
  * bin's dispatcher exits non-zero — a Job must fail loud.
@@ -125,7 +125,7 @@ export async function runDbMigrate(
 
     log.info(
         { dir: opts.migrationsFolder ?? "./drizzle" },
-        "kn-next db migrate (writer-only, one-shot — waking the writer once)",
+        "knext db migrate (writer-only, one-shot — waking the writer once)",
     );
 
     const result = await run({
@@ -140,6 +140,6 @@ export async function runDbMigrate(
 }
 
 // NO self-entry block here, DELIBERATELY — this module is reached ONLY via
-// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// the knext bin's subcommand dispatch (see the hazard note atop deploy.ts's
 // dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
 // tsup-inlining hijack, #263).

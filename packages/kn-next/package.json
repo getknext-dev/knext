@@ -7,6 +7,7 @@
   "module": "./dist/config.js",
   "types": "./dist/config.d.ts",
   "bin": {
+    "knext": "./dist/cli/kn-next.js",
     "kn-next": "./dist/cli/kn-next.js"
   },
   "exports": {
@@ -168,7 +169,7 @@
     "@types/node": "^25.3.0",
     "bun-types": "^1.3.9",
     "esbuild": "^0.28.0",
-    "next": "16.3.3",
+    "next": "16.3.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript-api": "npm:typescript@^5.9.3",

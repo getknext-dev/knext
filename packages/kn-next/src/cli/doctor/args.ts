@@ -1,5 +1,5 @@
 /**
- * Argument parsing for `kn-next doctor`.
+ * Argument parsing for `knext doctor`.
  */
 
 import { UsageError } from "../shared";
@@ -15,7 +15,7 @@ export function parseDoctorArgs(argv: readonly string[]): DoctorArgs {
     for (const a of argv) {
         if (a !== "--json" && a !== "-h" && a !== "--help") {
             throw new UsageError(
-                `unknown argument "${a}" (see kn-next doctor --help)`,
+                `unknown argument "${a}" (see knext doctor --help)`,
             );
         }
     }
