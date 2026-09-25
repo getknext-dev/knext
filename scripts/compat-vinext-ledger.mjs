@@ -1047,6 +1047,21 @@ export function isShallowRepo(execGit) {
  * across a rename the way `--follow` did; this trades that narrower gap for
  * closing the two above, which are the live, evidenced findings.)
  *
+ * HONEST SCOPE LIMIT on point 2: "treating each merged PR as ONE step" only
+ * holds when the merge itself compresses the PR into a single commit on the
+ * target branch — a squash merge, or a real `--no-ff` merge commit. This
+ * repo's GitHub settings permit "rebase and merge" too (`allow_rebase_merge`
+ * is on, no branch-protection restriction to squash-only), which — like a
+ * plain fast-forward — replays every one of the PR's individual commits
+ * directly onto the target branch's own first-parent line. A remove-then-
+ * re-add WITHIN a rebase-merged PR is therefore NOT compressed away by this
+ * fix: it would still show up as a real gap on the target branch's own
+ * history and reset the derived date to the re-addition commit, exactly the
+ * class this fix otherwise closes. Not solvable from git history alone
+ * (nothing in a rebase-merged commit sequence marks "these N commits were
+ * one PR"); closing it fully would need PR metadata (e.g. squash-only
+ * enforcement, or reading GitHub's PR-to-commit mapping), out of scope here.
+ *
  * Returns null when no commit in the queried history contains this entry —
  * a caller MUST treat that as "cannot verify" (an error), never as a silent
  * pass: with a full-history checkout of the ref actually being verified,
@@ -1131,13 +1146,17 @@ function toUtcDateString(isoDateWithOffset) {
 /**
  * Cross-check every entry's self-reported `added` against git history
  * (#1348): a PR could otherwise invent evidence or silently re-date `added`
- * to reset the 30-day clock, and nothing short of the commit graph itself
- * can catch a re-date (the JSON field alone is exactly what would have been
- * edited). Every entry must resolve to SOME commit (a real one is always
- * discoverable with a full-history checkout, since the entry's own
- * introducing commit is part of that history), and the resolved date must
- * equal `added` exactly — `added` is meant to be set once, at first
- * introduction, and never move again.
+ * FORWARD to reset the 30-day clock, and nothing short of the commit graph
+ * itself can catch a re-date (the JSON field alone is exactly what would
+ * have been edited). Every entry must resolve to SOME commit (a real one is
+ * always discoverable with a full-history checkout, since the entry's own
+ * introducing commit is part of that history). The resolved date is NOT
+ * required to equal `added` exactly (techdebt-4 round-2 finding): a squash
+ * merge or rebase moves the commit git log sees to the day the PR LANDED,
+ * which is never before the day a contributor actually wrote the entry, so
+ * an honest `added` may legitimately PRECEDE the derived date. Only `added`
+ * being LATER than the derived date is flagged — that is the only shape a
+ * forward re-date can take.
  * @param {any} ledger
  * @param {(args: string[]) => string} execGit
  * @param {string} ledgerRelPath
