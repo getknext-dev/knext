@@ -1,5 +1,5 @@
 /**
- * Where `kn-next build` should expect this app's output to land.
+ * Where `knext build` should expect this app's output to land.
  *
  * `build.ts` used to hardcode `.next/standalone` in five places: two log lines,
  * the bun-exports heal, the bytecode pass, and a warning that names
@@ -11,7 +11,7 @@
  * every path literal in the build command. That is the difference the artifact
  * contract is for.
  *
- * NOTE on what `kn-next build` actually does: it does NOT run `next build`
+ * NOTE on what `knext build` actually does: it does NOT run `next build`
  * itself. It runs the app's own `npm run build` (see `project-build.ts`), so an
  * app configured for vinext already builds with vinext today. What was missing
  * was knext knowing where to LOOK afterwards, and which post-build steps still
@@ -91,7 +91,7 @@ export function standaloneStepsApply(artifact: BuildArtifact): boolean {
 }
 
 /**
- * The target arch `kn-next deploy`/`preview` build images for — always
+ * The target arch `knext deploy`/`preview` build images for — always
  * `linux/amd64` (`dockerBuildxArgs`'s `--platform`), regardless of the host.
  * Shared with `build.ts`'s own `SHIP_ARCH` so the two names never drift.
  */
@@ -111,8 +111,8 @@ export interface CompileForDeployResult {
 }
 
 /**
- * Compile the executable `kn-next deploy`/`preview` need for the CURRENT
- * config's resolved target, sharing the EXACT logic `kn-next build` uses
+ * Compile the executable `knext deploy`/`preview` need for the CURRENT
+ * config's resolved target, sharing the EXACT logic `knext build` uses
  * (build.ts steps 2b/2b'/2c) — #1339 review finding #1 (jev 0.90, BLOCKER).
  *
  * Before this, `deploy()`/`defaultBuildAndPush()` ran the app's own
@@ -120,14 +120,14 @@ export interface CompileForDeployResult {
  * standalone-on-bun cell (`build: "turbopack"`/`"webpack"` + `runtime: "bun"`
  * — the DEFAULT since #1183), the staged Dockerfile does an UNCONDITIONAL
  * `COPY knext-standalone-exec-<arch>` / `COPY knext-exec-<arch>` of a binary
- * NEITHER caller ever produced — only `kn-next build` did. A bare-config
- * `kn-next deploy` therefore either failed the docker build outright (no
+ * NEITHER caller ever produced — only `knext build` did. A bare-config
+ * `knext deploy` therefore either failed the docker build outright (no
  * such file) or, worse, silently shipped a STALE binary left over from an
- * earlier `kn-next build` run in the same checkout.
+ * earlier `knext build` run in the same checkout.
  *
  * Called UNCONDITIONALLY whenever `deploy`/`preview` run a fresh project
  * build (i.e. NOT under `--skip-build`) — never gated on "does a binary
- * already exist", the same policy `kn-next build` itself follows, so
+ * already exist", the same policy `knext build` itself follows, so
  * staleness cannot occur on this path by construction: every call recompiles
  * from the tree the project build JUST produced. The `--skip-build` path
  * (deploy only; preview has no such flag) instead uses
@@ -246,8 +246,8 @@ export function hashSourceArtifact(sourcePath: string): string {
 
 /**
  * Write the freshness stamp for a just-compiled exec, from the source
- * artifact it was compiled FROM. Called at the one place both `kn-next
- * build` and `kn-next deploy`/`preview` compile through
+ * artifact it was compiled FROM. Called at the one place both `knext
+ * build` and `knext deploy`/`preview` compile through
  * (`compileArtifactForDeploy` below) — so a stamp exists for every exec this
  * CLI itself ever produces, regardless of which command triggered the
  * compile.
@@ -257,14 +257,14 @@ function writeBuildStamp(execPath: string, sourcePath: string): void {
 }
 
 /**
- * Fail-closed guard for `kn-next deploy --skip-build`: the ONE path where
+ * Fail-closed guard for `knext deploy --skip-build`: the ONE path where
  * `compileArtifactForDeploy` above is never called, so nothing here
  * recompiles fresh. Mirrors the BUILD_ID/asset-prefix lock-step guards
  * already in `deploy.ts` (T2a/Defect-A) — loud on a stale or missing
  * artifact, never a silent reuse.
  *
  * Missing: the exec was never compiled (drop `--skip-build`, or run
- * `kn-next build` first). Stale (`#1351`): the exec's `.buildstamp` sidecar
+ * `knext build` first). Stale (`#1351`): the exec's `.buildstamp` sidecar
  * — a SHA-256 of the standalone server / vinext output it was compiled FROM
  * — either does not match a hash of that source's CURRENT content, or does
  * not exist at all (an exec this check cannot vouch for, e.g. one predating
@@ -291,18 +291,18 @@ export function assertCompiledArtifactFresh(
 
     if (!existsSync(target.execPath)) {
         throw new UsageError(
-            `${target.execPath} is missing, and --skip-build means kn-next will not compile it.\n\n` +
-                "Drop --skip-build, or run `kn-next build` first to produce it.",
+            `${target.execPath} is missing, and --skip-build means knext will not compile it.\n\n` +
+                "Drop --skip-build, or run `knext build` first to produce it.",
         );
     }
 
     const stampPath = buildStampPathFor(target.execPath);
     if (!existsSync(stampPath)) {
         throw new UsageError(
-            `${target.execPath} has no freshness stamp (${stampPath} is missing) — kn-next ` +
+            `${target.execPath} has no freshness stamp (${stampPath} is missing) — knext ` +
                 `cannot verify it matches the current ${target.sourcePath}, and --skip-build ` +
                 "means it will not recompile.\n\n" +
-                "Drop --skip-build, or run `kn-next build` to recompile it with a verifiable stamp.",
+                "Drop --skip-build, or run `knext build` to recompile it with a verifiable stamp.",
         );
     }
     const stampedHash = readFileSync(stampPath, "utf8").trim();
@@ -311,8 +311,8 @@ export function assertCompiledArtifactFresh(
         throw new UsageError(
             `${target.execPath} is STALE — it was compiled from a different version of ` +
                 `${target.sourcePath} than the one currently on disk, and --skip-build means ` +
-                "kn-next will not recompile it.\n\n" +
-                "Drop --skip-build, or run `kn-next build` to refresh the executable before deploying.",
+                "knext will not recompile it.\n\n" +
+                "Drop --skip-build, or run `knext build` to refresh the executable before deploying.",
         );
     }
 }

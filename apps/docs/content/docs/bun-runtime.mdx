@@ -47,13 +47,13 @@ const config: KnativeNextConfig = {
 };
 ```
 
-`kn-next build` produces the binary (plus the native image-optimization module that ships beside
-it), and `kn-next deploy` builds it into the image. The `NextApp` resource records the artifact
+`knext build` produces the binary (plus the native image-optimization module that ships beside
+it), and `knext deploy` builds it into the image. The `NextApp` resource records the artifact
 (`spec.build: "vinext"`), and the operator starts the container through the image's own
 entrypoint — the executable *is* the server.
 
 <Callout type="warn">
-**Building from source requires Bun 1.4 or newer on your PATH.** The `kn-next` CLI itself runs
+**Building from source requires Bun 1.4 or newer on your PATH.** The `knext` CLI itself runs
 under plain Node — only this compile step shells out to `bun`. If Bun is missing, the build stops
 and tells you how to install it; if Bun is present but `bun --version` fails for another reason,
 the build reports that underlying error instead of claiming Bun is not installed. Older versions
@@ -107,7 +107,7 @@ The compiled build requires your app to be an **ES module** — your `package.js
 }
 ```
 
-`kn-next create` sets this for you, so a freshly scaffolded app already satisfies it and you never
+`knext create` sets this for you, so a freshly scaffolded app already satisfies it and you never
 have to think about it. The requirement matters only when you point the compiled build at an
 **existing** Next.js app that was written as CommonJS: add `"type": "module"` to its `package.json`
 before you build. Without it, the build fails while wiring up React Server Components — the
@@ -147,7 +147,7 @@ rather than papered over.
 
 The selectable standalone targets (`build: 'turbopack'` or `build: 'webpack'` — identical artifacts,
 different `next build` bundler; see the [build pipeline](/docs/build-pipeline)) run `next build`'s
-own server. With `runtime: 'bun'`, `kn-next build` compiles that server into a Bun single executable
+own server. With `runtime: 'bun'`, `knext build` compiles that server into a Bun single executable
 **with bytecode** as well, and the image runs the executable instead of `bun server.js`:
 
 - **What is inside.** Next's server entry and everything it loads up front — the request pipeline,
@@ -163,11 +163,11 @@ own server. With `runtime: 'bun'`, `kn-next build` compiles that server into a B
   module path computed at runtime cannot be seen at build time.
 - **The cache handler must ship with the app.** Configure `cacheHandler` as a file inside your
   project so `next build` copies it into the standalone folder. If the configured handler is not
-  there, `kn-next build` fails and names the file, because it cannot check what that handler imports.
-- **Bytecode is checked, not assumed.** After compiling, `kn-next build` inspects the executable and
+  there, `knext build` fails and names the file, because it cannot check what that handler imports.
+- **Bytecode is checked, not assumed.** After compiling, `knext build` inspects the executable and
   **fails the build** if the server was not compiled to bytecode. A binary without it would boot and
   serve — just slower on every cold start — so it is refused rather than shipped.
-- **Build requirements.** Bun 1.4 or newer on the machine running `kn-next build`, and
+- **Build requirements.** Bun 1.4 or newer on the machine running `knext build`, and
   `output: 'standalone'` in `next.config.ts`. A build with no standalone server fails instead of
   producing an image without the executable.
 

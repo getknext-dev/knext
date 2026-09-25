@@ -1,0 +1,166 @@
+{
+  "$comment": "Reviewed computed require/import call sites in the Next.js server core (the literal closure of `next` and `next/dist/server/lib/start-server`). The compiled standalone executable's disk-closure scan cannot follow these. Each reason says why the site cannot load a second instance of a module the executable bundles. A Next upgrade that changes this set fails standalone-computed-requires.test.ts: re-review the changed sites before updating this file.",
+  "reviewedAgainstNext": "16.3.3",
+  "sites": {
+    "dist/build/get-babel-loader-config.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/build/load-jsconfig.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/build/next-config-ts/transpile-config.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/build/swc/index.js": {
+      "count": 7,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/build/webpack-config.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/build/webpack/config/blocks/css/plugins.js": {
+      "count": 3,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/compiled/@vercel/nft/index.js": {
+      "count": 4,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/compiled/browserslist/index.js": {
+      "count": 3,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/compiled/jest-worker/index.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/compiled/loader-runner/LoaderRunner.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/compiled/next-server/app-page-experimental.runtime.dev.js": {
+      "count": 2,
+      "reason": "Development route runtime: loads its own webpack chunks by id. Production uses the .prod.js twin, so this is never loaded by the executable."
+    },
+    "dist/compiled/next-server/app-page-experimental.runtime.prod.js": {
+      "count": 1,
+      "reason": "Route runtime `import(e)` of the route's userland module: a compiled chunk under .next/server, loaded from disk exactly as uncompiled. The runtime itself is in the disk closure, so it is one instance."
+    },
+    "dist/compiled/next-server/app-page-turbo-experimental.runtime.dev.js": {
+      "count": 2,
+      "reason": "Development route runtime: loads its own webpack chunks by id. Production uses the .prod.js twin, so this is never loaded by the executable."
+    },
+    "dist/compiled/next-server/app-page-turbo-experimental.runtime.prod.js": {
+      "count": 1,
+      "reason": "Route runtime `import(e)` of the route's userland module: a compiled chunk under .next/server, loaded from disk exactly as uncompiled. The runtime itself is in the disk closure, so it is one instance."
+    },
+    "dist/compiled/next-server/app-page-turbo.runtime.dev.js": {
+      "count": 2,
+      "reason": "Development route runtime: loads its own webpack chunks by id. Production uses the .prod.js twin, so this is never loaded by the executable."
+    },
+    "dist/compiled/next-server/app-page-turbo.runtime.prod.js": {
+      "count": 1,
+      "reason": "Route runtime `import(e)` of the route's userland module: a compiled chunk under .next/server, loaded from disk exactly as uncompiled. The runtime itself is in the disk closure, so it is one instance."
+    },
+    "dist/compiled/next-server/app-page.runtime.dev.js": {
+      "count": 2,
+      "reason": "Development route runtime: loads its own webpack chunks by id. Production uses the .prod.js twin, so this is never loaded by the executable."
+    },
+    "dist/compiled/next-server/app-page.runtime.prod.js": {
+      "count": 1,
+      "reason": "Route runtime `import(e)` of the route's userland module: a compiled chunk under .next/server, loaded from disk exactly as uncompiled. The runtime itself is in the disk closure, so it is one instance."
+    },
+    "dist/compiled/next-server/pages-turbo.runtime.dev.js": {
+      "count": 1,
+      "reason": "Development route runtime: loads its own webpack chunks by id. Production uses the .prod.js twin, so this is never loaded by the executable."
+    },
+    "dist/compiled/next-server/pages-turbo.runtime.prod.js": {
+      "count": 1,
+      "reason": "Route runtime `import(e)` of the route's userland module: a compiled chunk under .next/server, loaded from disk exactly as uncompiled. The runtime itself is in the disk closure, so it is one instance."
+    },
+    "dist/compiled/next-server/pages.runtime.dev.js": {
+      "count": 1,
+      "reason": "Development route runtime: loads its own webpack chunks by id. Production uses the .prod.js twin, so this is never loaded by the executable."
+    },
+    "dist/compiled/next-server/pages.runtime.prod.js": {
+      "count": 1,
+      "reason": "Route runtime `import(e)` of the route's userland module: a compiled chunk under .next/server, loaded from disk exactly as uncompiled. The runtime itself is in the disk closure, so it is one instance."
+    },
+    "dist/compiled/webpack/HotModuleReplacement.runtime.js": {
+      "count": 1,
+      "reason": "Webpack HMR runtime, used only by the dev server. Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/compiled/webpack/bundle5.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/export/helpers/create-incremental-cache.js": {
+      "count": 2,
+      "reason": "Imports the configured cacheHandler/cacheHandlers by path. The compile makes every configured handler a disk-closure root and refuses one outside the standalone tree, so the handler and what it imports stay on disk as a single instance."
+    },
+    "dist/lib/find-config.js": {
+      "count": 4,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/lib/verify-partytown-setup.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/lib/verify-typescript-setup.js": {
+      "count": 1,
+      "reason": "Build/dev tooling (next build, dev server, type-checking, SWC/webpack/PostCSS/browserslist loading). Not executed by the production server, so nothing it loads can split an instance in the executable."
+    },
+    "dist/server/config.js": {
+      "count": 3,
+      "reason": "Loads next.config.* and the configured adapterPath by path. In a standalone build the config is inlined into server.js (__NEXT_PRIVATE_STANDALONE_CONFIG), so this runs only if a config file is loaded at runtime. The adapter is build-time only."
+    },
+    "dist/server/lib/module-loader/node-module-loader.js": {
+      "count": 2,
+      "reason": "Generic `require(id)` used to load page and route modules from .next/server by path. These are disk-loaded build output, in the disk closure."
+    },
+    "dist/server/lib/render-server.js": {
+      "count": 1,
+      "reason": "Imports the configured cache handler by path, as create-incremental-cache does. Handlers are disk-closure roots (see standaloneCacheHandlerFiles), so they stay single-instance."
+    },
+    "dist/server/lib/router-utils/instrumentation-globals.external.js": {
+      "count": 1,
+      "reason": "Requires the built instrumentation hook (.next/server/instrumentation.js) by path. Build output under .next/server, scanned as a disk-closure root."
+    },
+    "dist/server/next-server.js": {
+      "count": 5,
+      "reason": "Requires build manifests and .next/server/{middleware,functions-config-manifest} by path, and imports page modules. All build output under .next, which is disk-loaded and in the disk closure."
+    },
+    "dist/server/next.js": {
+      "count": 1,
+      "reason": "Requires the serialized required-server-files config under distDir by path: build output (JSON), no module identity involved."
+    },
+    "dist/server/og/image-response.js": {
+      "count": 1,
+      "reason": "`import(NEXT_RUNTIME === 'edge' ? '<edge og>' : '<node og>')`: a ternary of two literals. The compile defines NEXT_RUNTIME='nodejs', so the bundler resolves it statically. og is reached from route chunks, which puts it in the disk closure."
+    },
+    "dist/server/require.js": {
+      "count": 2,
+      "reason": "`require(pagePath)`: loads the page/route module from .next/server. Build output, in the disk closure."
+    },
+    "dist/server/route-matcher-providers/helpers/manifest-loaders/node-manifest-loader.js": {
+      "count": 1,
+      "reason": "Requires build manifests (JSON) under .next by path. No module identity involved."
+    },
+    "dist/server/route-modules/route-module.js": {
+      "count": 1,
+      "reason": "dynamicImportEsmDefault(id) for route userland modules under .next/server. Build output, in the disk closure."
+    },
+    "dist/telemetry/events/plugins.js": {
+      "count": 1,
+      "reason": "Reads the project's package.json for telemetry. JSON, no module identity involved."
+    },
+    "dist/telemetry/events/swc-load-failure.js": {
+      "count": 1,
+      "reason": "Reads SWC package.json versions after a SWC load failure (build/dev telemetry). JSON, and not reached on the production request path."
+    }
+  }
+}

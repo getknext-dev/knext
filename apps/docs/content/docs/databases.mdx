@@ -56,8 +56,8 @@ export default config;
 ```
 
 The config still references a **Secret** — never an inline DSN. Declaring `roSecretRef` without
-`secretRef` is rejected. The `kn-next db bind` command writes the equivalent patch directly — see
-the [CLI reference](/docs/cli#kn-next-db-bind).
+`secretRef` is rejected. The `knext db bind` command writes the equivalent patch directly — see
+the [CLI reference](/docs/cli#knext-db-bind).
 
 <Callout type="warn">
 Secrets live in Kubernetes Secrets / env **only** — never in `spec.env`, config files, images, or

@@ -98,8 +98,8 @@ describe('docs content — install & CLI story', () => {
     expect(firstInstall).toContain('@getknext/core');
   });
 
-  it('shows the CLI as `npx kn-next`', () => {
-    expect(gettingStarted).toMatch(/npx kn-next/);
+  it('shows the CLI as `npx knext`', () => {
+    expect(gettingStarted).toMatch(/npx knext/);
   });
 
   it('documents each published package', () => {
@@ -116,13 +116,13 @@ describe('docs content — CLI reference matches the real verb set', () => {
   // Source of truth: packages/kn-next/src/cli/deploy.ts (dispatcher).
   it('documents every bin-dispatched subcommand', () => {
     for (const verb of ['doctor', 'status', 'db bind', 'db migrate', 'rollback', 'gc']) {
-      expect(cli, `cli.mdx should document \`kn-next ${verb}\``).toContain(`kn-next ${verb}`);
+      expect(cli, `cli.mdx should document \`knext ${verb}\``).toContain(`knext ${verb}`);
     }
   });
 
   it('documents the gc --dry-run flag', () => {
     expect(cli).toContain('--dry-run');
-    expect(cli).toMatch(/kn-next gc[^\n]*--dry-run|`--dry-run` \| Compute/);
+    expect(cli).toMatch(/knext gc[^\n]*--dry-run|`--dry-run` \| Compute/);
   });
 
   it('does not invent bin subcommands that the dispatcher does not route', () => {
@@ -132,7 +132,7 @@ describe('docs content — CLI reference matches the real verb set', () => {
     // — both list and comment here track the dispatcher's truth, and this
     // enumeration is the guard's known weakness: it names non-verbs, so a verb
     // GAINING routing must remove its entry in the same PR.)
-    for (const notAVerb of ['kn-next deploy-all', 'kn-next init']) {
+    for (const notAVerb of ['knext deploy-all', 'knext init']) {
       expect(cli).not.toContain(notAVerb);
     }
   });

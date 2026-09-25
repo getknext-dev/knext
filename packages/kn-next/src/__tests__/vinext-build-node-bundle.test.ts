@@ -1,7 +1,7 @@
 /**
  * vinext-build-node-bundle.test.ts — #948
  *
- * `kn-next build` on the vinext target used to fail under the NODE-run CLI
+ * `knext build` on the vinext target used to fail under the NODE-run CLI
  * before it ever reached Bun: `detectBunVersion`'s lazy
  * `require("node:child_process")` became `__require("child_process")` in the
  * tsup ESM bundle, which throws `Dynamic require of "child_process" is not
@@ -148,7 +148,7 @@ function runNodeBuild(fixture: Fixture) {
     };
 }
 
-describe("bundled `kn-next build` (vinext) under plain Node — #948", () => {
+describe("bundled `knext build` (vinext) under plain Node — #948", () => {
     it("with Bun on PATH, the build gets past detection and succeeds", () => {
         const fixture = makeVinextApp("reports-1.4.0");
         try {

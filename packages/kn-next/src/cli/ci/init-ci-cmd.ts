@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The `kn-next init-ci` verb entry (ADR-0049, #874).
+ * The `knext init-ci` verb entry (ADR-0049, #874).
  *
  * Separate from `init-ci.ts` for the same reason `validate-cmd.ts` is separate
  * from `validate.ts`: the generators are a library other things test and reuse,
@@ -14,7 +14,7 @@ import { initCi, nextSteps, RBAC_PATH, WORKFLOW_PATH } from "./init-ci";
 
 const log = createLogger({ module: "init-ci" });
 
-const USAGE = `kn-next init-ci — set up push-to-deploy against YOUR cluster
+const USAGE = `knext init-ci — set up push-to-deploy against YOUR cluster
 
   Writes two files and touches no cluster:
 

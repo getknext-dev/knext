@@ -416,7 +416,7 @@ describe("uploadAssets data plane", () => {
         const markerKey = `_next/static/${BUILD_ID}/.knext-build`;
 
         beforeEach(async () => {
-            // `next build` wrote its BUILD_ID; on `kn-next deploy` it is pinned
+            // `next build` wrote its BUILD_ID; on `knext deploy` it is pinned
             // to the deploy tag, which the CALLER states to `uploadAssets`
             // (#924 — the marker is keyed on the stated id, not read off disk).
             await fs.writeFile(
@@ -436,7 +436,7 @@ describe("uploadAssets data plane", () => {
                 ]),
             );
 
-            // `kn-next deploy` states the deploy id; it equals .next/BUILD_ID.
+            // `knext deploy` states the deploy id; it equals .next/BUILD_ID.
             await expect(
                 uploadAssets(makeConfig(provider, bucket), BUILD_ID),
             ).resolves.toBeUndefined();
@@ -464,9 +464,9 @@ describe("uploadAssets data plane", () => {
             ).rejects.toThrow(".knext-build");
         });
 
-        it("no stated deploy id ⇒ no marker staged (`kn-next build`: that build is over-kept, #924)", async () => {
+        it("no stated deploy id ⇒ no marker staged (`knext build`: that build is over-kept, #924)", async () => {
             // The turbopack twin of #892: `uploadAssets` with no build id —
-            // `kn-next build`, which creates no revision — stages NO marker even
+            // `knext build`, which creates no revision — stages NO marker even
             // though .next/BUILD_ID is on disk. Unmarked = over-kept, the safe
             // direction; a marker keyed on Next's generated id could never be
             // protected by a revision label.

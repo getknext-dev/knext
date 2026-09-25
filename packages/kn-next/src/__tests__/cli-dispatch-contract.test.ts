@@ -4,13 +4,13 @@
  *
  *   1. EVERY dispatched verb parses its own argv. The first round's `build` and
  *      `cleanup` branches called their functions with no argument parsing at
- *      all, so `kn-next cleanup --help` DELETED the app instead of printing
+ *      all, so `knext cleanup --help` DELETED the app instead of printing
  *      help (a reviewer reproduced the CR delete). The guard below scans the
  *      dispatcher and requires each branch to hand `process.argv.slice(3)` to a
  *      `*Main`, which is where `-h/--help` and strict-flag rejection live.
  *
  *   2. An unrecognised FIRST TOKEN is an error, not a silent deploy (ADR-0046).
- *      `kn-next deplyo --dry-run` used to run the deploy flow. A bare
+ *      `knext deplyo --dry-run` used to run the deploy flow. A bare
  *      invocation and a flags-only invocation still deploy — that is the
  *      advertised front door and the ADR ratifies it.
  *
@@ -110,7 +110,7 @@ describe("every dispatched verb parses its own argv", () => {
         // `argv.includes("--help")` short-circuit (gc, status, cleanup, build,
         // …) and a parseArgs boolean option (create). A main that takes argv
         // and never looks at it matches neither — which is exactly the defect
-        // that made `kn-next cleanup --help` delete the app. The dist suite
+        // that made `knext cleanup --help` delete the app. The dist suite
         // proves the behaviour end-to-end, per verb, on the real bin.
         expect(src).toMatch(
             /includes\("--help"\)|help:\s*\{\s*type:\s*"boolean"/,

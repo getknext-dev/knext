@@ -1,5 +1,5 @@
 /**
- * loader.ts — loadConfig(path): dynamic-import a kn-next config module and
+ * loader.ts — loadConfig(path): dynamic-import a knext config module and
  * validate the minimal required shape (name/storage/registry). These pin the
  * error branches (missing file, no default export, invalid config) and the
  * happy path, using a real temp .mjs module so the dynamic import is genuine.

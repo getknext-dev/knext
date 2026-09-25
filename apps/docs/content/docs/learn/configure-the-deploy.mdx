@@ -19,13 +19,13 @@ export function GET() {
 at `/api/health` by default. `create-next-app` does not generate that route.
 
 <Callout type="info">
-**`kn-next create` writes this file for you.** If you scaffolded the app with `kn-next create`, the
+**`knext create` writes this file for you.** If you scaffolded the app with `knext create`, the
 route above is already there — skip ahead. This section is for an existing app you are adding knext
 to, which is where the missing route bites.
 </Callout>
 
 Without it, the probe gets a 404. The revision never becomes Ready. Your deploy "succeeds", the pod
-starts, and then `kn-next status` reports `Ready=False` forever — with nothing obviously wrong in
+starts, and then `knext status` reports `Ready=False` forever — with nothing obviously wrong in
 your application logs, because nothing *is* wrong with your application. It is being asked a
 question it cannot answer.
 

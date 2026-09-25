@@ -6,7 +6,7 @@
  * field this CLI can emit — and the emitted set is DERIVED BY SCANNING
  * cr-builder.ts (schema/emitted-fields.generated.ts), not enumerated.
  *
- * This is DIAGNOSIS. The verdict lives in `kn-next deploy`'s server-side
+ * This is DIAGNOSIS. The verdict lives in `knext deploy`'s server-side
  * dry-run apply, which needs no read at all — so when both schema reads are
  * denied, doctor SKIPS (visibly) rather than failing.
  *
@@ -39,7 +39,7 @@ export function crdSchemaCheck(ctx: CheckContext): CheckResult[] {
                 "crd-schema",
                 "NextApp CRD schema coverage",
                 "skip",
-                `${read.detail} — diagnosis only; \`kn-next deploy\` still verifies this cluster with a server-side dry-run apply, which needs no extra permission`,
+                `${read.detail} — diagnosis only; \`knext deploy\` still verifies this cluster with a server-side dry-run apply, which needs no extra permission`,
                 "optional: grant `get customresourcedefinitions` (or access to /openapi/v3) for a named-field diagnosis here",
             ),
         ];

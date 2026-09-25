@@ -10,10 +10,10 @@ const config: KnativeNextConfig = {
 
   // This zone builds with vinext (see vite.config.ts) — pinned explicitly so
   // it does not inherit the ambient default, which is "turbopack" (ADR-0058).
-  // `kn-next create` (the published CLI) now scaffolds the standalone target
+  // `knext create` (the published CLI) now scaffolds the standalone target
   // by default instead — this in-repo zone generator is a SEPARATE decision,
   // deliberately not flipped in the same change: the zone app is built by
-  // this repo's own pipeline (not `kn-next build`/`deploy`), so it carries
+  // this repo's own pipeline (not `knext build`/`deploy`), so it carries
   // none of the risk a stale scaffold would for an outside user, and
   // flipping it is its own design pass if/when it happens.
   build: "vinext",

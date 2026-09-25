@@ -15,7 +15,7 @@
  * ## Why the rules live here and not in a docs snippet
  *
  * The Role appears in four places: the ADR, the docs page, the manifest
- * `kn-next init-ci` generates, and this check. Four hand-maintained copies of a
+ * `knext init-ci` generates, and this check. Four hand-maintained copies of a
  * permission list is how one of them ends up granting more than the others —
  * and the one that drifts wide is the one nobody notices, because nothing
  * fails. `CI_ROLE_RULES` is the single definition; the renderer and the
@@ -200,5 +200,5 @@ const ROLE_REMEDY = [
     "",
     renderRoleYaml("<your-namespace>"),
     "Bind it to a ServiceAccount with a RoleBinding and use THAT account's",
-    "kubeconfig as KNEXT_KUBECONFIG. `kn-next init-ci` generates all three.",
+    "kubeconfig as KNEXT_KUBECONFIG. `knext init-ci` generates all three.",
 ].join("\n");

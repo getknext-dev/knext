@@ -67,7 +67,7 @@ Redis instance (or a self-hosted Redis Service). `cache.url` is required when th
 
 Push the app image to Azure Container Registry, e.g. `<registry>.azurecr.io/acme`. Attach ACR
 to the cluster (`az aks update --attach-acr`) so nodes can pull. The operator **rejects any image
-that is not digest-pinned** (`@sha256:…`); `kn-next deploy` resolves the digest automatically.
+that is not digest-pinned** (`@sha256:…`); `knext deploy` resolves the digest automatically.
 
 ## 6 · Complete `kn-next.config.ts`
 
@@ -107,9 +107,9 @@ true` alongside the `rediss://` URL.
 ## 7 · Deploy
 
 ```sh
-kn-next deploy --registry <registry>.azurecr.io/acme
+knext deploy --registry <registry>.azurecr.io/acme
 ```
 
-`kn-next deploy` builds the standalone image, pushes it (resolving the digest), and applies the
+`knext deploy` builds the standalone image, pushes it (resolving the digest), and applies the
 `NextApp` CR; the operator reconciles it into a scale-to-zero Knative Service. Verify the resolved
 URL with `kubectl get ksvc acme -o jsonpath='{.status.url}'`.
