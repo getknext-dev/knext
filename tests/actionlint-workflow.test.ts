@@ -316,3 +316,201 @@ describe.skipIf(!actionlintAvailable())(
     });
   },
 );
+
+/**
+ * #1397 round 2 review findings.
+ *
+ * 1. Nothing in CI ever put `actionlint` on PATH, so the `describe.skipIf`
+ *    suite above never RAN there — the gate's own regression coverage was
+ *    silently inert on every real PR, only ever exercised on a machine that
+ *    happens to have actionlint installed (this repo's dev box). Fixed by
+ *    running this file for real in actionlint.yml, right after the binary is
+ *    installed, and FAILING the job outright if any test came back skipped —
+ *    so a future PATH regression (a renamed binary, a broken install step) is
+ *    loud, not silently green.
+ * 2. Scope caveat, stated once so it does not need re-discovering: this gate
+ *    lints a composite action's `uses:` REFERENCE (as part of linting the
+ *    referencing workflow) — composite internals (the composite action's OWN
+ *    step bodies, `runs.steps`) are never linted by this gate, because
+ *    actionlint 1.7.12 refuses an action.yml as a direct argument at all.
+ * 3. The `uses:` scan regex only matched an unquoted
+ *    `uses: ./.github/actions/...` — `uses: './.github/actions/...'` (single
+ *    or double quoted, both valid YAML) silently escaped detection.
+ * 4. `grep -lE ... || true` could not tell "no workflow matched" (grep exit
+ *    1, fine) from a real grep failure (exit 2 — e.g. the workflows glob not
+ *    matching so the literal glob string is handed to grep as a
+ *    nonexistent filename) apart; both silently produced an empty
+ *    `referencing_workflows`, which reads as "nothing to re-lint" instead of
+ *    "the scan itself broke".
+ */
+describe('#1397 round 2: CI actually executes the real actionlint tests, and fails on any skip', () => {
+  it('a step runs tests/actionlint-workflow.test.ts using the just-installed actionlint binary', () => {
+    const { text } = jobSteps();
+    expect(text).toMatch(/bun test tests\/actionlint-workflow\.test\.ts/);
+  });
+
+  it('that step fails the job if any test in the file was skipped, not just on a non-zero exit code', () => {
+    const { steps } = jobSteps();
+    const testStep = steps.find((s) =>
+      /bun test tests\/actionlint-workflow\.test\.ts/.test(String(s.run)),
+    );
+    expect(testStep).toBeTruthy();
+    // A skip does not itself make `bun test` exit non-zero — this step must
+    // parse the skip count (e.g. from a junit reporter) and exit 1 itself.
+    expect(String(testStep!.run)).toMatch(/skipped/);
+    expect(String(testStep!.run)).toMatch(/exit 1/);
+  });
+
+  it('the install-actionlint step runs BEFORE the test-execution step', () => {
+    const { steps } = jobSteps();
+    const installIdx = steps.findIndex((s) => /Install actionlint/.test(String(s.name)));
+    const testIdx = steps.findIndex((s) =>
+      /bun test tests\/actionlint-workflow\.test\.ts/.test(String(s.run)),
+    );
+    expect(installIdx).toBeGreaterThanOrEqual(0);
+    expect(testIdx).toBeGreaterThan(installIdx);
+  });
+
+  it('documents the scope caveat: composite action internals are never linted, only the referencing `uses:`', () => {
+    const { text } = jobSteps();
+    expect(text).toMatch(/composite (action )?internals? (is|are) never linted/i);
+  });
+});
+
+describe.skipIf(!actionlintAvailable())(
+  '#1397 round 2: the referencing-workflow scan is quote-tolerant and grep-error-safe',
+  () => {
+    function buildFixtureWithConsumer(consumerUsesLine: string): {
+      dir: string;
+      run: (env: Record<string, string>) => string;
+    } {
+      const dir = mkdtempSync(join(tmpdir(), 'knext-actionlint-quoted-'));
+      mkdirSync(join(dir, '.github/workflows'), { recursive: true });
+      mkdirSync(join(dir, '.github/actions/sample'), { recursive: true });
+      writeFileSync(
+        join(dir, '.github/actions/sample/action.yml'),
+        "name: 'Sample composite'\ndescription: 'test'\nruns:\n  using: 'composite'\n  steps:\n    - run: echo hi\n      shell: bash\n",
+      );
+      writeFileSync(
+        join(dir, '.github/workflows/consumer.yml'),
+        `name: consumer\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - ${consumerUsesLine}\n`,
+      );
+      const git = (args: string[]) =>
+        execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
+          cwd: dir,
+          encoding: 'utf8',
+        });
+      git(['init', '-q']);
+      git(['config', 'user.email', 'test@example.com']);
+      git(['config', 'user.name', 'Test']);
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'base']);
+      const baseSha = git(['rev-parse', 'HEAD']).trim();
+      writeFileSync(
+        join(dir, '.github/actions/sample/action.yml'),
+        "name: 'Sample composite'\ndescription: 'test'\nruns:\n  using: 'composite'\n  steps:\n    - run: echo hi there\n      shell: bash\n",
+      );
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'change composite action only']);
+      const headSha = git(['rev-parse', 'HEAD']).trim();
+
+      const { steps } = jobSteps();
+      const diffStep = steps.find(
+        (s) => s.name && /Compute the .*files this diff actually changed/.test(String(s.name)),
+      );
+      if (!diffStep?.run) throw new Error('diff step not found');
+
+      return {
+        dir,
+        run: (extraEnv) => {
+          const outFile = join(dir, 'gh-output.txt');
+          writeFileSync(outFile, '');
+          execFileSync('bash', ['-c', diffStep.run as string], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              BASE_SHA: baseSha,
+              HEAD_SHA: headSha,
+              GITHUB_OUTPUT: outFile,
+              ...extraEnv,
+            },
+          });
+          return readFileSync(outFile, 'utf8');
+        },
+      };
+    }
+
+    it("a single-quoted `uses: './.github/actions/sample'` reference is still detected", () => {
+      const { run } = buildFixtureWithConsumer("uses: './.github/actions/sample'");
+      const output = run({});
+      expect(output).toContain('.github/workflows/consumer.yml');
+    });
+
+    it('a double-quoted `uses: "./.github/actions/sample"` reference is still detected', () => {
+      const { run } = buildFixtureWithConsumer('uses: "./.github/actions/sample"');
+      const output = run({});
+      expect(output).toContain('.github/workflows/consumer.yml');
+    });
+
+    it('an unquoted `uses: ./.github/actions/sample` reference (the pre-existing case) is still detected', () => {
+      const { run } = buildFixtureWithConsumer('uses: ./.github/actions/sample');
+      const output = run({});
+      expect(output).toContain('.github/workflows/consumer.yml');
+    });
+
+    // The genuine `grep exit 2` case: no `.github/workflows/*.y*ml` file
+    // exists at all, so the glob does not expand and the LITERAL glob string
+    // is handed to grep as a filename — "No such file or directory", exit 2,
+    // not "no matches" (exit 1). The pre-fix `|| true` swallowed this
+    // identically to "nothing referenced the changed action" instead of
+    // surfacing the scan itself being broken.
+    it('a real grep failure (no workflow files exist to scan) fails the step loudly, not silently as "nothing references it"', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'knext-actionlint-grep-error-'));
+      mkdirSync(join(dir, '.github/actions/sample'), { recursive: true });
+      writeFileSync(
+        join(dir, '.github/actions/sample/action.yml'),
+        "name: 'Sample composite'\ndescription: 'test'\nruns:\n  using: 'composite'\n  steps:\n    - run: echo hi\n      shell: bash\n",
+      );
+      const git = (args: string[]) =>
+        execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
+          cwd: dir,
+          encoding: 'utf8',
+        });
+      git(['init', '-q']);
+      git(['config', 'user.email', 'test@example.com']);
+      git(['config', 'user.name', 'Test']);
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'base']);
+      const baseSha = git(['rev-parse', 'HEAD']).trim();
+      writeFileSync(
+        join(dir, '.github/actions/sample/action.yml'),
+        "name: 'Sample composite'\ndescription: 'test'\nruns:\n  using: 'composite'\n  steps:\n    - run: echo hi there\n      shell: bash\n",
+      );
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'change composite action only']);
+      const headSha = git(['rev-parse', 'HEAD']).trim();
+
+      const { steps } = jobSteps();
+      const diffStep = steps.find(
+        (s) => s.name && /Compute the .*files this diff actually changed/.test(String(s.name)),
+      );
+      if (!diffStep?.run) throw new Error('diff step not found');
+
+      const outFile = join(dir, 'gh-output.txt');
+      writeFileSync(outFile, '');
+      expect(() =>
+        execFileSync('bash', ['-c', diffStep.run as string], {
+          cwd: dir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            BASE_SHA: baseSha,
+            HEAD_SHA: headSha,
+            GITHUB_OUTPUT: outFile,
+          },
+        }),
+      ).toThrow();
+    });
+  },
+);
