@@ -9,7 +9,7 @@ compiler API, which TypeScript 7 does not yet expose.
 
 Scaffolded apps are unaffected: `knext create` still pins
 `typescript@^5.9.3` by default. TypeScript 7 works for a scaffolded app's
-own build and typecheck, but breaks your standard `eslint`/editor
-TypeScript tooling today (`typescript-eslint` doesn't support it yet, and
-TypeScript 7 ships no language server) — see the TypeScript version doc for
-the opt-in path and what it costs.
+own build and typecheck (verified: `next build` succeeds clean under it),
+but it ships no `tsserver.js`, so editor TypeScript support that relies on
+"use workspace version" (VS Code's default) breaks today — see the
+TypeScript version doc for the opt-in path and what it costs.

@@ -16,16 +16,19 @@ import {
  * `sharp`.
  *
  * **The default scaffold stays on TS 5.9.x, not TS7 (2026-09-25 decision,
- * founder-flaggable).** TS7 is real and verified for scaffolded apps in
- * isolation — a real scaffold builds and tests clean on both builders, and
- * `next build`'s own TS7 typecheck is real — but a user's STANDARD toolchain
- * around the app breaks on it: `typescript-eslint` does not support TS7
- * (peer range `<6.1.0`, so `eslint-config-next` fails outright), and TS7
- * ships no `tsserver.js`, so editor "workspace TypeScript" and the `next`
- * tsconfig plugin both stop working. See the docs site's TS7 page for the
- * documented opt-in path and what breaks. This guard exists precisely so a
- * later change can't silently re-bump the scaffold default without also
- * updating that doc.
+ * founder-flaggable).** TS7 is real and verified for scaffolded apps: a real
+ * scaffold builds and tests clean on both builders, and `next build`'s own
+ * TS7 typecheck genuinely works (verified directly: 0 errors, no classic
+ * compiler API needed). Scaffolded apps ship no linter at all (no `eslint`,
+ * no lint script, no `eslint-config-next`), so there is no lint-toolchain
+ * reason either. The one real, verified reason: TS7 ships no `tsserver.js`
+ * — the protocol editors like VS Code speak for "use workspace version"
+ * (inline errors, autocomplete, the `next` tsconfig plugin). TS7 does have
+ * an LSP (`tsc --lsp --stdio`, verified to respond to JSON-RPC), but it's a
+ * different protocol editors don't auto-negotiate. See the docs site's TS7
+ * page for the documented opt-in path and what breaks. This guard exists
+ * precisely so a later change can't silently re-bump the scaffold default
+ * without also updating that doc.
  *
  * The monorepo's OWN `typescript` devDependency also stays `^5.9.3`
  * (classic-API-capable, required by `tsup`'s DTS bundling — see
@@ -67,7 +70,7 @@ describe('#1402 — template `typescript` pins track the workspace (TS7 stays op
     expect(workspaceTypescriptRange()).toMatch(/^\^\d+\.\d+\.\d+$/);
   });
 
-  it('the workspace default is NOT TS7 — eslint/editor breakage, TS7 is opt-in only', () => {
+  it('the workspace default is NOT TS7 — no tsserver.js, editor "workspace version" breaks; TS7 is opt-in only', () => {
     // Both halves: a caret-anything-else can slip past a "not ^7" check as
     // easily as ^7 itself, so pin to the exact decided default rather than
     // merely excluding one bad answer.
