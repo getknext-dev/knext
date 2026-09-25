@@ -104,6 +104,7 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
   for (const pkgDir of [
     'img-sharp-linuxmusl-x64-0.34.5',
     'img-sharp-libvips-linuxmusl-x64-1.2.4',
+    'sqlite3-5.0.2', // #1426
   ]) {
     mkdirSync(join(root, 'scripts/musl-native-lockfiles', pkgDir), { recursive: true });
     writeFileSync(join(root, 'scripts/musl-native-lockfiles', pkgDir, 'package.json'), '{}\n');
