@@ -25,6 +25,14 @@
 //    `/app/.output/server/index.mjs` "was accepted". Node keys the cache
 //    subdirectory by uid, so a bake run as root leaves (4) green and turns (5)
 //    red — which is exactly why (5) exists.
+// 6. #1298: `/_next/image` actually RESIZES, through the shipped image. The
+//    SHIPPED `stageSharpForVinextNode` (what `kn-next build` runs) replaces
+//    nitro's own host-platform/incomplete trace before the docker build, and
+//    the node entry direct-passes sharp to the image optimizer (`sharp` no
+//    longer relies on a `createRequire(cwd)` resolve that can never find
+//    `.output/server/node_modules` in the deployed image). A negotiated-format
+//    response that is SMALLER than the source PNG is proof the real sharp
+//    ran, not the fail-open passthrough.
 //
 // ── Discipline mirrored from standalone-webpack-build.docker-e2e ───────────
 //
@@ -44,6 +52,7 @@ import {
     mkdtempSync,
     readFileSync,
     rmSync,
+    statSync,
     symlinkSync,
     writeFileSync,
 } from "node:fs";
@@ -52,6 +61,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderScaffold } from "../cli/create";
 import { stageVinextNodeDockerfile } from "../cli/runtime-image";
+import { stageSharpForVinextNode } from "../cli/vinext-build";
 import { assertNodePresetOutput } from "../cli/vinext-node-build";
 
 // packages/kn-next/src/__tests__ -> package root (../..)
@@ -94,9 +104,21 @@ const RENDERED_TEMPLATES = [
 
 /**
  * Packages the node server entry imports that the fixture does NOT declare
- * itself: taken from the rendered template package.json (see 2b).
+ * itself: taken from the rendered template package.json (see 2b). `sharp`
+ * moved here with #1298's direct-pass fix — the entry now statically imports
+ * it (like the bun entry always has), so an undeclared template dependency
+ * fails the fixture's OWN build, exactly like `srvx`.
  */
-const ENTRY_RUNTIME_DEPS = ["srvx"] as const;
+const ENTRY_RUNTIME_DEPS = ["srvx", "sharp"] as const;
+
+/** The real, decodable PNG `/_next/image` resizes in the tests below. */
+const TEST_IMAGE = join(
+    __dirname,
+    "fixtures",
+    "vinext-node-app",
+    "public",
+    "test-image.png",
+);
 
 let workDir = "";
 let appDir = "";
@@ -365,6 +387,18 @@ beforeAll(async () => {
     // The shipped gate `kn-next build` runs; throws on a bun-preset output.
     assertNodePresetOutput(appDir);
 
+    // 4b. #1298: nitro's own trace into `.output/server/node_modules` copies
+    //     the BUILD HOST's sharp addon and an incomplete JS package — exactly
+    //     what `kn-next build` fixes before the image is built. Re-run that
+    //     fix here for the same reason the other shipped gates run here: this
+    //     proves the SHIPPED function, not a copy of its logic.
+    const sharpStaged = stageSharpForVinextNode(appDir, { arch: "linux-x64" });
+    if (!sharpStaged.staged) {
+        throw new Error(
+            "stageSharpForVinextNode reported nothing staged for a fixture that declares sharp",
+        );
+    }
+
     // 5. The image, from the staged recipe. Its bake RUN fails the build on
     //    a failed warm or an undersized cache.
     const image = run(
@@ -468,6 +502,36 @@ describe("the vinext × node image serves", () => {
         // `docker exec` + a node boot under linux/amd64 emulation outlives
         // bun's 5s default on a loaded host — measured, with four containers up.
     }, 60_000);
+});
+
+describe("#1298 /_next/image resizes for real, through the shipped image", () => {
+    const SOURCE_BYTES = statSync(TEST_IMAGE).size;
+
+    it("a webp-negotiated request is smaller than the source and decodes as webp", async () => {
+        const res = await fetch(
+            `http://127.0.0.1:${port}/_next/image?url=%2Ftest-image.png&w=32&q=75`,
+            { headers: { accept: "image/webp" } },
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("image/webp");
+        const bytes = await res.arrayBuffer();
+        // A passthrough (sharp missing/failed) would serve the source PNG
+        // byte-for-byte — same size, same content-type. A real resize to 32px
+        // wide + webp is a two-orders-of-magnitude shrink on this fixture
+        // (measured locally: 49456 -> 376 bytes); assert an order of
+        // magnitude margin rather than the exact figure.
+        expect(bytes.byteLength).toBeLessThan(SOURCE_BYTES / 10);
+        expect(bytes.byteLength).toBeGreaterThan(0);
+    });
+
+    it("an unnegotiated request (no Accept) still resizes, kept in the source format", async () => {
+        const res = await fetch(
+            `http://127.0.0.1:${port}/_next/image?url=%2Ftest-image.png&w=32&q=75`,
+        );
+        expect(res.status).toBe(200);
+        const bytes = await res.arrayBuffer();
+        expect(bytes.byteLength).toBeLessThan(SOURCE_BYTES / 5);
+    });
 });
 
 const DEPLOY_CACHE_CONTROL = "public, max-age=0, must-revalidate";

@@ -57,6 +57,7 @@ import {
     buildVinextExecutable,
     hostSmokeArch,
     smokeBinaryPlan,
+    stageSharpForVinextNode,
 } from "./vinext-build";
 import { assertNodePresetOutput } from "./vinext-node-build";
 
@@ -356,6 +357,17 @@ export async function build(options: BuildOptions = {}) {
                 ? "Staged the vinext-node image recipe (bakes the V8 compile cache at docker build)"
                 : "Using the app's existing vinext-node image recipe",
         );
+        // #1298: nitro's own trace into `.output/server/node_modules` copies
+        // the BUILD HOST's sharp addon (wrong platform for the alpine/musl
+        // image) and an incomplete JS package (missing the CJS entry sharp's
+        // own binding loader resolves to). Replace it with the real,
+        // complete, image-platform package before the assets/image build.
+        const sharpStaged = stageSharpForVinextNode(process.cwd());
+        if (sharpStaged.staged) {
+            log.info(
+                "Staged sharp's linuxmusl-x64 package into the vinext-node image's .output/server/node_modules",
+            );
+        }
     }
 
     // 3. Upload static assets — only when a storage block is configured.

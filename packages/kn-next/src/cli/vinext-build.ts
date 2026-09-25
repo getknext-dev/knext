@@ -545,6 +545,164 @@ export function stageSharpNative(
     }
 }
 
+export interface StageSharpForNodeOptions {
+    /** Image target arch; defaults to the ship target, like stageSharpNative. */
+    readonly arch?: string;
+    /** Injectable for tests; the real one fetches from the npm registry. */
+    readonly fetchPackage?: (
+        pkg: { name: string; version: string; integrity: string | null },
+        destDir: string,
+    ) => void;
+}
+
+/**
+ * Fix sharp inside a vinext × node build's `.output/server/node_modules`
+ * (#1298) — nitro's own node-file-trace ALREADY copies something there, and
+ * both halves of it are wrong:
+ *
+ *   1. It follows the ESM entry (`import sharp from 'sharp'`) and stops —
+ *      measured, on a real build: it copies `sharp/dist/*.mjs` but never
+ *      `sharp/dist/index.cjs`, the file sharp's own CJS binding loader
+ *      resolves to. `require('sharp')` from the deployed tree then throws
+ *      `Cannot find module '.../sharp/dist/index.cjs'` even though the trace
+ *      logged success and `.output/server/node_modules/sharp` exists.
+ *   2. The `@img/sharp-<platform>` / `@img/sharp-libvips-<platform>` pair it
+ *      traces is the BUILD HOST's platform (nitro says so out loud: "Ensure
+ *      your production environment matches the builder OS and architecture
+ *      ... to avoid native module issues") — not the deployed image's. The
+ *      Dockerfile's base is `node:22-alpine`, i.e. `linuxmusl`; a build on
+ *      any other host ships an addon the image cannot load.
+ *
+ * Either failure means `require('sharp')` throws inside
+ * `@getknext/core`'s image optimizer, which is written to FAIL OPEN — so the
+ * symptom is not a crash, it is `/_next/image` silently serving originals
+ * (the bug #1298 names).
+ *
+ * The fix mirrors `stageSharpNative` (the compiled-target twin, #949): stage
+ * the REAL, COMPLETE, correct-platform package into place, host-install or
+ * lockfile-pinned-fetch, rather than trusting the bundler's trace. Unlike
+ * `stageSharpNative` this writes INTO nitro's own `node_modules` — an ESM
+ * `import sharp from 'sharp'` inside `.output/server/index.mjs` (either an
+ * app's own or knext's runtime-resolve fallback in the image optimizer,
+ * `createRequire(cwd)`) needs to find it there, at
+ * `.output/server/node_modules`, exactly where nitro already looked — so
+ * only the CONTENTS of the `sharp` and `@img/sharp-*` entries change, never
+ * the two dependencies nitro also traced alongside them (`semver`,
+ * `detect-libc`, `@img/colour`), which this function never touches.
+ *
+ * No-op when the app does not use sharp (same signal as `stageSharpNative`):
+ * nitro's trace produces nothing in that case either, so there is nothing to
+ * fix.
+ */
+export function stageSharpForVinextNode(
+    cwd: string,
+    opts: StageSharpForNodeOptions = {},
+): { staged: boolean } {
+    const arch = opts.arch ?? "linux-x64";
+    const platformId = SHARP_PLATFORM_IDS[arch];
+    if (!platformId) {
+        throw new UsageError(
+            `Unknown build arch '${arch}'. Known: ${Object.keys(SHARP_PLATFORM_IDS).join(", ")}.`,
+        );
+    }
+
+    const imgRoot = findImgPackages(cwd);
+    const lockfilePath = findLockfile(cwd);
+    const locked = lockfilePath
+        ? readLockfilePackages(lockfilePath)
+        : undefined;
+
+    if (!appUsesSharp(cwd, imgRoot, locked)) {
+        return { staged: false };
+    }
+
+    const outputServer = join(cwd, ".output", "server");
+    if (!existsSync(outputServer)) {
+        throw new UsageError(
+            `No ${outputServer} — run the vinext node build ('vite build') before staging sharp for it.`,
+        );
+    }
+    const nodeModulesDest = join(outputServer, "node_modules");
+    mkdirSync(nodeModulesDest, { recursive: true });
+
+    // 1. The full sharp JS package, replacing whatever partial trace nitro
+    //    left — see the docblock's finding (1). Sharp's own JS is
+    //    platform-agnostic, so the HOST's install is always the right bytes;
+    //    only the native addon pair below is platform-specific.
+    const sharpSrc = findSharpPackageDir(cwd);
+    if (!sharpSrc) {
+        throw new UsageError(
+            "This app uses sharp, but no installed 'sharp' package was found on this " +
+                "host to stage into the node image (checked node_modules/sharp and the " +
+                "bun isolated-store/workspace-root equivalents). The vinext node build " +
+                "itself requires a resolvable sharp to have traced this far, so this is " +
+                "unexpected — reinstall (`bun install`) and rebuild.",
+        );
+    }
+    const sharpDest = join(nodeModulesDest, "sharp");
+    rmSync(sharpDest, { recursive: true, force: true });
+    // `dereference`: a bun/pnpm isolated store keeps the real package behind
+    // a symlink; copying the link would ship a dangling pointer in the image.
+    cpSync(sharpSrc, sharpDest, { recursive: true, dereference: true });
+
+    // 2. The native addon pair, for the IMAGE's platform — see finding (2).
+    //    Same host-or-lockfile-pinned-fetch strategy as `stageSharpNative`.
+    const imgDest = join(nodeModulesDest, "@img");
+    mkdirSync(imgDest, { recursive: true });
+    // Nitro's own trace left the HOST's addon pair here under its OWN name
+    // (e.g. `sharp-darwin-arm64`), which this loop below never revisits
+    // (it only clears the TARGET platform's own directory name). Left in
+    // place, the image would ship both — every one of sharp's own platform
+    // packages, whichever it resolves first at runtime is a coin flip this
+    // build must not leave to chance.
+    for (const entry of readdirSync(imgDest)) {
+        if (entry.startsWith("sharp-")) {
+            rmSync(join(imgDest, entry), { recursive: true, force: true });
+        }
+    }
+    const resolvedSharp = readResolvedSharpManifest(cwd);
+    for (const dir of [`sharp-${platformId}`, `sharp-libvips-${platformId}`]) {
+        const hostDir = imgRoot === undefined ? undefined : join(imgRoot, dir);
+        const destDir = join(imgDest, dir);
+        // Clear whatever nitro traced for this entry — the wrong platform's
+        // addon, or nothing — before writing the right one.
+        rmSync(destDir, { recursive: true, force: true });
+        if (hostDir !== undefined && existsSync(hostDir)) {
+            cpSync(hostDir, destDir, { recursive: true, dereference: true });
+            continue;
+        }
+        const name = `@img/${dir}`;
+        if (!lockfilePath || locked === undefined) {
+            throw new UsageError(
+                `This app uses sharp, the vinext-node image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
+                    "Run `bun install --save-text-lockfile` in the app and rebuild.",
+            );
+        }
+        const versions = locked.get(name);
+        if (!versions || versions.length === 0) {
+            throw new UsageError(
+                `The vinext-node image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
+                    "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
+                    "normally pins every platform's package. Reinstall from a clean lockfile\n" +
+                    "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
+                    `'${name}', and rebuild.`,
+            );
+        }
+        const entry = pickFetchVersion(
+            name,
+            versions,
+            resolvedSharp,
+            lockfilePath,
+        );
+        (opts.fetchPackage ?? fetchImgPackage)(
+            { name, version: entry.version, integrity: entry.integrity },
+            destDir,
+        );
+    }
+
+    return { staged: true };
+}
+
 /**
  * Does this app pull sharp into its bundle? ANY signal counts:
  *
@@ -750,6 +908,17 @@ function findImgPackages(cwd: string): string | undefined {
         join(cwd, "node_modules", ".bun", "node_modules", "@img"),
         join(cwd, "..", "..", "node_modules", "@img"),
         join(cwd, "..", "..", "node_modules", ".bun", "node_modules", "@img"),
+    ];
+    return candidates.find((c) => existsSync(c));
+}
+
+/** `node_modules/sharp` itself (the JS package), wherever the install layout put it. */
+function findSharpPackageDir(cwd: string): string | undefined {
+    const candidates = [
+        join(cwd, "node_modules", "sharp"),
+        join(cwd, "node_modules", ".bun", "node_modules", "sharp"),
+        join(cwd, "..", "..", "node_modules", "sharp"),
+        join(cwd, "..", "..", "node_modules", ".bun", "node_modules", "sharp"),
     ];
     return candidates.find((c) => existsSync(c));
 }
