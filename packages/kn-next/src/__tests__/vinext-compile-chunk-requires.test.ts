@@ -38,9 +38,16 @@ import { pathToFileURL } from "node:url";
 // The rolldown vinext itself builds with (the locked toolchain), reached through
 // vinext's own dependency tree: @getknext/core depends on vinext, not rolldown.
 const vinextRequire = createRequire(require.resolve("vinext/package.json"));
+/** The two rolldown APIs used here (rolldown is not a typed dependency of this package). */
+type RolldownModule = {
+    VERSION: string;
+    rolldown(input: Record<string, unknown>): Promise<{
+        write(output: Record<string, unknown>): Promise<unknown>;
+    }>;
+};
 const { rolldown, VERSION: ROLLDOWN_VERSION } = (await import(
     pathToFileURL(vinextRequire.resolve("rolldown")).href
-)) as typeof import("rolldown");
+)) as RolldownModule;
 
 const COMPILE = resolve(import.meta.dir, "../adapters/vinext-compile.mjs");
 const A = "KNEXT_1314_DEP_A_MARKER_3f7a";
