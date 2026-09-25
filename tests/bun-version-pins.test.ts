@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { afterAll, describe, expect, it } from 'bun:test';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -255,14 +255,20 @@ function isMarkerRejectedPath(f: string): boolean {
   return false;
 }
 
-type ScanResult = { selecting: number; exempted: number; off: string[]; exemptedEntries: string[] };
+type ExemptedEntry = { file: string; reason: string };
+type ScanResult = {
+  selecting: number;
+  exempted: number;
+  off: string[];
+  exemptedEntries: ExemptedEntry[];
+};
 
 /** The scan itself — pulled out of the `it()` body so it can run against a synthetic fixture root, not just REPO_ROOT (#1392 round 3 testability). */
 function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanResult {
   let selecting = 0;
   let exempted = 0;
   const off: string[] = [];
-  const exemptedEntries: string[] = [];
+  const exemptedEntries: ExemptedEntry[] = [];
   for (const f of imageBearingFiles(root)) {
     readFileSync(join(root, f), 'utf8')
       .split('\n')
@@ -276,7 +282,16 @@ function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanRe
           }
           if (/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/.test(line)) {
             exempted++;
-            exemptedEntries.push(`${f}:${line.trim()}`);
+            // The REASON is everything after the marker's own `:` — the
+            // stable, human-readable identity of an exemption. The rest of
+            // the line (fixture data, real oven/bun-shaped text) is exactly
+            // what would make PINNED_EXEMPTIONS self-scannable if stored
+            // verbatim (techdebt-3 round 2) — the reason text alone never
+            // contains the marker or an image-tag pattern.
+            const markerIdx = line.indexOf(LINE_EXEMPT_MARKER);
+            const afterMarker = line.slice(markerIdx + LINE_EXEMPT_MARKER.length);
+            const reason = afterMarker.replace(/^:\s*/, '').trim();
+            exemptedEntries.push({ file: f, reason });
           }
           return;
         }
@@ -293,56 +308,127 @@ function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanRe
 }
 
 /**
- * The reviewed, exact allowlist of every line the real repo is allowed to
- * exempt via LINE_EXEMPT_MARKER — `${file}:${trimmed line content}`. A NEW
- * exemption ANYWHERE (even in a file class the marker is otherwise permitted
- * in) means editing THIS list, not just adding the marker in the diff — the
- * gap this closes (#1392 round 3 review; techdebt-3): the marker could waive
- * any line in a non-rejected file class silently, with no reviewer-visible
- * signal that the exempt SET grew (techdebt-3 round).
+ * The reviewed, exact allowlist of every exemption the real repo is allowed
+ * to make via LINE_EXEMPT_MARKER — keyed by FILE, each value the list of
+ * REASON texts (the text after the marker's own `:`) that file is allowed
+ * to carry, in the order they appear top-to-bottom. A NEW exemption
+ * ANYWHERE (even in a file class the marker is otherwise permitted in)
+ * means editing THIS list, not just adding the marker in the diff — the gap
+ * this closes (#1392 round 3 review; techdebt-3 rounds 1 and 2): the marker
+ * could waive any line in a non-rejected file class silently, with no
+ * reviewer-visible signal that the exempt SET grew.
  *
- * BASE64-encoded, deliberately: each decoded entry itself CONTAINS a
- * literal exemption-marker string and an image-tag reference this file's
- * own scan is built to catch — spelled out as plain source text here, this
- * array would be self-scanned by the very scan it feeds, either re-tripping
- * the marker-in-non-rejected-file-class path (this file is not a rejected
- * path) or, worse, growing the exempt set every time the guard itself is
- * edited. Encoding breaks the literal substring match so the guard's own
- * data is inert to its own scan; `verifyPinnedExemptions` decodes before
- * comparing.
+ * Plain, readable text — not base64 (techdebt-3 round 2 correction to round
+ * 1's encoding). A REASON string never contains the literal marker text nor
+ * an image-tag-shaped substring (that's what makes it a "reason", not a
+ * selection or a marker use), so storing it verbatim here does not
+ * retrigger this file's own real-repo scan the way the FULL line (marker +
+ * image ref included) did.
+ *
+ * Stored as a per-file ARRAY, compared as a MULTISET (counts, not a Set) —
+ * two DIFFERENT lines can carry the IDENTICAL reason text (a real one
+ * exists nowhere in this file today, but nothing rules it out for a future
+ * exemption), and a Set-based comparison would silently collapse them,
+ * letting a genuine extra exemption hide behind an already-allowed reason
+ * string undetected — proved directly below (`multisetDiff` describe block)
+ * against a synthetic duplicate, since the real corpus has none to exercise
+ * this against today.
  */
-const PINNED_EXEMPT_LINES = [
-  'cGFja2FnZXMva24tbmV4dC9zcmMvX190ZXN0c19fL3J1bnRpbWUtaW1hZ2Utc2VsZWN0aW9uLnRlc3QudHM6ZXhwZWN0KHRleHQpLnRvQ29udGFpbigib3Zlbi9idW46MS40LjItYWxwaW5lQHNoYTI1NjoiKTsgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogcHJlZml4LW9ubHkgYXNzZXJ0aW9uLCBub3QgYSBzZWxlY3Rpb24=',
-  'cGFja2FnZXMva24tbmV4dC9zcmMvYWRhcHRlcnMvYnVuLWtlZXBhbGl2ZS1ndWFyZC5janM6Ly8gKHZlcmlmaWVkIG9uIG92ZW4vYnVuOmNhbmFyeSAxLjQuMCwgMjAyNi0wNy0wMikuIG92ZW4tYnVuLXBpbi1leGVtcHQ6IGhpc3RvcmljYWw=',
-  'dGVzdHMvYmFzZS1pbWFnZS1jdmUtaHlnaWVuZS50ZXN0LnRzOm5hbWU6ICdhcHBzL2RvY3MgKG92ZW4vYnVuOjEuNC4yLWFscGluZSknLCAvLyBvdmVuLWJ1bi1waW4tZXhlbXB0OiBkZXNjcmlwdGl2ZSBsYWJlbCwgYHJlZmAgYmVsb3cgY2FycmllcyB0aGUgcmVhbCBwaW4=',
-  'dGVzdHMvYnVpbHQtaW1hZ2UtdHJpdnkudGVzdC50czoqIChgb3Zlbi9idW46MS40LjAtYWxwaW5lYCwgYG5vZGU6MjItYWxwaW5lYCkuIG92ZW4tYnVuLXBpbi1leGVtcHQ6IGhpc3RvcmljYWw=',
-  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOiogb3Zlbi9idW46MS40LjAtYWxwaW5lICMgb3Zlbi1idW4tcGluLWV4ZW1wdDogLi4uYCBpbiBhIERvY2tlcmZpbGUgd291bGQ=',
-  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOmNvbnN0IGZpeHR1cmVUYWcgPSAnb3Zlbi9idW46MS40LjItYWxwaW5lJzsgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogdGVzdCBmaXh0dXJlIGFyZ3VtZW50LCBub3QgYSByZWFsIHNlbGVjdGlvbg==',
-  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOidGUk9NIG92ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCAjIG92ZW4tYnVuLXBpbi1leGVtcHQ6IHByZXRlbmQgdGhpcyBpcyByZXZpZXdlZFxuJyw=',
-  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOicvLyBoaXN0b3JpY2FsIG5vdGUgYWJvdXQgb3Zlbi9idW46MS40LjAtYWxwaW5lIC8vIG92ZW4tYnVuLXBpbi1leGVtcHQ6IHByb3NlLCBub3QgYSBzZWxlY3Rpb25cbics',
-  'dGVzdHMvYnl0ZWNvZGUtbGl2ZW5lc3MtY2hhaW4udGVzdC50czonbW9kZT1jb21waWxlZC1leGVjIHJ1bnRpbWU9YnVuIGltYWdlPW92ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6YWJjIGJ5dGVjb2RlX3ZlcmlmaWVkPXRydWUnOyAvLyBvdmVuLWJ1bi1waW4tZXhlbXB0OiBzeW50aGV0aWMgZml4dHVyZSAoZmFrZSB2ZXJzaW9uICsgZGlnZXN0KSwgbm90IGEgcmVhbCBzZWxlY3Rpb24=',
-  'dGVzdHMvYnl0ZWNvZGUtbGl2ZW5lc3MudGVzdC50czonbW9kZT1jb21waWxlZC1leGVjIHJ1bnRpbWU9YnVuIGltYWdlPW92ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6YWJjIGJ5dGVjb2RlX3ZlcmlmaWVkPXRydWUnOyAvLyBvdmVuLWJ1bi1waW4tZXhlbXB0OiBzeW50aGV0aWMgZml4dHVyZSAoZmFrZSB2ZXJzaW9uICsgZGlnZXN0KSwgbm90IGEgcmVhbCBzZWxlY3Rpb24=',
-  'dGVzdHMvYnl0ZWNvZGUtbGl2ZW5lc3MudGVzdC50czppbWFnZTogJ292ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6YWJjJywgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogc3ludGhldGljIGZpeHR1cmUsIG5vdCBhIHJlYWwgc2VsZWN0aW9u',
-  'dGVzdHMvZGVjbGFyZWQtdGVzdC1za2lwcy50ZXN0LnRzOidzY3JpcHRzL2UyZS1uYXRpdmUtcmVidWlsZC1tdXNsLnNoIGZvciByZWFsIGluc2lkZSB0aGUgcGlubmVkIG92ZW4vYnVuOjEuNC4yLWFscGluZSBpbWFnZSAnICsgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogZGVzY3JpcHRpdmUgcHJvc2UsIG5vdCBhIHNlbGVjdGlvbg==',
-].map((b64) => Buffer.from(b64, 'base64').toString('utf8'));
+const PINNED_EXEMPTIONS: Record<string, string[]> = {
+  'packages/kn-next/src/__tests__/runtime-image-selection.test.ts': [
+    'prefix-only assertion, not a selection',
+  ],
+  'packages/kn-next/src/adapters/bun-keepalive-guard.cjs': ['historical'],
+  'tests/base-image-cve-hygiene.test.ts': ['descriptive label, `ref` below carries the real pin'],
+  'tests/built-image-trivy.test.ts': ['historical'],
+  'tests/bun-version-pins.test.ts': [
+    // The design-comment paragraph above (explaining the marker itself)
+    // happens to also match the real scan's marker+oven/bun trigger —
+    // documented here rather than reworded away, since the paragraph's
+    // wording is the more important thing to keep readable.
+    '...` in a Dockerfile would',
+    // Only ONE occurrence, not two: `fixtureTag` below is a literal string
+    // containing "oven/bun:1.4.2-alpine", so it matches the scan's
+    // oven/bun regex on that line — but `fixturePinned` is a TEMPLATE
+    // LITERAL referencing `${fixtureTag}`, so its raw source text never
+    // contains a literal "oven/bun:" substring and the scan never matches
+    // that line at all, despite carrying the identical marker+reason
+    // comment. (An earlier round of this file wrongly assumed both lines
+    // counted — the multiset mechanism below is still correct and still
+    // needed for a REAL duplicate, just not this particular pair.)
+    'test fixture argument, not a real selection',
+    // These two carry a trailing `\n',` — that is literal SOURCE TEXT (the
+    // scan reads raw file bytes, not JS string semantics), because both
+    // reasons sit at the end of a JS string-literal fixture line
+    // (`'...# oven-bun-pin-exempt: pretend this is reviewed\n',`) whose
+    // `\n` escape and closing `'` / `,` are all part of the RAW line text
+    // after the marker's `:` — not stripped, since only the text UP TO the
+    // marker is special-cased, not what follows it.
+    "pretend this is reviewed\\n',",
+    "prose, not a selection\\n',",
+  ],
+  'tests/bytecode-liveness-chain.test.ts': [
+    'synthetic fixture (fake version + digest), not a real selection',
+  ],
+  'tests/bytecode-liveness.test.ts': [
+    'synthetic fixture (fake version + digest), not a real selection',
+    'synthetic fixture, not a real selection',
+  ],
+  'tests/declared-test-skips.test.ts': ['descriptive prose, not a selection'],
+};
 
 /**
- * Diff `exemptedEntries` (what the scan actually found) against the pinned
- * allowlist — in BOTH directions: an entry present but not pinned (a NEW,
- * unreviewed exemption) AND a pinned entry no longer present (the guard's
- * own list going stale, e.g. the exempted line was edited or removed) are
+ * A MULTISET diff of two string arrays — by COUNT, never by Set membership.
+ * Returns every element present MORE times in `found` than in `allowed`
+ * ("extra", once per surplus occurrence) and every element present more
+ * times in `allowed` than in `found` ("missing", once per shortfall) —
+ * duplicates are never collapsed in either direction (techdebt-3 round 2).
+ */
+function multisetDiff(found: string[], allowed: string[]): { extra: string[]; missing: string[] } {
+  const count = (arr: string[]) => {
+    const m = new Map<string, number>();
+    for (const s of arr) m.set(s, (m.get(s) ?? 0) + 1);
+    return m;
+  };
+  const foundCounts = count(found);
+  const allowedCounts = count(allowed);
+  const extra: string[] = [];
+  const missing: string[] = [];
+  for (const key of new Set([...foundCounts.keys(), ...allowedCounts.keys()])) {
+    const f = foundCounts.get(key) ?? 0;
+    const a = allowedCounts.get(key) ?? 0;
+    for (let i = 0; i < f - a; i++) extra.push(key);
+    for (let i = 0; i < a - f; i++) missing.push(key);
+  }
+  return { extra, missing };
+}
+
+/**
+ * Diff `exemptedEntries` (what the scan actually found, per file) against
+ * the pinned allowlist — in BOTH directions, per file, as a MULTISET: a
+ * reason present but not (enough times) pinned (a NEW, unreviewed
+ * exemption, or a duplicate the allowlist does not also carry) AND a pinned
+ * reason not (enough times) present (the guard's own list going stale) are
  * both reported, never silently accepted.
  */
-function verifyPinnedExemptions(entries: string[], allowlist: string[]): string[] {
-  const entrySet = new Set(entries);
-  const allowSet = new Set(allowlist);
-  const off: string[] = [];
-  for (const e of entries) {
-    if (!allowSet.has(e))
-      off.push(`NEW, unreviewed exemption — add it to PINNED_EXEMPT_LINES: ${e}`);
+function verifyPinnedExemptions(
+  entries: ExemptedEntry[],
+  allowlist: Record<string, string[]>,
+): string[] {
+  const foundByFile = new Map<string, string[]>();
+  for (const { file, reason } of entries) {
+    if (!foundByFile.has(file)) foundByFile.set(file, []);
+    foundByFile.get(file)!.push(reason);
   }
-  for (const a of allowlist) {
-    if (!entrySet.has(a)) off.push(`STALE pinned exemption — no longer present, remove it: ${a}`);
+  const off: string[] = [];
+  for (const file of new Set([...foundByFile.keys(), ...Object.keys(allowlist)])) {
+    const { extra, missing } = multisetDiff(foundByFile.get(file) ?? [], allowlist[file] ?? []);
+    for (const reason of extra)
+      off.push(`NEW, unreviewed exemption — add it to PINNED_EXEMPTIONS['${file}']: ${reason}`);
+    for (const reason of missing)
+      off.push(
+        `STALE pinned exemption in PINNED_EXEMPTIONS['${file}'] — no longer present, remove it: ${reason}`,
+      );
   }
   return off;
 }
@@ -354,8 +440,11 @@ function verifyPinnedExemptions(entries: string[], allowlist: string[]): string[
  * immune to the ambient gpg-signing config that makes an actual commit
  * fail in a sandboxed environment with no configured signing key.
  */
+const gitFixtureDirs: string[] = [];
+
 function makeGitFixture(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'bun-pin-marker-fixture-'));
+  gitFixtureDirs.push(dir);
   for (const [rel, contents] of Object.entries(files)) {
     const abs = join(dir, rel);
     mkdirSync(dirname(abs), { recursive: true });
@@ -365,6 +454,10 @@ function makeGitFixture(files: Record<string, string>): string {
   Bun.spawnSync(['git', 'add', '-A'], { cwd: dir });
   return dir;
 }
+
+afterAll(() => {
+  for (const dir of gitFixtureDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 describe('LINE_EXEMPT_MARKER is rejected in image-selecting file classes (#1392 round 3)', () => {
   it.each([
@@ -427,51 +520,80 @@ describe('LINE_EXEMPT_MARKER is rejected in image-selecting file classes (#1392 
 // exempts unconditionally, so a NEW exemption anywhere else is silent: no
 // reviewer-visible signal that the exempt SET grew, only that a diff added a
 // comment. `verifyPinnedExemptions` closes that: the exempt set from a real
-// scan must equal the reviewed allowlist EXACTLY, in both directions.
-// The fixture strings below deliberately build the exemption-marker text
-// and the image-tag substring via concatenation, NOT as one contiguous
-// literal — this file's own real-repo scan (below) reads its own raw
-// source text, and a literal marker-plus-image-tag pair on one line here
-// would be picked up as an (unpinned) exemption, same self-scan hazard
-// `PINNED_EXEMPT_LINES` is base64-encoded to avoid.
-const FAKE_MARKER = ['oven', 'bun', 'pin', 'exempt'].join('-');
-const fakeImageRef = (tag: string) => `oven${'/'}bun:${tag}`;
+// scan must equal the reviewed allowlist EXACTLY, in both directions, per
+// FILE, as a MULTISET (round 2: a duplicate reason string is not a free
+// pass for a second, unreviewed exemption).
 
-describe('verifyPinnedExemptions pins the exempt set exactly (#1392 round 3, techdebt-3)', () => {
-  it('an entry not in the allowlist (a NEW, unreviewed exemption) is flagged', () => {
+describe('multisetDiff: the primitive verifyPinnedExemptions is built on (techdebt-3 round 2)', () => {
+  it('an element with MORE occurrences in found than allowed reports the surplus as extra', () => {
+    expect(multisetDiff(['a', 'a', 'a'], ['a'])).toEqual({ extra: ['a', 'a'], missing: [] });
+  });
+
+  it('an element with MORE occurrences in allowed than found reports the shortfall as missing', () => {
+    expect(multisetDiff(['a'], ['a', 'a', 'a'])).toEqual({ extra: [], missing: ['a', 'a'] });
+  });
+
+  it('equal counts of a duplicate element are clean — no extra, no missing', () => {
+    expect(multisetDiff(['a', 'a'], ['a', 'a'])).toEqual({ extra: [], missing: [] });
+  });
+
+  it('does NOT collapse a duplicate the way a Set-based comparison would (the exact bug this replaces)', () => {
+    // A naive Set-based diff sees {'a'} === {'a'} for BOTH sides here and
+    // reports clean — silently hiding that `found` actually has ONE EXTRA,
+    // unreviewed 'a'. The multiset diff must not make that mistake.
+    const { extra } = multisetDiff(['a', 'a'], ['a']);
+    expect(extra).toEqual(['a']);
+  });
+});
+
+describe('verifyPinnedExemptions pins the exempt set exactly, per file, as a multiset (#1392 round 3/4, techdebt-3)', () => {
+  it("a reason not in that file's allowlist (a NEW, unreviewed exemption) is flagged", () => {
     const off = verifyPinnedExemptions(
-      [`lib/example.cjs:// ${fakeImageRef('9.9.9-alpine')} // ${FAKE_MARKER}: new, unreviewed`],
-      [],
+      [{ file: 'lib/example.cjs', reason: 'new, unreviewed' }],
+      {},
     );
     expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
   });
 
-  it('an allowlist entry no longer present in the scan (STALE) is flagged, not silently accepted', () => {
-    const off = verifyPinnedExemptions(
-      [],
-      [`lib/example.cjs:// ${fakeImageRef('1.4.0-alpine')} // ${FAKE_MARKER}: historical`],
-    );
+  it('an allowlist reason no longer present in the scan (STALE) is flagged, not silently accepted', () => {
+    const off = verifyPinnedExemptions([], { 'lib/example.cjs': ['historical'] });
     expect(off.some((o) => o.includes('STALE pinned exemption'))).toBe(true);
   });
 
   it('a matching entry set (found === allowlist) is clean', () => {
-    const line = `lib/example.cjs:// ${fakeImageRef('1.4.0-alpine')} // ${FAKE_MARKER}: historical`;
-    expect(verifyPinnedExemptions([line], [line])).toEqual([]);
+    const entries = [{ file: 'lib/example.cjs', reason: 'historical' }];
+    expect(verifyPinnedExemptions(entries, { 'lib/example.cjs': ['historical'] })).toEqual([]);
   });
 
-  it('the real allowlist decodes to 12 entries, each a real file:line pair, not empty base64 noise', () => {
-    expect(PINNED_EXEMPT_LINES.length).toBe(12);
-    for (const e of PINNED_EXEMPT_LINES) {
-      expect(e).toContain(':');
-      expect(e).toMatch(/oven-bun-pin-exempt/);
+  // The exact bug round 2 closes: a Set-based comparison treats a SECOND,
+  // genuinely new exemption with the SAME reason text as already covered by
+  // the first. The multiset diff must not.
+  it('a genuine SECOND exemption with the SAME reason text as an already-pinned one is still flagged as NEW', () => {
+    const entries = [
+      { file: 'lib/example.cjs', reason: 'historical' },
+      { file: 'lib/example.cjs', reason: 'historical' }, // a real 2nd line, unreviewed
+    ];
+    const off = verifyPinnedExemptions(entries, { 'lib/example.cjs': ['historical'] });
+    expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
+  });
+
+  it('PINNED_EXEMPTIONS is real, readable text — no base64, every file has at least one reason', () => {
+    const files = Object.keys(PINNED_EXEMPTIONS);
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      expect(PINNED_EXEMPTIONS[file].length).toBeGreaterThan(0);
+      for (const reason of PINNED_EXEMPTIONS[file]) {
+        expect(reason).not.toMatch(/oven-bun-pin-exempt/);
+        expect(reason).not.toMatch(/oven\/bun:/);
+      }
     }
   });
 
-  it('the REPO_ROOT scan`s exemptedEntries exactly matches PINNED_EXEMPT_LINES — no new, no stale', () => {
+  it("the REPO_ROOT scan's exemptedEntries exactly matches PINNED_EXEMPTIONS — no new, no stale", () => {
     const tag = `oven/bun:${PINNED_BUN}-alpine`;
     const pinned = `${tag}@${PINNED_BUN_IMAGE_DIGEST}`;
     const { exemptedEntries } = scanOvenBunImageRefs(REPO_ROOT, tag, pinned);
-    expect(verifyPinnedExemptions(exemptedEntries, PINNED_EXEMPT_LINES)).toEqual([]);
+    expect(verifyPinnedExemptions(exemptedEntries, PINNED_EXEMPTIONS)).toEqual([]);
   });
 });
 
