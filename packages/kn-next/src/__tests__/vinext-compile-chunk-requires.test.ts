@@ -497,4 +497,38 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
         expect(build.status, `${build.stdout}\n${build.stderr}`).not.toBe(0);
         expect(build.stderr).toContain(`${MISSING} (index.mjs)`);
     }, 120_000);
+
+    it("function and method HEADS named `__require` are not read as non-literal requires (tm-ok-plain)", async () => {
+        // esbuild/tsup CommonJS output next to only RESOLVABLE requires must
+        // pass a strict build: `function __require() {`, `function* __require(`
+        // and `__require() {` member heads define functions; they are not
+        // calls with a non-literal argument.
+        const { work, server, out } = await rolldownFrom({
+            "dep.cjs":
+                "var __getOwnPropNames = Object.getOwnPropertyNames;\n" +
+                "var __commonJS = (cb, mod) => function __require() {\n" +
+                "  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n" +
+                "};\n" +
+                'var require_lib = __commonJS({ "lib.js"(exports, module) { module.exports = () => "lib"; } });\n' +
+                "var gen = function* __require() { yield 1; };\n" +
+                "class K { __require() { return 1; } }\n" +
+                "var o = { __require(x) { return x; } };\n" +
+                'module.exports = { lib: require_lib(), gen, K, o, a: () => require("dep-a") };\n',
+            "index.mjs":
+                'import d from "./dep.cjs";\nconsole.log("RESULT:" + d.a() + d.lib());\n',
+        });
+        expect(out).toContain("=> function __require()");
+        expect(out).toContain("function* __require()");
+        expect(out).toMatch(/__require\(\) \{\s*return 1;/);
+
+        const build = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        expect(build.stderr).not.toContain("non-literal");
+
+        const run = deployAndRun(work, build.exe);
+        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(run.stdout).toContain(`RESULT:${A}lib`);
+    }, 120_000);
 });
