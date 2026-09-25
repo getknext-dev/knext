@@ -25,6 +25,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+    checkGitignoreCoversEnv,
     createMain,
     loadTemplates,
     renderScaffold,
@@ -338,5 +339,64 @@ describe("#1398 (rev-1393 round 2): createMain's --force output does not falsely
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
+    });
+
+    it('under --dry-run, reports "Would keep" rather than "Kept" for an existing .gitignore', async () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-gitignore-cli-dryrun-"));
+        try {
+            writeFileSync(join(dir, ".gitignore"), ".env\n", "utf8");
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "acme" }),
+                "utf8",
+            );
+            const { code, out } = await capture([
+                dir,
+                "--name",
+                "acme",
+                "--force",
+                "--dry-run",
+            ]);
+            expect(code).toBe(0);
+            expect(out.toLowerCase()).toContain(
+                "would keep your existing .gitignore",
+            );
+            expect(out.toLowerCase()).not.toContain(
+                "kept your existing .gitignore (not overwritten)",
+            );
+            // Nothing was actually written under --dry-run.
+            expect(readFileSync(join(dir, ".gitignore"), "utf8")).toBe(
+                ".env\n",
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("#1398 (rev-1393 round 3): checkGitignoreCoversEnv asks REAL git, not a regex — rev-3 review's exact false-positive/false-negative table", () => {
+    // False warnings (rev-3): git DOES ignore .env with these patterns — must
+    // report "ignored", not "not-ignored".
+    it.each([
+        [".env*", "create-next-app's own default"],
+        ["/.env", "anchored to repo root"],
+        ["**/.env", "matches .env at any depth, including root"],
+    ])("reports 'ignored' for %s (%s)", (pattern) => {
+        expect(checkGitignoreCoversEnv(pattern)).toBe("ignored");
+    });
+
+    // Missed warnings (rev-3): git does NOT ignore the bare .env file with
+    // these patterns — must report "not-ignored", not "ignored".
+    it.each([
+        [".env.local", "only the .local variant is covered, not bare .env"],
+        [".env.*", "requires a dot + suffix, doesn't match bare .env"],
+        [".env/", "directory-only pattern; .env is a FILE"],
+        [".env\n!.env", "negated right back out"],
+    ])("reports 'not-ignored' for %s (%s)", (pattern) => {
+        expect(checkGitignoreCoversEnv(pattern)).toBe("not-ignored");
+    });
+
+    it("reports 'ignored' for the plain bare .env line", () => {
+        expect(checkGitignoreCoversEnv(".env\n")).toBe("ignored");
     });
 });

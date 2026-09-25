@@ -19,13 +19,17 @@
  * `.hbs` so this repo's own vitest/biome/tsc never collect them as sources.
  */
 
+import { spawnSync } from "node:child_process";
 import {
     existsSync,
     mkdirSync,
+    mkdtempSync,
     readdirSync,
     readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -449,18 +453,64 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
 }
 
 /**
- * Whether a `.gitignore` on disk actually ignores `.env`/`.env.*` (a simple
- * literal check, not `git check-ignore` — this runs against a USER's own
- * possibly-uninitialized directory, not a git repo, so the real-check-ignore
- * helper `scaffold-gitignore.test.ts` uses for the SHIPPED template is not
- * available here). Deliberately conservative: a line has to actually start
- * with `.env` (after trimming) to count, so `#.env` (commented out) and
- * `!.env.example` (a negation) do not.
+ * Whether a `.gitignore`'s CONTENT actually causes git to ignore `.env` —
+ * asks REAL `git check-ignore` in a throwaway scratch repo, not a hand-rolled
+ * pattern matcher (#1398 rev-3: a line-prefix regex disagreed with real git
+ * in both directions — it warned on `.env*`, `/.env`, and a leading double-
+ * star glob before `/.env` (all of which git DOES ignore), and stayed
+ * silent on `.env.local`-only, `.env.*`-only, `.env/`
+ * (directory-only, `.env` is a file), and `.env` immediately renegated by
+ * `!.env`, none of which git actually ignores).
+ *
+ * Checks only the bare `.env` FILE, not `.env.local` too, deliberately: a
+ * `/.env`-only pattern is real-world sufficient coverage (it is also what
+ * `.env*`, create-next-app's own default, reduces to), and requiring BOTH
+ * paths to be covered would turn `/.env` back into a false warning — exactly
+ * the case rev-3 named as one that must NOT warn.
+ *
+ * Returns `"unknown"` (never guesses) when git itself isn't usable in this
+ * environment, so the caller can say so honestly instead of asserting a
+ * verdict it cannot back up.
  */
-function gitignoreCoversEnv(content: string): boolean {
-    return content
-        .split(/\r?\n/)
-        .some((line) => /^\.env(\..*)?\/?$/.test(line.trim()));
+export function checkGitignoreCoversEnv(
+    content: string,
+): "ignored" | "not-ignored" | "unknown" {
+    let scratch: string;
+    try {
+        scratch = mkdtempSync(join(tmpdir(), "knext-gitignore-env-check-"));
+    } catch {
+        return "unknown";
+    }
+    try {
+        const init = spawnSync("git", ["init", "-q"], { cwd: scratch });
+        if (init.error || init.status !== 0) return "unknown";
+        writeFileSync(join(scratch, ".gitignore"), content, "utf8");
+        writeFileSync(join(scratch, ".env"), "// probe\n", "utf8");
+        // `-c core.excludesFile=/dev/null`: isolate the probe from whatever
+        // global gitignore the running machine happens to have configured —
+        // same reasoning as install-smoke.mjs's `gitignoreReallyIgnores`.
+        const result = spawnSync(
+            "git",
+            [
+                "-c",
+                "core.excludesFile=/dev/null",
+                "check-ignore",
+                "--quiet",
+                ".env",
+            ],
+            { cwd: scratch },
+        );
+        if (result.error) return "unknown";
+        return result.status === 0 ? "ignored" : "not-ignored";
+    } catch {
+        return "unknown";
+    } finally {
+        try {
+            rmSync(scratch, { recursive: true, force: true });
+        } catch {
+            // best-effort cleanup
+        }
+    }
 }
 
 const HELP = `kn-next create — scaffold a knext app with guarded instrumentation
@@ -576,26 +626,32 @@ export async function createMain(argv: string[]): Promise<number> {
         });
         const rels = [...files.keys()].sort();
         // #1398 rev-2: `writeScaffold` already removes a KEPT `.gitignore`
-        // (an existing one under `--force`) from `files`, so it correctly
-        // never appears in the "Created"/"Would create" count/list above.
-        // Report it honestly instead of staying silent about it: a
-        // pre-existing `.gitignore` on disk that isn't in the returned map
-        // means it was kept, not skipped-because-absent-from-the-scaffold.
+        // (an existing one under `--force`) from `files` — for BOTH the real
+        // write and the `dryRun` path — so it correctly never appears in the
+        // "Created"/"Would create" count/list above. Report it honestly
+        // instead of staying silent about it: a pre-existing `.gitignore` on
+        // disk that isn't in the returned map means it was (or, under
+        // `--dry-run`, would be) kept, not skipped-because-absent-from-the-
+        // scaffold.
         const gitignoreWasKept =
-            !values["dry-run"] &&
             !files.has(GITIGNORE_TARGET_KEY) &&
             existsSync(join(appDir, GITIGNORE_TARGET_KEY));
         let gitignoreNote = "";
         if (gitignoreWasKept) {
-            gitignoreNote = `\nKept your existing ${GITIGNORE_TARGET_KEY} (not overwritten).\n`;
+            gitignoreNote = values["dry-run"]
+                ? `\nWould keep your existing ${GITIGNORE_TARGET_KEY} (not overwritten).\n`
+                : `\nKept your existing ${GITIGNORE_TARGET_KEY} (not overwritten).\n`;
             const existing = readFileSync(
                 join(appDir, GITIGNORE_TARGET_KEY),
                 "utf8",
             );
-            if (!gitignoreCoversEnv(existing)) {
+            const verdict = checkGitignoreCoversEnv(existing);
+            if (verdict === "not-ignored") {
                 gitignoreNote +=
                     `WARNING: your existing ${GITIGNORE_TARGET_KEY} does not appear to ignore ` +
-                    `.env / .env.* — secrets in those files could be committed.\n`;
+                    `.env — secrets in that file could be committed.\n`;
+            } else if (verdict === "unknown") {
+                gitignoreNote += `could not verify your existing ${GITIGNORE_TARGET_KEY} ignores .env (git unavailable)\n`;
             }
         }
         process.stdout.write(
