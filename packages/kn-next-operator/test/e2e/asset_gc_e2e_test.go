@@ -466,8 +466,8 @@ spec:
         - name: minio
           image: %[5]s
           # NO args override (#1403): Bitnami's minio image runs its own
-          # setup wrapper via CMD before exec-ing the real `minio server`
-          # invocation; overriding CMD with a raw `server /data` bypasses
+          # setup wrapper via CMD before exec-ing the real "minio server"
+          # invocation; overriding CMD with a raw "server /data" bypasses
           # that wrapper and the backend fails to initialize. MINIO_DATA_DIR
           # redirects Bitnami's own default (/bitnami/minio/data) onto the
           # volumeMount below, which otherwise goes unused.

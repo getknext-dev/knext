@@ -105,7 +105,9 @@ spec:
   template:
     metadata: { labels: { app: minio } }
     spec:
-      securityContext: { seccompProfile: { type: RuntimeDefault } }
+      # fsGroup: 1001 matches Bitnami minio's runtime UID so it can write the PVC
+      # root on block-volume storage classes (default root:root 0755 on OKE/GKE).
+      securityContext: { fsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: minio
           # #1403: quay.io/minio/minio UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror (genuine MinIO, verified S3-API-compatible). NO args override - Bitnami's own entrypoint runs `minio server` internally.

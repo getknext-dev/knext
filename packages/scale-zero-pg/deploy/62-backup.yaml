@@ -153,7 +153,12 @@ spec:
           # neon/ and neon-config/ prefixes.
           containers:
             - name: mirror
-              image: docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 # pinned
+              # #1423 (KNOWN BREAK, NOT FIXED HERE — needs szpg's own review, not
+              # a knext-side CI repin): docker.io/minio/mc now UNAUTHORIZES every
+              # anonymous pull, repo-wide (#1403). This LIVE backup-mirror CronJob
+              # was deliberately left pinned to the broken tag; see
+              # getknext-dev/knext#1423 for the tracked fix.
+              image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned — UNPULLABLE, see #1423
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
@@ -622,7 +627,12 @@ spec:
           # never over-pruned, #59). Never exit 0 having silently pruned nothing (#42).
           containers:
             - name: prune
-              image: docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 # pinned
+              # #1423 (KNOWN BREAK, NOT FIXED HERE — needs szpg's own review, not
+              # a knext-side CI repin): docker.io/minio/mc now UNAUTHORIZES every
+              # anonymous pull, repo-wide (#1403). This LIVE prune CronJob was
+              # deliberately left pinned to the broken tag; see
+              # getknext-dev/knext#1423 for the tracked fix.
+              image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned — UNPULLABLE, see #1423
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
