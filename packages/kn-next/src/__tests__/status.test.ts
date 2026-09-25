@@ -15,6 +15,8 @@
  */
 
 import { describe, expect, it, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { KubectlFn } from "../cli/doctor";
 import {
     ENVMAP_COLLISION_INFORMATIONAL_REASONS,
@@ -490,6 +492,41 @@ describe("renderStatusHuman", () => {
         expect(ENVMAP_COLLISION_INFORMATIONAL_REASONS).toEqual([
             "EnvMapExpectedOverride",
         ]);
+    });
+
+    it("ENVMAP_COLLISION_INFORMATIONAL_REASONS is lockstepped with the Go ReasonEnvMapExpectedOverride constant (#1391 round 5)", () => {
+        // The TS list and the Go reason string are hand-maintained on either
+        // side of a language boundary (see the doc comment on
+        // ENVMAP_COLLISION_INFORMATIONAL_REASONS) — a rename on one side with
+        // no corresponding change on the other would silently downgrade the
+        // informational rendering back to an alarm dump. Reads the Go source
+        // as text (same pattern as metrics-port-lockstep.test.ts) rather than
+        // hardcoding a second copy of the string, so a rename on the Go side
+        // is caught here without anyone remembering to update this file too.
+        const controllerGo = readFileSync(
+            resolve(
+                __dirname,
+                "..",
+                "..",
+                "..",
+                "kn-next-operator",
+                "internal",
+                "controller",
+                "nextapp_controller.go",
+            ),
+            "utf8",
+        );
+        const m = controllerGo.match(
+            /ReasonEnvMapExpectedOverride\s*=\s*"([^"]+)"/,
+        );
+        if (!m) {
+            throw new Error(
+                "could not find ReasonEnvMapExpectedOverride's string value in nextapp_controller.go — the constant was renamed/moved and this lockstep guard needs updating, not silently skipped",
+            );
+        }
+        expect(
+            ENVMAP_COLLISION_INFORMATIONAL_REASONS as readonly string[],
+        ).toContain(m[1]);
     });
 
     it("no envMap collision: healthy CR (no EnvMapCollision condition) renders 'not reported'", () => {

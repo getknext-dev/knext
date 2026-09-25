@@ -295,6 +295,12 @@ jsonpath='{.status.conditions[?(@.type=="EnvMapCollision")]}'` or
 stop the condition/event), remove the `envMap` entry — the app then falls
 back to the platform's own default (or, for `HOSTNAME`, already was).
 
+If you upgrade the platform's operator to a version that adds this
+collision detection, every already-grandfathered CR reconciles once as the
+`EnvMapCollision` condition is set for the first time — this cuts one extra
+Knative Revision per affected CR, a one-time effect on that upgrade, not a
+recurring one.
+
 The condition's `reason` tells you which case you are in, and the event type
 tells you whether it needs attention:
 
