@@ -757,8 +757,26 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
   // parse in production.
   const GH_502 =
     'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 502: Bad Gateway (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  // Realistic Go/gh network-error wordings (#1400 round 2) — "could not
+  // resolve host" was this suite's OWN invention, not what `gh`'s Go HTTP
+  // stack actually prints. The real shapes, verified against gh's own
+  // source/observed output:
+  //   - DNS failure:        "dial tcp: lookup api.github.com: no such host"
+  //   - refused connection: "dial tcp ...: connect: connection refused"
+  //   - truncated response:  "unexpected EOF"
+  //   - a Go net timeout:    "dial tcp: i/o timeout"
+  //   - gh's own friendly network-failure banner: "error connecting to
+  //     api.github.com"
   const GH_DNS =
-    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp: lookup api.github.com: could not resolve host';
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp: lookup api.github.com: no such host';
+  const GH_CONN_REFUSED =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp 140.82.121.6:443: connect: connection refused';
+  const GH_UNEXPECTED_EOF =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": unexpected EOF';
+  const GH_IO_TIMEOUT =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp: i/o timeout';
+  const GH_ERROR_CONNECTING =
+    'error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com';
   const GH_401 =
     'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 401: Bad credentials (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
   const GH_403_PERMISSION =
@@ -766,6 +784,13 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
   const GH_403_RATE_LIMIT =
     'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 403: API rate limit exceeded for installation ID 123456. (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
   const GH_JSON_PARSE = 'unexpected: JSON.parse failed on gh run list output';
+  // #1400 round 2 — a status code must NOT match from an unrelated number in
+  // the command line (a --limit value, a run id, a port). No "HTTP NNN"
+  // prefix anywhere in this message, so it must fall through to 'local', not
+  // 'fatal' or 'retryable' by accident of "401" or "403" appearing bounded
+  // by word boundaries somewhere in the text.
+  const GH_NUMBER_IN_COMMAND_LINE =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 401 --json databaseId,status,createdAt\nsome unrelated local failure unpacking run 403 from the response';
 
   it("classifyListingError: 'fatal' for 401, a plain 403, and 'authenticat...' wording — never retried (#1400)", () => {
     expect(classifyListingError(new Error(GH_401))).toBe('fatal');
@@ -784,14 +809,32 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
     );
   });
 
+  it("classifyListingError: 'retryable' for the real gh/Go network wordings round 2 found missing (#1400 round 2)", () => {
+    expect(classifyListingError(new Error(GH_CONN_REFUSED))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_UNEXPECTED_EOF))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_IO_TIMEOUT))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_ERROR_CONNECTING))).toBe('retryable');
+  });
+
   it("classifyListingError: 'local' for a JSON parse failure — not an HTTP/network shape at all (#1400)", () => {
     expect(classifyListingError(new Error(GH_JSON_PARSE))).toBe('local');
+  });
+
+  it('classifyListingError: a bare number in the command line (a --limit value, a run id) is NOT mistaken for an HTTP status (#1400 round 2)', () => {
+    expect(classifyListingError(new Error(GH_NUMBER_IN_COMMAND_LINE))).toBe('local');
   });
 
   it('retryAfterMs: parses a Retry-After hint from the error text when gh surfaces one, else null (#1400)', () => {
     expect(retryAfterMs('secondary rate limit hit. retry after: 30')).toBe(30_000);
     expect(retryAfterMs('Retry-After 12')).toBe(12_000);
     expect(retryAfterMs(GH_502)).toBeNull();
+  });
+
+  it('retryAfterMs: caps an implausibly large Retry-After hint at 60s, never waits longer (#1400 round 2)', () => {
+    expect(retryAfterMs('Retry-After 300')).toBe(60_000);
+    expect(retryAfterMs('secondary rate limit hit. retry after: 3600')).toBe(60_000);
+    // Under the cap is untouched.
+    expect(retryAfterMs('Retry-After 45')).toBe(45_000);
   });
 
   it('a LOCAL listing error (JSON parse failure) is never swallowed and NEVER retried — distinct from a retryable one (#1400)', () => {
@@ -862,9 +905,7 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
     // The blip is visible in warnings — a run that limped through a flaky
     // network window must not read identically to a clean first-try run
     // (the same discipline this repo's other retry-with-backoff guards use).
-    expect(
-      warnings.some((w) => /attempt 1[\s\S]*could not resolve host[\s\S]*retrying/.test(w)),
-    ).toBe(true);
+    expect(warnings.some((w) => /attempt 1[\s\S]*no such host[\s\S]*retrying/.test(w))).toBe(true);
   });
 
   it('a RETRY-AFTER hint (a rate-limited 403 with a numeric wait) is honoured in PREFERENCE to the exponential backoff (#1400)', () => {

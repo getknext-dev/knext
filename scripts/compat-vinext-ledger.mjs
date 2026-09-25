@@ -601,14 +601,29 @@ export function isAuthOrApiError(err) {
  */
 export function classifyListingError(err) {
   const msg = String(err?.message ?? err ?? '');
-  const isRateLimited403 = /\b403\b/.test(msg) && /rate.?limit/i.test(msg);
-  if (/\b401\b|authenticat/i.test(msg)) return 'fatal';
-  if (/\b403\b/.test(msg) && !isRateLimited403) return 'fatal';
+  // #1400 round 2 — an HTTP status is only ever meaningful right after the
+  // literal `HTTP ` gh itself prints ("HTTP 401: Bad credentials"); matching
+  // a bare `\b403\b` anywhere in the message let an UNRELATED number in the
+  // command line (a `--limit 401`, a run id) be mistaken for a status code.
+  const statusMatch = /\bHTTP\s+(\d{3})\b/.exec(msg);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const isRateLimited403 = status === 403 && /rate.?limit/i.test(msg);
+  if (status === 401 || /authenticat/i.test(msg)) return 'fatal';
+  if (status === 403 && !isRateLimited403) return 'fatal';
   if (
-    /\b(429|5\d\d)\b/.test(msg) ||
+    status === 429 ||
+    (status !== null && status >= 500 && status < 600) ||
     isRateLimited403 ||
-    /could not resolve/i.test(msg) ||
-    /connection reset|ECONNRESET/i.test(msg) ||
+    /could not resolve|no such host/i.test(msg) ||
+    /connection reset|ECONNRESET|connection refused/i.test(msg) ||
+    // #1400 round 2 — real `gh`/Go network-error wordings this bucket
+    // missed: a truncated TLS/HTTP response ("unexpected EOF"), gh's own
+    // friendly network-failure banner ("error connecting to <host>"), and
+    // the Go net package's timeout suffix ("i/o timeout", distinct text
+    // from the "timeout"/"timed out" wording already matched below).
+    /error connecting to/i.test(msg) ||
+    /unexpected EOF/i.test(msg) ||
+    /i\/o timeout/i.test(msg) ||
     /\btimeout\b|timed out|ETIMEDOUT/i.test(msg)
   ) {
     return 'retryable';
@@ -622,12 +637,19 @@ export function classifyListingError(err) {
  * PREFERENCE to the exponential backoff for that one attempt — the server
  * told us exactly how long to wait, so guessing shorter just re-triggers
  * the same limit, and guessing longer wastes the window needlessly.
+ *
+ * Capped at 60s (#1400 round 2): an implausibly large hint (a misparsed
+ * value, or a server genuinely asking for an unreasonable wait) must not
+ * turn a bounded-retry helper into an effectively-unbounded stall — this
+ * script's own LISTING_RETRY_ATTEMPTS budget assumes each wait is on the
+ * order of the exponential-backoff schedule it otherwise uses.
  * @param {string} msg
  * @returns {number | null} milliseconds, or null if no hint was found
  */
 export function retryAfterMs(msg) {
   const m = /retry.?after[:\s]+(\d+)/i.exec(msg);
-  return m ? Number(m[1]) * 1000 : null;
+  if (!m) return null;
+  return Math.min(Number(m[1]) * 1000, 60_000);
 }
 
 /**
