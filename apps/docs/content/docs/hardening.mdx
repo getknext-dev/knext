@@ -40,6 +40,14 @@ set) is knext.
   `kn-next doctor` and the `NetworkPolicyEnforced` condition on your app both report which case
   your cluster is in.
 - **Malformed HTTP** — external traffic passes three independent HTTP parsers before your code.
+- **Malformed request paths** — on the `vinext` build, the scaffolded server entry answers a path
+  that is not valid percent-encoding (for example a `%` not followed by two hex digits) with
+  `400 Bad Request` before any route runs, and turns any other failure on the request path into a
+  plain `500` rather than an error page or a process exit. These files are written once, when the
+  app is scaffolded: to pick this up in an older app, run `kn-next create --builder vinext` in a
+  throwaway directory and copy its `runtime-contract.mjs` and your runtime's entry
+  (`knext-bun-entry.mjs` or `knext-node-entry.mjs`) over yours — diff first if you edited them.
+  On the Node runtime, `kn-next doctor` warns when the entry is behind the installed version.
 - **Metrics-port separation** — the app's Prometheus listener defaults to `:9464`, deliberately off
   `:9091`, which Knative's queue-proxy binds inside every pod on a stock Serving install (default
   `config-observability`). The NetworkPolicy's scrape grants, the `prometheus.io/port` annotation

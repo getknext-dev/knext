@@ -113,7 +113,7 @@ export const DIVERGENT = {
       'this copy by one script from the same hunks. The recorded divergence is still ONLY the ' +
       'image intercept; leaving the wrap out here would have kept the one entry the alpine e2e ' +
       'compiles dropping `after()` work on shutdown.',
-    sha256: 'd504869f2cbaa4e7a3e2c50f707123791b630ddb7e479bddcc824906cb024d6f',
+    sha256: 'fc80c49eb44721a3c7fe5ab4d670c8f3b207c14cedef0ff5235b743e09d0b536',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:
@@ -128,7 +128,7 @@ export const DIVERGENT = {
       'HASH UPDATED for #1266 (drainPending loops until the pending set is empty, so work ' +
       'registered DURING the drain is awaited): applied to the template and this copy from the ' +
       'same hunk by one script. The recorded divergence is still ONLY the item-4 comment block.',
-    sha256: 'bbf38416192f41cd30d177eefb2804aab0bab667694814ec5c8f46cc462c8f6d',
+    sha256: 'f87d4b9f4e169a4356b8e7fcef39a876436a5869efb6332572af6df57019fbc0',
   },
 };
 
