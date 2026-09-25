@@ -15,7 +15,7 @@ rollback is a Deployment change in `kn-next-operator-system`.
 
 ## Part A — Roll back a bad app release (traffic split)
 
-This is the **ADR-0014** path. `kn-next deploy` produces a new Knative
+This is the **ADR-0014** path. `knext deploy` produces a new Knative
 **Revision**; you revert by pinning serving traffic to a prior revision via
 `NextApp.spec.traffic`. The operator is the sole writer of `ksvc.spec.traffic`
 (ADR-0001) — the CLI only patches the CR. This is the same procedure as
@@ -35,19 +35,19 @@ kubectl get revision -n <ns> -l serving.knative.dev/service=<app> \
 
 ### 2. Pin traffic to it
 
-Preferred — the CLI (`kn-next rollback` only `kubectl patch`es the CR; it never
+Preferred — the CLI (`knext rollback` only `kubectl patch`es the CR; it never
 mutates the ksvc, honouring ADR-0001). Flags are exactly those parsed in
 [`packages/kn-next/src/cli/rollback.ts`](../../packages/kn-next/src/cli/rollback.ts):
 
 ```sh
 # 100% back to the last-good revision:
-kn-next rollback <app> --to <app>-00007 -n <ns>
+knext rollback <app> --to <app>-00007 -n <ns>
 
 # Cautious canary — send N% (1..99) to latest-ready, the rest to the pinned revision:
-kn-next rollback <app> --to <app>-00007 --canary 10 -n <ns>
+knext rollback <app> --to <app>-00007 --canary 10 -n <ns>
 
 # After the fix is deployed, clear the pin to resume latest-ready:
-kn-next rollback <app> -n <ns>
+knext rollback <app> -n <ns>
 ```
 
 Equivalent raw CR edit (`spec.traffic`, fields from
@@ -81,9 +81,9 @@ with an actionable message). Fix by re-pinning to an existing revision:
 
 ```sh
 kubectl get revision -n <ns> -l serving.knative.dev/service=<app>   # list existing
-kn-next rollback <app> --to <an-existing-revision> -n <ns>          # re-pin
+knext rollback <app> --to <an-existing-revision> -n <ns>        # re-pin
 # or clear the pin to resume latest-ready:
-kn-next rollback <app> -n <ns>
+knext rollback <app> -n <ns>
 ```
 
 > Rollback interacts safely with asset skew protection (ADR-0011): any revision
