@@ -105,6 +105,31 @@ function run(cmd, args, opts = {}) {
 }
 
 /**
+ * Real `git check-ignore`, not a substring search. `gitignore.includes('.env')`
+ * would pass even if the ONLY `.env`-mentioning line were `!.env.example` (a
+ * NEGATION, which does the opposite of ignoring `.env`) — rev-1393 review.
+ * Builds an isolated scratch repo from the CONTENT, not the scaffold dir
+ * itself, so this never mutates the directory the rest of the gate installs
+ * and builds in.
+ */
+function gitignoreReallyIgnores(gitignoreContent, relPath) {
+  const scratch = mkdtempSync(join(tmpdir(), 'knext-gitcheck-'));
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: scratch });
+    writeFileSync(join(scratch, '.gitignore'), gitignoreContent, 'utf8');
+    const target = join(scratch, relPath);
+    execFileSync('mkdir', ['-p', dirname(target)]);
+    writeFileSync(target, '// probe\n', 'utf8');
+    const result = spawnSync('git', ['check-ignore', '--quiet', relPath], {
+      cwd: scratch,
+    });
+    return result.status === 0;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
  * Find `server.js` under `.next/standalone`, at whatever depth Next actually put
  * it. `node-server.ts` documents WHY there is no single fixed depth: a
  * single-app repo gets `.next/standalone/server.js`, but Next's own
@@ -495,13 +520,21 @@ try {
   }
   {
     const gitignore = readFileSync(join(scaffoldDir, '.gitignore'), 'utf8');
-    for (const pattern of ['node_modules', '.env', 'knext-exec*']) {
-      if (!gitignore.includes(pattern)) {
-        finish(
-          FAIL,
-          `kn-next create --builder vinext's .gitignore is missing the '${pattern}' pattern`,
-        );
-      }
+    if (!gitignore.includes('node_modules')) {
+      finish(FAIL, "kn-next create --builder vinext's .gitignore is missing 'node_modules'");
+    }
+    if (!gitignore.includes('knext-exec*')) {
+      finish(FAIL, "kn-next create --builder vinext's .gitignore is missing 'knext-exec*'");
+    }
+    // rev-1393: NOT a substring check — `.includes('.env')` would pass even
+    // if the ONLY `.env`-mentioning line were the `!.env.example` negation,
+    // which does the opposite of ignoring `.env`. Prove it actually ignores
+    // a real `.env` file via `git check-ignore`.
+    if (!gitignoreReallyIgnores(gitignore, '.env')) {
+      finish(
+        FAIL,
+        "kn-next create --builder vinext's .gitignore does not actually ignore .env (git check-ignore)",
+      );
     }
   }
   // Both halves: the vinext files are present AND the retired ones are gone.
@@ -706,13 +739,21 @@ try {
   }
   {
     const gitignore = readFileSync(join(defaultScaffoldDir, '.gitignore'), 'utf8');
-    for (const pattern of ['node_modules', '.env', 'knext-standalone-exec*']) {
-      if (!gitignore.includes(pattern)) {
-        finish(
-          FAIL,
-          `kn-next create (default builder)'s .gitignore is missing the '${pattern}' pattern`,
-        );
-      }
+    if (!gitignore.includes('node_modules')) {
+      finish(FAIL, "kn-next create (default builder)'s .gitignore is missing 'node_modules'");
+    }
+    if (!gitignore.includes('knext-standalone-exec*')) {
+      finish(
+        FAIL,
+        "kn-next create (default builder)'s .gitignore is missing 'knext-standalone-exec*'",
+      );
+    }
+    // rev-1393: real check, not substring — see the vinext block above.
+    if (!gitignoreReallyIgnores(gitignore, '.env')) {
+      finish(
+        FAIL,
+        "kn-next create (default builder)'s .gitignore does not actually ignore .env (git check-ignore)",
+      );
     }
   }
   for (const rel of [

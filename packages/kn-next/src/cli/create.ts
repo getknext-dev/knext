@@ -419,6 +419,15 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
 
     for (const [rel, content] of files) {
         const target = join(appDir, rel);
+        // #1398: `.gitignore` is the ONE emitted file that must never be
+        // silently clobbered under `--force` — a user's own `.gitignore`
+        // may ignore secrets (a private key, a local override file) knext's
+        // generated one knows nothing about, and overwriting it un-ignores
+        // them. Every other file's `--force` semantics are unchanged (that
+        // is the whole point of the flag: "add knext to an app I already
+        // have"); this is a narrow, named exception, not a general
+        // clobber-avoidance policy.
+        if (rel === GITIGNORE_TARGET_KEY && existsSync(target)) continue;
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, content, "utf8");
     }
