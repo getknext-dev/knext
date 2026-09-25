@@ -1633,6 +1633,107 @@ describe('deriveAddedFromGitLog against a REAL temp git repo (techdebt-3 — not
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * techdebt-4 round-2 findings 2+3: `--follow` DROPS merge commits (git's
+   * own documented behaviour — it only ever follows a SINGLE parent across
+   * a rename, and a merge commit has more than one), so a non-linear
+   * history could make `deriveAddedFromGitLog` return null for an entry
+   * that unquestionably IS in main's history — an honest entry then fails
+   * "cannot be verified" instead of passing. Separately, walking every
+   * commit reachable (not just main's own first-parent history) means a
+   * PR that removed-then-re-added an entry WITHIN its own branch — a
+   * sequence that never actually existed as a state on `main` — could
+   * still reset the derived "added" date to the PR's own internal
+   * re-addition commit. Both close together: derive strictly from main's
+   * `--first-parent` history, treating each merged PR as ONE step, with no
+   * `--follow` (renames are out of scope for this fix; only real git
+   * — not a canned fixture — can prove a merge commit is not silently
+   * dropped, since `--follow`'s merge-dropping behaviour is git's own
+   * plumbing, not something a fake `execGit` could either exhibit or hide).
+   */
+  function initialBranchName(dir: string): string {
+    return execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+      cwd: dir,
+      encoding: 'utf8',
+    }).trim();
+  }
+
+  function mergeFeatureBranch(
+    dir: string,
+    relPath: string,
+    baseContent: unknown,
+    baseDate: string,
+    featureCommits: { content: unknown; date: string }[],
+    mergeDate: string,
+  ) {
+    commitLedger(dir, relPath, baseContent, baseDate);
+    const base = initialBranchName(dir);
+    execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: dir });
+    for (const { content, date } of featureCommits) {
+      commitLedger(dir, relPath, content, date);
+    }
+    execFileSync('git', ['checkout', '-q', base], { cwd: dir });
+    execFileSync('git', ['merge', '--no-ff', '-q', '-m', 'merge feature', 'feature'], {
+      cwd: dir,
+      env: { ...process.env, GIT_AUTHOR_DATE: mergeDate, GIT_COMMITTER_DATE: mergeDate },
+    });
+  }
+
+  it('resolves through a REAL merge commit (non-linear history) — --follow alone would drop it and return null', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      mergeFeatureBranch(
+        dir,
+        relPath,
+        { entries: [] },
+        '2026-09-01T10:00:00+00:00',
+        [{ content: { entries: [{ test: SHELLS }] }, date: '2026-09-05T10:00:00+00:00' }],
+        '2026-09-10T10:00:00+00:00', // the PR lands on main 5 days later
+      );
+      // On main's first-parent history the entry first appears at the
+      // MERGE commit (main's own base commit had no entries) — the feature
+      // branch's own internal commit date is not directly reachable via
+      // first-parent, which is the whole point: main's history is what
+      // matters, not a branch that was never itself `main`.
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-10');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a remove-then-re-add INSIDE one PR (never a distinct state on main) does not reset the derived date', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      // main already carries the entry BEFORE this PR starts.
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-01T10:00:00+00:00');
+      const base = initialBranchName(dir);
+      execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: dir });
+      // The PR branch removes it, then re-adds it — net no-op — entirely
+      // WITHIN the branch; main itself never shows the entry absent.
+      commitLedger(dir, relPath, { entries: [] }, '2026-09-05T10:00:00+00:00');
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-06T10:00:00+00:00');
+      execFileSync('git', ['checkout', '-q', base], { cwd: dir });
+      execFileSync('git', ['merge', '--no-ff', '-q', '-m', 'merge feature', 'feature'], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: '2026-09-10T10:00:00+00:00',
+          GIT_COMMITTER_DATE: '2026-09-10T10:00:00+00:00',
+        },
+      });
+      // Must still resolve to the ORIGINAL 2026-09-01 commit — main's own
+      // first-parent history never shows a gap (the removal only ever
+      // existed inside the feature branch, never as a state main was
+      // actually at), so the "latest contiguous run" logic must not treat
+      // this PR's internal churn as a reset.
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-01');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
@@ -1760,6 +1861,29 @@ describe("verifyAddedDates: every entry's `added` must match its git-derived fir
     };
     expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
       /cannot be verified/,
+    );
+  });
+
+  // techdebt-4 round-2 finding: exact-date equality false-reds an HONEST
+  // entry after a squash merge or rebase, because the commit git log sees
+  // on main is dated the day the PR LANDED, not the day the contributor
+  // actually wrote it — `added` legitimately claims an EARLIER date than
+  // the derived one. Only `added` being LATER than the derived date is the
+  // actual attack (re-dating forward to reset the 30-day clock); a
+  // squash/rebase can only ever move the derived date FORWARD relative to
+  // the true authoring date, never backward, so `added < derived` is
+  // exactly the honest, expected shape and must not be flagged.
+  it('accepts an entry whose added date is EARLIER than the git-derived date (squash-merge/rebase honesty — jev 0.72)', () => {
+    const e = entry({ added: '2026-09-01' });
+    const execGit = fakeGitFor('2026-09-05', e.test); // landed on main 4 days after being written
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH)).toEqual([]);
+  });
+
+  it('still catches an added date LATER than the git-derived date — the actual re-dating attack', () => {
+    const e = entry({ added: '2026-09-20' });
+    const execGit = fakeGitFor('2026-09-01', e.test);
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
+      /does not match git history/,
     );
   });
 });

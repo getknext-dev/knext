@@ -1021,10 +1021,31 @@ export function isShallowRepo(execGit) {
  * 30-day clock (#1348). `execGit` is injected (real CLI: `git`) so this is
  * testable without a real repo.
  *
- * Needs FULL history on `ledgerRelPath` (`--follow`, across renames) — a
- * shallow checkout (`fetch-depth: 1`, this job's old default) would only
- * ever see the single most recent commit, making every entry look
- * "first introduced right now" regardless of its real history.
+ * Needs FULL history (a shallow checkout, `fetch-depth: 1` — this job's old
+ * default — would only ever see the single most recent commit, making every
+ * entry look "first introduced right now" regardless of its real history),
+ * walked via `--first-parent` on the branch actually being verified, NOT
+ * `--follow` (techdebt-4 round-2 finding). Two reasons together:
+ *
+ *   1. `--follow` DROPS merge commits outright (git's own documented
+ *      behaviour — across a rename it can only follow a single parent, and
+ *      a merge commit has more than one), so a squash merge or a real
+ *      `--no-ff` merge commit could make this return null for an entry
+ *      that unquestionably IS in the branch's history — an honest entry
+ *      then fails "cannot be verified" instead of passing.
+ *   2. Walking every commit reachable (not just the branch's OWN
+ *      first-parent history) means a PR that removed-then-re-added an
+ *      entry entirely WITHIN its own branch — a sequence that never
+ *      existed as a state on the target branch itself — could reset the
+ *      derived "added" date to the PR's internal re-addition commit,
+ *      resetting the 30-day quarantine clock on churn nobody outside the
+ *      PR ever saw. `--first-parent` treats each merged PR as ONE step, so
+ *      only a GAP on the branch's own history (the entry genuinely absent
+ *      at some point after landing) counts.
+ *
+ * (Renames are out of scope for this fix — `--first-parent` does not track
+ * across a rename the way `--follow` did; this trades that narrower gap for
+ * closing the two above, which are the live, evidenced findings.)
  *
  * Returns null when no commit in the queried history contains this entry —
  * a caller MUST treat that as "cannot verify" (an error), never as a silent
@@ -1044,7 +1065,7 @@ export function deriveAddedFromGitLog(execGit, ledgerRelPath, testName) {
     // commit's own timezone offset, never sliced directly below (see
     // toUtcDateString) — a late-night commit in a negative-offset zone can
     // land on a different UTC calendar date than its local one (techdebt-3).
-    log = execGit(['log', '--follow', '--format=%H %cI', '--', ledgerRelPath]);
+    log = execGit(['log', '--first-parent', '--format=%H %cI', '--', ledgerRelPath]);
   } catch {
     return null;
   }
@@ -1132,9 +1153,17 @@ export function verifyAddedDates(ledger, execGit, ledgerRelPath) {
       );
       continue;
     }
-    if (derived !== e.added) {
+    // Only `added` being LATER than the derived date is the attack —
+    // re-dating forward to reset the 30-day clock (techdebt-4 round-2
+    // finding). `added` legitimately being EARLIER than derived is the
+    // honest, expected shape after a squash merge or rebase: the commit
+    // git history sees on main is dated the day the PR LANDED, which is
+    // never before the day a contributor actually wrote the entry. Exact
+    // equality would false-red every honest entry the next time its PR is
+    // squash-merged or rebased.
+    if (e.added > derived) {
       errors.push(
-        `${e.test}: added (${e.added}) does not match git history — this entry first appears in a commit dated ${derived}; added must be set once, at first introduction, and never re-dated`,
+        `${e.test}: added (${e.added}) does not match git history — this entry first appears on main in a commit dated ${derived}; added must never be re-dated forward`,
       );
     }
   }
