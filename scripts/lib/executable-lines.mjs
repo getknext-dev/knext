@@ -39,7 +39,7 @@
  * emitted JS + source map): no line this module calls noise may emit runtime JS.
  */
 
-import ts from 'typescript-api';
+import ts from 'typescript';
 
 /** @typedef {'executable' | 'type-only' | 'punctuation' | 'continuation' | 'comment' | 'blank'} LineClass */
 

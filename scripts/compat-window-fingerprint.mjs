@@ -99,7 +99,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 // whole module load loudly (Node's own `ERR_MODULE_NOT_FOUND`) rather than
 // silently guessing — the workflow install step order is verified in
 // tests/compat-window-fingerprint.test.ts and this file's own header notes.
-import ts from 'typescript-api';
+import ts from 'typescript';
 import { CREDENTIAL_CELLS, CREDENTIAL_LANE } from './compat-window-audit.mjs';
 
 export const SCHEMA = 'knext.compat-window-fingerprint/v1';

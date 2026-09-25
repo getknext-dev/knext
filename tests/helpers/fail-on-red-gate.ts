@@ -54,7 +54,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import ts from 'typescript-api';
+import ts from 'typescript';
 import { parse } from 'yaml';
 import { commandPositionPrefix } from '../../scripts/lib/shell-command-position.mjs';
 

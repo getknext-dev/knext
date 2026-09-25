@@ -72,7 +72,7 @@
  * of rule 1 only, with TypeScript's scanner over each attributed line's text.
  */
 
-import ts from 'typescript-api';
+import ts from 'typescript';
 
 const K = ts.SyntaxKind;
 

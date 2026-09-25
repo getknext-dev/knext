@@ -123,7 +123,7 @@
     "deploy": "node ./dist/cli/kn-next.js",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "../../node_modules/typescript-tsc7/bin/tsc --noEmit",
     "test": "node ../../scripts/bun-test.mjs packages/kn-next",
     "test:coverage": "node ../../scripts/bun-test.mjs packages/kn-next --coverage"
   },
@@ -172,7 +172,6 @@
     "next": "16.3.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "typescript-api": "npm:typescript@^5.9.3",
     "vinext": "1.0.0-beta.12"
   },
   "dependencies": {
