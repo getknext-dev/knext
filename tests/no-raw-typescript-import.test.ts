@@ -29,6 +29,11 @@ import { join } from 'node:path';
 
 const REPO_ROOT = join(import.meta.dir, '..');
 
+/** This file's own repo-relative path — excluded from the scan below because
+ * it legitimately contains raw `'typescript'`-shaped import strings as
+ * fixtures for its own self-test, which are not real imports. */
+const SELF = 'tests/no-raw-typescript-import.test.ts';
+
 /** Every tracked `.ts`/`.tsx`/`.mjs`/`.js` file in the repo, via git — never
  * `node_modules`, `dist`, or other build output, because git doesn't track
  * those. */
@@ -44,6 +49,7 @@ function trackedSourceFiles(): string[] {
       .filter(Boolean)
       // .d.ts files never contain runtime imports worth scanning.
       .filter((f) => !f.endsWith('.d.ts'))
+      .filter((f) => f !== SELF)
   );
 }
 
