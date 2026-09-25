@@ -70,14 +70,15 @@ const MUTATIONS = [
   // ── rev-1396: deriveCellRunsFromWindow — the auditWindow -> readiness glue ──
   {
     label: 'deriveCellRunsFromWindow: stop requiring the night to be eligible',
-    anchor: "conclusion: n.eligible && onCurrentRcTag ? 'success' : 'failure',",
-    replacement: "conclusion: onCurrentRcTag ? 'success' : 'failure',",
+    anchor:
+      'const success = n.eligible && onCurrentRcTag && onCredentialedNextRef && inCurrentStreak;',
+    replacement: 'const success = onCurrentRcTag && onCredentialedNextRef && inCurrentStreak;',
   },
   {
     label:
       'deriveCellRunsFromWindow: stop requiring the CURRENT rcTag match (accept any RC-shaped ref)',
-    anchor: "conclusion: n.eligible && onCurrentRcTag ? 'success' : 'failure',",
-    replacement: "conclusion: n.eligible ? 'success' : 'failure',",
+    anchor: 'const onCurrentRcTag = n.knextRef === expectedKnextRef;',
+    replacement: 'const onCurrentRcTag = true;',
   },
   {
     label:
@@ -85,9 +86,29 @@ const MUTATIONS = [
     anchor: 'attempt: Number(n.runAttempt ?? 1),',
     replacement: 'attempt: 1,',
   },
+  {
+    // #1396 round 2 finding 2 — the credentialed Next.js ref check.
+    label: 'deriveCellRunsFromWindow: stop requiring the night tested the credentialed Next.js ref',
+    anchor: 'const onCredentialedNextRef = n.ref === expectedNextjsRef;',
+    replacement: 'const onCredentialedNextRef = true;',
+  },
+  {
+    label:
+      'deriveCellRunsFromWindow: stop throwing when expectedNextjsRef is missing (silently skip the check)',
+    anchor: '  if (!expectedNextjsRef) {\n    throw new Error(',
+    replacement: '  if (false) {\n    throw new Error(',
+  },
+  {
+    // #1396 round 2 finding 1 — the current-open-streak (fingerprint
+    // continuity) check.
+    label:
+      'deriveCellRunsFromWindow: stop requiring the night to sit inside the CURRENT open streak',
+    anchor: 'const inCurrentStreak = currentStreakRunIds.has(n.runId);',
+    replacement: 'const inCurrentStreak = true;',
+  },
 ];
 
-declareMutations(11);
+declareMutations(14);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -99,8 +120,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 11) {
-  console.error(`FATAL: declared 11 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 14) {
+  console.error(`FATAL: declared 14 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

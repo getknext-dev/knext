@@ -44,17 +44,48 @@ export const SOAK_REQUIRED_STREAK = 3;
  * never silently dropped, so it correctly BREAKS a trailing streak rather
  * than being invisible to it.
  *
- * @param {{ nights: Array<{ runId: string, eligible: boolean, runAttempt: string, knextRef: string|null }> }} auditWindowResult
+ * Two more things this function adds on top of `auditWindow`, neither of
+ * which `auditWindow` itself enforces (#1396 round 2 review):
+ *
+ *   1. STREAK CONTINUITY. `auditWindow` grades each night's OWN eligibility,
+ *      but individually-eligible nights either side of a fingerprint
+ *      restart are still two DIFFERENT streaks — `auditWindow`'s own
+ *      `current` field is exactly "the streak still running at the last
+ *      graded night" (see that module's header). A night whose `runId` is
+ *      not in `auditWindowResult.current.runIds` is treated as RED here,
+ *      even when it was individually eligible, so a trailing-3 evaluation
+ *      can never straddle a fingerprint boundary and call it one streak.
+ *   2. THE CREDENTIALED NEXT.JS REF. `auditWindow` grades credential-mode,
+ *      RC-tag shape, and bytecode-liveness — never WHICH Next.js ref a
+ *      night tested against. `expectedNextjsRef` (read by the caller from
+ *      `.github/compat-credentialed-next-version.json`'s `credentialedNextRef`)
+ *      is REQUIRED, not optional — an omitted or empty value throws rather
+ *      than silently skipping the check, the same fail-closed rule as
+ *      `assertLockstep`'s empty-set guard elsewhere in this repo.
+ *
+ * @param {{ nights: Array<{ runId: string, eligible: boolean, runAttempt: string, knextRef: string|null, ref: string|null }>, current?: { runIds?: string[] } }} auditWindowResult
  * @param {string} expectedKnextRef
+ * @param {string} expectedNextjsRef
  * @returns {import('./soak-readiness.mjs').CredentialRun[]}
  */
-export function deriveCellRunsFromWindow(auditWindowResult, expectedKnextRef) {
+export function deriveCellRunsFromWindow(auditWindowResult, expectedKnextRef, expectedNextjsRef) {
+  if (!expectedNextjsRef) {
+    throw new Error(
+      'deriveCellRunsFromWindow: expectedNextjsRef is required (the credentialedNextRef from ' +
+        '.github/compat-credentialed-next-version.json) — refusing to derive readiness without ' +
+        'pinning which Next.js ref a night must have tested against.',
+    );
+  }
   const nights = auditWindowResult?.nights ?? [];
+  const currentStreakRunIds = new Set(auditWindowResult?.current?.runIds ?? []);
   return nights.map((n) => {
     const onCurrentRcTag = n.knextRef === expectedKnextRef;
+    const onCredentialedNextRef = n.ref === expectedNextjsRef;
+    const inCurrentStreak = currentStreakRunIds.has(n.runId);
+    const success = n.eligible && onCurrentRcTag && onCredentialedNextRef && inCurrentStreak;
     return {
       id: Number(n.runId),
-      conclusion: n.eligible && onCurrentRcTag ? 'success' : 'failure',
+      conclusion: success ? 'success' : 'failure',
       attempt: Number(n.runAttempt ?? 1),
       createdAt: new Date(Number(n.runId)).toISOString(),
     };

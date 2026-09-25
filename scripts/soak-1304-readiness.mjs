@@ -82,10 +82,22 @@ import {
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const CREDENTIAL_REF_PIN = resolve(REPO_ROOT, '.github/compat-credential-ref.json');
+const CREDENTIALED_NEXT_VERSION_PIN = resolve(
+  REPO_ROOT,
+  '.github/compat-credentialed-next-version.json',
+);
 
 function loadRcTag() {
   const pin = JSON.parse(readFileSync(CREDENTIAL_REF_PIN, 'utf8'));
   return pin.rcTag ?? null;
+}
+
+/** The ONE Next.js ref every credential night must have tested against
+ * (#1396 round 2 finding 2) — same manifest `compat-vinext-ledger.mjs`'s
+ * `DEFAULT_NEXTJS_REF` already reads, so this never drifts independently. */
+function loadCredentialedNextjsRef() {
+  const manifest = JSON.parse(readFileSync(CREDENTIALED_NEXT_VERSION_PIN, 'utf8'));
+  return manifest.credentialedNextRef ?? null;
 }
 
 async function main() {
@@ -98,6 +110,15 @@ async function main() {
     process.exit(1);
   }
   const expectedKnextRef = `refs/tags/${rcTag}`;
+
+  const expectedNextjsRef = loadCredentialedNextjsRef();
+  if (!expectedNextjsRef) {
+    console.error(
+      '::error::no credentialedNextRef found in .github/compat-credentialed-next-version.json — ' +
+        'cannot verify which Next.js ref each night must have tested against.',
+    );
+    process.exit(1);
+  }
 
   const wiredCells = CREDENTIAL_CELLS.filter((c) => c.wired);
   if (wiredCells.length === 0) {
@@ -119,7 +140,11 @@ async function main() {
       scope: 'credential',
       requiredNights: SOAK_REQUIRED_STREAK,
     });
-    runsByCell[cell.lane] = deriveCellRunsFromWindow(windowResult, expectedKnextRef);
+    runsByCell[cell.lane] = deriveCellRunsFromWindow(
+      windowResult,
+      expectedKnextRef,
+      expectedNextjsRef,
+    );
   }
 
   const result = evaluateSoakReadiness(runsByCell, SOAK_REQUIRED_STREAK);

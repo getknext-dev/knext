@@ -61,10 +61,20 @@ It will:
    `auditWindow({ scope: 'credential' })` — ADR-0056 rule 6 (credential
    mode + a real RC-tag-shaped `knextRef`) and rule 7 (bytecode caching
    PROVEN LIVE per shard, for the cell's runtime) are enforced THERE, plus
-   an additional check that the night's `knextRef` matches the CURRENT
-   `rcTag` specifically (not just any RC-tag-shaped ref — closes the "RC
-   tag got bumped, stale evidence still counts" gap a naive time-window
-   filter would miss).
+   three additional checks `deriveCellRunsFromWindow` adds on top:
+   - the night's `knextRef` matches the CURRENT `rcTag` specifically (not
+     just any RC-tag-shaped ref — closes the "RC tag got bumped, stale
+     evidence still counts" gap a naive time-window filter would miss);
+   - the night's `ref` matches `credentialedNextRef` from
+     `.github/compat-credentialed-next-version.json` (`auditWindow` grades
+     credential-mode/RC-shape/bytecode-liveness, never WHICH Next.js ref a
+     night tested against — a night dispatched before a `NEXTJS_REF` bump
+     must not count as evidence for the new one);
+   - the night's `runId` is inside `auditWindow`'s own `current.runIds` —
+     the streak still running at the last graded night. Two individually
+     eligible nights either side of a fingerprint restart are two
+     DIFFERENT streaks; without this a trailing-3 evaluation could
+     straddle the restart and call it one continuous streak.
 4. Evaluate whether the 3 most recent qualifying nights are all
    first-attempt green (rule 6 already disqualifies a rerun, so this is
    enforced twice, structurally).
@@ -89,8 +99,10 @@ It will:
 
 - Pure comparison/streak logic AND the `auditWindow` -> readiness mapping:
   `scripts/lib/soak-readiness.mjs`, unit-tested against fixtures in
-  `tests/soak-1304-readiness.test.ts` (19 cases) and mutation-proved
-  (`scripts/mutation-prove-soak-readiness.mjs`, 11/11 caught, 0 decorative)
+  `tests/soak-1304-readiness.test.ts` (26 cases, including 4 composed
+  through the REAL `auditWindow` with synthetic ledgers — a fingerprint
+  change and a Next.js-ref change) and mutation-proved
+  (`scripts/mutation-prove-soak-readiness.mjs`, 14/14 caught, 0 decorative)
   — no live `gh` call needed to trust the logic.
 - `auditWindow`/`fetchLedgers` themselves are `scripts/compat-window-audit.mjs`'s
   own, separately-tested exports (rule 6 credential/RC-tag-shape enforcement,
