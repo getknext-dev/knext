@@ -1734,6 +1734,57 @@ describe('deriveAddedFromGitLog against a REAL temp git repo (techdebt-3 — not
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * Round-3 review finding: a rename COMBINED with a re-date in the same
+   * commit is a real bypass, not just the narrower "renames aren't tracked"
+   * limitation the function's own doc comment already states. Pinned here
+   * as a KNOWN, documented limitation (not a regression to fix in this
+   * round) — see the "COMPOUND GAP" note on deriveAddedFromGitLog's doc
+   * comment.
+   */
+  it('KNOWN LIMITATION: a rename that also re-dates `added` in the SAME commit is not caught — the rename becomes the earliest visible commit for the new path', () => {
+    const { dir, execGit } = realGitRepo();
+    const oldPath = 'ledger.json';
+    const newPath = 'renamed-ledger.json';
+    try {
+      // The entry has REALLY been in the ledger since 2026-01-01 — under
+      // the old filename.
+      commitLedger(dir, oldPath, { entries: [{ test: SHELLS }] }, '2026-01-01T10:00:00+00:00');
+      // One commit does BOTH: renames the file AND forges a much later
+      // `added` date for the same entry — the attack this pin documents.
+      writeFileSync(
+        join(dir, newPath),
+        `${JSON.stringify({ entries: [{ test: SHELLS, added: '2026-09-20' }] })}\n`,
+      );
+      execFileSync('git', ['rm', '-q', oldPath], { cwd: dir });
+      execFileSync('git', ['add', newPath], { cwd: dir });
+      execFileSync('git', ['commit', '-q', '-m', 'rename + re-date'], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: '2026-09-20T10:00:00+00:00',
+          GIT_COMMITTER_DATE: '2026-09-20T10:00:00+00:00',
+        },
+      });
+      // `--first-parent` (no `--follow`) sees NOTHING under the old path —
+      // the rename commit is the only, and therefore "first", commit this
+      // walk finds for the NEW path, so it resolves to the rename commit's
+      // own date, not the entry's real 2026-01-01 introduction.
+      expect(deriveAddedFromGitLog(execGit, newPath, SHELLS)).toBe('2026-09-20');
+      // Which means the forged `added: '2026-09-20'` in the ledger content
+      // passes verifyAddedDates cleanly — added === derived, no error —
+      // even though the entry's real history goes back to January.
+      const errors = verifyAddedDates(
+        { entries: [{ test: SHELLS, added: '2026-09-20' }] },
+        execGit,
+        newPath,
+      );
+      expect(errors).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

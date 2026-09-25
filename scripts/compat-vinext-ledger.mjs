@@ -1047,20 +1047,40 @@ export function isShallowRepo(execGit) {
  * across a rename the way `--follow` did; this trades that narrower gap for
  * closing the two above, which are the live, evidenced findings.)
  *
- * HONEST SCOPE LIMIT on point 2: "treating each merged PR as ONE step" only
- * holds when the merge itself compresses the PR into a single commit on the
- * target branch — a squash merge, or a real `--no-ff` merge commit. This
- * repo's GitHub settings permit "rebase and merge" too (`allow_rebase_merge`
- * is on, no branch-protection restriction to squash-only), which — like a
- * plain fast-forward — replays every one of the PR's individual commits
- * directly onto the target branch's own first-parent line. A remove-then-
- * re-add WITHIN a rebase-merged PR is therefore NOT compressed away by this
- * fix: it would still show up as a real gap on the target branch's own
- * history and reset the derived date to the re-addition commit, exactly the
- * class this fix otherwise closes. Not solvable from git history alone
- * (nothing in a rebase-merged commit sequence marks "these N commits were
- * one PR"); closing it fully would need PR metadata (e.g. squash-only
- * enforcement, or reading GitHub's PR-to-commit mapping), out of scope here.
+ * COMPOUND GAP (round-3 review): a rename ALSO resets what this function can
+ * see, which combines badly with a re-date in the SAME commit. If a PR
+ * renames `ledgerRelPath` and re-dates an entry's `added` in that one
+ * commit, the rename commit becomes the FIRST commit this walk finds for the
+ * new path — no history under the old path name is visible at all — so the
+ * derived date IS the rename commit's own date, and any `added` value at or
+ * before that date (including the rename commit's own date) passes the
+ * `e.added > derived` check with nothing to catch it. This is a real bypass
+ * of the whole verification, not just the narrower "renames aren't
+ * tracked" limitation above — recorded here rather than left implied.
+ *
+ * HONEST SCOPE LIMIT on point 2, LIVE not merely theoretical (round-3
+ * review, re-confirmed against the repo's actual settings): "treating each
+ * merged PR as ONE step" only holds when the merge itself compresses the PR
+ * into a single commit on the target branch — a squash merge, or a real
+ * `--no-ff` merge commit. `allow_rebase_merge` is on with no restriction to
+ * squash-only, AND the repo's one active branch ruleset (`main`, id
+ * 13073078) carries a `merge_queue` rule whose `merge_method` is `MERGE`
+ * (real merge commits) — but that ruleset's own `enforcement` is
+ * `"disabled"`, so that rule enforces NOTHING today. Nothing in this repo
+ * currently prevents a "rebase and merge", which — like a plain
+ * fast-forward — replays every one of the PR's individual commits directly
+ * onto the target branch's own first-parent line. A remove-then-re-add
+ * WITHIN a rebase-merged PR is therefore NOT compressed away by this fix:
+ * it would still show up as a real gap on the target branch's own history
+ * and reset the derived date to the re-addition commit, exactly the class
+ * this fix otherwise closes — this is a live, exploitable gap on this repo
+ * today, not a hypothetical one that would need a settings change to
+ * matter. Not solvable from git history alone (nothing in a rebase-merged
+ * commit sequence marks "these N commits were one PR"); closing it fully
+ * needs either enforcing squash-only merges repo-wide (a founder-level
+ * settings decision, out of scope for this function to make) or reading
+ * GitHub's PR-to-commit mapping (PR metadata this git-log-only function
+ * does not have).
  *
  * Returns null when no commit in the queried history contains this entry —
  * a caller MUST treat that as "cannot verify" (an error), never as a silent
