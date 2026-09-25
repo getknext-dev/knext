@@ -597,6 +597,13 @@ func DatabaseEnvMapCollisions(spec *appsv1alpha1.NextAppSpec) []string {
 // added-reconcile-only name each independently red it). Do not remove that
 // test's coverage without adding an equivalent one; do not re-add a claim
 // here that the two are "the same source" — they never have been.
+//
+// IF YOU ADD A NEW CONDITIONAL HERE (a new gate on spec.<x> != nil / != "" /
+// > 0), you MUST add a matching case to reserved_env_names_parity_test.go —
+// specifically a "present but the leaf gate is false/empty" case, not just a
+// "block enabled" case. A block-level-only case (pointer non-nil, no other
+// case) cannot distinguish "gated correctly" from "gate silently dropped",
+// because both look the same set of names when every leaf field is truthy.
 func ReservedOperatorEnvNames(spec *appsv1alpha1.NextAppSpec) map[string]struct{} {
 	names := map[string]struct{}{
 		"HOSTNAME": {},

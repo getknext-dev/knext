@@ -380,6 +380,7 @@ func computeStatusVerdict(
 	if !envMapCollision.empty() {
 		var parts []string
 		reason := ReasonEnvVarIgnored
+		eventType := corev1.EventTypeWarning
 		if len(envMapCollision.operatorWins) > 0 {
 			parts = append(parts, fmt.Sprintf(
 				"%s: always managed by the operator, envMap ignored (no action needed unless "+
@@ -387,16 +388,31 @@ func computeStatusVerdict(
 				strings.Join(envMapCollision.operatorWins, ", "),
 			))
 		}
-		if len(envMapCollision.userWins) > 0 {
+		if len(envMapCollision.userWinsGrandfathered) > 0 {
 			parts = append(parts, fmt.Sprintf(
 				"%s: spec.secrets.envMap overrides the operator's own default value for these "+
-					"name(s) — either because they are connection-string names (REDIS_URL, "+
-					"KAFKA_BROKER_URL, OTEL_EXPORTER_OTLP_ENDPOINT) that are always allowed to be "+
-					"user-supplied, or because this NextApp reconciled with the collision already "+
-					"present; remove the envMap entry to fall back to the operator's default",
-				strings.Join(envMapCollision.userWins, ", "),
+					"name(s) because this NextApp reconciled with the collision already present "+
+					"(predates admission rejection, or reconciled while the validating webhook was "+
+					"unavailable); remove the envMap entry to fall back to the operator's default",
+				strings.Join(envMapCollision.userWinsGrandfathered, ", "),
 			))
 			reason = ReasonEnvMapUserOverride
+		}
+		if len(envMapCollision.userWinsExempt) > 0 {
+			parts = append(parts, fmt.Sprintf(
+				"%s: connection-string name(s) always sourced from your spec.secrets.envMap "+
+					"Secret — the documented pattern for a value the CRD has no typed field for "+
+					"yet; no action needed",
+				strings.Join(envMapCollision.userWinsExempt, ", "),
+			))
+			// Informational ONLY when nothing else in this report is a real,
+			// alarm-worthy collision — a Ready/HOSTNAME-class or
+			// grandfathered name alongside it still deserves the Warning
+			// (#1391 round 3).
+			if len(envMapCollision.operatorWins) == 0 && len(envMapCollision.userWinsGrandfathered) == 0 {
+				reason = ReasonEnvMapExpectedOverride
+				eventType = corev1.EventTypeNormal
+			}
 		}
 		message := fmt.Sprintf(
 			"spec.secrets.envMap collides with operator-managed system env — %s.",
@@ -413,7 +429,7 @@ func computeStatusVerdict(
 		// collision set actually CHANGES, never on every converged reconcile.
 		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionEnvMapCollision)
 		if prev == nil || prev.Message != message {
-			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, reason, message})
+			v.events = append(v.events, verdictEvent{eventType, reason, message})
 		}
 	} else {
 		v.conditions = append(v.conditions, metav1.Condition{

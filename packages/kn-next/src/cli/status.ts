@@ -257,24 +257,49 @@ const LABEL_WIDTH = Math.max(...LABELS.map((l) => l.length));
  */
 type BadWhen = "True" | "False";
 
+/**
+ * #1391 round 3: EnvMapCollision reasons that must render as INFORMATIONAL
+ * even though status=True — the documented connection-string envMap pattern
+ * (REDIS_URL / KAFKA_BROKER_URL / OTEL_EXPORTER_OTLP_ENDPOINT have no typed
+ * `*SecretRef` CRD field yet, so binding them via envMap is the sanctioned
+ * way), for which the operator emits a Normal event, not a Warning. Without
+ * this exception, every app binding REDIS_URL the recommended way would show
+ * the same alarm formatting (reason + full message dump) as a real,
+ * grandfathered collision — training users to ignore it. Kept as a mirror of
+ * the Go `controller.ReasonEnvMapExpectedOverride` reason string; the two
+ * are hand-maintained on either side of a language boundary, so a rename on
+ * one side needs the other kept in sync by hand.
+ */
+export const ENVMAP_COLLISION_INFORMATIONAL_REASONS = [
+    "EnvMapExpectedOverride",
+] as const;
+
 function conditionLine(
     label: (typeof LABELS)[number],
     c: ConditionView | undefined,
     now: Date,
     badWhen: BadWhen,
+    informationalReasons: readonly string[] = [],
 ): string {
     if (!c) {
         return `${label.padEnd(LABEL_WIDTH)} ${NOT_REPORTED}`;
     }
+    const informational =
+        c.reason !== undefined && informationalReasons.includes(c.reason);
     // Unknown is never the healthy state — surface its reason/message too.
-    const bad = c.status === badWhen || c.status === "Unknown";
+    // An informational reason overrides badWhen: status=True is this
+    // condition's documented steady state, not an alarm (#1391 round 3).
+    const bad =
+        (c.status === badWhen || c.status === "Unknown") && !informational;
     const age = c.lastTransitionTime
         ? ` (${humanizeAge(c.lastTransitionTime, now)})`
         : "";
     let line = `${label.padEnd(LABEL_WIDTH)} ${c.status}${age}`;
     // Ready's reason is informative even when healthy; other conditions only
-    // carry a meaningful reason in their bad state.
-    if ((bad || label === "Ready") && c.reason) {
+    // carry a meaningful reason in their bad state, OR when the reason
+    // itself is documented as informational (same treatment as Ready — a
+    // calm one-line reason, never the alarm's message dump below).
+    if ((bad || label === "Ready" || informational) && c.reason) {
         line += `  ${c.reason}`;
     }
     if (bad && c.message) {
@@ -298,7 +323,13 @@ export function renderStatusHuman(model: StatusModel, now: Date): string {
     lines.push(conditionLine("Degraded", model.degraded, now, "True"));
     lines.push(conditionLine("Reconciling", model.reconciling, now, "True"));
     lines.push(
-        conditionLine("EnvMapCollision", model.envMapCollision, now, "True"),
+        conditionLine(
+            "EnvMapCollision",
+            model.envMapCollision,
+            now,
+            "True",
+            ENVMAP_COLLISION_INFORMATIONAL_REASONS,
+        ),
     );
     const dbLabel =
         model.database.mode === "none"

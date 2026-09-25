@@ -17,6 +17,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { KubectlFn } from "../cli/doctor";
 import {
+    ENVMAP_COLLISION_INFORMATIONAL_REASONS,
     extractStatus,
     humanizeAge,
     parseStatusArgs,
@@ -142,6 +143,30 @@ function envMapCollisionCr() {
         status: "True",
         reason: "EnvMapReservedGrandfathered",
         message: ENVMAP_COLLISION_MESSAGE,
+        lastTransitionTime: T_3M_AGO,
+    });
+    return cr;
+}
+
+/**
+ * #1391 round 3: the documented, exempt-only envMap collision — a
+ * connection-string name (REDIS_URL) sourced via envMap, the operator's
+ * sanctioned pattern. status=True (the condition still fires — the
+ * collision IS real at the env-render level) but the reason is the
+ * informational one the operator emits a Normal event for, never Warning.
+ */
+const ENVMAP_EXEMPT_COLLISION_MESSAGE =
+    "spec.secrets.envMap collides with operator-managed system env — REDIS_URL: " +
+    "connection-string name(s) always sourced from your spec.secrets.envMap Secret " +
+    "— the documented pattern for a value the CRD has no typed field for yet; no " +
+    "action needed.";
+function envMapExemptCollisionCr() {
+    const cr = healthyCr();
+    (cr.status.conditions as Record<string, unknown>[]).push({
+        type: "EnvMapCollision",
+        status: "True",
+        reason: "EnvMapExpectedOverride",
+        message: ENVMAP_EXEMPT_COLLISION_MESSAGE,
         lastTransitionTime: T_3M_AGO,
     });
     return cr;
@@ -407,6 +432,24 @@ describe("renderStatusHuman", () => {
             /EnvMapCollision\s+True.*EnvMapReservedGrandfathered/,
         );
         expect(text).toContain(ENVMAP_COLLISION_MESSAGE);
+    });
+
+    it("envMap collision, exempt-only (#1391 round 3): informational, NOT rendered as an alarm", () => {
+        const text = renderStatusHuman(
+            extractStatus(envMapExemptCollisionCr()),
+            NOW,
+        );
+        // The reason still renders (informational conditions get the calm,
+        // Ready-style one-line treatment), but the message dump — the alarm
+        // formatting a real collision gets — must NOT appear.
+        expect(text).toMatch(/EnvMapCollision\s+True.*EnvMapExpectedOverride/);
+        expect(text).not.toContain(ENVMAP_EXEMPT_COLLISION_MESSAGE);
+    });
+
+    it("informational reasons list contains exactly the operator's documented-pattern reason", () => {
+        expect(ENVMAP_COLLISION_INFORMATIONAL_REASONS).toEqual([
+            "EnvMapExpectedOverride",
+        ]);
     });
 
     it("no envMap collision: healthy CR (no EnvMapCollision condition) renders 'not reported'", () => {

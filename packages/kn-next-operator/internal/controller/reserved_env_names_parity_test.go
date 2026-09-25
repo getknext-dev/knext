@@ -108,6 +108,45 @@ func TestReservedEnvNamesParity(t *testing.T) {
 		{"poolMax set", appsv1alpha1.NextAppSpec{
 			Scaling: &appsv1alpha1.ScalingSpec{PoolMax: 10},
 		}},
+		// #1391 round 3: present-but-DISABLED cases. Round 2's cases were all
+		// "block enabled" — every gate in ReservedOperatorEnvNames/buildKsvcEnv
+		// is "pointer non-nil AND some leaf field truthy" (Enabled==true,
+		// Provider!="", Queue!="", PoolMax>0). Without a case where the
+		// pointer is non-nil but the leaf gate is false/empty, deleting JUST
+		// the leaf-gate half of a condition (e.g. `spec.Observability != nil`
+		// with the `&& spec.Observability.Enabled` dropped) in ONE of the two
+		// hand-maintained copies is invisible to every case above — it changes
+		// behavior only on a spec this suite never constructs. Each of the 7
+		// cases below pins one such gate. Mutation-proved: deleting any one of
+		// the 7 leaf-gate conditions in ReservedOperatorEnvNames (independent
+		// of buildKsvcEnv) reds exactly the matching case here.
+		{"scaling: present but poolMax==0", appsv1alpha1.NextAppSpec{
+			Scaling: &appsv1alpha1.ScalingSpec{PoolMax: 0},
+		}},
+		{"storage: present but provider==\"\"", appsv1alpha1.NextAppSpec{
+			Storage: &appsv1alpha1.StorageSpec{Provider: "", Bucket: "b"},
+		}},
+		{"cache: present but provider==\"\"", appsv1alpha1.NextAppSpec{
+			Cache: &appsv1alpha1.CacheSpec{Provider: "", URL: "redis://x"},
+		}},
+		{"revalidation: present but queue==\"\"", appsv1alpha1.NextAppSpec{
+			Revalidation: &appsv1alpha1.RevalidationSpec{Queue: "", KafkaBrokerUrl: "kafka:9092"},
+		}},
+		{"observability: present but disabled", appsv1alpha1.NextAppSpec{
+			Observability: &appsv1alpha1.ObservabilitySpec{Enabled: false},
+		}},
+		{"observability: enabled, rum present but disabled", appsv1alpha1.NextAppSpec{
+			Observability: &appsv1alpha1.ObservabilitySpec{
+				Enabled: true,
+				Rum:     &appsv1alpha1.RumSpec{Enabled: false},
+			},
+		}},
+		{"observability: enabled, tracing present but disabled", appsv1alpha1.NextAppSpec{
+			Observability: &appsv1alpha1.ObservabilitySpec{
+				Enabled: true,
+				Tracing: &appsv1alpha1.TracingSpec{Enabled: false},
+			},
+		}},
 		{"storage: provider+bucket only", appsv1alpha1.NextAppSpec{
 			Storage: &appsv1alpha1.StorageSpec{Provider: "s3", Bucket: "b"},
 		}},
@@ -179,5 +218,26 @@ func TestReservedEnvNamesParity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertReservedNamesParity(t, tc.name, tc.spec)
 		})
+	}
+}
+
+// #1391 round 3: validation.OperatorAlwaysWinsEnvNames (operator's own value
+// always wins, even on a grandfathered collision — HOSTNAME) and
+// validation.EnvMapUserAlwaysWinsEnvNames (envMap's value always wins, never
+// rejected at admission — the connection-string exemption) encode OPPOSITE
+// resolutions for the same kind of event: which side wins a reserved-name
+// collision. A name in both sets would be a direct contradiction with no
+// defined behavior. Nothing else in the codebase checks this; it is easy for
+// a future addition to either set to silently overlap the other.
+func TestOperatorAndEnvMapAlwaysWinsSetsAreDisjoint(t *testing.T) {
+	for name := range validation.OperatorAlwaysWinsEnvNames {
+		if _, inBoth := validation.EnvMapUserAlwaysWinsEnvNames[name]; inBoth {
+			t.Fatalf(
+				"%q is in BOTH validation.OperatorAlwaysWinsEnvNames and "+
+					"validation.EnvMapUserAlwaysWinsEnvNames — these encode "+
+					"opposite collision-resolution rules and must be disjoint",
+				name,
+			)
+		}
 	}
 }

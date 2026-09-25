@@ -98,8 +98,9 @@ func TestBuildKsvcEnv_HostnameCollision_OperatorAlwaysWins(t *testing.T) {
 	if len(report.operatorWins) != 1 || report.operatorWins[0] != "HOSTNAME" {
 		t.Fatalf("report.operatorWins: got %v, want [HOSTNAME]", report.operatorWins)
 	}
-	if len(report.userWins) != 0 {
-		t.Fatalf("report.userWins: got %v, want none", report.userWins)
+	if len(report.userWinsGrandfathered) != 0 || len(report.userWinsExempt) != 0 {
+		t.Fatalf("report.userWinsGrandfathered/Exempt: got %v/%v, want none",
+			report.userWinsGrandfathered, report.userWinsExempt)
 	}
 	if got := countNamed(env, "UNRELATED"); got != 1 {
 		t.Fatalf("UNRELATED (no collision) appears %d times, want exactly 1 — it must still be wired", got)
@@ -132,8 +133,11 @@ func TestBuildKsvcEnv_UnconditionalReservedNameCollision_UserWins(t *testing.T) 
 			}
 		}
 	}
-	if len(report.userWins) != 1 || report.userWins[0] != "NODE_ENV" {
-		t.Fatalf("report.userWins: got %v, want [NODE_ENV]", report.userWins)
+	if len(report.userWinsGrandfathered) != 1 || report.userWinsGrandfathered[0] != "NODE_ENV" {
+		t.Fatalf("report.userWinsGrandfathered: got %v, want [NODE_ENV]", report.userWinsGrandfathered)
+	}
+	if len(report.userWinsExempt) != 0 {
+		t.Fatalf("report.userWinsExempt: got %v, want none — NODE_ENV is not an exempt connection-string name", report.userWinsExempt)
 	}
 	if len(report.operatorWins) != 0 {
 		t.Fatalf("report.operatorWins: got %v, want none", report.operatorWins)
@@ -163,8 +167,37 @@ func TestBuildKsvcEnv_ConditionalReservedNameCollision_UserWins(t *testing.T) {
 			t.Fatalf("STORAGE_PROVIDER = %+v, want the envMap Secret ref (user-wins), not the operator's plain value", e)
 		}
 	}
-	if len(report.userWins) != 1 || report.userWins[0] != "STORAGE_PROVIDER" {
-		t.Fatalf("report.userWins: got %v, want [STORAGE_PROVIDER]", report.userWins)
+	if len(report.userWinsGrandfathered) != 1 || report.userWinsGrandfathered[0] != "STORAGE_PROVIDER" {
+		t.Fatalf("report.userWinsGrandfathered: got %v, want [STORAGE_PROVIDER]", report.userWinsGrandfathered)
+	}
+}
+
+// TestBuildKsvcEnv_ExemptConnectionStringCollision_UserWinsExempt proves
+// REDIS_URL — a validation.EnvMapUserAlwaysWinsEnvNames member — resolves
+// exactly like any other userWins collision at the env-render level, but is
+// reported in the SEPARATE userWinsExempt bucket so computeStatusVerdict can
+// treat it as the documented pattern rather than an alarm (#1391 round 3).
+func TestBuildKsvcEnv_ExemptConnectionStringCollision_UserWinsExempt(t *testing.T) {
+	app := envMapCollisionApp(map[string]appsv1alpha1.EnvMapEntry{
+		"REDIS_URL": {SecretName: "s", SecretKey: "k"},
+	})
+	app.Spec.Cache = &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://placeholder"}
+	r := &NextAppReconciler{}
+	env, _, report := r.buildKsvcEnv(app)
+
+	if got := countNamed(env, "REDIS_URL"); got != 1 {
+		t.Fatalf("REDIS_URL appears %d times, want exactly 1", got)
+	}
+	for _, e := range env {
+		if e.Name == "REDIS_URL" && e.ValueFrom == nil {
+			t.Fatalf("REDIS_URL = %+v, want the envMap Secret ref (user-wins), not the operator's plain value", e)
+		}
+	}
+	if len(report.userWinsExempt) != 1 || report.userWinsExempt[0] != "REDIS_URL" {
+		t.Fatalf("report.userWinsExempt: got %v, want [REDIS_URL]", report.userWinsExempt)
+	}
+	if len(report.userWinsGrandfathered) != 0 {
+		t.Fatalf("report.userWinsGrandfathered: got %v, want none — REDIS_URL is exempt, not grandfathered", report.userWinsGrandfathered)
 	}
 }
 
@@ -211,7 +244,7 @@ func TestComputeStatusVerdict_EnvMapCollision_UserWins_ConditionAndEvent(t *test
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWins: []string{"NODE_ENV"}}, now)
+		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapUserOverride {
@@ -227,6 +260,80 @@ func TestComputeStatusVerdict_EnvMapCollision_UserWins_ConditionAndEvent(t *test
 	for _, e := range v.events {
 		if e.reason == ReasonEnvMapUserOverride && e.eventType == corev1.EventTypeWarning {
 			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no Warning/%s event emitted: got %+v", ReasonEnvMapUserOverride, v.events)
+	}
+}
+
+// TestComputeStatusVerdict_EnvMapCollision_ExemptOnly_NormalEventAndInformationalCondition
+// proves #1391 round 3's UX fix: a report whose ONLY member is an
+// EnvMapUserAlwaysWinsEnvNames connection-string name (the documented,
+// sanctioned pattern — no typed *SecretRef CRD field exists for it yet) must
+// NOT alarm the same way a real collision does. Emitting a Warning here
+// would train users to ignore Warnings on this condition, since every app
+// binding REDIS_URL via envMap (the recommended pattern) would carry one
+// permanently.
+func TestComputeStatusVerdict_EnvMapCollision_ExemptOnly_NormalEventAndInformationalCondition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		envMapCollisionReport{userWinsExempt: []string{"REDIS_URL"}}, now)
+
+	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
+	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapExpectedOverride {
+		t.Fatalf("EnvMapCollision: got %+v, want True/%s (informational, exempt-only)", c, ReasonEnvMapExpectedOverride)
+	}
+	if !strings.Contains(c.Message, "REDIS_URL") {
+		t.Fatalf("EnvMapCollision message %q does not name the collision", c.Message)
+	}
+	for _, e := range v.events {
+		if e.eventType == corev1.EventTypeWarning {
+			t.Fatalf("exempt-only collision emitted a Warning event (should be Normal, informational): %+v", v.events)
+		}
+	}
+	found := false
+	for _, e := range v.events {
+		if e.reason == ReasonEnvMapExpectedOverride && e.eventType == corev1.EventTypeNormal {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no Normal/%s event emitted: got %+v", ReasonEnvMapExpectedOverride, v.events)
+	}
+}
+
+// TestComputeStatusVerdict_EnvMapCollision_ExemptPlusGrandfathered_StillWarning
+// proves the informational downgrade is scoped to the EXEMPT-ONLY case: an
+// exempt name alongside a REAL (grandfathered) collision must still alarm —
+// the real collision does not become invisible just because an unrelated
+// exempt name is also present in the same reconcile.
+func TestComputeStatusVerdict_EnvMapCollision_ExemptPlusGrandfathered_StillWarning(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		envMapCollisionReport{
+			userWinsExempt:        []string{"REDIS_URL"},
+			userWinsGrandfathered: []string{"NODE_ENV"},
+		}, now)
+
+	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
+	if c.Reason != ReasonEnvMapUserOverride {
+		t.Fatalf("EnvMapCollision reason: got %s, want %s (grandfathered collision present, must not downgrade to informational)",
+			c.Reason, ReasonEnvMapUserOverride)
+	}
+	found := false
+	for _, e := range v.events {
+		if e.reason == ReasonEnvMapUserOverride && e.eventType == corev1.EventTypeWarning {
+			found = true
+		}
+		if e.eventType == corev1.EventTypeNormal {
+			t.Fatalf("a Normal event fired even though a real (grandfathered) collision is present: %+v", v.events)
 		}
 	}
 	if !found {
@@ -261,16 +368,15 @@ func TestComputeStatusVerdict_EnvMapCollision_TransitionGated(t *testing.T) {
 		Status: metav1.ConditionTrue,
 		Reason: ReasonEnvMapUserOverride,
 		Message: "spec.secrets.envMap collides with operator-managed system env — NODE_ENV: " +
-			"spec.secrets.envMap overrides the operator's own default value for these name(s) — " +
-			"either because they are connection-string names (REDIS_URL, KAFKA_BROKER_URL, " +
-			"OTEL_EXPORTER_OTLP_ENDPOINT) that are always allowed to be user-supplied, or because " +
-			"this NextApp reconciled with the collision already present; remove the envMap entry " +
-			"to fall back to the operator's default.",
+			"spec.secrets.envMap overrides the operator's own default value for these name(s) " +
+			"because this NextApp reconciled with the collision already present (predates " +
+			"admission rejection, or reconciled while the validating webhook was unavailable); " +
+			"remove the envMap entry to fall back to the operator's default.",
 	}}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWins: []string{"NODE_ENV"}}, now)
+		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, now)
 
 	if len(v.events) != 0 {
 		t.Fatalf("events: got %+v, want none — the collision set is UNCHANGED from the prior reconcile", v.events)

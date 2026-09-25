@@ -169,6 +169,17 @@ const (
 	// while the validating webhook was unavailable. Labelling either of those
 	// "grandfathered" would misleadingly imply a legacy-only condition.
 	ReasonEnvMapUserOverride = "EnvMapUserOverride"
+	// ReasonEnvMapExpectedOverride marks an EnvMapCollision condition whose
+	// ONLY member is validation.EnvMapUserAlwaysWinsEnvNames (connection-
+	// string names) — the documented, sanctioned pattern for a value the CRD
+	// has no typed `*SecretRef` field for yet. computeStatusVerdict emits a
+	// Normal event (not Warning) and this reason for that case, so the
+	// documented pattern doesn't train users to ignore Warnings on this
+	// condition (#1391 round 3). If any real collision (operatorWins or
+	// userWinsGrandfathered) also fires alongside it, the reason/event
+	// upgrade to the alarm-worthy ones instead — this reason is reserved for
+	// the exempt-only case.
+	ReasonEnvMapExpectedOverride = "EnvMapExpectedOverride"
 	// ReasonIngressNotProgrammed marks a NextApp whose route has sat in
 	// IngressNotConfigured past the stall window — i.e. NO ingress controller
 	// reconciles the cluster's configured ingress-class, so the app will never
@@ -1243,16 +1254,32 @@ type envMapCollisionReport struct {
 	// own value was kept and the envMap entry dropped —
 	// validation.OperatorAlwaysWinsEnvNames (currently only HOSTNAME).
 	operatorWins []string
-	// userWins is the sorted set of collision names where the envMap value
-	// REPLACED the operator's own entry in place — every other reserved
-	// name, preserving the value the app was actually getting before #1288
-	// shipped (kubelet's real last-wins duplicate-env semantics already
-	// favored the later-appended envMap entry there).
-	userWins []string
+	// userWinsGrandfathered is the sorted set of collision names — EXCLUDING
+	// validation.EnvMapUserAlwaysWinsEnvNames — where the envMap value
+	// REPLACED the operator's own entry in place, preserving the value the
+	// app was actually getting before #1288 shipped (kubelet's real
+	// last-wins duplicate-env semantics already favored the later-appended
+	// envMap entry there). Reaching this for a NEW CR is impossible —
+	// admission rejects it — so every name here means the CR predates that
+	// rule, or reconciled while the validating webhook was unavailable: a
+	// real, alarm-worthy collision (#1391 round 3).
+	userWinsGrandfathered []string
+	// userWinsExempt is the sorted set of collision names IN
+	// validation.EnvMapUserAlwaysWinsEnvNames (REDIS_URL, KAFKA_BROKER_URL,
+	// OTEL_EXPORTER_OTLP_ENDPOINT) where the envMap value replaced the
+	// operator's own entry. This is the DOCUMENTED, expected pattern — these
+	// names have no typed `*SecretRef` CRD field yet, so envMap is the
+	// sanctioned way to source them from a Secret — never rejected at
+	// admission, on any CR. Kept separate from userWinsGrandfathered so the
+	// status verdict can treat a report that ONLY contains exempt names as
+	// informational (Normal event) rather than an alarm (#1391 round 3: users
+	// must not learn to ignore Warnings because the documented pattern keeps
+	// firing one).
+	userWinsExempt []string
 }
 
 func (r envMapCollisionReport) empty() bool {
-	return len(r.operatorWins) == 0 && len(r.userWins) == 0
+	return len(r.operatorWins) == 0 && len(r.userWinsGrandfathered) == 0 && len(r.userWinsExempt) == 0
 }
 
 // buildKsvcEnv assembles the container env (operator-managed system env,
@@ -1447,7 +1474,14 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 				// undocumented breaking change on upgrade (e.g. a bound
 				// REDIS_URL Secret silently replaced by an empty default).
 				envVars[reservedIndex[envName]] = fromSecret
-				report.userWins = append(report.userWins, envName)
+				if _, exempt := validation.EnvMapUserAlwaysWinsEnvNames[envName]; exempt {
+					// The documented pattern, not a real collision — kept
+					// out of userWinsGrandfathered so computeStatusVerdict
+					// can report it as informational (#1391 round 3).
+					report.userWinsExempt = append(report.userWinsExempt, envName)
+				} else {
+					report.userWinsGrandfathered = append(report.userWinsGrandfathered, envName)
+				}
 				continue
 			}
 			envVars = append(envVars, fromSecret)
