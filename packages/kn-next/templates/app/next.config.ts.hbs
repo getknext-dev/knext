@@ -14,8 +14,8 @@ import type { NextConfig } from "next";
  *
  * `adapterPath` wires the official Next.js Deployment Adapter
  * (`./next-adapter.ts` → `@getknext/core/adapter`) — this is what injects the
- * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on (#342),
- * and what reports build completion back to `knext build`. Building with
+ * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on, and
+ * what reports build completion back to `knext build`. Building with
  * `next build` and NOT wiring this adapter is a silent correctness gap, not a
  * build failure — don't delete it.
  *
@@ -38,7 +38,7 @@ const nextConfig: NextConfig = {
     // storage settings. In dev mode (`next dev`) ASSET_PREFIX is unset, so
     // assets serve locally.
     assetPrefix: process.env.ASSET_PREFIX || "",
-    // #93 skew protection (ADR-0011): pin every client to the build it
+    // Skew protection: pin every client to the build it
     // loaded — `deploymentId` makes Next append `?dpl=<id>` to asset/RSC
     // requests. `knext deploy` sets NEXT_DEPLOYMENT_ID = the deploy tag;
     // unset in `next dev` → no pinning.
@@ -55,7 +55,7 @@ const nextConfig: NextConfig = {
     cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,
     // Per-pod memory caches diverge across pods — Redis is the one cache.
     cacheMaxMemorySize: 0,
-    // ADR-0006: next/image optimization via sharp (in deps + the runtime
+    // next/image optimization via sharp (in deps + the runtime
     // image). remotePatterns is an EXPLICIT allowlist — empty means local
     // images only (no open optimizer / SSRF). Add trusted hosts as needed.
     images: {
@@ -64,7 +64,7 @@ const nextConfig: NextConfig = {
     },
     // The official Next.js Deployment Adapter (top-level since next 16.2).
     adapterPath: new URL("./next-adapter.ts", import.meta.url).pathname,
-    // #342/#356 (ADR-0031): `instrumentation.ts` is compiled for BOTH the
+    // `instrumentation.ts` is compiled for BOTH the
     // `nodejs` AND `edge` runtimes. Its Node-only body lives in
     // `src/instrumentation-node.ts`, loaded via a dynamic import guarded at
     // RUNTIME — but webpack/turbopack STATICALLY trace that import into the

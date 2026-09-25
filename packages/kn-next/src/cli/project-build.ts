@@ -174,16 +174,24 @@ function isAffectedNextVersion(v: ParsedNextVersion): boolean {
  * fix named, rather than let the raw Next stack trace ("ENOENT
  * .next/next-server.js.nft.json") stand as the only signal.
  *
- * Two escape hatches, both checked so this never blocks an app that already
+ * Three escape hatches, all checked so this never blocks an app that already
  * worked around the bug: (1) `builderId !== "turbopack"` — the `webpack`
  * builder is unaffected by construction (same `next build`, different
  * bundler flag), and the `vinext` target never calls adapter hooks at all;
  * (2) the app's OWN package.json `build` script already passing
- * `--webpack`. `--turbopack` is deliberately NOT an escape hatch — it is the
- * exact broken configuration this guard exists to catch (explicitly
- * requesting Turbopack does not un-break it), so a script that names
- * `--turbopack` still hits the check and gets the guard message instead of
- * a raw ENOENT.
+ * `--webpack`; (3) (#1378) the `build` script DELEGATES to another script
+ * (e.g. `"build": "run-s build:*"` with `--webpack` on `"build:next"`) — the
+ * check scans EVERY script in `package.json` for the flag, since a
+ * delegating `build` script's own text never contains it. Scoped since
+ * rev-1393 to scripts that themselves invoke `next build` (`/\bnext\s+build\b/`)
+ * — the earlier, looser version counted ANY script containing `--webpack`,
+ * so a common `"dev": "next dev --webpack"` sitting next to a bare
+ * `"build": "next build"` silently disabled the guard for a build script
+ * that was never actually fixed. `--turbopack` is deliberately NOT an escape
+ * hatch — it is the exact broken configuration this guard exists to catch
+ * (explicitly requesting Turbopack does not un-break it), so a script that
+ * names `--turbopack` still hits the check and gets the guard message
+ * instead of a raw ENOENT.
  *
  * The Next version read resolves through Node's own module resolution
  * (`createRequire` rooted at the app's package.json), not a hardcoded
@@ -203,19 +211,29 @@ export function checkTurbopackAdapterStandaloneRegression(
 ): void {
     if (builderId !== "turbopack") return;
 
-    let buildScript: unknown;
+    let scripts: Record<string, unknown> | undefined;
     try {
         const appPkg = JSON.parse(
             readFileSync(join(cwd, "package.json"), "utf8"),
         ) as { scripts?: Record<string, unknown> };
-        buildScript = appPkg.scripts?.build;
+        scripts = appPkg.scripts;
     } catch {
         return;
     }
-    if (typeof buildScript === "string" && /--webpack\b/.test(buildScript)) {
-        // Already opted out of the ambient Turbopack default — nothing to
-        // warn about. `--turbopack` is NOT checked for here: it is the
-        // broken configuration, not an opt-out of it.
+    if (
+        scripts !== undefined &&
+        Object.values(scripts).some(
+            (script) =>
+                typeof script === "string" &&
+                /\bnext\s+build\b/.test(script) &&
+                /--webpack\b/.test(script),
+        )
+    ) {
+        // Already opted out of the ambient Turbopack default — either the
+        // `build` script names `--webpack` directly, or (#1378) it
+        // DELEGATES to another script that does. `--turbopack` is NOT
+        // checked for here: it is the broken configuration, not an opt-out
+        // of it.
         return;
     }
 
@@ -244,7 +262,9 @@ export function checkTurbopackAdapterStandaloneRegression(
             "See https://github.com/getknext-dev/knext/issues/1372 for the full trace.\n\n" +
             "Fix: upgrade to next ≥ 16.3.5, or add `--webpack` to this app's package.json " +
             '`build` script (`"build": "next build --webpack"`) as a workaround — node/bun x ' +
-            "webpack is an already-verified knext build target.",
+            "webpack is an already-verified knext build target. If `build` delegates to " +
+            'other scripts (e.g. `"build": "run-s build:*"`), add `--webpack` to whichever ' +
+            "script actually invokes `next build` instead.",
     );
 }
 
