@@ -341,6 +341,48 @@ func TestComputeStatusVerdict_EnvMapCollision_ExemptPlusGrandfathered_StillWarni
 	}
 }
 
+// TestComputeStatusVerdict_ExemptPlusOperatorWins_StillWarning proves the
+// informational downgrade in computeStatusVerdict does not just check
+// userWinsGrandfathered — it also checks operatorWins. A HOSTNAME collision
+// (operator-managed, always operatorWins) alongside an unrelated exempt
+// REDIS_URL name is a REAL, alarm-worthy collision (HOSTNAME) and must still
+// Warning/ReasonEnvVarIgnored, never silently downgrade to the exempt-only
+// Normal/ReasonEnvMapExpectedOverride path. Dropping the operatorWins clause
+// from that gate would leave every OTHER test in this file green (#1413
+// review, round 4).
+func TestComputeStatusVerdict_ExemptPlusOperatorWins_StillWarning(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		envMapCollisionReport{
+			userWinsExempt: []string{"REDIS_URL"},
+			operatorWins:   []string{"HOSTNAME"},
+		}, now)
+
+	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
+	if c.Reason != ReasonEnvVarIgnored {
+		t.Fatalf("EnvMapCollision reason: got %s, want %s (operator-wins collision present, must not downgrade to informational)",
+			c.Reason, ReasonEnvVarIgnored)
+	}
+	if !strings.Contains(c.Message, "HOSTNAME") {
+		t.Fatalf("EnvMapCollision message %q does not name the operator-wins collision", c.Message)
+	}
+	found := false
+	for _, e := range v.events {
+		if e.reason == ReasonEnvVarIgnored && e.eventType == corev1.EventTypeWarning {
+			found = true
+		}
+		if e.eventType == corev1.EventTypeNormal {
+			t.Fatalf("a Normal event fired even though a real (operator-wins) collision is present: %+v", v.events)
+		}
+	}
+	if !found {
+		t.Fatalf("no Warning/%s event emitted: got %+v", ReasonEnvVarIgnored, v.events)
+	}
+}
+
 func TestComputeStatusVerdict_NoEnvMapCollision_ConditionFalse(t *testing.T) {
 	now := time.Now()
 	app := verdictApp()

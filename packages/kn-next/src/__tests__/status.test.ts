@@ -172,6 +172,34 @@ function envMapExemptCollisionCr() {
     return cr;
 }
 
+/**
+ * #1413 review, round 4: a MIXED report — a real, operator-managed collision
+ * (HOSTNAME, always operatorWins) alongside an unrelated exempt connection-
+ * string name (REDIS_URL). The Go side's informational gate
+ * (computeStatusVerdict) must NOT downgrade this to the informational reason
+ * just because an exempt name is also present — it stays reason=EnvVarIgnored,
+ * the real-collision alarm reason. This fixture proves the CLI mirror renders
+ * it as an alarm end to end, not just that the Go-side reason string is right.
+ */
+const ENVMAP_MIXED_COLLISION_MESSAGE =
+    "spec.secrets.envMap collides with operator-managed system env — HOSTNAME: " +
+    "always managed by the operator, envMap ignored (no action needed unless " +
+    "the operator's own value is not what you intended); REDIS_URL: " +
+    "connection-string name(s) always sourced from your spec.secrets.envMap Secret " +
+    "— the documented pattern for a value the CRD has no typed field for yet; no " +
+    "action needed.";
+function envMapMixedCollisionCr() {
+    const cr = healthyCr();
+    (cr.status.conditions as Record<string, unknown>[]).push({
+        type: "EnvMapCollision",
+        status: "True",
+        reason: "EnvVarIgnored",
+        message: ENVMAP_MIXED_COLLISION_MESSAGE,
+        lastTransitionTime: T_3M_AGO,
+    });
+    return cr;
+}
+
 /** Old operator: only status.url is populated — no conditions at all. */
 function sparseCr() {
     const cr = baseCr();
@@ -444,6 +472,18 @@ describe("renderStatusHuman", () => {
         // formatting a real collision gets — must NOT appear.
         expect(text).toMatch(/EnvMapCollision\s+True.*EnvMapExpectedOverride/);
         expect(text).not.toContain(ENVMAP_EXEMPT_COLLISION_MESSAGE);
+    });
+
+    it("envMap collision, operator-wins PLUS an unrelated exempt name (#1413 round 4): still ALARM, not downgraded", () => {
+        const text = renderStatusHuman(
+            extractStatus(envMapMixedCollisionCr()),
+            NOW,
+        );
+        // reason=EnvVarIgnored (the real-collision reason), not
+        // EnvMapExpectedOverride — an exempt name alongside a real
+        // operator-wins collision must not silently downgrade the alarm.
+        expect(text).toMatch(/EnvMapCollision\s+True.*EnvVarIgnored/);
+        expect(text).toContain(ENVMAP_MIXED_COLLISION_MESSAGE);
     });
 
     it("informational reasons list contains exactly the operator's documented-pattern reason", () => {
