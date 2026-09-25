@@ -1,5 +1,5 @@
 /**
- * ADR-0049 — what `kn-next init-ci` generates (#874).
+ * ADR-0049 — what `knext init-ci` generates (#874).
  *
  * The generated files are the entire client-facing surface of stage 1: a
  * workflow they will read, and an RBAC manifest they will `kubectl apply`

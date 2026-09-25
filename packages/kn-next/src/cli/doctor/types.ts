@@ -1,5 +1,5 @@
 /**
- * Shared types and constants for `kn-next doctor` (#1055 decomposition).
+ * Shared types and constants for `knext doctor` (#1055 decomposition).
  *
  * The doctor command was one 1912-line file; it is now a thin orchestrator
  * (`../doctor.ts`) over the spine modules here + `./checks/*`. This module holds
@@ -44,7 +44,7 @@ export const PRIVATE_REGISTRY_DOCS_URL =
 /**
  * Minimum kubectl CLIENT version for which `--validate=strict` is meaningful.
  *
- * WHY 1.25 and not 1.27: `kn-next deploy` passes `--validate=strict` explicitly
+ * WHY 1.25 and not 1.27: `knext deploy` passes `--validate=strict` explicitly
  * on the NextApp CR apply, and the STRING form of that flag
  * (`strict|warn|ignore`) only exists from kubectl **v1.25** — that same release
  * also made `strict` kubectl's default. On v1.24 and older `--validate` is a

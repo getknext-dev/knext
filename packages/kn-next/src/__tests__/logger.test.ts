@@ -4,24 +4,26 @@ import {
     unstubAllEnvs,
 } from "../../../../tests/helpers/bun-test-helpers";
 
-// The kn-next framework logger (`../utils/logger`) builds a named pino instance
+// The knext framework logger (`../utils/logger`) builds a named pino instance
 // at module load and also exposes `createLogger(bindings)` for child scoping.
 // In production it writes raw JSON (no pino-pretty worker); we pin its real,
 // observable contract:
 //   - constructs/exports without throwing,
 //   - honors LOG_LEVEL, with a prod default of "info",
-//   - carries the load-bearing `name: "kn-next"` binding,
+//   - carries the load-bearing `name: "kn-next"` binding (#1369 rename round:
+//     deliberately NOT renamed to "knext" — it is load-bearing for existing
+//     log queries/dashboards, unlike the CLI-surface rename),
 //   - and `createLogger` returns a child that merges extra bindings.
 
 function forceProdEnv() {
     // Force the raw-JSON branch — no pino-pretty transport worker under vitest.
     stubEnv("NODE_ENV", "production");
-    // Delete LOG_LEVEL (not ''): kn-next reads it via `??`, so an empty string
+    // Delete LOG_LEVEL (not ''): knext reads it via `??`, so an empty string
     // would survive and hand pino an invalid level.
     stubEnv("LOG_LEVEL", undefined);
 }
 
-describe("kn-next logger — instance contract", () => {
+describe("knext logger — instance contract", () => {
     beforeEach(async () => {
         // env FIRST, then the reset. `__resetLoggerForTests` re-reads
         // `NODE_ENV`, so resetting before `forceProdEnv()` recomputes
@@ -56,13 +58,13 @@ describe("kn-next logger — instance contract", () => {
         expect(logger.level).toBe("info");
     });
 
-    it('carries the load-bearing name binding ("kn-next")', async () => {
+    it('carries the load-bearing name binding ("kn-next", deliberately NOT renamed)', async () => {
         const { logger } = await import("../utils/logger");
         expect(logger.bindings().name).toBe("kn-next");
     });
 });
 
-describe("kn-next logger — createLogger child scoping", () => {
+describe("knext logger — createLogger child scoping", () => {
     beforeEach(async () => {
         // env FIRST, then the reset. `__resetLoggerForTests` re-reads
         // `NODE_ENV`, so resetting before `forceProdEnv()` recomputes
@@ -81,7 +83,7 @@ describe("kn-next logger — createLogger child scoping", () => {
         const { createLogger } = await import("../utils/logger");
         const child = createLogger({ module: "deploy" });
         const bindings = child.bindings();
-        // Child keeps the parent's name and adds its own scope.
+        // Child keeps the parent's name (deliberately still "kn-next") and adds its own scope.
         expect(bindings.name).toBe("kn-next");
         expect(bindings.module).toBe("deploy");
         expect(() =>
@@ -90,7 +92,7 @@ describe("kn-next logger — createLogger child scoping", () => {
     });
 });
 
-describe("kn-next logger — pino wiring (mocks pino; must run LAST)", () => {
+describe("knext logger — pino wiring (mocks pino; must run LAST)", () => {
     it("defaults to debug level outside production when LOG_LEVEL is unset", async () => {
         // LAST in the file, deliberately.
         //

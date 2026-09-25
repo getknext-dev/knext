@@ -97,7 +97,7 @@ Do not use your personal admin kubeconfig. The action **refuses** one — see be
 path is also the correct one:
 
 ```bash title="shell"
-kn-next init-ci --namespace my-app
+knext init-ci --namespace my-app
 ```
 
 That writes two files and touches nothing in your cluster:
@@ -170,7 +170,7 @@ that case, and turns the check off rather than satisfying it.
 | `skip-credential-preflight` | no | `false` | Turns off the credential check. Read the callout above first |
 
 The action sets no outputs. The deployed URL is reported by the cluster — read it with
-`kubectl get ksvc -n <namespace>`, or `kn-next status`. An output that was empty on every dry run
+`kubectl get ksvc -n <namespace>`, or `knext status`. An output that was empty on every dry run
 and unreliable otherwise would be worse than none.
 
 ## Preview deploys on pull requests
@@ -200,7 +200,7 @@ This makes the diff reviewable before it lands — the same instinct as `terrafo
 
 ## Why `doctor` runs first
 
-By default the action runs the read-only `kn-next doctor` preflight and fails the job if the cluster
+By default the action runs the read-only `knext doctor` preflight and fails the job if the cluster
 is not ready. It checks that the CRD exists, the operator is Ready, Knative Serving is installed, and
 the ingress class matches the controller actually serving traffic.
 

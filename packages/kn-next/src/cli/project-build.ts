@@ -70,7 +70,7 @@ export function preflightEsmPackage(cwd: string): void {
         throw new UsageError(
             'The vinext single-executable target requires the app to be an ES module: its package.json must have `"type": "module"`.\n\n' +
                 "vinext builds with Vite/Rollup (ESM); a CommonJS app fails to resolve the rsc↔ssr entry graph and dies mid-build.\n" +
-                'Add `"type": "module"` to package.json (apps scaffolded with `kn-next create` already have it).',
+                'Add `"type": "module"` to package.json (apps scaffolded with `knext create` already have it).',
         );
     }
 }
@@ -168,7 +168,7 @@ function isAffectedNextVersion(v: ParsedNextVersion): boolean {
  * guard falls through to its existing "cannot evaluate, don't block" path,
  * the same as an unresolvable `next` install. Every app on the `turbopack` builder
  * wires `adapterPath` by construction (it is what that target IS), so this
- * is not scaffold-specific: ANY `kn-next build` on the default target with
+ * is not scaffold-specific: ANY `knext build` on the default target with
  * an affected Next version hits it, including apps this CLI did not
  * scaffold. Fail BEFORE the (guaranteed-to-fail) build runs, with the actual
  * fix named, rather than let the raw Next stack trace ("ENOENT

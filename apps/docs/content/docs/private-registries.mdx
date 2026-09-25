@@ -10,7 +10,7 @@ deploy applies cleanly, the service is created, and then the pod sits in
 `ImagePullBackOff` while the registry answers `401`/`403` (GHCR words it
 "Anonymous users are only allowed read access").
 
-`kn-next doctor` checks for exactly this before it costs you a debugging
+`knext doctor` checks for exactly this before it costs you a debugging
 session: for every deployed app it probes whether the image is anonymously
 pullable, and if it is not — and no pull credential is **attached to the
 app's ServiceAccount** — it warns and points here. A credential Secret that
@@ -63,7 +63,7 @@ kubectl patch serviceaccount <app-name>-sa \
 ```
 
 This step is the one that actually takes effect — creating the Secret without
-attaching it here changes nothing, and `kn-next doctor` calls that case out
+attaching it here changes nothing, and `knext doctor` calls that case out
 specifically.
 
 **The patch replaces the whole `imagePullSecrets` list.** If the
@@ -80,14 +80,14 @@ retroactively — patching the ServiceAccount alone rescues nothing you can see.
 Roll a new revision:
 
 ```bash
-kn-next deploy
+knext deploy
 ```
 
 The new revision's pods resolve the credential at creation and pull cleanly.
 
 ## Verifying
 
-- `kn-next doctor` — the "App image pullable" check turns from a warning into
+- `knext doctor` — the "App image pullable" check turns from a warning into
   a pass once the credential is **attached to the app's ServiceAccount**. A
   Secret that exists but is not attached keeps a warning (with the attach
   command in the hint). Note what a pass verifies: **attachment**, not that

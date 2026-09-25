@@ -164,6 +164,7 @@
       "name": "@getknext/core",
       "version": "0.4.3",
       "bin": {
+        "knext": "./dist/cli/kn-next.js",
         "kn-next": "./dist/cli/kn-next.js",
       },
       "dependencies": {

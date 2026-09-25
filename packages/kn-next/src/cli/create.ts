@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `kn-next create` — scaffold a knext app that carries the guarded
+ * `knext create` — scaffold a knext app that carries the guarded
  * instrumentation BY DEFAULT (#407, ADR-0041 amending ADR-0031).
  *
  * ADR-0031 made the in-repo `turbo gen zone` template emit the guarded pair
@@ -196,11 +196,11 @@ export function loadTemplates(root = templateRoot()): Map<string, string> {
 }
 
 /**
- * Which build target `kn-next create` scaffolds (#1342, ADR-0058).
+ * Which build target `knext create` scaffolds (#1342, ADR-0058).
  *
  * `"default"` — the standalone shape: plain `next build`, `output:
  * 'standalone'`, `adapterPath` wired to the official Next.js Deployment
- * Adapter. `kn-next deploy`/`build` stage the runtime image automatically
+ * Adapter. `knext deploy`/`build` stage the runtime image automatically
  * (`runtime-image.ts`'s existing `selectRuntimeImage`/
  * `stageStandaloneBuildContext`) — the scaffold emits no Dockerfile for this
  * target, matching how that staging has always worked.
@@ -410,10 +410,10 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
     return files;
 }
 
-const HELP = `kn-next create — scaffold a knext app with guarded instrumentation
+const HELP = `knext create — scaffold a knext app with guarded instrumentation
 
 Usage:
-  kn-next create [directory] [options]
+  knext create [directory] [options]
 
 Emits the SAME guarded-instrumentation shape the in-repo app template does
 (ADR-0031/#407): an edge-clean src/instrumentation.ts, the Node-only
@@ -422,7 +422,7 @@ and the per-app instrumentation-edge-safe guard.
 
 By default scaffolds the standalone target (ADR-0058): plain \`next build\`,
 \`output: 'standalone'\`, the official Next.js Deployment Adapter wired via
-\`adapterPath\`. \`kn-next build\`/\`deploy\` stage the matching runtime image
+\`adapterPath\`. \`knext build\`/\`deploy\` stage the matching runtime image
 automatically — this command emits no Dockerfile for that target.
 
 Options:
@@ -449,8 +449,8 @@ export function partingLine(dir: string): string {
         `  ${cdPrefix}npm install\n` +
         "  npm run dev              # local dev server on http://localhost:3000\n" +
         "\nWhen you are ready to put it on your cluster:\n" +
-        "  kn-next doctor           # checks your cluster connection and setup\n" +
-        "  kn-next deploy           # builds the image and ships the app\n" +
+        "  knext doctor           # checks your cluster connection and setup\n" +
+        "  knext deploy           # builds the image and ships the app\n" +
         "\nBefore you ship real traffic, run `npm test` once — it checks the\n" +
         "app's built-in guards against a production build.\n"
     );
@@ -574,7 +574,7 @@ export async function createMain(argv: string[]): Promise<number> {
         // pino's transport is async and its object rendering buries the message
         // the user needs ("invalid app name … must be an RFC1123 label"), which
         // turns an actionable rejection into a bare "create failed".
-        process.stderr.write(`kn-next create: ${(err as Error).message}\n`);
+        process.stderr.write(`knext create: ${(err as Error).message}\n`);
         log.error({ err }, "create failed");
         return 1;
     }

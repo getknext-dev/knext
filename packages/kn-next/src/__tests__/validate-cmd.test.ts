@@ -1,5 +1,5 @@
 /**
- * UX ledger row 4 (4a) — `kn-next validate` is a routed verb.
+ * UX ledger row 4 (4a) — `knext validate` is a routed verb.
  *
  * validate runs config load + the schema checks + the placeholder preflight,
  * WITHOUT cluster access: plain output on both streams, exit 0/1. The verb
@@ -54,7 +54,7 @@ describe("validateMain — help and argv strictness", () => {
     it("--help prints usage to stdout, exits 0, loads nothing", async () => {
         const r = await runValidate(["--help"]);
         expect(r.code).toBe(0);
-        expect(r.stdout).toContain("kn-next validate");
+        expect(r.stdout).toContain("knext validate");
         // the persona's question: does this touch my cluster?
         expect(r.stdout.toLowerCase()).toContain("no cluster");
         expect(r.stderr).toBe("");

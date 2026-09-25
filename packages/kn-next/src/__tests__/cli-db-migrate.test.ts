@@ -1,5 +1,5 @@
 /**
- * `kn-next db migrate` — the one-shot, writer-only migration runner (ADR-0021 §3).
+ * `knext db migrate` — the one-shot, writer-only migration runner (ADR-0021 §3).
  *
  * The subcommand applies drizzle-kit-generated migrations against the WRITER
  * `DATABASE_URL` exactly once per deploy (a CI step or a k8s Job), out of the

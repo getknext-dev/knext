@@ -67,7 +67,7 @@ describe("stageStandaloneAssets", () => {
     it("stages .next/static under _next/static, copies public/, and writes the marker keyed on the STATED deploy id (#924)", () => {
         seedBuild({ buildId: "bid1", withPublic: true });
 
-        // `kn-next deploy` (turbopack): the caller STATES the deploy id, and it
+        // `knext deploy` (turbopack): the caller STATES the deploy id, and it
         // equals .next/BUILD_ID, so the marker is keyed on it.
         const staging = stageStandaloneAssets(cwd, "bid1");
 
@@ -93,7 +93,7 @@ describe("stageStandaloneAssets", () => {
     });
 
     it("stages NO marker when the caller states no build id — fail-safe over-keep (#924, the turbopack twin of #892)", () => {
-        // This is `kn-next build` on turbopack: it uploads assets but creates
+        // This is `knext build` on turbopack: it uploads assets but creates
         // no revision and exports no NEXT_DEPLOYMENT_ID, so .next/BUILD_ID holds
         // Next's own generated id — a value no revision label can ever carry.
         // Marking it would make the prefix reapable-but-never-protectable (the
@@ -293,7 +293,7 @@ describe("stageNitroPublicAssets", () => {
      * states the id and the write site verifies it". The discovery version was
      * wrong twice over, and both were real: vinext emits `_vinext_fonts/`
      * beside the build prefix for any app using `next/font`, which made the
-     * single-candidate rule ambiguous; and `kn-next build` — which exports no
+     * single-candidate rule ambiguous; and `knext build` — which exports no
      * deploy id at all — would have had a UUID discovered for it and marked,
      * producing a marker no revision label can ever match. A marker that can be
      * classified as reapable but never protected is the over-delete ADR-0011
@@ -376,7 +376,7 @@ describe("stageNitroPublicAssets", () => {
     });
 
     it("stages NO marker when the caller states no build id — fail-safe over-keep", () => {
-        // This is `kn-next build`: it uploads assets but creates no revision,
+        // This is `knext build`: it uploads assets but creates no revision,
         // so nothing could ever protect the prefix. Unmarked means over-kept
         // forever, which is the safe direction; marking it would make it
         // reapable-but-never-protectable.

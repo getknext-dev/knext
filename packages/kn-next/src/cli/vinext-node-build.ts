@@ -7,7 +7,7 @@
  * bytecode caching is the V8 compile cache the IMAGE bakes at `docker build`
  * time (ADR-0035) — see `templates/app/Dockerfile.vinext-node.hbs`.
  *
- * What `kn-next build` owes this cell is therefore one check: that the
+ * What `knext build` owes this cell is therefore one check: that the
  * `.output` it is about to hand to that image really IS the node preset. The
  * preset is chosen in the app's `vite.config.ts`, and an app scaffolded before
  * #1260 hardcodes `preset: 'bun'` there — switching such an app to
@@ -52,10 +52,10 @@ export function assertNodePresetOutput(cwd: string): void {
                 (preset === "bun"
                     ? "A bun-preset server calls Bun's own APIs at startup and exits 1 under node.\n"
                     : "") +
-                "Your vite.config.ts chooses the preset. Apps created by current `kn-next create` read it\n" +
+                "Your vite.config.ts chooses the preset. Apps created by current `knext create` read it\n" +
                 "from kn-next.config.ts's `runtime`; an older app hardcodes `preset: 'bun'`. To fix:\n" +
                 "  1. copy knext-node-entry.mjs into this app (from a freshly created app —\n" +
-                "     `npx kn-next create` — it sits next to knext-bun-entry.mjs);\n" +
+                "     `npx knext create` — it sits next to knext-bun-entry.mjs);\n" +
                 "  2. make the nitro plugin in vite.config.ts use `preset: 'node'` with\n" +
                 "     `entry: './knext-node-entry.mjs'` when runtime is node;\n" +
                 "  3. declare `srvx` in package.json (the node entry imports srvx/node).\n" +
