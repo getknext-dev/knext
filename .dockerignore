@@ -1,11 +1,51 @@
-node_modules
-dist
-.next
-.open-next
-.git
-.turbo
-*.log
-coverage
+# #1293: every pattern below (except `docs`, see its own comment) is `**/`-
+# prefixed for the same reason `.vinext`/`.output` needed it below — Docker's
+# `.dockerignore` matching is NOT recursive the way `.gitignore`'s is. A bare
+# pattern here matches ONLY at the context root; each of these directories
+# ALSO exists nested under `apps/*` and `packages/*` (e.g.
+# `apps/file-manager/node_modules`, `apps/docs/.next`, `packages/kn-next/dist`,
+# every workspace's own `.turbo`/`coverage`), and a bare line left every one
+# of those nested copies reachable by `COPY . .` — a bloated build context, a
+# HOST build's stale `.next`/`dist` output shadowing what the in-image build
+# regenerates, and non-reproducible builds keyed on whatever happened to be on
+# the host filesystem at build time. Audited every `COPY` in every Dockerfile
+# a GitHub Actions workflow ACTUALLY builds with `context: .` — currently
+# `apps/file-manager/Dockerfile`, `apps/docs/Dockerfile.trivyscan`, and
+# `examples/bun-exec/Dockerfile.node.trivyscan` (NOT `apps/docs/Dockerfile.oke`,
+# which is built manually for the OKE deploy, outside CI, and so is outside
+# what this audit can claim to cover) — before widening: none of them `COPY`s
+# a nested `node_modules`/`dist`/`.next`/`.open-next`/`.turbo`/`coverage`/`*.log`
+# from the HOST context (every `COPY --from=<stage>` reads from a PREVIOUS
+# BUILD STAGE's filesystem, which `.dockerignore` never touches; the two
+# `trivyscan` fixtures have no `COPY` at all — they reproduce only the base
+# OS layer — and file-manager's own non-`--from` `COPY` is `COPY . .` itself,
+# at the very start, before any in-image build has produced these
+# directories) — so widening every one of them to `**/` is a pure win, not a
+# risk. The Dockerfile list above is DERIVED by parsing the workflows, not
+# hand-maintained, so it never drifts from what CI actually builds.
+# Mutation-provable at `tests/dockerignore-recursive-pins.test.ts`.
+**/node_modules
+**/dist
+**/.next
+**/.open-next
+**/.git
+**/.turbo
+**/*.log
+**/coverage
+
+# `docs` is the ONE pattern here that must stay BARE, not `**/`-prefixed —
+# the opposite call from every pattern above. This line means "exclude the
+# workspace ROOT's own `docs/` directory" (this repo's ADR/knowledge-base
+# tree, irrelevant to any app image and worth keeping out of the build
+# context). `apps/docs` is a real Next.js app — its directory is also named
+# `docs`, and `apps/docs/Dockerfile`'s `COPY . .` needs it. `**/docs` would
+# match `apps/docs` too (`**/` matches zero-or-more leading directories, so
+# it matches any path ENDING in `/docs`, not just a root-level one) and
+# silently empty the build context for that app's own Dockerfile — the
+# opposite of "tidier context", an unbuildable image. Verified: `apps/docs`
+# is the only other `docs`-named directory under a build-context root in this
+# repo today; if a `packages/*/docs` or similar is ever added, it survives
+# this pattern too, by the same reasoning.
 docs
 
 # #1284: this is the file Docker ACTUALLY reads for apps/file-manager's build
@@ -30,11 +70,11 @@ docs
 # `.vinext` line and was excluded once the pattern became `**/.vinext`), and
 # the app's own `.vinext` lives at `apps/file-manager/.vinext` — one level
 # below this file — so a bare line here would have compiled, looked correct,
-# and silently done nothing. The same gap almost certainly affects several of
-# the bare patterns already above this comment (`node_modules`, `.next`,
-# `.turbo`, `dist`, `coverage`, `docs` all live nested under `apps/*` /
-# `packages/*` too) — out of scope for #1284, flagged rather than fixed here
-# so it isn't lost.
+# and silently done nothing. (#1293, RESOLVED: the same gap in every OTHER
+# bare pattern in this file — `node_modules`, `.next`, `.turbo`, `dist`,
+# `coverage`, `*.log`, `.git` — was fixed at the top of this file; `docs` is
+# the one deliberate exception, see its own comment there. Don't re-flag
+# this as outstanding.)
 #
 # Proved end-to-end with a real `docker build` of the UNMODIFIED Dockerfile:
 # WITHOUT this exclusion (even with the bare, non-recursive `.vinext` line),
