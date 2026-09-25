@@ -563,6 +563,117 @@ function constantTimeEqual(a, b) {
   return mismatch === 0;
 }
 
+// ── Request-path hardening (srvx middleware + srvx `error` handler) ─────────
+// h3's event constructor runs `decodeURI` on the request path before any app
+// code and throws on a path that is not valid percent-encoding. Inside srvx
+// that throw is a rejected promise: srvx/node has no handler for it, so the
+// process exits; Bun answers 500. `rejectMalformedPath` answers such a path
+// with a 400 before h3 sees it. Only the path is checked: h3 does not decode the
+// query there.
+export function rejectMalformedPath(req, next) {
+  const url = req.url;
+  if (url.includes('%')) {
+    const pathStart = url.indexOf('/', url.indexOf('//') + 2);
+    const queryAt = url.indexOf('?', pathStart);
+    const hashAt = url.indexOf('#', pathStart);
+    const pathEnd = Math.min(
+      queryAt === -1 ? url.length : queryAt,
+      hashAt === -1 ? url.length : hashAt,
+    );
+    const path = pathStart === -1 ? '' : url.slice(pathStart, pathEnd);
+    if (!isDecodablePath(path)) {
+      return new Response('Bad Request', {
+        status: 400,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+      });
+    }
+  }
+  return next();
+}
+
+// True exactly when `decodeURI(path)` would not throw: every `%` starts two hex
+// digits, and escaped bytes >= 0x80 form well-formed UTF-8 (RFC 3629: no
+// overlongs, no surrogates, nothing above U+10FFFF), all bytes of one character
+// escaped back to back. Written WITHOUT try/decodeURI on purpose: vinext's
+// production build minifies this file, and the minifier deletes a decodeURI
+// call whose result is unused — the try/catch form compiled to nothing.
+export function isDecodablePath(path) {
+  const hex = (c) =>
+    c >= 48 && c <= 57 ? c - 48 : c >= 65 && c <= 70 ? c - 55 : c >= 97 && c <= 102 ? c - 87 : -1;
+  const byteAt = (i) => {
+    if (path.charCodeAt(i) !== 37) return -1;
+    const hi = hex(path.charCodeAt(i + 1));
+    const lo = hex(path.charCodeAt(i + 2));
+    return hi < 0 || lo < 0 ? -1 : hi * 16 + lo;
+  };
+  for (let i = 0; i < path.length; i++) {
+    if (path.charCodeAt(i) !== 37) continue;
+    const lead = byteAt(i);
+    if (lead < 0) return false;
+    i += 2;
+    if (lead < 0x80) continue;
+    let more;
+    let min = 0x80;
+    let max = 0xbf;
+    if (lead >= 0xc2 && lead <= 0xdf) more = 1;
+    else if (lead === 0xe0) [more, min] = [2, 0xa0];
+    else if (lead === 0xed) [more, max] = [2, 0x9f];
+    else if (lead >= 0xe1 && lead <= 0xef) more = 2;
+    else if (lead === 0xf0) [more, min] = [3, 0x90];
+    else if (lead === 0xf4) [more, max] = [3, 0x8f];
+    else if (lead >= 0xf1 && lead <= 0xf3) more = 3;
+    else return false;
+    for (let k = 0; k < more; k++) {
+      const b = byteAt(i + 1);
+      if (b < (k === 0 ? min : 0x80) || b > (k === 0 ? max : 0xbf)) return false;
+      i += 3;
+    }
+  }
+  return true;
+}
+
+// srvx's `error` option: any throw or rejection on the request path becomes a
+// plain 500 instead of an unhandled rejection (which exits a node process) or
+// Bun's development error page (which renders the stack and source). The error
+// is logged server-side only; the body never echoes it.
+export function requestErrorResponse(err) {
+  console.error('[knext] request failed:', err);
+  return new Response('Internal Server Error', {
+    status: 500,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+  });
+}
+
+// The `:9464` metrics listener for a plain node:http server (the node entry;
+// the bun entry serves the same port through Bun.serve). node:http hands the
+// raw request target through, so it is compared as a string — never given to
+// the URL parser, which throws on targets such as `//`, and a throw here is
+// outside any framework error handling. The try/catch keeps any other failure
+// a 500 rather than an exited process.
+export function metricsRequestListener(state) {
+  return (req, res) => {
+    try {
+      if (Number(req.headers['content-length'] ?? 0) > METRICS_MAX_REQUEST_BYTES) {
+        res.writeHead(413).end();
+        return;
+      }
+      const target = req.url ?? '/';
+      const queryAt = target.indexOf('?');
+      const path = queryAt === -1 ? target : target.slice(0, queryAt);
+      if (req.method === 'GET' && path === '/metrics') {
+        res.writeHead(200, { 'content-type': METRICS_CONTENT_TYPE });
+        res.end(renderMetrics(state));
+        return;
+      }
+      res.writeHead(404).end('Not Found');
+    } catch (err) {
+      console.error('[knext] metrics request failed:', err);
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    }
+  };
+}
+
 // ── (7 / after()) Background-task registry, anchored on globalThis ──────────
 // ADR-0027: a runtime seam's mutable state MUST live on globalThis via a
 // namespaced Symbol.for key, never a bare module-level `let` — a bundler may

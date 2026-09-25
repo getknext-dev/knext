@@ -68,7 +68,9 @@ import {
   METRICS_MAX_REQUEST_BYTES,
   observeRequest,
   recordStartupComplete,
+  rejectMalformedPath,
   renderMetrics,
+  requestErrorResponse,
   resolveAssetAnchor,
   resolveBindHost,
   resolveMaxRequestBytes,
@@ -169,6 +171,9 @@ const appSrvx = serve({
   maxRequestBodySize: REQUEST_CAP.bytes,
   gracefulShutdown: false,
   silent: true,
+  // Any throw on the request path becomes a plain 500 (runtime-contract.mjs),
+  // never an exited process or Bun's development error page.
+  error: requestErrorResponse,
   middleware: [
     // ONE middleware, wrapping every request — which is why the full RED
     // contract (rate / errors / duration) is cheap here and nowhere else. It
@@ -194,6 +199,10 @@ const appSrvx = serve({
         metrics.inflight--;
       }
     },
+    // Malformed request paths answer 400 here, before h3 decodes them (see
+    // runtime-contract.mjs). Inside the counting middleware, so they are
+    // counted as 4xx.
+    rejectMalformedPath,
   ],
 });
 // Adapt srvx's BunServer to the { port, stop(force) } shape the metrics log and
