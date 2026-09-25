@@ -13,7 +13,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+    mkdirSync,
+    mkdtempSync,
+    rmSync,
+    symlinkSync,
+    unlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KnativeNextConfig } from "../config";
@@ -368,6 +375,28 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         expect(() =>
             assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
         ).not.toThrow();
+    });
+
+    it("a symlink under .next/standalone re-pointed to a DIFFERENT target is caught as stale — collectEntriesSorted hashes the link's target string (#1414 untested branch)", () => {
+        standaloneServer();
+        const execPath = join(dir, "knext-standalone-exec-linux-x64");
+        writeFileSync(execPath, "");
+        const linkPath = join(dir, ".next", "standalone", "asset-link");
+        // Targets need not exist on disk — symlinkSync/readlinkSync only
+        // ever deal in the link's TEXT, never follow it (see
+        // collectEntriesSorted's doc comment: symlinks are hashed by where
+        // they point, not by walking into the target).
+        symlinkSync("original-target", linkPath);
+
+        compileArtifactForDeploy(cfg(), dir);
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).not.toThrow();
+
+        // Re-point the SAME symlink to a different target — no file content
+        // anywhere changed, only what the link resolves to.
+        unlinkSync(linkPath);
+        symlinkSync("different-target", linkPath);
+
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stale/i);
     });
 
     it("is a no-op for the node runtime — nothing to compile, nothing to check", () => {
