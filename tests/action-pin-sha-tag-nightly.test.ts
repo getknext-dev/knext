@@ -124,7 +124,7 @@ describe('nightly SHA↔tag resolution — the workflow (#539)', () => {
     expect(text).toMatch(/issues: write/);
   });
 
-  it('fails loudly — an idempotent pinned alert issue on a red scheduled run', () => {
+  it('fails loudly — an idempotent pinned alert issue on a red scheduled run, delegated to the shared helper (#1347)', () => {
     const text = read(NIGHTLY);
     const alert = text.split(/^\s{2}\S+-alert:/m)[1] ?? '';
     expect(alert, 'alert must be scheduled-only so a dispatch experiment files nothing').toContain(
@@ -132,10 +132,37 @@ describe('nightly SHA↔tag resolution — the workflow (#539)', () => {
     );
     expect(alert, 'alert must not be skipped when the check job fails').toContain('always()');
     expect(alert, 'alert must fire only on failure').toMatch(/result == 'failure'/);
-    // Idempotency: look up an existing open issue by a FIXED title and comment
-    // on it rather than filing a fresh one every red night.
-    expect(alert).toContain('gh issue list');
-    expect(alert).toContain('gh issue comment');
+    // #1347 moved the inline `gh issue list`/`comment`/`create`/`pin` tail
+    // (previously asserted directly here) into ONE shared, never-pinning
+    // helper every nightly-alert job now routes through — see
+    // scripts/lib/nightly-alert-issue.mjs's own header and
+    // tests/nightly-alert-issue.test.ts, which is what actually proves the
+    // lookup-existing/comment-if-present/create-if-absent idempotent
+    // behavior this test used to assert inline. This test now proves
+    // DELEGATION, not the behavior a second time.
+    expect(
+      alert.includes('nightly-alert-issue.mjs'),
+      'the alert must route through scripts/nightly-alert-issue.mjs — the shared idempotent create-or-update helper',
+    ).toBe(true);
+    // No inline gh issue list/comment/create/pin calls, comment-stripped
+    // first: the migration note above literally SAYS "This alert used to
+    // `gh issue pin`", which would otherwise false-positive a bare
+    // substring check.
+    const stripped = alert
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    for (const forbidden of [
+      'gh issue list',
+      'gh issue comment',
+      'gh issue create',
+      'gh issue pin',
+    ]) {
+      expect(
+        stripped.includes(forbidden),
+        `${forbidden} must not appear as a real (non-comment) call — the shared helper owns this now`,
+      ).toBe(false);
+    }
   });
 
   it('checks out WITHOUT persisting the credential into the checkout (#666 review)', () => {
