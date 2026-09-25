@@ -674,6 +674,35 @@ export function metricsRequestListener(state) {
 // WinterCG `waitUntil` callbacks register here and are awaited during drain.
 const PENDING_KEY = Symbol.for('knext.bunexec.pendingTasks');
 
+// Read a warm response to its end, BOUNDED. vinext settles a route's after()
+// work only once its response body has been consumed, so the warm loop reads
+// it — but a body that never ends (a streaming route) must not hold the
+// process: at `deadlineMs` the body is cancelled (which also settles after())
+// and the timeout is logged. Returns true when the body finished in time.
+export async function drainWarmBody(res, path, deadlineMs, log = console.log) {
+  const reader = res.body?.getReader();
+  if (!reader) return true;
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), deadlineMs);
+  });
+  const read = (async () => {
+    try {
+      for (;;) {
+        if ((await reader.read()).done) return 'done';
+      }
+    } catch {
+      return 'error';
+    }
+  })();
+  const outcome = await Promise.race([read, deadline]);
+  clearTimeout(timer);
+  if (outcome !== 'timeout') return true;
+  log(`WARM_BODY_TIMEOUT:${path} body not finished after ${deadlineMs}ms — cancelled`);
+  await reader.cancel().catch(() => {});
+  return false;
+}
+
 export function waitUntil(promise) {
   globalThis[PENDING_KEY] ??= new Set();
   const set = globalThis[PENDING_KEY];

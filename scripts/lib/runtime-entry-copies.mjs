@@ -112,8 +112,12 @@ export const DIVERGENT = {
       'middleware wrap and the corrected srvx-close comment were applied to the template and to ' +
       'this copy by one script from the same hunks. The recorded divergence is still ONLY the ' +
       'image intercept; leaving the wrap out here would have kept the one entry the alpine e2e ' +
-      'compiles dropping `after()` work on shutdown.',
-    sha256: 'fc80c49eb44721a3c7fe5ab4d670c8f3b207c14cedef0ff5235b743e09d0b536',
+      'compiles dropping `after()` work on shutdown.\n\n' +
+      'HASH UPDATED for #1313 (malformed-path rejection before h3, a non-throwing request-error ' +
+      'handler) and #1269 (the warm-path body read is bounded by drainWarmBody): both landed on ' +
+      'the template and this copy from the same hunks. The recorded divergence is still ONLY the ' +
+      'image intercept.',
+    sha256: '14f9d5cde99d666f7ef79c5ea42f0f917540cb8947a1798b4adc97fdc8e4166e',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:
@@ -127,8 +131,11 @@ export const DIVERGENT = {
       'there, restore the template text, and delete this entry in the same change.\n\n' +
       'HASH UPDATED for #1266 (drainPending loops until the pending set is empty, so work ' +
       'registered DURING the drain is awaited): applied to the template and this copy from the ' +
-      'same hunk by one script. The recorded divergence is still ONLY the item-4 comment block.',
-    sha256: 'f87d4b9f4e169a4356b8e7fcef39a876436a5869efb6332572af6df57019fbc0',
+      'same hunk by one script. The recorded divergence is still ONLY the item-4 comment block.\n\n' +
+      'HASH UPDATED for #1313 (rejectMalformedPath, requestErrorResponse, metricsRequestListener) ' +
+      'and #1269 (drainWarmBody): applied to the template and this copy from the same hunks. The ' +
+      'recorded divergence is still ONLY the item-4 comment block.',
+    sha256: '4915049eb281f516461b1d041d891004350e3638b76779b7ed0cb4dd5fae17ff',
   },
 };
 
