@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -33,6 +33,22 @@ import { parse } from 'yaml';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const ACTIONLINT_WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/actionlint.yml');
+
+// techdebt-3 round 2 (CI red — D9's leak-baseline test caught every
+// mkdtempSync in this file with no paired removal). ONE tracked list +
+// ONE afterAll for the whole file, rather than a per-test try/finally —
+// several fixtures here are built inside a helper called from multiple
+// `it()`s, so a per-call cleanup would need threading a dir list back out
+// of each; simpler and just as safe to track centrally and sweep once.
+const trackedTempDirs: string[] = [];
+function trackedMkdtemp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  trackedTempDirs.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of trackedTempDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 function jobSteps() {
   const text = readFileSync(ACTIONLINT_WORKFLOW_PATH, 'utf8');
@@ -220,7 +236,7 @@ describe.skipIf(!actionlintAvailable())(
   '#1397: a changed composite action re-lints its REFERENCING workflow, never the action.yml itself',
   () => {
     function buildFixture(): { dir: string; run: (env: Record<string, string>) => string } {
-      const dir = mkdtempSync(join(tmpdir(), 'knext-actionlint-composite-'));
+      const dir = trackedMkdtemp('knext-actionlint-composite-');
       mkdirSync(join(dir, '.github/workflows'), { recursive: true });
       mkdirSync(join(dir, '.github/actions/sample'), { recursive: true });
       writeFileSync(
@@ -456,7 +472,7 @@ describe.skipIf(!actionlintAvailable())(
       dir: string;
       run: (env: Record<string, string>) => string;
     } {
-      const dir = mkdtempSync(join(tmpdir(), 'knext-actionlint-quoted-'));
+      const dir = trackedMkdtemp('knext-actionlint-quoted-');
       mkdirSync(join(dir, '.github/workflows'), { recursive: true });
       mkdirSync(join(dir, '.github/actions/sample'), { recursive: true });
       writeFileSync(
@@ -538,7 +554,7 @@ describe.skipIf(!actionlintAvailable())(
     // identically to "nothing referenced the changed action" instead of
     // surfacing the scan itself being broken.
     it('a real grep failure (no workflow files exist to scan) fails the step loudly, not silently as "nothing references it"', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'knext-actionlint-grep-error-'));
+      const dir = trackedMkdtemp('knext-actionlint-grep-error-');
       mkdirSync(join(dir, '.github/actions/sample'), { recursive: true });
       writeFileSync(
         join(dir, '.github/actions/sample/action.yml'),

@@ -121,7 +121,7 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'requires (scripts/e2e-deploy.sh itself refuses to run without docker once RUNTIME=bun).',
   },
   'tests/actionlint-workflow.test.ts': {
-    skips: { 'describe.skipIf': 1 },
+    skips: { 'describe.skipIf': 2 },
     reason:
       'ENVIRONMENT-availability gate (actionlint on PATH), not artifact-gated — same class as ' +
       'the dockerAvailable/bunAvailable pattern this scanner already treats as non-artifact ' +
