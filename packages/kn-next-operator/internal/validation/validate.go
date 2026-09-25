@@ -24,6 +24,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/robfig/cron/v3"
@@ -571,9 +572,164 @@ func DatabaseEnvMapCollisions(spec *appsv1alpha1.NextAppSpec) []string {
 	return out
 }
 
+// ReservedOperatorEnvNames returns the set of env var names the operator
+// injects into the ksvc container BEFORE spec.secrets.envMap is applied, for
+// the GIVEN spec — some entries are conditional (e.g. STORAGE_PROVIDER only
+// when spec.storage is set). It is the ADMISSION side's view of "which env
+// names does the operator manage" (EnvMapReservedCollisions, admission-time
+// rejection of NEW collisions).
+//
+// HONEST STATEMENT OF THE DRIFT RISK (#1391 round 2 — a prior version of this
+// comment overclaimed a guard that did not exist): this function is a HAND-
+// MAINTAINED MIRROR of the conditionals inside nextapp_controller.go's
+// buildKsvcEnv, in a DIFFERENT PACKAGE, NOT a shared call — buildKsvcEnv does
+// not call this function, it builds its own envVars slice independently and
+// derives its own "which names are reserved" set FROM that slice. Nothing in
+// the Go compiler enforces that the two lists agree; a name deleted from one
+// and not the other, or a new operator-managed name added to only one, both
+// compile and both stay green under every test that does not specifically
+// compare the two. That comparison is
+// reserved_env_names_parity_test.go's ENTIRE job — it asserts, for a matrix
+// of spec permutations exercising every conditional, that
+// ReservedOperatorEnvNames(spec) is EXACTLY the pre-envMap name set
+// buildKsvcEnv actually renders, with NO admission-side-only or reconcile-
+// side-only names — and it is mutation-proved (a deleted name and an
+// added-reconcile-only name each independently red it). Do not remove that
+// test's coverage without adding an equivalent one; do not re-add a claim
+// here that the two are "the same source" — they never have been.
+//
+// IF YOU ADD A NEW CONDITIONAL HERE (a new gate on spec.<x> != nil / != "" /
+// > 0), you MUST add a matching case to reserved_env_names_parity_test.go —
+// specifically a "present but the leaf gate is false/empty" case, not just a
+// "block enabled" case. A block-level-only case (pointer non-nil, no other
+// case) cannot distinguish "gated correctly" from "gate silently dropped",
+// because both look the same set of names when every leaf field is truthy.
+func ReservedOperatorEnvNames(spec *appsv1alpha1.NextAppSpec) map[string]struct{} {
+	names := map[string]struct{}{
+		"HOSTNAME": {},
+		"NODE_ENV": {},
+	}
+	if spec.Scaling != nil && spec.Scaling.PoolMax > 0 {
+		names["KNEXT_DB_POOL_MAX"] = struct{}{}
+	}
+	if spec.Storage != nil && spec.Storage.Provider != "" {
+		names["STORAGE_PROVIDER"] = struct{}{}
+		names["GCS_BUCKET_NAME"] = struct{}{}
+		if spec.Storage.Region != "" {
+			names["CACHE_BUCKET_REGION"] = struct{}{}
+		}
+		if spec.Storage.Endpoint != "" {
+			names["S3_ENDPOINT"] = struct{}{}
+		}
+	}
+	if spec.Cache != nil && spec.Cache.Provider != "" {
+		names["CACHE_PROVIDER"] = struct{}{}
+		names["REDIS_URL"] = struct{}{}
+		if spec.Cache.KeyPrefix != "" {
+			names["REDIS_KEY_PREFIX"] = struct{}{}
+		}
+	}
+	if spec.Revalidation != nil && spec.Revalidation.Queue != "" {
+		names["KAFKA_BROKER_URL"] = struct{}{}
+		names["KAFKA_REVALIDATION_TOPIC"] = struct{}{}
+	}
+	if spec.Observability != nil && spec.Observability.Enabled {
+		names["KN_APP_NAME"] = struct{}{}
+		if rum := spec.Observability.Rum; rum != nil && rum.Enabled {
+			names["NEXT_PUBLIC_RUM_ENABLED"] = struct{}{}
+			if rum.SampleRate != "" {
+				names["NEXT_PUBLIC_RUM_SAMPLE_RATE"] = struct{}{}
+			}
+		}
+		if tracing := spec.Observability.Tracing; tracing != nil && tracing.Enabled {
+			names["OTEL_TRACING_ENABLED"] = struct{}{}
+			if tracing.Endpoint != "" {
+				names["OTEL_EXPORTER_OTLP_ENDPOINT"] = struct{}{}
+			}
+			if tracing.SampleRate != "" {
+				names["OTEL_TRACES_SAMPLER_ARG"] = struct{}{}
+			}
+		}
+	}
+	return names
+}
+
+// OperatorAlwaysWinsEnvNames is the subset of ReservedOperatorEnvNames where
+// the operator's value must win even for a GRANDFATHERED pre-existing
+// collision, because correctness — not just precedence — depends on it.
+// HOSTNAME is the only member: node-server.ts's runtime and the queue-proxy
+// both depend on HOSTNAME=0.0.0.0 (#178/#184) so a bare `next start`/
+// server.js binds all interfaces instead of the pod IP only; the app never
+// legitimately reads HOSTNAME for its own identity (KNEXT_POD_NAME exists
+// for that, derived from the kernel hostname, untouched by this override).
+// Every other reserved name is app-observable CONFIGURATION (a URL, a flag,
+// a bucket name) where a grandfathered CR's existing envMap value is
+// preserved instead — see EnvMapReservedCollisions.
+var OperatorAlwaysWinsEnvNames = map[string]struct{}{"HOSTNAME": {}}
+
+// EnvMapUserAlwaysWinsEnvNames is the subset of ReservedOperatorEnvNames that
+// is NEVER rejected at admission, on a new CR or an update, regardless of
+// EnvMapReservedCollisions (#1391 round 2). These are the operator-managed
+// names whose value is a CONNECTION STRING carrying a credential —
+// REDIS_URL, KAFKA_BROKER_URL, OTEL_EXPORTER_OTLP_ENDPOINT — and every one of
+// spec.cache.url / spec.revalidation.kafkaBrokerUrl / the tracing endpoint is
+// PLAINTEXT in the CR spec (no secretRef field exists for any of them today).
+// Rejecting a user's envMap entry for one of these would force them to choose
+// between admission failure and putting the credential in plaintext in the
+// CR — exactly what security.md forbids ("Secrets live in Kubernetes Secrets
+// / env only — never in config files ... or URLs"). So these names are
+// exempt from rejection entirely: envMap wins for them, on new CRs and old
+// ones alike (the reconciler's resolution in buildKsvcEnv already does this —
+// they are not in OperatorAlwaysWinsEnvNames — this only changes ADMISSION).
+// A follow-up issue tracks proper `*SecretRef` CRD fields for these values,
+// which would let admission validate the SHAPE (Secret exists) without ever
+// seeing the plaintext; that is trigger-class (CRD change) and sprint-close
+// work, not this fix.
+var EnvMapUserAlwaysWinsEnvNames = map[string]struct{}{
+	"REDIS_URL":                   {},
+	"KAFKA_BROKER_URL":            {},
+	"OTEL_EXPORTER_OTLP_ENDPOINT": {},
+}
+
+// EnvMapReservedCollisions returns, in deterministic (sorted) order, the
+// spec.secrets.envMap names that collide with an operator-managed reserved
+// env name for this spec (see ReservedOperatorEnvNames) and are NOT in
+// EnvMapUserAlwaysWinsEnvNames. Mirrors DatabaseEnvMapCollisions's shape/
+// ratcheting contract: empty result = no collision; ValidateNextAppSpecCreate/
+// Update reject NEW collisions unratcheted, while a CR that predates this
+// rule (or reconciled while the webhook was unavailable — never assume
+// "predates" is the only path here) keeps reconciling — the reconciler
+// resolves it loudly (EnvMapCollision condition + Warning event), with the
+// envMap value WINNING except for OperatorAlwaysWinsEnvNames (#1391: this
+// differs from DatabaseEnvMapCollisions's own resolution, where spec.database
+// wins — the two directions are deliberately opposite, because before #1288
+// shipped, kubelet's real last-wins duplicate-env semantics already made the
+// ENVMAP value win for THIS collision class; a CR reconciling with the
+// collision already present must keep observing the value it was already
+// getting, not have it silently replaced by the operator's own default).
+func EnvMapReservedCollisions(spec *appsv1alpha1.NextAppSpec) []string {
+	if spec.Secrets == nil || spec.Secrets.EnvMap == nil {
+		return nil
+	}
+	reserved := ReservedOperatorEnvNames(spec)
+	var out []string
+	for name := range spec.Secrets.EnvMap {
+		if _, exempt := EnvMapUserAlwaysWinsEnvNames[name]; exempt {
+			continue
+		}
+		if _, collides := reserved[name]; collides {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ValidateNextAppSpecCreate is the CREATE-time admission entry point (webhook
 // only): the shared spec validation PLUS an unratcheted rejection of any
-// DATABASE_URL(_RO) collision between spec.database and spec.secrets.envMap.
+// DATABASE_URL(_RO) collision between spec.database and spec.secrets.envMap,
+// PLUS an unratcheted rejection of any spec.secrets.envMap name that collides
+// with an operator-managed reserved env name (#1391).
 func ValidateNextAppSpecCreate(spec *appsv1alpha1.NextAppSpec) error {
 	if err := ValidateNextAppSpec(spec); err != nil {
 		return err
@@ -584,7 +740,24 @@ func ValidateNextAppSpecCreate(spec *appsv1alpha1.NextAppSpec) error {
 			strings.Join(collisions, ", "),
 		)
 	}
+	if collisions := EnvMapReservedCollisions(spec); len(collisions) > 0 {
+		return fmt.Errorf(
+			"spec.secrets.envMap defines %s, which %s managed by the operator "+
+				"(injected automatically from other spec fields) — remove it from envMap "+
+				"(no silent precedence)",
+			strings.Join(collisions, ", "), isAre(len(collisions)),
+		)
+	}
 	return nil
+}
+
+// isAre returns the correctly-conjugated verb for an error message listing n
+// items ("is" for one, "are" for several).
+func isAre(n int) string {
+	if n == 1 {
+		return "is"
+	}
+	return "are"
 }
 
 // ValidateNextAppSpecUpdate is the UPDATE-time admission entry point (webhook
@@ -615,6 +788,32 @@ func ValidateNextAppSpecUpdate(oldSpec, newSpec *appsv1alpha1.NextAppSpec) error
 		return fmt.Errorf(
 			"spec.database and spec.secrets.envMap both define %s — remove one (no silent precedence)",
 			strings.Join(added, ", "),
+		)
+	}
+
+	// #1391: same ratcheting shape for the operator-reserved-env collision —
+	// an UPDATE that ADDS a new one is rejected; a pre-existing one carried
+	// forward (e.g. an unrelated image bump on a CR stored before this rule
+	// existed) is allowed, so upgrading the operator does not brick a
+	// running app on its next unrelated update.
+	oldReserved := map[string]struct{}{}
+	if oldSpec != nil {
+		for _, name := range EnvMapReservedCollisions(oldSpec) {
+			oldReserved[name] = struct{}{}
+		}
+	}
+	var addedReserved []string
+	for _, name := range EnvMapReservedCollisions(newSpec) {
+		if _, preexisting := oldReserved[name]; !preexisting {
+			addedReserved = append(addedReserved, name)
+		}
+	}
+	if len(addedReserved) > 0 {
+		return fmt.Errorf(
+			"spec.secrets.envMap defines %s, which %s managed by the operator "+
+				"(injected automatically from other spec fields) — remove it from envMap "+
+				"(no silent precedence)",
+			strings.Join(addedReserved, ", "), isAre(len(addedReserved)),
 		)
 	}
 	return nil
