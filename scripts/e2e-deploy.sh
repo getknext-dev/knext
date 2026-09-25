@@ -545,6 +545,7 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     # lookup logic (LOCKFILES_DIR/<key>/package.json) sees the same tree
     # shape as a single directory mount would have produced.
     docker run --rm \
+      -e "KNEXT_COMPAT_MODE=${KNEXT_COMPAT_MODE:-}" \
       -v "${STANDALONE_ROOT}:${STANDALONE_ROOT}" \
       -v "${SCRIPT_DIR}/e2e-native-rebuild-musl.sh:/e2e-native-rebuild-musl.sh:ro" \
       -v "${SCRIPT_DIR}/lib/musl-lockfile-lookup.sh:/lib/musl-lockfile-lookup.sh:ro" \

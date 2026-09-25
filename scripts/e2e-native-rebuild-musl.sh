@@ -265,10 +265,27 @@ musl_install_sibling() { # <spec> <dest-name>
       tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
       return 1
     fi
-  elif ! (cd "${_pkg_scratch}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${_spec}" >"${_pkg_scratch}.log" 2>&1); then
-    echo "[native-rebuild] WARNING: fresh (non-reproducible — no committed lockfile for ${_spec}) musl install of ${_spec} failed"
-    tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
-    return 1
+  else
+    # techdebt-3 fix: a credential run's whole point is a REPRODUCIBLE
+    # result — silently falling back to an unpinned, registry-resolved-at-
+    # rebuild-time install would make a "credential" claim about a tree
+    # whose native-addon transitive deps were never actually pinned. An
+    # early-warning run may still take the best-effort fallback (that is
+    # what it exists to surface), so this only refuses in credential mode.
+    if [ "${KNEXT_COMPAT_MODE:-}" = "credential" ]; then
+      echo "[native-rebuild] ERROR: no committed, reproducible lockfile for ${_spec} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
+      return 1
+    fi
+    if ! (cd "${_pkg_scratch}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${_spec}" >"${_pkg_scratch}.log" 2>&1); then
+      echo "[native-rebuild] WARNING: fresh (non-reproducible — no committed lockfile for ${_spec}) musl install of ${_spec} failed"
+      tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
+      return 1
+    fi
+    # Loud on SUCCESS too (techdebt-3 fix) — a silent-on-success fallback
+    # means the ONLY signal that this run was non-reproducible was a WARNING
+    # that never printed, because nothing failed. `::warning::` surfaces in
+    # the GitHub Actions UI even on a fully green job.
+    echo "::warning::[native-rebuild] ${_spec}: installed via the NON-REPRODUCIBLE fresh-install fallback (no committed lockfile) — transitive dependency versions were resolved against the registry at rebuild time, not pinned"
   fi
   _fresh_dir="${_pkg_scratch}/node_modules/${_dest_name}"
   if [ ! -d "${_fresh_dir}" ]; then
@@ -411,6 +428,13 @@ echo "${HITS}" | while IFS= read -r f; do
       continue
     fi
   else
+    # techdebt-3 fix — same credential-mode refusal as musl_install_sibling
+    # above: a credential run's claim is a REPRODUCIBLE result, so it must
+    # not silently take the unpinned fallback.
+    if [ "${KNEXT_COMPAT_MODE:-}" = "credential" ]; then
+      echo "[native-rebuild] ERROR: no committed, reproducible lockfile for ${NAME}@${VERSION} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
+      continue
+    fi
     # npm_config_build_from_source=true (review finding, round 4 — live CI
     # evidence, run 35862123588): WITHOUT this, `npm install` runs sqlite3's
     # own `node-pre-gyp install --fallback-to-build`, which tries a PREBUILT
@@ -430,6 +454,9 @@ echo "${HITS}" | while IFS= read -r f; do
       tail -c 4096 "${PKG_SCRATCH}.log" 2>/dev/null || true
       continue
     fi
+    # Loud on SUCCESS too (techdebt-3 fix) — see musl_install_sibling above
+    # for why a silent-on-success fallback is the actual gap.
+    echo "::warning::[native-rebuild] ${NAME}@${VERSION}: installed via the NON-REPRODUCIBLE fresh-install fallback (no committed lockfile) — transitive dependency versions were resolved against the registry at rebuild time, not pinned"
   fi
   FRESH_PKG_DIR="${PKG_SCRATCH}/node_modules/${NAME}"
   if [ ! -d "${FRESH_PKG_DIR}" ]; then
