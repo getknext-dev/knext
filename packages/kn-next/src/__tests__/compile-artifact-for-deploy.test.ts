@@ -49,7 +49,7 @@ const {
     buildStampPathFor,
     compileArtifactForDeploy,
     compiledExecPathFor,
-    hashSourceArtifact,
+    hashBuildIdentity,
 } = await import("../cli/build-artifact");
 const { UsageError } = await import("../cli/shared");
 
@@ -147,11 +147,14 @@ describe("compileArtifactForDeploy", () => {
 });
 
 describe("compiledExecPathFor", () => {
-    it("names the standalone-bun exec + its source for the default cell", () => {
+    it("names the standalone-bun exec + its source (entry file AND the whole tree) for the default cell", () => {
         const target = compiledExecPathFor(cfg(), dir);
         expect(target).toEqual({
             execPath: join(dir, "knext-standalone-exec-linux-x64"),
             sourcePath: join(dir, ".next", "standalone", "server.js"),
+            sourceDir: join(dir, ".next", "standalone"),
+            builderId: "turbopack",
+            runtimeId: "bun",
         });
     });
 
@@ -164,11 +167,14 @@ describe("compiledExecPathFor", () => {
         ).toBeNull();
     });
 
-    it("names the vinext exec + its source for build: 'vinext'", () => {
+    it("names the vinext exec + its source (entry file AND the whole .output tree) for build: 'vinext'", () => {
         const target = compiledExecPathFor(cfg({ build: "vinext" }), dir);
         expect(target).toEqual({
             execPath: join(dir, "knext-exec-linux-x64"),
             sourcePath: join(dir, ".output", "server", "index.mjs"),
+            sourceDir: join(dir, ".output"),
+            builderId: "vinext",
+            runtimeId: "bun",
         });
     });
 });
@@ -212,14 +218,17 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stale/i);
     });
 
-    it("does NOT throw when the stamp matches a hash of the source's CURRENT content", () => {
+    it("does NOT throw when the stamp matches a hash of the tree's CURRENT content", () => {
         standaloneServer();
         const execPath = join(dir, "knext-standalone-exec-linux-x64");
         writeFileSync(execPath, "");
-        const sourcePath = join(dir, ".next", "standalone", "server.js");
+        const sourceDir = join(dir, ".next", "standalone");
         writeFileSync(
             buildStampPathFor(execPath),
-            hashSourceArtifact(sourcePath),
+            hashBuildIdentity(sourceDir, {
+                builderId: "turbopack",
+                runtimeId: "bun",
+            }),
             "utf8",
         );
 
@@ -255,6 +264,60 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         );
 
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stale/i);
+    });
+
+    it("#1414 reviewer repro: a NON-entry-file change (a page under .next/standalone/.next/server/app) is caught even though server.js is rewritten byte-identical — the entry-file-only hash could not see this", () => {
+        standaloneServer();
+        const execPath = join(dir, "knext-standalone-exec-linux-x64");
+        writeFileSync(execPath, "");
+        compileArtifactForDeploy(cfg(), dir);
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).not.toThrow();
+
+        // Change a page deep in the standalone tree — NOT server.js itself.
+        mkdirSync(join(dir, ".next", "standalone", ".next", "server", "app"), {
+            recursive: true,
+        });
+        writeFileSync(
+            join(
+                dir,
+                ".next",
+                "standalone",
+                ".next",
+                "server",
+                "app",
+                "page.js",
+            ),
+            "// changed page content",
+        );
+        // Rewrite server.js with the SAME bytes it already had — simulating
+        // a build that regenerates the fixed launcher unchanged while the
+        // app's own route code changed underneath it.
+        writeFileSync(join(dir, ".next", "standalone", "server.js"), "");
+
+        expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stale/i);
+    });
+
+    it("#1414 vinext equivalent: a changed _chunks/_ssr asset under .output is caught even though index.mjs is rewritten byte-identical", () => {
+        vinextOutput();
+        const execPath = join(dir, "knext-exec-linux-x64");
+        writeFileSync(execPath, "");
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        expect(() =>
+            assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
+        ).not.toThrow();
+
+        // Change an asset elsewhere under .output — NOT server/index.mjs.
+        mkdirSync(join(dir, ".output", "_ssr"), { recursive: true });
+        writeFileSync(
+            join(dir, ".output", "_ssr", "chunk-a.mjs"),
+            "// changed ssr chunk",
+        );
+        // Rewrite the entry with the SAME bytes it already had.
+        writeFileSync(join(dir, ".output", "server", "index.mjs"), "");
+
+        expect(() =>
+            assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
+        ).toThrow(/stale/i);
     });
 
     it("is a no-op for the node runtime — nothing to compile, nothing to check", () => {

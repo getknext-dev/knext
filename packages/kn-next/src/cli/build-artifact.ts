@@ -19,8 +19,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, relative, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
     BUILDERS,
     type BuildArtifact,
@@ -140,7 +141,8 @@ export function compileArtifactForDeploy(
     opts: { arch?: string } = {},
 ): CompileForDeployResult {
     const arch = opts.arch ?? DEPLOY_SHIP_ARCH;
-    const { artifact } = resolveBuildArtifact(config, cwd);
+    const { artifact, builder } = resolveBuildArtifact(config, cwd);
+    const runtimeId = config.runtime ?? DEFAULT_RUNTIME_ID;
 
     if (standaloneStepsApply(artifact)) {
         const standaloneDir = join(cwd, ".next", "standalone");
@@ -149,7 +151,7 @@ export function compileArtifactForDeploy(
         const healed = existsSync(standaloneDir)
             ? healBunExportTargets({ projectDir: cwd, standaloneDir })
             : undefined;
-        if ((config.runtime ?? DEFAULT_RUNTIME_ID) !== "bun") {
+        if (runtimeId !== "bun") {
             return { compiled: false, healed };
         }
         // `buildStandaloneExecutable` ALSO throws a UsageError when there is
@@ -165,10 +167,15 @@ export function compileArtifactForDeploy(
             );
         }
         const binaryPath = buildStandaloneExecutable({ cwd, arch });
-        // #1351: stamp the exec with a hash of the server.js it was JUST
-        // compiled from, so a later `--skip-build` deploy can verify it
-        // still matches rather than trusting a filesystem mtime.
-        writeBuildStamp(binaryPath, join(standaloneDir, "server.js"));
+        // #1351/#1414: stamp the exec with a hash of the WHOLE standalone
+        // tree it was JUST compiled from (not just server.js — see
+        // `buildStampPathFor`'s doc comment), so a later `--skip-build`
+        // deploy can verify it still matches rather than trusting a
+        // filesystem mtime.
+        writeBuildStamp(binaryPath, standaloneDir, {
+            builderId: builder.id,
+            runtimeId,
+        });
         return { compiled: true, binaryPath, healed };
     }
 
@@ -181,11 +188,12 @@ export function compileArtifactForDeploy(
             arch,
             skipViteBuild: true,
         });
-        // #1351: same stamp, for the vinext output this exec was compiled from.
-        writeBuildStamp(
-            binaryPath,
-            join(cwd, ".output", "server", "index.mjs"),
-        );
+        // #1351/#1414: same stamp, for the WHOLE vinext `.output` tree this
+        // exec was compiled from.
+        writeBuildStamp(binaryPath, join(cwd, ".output"), {
+            builderId: builder.id,
+            runtimeId,
+        });
         return { compiled: true, binaryPath };
     }
 
@@ -198,62 +206,159 @@ export function compileArtifactForDeploy(
  * Where the compiled exec this config's target needs is expected to land,
  * and the artifact it must be at least as fresh as — or `null` if this
  * target needs no compile step at all (node runtime, or vinext × node).
+ *
+ * `sourcePath` is the entry file (`server.js`/`index.mjs`) — used only as the
+ * "did the project build even run" existence check and in user-facing
+ * messages. `sourceDir` is the TREE the freshness stamp is hashed over
+ * (`#1414`) — the whole standalone/`.output` directory, since the entry file
+ * alone does not change when only the app's own page/route code changes.
  */
 export function compiledExecPathFor(
     config: KnativeNextConfig,
     cwd: string,
     arch: string = DEPLOY_SHIP_ARCH,
-): { execPath: string; sourcePath: string } | null {
-    const { artifact } = resolveBuildArtifact(config, cwd);
+): {
+    execPath: string;
+    sourcePath: string;
+    sourceDir: string;
+    builderId: string;
+    runtimeId: string;
+} | null {
+    const { artifact, builder } = resolveBuildArtifact(config, cwd);
+    const runtimeId = config.runtime ?? DEFAULT_RUNTIME_ID;
 
-    if (
-        standaloneStepsApply(artifact) &&
-        (config.runtime ?? DEFAULT_RUNTIME_ID) === "bun"
-    ) {
+    if (standaloneStepsApply(artifact) && runtimeId === "bun") {
         return {
             execPath: join(cwd, standaloneExecFileName(arch)),
             sourcePath: join(cwd, ".next", "standalone", "server.js"),
+            sourceDir: join(cwd, ".next", "standalone"),
+            builderId: builder.id,
+            runtimeId,
         };
     }
     if (artifact.shape === "nitro-output-bun") {
         return {
             execPath: join(cwd, `knext-exec-${arch}`),
             sourcePath: join(cwd, ".output", "server", "index.mjs"),
+            sourceDir: join(cwd, ".output"),
+            builderId: builder.id,
+            runtimeId,
         };
     }
     return null;
 }
 
 /**
- * `#1351`: the compiled exec's freshness stamp — a SHA-256 of the SOURCE
- * artifact's content (`.next/standalone/server.js` / `.output/server/
- * index.mjs`) that produced it, written to a sidecar file next to the exec
- * (`<execPath>.buildstamp`) the moment it is compiled. Replaces an mtime
- * comparison (#1183 round 2): mtime is not a content signal — `git
- * checkout`, a container `COPY`, an `rsync` without `-t`, or a tarball
- * extract can all leave a NEWER mtime on an OLDER (or simply DIFFERENT) file
- * with no actual content change, in either direction. A content hash cannot
- * be fooled that way: it is wrong only when the content actually differs.
+ * `#1351`/`#1414`: the compiled exec's freshness stamp — a SHA-256 over the
+ * ENTIRE source tree's content (every file under `.next/standalone` /
+ * `.output`, not just the `server.js`/`index.mjs` entry point it launches),
+ * plus the knext CLI version and the resolved builder/runtime — written to a
+ * sidecar file next to the exec (`<execPath>.buildstamp`) the moment it is
+ * compiled. Replaces an mtime comparison (#1183 round 2): mtime is not a
+ * content signal — `git checkout`, a container `COPY`, an `rsync` without
+ * `-t`, or a tarball extract can all leave a NEWER mtime on an OLDER (or
+ * simply DIFFERENT) file with no actual content change, in either direction.
+ *
+ * `#1414` is a fix-forward on `#1351`'s first cut, which hashed ONLY the
+ * entry file. `server.js`/`index.mjs` is a fixed launcher — it does not embed
+ * the app's own page/route code or a BUILD_ID, so editing a page and
+ * rebuilding left the entry file byte-identical and the stamp still
+ * "matched," silently shipping the OLD exec under `--skip-build`. Hashing
+ * the whole tree makes any changed file (e.g.
+ * `.next/standalone/.next/server/app/page.js`, or a vinext `_ssr`/`_chunks`
+ * asset) change the stamp.
  */
 export function buildStampPathFor(execPath: string): string {
     return `${execPath}.buildstamp`;
 }
 
-/** SHA-256 hex digest of a source artifact's current on-disk content. */
-export function hashSourceArtifact(sourcePath: string): string {
-    return createHash("sha256").update(readFileSync(sourcePath)).digest("hex");
+/**
+ * Reads the knext CLI's own version from its package manifest. Works from
+ * both the source layout (`src/cli/build-artifact.ts`) and the bundled
+ * layout (`dist/cli/kn-next.js`) — package.json sits two directories up in
+ * both cases, mirroring `deploy.ts`'s `getCliVersion`. A separate copy
+ * (rather than an import) to avoid a `build-artifact.ts` → `deploy.ts` →
+ * `build-artifact.ts` import cycle (`deploy.ts` already imports from this
+ * file).
+ */
+function getCliVersionForStamp(): string {
+    try {
+        const here = fileURLToPath(import.meta.url);
+        const pkgPath = resolvePath(here, "..", "..", "..", "package.json");
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+            version?: string;
+        };
+        return pkg.version ?? "0.0.0";
+    } catch {
+        return "0.0.0";
+    }
+}
+
+/** Every regular file under `rootDir`, as absolute paths, in a stable (sorted) order. */
+function collectFilesSorted(rootDir: string): string[] {
+    const out: string[] = [];
+    const walk = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const full = join(dir, entry.name);
+            if (entry.isDirectory()) {
+                walk(full);
+            } else if (entry.isFile()) {
+                out.push(full);
+            }
+        }
+    };
+    walk(rootDir);
+    out.sort();
+    return out;
+}
+
+export interface BuildIdentityOptions {
+    /** The builder id (e.g. `"turbopack"`, `"webpack"`, `"vinext"`). */
+    readonly builderId: string;
+    /** The resolved runtime id (e.g. `"bun"`, `"node"`). */
+    readonly runtimeId: string;
 }
 
 /**
- * Write the freshness stamp for a just-compiled exec, from the source
- * artifact it was compiled FROM. Called at the one place both `knext
- * build` and `knext deploy`/`preview` compile through
- * (`compileArtifactForDeploy` below) — so a stamp exists for every exec this
- * CLI itself ever produces, regardless of which command triggered the
- * compile.
+ * SHA-256 hex digest of the build identity: the CLI version, the
+ * builder/runtime, and a sorted relative-path + content stream over EVERY
+ * file in `rootDir` (`.next/standalone` for the standalone-bun shape,
+ * `.output` for vinext) — not just its entry file. See the doc comment on
+ * `buildStampPathFor` for why the entry-file-only hash this replaces was a
+ * false-negative hazard.
  */
-function writeBuildStamp(execPath: string, sourcePath: string): void {
-    writeFileSync(buildStampPathFor(execPath), hashSourceArtifact(sourcePath));
+export function hashBuildIdentity(
+    rootDir: string,
+    opts: BuildIdentityOptions,
+): string {
+    const hash = createHash("sha256");
+    hash.update(`knext-cli-version:${getCliVersionForStamp()}\n`);
+    hash.update(`builder:${opts.builderId}\n`);
+    hash.update(`runtime:${opts.runtimeId}\n`);
+    for (const filePath of collectFilesSorted(rootDir)) {
+        hash.update(`file:${relative(rootDir, filePath)}\n`);
+        hash.update(readFileSync(filePath));
+        hash.update("\n");
+    }
+    return hash.digest("hex");
+}
+
+/**
+ * Write the freshness stamp for a just-compiled exec, from the source TREE
+ * it was compiled FROM. Called at the one place both `knext build` and
+ * `knext deploy`/`preview` compile through (`compileArtifactForDeploy`
+ * below) — so a stamp exists for every exec this CLI itself ever produces,
+ * regardless of which command triggered the compile.
+ */
+function writeBuildStamp(
+    execPath: string,
+    sourceDir: string,
+    opts: BuildIdentityOptions,
+): void {
+    writeFileSync(
+        buildStampPathFor(execPath),
+        hashBuildIdentity(sourceDir, opts),
+    );
 }
 
 /**
@@ -264,16 +369,17 @@ function writeBuildStamp(execPath: string, sourcePath: string): void {
  * artifact, never a silent reuse.
  *
  * Missing: the exec was never compiled (drop `--skip-build`, or run
- * `knext build` first). Stale (`#1351`): the exec's `.buildstamp` sidecar
- * — a SHA-256 of the standalone server / vinext output it was compiled FROM
- * — either does not match a hash of that source's CURRENT content, or does
- * not exist at all (an exec this check cannot vouch for, e.g. one predating
- * this stamp or copied in from elsewhere). Both "no stamp" and "stamp
- * mismatch" fail closed into the same stale-class error — a filesystem
- * mtime comparison used to stand in for this and was replaced because mtime
- * is not a content signal (see `buildStampPathFor`'s doc comment). All three
- * throw a `UsageError` naming the one-line fix, the same "actionable, not a
- * stack dump" family as the #1184 fail-fast check above.
+ * `knext build` first). Stale (`#1351`/`#1414`): the exec's `.buildstamp`
+ * sidecar — a SHA-256 of the WHOLE standalone/`.output` tree it was compiled
+ * FROM, plus the CLI version and builder/runtime — either does not match a
+ * fresh hash of that tree's CURRENT content, or does not exist at all (an
+ * exec this check cannot vouch for, e.g. one predating this stamp or copied
+ * in from elsewhere). Both "no stamp" and "stamp mismatch" fail closed into
+ * the same stale-class error — a filesystem mtime comparison used to stand
+ * in for this and was replaced because mtime is not a content signal (see
+ * `buildStampPathFor`'s doc comment). All three throw a `UsageError` naming
+ * the one-line fix, the same "actionable, not a stack dump" family as the
+ * #1184 fail-fast check above.
  *
  * A no-op when this target needs no compile step (node runtime, vinext ×
  * node) or when the source artifact itself does not exist yet — that is a
@@ -306,11 +412,14 @@ export function assertCompiledArtifactFresh(
         );
     }
     const stampedHash = readFileSync(stampPath, "utf8").trim();
-    const currentHash = hashSourceArtifact(target.sourcePath);
+    const currentHash = hashBuildIdentity(target.sourceDir, {
+        builderId: target.builderId,
+        runtimeId: target.runtimeId,
+    });
     if (stampedHash !== currentHash) {
         throw new UsageError(
             `${target.execPath} is STALE — it was compiled from a different version of ` +
-                `${target.sourcePath} than the one currently on disk, and --skip-build means ` +
+                `${target.sourceDir} than the one currently on disk, and --skip-build means ` +
                 "knext will not recompile it.\n\n" +
                 "Drop --skip-build, or run `knext build` to refresh the executable before deploying.",
         );
