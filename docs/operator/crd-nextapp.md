@@ -287,14 +287,29 @@ via `spec.secrets.envMap` (pointing at a Secret, the same shape as the
 the CR; `envMap` always wins for these three names, same as the
 grandfathered-else case above.
 
-Either outcome is surfaced two ways: a Warning event
-(`kubectl describe nextapp <name>`) and an `EnvMapCollision` status condition
-naming the affected entries and which side won (`True` while a collision
-exists, `False` otherwise) — check either with `kubectl get nextapp <name> -o
-jsonpath='{.status.conditions[?(@.type=="EnvMapCollision")]}'`. To resolve a
-grandfathered collision (and stop the condition/event), remove the `envMap`
-entry — the app then falls back to the platform's own default (or, for
-`HOSTNAME`, already was).
+Either outcome is surfaced on the `EnvMapCollision` status condition, naming
+the affected entries and which side won (`True` while a collision exists,
+`False` otherwise) — check it with `kubectl get nextapp <name> -o
+jsonpath='{.status.conditions[?(@.type=="EnvMapCollision")]}'` or
+`kubectl describe nextapp <name>`. To resolve a grandfathered collision (and
+stop the condition/event), remove the `envMap` entry — the app then falls
+back to the platform's own default (or, for `HOSTNAME`, already was).
+
+The condition's `reason` tells you which case you are in, and the event type
+tells you whether it needs attention:
+
+| Reason | When | Event type | Meaning |
+| --- | --- | --- | --- |
+| `EnvVarIgnored` | `envMap` names a platform-managed variable that always wins on the platform side (currently only `HOSTNAME`) | Warning | Your `envMap` entry is ignored outright; the platform's own value is what the app actually gets. Remove the entry — it has no effect. |
+| `EnvMapUserOverride` | `envMap` names any other reserved system variable, and this CR predates admission rejection for that collision (or reconciled while the validating webhook was briefly unavailable) | Warning | Your `envMap` value is used instead of the platform's own default for that name — the grandfathered case above. |
+| `EnvMapExpectedOverride` | `envMap` names ONLY connection-string exempt name(s) (`REDIS_URL` / `KAFKA_BROKER_URL` / `OTEL_EXPORTER_OTLP_ENDPOINT`) — the documented, sanctioned pattern above | Normal | Informational only — no action needed. |
+
+A report can mix reasons — e.g. a real `HOSTNAME` collision alongside an
+exempt `REDIS_URL` entry. Whenever any real collision (`EnvVarIgnored` or
+`EnvMapUserOverride`) is present, the condition reports that reason and a
+Warning event, even if an exempt name is also present in the same report —
+the informational downgrade only applies when the entire report is exempt
+names.
 
 ### `database` (Optional)
 Binds the app's Postgres. The only mode is **binding** (`secretRef`): bring
