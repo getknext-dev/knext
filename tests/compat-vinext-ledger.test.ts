@@ -477,6 +477,52 @@ describe('refreshSnapshots: the snapshot is generated from evidence', () => {
     expect(next.entries[0].cases).not.toContain('REGRESSION');
   });
 
+  it('reads PUBLISHED (applied) summaries: a ledgered failure moved into `quarantined` is still a failure (#1357)', () => {
+    // Every compat-vinext run since the ledger merged publishes APPLIED shard
+    // summaries: the ledger has already moved the entry's failing cases from
+    // `failures` into `quarantined`. Reading only `failures` made every
+    // ledgered file look like a PASS, so no entry could ever be renewed.
+    const e = entry({ cases: ['a', 'b'] });
+    const applied = (id: string, cases: string[]) => ({
+      id,
+      summaries: [
+        applyLedger(
+          summary({ failures: [{ file: SHELLS, kind: 'assertion', cases }], failed: 1 }),
+          [e],
+        ),
+      ] as Any[],
+    });
+    const published = [applied('71', ['a', 'b']), applied('72', ['a', 'b'])];
+    // precondition: the realistic shape — nothing left in `failures`
+    expect(published.every((r) => (r.summaries[0].failures ?? []).length === 0)).toBe(true);
+    expect(published.every((r) => r.summaries[0].quarantined.length === 1)).toBe(true);
+
+    const fromPublished = refresh(ledger([e]), published);
+    const fromRaw = refresh(ledger([e]), [run('71', ['a', 'b']), run('72', ['a', 'b'])]);
+    expect(fromPublished.errors).toEqual([]);
+    expect(fromPublished.ledger.entries[0].cases).toEqual(['a', 'b']);
+    expect(fromPublished.ledger.entries[0].evidence).toEqual(fromRaw.ledger.entries[0].evidence);
+  });
+
+  it('a partially applied shard: a NEW failing case left in `failures` is part of that run’s evidence too', () => {
+    const e = entry({ cases: ['a'] });
+    const partial = (id: string) => ({
+      id,
+      summaries: [
+        applyLedger(
+          summary({ failures: [{ file: SHELLS, kind: 'assertion', cases: ['a', 'NEW'] }], failed: 1 }),
+          [e],
+        ),
+      ] as Any[],
+    });
+    const { ledger: next, errors } = refresh(ledger([e]), [partial('81'), partial('82')]);
+    expect(errors).toEqual([]);
+    expect(next.entries[0].evidence.fail).toEqual([
+      { run: '81', cases: ['NEW', 'a'] },
+      { run: '82', cases: ['NEW', 'a'] },
+    ]);
+  });
+
   it('refuses a single run, and a run id given twice', () => {
     expect(refresh(ledger([entry()]), [run('31', ['a'])]).errors.join()).toMatch(
       /at least two runs/,

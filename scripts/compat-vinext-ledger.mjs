@@ -424,13 +424,21 @@ export function publishedNumber(summaries) {
 
 /**
  * Where a file stands in one run: its failing cases, a pass, or no result.
- * @param {any[]} summaries one run's (unapplied) shard summaries
+ *
+ * The summaries may be APPLIED — every compat-vinext run publishes them after
+ * the ledger moved an entry's failing cases from `failures` into `quarantined`
+ * — so both lists count as failures, as in flakyStatus. Reading `failures`
+ * alone made every ledgered file look like a pass, so no entry could ever be
+ * refreshed or verified from a run taken after the ledger existed (#1357).
+ * @param {any[]} summaries one run's shard summaries, applied or not
  * @param {string} test
  * @returns {{ state: 'fail', cases: string[] } | { state: 'pass' } | { state: 'none' }}
  */
 function fileInRun(summaries, test) {
   if (summaries.some((s) => (s.notRunFiles ?? []).includes(test))) return { state: 'none' };
-  const fs = summaries.flatMap((s) => s.failures ?? []).filter((f) => f.file === test);
+  const fs = summaries
+    .flatMap((s) => [...(s.failures ?? []), ...(s.quarantined ?? [])])
+    .filter((f) => f.file === test);
   if (fs.length === 0) return { state: 'pass' };
   if (fs.some((f) => !(f.cases ?? []).length)) return { state: 'none' }; // no case detail
   return { state: 'fail', cases: [...new Set(fs.flatMap((f) => f.cases))].sort() };
