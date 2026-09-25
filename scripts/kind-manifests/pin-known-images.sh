@@ -48,3 +48,17 @@ if [[ -n "$expect" && "$pinned" != "$expect" ]]; then
   echo "::error::pin-known-images expected exactly ${expect} pin(s) in ${file}, applied ${pinned} — the manifest's image tags no longer match image-digest-pins.json (upstream retag/rename?); re-resolve and update the table deliberately, do not apply an under-pinned manifest" >&2
   exit 1
 fi
+
+# Fail closed on ANY remaining mutable-tag image, not just a count mismatch
+# against the known table (#1413 review, round-1-1410). --expect only proves
+# the KNOWN entries in image-digest-pins.json still match — it says nothing
+# about a NEW `image:` line upstream added that this table has never heard
+# of, which would sail through with a plain tag and no digest. Scan the
+# whole (post-pin) manifest for any `image:` value that isn't `@sha256:`-
+# pinned and refuse to hand back an under-pinned manifest.
+unpinned="$(grep -nE '^[[:space:]]*image:[[:space:]]*"?[^"[:space:]]+"?[[:space:]]*$' "$file" | grep -v '@sha256:' || true)"
+if [[ -n "$unpinned" ]]; then
+  echo "::error::pin-known-images: ${file} still has unpinned (non-@sha256) image reference(s) after pinning — a new/renamed image upstream added is not in image-digest-pins.json:" >&2
+  echo "$unpinned" >&2
+  exit 1
+fi

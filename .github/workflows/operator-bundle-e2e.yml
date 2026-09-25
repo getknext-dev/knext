@@ -33,11 +33,13 @@ on:
     paths:
       - 'packages/kn-next-operator/**'
       - '.github/workflows/operator-bundle-e2e.yml'
+      - 'scripts/kind-manifests/**'
   push:
     branches: [main]
     paths:
       - 'packages/kn-next-operator/**'
       - '.github/workflows/operator-bundle-e2e.yml'
+      - 'scripts/kind-manifests/**'
   workflow_dispatch:
 
 permissions:
