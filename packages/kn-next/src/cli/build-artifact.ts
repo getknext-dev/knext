@@ -19,7 +19,13 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    readdirSync,
+    readFileSync,
+    readlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { join, relative, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -97,6 +103,17 @@ export function standaloneStepsApply(artifact: BuildArtifact): boolean {
  * Shared with `build.ts`'s own `SHIP_ARCH` so the two names never drift.
  */
 export const DEPLOY_SHIP_ARCH = "linux-x64";
+
+/**
+ * The vinext build-output subdirectories the freshness stamp hashes —
+ * deliberately NOT the whole `.output` root (see `compiledExecPathFor`'s
+ * doc comment). Shared by `compileArtifactForDeploy` (writes the stamp) and
+ * `compiledExecPathFor` (reads it back) so the two can never drift to
+ * different root sets.
+ */
+function vinextOutputSourceDirs(cwd: string): readonly string[] {
+    return [join(cwd, ".output", "server"), join(cwd, ".output", "public")];
+}
 
 export interface CompileForDeployResult {
     /** Whether this config's target needed a compile step at all. */
@@ -188,9 +205,12 @@ export function compileArtifactForDeploy(
             arch,
             skipViteBuild: true,
         });
-        // #1351/#1414: same stamp, for the WHOLE vinext `.output` tree this
-        // exec was compiled from.
-        writeBuildStamp(binaryPath, join(cwd, ".output"), {
+        // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
+        // `.output/public` — never the whole `.output` root, which is also
+        // where THIS CLI writes its own preflight/CR/buildx-metadata files
+        // (see `compiledExecPathFor`'s doc comment for the incident this
+        // fixes).
+        writeBuildStamp(binaryPath, vinextOutputSourceDirs(cwd), {
             builderId: builder.id,
             runtimeId,
         });
@@ -209,9 +229,25 @@ export function compileArtifactForDeploy(
  *
  * `sourcePath` is the entry file (`server.js`/`index.mjs`) — used only as the
  * "did the project build even run" existence check and in user-facing
- * messages. `sourceDir` is the TREE the freshness stamp is hashed over
- * (`#1414`) — the whole standalone/`.output` directory, since the entry file
- * alone does not change when only the app's own page/route code changes.
+ * messages. `sourceDirs` are the TREE(S) the freshness stamp is hashed over
+ * (`#1414`) — the whole standalone directory for the standalone-bun shape,
+ * since the entry file alone does not change when only the app's own
+ * page/route code changes.
+ *
+ * vinext (`#1414` rev-2) hashes `.output/server` + `.output/public` SPECIFICALLY
+ * — never the whole `.output` root. `.output` is also where THIS CLI writes
+ * its own artifacts alongside the build (`nextapp-preflight-cr.yaml`,
+ * `nextapp-cr.yaml`, `buildx-metadata.json` — see `deploy.ts`'s
+ * `runPrunePreflight` and the CR/buildx-metadata writers). Hashing the whole
+ * root meant `deploy --skip-build` wrote its OWN preflight CR into `.output`
+ * BEFORE calling `assertCompiledArtifactFresh`, which then hashed a tree
+ * containing a file that did not exist when the stamp was written — every
+ * non-dry-run vinext `--skip-build` deploy failed as "stale," always, by
+ * construction, never actually stale. Scoping to the two real BUILD OUTPUT
+ * subdirectories is immune to this by construction: knext's own artifacts
+ * never land inside `.output/server` or `.output/public`, so nothing knext
+ * itself writes can ever appear in the hashed set, regardless of write
+ * order or what future artifact gets added at the `.output` root.
  */
 export function compiledExecPathFor(
     config: KnativeNextConfig,
@@ -220,7 +256,7 @@ export function compiledExecPathFor(
 ): {
     execPath: string;
     sourcePath: string;
-    sourceDir: string;
+    sourceDirs: readonly string[];
     builderId: string;
     runtimeId: string;
 } | null {
@@ -231,7 +267,7 @@ export function compiledExecPathFor(
         return {
             execPath: join(cwd, standaloneExecFileName(arch)),
             sourcePath: join(cwd, ".next", "standalone", "server.js"),
-            sourceDir: join(cwd, ".next", "standalone"),
+            sourceDirs: [join(cwd, ".next", "standalone")],
             builderId: builder.id,
             runtimeId,
         };
@@ -240,7 +276,7 @@ export function compiledExecPathFor(
         return {
             execPath: join(cwd, `knext-exec-${arch}`),
             sourcePath: join(cwd, ".output", "server", "index.mjs"),
-            sourceDir: join(cwd, ".output"),
+            sourceDirs: vinextOutputSourceDirs(cwd),
             builderId: builder.id,
             runtimeId,
         };
@@ -294,21 +330,46 @@ function getCliVersionForStamp(): string {
     }
 }
 
-/** Every regular file under `rootDir`, as absolute paths, in a stable (sorted) order. */
-function collectFilesSorted(rootDir: string): string[] {
-    const out: string[] = [];
+/**
+ * Every entry under `rootDir` as `{ relPath, kind }` pairs, in a stable
+ * (sorted-by-relPath) order — `kind` is `"file"` for a regular file's
+ * absolute path, or `"symlink"` for a symlink's TARGET string (read via
+ * `readlinkSync`, never followed). Symlinks are hashed by where they POINT,
+ * not by walking into the target: `readdirSync`'s `Dirent` reports a
+ * symlink as neither a file nor a directory, so re-pointing one between two
+ * existing targets inside the tree was previously invisible to the stamp
+ * entirely (the entry was silently skipped) — hashing the link string
+ * closes that.
+ */
+function collectEntriesSorted(
+    rootDir: string,
+): { relPath: string; kind: "file" | "symlink"; value: string }[] {
+    const out: { relPath: string; kind: "file" | "symlink"; value: string }[] =
+        [];
     const walk = (dir: string): void => {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
             const full = join(dir, entry.name);
-            if (entry.isDirectory()) {
+            if (entry.isSymbolicLink()) {
+                out.push({
+                    relPath: relative(rootDir, full),
+                    kind: "symlink",
+                    value: readlinkSync(full),
+                });
+            } else if (entry.isDirectory()) {
                 walk(full);
             } else if (entry.isFile()) {
-                out.push(full);
+                out.push({
+                    relPath: relative(rootDir, full),
+                    kind: "file",
+                    value: full,
+                });
             }
         }
     };
     walk(rootDir);
-    out.sort();
+    out.sort((a, b) =>
+        a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0,
+    );
     return out;
 }
 
@@ -322,42 +383,63 @@ export interface BuildIdentityOptions {
 /**
  * SHA-256 hex digest of the build identity: the CLI version, the
  * builder/runtime, and a sorted relative-path + content stream over EVERY
- * file in `rootDir` (`.next/standalone` for the standalone-bun shape,
- * `.output` for vinext) — not just its entry file. See the doc comment on
- * `buildStampPathFor` for why the entry-file-only hash this replaces was a
- * false-negative hazard.
+ * file in `rootDirs` (`[.next/standalone]` for the standalone-bun shape,
+ * `[.output/server, .output/public]` for vinext — never the whole `.output`
+ * root; see `compiledExecPathFor`'s doc comment for why) — not just the
+ * entry file. See the doc comment on `buildStampPathFor` for why the
+ * entry-file-only hash this replaces was a false-negative hazard.
+ *
+ * A `rootDir` that does not exist (e.g. `.output/public` on a no-storage
+ * app that emits no static assets) contributes nothing rather than
+ * throwing — a missing directory is not an error here, since which
+ * subdirectories a given build actually produces is itself part of the
+ * app's config, not a defect.
  */
 export function hashBuildIdentity(
-    rootDir: string,
+    rootDirs: string | readonly string[],
     opts: BuildIdentityOptions,
 ): string {
+    const roots = typeof rootDirs === "string" ? [rootDirs] : rootDirs;
     const hash = createHash("sha256");
     hash.update(`knext-cli-version:${getCliVersionForStamp()}\n`);
     hash.update(`builder:${opts.builderId}\n`);
     hash.update(`runtime:${opts.runtimeId}\n`);
-    for (const filePath of collectFilesSorted(rootDir)) {
-        hash.update(`file:${relative(rootDir, filePath)}\n`);
-        hash.update(readFileSync(filePath));
-        hash.update("\n");
-    }
+    roots.forEach((rootDir, index) => {
+        if (!existsSync(rootDir)) return;
+        // Labeled by POSITION, not a path relative to `process.cwd()` — the
+        // caller's cwd (an app dir under test, say) need not match this
+        // process's actual cwd, and the root ORDER is deterministic per
+        // shape (`compiledExecPathFor` always builds the same array for the
+        // same target), so the index is a stable, cwd-independent label.
+        hash.update(`root:${index}\n`);
+        for (const entry of collectEntriesSorted(rootDir)) {
+            if (entry.kind === "symlink") {
+                hash.update(`symlink:${entry.relPath}->${entry.value}\n`);
+                continue;
+            }
+            hash.update(`file:${entry.relPath}\n`);
+            hash.update(readFileSync(entry.value));
+            hash.update("\n");
+        }
+    });
     return hash.digest("hex");
 }
 
 /**
- * Write the freshness stamp for a just-compiled exec, from the source TREE
- * it was compiled FROM. Called at the one place both `knext build` and
- * `knext deploy`/`preview` compile through (`compileArtifactForDeploy`
+ * Write the freshness stamp for a just-compiled exec, from the source
+ * TREE(S) it was compiled FROM. Called at the one place both `knext build`
+ * and `knext deploy`/`preview` compile through (`compileArtifactForDeploy`
  * below) — so a stamp exists for every exec this CLI itself ever produces,
  * regardless of which command triggered the compile.
  */
 function writeBuildStamp(
     execPath: string,
-    sourceDir: string,
+    sourceDirs: string | readonly string[],
     opts: BuildIdentityOptions,
 ): void {
     writeFileSync(
         buildStampPathFor(execPath),
-        hashBuildIdentity(sourceDir, opts),
+        hashBuildIdentity(sourceDirs, opts),
     );
 }
 
@@ -412,15 +494,15 @@ export function assertCompiledArtifactFresh(
         );
     }
     const stampedHash = readFileSync(stampPath, "utf8").trim();
-    const currentHash = hashBuildIdentity(target.sourceDir, {
+    const currentHash = hashBuildIdentity(target.sourceDirs, {
         builderId: target.builderId,
         runtimeId: target.runtimeId,
     });
     if (stampedHash !== currentHash) {
         throw new UsageError(
             `${target.execPath} is STALE — it was compiled from a different version of ` +
-                `${target.sourceDir} than the one currently on disk, and --skip-build means ` +
-                "knext will not recompile it.\n\n" +
+                `${target.sourceDirs.join(", ")} than the one currently on disk, and --skip-build ` +
+                "means knext will not recompile it.\n\n" +
                 "Drop --skip-build, or run `knext build` to refresh the executable before deploying.",
         );
     }

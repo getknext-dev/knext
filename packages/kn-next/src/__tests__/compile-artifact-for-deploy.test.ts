@@ -152,7 +152,7 @@ describe("compiledExecPathFor", () => {
         expect(target).toEqual({
             execPath: join(dir, "knext-standalone-exec-linux-x64"),
             sourcePath: join(dir, ".next", "standalone", "server.js"),
-            sourceDir: join(dir, ".next", "standalone"),
+            sourceDirs: [join(dir, ".next", "standalone")],
             builderId: "turbopack",
             runtimeId: "bun",
         });
@@ -167,12 +167,15 @@ describe("compiledExecPathFor", () => {
         ).toBeNull();
     });
 
-    it("names the vinext exec + its source (entry file AND the whole .output tree) for build: 'vinext'", () => {
+    it("names the vinext exec + its source, scoped to .output/server + .output/public — NEVER the whole .output root (#1414 rev-2)", () => {
         const target = compiledExecPathFor(cfg({ build: "vinext" }), dir);
         expect(target).toEqual({
             execPath: join(dir, "knext-exec-linux-x64"),
             sourcePath: join(dir, ".output", "server", "index.mjs"),
-            sourceDir: join(dir, ".output"),
+            sourceDirs: [
+                join(dir, ".output", "server"),
+                join(dir, ".output", "public"),
+            ],
             builderId: "vinext",
             runtimeId: "bun",
         });
@@ -225,7 +228,7 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         const sourceDir = join(dir, ".next", "standalone");
         writeFileSync(
             buildStampPathFor(execPath),
-            hashBuildIdentity(sourceDir, {
+            hashBuildIdentity([sourceDir], {
                 builderId: "turbopack",
                 runtimeId: "bun",
             }),
@@ -297,7 +300,7 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).toThrow(/stale/i);
     });
 
-    it("#1414 vinext equivalent: a changed _chunks/_ssr asset under .output is caught even though index.mjs is rewritten byte-identical", () => {
+    it("#1414 vinext equivalent: a changed static asset under .output/public is caught even though index.mjs is rewritten byte-identical", () => {
         vinextOutput();
         const execPath = join(dir, "knext-exec-linux-x64");
         writeFileSync(execPath, "");
@@ -306,11 +309,17 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
             assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
         ).not.toThrow();
 
-        // Change an asset elsewhere under .output — NOT server/index.mjs.
-        mkdirSync(join(dir, ".output", "_ssr"), { recursive: true });
+        // Change a static asset under .output/public — NOT server/index.mjs.
+        // This is the real vinext build-output location for such assets
+        // (`.output/public/_next/static/<build-id>/...`); a top-level
+        // `.output/_ssr` sibling is NOT hashed (#1414 rev-2 — see the
+        // preflight-pollution regression test below for why).
+        mkdirSync(join(dir, ".output", "public", "_next", "static"), {
+            recursive: true,
+        });
         writeFileSync(
-            join(dir, ".output", "_ssr", "chunk-a.mjs"),
-            "// changed ssr chunk",
+            join(dir, ".output", "public", "_next", "static", "chunk-a.mjs"),
+            "// changed static asset",
         );
         // Rewrite the entry with the SAME bytes it already had.
         writeFileSync(join(dir, ".output", "server", "index.mjs"), "");
@@ -318,6 +327,47 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         expect(() =>
             assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
         ).toThrow(/stale/i);
+    });
+
+    it("rev-1414 review regression: writing knext's OWN preflight CR into .output between the stamp and the assert does NOT falsely mark a vinext --skip-build deploy stale", () => {
+        // This is the real deploy.ts sequence, reproduced at the level this
+        // suite already pins directly: `compileArtifactForDeploy` writes the
+        // stamp during a fresh build (as `knext build` does); a LATER,
+        // SEPARATE `knext deploy --skip-build` invocation first runs
+        // `runPrunePreflight` (deploy.ts:368-369), which writes
+        // `.output/nextapp-preflight-cr.yaml` directly under `.output` —
+        // BEFORE `assertCompiledArtifactFresh` (deploy.ts:629) ever runs. A
+        // full (non-skip-build) deploy does the same with
+        // `.output/nextapp-cr.yaml` and `.output/buildx-metadata.json`
+        // (deploy.ts:540, :960). Hashing the whole `.output` root meant this
+        // ALWAYS failed as stale, on every non-dry-run vinext deploy,
+        // regardless of whether anything about the actual build output
+        // changed — never actually stale, just polluted by knext's own
+        // bookkeeping files landing inside the hashed tree.
+        vinextOutput();
+        const execPath = join(dir, "knext-exec-linux-x64");
+        writeFileSync(execPath, "");
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+
+        // Simulate runPrunePreflight/the full-deploy CR/metadata writers —
+        // all three land directly at the `.output` ROOT, never inside
+        // `.output/server` or `.output/public`.
+        writeFileSync(
+            join(dir, ".output", "nextapp-preflight-cr.yaml"),
+            "kind: NextApp\n",
+        );
+        writeFileSync(
+            join(dir, ".output", "nextapp-cr.yaml"),
+            "kind: NextApp\n",
+        );
+        writeFileSync(
+            join(dir, ".output", "buildx-metadata.json"),
+            '{"containerimage.digest":"sha256:deadbeef"}',
+        );
+
+        expect(() =>
+            assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
+        ).not.toThrow();
     });
 
     it("is a no-op for the node runtime — nothing to compile, nothing to check", () => {
