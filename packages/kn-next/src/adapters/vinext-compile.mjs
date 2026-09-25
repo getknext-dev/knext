@@ -163,12 +163,24 @@ function isServerOutputModule(path) {
     );
 }
 
-/** `spec (module, module)` for a spec -> modules map. */
-function describeSpecs(map) {
+/** A name a minifier would emit: at most 3 identifier characters. */
+const MINIFIED_NAME = /^[A-Za-z_$][\w$]{0,2}$/;
+
+/** At most `max` entries, then "+N more". */
+function capList(items, max = 10) {
+    return items.length <= max
+        ? items.join(", ")
+        : `${items.slice(0, max).join(", ")} +${items.length - max} more`;
+}
+
+/** `spec (module, module)` entries for a spec -> modules map. */
+function specEntries(map) {
     return [...map.keys()]
         .sort()
-        .map((spec) => `${spec} (${[...map.get(spec)].sort().join(", ")})`)
-        .join(", ");
+        .map((spec) => `${spec} (${[...map.get(spec)].sort().join(", ")})`);
+}
+function describeSpecs(map) {
+    return specEntries(map).join(", ");
 }
 
 /** Every server-output module (entry + chunks), by absolute path. */
@@ -208,7 +220,12 @@ function listServerOutputModules(dir) {
  *  so a call through such a name is not proof of a require. A require name the
  *  module also DECLARES elsewhere is AMBIGUOUS: its hits go to
  *  `ambiguousUnresolved` / `ambiguousDynamic`, which warn but never fail the
- *  strict build.
+ *  strict build. Only a MINIFIED-STYLE name (at most 3 characters) can be
+ *  ambiguous: in unminified output rolldown keeps its own `__require` and
+ *  renames top-level clashes (`__require$1`), so a long name that is declared
+ *  again elsewhere (a parameter, an inner helper) does not make its real
+ *  require hits doubtful — treating it as ambiguous would let a real failure
+ *  through a strict build.
  */
 function planRuntimeRequires() {
     const modules = new Map();
@@ -257,7 +274,9 @@ function planRuntimeRequires() {
             }
         }
         for (const [callee, ownDeclarations] of requireNames) {
-            const ambiguous = (analysis.declarationCounts.get(callee) ?? 0) > ownDeclarations;
+            const ambiguous =
+                MINIFIED_NAME.test(callee) &&
+                (analysis.declarationCounts.get(callee) ?? 0) > ownDeclarations;
             if (analysis.nonLiteralCallees.has(callee)) {
                 (ambiguous ? ambiguousDynamic : dynamic).push(name(path));
             }
@@ -527,10 +546,12 @@ if (PLAN.unresolved.size > 0) {
 if (PLAN.ambiguousUnresolved.size > 0 || PLAN.ambiguousDynamic.length > 0) {
     const parts = [];
     if (PLAN.ambiguousUnresolved.size > 0) {
-        parts.push(`package(s) that cannot be bundled: ${describeSpecs(PLAN.ambiguousUnresolved)}`);
+        parts.push(
+            `package(s) that cannot be bundled: ${capList(specEntries(PLAN.ambiguousUnresolved))}`,
+        );
     }
     if (PLAN.ambiguousDynamic.length > 0) {
-        parts.push(`a non-literal package name in ${PLAN.ambiguousDynamic.join(", ")}`);
+        parts.push(`a non-literal package name in ${capList(PLAN.ambiguousDynamic)}`);
     }
     console.warn(
         "[knext compile] WARNING: possibly a runtime require of " +

@@ -70,6 +70,33 @@ function parseSpecifierList(list) {
 }
 
 /**
+ * Whether the token starting at `index` sits in statement position: preceded
+ * (ignoring whitespace and comments) by nothing, `;`, `{` or `}`, possibly via
+ * `export` / `default` / `async`. A `function` there is a declaration; after
+ * `=`, `=>`, `(`, `,`, `?`, `:`, `return`, … it is an expression.
+ */
+function isStatementPosition(src, index) {
+    let i = index - 1;
+    for (;;) {
+        while (i >= 0 && /\s/.test(src[i])) i--;
+        if (i >= 1 && src[i] === "/" && src[i - 1] === "*") {
+            const open = src.lastIndexOf("/*", i - 2);
+            if (open < 0) return false;
+            i = open - 1;
+            continue;
+        }
+        if (i < 0) return true;
+        if (";{}".includes(src[i])) return true;
+        const word = /[A-Za-z_$][\w$]*$/.exec(src.slice(Math.max(0, i - 15), i + 1))?.[0];
+        if (word === "export" || word === "default" || word === "async") {
+            i -= word.length;
+            continue;
+        }
+        return false;
+    }
+}
+
+/**
  * Static facts about one server-output module.
  *
  * @param {string} src
@@ -182,7 +209,12 @@ export function analyzeServerModule(src) {
     const KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "with", "function", "return"]);
     for (const m of src.matchAll(new RegExp(`(?:\\bvar|\\blet|\\bconst)\\s+(${IDENT})`, "g"))) declare(m[1]);
     for (const m of src.matchAll(new RegExp(`,${GAP}(${IDENT})${GAP}=(?![=>])`, "g"))) declare(m[1]);
-    for (const m of src.matchAll(new RegExp(`\\bfunction${GAP}(${IDENT})${GAP}\\(`, "g"))) declare(m[1]);
+    // Function DECLARATIONS only: a named function EXPRESSION
+    // (`__commonJS = (cb, mod) => function __require() {…}`, esbuild/tsup's CJS
+    // helper) binds its name inside itself only and shadows nothing around it.
+    for (const m of src.matchAll(new RegExp(`\\bfunction${GAP}(${IDENT})${GAP}\\(`, "g"))) {
+        if (isStatementPosition(src, m.index)) declare(m[1]);
+    }
     for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}=>`, "g"))) declare(m[1]);
     for (const m of src.matchAll(new RegExp(`\\bcatch${GAP}\\(${GAP}(${IDENT})${GAP}\\)`, "g"))) declare(m[1]);
     const paramLists = [

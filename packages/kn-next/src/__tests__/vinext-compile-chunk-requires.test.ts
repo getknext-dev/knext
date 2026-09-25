@@ -418,4 +418,83 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
         expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(run.stdout).toContain(`RESULT:${A}|k: 1`);
     }, 120_000);
+
+    /** Bundle hand-written CommonJS sources with the real rolldown (unminified). */
+    async function rolldownFrom(
+        files: Record<string, string>,
+    ): Promise<{ work: string; server: string; out: string }> {
+        const work = temp("knext-1314-src-");
+        for (const [rel, body] of Object.entries(files)) {
+            write(join(work, "src", rel), body);
+        }
+        const server = join(work, ".output", "server");
+        const bundle = await rolldown({
+            input: join(work, "src", "index.mjs"),
+            platform: "node",
+            external: ["dep-a", MISSING],
+        });
+        await bundle.write({
+            dir: server,
+            format: "esm",
+            entryFileNames: "index.mjs",
+        });
+        cjsPackage(
+            join(server, "node_modules"),
+            "dep-a",
+            `module.exports = ${JSON.stringify(A)};\n`,
+        );
+        write(
+            join(work, "package.json"),
+            JSON.stringify({ name: "app", private: true, type: "module" }),
+        );
+        return {
+            work,
+            server,
+            out: readFileSync(join(server, "index.mjs"), "utf8"),
+        };
+    }
+
+    it("esbuild's __commonJS helper (a named `function __require()` expression) does not hide a real unbundlable require from strict", async () => {
+        // The exact helper esbuild/tsup emit into CommonJS output (e.g. the UMD
+        // build of @jridgewell/trace-mapping, drizzle-kit). rolldown keeps the
+        // inner name, so the bundle holds BOTH rolldown's `var __require =` and
+        // this `function __require()` expression.
+        const { work, server, out } = await rolldownFrom({
+            "dep.cjs":
+                "var __getOwnPropNames = Object.getOwnPropertyNames;\n" +
+                "var __commonJS = (cb, mod) => function __require() {\n" +
+                "  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n" +
+                "};\n" +
+                'var require_lib = __commonJS({ "lib.js"(exports, module) { module.exports = () => "lib"; } });\n' +
+                `module.exports = { lib: require_lib(), a: () => require("dep-a"), missing: () => require("${MISSING}") };\n`,
+            "index.mjs":
+                'import d from "./dep.cjs";\nconsole.log("RESULT:" + d.a());\n',
+        });
+        expect(out).toContain("=> function __require()");
+        expect(out).toContain("var __require = /* #__PURE__ */");
+
+        const build = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(build.status, `${build.stdout}\n${build.stderr}`).not.toBe(0);
+        expect(build.stderr).toContain(`${MISSING} (index.mjs)`);
+        expect(build.stderr).not.toContain("possibly");
+    }, 120_000);
+
+    it("an unminified parameter named `__require` does not hide a real unbundlable require from strict", async () => {
+        const { work, server, out } = await rolldownFrom({
+            "dep.cjs":
+                "function wrap(__require) { return typeof __require; }\n" +
+                `module.exports = { wrap, a: () => require("dep-a"), missing: () => require("${MISSING}") };\n`,
+            "index.mjs":
+                'import d from "./dep.cjs";\nconsole.log("RESULT:" + d.a() + d.wrap(1));\n',
+        });
+        expect(out).toContain("function wrap(__require)");
+
+        const build = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(build.status, `${build.stdout}\n${build.stderr}`).not.toBe(0);
+        expect(build.stderr).toContain(`${MISSING} (index.mjs)`);
+    }, 120_000);
 });

@@ -125,6 +125,24 @@ describe("analyzeServerModule (unit)", () => {
         expect(b.declarationCounts.get("u")).toBe(1);
     });
 
+    it("counts function DECLARATIONS but not named function EXPRESSIONS (esbuild's __commonJS helper)", () => {
+        const decl = (src: string, id: string) =>
+            analyzeServerModule(src).declarationCounts.get(id) ?? 0;
+        // expressions: after =>, =, (, ,, ?, :, return
+        expect(decl("var c=(cb,mod)=>function u(){return 1};", "u")).toBe(0);
+        expect(decl("var c=function u(){};", "u")).toBe(0);
+        expect(decl("f(function u(){});g(1,function u(){});", "u")).toBe(0);
+        expect(decl("var c=x?function u(){}:function u(){};", "u")).toBe(0);
+        expect(decl("function g(){return function u(){}}", "u")).toBe(0);
+        // declarations: file start, after ; { }, export / default / async, comments
+        expect(decl("function u(){}", "u")).toBe(1);
+        expect(decl("x=1;function u(){}", "u")).toBe(1);
+        expect(decl("{function u(){}}", "u")).toBe(1);
+        expect(decl("export function u(){}", "u")).toBe(1);
+        expect(decl("export default async function u(){}", "u")).toBe(1);
+        expect(decl("x=1;/* c */ function u(){}", "u")).toBe(1);
+    });
+
     it("flags a createRequire(import.meta.url) call it cannot attribute to a binding", () => {
         const a = analyzeServerModule(
             'import{createRequire as e}from"node:module";use(e(import.meta.url));',
