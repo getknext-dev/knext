@@ -31,6 +31,7 @@ import {
     mkdirSync,
     mkdtempSync,
     readFileSync,
+    realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
@@ -72,10 +73,20 @@ mock.module("../adapters/standalone-bun-exports", () => ({
 // excludes `packages/`, so it never sees it.
 const buildVinextExecutable = (() =>
     mock((_opts: VinextBuildOptions): string => "knext-exec-linux-x64"))();
+// #1298: mocked (not left real) so the "vinext × node" describe block below
+// can assert build() actually WIRES this call — leaving it real would have
+// let the wiring silently go missing, since every fixture there declares no
+// sharp and the real function no-ops (`{ staged: false }`) in that case,
+// which is exactly how this went unnoticed once (see build.ts's caller).
+const stageSharpForVinextNode = (() =>
+    mock((_cwd: string, _opts?: { arch?: string }): { staged: boolean } => ({
+        staged: true,
+    })))();
 const __knextRealVinext = { ...(await import("../cli/vinext-build")) };
 mock.module("../cli/vinext-build", () => ({
     ...__knextRealVinext,
     buildVinextExecutable,
+    stageSharpForVinextNode,
 }));
 
 // The post-compile smoke (#894) BOOTS the compiled binary, and these cases mock
@@ -143,6 +154,7 @@ beforeEach(() => {
     jest.clearAllMocks();
     healBunExportTargets.mockReturnValue({ copied: [], skipped: [] });
     buildVinextExecutable.mockReturnValue("knext-exec-linux-x64");
+    stageSharpForVinextNode.mockReturnValue({ staged: true });
 });
 
 afterEach(() => {
@@ -448,5 +460,29 @@ describe("build() — vinext × node", () => {
             /nitro\.json/,
         );
         expect(uploadAssets).not.toHaveBeenCalled();
+    });
+
+    // #1298: nitro's own trace into `.output/server/node_modules` copies an
+    // incomplete sharp package and the BUILD HOST's platform addon, not the
+    // image's — `stageSharpForVinextNode` is what fixes it, and this pins
+    // that `build()` actually calls it (not merely that the function exists).
+    it("stages sharp for the image target, BEFORE assets upload, on every nitro-output-node build", async () => {
+        loadConfig.mockResolvedValue(nodeCfg());
+        nitroOutput("node-server");
+
+        await build({ skipNextBuild: true });
+
+        expect(stageSharpForVinextNode).toHaveBeenCalledTimes(1);
+        // `process.cwd()` resolves symlinks (macOS: /var/... -> /private/var/...),
+        // so compare against realpath rather than the raw mkdtemp path.
+        expect(stageSharpForVinextNode.mock.calls[0]?.[0]).toBe(
+            realpathSync(dir),
+        );
+        const stageOrder = stageSharpForVinextNode.mock.invocationCallOrder[0];
+        const uploadOrder = uploadAssets.mock.invocationCallOrder[0];
+        expect(
+            stageOrder,
+            "sharp must be staged before assets upload",
+        ).toBeLessThan(uploadOrder);
     });
 });
