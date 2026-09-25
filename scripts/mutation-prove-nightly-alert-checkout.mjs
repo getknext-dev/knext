@@ -65,7 +65,7 @@ const MUTATIONS = [
     label: 'runsRepoScript: drop the execution-verb requirement (bare-mention false positive)',
     subject: 'checkoutTest',
     anchor:
-      'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?)\\s+scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b/m;',
+      'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?|bun|tsx)\\s+"?(?:\\$\\{?GITHUB_WORKSPACE\\}?\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)"?\\$\\{?GITHUB_WORKSPACE\\}?\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b/m;',
     replacement: 'const SCRIPT_EXEC_RE = /scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b/m;',
   },
   {
@@ -77,16 +77,42 @@ const MUTATIONS = [
     label: 'isTarExtractStep: stop recognising the tar-extract workspace-restore pattern',
     subject: 'checkoutTest',
     anchor:
-      'function providesRepoContent(step: YamlStep): boolean {\n  return isCheckoutStep(step) || isTarExtractStep(step);\n}',
+      'function providesRepoContent(step: YamlStep, precededByDownloadArtifact: boolean): boolean {\n  return isCheckoutStep(step) || isTarExtractStep(step, precededByDownloadArtifact);\n}',
     replacement:
-      'function providesRepoContent(step: YamlStep): boolean {\n  return isCheckoutStep(step);\n}',
+      'function providesRepoContent(step: YamlStep, precededByDownloadArtifact: boolean): boolean {\n  return isCheckoutStep(step);\n}',
+  },
+  {
+    // #1422 — the TIGHTENED tar-extract check reverts to the pre-#1422 bare
+    // `tar x…f` (any tarball at all is "repo-providing", ignoring
+    // `precededByDownloadArtifact` entirely). A job that unpacks an
+    // UNRELATED tarball (an adapter package, a prebuilt Next.js bundle)
+    // would then be silently accepted as having provided the repo.
+    label:
+      'isTarExtractStep: revert to bare tar x…f, ignoring the workspace-tarball name / download-artifact requirement (#1422)',
+    subject: 'checkoutTest',
+    anchor:
+      "function isTarExtractStep(step: YamlStep, precededByDownloadArtifact: boolean): boolean {\n  if (typeof step.run !== 'string') return false;\n  if (WORKSPACE_TARBALL_TAR_EXTRACT_RE.test(step.run)) return true;\n  return precededByDownloadArtifact && GENERIC_TAR_EXTRACT_RE.test(step.run);\n}",
+    replacement:
+      "function isTarExtractStep(step: YamlStep, _precededByDownloadArtifact: boolean): boolean {\n  return typeof step.run === 'string' && GENERIC_TAR_EXTRACT_RE.test(step.run);\n}",
+  },
+  {
+    // #1422 — the WIDENED SCRIPT_EXEC_RE reverts to the pre-#1422 invoker
+    // set (drops bun/tsx and the $GITHUB_WORKSPACE/scripts/... forms). A
+    // future `bun scripts/x.mjs` or `$GITHUB_WORKSPACE/scripts/x.sh` step
+    // with no checkout would then be silently invisible to the scan.
+    label: 'SCRIPT_EXEC_RE: revert to the pre-#1422 invoker set (drop bun/tsx/$GITHUB_WORKSPACE)',
+    subject: 'checkoutTest',
+    anchor:
+      'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?|bun|tsx)\\s+"?(?:\\$\\{?GITHUB_WORKSPACE\\}?\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)"?\\$\\{?GITHUB_WORKSPACE\\}?\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b/m;',
+    replacement:
+      'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?)\\s+scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b/m;',
   },
 ];
 
-declareMutations(3);
+declareMutations(5);
 
-if (MUTATIONS.length !== 3) {
-  console.error(`FATAL: declared 3 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 5) {
+  console.error(`FATAL: declared 5 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
