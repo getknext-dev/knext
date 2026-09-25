@@ -264,14 +264,38 @@ function jsLocalImportSpecifiers(src, absPath) {
   const requireLikeNames = new Set(['require']);
   const createRequireFnNames = new Set(['createRequire']);
   const createRequireDerivedNames = new Set();
+  // Names bound to the `node:module` NAMESPACE OBJECT itself (not a specific
+  // export of it) — `import * as mod from 'node:module'`, `import mod from
+  // 'node:module'`, or `const mod = require('node:module')`. A COMPUTED
+  // (bracket) access on one of these with a non-literal key can reach
+  // `createRequire`/`require` (or anything else on the namespace) without
+  // ever using a string literal this scanner could compare against, so it
+  // is invisible to every literal-key check above it (#1388/#1392 review;
+  // techdebt-3 round).
+  const nodeModuleBindingNames = new Set();
 
-  // Import aliasing (`import { createRequire as cr } from 'node:module'`):
-  // one pass — an import specifier's local name is a fresh binding, never
-  // itself the RHS of another import, so this never needs to iterate.
+  const isNodeModuleSpecifierText = (text) => text === 'node:module' || text === 'module';
+
+  // Import aliasing (`import { createRequire as cr } from 'node:module'`)
+  // and node:module namespace/default bindings: one pass — an import
+  // specifier/clause's local name is a fresh binding, never itself the RHS
+  // of another import, so this never needs to iterate.
   const collectImportAliases = (node) => {
     if (ts.isImportSpecifier(node)) {
       const importedName = (node.propertyName ?? node.name).text;
       if (importedName === 'createRequire') createRequireFnNames.add(node.name.text);
+    } else if (
+      ts.isImportDeclaration(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteralLike(node.moduleSpecifier) &&
+      isNodeModuleSpecifierText(node.moduleSpecifier.text) &&
+      node.importClause
+    ) {
+      const clause = node.importClause;
+      if (clause.name) nodeModuleBindingNames.add(clause.name.text); // default import
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        nodeModuleBindingNames.add(clause.namedBindings.name.text); // `import * as mod`
+      }
     }
     ts.forEachChild(node, collectImportAliases);
   };
@@ -303,6 +327,10 @@ function jsLocalImportSpecifiers(src, absPath) {
             createRequireDerivedNames.add(name);
             grew = true;
           }
+          if (nodeModuleBindingNames.has(initName) && !nodeModuleBindingNames.has(name)) {
+            nodeModuleBindingNames.add(name);
+            grew = true;
+          }
         } else if (
           ts.isCallExpression(init) &&
           ts.isIdentifier(init.expression) &&
@@ -310,6 +338,19 @@ function jsLocalImportSpecifiers(src, absPath) {
           !createRequireDerivedNames.has(name)
         ) {
           createRequireDerivedNames.add(name);
+          grew = true;
+        } else if (
+          ts.isCallExpression(init) &&
+          ts.isIdentifier(init.expression) &&
+          requireLikeNames.has(init.expression.text) &&
+          init.arguments[0] &&
+          ts.isStringLiteralLike(init.arguments[0]) &&
+          isNodeModuleSpecifierText(init.arguments[0].text) &&
+          !nodeModuleBindingNames.has(name)
+        ) {
+          // `const mod = require('node:module')` — binds the whole
+          // namespace object, not a specific export.
+          nodeModuleBindingNames.add(name);
           grew = true;
         }
       }
@@ -401,6 +442,35 @@ function jsLocalImportSpecifiers(src, absPath) {
     ts.isStringLiteralLike(node.argumentExpression) &&
     (node.argumentExpression.text === 'require' ||
       node.argumentExpression.text === 'createRequire');
+  /**
+   * A COMPUTED (bracket) access on a name bound to the `node:module`
+   * NAMESPACE (`import * as mod`, `import mod`, `const mod =
+   * require('node:module')`) whose key is NOT a string literal — e.g.
+   * `const k = 'createRequire'; mod[k](...)`. The key can't be compared
+   * against 'require'/'createRequire' at all, so without this check it is
+   * invisible to `isTrackedBracketPropertyAccess` above AND to every
+   * literal-name check — not exempted, just never seen (techdebt-3 round).
+   */
+  const isNonLiteralElementAccessOnModuleBinding = (node) =>
+    ts.isElementAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    nodeModuleBindingNames.has(node.expression.text) &&
+    !!node.argumentExpression &&
+    !ts.isStringLiteralLike(node.argumentExpression);
+  /**
+   * The bare `module` identifier (Node's implicit CJS binding) used in any
+   * form other than the base of `module.require(...)` or
+   * `module.exports`/`module.exports = ...` — e.g. `const m = module;`,
+   * which defeats the LITERAL `module.require`/`module.exports` checks by
+   * aliasing the base object first (techdebt-3 round). `module` is never
+   * added to any of the tracked-name sets above, so without this it is
+   * invisible to every check in this file.
+   */
+  const isModuleIdentifierAllowedUse = (node) =>
+    !!node.parent &&
+    ts.isPropertyAccessExpression(node.parent) &&
+    node.parent.expression === node &&
+    (node.parent.name.text === 'require' || node.parent.name.text === 'exports');
 
   /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
   const addSpecifier = (node, callOrDeclNode) => {
@@ -434,6 +504,20 @@ function jsLocalImportSpecifiers(src, absPath) {
       failClosed(
         node,
         `uses a computed (bracket) property access on a tracked name (\`${node.argumentExpression.text}\`) — this scanner only resolves literal \`.name\` property access`,
+      );
+    } else if (isNonLiteralElementAccessOnModuleBinding(node)) {
+      failClosed(
+        node,
+        `uses a non-literal computed (bracket) property access on \`${node.expression.text}\`, a name bound to node:module — this scanner cannot determine which export is accessed`,
+      );
+    } else if (
+      ts.isIdentifier(node) &&
+      node.text === 'module' &&
+      !isModuleIdentifierAllowedUse(node)
+    ) {
+      failClosed(
+        node,
+        'references the `module` identifier in a form this scanner does not track (only `module.require(...)`/`module.exports` are recognised)',
       );
     } else if (isModuleDotRequireCall(node) || isRequireLikeCall(node)) {
       // Same resolution base as a bare `require()` — handle identically.

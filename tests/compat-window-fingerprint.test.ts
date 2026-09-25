@@ -1422,6 +1422,33 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
       );
     });
 
+    // techdebt-3 round — two more shapes that still slipped through
+    // silently: aliasing the `module` identifier itself (defeating the
+    // literal `module.require` check), and a computed key on a node:module
+    // binding whose key is not a string literal (so it can't be compared
+    // against 'require'/'createRequire' at all, and was simply never seen).
+    it('aliasing the `module` identifier (`const m = module; m.require(...)`) is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const m = module;\nconst { real } = m.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references the `module` identifier in a form this scanner does not track/,
+      );
+    });
+
+    it("a computed key on a node:module binding (`const k='createRequire'; mod[k](u)`) is a hard error, not silently invisible", () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst k = 'createRequire';\nconst { real } = mod[k](import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /non-literal computed \(bracket\) property access on `mod`, a name bound to node:module/,
+      );
+    });
+
     // module.require via property access must still be exempt — this is the
     // one property-name shape the fix must keep working.
     it('module.require(...) called (not just the property-name exemption) is still recognised, not accidentally broken by the narrowed exemption', () => {
