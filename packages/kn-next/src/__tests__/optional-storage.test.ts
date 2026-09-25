@@ -16,7 +16,7 @@
  *   2. A present-but-broken storage block is still rejected — optional never
  *      means unvalidated.
  *   3. No sentinel: `provider: "none"` is rejected loudly.
- *   4. `kn-next gc` with no storage reports "nothing to reap" and exits 0.
+ *   4. `knext gc` with no storage reports "nothing to reap" and exits 0.
  *   5. The announced-mode notice names every dropped capability (image-served
  *      assets, no CDN offload, no cross-deploy retention, in-flight skew
  *      window) and carries the docs growth-path link.
@@ -193,7 +193,7 @@ describe("the emitted NextApp CR omits spec.storage (Q2: valid on every shipped 
     });
 });
 
-describe("kn-next gc without storage (condition 3)", () => {
+describe("knext gc without storage (condition 3)", () => {
     it("the report says nothing-to-reap in the exact announced words", () => {
         expect(GC_NO_STORAGE_REPORT).toContain(
             "no object storage configured — nothing to reap",
@@ -292,7 +292,7 @@ function scaffoldApp(
     return { appDir };
 }
 
-describe("kn-next create scaffolds the no-storage default (condition 6)", () => {
+describe("knext create scaffolds the no-storage default (condition 6)", () => {
     it("the generated config has storage COMMENTED OUT — every storage line is a comment", () => {
         const { appDir } = scaffoldApp("starter-app");
         const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
@@ -332,8 +332,8 @@ describe("kn-next create scaffolds the no-storage default (condition 6)", () => 
 });
 
 describe("the image serves its own statics (condition 4 build-time halves)", () => {
-    // #1342/ADR-0058: `kn-next create`'s DEFAULT builder emits no Dockerfile
-    // at all — `kn-next build`/`deploy` stage the standalone runtime image
+    // #1342/ADR-0058: `knext create`'s DEFAULT builder emits no Dockerfile
+    // at all — `knext build`/`deploy` stage the standalone runtime image
     // automatically (see create-scaffold-builder.test.ts's "emits NO
     // Dockerfile" pin). The Dockerfile assertions below are inherently
     // `--builder vinext`-shaped (the `.output/public` nitro artifact layout),

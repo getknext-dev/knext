@@ -2,7 +2,7 @@
  * Regression tests for the vinext → official Next.js Adapter migration.
  *
  * These tests assert that Nitro/Vinext build APIs are fully removed from the
- * kn-next framework packages, and that the official `output:'standalone'` path
+ * knext framework packages, and that the official `output:'standalone'` path
  * is wired instead. Written RED-first per superteam TDD discipline.
  *
  * Tested invariants:
@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Locate the kn-next src directory relative to this __tests__ file.
+// Locate the knext src directory relative to this __tests__ file.
 const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(TESTS_DIR, "..");
 

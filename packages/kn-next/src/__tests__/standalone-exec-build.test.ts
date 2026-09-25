@@ -1,5 +1,5 @@
 /**
- * The compiled standalone-on-Bun build step (`kn-next build` with
+ * The compiled standalone-on-Bun build step (`knext build` with
  * `build: 'turbopack'` + `runtime: 'bun'`).
  *
  * What is asserted, and why each is a real regression rather than a style:

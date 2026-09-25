@@ -6,7 +6,7 @@
  * `create.ts` infers the same fact by walking up to the OUTERMOST lockfile —
  * exactly what next 16.2's `findRootDirAndLockFiles` does to pick
  * `outputFileTracingRoot`. The two agree for `apps/<name>` and disagree
- * everywhere else, and `kn-next create` (#642) makes "everywhere else" — a flat
+ * everywhere else, and `knext create` (#642) makes "everywhere else" — a flat
  * single-app repo — the ordinary case for the audience that verb exists for.
  *
  * The lockfile walk wins, and not merely because it is layout-independent: the

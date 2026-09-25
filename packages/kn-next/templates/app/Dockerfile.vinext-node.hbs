@@ -14,7 +14,7 @@
 # Every pod — the very first one after scale-to-zero included — starts with a
 # populated cache, with no volume, no mount and no cluster feature flag.
 #
-# Selected by `kn-next build` / `kn-next deploy` when kn-next.config.ts says
+# Selected by `knext build` / `knext deploy` when kn-next.config.ts says
 # `runtime: 'node'`; unused otherwise. Its own ignore file,
 # `Dockerfile.vinext-node.dockerignore`, keeps `.output/server` in the build
 # context (the app's `.dockerignore` excludes it — the Bun image never needs it).
@@ -58,7 +58,7 @@ ENV PORT=3000 \
 ARG KNEXT_COMPILE_CACHE_MIN_BYTES=65536
 
 # The path the bake warms — MUST match `kn-next.config.ts`'s `healthCheckPath`
-# (default `/api/health`). `kn-next build`/`deploy`/`preview` pass this as a
+# (default `/api/health`). `knext build`/`deploy`/`preview` pass this as a
 # `--build-arg` when the app configures a custom path; an app with no
 # `/api/health` route and no custom `healthCheckPath` would otherwise fail
 # THIS BUILD, not just its Knative probe (#1273 — the same regression class

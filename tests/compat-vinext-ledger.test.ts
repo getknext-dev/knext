@@ -41,6 +41,7 @@ import { buildLedger, renderTable } from '../scripts/compat-run-ledger.mjs';
 import {
   applyLedger,
   CLASSES,
+  classifyListingError,
   collectHistory,
   DEFAULT_NEXTJS_REF,
   deriveAddedFromGitLog,
@@ -54,12 +55,15 @@ import {
   isCompleteDefaultRun,
   isNoArtifactError,
   LEDGER_FILE_CAP,
+  LISTING_RETRY_ATTEMPTS,
+  LISTING_RETRY_BASE_MS,
   MAX_CONSECUTIVE_HISTORY_SKIPS,
   MAX_EXPIRY_DAYS,
   previousRunCandidates,
   publishedNumber,
   readSummaries,
   refreshSnapshots,
+  retryAfterMs,
   skippedWarnings,
   staleEntries,
   validateLedger,
@@ -743,17 +747,222 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
     // reach the 3-consecutive threshold and every such run silently passed.
     expect(() =>
       collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
-    ).toThrow(/could not list.*401/);
+    ).toThrow(/could not list[\s\S]*401/);
   });
 
-  it('a non-auth listing error is never swallowed either', () => {
+  // #1400 review — every listing-error fixture below uses a REALISTIC `gh`
+  // stderr string (the shape `gh` actually prints, "Command failed: gh run
+  // list ... HTTP <code>: <reason>"), never a raw Node network-error string
+  // like `ECONNRESET`/`ENOTFOUND` — `gh` wraps those in its own wording
+  // before they ever reach this script, so testing against the RAW Node
+  // shape proves nothing about what classifyListingError actually has to
+  // parse in production.
+  const GH_502 =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 502: Bad Gateway (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  // Realistic Go/gh network-error wordings (#1400 round 2) — "could not
+  // resolve host" was this suite's OWN invention, not what `gh`'s Go HTTP
+  // stack actually prints. The real shapes, verified against gh's own
+  // source/observed output:
+  //   - DNS failure:        "dial tcp: lookup api.github.com: no such host"
+  //   - refused connection: "dial tcp ...: connect: connection refused"
+  //   - truncated response:  "unexpected EOF"
+  //   - a Go net timeout:    "dial tcp: i/o timeout"
+  //   - gh's own friendly network-failure banner: "error connecting to
+  //     api.github.com"
+  const GH_DNS =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp: lookup api.github.com: no such host';
+  const GH_CONN_REFUSED =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp 140.82.121.6:443: connect: connection refused';
+  const GH_UNEXPECTED_EOF =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": unexpected EOF';
+  const GH_IO_TIMEOUT =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp: i/o timeout';
+  const GH_ERROR_CONNECTING =
+    'error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com';
+  const GH_401 =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 401: Bad credentials (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  const GH_403_PERMISSION =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  const GH_403_RATE_LIMIT =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 403: API rate limit exceeded for installation ID 123456. (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  const GH_JSON_PARSE = 'unexpected: JSON.parse failed on gh run list output';
+  // #1400 round 2 — a status code must NOT match from an unrelated number in
+  // the command line (a --limit value, a run id, a port). No "HTTP NNN"
+  // prefix anywhere in this message, so it must fall through to 'local', not
+  // 'fatal' or 'retryable' by accident of "401" or "403" appearing bounded
+  // by word boundaries somewhere in the text.
+  const GH_NUMBER_IN_COMMAND_LINE =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 401 --json databaseId,status,createdAt\nsome unrelated local failure unpacking run 403 from the response';
+
+  it("classifyListingError: 'fatal' for 401, a plain 403, and 'authenticat...' wording — never retried (#1400)", () => {
+    expect(classifyListingError(new Error(GH_401))).toBe('fatal');
+    expect(classifyListingError(new Error(GH_403_PERMISSION))).toBe('fatal');
+    expect(classifyListingError(new Error('gh: authentication required'))).toBe('fatal');
+  });
+
+  it("classifyListingError: 'retryable' for 5xx, 429, a RATE-LIMIT 403, DNS, connection reset, timeout (#1400)", () => {
+    expect(classifyListingError(new Error(GH_502))).toBe('retryable');
+    expect(classifyListingError(new Error('HTTP 429: too many requests'))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_403_RATE_LIMIT))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_DNS))).toBe('retryable');
+    expect(classifyListingError(new Error('read: connection reset by peer'))).toBe('retryable');
+    expect(classifyListingError(new Error('context deadline exceeded (Client.Timeout)'))).toBe(
+      'retryable',
+    );
+  });
+
+  it("classifyListingError: 'retryable' for the real gh/Go network wordings round 2 found missing (#1400 round 2)", () => {
+    expect(classifyListingError(new Error(GH_CONN_REFUSED))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_UNEXPECTED_EOF))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_IO_TIMEOUT))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_ERROR_CONNECTING))).toBe('retryable');
+  });
+
+  it("classifyListingError: 'local' for a JSON parse failure — not an HTTP/network shape at all (#1400)", () => {
+    expect(classifyListingError(new Error(GH_JSON_PARSE))).toBe('local');
+  });
+
+  it('classifyListingError: a bare number in the command line (a --limit value, a run id) is NOT mistaken for an HTTP status (#1400 round 2)', () => {
+    expect(classifyListingError(new Error(GH_NUMBER_IN_COMMAND_LINE))).toBe('local');
+  });
+
+  it('retryAfterMs: parses a Retry-After hint from the error text when gh surfaces one, else null (#1400)', () => {
+    expect(retryAfterMs('secondary rate limit hit. retry after: 30')).toBe(30_000);
+    expect(retryAfterMs('Retry-After 12')).toBe(12_000);
+    expect(retryAfterMs(GH_502)).toBeNull();
+  });
+
+  it('retryAfterMs: caps an implausibly large Retry-After hint at 60s, never waits longer (#1400 round 2)', () => {
+    expect(retryAfterMs('Retry-After 300')).toBe(60_000);
+    expect(retryAfterMs('secondary rate limit hit. retry after: 3600')).toBe(60_000);
+    // Under the cap is untouched.
+    expect(retryAfterMs('Retry-After 45')).toBe(45_000);
+  });
+
+  it('a LOCAL listing error (JSON parse failure) is never swallowed and NEVER retried — distinct from a retryable one (#1400)', () => {
+    let calls = 0;
     const list = () => {
-      throw new Error('unexpected: JSON.parse failed');
+      calls += 1;
+      throw new Error(GH_JSON_PARSE);
     };
     const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    // sleep: (ms) => sleeps.push(ms) — asserted empty below: a local/
+    // deterministic failure must not cost a single backoff wait.
     expect(() =>
-      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
-    ).toThrow(/unexpected/);
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(/does not look like a transient API\/network error/);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it(`a persisting RETRYABLE listing error (HTTP 502) is retried exactly ${LISTING_RETRY_ATTEMPTS} times total (${LISTING_RETRY_ATTEMPTS - 1} retries) before failing closed, and the failure message says so (#1365/#1400)`, () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error(GH_502);
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(new RegExp(`after ${LISTING_RETRY_ATTEMPTS} attempts[\\s\\S]*HTTP 502`));
+    expect(calls).toBe(LISTING_RETRY_ATTEMPTS);
+    // Exponential backoff: base, 2x base, 4x base, ... — one sleep between
+    // each pair of attempts, so ATTEMPTS-1 sleeps total, never one PER
+    // attempt (that would sleep needlessly after the last, doomed attempt).
+    expect(sleeps).toHaveLength(LISTING_RETRY_ATTEMPTS - 1);
+    expect(sleeps).toEqual(
+      Array.from({ length: LISTING_RETRY_ATTEMPTS - 1 }, (_, i) => LISTING_RETRY_BASE_MS * 2 ** i),
+    );
+  });
+
+  it('a RETRYABLE listing error (DNS) that clears on the SECOND attempt succeeds — the retry is what makes this NOT red (#1365/#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      if (calls === 1) throw new Error(GH_DNS);
+      return [candidate('10'), candidate('9')];
+    };
+    const fetchSummaries = (id: string) =>
+      fullRun({
+        shard: '1/16',
+        failed: id === '10' ? 1 : 0,
+        failures: id === '10' ? ['a.spec.ts'] : [],
+      });
+    const sleeps: number[] = [];
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+      { repo: 'o/r', currentRunId: '11', want: 2 },
+    );
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([LISTING_RETRY_BASE_MS]);
+    expect(history).toHaveLength(2);
+    // The blip is visible in warnings — a run that limped through a flaky
+    // network window must not read identically to a clean first-try run
+    // (the same discipline this repo's other retry-with-backoff guards use).
+    expect(warnings.some((w) => /attempt 1[\s\S]*no such host[\s\S]*retrying/.test(w))).toBe(true);
+  });
+
+  it('a RETRY-AFTER hint (a rate-limited 403 with a numeric wait) is honoured in PREFERENCE to the exponential backoff (#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error(`${GH_403_RATE_LIMIT}\nsecondary rate limit hit. retry after: 7 seconds`);
+      }
+      return [candidate('10')];
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    collectHistory(
+      { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+      { repo: 'o/r', currentRunId: '11', want: 1 },
+    );
+    // 7s from the hint, NOT LISTING_RETRY_BASE_MS from the exponential default.
+    expect(sleeps).toEqual([7_000]);
+  });
+
+  it('a FATAL listing error (401) is NEVER retried — fails closed on the very first attempt (#1365/#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error(GH_401);
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(/could not list[\s\S]*401/);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('a FATAL listing error (plain permission 403, not rate-limited) is NEVER retried (#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error(GH_403_PERMISSION);
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(/could not list[\s\S]*403/);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
   });
 
   it('a "no artifact" failure downloading a run is NOT an auth/API error: skipped, not warned, not a fail-closed contributor', () => {

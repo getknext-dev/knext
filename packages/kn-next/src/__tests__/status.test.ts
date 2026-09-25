@@ -1,5 +1,5 @@
 /**
- * `kn-next status` — surface the NextApp CR's honest conditions (Workstream C).
+ * `knext status` — surface the NextApp CR's honest conditions (Workstream C).
  *
  * The operator reports rich truth on the CR (Ready with reasons incl.
  * IngressNotProgrammed, Degraded, DatabaseReady Provisioned|Bound, Reconciling,
@@ -467,7 +467,7 @@ describe("runStatus — clean errors with hints", () => {
             }),
         );
         await expect(runStatus("web", opts(), deps)).rejects.toThrow(
-            /NextApp "web" not found in namespace "default".*kn-next deploy.*kn-next doctor/s,
+            /NextApp "web" not found in namespace "default".*knext deploy.*knext doctor/s,
         );
     });
 
@@ -481,7 +481,7 @@ describe("runStatus — clean errors with hints", () => {
             }),
         );
         await expect(runStatus("web", opts(), deps)).rejects.toThrow(
-            /cluster unreachable.*kn-next doctor/s,
+            /cluster unreachable.*knext doctor/s,
         );
     });
 });
@@ -563,7 +563,7 @@ describe("--watch", () => {
     });
 
     it("tolerates up to 3 consecutive transient kubectl failures, then recovers", async () => {
-        // `kn-next deploy && kn-next status --watch` as a CI gate must not die
+        // `knext deploy && knext status --watch` as a CI gate must not die
         // on a single apiserver blip mid-poll.
         let call = 0;
         const kubectl: KubectlFn = () => {
@@ -601,7 +601,7 @@ describe("--watch", () => {
         const { deps } = makeDeps(kubectl);
         await expect(
             runStatus("web", opts({ watch: true }), deps),
-        ).rejects.toThrow(/cluster unreachable.*kn-next doctor/s);
+        ).rejects.toThrow(/cluster unreachable.*knext doctor/s);
         expect(call).toBe(4);
     });
 

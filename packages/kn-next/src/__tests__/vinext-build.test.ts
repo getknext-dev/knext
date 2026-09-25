@@ -708,7 +708,7 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         ).toBe("sharp-linuxmusl-x64 BYTES");
     });
 
-    /** What a previous `kn-next build` leaves behind: tree + manifest. */
+    /** What a previous `knext build` leaves behind: tree + manifest. */
     function stagePreviousBuild(
         cwd: string,
         files: Record<string, string>,

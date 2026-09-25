@@ -28,7 +28,7 @@ the knext CLI does not either. It builds your app, pushes the image, and hands t
 ```
    you                    knext CLI              the operator          the cluster
    ───                    ─────────              ────────────          ───────────
-   kn-next     ──────▶    builds image
+   knext     ──────▶    builds image
                           pushes image
                           applies NextApp  ──▶   reads it
                                                  creates the
@@ -38,7 +38,7 @@ the knext CLI does not either. It builds your app, pushes the image, and hands t
 
 Why it matters: **there is exactly one place cluster state comes from.** If you want to change how
 ACME is deployed, you change the `NextApp`. Nothing else edits the cluster behind its back, which
-is why `kn-next status` can tell you the truth rather than a guess.
+is why `knext status` can tell you the truth rather than a guess.
 
 ## What scale-to-zero actually means
 

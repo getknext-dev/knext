@@ -56,7 +56,7 @@ const RULE_FILE = join(
     "prometheusrule.yaml",
 );
 
-/** The canonical bun-exec runtime contract — what `kn-next create` emits. */
+/** The canonical bun-exec runtime contract — what `knext create` emits. */
 const BUNEXEC_TEMPLATE = join(
     PKG_ROOT,
     "templates",
