@@ -109,42 +109,75 @@ describe('docs content — install & CLI story', () => {
   });
 });
 
-describe('docs content — no stale `kn-next <verb>` command text', () => {
+describe('docs content — no stale `kn-next` command text', () => {
   // `kn-next` was renamed to `knext` (the deprecated alias still runs, but
-  // every USER-FACING command example must show the canonical name). Only
-  // getting-started.mdx's deprecation callout is allowed to say the bare
-  // word `kn-next` at all — it explains the alias, it does not tell a
-  // reader to type `kn-next <verb>`. Every other page, and every `kn-next`
-  // immediately followed by a CLI verb (a command a reader would copy and
-  // run), is a stale pre-rename example.
-  const CLI_VERBS = [
-    'create',
-    'deploy',
-    'build',
-    'doctor',
-    'status',
-    'db',
-    'rollback',
-    'gc',
-    'preview',
-    'loadtest',
-    'validate',
-    'cleanup',
-  ];
-  const staleVerbCommand = new RegExp(`\\bkn-next\\s+(?:${CLI_VERBS.join('|')})\\b`);
+  // every USER-FACING command example must show the canonical name). Three
+  // things are enforced, not one:
+  //
+  //  1. `kn-next <verb>` never appears as a command to run, anywhere.
+  //     Matched STRUCTURALLY — `kn-next` + whitespace + a token starting
+  //     with a letter — never against an enumerated verb list. An
+  //     enumerated list is exactly what went stale here the first time
+  //     (missed the shipped `init-ci` verb); this regex needs no updating
+  //     when a verb is added, because it does not know what a verb IS, only
+  //     that `kn-next` followed by whitespace and a word is a command
+  //     example. It does not match `kn-next.config.ts` (a `.`, not
+  //     whitespace, follows), `kn-next-operator`/`kn-next-action` (a `-`),
+  //     or a path segment like `packages/kn-next/...` (a `/`) — all of
+  //     those are followed by a non-whitespace character.
+  //  2. `npx kn-next` never appears, regardless of what (if anything)
+  //     follows — this is the exact hazard getting-started.mdx's own
+  //     warning callout names: the unscoped `knext` name on the public npm
+  //     registry belongs to someone else, and so, by the same logic, would
+  //     an unscoped bare `kn-next` invocation outside a project where the
+  //     package is already installed.
+  //  3. The bare WORD `kn-next` — not part of `kn-next.config.ts`,
+  //     `kn-next-operator`/`kn-next-action`, or a `packages/kn-next/...`
+  //     path (none of those name the COMMAND) — appears ONLY on the one
+  //     page that documents the deprecated alias: getting-started.mdx's own
+  //     callout, which explains the rename rather than telling a reader to
+  //     type `kn-next`. This is the rule the comment here used to CLAIM
+  //     without a test backing it; it is enforced now, not just described.
+  const staleVerbCommand = /\bkn-next\s+[a-z][\w-]*/;
+  const staleNpxInvocation = /\bnpx\s+kn-next\b/;
+  const bareKnNextWord = /(?<![\w/])kn-next(?![\w.\-/])/;
+  const DEPRECATION_CALLOUT_PAGE = 'getting-started.mdx';
 
   it('never shows `kn-next <verb>` as a command to run, anywhere in the docs', () => {
     expect(hits(staleVerbCommand)).toEqual([]);
   });
 
-  it('mutation control: the guard actually matches the stale form it exists to catch', () => {
-    // Not a doc-content check — proves the regex itself is live, so a typo
-    // in CLI_VERBS/staleVerbCommand above cannot silently make the previous
-    // test pass by matching nothing.
+  it('never shows a bare `npx kn-next` invocation', () => {
+    expect(hits(staleNpxInvocation)).toEqual([]);
+  });
+
+  it(`the bare word \`kn-next\` appears only in ${DEPRECATION_CALLOUT_PAGE}'s deprecation callout`, () => {
+    const offPage = hits(bareKnNextWord).filter(
+      (hit) => !hit.startsWith(`${DEPRECATION_CALLOUT_PAGE}:`),
+    );
+    expect(offPage).toEqual([]);
+  });
+
+  it('mutation control: each guard actually matches the stale form it exists to catch, and none trips on the legitimate callout text', () => {
+    // Not a doc-content check — proves the regexes themselves are live, so a
+    // typo above cannot silently make the checks above pass by matching
+    // nothing.
     expect(staleVerbCommand.test('run `kn-next deploy` first')).toBe(true);
+    expect(staleVerbCommand.test('run `kn-next init-ci` first')).toBe(true);
     expect(staleVerbCommand.test('run `knext deploy` first')).toBe(false);
-    // The deprecation callout's own bare-alias sentence must NOT trip it.
+    expect(staleNpxInvocation.test('run `npx kn-next` first')).toBe(true);
+    expect(staleNpxInvocation.test('run `npx knext` first')).toBe(false);
+    expect(bareKnNextWord.test('the CLI, `kn-next`, is deprecated')).toBe(true);
+    expect(bareKnNextWord.test('see `kn-next.config.ts`')).toBe(false);
+    expect(bareKnNextWord.test('the `kn-next-operator` Deployment')).toBe(false);
+    expect(bareKnNextWord.test('packages/kn-next/src/cli')).toBe(false);
+    // The deprecation callout's own bare-alias sentence must not trip the
+    // VERB/npx guards (only the bare-word guard is meant to see it, and
+    // only to confirm it stays confined to its one page).
     expect(staleVerbCommand.test('The CLI command was renamed from `kn-next` to `knext`.')).toBe(
+      false,
+    );
+    expect(staleNpxInvocation.test('The CLI command was renamed from `kn-next` to `knext`.')).toBe(
       false,
     );
   });
