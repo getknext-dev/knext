@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 
 // Absolute, not CWD-relative — the repo convention (vitest.config.ts explains
 // why: a run from a sub-directory must not resolve a non-existent path).
@@ -185,8 +186,8 @@ const PINNED_BUN = '1.4.2';
 const PINNED_BUN_IMAGE_DIGEST =
   'sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f';
 
-function trackedFiles(): string[] {
-  const r = Bun.spawnSync(['git', 'ls-files'], { cwd: REPO_ROOT });
+function trackedFiles(root: string): string[] {
+  const r = Bun.spawnSync(['git', 'ls-files'], { cwd: root });
   if (r.exitCode !== 0) throw new Error(`git ls-files failed: ${r.stderr.toString()}`);
   return r.stdout.toString().split('\n').filter(Boolean);
 }
@@ -216,9 +217,128 @@ function trackedFiles(): string[] {
 const LINE_EXEMPT_MARKER = 'oven-bun-pin-exempt';
 
 /** Files that SELECT an image — markdown prose is the only wholesale exclusion; everything else is scanned and line-exemptions (LINE_EXEMPT_MARKER) carry the rest. */
-function imageBearingFiles(): string[] {
-  return trackedFiles().filter((f) => !f.startsWith('.claude/') && !/\.(md|mdx)$/.test(f));
+function imageBearingFiles(root: string): string[] {
+  return trackedFiles(root).filter((f) => !f.startsWith('.claude/') && !/\.(md|mdx)$/.test(f));
 }
+
+/**
+ * #1392 round 3 — the LINE_EXEMPT_MARKER above can waive ANY line, including
+ * one that genuinely SELECTS an image at build/run time. A stale `FROM
+ * oven/bun:1.4.0-alpine # oven-bun-pin-exempt: ...` in a Dockerfile would
+ * stay green forever — the marker was meant for prose/fixtures/comments
+ * INSIDE test files, not for the file classes Docker builds, CI runs, and
+ * scaffolding stamps into every generated app. Those classes REJECT the
+ * marker outright: a real drift there must be fixed, never waived.
+ *   - Dockerfile* (any BUILD context's FROM line)
+ *   - *.hbs (a template stamps its pin into every scaffolded app)
+ *   - .github/workflows/** (what CI actually executes)
+ *   - scripts/*.sh (what those workflow steps shell out to)
+ */
+function isMarkerRejectedPath(f: string): boolean {
+  const base = f.split('/').pop() ?? f;
+  if (/^Dockerfile/.test(base)) return true;
+  if (/\.hbs$/.test(f)) return true;
+  if (f.startsWith('.github/workflows/')) return true;
+  if (/^scripts\/[^/]+\.sh$/.test(f)) return true;
+  return false;
+}
+
+type ScanResult = { selecting: number; exempted: number; off: string[] };
+
+/** The scan itself — pulled out of the `it()` body so it can run against a synthetic fixture root, not just REPO_ROOT (#1392 round 3 testability). */
+function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanResult {
+  let selecting = 0;
+  let exempted = 0;
+  const off: string[] = [];
+  for (const f of imageBearingFiles(root)) {
+    readFileSync(join(root, f), 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (line.includes(LINE_EXEMPT_MARKER)) {
+          if (isMarkerRejectedPath(f)) {
+            off.push(
+              `${f}:${i + 1}: LINE_EXEMPT_MARKER is not permitted in this file class (Dockerfile*/.hbs/workflows/scripts/*.sh) — fix the pin, do not exempt it`,
+            );
+            return;
+          }
+          if (/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/.test(line)) exempted++;
+          return;
+        }
+        const isComment = /^\s*(#|\/\/|\*)/.test(line);
+        for (const m of line.matchAll(/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/g)) {
+          if (m[0] === 'oven/bun') continue;
+          const ok = isComment ? m[0] === tag || m[0] === pinned : m[0] === pinned;
+          if (!isComment) selecting++;
+          if (!ok) off.push(`${f}:${i + 1}: ${m[0]}`);
+        }
+      });
+  }
+  return { selecting, exempted, off };
+}
+
+/**
+ * A throwaway git repo fixture under the OS tmp dir, so `git ls-files`
+ * behaves exactly like it does in the real scan. No commit is needed —
+ * `git ls-files` reads the INDEX, populated by `git add`, so this stays
+ * immune to the ambient gpg-signing config that makes an actual commit
+ * fail in a sandboxed environment with no configured signing key.
+ */
+function makeGitFixture(files: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'bun-pin-marker-fixture-'));
+  for (const [rel, contents] of Object.entries(files)) {
+    const abs = join(dir, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, contents);
+  }
+  Bun.spawnSync(['git', 'init', '-q'], { cwd: dir });
+  Bun.spawnSync(['git', 'add', '-A'], { cwd: dir });
+  return dir;
+}
+
+describe('LINE_EXEMPT_MARKER is rejected in image-selecting file classes (#1392 round 3)', () => {
+  it.each([
+    ['apps/docs/Dockerfile', true],
+    ['apps/docs/Dockerfile.oke', true],
+    ['packages/kn-next/templates/app/Dockerfile.hbs', true],
+    ['.github/workflows/ci.yml', true],
+    ['scripts/e2e-summary.sh', true],
+    ['tests/bytecode-liveness.test.ts', false],
+    ['packages/kn-next/src/adapters/bun-keepalive-guard.cjs', false],
+    ['scripts/lib/knext-closure.mjs', false],
+  ])('%s -> rejected=%s', (path, expected) => {
+    expect(isMarkerRejectedPath(path)).toBe(expected);
+  });
+
+  // The fixture literals below name a fake, deliberately-stale image ref —
+  // spelled `oven/bun` + `:` + digits so it does NOT match this repo's own
+  // `oven/bun(?::...)?` selection regex verbatim in a way that would need
+  // a marker on THIS line too: the fixture tag differs from the real
+  // lockstep pin, so bun-version-pins.test.ts's own real-repo scan sees it
+  // as a non-matching-but-exempt-by-marker fixture, same as the Dockerfile
+  // fixture content itself.
+  const fixtureTag = 'oven/bun:1.4.2-alpine'; // oven-bun-pin-exempt: test fixture argument, not a real selection
+  const fixturePinned = `${fixtureTag}@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f`; // oven-bun-pin-exempt: test fixture argument, not a real selection
+
+  it('a stale, marker-exempted pin in a Dockerfile is flagged, not silently waived', () => {
+    const dir = makeGitFixture({
+      'apps/docs/Dockerfile':
+        'FROM oven/bun:1.4.0-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000 # oven-bun-pin-exempt: pretend this is reviewed\n',
+    });
+    const { off } = scanOvenBunImageRefs(dir, fixtureTag, fixturePinned);
+    expect(off.some((o) => o.includes('apps/docs/Dockerfile:1'))).toBe(true);
+    expect(off.some((o) => o.includes('LINE_EXEMPT_MARKER is not permitted'))).toBe(true);
+  });
+
+  it('the same marker-exempted line in a non-rejected file (e.g. a .cjs comment) is accepted as before', () => {
+    const dir = makeGitFixture({
+      'lib/example.cjs':
+        '// historical note about oven/bun:1.4.0-alpine // oven-bun-pin-exempt: prose, not a selection\n',
+    });
+    const { off, exempted } = scanOvenBunImageRefs(dir, fixtureTag, fixturePinned);
+    expect(off).toEqual([]);
+    expect(exempted).toBe(1);
+  });
+});
 
 describe(`bun lockstep (#1310) — one Bun (${PINNED_BUN}) everywhere it is selected`, () => {
   it('packageManager pins the lockstep Bun', () => {
@@ -252,35 +372,7 @@ describe(`bun lockstep (#1310) — one Bun (${PINNED_BUN}) everywhere it is sele
   it('every oven/bun image reference is the lockstep tag, pinned by the one digest', () => {
     const tag = `oven/bun:${PINNED_BUN}-alpine`;
     const pinned = `${tag}@${PINNED_BUN_IMAGE_DIGEST}`;
-    let selecting = 0;
-    let exempted = 0;
-    const off: string[] = [];
-    for (const f of imageBearingFiles()) {
-      readFileSync(join(REPO_ROOT, f), 'utf8')
-        .split('\n')
-        .forEach((line, i) => {
-          if (line.includes(LINE_EXEMPT_MARKER)) {
-            if (/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/.test(line)) exempted++;
-            return;
-          }
-          // A concrete reference: `oven/bun:<tag>` and/or `@sha256:`. The
-          // `oven/bun:*-alpine` wildcard and a bare `oven/bun` ("oven/bun ships
-          // bun") are prose. A tag never ends in `.` (sentence punctuation).
-          // `#` (shell/YAML), `//` (JS/TS/CJS), and `*` (a JSDoc/block-comment
-          // CONTINUATION line, e.g. ` * ...`) — now in scope since the scan
-          // widened past scripts/*.sh to every tracked text file, #1318/#1392.
-          const isComment = /^\s*(#|\/\/|\*)/.test(line);
-          for (const m of line.matchAll(/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/g)) {
-            if (m[0] === 'oven/bun') continue;
-            // A comment may NAME the image without its digest, but must name
-            // the lockstep tag; anything that is not a comment SELECTS the
-            // image and must carry the one digest.
-            const ok = isComment ? m[0] === tag || m[0] === pinned : m[0] === pinned;
-            if (!isComment) selecting++;
-            if (!ok) off.push(`${f}:${i + 1}: ${m[0]}`);
-          }
-        });
-    }
+    const { selecting, exempted, off } = scanOvenBunImageRefs(REPO_ROOT, tag, pinned);
     expect(selecting).toBeGreaterThan(0);
     // Proves the exemption mechanism is actually exercised by the real repo
     // (not just theoretically wired) — a `LINE_EXEMPT_MARKER` with nothing
