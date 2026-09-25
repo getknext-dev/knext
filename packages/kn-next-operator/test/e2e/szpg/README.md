@@ -93,8 +93,20 @@ serve/seed steps; the default is the deliberately-unpullable placeholder), `KEEP
 
 ## Known drill gotchas (baked in)
 
-- `docker.io/minio/mc` is **access-denied**; the harness retags `quay.io/minio/mc`
-  and `kind load`s it so the storage-init bucket step never blocks.
+- `docker.io/minio/mc` and `quay.io/minio/mc` are **both access-denied** for
+  anonymous pull, repo-wide (#1403). THROWAWAY drill/CI fixtures were repinned to
+  `docker.io/bitnamilegacy/minio-client@<digest>`, which still pulls anonymously;
+  the harness pre-pulls + `kind load`s it as cheap insurance against a flaky
+  mid-drill pull.
+- **This drill currently `ImagePullBackOff`s regardless of the above.**
+  `deploy_szpg_plane()` applies the szpg `deploy/` directory verbatim, which
+  includes the **live** szpg manifests `50-minio.yaml` (still pins the now-unpullable
+  `quay.io/minio/minio`) and `62-backup.yaml` / `55-storage-init.yaml` (still pin the
+  bare, now-unpullable `minio/mc:RELEASE.2023-01-28T20-29-38Z`). Those three are
+  intentionally out of scope for a knext-side CI fix and are tracked in
+  szpg's own review at [getknext-dev/knext#1423](https://github.com/getknext-dev/knext/issues/1423).
+  The pre-pull/kind-load above covers only the `mc` CLIENT image used elsewhere in
+  the harness — it does not make the storage plane pullable.
 - Several `deploy/_verify-*.sh` default `KCTX` / `KSPG_CONTEXT` to the **OKE
   production** context. The harness exports both to the kind context and uses a
   throwaway `KUBECONFIG`, so a "local" drill can never touch a real cluster.

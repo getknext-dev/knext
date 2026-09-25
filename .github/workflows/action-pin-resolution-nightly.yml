@@ -120,6 +120,15 @@ jobs:
     permissions:
       issues: write
     steps:
+      # #1406 — this job's own steps shell out to scripts/nightly-alert-issue.mjs,
+      # which requires the repo to be checked out; nothing upstream shares a
+      # checkout across jobs. Anonymous, same as the sibling job above: this
+      # step reads nothing GH_TOKEN-scoped from the checkout itself.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Create or update the "Action pin SHA↔tag mismatch" issue (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -165,18 +174,72 @@ jobs:
             drop it. Typical cause: a major bump that renamed inputs.
 
           Re-run this workflow to confirm green, then close this issue."
-          # Idempotency: exactly-one open alert issue. --limit 100 explicitly
-          # (gh defaults to 30) so the pinned alert cannot fall off the first
-          # page and make every red night file a NEW issue.
+          # #1347 — create-or-update via the shared, never-pinning helper.
+          # This alert used to `gh issue pin` its own issue, racing 9 OTHER
+          # nightly workflows for GitHub's hard 3-pinned-issue cap (a failed
+          # pin was only `::warning::`, so a red beyond the third pinned
+          # issue went genuinely unseen). See scripts/lib/nightly-alert-issue.mjs.
+          # (The pre-#1347 inline block this replaced also gained a
+          # `--limit 100` idempotency fix independently on `main` — that
+          # same fix already lives in `ensureAlertIssue` itself, so nothing
+          # is lost by delegating here.)
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs
+
+  # ── #1211 item 2 — the crane version+checksum pin, folded into this nightly
+  # rather than a new workflow. The pin (`scripts/lib/crane-pin.mjs`'s
+  # scan+lockstep+upstream-comparison logic; `scripts/verify-crane-pin.mjs`'s
+  # thin CLI wrapper) is a DIFFERENT resolution shape than the action-SHA↔tag
+  # check above — a downloaded release binary's checksum, not a `uses:` pin's
+  # SHA — so it stays its own job/script rather than being folded into
+  # `verify-action-pins.mjs` itself, but shares this workflow's cadence and
+  # idempotent-alert pattern deliberately: previously, every copy of the pin
+  # (four, today — the operator-e2e-nightly preflight job, its scale job,
+  # supply-chain.yml, operator-supply-chain.yml) was guarded only by STEP
+  # NAME (`tests/operator-e2e-scale-image-preflight.test.ts`), never the
+  # pin's actual VALUE. `tests/crane-pin-lockstep.test.ts` is the PR-gated
+  # half (every copy must be byte-identical); this job is the nightly half
+  # (the shared value must match what the pinned CRANE_VERSION release
+  # ACTUALLY published) — same division as the action-pin check above.
+  verify-crane-pin:
+    name: Verify the crane version+checksum pin against upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify crane pin lockstep + upstream checksum (FAIL on any finding)
+        run: node scripts/verify-crane-pin.mjs
+
+  crane-pin-red-alert:
+    name: Crane pin nightly red alert (never pinned — #1347)
+    needs: [verify-crane-pin]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.verify-crane-pin.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Crane pin checksum verification RED" issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='Crane pin checksum verification RED'
+          body="The nightly crane pin check FAILED: either the pin's version+checksum has drifted between the 4 copies across .github/workflows/** (lockstep), or the pinned checksum no longer matches the real checksums.txt the pinned CRANE_VERSION release published (upstream). Read the job log for which. Run: ${RUN_URL}"
           existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
             --json number,title \
             --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
           if [ -n "${existing}" ]; then
-            echo "updating existing alert issue #${existing}"
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
           else
-            echo "creating the alert issue"
-            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
-            new_num="${new_url##*/}"
-            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" >/dev/null
+            # Deliberately NOT pinned — see #1347 (pin-slot competition; this
+            # workflow's OWN action-pin alert above already holds a pin slot).
           fi

@@ -1,6 +1,6 @@
 {
   "$comment": "Reviewed computed require/import call sites in the Next.js server core (the literal closure of `next` and `next/dist/server/lib/start-server`). The compiled standalone executable's disk-closure scan cannot follow these. Each reason says why the site cannot load a second instance of a module the executable bundles. A Next upgrade that changes this set fails standalone-computed-requires.test.ts: re-review the changed sites before updating this file.",
-  "reviewedAgainstNext": "16.3.3",
+  "reviewedAgainstNext": "16.3.5",
   "sites": {
     "dist/build/get-babel-loader-config.js": {
       "count": 1,

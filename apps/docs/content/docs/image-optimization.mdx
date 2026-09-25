@@ -76,6 +76,12 @@ path of the `.node` file inside its `@img` tree.
 selection is baked into that binary — rebuild and redeploy with the current `knext build` to get
 working image optimization; no configuration change is needed.
 
+The `runtime: 'node'` target (uncompiled vinext on Node, not the default single executable) gets
+the same treatment: `kn-next build` restages sharp's package and its platform addon into the
+image's build output on every build, so the same platform mismatch a macOS build host would
+otherwise produce is fixed automatically. An app scaffolded before this behaviour existed has an
+older `knext-node-entry.mjs`; replace it with the one from a freshly created app to pick it up.
+
 <Callout type="warn">
 **If your app imports sharp and its addon cannot load, the pod does not start** — the generated
 server entry imports sharp at boot, so a missing or wrong-platform addon is a startup failure with
