@@ -52,6 +52,11 @@
  *      BEFORE the (deliberately error-tolerant) AST walk — must let an
  *      unterminated string/regex silently fall through to a best-effort,
  *      possibly-wrong parse instead of refusing outright.
+ *  10. #1422 — `NAMED_EXCEPTIONS` in
+ *      `tests/compat-window-fingerprint-execution-scan.test.ts` must stay
+ *      SCOPED PER LANE via `permanentPathsForLane`, not applied globally.
+ *      Reverting `permanentPathsForLane` to ignore `lane` (the pre-#1422
+ *      shape) must go RED against its own direct unit coverage.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -80,6 +85,10 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FINGERPRINT = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
+const EXECUTION_SCAN_SPEC_PATH = resolve(
+  REPO_ROOT,
+  'tests/compat-window-fingerprint-execution-scan.test.ts',
+);
 const SPECS = [
   'tests/compat-window-fingerprint.test.ts',
   'tests/compat-vinext-lane.test.ts',
@@ -88,7 +97,7 @@ const SPECS = [
   'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(9);
+declareMutations(10);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -117,6 +126,32 @@ let fail = 0;
 function prove(label, anchor, replacement) {
   console.log(`── mutation: ${label}`);
   const snap = snapshot(FINGERPRINT);
+  try {
+    mutate(snap, anchor, replacement);
+    if (specsPass()) {
+      console.log('   x DECORATION: the specs stayed GREEN with the behaviour removed');
+      fail += 1;
+    } else {
+      console.log('   ok went RED as required');
+      pass += 1;
+    }
+    recordMutation();
+  } finally {
+    restore(snap);
+  }
+  if (!specsPass()) {
+    console.error(`   FATAL: ${SPECS.join(', ')} did not go green again after restore`);
+    process.exit(1);
+  }
+}
+
+// #1422 — same contract as `prove` above, but the subject is
+// EXECUTION_SCAN_SPEC_PATH (the execution-scan spec's own guard logic, not
+// FINGERPRINT). A SEPARATE function, not a `target` parameter on `prove`,
+// for the same static-audit reason documented above `prove`.
+function proveOnExecutionScanSpec(label, anchor, replacement) {
+  console.log(`── mutation: ${label}`);
+  const snap = snapshot(EXECUTION_SCAN_SPEC_PATH);
   try {
     mutate(snap, anchor, replacement);
     if (specsPass()) {
@@ -239,6 +274,17 @@ prove(
   'the syntax-error fail-closed check is disarmed: a file that does not parse is walked anyway',
   'if (syntaxErrors.length > 0) {',
   'if (false) {',
+);
+
+// 10. #1422 — `permanentPathsForLane` must actually filter by `lane`, not
+//     return the whole NAMED_EXCEPTIONS array regardless of which lane was
+//     asked for (the pre-#1422 shape). Caught directly by the
+//     "unlisted lane does NOT inherit" unit test, independent of whichever
+//     real repo files the harness happens to reference today.
+proveOnExecutionScanSpec(
+  'permanentPathsForLane stops filtering by lane: returns every NAMED_EXCEPTIONS path regardless of lane (#1422)',
+  'function permanentPathsForLane(lane: string): Set<string> {\n  return new Set(NAMED_EXCEPTIONS.filter((e) => e.lanes.includes(lane)).map((e) => e.path));\n}',
+  'function permanentPathsForLane(_lane: string): Set<string> {\n  return new Set(NAMED_EXCEPTIONS.map((e) => e.path));\n}',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
