@@ -120,9 +120,16 @@ function gitignoreReallyIgnores(gitignoreContent, relPath) {
     const target = join(scratch, relPath);
     execFileSync('mkdir', ['-p', dirname(target)]);
     writeFileSync(target, '// probe\n', 'utf8');
-    const result = spawnSync('git', ['check-ignore', '--quiet', relPath], {
-      cwd: scratch,
-    });
+    // `-c core.excludesFile=/dev/null`: without it, `git check-ignore` also
+    // consults the RUNNING MACHINE's global excludes file — a developer (or
+    // CI image) whose global gitignore already covers `.env` would make this
+    // probe pass regardless of what the scaffold's OWN `.gitignore` says,
+    // silently certifying nothing.
+    const result = spawnSync(
+      'git',
+      ['-c', 'core.excludesFile=/dev/null', 'check-ignore', '--quiet', relPath],
+      { cwd: scratch },
+    );
     return result.status === 0;
   } finally {
     rmSync(scratch, { recursive: true, force: true });
