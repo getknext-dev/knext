@@ -14,8 +14,8 @@ import type { NextConfig } from "next";
  *
  * `adapterPath` wires the official Next.js Deployment Adapter
  * (`./next-adapter.ts` → `@getknext/core/adapter`) — this is what injects the
- * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on (#342),
- * and what reports build completion back to `knext build`. Building with
+ * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on, and
+ * what reports build completion back to `knext build`. Building with
  * `next build` and NOT wiring this adapter is a silent correctness gap, not a
  * build failure — don't delete it.
  *
