@@ -95,6 +95,20 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
     join(root, 'test/compat-vinext-ledger.json'),
     '{"lane":"bun-vinext","entries":[]}\n',
   );
+  // #1257: every cell also declares the musl-native-addon lockfile lookup
+  // helper and the committed lockfiles themselves (MUSL_NATIVE_LOCKFILE_FILES,
+  // scripts/compat-window-audit.mjs) — same "every fixture used against the
+  // default lane needs them present" rule as the credential-ref files above.
+  mkdirSync(join(root, 'scripts/lib'), { recursive: true });
+  writeFileSync(join(root, 'scripts/lib/musl-lockfile-lookup.sh'), '#!/bin/sh\n');
+  for (const pkgDir of [
+    'img-sharp-linuxmusl-x64-0.34.5',
+    'img-sharp-libvips-linuxmusl-x64-1.2.4',
+  ]) {
+    mkdirSync(join(root, 'scripts/musl-native-lockfiles', pkgDir), { recursive: true });
+    writeFileSync(join(root, 'scripts/musl-native-lockfiles', pkgDir, 'package.json'), '{}\n');
+    writeFileSync(join(root, 'scripts/musl-native-lockfiles', pkgDir, 'package-lock.json'), '{}\n');
+  }
 
   const tarballsDir = tempDir('knext-fp-tarballs-');
   for (const [name, version] of [

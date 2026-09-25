@@ -535,11 +535,25 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     # deps INSIDE the alpine stage. Match that here: best-effort, so a
     # rebuild failure for one fixture's addon does not brick the whole bun
     # lane (see scripts/e2e-native-rebuild-musl.sh's header).
+    # musl-native-lockfiles/ (#1257): each committed lockfile FILE mounted
+    # individually, not the whole directory — CREDENTIAL_CELLS.extraFiles
+    # (scripts/compat-window-audit.mjs) freezes declared FILES, and this
+    # repo's convention is that adding a new pinned lockfile is itself a
+    # reviewed, credential-window-affecting change (mirrored there as
+    # MUSL_NATIVE_LOCKFILE_FILES — keep both lists in lockstep). Docker
+    # creates the intermediate directories for each mount, so the script's
+    # lookup logic (LOCKFILES_DIR/<key>/package.json) sees the same tree
+    # shape as a single directory mount would have produced.
     docker run --rm \
       -v "${STANDALONE_ROOT}:${STANDALONE_ROOT}" \
       -v "${SCRIPT_DIR}/e2e-native-rebuild-musl.sh:/e2e-native-rebuild-musl.sh:ro" \
+      -v "${SCRIPT_DIR}/lib/musl-lockfile-lookup.sh:/lib/musl-lockfile-lookup.sh:ro" \
+      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package.json:/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package.json:ro" \
+      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json:/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json:ro" \
+      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json:/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json:ro" \
+      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:ro" \
       "${STANDALONE_BUN_IMAGE}" \
-      sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" >&2
+      sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" /musl-native-lockfiles >&2
   else
     log "ERROR: KNEXT_E2E_SKIP_PACK=1 has no installed adapter to resolve the compile script from, but RUNTIME=bun was requested — refusing to silently fall back to server.js (contract-test mode is not expected to combine these)"
     exit 1

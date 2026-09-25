@@ -178,8 +178,13 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
   it('e2e-native-rebuild-musl.sh is best-effort per package (a rebuild failure warns, never aborts the whole script)', () => {
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
     expect(/^set -eu$/m.test(rebuildSrc)).toBe(true);
+    // #1257 round 7 — the fresh-install branch now lives inside an `else`
+    // (the pinned-lockfile `npm ci` branch runs first when a committed
+    // lockfile matches), and the install itself runs via `run_as_builder`
+    // (su-exec'd to the unprivileged `builder` user) rather than directly
+    // as root.
     expect(
-      /if ! \(cd "\$\{PKG_SCRATCH\}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
+      /if ! \(cd "\$\{PKG_SCRATCH\}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
         rebuildSrc,
       ),
       'a per-package fresh-install failure must be caught (the `if !` guard), not let a failing `npm install` kill the whole script under set -e',
@@ -256,12 +261,15 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
 
   it('e2e-native-rebuild-musl.sh sends apk output to stderr, not /dev/null (round-6 review finding — set -eu gave an opaque abort on an apk failure)', () => {
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    // #1257 round 7 — `su-exec` joined the apk package list (needed to drop
+    // root before any install-time code runs); the stdout-only-silenced
+    // shape this test protects is otherwise unchanged.
     expect(
-      /apk add --no-cache python3 make g\+\+ npm >\/dev\/null$/m.test(rebuildSrc),
+      /apk add --no-cache python3 make g\+\+ npm su-exec >\/dev\/null$/m.test(rebuildSrc),
       'apk stdout may still be silenced, but stderr must flow (no trailing 2>&1 redirecting it into /dev/null too) so a failure under set -eu is diagnosable',
     ).toBe(true);
     expect(
-      rebuildSrc.includes('apk add --no-cache python3 make g++ npm >/dev/null 2>&1'),
+      rebuildSrc.includes('apk add --no-cache python3 make g++ npm su-exec >/dev/null 2>&1'),
       'the old shape swallowed BOTH streams — must be gone',
     ).toBe(false);
   });
