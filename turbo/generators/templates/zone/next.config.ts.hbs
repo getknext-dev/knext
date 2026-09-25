@@ -24,13 +24,13 @@ import type { NextConfig } from "next";
  * cache directory to mount, and no warm-up step. It ships inside the artifact.
  *
  * `generateBuildId` is knext's own wiring (ADR-0011 skew protection).
- * `kn-next deploy` exports NEXT_DEPLOYMENT_ID = the deploy tag BEFORE the
+ * `knext deploy` exports NEXT_DEPLOYMENT_ID = the deploy tag BEFORE the
  * build. vinext reads that env var by itself for `?dpl=` asset suffixing, but
  * the STATIC NAMESPACE (`_next/static/<id>/`) comes from `generateBuildId` —
  * and with no `generateBuildId`, vinext falls back to a random UUID. That UUID
  * is a namespace nothing can resolve: the asset GC protects live builds by the
  * deploy tag it reads off a revision label, so a UUID prefix can never be
- * matched, marked, or reclaimed. Returning null outside `kn-next deploy` (a
+ * matched, marked, or reclaimed. Returning null outside `knext deploy` (a
  * plain `vite build`) keeps vinext's UUID fallback, so local builds are
  * unchanged.
  */

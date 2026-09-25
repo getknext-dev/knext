@@ -15,7 +15,7 @@ import {
 /**
  * Guards the REDIS_KEY_PREFIX drift surfaced by the architecture review (#2):
  * the manifest generator sets REDIS_KEY_PREFIX to the app name, but the
- * cache-handler falls back to 'kn-next' when the var is unset. If that fallback
+ * cache-handler falls back to 'knext' when the var is unset. If that fallback
  * happens silently while Redis is in use, ISR keys land in a different keyspace
  * than the rest of the app's pods. The cache-handler now warns loudly instead.
  *

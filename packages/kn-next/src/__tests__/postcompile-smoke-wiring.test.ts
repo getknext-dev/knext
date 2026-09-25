@@ -1,5 +1,5 @@
 /**
- * #894 — the smoke is WIRED into `kn-next build`, fail-closed.
+ * #894 — the smoke is WIRED into `knext build`, fail-closed.
  *
  * The module next door proves the smoke can see each obligation go missing.
  * That is worth nothing if nothing calls it, or if a failed call is swallowed,

@@ -1,5 +1,5 @@
 /**
- * `kn-next doctor` — NetworkPolicy-enforcement check (#744).
+ * `knext doctor` — NetworkPolicy-enforcement check (#744).
  *
  * The operator reconciles a default-on NetworkPolicy, but flannel (OKE GA,
  * OrbStack) ships no NetworkPolicy controller — there the policy is

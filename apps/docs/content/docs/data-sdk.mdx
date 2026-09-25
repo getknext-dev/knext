@@ -20,7 +20,7 @@ The package has three public subpaths:
 |---|---|
 | `@getknext/db` | Re-exports `drizzle-orm` (query builder, `eq`/`and`/`or`/`desc`/`sql`, …) plus the client accessors `getDb()` / `getDbRO()`. |
 | `@getknext/db/schema` | The schema surface — a thin re-export of drizzle's `pg-core` builders plus `relations`/`sql`, and the extension helpers. |
-| `@getknext/db/migrate` | `defineDrizzleConfig()` for your `drizzle.config.ts`, plus the engine behind `kn-next db migrate`. |
+| `@getknext/db/migrate` | `defineDrizzleConfig()` for your `drizzle.config.ts`, plus the engine behind `knext db migrate`. |
 
 ```bash
 npm i @getknext/db
@@ -89,12 +89,12 @@ npx drizzle-kit generate     # diff schema → ./drizzle/*.sql — commit these
 `generate` needs no live database (an unset `DATABASE_URL` still produces SQL). **Commit
 `./drizzle`** — the generated SQL is your migration history.
 
-### Apply — `kn-next db migrate`
+### Apply — `knext db migrate`
 
 ```bash
-kn-next db migrate                       # apply ./drizzle against the writer DATABASE_URL
-kn-next db migrate --dir ./migrations    # custom migrations directory
-kn-next db migrate --url "$WRITER_DSN"   # explicit writer DSN override
+knext db migrate                       # apply ./drizzle against the writer DATABASE_URL
+knext db migrate --dir ./migrations    # custom migrations directory
+knext db migrate --url "$WRITER_DSN"   # explicit writer DSN override
 ```
 
 - **Writer-only.** The runner resolves `DATABASE_URL` and **refuses** a read-replica DSN — a
@@ -127,7 +127,7 @@ spec:
       containers:
         - name: migrate
           image: registry.example/acme:<same-digest-as-the-deploy>
-          command: ['kn-next', 'db', 'migrate']
+          command: ['knext', 'db', 'migrate']
           env:
             # The WRITER DSN — the same Secret the operator injects into the app.
             # Writer only: never wire DATABASE_URL_RO here (the runner refuses it).
