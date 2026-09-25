@@ -117,12 +117,66 @@ const MUTATIONS = [
     replacement:
       '`[knext compiled] wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})`,',
   },
+  {
+    // #1421 review round 2 (jev 0.82), bypass 1 — the OLD scanner silently
+    // SKIPPED a non-literal first argument instead of treating it as an
+    // offender. Break the exact-match allowlist for the one legitimate
+    // non-literal site (an extra space inside `String( log)`) so it is no
+    // longer `console.error(String(log))` verbatim — the fixed scanner must
+    // now flag it (null literalPrefix, not allowlisted); the old "exclude
+    // every null" scanner would have stayed silently green forever.
+    label:
+      'vinext-compile.mjs: break the exact allowlist match on the one legitimate non-literal call (#1421 review round 2, bypass 1)',
+    subject: 'vinextCompileMjs',
+    spec: SCAN_SPEC,
+    anchor: 'for (const log of result.logs) console.error(String(log));',
+    replacement: 'for (const log of result.logs) console.error(String( log));',
+  },
+  {
+    // #1421 review round 2, bypass 2 — the OLD regex only matched
+    // console.(log|warn|error), so console.info/console.debug were never
+    // scanned at all. Switch one real, prefixed console.log call to
+    // console.info AND drop its prefix — the fixed scanner (any console
+    // method) must catch it; the old regex would never have looked.
+    label:
+      'vinext-compile.mjs: console.info call with no prefix, a method the old regex never matched (#1421 review round 2, bypass 2)',
+    subject: 'vinextCompileMjs',
+    spec: SCAN_SPEC,
+    anchor:
+      '                console.log(\n' +
+      '                    `[knext compile] bundling ${staticized.rewritten.length} package(s) the entry ` +\n' +
+      '                        `loads via createRequire(import.meta.url): ${staticized.rewritten.join(", ")}`,\n' +
+      '                );',
+    replacement:
+      '                console.info(\n' +
+      '                    `bundling ${staticized.rewritten.length} package(s) the entry ` +\n' +
+      '                        `loads via createRequire(import.meta.url): ${staticized.rewritten.join(", ")}`,\n' +
+      '                );',
+  },
+  {
+    // #1421 review round 2, bypass 3 — process.stdout.write was never
+    // scanned at all, an entirely different call shape from console.*.
+    // Replace the final, prefixed console.log with an unprefixed
+    // process.stdout.write — the fixed scanner must catch it.
+    label:
+      'vinext-compile.mjs: process.stdout.write with no prefix, a call shape console.* scanning cannot cover (#1421 review round 2, bypass 3)',
+    subject: 'vinextCompileMjs',
+    spec: SCAN_SPEC,
+    anchor:
+      'console.log(\n' +
+      '    `[knext compile] wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})`,\n' +
+      ');',
+    replacement:
+      'process.stdout.write(\n' +
+      '    `wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})\\n`,\n' +
+      ');',
+  },
 ];
 
-declareMutations(6);
+declareMutations(9);
 
-if (MUTATIONS.length !== 6) {
-  console.error(`FATAL: declared 6 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 9) {
+  console.error(`FATAL: declared 9 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
