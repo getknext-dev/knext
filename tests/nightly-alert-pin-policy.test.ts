@@ -51,17 +51,25 @@ const SCRIPTS_DIR = resolve(REPO_ROOT, 'scripts');
 const PIN_ALLOWLIST = new Set(['scripts/compat-matrix-tracker.mjs']);
 
 /**
- * Signals that PIN an issue, whichever of the three shapes this repo's `gh`
- * callables use: the shell CLI text (`gh issue pin ...`), the GraphQL
- * mutation (`pinIssue(...)`, the tracker's own mechanism), or an
- * ARRAY-ARGUMENT `gh` call — `gh(['issue', 'pin', ...])`, the shape
- * `scripts/lib/nightly-alert-issue.mjs`'s own `gh` callable takes (every
- * `gh(...)` invocation in this repo's `.mjs` scripts passes an args array,
- * never a shell string) — a mutation-proved gap: the first two signals alone
- * let a hypothetical `gh(['issue', 'pin', ...])` inside the shared helper
- * pass the scan silently.
+ * Signals that PIN an issue, whichever of the four shapes this repo's `gh`
+ * callables use: the shell CLI text (`gh issue pin ...`), the same CLI text
+ * with FLAGS interposed before `issue pin` (`gh --repo X issue pin ...` —
+ * `gh`'s own flag placement is not fixed, so a global flag can sit anywhere
+ * before the subcommand; the first, literal-adjacency signal alone misses
+ * this, per #1406 review round 2), the GraphQL mutation (`pinIssue(...)`,
+ * the tracker's own mechanism), or an ARRAY-ARGUMENT `gh` call —
+ * `gh(['issue', 'pin', ...])`, the shape `scripts/lib/nightly-alert-issue.mjs`'s
+ * own `gh` callable takes (every `gh(...)` invocation in this repo's `.mjs`
+ * scripts passes an args array, never a shell string) — a mutation-proved gap:
+ * the first two signals alone let a hypothetical `gh(['issue', 'pin', ...])`
+ * inside the shared helper pass the scan silently.
  */
-const PIN_SIGNALS = [/\bgh issue pin\b/, /\bpinIssue\s*\(/, /['"]issue['"]\s*,\s*['"]pin['"]/];
+const PIN_SIGNALS = [
+  /\bgh issue pin\b/,
+  /\bgh\b[^\n]*\bissue\s+pin\b/,
+  /\bpinIssue\s*\(/,
+  /['"]issue['"]\s*,\s*['"]pin['"]/,
+];
 
 function stripJsComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -111,16 +119,63 @@ function isMutationProver(relPath: string): boolean {
   return /^scripts\/mutation-prove-[^/]+\.mjs$/.test(relPath);
 }
 
+/**
+ * #1406 review round 2 — widened from `.mjs`-only. A pin bypass planted in a
+ * `.sh` helper `scripts/*.mjs` shells out to, or in a `.ts` file under
+ * `scripts/lib/`, was invisible to the original scan; the extension set now
+ * covers every language this repo's `scripts/` tree actually uses for CI
+ * logic.
+ */
+const SCRIPT_EXTENSIONS = ['.mjs', '.sh', '.js', '.ts'];
+
+function hasScannedExtension(name: string): boolean {
+  return SCRIPT_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
 function listScriptFiles(dir: string, prefix: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       out.push(...listScriptFiles(resolve(dir, entry.name), `${prefix}${entry.name}/`));
-    } else if (entry.name.endsWith('.mjs') && !isMutationProver(`${prefix}${entry.name}`)) {
+    } else if (hasScannedExtension(entry.name) && !isMutationProver(`${prefix}${entry.name}`)) {
       out.push(`${prefix}${entry.name}`);
     }
   }
   return out;
+}
+
+/**
+ * `.github/actions/` — this repo's composite-action directory — is scanned
+ * too (#1406 review round 2): a composite action's own `action.yml` can run
+ * a pin just as a workflow step can, and it lived entirely outside the
+ * original `scripts/`-only scan. Includes `.yml`/`.yaml` (composite-action
+ * manifests) on top of the script extensions above. Tolerates the directory
+ * not existing yet (it doesn't, today) rather than erroring — the scan must
+ * still run clean on a tree with no composite actions.
+ */
+function listActionFiles(): string[] {
+  const dir = resolve(REPO_ROOT, '.github/actions');
+  const walk = (d: string, prefix: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        out.push(...walk(resolve(d, entry.name), `${prefix}${entry.name}/`));
+      } else if (
+        hasScannedExtension(entry.name) ||
+        entry.name.endsWith('.yml') ||
+        entry.name.endsWith('.yaml')
+      ) {
+        out.push(`${prefix}${entry.name}`);
+      }
+    }
+    return out;
+  };
+  try {
+    return walk(dir, '.github/actions/');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
 }
 
 /** `{ relPath, effectiveText }` for every workflow, comments stripped via re-serialisation. */
@@ -133,11 +188,33 @@ function scanWorkflows(): Array<{ relPath: string; effectiveText: string }> {
   }));
 }
 
-/** Same, for every script file under scripts/ — comments stripped. */
+/**
+ * `#`-comment stripping for `.sh` (and `.yml`/`.yaml` composite-action
+ * manifests) vs `//`/`/* *\/`-comment stripping for `.mjs`/`.js`/`.ts` —
+ * picked by extension so a `.sh` file's bash comments (which a JS stripper
+ * cannot see) don't survive into the scan the way the YAML `run:` block
+ * case above required `stripBashCommentLines` for.
+ */
+function stripCommentsFor(relPath: string, text: string): string {
+  if (relPath.endsWith('.sh') || relPath.endsWith('.yml') || relPath.endsWith('.yaml')) {
+    return stripBashCommentLines(text);
+  }
+  return stripJsComments(text);
+}
+
+/** Same, for every script file under scripts/ (all scanned extensions) — comments stripped. */
 function scanScripts(): Array<{ relPath: string; effectiveText: string }> {
   return listScriptFiles(SCRIPTS_DIR, 'scripts/').map((relPath) => ({
     relPath,
-    effectiveText: stripJsComments(readFileSync(resolve(REPO_ROOT, relPath), 'utf8')),
+    effectiveText: stripCommentsFor(relPath, readFileSync(resolve(REPO_ROOT, relPath), 'utf8')),
+  }));
+}
+
+/** Same, for every file under `.github/actions/` — comments stripped. */
+function scanActions(): Array<{ relPath: string; effectiveText: string }> {
+  return listActionFiles().map((relPath) => ({
+    relPath,
+    effectiveText: stripCommentsFor(relPath, readFileSync(resolve(REPO_ROOT, relPath), 'utf8')),
   }));
 }
 
@@ -170,6 +247,33 @@ describe('#1347 — exactly one file may pin an issue (scan, not an enumerated l
       offenders,
       `these script(s) pin an issue outside the allowlist: ${offenders.join(', ')}`,
     ).toEqual([]);
+  });
+
+  it('no file under .github/actions/ calls `gh issue pin` or `pinIssue(` (#1406 review round 2)', () => {
+    const offenders = scanActions()
+      .filter((a) => PIN_SIGNALS.some((re) => re.test(a.effectiveText)))
+      .filter((a) => !PIN_ALLOWLIST.has(a.relPath))
+      .map((a) => a.relPath);
+    expect(
+      offenders,
+      `these composite-action file(s) pin an issue outside the allowlist: ${offenders.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('widened signal: catches a global flag interposed before `issue pin` (#1406 review round 2)', () => {
+    // The literal-adjacency signal (`\bgh issue pin\b`) alone misses this —
+    // `gh`'s flags are not fixed-position, so a bypass can sit a flag
+    // between the binary and the subcommand and slip the original scan.
+    const bypass = 'gh --repo getknext-dev/knext issue pin 123';
+    expect(PIN_SIGNALS.some((re) => re.test(bypass))).toBe(true);
+  });
+
+  it('widened extension scan: real .sh files under scripts/ are actually included (non-vacuity, #1406 review round 2)', () => {
+    // Not just "the filter compiles" — prove it against the real tree: a
+    // known .sh file must come back from the walk, or the widening from
+    // `.mjs`-only is decoration.
+    const scriptFiles = listScriptFiles(SCRIPTS_DIR, 'scripts/');
+    expect(scriptFiles).toContain('scripts/e2e-logs.sh');
   });
 
   it('every allowlisted entry names a file that still exists AND still actually pins something (no stale entries)', () => {

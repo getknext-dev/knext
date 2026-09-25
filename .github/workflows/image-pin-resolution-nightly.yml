@@ -92,6 +92,14 @@ jobs:
     permissions:
       issues: write
     steps:
+      # #1406 — this job's own steps shell out to scripts/nightly-alert-issue.mjs,
+      # which requires the repo to be checked out; nothing upstream shares a
+      # checkout across jobs.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Create or update the "Operator image pin mismatch" issue (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}

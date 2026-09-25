@@ -93,12 +93,33 @@ const MUTATIONS = [
     replacement:
       "const PIN_ALLOWLIST = new Set(['scripts/compat-matrix-tracker.mjs', 'scripts/lib/nightly-alert-issue.mjs']);",
   },
+  {
+    // #1406 review round 2, bypass 1: drop the flag-tolerant signal, so a
+    // `gh --repo X issue pin ...` bypass (a global flag interposed before
+    // the subcommand) is invisible to the scan again.
+    label: 'PIN_SIGNALS: drop the flag-tolerant `gh ... issue pin` regex (bypass 1)',
+    subject: 'policyTest',
+    spec: POLICY_SPEC,
+    anchor:
+      'const PIN_SIGNALS = [\n  /\\bgh issue pin\\b/,\n  /\\bgh\\b[^\\n]*\\bissue\\s+pin\\b/,',
+    replacement: 'const PIN_SIGNALS = [\n  /\\bgh issue pin\\b/,',
+  },
+  {
+    // #1406 review round 2, bypass 2: narrow the scanned extensions back to
+    // `.mjs`-only, so a pin bypass planted in a `.sh`/`.js`/`.ts` file under
+    // `scripts/` is invisible to the scan again.
+    label: 'SCRIPT_EXTENSIONS: narrow back to .mjs-only (bypass 2)',
+    subject: 'policyTest',
+    spec: POLICY_SPEC,
+    anchor: "const SCRIPT_EXTENSIONS = ['.mjs', '.sh', '.js', '.ts'];",
+    replacement: "const SCRIPT_EXTENSIONS = ['.mjs'];",
+  },
 ];
 
-declareMutations(6);
+declareMutations(8);
 
-if (MUTATIONS.length !== 6) {
-  console.error(`FATAL: declared 6 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 8) {
+  console.error(`FATAL: declared 8 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
