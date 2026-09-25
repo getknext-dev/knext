@@ -87,8 +87,20 @@ jobs:
         run: |
           set -euo pipefail
           bun test tests/actionlint-workflow.test.ts --reporter=junit --reporter-outfile=actionlint-test-results.xml
+          if [ ! -f actionlint-test-results.xml ]; then
+            echo "::error::actionlint-test-results.xml was not produced by the test run — cannot verify the skip count, failing closed rather than assuming 0 skips."
+            exit 1
+          fi
           skipped="$(grep -m1 '<testsuites ' actionlint-test-results.xml | grep -oE 'skipped="[0-9]+"' | grep -oE '[0-9]+' || true)"
-          skipped="${skipped:-0}"
+          if [ -z "${skipped}" ]; then
+            echo "::error::no skipped=\"N\" attribute found on the <testsuites> line of actionlint-test-results.xml — failing closed rather than assuming 0 skips (a missing attribute is not the same as a verified zero)."
+            exit 1
+          fi
+          tests="$(grep -m1 '<testsuites ' actionlint-test-results.xml | grep -oE 'tests="[0-9]+"' | grep -oE '[0-9]+' || true)"
+          if [ -z "${tests}" ] || [ "${tests}" -eq 0 ]; then
+            echo "::error::actionlint-test-results.xml reports zero tests — the suite did not actually run, failing closed rather than treating an empty run as a pass."
+            exit 1
+          fi
           if [ "${skipped}" -ne 0 ]; then
             echo "::error::${skipped} test(s) in tests/actionlint-workflow.test.ts were SKIPPED — that means actionlint was NOT on PATH for this run (the describe.skipIf guard), so this gate's own regression coverage did not execute. Composite action internals are never linted by this gate (see the header note above)."
             exit 1

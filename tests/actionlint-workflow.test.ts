@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -374,6 +375,77 @@ describe('#1397 round 2: CI actually executes the real actionlint tests, and fai
   it('documents the scope caveat: composite action internals are never linted, only the referencing `uses:`', () => {
     const { text } = jobSteps();
     expect(text).toMatch(/composite (action )?internals? (is|are) never linted/i);
+  });
+});
+
+/**
+ * techdebt-3 round — the skip-count parse in the step above FAILS OPEN:
+ * `grep -m1 ... || true` swallows a missing file (grep exits 2, "No such
+ * file or directory") the exact same way it swallows a merely-absent
+ * `skipped="N"` attribute, and `skipped="${skipped:-0}"` then reads either
+ * case as "0 skipped" — a PASS. So a junit reporter that changes its output
+ * shape, or a step that fails to produce the file at all, silently looks
+ * identical to a clean run with nothing skipped. These tests extract the
+ * REAL parsing logic (everything in the step after the `bun test`
+ * invocation, which is exercised separately above) and run it verbatim
+ * under bash against fixture junit files — not a reimplementation that
+ * could drift from what CI actually runs.
+ */
+describe('the skip-count parse fails CLOSED on a missing file, missing attribute, or empty suite (techdebt-3)', () => {
+  function parsingScript(): string {
+    const { steps } = jobSteps();
+    const testStep = steps.find((s) =>
+      /bun test tests\/actionlint-workflow\.test\.ts/.test(String(s.run)),
+    );
+    if (!testStep) throw new Error('test-execution step not found');
+    // Drop the `bun test ...` invocation line itself — that command is
+    // exercised for real elsewhere (round 2's suite) and would need a real
+    // workspace install to run here; everything AFTER it (the parsing this
+    // section targets) is kept verbatim, unedited.
+    return String(testStep.run)
+      .split('\n')
+      .filter((line) => !/^\s*bun test /.test(line))
+      .join('\n');
+  }
+
+  function runParsing(xml: string | null): { status: number | null; stderr: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'actionlint-skip-parse-'));
+    try {
+      if (xml !== null) writeFileSync(join(dir, 'actionlint-test-results.xml'), xml);
+      const r = spawnSync('bash', ['-c', parsingScript()], { cwd: dir, encoding: 'utf8' });
+      return { status: r.status, stderr: r.stderr };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const VALID_CLEAN = '<testsuites tests="4" skipped="0">\n</testsuites>\n';
+  const VALID_SKIPPED = '<testsuites tests="4" skipped="2">\n</testsuites>\n';
+  const NO_SKIPPED_ATTR = '<testsuites tests="4">\n</testsuites>\n';
+  const ZERO_TESTS = '<testsuites tests="0" skipped="0">\n</testsuites>\n';
+
+  it('a clean run (skipped=0, tests>0) exits 0 — no regression on the happy path', () => {
+    expect(runParsing(VALID_CLEAN).status).toBe(0);
+  });
+
+  it('a real skip (skipped>0) still exits 1, as before', () => {
+    const r = runParsing(VALID_SKIPPED);
+    expect(r.status).not.toBe(0);
+  });
+
+  it('the junit file missing entirely fails closed (exit 1), not "0 skipped"', () => {
+    const r = runParsing(null);
+    expect(r.status).not.toBe(0);
+  });
+
+  it('a <testsuites> line with no skipped="N" attribute fails closed, not "0 skipped"', () => {
+    const r = runParsing(NO_SKIPPED_ATTR);
+    expect(r.status).not.toBe(0);
+  });
+
+  it('tests="0" (an empty/never-ran suite) fails closed even with skipped="0"', () => {
+    const r = runParsing(ZERO_TESTS);
+    expect(r.status).not.toBe(0);
   });
 });
 
