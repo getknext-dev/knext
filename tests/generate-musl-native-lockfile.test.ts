@@ -218,4 +218,43 @@ describe('exact-version pin, real network (round-2 finding — the caret-range b
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * Round-3 review finding (techdebt-4): the `*'x'*` substring check
+   * rejects the LETTER x/X anywhere in the version string, contradicting
+   * this file's own header comment ("Reject anything that is not a bare
+   * dotted-numeric version WITH AN OPTIONAL PRERELEASE/BUILD SUFFIX") — a
+   * real, legitimate prerelease tag containing the letter x as part of a
+   * WORD (e.g. `next`, `hex`, `experimental`) is not an x-RANGE wildcard
+   * and must not be rejected. The x-range check must only fire when
+   * `x`/`X` is a whole DOT-DELIMITED SEGMENT (npm's actual `1.2.x` syntax),
+   * never a substring inside an unrelated word.
+   */
+  it('does NOT reject a legitimate prerelease tag that merely CONTAINS the letter x as part of a word (e.g. "1.0.0-next.1") — jev 0.68 finding', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.0.0-next.1']);
+    // Must pass the upfront validation stage — proven by reaching the real
+    // network call (a different, later failure than the validation
+    // rejection), not by asserting overall success (this prerelease
+    // version does not actually exist on the registry, so the network
+    // call itself fails — that failure is fine and expected; what must
+    // NOT happen is the validation-stage rejection).
+    expect(r.stderr).not.toMatch(/not an exact version/);
+    expect(r.stderr).toMatch(/resolving @img/);
+  });
+
+  it('still rejects a REAL x-range even with prerelease-shaped digits around it (e.g. "1.2.x")', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.x']);
+    expect(r.stderr).toMatch(/not an exact version/);
+    expect(r.stderr).not.toMatch(/resolving @img/);
+  });
+
+  it('still rejects a bare "x" or "X" version', () => {
+    for (const v of ['x', 'X']) {
+      const { script } = makeIsolatedCopy();
+      const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', v]);
+      expect(r.stderr).toMatch(/not an exact version/);
+    }
+  });
 });

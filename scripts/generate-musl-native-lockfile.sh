@@ -66,7 +66,21 @@ case "${VERSION}" in
     ;;
 esac
 case "${VERSION}" in
-  *'^'* | *'~'* | *'*'* | *'x'* | *'X'* | *'<'* | *'>'* | *'='* | *' '*)
+  *'^'* | *'~'* | *'*'* | *'<'* | *'>'* | *'='* | *' '*)
+    echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
+    exit 2
+    ;;
+esac
+# An x-RANGE (npm's `1.2.x` / `1.x` / `x` syntax) is only ever a WHOLE
+# dot-delimited segment — round-3 review finding: the previous blanket
+# `*'x'*`/`*'X'*` substring check also rejected any legitimate prerelease
+# tag that merely CONTAINS the letter x inside a word (e.g. `next`, `hex`),
+# contradicting this file's own header promise of an "optional
+# prerelease/build suffix". Wrapping in literal dots turns "1.2.x" into
+# ".1.2.x." (a whole-segment match) while "1.0.0-next.1" becomes
+# ".1.0.0-next.1." (no ".x."/".X." segment anywhere in it).
+case ".${VERSION}." in
+  *'.x.'* | *'.X.'*)
     echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
     exit 2
     ;;
