@@ -39,7 +39,7 @@
  * build` locally first.
  */
 
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
     existsSync,
@@ -752,6 +752,12 @@ describe("deprecated `kn-next` alias (#1369, rev-1380) — same file, told apart
         knNextLink = join(symlinkDir, "kn-next");
         symlinkSync(distBin, knextLink);
         symlinkSync(distBin, knNextLink);
+    });
+
+    afterAll(() => {
+        // `beforeAll` can throw before assigning `symlinkDir` (missing dist
+        // bin) — guard so cleanup itself doesn't crash the suite.
+        if (symlinkDir) rmSync(symlinkDir, { recursive: true, force: true });
     });
 
     it("`kn-next --help` prints the ONE-LINE deprecation notice to stderr, mentioning `knext`", () => {

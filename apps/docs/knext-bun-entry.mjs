@@ -283,7 +283,7 @@ const metricsServer = (() => {
       `[knext] failed to bind the metrics listener on :${METRICS_PORT}` +
         (err?.code ? ` (${err.code})` : '') +
         ' — if this is EADDRINUSE, another listener owns the port; on Knative, queue-proxy' +
-        ' binds :9091 whenever request metrics are enabled. Run `kn-next doctor`' +
+        ' binds :9091 whenever request metrics are enabled. Run `knext doctor`' +
         ' (metrics-port check), or move METRICS_PORT off the queue-proxy-owned ports.',
     );
     throw err;

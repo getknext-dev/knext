@@ -131,7 +131,7 @@ export const MAX_REQUEST_BYTES_ENV = 'KNEXT_MAX_REQUEST_BYTES';
  * (The return type is a `@typedef` rather than an inline object type on purpose:
  * an inline `@returns` object type opens with a doubled brace, which the
  * scaffolder's renderer reads as an unsubstituted placeholder and refuses to
- * emit — so every `kn-next create` would fail on this file. Do not reintroduce
+ * emit — so every `knext create` would fail on this file. Do not reintroduce
  * one, in code OR in a comment; the renderer does not care which.)
  *
  * @param {Record<string, string | undefined>} [env]
