@@ -6,27 +6,35 @@ import {
   REPO_ROOT,
   readManifest,
   templateManifests,
-  workspaceManifests,
 } from './helpers/workspace-manifests';
 
 /**
- * #1402 — every scaffolder's `typescript` pin tracks the workspace's TS 7
- * pin, the same lockstep discipline `template-next-pin.test.ts` (#643) and
- * `template-sharp-pin.test.ts` (#949) already hold for `next` and `sharp`.
+ * #1402 — every scaffolder's `typescript` pin tracks the TS7 range verified
+ * for scaffolded apps, the same lockstep discipline `template-next-pin.test.ts`
+ * (#643) and `template-sharp-pin.test.ts` (#949) already hold for `next` and
+ * `sharp` — just against a DIFFERENT source of truth than those two.
  *
- * The workspace moved to `typescript@^7.0.2` for `tsc` typechecking (the
- * spike in `.claude/research/ts7-migration-plan.md`: TS7's default export
- * drops the classic compiler API, but `tsc` itself typechecks the repo — and
- * a scaffolded app's own `next build` — cleanly and ~5-7x faster). A
- * scaffolder left behind on `^5` would hand new users a slower, unverified
- * toolchain the moment the workspace itself moved past it — exactly the
- * "we bumped the workspace and forgot the template" bug class #643 exists
- * to catch, just for a different dependency.
+ * This is deliberately NOT "derive from the workspace's own `typescript`
+ * pin" the way next/sharp are, and that took a real regression to learn
+ * (`.claude/research/ts7-migration-plan.md`'s corrected finding): the
+ * monorepo's OWN `typescript` devDependency must stay a classic-API-capable
+ * version (`^5.9.3`) because `tsup`'s DTS bundling (`rollup-plugin-dts`)
+ * `require`s the plain `typescript` package directly and needs `ts.sys` — which TS7's
+ * default export does not expose. Bumping the workspace's plain
+ * `typescript` to `^7` broke `packages/{kn-next,lib}`'s `tsup` DTS build
+ * outright (`TypeError: Cannot read properties of undefined (reading
+ * 'useCaseSensitiveFileNames')`), caught only by a REAL `bun install` +
+ * `turbo build` after a prior verification was contaminated by a stale,
+ * manually-placed `node_modules/typescript` directory left over from
+ * ad hoc testing.
  *
- * Derives the expected version from the workspace rather than hardcoding it,
- * for the same reason #643 gives: a hardcoded expectation turns the next
- * bump into a two-place edit, and editing a guard to get green is the
- * failure mode `release-action-pins.test.ts`'s header already names.
+ * A SCAFFOLDED app has no such constraint — it never runs `tsup`, `next
+ * build` does its own typechecking and was independently verified clean and
+ * fast under TS7 — so the template pin tracks the fast `typescript-tsc7`
+ * alias (`npm:typescript@^7.0.2` in the root manifest, added purely to run
+ * the ROOT `typecheck` script's `tsc` binary quickly) rather than the
+ * workspace's own `typescript` field. Deriving from that alias, rather than
+ * hardcoding `^7.0.2` here, keeps a future TS7 bump a one-place edit.
  *
  * `package.json.vinext.hbs` (the `--builder vinext` content override, #1342)
  * is checked separately: `templateManifests()`'s scan matches only
@@ -39,25 +47,24 @@ import {
 
 const VINEXT_TEMPLATE = 'packages/kn-next/templates/app/package.json.vinext.hbs';
 
-/** The single `typescript` major.minor.patch the workspace is pinned to. */
-function workspaceTypescriptVersion(): string {
-  const pinned = workspaceManifests().flatMap(({ path, pkg }) => {
-    const range = dependencyRange(pkg, 'typescript');
-    return range ? [{ path, range }] : [];
-  });
-  const versions = new Set(pinned.map((p) => p.range));
-  if (versions.size !== 1) {
-    const byManifest = pinned.map(({ path, range }) => `\n   * ${path}: ${range}`).join('');
+/** The `^X.Y.Z` range embedded in the root manifest's `typescript-tsc7`
+ * alias (`npm:typescript@^X.Y.Z`) — the TS7 range verified for scaffolded
+ * apps, independent of the workspace's own (classic-API) `typescript` pin. */
+function verifiedScaffoldTypescriptRange(): string {
+  const { pkg } = readManifest(resolve(REPO_ROOT, 'package.json'));
+  const alias = dependencyRange(pkg, 'typescript-tsc7');
+  const m = /^npm:typescript@(\^\d+\.\d+\.\d+)$/.exec(alias ?? '');
+  if (!m) {
     throw new Error(
-      `the workspace does not agree on ONE typescript range:${byManifest || ' (no manifest declares typescript)'}`,
+      `root package.json's "typescript-tsc7" alias is missing or not a plain "npm:typescript@^X.Y.Z" range: ${alias}`,
     );
   }
-  return [...versions][0];
+  return m[1];
 }
 
-describe('#1402 — template `typescript` pins track the workspace', () => {
-  it('derives ONE typescript range from the workspace (no hardcoded expectation)', () => {
-    expect(workspaceTypescriptVersion()).toMatch(/^\^\d+\.\d+\.\d+$/);
+describe('#1402 — template `typescript` pins track the verified-TS7 range', () => {
+  it('the root manifest declares a well-formed typescript-tsc7 alias (no hardcoded expectation)', () => {
+    expect(verifiedScaffoldTypescriptRange()).toMatch(/^\^\d+\.\d+\.\d+$/);
   });
 
   it.each(templateManifests())('$path declares a typescript pin at all', ({ pkg }) => {
@@ -66,19 +73,19 @@ describe('#1402 — template `typescript` pins track the workspace', () => {
     expect(dependencyRange(pkg, 'typescript')).toBeDefined();
   });
 
-  it.each(templateManifests())('$path pins the workspace typescript range', ({ path, pkg }) => {
+  it.each(templateManifests())('$path pins the verified-TS7 range', ({ path, pkg }) => {
     const range = dependencyRange(pkg, 'typescript');
     expect(range, `${path} declares no typescript dependency`).toBeDefined();
     expect(range, `${path} scaffolds a typescript range the TS7 spike never exercised`).toBe(
-      workspaceTypescriptVersion(),
+      verifiedScaffoldTypescriptRange(),
     );
   });
 
-  it(`${VINEXT_TEMPLATE} pins the workspace typescript range too (out of the shared scan's scope)`, () => {
+  it(`${VINEXT_TEMPLATE} pins the verified-TS7 range too (out of the shared scan's scope)`, () => {
     expect(KNOWN_TEMPLATE_MANIFESTS).not.toContain(VINEXT_TEMPLATE);
     const { pkg } = readManifest(resolve(REPO_ROOT, VINEXT_TEMPLATE));
     const range = dependencyRange(pkg, 'typescript');
     expect(range, `${VINEXT_TEMPLATE} declares no typescript dependency`).toBeDefined();
-    expect(range).toBe(workspaceTypescriptVersion());
+    expect(range).toBe(verifiedScaffoldTypescriptRange());
   });
 });

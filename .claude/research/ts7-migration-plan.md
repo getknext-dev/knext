@@ -2,6 +2,28 @@
 
 Date: 2026-09-25. Scope: spike only (see "Implementation" section for why this session stops at the plan).
 
+> **Correction (same day, PR #1408 implementation round).** §3's original "tsup DTS generation
+> under TS7: green" claim was **wrong**, caught only after a real `bun install` + `turbo build`
+> post-merge — the prior "green" run had been contaminated by a stale, manually-placed
+> `node_modules/typescript` directory left over from ad hoc API-surface testing (§1's scratch
+> testing), which masked the real resolution. The real failure: `tsup`'s DTS bundling
+> (`rollup-plugin-dts`) requires the plain `typescript` package directly and needs `ts.sys` —
+> absent from TS7's default export, same as everything else in §1 — so bumping the monorepo's own
+> `typescript` devDependency to `^7` broke `packages/{kn-next,lib}`'s `tsup` build outright
+> (`TypeError: Cannot read properties of undefined (reading 'useCaseSensitiveFileNames')`). This
+> is a **12th consumer of the classic API** this spike missed: a third-party build-tool dependency,
+> not a repo file, so it can't be fixed by switching an import.
+>
+> **Corrected design, implemented in #1408:** the monorepo's own `typescript` devDependency stays
+> classic-API-capable (`^5.9.3`, unified across all 8 workspace manifests) — required by `tsup`
+> and by anything else that implicitly `require('typescript')`s without this repo controlling the
+> call site. A new `typescript-tsc7` alias (`npm:typescript@^7.0.2`) is used **only** to run the
+> root `typecheck` script's `tsc` binary explicitly, for speed (still ~5x faster, verified: 0.57s
+> vs the 3.03s 5.9.3 baseline). Scaffolded **user apps** are unaffected by any of this — they never
+> run `tsup`, and `next build`'s own typecheck was independently verified clean under TS7 — so the
+> three scaffold templates keep pinning TS7 directly, now tracking `typescript-tsc7`'s range rather
+> than the workspace's own (now-reverted) `typescript` pin.
+
 ## 1. Library API usage — the decisive finding
 
 Confirmed by a real `npm install typescript@7.0.2` into a scratch dir and inspecting the package,

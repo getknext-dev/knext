@@ -9,7 +9,7 @@
     "lint:ts-imports": "node scripts/check-ts-import-extensions.mjs",
     "lint:mutation-residue": "node scripts/scan-mutation-residue.mjs",
     "verify:phase-gates": "node scripts/verify-phase-gates.mjs",
-    "typecheck": "tsc -p tsconfig.typecheck.json",
+    "typecheck": "node_modules/typescript-tsc7/bin/tsc -p tsconfig.typecheck.json",
     "format": "biome format --write .",
     "test": "node scripts/bun-test.mjs",
     "test:coverage": "node scripts/bun-test.mjs --coverage",
@@ -43,8 +43,9 @@
     "tar": "^7.4.3",
     "tsup": "^8.5.1",
     "turbo": "latest",
-    "typescript": "^7.0.2",
+    "typescript": "^5.9.3",
     "typescript-api": "npm:typescript@^5.9.3",
+    "typescript-tsc7": "npm:typescript@^7.0.2",
     "yaml": "^2.7.1"
   },
   "workspaces": [

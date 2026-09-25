@@ -24,6 +24,6 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "drizzle-kit": "^0.31.0",
-    "typescript": "^7.0.2"
+    "typescript": "^5.9.3"
   }
 }
