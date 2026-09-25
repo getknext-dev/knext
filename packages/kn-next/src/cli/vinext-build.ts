@@ -118,6 +118,14 @@ export function bunMeetsFloor(version: string): boolean {
 }
 
 /**
+ * #1385 — the literal prefix every line `vinext-compile.mjs` prints starts
+ * with (`console.log`/`console.warn` alike — see that file). Exported so a
+ * test can assert the wiring against the SAME literal the compile script
+ * actually uses, rather than two independently-typed copies drifting apart.
+ */
+export const COMPILE_LOG_PREFIX = "[knext compile]";
+
+/**
  * The `bun build --compile` argv for this target and entry.
  *
  * Exported so a test can assert the flags rather than trusting prose: dropping
@@ -342,7 +350,18 @@ export interface VinextBuildOptions {
  * read the BUILD TREE's assets silently.
  */
 export function buildVinextExecutable(opts: VinextBuildOptions): string {
-    const run = opts.run ?? runQuiet;
+    // #1385 — the compile step (`compileArgv`, below) prints build warnings
+    // to stdout that `apps/docs/content/docs/build-pipeline.mdx` quotes
+    // verbatim (e.g. createRequire-staticize warnings, native-addon
+    // warnings) — `[knext compile]` is the literal prefix every one of
+    // those lines starts with. Surfacing that prefix here (rather than at
+    // `runQuiet`'s own default) also covers step 1 (`npx vite build`)
+    // harmlessly: vite's own output never starts with `[knext compile]`, so
+    // normal build output there stays exactly as quiet as before.
+    const run =
+        opts.run ??
+        ((argv: readonly string[]) =>
+            runQuiet(argv, { surfaceStdoutPrefix: COMPILE_LOG_PREFIX }));
     const arch = opts.arch ?? "linux-x64";
     const outFile = opts.outFile ?? `knext-exec-${arch}`;
 

@@ -89,23 +89,87 @@ export function runInherit(argv: readonly string[]): void {
     });
 }
 
+export interface RunQuietOptions {
+    /**
+     * #1385 — `runQuiet` discards stdout wholesale, so any diagnostic a
+     * child process prints there (the vinext compile step's build warnings,
+     * e.g. createRequire-staticize warnings — see
+     * `apps/docs/content/docs/build-pipeline.mdx`) never reached
+     * `kn-next build` users, even though the docs quote them verbatim.
+     *
+     * When set, stdout lines starting with this exact prefix are printed
+     * (via `console.log`, one call per line) AFTER the command finishes —
+     * even on a non-zero exit, before the error is rethrown, since a
+     * warning printed right before a failure is exactly the context a user
+     * needs. Every other stdout line stays discarded: normal build noise
+     * (e.g. `npx vite build`'s own chatter) is unaffected. Undefined
+     * (default) preserves the original fully-quiet behaviour byte for byte.
+     */
+    readonly surfaceStdoutPrefix?: string;
+}
+
+/** Prints each line of `output` that starts with `prefix`, in order. */
+function surfacePrefixedLines(output: string, prefix: string): void {
+    for (const line of output.split("\n")) {
+        if (line.startsWith(prefix)) {
+            console.log(line);
+        }
+    }
+}
+
 /**
  * Run a command (argv array) QUIETLY — discard stdout, inherit stderr. A
  * non-zero exit throws. Use where the former code called `.quiet()` purely to
  * silence stdout.
  *
  * @param argv - command + args
+ * @param options - see {@link RunQuietOptions}
  */
-export function runQuiet(argv: readonly string[]): void {
+export function runQuiet(
+    argv: readonly string[],
+    options: RunQuietOptions = {},
+): void {
     const [cmd, ...args] = argv;
     if (!cmd) {
         throw new Error("runQuiet: empty argv");
     }
-    execFileSync(cmd, args, {
-        shell: false,
-        stdio: ["ignore", "ignore", "inherit"],
-        maxBuffer: 64 * 1024 * 1024,
-    });
+    const { surfaceStdoutPrefix } = options;
+    if (!surfaceStdoutPrefix) {
+        execFileSync(cmd, args, {
+            shell: false,
+            stdio: ["ignore", "ignore", "inherit"],
+            maxBuffer: 64 * 1024 * 1024,
+        });
+        return;
+    }
+    // stdout must be CAPTURED (not discarded) to filter it, but is never
+    // otherwise printed — only the matching lines are, via
+    // `surfacePrefixedLines` below. stderr stays inherited, same as the
+    // fully-quiet path.
+    try {
+        const out = execFileSync(cmd, args, {
+            shell: false,
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "inherit"],
+            maxBuffer: 64 * 1024 * 1024,
+        });
+        surfacePrefixedLines(out, surfaceStdoutPrefix);
+    } catch (error) {
+        // execFileSync attaches captured stdout to the thrown error even on
+        // a non-zero exit (Node's child_process contract) — surface a
+        // warning that was printed right before the failure, then rethrow
+        // unchanged so callers' error handling is unaffected.
+        const captured = (error as { stdout?: string | Buffer }).stdout;
+        if (typeof captured === "string") {
+            surfacePrefixedLines(captured, surfaceStdoutPrefix);
+        } else if (Buffer.isBuffer(captured)) {
+            surfacePrefixedLines(
+                captured.toString("utf-8"),
+                surfaceStdoutPrefix,
+            );
+        }
+        throw error;
+    }
 }
 
 /**
