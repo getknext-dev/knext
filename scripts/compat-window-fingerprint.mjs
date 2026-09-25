@@ -384,6 +384,23 @@ function jsLocalImportSpecifiers(src, absPath) {
     !!node.parent &&
     ts.isVariableDeclaration(node.parent) &&
     (node.parent.initializer === node || node.parent.name === node);
+  /**
+   * `<anything>['require']` / `<anything>['createRequire']` (or any other
+   * computed access whose string-literal key names a require-like or
+   * createRequire fn/derived NAME this scanner knows about) — a computed
+   * (bracket) property access. This scanner only ever resolves literal
+   * `.name` property access (`.resolve`, `.cache`, `module.require`); a
+   * bracket access never reaches the identifier-reference branch at all
+   * (its key is a StringLiteral, not an Identifier node), so without this
+   * check it is invisible to every rule above — not exempted, just never
+   * seen (#1392 review round).
+   */
+  const isTrackedBracketPropertyAccess = (node) =>
+    ts.isElementAccessExpression(node) &&
+    !!node.argumentExpression &&
+    ts.isStringLiteralLike(node.argumentExpression) &&
+    (node.argumentExpression.text === 'require' ||
+      node.argumentExpression.text === 'createRequire');
 
   /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
   const addSpecifier = (node, callOrDeclNode) => {
@@ -413,6 +430,11 @@ function jsLocalImportSpecifiers(src, absPath) {
       );
     } else if (isResolveCall(node)) {
       // Never treated as a dependency — do not descend into its argument.
+    } else if (isTrackedBracketPropertyAccess(node)) {
+      failClosed(
+        node,
+        `uses a computed (bracket) property access on a tracked name (\`${node.argumentExpression.text}\`) — this scanner only resolves literal \`.name\` property access`,
+      );
     } else if (isModuleDotRequireCall(node) || isRequireLikeCall(node)) {
       // Same resolution base as a bare `require()` — handle identically.
       const arg = /** @type {ts.CallExpression} */ (node).arguments[0];
@@ -461,10 +483,21 @@ function jsLocalImportSpecifiers(src, absPath) {
       !isAliasDeclarationSite(node) &&
       !isAllowedPropertyAccessBase(node) &&
       !(node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node) &&
-      // `module.require` — `require` as the PROPERTY NAME, not the base. The
-      // call site itself is handled by isModuleDotRequireCall; this is just
-      // the generic child-walk revisiting the same identifier node.
-      !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+      // `module.require` — `require` (and ONLY the literal name `require`)
+      // as the PROPERTY NAME, not the base. The call site itself is handled
+      // by isModuleDotRequireCall; this is just the generic child-walk
+      // revisiting the same identifier node. Narrowly scoped to the text
+      // `require` (#1392 review round): this used to exempt ANY tracked
+      // name used as a property name, so `m.createRequire(...)`,
+      // `mod.createRequire`, and `require('node:module').createRequire`
+      // all slipped through unexamined — `createRequire` as a property
+      // name is not `module.require` and must still fail closed.
+      !(
+        node.parent &&
+        ts.isPropertyAccessExpression(node.parent) &&
+        node.parent.name === node &&
+        node.text === 'require'
+      )
     ) {
       // A reference to a tracked require-like/createRequire name that is none
       // of: the direct callee of a call (handled above), the base of a

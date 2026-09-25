@@ -1370,6 +1370,77 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
         /import\.meta\.require\(\), a Bun-specific form/,
       );
     });
+
+    // #1392 review round — the "identifier used as property name" exemption
+    // (meant ONLY for `module.require`, the property name being `require`
+    // itself) was matching ANY tracked name used as a property name,
+    // including `createRequire` — so `m.createRequire(...)`,
+    // `mod.createRequire`, and `require('node:module').createRequire` all
+    // slipped through silently instead of failing closed. Fixed by narrowing
+    // the exemption to the literal name `require`.
+    it('a namespace-imported module.createRequire(...) call is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as m from 'node:module';\nconst { real } = m.createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it('a default-imported module object’s .createRequire is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import mod from 'node:module';\nconst { real } = mod.createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it("require('node:module').createRequire(...) is a hard error, not silently exempted", () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = require('node:module').createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it("a bracket-accessed mod['createRequire'](...) is a hard error, not silently invisible", () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = mod['createRequire'](import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /computed \(bracket\) property access on a tracked name/,
+      );
+    });
+
+    // module.require via property access must still be exempt — this is the
+    // one property-name shape the fix must keep working.
+    it('module.require(...) called (not just the property-name exemption) is still recognised, not accidentally broken by the narrowed exemption', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = module.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
   });
 
   // Fail CLOSED: a file that does not PARSE at all (an unterminated regex or
