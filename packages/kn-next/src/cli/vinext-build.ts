@@ -350,14 +350,17 @@ export interface VinextBuildOptions {
  * read the BUILD TREE's assets silently.
  */
 export function buildVinextExecutable(opts: VinextBuildOptions): string {
-    // #1385 — the compile step (`compileArgv`, below) prints build warnings
-    // to stdout that `apps/docs/content/docs/build-pipeline.mdx` quotes
-    // verbatim (e.g. createRequire-staticize warnings, native-addon
-    // warnings) — `[knext compile]` is the literal prefix every one of
-    // those lines starts with. Surfacing that prefix here (rather than at
-    // `runQuiet`'s own default) also covers step 1 (`npx vite build`)
-    // harmlessly: vite's own output never starts with `[knext compile]`, so
-    // normal build output there stays exactly as quiet as before.
+    // #1385 — the compile step (`compileArgv`, below) prints INFORMATIONAL
+    // lines to stdout (console.log) that `apps/docs/content/docs/build-pipeline.mdx`
+    // quotes verbatim — e.g. which server externals load from
+    // `.output/server/node_modules` vs. stay bundled. (Its `WARNING:` lines
+    // are console.warn -> stderr, already inherited and visible; only the
+    // console.log half was ever at risk.) `[knext compile]` is the literal
+    // prefix every one of those lines starts with. Surfacing that prefix
+    // here (rather than at `runQuiet`'s own default) also covers step 1
+    // (`npx vite build`) harmlessly: vite's own output never starts with
+    // `[knext compile]`, so normal build output there stays exactly as
+    // quiet as before.
     const run =
         opts.run ??
         ((argv: readonly string[]) =>

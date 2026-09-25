@@ -72,10 +72,13 @@ describe("runQuiet", () => {
         expect(() => runQuiet([NODE, "-e", "process.exit(4)"])).toThrow();
     });
 
-    // #1385 — the vinext compile step's stdout (build warnings the docs quote,
-    // e.g. createRequire staticize warnings) was silently discarded, exactly
-    // like the noise above. `surfaceStdoutPrefix` opts a call site INTO
-    // surfacing only the lines it cares about — everything else stays quiet.
+    // #1385 — the vinext compile step's stdout (console.log lines the docs
+    // quote, e.g. which server externals load from
+    // .output/server/node_modules vs. stay bundled) was silently discarded,
+    // exactly like the noise above. Its console.warn lines were already
+    // visible (stderr, already inherited) — only the console.log half was
+    // ever at risk. `surfaceStdoutPrefix` opts a call site INTO surfacing
+    // only the lines it cares about — everything else stays quiet.
     describe("surfaceStdoutPrefix", () => {
         it("prints only the lines starting with the given prefix, via console.log, after the run completes", () => {
             const originalLog = console.log;

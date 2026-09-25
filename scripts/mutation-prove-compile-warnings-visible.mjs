@@ -5,12 +5,19 @@
  * silently discarded by `runQuiet`'s fully-quiet default, so those warnings
  * never reached `kn-next build` users.
  *
- * Two specs, both proved here:
+ * Three specs, all proved here:
  *   - `packages/kn-next/src/__tests__/exec.test.ts` (the `surfaceStdoutPrefix`
  *     describe block) — `runQuiet`'s own new filtering behaviour.
  *   - `packages/kn-next/src/__tests__/vinext-build-compile-warnings.test.ts`
  *     — `buildVinextExecutable`'s DEFAULT `run` wires the compile step's
  *     `runQuiet` call with `surfaceStdoutPrefix: COMPILE_LOG_PREFIX`.
+ *   - `packages/kn-next/src/__tests__/vinext-compile-log-prefix.test.ts`
+ *     (#1421 review round 1, jev 0.66) — the REAL `vinext-compile.mjs`
+ *     carries `COMPILE_LOG_PREFIX` on every own-message console call. The
+ *     original "drift guard" (mutation 5 below) only ever compared the
+ *     constant to a literal written in ITS OWN test — the reviewer renamed
+ *     all 16 `[knext compile]` prefixes in the real `.mjs` file and every
+ *     spec stayed green. This third spec is what actually reads that file.
  *
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise;
@@ -32,19 +39,23 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const EXEC_SPEC = 'packages/kn-next/src/__tests__/exec.test.ts';
 const WIRING_SPEC = 'packages/kn-next/src/__tests__/vinext-build-compile-warnings.test.ts';
+const SCAN_SPEC = 'packages/kn-next/src/__tests__/vinext-compile-log-prefix.test.ts';
 
 const PROOF = {
   subjects: {
     execTs: 'packages/kn-next/src/cli/exec.ts',
     vinextBuildTs: 'packages/kn-next/src/cli/vinext-build.ts',
+    vinextCompileMjs: 'packages/kn-next/src/adapters/vinext-compile.mjs',
   },
 };
 
-const RUNNER_EXEC = resolveSpecRunner(REPO_ROOT, EXEC_SPEC);
-const RUNNER_WIRING = resolveSpecRunner(REPO_ROOT, WIRING_SPEC);
+// resolveSpecRunner's return is spec-agnostic (always runs
+// scripts/bun-test.mjs, which takes the spec as its own runtime arg) — ONE
+// shared runner, the spec string varies per call to specPasses below.
+const RUNNER = resolveSpecRunner(REPO_ROOT);
 
-function specPasses(runner, spec) {
-  const r = spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {
+function specPasses(spec) {
+  const r = spawnSync(RUNNER.command, [...RUNNER.args, ...RUNNER.runArgs(spec)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
@@ -91,17 +102,34 @@ const MUTATIONS = [
     anchor: 'export const COMPILE_LOG_PREFIX = "[knext compile]";',
     replacement: 'export const COMPILE_LOG_PREFIX = "[knext compiled]";',
   },
+  {
+    // #1421 review round 1 (jev 0.66) — the exact repro: rename a real
+    // vinext-compile.mjs literal so it no longer starts with
+    // COMPILE_LOG_PREFIX. Targets the LAST console.log call (unique in the
+    // file), proving the scan catches even a SINGLE offending line, not
+    // just a wholesale rename of all 16.
+    label:
+      'vinext-compile.mjs: rename one real console.log prefix so it drifts from COMPILE_LOG_PREFIX (#1421 review repro)',
+    subject: 'vinextCompileMjs',
+    spec: SCAN_SPEC,
+    anchor:
+      '`[knext compile] wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})`,',
+    replacement:
+      '`[knext compiled] wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})`,',
+  },
 ];
 
-declareMutations(5);
+declareMutations(6);
 
-if (MUTATIONS.length !== 5) {
-  console.error(`FATAL: declared 5 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 6) {
+  console.error(`FATAL: declared 6 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
-console.log('Baseline: both specs must be GREEN before anything is mutated.');
-if (!specPasses(RUNNER_EXEC, EXEC_SPEC) || !specPasses(RUNNER_WIRING, WIRING_SPEC)) {
+const ALL_SPECS = [EXEC_SPEC, WIRING_SPEC, SCAN_SPEC];
+
+console.log('Baseline: every spec must be GREEN before anything is mutated.');
+if (!ALL_SPECS.every((s) => specPasses(s))) {
   console.error('FATAL: baseline is not green to begin with');
   process.exit(1);
 }
@@ -110,12 +138,11 @@ console.log('   ok baseline green\n');
 const decorative = [];
 for (const m of MUTATIONS) {
   console.log(`── mutation: ${m.label}`);
-  const runner = m.spec === EXEC_SPEC ? RUNNER_EXEC : RUNNER_WIRING;
 
   const snap = snapshot(resolve(REPO_ROOT, PROOF.subjects[m.subject]));
   try {
     mutate(snap, m.anchor, m.replacement);
-    if (specPasses(runner, m.spec)) {
+    if (specPasses(m.spec)) {
       console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       decorative.push(m.label);
     } else {
@@ -125,7 +152,7 @@ for (const m of MUTATIONS) {
   } finally {
     restore(snap);
   }
-  if (!specPasses(runner, m.spec)) {
+  if (!specPasses(m.spec)) {
     console.error(`   FATAL: ${m.spec} did not go green again after restore`);
     process.exit(1);
   }

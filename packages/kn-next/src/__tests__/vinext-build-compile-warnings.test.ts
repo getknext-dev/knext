@@ -2,9 +2,12 @@
  * #1385 — `buildVinextExecutable`'s DEFAULT `run` (when the caller does not
  * inject one, i.e. the real `kn-next build` path) must wire the compile
  * step's `runQuiet` call to surface `[knext compile]`-prefixed stdout lines
- * — the build warnings `apps/docs/content/docs/build-pipeline.mdx` quotes
- * verbatim (createRequire-staticize warnings, native-addon warnings, …),
- * which `runQuiet`'s fully-quiet default previously discarded entirely.
+ * — the console.log lines `apps/docs/content/docs/build-pipeline.mdx` quotes
+ * verbatim (e.g. which server externals load from
+ * `.output/server/node_modules` vs. stay bundled), which `runQuiet`'s
+ * fully-quiet default previously discarded entirely. (Its console.warn
+ * lines were already visible via stderr — only the console.log half was
+ * ever at risk.)
  *
  * Every other test in `vinext-build.test.ts` injects `opts.run` explicitly,
  * so none of them exercises this wiring — this file is the one that does,

@@ -92,10 +92,13 @@ export function runInherit(argv: readonly string[]): void {
 export interface RunQuietOptions {
     /**
      * #1385 — `runQuiet` discards stdout wholesale, so any diagnostic a
-     * child process prints there (the vinext compile step's build warnings,
-     * e.g. createRequire-staticize warnings — see
-     * `apps/docs/content/docs/build-pipeline.mdx`) never reached
-     * `kn-next build` users, even though the docs quote them verbatim.
+     * child process prints THERE never reached `kn-next build` users, even
+     * though `apps/docs/content/docs/build-pipeline.mdx` quotes some of them
+     * verbatim. Precisely: the vinext compile step's `WARNING:` lines
+     * (`console.warn`, stderr) were always visible — `runQuiet` already
+     * inherits stderr. What was actually lost is its `console.log` lines
+     * (stdout) — e.g. which server externals load from
+     * `.output/server/node_modules` vs. stay bundled.
      *
      * When set, stdout lines starting with this exact prefix are printed
      * (via `console.log`, one call per line) AFTER the command finishes —
