@@ -27,7 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
-import ts from 'typescript';
+import ts from 'typescript-api';
 import { auditBlockingGate } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');

@@ -171,6 +171,7 @@
     "next": "16.3.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "typescript-api": "npm:typescript@^5.9.3",
     "vinext": "1.0.0-beta.12"
   },
   "dependencies": {

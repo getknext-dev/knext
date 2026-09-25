@@ -43,7 +43,8 @@
     "tar": "^7.4.3",
     "tsup": "^8.5.1",
     "turbo": "latest",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
+    "typescript-api": "npm:typescript@^5.9.3",
     "yaml": "^2.7.1"
   },
   "workspaces": [

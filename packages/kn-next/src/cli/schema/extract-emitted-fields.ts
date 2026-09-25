@@ -28,7 +28,7 @@
  *     object literals inside the call are walked one `*` segment deeper
  */
 
-import ts from "typescript";
+import ts from "typescript-api";
 
 /** A literal key found inside a function body, with its 1-based line. */
 export interface LiteralKey {

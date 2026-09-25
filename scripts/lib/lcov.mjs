@@ -22,7 +22,7 @@
  * `typescript` devDependency (for `isTypeOnly`), which is present after install —
  * "before built", not "before installed".
  */
-import ts from 'typescript';
+import ts from 'typescript-api';
 
 /** @typedef {{ lines: Map<number, number>, fnFound: number, fnHit: number, fnNames: Map<string, number> }} FileCoverage */
 

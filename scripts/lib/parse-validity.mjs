@@ -21,7 +21,7 @@
  * (ESM) and `.ts` sources.
  */
 
-import ts from 'typescript';
+import ts from 'typescript-api';
 
 /**
  * A `validate` hook for `createGuardProver`'s mutations (also callable from
