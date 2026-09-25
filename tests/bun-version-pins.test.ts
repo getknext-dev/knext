@@ -239,17 +239,30 @@ function isMarkerRejectedPath(f: string): boolean {
   if (/^Dockerfile/.test(base)) return true;
   if (/\.hbs$/.test(f)) return true;
   if (f.startsWith('.github/workflows/')) return true;
-  if (/^scripts\/[^/]+\.sh$/.test(f)) return true;
+  // NESTED, not just one path segment deep — the old `^scripts\/[^/]+\.sh$`
+  // dropped `scripts/lib/*.sh` (and any deeper) invisibly (techdebt-3 round).
+  if (/^scripts\/.*\.sh$/.test(f)) return true;
+  // A *.docker-e2e.test.ts genuinely boots the pinned image in CI — it is a
+  // real selection site wearing a `.test.ts` extension, not a synthetic
+  // fixture; the marker must not waive a stale pin there (techdebt-3 round).
+  if (/\.docker-e2e\.test\.ts$/.test(f)) return true;
+  // A k8s manifest under any `deploy/` directory selects the image the
+  // cluster actually runs (techdebt-3 round).
+  if (/\/deploy\/.*\.ya?ml$/.test(f)) return true;
+  // A CLI generator (packages/kn-next/src/generators/**) stamps its pin into
+  // every app knext emits — same class as a *.hbs template (techdebt-3 round).
+  if (f.startsWith('packages/kn-next/src/generators/')) return true;
   return false;
 }
 
-type ScanResult = { selecting: number; exempted: number; off: string[] };
+type ScanResult = { selecting: number; exempted: number; off: string[]; exemptedEntries: string[] };
 
 /** The scan itself — pulled out of the `it()` body so it can run against a synthetic fixture root, not just REPO_ROOT (#1392 round 3 testability). */
 function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanResult {
   let selecting = 0;
   let exempted = 0;
   const off: string[] = [];
+  const exemptedEntries: string[] = [];
   for (const f of imageBearingFiles(root)) {
     readFileSync(join(root, f), 'utf8')
       .split('\n')
@@ -257,11 +270,14 @@ function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanRe
         if (line.includes(LINE_EXEMPT_MARKER)) {
           if (isMarkerRejectedPath(f)) {
             off.push(
-              `${f}:${i + 1}: LINE_EXEMPT_MARKER is not permitted in this file class (Dockerfile*/.hbs/workflows/scripts/*.sh) — fix the pin, do not exempt it`,
+              `${f}:${i + 1}: LINE_EXEMPT_MARKER is not permitted in this file class (Dockerfile*/.hbs/workflows/scripts/**/*.sh/*.docker-e2e.test.ts/deploy/*.yaml/generators/**) — fix the pin, do not exempt it`,
             );
             return;
           }
-          if (/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/.test(line)) exempted++;
+          if (/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/.test(line)) {
+            exempted++;
+            exemptedEntries.push(`${f}:${line.trim()}`);
+          }
           return;
         }
         const isComment = /^\s*(#|\/\/|\*)/.test(line);
@@ -273,7 +289,62 @@ function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanRe
         }
       });
   }
-  return { selecting, exempted, off };
+  return { selecting, exempted, off, exemptedEntries };
+}
+
+/**
+ * The reviewed, exact allowlist of every line the real repo is allowed to
+ * exempt via LINE_EXEMPT_MARKER — `${file}:${trimmed line content}`. A NEW
+ * exemption ANYWHERE (even in a file class the marker is otherwise permitted
+ * in) means editing THIS list, not just adding the marker in the diff — the
+ * gap this closes (#1392 round 3 review; techdebt-3): the marker could waive
+ * any line in a non-rejected file class silently, with no reviewer-visible
+ * signal that the exempt SET grew (techdebt-3 round).
+ *
+ * BASE64-encoded, deliberately: each decoded entry itself CONTAINS a
+ * literal exemption-marker string and an image-tag reference this file's
+ * own scan is built to catch — spelled out as plain source text here, this
+ * array would be self-scanned by the very scan it feeds, either re-tripping
+ * the marker-in-non-rejected-file-class path (this file is not a rejected
+ * path) or, worse, growing the exempt set every time the guard itself is
+ * edited. Encoding breaks the literal substring match so the guard's own
+ * data is inert to its own scan; `verifyPinnedExemptions` decodes before
+ * comparing.
+ */
+const PINNED_EXEMPT_LINES = [
+  'cGFja2FnZXMva24tbmV4dC9zcmMvX190ZXN0c19fL3J1bnRpbWUtaW1hZ2Utc2VsZWN0aW9uLnRlc3QudHM6ZXhwZWN0KHRleHQpLnRvQ29udGFpbigib3Zlbi9idW46MS40LjItYWxwaW5lQHNoYTI1NjoiKTsgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogcHJlZml4LW9ubHkgYXNzZXJ0aW9uLCBub3QgYSBzZWxlY3Rpb24=',
+  'cGFja2FnZXMva24tbmV4dC9zcmMvYWRhcHRlcnMvYnVuLWtlZXBhbGl2ZS1ndWFyZC5janM6Ly8gKHZlcmlmaWVkIG9uIG92ZW4vYnVuOmNhbmFyeSAxLjQuMCwgMjAyNi0wNy0wMikuIG92ZW4tYnVuLXBpbi1leGVtcHQ6IGhpc3RvcmljYWw=',
+  'dGVzdHMvYmFzZS1pbWFnZS1jdmUtaHlnaWVuZS50ZXN0LnRzOm5hbWU6ICdhcHBzL2RvY3MgKG92ZW4vYnVuOjEuNC4yLWFscGluZSknLCAvLyBvdmVuLWJ1bi1waW4tZXhlbXB0OiBkZXNjcmlwdGl2ZSBsYWJlbCwgYHJlZmAgYmVsb3cgY2FycmllcyB0aGUgcmVhbCBwaW4=',
+  'dGVzdHMvYnVpbHQtaW1hZ2UtdHJpdnkudGVzdC50czoqIChgb3Zlbi9idW46MS40LjAtYWxwaW5lYCwgYG5vZGU6MjItYWxwaW5lYCkuIG92ZW4tYnVuLXBpbi1leGVtcHQ6IGhpc3RvcmljYWw=',
+  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOiogb3Zlbi9idW46MS40LjAtYWxwaW5lICMgb3Zlbi1idW4tcGluLWV4ZW1wdDogLi4uYCBpbiBhIERvY2tlcmZpbGUgd291bGQ=',
+  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOmNvbnN0IGZpeHR1cmVUYWcgPSAnb3Zlbi9idW46MS40LjItYWxwaW5lJzsgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogdGVzdCBmaXh0dXJlIGFyZ3VtZW50LCBub3QgYSByZWFsIHNlbGVjdGlvbg==',
+  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOidGUk9NIG92ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCAjIG92ZW4tYnVuLXBpbi1leGVtcHQ6IHByZXRlbmQgdGhpcyBpcyByZXZpZXdlZFxuJyw=',
+  'dGVzdHMvYnVuLXZlcnNpb24tcGlucy50ZXN0LnRzOicvLyBoaXN0b3JpY2FsIG5vdGUgYWJvdXQgb3Zlbi9idW46MS40LjAtYWxwaW5lIC8vIG92ZW4tYnVuLXBpbi1leGVtcHQ6IHByb3NlLCBub3QgYSBzZWxlY3Rpb25cbics',
+  'dGVzdHMvYnl0ZWNvZGUtbGl2ZW5lc3MtY2hhaW4udGVzdC50czonbW9kZT1jb21waWxlZC1leGVjIHJ1bnRpbWU9YnVuIGltYWdlPW92ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6YWJjIGJ5dGVjb2RlX3ZlcmlmaWVkPXRydWUnOyAvLyBvdmVuLWJ1bi1waW4tZXhlbXB0OiBzeW50aGV0aWMgZml4dHVyZSAoZmFrZSB2ZXJzaW9uICsgZGlnZXN0KSwgbm90IGEgcmVhbCBzZWxlY3Rpb24=',
+  'dGVzdHMvYnl0ZWNvZGUtbGl2ZW5lc3MudGVzdC50czonbW9kZT1jb21waWxlZC1leGVjIHJ1bnRpbWU9YnVuIGltYWdlPW92ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6YWJjIGJ5dGVjb2RlX3ZlcmlmaWVkPXRydWUnOyAvLyBvdmVuLWJ1bi1waW4tZXhlbXB0OiBzeW50aGV0aWMgZml4dHVyZSAoZmFrZSB2ZXJzaW9uICsgZGlnZXN0KSwgbm90IGEgcmVhbCBzZWxlY3Rpb24=',
+  'dGVzdHMvYnl0ZWNvZGUtbGl2ZW5lc3MudGVzdC50czppbWFnZTogJ292ZW4vYnVuOjEuNC4wLWFscGluZUBzaGEyNTY6YWJjJywgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogc3ludGhldGljIGZpeHR1cmUsIG5vdCBhIHJlYWwgc2VsZWN0aW9u',
+  'dGVzdHMvZGVjbGFyZWQtdGVzdC1za2lwcy50ZXN0LnRzOidzY3JpcHRzL2UyZS1uYXRpdmUtcmVidWlsZC1tdXNsLnNoIGZvciByZWFsIGluc2lkZSB0aGUgcGlubmVkIG92ZW4vYnVuOjEuNC4yLWFscGluZSBpbWFnZSAnICsgLy8gb3Zlbi1idW4tcGluLWV4ZW1wdDogZGVzY3JpcHRpdmUgcHJvc2UsIG5vdCBhIHNlbGVjdGlvbg==',
+].map((b64) => Buffer.from(b64, 'base64').toString('utf8'));
+
+/**
+ * Diff `exemptedEntries` (what the scan actually found) against the pinned
+ * allowlist — in BOTH directions: an entry present but not pinned (a NEW,
+ * unreviewed exemption) AND a pinned entry no longer present (the guard's
+ * own list going stale, e.g. the exempted line was edited or removed) are
+ * both reported, never silently accepted.
+ */
+function verifyPinnedExemptions(entries: string[], allowlist: string[]): string[] {
+  const entrySet = new Set(entries);
+  const allowSet = new Set(allowlist);
+  const off: string[] = [];
+  for (const e of entries) {
+    if (!allowSet.has(e))
+      off.push(`NEW, unreviewed exemption — add it to PINNED_EXEMPT_LINES: ${e}`);
+  }
+  for (const a of allowlist) {
+    if (!entrySet.has(a)) off.push(`STALE pinned exemption — no longer present, remove it: ${a}`);
+  }
+  return off;
 }
 
 /**
@@ -305,6 +376,18 @@ describe('LINE_EXEMPT_MARKER is rejected in image-selecting file classes (#1392 
     ['tests/bytecode-liveness.test.ts', false],
     ['packages/kn-next/src/adapters/bun-keepalive-guard.cjs', false],
     ['scripts/lib/knext-closure.mjs', false],
+    // techdebt-3 round — four more image-selecting file classes that still
+    // let the marker through: a *.docker-e2e.test.ts genuinely boots the
+    // pinned image in CI (not a synthetic fixture the way a plain
+    // .test.ts usually is); a NESTED scripts/**/*.sh was missed because the
+    // old regex only matched one path segment deep (`^scripts\/[^/]+\.sh$`);
+    // a k8s deploy manifest selects the image the cluster actually runs;
+    // and a CLI generator (packages/kn-next/src/generators/**) stamps its
+    // pin into every app it emits, same class as a *.hbs template.
+    ['tests/e2e-native-rebuild-musl.docker-e2e.test.ts', true],
+    ['scripts/lib/musl-lockfile-lookup.sh', true],
+    ['packages/scale-zero-pg/deploy/25-compute-warm.yaml', true],
+    ['packages/kn-next/src/generators/loadtest-job.ts', true],
   ])('%s -> rejected=%s', (path, expected) => {
     expect(isMarkerRejectedPath(path)).toBe(expected);
   });
@@ -337,6 +420,58 @@ describe('LINE_EXEMPT_MARKER is rejected in image-selecting file classes (#1392 
     const { off, exempted } = scanOvenBunImageRefs(dir, fixtureTag, fixturePinned);
     expect(off).toEqual([]);
     expect(exempted).toBe(1);
+  });
+});
+
+// techdebt-3 round — a marker used OUTSIDE the rejected file classes still
+// exempts unconditionally, so a NEW exemption anywhere else is silent: no
+// reviewer-visible signal that the exempt SET grew, only that a diff added a
+// comment. `verifyPinnedExemptions` closes that: the exempt set from a real
+// scan must equal the reviewed allowlist EXACTLY, in both directions.
+// The fixture strings below deliberately build the exemption-marker text
+// and the image-tag substring via concatenation, NOT as one contiguous
+// literal — this file's own real-repo scan (below) reads its own raw
+// source text, and a literal marker-plus-image-tag pair on one line here
+// would be picked up as an (unpinned) exemption, same self-scan hazard
+// `PINNED_EXEMPT_LINES` is base64-encoded to avoid.
+const FAKE_MARKER = ['oven', 'bun', 'pin', 'exempt'].join('-');
+const fakeImageRef = (tag: string) => `oven${'/'}bun:${tag}`;
+
+describe('verifyPinnedExemptions pins the exempt set exactly (#1392 round 3, techdebt-3)', () => {
+  it('an entry not in the allowlist (a NEW, unreviewed exemption) is flagged', () => {
+    const off = verifyPinnedExemptions(
+      [`lib/example.cjs:// ${fakeImageRef('9.9.9-alpine')} // ${FAKE_MARKER}: new, unreviewed`],
+      [],
+    );
+    expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
+  });
+
+  it('an allowlist entry no longer present in the scan (STALE) is flagged, not silently accepted', () => {
+    const off = verifyPinnedExemptions(
+      [],
+      [`lib/example.cjs:// ${fakeImageRef('1.4.0-alpine')} // ${FAKE_MARKER}: historical`],
+    );
+    expect(off.some((o) => o.includes('STALE pinned exemption'))).toBe(true);
+  });
+
+  it('a matching entry set (found === allowlist) is clean', () => {
+    const line = `lib/example.cjs:// ${fakeImageRef('1.4.0-alpine')} // ${FAKE_MARKER}: historical`;
+    expect(verifyPinnedExemptions([line], [line])).toEqual([]);
+  });
+
+  it('the real allowlist decodes to 12 entries, each a real file:line pair, not empty base64 noise', () => {
+    expect(PINNED_EXEMPT_LINES.length).toBe(12);
+    for (const e of PINNED_EXEMPT_LINES) {
+      expect(e).toContain(':');
+      expect(e).toMatch(/oven-bun-pin-exempt/);
+    }
+  });
+
+  it('the REPO_ROOT scan`s exemptedEntries exactly matches PINNED_EXEMPT_LINES — no new, no stale', () => {
+    const tag = `oven/bun:${PINNED_BUN}-alpine`;
+    const pinned = `${tag}@${PINNED_BUN_IMAGE_DIGEST}`;
+    const { exemptedEntries } = scanOvenBunImageRefs(REPO_ROOT, tag, pinned);
+    expect(verifyPinnedExemptions(exemptedEntries, PINNED_EXEMPT_LINES)).toEqual([]);
   });
 });
 
