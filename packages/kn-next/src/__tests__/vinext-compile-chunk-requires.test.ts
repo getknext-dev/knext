@@ -223,6 +223,26 @@ function deployAndRun(
     });
 }
 
+/**
+ * Minified output reuses the require binding's one-letter name for other
+ * functions and parameters, so the scope-blind analysis may only be able to
+ * say "possibly". The contract there is: NEVER SILENT. A strict build either
+ * fails, or passes while printing the "possibly" warning for the same problem.
+ */
+function expectStrictNeverSilent(
+    build: ReturnType<typeof spawnSync>,
+    detail: string,
+): void {
+    const err = String(build.stderr);
+    if (build.status === 0) {
+        expect(err).toContain("WARNING: possibly a runtime require of");
+        expect(err).toContain(detail);
+    } else {
+        expect(err).toContain("KNEXT_COMPILE_STRICT_REQUIRES=1");
+        expect(err).toContain(detail);
+    }
+}
+
 const SHAPES: [string, Shape][] = [
     ["single chunk", { multi: false, minify: false }],
     ["single chunk, minified", { multi: false, minify: true }],
@@ -288,14 +308,21 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             const build = compile(work, server, {
                 KNEXT_COMPILE_STRICT_REQUIRES: "1",
             });
-            expect(build.status).not.toBe(0);
-            expect(build.stderr).toContain(`${MISSING} (chunks/`);
-            expect(build.stderr).toContain("KNEXT_COMPILE_STRICT_REQUIRES=1");
+            if (minify) {
+                expectStrictNeverSilent(build, `${MISSING} (chunks/`);
+            } else {
+                expect(build.status).not.toBe(0);
+                expect(build.stderr).toContain(`${MISSING} (chunks/`);
+                expect(build.stderr).toContain(
+                    "KNEXT_COMPILE_STRICT_REQUIRES=1",
+                );
+            }
         }, 120_000);
     }
 
     for (const [label, shape] of [
         ["multi chunk", { multi: true, minify: false, dynamic: true }],
+        ["single chunk", { multi: false, minify: false, dynamic: true }],
         ["multi chunk, minified", { multi: true, minify: true, dynamic: true }],
         [
             "single chunk, minified",
@@ -306,9 +333,8 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             const { work, server } = await rolldownOutput(shape);
             const build = compile(work, server);
             expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
-            expect(build.stderr).toContain(
-                "runtime require called with a non-literal package name",
-            );
+            // plain output: the definite message; minified: definite or "possibly"
+            expect(build.stderr).toContain("non-literal package name");
             expect(build.stderr).toContain(
                 shape.multi ? "chunks/" : "index.mjs",
             );
@@ -319,10 +345,14 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             const build = compile(work, server, {
                 KNEXT_COMPILE_STRICT_REQUIRES: "1",
             });
-            expect(build.status).not.toBe(0);
-            expect(build.stderr).toContain(
-                "runtime require called with a non-literal package name",
-            );
+            if (shape.minify) {
+                expectStrictNeverSilent(build, "non-literal package name");
+            } else {
+                expect(build.status).not.toBe(0);
+                expect(build.stderr).toContain(
+                    "runtime require called with a non-literal package name",
+                );
+            }
         }, 120_000);
     }
 
@@ -336,4 +366,56 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             expect(build.stderr).not.toContain("non-literal");
         }
     }, 240_000);
+
+    it("minified real third-party code (yaml) reusing the require's name does not fail a strict build", async () => {
+        // The #1384 round-3 case: rolldown names the minified require binding
+        // with one letter, and yaml's own minified functions and parameters
+        // reuse it (`function u(`, `u(e,r,a,s)`). That must not fail strict.
+        const work = temp("knext-1314-yaml-");
+        const src = join(work, "src");
+        write(
+            join(src, "index.mjs"),
+            'import YAML from "yaml";\nimport a from "./a.cjs";\n' +
+                'console.log("RESULT:" + a() + "|" + YAML.stringify({ k: 1 }).trim());\n',
+        );
+        write(join(src, "a.cjs"), 'module.exports = () => require("dep-a");\n');
+        const server = join(work, ".output", "server");
+        const bundle = await rolldown({
+            input: join(src, "index.mjs"),
+            platform: "node",
+            external: ["dep-a"],
+            resolve: {
+                alias: { yaml: realpathSync(require.resolve("yaml")) },
+            },
+        });
+        await bundle.write({
+            dir: server,
+            format: "esm",
+            minify: true,
+            entryFileNames: "index.mjs",
+        });
+        // Guard against fixture drift: yaml is really in there, minified.
+        const out = readFileSync(join(server, "index.mjs"), "utf8");
+        expect(out).toMatch(/import\{createRequire as \w+\}from"node:module"/);
+        expect(out.length).toBeGreaterThan(50_000);
+        cjsPackage(
+            join(server, "node_modules"),
+            "dep-a",
+            `module.exports = ${JSON.stringify(A)};\n`,
+        );
+        write(
+            join(work, "package.json"),
+            JSON.stringify({ name: "app", private: true, type: "module" }),
+        );
+
+        const build = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        expect(build.stdout).toContain("dep-a (index.mjs)");
+
+        const run = deployAndRun(work, build.exe);
+        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(run.stdout).toContain(`RESULT:${A}|k: 1`);
+    }, 120_000);
 });

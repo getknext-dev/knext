@@ -201,6 +201,14 @@ function listServerOutputModules(dir) {
  *    analysis could not see through.
  *  `unresolved`, `dynamic` and `unrecognized` warn, or fail the build under
  *  KNEXT_COMPILE_STRICT_REQUIRES=1.
+ *
+ *  The call analysis is scope-blind. In minified output the require binding is
+ *  a one-letter name that bundled libraries also declare for their own
+ *  functions and parameters (yaml's `u(e,r,a,s)` beside `u=e(import.meta.url)`),
+ *  so a call through such a name is not proof of a require. A require name the
+ *  module also DECLARES elsewhere is AMBIGUOUS: its hits go to
+ *  `ambiguousUnresolved` / `ambiguousDynamic`, which warn but never fail the
+ *  strict build.
  */
 function planRuntimeRequires() {
     const modules = new Map();
@@ -227,28 +235,38 @@ function planRuntimeRequires() {
     }
 
     const unresolved = new Map();
+    const ambiguousUnresolved = new Map();
     const dynamic = [];
+    const ambiguousDynamic = [];
     const unrecognized = [];
     for (const [path, analysis] of modules) {
         if (analysis.unrecognizedBinding) unrecognized.push(name(path));
-        const requireNames = new Set(analysis.requireBindings);
+        // name -> declarations that would make a hit on it NOT a require:
+        // beyond the binding's own declaration where it is defined, any at all
+        // where it is imported.
+        const requireNames = new Map();
+        for (const binding of analysis.requireBindings) requireNames.set(binding, 1);
         for (const imp of analysis.imports) {
             const from = modules.get(resolve(dirname(path), imp.from));
             if (!from) continue;
             for (const binding of from.requireBindings) {
                 for (const exported of from.exports.get(binding) ?? []) {
                     const local = imp.names.get(exported);
-                    if (local) requireNames.add(local);
+                    if (local) requireNames.set(local, 0);
                 }
             }
         }
-        for (const callee of requireNames) {
-            if (analysis.nonLiteralCallees.has(callee)) dynamic.push(name(path));
+        for (const [callee, ownDeclarations] of requireNames) {
+            const ambiguous = (analysis.declarationCounts.get(callee) ?? 0) > ownDeclarations;
+            if (analysis.nonLiteralCallees.has(callee)) {
+                (ambiguous ? ambiguousDynamic : dynamic).push(name(path));
+            }
             for (const spec of analysis.literalCalls.get(callee) ?? []) {
                 if (embed.has(spec)) continue;
-                const users = unresolved.get(spec) ?? new Set();
+                const target = ambiguous ? ambiguousUnresolved : unresolved;
+                const users = target.get(spec) ?? new Set();
                 users.add(name(path));
-                unresolved.set(spec, users);
+                target.set(spec, users);
             }
         }
     }
@@ -256,7 +274,9 @@ function planRuntimeRequires() {
         modules,
         embed,
         unresolved,
+        ambiguousUnresolved,
         dynamic: [...new Set(dynamic)].sort(),
+        ambiguousDynamic: [...new Set(ambiguousDynamic)].sort(),
         unrecognized,
     };
 }
@@ -502,6 +522,21 @@ if (PLAN.unresolved.size > 0) {
         "[knext compile] WARNING: the server output runtime-requires package(s) that do not " +
             `resolve and cannot be bundled: ${describeSpecs(PLAN.unresolved)} — the binary ` +
             "throws if that code path runs (set KNEXT_COMPILE_STRICT_REQUIRES=1 to fail the build instead)",
+    );
+}
+if (PLAN.ambiguousUnresolved.size > 0 || PLAN.ambiguousDynamic.length > 0) {
+    const parts = [];
+    if (PLAN.ambiguousUnresolved.size > 0) {
+        parts.push(`package(s) that cannot be bundled: ${describeSpecs(PLAN.ambiguousUnresolved)}`);
+    }
+    if (PLAN.ambiguousDynamic.length > 0) {
+        parts.push(`a non-literal package name in ${PLAN.ambiguousDynamic.join(", ")}`);
+    }
+    console.warn(
+        "[knext compile] WARNING: possibly a runtime require of " +
+            `${parts.join("; ")}. The require's name is also declared by other code in that ` +
+            "module (common in minified output), so this may be a false alarm; it does not " +
+            "fail a KNEXT_COMPILE_STRICT_REQUIRES=1 build",
     );
 }
 if (PLAN.dynamic.length > 0) {

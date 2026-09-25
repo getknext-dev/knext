@@ -212,8 +212,19 @@ The build also warns, naming the file, in two cases where it cannot know what to
 - the bundle creates its `require` in a form the build does not recognise.
 
 In both cases the binary throws `Cannot find module` if that code loads a package that was not bundled
-and is not deployed next to the binary. To make any of these warnings a build failure (for example in
-CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when you run `kn-next build`.
+and is not deployed next to the binary.
+
+To make these warnings a build failure (for example in CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when
+you run `kn-next build`. Two limits apply:
+
+- **Minified server bundles.** When the server bundle is minified, other code can reuse the short name
+  of the bundle's `require`, so the build cannot always tell a real `require` from an unrelated call. It
+  then reports the finding as `WARNING: possibly a runtime require of …`. These warnings do not fail a
+  strict build, because they can be false alarms. The server bundle is not minified by default.
+- **Optional dependencies.** Some packages `require()` another package only if it is installed, for
+  example `ws` (`bufferutil`, `utf-8-validate`) or `pg` (`pg-native`). If your app does not install
+  those, the build correctly warns that they cannot be bundled, and a strict build fails on that
+  warning. Leave strict mode off for such apps, or install the optional packages.
 
 The same applies to packages you list in `serverExternalPackages` and to the packages Next.js keeps
 external by default (for example `typescript`, `sqlite3`, `prisma`). The binary carries a bundled

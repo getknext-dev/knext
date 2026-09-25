@@ -110,6 +110,21 @@ describe("analyzeServerModule (unit)", () => {
         expect(a.literalCalls.size).toBe(0);
     });
 
+    it("counts declarations of a name (var list, function, parameters, catch), so a reused require name reads as ambiguous", () => {
+        const a = analyzeServerModule(
+            'import{createRequire as e}from"node:module";var t=1,u=e(import.meta.url);' +
+                "function u(e,r){}var f=(u,x)=>u(x);var g=u=>u;try{}catch(u){}" +
+                "var o={m(u){return u(1)}};",
+        );
+        expect(a.requireBindings).toEqual(["u"]);
+        // binding + function + 2 arrow params + catch + method param
+        expect(a.declarationCounts.get("u")).toBeGreaterThanOrEqual(6);
+        expect(a.nonLiteralCallees.has("u")).toBe(true);
+        // a name declared only as the binding stays unambiguous
+        const b = analyzeServerModule(ROLLDOWN_MIN);
+        expect(b.declarationCounts.get("u")).toBe(1);
+    });
+
     it("flags a createRequire(import.meta.url) call it cannot attribute to a binding", () => {
         const a = analyzeServerModule(
             'import{createRequire as e}from"node:module";use(e(import.meta.url));',

@@ -80,6 +80,7 @@ function parseSpecifierList(list) {
  *   imports: { from: string, names: Map<string, string> }[],
  *   literalCalls: Map<string, Set<string>>,
  *   nonLiteralCallees: Set<string>,
+ *   declarationCounts: Map<string, number>,
  *   unrecognizedBinding: boolean,
  * }}
  */
@@ -158,15 +159,46 @@ export function analyzeServerModule(src) {
 
     // Callees also called with anything but ONE string literal (`__require(n)`,
     // `r(a + b)`, a template with `${…}`): their specifier is only known at
-    // runtime, so nothing can embed it. The caller flags these on require
-    // bindings. In minified output a one-letter callee can be a shadowed inner
-    // parameter; that can only over-report (a warning), never hide a require.
+    // runtime, so nothing can embed it. This is scope-blind: in minified output
+    // the require binding is a one-letter name that bundled libraries reuse for
+    // their own functions and parameters, so a hit on such a name is NOT proof
+    // of a dynamic require. declarationCounts below lets the caller tell the
+    // two apart.
     const nonLiteralCallees = new Set();
     // Sticky, positioned at each call's `(`: no per-call copy of a multi-MB bundle.
     const literalArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
     for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}\\(`, "g"))) {
         literalArgRe.lastIndex = m.index + m[0].length;
         if (!literalArgRe.test(src)) nonLiteralCallees.add(m[1]);
+    }
+
+    // How often each name is DECLARED in this module: var/let/const entries
+    // (including `,x=` continuations), function names, parameters (arrow,
+    // function, method shorthand, catch). Heuristic by design — over-counting
+    // only makes a name ambiguous, which downgrades a strict failure to a
+    // warning; it can never hide a require.
+    const declarationCounts = new Map();
+    const declare = (id) => declarationCounts.set(id, (declarationCounts.get(id) ?? 0) + 1);
+    const KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "with", "function", "return"]);
+    for (const m of src.matchAll(new RegExp(`(?:\\bvar|\\blet|\\bconst)\\s+(${IDENT})`, "g"))) declare(m[1]);
+    for (const m of src.matchAll(new RegExp(`,${GAP}(${IDENT})${GAP}=(?![=>])`, "g"))) declare(m[1]);
+    for (const m of src.matchAll(new RegExp(`\\bfunction${GAP}(${IDENT})${GAP}\\(`, "g"))) declare(m[1]);
+    for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}=>`, "g"))) declare(m[1]);
+    for (const m of src.matchAll(new RegExp(`\\bcatch${GAP}\\(${GAP}(${IDENT})${GAP}\\)`, "g"))) declare(m[1]);
+    const paramLists = [
+        new RegExp(`\\(([^()]*)\\)${GAP}=>`, "g"),
+        new RegExp(`\\bfunction${GAP}(?:${IDENT})?${GAP}\\(([^()]*)\\)`, "g"),
+        new RegExp(`(?<![\\w$.])(?:${IDENT})${GAP}\\(([^()]*)\\)${GAP}\\{`, "g"),
+    ];
+    for (const re of paramLists) {
+        for (const m of src.matchAll(re)) {
+            const head = src.slice(m.index, m.index + 12);
+            const kw = /^[A-Za-z_$][\w$]*/.exec(head)?.[0];
+            if (kw && KEYWORDS.has(kw) && re !== paramLists[1]) continue;
+            for (const p of m[1].matchAll(new RegExp(`(?:^|[,{\\[])\\s*(?:\\.\\.\\.)?(${IDENT})\\s*(?=[,=}\\]]|$)`, "g"))) {
+                declare(p[1]);
+            }
+        }
     }
 
     return {
@@ -176,6 +208,7 @@ export function analyzeServerModule(src) {
         imports,
         literalCalls,
         nonLiteralCallees,
+        declarationCounts,
         unrecognizedBinding: aliasCalls > recognized,
     };
 }
