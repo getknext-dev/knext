@@ -53,12 +53,12 @@ actually resizes pixels is a native library. A compiled executable can only load
 built into it, so that native library has to travel as a **real file next to the binary**, in a
 `native/` directory.
 
-`kn-next build` creates that directory for you, and the generated `Dockerfile` copies it in. You
+`knext build` creates that directory for you, and the generated `Dockerfile` copies it in. You
 only need to know this exists if you write your own Dockerfile or copy the binary somewhere by
 hand.
 
 The native library is platform-specific, and the platform that matters is the **container image's**
-(Linux/musl), not your laptop's. `kn-next build` stages the image's addon set regardless of where
+(Linux/musl), not your laptop's. `knext build` stages the image's addon set regardless of where
 you build: when your local install already has it (a Linux host) it is copied, and when it does not
 (a macOS host holds only macOS addons) the build downloads the version your app's installed sharp
 resolves to, as pinned in `bun.lock`, and verifies the download against the lockfile's integrity
@@ -73,7 +73,7 @@ selection (say, a hand-built image with a custom layout), set `KNEXT_SHARP_ADDON
 path of the `.node` file inside its `@img` tree.
 
 **Upgrading:** if you built an app image on macOS before this behaviour existed, the old addon
-selection is baked into that binary — rebuild and redeploy with the current `kn-next build` to get
+selection is baked into that binary — rebuild and redeploy with the current `knext build` to get
 working image optimization; no configuration change is needed.
 
 The `runtime: 'node'` target (uncompiled vinext on Node, not the default single executable) gets

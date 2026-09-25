@@ -277,9 +277,9 @@ describe("build()", () => {
     });
 
     it("compiles the single executable on a vinext build", async () => {
-        // The load-bearing case: `kn-next deploy` builds an image whose
+        // The load-bearing case: `knext deploy` builds an image whose
         // Dockerfile COPYs `knext-exec-linux-x64` from the build context, so a
-        // default `kn-next build` that does not produce it emits a build that
+        // default `knext build` that does not produce it emits a build that
         // fails at docker-build time — or worse, dockerizes a stale binary.
         // build: "vinext" EXPLICIT — #1183/ADR-0058 flipped the ambient
         // default to turbopack.
@@ -307,7 +307,7 @@ describe("build()", () => {
     it("fails fast with an actionable message when turbopack produces no .next/standalone (#1184)", async () => {
         // The project build itself is mocked (runQuiet), so this reproduces
         // the real #1184 shape: the app's OWN build script ran (e.g. still
-        // `vite build`, unmodified from `kn-next create`) and exited 0, but
+        // `vite build`, unmodified from `knext create`) and exited 0, but
         // never emitted `.next/standalone` — this must be a HARD failure, not
         // a warning, and it must happen before assets are uploaded or an
         // image is built.

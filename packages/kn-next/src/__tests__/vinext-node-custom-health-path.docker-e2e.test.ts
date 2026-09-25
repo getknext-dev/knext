@@ -69,7 +69,7 @@ const EPOCH_LABEL = `${EPOCH_LABEL_KEY}=${Date.now()}`;
 // `docker build`s two throwaway images — so the only leak surface is images,
 // already covered by the `until=2h` filter below.
 
-/** The templates the node cell ships, rendered exactly as `kn-next create` would. */
+/** The templates the node cell ships, rendered exactly as `knext create` would. */
 const RENDERED_TEMPLATES = [
     "vite.config.ts",
     "knext-node-entry.mjs",
@@ -175,7 +175,7 @@ beforeAll(() => {
         );
     }
 
-    // #1342/ADR-0058: `kn-next create`'s DEFAULT builder no longer renders
+    // #1342/ADR-0058: `knext create`'s DEFAULT builder no longer renders
     // these vinext-shaped files — request `--builder vinext` explicitly,
     // matching what this suite actually exercises (the vinext × node runtime
     // image with a custom health path).
@@ -238,7 +238,7 @@ beforeAll(() => {
             `fixture "vite build" failed:\n${build.stdout}\n${build.stderr}`,
         );
     }
-    // The shipped gate `kn-next build` runs; throws on a bun-preset output.
+    // The shipped gate `knext build` runs; throws on a bun-preset output.
     assertNodePresetOutput(appDir);
 
     // #1298: this fixture declares sharp (see ENTRY_RUNTIME_DEPS above), so

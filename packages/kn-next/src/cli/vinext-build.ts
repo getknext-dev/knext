@@ -1,7 +1,7 @@
 /**
  * The vinext → single-executable build path (ADR-0048).
  *
- * `kn-next build` previously ran only the app's `npm run build` and looked for
+ * `knext build` previously ran only the app's `npm run build` and looked for
  * `.next/standalone`. ADR-0048 made `build: vinext` + `runtime: bun` the
  * default target, so the CLI has to be able to PRODUCE that artifact rather
  * than merely describe where it lands. (ADR-0054 item 6 re-opened the
@@ -140,7 +140,7 @@ export function compileArgv(
     //     so its loader is swapped for a `process.dlopen` shim. Without that,
     //     `/_next/image` silently serves unoptimized originals.
     //
-    // The script ships in this package, so a user's `kn-next build` gets the same
+    // The script ships in this package, so a user's `knext build` gets the same
     // treatment knext's own reference app does rather than a second copy that
     // drifts.
     return [
@@ -327,7 +327,7 @@ export interface VinextBuildOptions {
     readonly bunVersion?: string;
     /**
      * Skip step 1 (`vite build`) and compile an EXISTING `.output`. The caller
-     * that sets this is `kn-next build`, which has just run the app's own
+     * that sets this is `knext build`, which has just run the app's own
      * build script — running vite twice would double the slowest part of the
      * build for nothing. The `.output` existence check still runs either way.
      */
@@ -752,7 +752,7 @@ function appUsesSharp(
  *
  * `native/` is a standard N-API convention, so the name alone does not make the
  * directory knext's to delete: a hand-written `native/` holds someone's source.
- * The ownership marker is the `.integrity.json` manifest every `kn-next build`
+ * The ownership marker is the `.integrity.json` manifest every `knext build`
  * writes — present, the manifest's own file list says exactly what knext staged
  * and only those entries (plus the manifest) are removed; absent with content,
  * the build REFUSES rather than deleting what it cannot prove it created.
@@ -766,7 +766,7 @@ function clearStagedNative(dest: string): void {
     if (!existsSync(manifestPath)) {
         throw new UsageError(
             `Refusing to stage into ${dest}: it has content but no ${INTEGRITY_MANIFEST_NAME}, so knext did not stage it.\n\n` +
-                "`kn-next build` stages sharp's native addons into 'native/' beside the compiled\n" +
+                "`knext build` stages sharp's native addons into 'native/' beside the compiled\n" +
                 "binary and clears its own previous staging on rebuild — but this tree was not\n" +
                 "written by knext, and deleting it could destroy your files. Move it aside (or\n" +
                 "delete it yourself if it is disposable) and rebuild.",
@@ -1056,8 +1056,8 @@ export function detectBunVersion(
         if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
             throw new UsageError(
                 "The vinext single-executable target needs `bun` on PATH (https://bun.sh), and it was not found.\n\n" +
-                    `Install Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}+ (https://bun.sh/docs/installation) and re-run \`kn-next build\`.\n` +
-                    "(The kn-next CLI itself runs under plain Node — only this compile step shells out to Bun.)",
+                    `Install Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}+ (https://bun.sh/docs/installation) and re-run \`knext build\`.\n` +
+                    "(The knext CLI itself runs under plain Node — only this compile step shells out to Bun.)",
             );
         }
         const detail = err instanceof Error ? err.message : String(err);

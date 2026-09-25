@@ -33,7 +33,7 @@ user-metrics server, so an app defaulting to `9091` loses the port race and cras
 `EADDRINUSE`. `9464` is the conventional OpenTelemetry Prometheus-exporter port and collides with
 nothing Knative runs in the pod. The port is overridable via the `METRICS_PORT` env — but never set
 it to `9091`, and note the default NetworkPolicy's scrape grants are fixed at `9464` (an app that
-moves the port opts out of the shipped scrape path). `kn-next doctor` flags any app pinned onto
+moves the port opts out of the shipped scrape path). `knext doctor` flags any app pinned onto
 `9091` while queue-proxy's user metrics are active.
 
 Your app may additionally serve its own **`GET /api/metrics`** route — that is where the RUM Web
@@ -174,10 +174,10 @@ no exporter, no span processors, **zero overhead**.
 
 ## Load testing
 
-knext ships a **k6** load-test harness invoked with `kn-next loadtest`:
+knext ships a **k6** load-test harness invoked with `knext loadtest`:
 
 ```bash
-kn-next loadtest --url https://app.example.com --type scale-to-zero --namespace default
+knext loadtest --url https://app.example.com --type scale-to-zero --namespace default
 ```
 
 It generates a Kubernetes `ConfigMap` + `Job` (image `grafana/k6`) that runs the k6 script

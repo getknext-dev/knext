@@ -7,13 +7,13 @@
 //
 // 1. The SHIPPED scaffold templates build a node-runnable artifact. The suite
 //    renders `vite.config.ts`, `knext-node-entry.mjs` and `runtime-contract.mjs`
-//    through `renderScaffold` (the function `kn-next create` uses) over a
+//    through `renderScaffold` (the function `knext create` uses) over a
 //    minimal fixture app whose kn-next.config.ts says `runtime: 'node'`, then
 //    runs the app's own `vite build`. `.output/nitro.json` must say
 //    `node-server` — checked by the SHIPPED `assertNodePresetOutput`, the same
-//    gate `kn-next build` runs.
+//    gate `knext build` runs.
 // 2. The image recipe is staged by the SHIPPED `stageVinextNodeDockerfile`
-//    (what `kn-next build` does for an app that lacks it) and built with
+//    (what `knext build` does for an app that lacks it) and built with
 //    `docker build`. Its bake step boots the server once, as the runtime uid,
 //    and fails the build on an undersized cache — so a green build is already
 //    evidence the bake ran.
@@ -88,7 +88,7 @@ const EPOCH_LABEL_KEY = `${LABEL_KEY}.epoch`;
 const EPOCH_LABEL = `${EPOCH_LABEL_KEY}=${Date.now()}`;
 const LEAK_AGE_MS = 2 * 60 * 60 * 1000;
 
-/** The templates the node cell ships, rendered exactly as `kn-next create` would. */
+/** The templates the node cell ships, rendered exactly as `knext create` would. */
 const RENDERED_TEMPLATES = [
     "vite.config.ts",
     "knext-node-entry.mjs",
@@ -300,7 +300,7 @@ beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "knext-vinext-node-"));
     appDir = join(workDir, "app");
     cpSync(FIXTURE_SRC, appDir, { recursive: true });
-    // #1342/ADR-0058: `kn-next create`'s DEFAULT builder no longer renders
+    // #1342/ADR-0058: `knext create`'s DEFAULT builder no longer renders
     // these vinext-shaped files at all — request the `--builder vinext`
     // override explicitly, matching what this suite actually exercises (the
     // vinext × node runtime image).
@@ -318,7 +318,7 @@ beforeAll(async () => {
         }
         writeFileSync(join(appDir, rel), text, "utf8");
     }
-    // What `kn-next build` does for an app that has no recipe yet.
+    // What `knext build` does for an app that has no recipe yet.
     const staged = stageVinextNodeDockerfile({ cwd: appDir });
     if (!staged.staged) {
         throw new Error(
@@ -327,7 +327,7 @@ beforeAll(async () => {
     }
 
     // 2b. The runtime dependencies the SERVER ENTRY imports come from the
-    //     rendered `kn-next create` package.json — never from the fixture — so
+    //     rendered `knext create` package.json — never from the fixture — so
     //     a template that forgets to declare one fails here, not in a user's
     //     repo. (The fixture deliberately omits srvx.) Only the packages the
     //     entry needs: the rest of the template's deps (@getknext/lib, otel…)
@@ -384,7 +384,7 @@ beforeAll(async () => {
             ) as { preset?: unknown }
         ).preset,
     );
-    // The shipped gate `kn-next build` runs; throws on a bun-preset output.
+    // The shipped gate `knext build` runs; throws on a bun-preset output.
     assertNodePresetOutput(appDir);
 
     // 4b. #1298: nitro's own trace into `.output/server/node_modules` copies

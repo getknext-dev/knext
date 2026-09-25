@@ -1,5 +1,5 @@
 /**
- * T6 (doctor half) — `kn-next doctor` reports SCHEMA COVERAGE, not CRD
+ * T6 (doctor half) — `knext doctor` reports SCHEMA COVERAGE, not CRD
  * existence.
  *
  * The pre-#314 check answered "is the NextApp CRD installed and does it serve a

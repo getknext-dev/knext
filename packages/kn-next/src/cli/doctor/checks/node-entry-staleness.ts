@@ -2,8 +2,8 @@
  * vinext-on-node entry freshness (#1356) — LOCAL and read-only, so it runs
  * even when the cluster is unreachable (like storage-mode.ts).
  *
- * WHY THIS EXISTS: `knext-node-entry.mjs` is scaffolded ONCE by `kn-next
- * create` and never touched again — it is not re-rendered on `kn-next
+ * WHY THIS EXISTS: `knext-node-entry.mjs` is scaffolded ONCE by `knext
+ * create` and never touched again — it is not re-rendered on `knext
  * build`/`deploy`. It changed runtime behavior once already (the deployed
  * Cache-Control normalization, `response-cache-control.mjs`'s
  * `applyVinextDeployDefault` + `cacheControlMiddleware`), but an app
@@ -15,7 +15,7 @@
  *
  * SCOPE: `knext-node-entry.mjs` is only ever RUN by an app on
  * `build: 'vinext'` + `runtime: 'node'` (`vite.config.ts.hbs` is what wires
- * nitro's `entry` to it under that combination). `kn-next create` scaffolds
+ * nitro's `entry` to it under that combination). `knext create` scaffolds
  * the file into every app regardless of which build/runtime it will end up
  * selecting — a default-standalone or vinext×bun app carries an inert copy
  * it never executes. Comparing that inert copy's marker against the
@@ -173,7 +173,7 @@ export async function nodeEntryStalenessCheck(
             "vinext-on-node entry freshness",
             "warn",
             `knext-node-entry.mjs ${from}; the installed @getknext/core is at marker ${templateMarker} — this app may be missing a runtime fix (e.g. a deployed Cache-Control normalization) that a newer scaffold ships`,
-            `copy the current template over yours: kn-next create --force <scratch-dir> in a throwaway directory, then replace this app's knext-node-entry.mjs with the freshly scaffolded one (diff first if you made local edits)`,
+            `copy the current template over yours: knext create --force <scratch-dir> in a throwaway directory, then replace this app's knext-node-entry.mjs with the freshly scaffolded one (diff first if you made local edits)`,
         ),
     ];
 }

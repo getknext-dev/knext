@@ -9,13 +9,13 @@ import type { NextConfig } from "next";
  * knext runtime
  * image's supervisor (`knext-standalone-entry.mjs`) spawns that server and
  * drains it on SIGTERM. Deleting `output: 'standalone'` does not fail the
- * build locally, but `kn-next deploy` has nothing to COPY into the runtime
+ * build locally, but `knext deploy` has nothing to COPY into the runtime
  * image and fails loudly instead.
  *
  * `adapterPath` wires the official Next.js Deployment Adapter
  * (`./next-adapter.ts` → `@getknext/core/adapter`) — this is what injects the
  * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on (#342),
- * and what reports build completion back to `kn-next build`. Building with
+ * and what reports build completion back to `knext build`. Building with
  * `next build` and NOT wiring this adapter is a silent correctness gap, not a
  * build failure — don't delete it.
  *
@@ -30,7 +30,7 @@ import type { NextConfig } from "next";
  * https://github.com/getknext-dev/knext/issues/1372 for the full trace and
  * the bisection. `--webpack` is not a stopgap hack: node/bun × webpack is an
  * already-verified knext build target, so this pins the scaffold to a path
- * knext verifies end-to-end. `kn-next build`/`deploy` carry the same check
+ * knext verifies end-to-end. `knext build`/`deploy` carry the same check
  * for apps that did NOT go through this scaffold
  * (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`) — it
  * fails fast with this same explanation rather than the raw ENOENT. Do not
@@ -38,13 +38,13 @@ import type { NextConfig } from "next";
  * issue is resolved upstream at whatever Next version you are bumping to.
  */
 const nextConfig: NextConfig = {
-    // Asset prefix is injected by `kn-next deploy` from `kn-next.config.ts`
+    // Asset prefix is injected by `knext deploy` from `kn-next.config.ts`
     // storage settings. In dev mode (`next dev`) ASSET_PREFIX is unset, so
     // assets serve locally.
     assetPrefix: process.env.ASSET_PREFIX || "",
     // #93 skew protection (ADR-0011): pin every client to the build it
     // loaded — `deploymentId` makes Next append `?dpl=<id>` to asset/RSC
-    // requests. `kn-next deploy` sets NEXT_DEPLOYMENT_ID = the deploy tag;
+    // requests. `knext deploy` sets NEXT_DEPLOYMENT_ID = the deploy tag;
     // unset in `next dev` → no pinning.
     deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
     // `deploymentId` alone only sets the `?dpl=` query param — it does NOT

@@ -70,7 +70,7 @@ export function preflightEsmPackage(cwd: string): void {
         throw new UsageError(
             'The vinext single-executable target requires the app to be an ES module: its package.json must have `"type": "module"`.\n\n' +
                 "vinext builds with Vite/Rollup (ESM); a CommonJS app fails to resolve the rsc↔ssr entry graph and dies mid-build.\n" +
-                'Add `"type": "module"` to package.json (apps scaffolded with `kn-next create` already have it).',
+                'Add `"type": "module"` to package.json (apps scaffolded with `knext create` already have it).',
         );
     }
 }
@@ -108,7 +108,7 @@ export interface RunProjectBuildOptions {
  * IDENTICAL config successfully; 16.3.0 already does not — not a permanent
  * upstream incompatibility, and not a knext defect). Every app on the
  * `turbopack` builder wires `adapterPath` by construction (it is what that
- * target IS), so this is not scaffold-specific: ANY `kn-next build` on the
+ * target IS), so this is not scaffold-specific: ANY `knext build` on the
  * default target with an affected Next version hits it, including apps this
  * CLI did not scaffold. Fail BEFORE the (guaranteed-to-fail) build runs, with
  * the actual fix named, rather than let the raw Next stack trace ("ENOENT
@@ -190,7 +190,7 @@ export function checkTurbopackAdapterStandaloneRegression(
             "See https://github.com/getknext-dev/knext/issues/1372 for the full trace.\n\n" +
             "Fix: add `--webpack` to this app's package.json `build` script " +
             '(`"build": "next build --webpack"`) — node/bun x webpack is an already-verified ' +
-            "knext build target. `kn-next create`'s own scaffold does this by default.",
+            "knext build target. `knext create`'s own scaffold does this by default.",
     );
 }
 

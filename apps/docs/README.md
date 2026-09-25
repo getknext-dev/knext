@@ -32,7 +32,7 @@ bun run --filter @getknext/lib build && bun run --filter @getknext/db build && b
 bun run --filter knext-docs dev               # next dev → http://localhost:3000
 bun run --filter knext-docs build             # vanilla (managed-host / Vercel) build
 KNEXT_ADAPTER=1 bun run --filter knext-docs build   # self-host / adapter dogfood → .next/standalone
-bun run --filter knext-docs config:validate   # validate kn-next.config.ts with the real kn-next validator
+bun run --filter knext-docs config:validate   # validate kn-next.config.ts with the real knext validator
 ```
 
 ## Layout

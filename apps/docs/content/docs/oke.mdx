@@ -72,7 +72,7 @@ Redis) or a self-hosted Redis Service. `cache.url` is required when the provider
 
 Push the app image to OCI Registry (OCIR), e.g.
 `<region-key>.ocir.io/<tenancy-namespace>/<repo>`. The operator **rejects any image that is not
-digest-pinned** (`@sha256:…`); `kn-next deploy` resolves the digest automatically.
+digest-pinned** (`@sha256:…`); `knext deploy` resolves the digest automatically.
 
 ## 6 · Complete `kn-next.config.ts`
 
@@ -112,10 +112,10 @@ export default config;
 ## 7 · Deploy and verify scale-to-zero
 
 ```sh
-kn-next deploy --registry <region-key>.ocir.io/<tenancy-namespace>/acme
+knext deploy --registry <region-key>.ocir.io/<tenancy-namespace>/acme
 ```
 
-`kn-next deploy` builds the standalone image, pushes it (resolving the digest), and applies the
+`knext deploy` builds the standalone image, pushes it (resolving the digest), and applies the
 `NextApp` CR; the operator reconciles it into a Knative Service. Confirm the service scales to zero
 when idle:
 
