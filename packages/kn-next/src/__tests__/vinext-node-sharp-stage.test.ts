@@ -20,7 +20,7 @@
  * '.../sharp/dist/index.cjs'`.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import {
     existsSync,
     mkdirSync,
@@ -41,6 +41,9 @@ function tempDir(prefix: string): string {
     tempDirs.push(dir);
     return dir;
 }
+afterAll(() => {
+    for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
+});
 
 const SHARP_V = "0.35.4";
 const VIPS_V = "1.3.3";
