@@ -85,9 +85,18 @@ const MUTATIONS = [
     anchor: "return 'go-containerregistry_Linux_x86_64.tar.gz';",
     replacement: "return 'go-containerregistry_Darwin_arm64.tar.gz';",
   },
+  {
+    // rev-ci-1390-1396 — stop stripping `#` comments before scanning, so a
+    // documentation comment describing the CORRECT pin can silently balance
+    // the three counts against a real, WRONG inline install next to it.
+    label:
+      'stripFullLineComments: stop stripping comments before scanning (reintroduce the bypass)',
+    anchor: "return text.replace(/^[ \\t]*#.*$/gm, '');",
+    replacement: 'return text;',
+  },
 ];
 
-declareMutations(11);
+declareMutations(12);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -99,8 +108,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 11) {
-  console.error(`FATAL: declared 11 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 12) {
+  console.error(`FATAL: declared 12 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

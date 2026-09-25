@@ -51,6 +51,26 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
+ * Strips full-line `#` comments (a line whose first non-blank character is
+ * `#`, arbitrarily indented) before scanning — rev-ci-1390-1396 review: a
+ * documentation comment describing the CORRECT pin (`# CRANE_VERSION: vX.Y.Z
+ * CRANE_SHA256: ...`) sitting next to a REAL inline install of a WRONG
+ * version (no named env vars — the shape the download-URL cross-check
+ * exists to catch) can silently BALANCE the three counts: the comment
+ * supplies the missing version/checksum matches, the real step supplies the
+ * URL, and the scan reports the comment's (correct-looking) pin instead of
+ * throwing on the real, unaccounted-for wrong one. Same rule this repo
+ * already applies to `run:` block scalars elsewhere
+ * (`tests/helpers/publish-markers.ts`'s `stripBashCommentLines`) — not a
+ * YAML-level `#` comment (`effectiveWorkflowText` already strips those via
+ * parse+re-serialise), but a bash `#`-comment INSIDE an opaque `run: |`
+ * string, which survives re-serialisation untouched.
+ */
+function stripFullLineComments(text) {
+  return text.replace(/^[ \t]*#.*$/gm, '');
+}
+
+/**
  * The exact release asset this workflow downloads — the Linux x86_64
  * tarball, matching the `curl` URL in every "Install crane" step. A single
  * source of truth so the scanner and the upstream-verification script never
@@ -116,7 +136,7 @@ export function scanCranePins(workflowsDir, deps = {}) {
 
   const found = [];
   for (const file of listFiles()) {
-    const text = readSource(file);
+    const text = stripFullLineComments(readSource(file));
     const versions = scanCraneVersions(text);
     const checksums = scanCraneChecksums(text);
     const urlCount = countDownloadUrlOccurrences(text);

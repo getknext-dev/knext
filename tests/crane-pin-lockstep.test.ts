@@ -173,6 +173,82 @@ describe('scanCranePins — finds every CRANE_VERSION/CRANE_SHA256 pair', () => 
     });
   });
 
+  describe('rev-ci-1390-1396: a commented pin must not offset a real, wrong inline install (#1390)', () => {
+    it('a comment containing a CORRECT-looking CRANE_VERSION/CRANE_SHA256/URL text must not balance the counts against a real WRONG inline install with no named vars', () => {
+      // The real "Install crane" step below inlines a WRONG version+checksum
+      // directly into `run:` with no named env vars at all — exactly the
+      // shape the download-URL cross-check exists to catch (see the "no
+      // named env vars" test above), which on its own throws because
+      // versions=0, checksums=0, urlCount=1.
+      //
+      // But a `#`-comment sits right above it, DOCUMENTING the historically
+      // correct pin in prose — `CRANE_VERSION: v9.9.9` / `CRANE_SHA256:
+      // <hex>` — and even mentions the download-URL host+path once. Without
+      // comment stripping, that ONE comment line alone supplies
+      // versions=1, checksums=1, urlCount=1 (comment) + urlCount=1 (real) =
+      // 2 — no, more precisely: the comment contributes 1 version, 1
+      // checksum, and 1 URL mention; the real inline step contributes 0
+      // versions, 0 checksums, 1 URL. Totals: versions=1, checksums=1,
+      // urlCount=2 — WOULD still mismatch (1 != 2) and throw... unless the
+      // comment's URL mention is dropped (a comment that names the version
+      // and checksum in prose but does not literally repeat the download
+      // URL text, which is the realistic "documents the old pin" shape).
+      // That is exactly the fixture below: the comment supplies exactly one
+      // version and one checksum and NO url text, so pre-fix the totals are
+      // versions=1, checksums=1, urlCount=1 (the real step's own URL) — a
+      // perfect, silent balance — while the pin `scanCranePins` reports is
+      // the COMMENT's (correct-looking) value, not the real wrong one the
+      // step actually installs.
+      const text =
+        'jobs:\n  p:\n    steps:\n      - name: Install crane (version + checksum pinned)\n' +
+        `        # Historically pinned to CRANE_VERSION: v9.9.9 CRANE_SHA256: ${'a'.repeat(64)} — matches the other copies.\n` +
+        '        run: |\n' +
+        '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
+        '            "https://github.com/google/go-containerregistry/releases/download/v1.0.0-WRONG/go-containerregistry_Linux_x86_64.tar.gz"\n' +
+        `          echo "${'b'.repeat(64)}  /tmp/crane.tar.gz" | sha256sum -c -\n`;
+      expect(() =>
+        scanCranePins(WORKFLOWS_DIR, {
+          readSource: () => text,
+          listFiles: () => ['synthetic.yml'],
+        }),
+      ).toThrow(/UNACCOUNTED-FOR/);
+    });
+
+    it("an INDENTED full-line comment (matching this repo's actual step indentation) is also stripped, not just column-0 comments", () => {
+      const text =
+        'jobs:\n  p:\n    steps:\n      - name: Install crane (version + checksum pinned)\n' +
+        '        env:\n' +
+        `            # CRANE_VERSION: v9.9.9\n` +
+        `            # CRANE_SHA256: ${'a'.repeat(64)}\n` +
+        '        run: |\n' +
+        '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
+        '            "https://github.com/google/go-containerregistry/releases/download/v1.0.0-WRONG/go-containerregistry_Linux_x86_64.tar.gz"\n' +
+        `          echo "${'b'.repeat(64)}  /tmp/crane.tar.gz" | sha256sum -c -\n`;
+      expect(() =>
+        scanCranePins(WORKFLOWS_DIR, {
+          readSource: () => text,
+          listFiles: () => ['synthetic.yml'],
+        }),
+      ).toThrow(/UNACCOUNTED-FOR/);
+    });
+
+    it('non-vacuity: a genuinely commented-out DUPLICATE of the same real pin does not itself cause a false violation once stripped', () => {
+      // Guard against over-correcting: stripping comments must not turn a
+      // legitimate single real pin into zero signals (which would silently
+      // skip the file instead of recognising the pin).
+      const version = 'v9.9.9';
+      const sha256 = 'a'.repeat(64);
+      const text =
+        `        # CRANE_VERSION: ${version} (comment only, no real effect)\n` +
+        syntheticCraneStep(version, sha256);
+      const pins = scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      });
+      expect(pins).toEqual([{ file: 'synthetic.yml', version, sha256 }]);
+    });
+  });
+
   it('does not match a CRANE_VERSION that is an unresolved GitHub Actions expression as a real pin count (self-test: superseded by the cross-check test above, kept as a direct regression pin on the throw)', () => {
     expect(() =>
       scanCranePins(WORKFLOWS_DIR, {
