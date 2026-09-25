@@ -32,6 +32,18 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const CI_WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/ci.yml');
 const NIGHTLY_WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/docs-closure-nightly.yml');
 
+/**
+ * #1421 review round 1 (jev 0.83) — the real INVOCATION, not a mere mention.
+ * A comment line's first non-whitespace character is `#`, so `[^#\n]*`
+ * greedily matching everything up to (but never past) a `#` cannot span one:
+ * a comment like `# See scripts/lib/nightly-alert-issue.mjs's own header`
+ * never matches, because the character immediately after `^\s*` IS `#`, and
+ * `[^#\n]*` cannot cross it to reach `node`. The real invocation line
+ * (`TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs`)
+ * has no `#` before `node`, so it matches.
+ */
+const NIGHTLY_ALERT_INVOCATION_RE = /^\s*[^#\n]*\bnode scripts\/nightly-alert-issue\.mjs\b/m;
+
 function read(path: string): string {
   return readFileSync(path, 'utf8');
 }
@@ -225,9 +237,14 @@ describe('#320 idempotent pinned alert (mirrors nightly-red-alert)', () => {
     // behavior this test used to assert inline. This test now proves
     // DELEGATION, not the behavior a second time.
     const text = read(NIGHTLY_WORKFLOW_PATH);
+    // #1421 review round 1 (jev 0.83): a bare `.includes('nightly-alert-issue.mjs')`
+    // matches the migration note's OWN prose ("See scripts/lib/nightly-alert-issue.mjs")
+    // just as readily as the real invocation — the reviewer deleted the real
+    // `node scripts/nightly-alert-issue.mjs` line and this stayed green.
+    // Require the real INVOCATION shape on a non-comment line instead.
     expect(
-      text.includes('nightly-alert-issue.mjs'),
-      'the alert must route through scripts/nightly-alert-issue.mjs — the shared idempotent create-or-update helper',
+      NIGHTLY_ALERT_INVOCATION_RE.test(text),
+      'the alert must actually INVOKE (not merely mention) scripts/nightly-alert-issue.mjs on a real, non-comment line',
     ).toBe(true);
     // No inline gh issue list/comment/create/pin calls: those would
     // duplicate — and risk drifting from — the shared helper's own logic,

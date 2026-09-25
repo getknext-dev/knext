@@ -44,6 +44,22 @@ const WORKFLOWS_DIR = resolve(REPO_ROOT, '.github/workflows');
 const SCRIPTS_DIR = resolve(REPO_ROOT, 'scripts');
 
 /**
+ * #1421 review round 1 (jev 0.83) — the real INVOCATION, not a mere mention.
+ * A bare `.includes('nightly-alert-issue.mjs')` also matches every migrated
+ * workflow's OWN comment prose (each names the helper in two comment lines
+ * explaining the migration) — the reviewer deleted the real
+ * `node scripts/nightly-alert-issue.mjs` line in two workflows and this
+ * stayed green. A comment line's first non-whitespace character is `#`, so
+ * `[^#\n]*` greedily matching everything up to (but never past) a `#`
+ * cannot span one: the character immediately after `^\s*` on a comment line
+ * IS `#`, so `[^#\n]*` matches zero characters there and the required
+ * literal `node` never follows. The real invocation line
+ * (`TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs`)
+ * has no `#` before `node`, so it matches.
+ */
+const NIGHTLY_ALERT_INVOCATION_RE = /^\s*[^#\n]*\bnode scripts\/nightly-alert-issue\.mjs\b/m;
+
+/**
  * The ONLY file(s) permitted to actually pin an issue. Relative to repo
  * root, matching how `git ls-files`-style enumeration elsewhere in this
  * repo names files.
@@ -312,9 +328,9 @@ describe('#1347 — exactly one file may pin an issue (scan, not an enumerated l
       const text = byFile.get(file);
       expect(text, `expected workflow ${file} not found under .github/workflows`).toBeTruthy();
       expect(
-        text,
-        `${file} does not call scripts/nightly-alert-issue.mjs — was it migrated to the shared helper?`,
-      ).toContain('nightly-alert-issue.mjs');
+        NIGHTLY_ALERT_INVOCATION_RE.test(text as string),
+        `${file} does not actually INVOKE scripts/nightly-alert-issue.mjs on a real, non-comment line — was it migrated to the shared helper, or did its invocation line get deleted while its migration COMMENTS survived?`,
+      ).toBe(true);
     }
   });
 

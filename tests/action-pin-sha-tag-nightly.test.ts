@@ -58,6 +58,18 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WORKFLOW_DIR = resolve(REPO_ROOT, '.github/workflows');
 const NIGHTLY = resolve(WORKFLOW_DIR, 'action-pin-resolution-nightly.yml');
 
+/**
+ * #1421 review round 1 (jev 0.83) — the real INVOCATION, not a mere mention.
+ * A comment line's first non-whitespace character is `#`, so `[^#\n]*`
+ * greedily matching everything up to (but never past) a `#` cannot span one:
+ * a comment like `# See scripts/lib/nightly-alert-issue.mjs's own header`
+ * never matches, because the character immediately after `^\s*` IS `#`, and
+ * `[^#\n]*` cannot cross it to reach `node`. The real invocation line
+ * (`TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs`)
+ * has no `#` before `node`, so it matches.
+ */
+const NIGHTLY_ALERT_INVOCATION_RE = /^\s*[^#\n]*\bnode scripts\/nightly-alert-issue\.mjs\b/m;
+
 function read(path: string): string {
   return readFileSync(path, 'utf8');
 }
@@ -140,9 +152,12 @@ describe('nightly SHA↔tag resolution — the workflow (#539)', () => {
     // lookup-existing/comment-if-present/create-if-absent idempotent
     // behavior this test used to assert inline. This test now proves
     // DELEGATION, not the behavior a second time.
+    // deleted the real invocation line and this stayed green — a bare
+    // `.includes('nightly-alert-issue.mjs')` also matches the migration
+    // note's own prose above. Require the real INVOCATION shape instead.
     expect(
-      alert.includes('nightly-alert-issue.mjs'),
-      'the alert must route through scripts/nightly-alert-issue.mjs — the shared idempotent create-or-update helper',
+      NIGHTLY_ALERT_INVOCATION_RE.test(alert),
+      'the alert must actually INVOKE (not merely mention) scripts/nightly-alert-issue.mjs on a real, non-comment line',
     ).toBe(true);
     // No inline gh issue list/comment/create/pin calls, comment-stripped
     // first: the migration note above literally SAYS "This alert used to
