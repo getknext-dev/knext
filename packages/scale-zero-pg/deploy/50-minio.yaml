@@ -20,6 +20,28 @@
 # last-good RELEASE.2022-10-20 build by its immutable sha256 (the exact image the
 # live plane has been running) — a moved/retagged upstream can never change what
 # we pull.
+#
+# #1403 (KNOWN BREAK, NOT FIXED HERE — needs szpg's own review, not a knext-side
+# tech-debt PR): the digest below is UNPULLABLE. quay.io/minio/minio now
+# UNAUTHORIZES every anonymous pull, repo-wide — verified with `crane manifest`
+# against several tags including this exact "last-good" pin, not a transient
+# flake. Every THROWAWAY MinIO consumer in this repo (deploy/_verify-*.sh
+# drills, knext's own CI fixtures) was repinned to
+# docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+# (Bitnami's post-license-change "legacy" free mirror — unmaintained but genuine
+# MinIO, proven S3-API-compatible). THIS file, 55-storage-init.yaml, and
+# 62-backup.yaml are szpg's LIVE production manifests and were deliberately
+# left UNFIXED (getknext-dev/knext#1423, filed for szpg's own review) — not
+# repinned to Bitnami. For THIS file specifically: it is szpg's LIVE persistent
+# plane with EXISTING root-owned PVC data (see the runAsNonRoot note below),
+# and Bitnami's image runs as non-root UID 1001 by default — swapping images
+# here needs either a chown-PVC initContainer or an explicit root override,
+# verified against real PVC data, which is a decision for szpg's own review
+# process (code review + architect + system-designer sign-off per
+# packages/scale-zero-pg/CLAUDE.md), not a unilateral edit from a knext-side CI
+# tech-debt pass. This file's own comment above already argues for migrating
+# off MinIO entirely (SeaweedFS/Ceph RGW/Garage) — #1403 is a live argument for
+# prioritizing that.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
