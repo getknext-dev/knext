@@ -94,9 +94,21 @@ const MUTATIONS = [
     anchor: "return text.replace(/^[ \\t]*#.*$/gm, '');",
     replacement: 'return text;',
   },
+  {
+    // #1429 — stop cross-checking a crane pin's accompanying comment
+    // against its own CRANE_VERSION at all. Without this, CRANE_VERSION
+    // could be bumped while the "from the vX.Y.Z release's checksums.txt"
+    // comment beside it is left naming the OLD version, and nothing would
+    // ever flag the drift.
+    label: 'scanCranePins: stop cross-checking the accompanying comment against CRANE_VERSION',
+    anchor:
+      'const commentVersions = scanCraneVersionComments(readSource(file));\n    for (const cv of commentVersions) {\n      if (!versions.includes(cv)) {',
+    replacement:
+      'const commentVersions = scanCraneVersionComments(readSource(file));\n    for (const cv of commentVersions) {\n      if (false) {',
+  },
 ];
 
-declareMutations(12);
+declareMutations(13);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -108,8 +120,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 12) {
-  console.error(`FATAL: declared 12 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 13) {
+  console.error(`FATAL: declared 13 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

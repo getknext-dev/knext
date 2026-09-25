@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   assertLockstep,
   filenameForPin,
   parseChecksumsTxt,
   scanCranePins,
+  scanCraneVersionComments,
   verifyPinAgainstChecksums,
 } from '../scripts/lib/crane-pin.mjs';
 
@@ -346,5 +348,105 @@ describe('verifyPinAgainstChecksums — fail-closed comparison', () => {
     expect(() =>
       verifyPinAgainstChecksums({ version: 'v1.0.0', sha256: 'd'.repeat(64) }, map),
     ).toThrow(/no checksums entry/i);
+  });
+});
+
+/**
+ * #1429 — a synthetic "Install crane" step in this repo's REAL shape,
+ * including the trailing comment ("# sha256 of ... from the vX.Y.Z\n#
+ * release's checksums.txt (...)") that names the version — unlike
+ * `syntheticCraneStep` above, which omits it (most tests above don't need
+ * it, and adding it there would force every existing fixture to carry a
+ * comment it does not need).
+ */
+function syntheticCraneStepWithComment(
+  version: string,
+  sha256: string,
+  commentVersion: string,
+): string {
+  return (
+    'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n' +
+    `          CRANE_VERSION: ${version}\n` +
+    `          # sha256 of go-containerregistry_Linux_x86_64.tar.gz from the ${commentVersion}\n` +
+    "          # release's checksums.txt (github.com/google/go-containerregistry).\n" +
+    `          CRANE_SHA256: ${sha256}\n` +
+    '        run: |\n' +
+    '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
+    '            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"\n'
+  );
+}
+
+describe('scanCraneVersionComments (the scanner itself, against synthetic snippets)', () => {
+  it("extracts the version from this repo's established comment wording", () => {
+    const text =
+      '# sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7\n' +
+      "# release's checksums.txt (github.com/google/go-containerregistry).\n";
+    expect(scanCraneVersionComments(text)).toEqual(['v0.21.7']);
+  });
+
+  it('finds multiple comment-version mentions, in order', () => {
+    const text =
+      '# sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v1.1.1\n' +
+      "# release's checksums.txt (...)\n" +
+      '# sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v2.2.2\n' +
+      "# release's checksums.txt (...)\n";
+    expect(scanCraneVersionComments(text)).toEqual(['v1.1.1', 'v2.2.2']);
+  });
+
+  it('finds nothing in text with no such comment (non-vacuity: absence is not an error at this layer)', () => {
+    expect(scanCraneVersionComments('jobs:\n  p:\n    steps:\n      - run: echo hi\n')).toEqual([]);
+  });
+
+  it('non-vacuity: the real workflows carry this comment, and every mention matches its own file', () => {
+    let total = 0;
+    for (const file of [
+      'supply-chain.yml',
+      'operator-supply-chain.yml',
+      'operator-e2e-nightly.yml',
+    ]) {
+      const text = readFileSync(resolve(WORKFLOWS_DIR, file), 'utf8');
+      const mentions = scanCraneVersionComments(text);
+      total += mentions.length;
+    }
+    expect(total).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("scanCranePins — a crane pin's accompanying comment must track the pin (#1429)", () => {
+  it('a matching comment (same version as CRANE_VERSION) is accepted', () => {
+    const text = syntheticCraneStepWithComment('v9.9.9', 'a'.repeat(64), 'v9.9.9');
+    const pins = scanCranePins(WORKFLOWS_DIR, {
+      readSource: () => text,
+      listFiles: () => ['synthetic.yml'],
+    });
+    expect(pins).toEqual([{ file: 'synthetic.yml', version: 'v9.9.9', sha256: 'a'.repeat(64) }]);
+  });
+
+  it('a DRIFTED comment (names a version other than the pinned CRANE_VERSION) throws — the exact #1429 repro', () => {
+    // CRANE_VERSION was bumped to v9.9.9 but the accompanying comment still
+    // says v9.8.0 — exactly the shape a version bump that forgot to update
+    // its own comment leaves behind.
+    const text = syntheticCraneStepWithComment('v9.9.9', 'a'.repeat(64), 'v9.8.0');
+    expect(() =>
+      scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      }),
+    ).toThrow(/comment has drifted/);
+  });
+
+  it('no comment at all is fine — the comment is documentation, not a second source of truth', () => {
+    // Every OTHER fixture in this file uses `syntheticCraneStep`, which
+    // carries no comment at all — this pins that shape as explicitly valid,
+    // not just "happens to pass".
+    const pins = scanCranePins(WORKFLOWS_DIR, {
+      readSource: () => syntheticCraneStep('v9.9.9', 'a'.repeat(64)),
+      listFiles: () => ['synthetic.yml'],
+    });
+    expect(pins).toEqual([{ file: 'synthetic.yml', version: 'v9.9.9', sha256: 'a'.repeat(64) }]);
+  });
+
+  it('the real repo files pass this check today (non-vacuity + no live drift)', () => {
+    expect(() => scanCranePins(WORKFLOWS_DIR)).not.toThrow();
   });
 });

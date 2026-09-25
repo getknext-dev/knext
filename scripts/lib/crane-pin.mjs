@@ -111,6 +111,29 @@ function countDownloadUrlOccurrences(text) {
 }
 
 /**
+ * Every `vX.Y.Z` this repo's established comment wording names as the
+ * source of a `CRANE_SHA256` value — e.g. "# sha256 of
+ * go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7\n# release's
+ * checksums.txt (...)". Operates on the RAW, un-stripped text: unlike
+ * `scanCraneVersions`/`scanCraneChecksums`, this function's whole job is to
+ * read a `#` comment, not to be fooled by one (#1429).
+ *
+ * Deliberately tied to this repo's actual established phrasing rather than
+ * a generic "any vX.Y.Z near a comment" scan — a looser pattern would flag
+ * unrelated prose as a pin claim. If the wording changes, this scan must be
+ * updated alongside it, the same way `filenameForPin()` above is the one
+ * place that knows the release asset's name.
+ */
+export function scanCraneVersionComments(text) {
+  const re = /#\s*sha256 of \S+ from the (v?\d+\.\d+\.\d+)\s*\n\s*#\s*release/gi;
+  const out = [];
+  for (const m of text.matchAll(re)) {
+    out.push(m[1].startsWith('v') ? m[1] : `v${m[1]}`);
+  }
+  return out;
+}
+
+/**
  * Scans every `.github/workflows/*.yml`/`*.yaml` file for CRANE_VERSION /
  * CRANE_SHA256 pairs, TEXT-based (no YAML parser — see the module header).
  * `deps.listFiles`/`deps.readSource` are injectable so the test suite can
@@ -154,6 +177,25 @@ export function scanCranePins(workflowsDir, deps = {}) {
           `\${{ }} expression, an inline literal with no named env var, or a genuinely missing ` +
           `half of a pair) — #1211 item 2 exists precisely to catch that, not to skip past it.`,
       );
+    }
+
+    // #1429 — a comment claiming a DIFFERENT version than the pin it sits
+    // beside is exactly what a version bump that only touched CRANE_VERSION
+    // (and forgot the comment) leaves behind. Scanned from the RAW,
+    // un-stripped source (the comment is the thing under test here, not
+    // noise to remove), matched against the SAME version this pass already
+    // trusts. Only checked when the comment shape is present at all — a
+    // pin with no such comment is not itself an error; this repo's own
+    // synthetic test fixtures deliberately omit it.
+    const commentVersions = scanCraneVersionComments(readSource(file));
+    for (const cv of commentVersions) {
+      if (!versions.includes(cv)) {
+        throw new Error(
+          `${file}: a crane pin's accompanying comment names ${cv}, but no CRANE_VERSION ` +
+            `in this file is set to ${cv} (found: ${versions.join(', ') || '(none)'}) — the ` +
+            `comment has drifted from the pin it describes (#1429).`,
+        );
+      }
     }
 
     for (let i = 0; i < versions.length; i++) {
