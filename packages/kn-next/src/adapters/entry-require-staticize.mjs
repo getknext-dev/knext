@@ -194,14 +194,13 @@ export function analyzeServerModule(src) {
     const nonLiteralCallees = new Set();
     // Sticky, positioned at each call's `(`: no per-call copy of a multi-MB bundle.
     const literalArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
-    // Not every `name(` is a call: `function name(`, `function* name(` and
-    // method / class-member heads `name(…) {` DEFINE a function (esbuild/tsup's
-    // `(cb, mod) => function __require() {`), and their `)` is not a
-    // non-literal argument.
-    const functionHeadRe = new RegExp(`\\bfunction${GAP}\\*?${GAP}$`);
+    // Not every `name(` is a call. A parameter list followed by `{` is a
+    // function HEAD — `function name(…) {`, `function* name(…) {` (esbuild/tsup's
+    // `(cb, mod) => function __require() {`), a method, class member or getter
+    // `name(…) {` — and its `)` is not a non-literal argument. (A call is never
+    // directly followed by `{`, so one check covers every head form.)
     const memberHeadRe = new RegExp(`[^()]*\\)${GAP}\\{`, "y");
     for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}\\(`, "g"))) {
-        if (functionHeadRe.test(src.slice(Math.max(0, m.index - 64), m.index))) continue;
         memberHeadRe.lastIndex = m.index + m[0].length;
         if (memberHeadRe.test(src)) continue;
         literalArgRe.lastIndex = m.index + m[0].length;
