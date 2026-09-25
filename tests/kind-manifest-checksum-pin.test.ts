@@ -591,6 +591,20 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     expect(offenders.length).toBeGreaterThan(0);
   });
 
+  it('unsafeApplies() catches an unverified apply that shares a single `&&`-joined line with an UNRELATED, correctly-verified fetch', () => {
+    // A stronger version of the fixture above: fetches TWO files on one
+    // folded line, checksum-verifies only the first, and applies the
+    // SECOND (never verified). This is the case that actually depends on
+    // splitting `&&`-joined statements into separate clauses — treating
+    // the whole line as one clause lets the genuine `sha256sum -c` match
+    // anywhere in the string short-circuit the scan before the apply of
+    // the OTHER, unverified file is ever reached.
+    const offenders = unsafeApplies(
+      'curl -o f URL1 && curl -o g URL2 && echo "h  f" | sha256sum -c - && kubectl apply -f g',
+    );
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+
   it('unsafeApplies() catches every curl/wget output-flag spelling finding 1 named', () => {
     const bad = [
       'curl -fsSLo f "https://example.com/m.yaml"\nkubectl apply -f f', // combined short flags
