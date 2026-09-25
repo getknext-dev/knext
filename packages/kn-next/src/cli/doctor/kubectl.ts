@@ -1,5 +1,5 @@
 /**
- * kubectl invocation + classification helpers for `kn-next doctor`.
+ * kubectl invocation + classification helpers for `knext doctor`.
  *
  * All of this is READ-ONLY by construction (ADR-0001): the runner spawns
  * `kubectl get`/`version`, the registry probe is an HTTP manifest HEAD, and the
@@ -174,7 +174,7 @@ export function inspectKubeconfig(): KubeconfigState {
 const GETTING_STARTED_URL = `${DOCS_URL}/docs/getting-started`;
 
 /** The persona-plain hint for every no-cluster-configured state (finding 1c). */
-const NO_CLUSTER_HINT = `you don't have a Kubernetes cluster connected yet — kn-next deploys into one; follow ${GETTING_STARTED_URL} to get set up, then re-run doctor`;
+const NO_CLUSTER_HINT = `you don't have a Kubernetes cluster connected yet — knext deploys into one; follow ${GETTING_STARTED_URL} to get set up, then re-run doctor`;
 
 /**
  * A refused dial on an address that can only be THIS machine. Anchored on

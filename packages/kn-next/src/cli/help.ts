@@ -1,5 +1,5 @@
 /**
- * The `kn-next --help` text — the CLI's front door.
+ * The `knext --help` text — the CLI's front door.
  *
  * It lives in its own module (rather than inline in the bin) so the surface can
  * be asserted directly by cli-help-surface.test.ts without importing the whole
@@ -165,9 +165,9 @@ function renderCommandLines(): string[] {
 }
 
 export const CLI_HELP = `${[
-    "kn-next — deploy Next.js apps to Kubernetes (Knative), scaled to zero when idle",
+    "knext — deploy Next.js apps to Kubernetes (Knative), scaled to zero when idle",
     "",
-    "Usage: kn-next <command> [options]   (or: npx @getknext/core <command>)",
+    "Usage: knext <command> [options]   (or: npx @getknext/core <command>)",
     "",
     ...renderCommandLines(),
     "Options (deploy):",
@@ -187,11 +187,11 @@ export const CLI_HELP = `${[
     "                  layout differs from the scaffolded templates",
     "  --dry-run       Print the NextApp CR without applying it",
     "  -h, --help      Show this help",
-    "  -v, --version   Print the kn-next version",
+    "  -v, --version   Print the knext version",
     "",
     "Examples:",
-    "  kn-next create my-app   scaffold a new app in ./my-app",
-    "  kn-next deploy          deploy the app in the current directory",
+    "  knext create my-app   scaffold a new app in ./my-app",
+    "  knext deploy          deploy the app in the current directory",
     "",
     `Docs: ${DOCS_URL}`,
 ].join("\n")}\n`;

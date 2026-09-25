@@ -71,7 +71,7 @@ describe("#B2 spec.build on the emitted CR", () => {
     });
 
     it("resolves an UNSET runtime to an explicit 'bun' on the default (turbopack) shape (#1183 PR review finding #3)", () => {
-        // `kn-next build`/`selectRuntimeImage` both now compile and stage the
+        // `knext build`/`selectRuntimeImage` both now compile and stage the
         // Bun bytecode executable by default (DEFAULT_RUNTIME_ID,
         // build.ts/runtime-image.ts) — a bare config's local build produces
         // the bun-standalone artifact, not node-standalone. The CR must

@@ -1,11 +1,11 @@
 /**
- * #1339 review round 2, finding #1 (jev 0.90, BLOCKER) — `kn-next deploy`/
+ * #1339 review round 2, finding #1 (jev 0.90, BLOCKER) — `knext deploy`/
  * `preview` never compiled the standalone bun exec (or the vinext exec):
  * `runtime-image.ts` picks `standalone-bun` and stages a Dockerfile that
  * unconditionally `COPY`s `knext-standalone-exec-<arch>`, but only
  * `build.ts` ever called `buildStandaloneExecutable`/`buildVinextExecutable`
  * — a bare-config deploy either failed the docker build (no such file) or
- * shipped a STALE binary left over from an earlier `kn-next build`.
+ * shipped a STALE binary left over from an earlier `knext build`.
  *
  * This suite pins the shared fix directly (`build-artifact.ts`'s
  * `compileArtifactForDeploy`/`assertCompiledArtifactFresh`), independent of

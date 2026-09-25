@@ -146,7 +146,7 @@ describe("deploy — --help (exit 0)", () => {
         expect(writeSyncCalls.length).toBe(1);
         const [fd, text] = writeSyncCalls[0];
         expect(fd).toBe(1);
-        expect(text).toContain("kn-next deploy");
+        expect(text).toContain("knext deploy");
     });
 });
 
@@ -167,7 +167,7 @@ describe("deploy — parseArgs' own failure on an unknown flag", () => {
         // into exit(1), and it is not in play for a direct deploy() call.
         expect(thrown).toBeDefined();
         expect(thrown).not.toBeInstanceOf(ProcessExitCalled);
-        expect(thrown?.message).toContain("(see kn-next --help)");
+        expect(thrown?.message).toContain("(see knext --help)");
     });
 });
 

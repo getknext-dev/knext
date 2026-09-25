@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * kn-next doctor — cluster-prereq preflight.
+ * knext doctor — cluster-prereq preflight.
  *
  * Usage:
- *   kn-next doctor [--json]
+ *   knext doctor [--json]
  *
- * Runs the checks a fresh `kn-next deploy` depends on, each one field-learned
+ * Runs the checks a fresh `knext deploy` depends on, each one field-learned
  * from a real outage:
  *   (a) NextApp CRD present + a served version
  *   (b) operator Deployment Ready in kn-next-operator-system
@@ -140,7 +140,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     return { checks, exitCode };
 }
 
-const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
+const DOCTOR_HELP = `knext doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
@@ -159,7 +159,7 @@ Options:
 `;
 
 /**
- * Entry for `kn-next doctor`. Returns the process exit code.
+ * Entry for `knext doctor`. Returns the process exit code.
  *
  * `deps` defaults to the production kubectl runner + registry probe; tests
  * inject fakes so the unit suite never shells out to a real kubectl or dials
@@ -192,6 +192,6 @@ export async function doctorMain(
 }
 
 // NO self-entry block here, DELIBERATELY — this module is reached ONLY via
-// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// the knext bin's subcommand dispatch (see the hazard note atop deploy.ts's
 // dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
 // tsup-inlining hijack, #263).

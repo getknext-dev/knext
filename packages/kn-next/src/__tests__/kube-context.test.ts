@@ -1,7 +1,7 @@
 /**
  * #978: every cluster-writing verb must honour an explicit `--context <ctx>`
  * and target THAT cluster, never the ambient kubectl current-context — else
- * `kn-next cleanup --context staging` silently deletes on production.
+ * `knext cleanup --context staging` silently deletes on production.
  *
  * This suite drives each verb's exec boundary with a capturing runner and a
  * resolved context, then asserts — as a SCAN over EVERY kubectl argv the verb

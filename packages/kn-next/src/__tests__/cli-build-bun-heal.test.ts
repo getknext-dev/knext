@@ -4,7 +4,7 @@
  *
  * The adapter's onBuildComplete call is a documented no-op (the hook fires
  * before `.next/standalone` exists at next 16.2), and e2e-deploy.sh only
- * covers the compat lane. `kn-next build` (cli/build.ts → `next build` →
+ * covers the compat lane. `knext build` (cli/build.ts → `next build` →
  * asset upload; the Dockerfile COPYs the raw standalone tree) is what real
  * deployments run — without the heal there, a `runtime: bun` user still 500s
  * every pages-router SSR/API render (missing react-dom `server.bun.js`).
@@ -113,7 +113,7 @@ afterEach(() => {
         rmSync(d, { recursive: true, force: true });
 });
 
-describe("kn-next build — bun-exports heal ships on the user build path (#188)", () => {
+describe("knext build — bun-exports heal ships on the user build path (#188)", () => {
     it("heals the standalone tree during build(), even with a node runtime config", async () => {
         const { projectDir, standalonePkgDir } = seedProject();
         spyOn(process, "cwd").mockReturnValue(projectDir);
@@ -136,7 +136,7 @@ describe("kn-next build — bun-exports heal ships on the user build path (#188)
     it("build.ts invokes the heal on the post-build path, via the shared compile step (source contract)", () => {
         // #1339 review finding #1: the heal (and the standalone-bun/vinext
         // compile) moved into ONE shared step (`build-artifact.ts`'s
-        // `compileArtifactForDeploy`) so `kn-next deploy`/`preview` reuse it
+        // `compileArtifactForDeploy`) so `knext deploy`/`preview` reuse it
         // instead of duplicating it. build.ts no longer calls
         // `healBunExportTargets` directly — it calls the shared step, which
         // does. Both halves are asserted so this stays a real source

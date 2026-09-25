@@ -9,7 +9,7 @@ import type { KnativeNextConfig } from "../config";
  * validation truth (internal/validation/validate.go parses these with
  * resource.ParseQuantity and rejects zero/negative + request>limit); this is
  * only the early, CLI-side copy so a typo like "1GB" / "0.5 CPU" / "0" is caught
- * at `kn-next deploy` time instead of by a rejected CR — and so the CLI and
+ * at `knext deploy` time instead of by a rejected CR — and so the CLI and
  * operator agree that a zero quantity is invalid (the #433-noted divergence).
  */
 

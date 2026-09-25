@@ -284,7 +284,7 @@ describe("deploy() — failed kubectl apply diagnostics (describeFailedCRApply)"
             /your kubectl client \(v1\.24\.9\) is\s*older than v1\.25/,
         );
         expect(thrown?.message).toContain("kubectl version --client");
-        expect(thrown?.message).toContain("kn-next doctor");
+        expect(thrown?.message).toContain("knext doctor");
     });
 
     it("gives the generic differential (not a client-age claim) when the local client IS current", async () => {
