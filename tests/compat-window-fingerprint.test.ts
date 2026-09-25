@@ -1449,6 +1449,179 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
       );
     });
 
+    // Round-4 findings (last round on #1388).
+    //
+    // 1. `require` as a PROPERTY VALUE, taken but never called, defeated
+    // the narrow "require as a property name is exempt" carve-out — that
+    // carve-out only checked the property NAME's text, never whether the
+    // access itself was actually CALLED. `const r = module.require;`
+    // extracts the function without invoking it (a hard error is still
+    // correct: a LATER indirect call through `r` is exactly as unresolvable
+    // as any other untracked alias), and `module.require.call(...)` chains
+    // through `.call` the same way `require.call(...)` already fails
+    // closed for the bare-`require` case.
+    it('`const r = module.require` (the property VALUE taken, not called) is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const r = module.require;\nconst { real } = r('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('`module.require.call(...)` is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = module.require.call(module, './lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    // 2. ANY use of a node:module binding other than a DIRECT
+    // `.createRequire(...)` call must fail closed — not just the specific
+    // shapes caught so far (literal/non-literal bracket access). Covers:
+    // destructuring, `Reflect.get`, `._load`, referencing `.createRequire`
+    // without calling it, and the base expression of an inline
+    // `await import('node:module')` used without ever binding a name.
+    // Destructuring the literal `createRequire` property is ALREADY caught
+    // by the pre-existing seeded-name check on the destructured KEY
+    // identifier itself (its text is literally 'createRequire', which this
+    // scanner treats as a reference regardless of scope) — a valid,
+    // independent path to the same fail-closed outcome, not the NEW general
+    // check this round adds. Accepts either message: both are correct.
+    it('destructuring createRequire off a node:module binding (`const { createRequire } = mod`) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { createRequire } = mod;\nconst { real } = createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/#1316\/#1388/);
+    });
+
+    // Destructuring a DIFFERENT, non-seeded property (`_load`, not
+    // `createRequire`) is what actually PROVES the new general
+    // node:module-binding check is doing the work — nothing seeds `_load`
+    // into any tracked-name set, so the ONLY thing that can catch this is
+    // the new check examining the `mod` reference itself.
+    it('destructuring a non-seeded property (`const { _load } = mod`) is a hard error via the new general check', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { _load } = mod;\nconst { real } = _load('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('Reflect.get(mod, "createRequire") is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = Reflect.get(mod, 'createRequire')(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('mod._load (an undocumented internal, not createRequire) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = mod._load('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('`mod.createRequire` referenced but not called (the value taken) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst cr = mod.createRequire;\nconst { real } = cr(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('an inline `(await import("node:module"))[k]` with no bound name at all is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const k = 'createRequire';\nconst { real } = (await import('node:module'))[k](import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a non-literal computed \(bracket\) property access.*node:module/,
+      );
+    });
+
+    // `mod.createRequire(...)` (a PROPERTY-ACCESS call, not a plain
+    // identifier call) was ALWAYS a hard error, before and after round 4 —
+    // there is no "real corpus shape" that resolves through
+    // `<namespace>.createRequire(...)`; the only chained-call form this
+    // scanner ever resolves is a plain identifier reaching createRequire
+    // via an import (`import { createRequire } from 'node:module'`), never
+    // a namespace/default object's `.createRequire` property (see the
+    // existing "namespace-imported"/"default-imported" tests above). This
+    // test exists only to record that the strict node:module-binding rule
+    // does not change that pre-existing outcome.
+    it('`import * as mod from "node:module"; mod.createRequire(...)` chained straight into a call is STILL a hard error, unchanged by the round-4 strict rule', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = mod.createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    // The RESULT of `mod.createRequire(...)` assigned to a local was never a
+    // tracked shape (the fixpoint pass only tracks a createRequireFnNames-
+    // member IDENTIFIER call, not a PropertyAccessExpression one) — still a
+    // hard error under the strict rule, same as before it, just via the
+    // generic untracked-reference path rather than a createRequire-derived
+    // one. Documented here so the exact message is not mistaken for a
+    // regression.
+    it('`const req = mod.createRequire(...)` (the derived function assigned to a local) is still a hard error, not silently allowed', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst req = mod.createRequire(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/#1316\/#1388/);
+    });
+
+    // 3. The `module` identifier check must be narrow enough that a property
+    // NAMED "module" (an object-literal key, or a `.module` property access
+    // on some unrelated object) does not trip it — `module` is only
+    // meaningful as a VALUE reference to the ambient CJS binding.
+    it('`{ module: 1 }` (an object literal KEY named "module") does not trip the module-identifier check', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        'const cfg = { module: 1 };\nexport const y = cfg;\n',
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('`o.module` (a property access NAMED "module" on an unrelated object) does not trip the module-identifier check', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        'const o = { module: 1 };\nconst y = o.module;\nexport { y };\n',
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
     // module.require via property access must still be exempt — this is the
     // one property-name shape the fix must keep working.
     it('module.require(...) called (not just the property-name exemption) is still recognised, not accidentally broken by the narrowed exemption', () => {

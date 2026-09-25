@@ -420,10 +420,20 @@ function jsLocalImportSpecifiers(src, absPath) {
       (node.parent.name === node || node.parent.propertyName === node)) ||
       (ts.isImportClause(node.parent) && node.parent.name === node) ||
       (ts.isNamespaceImport(node.parent) && node.parent.name === node));
-  /** The RHS of `const Y = X` (a plain reference alias) or the LHS binding name of `const X = require`/`createRequire(...)` — both exempt; tracked by the fixpoint pass above. */
+  /**
+   * The RHS of `const Y = X` (a plain reference alias) or the LHS binding
+   * name of `const X = require`/`createRequire(...)` — both exempt; tracked
+   * by the fixpoint pass above. Requires the declared NAME to be a plain
+   * Identifier, not a BindingPattern (round-4 finding): without that,
+   * `const { createRequire } = mod;` — a DESTRUCTURE, not a plain alias —
+   * matched here too (`node.parent.initializer === node` is true regardless
+   * of what `node.parent.name` is), silently exempting an extraction shape
+   * the fixpoint pass above never actually tracks.
+   */
   const isAliasDeclarationSite = (node) =>
     !!node.parent &&
     ts.isVariableDeclaration(node.parent) &&
+    ts.isIdentifier(node.parent.name) &&
     (node.parent.initializer === node || node.parent.name === node);
   /**
    * `<anything>['require']` / `<anything>['createRequire']` (or any other
@@ -443,18 +453,47 @@ function jsLocalImportSpecifiers(src, absPath) {
     (node.argumentExpression.text === 'require' ||
       node.argumentExpression.text === 'createRequire');
   /**
-   * A COMPUTED (bracket) access on a name bound to the `node:module`
-   * NAMESPACE (`import * as mod`, `import mod`, `const mod =
-   * require('node:module')`) whose key is NOT a string literal — e.g.
-   * `const k = 'createRequire'; mod[k](...)`. The key can't be compared
-   * against 'require'/'createRequire' at all, so without this check it is
-   * invisible to `isTrackedBracketPropertyAccess` above AND to every
-   * literal-name check — not exempted, just never seen (techdebt-3 round).
+   * `await import('node:module')` used INLINE, as the base of a further
+   * access, with no name ever bound to it at all — e.g.
+   * `(await import('node:module'))[k](...)`. Every other node:module check
+   * in this file keys off a tracked IDENTIFIER (`nodeModuleBindingNames`);
+   * this expression form has none, so without recognising it directly it
+   * is invisible even to the checks below (round-4 finding).
+   */
+  const isInlineNodeModuleDynamicImport = (node) => {
+    // `(await import('node:module'))[k]` parenthesizes the AwaitExpression
+    // — unwrap any ParenthesizedExpression wrapper before checking, or this
+    // never matches at all (the ElementAccessExpression's `.expression` is
+    // the ParenthesizedExpression, never the AwaitExpression directly).
+    let unwrapped = node;
+    while (ts.isParenthesizedExpression(unwrapped)) unwrapped = unwrapped.expression;
+    return (
+      ts.isAwaitExpression(unwrapped) &&
+      ts.isCallExpression(unwrapped.expression) &&
+      unwrapped.expression.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      !!unwrapped.expression.arguments[0] &&
+      ts.isStringLiteralLike(unwrapped.expression.arguments[0]) &&
+      isNodeModuleSpecifierText(unwrapped.expression.arguments[0].text)
+    );
+  };
+  /** Either a tracked node:module-bound identifier OR the inline `await import('node:module')` expression form above — the two bases `isNonLiteralElementAccessOnModuleBinding` and the strict createRequire-only check below both need to recognise. */
+  const isNodeModuleNamespaceExpr = (node) =>
+    (ts.isIdentifier(node) && nodeModuleBindingNames.has(node.text)) ||
+    isInlineNodeModuleDynamicImport(node);
+  /**
+   * A COMPUTED (bracket) access on a node:module NAMESPACE expression
+   * (a tracked identifier — `import * as mod`, `import mod`, `const mod =
+   * require('node:module')` — OR the inline `await import(...)` form above)
+   * whose key is NOT a string literal — e.g. `const k = 'createRequire';
+   * mod[k](...)`. The key can't be compared against
+   * 'require'/'createRequire' at all, so without this check it is invisible
+   * to `isTrackedBracketPropertyAccess` above AND to every literal-name
+   * check — not exempted, just never seen (techdebt-3 round; round 4 widened
+   * the base to also cover the inline-import form).
    */
   const isNonLiteralElementAccessOnModuleBinding = (node) =>
     ts.isElementAccessExpression(node) &&
-    ts.isIdentifier(node.expression) &&
-    nodeModuleBindingNames.has(node.expression.text) &&
+    isNodeModuleNamespaceExpr(node.expression) &&
     !!node.argumentExpression &&
     !ts.isStringLiteralLike(node.argumentExpression);
   /**
@@ -471,6 +510,63 @@ function jsLocalImportSpecifiers(src, absPath) {
     ts.isPropertyAccessExpression(node.parent) &&
     node.parent.expression === node &&
     (node.parent.name.text === 'require' || node.parent.name.text === 'exports');
+  /**
+   * `module` used as a PROPERTY-NAME LABEL, never a value reference to the
+   * ambient CJS binding — `{ module: 1 }` (an object-literal key) or
+   * `o.module` (a property access NAMED "module" on some unrelated object).
+   * Both are syntactically an Identifier with text `module`, but neither
+   * ever REFERENCES the actual `module` global, so the identifier check
+   * below must not fire on them (round-4 finding — the check previously
+   * matched by TEXT alone, with no regard for whether the identifier was in
+   * label position or value position).
+   */
+  const isModulePropertyNameLabel = (node) =>
+    !!node.parent &&
+    ((ts.isPropertyAssignment(node.parent) && node.parent.name === node) ||
+      (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) ||
+      (ts.isMethodDeclaration(node.parent) && node.parent.name === node) ||
+      ((ts.isImportSpecifier(node.parent) || ts.isExportSpecifier(node.parent)) &&
+        (node.parent.name === node || node.parent.propertyName === node)));
+  /**
+   * `module.require` — `require` as a property NAME (not the base) — is
+   * exempt ONLY when it is the callee of a DIRECT call, `module.require(
+   * ...)`. Round-4 finding: the previous version of this check matched the
+   * property NAME's text alone, with no regard for whether the access was
+   * actually being CALLED — so `const r = module.require;` (the value
+   * taken, never invoked) and `module.require.call(...)` (chained through
+   * `.call`, never a direct call) both slipped through as if they were
+   * `module.require('./x')` itself.
+   */
+  const isModuleRequirePropertyNameOfDirectCall = (node) =>
+    !!node.parent &&
+    ts.isPropertyAccessExpression(node.parent) &&
+    node.parent.name === node &&
+    node.text === 'require' &&
+    ts.isIdentifier(node.parent.expression) &&
+    node.parent.expression.text === 'module' &&
+    !!node.parent.parent &&
+    ts.isCallExpression(node.parent.parent) &&
+    node.parent.parent.expression === node.parent;
+  /**
+   * A node:module-bound identifier used as anything OTHER than the base of
+   * a DIRECT `.createRequire(...)` call — round-4 finding: the checks so
+   * far only caught specific shapes (bracket access, literal or not); any
+   * OTHER use — destructuring (`const { createRequire } = mod`, including
+   * a renamed destructure), `Reflect.get(mod, 'createRequire')`, an
+   * undocumented internal (`mod._load`), or referencing `.createRequire`
+   * without calling it — was simply never examined, since none of them
+   * reach the identifier-reference branch the way a bare property access
+   * does. This closes the general case rather than adding one shape at a
+   * time.
+   */
+  const isNodeModuleBindingAllowedUse = (node) =>
+    !!node.parent &&
+    ts.isPropertyAccessExpression(node.parent) &&
+    node.parent.expression === node &&
+    node.parent.name.text === 'createRequire' &&
+    !!node.parent.parent &&
+    ts.isCallExpression(node.parent.parent) &&
+    node.parent.parent.expression === node.parent;
 
   /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
   const addSpecifier = (node, callOrDeclNode) => {
@@ -506,18 +602,33 @@ function jsLocalImportSpecifiers(src, absPath) {
         `uses a computed (bracket) property access on a tracked name (\`${node.argumentExpression.text}\`) — this scanner only resolves literal \`.name\` property access`,
       );
     } else if (isNonLiteralElementAccessOnModuleBinding(node)) {
+      const baseDescription = ts.isIdentifier(node.expression)
+        ? `\`${node.expression.text}\`, a name bound to node:module`
+        : 'an inline `await import(...)` of node:module';
       failClosed(
         node,
-        `uses a non-literal computed (bracket) property access on \`${node.expression.text}\`, a name bound to node:module — this scanner cannot determine which export is accessed`,
+        `uses a non-literal computed (bracket) property access on ${baseDescription} — this scanner cannot determine which export is accessed`,
       );
     } else if (
       ts.isIdentifier(node) &&
       node.text === 'module' &&
+      !isModulePropertyNameLabel(node) &&
       !isModuleIdentifierAllowedUse(node)
     ) {
       failClosed(
         node,
         'references the `module` identifier in a form this scanner does not track (only `module.require(...)`/`module.exports` are recognised)',
+      );
+    } else if (
+      ts.isIdentifier(node) &&
+      nodeModuleBindingNames.has(node.text) &&
+      !isImportBindingName(node) &&
+      !isAliasDeclarationSite(node) &&
+      !isNodeModuleBindingAllowedUse(node)
+    ) {
+      failClosed(
+        node,
+        `uses a name bound to node:module in a form this scanner does not track — only a direct \`.createRequire(...)\` call is recognised (destructuring, Reflect.get, an internal like ._load, or referencing .createRequire without calling it all fail closed here)`,
       );
     } else if (isModuleDotRequireCall(node) || isRequireLikeCall(node)) {
       // Same resolution base as a bare `require()` — handle identically.
@@ -568,20 +679,22 @@ function jsLocalImportSpecifiers(src, absPath) {
       !isAllowedPropertyAccessBase(node) &&
       !(node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node) &&
       // `module.require` — `require` (and ONLY the literal name `require`)
-      // as the PROPERTY NAME, not the base. The call site itself is handled
-      // by isModuleDotRequireCall; this is just the generic child-walk
-      // revisiting the same identifier node. Narrowly scoped to the text
-      // `require` (#1392 review round): this used to exempt ANY tracked
-      // name used as a property name, so `m.createRequire(...)`,
-      // `mod.createRequire`, and `require('node:module').createRequire`
-      // all slipped through unexamined — `createRequire` as a property
-      // name is not `module.require` and must still fail closed.
-      !(
-        node.parent &&
-        ts.isPropertyAccessExpression(node.parent) &&
-        node.parent.name === node &&
-        node.text === 'require'
-      )
+      // as the PROPERTY NAME of a DIRECT call, not merely the base. The
+      // call site itself is handled by isModuleDotRequireCall; this is just
+      // the generic child-walk revisiting the same identifier node.
+      // Narrowly scoped to the text `require` (#1392 review round): this
+      // used to exempt ANY tracked name used as a property name, so
+      // `m.createRequire(...)`, `mod.createRequire`, and
+      // `require('node:module').createRequire` all slipped through
+      // unexamined — `createRequire` as a property name is not
+      // `module.require` and must still fail closed. Round 4: the exemption
+      // ALSO used to ignore whether the access was actually CALLED — so
+      // `const r = module.require;` (the value taken) and
+      // `module.require.call(...)` (chained through `.call`) both slipped
+      // through too. Now requires isModuleRequirePropertyNameOfDirectCall,
+      // which checks the grandparent is a CallExpression directly invoking
+      // `module.require` itself.
+      !isModuleRequirePropertyNameOfDirectCall(node)
     ) {
       // A reference to a tracked require-like/createRequire name that is none
       // of: the direct callee of a call (handled above), the base of a
