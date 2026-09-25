@@ -999,6 +999,22 @@ export function verifyEvidence(ledger, fetchRun) {
 }
 
 /**
+ * Whether the checkout `execGit` operates against is a SHALLOW clone
+ * (`git rev-parse --is-shallow-repository`, the documented, git-native way
+ * to ask this — never inferred from `git log`'s own output, which degrades
+ * silently on a shallow checkout rather than signalling it). `verify`
+ * MUST fail closed on `true`: `deriveAddedFromGitLog`'s whole premise is a
+ * full history on `ledgerRelPath`, and a shallow clone makes every entry
+ * look "just introduced right now" regardless of its real history (#1348,
+ * techdebt-3).
+ * @param {(args: string[]) => string} execGit
+ * @returns {boolean}
+ */
+export function isShallowRepo(execGit) {
+  return execGit(['rev-parse', '--is-shallow-repository']).trim() === 'true';
+}
+
+/**
  * The date (YYYY-MM-DD) an entry with `test === testName` FIRST appears in
  * `ledgerRelPath`'s git history, walked oldest-commit-first — never trusted
  * from the entry's own `added` field, which a PR could re-date to reset the
@@ -1022,7 +1038,13 @@ export function verifyEvidence(ledger, fetchRun) {
 export function deriveAddedFromGitLog(execGit, ledgerRelPath, testName) {
   let log;
   try {
-    log = execGit(['log', '--follow', '--format=%H %aI', '--', ledgerRelPath]);
+    // COMMITTER date (%cI), not author date (%aI) — the committer date is
+    // what GitHub's own UI shows and is stable across a rebase/amend that
+    // only touches authorship; either way, the RAW string carries the
+    // commit's own timezone offset, never sliced directly below (see
+    // toUtcDateString) — a late-night commit in a negative-offset zone can
+    // land on a different UTC calendar date than its local one (techdebt-3).
+    log = execGit(['log', '--follow', '--format=%H %cI', '--', ledgerRelPath]);
   } catch {
     return null;
   }
@@ -1032,26 +1054,57 @@ export function deriveAddedFromGitLog(execGit, ledgerRelPath, testName) {
     .map((line) => {
       const sp = line.indexOf(' ');
       return { sha: line.slice(0, sp), date: line.slice(sp + 1) };
-    })
-    .reverse(); // oldest first
-  for (const c of commits) {
+    }); // newest first (git log's natural order) — kept newest-first below,
+  // not reversed, because the LATEST contiguous run of presence (not the
+  // first-ever appearance) is what "added" must track (see below).
+
+  /** Whether `testName` is present in `ledgerRelPath` AT this commit — false for a missing file, unparseable content, or an absent entry, never thrown. */
+  const presentAt = (sha) => {
     let content;
     try {
-      content = execGit(['show', `${c.sha}:${ledgerRelPath}`]);
+      content = execGit(['show', `${sha}:${ledgerRelPath}`]);
     } catch {
-      continue; // the file did not exist at this commit (e.g. a rename edge)
+      return false; // the file did not exist at this commit (e.g. a rename edge)
     }
     let parsed;
     try {
       parsed = JSON.parse(content);
     } catch {
-      continue; // not valid JSON at this point in history — keep looking forward
+      return false; // not valid JSON at this point in history
     }
-    if ((parsed.entries ?? []).some((e) => e.test === testName)) {
-      return c.date.slice(0, 10);
-    }
+    return (parsed.entries ?? []).some((e) => e.test === testName);
+  };
+
+  // A test REMOVED and then RE-ADDED must be re-quarantinable — its `added`
+  // has to track the RE-addition, not the entry's very first-ever
+  // appearance somewhere deep in history (techdebt-3). Walk NEWEST to
+  // OLDEST; the entry must be present at the most recent commit that
+  // touched this file (otherwise it is not currently in the ledger at
+  // all — nothing to derive an `added` date FOR), then keep walking
+  // backward while it stays present, stopping at the first gap. The last
+  // commit still inside that unbroken run is where the CURRENT stint began.
+  if (commits.length === 0 || !presentAt(commits[0].sha)) return null;
+  let start = commits[0];
+  for (let i = 1; i < commits.length; i++) {
+    if (!presentAt(commits[i].sha)) break;
+    start = commits[i];
   }
-  return null;
+  return toUtcDateString(start.date);
+}
+
+/**
+ * A commit date string (`git log --format=%cI`, e.g.
+ * `2026-09-24T23:30:00-07:00`) normalised to its UTC calendar date
+ * (`YYYY-MM-DD`) — via `Date`, never a raw slice of the first 10
+ * characters, which reads the date in whatever OFFSET the string itself
+ * carries, not UTC. `added` fields are UTC dates; comparing a local-offset
+ * slice against them is exactly the false-red (and false-green) class this
+ * closes (techdebt-3).
+ * @param {string} isoDateWithOffset
+ * @returns {string}
+ */
+function toUtcDateString(isoDateWithOffset) {
+  return new Date(isoDateWithOffset).toISOString().slice(0, 10);
 }
 
 /**
@@ -1172,6 +1225,17 @@ function main(argv) {
     const repo = process.env.GITHUB_REPOSITORY;
     if (!repo) {
       console.error('::error::verify needs GITHUB_REPOSITORY (owner/name) and a gh token');
+      return 1;
+    }
+    // techdebt-3 — deriveAddedFromGitLog's whole premise is a FULL history
+    // on the ledger file; a shallow checkout (fetch-depth: 1, or any
+    // partial clone) silently makes every entry look "just introduced
+    // right now" instead of surfacing as a re-date attack. Fail closed
+    // BEFORE trusting anything verifyAddedDates derives, never after.
+    if (isShallowRepo(git)) {
+      console.error(
+        "::error::vinext quarantine ledger — verify needs a FULL-history checkout (this one is shallow); deriveAddedFromGitLog cannot see past a shallow clone's single commit, so every entry would falsely look brand new — fetch-depth: 0 (or unshallow) before running verify",
+      );
       return 1;
     }
     const evidenceFailures = withRuns((root) =>

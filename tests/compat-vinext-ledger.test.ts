@@ -54,6 +54,7 @@ import {
   isAuthOrApiError,
   isCompleteDefaultRun,
   isNoArtifactError,
+  isShallowRepo,
   LEDGER_FILE_CAP,
   LISTING_RETRY_ATTEMPTS,
   LISTING_RETRY_BASE_MS,
@@ -1507,6 +1508,219 @@ describe('deriveAddedFromGitLog: the FIRST commit introducing an entry, never th
       },
     );
     expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-10');
+  });
+
+  // techdebt-3 round — two more gaps.
+  //
+  // (a) A commit's AUTHOR date (`%aI`) carries the AUTHOR's local timezone
+  // offset, and the old code sliced the first 10 characters of that raw
+  // string — which reads the LOCAL-ZONE calendar date, not the UTC one
+  // `added` is recorded in. A commit made late at night in a negative-offset
+  // zone can be a DIFFERENT UTC date than its local one. Fixed by switching
+  // to the COMMITTER date (`%cI` — what GitHub's own UI shows, and stable
+  // across a rebase/amend that only touches authorship) and normalising via
+  // `Date`/`toISOString`, never a raw string slice.
+  it('normalises a non-UTC offset commit date to its UTC calendar date, not a raw string slice of the local offset', () => {
+    // 23:30 on 2026-09-24 at UTC-07:00 is 06:30 UTC on 2026-09-25 — a raw
+    // slice of the offset string reads "2026-09-24" (WRONG); UTC
+    // normalisation reads "2026-09-25" (correct).
+    const execGit = fakeGit([{ sha: 'c1', date: '2026-09-24T23:30:00-07:00' }], {
+      c1: JSON.stringify({ entries: [{ test: SHELLS }] }),
+    });
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-25');
+  });
+
+  // (b) A test REMOVED and then RE-ADDED could never be re-quarantined: the
+  // old code returned the FIRST-EVER commit containing the entry (walking
+  // oldest-to-newest, stopping at the first hit), so a re-added entry's
+  // `added` date would always be judged against its ORIGINAL introduction,
+  // even if it was absent from the ledger for months in between. Fixed by
+  // returning the start of the LATEST CONTIGUOUS run of presence — walking
+  // newest-to-oldest and stopping at the first gap.
+  it('returns the start of the LATEST contiguous run, not the first-ever appearance, when an entry was removed then re-added', () => {
+    const execGit = fakeGit(
+      [
+        { sha: 'c3', date: '2026-09-24T10:00:00+00:00' }, // re-added here
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' }, // REMOVED (gap)
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' }, // originally added here
+      ],
+      {
+        c1: JSON.stringify({ entries: [{ test: SHELLS }] }),
+        c2: JSON.stringify({ entries: [] }), // the gap
+        c3: JSON.stringify({ entries: [{ test: SHELLS }] }),
+      },
+    );
+    // NOT '2026-09-01' (the original, now-irrelevant introduction) —
+    // '2026-09-24', the re-addition that starts the CURRENT run.
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-24');
+  });
+
+  it('returns null (not the stale historical date) when the entry was removed and never re-added — absent at the most recent commit', () => {
+    const execGit = fakeGit(
+      [
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' }, // removed, currently absent
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' }, // was present once
+      ],
+      {
+        c1: JSON.stringify({ entries: [{ test: SHELLS }] }),
+        c2: JSON.stringify({ entries: [] }),
+      },
+    );
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBeNull();
+  });
+});
+
+describe('deriveAddedFromGitLog against a REAL temp git repo (techdebt-3 — not just a fake git)', () => {
+  function realGitRepo(): { dir: string; execGit: (args: string[]) => string } {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-git-history-'));
+    const run = (args: string[], env?: Record<string, string>) =>
+      execFileSync('git', args, {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+      });
+    run(['init', '-q']);
+    run(['config', 'user.email', 'test@example.com']);
+    run(['config', 'user.name', 'Test']);
+    run(['config', 'commit.gpgsign', 'false']);
+    const execGit = (args: string[]) => run(args);
+    return { dir, execGit };
+  }
+
+  function commitLedger(dir: string, relPath: string, content: unknown, isoDate: string) {
+    writeFileSync(join(dir, relPath), `${JSON.stringify(content)}\n`);
+    execFileSync('git', ['add', relPath], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', 'ledger update'], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: isoDate,
+        GIT_COMMITTER_DATE: isoDate,
+      },
+    });
+  }
+
+  it('derives the correct date from a real 3-commit history (add, unrelated no-op, no gap)', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      commitLedger(dir, relPath, { entries: [] }, '2026-09-01T10:00:00+00:00');
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-10T10:00:00+00:00');
+      // An unrelated content change (a second, irrelevant entry) — the
+      // point of this third commit is that it must NOT move the derived
+      // date, since SHELLS was already present in the previous commit.
+      commitLedger(
+        dir,
+        relPath,
+        { entries: [{ test: SHELLS }, { test: 'unrelated-noop-entry' }] },
+        '2026-09-15T10:00:00+00:00',
+      );
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-10');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a real remove-then-re-add sequence resolves to the RE-ADDITION commit, not the original one', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-01T10:00:00+00:00'); // original add
+      commitLedger(dir, relPath, { entries: [] }, '2026-09-10T10:00:00+00:00'); // removed
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-20T10:00:00+00:00'); // re-added
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-20');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * `isShallowRepo` (techdebt-3) — `deriveAddedFromGitLog`'s whole premise
+ * (walking a ledger file's FULL git history) is silently defeated by a
+ * shallow checkout: `git log` on a `--depth=1` clone only ever sees the
+ * single most recent commit, so every entry looks "just introduced right
+ * now" regardless of its real history — the exact false-pass a shallow
+ * checkout was already called out as needing (`deriveAddedFromGitLog`'s own
+ * doc comment). `verify` must fail closed rather than silently accept a
+ * shallow clone's uninformative answer.
+ */
+describe('isShallowRepo: detects a shallow clone so verify can fail closed rather than trust a truncated history (techdebt-3)', () => {
+  function fakeGit(output: string): (args: string[]) => string {
+    return (args: string[]) => {
+      if (args[0] === 'rev-parse' && args[1] === '--is-shallow-repository') return output;
+      throw new Error(`unexpected git invocation: ${args.join(' ')}`);
+    };
+  }
+
+  it('returns true for a shallow repository', () => {
+    expect(isShallowRepo(fakeGit('true'))).toBe(true);
+  });
+
+  it('returns false for a full (unshallow) repository', () => {
+    expect(isShallowRepo(fakeGit('false'))).toBe(false);
+  });
+
+  it('tolerates trailing whitespace/newline in the git output', () => {
+    expect(isShallowRepo(fakeGit('true\n'))).toBe(true);
+    expect(isShallowRepo(fakeGit('false\n'))).toBe(false);
+  });
+
+  it('a real (unshallow) temp git repo reports false', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-shallow-check-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+      execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: dir });
+      writeFileSync(join(dir, 'x.txt'), 'x');
+      execFileSync('git', ['add', 'x.txt'], { cwd: dir });
+      execFileSync('git', ['commit', '-q', '-m', 'x'], { cwd: dir });
+      const execGit = (args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+      expect(isShallowRepo(execGit)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a real SHALLOW clone (--depth=1 of the real repo) reports true', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-shallow-clone-'));
+    try {
+      execFileSync('git', ['clone', '-q', '--depth=1', `file://${repoRoot}`, dir]);
+      const execGit = (args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+      expect(isShallowRepo(execGit)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The CLI `verify` command's own `main()` is not exported (no test in this
+// file exercises the CLI dispatch directly, for `verify` or any other
+// subcommand) — this is a SCAN of the wiring instead: `isShallowRepo` must
+// be called, and checked, BEFORE `verifyAddedDates` ever runs in the
+// `verify` branch, so a shallow checkout is caught before its truncated
+// history is trusted for anything.
+describe('CLI wiring: the verify command checks isShallowRepo before trusting verifyAddedDates (techdebt-3)', () => {
+  it('scripts/compat-vinext-ledger.mjs calls isShallowRepo(git) inside the verify branch, before verifyAddedDates', () => {
+    const source = readFileSync(resolve(repoRoot, 'scripts/compat-vinext-ledger.mjs'), 'utf8');
+    const verifyBranchStart = source.indexOf("cmd === 'verify'");
+    expect(verifyBranchStart).toBeGreaterThan(-1);
+    const shallowCallIdx = source.indexOf('isShallowRepo(git)', verifyBranchStart);
+    const addedDatesCallIdx = source.indexOf(
+      'verifyAddedDates(ledger, git, ledgerPath)',
+      verifyBranchStart,
+    );
+    expect(shallowCallIdx).toBeGreaterThan(verifyBranchStart);
+    expect(addedDatesCallIdx).toBeGreaterThan(shallowCallIdx);
+  });
+
+  it('the shallow-repo branch returns 1 (fails the job) rather than continuing', () => {
+    const source = readFileSync(resolve(repoRoot, 'scripts/compat-vinext-ledger.mjs'), 'utf8');
+    const shallowCallIdx = source.indexOf('isShallowRepo(git)');
+    const nearby = source.slice(shallowCallIdx, shallowCallIdx + 400);
+    expect(nearby).toMatch(/return 1;/);
+    expect(nearby).toMatch(/::error::/);
   });
 });
 
