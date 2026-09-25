@@ -72,13 +72,42 @@
  * backfill.
  *
  * LISTING candidates in the first place is different from fetching one:
- * `collectHistory` only ever runs when there is a flaky entry to judge, so an
- * auth/API error (`isAuthOrApiError`) listing is FATAL — throws immediately
- * (round-3 finding 2; round-2's fix made a listing failure ONE soft skip
- * with zero candidates, which meant it could never reach the threshold and
- * every such run silently warned and exited 0, i.e. the window was
- * effectively disabled the moment the token broke). Fetching one CANDIDATE's
- * summaries, once listing succeeded, still uses the softer per-run budget:
+ * `collectHistory` only ever runs when there is a flaky entry to judge, so
+ * classifying that failure correctly matters more here than anywhere else
+ * (`classifyListingError`, #1400 review — the FIRST version of this bucket
+ * used the coarser `isAuthOrApiError`, which put 401/a plain 403 in the SAME
+ * bucket as 5xx/429/a rate-limited 403, so the retry added for #1365 fired
+ * on exactly the wrong errors: fatal ones got retried, transient ones did
+ * not, and a JSON.parse failure — no HTTP status at all — fell into "retry"
+ * purely by not matching anything):
+ *
+ *   - 'fatal' (401, "authenticat…", a plain non-rate-limit 403) throws
+ *     immediately, NEVER retried (round-3 finding 2; round-2's fix made a
+ *     listing failure ONE soft skip with zero candidates, which meant it
+ *     could never reach the threshold and every such run silently warned
+ *     and exited 0, i.e. the window was effectively disabled the moment the
+ *     token broke). Not transient — retrying just delays the same failure.
+ *   - 'local' (e.g. a JSON.parse failure on gh's own output) ALSO throws
+ *     immediately, never retried, but for a different reason: a
+ *     deterministic local error cannot change on a second attempt.
+ *   - 'retryable' (5xx, 429, a RATE-LIMITED 403, DNS "could not resolve", a
+ *     connection reset, a timeout) is plausibly transient, so it gets
+ *     `LISTING_RETRY_ATTEMPTS` total attempts with exponential backoff
+ *     (`LISTING_RETRY_BASE_MS * 2^n`), or the server's own `Retry-After`
+ *     hint when `gh` surfaces one (`retryAfterMs`), before failing closed.
+ *     Still fail-closed at the end — a listing failure that PERSISTS across
+ *     every attempt is exactly as fatal as before, just no longer on the
+ *     very first blip. Each retry is logged to `warnings` so a run that
+ *     limped through a flaky network window is visible, not silently equal
+ *     to a clean one.
+ *
+ * Fetching one CANDIDATE's summaries, once listing succeeded, still
+ * uses the softer per-run budget (unchanged, still keyed on the coarser
+ * `isAuthOrApiError` — that budget's failure mode, an endless string of
+ * per-run skips, is bounded by `MAX_CONSECUTIVE_HISTORY_SKIPS` regardless of
+ * which sub-class of error caused each skip, so the fatal/retryable/local
+ * split that matters for the ONE listing call does not carry the same
+ * weight there):
  * an auth/API error there is a WARNING (that run is skipped), and
  * `MAX_CONSECUTIVE_HISTORY_SKIPS` such errors IN A ROW fail closed, rather
  * than silently returning an ever-smaller window; a successful fetch
@@ -166,6 +195,10 @@ export const DEFAULT_NEXTJS_REF = JSON.parse(
 export const EXPECTED_SHARD_TOTAL = 16;
 /** Consecutive per-run history fetch failures (auth/API errors) before `report` fails closed. */
 export const MAX_CONSECUTIVE_HISTORY_SKIPS = 3;
+/** Total attempts (including the first) for a NON-auth history-LISTING error before failing closed (#1365). Auth/API errors are never retried — see collectHistory's doc comment. */
+export const LISTING_RETRY_ATTEMPTS = 3;
+/** Backoff base, doubled per retry: attempt 2 waits this long, attempt 3 waits 2x this. */
+export const LISTING_RETRY_BASE_MS = 500;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UPSTREAM_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+$/;
@@ -540,6 +573,86 @@ export function isAuthOrApiError(err) {
 }
 
 /**
+ * Three-way classification for a LISTING (`gh run list`) failure — #1400
+ * review. `isAuthOrApiError` above answers a coarser, different question
+ * ("does this look like it came from gh's API layer at all", used by the
+ * per-RUN fetch budget) and conflating it with the LISTING retry added for
+ * #1365 retried exactly the errors that should fail fast (401/a plain
+ * permission 403) and failed fast on exactly the ones a bounded retry
+ * exists for (5xx/429/a RATE-LIMIT 403/DNS/connection reset/timeout) —
+ * because a plain 403 and a rate-limited 403 both matched the SAME `\b403\b`
+ * branch, and a JSON parse failure (a deterministic LOCAL bug, no HTTP
+ * status at all) matched NEITHER branch and fell into "retry" by default.
+ *
+ *   'fatal'     — 401, any "authenticat…" wording, or a 403 that is NOT
+ *                 itself a rate-limit response. Never retried: retrying an
+ *                 invalid/expired token just delays the identical failure.
+ *   'retryable' — 5xx, 429, a RATE-LIMIT 403, "could not resolve" (DNS),
+ *                 a connection reset, or a timeout. Plausibly transient —
+ *                 the bounded retry applies.
+ *   'local'     — everything else, e.g. a JSON.parse failure on `gh`'s own
+ *                 output. Also never retried (a deterministic local bug
+ *                 cannot change on a second attempt), but for a DIFFERENT
+ *                 reason than 'fatal' — kept as its own bucket so a caller
+ *                 can report "the API said no" and "we could not even read
+ *                 what it said" with distinct, honest messages.
+ * @param {unknown} err
+ * @returns {'fatal' | 'retryable' | 'local'}
+ */
+export function classifyListingError(err) {
+  const msg = String(err?.message ?? err ?? '');
+  // #1400 round 2 — an HTTP status is only ever meaningful right after the
+  // literal `HTTP ` gh itself prints ("HTTP 401: Bad credentials"); matching
+  // a bare `\b403\b` anywhere in the message let an UNRELATED number in the
+  // command line (a `--limit 401`, a run id) be mistaken for a status code.
+  const statusMatch = /\bHTTP\s+(\d{3})\b/.exec(msg);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const isRateLimited403 = status === 403 && /rate.?limit/i.test(msg);
+  if (status === 401 || /authenticat/i.test(msg)) return 'fatal';
+  if (status === 403 && !isRateLimited403) return 'fatal';
+  if (
+    status === 429 ||
+    (status !== null && status >= 500 && status < 600) ||
+    isRateLimited403 ||
+    /could not resolve|no such host/i.test(msg) ||
+    /connection reset|ECONNRESET|connection refused/i.test(msg) ||
+    // #1400 round 2 — real `gh`/Go network-error wordings this bucket
+    // missed: a truncated TLS/HTTP response ("unexpected EOF"), gh's own
+    // friendly network-failure banner ("error connecting to <host>"), and
+    // the Go net package's timeout suffix ("i/o timeout", distinct text
+    // from the "timeout"/"timed out" wording already matched below).
+    /error connecting to/i.test(msg) ||
+    /unexpected EOF/i.test(msg) ||
+    /i\/o timeout/i.test(msg) ||
+    /\btimeout\b|timed out|ETIMEDOUT/i.test(msg)
+  ) {
+    return 'retryable';
+  }
+  return 'local';
+}
+
+/**
+ * A `Retry-After: <seconds>`-shaped hint in an error's own text, when `gh`
+ * surfaces one (secondary rate-limit responses sometimes do). Honoured in
+ * PREFERENCE to the exponential backoff for that one attempt — the server
+ * told us exactly how long to wait, so guessing shorter just re-triggers
+ * the same limit, and guessing longer wastes the window needlessly.
+ *
+ * Capped at 60s (#1400 round 2): an implausibly large hint (a misparsed
+ * value, or a server genuinely asking for an unreasonable wait) must not
+ * turn a bounded-retry helper into an effectively-unbounded stall — this
+ * script's own LISTING_RETRY_ATTEMPTS budget assumes each wait is on the
+ * order of the exponential-backoff schedule it otherwise uses.
+ * @param {string} msg
+ * @returns {number | null} milliseconds, or null if no hint was found
+ */
+export function retryAfterMs(msg) {
+  const m = /retry.?after[:\s]+(\d+)/i.exec(msg);
+  if (!m) return null;
+  return Math.min(Number(m[1]) * 1000, 60_000);
+}
+
+/**
  * True when `gh run download` failed because the run simply has no matching
  * artifact — never uploaded (artifactless), aged past GitHub's 90-day
  * retention, or the run had zero artifacts at all. `gh` uses at least TWO
@@ -609,6 +722,21 @@ export function downloadRun(exec, { repo, runId, dir }) {
 }
 
 /**
+ * A synchronous, real backoff sleep for `collectHistory`'s listing retry
+ * (#1365) — this whole file is synchronous throughout (`execFileSync`), so
+ * `collectHistory` stays synchronous too rather than forcing every existing
+ * call site (production and the whole test suite) to become async just for
+ * this one retry loop. `Atomics.wait` genuinely blocks the calling thread
+ * for `ms`, which Node (unlike browsers) permits on the main thread. Tests
+ * inject `deps.sleep` (a no-op or a recording stub) so the retry-with-backoff
+ * behaviour is provable without a real test suite actually sleeping.
+ * @param {number} ms
+ */
+function defaultSyncSleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
  * One "step" fetching one candidate's summaries — succeeded, was skipped as
  * an auth/API error (consuming the `consecutiveSkips` budget), or is a plain
  * "not informative, keep backfilling" outcome that never touches the budget
@@ -654,12 +782,15 @@ function attemptStep(attempt, label, budget) {
  * retention) is not evidence either, and NOT a skip.
  *
  * `collectHistory` is only ever called when there IS at least one flaky
- * entry to judge (`flakyHistory` checks that first), so LISTING candidates
- * failing on an auth/API error is FATAL (throws immediately) — round-2
- * finding 2: there is nothing to fall back to, and treating a listing
- * failure as one soft skip meant every such failure warned and exited 0,
- * silently disabling the whole window. Any non-auth listing error was
- * already, and remains, never swallowed.
+ * entry to judge (`flakyHistory` checks that first). LISTING candidates
+ * failing on an auth/API error is FATAL, on the FIRST attempt, never
+ * retried — round-2 finding 2: there is nothing to fall back to, and
+ * treating a listing failure as one soft skip meant every such failure
+ * warned and exited 0, silently disabling the whole window. A NON-auth
+ * listing error (#1365 follow-up) gets `LISTING_RETRY_ATTEMPTS` total
+ * attempts with exponential backoff before it, too, fails closed — see the
+ * module doc's "#1365 follow-up" paragraph for why the two are treated
+ * differently.
  *
  * Fetching one CANDIDATE's summaries, once listing succeeded, is different:
  * an auth/API error there is a WARNING (that run is skipped), and
@@ -668,7 +799,7 @@ function attemptStep(attempt, label, budget) {
  * (informative or not) resets that budget to zero. This budget is
  * per-CALL, not persisted across separate invocations of this script — see
  * the module doc.
- * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string, createdAt?: string}[], fetchSummaries: (id: string) => any[] }} deps
+ * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string, createdAt?: string}[], fetchSummaries: (id: string) => any[], sleep?: (ms: number) => void }} deps
  * @param {{ repo: string, currentRunId?: string, want: number, since?: string }} opts
  * @returns {{ history: any[][], warnings: string[] }}
  */
@@ -685,13 +816,53 @@ export function collectHistory(deps, { repo, currentRunId, want, since }) {
     },
     count: () => consecutiveSkips,
   };
+  const sleep = deps.sleep ?? defaultSyncSleep;
   let candidates;
-  try {
-    candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
-  } catch (err) {
-    if (!isAuthOrApiError(err)) throw err;
+  let listErr;
+  for (let attempt = 1; attempt <= LISTING_RETRY_ATTEMPTS; attempt++) {
+    try {
+      candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
+      listErr = undefined;
+      break;
+    } catch (err) {
+      const msg = String(err?.message ?? err ?? '');
+      const kind = classifyListingError(err);
+      if (kind === 'fatal') {
+        // Never retried: an expired/invalid token or a plain permission
+        // denial is not transient, and retrying it just delays the
+        // identical failure instead of surfacing it promptly.
+        throw new Error(
+          `could not list the lane's history runs (${msg}); failing closed — ` +
+            'there is nothing to backfill from and the flaky window cannot be judged',
+        );
+      }
+      if (kind === 'local') {
+        // Also never retried, but for a different reason: a deterministic
+        // local error (e.g. a JSON.parse failure on gh's own output) cannot
+        // change on a second attempt — retrying it only wastes the backoff
+        // window on a failure that was never going to clear.
+        throw new Error(
+          `could not list the lane's history runs (${msg}); failing closed — this does not look ` +
+            'like a transient API/network error, so it is not retried; there is nothing to ' +
+            'backfill from and the flaky window cannot be judged',
+        );
+      }
+      listErr = err;
+      if (attempt >= LISTING_RETRY_ATTEMPTS) break;
+      const delayMs = retryAfterMs(msg) ?? LISTING_RETRY_BASE_MS * 2 ** (attempt - 1);
+      warnings.push(
+        `listing the lane's history runs failed on attempt ${attempt}/${LISTING_RETRY_ATTEMPTS} ` +
+          `(${msg}); retrying after ${delayMs}ms`,
+      );
+      sleep(delayMs);
+    }
+  }
+  if (listErr) {
+    // Persisted across every attempt — fail closed exactly as before, just
+    // not on the very first transient blip.
     throw new Error(
-      `could not list the lane's history runs (${err?.message ?? err}); failing closed — ` +
+      `could not list the lane's history runs after ${LISTING_RETRY_ATTEMPTS} attempts ` +
+        `(${listErr?.message ?? listErr}); failing closed — ` +
         'there is nothing to backfill from and the flaky window cannot be judged',
     );
   }
