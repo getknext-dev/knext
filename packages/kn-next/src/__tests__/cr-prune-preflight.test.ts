@@ -224,7 +224,7 @@ describe("tier 1 — the verdict is a server-side dry-run apply", () => {
         expect(msg).toContain(
             "kubectl -n kn-next-operator-system get deploy,pods",
         );
-        expect(msg).toContain("kn-next doctor");
+        expect(msg).toContain("knext doctor");
     });
 
     it("a pre-v1.25 client rejecting --validate=strict at flag parsing is BLOCKED, not skew", () => {

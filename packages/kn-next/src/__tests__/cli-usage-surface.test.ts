@@ -201,7 +201,7 @@ describe("formatStrayPositional — three shapes of the same mistake", () => {
         const text = formatStrayPositional("cleanup");
         expect(text).toContain("unexpected argument: cleanup");
         expect(text).toContain("`cleanup` is a command");
-        expect(text).toContain("kn-next cleanup [options]");
+        expect(text).toContain("knext cleanup [options]");
         expect(text).toContain("--help");
     });
 
@@ -209,7 +209,7 @@ describe("formatStrayPositional — three shapes of the same mistake", () => {
         const text = formatStrayPositional("celanup");
         expect(text).toContain("unexpected argument: celanup");
         expect(text).toContain("Did you mean the `cleanup` command?");
-        expect(text).toContain("kn-next cleanup [options]");
+        expect(text).toContain("knext cleanup [options]");
     });
 
     it("explains where the app comes from when the token resembles nothing", () => {
@@ -264,17 +264,17 @@ describe("handleUsageError — the pointer branch and the writer default", () =>
     it("appends a help pointer only when the message carries none", () => {
         const withPointer: string[] = [];
         handleUsageError(
-            new UsageError('unknown flag "-q" (see kn-next gc --help)'),
+            new UsageError('unknown flag "-q" (see knext gc --help)'),
             (t) => withPointer.push(t),
         );
-        expect(withPointer.join("")).not.toContain("Run `kn-next --help`");
+        expect(withPointer.join("")).not.toContain("Run `knext --help`");
 
         const without: string[] = [];
         handleUsageError(new UsageError("app name required"), (t) =>
             without.push(t),
         );
         expect(without.join("")).toContain(
-            "Run `kn-next --help` to see the available commands.",
+            "Run `knext --help` to see the available commands.",
         );
     });
 
@@ -283,7 +283,7 @@ describe("handleUsageError — the pointer branch and the writer default", () =>
         expect(
             handleUsageError({ code: USAGE_ERROR_CODE }, (t) => out.push(t)),
         ).toBe(true);
-        expect(out.join("")).toContain("Run `kn-next --help`");
+        expect(out.join("")).toContain("Run `knext --help`");
     });
 
     it("declines a plain Error, an Error with another code, and a non-object", () => {

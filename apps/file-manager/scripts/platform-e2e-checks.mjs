@@ -694,3 +694,50 @@ export async function checkInvalidationEndpoint(request, token, tag, betweenUnau
   const right = await post({ authorization: `Bearer ${token}` });
   return assertInvalidationAuth({ none, wrong, right });
 }
+
+// ---------------------------------------------------------------------------
+// Malformed request paths — the app refuses them and keeps serving.
+// ---------------------------------------------------------------------------
+
+/**
+ * Paths that are not valid percent-encoding. The app's server decodes the
+ * request path before any route runs, so each must be refused with a 4xx —
+ * never a 5xx (the decoder threw inside the app), never a dropped connection
+ * (the process died mid-request).
+ */
+export const MALFORMED_PATHS = Object.freeze(['/%2/', '/%E0%A4%A', '/%', '/a%2', '/ok/%zz']);
+
+/**
+ * @param {{ probes: { path: string, status: number }[], after: { status: number } }} obs
+ *   `status` 0 means the request failed without an HTTP response.
+ */
+export function assertMalformedPathsRefused({ probes, after }) {
+  assert.ok(probes.length > 0, 'no malformed-path probes were sent');
+  for (const { path, status } of probes) {
+    assert.ok(
+      status >= 400 && status < 500,
+      `${path}: ${status === 0 ? 'no HTTP response (connection dropped)' : `HTTP ${status}`}, expected a 4xx refusal`,
+    );
+  }
+  assert.equal(
+    after.status,
+    200,
+    `GET / after the malformed paths: HTTP ${after.status}, expected 200 — the app stopped serving`,
+  );
+  return `${probes.map((p) => `${p.path} ${p.status}`).join('; ')}; then / ${after.status}`;
+}
+
+/** @param {RequestFn} request @param {readonly string[]} [paths] */
+export async function checkMalformedUrls(request, paths = MALFORMED_PATHS) {
+  const probes = [];
+  for (const path of paths) {
+    let status = 0;
+    try {
+      status = (await request(path)).status;
+    } catch {
+      status = 0;
+    }
+    probes.push({ path, status });
+  }
+  return assertMalformedPathsRefused({ probes, after: await request('/') });
+}

@@ -653,7 +653,7 @@ describe("NextApp CR apply — the failure is attributed to the right side", () 
         expect(caught?.message).toMatch(
             /kubectl get crd nextapps\.apps\.kn-next\.dev/,
         );
-        expect(caught?.message).toMatch(/kn-next doctor/);
+        expect(caught?.message).toMatch(/knext doctor/);
         expect((caught as Error & { cause?: unknown }).cause).toBe(original);
     });
 

@@ -1,5 +1,5 @@
 /**
- * `kn-next validate` — check the config without touching a cluster
+ * `knext validate` — check the config without touching a cluster
  * (UX ledger row 4, finding 4a; routed per the ADR-0046 dispatch contract).
  *
  * Runs config load + the schema checks (validate.ts, via loadConfig) + the
@@ -24,16 +24,16 @@ import {
 import { loadConfig, UsageError } from "./shared";
 import { CONFIG_INVALID_CODE } from "./validate";
 
-const VALIDATE_HELP = `kn-next validate — check kn-next.config.ts without deploying anything
+const VALIDATE_HELP = `knext validate — check kn-next.config.ts without deploying anything
 
 Usage:
-  kn-next validate
+  knext validate
 
 Loads the config from the current directory, runs every schema check, and
 flags placeholder values (like "ghcr.io/<your-user>") that still need real
 ones. Needs no cluster: it reads your config file and nothing else.
 
-Exit code 0 means the config is ready for \`kn-next deploy\`.
+Exit code 0 means the config is ready for \`knext deploy\`.
 
 Options:
   -h, --help            Show this help
@@ -51,7 +51,7 @@ const FD_IO: ValidateIO = {
 };
 
 /**
- * argv entry for `kn-next validate` (dispatched by the bin; parses its OWN
+ * argv entry for `knext validate` (dispatched by the bin; parses its OWN
  * argv per the ADR-0046 contract — flags first, so `validate --help` in an
  * empty directory is help, never a config error).
  */
@@ -66,8 +66,8 @@ export async function validateMain(
     for (const a of argv) {
         throw new UsageError(
             a.startsWith("-")
-                ? `unknown flag "${a}" (see kn-next validate --help)`
-                : `unexpected positional ${JSON.stringify(a)} — validate takes no arguments (see kn-next validate --help)`,
+                ? `unknown flag "${a}" (see knext validate --help)`
+                : `unexpected positional ${JSON.stringify(a)} — validate takes no arguments (see knext validate --help)`,
         );
     }
 
@@ -102,7 +102,7 @@ export async function validateMain(
     }
 
     io.out(
-        `kn-next.config.ts is valid — "${config.name}" is ready for \`kn-next deploy\`.\n`,
+        `kn-next.config.ts is valid — "${config.name}" is ready for \`knext deploy\`.\n`,
     );
     return 0;
 }

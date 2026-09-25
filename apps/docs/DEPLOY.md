@@ -16,7 +16,7 @@ scale-to-zero Knative Service via a `NextApp` CR.
   `NextApp` CR).
 - A container **registry** you can push to.
 - An object-storage **bucket** (`gcs`, `s3`, or `minio`) + credentials for asset upload.
-- A checkout of the knext repo (the `kn-next` CLI is not on npm yet — issue #53).
+- A checkout of the knext repo (the `knext` CLI is not on npm yet — issue #53).
 
 ## 1. Resolve `@getknext/core`
 
@@ -39,7 +39,7 @@ the build loudly rather than silently shipping an empty cache.
 ## 2. Validate the deploy config
 
 ```bash
-npm run config:validate   # runs the real kn-next validateConfig() against kn-next.config.ts
+npm run config:validate   # runs the real knext validateConfig() against kn-next.config.ts
 ```
 
 `kn-next.config.ts` is minimal-valid: `name`, `registry`, `storage{provider:gcs, bucket, publicUrl}`,
@@ -53,12 +53,12 @@ docker push registry.example.com/knext-docs:$(git rev-parse --short HEAD)
 # capture the resulting @sha256: digest — the operator REJECTS non-digest-pinned images.
 ```
 
-## 4. Deploy via the kn-next CLI (operator path)
+## 4. Deploy via the knext CLI (operator path)
 
 From a knext checkout, with this repo's `kn-next.config.ts` on the path:
 
 ```bash
-kn-next deploy --registry registry.example.com/knext-docs
+knext deploy --registry registry.example.com/knext-docs
 # emits a NextApp CR (apps.kn-next.dev/v1alpha1) and applies it;
 # the operator reconciles it into a scale-to-zero Knative Service.
 ```
@@ -75,5 +75,5 @@ kubectl get ksvc                            # Knative Service, should scale to 0
 ## Rollback
 
 ```bash
-kn-next rollback knext-docs --to <previous-revision>   # optionally --canary <n>
+knext rollback knext-docs --to <previous-revision>   # optionally --canary <n>
 ```

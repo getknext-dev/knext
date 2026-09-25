@@ -1,4 +1,10 @@
 name: Compat suite (official Next.js deploy harness)
+# #1382 — when a caller sets `dispatchId`, this run's own display title
+# BECOMES it, so `gh run list --json displayTitle` gives an exact,
+# non-heuristic match for the run a specific dispatch created. Falls back to
+# the plain workflow name for every schedule run and every dispatch that
+# does not set it (the overwhelming majority of dispatches).
+run-name: ${{ github.event.inputs.dispatchId || github.workflow }}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # #89 / ADR-0007 A3-2 — the AUTHORITATIVE (slow) compatibility gate.
@@ -144,6 +150,24 @@ on:
         required: false
         type: boolean
         default: false
+      # #1382 — a caller-supplied identifier for THIS run, echoed into
+      # `run-name:` below and folded into the dispatch concurrency group.
+      # Exists because "newest workflow_dispatch run not seen before" (the
+      # only way `gh workflow run` lets a caller recover the run id it just
+      # created) is a HEURISTIC that a fast multi-leg fan-out defeats: the
+      # shipped-pin early-warning lane (compat-shipped-pin-early-warning.yml)
+      # dispatches 4 legs on `main` within seconds, and every leg satisfied
+      # that heuristic identically — all 4 latched onto the SAME run
+      # (rev-1382 finding 2, reproduced live: every leg picked run 104).
+      # With a per-leg dispatchId set as this run's OWN `run-name`, a caller
+      # matches on the EXACT `displayTitle`, no recency guess involved. Empty
+      # by default: a plain manual dispatch does not need one, and the
+      # concurrency group below falls back to its pre-#1382 shape when unset.
+      dispatchId:
+        description: '#1382 — optional caller-supplied id for this run, embedded in `run-name:` and the dispatch concurrency group so a multi-leg fan-out (e.g. the shipped-pin early-warning lane) can identify and isolate its OWN dispatched run by an exact match, never a "newest run" guess.'
+        required: false
+        type: string
+        default: ''
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
@@ -188,8 +212,15 @@ on:
 # workflow_dispatch only — cancelling a pending credential run resets its
 # 14-night window (jev 0.83; see docs/ci/capacity-budget.md and
 # tests/ci-concurrency-group.test.ts for the ci.yml precedent this mirrors).
+# #1382 — the dispatch group now also folds in `inputs.dispatchId` (falling
+# back to the literal 'shared' when unset, so an ORDINARY dispatch keeps
+# grouping — and cancelling a re-dispatch on the same ref — exactly as
+# before). A caller that sets a distinct dispatchId per leg (the shipped-pin
+# early-warning lane's 4-leg fan-out) gets a group UNIQUE to that leg, so
+# concurrent legs on the same ref never cancel each other, and never collide
+# with a developer's own plain manual dispatch either.
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.

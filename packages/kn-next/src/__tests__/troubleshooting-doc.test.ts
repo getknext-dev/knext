@@ -8,7 +8,7 @@
  *      section each).
  *   2. Every ground-truth token the guide cites — operator Event reasons,
  *      status Condition types, the exact `:latest` rejection phrasing, the
- *      alert names, the `kn-next doctor` command, ADR references — is present
+ *      alert names, the `knext doctor` command, ADR references — is present
  *      BOTH in the guide AND in the source of truth it claims to quote. If the
  *      code renames a reason/alert/condition, this test goes red so the doc
  *      cannot silently drift into fiction (CLAUDE.md rule 2b: doc drift = defect).
@@ -81,7 +81,7 @@ const GROUNDED_TOKENS: Array<{ token: string; source: string }> = [
     { token: "KnextNextAppDegraded", source: "docs/observability/slos.md" },
     // The diagnostic command really exists (audited, not invented).
     {
-        token: "kn-next doctor",
+        token: "knext doctor",
         source: "packages/kn-next/src/cli/doctor.ts",
     },
     // DB binding failure mode is grounded in ADR-0019.
@@ -113,8 +113,8 @@ describe("docs/runbooks/troubleshooting.md (#313)", () => {
         expect(sections.length).toBeGreaterThanOrEqual(10);
     });
 
-    it("documents the audited `kn-next doctor` diagnostic", () => {
-        expect(doc()).toContain("kn-next doctor");
+    it("documents the audited `knext doctor` diagnostic", () => {
+        expect(doc()).toContain("knext doctor");
     });
 
     it.each([...GROUNDED_TOKENS])("grounds %s in its cited source", ({

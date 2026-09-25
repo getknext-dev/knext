@@ -3,9 +3,9 @@ title: Preview environments
 description: Per-PR ephemeral preview deployments, isolated by name down to the cache keyspace.
 ---
 
-A preview is a complete, ephemeral deployment of your app for a single pull request. `kn-next
+A preview is a complete, ephemeral deployment of your app for a single pull request. `knext
 preview deploy` builds a fresh image and applies a **new** `NextApp` CR named `<app>-pr-<n>` — its
-own image, its own URL, its own assets, its own cache keyspace. `kn-next preview destroy` deletes
+own image, its own URL, its own assets, its own cache keyspace. `knext preview destroy` deletes
 only that CR; the operator then reaps everything it owned.
 
 The CLI emits intent only: it `kubectl apply`s the preview CR and (on destroy) deletes it. It never
@@ -15,10 +15,10 @@ writes the Knative Service or Route directly.
 
 ```bash
 # Deploy / update the preview for PR 42 from a branch
-kn-next preview deploy --pr 42 --branch feature/cart
+knext preview deploy --pr 42 --branch feature/cart
 
 # Tear it down
-kn-next preview destroy --pr 42
+knext preview destroy --pr 42
 ```
 
 | Flag | Notes |
@@ -78,7 +78,7 @@ It triggers on `pull_request` (deliberately **not** `pull_request_target`), so a
 a read-only token and cannot reach deploy credentials.
 
 <Callout type="info">
-The shippable mechanism — the `kn-next preview` CLI and the operator's preview reconcile — is fully
+The shippable mechanism — the `knext preview` CLI and the operator's preview reconcile — is fully
 implemented and tested. The live per-PR flow stays inert until you provide the cluster credentials
 and enable previews in your repository; knext does not ship those for you.
 </Callout>

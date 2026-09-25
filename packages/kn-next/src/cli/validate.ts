@@ -132,7 +132,7 @@ const RESERVED_ENV_NAMES = [
  * reasoning as shared.ts's CONFIG_NOT_FOUND_CODE: the CLI ships as a tsup
  * bundle whose subcommands are dynamic-imported chunks, so two copies of the
  * class can exist in one process and `instanceof` would silently stop
- * matching. `kn-next validate` renders this error as its verdict by checking
+ * matching. `knext validate` renders this error as its verdict by checking
  * the code.
  */
 export const CONFIG_INVALID_CODE = "ERR_KN_CONFIG_INVALID";
@@ -141,7 +141,7 @@ export class ConfigValidationError extends Error {
     readonly code = CONFIG_INVALID_CODE;
 
     constructor(message: string) {
-        super(`[kn-next] Config validation failed: ${message}`);
+        super(`[knext] Config validation failed: ${message}`);
         this.name = "ConfigValidationError";
     }
 }
@@ -173,7 +173,7 @@ const MANTISSA_RE_SRC = String.raw`(?:\d+(?:\.\d*)?|\.\d+)`;
 // ~1 µs but "1e2147483648" was still running after 45 s, so the operator now
 // refuses any exponent beyond ±9999 before parsing
 // (kn-next-operator/internal/validation/quantity.go). The CLI mirrors that bound
-// so `kn-next deploy` fails on the value instead of shipping it to a cluster.
+// so `knext deploy` fails on the value instead of shipping it to a cluster.
 // `0*` first, so leading zeros are not counted: "1e0000009" is exponent 9 and
 // stays valid, while "1e00000002147483648" does not.
 const MAX_EXPONENT_DIGITS = 4;
@@ -308,7 +308,7 @@ export function validateConfig(
     // Cheap SINGLE-FIELD check only: the operator stays the single source of
     // validation truth (ValidateNextAppSpec parses this with
     // resource.ParseQuantity and fails the CR as a status condition). This is
-    // the early, CLI-side copy so the user learns about a typo at `kn-next
+    // the early, CLI-side copy so the user learns about a typo at `knext
     // deploy` time instead of from a rejected CR.
     //
     // The suffix set mirrors the Kubernetes quantity grammar EXACTLY
@@ -511,7 +511,7 @@ export function validateConfig(
         // that flow into the CR's spec.resources. The OPERATOR stays the single
         // source of validation truth (internal/validation/validate.go rejects
         // malformed / non-positive quantities AND the request>limit cross-field
-        // rule); this early copy just gives fast `kn-next deploy`-time feedback
+        // rule); this early copy just gives fast `knext deploy`-time feedback
         // on a typo like "1GB" / "0.5 CPU" / "0". Deliberately NOT the
         // request>limit cross-field wall — that stays the operator's job.
         for (const field of [

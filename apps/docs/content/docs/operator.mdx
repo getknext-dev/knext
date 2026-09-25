@@ -8,7 +8,7 @@ watches `NextApp` resources and reconciles each into a running Knative Service. 
 *applies the CR* — it never touches Knative or infra manifests directly.
 
 ```
-kn-next deploy   →  build · push · emit CR
+knext deploy   →  build · push · emit CR
 NextApp CR       →  applied to the cluster
 operator         →  reconciles desired state
 Knative Service  →  scaled-to-zero, reachable
@@ -111,8 +111,8 @@ a **bring-your-own** binding: it wires an existing Postgres Secret into the app 
 `secretRef` binds a Secret in the app's own namespace as `DATABASE_URL`; `roSecretRef` optionally
 binds a read-only DSN as `DATABASE_URL_RO` (its key defaults to `DATABASE_URL_RO`, so one Secret
 carrying both keys binds with the same name). It is typed sugar over the `envMap` path above —
-same injection machinery, same semantics. `kn-next db bind` writes exactly this patch for you (see
-the [CLI reference](/docs/cli#kn-next-db-bind)).
+same injection machinery, same semantics. `knext db bind` writes exactly this patch for you (see
+the [CLI reference](/docs/cli#knext-db-bind)).
 
 ```yaml title="nextapp.yaml (BYO database)"
 spec:
@@ -143,8 +143,8 @@ URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who 
 The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own
 `Ready` condition rather than reporting success as soon as the resource is applied — a CR whose
 service never comes up shows `Ready: False` with the real reason (e.g. the image-pull or crash
-detail). `kn-next status` renders these conditions verbatim and exits non-zero when `Ready` is
-`False` — see the [CLI reference](/docs/cli#kn-next-status).
+detail). `knext status` renders these conditions verbatim and exits non-zero when `Ready` is
+`False` — see the [CLI reference](/docs/cli#knext-status).
 
 `DatabaseReady` reports **binding health** for a bring-your-own database. When `spec.database`
 binds a Secret, a successfully bound app shows `DatabaseReady: True` with reason `Bound` (message:
