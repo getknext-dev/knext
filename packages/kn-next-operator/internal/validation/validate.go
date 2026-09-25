@@ -575,18 +575,28 @@ func DatabaseEnvMapCollisions(spec *appsv1alpha1.NextAppSpec) []string {
 // ReservedOperatorEnvNames returns the set of env var names the operator
 // injects into the ksvc container BEFORE spec.secrets.envMap is applied, for
 // the GIVEN spec — some entries are conditional (e.g. STORAGE_PROVIDER only
-// when spec.storage is set). This is the single source of truth for "which
-// env names does the operator manage", consumed by BOTH the webhook
-// (EnvMapReservedCollisions, admission-time rejection of NEW collisions) and
-// the reconciler (nextapp_controller.go's buildKsvcEnv, runtime resolution
-// for grandfathered ones) so the two cannot drift the way DATABASE_URL's
-// equivalent split (validateDatabase / injectBoundDatabaseEnv) already avoids
-// (#1288, #1391).
+// when spec.storage is set). It is the ADMISSION side's view of "which env
+// names does the operator manage" (EnvMapReservedCollisions, admission-time
+// rejection of NEW collisions).
 //
-// HOSTNAME and NODE_ENV are unconditional. Everything else mirrors
-// buildKsvcEnv's conditionals exactly; reconcile_idempotency_envtest_test.go
-// and envmap_reserved_collision_test.go both exercise permutations of these
-// conditionals to catch drift between the two copies of this logic.
+// HONEST STATEMENT OF THE DRIFT RISK (#1391 round 2 — a prior version of this
+// comment overclaimed a guard that did not exist): this function is a HAND-
+// MAINTAINED MIRROR of the conditionals inside nextapp_controller.go's
+// buildKsvcEnv, in a DIFFERENT PACKAGE, NOT a shared call — buildKsvcEnv does
+// not call this function, it builds its own envVars slice independently and
+// derives its own "which names are reserved" set FROM that slice. Nothing in
+// the Go compiler enforces that the two lists agree; a name deleted from one
+// and not the other, or a new operator-managed name added to only one, both
+// compile and both stay green under every test that does not specifically
+// compare the two. That comparison is
+// reserved_env_names_parity_test.go's ENTIRE job — it asserts, for a matrix
+// of spec permutations exercising every conditional, that
+// ReservedOperatorEnvNames(spec) is EXACTLY the pre-envMap name set
+// buildKsvcEnv actually renders, with NO admission-side-only or reconcile-
+// side-only names — and it is mutation-proved (a deleted name and an
+// added-reconcile-only name each independently red it). Do not remove that
+// test's coverage without adding an equivalent one; do not re-add a claim
+// here that the two are "the same source" — they never have been.
 func ReservedOperatorEnvNames(spec *appsv1alpha1.NextAppSpec) map[string]struct{} {
 	names := map[string]struct{}{
 		"HOSTNAME": {},
@@ -650,20 +660,46 @@ func ReservedOperatorEnvNames(spec *appsv1alpha1.NextAppSpec) map[string]struct{
 // preserved instead — see EnvMapReservedCollisions.
 var OperatorAlwaysWinsEnvNames = map[string]struct{}{"HOSTNAME": {}}
 
+// EnvMapUserAlwaysWinsEnvNames is the subset of ReservedOperatorEnvNames that
+// is NEVER rejected at admission, on a new CR or an update, regardless of
+// EnvMapReservedCollisions (#1391 round 2). These are the operator-managed
+// names whose value is a CONNECTION STRING carrying a credential —
+// REDIS_URL, KAFKA_BROKER_URL, OTEL_EXPORTER_OTLP_ENDPOINT — and every one of
+// spec.cache.url / spec.revalidation.kafkaBrokerUrl / the tracing endpoint is
+// PLAINTEXT in the CR spec (no secretRef field exists for any of them today).
+// Rejecting a user's envMap entry for one of these would force them to choose
+// between admission failure and putting the credential in plaintext in the
+// CR — exactly what security.md forbids ("Secrets live in Kubernetes Secrets
+// / env only — never in config files ... or URLs"). So these names are
+// exempt from rejection entirely: envMap wins for them, on new CRs and old
+// ones alike (the reconciler's resolution in buildKsvcEnv already does this —
+// they are not in OperatorAlwaysWinsEnvNames — this only changes ADMISSION).
+// A follow-up issue tracks proper `*SecretRef` CRD fields for these values,
+// which would let admission validate the SHAPE (Secret exists) without ever
+// seeing the plaintext; that is trigger-class (CRD change) and sprint-close
+// work, not this fix.
+var EnvMapUserAlwaysWinsEnvNames = map[string]struct{}{
+	"REDIS_URL":                   {},
+	"KAFKA_BROKER_URL":            {},
+	"OTEL_EXPORTER_OTLP_ENDPOINT": {},
+}
+
 // EnvMapReservedCollisions returns, in deterministic (sorted) order, the
 // spec.secrets.envMap names that collide with an operator-managed reserved
-// env name for this spec (see ReservedOperatorEnvNames). Mirrors
-// DatabaseEnvMapCollisions's shape/ratcheting contract: empty result = no
-// collision; ValidateNextAppSpecCreate/Update reject NEW collisions
-// unratcheted, while a CR that predates this rule keeps reconciling — the
-// reconciler resolves it loudly (EnvMapCollision condition + Warning event),
-// with the envMap value WINNING except for OperatorAlwaysWinsEnvNames (#1391:
-// this differs from DatabaseEnvMapCollisions's own grandfathered resolution,
-// where spec.database wins — the two directions are deliberately opposite,
-// because before #1288 shipped, kubelet's real last-wins duplicate-env
-// semantics already made the ENVMAP value win for THIS collision class; a
-// grandfathered CR must keep observing the value it was already getting, not
-// have it silently replaced by the operator's own default on upgrade).
+// env name for this spec (see ReservedOperatorEnvNames) and are NOT in
+// EnvMapUserAlwaysWinsEnvNames. Mirrors DatabaseEnvMapCollisions's shape/
+// ratcheting contract: empty result = no collision; ValidateNextAppSpecCreate/
+// Update reject NEW collisions unratcheted, while a CR that predates this
+// rule (or reconciled while the webhook was unavailable — never assume
+// "predates" is the only path here) keeps reconciling — the reconciler
+// resolves it loudly (EnvMapCollision condition + Warning event), with the
+// envMap value WINNING except for OperatorAlwaysWinsEnvNames (#1391: this
+// differs from DatabaseEnvMapCollisions's own resolution, where spec.database
+// wins — the two directions are deliberately opposite, because before #1288
+// shipped, kubelet's real last-wins duplicate-env semantics already made the
+// ENVMAP value win for THIS collision class; a CR reconciling with the
+// collision already present must keep observing the value it was already
+// getting, not have it silently replaced by the operator's own default).
 func EnvMapReservedCollisions(spec *appsv1alpha1.NextAppSpec) []string {
 	if spec.Secrets == nil || spec.Secrets.EnvMap == nil {
 		return nil
@@ -671,6 +707,9 @@ func EnvMapReservedCollisions(spec *appsv1alpha1.NextAppSpec) []string {
 	reserved := ReservedOperatorEnvNames(spec)
 	var out []string
 	for name := range spec.Secrets.EnvMap {
+		if _, exempt := EnvMapUserAlwaysWinsEnvNames[name]; exempt {
+			continue
+		}
 		if _, collides := reserved[name]; collides {
 			out = append(out, name)
 		}

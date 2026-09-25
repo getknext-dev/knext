@@ -214,23 +214,23 @@ func TestComputeStatusVerdict_EnvMapCollision_UserWins_ConditionAndEvent(t *test
 		envMapCollisionReport{userWins: []string{"NODE_ENV"}}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
-	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapReservedGrandfathered {
-		t.Fatalf("EnvMapCollision: got %+v, want True/%s", c, ReasonEnvMapReservedGrandfathered)
+	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapUserOverride {
+		t.Fatalf("EnvMapCollision: got %+v, want True/%s", c, ReasonEnvMapUserOverride)
 	}
 	if !strings.Contains(c.Message, "NODE_ENV") {
 		t.Fatalf("EnvMapCollision message %q does not name the collision", c.Message)
 	}
-	if !strings.Contains(c.Message, "predates admission validation") {
-		t.Fatalf("EnvMapCollision message %q does not explain the grandfathering, want a mention of admission validation", c.Message)
+	if !strings.Contains(c.Message, "overrides the operator's own default value") {
+		t.Fatalf("EnvMapCollision message %q does not explain the override", c.Message)
 	}
 	found := false
 	for _, e := range v.events {
-		if e.reason == ReasonEnvMapReservedGrandfathered && e.eventType == corev1.EventTypeWarning {
+		if e.reason == ReasonEnvMapUserOverride && e.eventType == corev1.EventTypeWarning {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("no Warning/%s event emitted: got %+v", ReasonEnvMapReservedGrandfathered, v.events)
+		t.Fatalf("no Warning/%s event emitted: got %+v", ReasonEnvMapUserOverride, v.events)
 	}
 }
 
@@ -259,12 +259,13 @@ func TestComputeStatusVerdict_EnvMapCollision_TransitionGated(t *testing.T) {
 	app.Status.Conditions = []metav1.Condition{{
 		Type:   ConditionEnvMapCollision,
 		Status: metav1.ConditionTrue,
-		Reason: ReasonEnvMapReservedGrandfathered,
-		Message: "spec.secrets.envMap collides with operator-managed system env — NODE_ENV: this " +
-			"NextApp predates admission validation for this collision (new/updated CRs are " +
-			"rejected) — the spec.secrets.envMap value is used INSTEAD of the operator's own " +
-			"default for these name(s); remove the envMap entry to fall back to the operator's " +
-			"default.",
+		Reason: ReasonEnvMapUserOverride,
+		Message: "spec.secrets.envMap collides with operator-managed system env — NODE_ENV: " +
+			"spec.secrets.envMap overrides the operator's own default value for these name(s) — " +
+			"either because they are connection-string names (REDIS_URL, KAFKA_BROKER_URL, " +
+			"OTEL_EXPORTER_OTLP_ENDPOINT) that are always allowed to be user-supplied, or because " +
+			"this NextApp reconciled with the collision already present; remove the envMap entry " +
+			"to fall back to the operator's default.",
 	}}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},

@@ -106,12 +106,22 @@ provision the database.
 An `envMap` name can also collide with a **platform-managed system variable** — `HOSTNAME`,
 `NODE_ENV`, or a conditionally-injected one like `STORAGE_PROVIDER` when `spec.storage` is set.
 Applying the resource **rejects** this collision (same no-silent-precedence rule as the
-`DATABASE_URL` case below), so a new or updated CR can never carry one. A CR that already had the
-collision before this rule existed keeps reconciling (grandfathered): for `HOSTNAME` the
-platform's own value always wins (request routing depends on it), but for every other name your
-`envMap` value wins instead, preserving what the app was already receiving. Either way it is
-surfaced by a Warning event and the `EnvMapCollision` condition — remove the `envMap` entry to
-resolve it.
+`DATABASE_URL` case below), so a new or updated CR can never carry one — except the **connection-
+string names** below, which are always allowed. For every other reserved name your `envMap`
+override is surfaced by a Warning event and the `EnvMapCollision` condition; for `HOSTNAME` the
+platform's own value always wins instead (request routing depends on it). Remove the `envMap`
+entry to fall back to the platform's default.
+
+**Connection-string names are exempt from rejection: `REDIS_URL`, `KAFKA_BROKER_URL`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`.** These are the values behind `spec.cache.url`,
+`spec.revalidation.kafkaBrokerUrl`, and the tracing endpoint — all **plain, non-secret CR
+fields** today (there is no `secretRef` equivalent for them yet, unlike `spec.database`).
+Rejecting an `envMap` override for one of these would force you to choose between admission
+failure and writing the credential into the CR in plaintext, which is exactly what this platform's
+secret handling forbids. So your `envMap` entry always wins for these three names, on every CR —
+**this is the recommended way to keep a Redis/Kafka/OTel credential out of the CR**: bind it via
+`spec.secrets.envMap` pointing at a Secret, the same way you would bind `DATABASE_URL`, rather
+than putting the URL in `spec.cache.url` / `spec.revalidation.kafkaBrokerUrl` directly.
 
 ### Databases: `spec.database`
 

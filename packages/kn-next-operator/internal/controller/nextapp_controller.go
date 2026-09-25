@@ -75,15 +75,22 @@ const (
 	// NODE_ENV, STORAGE_PROVIDER, ...). Before #1288 such an entry was
 	// silently appended a second time — kubelet's last-wins duplicate-env
 	// semantics decided which value actually reached the container, with no
-	// signal that it happened. Admission REJECTS any new such collision
-	// (#1391); this condition only fires for a CR that predates that rule
-	// (validation ratcheting). Informational/non-fatal — Ready stays True.
-	// Resolution differs by name: for validation.OperatorAlwaysWinsEnvNames
-	// (HOSTNAME) the operator's own value always wins; for every other
-	// reserved name the envMap value WINS instead, preserving the value the
-	// app was actually getting before #1288 (kubelet's real last-wins
-	// semantics already favored envMap there) rather than silently swapping
-	// it for the operator's default on upgrade.
+	// signal that it happened. Admission REJECTS any NEW such collision
+	// (#1391), EXCEPT validation.EnvMapUserAlwaysWinsEnvNames (connection-
+	// string names — REDIS_URL, KAFKA_BROKER_URL, OTEL_EXPORTER_OTLP_ENDPOINT
+	// — which have no secretRef field today and would otherwise force a
+	// credential into the CR in plaintext to pass admission). So this
+	// condition fires for two DIFFERENT reasons, and neither implies the
+	// other: a CR reconciling with a collision the webhook would now reject
+	// (predates the rule, or reconciled while the webhook was unavailable —
+	// never assume "predates" is the only path), or an always-exempt
+	// connection-string name on ANY CR, new or old. Informational/non-fatal —
+	// Ready stays True. Resolution differs by name: for
+	// validation.OperatorAlwaysWinsEnvNames (HOSTNAME) the operator's own
+	// value always wins; for every other reserved name the envMap value WINS
+	// instead, preserving the value the app was actually getting before
+	// #1288 (kubelet's real last-wins semantics already favored envMap
+	// there) rather than silently swapping it for the operator's default.
 	ConditionEnvMapCollision = "EnvMapCollision"
 )
 
@@ -151,12 +158,17 @@ const (
 	// (#186). Warning, not error: the reconcile proceeds, but the user must be
 	// able to see via `kubectl describe nextapp` why their flag didn't land.
 	ReasonEnvVarIgnored = "EnvVarIgnored"
-	// ReasonEnvMapReservedGrandfathered marks a spec.secrets.envMap entry that
-	// collides with an operator-managed reserved env name on a CR that
-	// predates admission rejection of the collision (#1391 ratcheting). The
-	// envMap value WINS (see ConditionEnvMapCollision's doc comment for why
-	// the direction differs from ReasonEnvVarIgnored/DATABASE_URL).
-	ReasonEnvMapReservedGrandfathered = "EnvMapReservedGrandfathered"
+	// ReasonEnvMapUserOverride marks a spec.secrets.envMap entry that
+	// collides with an operator-managed reserved env name AND the envMap
+	// value WINS (see ConditionEnvMapCollision's doc comment for why the
+	// direction differs from ReasonEnvVarIgnored/DATABASE_URL). Deliberately
+	// NEUTRAL wording (#1391 round 2), not "grandfathered": the collision
+	// reaching the reconciler does not always mean the CR predates admission
+	// rejection — it also covers EnvMapUserAlwaysWinsEnvNames (connection-
+	// string names exempt from rejection entirely) and a CR that reconciled
+	// while the validating webhook was unavailable. Labelling either of those
+	// "grandfathered" would misleadingly imply a legacy-only condition.
+	ReasonEnvMapUserOverride = "EnvMapUserOverride"
 	// ReasonIngressNotProgrammed marks a NextApp whose route has sat in
 	// IngressNotConfigured past the stall window — i.e. NO ingress controller
 	// reconciles the cluster's configured ingress-class, so the app will never
@@ -1420,8 +1432,11 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 					report.operatorWins = append(report.operatorWins, envName)
 					continue
 				}
-				// Grandfathered collision, every other reserved name: the
-				// envMap value REPLACES the operator's plain entry IN PLACE
+				// Every other reserved name (whether the collision predates
+				// admission rejection, reached us while the webhook was
+				// unavailable, or is an always-exempt connection-string name
+				// — validation.EnvMapUserAlwaysWinsEnvNames): the envMap
+				// value REPLACES the operator's plain entry IN PLACE
 				// — deterministic, never an appended duplicate whose winner
 				// depends on kubelet's last-wins resolution (the pre-#1288
 				// bug). This is also the value that actually reached the

@@ -257,22 +257,35 @@ An `envMap` name can also collide with a **platform-managed system variable**
 (e.g. `HOSTNAME`, `NODE_ENV`, or a conditionally-injected one like
 `STORAGE_PROVIDER` when `spec.storage` is set). The validating webhook
 **rejects** this on create, and on any update that introduces the conflict —
-same no-silent-precedence rule as the `spec.database` case above. Every
+same no-silent-precedence rule as the `spec.database` case above — **except**
+`REDIS_URL`, `KAFKA_BROKER_URL`, and `OTEL_EXPORTER_OTLP_ENDPOINT` (see the
+connection-string exemption below, unconditional and never ratcheted). Every
 non-colliding env var is fair game.
 
-CRs that already carried the conflict before this rule are grandfathered
-(ratcheted): they keep reconciling, and the resolution depends on which name
-collided:
+A CR that reconciles with the conflict still present — because it predates
+this rule, because an update raced the webhook, or because the name is one of
+the connection-string exemptions below — is resolved LOUDLY rather than
+silently, and the resolution depends on which name collided:
 
 - **`HOSTNAME` always loses to the platform's own value.** Request routing
   depends on the platform's `HOSTNAME=0.0.0.0`, so this is the one name where
-  the platform's value wins even for a grandfathered CR — the `envMap` entry
-  is ignored.
+  the platform's value wins regardless — the `envMap` entry is ignored.
 - **Every other name — your `envMap` value wins.** This preserves the value
-  the app was actually receiving before this rule existed (Kubernetes'
-  duplicate-env resolution used to favor the later-appended `envMap` entry),
-  so upgrading the platform does not silently swap a working value (e.g. a
-  bound `REDIS_URL` Secret) for the platform's own default.
+  the app was actually receiving before admission rejection existed
+  (Kubernetes' duplicate-env resolution used to favor the later-appended
+  `envMap` entry), so upgrading the platform does not silently swap a working
+  value (e.g. a bound `REDIS_URL` Secret) for the platform's own default.
+
+**Connection-string exemption (`REDIS_URL`, `KAFKA_BROKER_URL`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`):** these three names are NEVER rejected at
+admission, on any CR. `spec.cache.url` / `spec.revalidation.kafkaBrokerUrl` /
+the tracing endpoint are plain (non-`secretRef`) CR fields today, so rejecting
+an `envMap` override would force a credential into the CR in plaintext —
+exactly what this platform's secret handling forbids. Binding one of these
+via `spec.secrets.envMap` (pointing at a Secret, the same shape as the
+`DATABASE_URL` binding) is the RECOMMENDED way to keep the credential out of
+the CR; `envMap` always wins for these three names, same as the
+grandfathered-else case above.
 
 Either outcome is surfaced two ways: a Warning event
 (`kubectl describe nextapp <name>`) and an `EnvMapCollision` status condition

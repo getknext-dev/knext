@@ -364,15 +364,19 @@ func computeStatusVerdict(
 		})
 	}
 
-	// EnvMapCollision (#1288/#1391): non-fatal surface of a GRANDFATHERED
+	// EnvMapCollision (#1288/#1391): non-fatal surface of a
 	// spec.secrets.envMap entry colliding with an operator-injected system
-	// env var — admission rejects any NEW such collision, so reaching here
-	// means the CR predates that rule. Before #1288 the collision was
-	// resolved by kubelet's last-wins duplicate-env semantics with NO signal
-	// anywhere that it happened — a Ready=True app silently running on
-	// whichever value append-order happened to put last. Both lists in
-	// envMapCollision are already sorted (buildKsvcEnv iterates envMap in
-	// sorted key order).
+	// env var. Admission rejects any NEW such collision except
+	// validation.EnvMapUserAlwaysWinsEnvNames (connection-string names,
+	// always exempt) — so reaching here for a NON-exempt name means either
+	// the CR predates that rule, or it reconciled while the validating
+	// webhook was unavailable (NEVER assume "predates" is the only path; the
+	// message below is deliberately neutral about which). Before #1288 the
+	// collision was resolved by kubelet's last-wins duplicate-env semantics
+	// with NO signal anywhere that it happened — a Ready=True app silently
+	// running on whichever value append-order happened to put last. Both
+	// lists in envMapCollision are already sorted (buildKsvcEnv iterates
+	// envMap in sorted key order).
 	if !envMapCollision.empty() {
 		var parts []string
 		reason := ReasonEnvVarIgnored
@@ -385,13 +389,14 @@ func computeStatusVerdict(
 		}
 		if len(envMapCollision.userWins) > 0 {
 			parts = append(parts, fmt.Sprintf(
-				"%s: this NextApp predates admission validation for this collision (new/updated "+
-					"CRs are rejected) — the spec.secrets.envMap value is used INSTEAD of the "+
-					"operator's own default for these name(s); remove the envMap entry to fall back "+
-					"to the operator's default",
+				"%s: spec.secrets.envMap overrides the operator's own default value for these "+
+					"name(s) — either because they are connection-string names (REDIS_URL, "+
+					"KAFKA_BROKER_URL, OTEL_EXPORTER_OTLP_ENDPOINT) that are always allowed to be "+
+					"user-supplied, or because this NextApp reconciled with the collision already "+
+					"present; remove the envMap entry to fall back to the operator's default",
 				strings.Join(envMapCollision.userWins, ", "),
 			))
-			reason = ReasonEnvMapReservedGrandfathered
+			reason = ReasonEnvMapUserOverride
 		}
 		message := fmt.Sprintf(
 			"spec.secrets.envMap collides with operator-managed system env — %s.",

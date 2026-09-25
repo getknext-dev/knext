@@ -925,6 +925,35 @@ func TestEnvMapReservedCollisions(t *testing.T) {
 			spec: &appsv1alpha1.NextAppSpec{Secrets: envMap("STRIPE_KEY")},
 			want: nil,
 		},
+		{
+			// #1391 round 2: REDIS_URL/KAFKA_BROKER_URL/OTEL_EXPORTER_OTLP_ENDPOINT
+			// have no secretRef field — spec.cache.url is plaintext — so
+			// rejecting the collision would force a credential into the CR.
+			// These names are EXEMPT from EnvMapReservedCollisions entirely,
+			// even though ReservedOperatorEnvNames still lists them (the
+			// reconciler still needs to know they're operator-managed to
+			// resolve who wins).
+			name: "connection-string names are EXEMPT even when the operator would otherwise inject them",
+			spec: &appsv1alpha1.NextAppSpec{
+				Cache:        &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+				Revalidation: &appsv1alpha1.RevalidationSpec{Queue: "kafka", KafkaBrokerUrl: "kafka:9092"},
+				Observability: &appsv1alpha1.ObservabilitySpec{
+					Enabled: true,
+					Tracing: &appsv1alpha1.TracingSpec{Enabled: true, Endpoint: "http://otel:4318"},
+				},
+				Secrets: envMap("REDIS_URL", "KAFKA_BROKER_URL", "OTEL_EXPORTER_OTLP_ENDPOINT"),
+			},
+			want: nil,
+		},
+		{
+			name: "connection-string exemption does not exempt OTHER reserved names in the same envMap",
+			spec: &appsv1alpha1.NextAppSpec{
+				Cache:   &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+				Storage: &appsv1alpha1.StorageSpec{Provider: "s3", Bucket: "b"},
+				Secrets: envMap("REDIS_URL", "STORAGE_PROVIDER"),
+			},
+			want: []string{"STORAGE_PROVIDER"},
+		},
 	}
 
 	for _, tc := range tests {

@@ -352,4 +352,42 @@ func TestEnvMapReservedCollisionRatchet(t *testing.T) {
 			t.Fatalf("expected HOSTNAME collision rejection on create, got err=%v", err)
 		}
 	})
+
+	// #1391 round 2: a REDIS_URL/KAFKA_BROKER_URL/OTEL_EXPORTER_OTLP_ENDPOINT
+	// collision must be ACCEPTED, never rejected — these connection-string
+	// names have no secretRef field, so rejecting them would force the
+	// credential into the CR in plaintext.
+	t.Run("connection-string collision (REDIS_URL) is accepted at CREATE, not rejected", func(t *testing.T) {
+		spec := appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Cache: &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+			Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					"REDIS_URL": {SecretName: "redis-creds", SecretKey: "url"},
+				},
+			},
+		}
+		if _, err := v.ValidateCreate(ctx, newNextApp(spec)); err != nil {
+			t.Fatalf("REDIS_URL is a connection-string exemption — CREATE must be accepted, got err=%v", err)
+		}
+	})
+
+	t.Run("connection-string collision (REDIS_URL) is accepted at UPDATE too, not just carried forward", func(t *testing.T) {
+		clean := appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Cache: &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+		}
+		withCollision := appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Cache: &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+			Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					"REDIS_URL": {SecretName: "redis-creds", SecretKey: "url"},
+				},
+			},
+		}
+		if _, err := v.ValidateUpdate(ctx, newNextApp(clean), newNextApp(withCollision)); err != nil {
+			t.Fatalf("REDIS_URL is a connection-string exemption — an UPDATE that ADDS it must still be accepted, got err=%v", err)
+		}
+	})
 }
