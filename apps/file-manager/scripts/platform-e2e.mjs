@@ -53,6 +53,7 @@ import {
   assertUploadStored,
   assertWoken,
   checkInvalidationEndpoint,
+  checkMalformedUrls,
   checkPublicFiles,
   checkStaticAssets,
   checkStreaming,
@@ -490,6 +491,38 @@ async function main() {
     if (res.status !== 404) throw new Error(`HTTP ${res.status}, expected 404`);
     return '404';
   });
+
+  await check(
+    'A. app',
+    'Malformed request paths are refused with a 4xx, the app keeps serving, no container restarts',
+    async () => {
+      /** Restarts of the app pods' non-sidecar containers, summed. */
+      const appRestarts = () =>
+        JSON.parse(
+          kubectl([
+            'get',
+            'pods',
+            '-n',
+            ns,
+            '-l',
+            `serving.knative.dev/service=${APP}`,
+            '-o',
+            'json',
+          ]),
+        )
+          .items.flatMap((/** @type {any} */ p) => p.status?.containerStatuses ?? [])
+          .filter((/** @type {any} */ c) => c.name !== 'queue-proxy')
+          .reduce((/** @type {number} */ n, /** @type {any} */ c) => n + (c.restartCount ?? 0), 0);
+      await get('/'); // make sure a pod is up before the baseline
+      const before = appRestarts();
+      const evidence = await checkMalformedUrls(http.request);
+      const after = appRestarts();
+      if (after !== before) {
+        throw new Error(`app container restarts went ${before} -> ${after} during the probes`);
+      }
+      return `${evidence}; restarts ${before} -> ${after}`;
+    },
+  );
 
   // ── C. deployment basics ─────────────────────────────────────────────────
   await check(

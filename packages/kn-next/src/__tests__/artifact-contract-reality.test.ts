@@ -135,7 +135,7 @@ describe("#B3 availability is an honest claim about the CORE cli", () => {
     it("vinext is available: BOTH the build path and the image now exist", () => {
         // An earlier version of this test asserted `build.ts` contains no
         // "vinext". That tripwire fired the moment `build.ts` became
-        // shape-aware — and it was the WRONG proxy. `kn-next build` can now
+        // shape-aware — and it was the WRONG proxy. `knext build` can now
         // resolve, verify and post-process a nitro artifact perfectly well; the
         // thing that still cannot work is the image.
         //
@@ -165,7 +165,7 @@ describe("#B3 availability is an honest claim about the CORE cli", () => {
         ).toBe(true);
     });
 
-    it("`kn-next build` IS shape-aware, even though vinext is not yet available", () => {
+    it("`knext build` IS shape-aware, even though vinext is not yet available", () => {
         // The two are independent, and conflating them is what the previous
         // version of the test above got wrong. Build-side support landing does
         // not make the builder available; image-side support is the remaining

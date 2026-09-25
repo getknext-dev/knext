@@ -104,7 +104,7 @@ export function renderCrFieldsMarkdown(
                   .join(", ")}`;
     return `<!-- ${GENERATED_BANNER.split("\n").join("\n     ")} -->
 
-# NextApp CR fields the \`kn-next\` CLI emits
+# NextApp CR fields the \`knext\` CLI emits
 
 This table is **derived by scanning \`cr-builder.ts\`**, not maintained by hand —
 a field added to the builder shows up here on the next generation, and CI reds
@@ -115,8 +115,8 @@ ${CR_FIELDS_ARTIFACT_VERSION}), which is the artifact other tools should consume
 
 **What "in bundled CRD" means:** the field is defined by the NextApp CRD in
 *this repository* (\`packages/kn-next-operator/config/crd/bases\`). It says
-nothing about the CRD installed on *your* cluster — that is what \`kn-next
-deploy\`'s preflight and \`kn-next doctor\`'s schema-coverage check answer, live.
+nothing about the CRD installed on *your* cluster — that is what \`knext
+deploy\`'s preflight and \`knext doctor\`'s schema-coverage check answer, live.
 Upgrade order matters: **operator/CRD first, then CLI.**
 
 \`*\` in a path is a dynamic map key or an array index.

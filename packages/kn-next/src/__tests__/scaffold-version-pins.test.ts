@@ -1,5 +1,5 @@
 /**
- * #950 — a fresh `kn-next create` app must not be dead on arrival at
+ * #950 — a fresh `knext create` app must not be dead on arrival at
  * `npm install`.
  *
  * The S3-V verification run (Finding A-1) reproduced the failure: the scaffold

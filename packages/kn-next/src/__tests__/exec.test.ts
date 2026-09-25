@@ -1,5 +1,5 @@
 /**
- * exec.ts — node:child_process argv helpers for the kn-next CLI (CLI-58).
+ * exec.ts — node:child_process argv helpers for the knext CLI (CLI-58).
  *
  * These pin the shell:false contract at the seam: each helper spawns a discrete
  * argv (no /bin/sh), empty argv is a hard error, and the "allow fail" variant
