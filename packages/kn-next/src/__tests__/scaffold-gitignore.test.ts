@@ -246,13 +246,13 @@ describe("#1398 (rev-1393 round 2): createMain's --force output does not falsely
         let out = "";
         let err = "";
         const outSpy = spyOn(process.stdout, "write").mockImplementation(
-            (chunk) => {
+            (chunk: unknown) => {
                 out += String(chunk);
                 return true;
             },
         );
         const errSpy = spyOn(process.stderr, "write").mockImplementation(
-            (chunk) => {
+            (chunk: unknown) => {
                 err += String(chunk);
                 return true;
             },
