@@ -8,17 +8,22 @@
 # of those nested copies reachable by `COPY . .` — a bloated build context, a
 # HOST build's stale `.next`/`dist` output shadowing what the in-image build
 # regenerates, and non-reproducible builds keyed on whatever happened to be on
-# the host filesystem at build time. Audited every `COPY` in
-# `apps/file-manager/Dockerfile` and `apps/docs/Dockerfile{,.oke}` (the two
-# apps whose build context resolves to this workspace root — see the
-# `**/.vinext` comment below) before widening: none of them `COPY`s a nested
-# `node_modules`/`dist`/`.next`/`.open-next`/`.turbo`/`coverage`/`*.log` from
-# the HOST context (every `COPY --from=<stage>` reads from a PREVIOUS BUILD
-# STAGE's filesystem, which `.dockerignore` never touches; every non-`--from`
-# `COPY` in those two Dockerfiles is `COPY . .` itself, at the very start,
-# before any in-image build has produced these directories) — so widening
-# every one of them to `**/` is a pure win, not a risk. Mutation-provable at
-# `tests/dockerignore-recursive-pins.test.ts`.
+# the host filesystem at build time. Audited every `COPY` in every Dockerfile
+# a GitHub Actions workflow ACTUALLY builds with `context: .` — currently
+# `apps/file-manager/Dockerfile`, `apps/docs/Dockerfile.trivyscan`, and
+# `examples/bun-exec/Dockerfile.node.trivyscan` (NOT `apps/docs/Dockerfile.oke`,
+# which is built manually for the OKE deploy, outside CI, and so is outside
+# what this audit can claim to cover) — before widening: none of them `COPY`s
+# a nested `node_modules`/`dist`/`.next`/`.open-next`/`.turbo`/`coverage`/`*.log`
+# from the HOST context (every `COPY --from=<stage>` reads from a PREVIOUS
+# BUILD STAGE's filesystem, which `.dockerignore` never touches; the two
+# `trivyscan` fixtures have no `COPY` at all — they reproduce only the base
+# OS layer — and file-manager's own non-`--from` `COPY` is `COPY . .` itself,
+# at the very start, before any in-image build has produced these
+# directories) — so widening every one of them to `**/` is a pure win, not a
+# risk. The Dockerfile list above is DERIVED by parsing the workflows, not
+# hand-maintained, so it never drifts from what CI actually builds.
+# Mutation-provable at `tests/dockerignore-recursive-pins.test.ts`.
 **/node_modules
 **/dist
 **/.next
