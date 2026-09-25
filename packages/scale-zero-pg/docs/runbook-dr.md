@@ -105,7 +105,7 @@ kubectl -n $NS get cm compute-config compute-files pageserver-config   # expect 
 #     cross-internet re-download is the bulk of the RTO (scales with bucket size).
 kubectl -n $NS apply -f deploy/50-minio.yaml
 kubectl -n $NS rollout status deploy/minio --timeout=300s
-kubectl -n $NS run mc-seed --restart=Never --image=minio/mc:RELEASE.2023-01-28T20-29-38Z \
+kubectl -n $NS run mc-seed --restart=Never --image=docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 \
   --env=BK_ENDPOINT="$BK_ENDPOINT" --env=BK_ACCESS="$BK_ACCESS" --env=BK_SECRET="$BK_SECRET" --env=BK_BUCKET="$BK_BUCKET" \
   --env=U="$(kubectl -n $NS get secret storage-s3-creds -o jsonpath='{.data.user}' | base64 -d)" \
   --env=P="$(kubectl -n $NS get secret storage-s3-creds -o jsonpath='{.data.password}' | base64 -d)" \

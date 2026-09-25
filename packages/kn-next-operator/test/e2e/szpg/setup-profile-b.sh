@@ -31,7 +31,10 @@
 # script drives it live via ../szpg_profile_b_test.go (`-tags e2e_szpg`).
 #
 # KNOWN DRILL GOTCHAS baked in (from the szpg-d8 exit-gate run, design §4.5):
-#   - docker.io/minio/mc is access-denied; we retag quay.io/minio/mc and kind load it.
+#   - docker.io/minio/mc and quay.io/minio/mc are BOTH access-denied for anonymous
+#     pull, repo-wide (#1403). Manifests are repinned to
+#     docker.io/bitnamilegacy/minio-client@<digest>, which still pulls anonymously
+#     — we pre-pull + kind load it as cheap insurance against a flaky mid-drill pull.
 #   - several deploy/_verify-*.sh default KCTX/KSPG_CONTEXT to the OKE production
 #     context. We set KUBECONFIG to a throwaway file and pass the kind context
 #     EXPLICITLY so a "local" drill can never touch a real cluster.
@@ -146,12 +149,19 @@ build_and_load_gateway() {
   docker build -t "$GW_LOCAL_IMAGE" "$SZPG_DIR/gateway"
   log "kind load $GW_LOCAL_IMAGE"
   kind load docker-image "$GW_LOCAL_IMAGE" --name "$CLUSTER_NAME"
-  # mc gotcha (design §4.5): docker.io/minio/mc is access-denied on this network.
-  # Pre-pull the quay mirror and load it so the storage-init bucket step never
-  # blocks on a docker.io pull.
-  docker pull quay.io/minio/mc:latest >/dev/null 2>&1 || warn "could not pre-pull quay.io/minio/mc (storage-init may retry)"
-  docker tag quay.io/minio/mc:latest minio/mc:latest 2>/dev/null || true
-  kind load docker-image minio/mc:latest --name "$CLUSTER_NAME" 2>/dev/null || true
+  # mc gotcha (design §4.5, UPDATED #1403): docker.io/minio/mc AND
+  # quay.io/minio/mc now UNAUTHORIZE every anonymous pull repo-wide (verified
+  # — not a transient rate limit). 55-storage-init.yaml and 62-backup.yaml
+  # were repinned to docker.io/bitnamilegacy/minio-client@<digest>, which DOES
+  # pull anonymously, so the retag-and-kind-load workaround this block used to
+  # need is gone — a bare `kind load` of a locally-pulled copy is still cheap
+  # insurance against a flaky docker.io pull mid-drill, so keep pre-pulling,
+  # just from the new source and without the old retag-to-minio/mc step (no
+  # manifest references that name anymore).
+  docker pull docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 \
+    >/dev/null 2>&1 || warn "could not pre-pull the mc mirror image (storage-init may retry)"
+  kind load docker-image docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 \
+    --name "$CLUSTER_NAME" 2>/dev/null || true
 }
 
 deploy_szpg_plane() {

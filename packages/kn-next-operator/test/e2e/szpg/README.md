@@ -93,8 +93,11 @@ serve/seed steps; the default is the deliberately-unpullable placeholder), `KEEP
 
 ## Known drill gotchas (baked in)
 
-- `docker.io/minio/mc` is **access-denied**; the harness retags `quay.io/minio/mc`
-  and `kind load`s it so the storage-init bucket step never blocks.
+- `docker.io/minio/mc` and `quay.io/minio/mc` are **both access-denied** for
+  anonymous pull, repo-wide (#1403). Manifests are repinned to
+  `docker.io/bitnamilegacy/minio-client@<digest>`, which still pulls anonymously;
+  the harness pre-pulls + `kind load`s it as cheap insurance against a flaky
+  mid-drill pull.
 - Several `deploy/_verify-*.sh` default `KCTX` / `KSPG_CONTEXT` to the **OKE
   production** context. The harness exports both to the kind context and uses a
   throwaway `KUBECONFIG`, so a "local" drill can never touch a real cluster.

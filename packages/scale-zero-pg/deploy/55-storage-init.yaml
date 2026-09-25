@@ -24,7 +24,13 @@ spec:
       # reachability instead). mc talks SigV4 + path-style, exactly like neon.
       initContainers:
         - name: ensure-bucket
-          image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned (matches backup mirror)
+          # #1403: docker.io/minio/mc (and quay.io/minio/mc) now UNAUTHORIZE
+          # every anonymous pull repo-wide — verified, not a transient flake.
+          # Bitnami's post-license-change "legacy" free mirror: unmaintained
+          # but genuine `mc`, and this Job already runs it via an explicit
+          # `command: ["/bin/sh", "-c"]` override, so Bitnami's own entrypoint
+          # wrapper never runs (verified compatible against a live pull).
+          image: docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 # pinned (matches backup mirror)
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }

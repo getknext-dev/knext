@@ -49,7 +49,7 @@ TIMELINE=f000f000f000f000f000f000f000f002
 DRILL_GEN=2
 IMG_NEON=neondatabase/neon:8464
 IMG_COMPUTE=neondatabase/compute-node-v17:8464
-IMG_MC=minio/mc:RELEASE.2023-01-28T20-29-38Z
+IMG_MC=docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511  # #1403: quay.io/minio/mc is UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror
 # Drill PVC sizes. The minio store must hold a full copy of the neon bucket
 # (pageserver layers + safekeeper WAL offload, several GB after write activity);
 # pageserver/safekeeper caches are smaller.
@@ -249,9 +249,10 @@ spec:
       securityContext: { seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
-          args: ["server","/data","--address",":9000","--console-address",":9001"]
+          # #1403: quay.io/minio/minio UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror (genuine MinIO, verified S3-API-compatible). NO args override - Bitnami's own entrypoint runs `minio server` internally.
+          image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
           env:
+            - { name: MINIO_DATA_DIR, value: /data }
             - { name: MINIO_ROOT_USER, valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } } }
             - { name: MINIO_ROOT_PASSWORD, valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } } }
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
