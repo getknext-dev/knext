@@ -357,6 +357,29 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
     }
   });
 
+  // rev-1382 finding (folded in here per the coordinator's ask): the
+  // `compat-shipped-pin-early-warning.yml` entry's `value: 'v16.3.3'` cited
+  // a literal that workflow file never actually carries — its `nextjsRef` is
+  // derived at RUN TIME from `shippedNextPin` (dispatch-poll.mjs's
+  // `shippedPinRef`), never a static workflow-YAML occurrence, so the scan
+  // this whole file exists to run had NOTHING to excuse there. An unused
+  // exception is exactly the staleness this manifest exists to prevent
+  // elsewhere — so require every entry to correspond to a REAL scanned
+  // occurrence (by file + kind; value drift is what the exception is FOR).
+  it('every lockstepExceptions entry corresponds to a REAL scanned occurrence (no unused/stale entries)', () => {
+    const manifest = loadManifest();
+    const occurrences = scanNextjsRefOccurrences(WORKFLOWS_DIR);
+    for (const ex of manifest.lockstepExceptions) {
+      const matches = occurrences.some((o) => o.file === ex.file && o.kind === ex.kind);
+      expect(
+        matches,
+        `lockstepExceptions entry ${JSON.stringify(ex)} excuses no real scanned occurrence — ` +
+          'it is stale. Either the cited file/kind no longer exists (drop the entry) or the scanner ' +
+          'needs to see it (check the kind).',
+      ).toBe(true);
+    }
+  });
+
   it('parses NEXTJS_REF from the real workflow exactly once (self-test)', () => {
     const line = `  NEXTJS_REF: \${{ github.event.inputs.nextjsRef || 'v9.9.9' }}\n`;
     expect(workflowNextjsRef(line)).toBe('v9.9.9');
