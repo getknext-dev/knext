@@ -63,9 +63,48 @@ fi
 # `-[[:space:]]*` prefix is now allowed. It also required end-of-line right
 # after the ref, so a trailing `# comment` made the whole line invisible to
 # this scan; the anchor now tolerates an optional trailing comment.
-unpinned="$(grep -nE '^[[:space:]]*(-[[:space:]]*)?image:[[:space:]]*"?[^"[:space:]]+"?[[:space:]]*(#.*)?$' "$file" | grep -v '@sha256:' || true)"
+#
+# #1410 review round 3: that fix STILL anchored the whole line to
+# `^[[:space:]]*(-[[:space:]]*)?image:...$`, so it never saw `image:` once it
+# stopped being the first thing on the line — a flow-style `{image: x:tag}`
+# (kourier.yaml's containers list can render this way too), a JSON-style
+# `"image": "x:tag"`, or a plain scalar VALUE placed on the line AFTER
+# `image:` (valid YAML) all sailed through unpinned. Replaced the single
+# whole-line regex with a small line-by-line scan: it finds `image`/`"image"`
+# preceded by line-start or a non-identifier character (so it does not
+# false-match the substring "image" inside another word, e.g. "newimage"),
+# takes whatever follows the colon up to a `"`, `}`, or `,` as the value
+# regardless of where else on the line it sits, and — when nothing follows
+# the colon on that same line at all — treats the NEXT non-blank,
+# non-comment line as the value. Any of those forms lacking `@sha256:`
+# fails closed, exactly like the anchored case already did.
+unpinned=""
+pending=0
+while IFS= read -r rawline || [[ -n "$rawline" ]]; do
+  if [[ "$rawline" =~ (^|[^A-Za-z0-9_])\"?image\"?[[:space:]]*:[[:space:]]*\"?([^\",}[:space:]][^\",}]*)? ]]; then
+    val="${BASH_REMATCH[2]}"
+    if [[ -z "$val" ]]; then
+      # `image:` with nothing after it on this line — the value, if any, is
+      # the next non-blank/non-comment line (valid YAML block-scalar form).
+      pending=1
+      continue
+    fi
+    pending=0
+    if [[ "$val" != *"@sha256:"* ]]; then
+      unpinned+="${rawline}"$'\n'
+    fi
+    continue
+  fi
+  if [[ "$pending" == 1 ]] && [[ "$rawline" =~ ^[[:space:]]*[^[:space:]#] ]]; then
+    pending=0
+    if [[ "$rawline" != *"@sha256:"* ]]; then
+      unpinned+="${rawline}"$'\n'
+    fi
+  fi
+done < "$file"
+
 if [[ -n "$unpinned" ]]; then
   echo "::error::pin-known-images: ${file} still has unpinned (non-@sha256) image reference(s) after pinning — a new/renamed image upstream added is not in image-digest-pins.json:" >&2
-  echo "$unpinned" >&2
+  printf '%s' "$unpinned" >&2
   exit 1
 fi
