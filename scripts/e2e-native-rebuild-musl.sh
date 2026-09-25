@@ -273,8 +273,17 @@ musl_install_sibling() { # <spec> <dest-name>
     # early-warning run may still take the best-effort fallback (that is
     # what it exists to surface), so this only refuses in credential mode.
     if [ "${KNEXT_COMPAT_MODE:-}" = "credential" ]; then
-      echo "[native-rebuild] ERROR: no committed, reproducible lockfile for ${_spec} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
-      return 1
+      # techdebt-4 fix (round-2 finding): a bare `return 1` here was
+      # swallowed identically to a real network failure by this function's
+      # caller (which just logs a fallback warning and moves on) — a
+      # credential run could silently skip an unpinned addon's reproducible
+      # rebuild and still exit 0. `::error::` surfaces in the GitHub Actions
+      # UI even if something downstream swallows the exit code; `exit 1`
+      # terminates the `while read` subshell this runs inside, which makes
+      # the enclosing pipeline (and, under `set -eu`, the whole script)
+      # fail loudly instead.
+      echo "::error::[native-rebuild] no committed, reproducible lockfile for ${_spec} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
+      exit 1
     fi
     if ! (cd "${_pkg_scratch}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${_spec}" >"${_pkg_scratch}.log" 2>&1); then
       echo "[native-rebuild] WARNING: fresh (non-reproducible — no committed lockfile for ${_spec}) musl install of ${_spec} failed"
@@ -432,8 +441,18 @@ echo "${HITS}" | while IFS= read -r f; do
     # above: a credential run's claim is a REPRODUCIBLE result, so it must
     # not silently take the unpinned fallback.
     if [ "${KNEXT_COMPAT_MODE:-}" = "credential" ]; then
-      echo "[native-rebuild] ERROR: no committed, reproducible lockfile for ${NAME}@${VERSION} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
-      continue
+      # techdebt-4 fix (round-2 finding): a bare `continue` here just moved
+      # to the next *.node hit in this SAME `while read` loop, so a
+      # credential run could silently skip an unpinned addon's reproducible
+      # rebuild (e.g. sqlite3, no lockfile yet — #1426) and still exit 0,
+      # with the actual failure only surfacing later as ERR_DLOPEN_FAILED in
+      # a downstream fixture, unattributed to the credential-mode
+      # violation. `::error::` surfaces in the GitHub Actions UI even if
+      # something downstream swallows the exit code; `exit 1` terminates
+      # this subshell, which makes the enclosing pipeline (and, under
+      # `set -eu`, the whole script) fail loudly instead.
+      echo "::error::[native-rebuild] no committed, reproducible lockfile for ${NAME}@${VERSION} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
+      exit 1
     fi
     # npm_config_build_from_source=true (review finding, round 4 — live CI
     # evidence, run 35862123588): WITHOUT this, `npm install` runs sqlite3's
