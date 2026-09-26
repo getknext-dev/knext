@@ -24,32 +24,113 @@ import { resolve } from 'node:path';
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const SCRIPT_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 
-/** Every line that actually INVOKES `npm ci` (not prose mentioning it in a comment or echo message). */
-function npmCiInvocationLines(source: string): { line: number; text: string }[] {
-  return source
-    .split('\n')
-    .map((text, i) => ({ line: i + 1, text }))
-    .filter(({ text }) => {
-      const trimmed = text.trim();
-      if (trimmed.startsWith('#')) return false; // comment/prose
-      const codePortion = trimmed.split('#')[0] ?? trimmed;
-      // Must actually invoke `npm ci` as a command word, not merely mention
-      // the phrase inside a quoted string (e.g. an echo message).
-      return /(?:^|[&;(]|\brun_as_builder\b.*?)\s*(?:env\s+\S+=\S+\s+)?npm\s+ci\b/.test(
-        codePortion,
-      );
-    });
+/**
+ * Replace every character INSIDE a quoted span (single or double) with a
+ * space, keeping the delimiters and the string length unchanged — so an
+ * operator or the phrase "npm ci" mentioned inside an echo message's quotes
+ * cannot be mistaken for real shell syntax, while every index in the masked
+ * string still lines up with the same index in the original.
+ */
+function maskQuotedSpans(text: string): string {
+  let out = '';
+  let quote: '"' | "'" | null = null;
+  for (const ch of text) {
+    if (quote) {
+      out += ch === quote ? ch : ' ';
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
 /**
- * Whether an `npm ci` invocation line sets `npm_config_build_from_source=true`
- * — checked against the CODE portion only (everything before an unquoted
- * trailing `#`), so a comment that merely NAMES the flag cannot make an
- * unset line read as set.
+ * Split a line's CODE portion into individual shell statements on unquoted
+ * `;`, `&&`, and `||` — ported/adapted from #1415's quote-aware statement
+ * splitter. A lone `&` or `|` is deliberately NOT a split point here: this
+ * script's real invocations end in `2>&1` (a redirect, not a background
+ * operator), and splitting on a bare `&` would sever the
+ * `npm_config_build_from_source=true` prefix from the `npm ci` it guards on
+ * every real call site. Returns [{ original, masked }] pairs so callers can
+ * regex-match on the masked (quote-blind) text while still reporting the
+ * real source text.
+ */
+function splitUnquotedStatements(codeOriginal: string): { original: string; masked: string }[] {
+  const codeMasked = maskQuotedSpans(codeOriginal);
+  const statements: { original: string; masked: string }[] = [];
+  let start = 0;
+  let i = 0;
+  while (i < codeMasked.length) {
+    const ch = codeMasked[i];
+    if (ch === ';') {
+      statements.push({
+        original: codeOriginal.slice(start, i),
+        masked: codeMasked.slice(start, i),
+      });
+      i += 1;
+      start = i;
+      continue;
+    }
+    if ((ch === '&' && codeMasked[i + 1] === '&') || (ch === '|' && codeMasked[i + 1] === '|')) {
+      statements.push({
+        original: codeOriginal.slice(start, i),
+        masked: codeMasked.slice(start, i),
+      });
+      i += 2;
+      start = i;
+      continue;
+    }
+    i += 1;
+  }
+  statements.push({ original: codeOriginal.slice(start), masked: codeMasked.slice(start) });
+  return statements;
+}
+
+/** Every STATEMENT that actually INVOKES `npm ci`/`npm clean-install`/`npm install-clean`
+ * (not prose mentioning it in a comment or inside a quoted echo message, and not a
+ * sibling statement on the same line that merely sets an env var for a DIFFERENT
+ * command — e.g. `npm_config_build_from_source=true true && run_as_builder npm ci`). */
+function npmCiInvocationLines(source: string): { line: number; text: string }[] {
+  const results: { line: number; text: string }[] = [];
+  const lines = source.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    if (trimmed.startsWith('#')) continue; // comment/prose
+
+    // Drop a trailing `#...` comment, but only an UNQUOTED one.
+    const maskedLine = maskQuotedSpans(rawLine);
+    const hashIdx = maskedLine.indexOf('#');
+    const codeOriginal = hashIdx === -1 ? rawLine : rawLine.slice(0, hashIdx);
+
+    for (const { original, masked } of splitUnquotedStatements(codeOriginal)) {
+      // Must actually invoke npm ci/clean-install as a command word, not
+      // merely mention the phrase inside a quoted string — matched against
+      // the MASKED statement so quoted content can never satisfy this.
+      if (/\bnpm\s+(ci|clean-install|install-clean)\b/.test(masked)) {
+        results.push({ line: i + 1, text: original });
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * Whether an `npm ci` invocation STATEMENT sets `npm_config_build_from_source=true`
+ * as an assignment within THAT SAME statement — checked against the masked
+ * (quote-blind) text, so a comment or quoted string that merely NAMES the flag
+ * cannot make an unset statement read as set, and a flag set on a different
+ * statement (split on `;`/`&&`/`||`) never leaks across the boundary.
  */
 function setsBuildFromSource(text: string): boolean {
-  const codePortion = text.split('#')[0] ?? text;
-  return /\bnpm_config_build_from_source=true\b/.test(codePortion);
+  const masked = maskQuotedSpans(text);
+  return /\bnpm_config_build_from_source=true\b/.test(masked);
 }
 
 describe('every npm ci invocation for a native corpus package sets npm_config_build_from_source=true (#1426)', () => {
@@ -95,5 +176,57 @@ describe('every npm ci invocation for a native corpus package sets npm_config_bu
       ({ text }) => !setsBuildFromSource(text),
     );
     expect(offenders.length).toBe(0);
+  });
+
+  /**
+   * jev 0.90 — the OLD regex only matched `npm ci` after `^`, `[&;(]`, or
+   * `run_as_builder`, so each of these five bypasses invoked `npm ci`
+   * (or an alias of it) WITHOUT the flag and stayed green: the scan never
+   * even counted them as invocations, so they never reached the offender
+   * check at all. One fixture per distinct gap, each proven as BOTH "this is
+   * counted as an invocation" and "this is correctly flagged as an offender"
+   * — a scan that silently drops these back to zero invocations would pass
+   * the old (wrong) test again.
+   */
+  describe('bypasses that the old anchored regex missed entirely (jev 0.90)', () => {
+    it('"if ! npm ci" — no [&;(]/run_as_builder prefix immediately before npm', () => {
+      const line = 'if ! npm ci';
+      expect(npmCiInvocationLines(line).length).toBe(1);
+      const offenders = npmCiInvocationLines(line).filter(({ text }) => !setsBuildFromSource(text));
+      expect(offenders.length).toBe(1);
+    });
+
+    it('"su-exec builder:builder npm ci" — a raw su-exec invocation, not the run_as_builder wrapper word', () => {
+      const line = 'su-exec builder:builder npm ci';
+      expect(npmCiInvocationLines(line).length).toBe(1);
+      const offenders = npmCiInvocationLines(line).filter(({ text }) => !setsBuildFromSource(text));
+      expect(offenders.length).toBe(1);
+    });
+
+    it('"npm clean-install" — the long-form alias of `npm ci` never matched the `ci`-only regex', () => {
+      const line = 'npm clean-install';
+      expect(npmCiInvocationLines(line).length).toBe(1);
+      const offenders = npmCiInvocationLines(line).filter(({ text }) => !setsBuildFromSource(text));
+      expect(offenders.length).toBe(1);
+    });
+
+    it('"env HOME=/x A=1 npm ci" — more than one env assignment before npm defeated the single-assignment env group', () => {
+      const line = 'env HOME=/x A=1 npm ci';
+      expect(npmCiInvocationLines(line).length).toBe(1);
+      const offenders = npmCiInvocationLines(line).filter(({ text }) => !setsBuildFromSource(text));
+      expect(offenders.length).toBe(1);
+    });
+
+    it('"npm_config_build_from_source=true true && run_as_builder npm ci" — the flag is an assignment prefix of a DIFFERENT statement\'s command', () => {
+      const line = 'npm_config_build_from_source=true true && run_as_builder npm ci';
+      const invocations = npmCiInvocationLines(line);
+      expect(invocations.length).toBe(1);
+      // The one invocation found must be the `run_as_builder npm ci` statement,
+      // not the `npm_config_build_from_source=true true` statement — proving
+      // the flag-bearing statement is not itself mistaken for an invocation.
+      expect(invocations[0].text).toMatch(/run_as_builder npm ci/);
+      const offenders = invocations.filter(({ text }) => !setsBuildFromSource(text));
+      expect(offenders.length).toBe(1);
+    });
   });
 });
