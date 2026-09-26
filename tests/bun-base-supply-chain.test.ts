@@ -39,23 +39,37 @@ describe('build.sh verifies every pinnable fetch', () => {
     expect(build).not.toMatch(re);
   });
 
+  const pins = readFileSync(resolve(dir, 'fetch-pins.sha256'), 'utf8').trim().split('\n');
   it.each([
-    ['bootstrap bun zip', 'BOOTSTRAP_BUN_ZIP_SHA256  bun-linux-x64.zip'],
-    ['rustup-init', 'RUSTUP_INIT_SHA256  /tmp/rustup-init'],
-    ['apk-tools-static', 'APK_TOOLS_STATIC_SHA256  /tmp/apk-tools-static.apk'],
-  ])('checks the %s against the in-repo sha256', (_n, line) => {
-    expect(build).toContain(`echo "$${line}" | sha256sum -c -`);
-    const v = line.split(' ')[0];
-    expect(build).toMatch(new RegExp(`^${v}=[0-9a-f]{64}$`, 'm'));
+    ['bootstrap bun zip', 'bun-linux-x64.zip'],
+    ['rustup-init', 'rustup-init'],
+    ['apk-tools-static', 'apk-tools-static.apk'],
+  ])('checks the %s against its in-repo sha256 pin', (_n, file) => {
+    expect(pins.filter((l) => l.endsWith(`  ${file}`))).toHaveLength(1);
+    expect(pins).toContainEqual(
+      expect.stringMatching(new RegExp(`^[0-9a-f]{64}  ${file.replace(/\./g, '\\.')}$`)),
+    );
+    expect(build).toMatch(
+      new RegExp(`(^|\\(cd /tmp && )pin ${file.replace(/\./g, '\\.')}\\)?$`, 'm'),
+    );
+  });
+
+  it('the pin helper demands exactly one sha256sum line and runs sha256sum -c', () => {
+    expect(build).toContain('grep -c .)" = 1 ] ||');
+    expect(build).toContain('printf \'%s\\n\' "$line" | sha256sum -c -');
   });
 
   it('pins the apt.llvm.org key fingerprint and the LLVM package version', () => {
-    expect(build).toMatch(/^LLVM_KEY_FPR=[0-9A-F]{40}\b/m);
-    expect(build).toContain('[ "$fpr" = "$LLVM_KEY_FPR" ] ||');
+    expect(build).toMatch(/^LLVM_SIGNER_FPR='(?:[0-9A-F]{4} {1,2}){9}[0-9A-F]{4}'$/m);
+    expect(build).toContain('[ "$fpr" = "${LLVM_SIGNER_FPR// /}" ] ||');
     expect(build).toContain('signed-by=/etc/apt/keyrings/apt.llvm.org.gpg');
     for (const pkg of ['clang', 'lld', 'llvm', 'libclang-rt', 'libclang-common']) {
       expect(build).toMatch(new RegExp(`${pkg}-\\$LLVM_MAJOR(-dev)?="\\$LLVM_PKG_VERSION"`));
     }
+  });
+
+  it('secret-scan hygiene: no NAME=<32+ hex> assignment in build.sh', () => {
+    expect(build).not.toMatch(/^\s*[A-Za-z_]+=['"]?[0-9A-Fa-f]{32,}/m);
   });
 
   it('verifies Alpine packages against the checked-in keys', () => {

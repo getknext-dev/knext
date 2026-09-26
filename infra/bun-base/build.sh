@@ -19,14 +19,20 @@ OUT=$WS/out
 # "Toolchain pins". What remains unpinned is listed there too.
 LLVM_MAJOR=23
 LLVM_PKG_VERSION='1:23.1.2~++20260919103626+4b1925210476-1~exp1~20260919223755.77'
-LLVM_KEY_FPR=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421 # apt.llvm.org archive signing key
+# apt.llvm.org archive signer, written as `gpg --fingerprint` prints it; compared with spaces stripped.
+# (Grouped, not one 40-hex token: see README "Secret-scan hygiene".)
+LLVM_SIGNER_FPR='6084 F3CF 814B 57C1 CF12  EFD5 15CF 4D18 AF4F 7421'
 ALPINE_RELEASE=3.23
 APK_TOOLS_STATIC_VERSION=3.0.8-r0
-APK_TOOLS_STATIC_SHA256=2edccd3267ce540f8d2371a0f394e84b40d8348ecc28425309e6d07079ed1259
 BOOTSTRAP_BUN=1.4.2
-BOOTSTRAP_BUN_ZIP_SHA256=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
 RUSTUP_VERSION=1.29.1
-RUSTUP_INIT_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+# sha256 pins for downloaded files live in fetch-pins.sha256 (sha256sum format, one per file).
+pin() { # pin <file-in-cwd> — verify it against its fetch-pins.sha256 line, exactly one line required
+  local line
+  line="$(grep -E "^[0-9a-f]{64}  $1\$" "$WS/fetch-pins.sha256")"
+  [ "$(printf '%s\n' "$line" | grep -c .)" = 1 ] || { echo "fetch-pins.sha256: need exactly one line for $1" >&2; exit 1; }
+  printf '%s\n' "$line" | sha256sum -c -
+}
 TARGETS="${BUN_BASE_TARGETS:-x64 aarch64}"
 
 T0=$(date +%s)
@@ -56,7 +62,7 @@ wget -qO /tmp/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key
 gpg --show-keys --with-colons /tmp/llvm.asc >/tmp/llvm.colons
 [ "$(grep -c '^pub:' /tmp/llvm.colons)" = 1 ] || { echo "apt.llvm.org key: expected exactly one primary key" >&2; exit 1; }
 fpr="$(awk -F: '/^fpr:/ && !n++ {print $10}' /tmp/llvm.colons)"
-[ "$fpr" = "$LLVM_KEY_FPR" ] || { echo "apt.llvm.org key fingerprint $fpr != pinned $LLVM_KEY_FPR" >&2; exit 1; }
+[ "$fpr" = "${LLVM_SIGNER_FPR// /}" ] || { echo "apt.llvm.org key fingerprint $fpr != pinned $LLVM_SIGNER_FPR" >&2; exit 1; }
 mkdir -p /etc/apt/keyrings && gpg --dearmor </tmp/llvm.asc >/etc/apt/keyrings/apt.llvm.org.gpg
 echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.gpg] http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-$LLVM_MAJOR main" \
   >/etc/apt/sources.list.d/llvm.list
@@ -73,14 +79,14 @@ done
 cd /tmp
 base="https://github.com/oven-sh/bun/releases/download/bun-v$BOOTSTRAP_BUN"
 curl -fsSLO "$base/bun-linux-x64.zip"
-echo "$BOOTSTRAP_BUN_ZIP_SHA256  bun-linux-x64.zip" | sha256sum -c -
+pin bun-linux-x64.zip
 curl -fsSLO "$base/SHASUMS256.txt"
-grep -qxF "$BOOTSTRAP_BUN_ZIP_SHA256  bun-linux-x64.zip" SHASUMS256.txt
+grep -qxF "$(grep -E '  bun-linux-x64\.zip$' "$WS/fetch-pins.sha256")" SHASUMS256.txt
 unzip -q bun-linux-x64.zip && install -m755 bun-linux-x64/bun /usr/local/bin/bun
 # rustup-init by version, checked against the pinned sha256 — never `curl sh.rustup.rs | sh`.
 curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
   "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"
-echo "$RUSTUP_INIT_SHA256  /tmp/rustup-init" | sha256sum -c -
+(cd /tmp && pin rustup-init)
 chmod +x /tmp/rustup-init
 /tmp/rustup-init -y --profile minimal --default-toolchain none --no-modify-path
 export PATH=$HOME/.cargo/bin:$PATH
@@ -94,7 +100,7 @@ repo="https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_RELEASE/main"
 mkdir -p /tmp/apk
 curl -fsSL "$repo/x86_64/apk-tools-static-$APK_TOOLS_STATIC_VERSION.apk" -o /tmp/apk-tools-static.apk \
   || { echo "apk-tools-static-$APK_TOOLS_STATIC_VERSION is gone from the CDN — bump the pin (README: Toolchain pins)" >&2; exit 1; }
-echo "$APK_TOOLS_STATIC_SHA256  /tmp/apk-tools-static.apk" | sha256sum -c -
+(cd /tmp && pin apk-tools-static.apk)
 tar -xzi -f /tmp/apk-tools-static.apk -C /tmp/apk sbin/apk.static
 test -x /tmp/apk/sbin/apk.static
 # Alpine's signing keys are checked in (keys/<arch>/, copied from the digest-pinned alpine:3.23

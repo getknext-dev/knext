@@ -120,11 +120,11 @@ origin:
 
 | Fetch | Pinned by |
 |---|---|
-| apt.llvm.org signing key | fingerprint `6084F3CF814B57C1CF12EFD515CF4D18AF4F7421`, exactly one primary key, `signed-by` scoped to the LLVM source only |
+| apt.llvm.org signing key | fingerprint `6084 F3CF 814B 57C1 CF12  EFD5 15CF 4D18 AF4F 7421` (`LLVM_SIGNER_FPR`), exactly one primary key, `signed-by` scoped to the LLVM source only |
 | LLVM `clang/lld/llvm-23` | exact package version (`LLVM_PKG_VERSION`) |
-| bootstrap Bun `1.4.2` zip | sha256 (`BOOTSTRAP_BUN_ZIP_SHA256`), cross-checked against the release's `SHASUMS256.txt` |
-| `rustup-init` | version `1.29.1` + sha256 (`RUSTUP_INIT_SHA256`); no `curl sh.rustup.rs \| sh` |
-| `apk-tools-static` | version + sha256 (`APK_TOOLS_STATIC_*`) |
+| bootstrap Bun `1.4.2` zip | sha256 in `fetch-pins.sha256`, cross-checked against the release's `SHASUMS256.txt` |
+| `rustup-init` | version `1.29.1` + sha256 in `fetch-pins.sha256`; no `curl sh.rustup.rs \| sh` |
+| `apk-tools-static` | `APK_TOOLS_STATIC_VERSION` + sha256 in `fetch-pins.sha256` |
 | Alpine sysroot packages | apk signature verification against the Alpine keys checked in under `keys/<arch>/` (from the digest-pinned `alpine:3.23` image; fingerprints in `keys/SHA256SUMS`) — no `--allow-untrusted` |
 | Bun source | full commit SHA (`UPSTREAM_SHA`) |
 
@@ -139,6 +139,22 @@ not version-pinned); the Rust toolchain that `rustup toolchain install` pulls fo
 repository contents beyond their signature (the index is signed, but the package versions are
 whatever `v3.23/main` serves that day); and `bun install --frozen-lockfile` inside the Bun source
 tree (integrity from Bun's own lockfile).
+
+## Secret-scan hygiene
+
+CI runs gitleaks over the **full git history of every branch**, fail-closed, and history is never
+rewritten. So a public constant that merely *looks* like a credential will turn every open PR's
+secret scan red, and the only fix is an allowlist entry. This happened once: a 40-hex key
+fingerprint written as `NAME=<hex>` matched `generic-api-key`. Write constants so they cannot match:
+
+- **Key fingerprints:** write them grouped, the way `gpg --fingerprint` prints them
+  (`'6084 F3CF … 7421'`), and compare after stripping spaces (`${VAR// /}`).
+- **sha256 pins:** put them in `fetch-pins.sha256` as `sha256sum` lines (`<hex>  <file>`), one per
+  file, and verify them with `pin <file>` in `build.sh`. Never write `NAME=<hex>`.
+- **Anything else 32+ hex or base64 characters long:** keep it out of `NAME=value` shapes, or run
+  `node scripts/secret-scan.mjs` before pushing.
+
+`tests/bun-base-supply-chain.test.ts` fails on any `NAME=<32+ hex>` assignment in `build.sh`.
 
 ## Provisioning — FOUNDER ACTION REQUIRED (one-time GCP IAM; not done by an agent)
 
