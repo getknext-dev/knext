@@ -238,7 +238,7 @@ describe.skipIf(!dockerAvailable())(
       const apkLine = scriptSrc
         .split('\n')
         .find((l) =>
-          l.includes('apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 su-exec~0.2'),
+          l.includes('apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 nodejs~22 su-exec~0.2'),
         );
       const adduserLine = scriptSrc.split('\n').find((l) => l.trim().startsWith('adduser -D -H'));
       const chownLine = scriptSrc
