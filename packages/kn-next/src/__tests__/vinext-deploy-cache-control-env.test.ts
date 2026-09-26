@@ -175,13 +175,35 @@ const READ_SAFE: [RegExp, RegExp][] = [
     ],
 ];
 
-const isOne = (v: unknown) => v === 1 || v === "1";
+/**
+ * YAML is parsed with the `failsafe` schema, so every scalar stays its SOURCE
+ * text: `1.0`, `0x1`, `01` are not "1" (only `1`, `"1"` and `'1'` are). `merge`
+ * applies `<<` keys the way kubectl/compose do.
+ */
+const isOne = (v: unknown) => v === "1";
+
+/** `\xHH`, `\uHHHH`, `\u{H+}` and octal escapes decoded (for the mention pre-filter). */
+function decodeEscapes(s: string): string {
+    return s.replace(
+        /\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|u\{([0-9a-fA-F]+)\}|([0-7]{1,3}))/g,
+        (m, x, u, ub, o) => {
+            const cp = x
+                ? Number.parseInt(x, 16)
+                : u
+                  ? Number.parseInt(u, 16)
+                  : ub
+                    ? Number.parseInt(ub, 16)
+                    : Number.parseInt(o, 8);
+            return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+        },
+    );
+}
 
 /** Unsafe mentions in a YAML document: walk the parsed value, not the text. */
 function yamlHits(src: string): string[] {
     let docs: ReturnType<typeof parseAllDocuments>;
     try {
-        docs = parseAllDocuments(src);
+        docs = parseAllDocuments(src, { merge: true, schema: "failsafe" });
     } catch (e) {
         return [`unparseable YAML: ${String(e).slice(0, 80)}`];
     }
@@ -217,7 +239,11 @@ function yamlHits(src: string): string[] {
     for (const d of docs) {
         for (const e of d.errors)
             hits.push(`YAML error: ${e.message.slice(0, 80)}`);
-        walk(d.toJS({ maxAliasCount: -1 }));
+        try {
+            walk(d.toJS({ maxAliasCount: -1 }));
+        } catch (e) {
+            hits.push(`unresolvable YAML: ${String(e).slice(0, 80)}`);
+        }
     }
     return hits;
 }
@@ -228,6 +254,10 @@ function yamlHits(src: string): string[] {
  */
 export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     const file = basename(path);
+    // Pre-filter on the DECODED text, so an escaped spelling of the name is
+    // still looked at. A file that never names the switch cannot override it,
+    // so a parse error there is irrelevant.
+    if (!decodeEscapes(src).includes(N)) return [];
     let lines: string[];
     if (loaderFor(file)) {
         try {
@@ -238,6 +268,8 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     } else if (/\.ya?ml$/i.test(file)) {
         return yamlHits(src);
     } else {
+        if (!src.includes(N))
+            return [`${file}  [escaped spelling of the switch name]`];
         // Only a line that is ENTIRELY a comment is skipped.
         lines = src
             .split("\n")
@@ -399,7 +431,33 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.yaml", `- name: ${NAME}\n  value: "0"\n  value: "1"`],
         ["x.yaml", `- name: ${NAME}\n  value: "1"\n  value: "0"`],
         ["x.yaml", `args: ["unset ${NAME}"]`],
-        ["x.yaml", `- {{ broken`],
+        ["x.yaml", `- {{ broken ${NAME}`],
+        // merge keys are applied (kubectl/compose do), so the effective value is 0
+        [
+            "x.yaml",
+            `base: &b\n  name: ${NAME}\n  value: "1"\nspec:\n  env:\n  - <<: *b\n    value: "0"`,
+        ],
+        [
+            "x.yaml",
+            `base: &b {name: ${NAME}, value: "1"}\nspec:\n  env:\n  - {<<: *b, value: "0"}`,
+        ],
+        // an alias that does not resolve cannot be judged: red
+        ["x.yaml", `- {<<: *nope, name: ${NAME}, value: "1"}`],
+        // only the literal scalar 1 is 1
+        ["x.yaml", `- name: ${NAME}\n  value: 1.0`],
+        ["x.yaml", `- name: ${NAME}\n  value: 0x1`],
+        ["x.yaml", `- name: ${NAME}\n  value: 01`],
+        // an escaped spelling of the name is decoded before the pre-filter
+        ["x.mjs", `process.env["VINEXT\\x5fNEXT_DEPLOY_CACHE_CONTROL"] = "0";`],
+        [
+            "x.mjs",
+            `process.env["VINEXT\\u005fNEXT_DEPLOY_CACHE_CONTROL"] = "0";`,
+        ],
+        [
+            "x.mjs",
+            `process.env["VINEXT\\u{5f}NEXT_DEPLOY_CACHE_CONTROL"] = "0";`,
+        ],
+        ["x.json", `{"VINEXT\\u005fNEXT_DEPLOY_CACHE_CONTROL": "0"}`],
         // JS: real lexer, allowlist on the output
         ["x.mjs", `process.env.${NAME} ??= "0";`],
         ["x.mjs", `process.env.${NAME} ||= "0";`],
@@ -705,7 +763,6 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
             } catch {
                 continue;
             }
-            if (!src.includes(NAME)) continue;
             for (const h of findUnsafeMentions(src, rel(f)))
                 bad.push(`${rel(f)}: ${h}`);
         }
