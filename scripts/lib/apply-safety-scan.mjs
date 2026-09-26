@@ -1021,7 +1021,8 @@ export const REMOTE_FETCH_ALLOWLIST = [
  * Statements that interpolate a value read from an IN-CLUSTER endpoint (the
  * pageserver's own `last_record_lsn`, a `compute_ctl` control blob this drill
  * crafted a few lines earlier) into a manifest that is applied to the same
- * throwaway drill cluster. A fetched value can carry newlines and `---`, so
+ * throwaway drill cluster. The statement text is pinned AND so is every source
+ * that can feed the variables it interpolates (`sources`). A fetched value can carry newlines and `---`, so
  * this can NEVER be a generic rule ("loopback scalar", "field position",
  * "data not document"): each site is named here, byte-exact, per file.
  *
@@ -1040,6 +1041,12 @@ export const STATEMENT_ALLOWLIST = [
     id: 'lsn-inject-objstore',
     anchor: 'awk -v lsn="$STATIC_LSN"',
     file: 'packages/scale-zero-pg/deploy/_verify-objstore.sh',
+    // Every source that can reach a variable this statement interpolates, byte-exact
+    // (the scanner follows each variable's assignment and each helper it calls). Any
+    // other fetch / URL / network-written file feeding it reds the scan.
+    sources: [
+      'fetch:$KD exec sts/pageserver -- curl -s "http://localhost:9898/v1/tenant/$TENANT/timeline/$TIMELINE" 2>/dev/null',
+    ],
     statement:
       'sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g"     -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/"     "$COMPUTE_FILES_SRC"   | awk -v lsn="$STATIC_LSN" \'{print} /"format_version": 1.0,/{print "            \\"mode\\": {\\"Static\\": \\"" lsn "\\"},"}\'   | $KD apply -f - >/dev/null',
   },
@@ -1047,6 +1054,12 @@ export const STATEMENT_ALLOWLIST = [
     id: 'lsn-inject-restore',
     anchor: 'awk -v lsn="$STATIC_LSN"',
     file: 'packages/scale-zero-pg/deploy/_verify-restore.sh',
+    // Every source that can reach a variable this statement interpolates, byte-exact
+    // (the scanner follows each variable's assignment and each helper it calls). Any
+    // other fetch / URL / network-written file feeding it reds the scan.
+    sources: [
+      'fetch:$KD exec sts/pageserver -- curl -s "http://localhost:9898/v1/tenant/$TENANT/timeline/$TIMELINE" 2>/dev/null',
+    ],
     statement:
       'sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g"     -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/"     "$COMPUTE_FILES_SRC"   | awk -v lsn="$STATIC_LSN" \'{print} /"format_version": 1.0,/{print "            \\"mode\\": {\\"Static\\": \\"" lsn "\\"},"}\'   | $KD apply -f - >/dev/null',
   },
@@ -1054,6 +1067,12 @@ export const STATEMENT_ALLOWLIST = [
     id: 'lsn-inject-app-restore',
     anchor: 'awk -v lsn="$MODE_LSN"',
     file: 'packages/scale-zero-pg/deploy/_verify-app-restore.sh',
+    // Every source that can reach a variable this statement interpolates, byte-exact
+    // (the scanner follows each variable's assignment and each helper it calls). Any
+    // other fetch / URL / network-written file feeding it reds the scan.
+    sources: [
+      'fetch:$KUBECTL -n "$_ns" $RT exec sts/pageserver -- curl -s "http://localhost:9898/v1/tenant/$_tn/timeline/$_tl" 2>/dev/null',
+    ],
     statement:
       'sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g"       -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/"       -e "s/f000f000f000f000f000f000f000f001/$APPS_TENANT/g"       -e "s/f000f000f000f000f000f000f000f002/$VICTIM_TL/g"       "$COMPUTE_FILES_SRC"   | if [ -n "$_inject" ]; then awk -v lsn="$MODE_LSN" \'{print} /"format_version": 1.0,/{print "            \\"mode\\": {\\"Static\\": \\"" lsn "\\"},"}\'; else cat; fi   | $KD apply -f - >/dev/null',
   },
@@ -1064,6 +1083,13 @@ export const STATEMENT_ALLOWLIST = [
     // `value: "$_ctl"` inside the sk-seed Pod heredoc: the base64 control blob
     // this same script crafts with `python3 "$SKCTL" craft` two lines earlier.
     // The heredoc body is committed by hash, so editing it re-reviews the entry.
+    // Every source that can reach a variable this statement interpolates, byte-exact
+    // (the scanner follows each variable's assignment and each helper it calls). Any
+    // other fetch / URL / network-written file feeding it reds the scan.
+    sources: [
+      'fetch:$KD exec sts/pageserver -- curl -s "http://localhost:9898/v1/tenant/$TENANT/timeline/$TIMELINE" 2>/dev/null',
+      'url:http://minio:9000',
+    ],
     statement:
       'cat <<[sha256:cd45b43f7d259d912957deba67fadacf777dcb4b899162e959eb699ef70b15a4] | $KD apply -f - >/dev/null',
   },
@@ -1078,10 +1104,98 @@ function statementText(clause, st) {
   );
 }
 
+// Variables and helpers are visited at most once each, so this only bounds a
+// helper whose arguments grow on every recursive call.
+const TAINT_TRACE_DEPTH = 60;
+
+/**
+ * Every place a byte can enter `text` from outside the script: a fetch command,
+ * a URL argument or URL variable, a read of a network-written file — followed
+ * through each variable the text interpolates (its assigned value, recursively)
+ * and each helper function it calls (its body, with this call's arguments).
+ * Returns a Set of `kind:exact-text` strings. Unlike `textIsNetwork` it does
+ * not stop at the first hit, because an allowlisted statement must be judged
+ * on WHERE ITS VARIABLES GET THEIR VALUES, not only on its own text. Anything
+ * it cannot follow is reported as `opaque:` (fail closed).
+ */
+function taintSources(text, st, depth, ctx) {
+  const { out, vars, fns } = ctx;
+  if (depth > TAINT_TRACE_DEPTH) {
+    out.add('opaque:nesting too deep');
+    return;
+  }
+  if (/\$\{!/.test(text)) out.add(`opaque:indirect expansion in \`${text.slice(0, 80)}\``);
+  const followVar = (r) => {
+    if (vars.has(r)) return;
+    vars.add(r);
+    const v = st.vars.get(r);
+    if (v) taintSources(v.value, st, depth + 1, ctx);
+    else if (v === undefined) return; // unset here: an env value, not a scanned source
+  };
+  for (const r of varRefs(text)) followVar(r);
+  const { code } = lex(text);
+  for (const cl of splitClauses(code)) {
+    for (const seg of splitPipeline(cl.text)) {
+      const ws = words(seg);
+      if (isFetchSegment(ws, st)) out.add(`fetch:${seg.trim()}`);
+      for (let k = 0; k < ws.length; k++) {
+        const w = ws[k];
+        const u = unquote(w);
+        if (st.functions.has(u)) {
+          const raw = st.functions.get(u);
+          const args = ws
+            .slice(k + 1)
+            .filter((a) => !/^(\d*|&)?[<>]/.test(a))
+            .map(unquote);
+          const body = /(^|[\s;])shift\b/.test(raw) ? raw : substituteArgs(raw, args);
+          const key = `${u}\0${args.join('\0')}`;
+          if (!fns.has(key)) {
+            fns.add(key);
+            taintSources(body, st, depth + 1, ctx);
+          }
+        }
+        for (const inner of innerSubstitutions(w)) taintSources(inner, st, depth + 1, ctx);
+        const c = canonical(w, st.vars);
+        if (/^https?:\/\//.test(c) && !isLoopbackUrl(c)) out.add(`url:${c}`);
+        if (isTaintedPath(c, st)) out.add(`path:${c}`);
+        const wholeVar = u.match(/^\$\{?([A-Za-z_]\w*)\}?$/);
+        if (wholeVar && st.vars.get(wholeVar[1])?.url) out.add(`urlvar:${u}`);
+      }
+    }
+  }
+}
+
+/** The clause with each heredoc placeholder replaced by its literal body (for source tracing). */
+function clauseWithBodies(clause, st) {
+  return clause.replace(/<<__HD(\d+)__/g, (m, n) =>
+    st.heredocs[Number(n)] ? `<<\n${st.heredocs[Number(n)].body}\n` : m,
+  );
+}
+
 function reportStdinApply(st, why, clause) {
   const stmt = statementText(clause, st);
   const entry = STATEMENT_ALLOWLIST.find((e) => e.file === st.file && e.statement === stmt);
   if (entry) {
+    // The statement text is pinned, but a variable it interpolates takes its
+    // value elsewhere: judge every source that can reach it against the sources
+    // this entry names. A new or different one reds the scan.
+    const found = new Set();
+    taintSources(clauseWithBodies(clause, st), st, 0, {
+      out: found,
+      vars: new Set(),
+      fns: new Set(),
+    });
+    const allowed = new Set(entry.sources);
+    const extra = [...found].filter((x) => !allowed.has(x));
+    if (extra.length > 0) {
+      offend(
+        st,
+        `${why}; allowlisted statement '${entry.id}' interpolates a value from an unpinned source: ${extra.join(' ; ')}`,
+        clause,
+      );
+      return;
+    }
+    for (const x of found) countAllowHit(st, `${entry.id}::${x}`);
     countAllowHit(st, entry.id);
     return;
   }
@@ -1349,6 +1463,13 @@ function producerIsNetwork(text, st, depth) {
         urlLiteralCounts: false,
       });
       if (hwhy) return `heredoc expands ${hwhy}`;
+      // `${!N}` names its variable at RUN time, so no static reference reveals a
+      // fetched value it dereferences: refuse it whenever any variable holds one.
+      if (/\$\{![A-Za-z_]/.test(hd.body)) {
+        const tainted = [...st.vars].find(([, v]) => v.content);
+        if (tainted)
+          return `heredoc uses indirect expansion \${!…} while $${tainted[0]} holds network content`;
+      }
     }
   }
   return false;

