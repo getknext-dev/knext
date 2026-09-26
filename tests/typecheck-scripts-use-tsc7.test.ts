@@ -309,7 +309,7 @@ function segments(script: string, inherited: boolean): Segment[] {
       if (prog === 'set') {
         const effect = errexitEffect(c.tokens.slice(c.tokens.indexOf('set') + 1));
         if (effect === false) errexit = false;
-        else if (effect === true && k === 0 && !pipedOut && term !== '&' && !exited) errexit = true;
+        else if (effect === true && k === 0 && !pipedOut && term !== '&') errexit = true;
       }
       out.push({ text: c.text, tokens: c.tokens, subs: c.subs, masked });
       if (prog !== undefined && EXITS.has(prog)) exited = true;
@@ -897,6 +897,7 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['`true && set +e`', `set -e; true && set +e; ${TSC7}; echo done`],
     ['conditional `true && set -e`', `true && set -e; ${TSC7}; echo done`],
     ['`set -e` in a pipeline (subshell)', `set -e | cat; ${TSC7}; echo done`],
+    ['`set -e` backgrounded (subshell)', `set -e & ${TSC7}; echo done`],
     ['non-final && operand under set -e', `set -e; ${TSC7} && echo ok; echo done`],
   ])('a tsc7 invocation that is not an enforced typecheck does not count: %s', (_l, typecheck) => {
     expect(run(lib({ typecheck, tc: TSC7 })).tsc7).toBe(0);
@@ -921,6 +922,10 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['under `set -e`, followed by ;', `set -e; ${TSC7}; echo done`],
     ['under `set -o errexit`', `set -o errexit; ${TSC7}; echo done`],
     ['under `set -euo pipefail`', `set -euo pipefail && ${TSC7}; echo done`],
+    // the `&` of a redirection is not a background separator
+    ['with 2>&1', `${TSC7} 2>&1`],
+    ['with >&2', `${TSC7} >&2`],
+    ['with &>', `${TSC7} &>/dev/null`],
   ])('an enforced tsc7 typecheck counts: %s', (_l, typecheck) => {
     expect(run(lib({ typecheck, tc: TSC7 })).tsc7).toBe(1);
   });
@@ -934,7 +939,8 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['$(…)', `echo $(tsc -p .) && ${TSC7}`],
     ['$(…) in double quotes', `echo "v=$(tsc --version)" && ${TSC7}`],
     ['backticks', `echo \`tsc -p .\` && ${TSC7}`],
-    ['nested $(…)', `echo $(echo $(node node_modules/typescript/lib/_tsc.js)) && ${TSC7}`],
+    ['nested $(…)', `echo $(echo $(tsc -p .)) && ${TSC7}`],
+    ['plain typescript lib', `echo $(node node_modules/typescript/lib/_tsc.js) && ${TSC7}`],
   ])('plain tsc inside a command substitution is caught: %s', (_l, typecheck) => {
     expect(run(lib({ typecheck })).plainTsc).toHaveLength(1);
   });
