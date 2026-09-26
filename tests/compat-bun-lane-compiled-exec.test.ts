@@ -40,48 +40,67 @@ const NATIVE_REBUILD_SH_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-mu
 const src = readFileSync(DEPLOY_SH_PATH, 'utf8');
 
 /**
- * Strip a trailing shell comment from one line, quote-aware: a `#` only
- * starts a comment when it is outside single/double quotes and at the start
- * of a word (preceded by whitespace or line start). A whole-line comment
- * yields ''.
+ * The shell WORDS of the single `docker run --rm` command in `text`, modelled
+ * on bash rather than on regexes over lines:
+ *   - a backslash IMMEDIATELY before the newline joins the next line; any
+ *     other trailing character (`\ ` with a space) does not — the command
+ *     ends there;
+ *   - a `#` at the start of a word (outside quotes) begins a comment that runs
+ *     to the end of the LINE and ends the command — a comment line inside a
+ *     continuation block truncates it, it is not skipped;
+ *   - `'..'` and `".."` (with `\`-escapes) keep their contents inside ONE word,
+ *     so a flag quoted inside another flag's value is never a flag.
+ * Returns [] when there is no `docker run --rm` line. THROWS on more than one
+ * (fail closed: a guard that reads only the first of two blocks certifies
+ * whichever one it did not read).
  */
-function stripShellComment(line: string): string {
-  let quote: '"' | "'" | null = null;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === '\\' && quote === '"') i++;
-      else if (c === quote) quote = null;
-    } else if (c === '"' || c === "'") quote = c;
-    else if (c === '\\') i++;
-    else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
+function dockerRunWords(text: string): string[] {
+  const lines = text.split('\n');
+  const starts = lines.flatMap((l, i) => (/^\s*docker run --rm\b/.test(l) ? [i] : []));
+  if (starts.length === 0) return [];
+  if (starts.length > 1) {
+    throw new Error(`expected exactly one docker run --rm block, found ${starts.length}`);
   }
-  return line;
+  const src = lines.slice(starts[0]).join('\n');
+  const words: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  const push = () => {
+    if (cur !== '') words.push(cur);
+    cur = '';
+  };
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      cur += c;
+      if (c === '\\' && quote === '"' && i + 1 < src.length) cur += src[++i];
+      else if (c === quote) quote = null;
+    } else if (c === '\\') {
+      if (src[i + 1] === '\n') {
+        i++; // line continuation: joins, and separates words
+        push();
+      } else {
+        cur += c + (src[i + 1] ?? '');
+        i++;
+      }
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      cur += c;
+    } else if (c === '#' && cur === '') {
+      const nl = src.indexOf('\n', i);
+      i = nl === -1 ? src.length : nl - 1; // comment to EOL; the newline then ends the command
+    } else if (c === '\n') {
+      break;
+    } else if (/[ \t]/.test(c)) push();
+    else cur += c;
+  }
+  push();
+  return words;
 }
 
-/**
- * The COMMENT-FREE text of the `docker run --rm \` continuation block (the
- * command line through the first non-continued line). Flag assertions must
- * run against this, never the whole slice: a comment that merely quotes a
- * flag would otherwise satisfy a set-membership count while the real flag is
- * gone. Returns '' when there is no such block.
- */
-function dockerRunBlock(text: string): string {
-  const lines = text.split('\n');
-  const start = lines.findIndex((l) => /^\s*docker run --rm \\\s*$/.test(l));
-  if (start < 0) return '';
-  const out: string[] = [];
-  for (let i = start; i < lines.length; i++) {
-    const code = stripShellComment(lines[i]);
-    if (code.trim() === '') {
-      if (lines[i].trim() === '') break;
-      continue; // whole-line comment inside the continuation
-    }
-    out.push(code);
-    if (!/\\\s*$/.test(code)) break;
-  }
-  return out.join('\n');
-}
+/** How many times `flag` is immediately followed by a value word satisfying `ok`. */
+const countFlagPairs = (words: string[], flag: string, ok: (v: string) => boolean): number =>
+  words.filter((w, i) => w === flag && i + 1 < words.length && ok(words[i + 1])).length;
 
 describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec (#1166/#1225)', () => {
   it('compiles the standalone server via the shipped standalone-compile script', () => {
@@ -202,44 +221,75 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     // so this asserts the required flags as a SET, each exactly once, rather
     // than pinning a specific adjacency.
     expect(compileBlock.includes('docker run --rm'), 'must invoke docker run --rm').toBe(true);
-    const runBlock = dockerRunBlock(compileBlock);
-    expect(runBlock, 'the docker run --rm continuation block must be found').not.toBe('');
-    const standaloneRootMounts = (
-      runBlock.match(/-v "\$\{STANDALONE_ROOT\}:\$\{STANDALONE_ROOT\}"/g) ?? []
-    ).length;
+    const runWords = dockerRunWords(compileBlock);
+    expect(runWords.length, 'the docker run --rm command must be found').toBeGreaterThan(0);
+    const standaloneRootMounts = countFlagPairs(
+      runWords,
+      '-v',
+      (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
+    );
     expect(
       standaloneRootMounts,
       'must mount STANDALONE_ROOT into the rebuild container exactly once',
     ).toBe(1);
-    const rebuildScriptMounts = (
-      runBlock.match(/-v "\$\{SCRIPT_DIR\}\/e2e-native-rebuild-musl\.sh/g) ?? []
-    ).length;
+    const rebuildScriptMounts = countFlagPairs(runWords, '-v', (v) =>
+      v.startsWith('"${SCRIPT_DIR}/e2e-native-rebuild-musl.sh'),
+    );
     expect(
       rebuildScriptMounts,
       'must mount e2e-native-rebuild-musl.sh into the rebuild container exactly once',
     ).toBe(1);
-    expect(
-      /"\$\{STANDALONE_BUN_IMAGE\}"\s*\\\s*\n\s*sh \/e2e-native-rebuild-musl\.sh "\$\{STANDALONE_ROOT\}"/.test(
-        runBlock,
-      ),
-    ).toBe(true);
+    const imageIdx = runWords.indexOf('"${STANDALONE_BUN_IMAGE}"');
+    expect(imageIdx).toBeGreaterThan(-1);
+    expect(runWords.slice(imageIdx + 1, imageIdx + 4)).toEqual([
+      'sh',
+      '/e2e-native-rebuild-musl.sh',
+      '"${STANDALONE_ROOT}"',
+    ]);
   });
 
-  it('docker-flag set check ignores comments: a comment quoting the mount does not stand in for the real flag', () => {
-    const real = dockerRunBlock(src);
-    expect(real).toContain('-v "${STANDALONE_ROOT}:${STANDALONE_ROOT}"');
-    const bypass = [
-      '  # rebuild runs in-place: -v "${STANDALONE_ROOT}:${STANDALONE_ROOT}" (see below)',
-      '  docker run --rm \\',
-      '    -e "X=1" \\',
-      '    # -v "${STANDALONE_ROOT}:${STANDALONE_ROOT}" \\',
-      '    "${STANDALONE_BUN_IMAGE}" \\',
-      '    sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" >&2',
-    ].join('\n');
-    const block = dockerRunBlock(bypass);
-    expect(block).toContain('docker run --rm');
-    expect(block).not.toContain('-v "${STANDALONE_ROOT}');
-    expect(block).toContain('sh /e2e-native-rebuild-musl.sh');
+  describe('dockerRunWords models bash, so none of these bypasses keep the mount "present"', () => {
+    const MOUNT = '-v "${STANDALONE_ROOT}:${STANDALONE_ROOT}"';
+    const mounts = (t: string) =>
+      countFlagPairs(
+        dockerRunWords(t),
+        '-v',
+        (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
+      );
+
+    it('sanity: the real block yields the mount exactly once', () => {
+      expect(mounts(src)).toBe(1);
+    });
+
+    // `C` is a backslash immediately followed by a newline (a continuation).
+    const C = '\\\n';
+    const IMG = 'img sh /x.sh';
+
+    it('a comment ABOVE the block quoting the mount is ignored', () => {
+      const t = `# in place: ${MOUNT}\ndocker run --rm ${C}  -e X=1 ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+    });
+
+    it('a comment line INSIDE the continuation ends the command (bash runs docker with no mounts/image)', () => {
+      const t = `docker run --rm ${C}  # note ${C}  ${MOUNT} ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+      expect(dockerRunWords(t)).toEqual(['docker', 'run', '--rm']);
+    });
+
+    it('the mount text inside a QUOTED value of another flag is not a mount', () => {
+      const t = `docker run --rm ${C}  -e 'N=${MOUNT}' ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+    });
+
+    it('a backslash followed by a trailing space does NOT continue the command', () => {
+      const t = `docker run --rm \\ \n  ${MOUNT} ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+    });
+
+    it('TWO docker run blocks fail closed', () => {
+      const t = `docker run --rm ${C}  ${MOUNT} ${C}  ${IMG}\ndocker run --rm alpine true`;
+      expect(() => dockerRunWords(t)).toThrow(/exactly one/);
+    });
   });
 
   it('e2e-native-rebuild-musl.sh is a fast no-op when the standalone tree has no native addons', () => {
