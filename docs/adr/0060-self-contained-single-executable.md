@@ -50,7 +50,7 @@ bundler bug), all upstream work in flight:
 | `--include` with path fidelity | oven-sh/bun#44059 (ours) | ready for review; 19/19 build tests pass on the patched build, 0/19 on system Bun |
 | exe-dir resolution of what stays on disk | oven-sh/bun#44053 | a maintainer bot is implementing; no PR yet |
 | multi-file native addons (sharp) | oven-sh/bun#44063 | a maintainer bot is reproducing |
-| `__dirname`/`__filename` in an included CommonJS module | oven-sh/bun#44068 (issue); fix PR oven-sh/bun#29066 | fix verified on a Cloud Build from source; not merged. On stock Bun 1.4.2 the bundler inlines both as the **build** directory, so `require(join(__dirname, x))` misses `$bunfs` (measured in PR #1468). knext carries a named, registered shim for it (Decision 3) that is deleted on the Bun release containing #29066 |
+| `__dirname`/`__filename` in an included CommonJS module | oven-sh/bun#44068 (issue); fix PR oven-sh/bun#29066 | fix verified on a Cloud Build from source; not merged. On stock Bun 1.4.2 the bundler inlines both as the **build** directory, so `require(join(__dirname, x))` misses `$bunfs` (measured in PR #1468). knext carries it as the registered shim `bun-cjs-dirname-inlined` (Decision 3; the F1 registry entry in PR #1468), deleted on the Bun release containing #29066 |
 
 Two facts discovered while planning constrain the carrier:
 
@@ -140,7 +140,7 @@ The facts in the table are measurements unless marked *(extrapolation)* or *(unm
 
 | Option | Cold start | Image / binary size | Upstream risk | Security surface | Verdict |
 |---|---|---|---|---|---|
-| **(a) Self-contained as the default now** | OKE win unproven: last two cluster A/Bs are a tie (3401 vs 3610 ms) and a 335 ms loss (not significant); local boot is at parity (88 vs 85 ms), not a win | vinext: 92.5 MiB binary; +19.1 MB for embedded sharp; embedded app JS 77.8 MB vs 65.3 MB disk-mode binary. Next standalone tree *(unmeasured until N1)*; ~170 MB if all 44 MB of `node_modules` were embedded *(extrapolation)* | high: depends on 3 unmerged Bun primitives; every user build hits the shims on day one | smaller image, no `node_modules` layer; new writable-tmp need for sharp | rejected — ships an unmeasured claim to every user and breaks the "prove parity first" rule |
+| **(a) Self-contained as the default now** | OKE win unproven: last two cluster A/Bs are a tie (3401 vs 3610 ms) and a 335 ms loss (not significant); local boot is at parity (88 vs 85 ms), not a win | vinext: 92.5 MiB binary; +19.1 MB for embedded sharp; embedding app + `node_modules` JS (all but sharp) 77,830,770 B vs 65,281,650 B disk-mode ≈ +12.5 MB (spike, L3 vs disk-mode). Next standalone tree *(unmeasured until N1)* | high: depends on 4 unmerged upstream fixes; every user build hits the shims on day one | smaller image, no `node_modules` layer; new writable-tmp need for sharp | rejected — ships an unmeasured claim to every user and breaks the "prove parity first" rule |
 | **(b) Opt-in behind a flag, lanes + OKE gate (chosen)** | measured per track by the A/B in Decision 7 before any claim | same growth, paid only by opt-in users; pull time reported separately | contained: shims are registered, probed and deleted on the fixing bump | same as (a), limited to opt-in; base-exe stays in CI | **chosen** — the only option that turns the hypothesis into a measurement without exposing defaults |
 | **(c) Never (disk mode only)** | today's numbers: route chunks and renderers load as source, no bytecode | unchanged (image carries `.next/standalone` + `node_modules`) | none | unchanged (a `node_modules` tree in every Bun image) | rejected — forfeits the largest untapped bytecode surface and the upstream work that is the credibility lever |
 | **(d) Ship a patched Bun base executable to users** | would remove the shims' overhead *(unmeasured)* | same as (a)/(b) | lowest shim debt, but knext becomes a Bun distributor tracking an unmerged fork | **largest**: a knext-built runtime binary in every user image, needing its own SBOM, signing, CVE response and release cadence | rejected — founder decision A: the base executable is verification-only |
@@ -174,14 +174,17 @@ win nobody has measured yet.
   modules embedded as extra entrypoints are compiled to bytecode on **stock Bun 1.4.2**. What is
   still open is coverage of *Next's* route chunks specifically, which #1456 extends the verifier to.
 - **`__dirname`/`__filename` inlining in included CJS** (bun#44068). Measured in PR #1468; carried
-  as a registered shim (Decision 3) whose probe goes red, and the shim is deleted, on the Bun
+  as the registered shim `bun-cjs-dirname-inlined` (Decision 3) whose probe goes red, and the shim is deleted, on the Bun
   release containing bun#29066.
 - **The OKE result may stay a tie.** Two of two cluster measurements so far are a tie or a
   not-significant loss. If N3/V2 repeat that, the feature stays flag-only and "done" fails, as
   Decision 7 says.
-- **Binary growth.** Measured for vinext: 92.5 MiB total, +19.1 MB for embedded sharp. The Next
-  standalone tree's growth is **unquantified until N1**; the only figure is an extrapolation (~170 MB
-  if all 44 MB of `node_modules` were embedded). Pull time is reported separately in the A/B; a
+- **Binary growth.** Measured for vinext (spike, L3 vs disk-mode): embedding the app +
+  `node_modules` JS (all but sharp) adds ≈+12.5 MB (77,830,770 B vs 65,281,650 B); sharp adds
+  +19.1 MB; 92.5 MiB total. An earlier ~170 MB figure (≈3.9× applied to the vinext file-manager's
+  44 MB `node_modules`, `.claude/research/compile-closure-measurement-2026-09-27.md:203-205`) is a
+  **superseded vinext-only extrapolation** — the spike measured that case directly. The **Next
+  standalone tree is unmeasured until N1**; no figure for it is claimed here. Pull time is reported separately in the A/B; a
   large first-exec cost is tested by an eager-extract arm (C) against the lazy one (B).
 - **Read-only root filesystems vs sharp extraction.** Embedded sharp must be extracted to `$TMPDIR`
   at run time (lazily, on the first image request, so boot does not pay the ≈375 ms fresh-extract
