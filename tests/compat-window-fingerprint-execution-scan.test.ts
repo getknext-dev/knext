@@ -46,42 +46,18 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const SCRIPT = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
 
 /**
- * Every credential lane `NAMED_EXCEPTIONS` below currently applies to.
- * `HARNESS_ROOTS` in `scripts/compat-window-fingerprint.mjs` is
- * lane-INDEPENDENT — every credentialed lane's harness includes
- * `scripts/e2e-deploy.sh` and its closure regardless of which workflow that
- * lane actually runs (`bun-vinext`'s `compat-vinext.yml` included), so the
- * dead contract-test-mode fallback below is genuinely reachable, by text,
- * from every one of them today.
- *
- * The point of naming them explicitly, rather than applying the exception
- * unconditionally to "whatever lane happens to be running" (the pre-#1422
- * shape), is what a FUTURE lane gets: a new credential lane is EXCLUDED by
- * default until someone adds it here on purpose, rather than silently
- * inheriting an exception reasoned about for a workflow it may never touch.
- * `permanentPathsForLane` fails closed on an unlisted lane, and the test
- * below asserts this list tracks `credentialLanes()` — so adding a lane
- * without updating this one is a hard failure, not a silent gap.
- */
-const E2E_DEPLOY_LANES = ['node', 'bun', 'node-webpack', 'bun-webpack', 'bun-vinext'] as const;
-
-/**
  * PERMANENT exceptions (#1294 round 3) — structurally dead code, verified by
  * a standing check below (not a clock): re-verified every run, so staying on
  * this list forever is correct as long as the verification keeps passing.
  *
- * #1422 (delta review of #1406, round 3) — `lanes` SCOPES each exception:
- * before this, `permanentPaths` was built from the WHOLE array for every
- * lane in the loop below, including `bun-vinext` (`compat-vinext.yml`),
- * which never runs `e2e-deploy.sh` and has no reason to reference any of
- * these four files. Had `compat-vinext.yml` ever referenced one of them —
- * by accident, or by a future edit that has nothing to do with
- * `e2e-deploy.sh`'s contract-test-mode fallback — the exemption would have
- * applied silently, with no review forcing a decision about whether it
- * actually belonged there. `permanentPathsForLane` below is what enforces
- * the scope.
+ * #1422 — each exception is scoped to EXACTLY the source file(s) that
+ * reference the path (`sources`), never to a lane or the whole repo. The
+ * exemption key is the pair (source file, referenced path): a second file
+ * (another workflow, another harness script) referencing the same path gets
+ * no exemption and must be frozen or named on its own. `isNamedException`
+ * below is the only place the pair is consulted.
  */
-const NAMED_EXCEPTIONS: { path: string; reason: string; lanes: readonly string[] }[] = [
+const NAMED_EXCEPTIONS: { path: string; reason: string; sources: readonly string[] }[] = [
   // scripts/e2e-deploy.sh's contract-test-mode (KNEXT_E2E_SKIP_PACK=1)
   // fallback resolves these FOUR preloads from in-repo SOURCE rather than the
   // installed tarball. VERIFIED DEAD on every CI run: KNEXT_E2E_SKIP_PACK is
@@ -96,25 +72,25 @@ const NAMED_EXCEPTIONS: { path: string; reason: string; lanes: readonly string[]
     path: 'packages/kn-next/src/adapters/cache-control-normalize.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
-    lanes: E2E_DEPLOY_LANES,
+    sources: ['scripts/e2e-deploy.sh'],
   },
   {
     path: 'packages/kn-next/src/adapters/bun-keepalive-guard.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
-    lanes: E2E_DEPLOY_LANES,
+    sources: ['scripts/e2e-deploy.sh'],
   },
   {
     path: 'packages/kn-next/src/adapters/sandbox-fetch-debug.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
-    lanes: E2E_DEPLOY_LANES,
+    sources: ['scripts/e2e-deploy.sh'],
   },
   {
     path: 'packages/kn-next/src/adapters/sandbox-fetch-realm-debug.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
-    lanes: E2E_DEPLOY_LANES,
+    sources: ['scripts/e2e-deploy.sh'],
   },
   // #1347/#1406 — compat-vinext.yml's `vinext-red-alert` job shells out to
   // scripts/nightly-alert-issue.mjs. VERIFIED structurally outside the
@@ -132,12 +108,16 @@ const NAMED_EXCEPTIONS: { path: string; reason: string; lanes: readonly string[]
     path: 'scripts/nightly-alert-issue.mjs',
     reason:
       "invoked only by compat-vinext.yml's vinext-red-alert job (and the 8 sibling nightly-red-alert jobs, none of which are CREDENTIAL_CELLS lanes), which needs the other jobs only for status gating and runs strictly after the credential build/test work — never part of the fingerprint-relevant harness.",
+    sources: ['.github/workflows/compat-vinext.yml'],
   },
 ];
 
-/** Every `NAMED_EXCEPTIONS` path scoped to `lane` — never the whole array. */
-function permanentPathsForLane(lane: string): Set<string> {
-  return new Set(NAMED_EXCEPTIONS.filter((e) => e.lanes.includes(lane)).map((e) => e.path));
+/**
+ * True only when `source` (repo-relative file containing the reference) is
+ * explicitly listed for `ref` — exact string match on both, no wildcards.
+ */
+function isNamedException(source: string, ref: string): boolean {
+  return NAMED_EXCEPTIONS.some((e) => e.path === ref && e.sources.includes(source));
 }
 
 /**
@@ -364,47 +344,43 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
     }
   });
 
-  // #1422 — NAMED_EXCEPTIONS is scoped per lane, not global. Direct unit
-  // coverage of `permanentPathsForLane`, independent of whichever real
-  // paths NAMED_EXCEPTIONS happens to hold today.
-  it('permanentPathsForLane: an exception applies only to the lanes it declares', () => {
-    for (const lane of E2E_DEPLOY_LANES) {
-      expect(
-        permanentPathsForLane(lane).has(
-          'packages/kn-next/src/adapters/cache-control-normalize.cjs',
-        ),
-        `lane "${lane}" should carry the e2e-deploy.sh contract-test-mode exceptions`,
-      ).toBe(true);
+  // #1422 — NAMED_EXCEPTIONS is scoped per SOURCE FILE. Direct unit coverage
+  // of `isNamedException`, independent of what the repo references today.
+  it('isNamedException: exempts exactly the (source, path) pairs declared', () => {
+    for (const { path, sources } of NAMED_EXCEPTIONS) {
+      for (const source of sources) {
+        expect(isNamedException(source, path), `${source} -> ${path}`).toBe(true);
+      }
     }
   });
 
-  it('permanentPathsForLane: an unlisted lane does NOT inherit the exception — fails closed (#1422)', () => {
-    // Before scoping, `permanentPaths` was built from the WHOLE
-    // NAMED_EXCEPTIONS array for whatever lane happened to be running, so a
-    // brand-new credential lane would have silently inherited every
-    // exception reasoned about for OTHER workflows, with no review forcing
-    // a decision. A lane this file has never heard of gets nothing.
-    const paths = permanentPathsForLane('not-a-real-lane');
-    for (const { path } of NAMED_EXCEPTIONS) {
-      expect(paths.has(path), `an unlisted lane should not inherit the exception for ${path}`).toBe(
-        false,
-      );
+  it('isNamedException: a different source file referencing the same path is NOT exempt (#1422)', () => {
+    for (const { path, sources } of NAMED_EXCEPTIONS) {
+      for (const other of [
+        '.github/workflows/compat-window-other.yml',
+        'scripts/some-other-harness.sh',
+        `${sources[0]}.bak`,
+      ]) {
+        expect(isNamedException(other, path), `${other} must not inherit ${path}`).toBe(false);
+      }
     }
-    expect(paths.size).toBe(0);
   });
 
-  it('E2E_DEPLOY_LANES tracks credentialLanes() exactly — a new lane must be a conscious inclusion or exclusion decision here, never silent (#1422)', () => {
-    const declaredLanes = new Set(credentialLanes().map((c) => c.lane));
-    for (const lane of E2E_DEPLOY_LANES) {
-      expect(
-        declaredLanes.has(lane),
-        `E2E_DEPLOY_LANES names "${lane}", which is not (or no longer) a real credential lane`,
-      ).toBe(true);
+  it('isNamedException: a declared source is not exempt for a path it was not declared for (#1422)', () => {
+    expect(isNamedException('scripts/e2e-deploy.sh', 'scripts/anything-else.sh')).toBe(false);
+  });
+
+  it('every named-exception source exists and really references its path (no stale exemption)', () => {
+    for (const { path, sources } of NAMED_EXCEPTIONS) {
+      for (const source of sources) {
+        const abs = resolve(REPO_ROOT, source);
+        expect(existsSync(abs), `${source} is gone — remove the exception`).toBe(true);
+        expect(
+          readFileSync(abs, 'utf8').includes(path.split('/').pop() as string),
+          `${source} no longer references ${path} — remove the exception`,
+        ).toBe(true);
+      }
     }
-    // Not asserting the reverse (every credentialLanes() member is in
-    // E2E_DEPLOY_LANES): a future lane that genuinely should NOT carry this
-    // exception is a valid, deliberate omission, not a bug. What matters is
-    // that E2E_DEPLOY_LANES never names a lane that does not exist.
   });
 
   // #1294 round 6 — DATED_EXCEPTIONS is empty right now (its one real
@@ -469,7 +445,6 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
         'utf8',
       );
       const harness = harnessFor(lane);
-      const permanentPaths = permanentPathsForLane(lane);
       const datedPaths = activeDatedExceptionPaths();
 
       for (const ref of workflowSubprocessRefs(workflowText)) {
@@ -478,7 +453,9 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
         // exception.
         if (ref === 'scripts/compat-window-fingerprint.mjs') continue;
         expect(
-          harness.has(ref) || permanentPaths.has(ref) || datedPaths.has(ref),
+          harness.has(ref) ||
+            isNamedException(`.github/workflows/${workflowFile}`, ref) ||
+            datedPaths.has(ref),
           `${workflowFile} invokes ${ref} by subprocess; missing from lane "${lane}"'s harness and not a named exception`,
         ).toBe(true);
       }
@@ -486,7 +463,6 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
 
     it(`lane "${lane}": every ${'${SCRIPT_DIR}'}/${'${KNEXT_REPO_ROOT}'} reference AND every local import, in every harness file this lane actually includes, is frozen or named`, () => {
       const harness = harnessFor(lane);
-      const permanentPaths = permanentPathsForLane(lane);
       const datedPaths = activeDatedExceptionPaths();
 
       for (const { relPath, text } of harnessCodeFiles(lane)) {
@@ -497,7 +473,7 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
         ];
         for (const ref of refs) {
           expect(
-            harness.has(ref) || permanentPaths.has(ref) || datedPaths.has(ref),
+            harness.has(ref) || isNamedException(relPath, ref) || datedPaths.has(ref),
             `${relPath} references ${ref}; missing from lane "${lane}"'s harness and not a named exception`,
           ).toBe(true);
         }

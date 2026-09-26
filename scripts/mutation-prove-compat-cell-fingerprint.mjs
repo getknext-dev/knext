@@ -54,9 +54,9 @@
  *      possibly-wrong parse instead of refusing outright.
  *  10. #1422 — `NAMED_EXCEPTIONS` in
  *      `tests/compat-window-fingerprint-execution-scan.test.ts` must stay
- *      SCOPED PER LANE via `permanentPathsForLane`, not applied globally.
- *      Reverting `permanentPathsForLane` to ignore `lane` (the pre-#1422
- *      shape) must go RED against its own direct unit coverage.
+ *      SCOPED PER SOURCE FILE via `isNamedException` (exact (source, path)
+ *      pair), never per lane or global. Two mutations: ignoring `source`, and
+ *      ignoring `path`, must each go RED against the unit coverage.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -97,7 +97,7 @@ const SPECS = [
   'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(10);
+declareMutations(11);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -111,6 +111,17 @@ function specsPass() {
     if (r.status !== 0) return false;
   }
   return true;
+}
+
+/** Exit code of ONLY the mutated spec — no timing, no output parsing. */
+function execScanSpecPasses() {
+  const spec = 'tests/compat-window-fingerprint-execution-scan.test.ts';
+  const { runner } = RUNNERS.find((r) => r.spec === spec);
+  const r = spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+  return r.status === 0;
 }
 
 let pass = 0;
@@ -154,8 +165,8 @@ function proveOnExecutionScanSpec(label, anchor, replacement) {
   const snap = snapshot(EXECUTION_SCAN_SPEC_PATH);
   try {
     mutate(snap, anchor, replacement);
-    if (specsPass()) {
-      console.log('   x DECORATION: the specs stayed GREEN with the behaviour removed');
+    if (execScanSpecPasses()) {
+      console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       fail += 1;
     } else {
       console.log('   ok went RED as required');
@@ -276,15 +287,20 @@ prove(
   'if (false) {',
 );
 
-// 10. #1422 — `permanentPathsForLane` must actually filter by `lane`, not
-//     return the whole NAMED_EXCEPTIONS array regardless of which lane was
-//     asked for (the pre-#1422 shape). Caught directly by the
-//     "unlisted lane does NOT inherit" unit test, independent of whichever
-//     real repo files the harness happens to reference today.
+// 10. #1422 — `isNamedException` must key on the exact (source, path) pair.
+//     Each anchor is asserted to occur exactly once by `mutate` (abort
+//     otherwise); the verdict is the specs' exit code, never their output.
+const IS_NAMED_ANCHOR =
+  'return NAMED_EXCEPTIONS.some((e) => e.path === ref && e.sources.includes(source));';
 proveOnExecutionScanSpec(
-  'permanentPathsForLane stops filtering by lane: returns every NAMED_EXCEPTIONS path regardless of lane (#1422)',
-  'function permanentPathsForLane(lane: string): Set<string> {\n  return new Set(NAMED_EXCEPTIONS.filter((e) => e.lanes.includes(lane)).map((e) => e.path));\n}',
-  'function permanentPathsForLane(_lane: string): Set<string> {\n  return new Set(NAMED_EXCEPTIONS.map((e) => e.path));\n}',
+  'isNamedException stops checking the source file: any file referencing a named path is exempt (#1422)',
+  IS_NAMED_ANCHOR,
+  'return NAMED_EXCEPTIONS.some((e) => e.path === ref);',
+);
+proveOnExecutionScanSpec(
+  'isNamedException stops checking the path: any reference from a named source is exempt (#1422)',
+  IS_NAMED_ANCHOR,
+  'return NAMED_EXCEPTIONS.some((e) => e.sources.includes(source));',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
