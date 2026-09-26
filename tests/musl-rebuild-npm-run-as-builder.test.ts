@@ -738,26 +738,65 @@ describe('every real package-manager invocation runs via run_as_builder — broa
   });
 
   /**
-   * Acceptance proof against the REAL script. The enumerated line numbers
-   * are deliberately brittle: a real `npm ci`/`npm install` line added,
-   * moved or removed must fail here and be re-classified by a human.
+   * Finds every `node -e '...'` multi-line single-quoted JS literal in the
+   * real script and returns each one's [opener, closer] 1-based line pair —
+   * the opener is the line ENDING in `node -e '` (the string starts right
+   * there), the closer is the next line whose only leading content is the
+   * matching bare `'` that ends it. Scanning this instead of enumerating it
+   * (round-3 follow-up, coordinator-directed): a hardcoded line-number list
+   * goes stale the moment ANY earlier line in the script shifts for an
+   * unrelated reason (exactly what happened here once a sibling PR added
+   * lines above these literals) — deriving both the openers and the
+   * "still inside the literal" insertion range from the actual text keeps
+   * this guard correct regardless of where in the file the literals sit.
+   */
+  function findNodeELiteralRanges(lines: string[]): { opener: number; closer: number }[] {
+    const ranges: { opener: number; closer: number }[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (!/node -e '$/.test(lines[i])) continue;
+      const opener = i + 1;
+      let closer = -1;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (/^\s*'/.test(lines[j])) {
+          closer = j + 1;
+          break;
+        }
+      }
+      if (closer === -1) {
+        throw new Error(`node -e '...' literal opened at line ${opener} was never closed`);
+      }
+      ranges.push({ opener, closer });
+    }
+    return ranges;
+  }
+
+  /**
+   * Acceptance proof against the REAL script. Both the invocation lines and
+   * the `node -e` literal ranges below are DERIVED from the current script
+   * text (scanning), not enumerated — a hardcoded list is exactly the kind
+   * of guard `workflow.md` warns against ("prefer scanning to enumerating"):
+   * it silently goes stale the moment an unrelated, earlier edit shifts
+   * these lines, which is what happened here. What still gets a hard
+   * assertion is the property that actually matters: every real invocation
+   * IS guarded, and un-guarding any one of them is caught at its own line.
    */
   describe('acceptance: the real script', () => {
-    const REAL_INVOCATION_LINES = [263, 288, 434, 471];
-
-    it('classifies EXACTLY the enumerated real npm ci/install lines as invocations, each guarded', () => {
+    it('every real npm ci/install invocation the scanner finds is guarded, and the scan is not vacuous', () => {
       const source = readFileSync(SCRIPT_PATH, 'utf8');
       const lines = source.split('\n');
-      expect(packageManagerMentionLines(source).map((l) => l.line)).toEqual(REAL_INVOCATION_LINES);
-      for (const n of REAL_INVOCATION_LINES) {
+      const realInvocationLines = packageManagerMentionLines(source).map((l) => l.line);
+      expect(realInvocationLines.length).toBeGreaterThan(0);
+      for (const n of realInvocationLines) {
         expect(lines[n - 1]).toMatch(/run_as_builder (env \S+ )?npm (ci|install)\b/);
       }
       expect(offendersOf(source)).toEqual([]);
     });
 
-    it('removing run_as_builder from any enumerated real line is detected at that line', () => {
+    it('removing run_as_builder from any real invocation line is detected at that line', () => {
       const source = readFileSync(SCRIPT_PATH, 'utf8');
-      for (const n of REAL_INVOCATION_LINES) {
+      const realInvocationLines = packageManagerMentionLines(source).map((l) => l.line);
+      expect(realInvocationLines.length).toBeGreaterThan(0);
+      for (const n of realInvocationLines) {
         const lines = source.split('\n');
         expect(lines[n - 1].split('run_as_builder ').length - 1).toBe(1);
         lines[n - 1] = lines[n - 1].replace('run_as_builder ', '');
@@ -765,25 +804,25 @@ describe('every real package-manager invocation runs via run_as_builder — broa
       }
     });
 
-    /**
-     * Inserted line numbers that land INSIDE one of the script's three
-     * multi-line single-quoted `node -e '...'` JS literals. A shell never
-     * runs the inserted text there — it is part of the JS program — so the
-     * lexer correctly keeps it inside the enclosing statement instead of
-     * reporting it as its own `npm ci`. Enumerated (not derived from the
-     * lexer under test), and each literal's opener is asserted below.
-     */
-    const INSIDE_NODE_E_LITERAL = [
-      ...[355, 356, 357, 358],
-      ...[360, 361, 362, 363],
-      ...[402, 403, 404, 405, 406, 407, 408],
-    ];
-    const NODE_E_OPENERS = [354, 359, 401];
-
     it('a bare `npm ci` line inserted at EVERY line position of the real script is detected', () => {
       const source = readFileSync(SCRIPT_PATH, 'utf8');
       const lines = source.split('\n');
-      for (const n of NODE_E_OPENERS) expect(lines[n - 1]).toMatch(/node -e '$/);
+      const literalRanges = findNodeELiteralRanges(lines);
+      // Sanity on the scan itself: the script is known to carry at least
+      // one multi-line `node -e '...'` literal (this whole test exists
+      // because a shell must not treat text inside one as its own
+      // statement) — a scan that finds none would make the rest of this
+      // test vacuously pass.
+      expect(literalRanges.length).toBeGreaterThan(0);
+      // Inserting a new line lands "inside" a literal for every position
+      // from just after its opener through (and including) its closer —
+      // pushing the closer down still leaves the quote open at the
+      // insertion point; pushing anything AFTER the closer down does not.
+      const insideNodeELiteral = literalRanges.flatMap(({ opener, closer }) => {
+        const positions: number[] = [];
+        for (let p = opener + 1; p <= closer; p++) positions.push(p);
+        return positions;
+      });
       const undetected: number[] = [];
       const notOwnStatement: number[] = [];
       for (let pos = 0; pos <= lines.length; pos++) {
@@ -801,7 +840,7 @@ describe('every real package-manager invocation runs via run_as_builder — broa
       expect(undetected).toEqual([]);
       // …and as its OWN statement, at its own line, everywhere a shell
       // would actually run it.
-      expect(notOwnStatement).toEqual(INSIDE_NODE_E_LITERAL);
+      expect(notOwnStatement).toEqual(insideNodeELiteral);
     });
   });
 });

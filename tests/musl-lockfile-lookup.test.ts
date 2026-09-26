@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 /**
  * scripts/lib/musl-lockfile-lookup.sh (#1257 round 7) — pure, side-effect-free
@@ -77,9 +79,29 @@ describe('pinned_lockfile_dir_for: finds a committed lockfile only when BOTH fil
   });
 
   it('is empty when a directory exists but is MISSING package-lock.json (a partial/corrupt pin must not be trusted)', () => {
-    const out = run(
-      `${SOURCE}; mkdir -p "$TMPDIR/partial-pin/img-fake-pkg-1.0.0" && touch "$TMPDIR/partial-pin/img-fake-pkg-1.0.0/package.json" && LOCKFILES_DIR="$TMPDIR/partial-pin" pinned_lockfile_dir_for '@img/fake-pkg' '1.0.0'`,
-    );
-    expect(out).toBe('');
+    // Node's own mkdtempSync, not a bare `$TMPDIR` reference inside the `sh
+    // -c` script — `$TMPDIR` is unset on the GitHub runner, so `mkdir -p
+    // "$TMPDIR/partial-pin/..."` expanded to `mkdir -p "/partial-pin/..."`
+    // and failed with EACCES/"Permission denied" against the filesystem
+    // root, not against a real scratch dir — this test file is new on this
+    // branch (#1257), not present on main, so this is fixed as part of
+    // making #1257 itself green, not a pre-existing main regression.
+    // Node's own mkdtempSync, not a bare `$TMPDIR` reference inside the `sh
+    // -c` script — `$TMPDIR` is unset on the GitHub runner, so `mkdir -p
+    // "$TMPDIR/partial-pin/..."` expanded to `mkdir -p "/partial-pin/..."`
+    // and failed against the filesystem root, not a real scratch dir. This
+    // test file is new on this branch (#1257), not present on main, so this
+    // is fixed as part of making #1257 itself green, not a pre-existing
+    // main regression.
+    const scratch = mkdtempSync(join(tmpdir(), 'musl-partial-pin-'));
+    try {
+      const out = run(
+        `${SOURCE}; mkdir -p "\${SCRATCH_DIR}/partial-pin/img-fake-pkg-1.0.0" && touch "\${SCRATCH_DIR}/partial-pin/img-fake-pkg-1.0.0/package.json" && LOCKFILES_DIR="\${SCRATCH_DIR}/partial-pin" pinned_lockfile_dir_for '@img/fake-pkg' '1.0.0'`,
+        { SCRATCH_DIR: scratch },
+      );
+      expect(out).toBe('');
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
