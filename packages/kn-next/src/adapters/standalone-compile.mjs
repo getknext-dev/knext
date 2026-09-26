@@ -84,6 +84,7 @@ import {
 import { isBuiltin } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { bunBaseExeCompileOptions } from "./bun-base-exe.mjs";
 import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
 import { computedRequireInventory, moduleDisposition } from "./computed-require-scan.mjs";
 import {
@@ -116,6 +117,13 @@ if (!args.outfile) fail("--outfile <path> is required");
 const SERVER = resolve(args.server);
 const OUTFILE = resolve(args.outfile);
 const TARGET = args.target?.trim();
+// CI-only patched Bun base executable (infra/bun-base/); `{}` when unset.
+let BUN_BASE_EXE;
+try {
+    BUN_BASE_EXE = bunBaseExeCompileOptions();
+} catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+}
 
 if (!existsSync(SERVER)) {
     fail(`no standalone server at ${SERVER} — run \`next build\` with output: 'standalone' first`);
@@ -457,6 +465,7 @@ try {
             // The load-bearing flag — see the header.
             autoloadPackageJson: true,
             ...(TARGET ? { target: TARGET } : {}),
+            ...BUN_BASE_EXE,
         },
     });
 } finally {

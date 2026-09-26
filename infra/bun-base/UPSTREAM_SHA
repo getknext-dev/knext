@@ -1,0 +1,5 @@
+# oven-sh/bun main, pinned. The first non-comment line is the 40-hex SHA; nothing else is read.
+# Pinned 2026-09-26: b12539ce "main" — the most recent main commit on that day whose Buildkite
+# status AND every GitHub check-run were green (the newer 36cd1514 tip had 6 failing checks).
+# Bump rule: see README.md "Bumping the SHA".
+b12539ce270ba098058d92c92a34c917e020a4bd
