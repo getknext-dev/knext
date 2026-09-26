@@ -540,6 +540,28 @@ describe('every real package-manager invocation runs via run_as_builder — broa
       expect(offenders[0].text).toMatch(/npm ci/);
     });
 
+    /**
+     * Isolates the SPLITTER's own escape handling from
+     * `hasUnquotedControlToken`'s (both independently escape-aware, but the
+     * echo-exclusion path above only ever exercises the LATTER — an
+     * un-split whole statement still gets classified correctly there
+     * because `hasUnquotedControlToken` finds the real `;` on its own,
+     * whatever the splitter did). Here `run_as_builder` is the statement's
+     * OWN first word, wrapping only the harmless `echo \"` before the
+     * escaped quote — if the splitter fails to split on the REAL `;` after
+     * it (reading the escaped quote as a genuine quote-open instead), the
+     * whole blob stays one statement whose first word is `run_as_builder`,
+     * so the guard-check would misread the separate, unguarded `npm ci`
+     * after the `;` as guarded by a wrapper that was only ever wrapping
+     * `echo`.
+     */
+    it('a backslash-escaped quote does not let a guard on an EARLIER command leak across a real `;` hidden behind it (run_as_builder echo \\" ; npm ci)', () => {
+      const line = 'run_as_builder echo \\" ; npm ci --no-audit';
+      const offenders = offendersOf(line);
+      expect(offenders.length).toBe(1);
+      expect(offenders[0].text).toMatch(/npm ci/);
+    });
+
     it('a literal `#` inside a quoted argument does not truncate the statement before the real invocation (FOO="#" npm ci)', () => {
       const line = 'FOO="#" npm ci --no-audit';
       expect(offendersOf(line).length).toBe(1);
