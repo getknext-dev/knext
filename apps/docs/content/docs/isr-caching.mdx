@@ -9,12 +9,26 @@ scale-to-zero, where pods appear and disappear constantly.
 
 ## Where the wiring lives
 
-knext builds your app with **vinext** (Vite/rolldown). vinext does **not** read the
-`cacheHandler` option in `next.config.ts` — that option belongs to Next's webpack/turbopack
-pipeline, which this build never runs. The line is kept in scaffolded apps for Next-aware tooling,
-but it is inert at runtime.
+**On the default build** (`build: 'turbopack'` or `'webpack'`), Next reads the `cacheHandler`
+option in `next.config.ts`. `knext create` scaffolds it, pointing at a `cache-handler.js` file in
+your project, together with `cacheMaxMemorySize: 0` so the per-pod memory cache never diverges
+from Redis:
 
-The live registration is in `vite.config.ts`, on the `vinext()` plugin itself:
+```ts title="next.config.ts"
+const nextConfig: NextConfig = {
+  cacheHandler: new URL('./cache-handler.js', import.meta.url).pathname,
+  cacheMaxMemorySize: 0,
+};
+```
+
+Keep the handler file inside your project so `next build` copies it into the standalone output.
+
+**On the vinext build** (`build: 'vinext'`), the app builds with **vinext** (Vite/rolldown). vinext
+does **not** read the `cacheHandler` option in `next.config.ts` — that option belongs to Next's
+webpack/turbopack pipeline, which this build never runs. The line is kept in scaffolded apps for
+Next-aware tooling, but it is inert at runtime.
+
+The live registration on vinext is in `vite.config.ts`, on the `vinext()` plugin itself:
 
 ```ts title="vite.config.ts"
 import vinext from 'vinext';
@@ -63,9 +77,9 @@ into your pods from the `cache` block of your deploy config (see
 Next.js marks cacheable pages with directives meant for a shared cache in front of the server, such
 as `s-maxage=2, stale-while-revalidate=31535998` for an ISR page or `s-maxage=31536000` for a
 static one. knext serves your app directly, with no shared cache in between, so every build
-rewrites those responses to `public, max-age=0, must-revalidate`: the compiled executable (the
-default build), vinext on Node (`runtime: 'node'` with the default build), and the standalone server
-(`build: 'turbopack'` or `'webpack'`, on Node or Bun). That's the header a deployed Next.js app
+rewrites those responses to `public, max-age=0, must-revalidate`: the standalone server
+(`build: 'turbopack'` or `'webpack'`, on Node or Bun — the default), the vinext compiled
+executable, and vinext on Node (`build: 'vinext'` with `runtime: 'node'`). That's the header a deployed Next.js app
 returns to browsers.
 The first request for a `fallback: true` page gets the same header rather than `private, no-store`.
 Hashed static assets (`immutable`) and non-`GET`/`HEAD` responses are never changed.
@@ -87,9 +101,9 @@ On vinext on Node, both layers live in the app's `knext-node-entry.mjs`. An app 
 this behaviour shipped has an older copy of that file and still serves Next.js's original headers;
 replace it with the one from a freshly created app (`knext create`).
 
-## Upgrading an app scaffolded before the cache wiring
+## Upgrading a vinext app scaffolded before the cache wiring
 
-Apps created by earlier versions of `knext create` wired the cache handler **only** through
+Vinext apps created by earlier versions of `knext create` wired the cache handler **only** through
 `next.config.ts`'s `cacheHandler` — which the vinext build ignores, so their ISR never reached
 Redis. To fix an existing app, add the `cache` block to the `vinext()` call in your
 `vite.config.ts` exactly as shown above, and make sure `@getknext/core` is in your
