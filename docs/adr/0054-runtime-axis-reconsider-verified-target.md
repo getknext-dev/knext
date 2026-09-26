@@ -404,3 +404,22 @@ would give and is not yet measured on a cluster (#1226).
 7. Flip `DEFAULT_BUILDER_ID` to bun-standalone once that cell is credentialed. *(#1183)*
 8. **Maintainer:** reconcile `.claude/rules/architecture.md §4` and `CLAUDE.md §3` with this
    Amendment (see the PR body for the exact lines).
+
+## Amendment 8 — cross-reference to Amendment 7: self-contained compiled cells (ADR-0060, 2026-09-26)
+
+- **Status:** Accepted with ADR-0060, pending the same sprint-close design gate. Amends Amendment 7
+  by cross-reference only; ADR-0058's cell list is unchanged.
+
+1. **Compiled bun cells may ship self-contained, behind the flag.** With `--self-contained` /
+   `selfContained: true` (default off), a bun × turbopack or bun × webpack executable embeds what
+   Amendment 7 left on disk (`.next/server/**`, `*.runtime.prod.js`, manifests) and boots from a
+   directory with no `node_modules/` or `.next/`. Default builds are byte-identical to today.
+   Amendment 7's single-instance rule still holds: the embed must keep one module instance per
+   file, which ADR-0060's path-fidelity invariant is written to preserve.
+2. **Bytecode coverage of included modules is a measured claim, not an assumed one.** Amendment 7's
+   fail-closed verifier checks the executable's entry graph. Nothing yet shows that a module
+   embedded as an extra entrypoint is compiled to bytecode; #1451 measures it, and #1456 extends the
+   verifier to route chunks. Until then, "self-contained" must not be read as "bytecode on every
+   route".
+3. **A self-contained cell is a separate fingerprint.** Its compat window starts from zero (ADR-0056)
+   and does not inherit the disk-mode cell's nights.
