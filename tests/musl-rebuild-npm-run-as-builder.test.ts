@@ -28,6 +28,33 @@ import { resolve } from 'node:path';
  * an apk PACKAGE NAME (an explicit, named allowlist entry, asserted to
  * appear in the real script EXACTLY ONCE so it cannot silently drift).
  *
+ * FOLLOW-UP (jev 0.94): a second round of bypasses in the STATEMENT
+ * splitter/guard-check itself, on top of #1415's own earlier fixes (the
+ * jev 0.59 findings below):
+ *   - the splitter only recognized `;`/`&&`/`||` as statement boundaries —
+ *     a bare `|` (pipe) or bare `&` (background) never split a statement,
+ *     so `run_as_builder true | npm ci` / `run_as_builder true & npm ci`
+ *     stayed guarded by a wrapper that only ever wrapped `true`;
+ *   - the echo-message exclusion's own control-token scan missed a bare
+ *     `&` and process substitution (`>(...)`/`<(...)`);
+ *   - NEITHER the splitter nor the control-token scan handled a backslash
+ *     escape — an escaped quote character (`\"`) was read as a REAL quote
+ *     toggle, so everything after it (including a genuine unescaped `;`)
+ *     was swallowed into a phantom "quoted" region for the rest of the
+ *     statement;
+ *   - the trailing-comment strip (`text.split('#')[0]`) was not
+ *     quote-aware, so a literal `#` inside a quoted argument
+ *     (`FOO="#" npm ci`) truncated the statement mid-command;
+ *   - the guard check matched `run_as_builder` ANYWHERE in the statement,
+ *     not just as the command word — `npm ci --tag run_as_builder` read as
+ *     guarded because the wrapper's NAME appeared as a flag VALUE.
+ * Fixed by scanning the WHOLE source in one quote-and-escape-aware pass
+ * (never pre-split by raw `\n` first, which cannot see a real separator
+ * hidden behind an escaped quote on the same physical line), splitting on
+ * `;`/`&`/`&&`/`||`/`|`/newline, and requiring `run_as_builder` as the
+ * FIRST word of a statement (after any leading `VAR=value` env
+ * assignments) rather than a mere substring.
+ *
  * This is a SCAN, not an enumerated list of line numbers (workflow.md's
  * "prefer scanning to enumerating" rule) — a NEW invocation added later
  * without `run_as_builder`, in ANY shape, must fail this test.
@@ -63,20 +90,63 @@ function isAllowlistedNonInvocation(text: string): boolean {
 }
 
 /**
- * Whether `text` contains one of `;`, `&&`, `||`, `|`, `$(`, or a backtick
- * OUTSIDE single quotes (#1415 jev 0.59 finding). Single quotes make
- * everything inside them fully inert in real shell semantics, so a token
- * inside single quotes is never a real chain/substitution. Double quotes
- * are NOT inert for `$(...)`/backticks — real shell still expands command
- * substitution inside a double-quoted string — so those two are still
- * detected even while "inside quotes"; only `;`/`&&`/`||`/`|` are treated
- * as literal while double-quoted, matching real shell parsing.
+ * Strips a trailing `#...` comment, but only an UNQUOTED, UNESCAPED one
+ * (jev 0.94 finding: `FOO="#" npm ci` used to be truncated at the `#`
+ * INSIDE the quotes by a naive `text.split('#')[0]`, silently deleting
+ * `npm ci` from what the scan ever looked at).
+ */
+function stripUnquotedComment(text: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\\' && !inSingle && i + 1 < text.length) {
+      i++;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === '#') return text.slice(0, i);
+  }
+  return text;
+}
+
+/**
+ * Whether `text` contains one of `;`, `&`, `&&`, `||`, `|`, `$(`, a
+ * backtick, or a process substitution (`>(`/`<(`) OUTSIDE single quotes and
+ * not escaped by a preceding unquoted backslash (jev 0.94: added the bare
+ * `&` and process-substitution cases, and backslash-escape awareness, on
+ * top of #1415's jev 0.59 fix below). Single quotes make everything inside
+ * them fully inert in real shell semantics, so a token inside single quotes
+ * is never a real chain/substitution. Double quotes are NOT inert for
+ * `$(...)`/backticks — real shell still expands command substitution
+ * inside a double-quoted string — so those two are still detected even
+ * while "inside quotes"; only the plain separator characters are treated as
+ * literal while double-quoted, matching real shell parsing.
  */
 function hasUnquotedControlToken(text: string): boolean {
   let inSingle = false;
   let inDouble = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
+    if (ch === '\\' && !inSingle && i + 1 < text.length) {
+      i++; // the escaped character can never itself be a control token
+      continue;
+    }
     if (inSingle) {
       if (ch === "'") inSingle = false;
       continue;
@@ -99,70 +169,113 @@ function hasUnquotedControlToken(text: string): boolean {
       continue;
     }
     if (ch === ';') return true;
-    if (ch === '&' && text[i + 1] === '&') return true;
+    if (ch === '&') return true; // covers a bare `&` (background) and `&&`
     if (ch === '|') return true; // covers a bare `|` and `||`
     if (ch === '$' && text[i + 1] === '(') return true;
     if (ch === '`') return true;
+    if ((ch === '>' || ch === '<') && text[i + 1] === '(') return true; // process substitution
   }
   return false;
 }
 
+type Statement = { text: string; line: number };
+
 /**
- * Splits a raw script LINE into individual shell statements on `;`, `&&`,
- * and `||` that occur OUTSIDE single/double quotes (#1415 low finding: the
- * guard previously checked `run_as_builder` presence against the WHOLE
- * LINE, so `run_as_builder true; npm ci` read as guarded because the
- * wrapper's name appeared SOMEWHERE on the line, even though it only wraps
- * `true` — a different statement than the unguarded `npm ci` after it).
- * Each statement is classified and guard-checked independently below.
+ * Splits the ENTIRE source into individual shell statements on `;`, `&`,
+ * `&&`, `||`, `|`, and newlines that occur OUTSIDE single/double quotes and
+ * are not escaped by a preceding unquoted backslash (jev 0.94 follow-up to
+ * #1415's own jev 0.59 fix, see the file header). Operating over the WHOLE
+ * source in one pass — rather than pre-splitting on raw `\n` and only then
+ * quote-tracking each line independently — matters for two reasons: (1) a
+ * backslash-escaped quote character on one line must not leak a phantom
+ * "still inside a quote" state past that line's own boundary the way a
+ * naive per-line re-scan implicitly resets it every line regardless
+ * (masking the bug rather than fixing it), and (2) a genuinely multi-line
+ * quoted string's embedded newline must not be mistaken for a statement
+ * separator. Each returned statement carries the 1-based LINE NUMBER it
+ * started on, for reporting.
  */
-function splitUnquotedStatements(text: string): string[] {
-  const statements: string[] = [];
+function splitSourceIntoStatements(source: string): Statement[] {
+  const statements: Statement[] = [];
   let current = '';
+  let line = 1;
+  let startLine: number | null = null;
   let inSingle = false;
   let inDouble = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
+
+  const append = (ch: string) => {
+    if (startLine === null) startLine = line;
+    current += ch;
+  };
+  const push = () => {
+    statements.push({ text: current, line: startLine ?? line });
+    current = '';
+    startLine = null;
+  };
+
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+
+    // Backslash escape: consumes the NEXT character literally — it can
+    // never itself open/close a quote or act as a statement separator.
+    // Real shell semantics: backslash has NO special meaning inside single
+    // quotes (everything there is already fully literal).
+    if (ch === '\\' && !inSingle && i + 1 < source.length) {
+      append(ch);
+      append(source[i + 1]);
+      if (source[i + 1] === '\n') line++;
+      i++;
+      continue;
+    }
+
     if (inSingle) {
-      current += ch;
+      append(ch);
       if (ch === "'") inSingle = false;
+      if (ch === '\n') line++;
       continue;
     }
     if (inDouble) {
-      current += ch;
+      append(ch);
       if (ch === '"') inDouble = false;
+      if (ch === '\n') line++;
       continue;
     }
     if (ch === "'") {
       inSingle = true;
-      current += ch;
+      append(ch);
       continue;
     }
     if (ch === '"') {
       inDouble = true;
-      current += ch;
+      append(ch);
+      continue;
+    }
+    if (ch === '\n') {
+      push();
+      line++;
       continue;
     }
     if (ch === ';') {
-      statements.push(current);
-      current = '';
+      push();
       continue;
     }
-    if (ch === '&' && text[i + 1] === '&') {
-      statements.push(current);
-      current = '';
+    if (ch === '&' && source[i + 1] === '&') {
+      push();
       i++;
       continue;
     }
-    if (ch === '|' && text[i + 1] === '|') {
-      statements.push(current);
-      current = '';
+    if (ch === '|' && source[i + 1] === '|') {
+      push();
       i++;
       continue;
     }
-    current += ch;
+    if (ch === '&' || ch === '|') {
+      push();
+      continue;
+    }
+    append(ch);
   }
-  statements.push(current);
+  statements.push({ text: current, line: startLine ?? line });
   return statements;
 }
 
@@ -171,57 +284,62 @@ function splitUnquotedStatements(text: string): string[] {
  * line) is a real package-manager invocation — every exclusion rule
  * (comment, pure-echo-message, exact-match allowlist) is applied against
  * that statement alone, and the word check itself runs against the CODE
- * portion only (before an unquoted trailing `#`), so a trailing comment
- * mentioning a package manager can't manufacture a false mention.
+ * portion only (before an unquoted, unescaped trailing `#`), so a trailing
+ * comment mentioning a package manager can't manufacture a false mention.
  */
 function isRealInvocationStatement(statement: string): boolean {
   const trimmed = statement.trim();
   if (trimmed === '' || trimmed.startsWith('#')) return false; // comment/prose
   if (trimmed.startsWith('echo ') && !hasUnquotedControlToken(trimmed)) return false; // a pure message string, never a real invocation
   if (isAllowlistedNonInvocation(trimmed)) return false;
-  const codePortion = trimmed.split('#')[0] ?? trimmed;
+  const codePortion = stripUnquotedComment(trimmed);
   return PACKAGE_MANAGER_WORD_RE.test(codePortion);
 }
 
 /** Every source LINE that has at least one real package-manager invocation statement on it. */
 function packageManagerMentionLines(source: string): { line: number; text: string }[] {
-  const lines = source.split('\n');
-  const mentionLineNumbers = new Set<number>();
-  lines.forEach((lineText, i) => {
-    for (const statement of splitUnquotedStatements(lineText)) {
-      if (isRealInvocationStatement(statement)) {
-        mentionLineNumbers.add(i + 1);
-        break;
-      }
+  const lines = new Map<number, string>();
+  for (const { text, line } of splitSourceIntoStatements(source)) {
+    if (isRealInvocationStatement(text) && !lines.has(line)) {
+      lines.set(line, text);
     }
-  });
-  return [...mentionLineNumbers]
-    .sort((a, b) => a - b)
-    .map((line) => ({ line, text: lines[line - 1] }));
+  }
+  return [...lines.entries()].sort((a, b) => a[0] - b[0]).map(([line, text]) => ({ line, text }));
 }
 
 /**
- * Whether a single STATEMENT is wrapped by `run_as_builder` — checked
- * against the CODE portion of THAT STATEMENT only (everything before an
- * unquoted trailing `#`), never the whole line (#1415 low finding), so a
- * comment that merely NAMES the wrapper after the command cannot make an
- * unguarded command read as guarded, and `run_as_builder` guarding an
- * EARLIER statement on the same line cannot guard a later, unrelated one.
+ * Whether a single STATEMENT is wrapped by `run_as_builder` — required to
+ * be the FIRST word of the statement's code portion, after skipping any
+ * number of leading `VAR=value` env assignments (jev 0.94 finding: the
+ * previous check matched `run_as_builder` ANYWHERE in the statement, so
+ * `npm ci --tag run_as_builder` read as guarded because the wrapper's own
+ * NAME appeared as a flag VALUE, never actually wrapping the command). The
+ * comment strip is quote-aware (`stripUnquotedComment`), so a comment that
+ * merely NAMES the wrapper after the command cannot make an unguarded
+ * command read as guarded, and `run_as_builder` guarding an EARLIER
+ * statement on the same line cannot guard a later, unrelated one (already
+ * true structurally: each statement is checked independently).
  */
-function isGuardedByRunAsBuilder(text: string): boolean {
-  const codePortion = text.split('#')[0] ?? text;
-  return /\brun_as_builder\b/.test(codePortion);
+const LEADING_ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=\S*/;
+
+function isGuardedByRunAsBuilder(statement: string): boolean {
+  const codePortion = stripUnquotedComment(statement);
+  let rest = codePortion.trimStart();
+  for (;;) {
+    const m = rest.match(LEADING_ENV_ASSIGNMENT_RE);
+    if (!m) break;
+    rest = rest.slice(m[0].length).trimStart();
+  }
+  return /^run_as_builder\b/.test(rest);
 }
 
 function offendersOf(source: string): { line: number; text: string }[] {
   const offenders: { line: number; text: string }[] = [];
-  source.split('\n').forEach((lineText, i) => {
-    for (const statement of splitUnquotedStatements(lineText)) {
-      if (isRealInvocationStatement(statement) && !isGuardedByRunAsBuilder(statement)) {
-        offenders.push({ line: i + 1, text: statement.trim() });
-      }
+  for (const { text, line } of splitSourceIntoStatements(source)) {
+    if (isRealInvocationStatement(text) && !isGuardedByRunAsBuilder(text)) {
+      offenders.push({ line, text: text.trim() });
     }
-  });
+  }
   return offenders;
 }
 
@@ -384,5 +502,56 @@ describe('every real package-manager invocation runs via run_as_builder — broa
   it('run_as_builder genuinely wrapping the SAME statement still guards it, even with other statements on the line', () => {
     expect(offendersOf('true; run_as_builder npm ci --no-audit').length).toBe(0);
     expect(offendersOf('cd x && run_as_builder npm ci --no-audit').length).toBe(0);
+  });
+
+  /**
+   * jev 0.94 — five bypasses of the splitter/guard-check itself (as opposed
+   * to the WORD-detection bypasses #1415 already closed above): each stayed
+   * guarded or excused despite being a real, unguarded invocation, because
+   * the splitter/control-token-scan/guard-check missed a shape they didn't
+   * previously handle. One fixture per distinct rule.
+   */
+  describe('splitter/guard-check bypasses beyond #1415 (jev 0.94)', () => {
+    it('a bare `|` (pipe) is a statement boundary — run_as_builder wrapping the LEFT side does not guard npm ci on the right', () => {
+      expect(offendersOf('run_as_builder true | npm ci --no-audit').length).toBe(1);
+    });
+
+    it('a bare `&` (background) is a statement boundary — run_as_builder wrapping the LEFT side does not guard npm ci on the right', () => {
+      expect(offendersOf('run_as_builder true & npm ci --no-audit').length).toBe(1);
+    });
+
+    it('an echo message chained via a bare `&` still surfaces the real invocation after it', () => {
+      expect(offendersOf('echo x & npm ci --no-audit').length).toBe(1);
+    });
+
+    it('an echo message followed by process substitution containing a real invocation is not waved through', () => {
+      expect(offendersOf('echo x > >(npm ci --no-audit)').length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('a backslash-escaped quote does not hide a genuine unquoted `;` after it (echo \\" ; npm ci)', () => {
+      // Shell text: echo \" ; npm ci --no-audit
+      // The `\"` is a literal escaped double-quote character inside echo's
+      // OWN argument — it never opens a real quoted region, so the `;`
+      // right after it is a REAL, unquoted statement separator, and
+      // `npm ci` is a second, entirely separate, unguarded statement.
+      const line = 'echo \\" ; npm ci --no-audit';
+      const offenders = offendersOf(line);
+      expect(offenders.length).toBe(1);
+      expect(offenders[0].text).toMatch(/npm ci/);
+    });
+
+    it('a literal `#` inside a quoted argument does not truncate the statement before the real invocation (FOO="#" npm ci)', () => {
+      const line = 'FOO="#" npm ci --no-audit';
+      expect(offendersOf(line).length).toBe(1);
+    });
+
+    it('`run_as_builder` appearing as a flag VALUE (not the command word) does not count as guarding the statement', () => {
+      const line = 'npm ci --tag run_as_builder';
+      expect(offendersOf(line).length).toBe(1);
+    });
+
+    it('`run_as_builder` genuinely wrapping the command, with leading env assignments before it, still guards (regression check for the FIRST-word rewrite)', () => {
+      expect(offendersOf('FOO=1 BAR=2 run_as_builder npm ci --no-audit').length).toBe(0);
+    });
   });
 });
