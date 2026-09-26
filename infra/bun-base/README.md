@@ -93,7 +93,10 @@ guarantee.
 
 | Date | SHA | Builds | x64 sha256 match |
 |---|---|---|---|
-| 2026-09-26 | b12539ce | _see #1452_ | _see #1452_ |
+| 2026-09-26 | b12539ce | `9a2d4c23`, `455d16b9` | **yes** — both `38f38e7649d71274ee94c2b9ab21aee1917d78d8af8c6686498340e696462ba9` (74,671,944 bytes, `cmp` 0 differing bytes) |
+
+The SBOM and `manifest.json` differ between builds by design: they carry the build id and the SBOM's
+serial number and timestamp. Only the binaries are compared.
 
 The aarch64 binary is cross-compiled and checked only for format (`file`). Nothing executes it.
 
