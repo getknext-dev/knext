@@ -1,7 +1,17 @@
 /**
  * Every vinext runtime path turns on vinext's own deploy Cache-Control switch
  * (`VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1`) by calling `applyVinextDeployDefault`
- * at process start, before any request, and nothing in the repo overrides it.
+ * at process start, before any request, and nothing on the runtime surface
+ * overrides it.
+ *
+ * PURPOSE AND SCOPE. This is a REGRESSION NET for knext's own runtime paths, not a
+ * security boundary against an adversarial contributor — code review and the
+ * compat lanes are that. The override scan therefore covers the runtime SURFACE
+ * only (`inScope`): `packages/kn-next/src/**`, `packages/kn-next/templates/**`,
+ * `apps/*\/vite.config*`, every `Dockerfile*`, `apps/*\/deploy/**`,
+ * `.github/workflows/**` and `.env*` files. Everything else — the Go operator,
+ * `packages/lib`, app source, examples, scripts — is OUT of scope, deliberately,
+ * and the "documented limits" block below asserts it so the limit is visible.
  *
  * SCANNED, not enumerated. Entries are found by walking the repo for
  * `knext-(node|bun)-entry.*` and classified by CONTENT, not name:
@@ -41,7 +51,7 @@
  * `os.Setenv`, `unset`, `env -u`, `delete`, `valueFrom`, tuples, `const K =
  * "NAME"`, and a multi-line Go struct (write it on one line) are all red.
  *
- * Skipped: `node_modules`, build output, `.claude`, `docs/` and
+ * Within the surface, skipped: `node_modules`, build output, `.claude`, `docs/` and
  * `apps/docs/content` (user-facing prose that documents the `=0` opt-out), any
  * `*.md` (prose — it cannot execute) and test FILES (`*.test.*`, which set `0`
  * on purpose; never a whole `__tests__` directory).
@@ -57,6 +67,14 @@
  * of the name is not skipped. In JS the transpiler decodes it; in other file types an escaped
  * spelling is red outright. A parse error in a file that never names the switch
  * is irrelevant and ignored.
+ *
+ * YAML: EVERY explicit tag (`!!binary`, `!!str`, a custom `!x`) is red, in any
+ * in-scope YAML file, because a tag can make a scalar decode to the name
+ * (`!!binary` base64) and not every tag can be decoded here. `\N{NAME}` escapes
+ * (Python/Go-style named characters) are red for the same reason.
+ * Dockerfile/shell continuation: `NAME=1` may be followed by ` \` only when the
+ * next line is itself an `IDENT=value` pair (`NAME=1\` + `0` would join to
+ * `NAME=10`); `ENV NAME 1` allows no continuation at all.
  *
  * REAL LIMITS: the name never appearing whole is invisible when it is built by
  * string concatenation (`"VINEXT_NEXT_" + "DEPLOY_CACHE_CONTROL"`), split by a
@@ -81,7 +99,7 @@
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { parseAllDocuments } from "yaml";
+import { isNode, parseAllDocuments, visit } from "yaml";
 
 const NAME = "VINEXT_NEXT_DEPLOY_CACHE_CONTROL";
 const REPO = join(__dirname, "..", "..", "..", "..");
@@ -165,8 +183,8 @@ const CALL = /^applyVinextDeployDefault\(process\.env\);$/m;
 const N = NAME;
 const ONE = `["']?1["']?`;
 const ASSIGN_SAFE = [
-    new RegExp(`^(?:(?:ENV|export)\\s+)?${N}=${ONE}(?:\\s*\\\\)?$`),
-    new RegExp(`^ENV\\s+${N}\\s+${ONE}(?:\\s*\\\\)?$`),
+    new RegExp(`^(?:(?:ENV|export)\\s+)?${N}=${ONE}(?:\\s+\\\\)?$`),
+    new RegExp(`^ENV\\s+${N}\\s+${ONE}$`),
     new RegExp(`^["']?${N}["']?\\s*:\\s*${ONE},?$`),
     new RegExp(
         `^(?:[\\w$.]*env)(?:\\.${N}|\\[["']${N}["']\\])\\s*=\\s*["']1["'];?$`,
@@ -174,6 +192,8 @@ const ASSIGN_SAFE = [
     new RegExp(`^\\{?\\s*Name:\\s*"${N}",\\s*Value:\\s*"1",?\\s*\\}?,?$`),
     new RegExp(`^\\{?\\s*Value:\\s*"1",\\s*Name:\\s*"${N}",?\\s*\\}?,?$`),
 ];
+const PAIR = /^[A-Za-z_][A-Za-z0-9_]*=\S*(?:\s+\\)?$/;
+
 /** The only READ shapes, each bound to the file it is legitimate in. */
 const READ_SAFE: [RegExp, RegExp][] = [
     [
@@ -208,27 +228,29 @@ function looseText(s: string): string {
 /** `\xHH`, `\uHHHH`, `\u{H+}` and octal escapes decoded (for the mention pre-filter). */
 function decodeEscapes(s: string): string {
     return s.replace(
-        /\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|u\{([0-9a-fA-F]+)\}|([0-7]{1,3}))/g,
-        (m, x, u, ub, o) => {
+        /\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|u\{([0-9a-fA-F]+)\}|U([0-9a-fA-F]{8})|([0-7]{1,3}))/g,
+        (m, x, u, ub, ubig, o) => {
             const cp = x
                 ? Number.parseInt(x, 16)
                 : u
                   ? Number.parseInt(u, 16)
                   : ub
                     ? Number.parseInt(ub, 16)
-                    : Number.parseInt(o, 8);
+                    : ubig
+                      ? Number.parseInt(ubig, 16)
+                      : Number.parseInt(o, 8);
             return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
         },
     );
 }
 
 /** Unsafe mentions in a YAML document: walk the parsed value, not the text. */
-function yamlHits(src: string): string[] {
+function yamlHits(src: string, mentioned: boolean): string[] {
     let docs: ReturnType<typeof parseAllDocuments>;
     try {
         docs = parseAllDocuments(src, { merge: true, schema: "failsafe" });
     } catch (e) {
-        return [`unparseable YAML: ${String(e).slice(0, 80)}`];
+        return mentioned ? [`unparseable YAML: ${String(e).slice(0, 80)}`] : [];
     }
     const hits: string[] = [];
     const walk = (node: unknown): void => {
@@ -260,6 +282,13 @@ function yamlHits(src: string): string[] {
         }
     };
     for (const d of docs) {
+        if (d.errors.length && !mentioned) continue;
+        visit(d, (_k, node) => {
+            if (isNode(node) && node.tag)
+                hits.push(
+                    `${node.tag}  [explicit YAML tag cannot be decoded here]`,
+                );
+        });
         for (const e of d.errors)
             hits.push(`YAML error: ${e.message.slice(0, 80)}`);
         try {
@@ -281,6 +310,9 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     // still looked at. A file that never names the switch cannot override it,
     // so a parse error there is irrelevant.
     const norm = looseText(src);
+    if (/\.ya?ml$/i.test(file)) return yamlHits(src, norm.includes(N));
+    if (/\\N\{/.test(src))
+        return [`${file}  [\\N{…} named-character escape cannot be decoded]`];
     if (!norm.includes(N)) return [];
     let lines: string[];
     if (loaderFor(file)) {
@@ -289,8 +321,6 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
         } catch (e) {
             return [`unparseable JS (${file}): ${String(e).slice(0, 80)}`];
         }
-    } else if (/\.ya?ml$/i.test(file)) {
-        return yamlHits(src);
     } else {
         // Any spelling the loose pre-filter sees that the exact-line check
         // below cannot (escapes, `\_`, backslash-newline) is red outright —
@@ -303,10 +333,19 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
             .filter((l) => !(/^\s*(?:#|\/\/)/.test(l) && !/[=(:]/.test(l)));
     }
     const hits: string[] = [];
-    for (const raw of lines) {
+    for (const [i, raw] of lines.entries()) {
         const l = raw.trim();
         if (!l.includes(N)) continue;
-        if (ASSIGN_SAFE.some((re) => re.test(l))) continue;
+        if (ASSIGN_SAFE.some((re) => re.test(l))) {
+            if (l.endsWith("\\")) {
+                const next = lines.slice(i + 1).find((x) => x.trim() !== "");
+                if (next !== undefined && !PAIR.test(next.trim()))
+                    hits.push(
+                        `${l}  [continuation is not an IDENT=value pair]`,
+                    );
+            }
+            continue;
+        }
         if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) continue;
         hits.push(`${l}  [unknown form]`);
     }
@@ -384,6 +423,21 @@ export function isBunEntryWired(viteSrc: string): boolean {
             if (depthAt[sm.index] === 1) return true;
     }
     return false;
+}
+
+/** The runtime surface the override scan covers (repo-relative, `/`-separated). */
+export function inScope(relPath: string): boolean {
+    const p = relPath.split("\\").join("/");
+    const b = basename(p);
+    return (
+        p.startsWith("packages/kn-next/src/") ||
+        p.startsWith("packages/kn-next/templates/") ||
+        /^apps\/[^/]+\/vite\.config[^/]*$/.test(p) ||
+        /^apps\/[^/]+\/deploy\//.test(p) ||
+        p.startsWith(".github/workflows/") ||
+        /^Dockerfile/.test(b) ||
+        /^\.env/.test(b)
+    );
 }
 
 const FILES = walk(REPO);
@@ -474,6 +528,29 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.yaml", `- name: ${NAME}\n  value: 1.0`],
         ["x.yaml", `- name: ${NAME}\n  value: 0x1`],
         ["x.yaml", `- name: ${NAME}\n  value: 01`],
+        // round-9 reviewer inputs: 8-hex `\U`, named `\N{}`, YAML tags,
+        // and a continuation that joins `1` to the next line
+        [
+            "x.yaml",
+            `- name: "\\U00000056INEXT_NEXT_DEPLOY_CACHE_CONTROL"\n  value: "0"`,
+        ],
+        ["x.sh", `export $'\\U00000056INEXT_NEXT_DEPLOY_CACHE_CONTROL'=0`],
+        [
+            "x.go",
+            `os.Setenv("\\N{LATIN CAPITAL LETTER V}INEXT_NEXT_DEPLOY_CACHE_CONTROL", "0")`,
+        ],
+        [
+            "x.yaml",
+            `- name: !!binary ${Buffer.from(NAME).toString("base64")}\n  value: "0"`,
+        ],
+        ["x.yaml", `- name: !!str ${NAME}\n  value: "1"`],
+        ["x.yaml", `- name: !custom ${NAME}\n  value: "1"`],
+        ["x.yaml", `- name: ${NAME}\n  value: !!str "1"`],
+        ["Dockerfile", `ENV ${NAME}=1\\\n0`],
+        ["x.sh", `export ${NAME}=1\\\n0`],
+        ["Dockerfile", `ENV ${NAME}=1 \\\n  0`],
+        ["Dockerfile", `ENV ${NAME} 1 \\\n  0`],
+        ["Dockerfile", `ENV ${NAME} 1\\\n0`],
         // identity escapes and backslash-newline continuations (round-8 inputs)
         ["x.mjs", `process.env["VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL"] = "0";`],
         ["x.mjs", `process.env[\`VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL\`] = "0";`],
@@ -550,6 +627,8 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
     const GOOD: [string, string][] = [
         ["Dockerfile", `ENV ${NAME}=1`],
         ["Dockerfile", `ENV ${NAME}=1 \\`],
+        ["Dockerfile", `ENV ${NAME}=1 \\\n  OTHER=x`],
+        ["Dockerfile", `ENV A=x \\\n  ${NAME}=1 \\\n  B=y`],
         ["Dockerfile", `ENV ${NAME} 1`],
         ["Dockerfile", `ENV ${NAME} "1"`],
         ["x.sh", `export ${NAME}=1`],
@@ -599,6 +678,43 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
             expect(findUnsafeMentions(g, path)).toEqual([]);
         });
     }
+});
+
+describe("runtime-surface scope (the guard is a regression net, not a boundary)", () => {
+    const IN = [
+        "packages/kn-next/src/adapters/x.mjs",
+        "packages/kn-next/templates/app/Dockerfile.hbs",
+        "packages/kn-next/templates/app/vite.config.ts.hbs",
+        "apps/docs/vite.config.ts",
+        "apps/file-manager/vite.config.mjs",
+        "apps/file-manager/deploy/knext.yaml",
+        ".github/workflows/ci.yml",
+        "Dockerfile",
+        "examples/bun-exec/Dockerfile.oke",
+        ".env.example",
+        "apps/file-manager/.env.local",
+    ];
+    for (const p of IN)
+        it(`in scope: ${p}`, () => {
+            expect(inScope(p)).toBe(true);
+        });
+    // Documented limits: these are NOT scanned, on purpose.
+    const OUT = [
+        "packages/kn-next-operator/internal/controller/render.go",
+        "packages/lib/src/x.mjs",
+        "packages/kn-next/package.json",
+        "packages/kn-next/srcx/x.mjs",
+        "apps/file-manager/src/server.ts",
+        "apps/docs/src/vite.config.ts",
+        "examples/bun-exec/app.mjs",
+        "scripts/deploy.sh",
+        "benchmarks/run.sh",
+        "docs/x.yaml",
+    ];
+    for (const p of OUT)
+        it(`documented limit — out of scope, ignored: ${p}`, () => {
+            expect(inScope(p)).toBe(false);
+        });
 });
 
 describe("vite config file names", () => {
@@ -797,7 +913,7 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
 
     it("every mention of the switch in the repo is a known-safe form", () => {
         const bad: string[] = [];
-        for (const f of FILES) {
+        for (const f of FILES.filter((x) => inScope(rel(x)))) {
             let src: string;
             try {
                 src = readFileSync(f, "utf8");
