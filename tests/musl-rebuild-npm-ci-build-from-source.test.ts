@@ -42,6 +42,8 @@ const CI_ALIASES = new Set([
   'sit',
 ]);
 const FLAG = 'npm_config_build_from_source';
+/** Any word that mentions the flag under any separator/case/quoting — recognised or not. */
+const BFS_MENTION = /build.from.source/i;
 /** Words that may legitimately sit BEFORE the program word (wrappers, keywords, env plumbing). */
 const WRAPPERS = new Set([
   'run_as_builder',
@@ -164,19 +166,30 @@ function setsBuildFromSource(text: string): boolean {
     else if (w === '-u' || w === '--unset') {
       if (unquote(words[i + 1] ?? '') === FLAG) effective = false;
     } else if (w === `-u${FLAG}` || w === `--unset=${FLAG}`) effective = false;
+    // Fail closed: a word that mentions the flag but is not a form recognised
+    // above (npm lower-cases env names, so e.g. NPM_CONFIG_BUILD_FROM_SOURCE=…
+    // could set it in ways this scan does not model) is never credited.
+    else if (BFS_MENTION.test(w)) effective = false;
   }
   for (let j = prog.npmIdx + 1; j < words.length; j++) {
-    const w = unquote(words[j]);
-    if (w === '--build-from-source') {
+    // npm normalises flag NAMES (nopt/config): `_`≡`-`, case-insensitive, and
+    // quotes inside a word are removed by the shell. `--build_from_source=false`,
+    // `--Build-From-Source=false` and `--build-from-"source"=false` all switch
+    // the flag off, so compare the normalised name, never the raw text.
+    const raw = words[j].replace(/["']/g, '');
+    if (!BFS_MENTION.test(raw)) continue;
+    const eq = raw.indexOf('=');
+    const name = (eq === -1 ? raw : raw.slice(0, eq)).toLowerCase().replaceAll('_', '-');
+    const value = eq === -1 ? null : raw.slice(eq + 1);
+    if (name === '--build-from-source' && value === null) {
       // nopt consumes a FOLLOWING `true`/`false` word as the flag's value.
-      const next = unquote(words[j + 1] ?? '');
+      const next = (words[j + 1] ?? '').replace(/["']/g, '');
       if (next === 'true' || next === 'false') {
         effective = next === 'true';
         j++;
       } else effective = true;
-    } else if (w === '--build-from-source=true') effective = true;
-    else if (w.startsWith('--build-from-source=') || w === '--no-build-from-source')
-      effective = false;
+    } else if (name === '--build-from-source' && value === 'true') effective = true;
+    else effective = false; // =<other>, --no-…, or any mention not recognised: fail closed
   }
   return effective;
 }
@@ -391,6 +404,41 @@ describe('every npm ci invocation for a native corpus package sets npm_config_bu
         'env npm_config_build_from_source="true" npm ci',
       ]) {
         expect(offends(src).length).toBe(0);
+      }
+    });
+
+    it('npm-normalised spellings of the flag NAME (`_`, case, embedded quotes) switch it OFF — none may credit the invocation', () => {
+      for (const flag of [
+        '--build_from_source=false',
+        '--Build-From-Source=false',
+        '--build-from-"source"=false',
+        '--BUILD_FROM_SOURCE=false',
+        '--no_build_from_source',
+        '--build_from_source false',
+      ]) {
+        const src = `env npm_config_build_from_source=true npm ci ${flag}`;
+        expect(npmCiInvocationLines(src).length, flag).toBe(1);
+        expect(offends(src).length, flag).toBe(1);
+      }
+    });
+
+    it('a normalised spelling that stays TRUE is still recognised as flagged', () => {
+      for (const flag of [
+        '--build_from_source=true',
+        '--Build-From-Source',
+        '--build_from_source true',
+      ]) {
+        expect(offends(`npm ci ${flag}`).length, flag).toBe(0);
+      }
+    });
+
+    it('fails closed: an unrecognised mention of the flag (`--build-from-source=true=x`, `--x=build_from_source`, odd-cased env name) never credits the line', () => {
+      for (const src of [
+        'npm ci --build-from-source=true=x',
+        'env npm_config_build_from_source=true npm ci --foo=build_from_source',
+        'env NPM_CONFIG_BUILD_FROM_SOURCE=true npm ci',
+      ]) {
+        expect(offends(src).length, src).toBe(1);
       }
     });
 

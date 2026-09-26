@@ -55,6 +55,14 @@ const HEREDOC_OP_RE = /^<<(-?)[ \t]*((?:'[^'\n]*'|"[^"\n]*"|\\.|[^\s;&|<>()'"\\]
  *
  * Unclosed constructs at end of input are flushed as-is (fail towards
  * reporting text, never towards hiding it).
+ *
+ * KNOWN FALSE ALARM (deliberate, fails towards reporting): arithmetic
+ * `X=$((1<<2))` is read as `$(` + a subshell, and its `<<2` as a heredoc
+ * whose delimiter is `2`. The lines that follow are then treated as a
+ * heredoc body until a line that is exactly `2` (or end of input). Nothing is
+ * hidden — body text is still lexed and scanned for invocations — but the
+ * statements come out attributed to a "body" and an extra `(1<<2)` statement
+ * appears. Scripts under scan do not use `<<` inside `$((…))`.
  */
 export function splitSourceIntoStatements(source: string, firstLine = 1): Statement[] {
   const out: Statement[] = [];
