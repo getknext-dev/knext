@@ -287,3 +287,18 @@ something this amendment settles. node-standalone is cold-tied, ships 778/778 co
 carries no `#3197`-class dependency; the compiled target trades that for a smaller image + the
 warm-latency/ops edges above. Recorded here so the trade is legible; the decision above is unchanged
 until the founder revisits it.
+
+## Amendment 6 — cross-reference: the self-contained single executable (ADR-0060, 2026-09-26)
+
+- **Status:** Accepted with ADR-0060, pending the same sprint-close design gate. A cross-reference;
+  it does not reopen this ADR's decision or Amendment 5's.
+
+1. **The single executable is the artifact shape for both runtimes' Bun cells**, not a vinext-only
+   shape. ADR-0054 made Next standalone (turbopack/webpack × bun) the default and compiled it
+   (Amendment 7); vinext × bun is compiled the same way. ADR-0060 treats both as one capability.
+2. **Amendment 5's premise is what ADR-0060's OKE A/B tests.** Amendment 5 established that the
+   61 ms figure is process boot and that Knative scale-from-zero was a tie (3401 vs 3610 ms).
+   ADR-0060 asks whether embedding the code that is still loaded from disk (Next's route chunks and
+   renderers) moves the *cluster* number. Its success criterion is B's median below A's by more than
+   A's IQR, n ≥ 7, one node. Until that is met, Amendment 5's framing stands: no Knative cold-start
+   win may be claimed for the single executable, self-contained or not.
