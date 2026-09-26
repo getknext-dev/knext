@@ -285,9 +285,10 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
 
   it('the loopback exemption is strict: a variable host, a userinfo trick, or a nested URL is still network', () => {
     expectAllFlagged({
-      varHost: `V="$(curl -s "http://$HOST:9898/x")"\necho "$V" | kubectl apply -f -`,
-      userinfoTrick: `V="$(curl -s "http://localhost:9898$P")"\necho "$V" | kubectl apply -f -`,
-      nestedUrl: `V="$(curl -s "http://localhost:8080/proxy?u=${URL}")"\necho "$V" | kubectl apply -f -`,
+      // Piped straight into the apply, so ONLY the loopback test decides.
+      varHost: 'curl -s "http://$HOST:9898/x" | kubectl apply -f -',
+      userinfoTrick: 'curl -s "http://localhost:9898$P" | kubectl apply -f -',
+      nestedUrl: `curl -s "http://localhost:8080/proxy?u=${URL}" | kubectl apply -f -`,
     });
   });
 
