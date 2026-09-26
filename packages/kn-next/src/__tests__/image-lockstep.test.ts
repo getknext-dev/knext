@@ -476,6 +476,14 @@ describe("verifyBuiltImageLockstep — ASSET_PREFIX embedding (storage mode) —
  */
 describe("verifyBuiltImageLockstep — a REAL compiled exec from the running Bun (#1310)", () => {
     const PREFIX = "https://cdn.example.com/my-app-real-compile";
+    // Measured layout: 1.4.0 Latin-1, 1.4.2 UTF-16LE only. Hoisted to
+    // describe-scope (not re-literalled per test, #1318) so the "pinned Bun
+    // has a MEASURED entry" guard below reads the SAME table the real-compile
+    // assertion is pinned against — a future bump only has one map to update.
+    const MEASURED: Record<string, { utf8: boolean; utf16: boolean }> = {
+        "1.4.0": { utf8: true, utf16: false },
+        "1.4.2": { utf8: false, utf16: true },
+    };
 
     function compileReal(): Buffer {
         const dir = tmp();
@@ -506,13 +514,8 @@ describe("verifyBuiltImageLockstep — a REAL compiled exec from the running Bun
         const bytes = compileReal();
         const utf8 = bytes.includes(Buffer.from(PREFIX, "utf-8"));
         const utf16 = bytes.includes(Buffer.from(PREFIX, "utf16le"));
-        // Measured layout: 1.4.0 Latin-1, 1.4.2 UTF-16LE only. Pinning it here
-        // is what makes this case a proof of the UTF-16 branch, not a pass
-        // through the UTF-8 one.
-        const MEASURED: Record<string, { utf8: boolean; utf16: boolean }> = {
-            "1.4.0": { utf8: true, utf16: false },
-            "1.4.2": { utf8: false, utf16: true },
-        };
+        // Pinning against the shared MEASURED table above is what makes this
+        // case a proof of the UTF-16 branch, not a pass through the UTF-8 one.
         const measured = MEASURED[Bun.version];
         if (measured) expect({ utf8, utf16 }).toEqual(measured);
         stageFixtureImage({ staticId: "deploytag-9", serverBytes: bytes });
@@ -524,6 +527,26 @@ describe("verifyBuiltImageLockstep — a REAL compiled exec from the running Bun
             }),
         ).toEqual({ ok: true });
     }, 60_000);
+
+    // #1318 — MEASURED above is a Record, so a Bun this repo has never
+    // measured looks up `undefined` and the exact-layout assertion above
+    // silently no-ops (`if (measured) expect(...)`) instead of failing. CI
+    // always runs on the repo's PINNED Bun, so a version bump that outpaces
+    // this table would make the UTF-16 branch's proof quietly stop proving
+    // anything — passing for the wrong reason (skipped, not verified) —
+    // exactly the failure mode `bytecode-exec-verify.test.ts`'s own
+    // "pinned Bun has a MEASURED layout" guard exists to catch for its
+    // sibling table. This is that same guard for THIS table.
+    it("the repo's pinned Bun (packageManager) has a MEASURED entry — a pin bump must measure it, not fall through to the unasserted branch", () => {
+        const pkg = JSON.parse(
+            readFileSync(
+                join(import.meta.dir, "../../../../package.json"),
+                "utf8",
+            ),
+        ) as { packageManager: string };
+        const pin = pkg.packageManager.replace(/^bun@/, "");
+        expect(MEASURED[pin]).toBeDefined();
+    });
 
     it("and still fails closed on that real exec when the configured prefix differs", () => {
         stageFixtureImage({
