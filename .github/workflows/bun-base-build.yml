@@ -77,7 +77,8 @@ jobs:
           set -euo pipefail
           prefix="$(bash infra/bun-base/prefix.sh)"
           id="$(gcloud builds submit infra/bun-base --config infra/bun-base/cloudbuild.yaml \
-            --project "$GCP_PROJECT" --substitutions="_TARGETS=$TARGETS" --async --format='value(id)')"
+            --project "$GCP_PROJECT" --gcs-source-staging-dir "gs://$BUCKET/_source" \
+            --substitutions="_TARGETS=$TARGETS" --async --format='value(id)')"
           echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
           echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "Cloud Build $id → gs://$BUCKET/$prefix/$id/" >> "$GITHUB_STEP_SUMMARY"

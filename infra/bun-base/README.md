@@ -97,11 +97,17 @@ guarantee.
 
 The aarch64 binary is cross-compiled and checked only for format (`file`). Nothing executes it.
 
-## Provisioning (one-time; GCP IAM, so a maintainer does this, not an agent)
+## Provisioning — FOUNDER ACTION REQUIRED (one-time GCP IAM; not done by an agent)
 
-The workflow reads two repository **variables**: `GCP_WIF_PROVIDER` and `GCP_BUN_BASE_SA`. They are
-variables, not secrets, because neither value is sensitive. Until both exist, the workflow fails at
-its first step.
+The workflow reads two repository **variables** (not secrets; neither value is sensitive):
+`GCP_WIF_PROVIDER` and `GCP_BUN_BASE_SA`. Until both exist it fails closed at its first step. It never
+falls back to a static key — `tests/bun-base-workflow-auth.test.ts` reds on `credentials_json`,
+`GOOGLE_APPLICATION_CREDENTIALS` or any `secrets.*` in the workflow.
+
+Least privilege: one dedicated service account, federated only for this workflow on `main`, with
+`cloudbuild.builds.editor` (submit/describe), `actAs` on the default build SA (builds run as it),
+and `storage.objectAdmin` on `gs://gsw-mcp-bun-base` only (the workflow stages its build source under
+`_source/` there, so the shared `gs://gsw-mcp_cloudbuild` bucket is not needed).
 
 ```sh
 P=gsw-mcp; N=596588086796; SA=bun-base-ci@$P.iam.gserviceaccount.com
@@ -109,19 +115,18 @@ gcloud iam workload-identity-pools create github --project $P --location global
 gcloud iam workload-identity-pools providers create-oidc knext --project $P --location global \
   --workload-identity-pool github --issuer-uri https://token.actions.githubusercontent.com \
   --attribute-mapping 'google.subject=assertion.sub,attribute.repository=assertion.repository' \
-  --attribute-condition "assertion.repository=='getknext-dev/knext' && assertion.workflow_ref.startsWith('getknext-dev/knext/.github/workflows/bun-base-build.yml@refs/heads/main')"
+  --attribute-condition "assertion.repository == 'getknext-dev/knext' && assertion.workflow_ref.startsWith('getknext-dev/knext/.github/workflows/bun-base-build.yml@refs/heads/main')"
 gcloud iam service-accounts create bun-base-ci --project $P
 gcloud iam service-accounts add-iam-policy-binding $SA --project $P --role roles/iam.workloadIdentityUser \
   --member "principalSet://iam.googleapis.com/projects/$N/locations/global/workloadIdentityPools/github/attribute.repository/getknext-dev/knext"
 gcloud projects add-iam-policy-binding $P --member serviceAccount:$SA --role roles/cloudbuild.builds.editor
 gcloud iam service-accounts add-iam-policy-binding $N-compute@developer.gserviceaccount.com --project $P \
-  --member serviceAccount:$SA --role roles/iam.serviceAccountUser   # builds run as the default build SA
-gcloud storage buckets add-iam-policy-binding gs://${P}_cloudbuild --member serviceAccount:$SA --role roles/storage.objectAdmin
+  --member serviceAccount:$SA --role roles/iam.serviceAccountUser
 gcloud storage buckets add-iam-policy-binding gs://gsw-mcp-bun-base --member serviceAccount:$SA --role roles/storage.objectAdmin
 gh variable set GCP_WIF_PROVIDER -R getknext-dev/knext \
   --body projects/$N/locations/global/workloadIdentityPools/github/providers/knext
 gh variable set GCP_BUN_BASE_SA -R getknext-dev/knext --body $SA
 ```
 
-The attribute condition restricts federation to this workflow on `main`. A dispatch from any other
-branch therefore cannot spend build minutes.
+The attribute condition pins the repository **and** this workflow on `main`, so a dispatch from any
+other branch or workflow cannot mint a token that spends build minutes.
