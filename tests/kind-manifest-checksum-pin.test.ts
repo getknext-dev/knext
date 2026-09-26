@@ -371,8 +371,12 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       varHost: 'curl -s "http://$HOST:9898/x" | kubectl apply -f -',
       userinfoTrick: 'curl -s "http://localhost:9898$P" | kubectl apply -f -',
       nestedUrl: `curl -s "http://localhost:8080/proxy?u=${URL}" | kubectl apply -f -`,
-      // As a $(…) scalar, ONLY the loopback test decides whether it is data.
-      nestedUrlScalar: `X=$(curl -s "http://localhost:8080/proxy?u=${URL}")\npython3 gen --v="$X" | kubectl apply -f -`,
+      // A non-fetcher handed a nested URL: ONLY isLoopbackUrl decides (fetchers are
+      // taint sources whatever their URL), and a plain loopback URL argument is text.
+      nestedUrlArgument: {
+        src: `mytool "http://localhost:8080/proxy?u=${URL}" | kubectl apply -f -`,
+        kind: /URL argument http:\/\/localhost:8080\/proxy\?u=/,
+      },
     });
   });
 

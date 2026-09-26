@@ -23,7 +23,7 @@
  *   round 5 — unclassified remote fetch:    M21 … M31
  *   round 5 — pinned versions fail fast:    M32 M33 M34
  *   round 6 — loopback stays a taint source: M35 M36 M41 M42
- *   round 7 — a fetched value is never data:  M37 M38 (no scalar exemption),
+ *   round 7 — a fetched value is never data:  M37 (heredoc expansions) M38 (no scalar exemption),
  *             M39 M40 M43 M44 (each allowlist entry), M45 (prefix match),
  *             M46 (file key ignored)
  *
@@ -340,10 +340,10 @@ prove(
   'const hasRemoteArg = (args) => args.some((a) => REMOTE_ARG_RE.test(a) && !isLoopbackUrl(a));',
 );
 prove(
-  'M37 no scalar exemption: a variable interpolated into a heredoc is data, not the document',
+  'M37 heredoc: the variables an unquoted heredoc interpolates are not consulted at all',
   SCANNER,
-  'for (const m of body.matchAll(/\\$\\{?([A-Za-z_]\\w*)\\}?/g)) bits.push(`echo "$${m[1]}"`);',
-  'for (const m of body.matchAll(/\\$\\{?([A-Za-z_]\\w*)\\}?/g)) bits.push(`: "$${m[1]}"`);',
+  '    if (hd && !hd.quoted) {',
+  '    if (false) {',
 );
 prove(
   'M38 no scalar exemption: a fetched variable is only network content where a command emits it',
