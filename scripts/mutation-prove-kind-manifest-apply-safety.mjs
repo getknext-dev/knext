@@ -24,6 +24,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
@@ -36,6 +37,11 @@ const PIN_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/pin-known-images.s
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
 declareMutations(14);
+
+// Both subjects must exist before anything is mutated: a missing one is a
+// FATAL throw here, never fourteen vacuous reds.
+readFileSync(SCANNER, 'utf8');
+readFileSync(PIN_SCRIPT, 'utf8');
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -51,10 +57,10 @@ function specPasses() {
 let caught = 0;
 let decorative = 0;
 
-/** Applies one mutation to `target`, requires RED, restores, requires GREEN. */
-function prove(label, target, anchor, replacement) {
+/** Applies one mutation to `file`, requires RED, restores, requires GREEN. */
+function prove(label, file, anchor, replacement) {
   console.log(`── ${label}`);
-  const snap = snapshot(target);
+  const snap = snapshot(file);
   try {
     mutate(snap, anchor, replacement);
     if (specPasses()) {
