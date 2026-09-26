@@ -45,10 +45,22 @@ import {
 
 const WORKFLOWS_DIR = resolve(import.meta.dirname, '../.github/workflows');
 
-/** A realistic synthetic "Install crane" step: named env vars AND the
- * download URL, matching every real copy's shape — required now that
- * `scanCranePins` cross-checks the two. */
+/** A realistic synthetic "Install crane" step: named env vars, the download
+ * URL (matching every real copy's shape — required now that `scanCranePins`
+ * cross-checks the two), AND a version comment matching its own
+ * CRANE_VERSION (required now that every pin must carry one, #1429
+ * follow-up). Delegates to `syntheticCraneStepWithComment` below (hoisted,
+ * so the forward reference is safe) rather than duplicating its shape. */
 function syntheticCraneStep(version: string, sha256: string): string {
+  return syntheticCraneStepWithComment(version, sha256, version);
+}
+
+/** The same shape as `syntheticCraneStep`, but with NO version comment at
+ * all — for the tests that specifically exercise the "no comment" case
+ * (either the fail-if-absent violation, or an earlier count-mismatch throw
+ * that happens before the comment check is ever reached, where the comment
+ * is simply irrelevant). */
+function syntheticCraneStepNoComment(version: string, sha256: string): string {
   return (
     'jobs:\n  p:\n    steps:\n      - name: Install crane\n        env:\n' +
     `          CRANE_VERSION: ${version}\n` +
@@ -121,6 +133,8 @@ describe('scanCranePins — finds every CRANE_VERSION/CRANE_SHA256 pair', () => 
         '  a:\n    steps:\n      - name: Install crane (part 1)\n        env:\n' +
         '          CRANE_VERSION: v9.9.9\n' +
         '  b:\n    steps:\n      - name: Install crane (part 2)\n        env:\n' +
+        '          # sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v9.9.9\n' +
+        "          # release's checksums.txt (github.com/google/go-containerregistry).\n" +
         `          CRANE_SHA256: ${'b'.repeat(64)}\n` +
         '        run: |\n' +
         '          curl -fsSL -o /tmp/crane.tar.gz \\\n' +
@@ -354,10 +368,10 @@ describe('verifyPinAgainstChecksums — fail-closed comparison', () => {
 /**
  * #1429 — a synthetic "Install crane" step in this repo's REAL shape,
  * including the trailing comment ("# sha256 of ... from the vX.Y.Z\n#
- * release's checksums.txt (...)") that names the version — unlike
- * `syntheticCraneStep` above, which omits it (most tests above don't need
- * it, and adding it there would force every existing fixture to carry a
- * comment it does not need).
+ * release's checksums.txt (...)") that names the version. `syntheticCraneStep`
+ * above delegates to this with `commentVersion === version` (a matching
+ * comment), since every well-formed fixture now needs one (#1429
+ * follow-up: every pinned crane URL must carry a version comment).
  */
 function syntheticCraneStepWithComment(
   version: string,
@@ -376,28 +390,54 @@ function syntheticCraneStepWithComment(
   );
 }
 
-describe('scanCraneVersionComments (the scanner itself, against synthetic snippets)', () => {
-  it("extracts the version from this repo's established comment wording", () => {
+describe('scanCraneVersionComments (the scanner itself, against synthetic snippets) (#1429)', () => {
+  it("extracts the version from this repo's established two-line comment wording", () => {
     const text =
       '# sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7\n' +
-      "# release's checksums.txt (github.com/google/go-containerregistry).\n";
-    expect(scanCraneVersionComments(text)).toEqual(['v0.21.7']);
+      "# release's checksums.txt (github.com/google/go-containerregistry).\n" +
+      `CRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([['v0.21.7']]);
   });
 
-  it('finds multiple comment-version mentions, in order', () => {
+  it('a SINGLE-LINE comment (no "the", no "release" wording) is also parsed — loose token matching, not phrasing', () => {
+    const text = `# pinned from v0.21.7\nCRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([['v0.21.7']]);
+  });
+
+  it('"checksum of ... vX.Y.Z" wording (no "the", no "release\'s checksums.txt") is also parsed', () => {
+    const text = `# checksum of go-containerregistry_Linux_x86_64.tar.gz v0.21.7\nCRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([['v0.21.7']]);
+  });
+
+  it('finds multiple comment-version mentions, in order, one per CRANE_SHA256 occurrence', () => {
     const text =
       '# sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v1.1.1\n' +
       "# release's checksums.txt (...)\n" +
+      `CRANE_SHA256: ${'a'.repeat(64)}\n` +
       '# sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v2.2.2\n' +
-      "# release's checksums.txt (...)\n";
-    expect(scanCraneVersionComments(text)).toEqual(['v1.1.1', 'v2.2.2']);
+      "# release's checksums.txt (...)\n" +
+      `CRANE_SHA256: ${'b'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([['v1.1.1'], ['v2.2.2']]);
   });
 
-  it('finds nothing in text with no such comment (non-vacuity: absence is not an error at this layer)', () => {
+  it('a CRANE_SHA256 with NO preceding comment block at all yields an EMPTY token list for that occurrence (not skipped, not thrown here — the caller decides)', () => {
+    const text = `CRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([[]]);
+  });
+
+  it('no CRANE_SHA256 anywhere yields an empty array', () => {
     expect(scanCraneVersionComments('jobs:\n  p:\n    steps:\n      - run: echo hi\n')).toEqual([]);
   });
 
-  it('non-vacuity: the real workflows carry this comment, and every mention matches its own file', () => {
+  it('a comment that is not DIRECTLY above (separated by a non-comment line) does not count for that pin', () => {
+    const text =
+      '# sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v1.1.1\n' +
+      'env:\n' +
+      `CRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([[]]);
+  });
+
+  it('non-vacuity: the real workflows carry this comment, and every occurrence resolves to a real version', () => {
     let total = 0;
     for (const file of [
       'supply-chain.yml',
@@ -406,13 +446,15 @@ describe('scanCraneVersionComments (the scanner itself, against synthetic snippe
     ]) {
       const text = readFileSync(resolve(WORKFLOWS_DIR, file), 'utf8');
       const mentions = scanCraneVersionComments(text);
+      for (const m of mentions)
+        expect(m.length, `${file}: expected a version token`).toBeGreaterThan(0);
       total += mentions.length;
     }
     expect(total).toBeGreaterThanOrEqual(4);
   });
 });
 
-describe("scanCranePins — a crane pin's accompanying comment must track the pin (#1429)", () => {
+describe("scanCranePins — a crane pin's accompanying comment must track ITS OWN pin (#1429)", () => {
   it('a matching comment (same version as CRANE_VERSION) is accepted', () => {
     const text = syntheticCraneStepWithComment('v9.9.9', 'a'.repeat(64), 'v9.9.9');
     const pins = scanCranePins(WORKFLOWS_DIR, {
@@ -435,15 +477,70 @@ describe("scanCranePins — a crane pin's accompanying comment must track the pi
     ).toThrow(/comment has drifted/);
   });
 
-  it('no comment at all is fine — the comment is documentation, not a second source of truth', () => {
-    // Every OTHER fixture in this file uses `syntheticCraneStep`, which
-    // carries no comment at all — this pins that shape as explicitly valid,
-    // not just "happens to pass".
+  it('no comment at all is now a VIOLATION (fail if absent) — every pinned crane URL must carry one', () => {
+    const text = syntheticCraneStepNoComment('v9.9.9', 'a'.repeat(64));
+    expect(() =>
+      scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      }),
+    ).toThrow(/no accompanying/);
+  });
+
+  it('TWO pins in one file with SWAPPED comments each throw against their OWN pin — the exact operator-e2e-nightly.yml shape (#1429 finding 2)', () => {
+    // Pin 1 is v1.1.1 but its comment names v2.2.2 (pin 2's version); pin 2
+    // is v2.2.2 but its comment names v1.1.1 (pin 1's version). The OLD
+    // file-wide `.includes()` check would pass this silently, since both
+    // v1.1.1 and v2.2.2 are present somewhere in the file — exactly the
+    // undetected-swap bug this fix closes.
+    const text =
+      `${syntheticCraneStepWithComment('v1.1.1', 'a'.repeat(64), 'v2.2.2')}\n` +
+      syntheticCraneStepWithComment('v2.2.2', 'b'.repeat(64), 'v1.1.1');
+    expect(() =>
+      scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      }),
+    ).toThrow(/comment has drifted/);
+  });
+
+  it('a comment naming the pin AND a stale version is rejected — every version token in the block must match', () => {
+    const text = syntheticCraneStepWithComment('v9.9.9', 'a'.repeat(64), 'v9.9.9 (was v9.8.0)');
+    expect(() =>
+      scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      }),
+    ).toThrow(/names v9\.8\.0, but its own CRANE_VERSION is v9\.9\.9/);
+  });
+
+  it('a SINGLE-LINE "from v9.9.9" comment satisfies the requirement end-to-end (loose parse, not one phrasing)', () => {
+    const text = syntheticCraneStepNoComment('v9.9.9', 'a'.repeat(64)).replace(
+      '          CRANE_SHA256:',
+      '          # checksum from v9.9.9\n          CRANE_SHA256:',
+    );
     const pins = scanCranePins(WORKFLOWS_DIR, {
-      readSource: () => syntheticCraneStep('v9.9.9', 'a'.repeat(64)),
+      readSource: () => text,
       listFiles: () => ['synthetic.yml'],
     });
     expect(pins).toEqual([{ file: 'synthetic.yml', version: 'v9.9.9', sha256: 'a'.repeat(64) }]);
+  });
+
+  it('a commented-out OLD CRANE_SHA256 line inside the comment block does not shift the pin↔comment pairing', () => {
+    // Two pins; the first carries a commented-out previous checksum in its
+    // comment block. Stripped-text scanning never sees that line, so the raw
+    // comment scan must skip it too or pin #1 would be paired with an empty
+    // block and pin #2 with pin #1's comment.
+    const first = syntheticCraneStepWithComment('v1.1.1', 'a'.repeat(64), 'v1.1.1').replace(
+      '          CRANE_SHA256:',
+      `          # CRANE_SHA256: ${'c'.repeat(64)}\n          CRANE_SHA256:`,
+    );
+    const text = `${first}\n${syntheticCraneStepWithComment('v2.2.2', 'b'.repeat(64), 'v2.2.2')}`;
+    const pins = scanCranePins(WORKFLOWS_DIR, {
+      readSource: () => text,
+      listFiles: () => ['synthetic.yml'],
+    });
+    expect(pins.map((p) => p.sha256)).toEqual(['a'.repeat(64), 'b'.repeat(64)]);
   });
 
   it('the real repo files pass this check today (non-vacuity + no live drift)', () => {

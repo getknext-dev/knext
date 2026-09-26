@@ -111,24 +111,54 @@ function countDownloadUrlOccurrences(text) {
 }
 
 /**
- * Every `vX.Y.Z` this repo's established comment wording names as the
- * source of a `CRANE_SHA256` value — e.g. "# sha256 of
- * go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7\n# release's
- * checksums.txt (...)". Operates on the RAW, un-stripped text: unlike
- * `scanCraneVersions`/`scanCraneChecksums`, this function's whole job is to
- * read a `#` comment, not to be fooled by one (#1429).
+ * One entry per `CRANE_SHA256` assignment, in the SAME order
+ * `scanCraneChecksums`/`scanCraneVersions` already produce theirs in — the
+ * position-based replacement for an earlier version of this scan that (a)
+ * only matched this repo's exact two-line phrasing ("# sha256 of X from the
+ * vX.Y.Z\n# release's checksums.txt"), so a single-line comment, "from
+ * v0.21.7" without "the", or "checksum of vX.Y.Z" wording all slipped past
+ * it, and (b) returned a flat, file-wide list, so the caller could only ask
+ * "does this version appear ANYWHERE in the file" rather than "does THIS
+ * pin's own comment match THIS pin" — on a file with two pins (this repo's
+ * `operator-e2e-nightly.yml` has exactly that shape), two comments that
+ * each named the OTHER pin's version passed undetected (#1429 follow-up).
  *
- * Deliberately tied to this repo's actual established phrasing rather than
- * a generic "any vX.Y.Z near a comment" scan — a looser pattern would flag
- * unrelated prose as a pin claim. If the wording changes, this scan must be
- * updated alongside it, the same way `filenameForPin()` above is the one
- * place that knows the release asset's name.
+ * For each (non-comment) `CRANE_SHA256` line, walks UPWARD collecting the
+ * contiguous block of full-line `#` comments directly above it (stopping at
+ * the first non-comment line), then extracts EVERY `v?X.Y.Z`-shaped token in
+ * that block. Deliberately loose about the surrounding prose — only the
+ * version TOKEN is pinned to a shape, not the sentence around it — because
+ * the point is which version the comment NAMES, not which phrasing it uses.
+ * All tokens are returned (not just the first) so the caller can also reject
+ * a block that names the pin's version AND a stale one.
+ *
+ * A `CRANE_SHA256` line that is itself a full-line `#` comment is skipped,
+ * exactly as `scanCraneChecksums` never sees it (it runs on stripped text) —
+ * otherwise a commented-out old pin would shift this list's ordinals off the
+ * `versions`/`checksums` pairing the caller indexes by.
+ *
+ * An EMPTY array for an occurrence means it has no comment block at all (or
+ * one with no parseable version token) — every pinned crane URL must carry
+ * one, so `scanCranePins` treats that as a violation, not "comment optional."
+ *
+ * Operates on the RAW, un-stripped text: this function's whole job is to read
+ * a `#` comment, not to have one stripped out from under it.
+ *
+ * @param {string} text
+ * @returns {string[][]} one array of `vX.Y.Z` tokens per CRANE_SHA256 line
  */
 export function scanCraneVersionComments(text) {
-  const re = /#\s*sha256 of \S+ from the (v?\d+\.\d+\.\d+)\s*\n\s*#\s*release/gi;
+  const lines = text.split('\n');
+  const shaAssignRe = /\bCRANE_SHA256\b\s*[:=]\s*['"]?[0-9a-f]{64}['"]?/i;
+  const commentLineRe = /^[ \t]*#/;
+  const versionTokenRe = /\bv?\d+\.\d+\.\d+\b/gi;
   const out = [];
-  for (const m of text.matchAll(re)) {
-    out.push(m[1].startsWith('v') ? m[1] : `v${m[1]}`);
+  for (let i = 0; i < lines.length; i++) {
+    if (commentLineRe.test(lines[i]) || !shaAssignRe.test(lines[i])) continue;
+    const block = [];
+    for (let j = i - 1; j >= 0 && commentLineRe.test(lines[j]); j--) block.unshift(lines[j]);
+    const tokens = block.join('\n').match(versionTokenRe) ?? [];
+    out.push(tokens.map((t) => `v${t.replace(/^v/i, '')}`));
   }
   return out;
 }
@@ -179,21 +209,33 @@ export function scanCranePins(workflowsDir, deps = {}) {
       );
     }
 
-    // #1429 — a comment claiming a DIFFERENT version than the pin it sits
-    // beside is exactly what a version bump that only touched CRANE_VERSION
-    // (and forgot the comment) leaves behind. Scanned from the RAW,
-    // un-stripped source (the comment is the thing under test here, not
-    // noise to remove), matched against the SAME version this pass already
-    // trusts. Only checked when the comment shape is present at all — a
-    // pin with no such comment is not itself an error; this repo's own
-    // synthetic test fixtures deliberately omit it.
+    // #1429 follow-up — every pinned crane URL must carry its OWN version
+    // comment, checked against its OWN CRANE_VERSION, not a file-wide
+    // "does this version appear anywhere" scan: on a file with two pins
+    // (operator-e2e-nightly.yml has exactly that shape), two comments that
+    // each named the OTHER pin's version passed the old `.includes()` check
+    // undetected. `scanCraneVersionComments` returns one entry per
+    // CRANE_SHA256 occurrence, in the same order `versions`/`checksums`
+    // above are already ordinally paired in, so index `i` here is the SAME
+    // pin throughout.
     const commentVersions = scanCraneVersionComments(readSource(file));
-    for (const cv of commentVersions) {
-      if (!versions.includes(cv)) {
+    for (let i = 0; i < checksums.length; i++) {
+      // `?? []` fails closed (as "no comment") should the raw-text ordinals
+      // ever disagree with the stripped-text ones.
+      const named = commentVersions[i] ?? [];
+      if (named.length === 0) {
         throw new Error(
-          `${file}: a crane pin's accompanying comment names ${cv}, but no CRANE_VERSION ` +
-            `in this file is set to ${cv} (found: ${versions.join(', ') || '(none)'}) — the ` +
-            `comment has drifted from the pin it describes (#1429).`,
+          `${file}: crane pin #${i + 1} (CRANE_VERSION ${versions[i]}) has no accompanying ` +
+            `version comment directly above its CRANE_SHA256 line — every pinned crane URL must ` +
+            `carry one naming the release its checksum came from (#1429).`,
+        );
+      }
+      const stale = named.filter((cv) => cv !== versions[i]);
+      if (stale.length > 0) {
+        throw new Error(
+          `${file}: crane pin #${i + 1}'s accompanying comment names ${stale.join(', ')}, but its ` +
+            `own CRANE_VERSION is ${versions[i]} — the comment has drifted from the pin it ` +
+            `describes (#1429).`,
         );
       }
     }
