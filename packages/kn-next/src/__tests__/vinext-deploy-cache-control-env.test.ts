@@ -20,9 +20,14 @@
  * The override scan covers the whole repo (dotfiles included) except
  * `node_modules`, build output, `.claude`, `docs/` and `apps/docs/content`
  * (user-facing prose that documents the `=0` opt-out) and test files (which set
- * `0` on purpose to prove the opt-out). It rejects every override form: `=`/`:`
+ * `0` on purpose to prove the opt-out; only test FILES are skipped, never a
+ * whole `__tests__` directory). It rejects every override form: `=`/`:`
  * assignment, Dockerfile `ENV NAME value`, empty value, `unset`, `env -u`,
- * `env -i`, and `delete process.env.NAME`.
+ * `env -i`, `delete process.env.NAME`, the bracket-literal `process.env["NAME"]`,
+ * JSON `"NAME": "0"`, a k8s `name: NAME` / `value: …` pair and the Go struct
+ * `Name: "NAME", Value: "…"` (either order). KNOWN LIMIT: a computed key
+ * (`const K = "NAME"; process.env[K] = "0"`) is not caught — the scan is
+ * textual, and the literal name never appears next to the assignment.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -38,7 +43,6 @@ const SKIP_DIRS = new Set([
     ".next",
     ".output",
     "dist",
-    "__tests__",
     ".turbo",
 ]);
 
@@ -111,11 +115,16 @@ export function findOverrides(src: string): string[] {
         )
             continue;
         const assign = line.match(
-            new RegExp(`${NAME}\\s*[=:](?![=])\\s*["']?([^\\s"',;)\`]*)`),
+            new RegExp(
+                `${NAME}["']?\\]?\\s*[=:](?![=])\\s*["']?([^\\s"',;)\`}]*)`,
+            ),
         );
         if (assign && assign[1] !== "1") hits.push(line);
         const envSpace = line.match(
-            new RegExp(`^ENV\\s+${NAME}(?:\\s+["']?([^\\s"']*))?\\s*$`, "i"),
+            new RegExp(
+                `^ENV\\s+${NAME}(?:\\s+["']?([^\\s"']*)["']?)?\\s*$`,
+                "i",
+            ),
         );
         if (envSpace && envSpace[1] !== "1") hits.push(line);
         if (new RegExp(`\\bunset\\b[^\\n]*${NAME}`).test(line)) hits.push(line);
@@ -130,7 +139,31 @@ export function findOverrides(src: string): string[] {
         if (new RegExp(`\\bdelete\\s+process\\.env\\.${NAME}`).test(line))
             hits.push(line);
     }
+    // Name/value pairs split across lines: k8s `- name: NAME` + `value: "x"` and
+    // the Go struct `Name: "NAME", Value: "x"`, in either order.
+    const V = `["']?([^\\s"',}]*)["']?`;
+    const pairs = [
+        new RegExp(
+            `\\bname:\\s*["']?${NAME}["']?\\s*,?\\s*\\n?\\s*value:\\s*${V}`,
+            "gi",
+        ),
+        new RegExp(
+            `\\bvalue:\\s*${V}\\s*,?\\s*\\n?\\s*name:\\s*["']?${NAME}["']?`,
+            "gi",
+        ),
+    ];
+    for (const re of pairs) {
+        for (const m of src.matchAll(re))
+            if (m[1] !== "1") hits.push(m[0].replace(/\s+/g, " "));
+    }
     return [...new Set(hits)];
+}
+
+/** Whether a vite config wires the bun entry as the build entry (comments ignored). */
+export function isBunEntryWired(viteSrc: string): boolean {
+    return /\bentry\s*:[^\n]*["']\.\/knext-bun-entry\.mjs["']/.test(
+        scrub(viteSrc, false),
+    );
 }
 
 const FILES = walk(REPO);
@@ -168,9 +201,17 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         `RUN env --unset=${NAME} node x`,
         `RUN env -i PATH=$PATH node x`,
         `delete process.env.${NAME};`,
+        `ENV ${NAME} "0"`,
+        `process.env["${NAME}"] = "0";`,
+        `{"${NAME}": "0"}`,
+        `- name: ${NAME}\n  value: "0"`,
+        `- value: "0"\n  name: ${NAME}`,
+        `{Name: "${NAME}", Value: "0"}`,
+        `{\n  Name:  "${NAME}",\n  Value: "0",\n}`,
+        `{Value: "", Name: "${NAME}"}`,
     ];
     for (const b of BAD) {
-        it(`flags: ${b}`, () => {
+        it(`flags: ${JSON.stringify(b)}`, () => {
             expect(findOverrides(b)).not.toEqual([]);
         });
     }
@@ -182,11 +223,32 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         `# ${NAME}=0 documents the opt-out`,
         `if (env.${NAME} !== undefined) return;`,
         `env.${NAME} = "1";`,
+        `ENV ${NAME} "1"`,
+        `- name: ${NAME}\n  value: "1"`,
+        `{Name: "${NAME}", Value: "1"}`,
     ]) {
-        it(`allows: ${g}`, () => {
+        it(`allows: ${JSON.stringify(g)}`, () => {
             expect(findOverrides(g)).toEqual([]);
         });
     }
+});
+
+describe("bun-entry wiring fixture", () => {
+    it("a renamed reference plus a trailing comment is not wired; a real entry is", () => {
+        expect(
+            isBunEntryWired(
+                "nitro({ preset: 'bun', entry: './other.mjs' }) // knext-bun-entry",
+            ),
+        ).toBe(false);
+        expect(isBunEntryWired("/* entry: './knext-bun-entry.mjs' */ x")).toBe(
+            false,
+        );
+        expect(
+            isBunEntryWired(
+                "nitro({ preset: 'bun', entry: './knext-bun-entry.mjs' })",
+            ),
+        ).toBe(true);
+    });
 });
 
 describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () => {
@@ -248,9 +310,7 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
                 const wired = readdirSync(dir)
                     .filter((n) => /^vite\.config\./.test(n))
                     .some((n) =>
-                        /knext-bun-entry/.test(
-                            readFileSync(join(dir, n), "utf8"),
-                        ),
+                        isBunEntryWired(readFileSync(join(dir, n), "utf8")),
                     );
                 if (!wired) {
                     throw new Error(
