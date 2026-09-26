@@ -343,11 +343,15 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     // root before any install-time code runs); the stdout-only-silenced
     // shape this test protects is otherwise unchanged.
     expect(
-      /apk add --no-cache python3 make g\+\+ npm su-exec >\/dev\/null$/m.test(rebuildSrc),
+      /apk add --no-cache python3~3\.12 make~4\.4 g\+\+~14\.2 npm~11\.6 su-exec~0\.2 >\/dev\/null$/m.test(
+        rebuildSrc,
+      ),
       'apk stdout may still be silenced, but stderr must flow (no trailing 2>&1 redirecting it into /dev/null too) so a failure under set -eu is diagnosable',
     ).toBe(true);
     expect(
-      rebuildSrc.includes('apk add --no-cache python3 make g++ npm su-exec >/dev/null 2>&1'),
+      rebuildSrc.includes(
+        'apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 su-exec~0.2 >/dev/null 2>&1',
+      ),
       'the old shape swallowed BOTH streams — must be gone',
     ).toBe(false);
   });

@@ -237,7 +237,9 @@ describe.skipIf(!dockerAvailable())(
       const scriptSrc = require('node:fs').readFileSync(NATIVE_REBUILD_SH, 'utf8') as string;
       const apkLine = scriptSrc
         .split('\n')
-        .find((l) => l.includes('apk add --no-cache python3 make g++ npm su-exec'));
+        .find((l) =>
+          l.includes('apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 su-exec~0.2'),
+        );
       const adduserLine = scriptSrc.split('\n').find((l) => l.trim().startsWith('adduser -D -H'));
       const chownLine = scriptSrc
         .split('\n')

@@ -140,13 +140,24 @@ const TYPECHECK_JOB = 'typecheck-root';
 
 let cachedShowConfig: ShownConfig | undefined;
 
-/** `tsc --showConfig -p <cfg>` — the resolved program, not the raw file. */
+/**
+ * `tsc --showConfig -p <cfg>` — the resolved program, not the raw file.
+ *
+ * Runs the SAME binary the root `typecheck` script actually invokes
+ * (`typescript-tsc7`, the TS7 alias — see `package.json`'s `typecheck`
+ * script and `.claude/research/ts7-migration-plan.md`), not the plain
+ * `typescript` package. TS7 resolves compiler options differently in at
+ * least one way already found (its `types` auto-inclusion default), so
+ * checking this against a DIFFERENT binary than the one that actually
+ * gates CI would let this guard pass while the real gate's resolved config
+ * silently drifted.
+ */
 function showConfig(): ShownConfig {
   if (cachedShowConfig) return cachedShowConfig;
   const stdout = execFileSync(
     process.execPath,
     [
-      join(REPO_ROOT, 'node_modules', 'typescript', 'bin', 'tsc'),
+      join(REPO_ROOT, 'node_modules', 'typescript-tsc7', 'bin', 'tsc'),
       '--showConfig',
       '-p',
       TSCONFIG_PATH,

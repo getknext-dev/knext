@@ -133,21 +133,14 @@
 #     `scripts/generate-musl-native-lockfile.sh` is the (real-network,
 #     contributor-run, not CI-run) tool that adds a new pin to that corpus.
 #
-# NOT done here, and stated rather than left implicit (#1257's other
-# acceptance leg): the `apk add` toolchain packages themselves are pinned by
-# NAME only, not by an exact NEVRA version or content digest — this script
-# cannot safely author those pins without a live container to resolve
-# against (no local docker in this environment; guessing a version risks
-# either being wrong, in which case CI reds outright, or being silently
-# stale). Alpine's package index IS signature-verified by `apk` itself
-# against Alpine's own trusted keys (not a bare unauthenticated mirror
-# fetch), and the base image `apk add` runs inside is already pinned by OCI
-# digest (`STANDALONE_BUN_IMAGE` in scripts/e2e-deploy.sh) — so this is a
-# real, if narrower, gap than a full digest pin: a mirror-side security
-# patch to python3/make/g++/npm/su-exec between two runs of this script can
-# still shift the exact toolchain build without either pin changing. Tracked
-# to close in a follow-up once a live CI run's `apk add` output supplies the
-# exact resolved versions to pin against (see the PR description).
+# apk toolchain pins (#1425): each `apk add` package carries a `~X.Y`
+# minor-lock (Alpine's fuzzy prefix match), resolved against the Alpine 3.22
+# index the digest-pinned base image ships (python3~3.12, make~4.4, g++~14.2,
+# npm~11.6, su-exec~0.2). Deliberately NOT an exact `=X.Y.Z-rN` pin: Alpine
+# mirrors keep only the latest build per release branch, so an exact pin
+# reds CI the next time Alpine ships a routine security bump. The minor-lock
+# rejects a minor/major drift while accepting patch-level bumps. Guarded by
+# tests/musl-apk-pin.test.ts.
 set -eu
 
 ROOT="${1:?usage: e2e-native-rebuild-musl.sh <standalone-root> [lockfiles-dir]}"
@@ -187,8 +180,7 @@ trap restore_ownership EXIT
 # (#1257 round 7 — see the header note). stdout only is suppressed — an apk
 # failure under `set -eu` must not abort with zero diagnostic output (review
 # finding): stderr reaches the caller's log.
-apk add --no-cache python3 make g++ npm su-exec >/dev/null
-
+apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 su-exec~0.2 >/dev/null
 # #1257 round 7 — an unprivileged user every npm install/ci below is
 # `su-exec`'d to, so install scripts (and anything node-gyp/npm itself runs)
 # never execute as root. `-D` (no password), `-H` (no default /home/<user>
