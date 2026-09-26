@@ -84,7 +84,7 @@ function walk(dir: string, out: string[] = []): string[] {
         if (rel === "docs" || rel === join("apps", "docs", "content")) continue;
         const st = statSync(p);
         if (st.isDirectory()) walk(p, out);
-        else if (!/\.test\.[cm]?[tj]sx?$/.test(name) && !/\.mdx?$/.test(name))
+        else if (!/\.test\.[cm]?[tj]sx?$/.test(name) && !/\.md$/.test(name))
             out.push(p);
     }
     return out;
@@ -147,8 +147,23 @@ const HASH_COMMENT =
 function codeLines(src: string, path: string): string[] {
     const file = basename(path);
     let text = src;
-    if (JS_FAMILY.test(file)) text = scrub(src, false);
-    else if (HASH_COMMENT.test(file))
+    if (JS_FAMILY.test(file)) {
+        // No regex-literal parsing (a `/^https?:\/\//` desyncs any scanner).
+        // Fail closed instead: `scrub` keeps line numbering, so a line that
+        // mentions the name RAW but not SCRUBBED was eaten as a "comment"; keep
+        // its raw text (an unknown form → red) unless it is a pure comment line.
+        const raw = src.split("\n");
+        text = scrub(src, false)
+            .split("\n")
+            .map((l, i) =>
+                raw[i]?.includes(NAME) &&
+                !l.includes(NAME) &&
+                !/^\s*(?:\/\/|\/\*|\*|#)/.test(raw[i])
+                    ? raw[i]
+                    : l,
+            )
+            .join("\n");
+    } else if (HASH_COMMENT.test(file))
         text = src
             .split("\n")
             .map((l) => (/^\s*#/.test(l) ? "" : l))
@@ -175,12 +190,8 @@ const ASSIGN_SAFE = [
     new RegExp(
         `^(?:[\\w$.]*env)(?:\\.${N}|\\[["']${N}["']\\])\\s*=\\s*["']1["'];?$`,
     ),
-    new RegExp(
-        `^\\{?\\s*Name:\\s*"${N}",\\s*Value:\\s*"1",?\\s*\\}?,?$`,
-    ),
-    new RegExp(
-        `^\\{?\\s*Value:\\s*"1",\\s*Name:\\s*"${N}",?\\s*\\}?,?$`,
-    ),
+    new RegExp(`^\\{?\\s*Name:\\s*"${N}",\\s*Value:\\s*"1",?\\s*\\}?,?$`),
+    new RegExp(`^\\{?\\s*Value:\\s*"1",\\s*Name:\\s*"${N}",?\\s*\\}?,?$`),
 ];
 /** The only READ shapes, each bound to the file it is legitimate in. */
 const READ_SAFE: [RegExp, RegExp][] = [
@@ -206,26 +217,22 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
         if (ASSIGN_SAFE.some((re) => re.test(l))) return;
         if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) return;
         if (NAME_KEY.test(l)) {
-            const next = lines[idx + 1] ?? "";
-            const prev = lines[idx - 1] ?? "";
-            const nextIsValue = VALUE_KEY.test(next);
-            const prevIsValue = VALUE_KEY.test(prev);
-            const dashed = /^(-|\{)/.test(l);
-            // `- name: N` (or `{ name: N`) opens its entry, so its value is
-            // the NEXT line; otherwise the value is whichever neighbour is a
-            // value key, and two candidates is ambiguous → unsafe.
-            const partner = dashed
-                ? nextIsValue
-                    ? next
-                    : ""
-                : nextIsValue !== prevIsValue
-                  ? nextIsValue
-                      ? next
-                      : prev
-                  : "";
-            const doubled = dashed && VALUE_KEY.test(lines[idx + 2] ?? "");
-            if (partner && !doubled && VALUE_ONE.test(partner)) return;
-            hits.push(`${l}  [name without a value of exactly 1]`);
+            // The ITEM is the run of lines from the nearest line opening one
+            // (`-` or `{`) to the next line that opens or closes one. It must
+            // hold exactly one value key, equal to 1, and no `valueFrom`; a
+            // name never borrows a value across an item boundary.
+            let start = idx;
+            while (start > 0 && !/^[-{]/.test(lines[start])) start--;
+            let end = idx + 1;
+            while (end < lines.length && !/^[-{}]/.test(lines[end])) end++;
+            const item = lines.slice(start, end);
+            const values = item.filter((x) => VALUE_KEY.test(x));
+            const ok =
+                values.length === 1 &&
+                VALUE_ONE.test(values[0]) &&
+                !item.some((x) => /valueFrom/i.test(x));
+            if (ok) return;
+            hits.push(`${l}  [name without a single value of exactly 1]`);
             return;
         }
         hits.push(`${l}  [unknown form]`);
@@ -241,8 +248,24 @@ export function isBunEntryWired(viteSrc: string): boolean {
     const code = scrub(viteSrc, true, /^\.\/knext-(?:bun|node)-entry\.mjs$/);
     const at = code.indexOf("export default");
     if (at < 0) return false;
-    const exported = code.slice(at);
-    const re = /\bnitro\s*\(\s*\{/g;
+    // Bracket-match the exported expression: text after it is not the config.
+    let e = at + "export default".length;
+    let d = 0;
+    let opened = false;
+    for (; e < code.length; e++) {
+        const c = code[e];
+        if ("({[".includes(c)) {
+            d++;
+            opened = true;
+        } else if (")}]".includes(c)) d--;
+        if (opened && d === 0) {
+            if (/^\s*=>/.test(code.slice(e + 1))) continue;
+            e++;
+            break;
+        }
+    }
+    const exported = code.slice(at, e);
+    const re = /(?<![\w$.])nitro\s*\(\s*\{/g;
     for (let m = re.exec(exported); m; m = re.exec(exported)) {
         const start = m.index + m[0].length - 1;
         let depth = 0;
@@ -265,7 +288,7 @@ export function isBunEntryWired(viteSrc: string): boolean {
             depthAt[i - start] = depth;
         }
         if (
-            /(?:^|[\s,])entry\s*:\s*(?:\w+\s*\?\s*['"]\.\/knext-node-entry\.mjs['"]\s*:\s*)?['"]\.\/knext-bun-entry\.mjs['"]\s*(?:,|$)/.test(
+            /(?:^|[\s,])entry\s*:\s*(?:onNode\s*\?\s*['"]\.\/knext-node-entry\.mjs['"]\s*:\s*)?['"]\.\/knext-bun-entry\.mjs['"]\s*(?:,|$)/.test(
                 top,
             )
         )
@@ -346,6 +369,23 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.yaml", `- name: ${NAME}`],
         ["x.mjs", `env.${NAME} = "1"; env.${NAME} = "0";`],
         ["x.yaml", `- name: ${NAME}\n  value: "1"\n  value: "0"`],
+        // round-4 reviewer inputs
+        ["x.mjs", `const re = /^https?:\\/\\//; process.env.${NAME} = "0";`],
+        [
+            "x.mjs",
+            `const q = /'/; const u = 'http://x'; process.env.${NAME} = "0";`,
+        ],
+        [
+            "x.yaml",
+            `env:\n- value: "0"\n  valueFrom: null\n  name: ${NAME}\n- value: "1"\n  name: OTHER`,
+        ],
+        [
+            "x.yaml",
+            `- name: ${NAME}\n  value: "1"\n  valueFrom: null\n  value: "0"`,
+        ],
+        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  x: y\n  value: "0"`],
+        // a block-comment INTERIOR line without a leading `*` is not pure comment
+        ["x.mjs", `/*\n process.env.${NAME} = "0";\n*/`],
         // an ambiguous neighbour on both sides is refused
         ["x.yaml", `value: "1"\nname: ${NAME}\nvalue: "1"`],
         // unrecognised file type: comments are not stripped, so a mention fails
@@ -375,7 +415,7 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.go", `{\n  Name:  "${NAME}",\n  Value: "1",\n}`],
         ["Dockerfile", `# ${NAME}=0 documents the opt-out`],
         ["x.mjs", `// ${NAME}=0 documents the opt-out\nx();`],
-        ["x.mjs", `/*\n process.env.${NAME} = "0";\n*/`],
+        ["x.mjs", `/*\n * process.env.${NAME} = "0";\n */`],
         [
             "packages/kn-next/src/adapters/response-cache-control.mjs",
             `if (!env || env.${NAME} !== undefined) return;`,
@@ -396,6 +436,23 @@ describe("bun-entry wiring fixture", () => {
     const wrap = (nitroArg: string, before = "") =>
         `${before}\nexport default defineConfig({ plugins: [nitro(${nitroArg})] });`;
     const NOT_WIRED: [string, string][] = [
+        [
+            "a dead nitro() AFTER the export",
+            `export default defineConfig({ plugins: [nitro({ entry: './other.mjs' })] });\nconst dead = nitro({ entry: './knext-bun-entry.mjs' });`,
+        ],
+        [
+            "a member call named nitro",
+            wrap(`{ entry: './knext-bun-entry.mjs' }`).replace(
+                "nitro(",
+                "foo.nitro(",
+            ),
+        ],
+        [
+            "a ternary on some other condition",
+            wrap(
+                `{ entry: c ? './knext-node-entry.mjs' : './knext-bun-entry.mjs' }`,
+            ),
+        ],
         [
             "renamed entry + trailing comment",
             "export default nitro({ preset: 'bun', entry: './other.mjs' }) // knext-bun-entry",
@@ -441,10 +498,7 @@ describe("bun-entry wiring fixture", () => {
                 `{ opts: { ...(c ? { entry: './knext-bun-entry.mjs' } : {}) } }`,
             ),
         ],
-        [
-            "the node entry only",
-            wrap(`{ entry: './knext-node-entry.mjs' }`),
-        ],
+        ["the node entry only", wrap(`{ entry: './knext-node-entry.mjs' }`)],
     ];
     for (const [why, src] of NOT_WIRED) {
         it(`is NOT wired: ${why}`, () => {
@@ -462,7 +516,9 @@ describe("bun-entry wiring fixture", () => {
     });
     it("is wired: a plain entry, and the runtime ternary the template uses", () => {
         expect(
-            isBunEntryWired(wrap(`{ preset: 'bun', entry: './knext-bun-entry.mjs' }`)),
+            isBunEntryWired(
+                wrap(`{ preset: 'bun', entry: './knext-bun-entry.mjs' }`),
+            ),
         ).toBe(true);
         expect(
             isBunEntryWired(
@@ -531,7 +587,7 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
                 // entry (or the scaffolder template) must wire it in...
                 const dir = dirname(f);
                 const wired = readdirSync(dir)
-                    .filter((n) => /^vite\.config\./.test(n))
+                    .filter((n) => /^vite\.config\.m?[jt]s(?:\.hbs)?$/.test(n))
                     .some((n) =>
                         isBunEntryWired(readFileSync(join(dir, n), "utf8")),
                     );
