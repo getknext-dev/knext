@@ -8,11 +8,12 @@ Next.js compatibility suite, honest about every exclusion. This page describes e
 verified, how, and what the claim does and does not cover.
 
 <Callout type="info">
-**The claim.** knext runs the official `vercel/next.js` **deploy-mode e2e suite** against every
-supported combination of runtime (Node, Bun) and builder (the standalone build, or the `vinext`
-build). Each combination — a **cell** — is tracked and credentialed separately: a green result on
-one cell says nothing about another. The scope — including the small set of documented exclusions
-— is spelled out below.
+**The claim.** knext runs the official `vercel/next.js` **deploy-mode e2e suite** against each
+combination of runtime (Node, Bun) and builder (Turbopack, webpack, or `vinext`). Each combination
+— a **cell** — is tracked separately: a green result on one cell says nothing about another.
+Four cells are in scope for v1.0: Node and Bun, each on Turbopack and on webpack. The `vinext`
+cells are measured, not credentialed. The scope — including the small set of documented
+exclusions — is spelled out below.
 </Callout>
 
 ## What "the official suite" is
@@ -28,16 +29,18 @@ deployment your scripts produce — the same validation path the reference adapt
 knext supports building and running a Next.js app in more than one shape. Each shape is its own
 compatibility cell, tracked with its own evidence:
 
-- **Standalone build, Node runtime.** `next build`'s own standalone output (`server.js`), booted
-  under Node. Selectable — this is not a deprecated path.
-- **Standalone build, Bun runtime.** Also selectable. The same standalone output, but compiled
-  ahead of time into a single **bytecode executable** and run on Bun. This is what `knext build`
-  produces when the standalone builder targets Bun.
-- **`vinext` build, Bun runtime.** knext's own build pipeline, compiled into a bytecode single
-  executable on Bun. This is the **default** build today.
+- **Turbopack build, Bun runtime (the default).** `next build`'s standalone output, with the
+  server compiled ahead of time into a **bytecode executable** that runs on Bun. This is what
+  `knext build` produces when you set nothing.
+- **Turbopack build, Node runtime.** The same standalone output (`server.js`) booted under Node,
+  with a V8 compile cache baked into the image. Selectable with `runtime: 'node'`.
+- **Webpack build, Bun or Node runtime.** The same two runtimes, with `next build --webpack`
+  as the bundler (`build: 'webpack'`).
+- **`vinext` build, Bun runtime.** The vinext build, compiled into a bytecode executable on Bun.
+  Selectable with `build: 'vinext'`; measured, not credentialed for v1.0.
 - **`vinext` build, Node runtime.** The same vinext build, emitted for Node instead of compiled for
   Bun, and run with a V8 compile cache baked into the image. It builds and boots today; the suite
-  has not been run against it yet.
+  has no lane for it yet.
 
 ## How knext runs the suite
 
@@ -46,7 +49,7 @@ compatibility cell, tracked with its own evidence:
   regression.
 - **Real lifecycle scripts.** The deploy tests run through knext's lifecycle scripts, which pack
   the `@getknext/core` adapter, set `NEXT_ADAPTER_PATH`, and boot each cell's own artifact — the
-  standalone `server.js` under Node or Bun, or the compiled executable, depending on the cell under
+  standalone `server.js` on Node, or the compiled executable on Bun, depending on the cell under
   test.
 - **16 shards, on a schedule.** Each cell's suite run is sharded 16 ways (matching the reference
   adapter setup). Two kinds of scheduled run exist per cell — see **Credentialing**, below — plus
@@ -60,8 +63,9 @@ compatibility cell, tracked with its own evidence:
 A single green run — even a green nightly — is evidence, not a credential. knext's v1.0 bar asks
 for more:
 
-- **Every supported cell earns its own credential.** There is no single "the suite is green"
-  claim; each runtime × builder cell must independently bank **14 consecutive scheduled nights**
+- **Every v1.0 cell earns its own credential.** There is no single "the suite is green"
+  claim; each of the four cells (Node and Bun, each on Turbopack and on webpack) must independently
+  bank **14 consecutive scheduled nights**
   where every shard reports zero failed and zero not-run tests, and no new entry lands in the
   documented flaky-exceptions ledger for that cell.
 - **A credential night runs against a frozen release build of knext**, not against the
@@ -70,22 +74,27 @@ for more:
 - **Nightly runs on the main branch are early warning only.** They keep running, and a red one
   still raises an alarm, but they can never advance a cell toward its 14-night credential — only a
   scheduled run against a frozen release build counts.
+- **`vinext` is outside the v1.0 credential.** The `vinext` × Bun cell is selectable but measurably
+  below parity, so its number is published as a measurement and it gets no 14-night window. The
+  `vinext` × Node cell has no suite lane yet. Both can join the credential set in a later release.
 - **No cell is credentialed yet.** A frozen release build for credentialing has not been cut, so no
   cell currently holds a 14-night streak. This page will be updated with per-cell credential status
   once a streak exists to report.
 
 ## Results
 
-The numbers below are what the most recent **main-branch nightly** (early warning, not a
-credential) has observed for each cell. Treat them as current evidence of where each cell stands
-today, not as a completed v1.0 credential.
+The numbers below are the most recent runs for each cell. Treat them as current evidence of where
+each cell stands today, not as a completed v1.0 credential. Runs marked "one run" were a manually
+dispatched run against Next.js v16.2.0: verified once, not credentialed.
 
 | Cell | Most recent evidence | Cadence |
 |---|---|---|
-| Standalone build, **Node** runtime (default) | 778 tests passed, 0 failed, against Next.js v16.2.0 | Nightly (main), early warning |
-| Standalone build, **Bun** runtime, compiled executable | Not yet run through the official suite — the suite lane still boots the uncompiled server and does not exercise the shipped compiled artifact | — |
-| `vinext` build, **Bun** runtime | Selectable, not the default. Below the Node cell's pass rate; tracked on its own bar, see [Bun & the compiled executable](/docs/bun-runtime) | Weekly |
-| `vinext` build, **Node** runtime | Buildable and booted on every PR (GET 200, compile cache baked and accepted); not yet run through the official suite | — |
+| Turbopack build, **Node** runtime | 778 tests passed, 0 failed, against Next.js v16.2.0, on the nightly | Nightly (main), early warning |
+| Turbopack build, **Bun** runtime, compiled executable (default) | 778 passed, 0 failed, on the compiled executable (one run, Bun 1.4.2); its nightly credential lane is wired and waiting for a release candidate | One run; credential lane scheduled |
+| Webpack build, **Node** runtime | 778 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
+| Webpack build, **Bun** runtime | 778 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
+| `vinext` build, **Bun** runtime | 727 passed, 51 failed of 778 — a measurement, not a credential. Tracked on its own bar, see [Bun & the compiled executable](/docs/bun-runtime) | Weekly |
+| `vinext` build, **Node** runtime | Buildable and booted on every PR (GET 200, compile cache baked and accepted); no suite lane yet | — |
 
 ## What the claim covers — and what it doesn't
 

@@ -1,10 +1,11 @@
 ---
 title: Use Bun's standard library
-description: Your app compiles into a single Bun executable, so prefer Bun's built-in APIs over npm packages that reimplement them.
+description: Your server compiles into a Bun executable, so prefer Bun's built-in APIs over npm packages that reimplement them.
 ---
 
-Your app is built with vinext and compiled into a single Bun executable. Bun is the runtime, and
-that changes which library you should reach for.
+On the default build (`runtime: 'bun'`), your server is compiled into a Bun executable. Bun is the
+runtime, and that changes which library you should reach for. The same holds for the vinext build,
+which compiles your whole app into one binary.
 
 **Prefer Bun's built-in APIs over an npm package that does the same thing.** They are already inside
 the binary, so they cost nothing to add, and they are native code rather than JavaScript.
@@ -13,9 +14,9 @@ the binary, so they cost nothing to add, and they are native code rather than Ja
 
 Every npm dependency you add is compiled into the executable. That has three effects you can feel:
 
-- **Binary size.** A production build is around 70 MB before your dependencies. Each package that
+- **Binary size.** A vinext production build is around 70 MB before your dependencies. Each package that
   duplicates something Bun already does adds to what your cluster pulls on every deploy.
-- **Boot speed.** The whole point of this build is starting fast — the server **boots** in ~61 ms
+- **Boot speed.** The whole point of compiling is starting fast — the vinext build **boots** in ~61 ms
   to the first response (a fresh local process; on Knative scale-from-zero the platform's scheduling
   dominates the end-to-end cold start — see [Scale-to-zero & cold starts](/docs/scale-to-zero)).
   Bun's built-ins are native, so they add no JavaScript for the runtime to parse and execute at boot.

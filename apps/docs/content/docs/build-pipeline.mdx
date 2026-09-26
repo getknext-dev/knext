@@ -1,6 +1,6 @@
 ---
 title: How your app is built
-description: knext's default build compiles your Next.js app with next build into a standalone server, run by a small supervisor — the official-adapter-verified target. vinext (a single self-contained executable) stays selectable.
+description: knext's default build compiles your Next.js app with next build into a standalone server, run as a Bun bytecode executable — the official-adapter-verified target. vinext (a single executable) stays selectable.
 ---
 
 When you run `knext build`, knext turns your Next.js app into a deployable artifact your image
@@ -26,7 +26,7 @@ const config: KnativeNextConfig = {
   registry: 'registry.example.com/acme',
   // build: 'turbopack' is the default — you can state it explicitly, but you don't need to
   // runtime: 'bun' is ALSO the default: the standalone server compiles into a Bun
-  // bytecode single executable. Set runtime: 'node' for the uncompiled fallback.
+  // bytecode executable. Set runtime: 'node' for the uncompiled fallback.
 };
 ```
 
@@ -71,9 +71,11 @@ const config: KnativeNextConfig = {
 Both the `turbopack` and `webpack` targets have a prerequisite in your project, not just in the
 config: `knext build` runs your app's own build script, so that script must run `next build`
 (with `--webpack` for the webpack target) and `output: 'standalone'` set in `next.config.ts` —
-otherwise there is no standalone server for the image to copy. Apps created by `knext create` are
-vinext apps whose build script runs `vite build` and whose `next.config.ts` deliberately omits
-`output`, so switching such an app to either of these targets means changing both first.
+otherwise there is no standalone server for the image to copy. Apps created by `knext create` already
+satisfy this (pass `--builder vinext` to scaffold the vinext shape instead). An app whose build
+script runs `vite build` and whose `next.config.ts` omits `output` must change both before you
+switch it to either of these targets, and an app that stays on vinext must set `build: 'vinext'`
+explicitly — an absent `build` means Turbopack.
 
 If you select `build: 'turbopack'` or `build: 'webpack'` and your build script still doesn't
 produce `.next/standalone` (for example, the build script wasn't updated), `knext build` fails
@@ -119,7 +121,7 @@ Nothing is compiled into an executable on this target. Instead:
   (`Dockerfile.vinext-node`, next to your `Dockerfile`) boots the server once during
   `docker build` and warms your configured **health check path** (`healthCheckPath` in
   `kn-next.config.ts`, default `/api/health`) before shipping the compiled code as a layer.
-  `knext deploy` and `knext preview` — the two commands that actually run `docker build` —
+  `knext deploy` and `preview` — the two commands that actually run `docker build` —
   thread a custom `healthCheckPath` through automatically as a `--build-arg`, so a custom health
   route works with nothing extra to configure through either of them. `knext build` does **not**:
   it only stages `Dockerfile.vinext-node` into your app (and never runs docker itself), so if you
@@ -170,9 +172,9 @@ Two differences from the Bun executable, stated plainly:
 - **The request body cap is enforced as the body is read**, not before your handler runs. The limit
   is the same `KNEXT_MAX_REQUEST_BYTES`.
 
-## The pipeline
+## The vinext pipeline
 
-`knext build` produces the executable in two stages:
+On the vinext target, `knext build` produces the executable in two stages:
 
 1. **`vite build`** — vinext compiles your app and emits a [nitro](https://nitro.build) server
    bundle targeting the **Bun** preset (a `.output` directory whose entry is an ES module).
@@ -260,7 +262,7 @@ system and CPU it was compiled for.
 
 ## Requirements
 
-### Your app must be an ES module
+### For vinext: your app must be an ES module
 
 vinext builds through Vite, whose server/client (RSC ↔ SSR) module graph requires your app to be an
 **ES module**. Set it in `package.json`:
@@ -284,7 +286,7 @@ Without `"type": "module"`, the build fails while wiring up React Server Compone
 server/client module graph cannot be resolved — rather than producing a broken binary. A CommonJS
 app is not supported on this target.
 
-### Building requires Bun 1.4 or newer
+### Building on the Bun runtime or vinext requires Bun 1.4 or newer
 
 The compile step shells out to `bun build --compile`, so the machine doing the build needs
 **Bun 1.4.0 or newer** on its `PATH`. (The `knext` CLI itself runs under plain Node; only this one
@@ -298,22 +300,21 @@ on anyone deploying an already-built image.
 
 ## Compatibility, stated honestly
 
-knext's official-suite credential — [778/778, re-verified nightly](/docs/compat-suite) — was earned
+knext's official-suite result — [778/778, re-verified nightly on Node](/docs/compat-suite) — was earned
 on the **standalone** target (the `build: 'turbopack'` shape above), which is a *different artifact*
-from the compiled vinext executable. If suite-verified compatibility is what you need, that target
-is selectable today — with one caveat stated plainly: the suite runs against the standalone server
-directly, so the credential covers that output rather than the supervisor knext boots it with. The
-suite lane for the compiled vinext executable is being stood up; until it
-publishes a green run, treat the compiled build's compatibility as **measured per feature rather
-than suite-verified**, and read the per-feature status on the
-[compatibility matrix](/docs/compat-matrix) rather than assuming the standalone number carries over.
+from the compiled vinext executable. The default Bun executable and the webpack builds each passed
+the suite once at 778/0; none of these cells is credentialed yet. The suite runs against the
+standalone server directly, so the result covers that output rather than the supervisor knext boots
+it with. The `vinext` build is **measured, not credentialed**: its latest run passed 727 of 778
+tests. Read the per-feature status on the [compatibility matrix](/docs/compat-matrix) rather than
+assuming the standalone number carries over.
 
 The remaining gaps are largely a function of how far the underlying vinext framework has matured on
 areas such as streaming/Suspense flushing, Partial Prerendering, Cache Components (`'use cache'`),
 edge middleware, and internationalized routing. The matrix marks each honestly — ✅ only where a
 red-on-fail check backs it, ⚠️ where something is implemented but unguarded, and ❌/⛔ where it is a
-known or upstream-gated gap. Nothing there is papered over, and the first published suite number for
-the compiled build may be low — it gets published anyway.
+known or upstream-gated gap. Nothing there is papered over, and the vinext number is published as it
+is measured, even when it is low.
 
 <Callout type="info">
 **Which page answers what.** This page covers *how* the build works and what it needs. For the

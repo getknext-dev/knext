@@ -189,7 +189,7 @@ describe('docs content — CLI reference matches the real verb set', () => {
   // The bin dispatches exactly these subcommands; anything else runs `deploy`.
   // Source of truth: packages/kn-next/src/cli/deploy.ts (dispatcher).
   it('documents every bin-dispatched subcommand', () => {
-    for (const verb of ['doctor', 'status', 'db bind', 'db migrate', 'rollback', 'gc']) {
+    for (const verb of ['doctor', 'status', 'db bind', 'db migrate', 'rollback', 'gc', 'init-ci']) {
       expect(cli, `cli.mdx should document \`knext ${verb}\``).toContain(`knext ${verb}`);
     }
   });
@@ -206,7 +206,7 @@ describe('docs content — CLI reference matches the real verb set', () => {
     // — both list and comment here track the dispatcher's truth, and this
     // enumeration is the guard's known weakness: it names non-verbs, so a verb
     // GAINING routing must remove its entry in the same PR.)
-    for (const notAVerb of ['knext deploy-all', 'knext init']) {
+    for (const notAVerb of ['knext deploy-all', 'knext init ']) {
       expect(cli).not.toContain(notAVerb);
     }
   });

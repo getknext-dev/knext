@@ -1,28 +1,35 @@
 ---
 title: Bun & the compiled executable
-description: knext's default build compiles your app into a single executable — bundled, minified, and bytecode-precompiled, with the Bun runtime baked in.
+description: knext's default build compiles your Next.js server into a bytecode executable with the Bun runtime baked in. The selectable vinext build compiles a single self-contained executable.
 ---
 
-knext's default build does not ship a folder of JavaScript. It compiles your app into a **single
-executable**: the server bundle is minified, precompiled to bytecode ahead of time, and baked
-together with the Bun 1.4 runtime into one binary that the image runs directly. Precompiling to
-bytecode means the server **boots** in tens of milliseconds instead of parsing your source at
-startup — the boot phase where a Next.js app otherwise spends real CPU.
+knext compiles your server ahead of time. Two builds do it, and this page covers both:
+
+- **The default** (`build: 'turbopack'`, `runtime: 'bun'`) compiles Next's standalone `server.js`
+  into a Bun **bytecode executable**. The executable runs inside the standalone folder and loads
+  each route's chunks from `.next/server` beside it. See
+  [The standalone target on Bun is compiled too](#the-standalone-target-on-bun-is-compiled-too).
+- **The vinext build** (`build: 'vinext'`) compiles your whole app into one executable, with the
+  Bun runtime baked in. The numbers below were measured on this build.
+
+Precompiling to bytecode means the server **boots** in tens of milliseconds instead of parsing your
+source at startup — the boot phase where a Next.js app otherwise spends real CPU.
 
 ## The numbers
 
 All figures are the same app and the same route, responses verified byte-identical, ten samples
 each with a **fresh local process and port** — i.e. this measures the server's own **boot**, not
-an end-to-end deployment cold start:
+an end-to-end deployment cold start. They were measured on the **vinext** compiled executable; the
+default standalone executable was not part of this benchmark, so do not read these as its numbers:
 
 | Target | Process boot (median) | Requests/sec |
 |---|---|---|
 | Node standalone | 884 ms | 630 |
 | Bun 1.4 standalone | 703 ms | 714 |
-| **Compiled executable (default)** | **61 ms** | **1103** |
+| **vinext compiled executable** | **61 ms** | **1103** |
 
-The compiled executable **boots** 14× faster and serves **75% more** requests per second than the
-Node standalone it replaces. It wins both axes at once because the whole bundle is compiled
+The vinext compiled executable **boots** 14× faster and serves **75% more** requests per second than
+the Node standalone. It wins both axes at once because the whole bundle is compiled
 together: minification and bundling remove the per-module boundary cost that made earlier
 file-by-file bytecode approaches trade throughput for cold start.
 
@@ -37,7 +44,7 @@ file-by-file bytecode approaches trade throughput for cold start.
 
 ## Nothing to configure
 
-This is the default. A minimal config builds and deploys the compiled executable:
+The compiled Bun executable is the default. A minimal config builds and deploys it:
 
 ```ts title="kn-next.config.ts"
 const config: KnativeNextConfig = {
@@ -47,23 +54,31 @@ const config: KnativeNextConfig = {
 };
 ```
 
-`knext build` produces the binary (plus the native image-optimization module that ships beside
-it), and `knext deploy` builds it into the image. The `NextApp` resource records the artifact
-(`spec.build: "vinext"`), and the operator starts the container through the image's own
-entrypoint — the executable *is* the server.
+Your app needs `output: 'standalone'` in `next.config.ts` and a build script that runs `next build`.
+`knext create` sets both up. `knext build` compiles the server, and `knext deploy` builds it into the
+image. The `NextApp` resource records the artifact (`spec.build: "turbopack"` and
+`spec.runtime: "bun"`), and the operator starts the container.
+
+To compile the vinext build instead, set `build: 'vinext'`; `knext build` then produces one binary
+(plus the native image-optimization module that ships beside it), and the executable *is* the
+server.
 
 <Callout type="warn">
-**Building from source requires Bun 1.4 or newer on your PATH.** The `knext` CLI itself runs
-under plain Node — only this compile step shells out to `bun`. If Bun is missing, the build stops
+**Building requires Bun 1.4 or newer on your PATH.** The `knext` CLI itself runs
+under plain Node — only the compile step shells out to `bun`. If Bun is missing, the build stops
 and tells you how to install it; if Bun is present but `bun --version` fails for another reason,
 the build reports that underlying error instead of claiming Bun is not installed. Older versions
 are refused rather than silently producing a binary that boots roughly twice as slowly — upgrade
 with `bun upgrade`.
 </Callout>
 
-## Warm-on-boot (optional)
+## Warm-on-boot (vinext build)
 
-When a scaled-to-zero app wakes, the very first request pays the full cost of a cold process —
+This section applies to the **vinext build**, whose scaffolded server entry does the warming. On the
+default standalone build, `KNEXT_WARM_PATH` only chooses the paths warmed while the image bakes its
+compile cache; nothing fires at pod boot.
+
+When a scaled-to-zero vinext app wakes, the very first request pays the full cost of a cold process —
 JIT warm-up and the first render. To keep a real visitor from paying it, the runtime fires a
 **synthetic request at your own app the moment it boots**, overlapped with becoming ready, so the
 hot path is already warm when the first user arrives. This is **on by default**; you don't need to
@@ -97,9 +112,9 @@ otherwise leave the default `/api/health`.
 Set these in your `kn-next.config.ts` `env:` block (they become `spec.env` on the `NextApp`), the
 same way as any other runtime environment variable.
 
-## Your app must be an ES module
+## The vinext build: your app must be an ES module
 
-The compiled build requires your app to be an **ES module** — your `package.json` must set:
+The vinext build requires your app to be an **ES module** — your `package.json` must set:
 
 ```json title="package.json"
 {
@@ -108,7 +123,7 @@ The compiled build requires your app to be an **ES module** — your `package.js
 ```
 
 `knext create` sets this for you, so a freshly scaffolded app already satisfies it and you never
-have to think about it. The requirement matters only when you point the compiled build at an
+have to think about it. The requirement matters only when you point the vinext build at an
 **existing** Next.js app that was written as CommonJS: add `"type": "module"` to its `package.json`
 before you build. Without it, the build fails while wiring up React Server Components — the
 server/client module graph cannot be resolved — rather than producing a broken binary.
@@ -124,7 +139,7 @@ The compiled binary cannot load native modules from inside itself, so knext ship
 exactly as it does on a folder deployment — verified in CI against the production image. See
 [Image optimization](/docs/image-optimization).
 
-## What the executable is, plainly
+## What the vinext executable is, plainly
 
 - **One file.** The server, every route it reaches, and the Bun runtime, compiled together
   (~70 MB). Static assets and the native image codec ship alongside it in the image.
@@ -132,16 +147,18 @@ exactly as it does on a folder deployment — verified in CI against the product
   happened at build time, which is where most of the 14× comes from.
 - **Linux x64.** The build cross-compiles for the deployment platform regardless of the machine
   you build on.
-- **Runtime is baked in.** The `runtime` config field only affects the standalone target (below);
-  for the default compiled build the runtime ships inside the binary and there is nothing to select.
+- **Runtime is baked in.** On this build the `runtime` config field does not select anything for
+  the compiled executable; the Bun runtime ships inside the binary. (`runtime: 'node'` selects a
+  separate uncompiled Node server for vinext — see [vinext on Node](/docs/build-pipeline#vinext-on-node).)
 
 ## Verification status, stated honestly
 
-knext's official-suite credential — [778/778 nightly](/docs/compat-suite) — was earned on the
-Node standalone lane. The compiled executable is a different artifact, and its own suite lane is
-being stood up; until it is green, treat the compatibility claim as **measured-per-feature rather
-than suite-verified**, with gaps published on the [compatibility matrix](/docs/compat-matrix)
-rather than papered over.
+The default cell — Turbopack build on the compiled Bun executable — passed the official suite in
+one run (778 passed, 0 failed) with every deploy confirmed to boot the bytecode executable. It is
+verified once, not yet credentialed: see [Verified compatibility](/docs/compat-suite). The vinext
+build is a different artifact. It is measured, not credentialed: its latest run passed 727 of 778
+tests. Read the per-feature status on the [compatibility matrix](/docs/compat-matrix) rather than
+assuming one number carries over.
 
 ## The standalone target on Bun is compiled too
 
