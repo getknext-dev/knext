@@ -215,7 +215,7 @@ In both cases the binary throws `Cannot find module` if that code loads a packag
 and is not deployed next to the binary.
 
 To make these warnings a build failure (for example in CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when
-you run `kn-next build`. Two limits apply:
+you run `knext build`. Two limits apply:
 
 - **Minified server bundles.** When the server bundle is minified, other code can reuse the short name
   of the bundle's `require`, so the build cannot always tell a real `require` from an unrelated call. It
