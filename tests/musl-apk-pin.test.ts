@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
@@ -34,22 +34,55 @@ import { resolve } from 'node:path';
  */
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const SCRIPT_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
+const SCRIPTS_DIR = resolve(REPO_ROOT, 'scripts');
 
-/** Every `apk add` invocation line's package tokens (flags like `--no-cache` excluded), extracted from a real script source. */
-function apkAddPackageTokens(source: string): string[] {
-  const lines = source.split('\n').filter((l) => /^\s*apk add\b/.test(l));
+interface ApkScan {
+  tokens: string[];
+  /** Lines the scanner cannot statically resolve — a guard must FAIL on these, never skip them. */
+  unparseable: string[];
+}
+
+/**
+ * Every `apk add` invocation's package tokens (flags excluded), extracted from
+ * a script source. Fails CLOSED: a line continuation, a variable/command
+ * substitution, or a chained command on an `apk add` line is reported in
+ * `unparseable` rather than silently ignored.
+ */
+function scanApkAdd(source: string): ApkScan {
   const tokens: string[] = [];
-  for (const line of lines) {
-    // Strip a trailing `>/dev/null`-style redirect (not a package token) and
-    // the leading `apk add` command word itself.
-    const withoutRedirect = line.replace(/>\s*\S+\s*$/, '');
-    const words = withoutRedirect.trim().split(/\s+/).slice(2); // drop "apk" "add"
+  const unparseable: string[] = [];
+  for (const line of source.split('\n')) {
+    if (!/^\s*(?:\S+\s+&&\s+)?apk\s+add\b/.test(line)) continue;
+    const body = line.trim().replace(/\s*>\s*\S+\s*$/, ''); // trailing >/dev/null
+    if (/[\\$`;|&(]/.test(body.replace(/^\S+\s+&&\s+/, ''))) {
+      unparseable.push(line.trim());
+      continue;
+    }
+    const words = body
+      .replace(/^\S+\s+&&\s+/, '')
+      .split(/\s+/)
+      .slice(2); // drop "apk" "add"
     for (const w of words) {
       if (w.startsWith('-')) continue; // a flag, e.g. --no-cache
       tokens.push(w);
     }
   }
-  return tokens;
+  return { tokens, unparseable };
+}
+
+function apkAddPackageTokens(source: string): string[] {
+  return scanApkAdd(source).tokens;
+}
+
+/** Every shell script under scripts/ (recursive) — a scan, so a new script that installs via apk is covered automatically. */
+function shellScripts(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const full = resolve(dir, e.name);
+    if (e.isDirectory()) out.push(...shellScripts(full));
+    else if (e.name.endsWith('.sh')) out.push(full);
+  }
+  return out;
 }
 
 /** A `pkg~X.Y` (or deeper, `pkg~X.Y.Z`) minor-locked fuzzy version constraint — Alpine's `~` prefix-match operator, never a full `=X.Y.Z-rN` exact pin (which this repo has deliberately chosen NOT to use — see the file header). */
@@ -66,6 +99,30 @@ describe('every apk package in scripts/e2e-native-rebuild-musl.sh carries a mino
     const tokens = apkAddPackageTokens(source);
     const unpinned = tokens.filter((t) => !MINOR_LOCK_RE.test(t));
     expect(unpinned).toEqual([]);
+  });
+
+  it('EVERY shell script under scripts/ that runs `apk add` is fully pinned and fully parseable', () => {
+    const problems: string[] = [];
+    let scanned = 0;
+    for (const f of shellScripts(SCRIPTS_DIR)) {
+      const { tokens, unparseable } = scanApkAdd(readFileSync(f, 'utf8'));
+      scanned += tokens.length;
+      for (const u of unparseable) problems.push(`${f}: unparseable apk add line: ${u}`);
+      for (const t of tokens) if (!MINOR_LOCK_RE.test(t)) problems.push(`${f}: unpinned ${t}`);
+    }
+    expect(scanned).toBeGreaterThan(0);
+    expect(problems).toEqual([]);
+  });
+
+  it('fails closed on constructs it cannot parse (continuation, variable, chained command)', () => {
+    for (const bad of [
+      'apk add --no-cache python3~3.12 \\',
+      'apk add --no-cache $PKGS',
+      'apk add --no-cache python3~3.12; apk add make',
+      'apk add --no-cache "$(cat pkgs)"',
+    ]) {
+      expect(scanApkAdd(bad).unparseable).toHaveLength(1);
+    }
   });
 
   it('rejects an EXACT `=version-rN` pin too — that is the guaranteed-future-break shape this deliberately avoids', () => {
