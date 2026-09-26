@@ -19,6 +19,9 @@
  *   fail closed on the unclassifiable:      M11
  *   loopback exemption stays strict:       M12
  *   class 4 — pin-known-images evasions:    M13 M14
+ *   round 5 — step shell / errexit:         M15 M16 M17 M18 M19 M20
+ *   round 5 — unclassified remote fetch:    M21 … M31
+ *   round 5 — pinned versions fail fast:    M32 M33 M34
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -34,14 +37,23 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCANNER = resolve(REPO_ROOT, 'scripts/lib/apply-safety-scan.mjs');
 const PIN_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/pin-known-images.sh');
+const DRILL_SCRIPT = resolve(
+  REPO_ROOT,
+  'packages/kn-next-operator/test/e2e/szpg/setup-profile-b.sh',
+);
+const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(14);
+declareMutations(34);
 
-// Both subjects must exist before anything is mutated: a missing one is a
-// FATAL throw here, never fourteen vacuous reds.
+// Every subject must exist before anything is mutated: a missing one is a
+// FATAL throw here, never a run of vacuous reds.
+// (Spelled out, one call per subject: the prover-lane audit binds each
+// subject by its `readFileSync(NAME, …)` call.)
 readFileSync(SCANNER, 'utf8');
 readFileSync(PIN_SCRIPT, 'utf8');
+readFileSync(DRILL_SCRIPT, 'utf8');
+readFileSync(KNATIVE_SCRIPT, 'utf8');
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -181,6 +193,132 @@ prove(
   PIN_SCRIPT,
   'digest_pinned() { [[ "$1" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; }',
   'digest_pinned() { [[ "$1" == *@sha256:* ]]; }',
+);
+
+// round 5, finding 1 — the step's effective shell decides errexit
+prove(
+  'M15 shell: a custom step shell without -e (`bash {0}`) still counts as errexit',
+  SCANNER,
+  '  let errexit = false;',
+  '  let errexit = true;',
+);
+prove(
+  'M16 shell: workflow-level defaults.run.shell is ignored',
+  SCANNER,
+  '    doc?.defaults?.run?.shell ??',
+  '    undefined ??',
+);
+prove(
+  'M17 shell: job-level defaults.run.shell is ignored',
+  SCANNER,
+  '    job?.defaults?.run?.shell ??',
+  '    undefined ??',
+);
+prove(
+  'M18 shell: a non-POSIX step shell (pwsh/python) is scanned as bash instead of unclassifiable',
+  SCANNER,
+  "  if (!EXEC_STRING_SHELLS.has(ws[0].split('/').pop()) || /\\$\\{\\{/.test(s)) return null;",
+  "  if (!EXEC_STRING_SHELLS.has(ws[0].split('/').pop()) || /\\$\\{\\{/.test(s)) return true;",
+);
+prove(
+  'M19 shell: a checksum step with continue-on-error still covers later steps',
+  SCANNER,
+  "  if (truthyKey(step['continue-on-error'])) return false;",
+  '  void truthyKey;',
+);
+prove(
+  'M20 shell: a checksum step with an if: still covers later steps',
+  SCANNER,
+  '  if (step.if !== undefined) return false;',
+  '  void step;',
+);
+
+// round 5, finding 2 — unclassified remote fetches
+prove(
+  'M21 remote: an interpreter fetching in-process (python -c urllib, node -e fetch) passes',
+  SCANNER,
+  "  if (INTERPRETERS.has(b) && INTERPRETER_FETCH.test(args.join(' '))) return interpreterFetch(b);",
+  '  void interpreterFetch;',
+);
+prove(
+  'M22 remote: an interpreter program fed by heredoc (node - <<JS … fetch) passes',
+  SCANNER,
+  '        else if (INTERPRETER_FETCH.test(body))',
+  '        else if (false)',
+);
+prove(
+  'M23 remote: git clone passes',
+  SCANNER,
+  "  if (b === 'git' && gitFetches(args)) return 'git fetches a remote repository';",
+  '  void gitFetches;',
+);
+prove(
+  'M24 remote: gh release download passes',
+  SCANNER,
+  "  if (b === 'gh' && ghDownloads(args)) return 'gh downloads a release/repo/run artifact';",
+  '  void ghDownloads;',
+);
+prove(
+  'M25 remote: helm from a remote chart URL or an added repo passes',
+  SCANNER,
+  "  if (b === 'helm' && helmFetches(args)) return 'helm pulls a remote chart or repo index';",
+  '  void helmFetches;',
+);
+prove(
+  'M26 remote: curl | sh / wget | bash passes',
+  SCANNER,
+  '  if (pipedFromNetwork && runsStdinAsCode(b, args)) return `${b} executes piped network content`;',
+  '  void pipedFromNetwork;',
+);
+prove(
+  'M27 remote: bash <(curl …) / sh -c "$(curl …)" passes',
+  SCANNER,
+  '  if (runsNetworkCode(b, rawArgs, st, depth)) return `${b} executes network content`;',
+  '  void runsNetworkCode;',
+);
+prove(
+  'M28 remote: a heredoc fed to ssh / docker exec / a shell is not scanned as a script',
+  SCANNER,
+  '          walkScript(body, st, { ...ctx, defeated: verifyDefeated, depth: ctx.depth + 1 });',
+  '          void walkScript;',
+);
+prove(
+  "M29 remote: a sourced file's functions are not followed",
+  SCANNER,
+  '  for (const [n, fn] of sourcedFns) if (!st.functions.has(n)) st.functions.set(n, fn);',
+  '  void sourcedFns;',
+);
+prove(
+  'M30 remote: a URL call into an unresolvable sourced file passes',
+  SCANNER,
+  '      if (unresolvedCallWithUrl(ws, st))',
+  '      if (false)',
+);
+prove(
+  'M31 remote: allowlist matches are no longer counted (the exactly-once check goes blind)',
+  SCANNER,
+  '    st.allowHits?.set(entry.id, (st.allowHits.get(entry.id) ?? 0) + 1);',
+  '    void entry;',
+);
+
+// round 5, finding 3 — pinned versions fail fast, by name
+prove(
+  'M32 pins: the szpg drill no longer rejects a version override up front',
+  DRILL_SCRIPT,
+  '  check_pinned_versions\n  preflight',
+  '  preflight',
+);
+prove(
+  'M33 pins: apply-knative-kourier.sh no longer rejects an unpinned version by name',
+  KNATIVE_SCRIPT,
+  'if [ "$KNATIVE_VERSION" != "$PINNED_KNATIVE_VERSION" ]; then',
+  'if false; then',
+);
+prove(
+  'M34 pins: the drill resolves REPO_ROOT one level too shallow again (packages/)',
+  DRILL_SCRIPT,
+  'OPERATOR_DIR="$(cd "$HERE/../../.." && pwd)"',
+  'OPERATOR_DIR="$(cd "$HERE/../.." && pwd)"',
 );
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);

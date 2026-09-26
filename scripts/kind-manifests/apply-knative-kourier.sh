@@ -12,6 +12,14 @@ set -euo pipefail
 
 KNATIVE_VERSION="${1:?usage: apply-knative-kourier.sh <knative-version>}"
 
+# The three checksums below belong to THIS release. Any other version fails
+# fast here, naming the pin, rather than with an unexplained checksum mismatch.
+PINNED_KNATIVE_VERSION="knative-v1.16.0"
+if [ "$KNATIVE_VERSION" != "$PINNED_KNATIVE_VERSION" ]; then
+  echo "apply-knative-kourier.sh: $KNATIVE_VERSION requested, but this script pins $PINNED_KNATIVE_VERSION; update PINNED_KNATIVE_VERSION and the three sha256 values together" >&2
+  exit 1
+fi
+
 SERVING_CRDS_SHA256="33cc24f96321cd19deea6b85397e53b24e1a7ae61aebc4a92c2bd867e93611ec"
 SERVING_CORE_SHA256="1f55c6b02bbea20ffe7c203811ae8dfd238ead7caca1f2e76275b239dfd06206"
 KOURIER_SHA256="381efeb83e0f424d7ada19a581ecfa9a8267aae396d9100e836cc131cc7d210f"

@@ -47,11 +47,20 @@
 # (default db-demo), DB_DEMO_IMAGE (a real, pullable — or locally-built + kind-loaded
 # — db-demo image; the default placeholder is unpullable by design), KEEP=1 (skip
 # teardown on exit for post-mortem).
+#
+# Pinned versions (NOT overridable here): cert-manager and Knative Serving/Kourier are
+# installed by the shared scripts in scripts/kind-manifests/, which pin each release
+# by version AND sha256 (cert-manager v1.16.2 — this drill used v1.16.1 before it
+# moved onto the shared scripts — and Knative knative-v1.16.0). CERT_MANAGER_VERSION /
+# KNATIVE_VERSION are accepted only when they equal those pins; any other value fails
+# fast before a cluster is created. To move a version, change the pin (version and
+# checksum together) in scripts/kind-manifests/apply-cert-manager.sh or
+# apply-knative-kourier.sh.
 set -euo pipefail
 
 # --- resolve paths (repo-relative, no hard-coded homedir) ---------------------
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OPERATOR_DIR="$(cd "$HERE/../.." && pwd)"                 # packages/kn-next-operator
+OPERATOR_DIR="$(cd "$HERE/../../.." && pwd)"              # packages/kn-next-operator (HERE is test/e2e/szpg)
 REPO_ROOT="$(cd "$OPERATOR_DIR/../.." && pwd)"            # repo root
 SZPG_DIR="$REPO_ROOT/packages/scale-zero-pg"
 SZPG_DEPLOY="$SZPG_DIR/deploy"
@@ -96,7 +105,25 @@ teardown() {
   rm -f "$KUBECONFIG_FILE" 2>/dev/null || true
 }
 
+# The shared kind-manifest scripts pin each release by version + sha256, so a
+# version override cannot be honoured — reject it up front, naming the pin,
+# instead of failing later with an unexplained checksum mismatch.
+check_pinned_versions() {
+  local manifests="$REPO_ROOT/scripts/kind-manifests" cm kn
+  cm="$(sed -n 's/^CERT_MANAGER_VERSION="\(.*\)"$/\1/p' "$manifests/apply-cert-manager.sh")"
+  kn="$(sed -n 's/^PINNED_KNATIVE_VERSION="knative-\(.*\)"$/\1/p' "$manifests/apply-knative-kourier.sh")"
+  [ -n "$cm" ] && [ -n "$kn" ] || die "cannot read the pinned versions from $manifests"
+  if [ -n "${CERT_MANAGER_VERSION:-}" ] && [ "$CERT_MANAGER_VERSION" != "$cm" ]; then
+    die "CERT_MANAGER_VERSION=$CERT_MANAGER_VERSION cannot be honoured: cert-manager is pinned to $cm (version + sha256) by scripts/kind-manifests/apply-cert-manager.sh; override there"
+  fi
+  if [ -n "${KNATIVE_VERSION:-}" ] && [ "$KNATIVE_VERSION" != "$kn" ]; then
+    die "KNATIVE_VERSION=$KNATIVE_VERSION cannot be honoured: Knative is pinned to $kn (version + sha256) by scripts/kind-manifests/apply-knative-kourier.sh; override there"
+  fi
+  KN_VER="$kn"
+}
+
 cmd_up() {
+  check_pinned_versions
   preflight
   # 1. cluster
   if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
@@ -125,7 +152,7 @@ cmd_up() {
 }
 
 install_knative() {
-  local KN_VER="${KNATIVE_VERSION:-v1.16.0}"
+  # KN_VER was set (and any override rejected) by check_pinned_versions.
   # The shared kind-manifest scripts fetch, checksum-verify and image-digest-pin
   # each release manifest before applying it (a moved or edited release asset
   # fails the checksum). They apply with the CURRENT context of $KUBECONFIG, so

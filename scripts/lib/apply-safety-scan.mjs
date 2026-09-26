@@ -35,7 +35,18 @@
  *   - anything the scanner cannot classify (a top-level `-f -` with no
  *     producer, a GitHub `${{ }}` expression as the target, an unterminated
  *     heredoc, a `shift`ing helper that fetches or applies, recursion too
- *     deep) is reported, never passed.
+ *     deep) is reported, never passed;
+ *   - (round 5) a remote fetch whose writes the walk cannot follow — an
+ *     interpreter's in-process fetch, `git clone`, `gh release download`,
+ *     helm charts/repos, `curl | sh`, `bash <(curl …)` — is an "unclassified
+ *     remote fetch" unless it is on the exactly-once REMOTE_FETCH_ALLOWLIST;
+ *     a heredoc fed to a shell (locally, `ssh host`, `docker exec -i c sh`)
+ *     is walked as a script; a `source`d file's functions are followed, and
+ *     when it cannot be read a URL-taking call fails closed;
+ *   - (round 5) a workflow step's errexit comes from its EFFECTIVE shell
+ *     (step, job or workflow `defaults.run.shell`), a non-POSIX shell is
+ *     unclassifiable, and a checksum in a `continue-on-error` or `if:` step
+ *     does not cover later steps.
  *
  * Exports are pure (text in, offender strings out) so the spec can drive them
  * with fixtures and the mutation prover can break each rule independently.
@@ -51,6 +62,32 @@ const EXEC_STRING_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh']);
 const URL_RE = /\bhttps?:\/\//;
 const MANIFEST_RE = /\.(ya?ml|json)$/i;
 const MAX_DEPTH = 6;
+/** Any remote scheme a fetcher (git/helm/an interpreter) can be handed. */
+const REMOTE_ARG_RE = /^(https?|oci|git|ssh|s3|gs):\/\/|^git@/;
+/**
+ * Commands that never fetch, so a URL argument to one is text, not a
+ * download — only consulted for the "call into an unresolved sourced file"
+ * rule, which otherwise treats every URL-taking call as a possible fetch.
+ */
+const NON_FETCHING = new Set([
+  'echo',
+  'printf',
+  'log',
+  'info',
+  'warn',
+  'die',
+  'fail',
+  'ok',
+  'bad',
+  'note',
+  'step',
+  'kubectl',
+  'export',
+  'local',
+  'test',
+  '[',
+  '[[',
+]);
 
 // ---------------------------------------------------------------------------
 // Lexing — one frame-stack scanner shared by every splitter
@@ -427,6 +464,12 @@ class State {
     this.walkSeq = 0;
     this.persistedEnv = new Map();
     this.curChainTag = null;
+    /** (path) => text | null: reads a `source`d file (the caller knows the tree). */
+    this.resolveSource = null;
+    /** canonical paths already loaded via `source`, to stop cycles. */
+    this.sourced = new Set();
+    /** the first `source`d path that could not be resolved, if any. */
+    this.unresolvedSource = null;
   }
 }
 
@@ -490,6 +533,201 @@ export function isFetchSegment(ws, st) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Unclassified remote fetches (#1410 round 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Remote-fetch shapes the taint walk CANNOT follow, reported as
+ * "unclassified remote fetch" rather than passed. The walk tracks what curl,
+ * wget and friends write (`-o`, redirects, tee, pipes); these shapes write or
+ * run remote content through a channel it never sees — an interpreter's own
+ * file I/O, a cloned tree, a helm chart cache, a script piped into a shell.
+ * Allowlisted shapes (below) must each match exactly once in the real tree.
+ *
+ * Each rule is its own line so the mutation prover can remove it alone.
+ */
+export function unclassifiedFetch(ws, st, { pipedFromNetwork = false, depth = 0 } = {}) {
+  const u = ws.map(unquote);
+  for (let k = 0; k < u.length; k++) {
+    const b = u[k].split('/').pop();
+    const args = u.slice(k + 1);
+    const why = fetchShape(b, args, ws.slice(k + 1), st, pipedFromNetwork, depth);
+    if (why) return why;
+  }
+  return null;
+}
+
+function fetchShape(b, args, rawArgs, st, pipedFromNetwork, depth) {
+  if (INTERPRETERS.has(b) && INTERPRETER_FETCH.test(args.join(' '))) return interpreterFetch(b);
+  if (b === 'git' && gitFetches(args)) return 'git fetches a remote repository';
+  if (b === 'gh' && ghDownloads(args)) return 'gh downloads a release/repo/run artifact';
+  if (b === 'helm' && helmFetches(args)) return 'helm pulls a remote chart or repo index';
+  if (pipedFromNetwork && runsStdinAsCode(b, args)) return `${b} executes piped network content`;
+  if (runsNetworkCode(b, rawArgs, st, depth)) return `${b} executes network content`;
+  return null;
+}
+
+const interpreterFetch = (b) => `${b} fetches in-process (the files it writes are invisible)`;
+
+/** First non-option word, skipping the values of `-C`/`-c`-style options. */
+function subcommand(args, valued) {
+  for (let k = 0; k < args.length; k++) {
+    if (valued.has(args[k])) {
+      k++;
+      continue;
+    }
+    if (!args[k].startsWith('-')) return { sub: args[k], rest: args.slice(k + 1) };
+  }
+  return { sub: '', rest: [] };
+}
+
+const hasRemoteArg = (args) => args.some((a) => REMOTE_ARG_RE.test(a) && !isLoopbackUrl(a));
+
+function gitFetches(args) {
+  const { sub, rest } = subcommand(args, new Set(['-C', '-c', '--git-dir', '--work-tree']));
+  if (sub === 'clone' || sub === 'svn') return true;
+  if (/^(fetch|pull|ls-remote|archive|submodule|remote)$/.test(sub)) return hasRemoteArg(rest);
+  return false;
+}
+
+function ghDownloads(args) {
+  const { sub, rest } = subcommand(args, new Set(['-R', '--repo']));
+  const verb = rest.find((a) => !a.startsWith('-')) ?? '';
+  return /^(release|run|attestation)$/.test(sub)
+    ? verb === 'download'
+    : /^(repo|gist)$/.test(sub) && verb === 'clone';
+}
+
+function helmFetches(args) {
+  const { sub, rest } = subcommand(args, new Set(['-n', '--namespace', '--kube-context']));
+  const verb = rest.find((a) => !a.startsWith('-')) ?? '';
+  if (sub === 'repo') return verb === 'add' || verb === 'update';
+  if (sub === 'pull' || sub === 'fetch' || sub === 'dependency' || sub === 'dep') return true;
+  return hasRemoteArg(rest) || rest.some((a) => /^--repo(=|$)/.test(a));
+}
+
+/** A shell or interpreter that reads its PROGRAM from stdin (`sh`, `bash -s`, `python3 -`). */
+function runsStdinAsCode(b, args) {
+  const nonOpt = args.filter((a) => !a.startsWith('-'));
+  if (EXEC_STRING_SHELLS.has(b))
+    return !args.some((a) => /^-[a-z]*c$/.test(a)) && (nonOpt.length === 0 || args.includes('-s'));
+  if (INTERPRETERS.has(b))
+    return !args.some((a) => /^-(c|e|p)$/.test(a)) && (nonOpt.length === 0 || args.includes('-'));
+  return false;
+}
+
+/** `bash <(curl …)`, `source <(curl …)`, `sh -c "$(curl …)"`, `bash fetched.sh`. */
+function runsNetworkCode(b, rawArgs, st, depth) {
+  const shellLike = EXEC_STRING_SHELLS.has(b) || b === 'source' || b === '.' || b === 'eval';
+  if (!shellLike && !INTERPRETERS.has(b)) return false;
+  const judged = shellLike
+    ? rawArgs
+    : rawArgs.filter((a) => !unquote(a).startsWith('-')).slice(0, 1);
+  return judged.some(
+    (w) =>
+      innerSubstitutions(w).some((inner) => textIsNetwork(inner, st, depth + 1)) ||
+      isTaintedPath(canonical(w, st.vars), st),
+  );
+}
+
+/** Rebases a nested source's heredoc placeholders onto `st.heredocs`. */
+function adoptHeredocs(code, heredocs, st) {
+  const base = st.heredocs.length;
+  st.heredocs.push(...heredocs);
+  return code.replace(/<<__HD(\d+)__/g, (_, n) => `<<__HD${Number(n) + base}__`);
+}
+
+/** Lexes a nested script (a heredoc fed to a shell) and walks it as code. */
+function walkScript(text, st, ctx) {
+  const { code, heredocs, error } = lex(text);
+  if (error) {
+    offend(st, 'unparseable', `${error} in a script fed to a shell`);
+    return;
+  }
+  const { code: top, functions } = extractFunctions(adoptHeredocs(code, heredocs, st));
+  for (const [n, b] of functions) if (!st.functions.has(n)) st.functions.set(n, b);
+  walk(top, st, ctx);
+}
+
+/** `ssh [opts] host` with no remote command (or a shell) runs its stdin remotely. */
+const SSH_VALUED = new Set('bcDEeFIiJLlmOopQRSWw'.split('').map((c) => `-${c}`));
+function sshRunsStdin(args) {
+  const { rest } = subcommand(args, SSH_VALUED);
+  const cmd = rest.find((a) => !a.startsWith('-'));
+  return (
+    cmd === undefined || runsStdinAsCode(cmd.split('/').pop(), rest.slice(rest.indexOf(cmd) + 1))
+  );
+}
+
+/**
+ * The stdin bodies (heredocs, here-strings) a segment executes as a program,
+ * and what runs them: 'shell' (a local shell, `ssh host`, `docker exec -i c sh`)
+ * or an interpreter name (`node - <<EOF`), whose body is not shell.
+ */
+/** Drops redirections — and a bare operator's target word — from unquoted args. */
+function withoutRedirects(args) {
+  const out = [];
+  for (let k = 0; k < args.length; k++) {
+    if (/^(\d*|&)?(<<<|<<-?|<|>>|>\|?)$/.test(args[k])) k++;
+    else if (!/^(\d*|&)?[<>]/.test(args[k])) out.push(args[k]);
+  }
+  return out;
+}
+
+function scriptBodies(ws, st) {
+  const u = ws.map(unquote);
+  let runner = null;
+  for (let k = 0; k < u.length && runner === null; k++) {
+    const b = u[k].split('/').pop();
+    const args = withoutRedirects(u.slice(k + 1));
+    if (
+      (b === 'ssh' && sshRunsStdin(args)) ||
+      (EXEC_STRING_SHELLS.has(b) && runsStdinAsCode(b, args))
+    )
+      runner = 'shell';
+    else if (runsStdinAsCode(b, args)) runner = b;
+  }
+  if (runner === null) return { runner, bodies: [] };
+  const out = [];
+  for (let k = 0; k < ws.length; k++) {
+    const hd = ws[k].match(/^<<__HD(\d+)__$/);
+    if (hd) out.push(st.heredocs[Number(hd[1])]?.body ?? '');
+    else if (ws[k] === '<<<') out.push(unquote(ws[k + 1] ?? ''));
+    else if (ws[k].startsWith('<<<')) out.push(unquote(ws[k].slice(3)));
+  }
+  return { runner, bodies: out };
+}
+
+/** `source f` / `. f`: adopt f's functions, or remember that it could not be read. */
+function loadSource(word, st) {
+  if (/^[<>]\(/.test(word)) return; // `source <(curl …)` is judged by runsNetworkCode
+  const path = canonical(word, st.vars);
+  if (st.sourced.has(path)) return;
+  st.sourced.add(path);
+  const text = st.resolveSource ? st.resolveSource(path) : null;
+  if (text === null || text === undefined) {
+    st.unresolvedSource = st.unresolvedSource ?? path;
+    return;
+  }
+  const { code, heredocs, error } = lex(text);
+  if (error) {
+    offend(st, 'unparseable', `${error} in sourced ${path}`);
+    return;
+  }
+  const { functions: sourcedFns } = extractFunctions(adoptHeredocs(code, heredocs, st));
+  for (const [n, fn] of sourcedFns) if (!st.functions.has(n)) st.functions.set(n, fn);
+}
+
+/** A call that may resolve into an unread sourced file, handed a remote URL. */
+function unresolvedCallWithUrl(ws, st) {
+  if (st.unresolvedSource === null) return false;
+  const cmd = unquote(ws[0] ?? '');
+  if (!/^[A-Za-z_][\w-]*$/.test(cmd) || st.functions.has(cmd)) return false;
+  if (NON_FETCHING.has(cmd) || FETCH_WORDS.has(cmd)) return false;
+  return hasRemoteArg(ws.slice(1).map((w) => canonical(w, st.vars)));
+}
+
 /**
  * Whether a text fragment (a producer, an inner `$(…)`, a heredoc's
  * expansions) carries network content. Returns a reason string (truthy) or
@@ -550,7 +788,9 @@ export function textIsNetwork(text, st, depth, { urlLiteralCounts = true, seen =
 function innerSubstitutions(w) {
   const out = [];
   for (let i = 0; i < w.length; i++) {
-    if ((w[i] === '$' || w[i] === '<' || w[i] === '>') && w[i + 1] === '(') {
+    if (w[i] === '\\') {
+      i++; // an escaped `\$(` is literal text, not a substitution
+    } else if ((w[i] === '$' || w[i] === '<' || w[i] === '>') && w[i + 1] === '(') {
       let d = 0;
       for (let j = i + 1; j < w.length; j++) {
         if (w[j] === '(') d++;
@@ -739,6 +979,32 @@ function offend(st, kind, text) {
 }
 
 /**
+ * Remote fetches the real tree makes on purpose and that cannot reach a
+ * cluster apply. Each entry must match EXACTLY ONE segment across the whole
+ * tree (the spec asserts it), so an entry can neither go stale nor quietly
+ * grow into a pattern that blesses a new call site.
+ */
+export const REMOTE_FETCH_ALLOWLIST = [
+  {
+    id: 'wayfinder-ssr-probe',
+    // docs/wayfinder/spike-vinext-ssr-embed/e2e-container-arm.sh: fetches the
+    // spike container's SSR page and PRINTS its size/markers; writes no file,
+    // and the script applies nothing to any cluster.
+    segment:
+      /^node -e '\s*const r = await fetch\(process\.argv\[1\]\);\s*const b = await r\.text\(\);/,
+  },
+];
+
+function reportRemoteFetch(st, why, seg) {
+  const entry = REMOTE_FETCH_ALLOWLIST.find((e) => e.segment.test(seg));
+  if (entry) {
+    st.allowHits?.set(entry.id, (st.allowHits.get(entry.id) ?? 0) + 1);
+    return;
+  }
+  offend(st, `unclassified remote fetch (${why})`, seg);
+}
+
+/**
  * Walks clauses in order. `ctx` carries: depth, whether verifications here
  * are defeated by the caller (a call in a condition / after `||`), the
  * inherited stdin producer (for a function body that applies `-f -`), and
@@ -874,6 +1140,19 @@ function walk(code, st, ctx) {
         walk(lex(execStr).code, st, { ...ctx, defeated: verifyDefeated, depth: ctx.depth + 1 });
       }
 
+      // A heredoc / here-string fed to a shell (locally, over ssh, into a
+      // container) is a script: walk it as one.
+      const fed = scriptBodies(ws, st);
+      for (const body of fed.bodies) {
+        if (fed.runner === 'shell')
+          walkScript(body, st, { ...ctx, defeated: verifyDefeated, depth: ctx.depth + 1 });
+        else if (INTERPRETER_FETCH.test(body))
+          reportRemoteFetch(st, interpreterFetch(fed.runner), segs[si]);
+      }
+
+      // `source f` / `. f` adopts f's functions (or records that it could not).
+      if ((cmd === 'source' || cmd === '.') && ws.length >= 2) loadSource(ws[1], st);
+
       // Function call (anywhere in the segment: wrappers like `retry 3 fn …`).
       for (let k = 0; k < ws.length; k++) {
         const name = unquote(ws[k]);
@@ -891,8 +1170,17 @@ function walk(code, st, ctx) {
         break;
       }
 
+      const pipedFromNetwork = networkSoFar;
       const isFetch = isFetchSegment(ws, st);
       if (isFetch) networkSoFar = true;
+      const remote = unclassifiedFetch(ws, st, { pipedFromNetwork, depth: ctx.depth });
+      if (remote) reportRemoteFetch(st, remote, segs[si]);
+      if (unresolvedCallWithUrl(ws, st))
+        reportRemoteFetch(
+          st,
+          `${cmd} may be defined in unresolved sourced ${st.unresolvedSource}`,
+          segs[si],
+        );
       const readsNetwork =
         networkSoFar ||
         ws.some((w) => {
@@ -1184,13 +1472,26 @@ function heredocExpansions(body) {
  * a GitHub Actions bash step, false for a script until it runs `set -e`).
  * `vars` seeds known variables (a workflow's `env:`). `tainted`/`verified`
  * may be passed in to carry FILE state across the steps of one job.
+ * `resolveSource(path)` returns the text of a `source`d file, or null when it
+ * cannot be read (then a URL-taking call that may live in it fails closed).
+ * `allowHits` (a Map) counts REMOTE_FETCH_ALLOWLIST matches for the spec.
  */
 export function unsafeApplies(
   rawText,
-  { errexit = false, vars = [], carry = null, persisted = null, finalCheck = true } = {},
+  {
+    errexit = false,
+    vars = [],
+    carry = null,
+    persisted = null,
+    finalCheck = true,
+    resolveSource = null,
+    allowHits = null,
+  } = {},
 ) {
   const { code, heredocs, error } = lex(rawText);
   const st = new State({ errexit: errexit || /^#!.*\s-[a-z]*e/.test(rawText), vars });
+  st.resolveSource = resolveSource;
+  st.allowHits = allowHits;
   if (carry) {
     st.tainted = carry.tainted;
     st.verified = carry.verified;
@@ -1210,6 +1511,10 @@ export function unsafeApplies(
     sub.heredocs = heredocs;
     sub.tainted = new Set(st.tainted);
     sub.verified = new Map(st.verified);
+    sub.resolveSource = st.resolveSource;
+    sub.allowHits = st.allowHits;
+    sub.sourced = new Set(st.sourced);
+    sub.unresolvedSource = st.unresolvedSource;
     walk(body, sub, {
       depth: 1,
       defeated: false,
@@ -1238,18 +1543,65 @@ export function unsafeApplies(
 }
 
 /**
+ * The errexit state a step's shell starts with, or null when the shell is not
+ * a POSIX shell the scanner can read (pwsh, python, cmd, node, a `${{ }}`
+ * expression) — the step is then unclassifiable. GitHub runs `shell: bash` as
+ * `bash --noprofile --norc -eo pipefail {0}` and `shell: sh` as `sh -e {0}`; a
+ * custom template (`bash {0}`) has errexit only if IT passes -e / -o errexit.
+ */
+export function shellErrexit(shell) {
+  const s = String(shell).trim();
+  if (s === 'bash' || s === 'sh') return true;
+  const ws = s.split(/\s+/);
+  if (!EXEC_STRING_SHELLS.has(ws[0].split('/').pop()) || /\$\{\{/.test(s)) return null;
+  let errexit = false;
+  for (let k = 1; k < ws.length && ws[k] !== '{0}'; k++) {
+    if (/^-[A-Za-z]*e[A-Za-z]*$/.test(ws[k])) errexit = true;
+    if (ws[k] === '-o' && ws[k + 1] === 'errexit') errexit = true;
+  }
+  return errexit;
+}
+
+/** The shell a step runs under: its own, else job then workflow `defaults.run.shell`. */
+export function effectiveShell(doc, job, step) {
+  const onWindows = /windows/i.test(JSON.stringify(job?.['runs-on'] ?? ''));
+  return (
+    step.shell ??
+    job?.defaults?.run?.shell ??
+    doc?.defaults?.run?.shell ??
+    (onWindows ? 'pwsh' : 'bash')
+  );
+}
+
+const truthyKey = (v) => v === true || v === 'true' || (typeof v === 'string' && /\$\{\{/.test(v));
+
+/**
+ * Whether a step's checksum can be relied on by LATER steps. With
+ * `continue-on-error` a failed check lets the job carry on; with `if:` the
+ * step may never run. Either way the verification does not dominate an apply
+ * in a later step (inside the step, errexit still aborts before the apply).
+ */
+export function stepGuaranteed(step) {
+  if (truthyKey(step['continue-on-error'])) return false;
+  if (step.if !== undefined) return false;
+  return true;
+}
+
+/**
  * Scans a parsed GitHub workflow (or composite action) document. A job's
  * `run:` steps execute in order on ONE runner filesystem, so they share FILE
  * state (a file fetched in step 1 and applied in step 3 is caught), while
  * shell variables and errexit reset per step, as they do on a runner. A
- * step's bash starts with errexit on (`bash -e {0}` or
- * `bash --noprofile --norc -eo pipefail {0}`). `env:` at workflow, job and
- * step level seeds variables, as do `>> $GITHUB_ENV` writes from earlier
- * steps, so `env: { M: https://… }` + `apply -f "$M"` is a bare-URL apply.
- * The YAML parser has already folded `run: >` blocks — exactly the
- * single-line form bash receives.
+ * step's errexit comes from its EFFECTIVE shell (step `shell:`, else job, else
+ * workflow `defaults.run.shell`, else bash) — see shellErrexit. A step whose
+ * shell is not a POSIX shell is unclassifiable. A verification in a step that
+ * is not guaranteed to run to completion (stepGuaranteed) does not carry to
+ * later steps. `env:` at workflow, job and step level seeds variables, as do
+ * `>> $GITHUB_ENV` writes from earlier steps, so `env: { M: https://… }` +
+ * `apply -f "$M"` is a bare-URL apply. The YAML parser has already folded
+ * `run: >` blocks — exactly the single-line form bash receives.
  */
-export function unsafeAppliesInWorkflow(doc) {
+export function unsafeAppliesInWorkflow(doc, { resolveSource = null, allowHits = null } = {}) {
   const offenders = [];
   const envPairs = (env) =>
     Object.entries(env ?? {}).map(([k, v]) => [
@@ -1264,21 +1616,40 @@ export function unsafeAppliesInWorkflow(doc) {
     const persisted = new Map();
     const steps = (job?.steps ?? []).filter((s) => typeof s?.run === 'string');
     steps.forEach((step, i) => {
+      const shell = effectiveShell(doc, job, step);
+      const errexit = shellErrexit(shell);
+      if (errexit === null) {
+        offenders.push(`${jobId}[${i}]: unclassifiable step shell ${JSON.stringify(shell)}`);
+        return;
+      }
       const vars = [
         ...envPairs(doc.env),
         ...envPairs(job.env),
         ...persisted,
         ...envPairs(step.env),
       ];
+      const before = new Map(carry.verified);
       const result = unsafeApplies(step.run, {
-        errexit: true,
+        errexit,
         vars,
         carry,
         persisted,
         finalCheck: i === steps.length - 1,
+        resolveSource,
+        allowHits,
       });
       for (const o of result) offenders.push(`${jobId}[${i}]: ${o}`);
+      if (!stepGuaranteed(step)) revokeStepVerifications(carry, before);
     });
   }
   return [...new Set(offenders)];
+}
+
+/** Un-verifies (re-taints) every file this step verified. */
+function revokeStepVerifications(carry, before) {
+  for (const [p, v] of [...carry.verified]) {
+    if (before.get(p) === v) continue;
+    carry.verified.delete(p);
+    carry.tainted.add(p);
+  }
 }

@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'bun:test';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, normalize } from 'node:path';
 import { parse } from 'yaml';
-import { unsafeApplies, unsafeAppliesInWorkflow } from '../scripts/lib/apply-safety-scan.mjs';
+import {
+  REMOTE_FETCH_ALLOWLIST,
+  unsafeApplies,
+  unsafeAppliesInWorkflow,
+} from '../scripts/lib/apply-safety-scan.mjs';
 
 /**
  * #1289: checksum-pin the cert-manager/Knative/Kourier/Calico cluster
@@ -77,21 +81,50 @@ const WORKFLOW_SOURCES = () =>
     '.github/actions/**/action.yaml',
   );
 
+/**
+ * Resolves a `source`d path the way the tree spells it: the tail after the
+ * last variable / substitution (`"$HERE/_lib.sh"`, `"${SCRIPT_DIR}/lib/x.sh"`,
+ * `/compute-files/lib.sh` inside an image), tried next to the sourcing file,
+ * at the repo root, then as a unique suffix of a tracked script.
+ */
+function sourceResolver(from: string): (p: string) => string | null {
+  const shell = SHELL_SOURCES();
+  const tracked = new Set(shell);
+  return (p) => {
+    const tail = p
+      .replace(/^.*[)}]/, '')
+      .replace(/^.*\$[A-Za-z_]\w*/, '')
+      .replace(/^\/+/, '');
+    if (!tail || tail.includes('$')) return null;
+    for (const c of [normalize(join(dirname(from), tail)), normalize(tail)])
+      if (tracked.has(c)) return readFileSync(join(ROOT, c), 'utf8');
+    const m = shell.filter((f) => f === tail || f.endsWith(`/${tail}`));
+    return m.length === 1 ? readFileSync(join(ROOT, m[0]), 'utf8') : null;
+  };
+}
+
 /** Scans every tracked shell script and every workflow/composite-action job. */
-function scanRealTree(): { scanned: string[]; offenders: string[] } {
+function scanRealTree(): {
+  scanned: string[];
+  offenders: string[];
+  allowHits: Map<string, number>;
+} {
   const scanned: string[] = [];
   const offenders: string[] = [];
+  const allowHits = new Map<string, number>();
   for (const f of SHELL_SOURCES()) {
     scanned.push(f);
-    for (const o of unsafeApplies(readFileSync(join(ROOT, f), 'utf8')))
+    const opts = { resolveSource: sourceResolver(f), allowHits };
+    for (const o of unsafeApplies(readFileSync(join(ROOT, f), 'utf8'), opts))
       offenders.push(`${f}: ${o}`);
   }
   for (const f of WORKFLOW_SOURCES()) {
     scanned.push(f);
     const doc = parse(readFileSync(join(ROOT, f), 'utf8'));
-    for (const o of unsafeAppliesInWorkflow(doc)) offenders.push(`${f}#${o}`);
+    const opts = { resolveSource: sourceResolver(f), allowHits };
+    for (const o of unsafeAppliesInWorkflow(doc, opts)) offenders.push(`${f}#${o}`);
   }
-  return { scanned, offenders };
+  return { scanned, offenders, allowHits };
 }
 
 const STRICT = 'set -euo pipefail\n';
@@ -113,8 +146,28 @@ function expectNoneFlagged(fixtures: Record<string, string>) {
   expect(flagged).toEqual([]);
 }
 
-function workflow(run: string, extra = ''): unknown {
-  return parse(`on: push\n${extra}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n${run}`);
+function workflow(run: string, extra = '', jobExtra = ''): unknown {
+  return parse(
+    `on: push\n${extra}jobs:\n  j:\n    runs-on: ubuntu-latest\n${jobExtra}    steps:\n${run}`,
+  );
+}
+
+/** Runs a script with kind/kubectl/docker/go/curl stubbed to fail loudly: nothing real is touched. */
+function runStubbed(script: string, args: string[], env: Record<string, string>) {
+  const stubs = mkdtempSync(join(tmpdir(), 'kind-manifest-stubs-'));
+  try {
+    for (const tool of ['kind', 'kubectl', 'docker', 'go', 'curl', 'wget', 'kn-next', 'bun']) {
+      writeFileSync(join(stubs, tool), `#!/bin/sh\necho "STUB ${tool} $*" >&2\nexit 97\n`);
+      chmodSync(join(stubs, tool), 0o755);
+    }
+    return spawnSync('bash', [join(ROOT, script), ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: { PATH: `${stubs}:/usr/bin:/bin`, HOME: tmpdir(), ...env },
+    });
+  } finally {
+    rmSync(stubs, { recursive: true, force: true });
+  }
 }
 
 describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + image-digest pinned (#1289)', () => {
@@ -290,6 +343,155 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       userinfoTrick: 'curl -s "http://localhost:9898$P" | kubectl apply -f -',
       nestedUrl: `curl -s "http://localhost:8080/proxy?u=${URL}" | kubectl apply -f -`,
     });
+  });
+
+  // ---- #1410 round 5, finding 1: the step's shell decides errexit ---------
+
+  const verifiedStep = (mod: string) =>
+    `      - ${mod}run: |\n          curl -fsSL -o f "${URL}"\n          echo "${SHA}  f" | sha256sum -c -\n          kubectl apply -f f\n`;
+  const NO_E = 'bash --noprofile --norc {0}';
+
+  it('round 5: errexit comes from the EFFECTIVE step shell (step, job defaults, workflow defaults)', () => {
+    // Controls: GitHub's `bash`, and a custom template that passes -e, keep errexit.
+    expect(unsafeAppliesInWorkflow(workflow(verifiedStep('')))).toEqual([]);
+    expect(unsafeAppliesInWorkflow(workflow(verifiedStep('shell: bash -e {0}\n        ')))).toEqual(
+      [],
+    );
+    // A template without -e: a failed checksum no longer stops the apply.
+    const stepShell = workflow(verifiedStep('shell: bash {0}\n        '));
+    const wfDefault = workflow(verifiedStep(''), `defaults:\n  run:\n    shell: ${NO_E}\n`);
+    const jobDefault = workflow(
+      verifiedStep(''),
+      '',
+      `    defaults:\n      run:\n        shell: ${NO_E}\n`,
+    );
+    expect(unsafeAppliesInWorkflow(stepShell).length).toBeGreaterThan(0);
+    expect(unsafeAppliesInWorkflow(wfDefault).length).toBeGreaterThan(0);
+    expect(unsafeAppliesInWorkflow(jobDefault).length).toBeGreaterThan(0);
+  });
+
+  it('round 5: a step whose shell is not a POSIX shell (pwsh, python) cannot be classified', () => {
+    const run = `run: |\n          Invoke-WebRequest "${URL}" -OutFile f\n          kubectl apply -f f\n`;
+    for (const shell of ['pwsh', 'python', 'cmd']) {
+      const off = unsafeAppliesInWorkflow(workflow(`      - shell: ${shell}\n        ${run}`));
+      expect({ shell, off: off.join('\n').includes('unclassifiable step shell') }).toEqual({
+        shell,
+        off: true,
+      });
+    }
+  });
+
+  it('round 5: a checksum step with continue-on-error or an if: does not cover a LATER step', () => {
+    const steps = (mod: string) =>
+      `      - ${mod}run: |\n          curl -fsSL -o f "${URL}"\n          echo "${SHA}  f" | sha256sum -c -\n      - run: kubectl apply -f f\n`;
+    expect(unsafeAppliesInWorkflow(workflow(steps('')))).toEqual([]);
+    const coe = workflow(steps('continue-on-error: true\n        '));
+    const guarded = workflow(steps("if: github.event_name == 'push'\n        "));
+    expect(unsafeAppliesInWorkflow(coe).length).toBeGreaterThan(0);
+    expect(unsafeAppliesInWorkflow(guarded).length).toBeGreaterThan(0);
+  });
+
+  // ---- #1410 round 5, finding 2: unclassified remote fetches ---------------
+
+  const remoteFetchFlagged = (src: string, opts = {}) =>
+    unsafeApplies(src, opts).some((o) => o.startsWith('unclassified remote fetch'));
+
+  it('round 5: a remote fetch the taint walk cannot follow fails as "unclassified remote fetch"', () => {
+    const cases: Record<string, string> = {
+      pythonUrllib: `python3 -c "import urllib.request as u; u.urlretrieve('${URL}', 'f')"\nkubectl apply -f f`,
+      nodeFetch: `node -e "fetch('${URL}').then(r => r.text()).then(t => require('fs').writeFileSync('f', t))"\nkubectl apply -f f`,
+      nodeHeredoc: `node - <<'JS'\nconst r = await fetch('${URL}');\nrequire('fs').writeFileSync('f', await r.text());\nJS\nkubectl apply -f f`,
+      gitClone: 'git clone https://github.com/org/repo r\nkubectl apply -f r/config',
+      ghReleaseDownload: 'gh release download v1 -R org/repo -p m.yaml\nkubectl apply -f m.yaml',
+      helmRemoteChart: 'helm install x https://example.com/chart-1.0.0.tgz',
+      helmRepoAdd: 'helm repo add r https://charts.example.com\nhelm install x r/chart',
+      curlPipeSh: `curl -fsSL "${URL}" | sh`,
+      wgetPipeBash: `wget -qO- "${URL}" | bash`,
+      bashProcessSubstitution: `bash <(curl -fsSL "${URL}")`,
+      shDashCCurl: `sh -c "$(curl -fsSL "${URL}")"`,
+    };
+    const missed = Object.entries(cases)
+      .filter(([, src]) => !remoteFetchFlagged(src))
+      .map(([name]) => name);
+    expect(missed).toEqual([]);
+  });
+
+  it('round 5: a heredoc fed to ssh / docker exec / a shell is scanned as a script', () => {
+    expectAllFlagged({
+      sshHeredoc: `ssh ops@host <<'EOF'\nkubectl apply -f ${URL}\nEOF`,
+      sshBashS: `ssh -i key ops@host bash -s <<'EOF'\nkubectl apply -f ${URL}\nEOF`,
+      dockerExecSh: `docker exec -i ctr sh <<'EOF'\nkubectl apply -f ${URL}\nEOF`,
+      hereStringToBash: `bash <<< "kubectl apply -f ${URL}"`,
+    });
+    // A heredoc fed to ssh AS DATA (the remote command reads stdin) is not a script.
+    expectNoneFlagged({
+      sshDataHeredoc: `ssh ops@host 'cat > /tmp/x' <<'EOF'\nit's data, with an unbalanced ' quote\nEOF`,
+    });
+  });
+
+  it('round 5: a sourced helper is followed, and an unresolvable one fails closed on a URL call', () => {
+    const lib = 'fetch_manifest() { curl -fsSL -o "$2" "$1"; }';
+    const caller = `${STRICT}source ./lib.sh\nfetch_manifest "${URL}" f\nkubectl apply -f f`;
+    // Followed: the helper's curl taints f, so the unchecked apply is caught.
+    expect(unsafeApplies(caller, { resolveSource: () => lib }).length).toBeGreaterThan(0);
+    // Followed, and the caller checksums before applying: clean.
+    const verifiedCaller = `${STRICT}source ./lib.sh\nfetch_manifest "${URL}" f\necho "${SHA}  f" | sha256sum -c -\nkubectl apply -f f`;
+    expect(unsafeApplies(verifiedCaller, { resolveSource: () => lib })).toEqual([]);
+    // Unresolvable: the URL-taking call fails closed.
+    expect(remoteFetchFlagged(caller, { resolveSource: () => null })).toBe(true);
+    expect(remoteFetchFlagged(caller)).toBe(true);
+  });
+
+  it('round 5: every `source`d file in the tree resolves (so the real-tree scan follows it)', () => {
+    const unresolved: string[] = [];
+    let seen = 0;
+    for (const f of SHELL_SOURCES()) {
+      const resolve = sourceResolver(f);
+      const text = readFileSync(join(ROOT, f), 'utf8');
+      for (const m of text.matchAll(/^\s*(?:source|\.)\s+(\S+)\s*$/gm)) {
+        seen += 1;
+        const word = m[1].replace(/^["']|["']$/g, '');
+        if (resolve(word) === null) unresolved.push(`${f}: ${word}`);
+      }
+    }
+    expect(seen).toBeGreaterThan(0);
+    expect(unresolved).toEqual([]);
+  });
+
+  it('round 5: every remote-fetch allowlist entry matches EXACTLY ONE call site in the real tree', () => {
+    const { allowHits } = scanRealTree();
+    expect(REMOTE_FETCH_ALLOWLIST.length).toBeGreaterThan(0);
+    for (const e of REMOTE_FETCH_ALLOWLIST)
+      expect({ id: e.id, hits: allowHits.get(e.id) ?? 0 }).toEqual({ id: e.id, hits: 1 });
+  });
+
+  // ---- #1410 round 5, finding 3: pinned versions fail fast, by name --------
+
+  it('round 5: the szpg drill rejects a cert-manager / Knative version override, naming the pin, before any cluster work', () => {
+    for (const [name, value, pin] of [
+      ['CERT_MANAGER_VERSION', 'v1.16.1', 'apply-cert-manager.sh'],
+      ['KNATIVE_VERSION', 'v1.17.0', 'apply-knative-kourier.sh'],
+    ]) {
+      const r = runStubbed(SZPG_PROFILE_B_SCRIPT, ['up'], { [name]: value });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain(`${name}=${value} cannot be honoured`);
+      expect(r.stderr).toContain(pin);
+      expect(r.stderr).not.toContain('STUB'); // failed BEFORE touching kind/kubectl
+    }
+    // The pins themselves are accepted: the run proceeds to the (stubbed) kind.
+    const ok = runStubbed(SZPG_PROFILE_B_SCRIPT, ['up'], {
+      CERT_MANAGER_VERSION: 'v1.16.2',
+      KNATIVE_VERSION: 'v1.16.0',
+    });
+    expect(ok.stderr).not.toContain('cannot be honoured');
+    expect(ok.stderr).toContain('STUB kind');
+  });
+
+  it('round 5: apply-knative-kourier.sh rejects an unpinned version by name, before downloading', () => {
+    const r = runStubbed(KNATIVE_SCRIPT, ['knative-v1.17.0'], {});
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('this script pins knative-v1.16.0');
+    expect(r.stderr).not.toContain('STUB curl');
   });
 
   it('pin-known-images.sh fails closed on a second image on one line, a comment-borne digest, and a block-scalar value (#1410 round 4)', () => {
