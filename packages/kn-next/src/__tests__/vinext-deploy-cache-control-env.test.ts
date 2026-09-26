@@ -551,6 +551,9 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["Dockerfile", `ENV ${NAME}=1 \\\n  0`],
         ["Dockerfile", `ENV ${NAME} 1 \\\n  0`],
         ["Dockerfile", `ENV ${NAME} 1\\\n0`],
+        // a pair-shaped continuation still joins to the value
+        ["Dockerfile", `ENV ${NAME}=1\\\n  OTHER=x`],
+        ["Dockerfile", `ENV ${NAME} 1 \\\n  OTHER=x`],
         // identity escapes and backslash-newline continuations (round-8 inputs)
         ["x.mjs", `process.env["VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL"] = "0";`],
         ["x.mjs", `process.env[\`VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL\`] = "0";`],
