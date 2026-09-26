@@ -121,6 +121,58 @@ function isNamedException(source: string, ref: string): boolean {
 }
 
 /**
+ * The REAL scan code path for the workflow half — the lane tests and the
+ * negative fixtures below both go through it, so a call-site exemption that
+ * goes global is visible to the fixtures. `source` for the exemption key is
+ * the workflow's repo path.
+ */
+function unresolvedWorkflowRefs(
+  workflowFile: string,
+  workflowText: string,
+  harness: Set<string>,
+  datedPaths: Set<string>,
+): string[] {
+  const unresolved: string[] = [];
+  for (const ref of workflowSubprocessRefs(workflowText)) {
+    // compat-window-fingerprint.mjs itself is the TOOL computing the digest,
+    // never a subject of it — excluded by construction, not by exception.
+    if (ref === 'scripts/compat-window-fingerprint.mjs') continue;
+    if (
+      !(
+        harness.has(ref) ||
+        isNamedException(`.github/workflows/${workflowFile}`, ref) ||
+        datedPaths.has(ref)
+      )
+    ) {
+      unresolved.push(ref);
+    }
+  }
+  return unresolved;
+}
+
+/** The REAL scan code path for the harness-file half; key = the file's relPath. */
+function unresolvedHarnessRefs(
+  files: { relPath: string; text: string }[],
+  harness: Set<string>,
+  datedPaths: Set<string>,
+): string[] {
+  const unresolved: string[] = [];
+  for (const { relPath, text } of files) {
+    const fromDir = dirname(resolve(REPO_ROOT, relPath));
+    const refs = [
+      ...scriptDirRefs(text, fromDir),
+      ...(/\.(mjs|cjs|js)$/.test(relPath) ? jsImportRefs(text, fromDir) : []),
+    ];
+    for (const ref of refs) {
+      if (!(harness.has(ref) || isNamedException(relPath, ref) || datedPaths.has(ref))) {
+        unresolved.push(`${relPath} -> ${ref}`);
+      }
+    }
+  }
+  return unresolved;
+}
+
+/**
  * DATED exceptions (#1294 round 4, jev 0.75) — real, temporary tech debt,
  * each with a clock and a tracking issue, so it CANNOT quietly become
  * permanent the way a plain comment-only exception can. `activeExemptions`
@@ -370,17 +422,55 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
     expect(isNamedException('scripts/e2e-deploy.sh', 'scripts/anything-else.sh')).toBe(false);
   });
 
-  it('every named-exception source exists and really references its path (no stale exemption)', () => {
+  it('every named-exception source exists and references its FULL path (no stale exemption); sources is never empty', () => {
     for (const { path, sources } of NAMED_EXCEPTIONS) {
+      expect(sources.length, `${path} declares no sources — a dead exception`).toBeGreaterThan(0);
       for (const source of sources) {
         const abs = resolve(REPO_ROOT, source);
         expect(existsSync(abs), `${source} is gone — remove the exception`).toBe(true);
         expect(
-          readFileSync(abs, 'utf8').includes(path.split('/').pop() as string),
+          readFileSync(abs, 'utf8').includes(path),
           `${source} no longer references ${path} — remove the exception`,
         ).toBe(true);
       }
     }
+  });
+
+  // #1422 — NEGATIVE SCAN FIXTURES through the real call-site code paths. An
+  // undeclared source referencing an exempt path must be REPORTED; declared
+  // sources must not be. Workflow key and harness key are proved separately,
+  // so reverting either call site to a global exemption goes red.
+  it('workflow scan: an undeclared workflow referencing an exempt path is reported; the declared one is not (#1422)', () => {
+    const { path, sources } = NAMED_EXCEPTIONS.find((e) =>
+      e.sources.some((s) => s.startsWith('.github/workflows/')),
+    ) as (typeof NAMED_EXCEPTIONS)[number];
+    const declared = (sources.find((s) => s.startsWith('.github/workflows/')) as string).replace(
+      '.github/workflows/',
+      '',
+    );
+    const text = `jobs:\n  j:\n    steps:\n      - run: node ${path}\n`;
+    expect(workflowSubprocessRefs(text)).toContain(path);
+    expect(unresolvedWorkflowRefs('undeclared-fixture.yml', text, new Set(), new Set())).toEqual([
+      path,
+    ]);
+    expect(unresolvedWorkflowRefs(declared, text, new Set(), new Set())).toEqual([]);
+  });
+
+  it('harness scan: an undeclared harness file referencing an exempt path is reported; the declared one is not (#1422)', () => {
+    const { path, sources } = NAMED_EXCEPTIONS.find((e) =>
+      e.sources.includes('scripts/e2e-deploy.sh'),
+    ) as (typeof NAMED_EXCEPTIONS)[number];
+    expect(sources).toContain('scripts/e2e-deploy.sh');
+    // Real, existing directory so `${SCRIPT_DIR}/../<path>` resolves the same
+    // way for the declared and the undeclared source.
+    const text = `KNEXT_PRELOAD="\${SCRIPT_DIR}/../${path}"\n`;
+    const undeclared = [{ relPath: 'scripts/undeclared-fixture.sh', text }];
+    const declared = [{ relPath: 'scripts/e2e-deploy.sh', text }];
+    expect(scriptDirRefs(text, resolve(REPO_ROOT, 'scripts'))).toContain(path);
+    expect(unresolvedHarnessRefs(undeclared, new Set(), new Set())).toEqual([
+      `scripts/undeclared-fixture.sh -> ${path}`,
+    ]);
+    expect(unresolvedHarnessRefs(declared, new Set(), new Set())).toEqual([]);
   });
 
   // #1294 round 6 — DATED_EXCEPTIONS is empty right now (its one real
@@ -444,40 +534,28 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
         resolve(REPO_ROOT, '.github/workflows', workflowFile),
         'utf8',
       );
-      const harness = harnessFor(lane);
-      const datedPaths = activeDatedExceptionPaths();
-
-      for (const ref of workflowSubprocessRefs(workflowText)) {
-        // compat-window-fingerprint.mjs itself is the TOOL computing the
-        // digest, never a subject of it — excluded by construction, not by
-        // exception.
-        if (ref === 'scripts/compat-window-fingerprint.mjs') continue;
-        expect(
-          harness.has(ref) ||
-            isNamedException(`.github/workflows/${workflowFile}`, ref) ||
-            datedPaths.has(ref),
-          `${workflowFile} invokes ${ref} by subprocess; missing from lane "${lane}"'s harness and not a named exception`,
-        ).toBe(true);
-      }
+      const unresolved = unresolvedWorkflowRefs(
+        workflowFile,
+        workflowText,
+        harnessFor(lane),
+        activeDatedExceptionPaths(),
+      );
+      expect(
+        unresolved,
+        `${workflowFile} invokes these by subprocess; missing from lane "${lane}"'s harness and not a named exception`,
+      ).toEqual([]);
     });
 
     it(`lane "${lane}": every ${'${SCRIPT_DIR}'}/${'${KNEXT_REPO_ROOT}'} reference AND every local import, in every harness file this lane actually includes, is frozen or named`, () => {
-      const harness = harnessFor(lane);
-      const datedPaths = activeDatedExceptionPaths();
-
-      for (const { relPath, text } of harnessCodeFiles(lane)) {
-        const fromDir = dirname(resolve(REPO_ROOT, relPath));
-        const refs = [
-          ...scriptDirRefs(text, fromDir),
-          ...(/\.(mjs|cjs|js)$/.test(relPath) ? jsImportRefs(text, fromDir) : []),
-        ];
-        for (const ref of refs) {
-          expect(
-            harness.has(ref) || isNamedException(relPath, ref) || datedPaths.has(ref),
-            `${relPath} references ${ref}; missing from lane "${lane}"'s harness and not a named exception`,
-          ).toBe(true);
-        }
-      }
+      const unresolved = unresolvedHarnessRefs(
+        harnessCodeFiles(lane),
+        harnessFor(lane),
+        activeDatedExceptionPaths(),
+      );
+      expect(
+        unresolved,
+        `these harness references are missing from lane "${lane}"'s harness and not a named exception`,
+      ).toEqual([]);
     });
   }
 

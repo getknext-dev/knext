@@ -52,11 +52,20 @@
  *      BEFORE the (deliberately error-tolerant) AST walk — must let an
  *      unterminated string/regex silently fall through to a best-effort,
  *      possibly-wrong parse instead of refusing outright.
- *  10. #1422 — `NAMED_EXCEPTIONS` in
+ *  10. A GLOBAL OBJECT ESCAPING AS A VALUE MUST FAIL CLOSED (round 6 (a'),
+ *      #1388): `isAmbientRootEscape` is the guard behind `const R = Reflect;
+ *      R.get(process, k)` and `pick(globalThis, k)` — a global object handed
+ *      to anything other than a property base, an alias, `typeof`, an
+ *      equality operand, or the right side of `in`. Disarming it (short-
+ *      circuiting to `return false` at the top) must silently let both
+ *      shapes back through as clean.
+ *  11. #1422 — `NAMED_EXCEPTIONS` in
  *      `tests/compat-window-fingerprint-execution-scan.test.ts` must stay
  *      SCOPED PER SOURCE FILE via `isNamedException` (exact (source, path)
- *      pair), never per lane or global. Two mutations: ignoring `source`, and
- *      ignoring `path`, must each go RED against the unit coverage.
+ *      pair), never per lane or global. Five mutations: the helper ignoring
+ *      `source`, the helper ignoring `path`, EACH of the two scan call sites
+ *      (workflow key, harness key) reverted to a global exemption, and
+ *      `sources: []` no longer being rejected — each must go RED.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -67,8 +76,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 8-of-9 from
- *     9-of-9;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 9-of-10 from
+ *     10-of-10;
  *   * judged on EXIT CODES, never on grepped output — vitest/bun:test write
  *     ANSI, and a pass/fail grep over it once certified fourteen decorative
  *     mutations green.
@@ -97,7 +106,7 @@ const SPECS = [
   'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(11);
+declareMutations(15);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -287,9 +296,23 @@ prove(
   'if (false) {',
 );
 
-// 10. #1422 — `isNamedException` must key on the exact (source, path) pair.
+// 10. Round 6 (a')'s fail-closed fix: a global object (globalThis/global/
+//     self/window/process, or an alias of one) escaping as a VALUE — handed
+//     to a helper, an aliased reflective API, Object.assign, a spread — is
+//     as reachable as `globalThis[k]` itself, just one hop further out.
+//     Disarming `isAmbientRootEscape` (short-circuiting it to always return
+//     false) must silently let both `const R = Reflect; R.get(process, k)`
+//     and `pick(globalThis, k)` back through unflagged.
+prove(
+  'a global object escaping as a value stops being a hard error: isAmbientRootEscape always returns false',
+  'const isAmbientRootEscape = (node) => {\n    if (',
+  'const isAmbientRootEscape = (node) => {\n    return false;\n    if (',
+);
+
+// 11. #1422 — `isNamedException` must key on the exact (source, path) pair,
+//     AND both real scan call sites must consult it with their own source key.
 //     Each anchor is asserted to occur exactly once by `mutate` (abort
-//     otherwise); the verdict is the specs' exit code, never their output.
+//     otherwise); the verdict is the spec's exit code, never its output.
 const IS_NAMED_ANCHOR =
   'return NAMED_EXCEPTIONS.some((e) => e.path === ref && e.sources.includes(source));';
 proveOnExecutionScanSpec(
@@ -301,6 +324,21 @@ proveOnExecutionScanSpec(
   'isNamedException stops checking the path: any reference from a named source is exempt (#1422)',
   IS_NAMED_ANCHOR,
   'return NAMED_EXCEPTIONS.some((e) => e.sources.includes(source));',
+);
+proveOnExecutionScanSpec(
+  'workflow scan call site reverts to a global exemption (#1422)',
+  'isNamedException(`.github/workflows/${workflowFile}`, ref)',
+  'true',
+);
+proveOnExecutionScanSpec(
+  'harness scan call site reverts to a global exemption (#1422)',
+  'isNamedException(relPath, ref)',
+  'true',
+);
+proveOnExecutionScanSpec(
+  'a named exception with sources: [] is no longer rejected as dead (#1422)',
+  'declares no sources — a dead exception`).toBeGreaterThan(0);',
+  'declares no sources — a dead exception`).toBeGreaterThan(-1);',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

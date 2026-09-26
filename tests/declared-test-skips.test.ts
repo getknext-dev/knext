@@ -115,7 +115,7 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
     reason:
       'ENVIRONMENT-availability gate (docker daemon reachable), not artifact-gated — same class ' +
       'as the bunAvailable pattern this scanner already treats as non-artifact. Executes ' +
-      'scripts/e2e-native-rebuild-musl.sh for real inside the pinned oven/bun:1.4.2-alpine image ' +
+      'scripts/e2e-native-rebuild-musl.sh for real inside the pinned oven/bun:1.4.2-alpine image ' + // oven-bun-pin-exempt: descriptive prose, not a selection
       '(#1230 round 6: ROOT-escape guard, sharp musl sibling load, --user pid-attribution); needs ' +
       'a working docker on the machine, which every CI runner that boots the bun lane already ' +
       'requires (scripts/e2e-deploy.sh itself refuses to run without docker once RUNTIME=bun).',

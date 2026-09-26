@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+import { CREDENTIAL_CELLS } from '../scripts/compat-window-audit.mjs';
 
 /**
  * S1 / #545 — the COMPAT-WINDOW FINGERPRINT.
@@ -611,6 +612,48 @@ describe('compat-window fingerprint — wired into the scheduled run', () => {
     expect(fingerprintIdx, 'Fingerprint step not found').toBeGreaterThan(-1);
     expect(installIdx).toBeLessThan(fingerprintIdx);
   });
+
+  // #1316 — the test above only ever read `test-e2e-deploy.yml` (via the
+  // module-level `WORKFLOW` constant), so `compat-vinext.yml` — the OTHER
+  // real `workflowFile` in `CREDENTIAL_CELLS` (#1294's per-cell workflow
+  // entry) — was completely unguarded: a reorder there that put the
+  // fingerprint step before the install step would break the bun-vinext
+  // lane's nightly run and nothing in this suite would notice. SCANNED, not
+  // hand-listed: this reads the actual `workflowFile` values off
+  // `CREDENTIAL_CELLS` (deduped, `null` entries dropped — a cell with no
+  // workflow wired yet, e.g. node-vinext, has nothing to check), so a NEW
+  // lane wired to a NEW workflow file is covered automatically, the same
+  // "scan, don't enumerate" discipline `compat-window-fingerprint.mjs`
+  // itself uses for the frozen set.
+  it('every wired lane workflow in CREDENTIAL_CELLS runs "Install knext deps" BEFORE its fingerprint step', () => {
+    // CREDENTIAL_CELLS is inferred from literal values in a plain .mjs
+    // module, so `workflowFile` narrows to a LITERAL union (e.g.
+    // `"test-e2e-deploy.yml" | "compat-vinext.yml" | null`), not `string |
+    // null` — a `(f): f is string =>` predicate widens past that literal
+    // union and TS correctly rejects it as unsound. `NonNullable<...>` keeps
+    // the predicate's output type assignable to the real element type.
+    const rawWorkflowFiles = CREDENTIAL_CELLS.map((c) => c.workflowFile);
+    const workflowFiles = [
+      ...new Set(
+        rawWorkflowFiles.filter(
+          (f): f is NonNullable<(typeof rawWorkflowFiles)[number]> => f !== null,
+        ),
+      ),
+    ];
+    expect(workflowFiles.length).toBeGreaterThan(1);
+    for (const file of workflowFiles) {
+      const path = resolve(REPO_ROOT, '.github/workflows', file);
+      const contents = readFileSync(path, 'utf8');
+      const installIdx = contents.indexOf('name: Install knext deps');
+      const fingerprintIdx = contents.indexOf('name: Fingerprint the frozen compat-window set');
+      expect(installIdx, `${file}: "Install knext deps" step not found`).toBeGreaterThan(-1);
+      expect(fingerprintIdx, `${file}: fingerprint step not found`).toBeGreaterThan(-1);
+      expect(
+        installIdx,
+        `${file}: "Install knext deps" (idx ${installIdx}) must run BEFORE the fingerprint step (idx ${fingerprintIdx})`,
+      ).toBeLessThan(fingerprintIdx);
+    }
+  });
 });
 
 /**
@@ -1045,6 +1088,561 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     expect(harness).toContain('scripts/lib/real.cjs');
   });
 
+  // #1316 — `createRequire`, an aliased `require`, and `module.require` were
+  // all invisible to jsLocalImportSpecifiers: none of them is literally the
+  // identifier `require` called directly, so a relative path reached through
+  // any of them returned [] SILENTLY — the exact "silently unfrozen
+  // dependency" failure mode #1294 round 5 closed for non-literal specifiers,
+  // just reopened one idiom over.
+  describe('aliased require / createRequire / module.require fail closed (#1316)', () => {
+    it('a plain require() alias with a literal relative specifier is recognised and resolved (same base as require())', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const r = require;\nconst { real } = r('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    // An UNTRACKED alias — one this scanner's collect pass never bound to
+    // `require`/`createRequire` — must still fail closed. `passthrough`
+    // returns its argument unchanged at runtime, but that is not something a
+    // static AST walk can know; treating it as safe would be exactly the
+    // silent-omission failure mode this whole mechanism exists to close.
+    it('an UNTRACKED require reference (e.g. passed through a function) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "function passthrough(fn) { return fn; }\nconst r = passthrough(require);\nconst { real } = r('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('module.require(...) with a literal relative specifier is recognised and resolved (same base as require())', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = module.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    it('a createRequire()-derived function called with a relative-looking literal is a hard error (wrong resolution base)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /createRequire\(\)-derived function with the relative-looking specifier/,
+      );
+    });
+
+    it('createRequire() invoked inline (not bound to a tracked local) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst { real } = createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /calls createRequire\(\).*without binding it to a tracked local/,
+      );
+    });
+
+    it('a createRequire()-derived function used ONLY for .resolve() on a bare specifier does NOT trip fail-closed (the real scripts\\/e2e-preflight.mjs shape)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nconst SUBPATH = '@getknext/core/adapter';\nconst adapterPath = req.resolve(SUBPATH);\nexport const y = adapterPath;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('a createRequire()-derived function called with a BARE (non-relative) specifier does NOT trip fail-closed', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nconst pkg = req('@getknext/core/adapter');\nexport const y = pkg;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('createRequire referenced but not called (e.g. passed around) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nfunction wrap(fn) { return fn; }\nconst req = wrap(createRequire);\nexport const y = req;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it('a plain require() alias reaching a NON-relative (bare) specifier does NOT trip fail-closed', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const r = require;\nconst pkg = r('node:path');\nexport const y = pkg;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    // The real corpus case (scripts/e2e-preflight.mjs): `const require =
+    // createRequire(...)` SHADOWS the global `require` name with a
+    // createRequire-derived function. This must not itself be a hard error —
+    // only a later CALL through it (already covered above) is.
+    it('`const require = createRequire(...)` (shadowing the global name) is not itself a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst require = createRequire(import.meta.url);\nconst adapterPath = require.resolve('@getknext/core/adapter');\nexport const y = adapterPath;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('module.require(...) with a NON-literal specifier is a hard error, matching bare require()', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const dynamicPath = './lib/real.cjs';\nconst { real } = module.require(dynamicPath);\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/NON-LITERAL specifier/);
+    });
+
+    // #1388 review round — four shapes that still returned [] silently.
+    it('an ALIASED createRequire import (`import { createRequire as cr }`) reaching a relative path is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire as cr } from 'node:module';\nconst req = cr(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /createRequire\(\)-derived function with the relative-looking specifier/,
+      );
+    });
+
+    it('a TWO-LEVEL plain alias (`const a = require; const b = a;`) resolves the relative path it reaches — tracked, not dropped', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const a = require;\nconst b = a;\nconst { real } = b('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      // A two-hop plain alias still resolves relative to the FILE's OWN
+      // directory (same base as bare `require()`) — no ambiguity, so it is
+      // TRACKED, not a hard error, and the real dependency lands in the
+      // harness rather than silently vanishing.
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    // A single top-to-bottom AST walk happens to resolve a two-hop chain
+    // DECLARED IN DEPENDENCY ORDER on its own (by the time `const b = a` is
+    // visited, `a` was already added while visiting `const a = require`
+    // earlier in the same walk) — so that shape alone does not prove the
+    // FIXPOINT loop is load-bearing. A chain three hops deep, declared in
+    // REVERSE dependency order, does: a single pass can only add `a` (the
+    // one whose RHS is already tracked); `b`'s RHS (`a`) and `c`'s RHS (`b`)
+    // are not yet tracked when the walk reaches them, so only a SECOND and
+    // THIRD pass (the `while (grew)` loop) tracks `b` then `c`.
+    it('a THREE-level alias chain declared in REVERSE order is still tracked (the fixpoint, not a single pass)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const c = b;\nconst b = a;\nconst a = require;\nconst { real } = c('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+
+    it('a TWO-LEVEL alias where the second hop escapes tracking (`const a = require; const b = wrap(a);`) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "function wrap(fn) { return fn; }\nconst a = require;\nconst b = wrap(a);\nconst { real } = b('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      // `a` is passed to a function call, not aliased by a plain
+      // `const X = <tracked-name>` reference — the fixpoint pass correctly
+      // does NOT track `b`, so referencing `a` this way must itself fail
+      // closed (an untracked way to get at a tracked name).
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `a` in a form this scanner does not track/,
+      );
+    });
+
+    it('a two-level createRequire alias chain (`const a = cr; const b = a(u); b(x)`) with a relative-looking literal is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import { createRequire } from 'node:module';\nconst a = createRequire;\nconst req = a(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /createRequire\(\)-derived function with the relative-looking specifier/,
+      );
+    });
+
+    it('require.call(null, "./x") — a property access other than .resolve/.cache — is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = require.call(null, './lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('an aliased require.call (`req.call(null, "./x")`) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const req = require;\nconst { real } = req.call(null, './lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `req` in a form this scanner does not track/,
+      );
+    });
+
+    it('require.apply(null, ["./x"]) is a hard error too (not just .call)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = require.apply(null, ['./lib/real.cjs']);\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('import.meta.require("./x") (Bun-specific) is UNCONDITIONALLY a hard error, even with a bare specifier', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = import.meta.require('node:path');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /import\.meta\.require\(\), a Bun-specific form/,
+      );
+    });
+
+    it('import.meta.require("./x") with a relative-looking literal is also a hard error (same unconditional rule)', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = import.meta.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /import\.meta\.require\(\), a Bun-specific form/,
+      );
+    });
+
+    // #1392 review round — the "identifier used as property name" exemption
+    // (meant ONLY for `module.require`, the property name being `require`
+    // itself) was matching ANY tracked name used as a property name,
+    // including `createRequire` — so `m.createRequire(...)`,
+    // `mod.createRequire`, and `require('node:module').createRequire` all
+    // slipped through silently instead of failing closed. Fixed by narrowing
+    // the exemption to the literal name `require`.
+    it('a namespace-imported module.createRequire(...) call is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as m from 'node:module';\nconst { real } = m.createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it('a default-imported module object’s .createRequire is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import mod from 'node:module';\nconst { real } = mod.createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it("require('node:module').createRequire(...) is a hard error, not silently exempted", () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = require('node:module').createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    it("a bracket-accessed mod['createRequire'](...) is a hard error, not silently invisible", () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = mod['createRequire'](import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /computed \(bracket\) property access on a tracked name/,
+      );
+    });
+
+    // techdebt-3 round — two more shapes that still slipped through
+    // silently: aliasing the `module` identifier itself (defeating the
+    // literal `module.require` check), and a computed key on a node:module
+    // binding whose key is not a string literal (so it can't be compared
+    // against 'require'/'createRequire' at all, and was simply never seen).
+    it('aliasing the `module` identifier (`const m = module; m.require(...)`) is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const m = module;\nconst { real } = m.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references the `module` identifier in a form this scanner does not track/,
+      );
+    });
+
+    it("a computed key on a node:module binding (`const k='createRequire'; mod[k](u)`) is a hard error, not silently invisible", () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst k = 'createRequire';\nconst { real } = mod[k](import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /non-literal computed \(bracket\) property access on `mod`, a name bound to node:module/,
+      );
+    });
+
+    // Round-4 findings (last round on #1388).
+    //
+    // 1. `require` as a PROPERTY VALUE, taken but never called, defeated
+    // the narrow "require as a property name is exempt" carve-out — that
+    // carve-out only checked the property NAME's text, never whether the
+    // access itself was actually CALLED. `const r = module.require;`
+    // extracts the function without invoking it (a hard error is still
+    // correct: a LATER indirect call through `r` is exactly as unresolvable
+    // as any other untracked alias), and `module.require.call(...)` chains
+    // through `.call` the same way `require.call(...)` already fails
+    // closed for the bare-`require` case.
+    it('`const r = module.require` (the property VALUE taken, not called) is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const r = module.require;\nconst { real } = r('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    it('`module.require.call(...)` is a hard error, not silently exempted', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = module.require.call(module, './lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `require` in a form this scanner does not track/,
+      );
+    });
+
+    // 2. ANY use of a node:module binding other than a DIRECT
+    // `.createRequire(...)` call must fail closed — not just the specific
+    // shapes caught so far (literal/non-literal bracket access). Covers:
+    // destructuring, `Reflect.get`, `._load`, referencing `.createRequire`
+    // without calling it, and the base expression of an inline
+    // `await import('node:module')` used without ever binding a name.
+    // Destructuring the literal `createRequire` property is ALREADY caught
+    // by the pre-existing seeded-name check on the destructured KEY
+    // identifier itself (its text is literally 'createRequire', which this
+    // scanner treats as a reference regardless of scope) — a valid,
+    // independent path to the same fail-closed outcome, not the NEW general
+    // check this round adds. Accepts either message: both are correct.
+    it('destructuring createRequire off a node:module binding (`const { createRequire } = mod`) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { createRequire } = mod;\nconst { real } = createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/#1316\/#1388/);
+    });
+
+    // Destructuring a DIFFERENT, non-seeded property (`_load`, not
+    // `createRequire`) is what actually PROVES the new general
+    // node:module-binding check is doing the work — nothing seeds `_load`
+    // into any tracked-name set, so the ONLY thing that can catch this is
+    // the new check examining the `mod` reference itself.
+    it('destructuring a non-seeded property (`const { _load } = mod`) is a hard error via the new general check', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { _load } = mod;\nconst { real } = _load('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('Reflect.get(mod, "createRequire") is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = Reflect.get(mod, 'createRequire')(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('mod._load (an undocumented internal, not createRequire) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = mod._load('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('`mod.createRequire` referenced but not called (the value taken) is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst cr = mod.createRequire;\nconst { real } = cr(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a name bound to node:module in a form this scanner does not track/,
+      );
+    });
+
+    it('an inline `(await import("node:module"))[k]` with no bound name at all is a hard error', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const k = 'createRequire';\nconst { real } = (await import('node:module'))[k](import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /uses a non-literal computed \(bracket\) property access.*node:module/,
+      );
+    });
+
+    // `mod.createRequire(...)` (a PROPERTY-ACCESS call, not a plain
+    // identifier call) was ALWAYS a hard error, before and after round 4 —
+    // there is no "real corpus shape" that resolves through
+    // `<namespace>.createRequire(...)`; the only chained-call form this
+    // scanner ever resolves is a plain identifier reaching createRequire
+    // via an import (`import { createRequire } from 'node:module'`), never
+    // a namespace/default object's `.createRequire` property (see the
+    // existing "namespace-imported"/"default-imported" tests above). This
+    // test exists only to record that the strict node:module-binding rule
+    // does not change that pre-existing outcome.
+    it('`import * as mod from "node:module"; mod.createRequire(...)` chained straight into a call is STILL a hard error, unchanged by the round-4 strict rule', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst { real } = mod.createRequire(import.meta.url)('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /references `createRequire` in a form this scanner does not track/,
+      );
+    });
+
+    // The RESULT of `mod.createRequire(...)` assigned to a local was never a
+    // tracked shape (the fixpoint pass only tracks a createRequireFnNames-
+    // member IDENTIFIER call, not a PropertyAccessExpression one) — still a
+    // hard error under the strict rule, same as before it, just via the
+    // generic untracked-reference path rather than a createRequire-derived
+    // one. Documented here so the exact message is not mistaken for a
+    // regression.
+    it('`const req = mod.createRequire(...)` (the derived function assigned to a local) is still a hard error, not silently allowed', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "import * as mod from 'node:module';\nconst req = mod.createRequire(import.meta.url);\nconst { real } = req('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/#1316\/#1388/);
+    });
+
+    // 3. The `module` identifier check must be narrow enough that a property
+    // NAMED "module" (an object-literal key, or a `.module` property access
+    // on some unrelated object) does not trip it — `module` is only
+    // meaningful as a VALUE reference to the ambient CJS binding.
+    it('`{ module: 1 }` (an object literal KEY named "module") does not trip the module-identifier check', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        'const cfg = { module: 1 };\nexport const y = cfg;\n',
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('`o.module` (a property access NAMED "module" on an unrelated object) does not trip the module-identifier check', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        'const o = { module: 1 };\nconst y = o.module;\nexport { y };\n',
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    // module.require via property access must still be exempt — this is the
+    // one property-name shape the fix must keep working.
+    it('module.require(...) called (not just the property-name exemption) is still recognised, not accidentally broken by the narrowed exemption', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      mkdirSync(join(repoRoot, 'scripts/lib'), { recursive: true });
+      writeFileSync(join(repoRoot, 'scripts/lib/real.cjs'), 'module.exports = { real: 1 };\n');
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "const { real } = module.require('./lib/real.cjs');\nexport const y = real;\n",
+      );
+      const result = execFileSync(
+        process.execPath,
+        [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json', '--files'],
+        { encoding: 'utf8' },
+      );
+      const parsed = JSON.parse(result) as { files: { component: string; path: string }[] };
+      const harness = parsed.files.filter((f) => f.component === 'harness').map((f) => f.path);
+      expect(harness).toContain('scripts/lib/real.cjs');
+    });
+  });
+
   // Fail CLOSED: a file that does not PARSE at all (an unterminated regex or
   // string literal, among other syntax errors) is a hard error — refusing
   // to scan a recovered-but-possibly-wrong best-effort AST — rather than a
@@ -1068,6 +1666,324 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
       'const bad = "unterminated\nexport const y = 1;\n',
     );
     expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/does not parse as JavaScript/);
+  });
+
+  // #1388 round 5: every shape below reached `require`/`node:module` with
+  // NO error. Enumerating spellings of `require` cannot close this — a
+  // string-built name (`'req'+'uire'`) defeats any literal comparison. So
+  // the scanner fails closed on the CHANNELS that let a string become code
+  // or a property key: the `eval`/`Function` identifiers (any reference at
+  // all), `.constructor` (Function by another name), node:vm, a non-literal
+  // computed key on a global object or on a getBuiltinModule() result, and
+  // getBuiltinModule itself used any way but a direct literal-argument call.
+  // Each case names the class its failure message must cite, so a mutation
+  // removing one class reds exactly its own rows.
+  describe('string-to-code / string-to-key channels fail closed (#1388 round 5)', () => {
+    const cases: { name: string; src: string; error: RegExp }[] = [
+      {
+        name: "new Function('return require')()",
+        src: "const r = new Function('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `Function` identifier/,
+      },
+      {
+        name: "Function('return req'+'uire')()",
+        src: "const r = Function('return req' + 'uire')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `Function` identifier/,
+      },
+      {
+        name: "eval('req'+'uire')",
+        src: "const r = eval('req' + 'uire');\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `eval` identifier/,
+      },
+      {
+        name: '(0, eval)(...) — indirect eval',
+        src: "const r = (0, eval)('req' + 'uire');\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `eval` identifier/,
+      },
+      {
+        name: 'globalThis.eval(...) — eval as a property name',
+        src: "const r = globalThis.eval('req' + 'uire');\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `eval` identifier/,
+      },
+      {
+        name: "globalThis['req'+'uire']",
+        src: "const r = globalThis['req' + 'uire'];\nexport const y = r('./lib/real.cjs');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: 'const g = global; g[k] — an ALIASED global object',
+        src: "const g = global;\nconst k = 'req' + 'uire';\nexport const y = g[k]('./lib/real.cjs');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: 'globalThis.process[k] — a chain rooted at a global object',
+        src: "const k = 'getBuiltin' + 'Module';\nexport const y = globalThis.process[k]('module');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: 'const { process: p } = globalThis; p[k] — a DESTRUCTURED global alias',
+        src: "const { process: p } = globalThis;\nconst k = 'getBuiltin' + 'Module';\nexport const y = p[k]('module');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: 'const { [k]: r } = globalThis — a computed destructuring key',
+        src: "const k = 'req' + 'uire';\nconst { [k]: r } = globalThis;\nexport const y = r('./lib/real.cjs');\n",
+        error:
+          /non-literal computed \(bracket\) property access on a global object \(via a computed destructuring key\)/,
+      },
+      {
+        name: "process.getBuiltinModule('mod'+'ule')._load",
+        src: "const m = process.getBuiltinModule('mod' + 'ule');\nexport const y = m._load('./lib/real.cjs');\n",
+        error: /calls getBuiltinModule\(\) with a non-literal argument/,
+      },
+      {
+        name: "process.getBuiltinModule('module')._load — a LITERAL node:module",
+        src: "export const y = process.getBuiltinModule('module')._load('./lib/real.cjs');\n",
+        error: /calls getBuiltinModule\(\) for node:module/,
+      },
+      {
+        name: "process.getBuiltinModule('node:module') bound to a local",
+        src: "const m = process.getBuiltinModule('node:module');\nexport const y = m._load('./lib/real.cjs');\n",
+        error: /calls getBuiltinModule\(\) for node:module/,
+      },
+      {
+        name: "process.getBuiltinModule('fs')[k] — non-literal key on the result",
+        src: "const k = 'read' + 'FileSync';\nexport const y = process.getBuiltinModule('fs')[k];\n",
+        error: /non-literal computed \(bracket\) property access on a getBuiltinModule\(\) result/,
+      },
+      {
+        name: "const fs = process.getBuiltinModule('fs'); fs[k] — an ALIASED result",
+        src: "const fs = process.getBuiltinModule('fs');\nconst k = 'read' + 'FileSync';\nexport const y = fs[k];\n",
+        error: /non-literal computed \(bracket\) property access on a getBuiltinModule\(\) result/,
+      },
+      {
+        name: 'const { getBuiltinModule } = process — destructured',
+        src: "const { getBuiltinModule } = process;\nexport const y = getBuiltinModule('fs');\n",
+        error: /references `getBuiltinModule` in a form this scanner does not track/,
+      },
+      {
+        name: "globalThis['eval'] — a LITERAL bracket key naming eval",
+        src: "const r = globalThis['eval'];\nexport const y = r('1');\n",
+        error: /computed \(bracket\) property access on a tracked name \(`eval`\)/,
+      },
+      {
+        name: "process['getBuiltinModule']('module') — literal bracket key",
+        src: "export const y = process['getBuiltinModule']('module');\n",
+        error: /computed \(bracket\) property access on a tracked name \(`getBuiltinModule`\)/,
+      },
+      {
+        name: "(() => {}).constructor('return require')() — Function via .constructor",
+        src: "const r = (() => {}).constructor('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /accesses `\.constructor`/,
+      },
+      {
+        name: "import vm from 'node:vm' — string code via vm",
+        src: "import vm from 'node:vm';\nexport const y = vm.runInThisContext('1');\n",
+        error: /imports node:vm/,
+      },
+      {
+        name: "require('vm') — string code via vm, CJS form",
+        src: "const vm = require('vm');\nexport const y = vm.runInThisContext('1');\n",
+        error: /imports node:vm/,
+      },
+    ];
+
+    for (const { name, src, error } of cases) {
+      it(`${name} is a hard error`, () => {
+        const { repoRoot, tarballsDir } = makeFixture();
+        writeFileSync(join(repoRoot, 'scripts/e2e-summary.mjs'), src);
+        expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(error);
+      });
+    }
+
+    // The other half: the rules must not fire on the ordinary, LITERAL uses
+    // of the same objects — or the guard is unusable and gets deleted.
+    it('literal-keyed global/process access and a literal non-module getBuiltinModule call still fingerprint cleanly', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        [
+          "const a = globalThis.process.env['HOME'];",
+          "const b = globalThis['structuredClone'];",
+          "const fs = process.getBuiltinModule('node:fs');",
+          'const c = fs.existsSync;',
+          "const key = 'PATH';",
+          'const d = process.env[key];',
+          'const e = { evaluate: 1, FunctionName: 2 };',
+          'export const y = [a, b, c, d, e];',
+          '',
+        ].join('\n'),
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+  });
+
+  // #1388 round 6: round 5 closed the string-to-key channel only for the
+  // ElementAccessExpression SPELLING (`globalThis[k]`). The same channels are
+  // reachable through reflection (`Reflect.get(process, k)`), by letting a
+  // global object escape as a value (`const R = Reflect; R.get(globalThis,
+  // k)`, a helper call), and through a computed `constructor` key
+  // (`fn['constr' + 'uctor']`, `Reflect.get(fnProto, 'constructor')`), and by
+  // importing code straight out of a `data:`/`blob:` URL. Each is scanned as
+  // a CHANNEL, not a spelling. Every case names its class's message, so a
+  // mutation removing one class reds exactly its own rows.
+  //
+  // (round 8 review) A chained-key rule (`x[a][b]` → `Function`) used to live
+  // here too, but it false-positived on ordinary code — a nested-object
+  // assignment (`scaffoldPkg[field][dep] = …`, `scripts/install-smoke.mjs`)
+  // or a matrix loop (`g[y][x]`) — while the actual bypass channels, a
+  // split-local (`const t = ({})[a]; t[a]('…')()`) or a `reduce`-built key
+  // path (`ks.reduce((o, k) => o[k], {})`), passed clean through it. It was
+  // dropped rather than fixed; both bypasses are out of scope for a static
+  // scan and are tracked on #1441 instead.
+  describe('reflection / escaping globals / computed constructor / data: URLs fail closed (#1388 round 6)', () => {
+    const cases: { name: string; src: string; error: RegExp }[] = [
+      // (a) reflective APIs handed a global object or a getBuiltinModule() result
+      {
+        name: 'Reflect.get(process, k)',
+        src: "const k = 'getBuiltin' + 'Module';\nexport const y = Reflect.get(process, k)('module');\n",
+        error: /passes a global object .* to the reflective API `Reflect\.get`/,
+      },
+      {
+        name: 'Reflect.get(globalThis, k)',
+        src: "const k = 'req' + 'uire';\nexport const y = Reflect.get(globalThis, k)('./lib/real.cjs');\n",
+        error: /passes a global object .* to the reflective API `Reflect\.get`/,
+      },
+      {
+        name: "Object.getOwnPropertyDescriptor(process, 'getBuiltinModule').value(...)",
+        src: "export const y = Object.getOwnPropertyDescriptor(process, 'getBuiltinModule').value('module');\n",
+        error: /passes a global object .* to the reflective API `Object\.getOwnPropertyDescriptor`/,
+      },
+      {
+        name: 'Object.entries(globalThis)',
+        src: 'export const y = Object.entries(globalThis);\n',
+        error: /passes a global object .* to the reflective API `Object\.entries`/,
+      },
+      {
+        name: 'Object.keys(g) — an ALIASED global object',
+        src: 'const g = globalThis;\nexport const y = Object.keys(g);\n',
+        error: /passes a global object .* to the reflective API `Object\.keys`/,
+      },
+      {
+        name: "Reflect.get(process.getBuiltinModule('fs'), k) — a getBuiltinModule() result",
+        src: "const k = 'read' + 'FileSync';\nexport const y = Reflect.get(process.getBuiltinModule('fs'), k);\n",
+        error: /passes a getBuiltinModule\(\) result to the reflective API `Reflect\.get`/,
+      },
+      // (a') a global object ESCAPING as a value — the reflective function
+      // aliased, or the global handed to a helper, reaches the same place.
+      {
+        name: 'const R = Reflect; R.get(process, k) — an ALIASED reflective API',
+        src: "const R = Reflect;\nconst k = 'getBuiltin' + 'Module';\nexport const y = R.get(process, k)('module');\n",
+        error: /uses a global object .* as a value/,
+      },
+      {
+        name: 'pick(globalThis) — a global object handed to a helper',
+        src: "function pick(o, k) { return o[k]; }\nexport const y = pick(globalThis, 'req' + 'uire')('./lib/real.cjs');\n",
+        error: /uses a global object .* as a value/,
+      },
+      // (b) a computed key that reaches `constructor` (Function by another name)
+      {
+        name: '(() => 0)[k] — a non-literal key on a function expression',
+        src: "const k = 'constr' + 'uctor';\nconst r = (() => 0)[k]('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /non-literal computed \(bracket\) property access on a function or prototype/,
+      },
+      {
+        name: 'function f() {} f[k] — a non-literal key on a declared function',
+        src: "function f() {}\nconst k = 'constr' + 'uctor';\nexport const y = f[k]('return 1');\n",
+        error: /non-literal computed \(bracket\) property access on a function or prototype/,
+      },
+      {
+        name: "(() => 0)['constr' + 'uctor'] — a constant-folded key naming constructor",
+        src: "const r = (() => 0)['constr' + 'uctor']('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /computed \(bracket\) property access on a tracked name \(`constructor`\)/,
+      },
+      {
+        name: "Reflect.get(fnProto, 'constructor')",
+        src: "const fnProto = Object.getPrototypeOf(() => 0);\nconst r = Reflect.get(fnProto, 'constructor')('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /names the tracked key `constructor` through the reflective API `Reflect\.get`/,
+      },
+      {
+        name: 'Reflect.get(fn, k) — a non-literal key on a function through reflection',
+        src: "const k = 'constr' + 'uctor';\nexport const y = Reflect.get(() => 0, k)('return 1');\n",
+        error:
+          /non-literal key on a function or prototype through the reflective API `Reflect\.get`/,
+      },
+      // (c) code imported from a data:/blob: URL — non-relative, so it used
+      // to pass as a "bare" specifier.
+      {
+        name: "import('data:text/javascript,...')",
+        src: "export const y = await import('data:text/javascript,export default 1');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "import('data:text/javascript;base64,...')",
+        src: "export const y = await import('data:text/javascript;base64,ZXhwb3J0IGRlZmF1bHQgMQ==');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "static import from 'data:...'",
+        src: "import z from 'data:text/javascript,export default 1';\nexport const y = z;\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "require('data:...')",
+        src: "export const y = require('data:text/javascript,module.exports=1');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "import('blob:...')",
+        src: "export const y = await import('blob:nodedata:abc');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+    ];
+
+    for (const { name, src, error } of cases) {
+      it(`${name} is a hard error`, () => {
+        const { repoRoot, tarballsDir } = makeFixture();
+        writeFileSync(join(repoRoot, 'scripts/e2e-summary.mjs'), src);
+        expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(error);
+      });
+    }
+
+    // (d) The other half. ADR-0027 MANDATES a `globalThis` slot keyed by a
+    // registry `Symbol.for('knext.lib.*')` in packages/lib — a symbol key can
+    // never name `require`/`eval`/`Function`, so the seam shape must pass,
+    // in both its inline and its const-bound form. Ordinary use of global
+    // objects (base of a property access, typeof, comparisons) must too.
+    it('the ADR-0027 Symbol.for seam shape and ordinary global-object use still fingerprint cleanly', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        [
+          "const STATE_KEY = Symbol.for('knext.lib.context.state');",
+          'const stateGlobal = globalThis;',
+          'stateGlobal[STATE_KEY] ??= { n: 0 };',
+          'const s = stateGlobal[STATE_KEY];',
+          "const t = globalThis[Symbol.for('knext.lib.x')];",
+          "const isBrowser = typeof window !== 'undefined';",
+          'const same = globalThis === global;',
+          "const has = 'fetch' in globalThis;",
+          'const env = process.env;',
+          'const rows = [[1]];',
+          'const cell = rows[0][0];',
+          'const kv = Object.entries(env);',
+          'export const y = [s, t, isBrowser, same, has, cell, kv];',
+          '',
+        ].join('\n'),
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('a Symbol.for key bound with `let` (re-assignable) is NOT exempt', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "let key = Symbol.for('knext.lib.x');\nkey = 'req' + 'uire';\nexport const y = globalThis[key];\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /non-literal computed \(bracket\) property access on a global object/,
+      );
+    });
   });
 
   it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {

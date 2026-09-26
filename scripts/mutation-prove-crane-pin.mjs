@@ -94,9 +94,55 @@ const MUTATIONS = [
     anchor: "return text.replace(/^[ \\t]*#.*$/gm, '');",
     replacement: 'return text;',
   },
+  {
+    // #1429 finding 1a — stop requiring a crane pin to carry an accompanying
+    // version comment. A pin with NO comment would pass silently.
+    label: 'scanCranePins: stop requiring a crane pin to have an accompanying version comment',
+    anchor: 'if (named.length === 0) {',
+    replacement: 'if (false) {',
+  },
+  {
+    // #1429 finding 1b — narrow the comment parse back to one phrasing
+    // ("from the vX.Y.Z"). A single-line "from v9.9.9" comment then yields
+    // no token and the loose-parse end-to-end test goes red.
+    label: 'scanCraneVersionComments: parse only the exact "from the vX.Y.Z" phrasing',
+    anchor: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+    replacement: 'const versionTokenRe = /(?<=from the )v\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+  },
+  {
+    // #1429 — make the v prefix OPTIONAL again. "go 1.22.3" / "10.0.0.1" in a
+    // comment block then become tokens that differ from the pin's version,
+    // so a block that names the correct version plus those throws.
+    label: 'scanCraneVersionComments: accept bare X.Y.Z tokens (v prefix optional)',
+    anchor: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+    replacement: 'const versionTokenRe = /\\bv?\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+  },
+  {
+    // #1429 — drop the ".<digit>" exclusion. The trailing \b then matches
+    // before the "." of "v9.9.9.1", reading it as v9.9.9 and passing.
+    label: 'scanCraneVersionComments: drop the ".<digit>" exclusion (v0.20.2.1 reads as v0.20.2)',
+    anchor: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+    replacement: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b/gi;',
+  },
+  {
+    // #1429 finding 2 — compare each comment against ANY CRANE_VERSION in
+    // the file (the old `versions.includes(cv)` shape) instead of its OWN
+    // pin. The single-drift test still passes; only the swapped-comments
+    // test (operator-e2e-nightly.yml's two-pin shape) catches it.
+    label: "scanCranePins: compare a pin's comment file-wide instead of against its OWN pin",
+    anchor: 'const stale = named.filter((cv) => cv !== versions[i]);',
+    replacement: 'const stale = named.filter((cv) => !versions.includes(cv));',
+  },
+  {
+    // #1429 — count commented-out CRANE_SHA256 lines in the raw comment
+    // scan, shifting its ordinals off the stripped-text pairing.
+    label: 'scanCraneVersionComments: stop skipping commented-out CRANE_SHA256 lines',
+    anchor: 'if (commentLineRe.test(lines[i]) || !shaAssignRe.test(lines[i])) continue;',
+    replacement: 'if (!shaAssignRe.test(lines[i])) continue;',
+  },
 ];
 
-declareMutations(12);
+declareMutations(18);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -108,8 +154,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 12) {
-  console.error(`FATAL: declared 12 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 18) {
+  console.error(`FATAL: declared 18 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
