@@ -510,7 +510,10 @@ describe('refreshSnapshots: the snapshot is generated from evidence', () => {
       id,
       summaries: [
         applyLedger(
-          summary({ failures: [{ file: SHELLS, kind: 'assertion', cases: ['a', 'NEW'] }], failed: 1 }),
+          summary({
+            failures: [{ file: SHELLS, kind: 'assertion', cases: ['a', 'NEW'] }],
+            failed: 1,
+          }),
           [e],
         ),
       ] as Any[],
