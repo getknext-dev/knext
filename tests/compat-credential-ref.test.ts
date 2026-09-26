@@ -612,6 +612,10 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
       'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json',
       'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json',
       'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json',
+      // #1426: sqlite3's committed lockfile pin, added to
+      // MUSL_NATIVE_LOCKFILE_FILES alongside the sharp entries above.
+      'scripts/musl-native-lockfiles/sqlite3-5.0.2/package.json',
+      'scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json',
     ]) {
       mkdirSync(join(root, dirname(rel)), { recursive: true });
       writeFileSync(join(root, rel), '{}\n');

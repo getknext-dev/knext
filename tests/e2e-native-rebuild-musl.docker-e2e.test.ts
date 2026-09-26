@@ -225,6 +225,82 @@ describe.skipIf(!dockerAvailable())(
       ).toContain('LOADED OK:object');
     }, 360_000);
 
+    // #1426 — before this fixture, the sqlite3 build-from-source path (the
+    // script's OWN original motivating case, header ROUND 2/ROUND 7) had
+    // NEVER actually run in this suite: the only committed corpus fixture was
+    // sharp, which takes the entirely separate `musl_install_sibling()`
+    // branch (a glibc-only prebuilt with no source fallback). sqlite3 exits
+    // through the GENERIC `*.node`-owning-package loop instead — walk up to
+    // its package.json, look up `pinned_lockfile_dir_for`, `npm ci` against
+    // the committed lockfile with npm_config_build_from_source=true, replace
+    // the traced dir wholesale. Nothing here had ever proven that path
+    // against a real, compiled-from-source addon.
+    it('installs sqlite3 for musl via the committed lockfile pin (npm ci, build-from-source) and the resulting native addon LOADS under musl bun (#1426)', () => {
+      // Simulate what Next's output-file tracer keeps for a fixture that
+      // requires sqlite3: a node_modules-nested package.json (name/version
+      // is all the script's generic loop reads) plus a stray *.node file
+      // wherever node-pre-gyp's GLIBC prebuilt would have landed on the
+      // glibc ubuntu-latest install runner. The script never inspects the
+      // .node file's content, only its presence, before wholesale-replacing
+      // the owning package directory with a fresh musl-appropriate install —
+      // so a placeholder file is enough to drive the walk-up/lookup/rebuild
+      // machinery for real, exactly like the sharp fixture above does for
+      // its own corpus entry.
+      const sqliteDir = mkdtempSync(join(tmpDir, 'sqlite3-'));
+      temps.push(sqliteDir);
+      const pkgDir = join(sqliteDir, 'node_modules', 'sqlite3');
+      mkdirSync(join(pkgDir, 'lib', 'binding', 'napi-v6-linux-glibc-x64'), { recursive: true });
+      writeFileSync(
+        join(pkgDir, 'package.json'),
+        JSON.stringify({ name: 'sqlite3', version: '5.0.2' }),
+      );
+      writeFileSync(
+        join(pkgDir, 'lib', 'binding', 'napi-v6-linux-glibc-x64', 'node_sqlite3.node'),
+        'GLIBC PLACEHOLDER — must be replaced wholesale by the musl rebuild',
+      );
+
+      const { status, stdout } = runRebuild(sqliteDir, 340_000);
+      expect(status, `expected exit 0; stdout:\n${stdout}`).toBe(0);
+      // #1426 — this exact name@version has a COMMITTED lockfile under
+      // scripts/musl-native-lockfiles/sqlite3-5.0.2/, so the install must
+      // take the reproducible `npm ci` path, never the fresh/unpinned one
+      // (which is what every prior run of this corpus took, silently, since
+      // no committed lockfile existed for sqlite3 before this PR).
+      expect(stdout).toContain('sqlite3@5.0.2: using the committed, reproducible lockfile');
+      expect(stdout).not.toContain('NON-REPRODUCIBLE fresh-install fallback');
+      expect(stdout).not.toContain("reproducible 'npm ci' of sqlite3@5.0.2 failed");
+      expect(stdout).toContain('replacing the traced copy');
+
+      // The behavioural claim (CI run 35862123588's actual failure mode,
+      // cited in the script's own header/#1426 commit): the rebuilt sqlite3
+      // must not just exist on disk, it must actually LOAD under the pinned
+      // musl bun runtime — proving npm_config_build_from_source=true really
+      // forced a from-source compile (sqlite3 ships no musl prebuilt) rather
+      // than resolving to a GLIBC prebuilt that "succeeds" at install time
+      // and only fails later, unmasked, at dlopen.
+      const loadCheck = spawnSync(
+        'docker',
+        [
+          'run',
+          '--rm',
+          '--platform',
+          'linux/amd64',
+          '-v',
+          `${sqliteDir}:/mnt`,
+          STANDALONE_BUN_IMAGE,
+          'sh',
+          '-c',
+          "cd /mnt && bun -e \"try{const m=require('./node_modules/sqlite3');console.log('LOADED OK:'+typeof m)}catch(e){console.log('ERR:'+e.message)}\"",
+        ],
+        { encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(
+        loadCheck.stdout,
+        `sqlite3's musl native addon must load cleanly:\n${loadCheck.stdout}\n${loadCheck.stderr}`,
+      ).toContain('LOADED OK:');
+      expect(loadCheck.stdout).not.toContain('ERR:');
+    }, 360_000);
+
     // #1257 round 7 — install scripts (and node-gyp/npm itself) must never
     // run as root inside the container. Extracts the REAL `apk add` /
     // `adduser` / `chown` lines this script uses to set up its unprivileged
