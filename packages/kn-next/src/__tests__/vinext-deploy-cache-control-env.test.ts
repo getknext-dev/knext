@@ -104,7 +104,10 @@ export function findOverrides(src: string): string[] {
     for (const raw of src.split("\n")) {
         const line = raw.trim();
         if (/^(#|\/\/|\*|\/\*)/.test(line)) continue;
-        if (!line.includes(NAME) && !/\benv\s+(-\w*i\b|--ignore-environment)/.test(line))
+        if (
+            !line.includes(NAME) &&
+            !/\benv\s+(-\w*i\b|--ignore-environment)/.test(line)
+        )
             continue;
         const assign = line.match(
             new RegExp(`${NAME}\\s*[=:](?![=])\\s*["']?([^\\s"',;)\`]*)`),
@@ -115,9 +118,14 @@ export function findOverrides(src: string): string[] {
         );
         if (envSpace && envSpace[1] !== "1") hits.push(line);
         if (new RegExp(`\\bunset\\b[^\\n]*${NAME}`).test(line)) hits.push(line);
-        if (new RegExp(`\\benv\\b[^\\n]*(?:-u\\s*|--unset[=\\s])${NAME}`).test(line))
+        if (
+            new RegExp(`\\benv\\b[^\\n]*(?:-u\\s*|--unset[=\\s])${NAME}`).test(
+                line,
+            )
+        )
             hits.push(line);
-        if (/\benv\s+(-\w*i\b|--ignore-environment)/.test(line)) hits.push(line);
+        if (/\benv\s+(-\w*i\b|--ignore-environment)/.test(line))
+            hits.push(line);
         if (new RegExp(`\\bdelete\\s+process\\.env\\.${NAME}`).test(line))
             hits.push(line);
     }
@@ -132,15 +140,18 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
     it("scrub is quote-aware: a call inside a template literal is not code", () => {
         const src = "const s = `\napplyVinextDeployDefault(process.env);\n`;\n";
         expect(scrub(src, true)).not.toMatch(CALL);
-        expect(scrub("applyVinextDeployDefault(process.env);\n", true)).toMatch(CALL);
+        expect(scrub("applyVinextDeployDefault(process.env);\n", true)).toMatch(
+            CALL,
+        );
     });
 
     it("scrub: a block-comment opener inside a string does not eat real code", () => {
-        const src = 'const a = "a/**/b";\napplyVinextDeployDefault(process.env);\n';
+        const src =
+            'const a = "a/**/b";\napplyVinextDeployDefault(process.env);\n';
         expect(scrub(src, true)).toMatch(CALL);
-        expect(scrub("/* applyVinextDeployDefault(process.env);\n*/\nx", true)).not.toMatch(
-            CALL,
-        );
+        expect(
+            scrub("/* applyVinextDeployDefault(process.env);\n*/\nx", true),
+        ).not.toMatch(CALL);
     });
 
     const BAD = [
@@ -201,7 +212,9 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
     /** Modules the compile step imports ahead of the entry. */
     function injectedInstallModules(): string[] {
         const ids = [
-            ...compileCode.matchAll(/`import \$\{JSON\.stringify\((\w+)\)\};\\n`/g),
+            ...compileCode.matchAll(
+                /`import \$\{JSON\.stringify\((\w+)\)\};\\n`/g,
+            ),
         ].map((m) => m[1]);
         return ids.map((id) => {
             const decl = compileCode.match(
@@ -233,9 +246,13 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
                 const wired = readdirSync(dir)
                     .filter((n) => /^vite\.config\./.test(n))
                     .some((n) =>
-                        /knext-bun-entry/.test(readFileSync(join(dir, n), "utf8")),
+                        /knext-bun-entry/.test(
+                            readFileSync(join(dir, n), "utf8"),
+                        ),
                     );
-                expect(wired, `${rel(f)} is wired into a vite.config*`).toBe(true);
+                expect(wired, `${rel(f)} is wired into a vite.config*`).toBe(
+                    true,
+                );
             }
         });
     }
