@@ -69,8 +69,25 @@ function dockerRunWords(text: string): string[] {
     if (cur !== '') words.push(cur);
     cur = '';
   };
+  const fail = (what: string): never => {
+    throw new Error(`docker run block uses ${what}, which this guard does not model — fail closed`);
+  };
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
+    // FAIL CLOSED on anything that can make bash build the argv differently
+    // from the literal words read here. A quoted `${NAME}` is one word and
+    // cannot add flags, so it is allowed inside "..." (the real block needs
+    // it); command substitution and backticks are refused everywhere
+    // outside single quotes, and every expansion/operator is refused unquoted.
+    if (quote !== "'") {
+      if (src.startsWith('$(', i) || c === '`') fail(c === '`' ? 'a backtick' : '$(');
+    }
+    if (!quote) {
+      if (src.startsWith('${', i)) fail('an unquoted ${');
+      if (src.startsWith("$'", i)) fail("$'…'");
+      if (src.startsWith('<(', i) || src.startsWith('>(', i)) fail('process substitution');
+      if (c === ';' || c === '|' || src.startsWith('&&', i)) fail(`the operator ${c}`);
+    }
     if (quote) {
       cur += c;
       if (c === '\\' && quote === '"' && i + 1 < src.length) cur += src[++i];
@@ -98,9 +115,19 @@ function dockerRunWords(text: string): string[] {
   return words;
 }
 
-/** How many times `flag` is immediately followed by a value word satisfying `ok`. */
-const countFlagPairs = (words: string[], flag: string, ok: (v: string) => boolean): number =>
-  words.filter((w, i) => w === flag && i + 1 < words.length && ok(words[i + 1])).length;
+/**
+ * How many times `flag` is immediately followed by a value word satisfying
+ * `ok`, counting only words BEFORE `stopAt` — docker stops reading options at
+ * the image name, so a `-v` after it is an argument to the container command,
+ * not a mount.
+ */
+const countFlagPairs = (
+  words: string[],
+  flag: string,
+  ok: (v: string) => boolean,
+  stopAt = words.length,
+): number =>
+  words.slice(0, stopAt).filter((w, i, a) => w === flag && i + 1 < a.length && ok(a[i + 1])).length;
 
 describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec (#1166/#1225)', () => {
   it('compiles the standalone server via the shipped standalone-compile script', () => {
@@ -223,24 +250,28 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     expect(compileBlock.includes('docker run --rm'), 'must invoke docker run --rm').toBe(true);
     const runWords = dockerRunWords(compileBlock);
     expect(runWords.length, 'the docker run --rm command must be found').toBeGreaterThan(0);
+    const imageIdx = runWords.indexOf('"${STANDALONE_BUN_IMAGE}"');
+    expect(imageIdx).toBeGreaterThan(-1);
     const standaloneRootMounts = countFlagPairs(
       runWords,
       '-v',
       (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
+      imageIdx,
     );
     expect(
       standaloneRootMounts,
       'must mount STANDALONE_ROOT into the rebuild container exactly once',
     ).toBe(1);
-    const rebuildScriptMounts = countFlagPairs(runWords, '-v', (v) =>
-      v.startsWith('"${SCRIPT_DIR}/e2e-native-rebuild-musl.sh'),
+    const rebuildScriptMounts = countFlagPairs(
+      runWords,
+      '-v',
+      (v) => v.startsWith('"${SCRIPT_DIR}/e2e-native-rebuild-musl.sh'),
+      imageIdx,
     );
     expect(
       rebuildScriptMounts,
       'must mount e2e-native-rebuild-musl.sh into the rebuild container exactly once',
     ).toBe(1);
-    const imageIdx = runWords.indexOf('"${STANDALONE_BUN_IMAGE}"');
-    expect(imageIdx).toBeGreaterThan(-1);
     expect(runWords.slice(imageIdx + 1, imageIdx + 4)).toEqual([
       'sh',
       '/e2e-native-rebuild-musl.sh',
@@ -250,12 +281,16 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
 
   describe('dockerRunWords models bash, so none of these bypasses keep the mount "present"', () => {
     const MOUNT = '-v "${STANDALONE_ROOT}:${STANDALONE_ROOT}"';
-    const mounts = (t: string) =>
-      countFlagPairs(
-        dockerRunWords(t),
+    const mounts = (t: string) => {
+      const w = dockerRunWords(t);
+      const img = w.indexOf('img'); // fixtures' image word; real block: STANDALONE_BUN_IMAGE
+      return countFlagPairs(
+        w,
         '-v',
         (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
+        img === -1 ? w.length : img,
       );
+    };
 
     it('sanity: the real block yields the mount exactly once', () => {
       expect(mounts(src)).toBe(1);
@@ -284,6 +319,37 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     it('a backslash followed by a trailing space does NOT continue the command', () => {
       const t = `docker run --rm \\ \n  ${MOUNT} ${C}  ${IMG}`;
       expect(mounts(t)).toBe(0);
+    });
+
+    it('a mount placed AFTER the image name is an argument to the container command, not a mount', () => {
+      const t = `docker run --rm ${C}  ${IMG} ${C}  ${MOUNT}`;
+      expect(mounts(t)).toBe(0);
+    });
+
+    it('a mount hidden in a ${X:+ …} expansion fails closed', () => {
+      const t = `docker run --rm ${C}  \${KNEXT_NOPE_UNSET:+ ${MOUNT} } ${C}  ${IMG}`;
+      expect(() => dockerRunWords(t)).toThrow(/fail closed/);
+    });
+
+    it('a mount hidden in $(…) or backticks fails closed (unquoted and inside double quotes)', () => {
+      for (const frag of [`\$(: ${MOUNT} )`, `\`: ${MOUNT}\``, `-e "N=\$(id)"`, '-e "N=`id`"']) {
+        expect(() => dockerRunWords(`docker run --rm ${C}  ${frag} ${C}  ${IMG}`), frag).toThrow(
+          /fail closed/,
+        );
+      }
+    });
+
+    it('command separators and pipes in the block fail closed', () => {
+      for (const op of [';', '&&', '|']) {
+        expect(
+          () => dockerRunWords(`docker run --rm ${C}  ${MOUNT} ${C}  ${IMG} ${op} true`),
+          op,
+        ).toThrow(/fail closed/);
+      }
+    });
+
+    it('a quoted "${NAME}" (single word) stays allowed — the real block needs it', () => {
+      expect(mounts(`docker run --rm ${C}  ${MOUNT} ${C}  ${IMG} >&2`)).toBe(1);
     });
 
     it('TWO docker run blocks fail closed', () => {
