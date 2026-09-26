@@ -1,0 +1,49 @@
+# Patched Bun base executable — CI-verification only, never shipped to users (README.md).
+#
+# Submitted with this directory as the build source (the workflow does this; so can a maintainer):
+#   gcloud builds submit infra/bun-base --config infra/bun-base/cloudbuild.yaml --project gsw-mcp --async
+# Everything the build reads (UPSTREAM_SHA, patches/, prefix.sh, build.sh) comes from that upload,
+# so the artifacts are a function of the committed files — no substitution can change the pin.
+# `_TARGETS` only narrows which of the two musl targets are built (default: both).
+#
+# Output: gs://gsw-mcp-bun-base/<upstream-sha>-<patchset-hash>/<BUILD_ID>/
+#   bun-linux-{x64,aarch64}-musl (+ .sha256)   release binaries
+#   bun-source.cdx.json (+ .sha256)            CycloneDX SBOM (syft) of the patched source tree
+#   manifest.json (+ .sha256)                  pin, patches, patched HEAD, build id
+#   SHA256SUMS                                 every artifact's sha256, in one file
+#
+# NOT signed here. Cloud Build has no ambient OIDC identity Fulcio can use: measured 2026-09-26
+# (builds e72ee4a0, 536543d1), the metadata server's `identity` endpoint returns 404 and
+# `gcloud auth print-identity-token` reports "No identity token can be obtained". Keyless signing
+# happens in .github/workflows/bun-base-build.yml with GitHub's OIDC token instead, over SHA256SUMS.
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 300
+  logging: CLOUD_LOGGING_ONLY
+timeout: 7200s
+substitutions:
+  _TARGETS: x64 aarch64
+steps:
+  - id: build
+    name: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+    entrypoint: bash
+    args: [/workspace/build.sh]
+    env: [BUILD_ID=$BUILD_ID, BUN_BASE_TARGETS=$_TARGETS]
+  - id: sbom
+    name: anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02
+    args: [scan, dir:/workspace/bun, --exclude, ./build, -o, cyclonedx-json=/workspace/out/bun-source.cdx.json]
+  - id: digests-and-upload
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim@sha256:cfca8415b7ce1abccf4c7a1a9c78b4da2c3718ac668806480a4471cb052e1ca9
+    entrypoint: bash
+    args:
+      - -euo
+      - pipefail
+      - -c
+      - |
+        cd /workspace/out
+        for f in bun-linux-*-musl bun-source.cdx.json manifest.json; do sha256sum "$$f" > "$$f.sha256"; done
+        cat bun-linux-*-musl.sha256 bun-source.cdx.json.sha256 manifest.json.sha256 > SHA256SUMS
+        cat SHA256SUMS
+        dest="gs://gsw-mcp-bun-base/$(cat /workspace/.prefix)/$BUILD_ID/"
+        gcloud storage cp /workspace/out/* "$$dest"
+        echo "uploaded to $$dest"

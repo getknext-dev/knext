@@ -1,0 +1,168 @@
+# Patched Bun base executable — CI-VERIFICATION ONLY, never shipped to users (#1452).
+#
+# What runs where:
+#   Cloud Build (gsw-mcp, E2_HIGHCPU_32)  build.sh: UPSTREAM_SHA + patches/*.patch → release
+#                                         bun-linux-{x64,aarch64}-musl, a syft CycloneDX SBOM,
+#                                         manifest.json, per-file .sha256 and SHA256SUMS → GCS.
+#   This workflow                         submits that build, waits, downloads it, checks every
+#                                         sha256 and the manifest against what it submitted, signs
+#                                         SHA256SUMS keyless with GitHub OIDC (Cloud Build has no
+#                                         identity Fulcio accepts — see cloudbuild.yaml), verifies
+#                                         the signature, smoke-tests the x64 binary, and keeps the
+#                                         verified set as a 7-day workflow artifact.
+#
+# Consumption: a lane downloads the artifact and sets KNEXT_BUN_BASE_EXE to bun-linux-x64-musl;
+# the compile scripts refuse it unless the sibling .sha256 matches (bun-base-exe.mjs).
+#
+# GCP access is Workload Identity Federation. No secrets: the provider and service account are
+# repository VARIABLES (not sensitive). Provisioning is in infra/bun-base/README.md; until both
+# variables exist the job fails closed at its first step.
+name: bun-base-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Which musl targets to build
+        type: choice
+        options: ['x64 aarch64', 'x64']
+        default: 'x64 aarch64'
+  schedule:
+    - cron: '17 4 * * 1' # weekly, Monday 04:17 UTC
+
+permissions: {}
+
+concurrency:
+  group: bun-base-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      id-token: write # GCP federation + cosign keyless
+    env:
+      GCP_PROJECT: gsw-mcp
+      BUCKET: gsw-mcp-bun-base
+      TARGETS: ${{ inputs.targets || 'x64 aarch64' }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+      ALPINE_IMAGE: alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
+    steps:
+      - name: Require the GCP federation variables (fail closed)
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          WIF_SA: ${{ vars.GCP_BUN_BASE_SA }}
+        run: |
+          if [ -z "$WIF_PROVIDER" ] || [ -z "$WIF_SA" ]; then
+            echo "::error::vars.GCP_WIF_PROVIDER and vars.GCP_BUN_BASE_SA must be set (see infra/bun-base/README.md, 'Provisioning')"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_BUN_BASE_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Submit the Cloud Build
+        id: submit
+        run: |
+          set -euo pipefail
+          prefix="$(bash infra/bun-base/prefix.sh)"
+          id="$(gcloud builds submit infra/bun-base --config infra/bun-base/cloudbuild.yaml \
+            --project "$GCP_PROJECT" --substitutions="_TARGETS=$TARGETS" --async --format='value(id)')"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "Cloud Build $id → gs://$BUCKET/$prefix/$id/" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the Cloud Build
+        env:
+          BUILD_ID: ${{ steps.submit.outputs.id }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 260); do
+            status="$(gcloud builds describe "$BUILD_ID" --project "$GCP_PROJECT" --format='value(status)')"
+            case "$status" in
+              SUCCESS) echo "build $BUILD_ID: SUCCESS"; exit 0 ;;
+              FAILURE|TIMEOUT|CANCELLED|INTERNAL_ERROR|EXPIRED)
+                echo "::error::Cloud Build $BUILD_ID ended $status"; exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "::error::gave up waiting for Cloud Build $BUILD_ID"; exit 1
+
+      - name: Download the artifacts
+        env:
+          PREFIX: ${{ steps.submit.outputs.prefix }}
+          BUILD_ID: ${{ steps.submit.outputs.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          gcloud storage cp "gs://$BUCKET/$PREFIX/$BUILD_ID/*" out/
+          ls -la out
+
+      - name: Verify digests and the manifest (fail closed)
+        env:
+          PREFIX: ${{ steps.submit.outputs.prefix }}
+          BUILD_ID: ${{ steps.submit.outputs.id }}
+        working-directory: out
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          # Every per-file .sha256 (the file the KNEXT_BUN_BASE_EXE seam reads) must agree too.
+          for f in *.sha256; do sha256sum -c "$f"; grep -qxF "$(cat "$f")" SHA256SUMS; done
+          for t in $TARGETS; do test -s "bun-linux-$t-musl"; test -s "bun-linux-$t-musl.sha256"; done
+          jq -e --arg p "$PREFIX" --arg b "$BUILD_ID" --arg s "${PREFIX%%-*}" \
+            '.prefix == $p and .build_id == $b and .upstream_sha == $s' manifest.json
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature
+        working-directory: out
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "https://github.com/$WORKFLOW_REF" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            SHA256SUMS | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Store the signature beside the build
+        env:
+          PREFIX: ${{ steps.submit.outputs.prefix }}
+          BUILD_ID: ${{ steps.submit.outputs.id }}
+        run: gcloud storage cp out/SHA256SUMS.sigstore.json "gs://$BUCKET/$PREFIX/$BUILD_ID/"
+
+      - name: Smoke-test the x64 binary (musl, in Alpine)
+        run: |
+          set -euo pipefail
+          head="$(jq -r .patched_head out/manifest.json)"
+          docker run --rm -v "$PWD/out:/w:ro" -e HEAD="$head" "$ALPINE_IMAGE" sh -euc '
+            apk add --no-cache libstdc++ libgcc >/dev/null
+            cp /w/bun-linux-x64-musl /usr/local/bin/bun
+            bun --version
+            bun --revision | tee /tmp/rev
+            grep -q "$(echo "$HEAD" | cut -c1-9)" /tmp/rev
+            cd /tmp && echo "console.log(\"knext-bun-base-ok\")" > a.js
+            bun build --compile a.js --outfile hello
+            ./hello | grep -qx knext-bun-base-ok
+            echo "compile round trip ok"
+          '
+          # aarch64 is not executed here (no arm64 runner/emulation in this job): format check only.
+          if [ -f out/bun-linux-aarch64-musl ]; then file out/bun-linux-aarch64-musl | grep -q 'ARM aarch64'; fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bun-base-${{ steps.submit.outputs.prefix }}-${{ steps.submit.outputs.id }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
