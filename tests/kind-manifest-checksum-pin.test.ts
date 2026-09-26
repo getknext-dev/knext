@@ -4,59 +4,32 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { unsafeApplies, unsafeAppliesInWorkflow } from '../scripts/lib/apply-safety-scan.mjs';
 
 /**
  * #1289: checksum-pin the cert-manager/Knative/Kourier/Calico cluster
- * manifests AND digest-pin the mutable-tag IMAGES those manifests reference,
- * across every kind-based workflow — several used to `kubectl apply -f <url>`
- * those manifests directly, with NO checksum at all: a moved/edited release
- * asset would have applied silently.
+ * manifests AND digest-pin the mutable-tag IMAGES those manifests reference.
+ * Several kind lanes used to `kubectl apply -f <url>` those manifests with no
+ * checksum at all: a moved/edited release asset would have applied silently.
  *
- * `scripts/kind-manifests/apply-cert-manager.sh` and
- * `apply-knative-kourier.sh` are the single "fetch + checksum-verify +
- * image-digest-pin + apply" helper the kind workflows call.
+ * #1410 review rounds 1-4 found, each time, a spelling the previous regex set
+ * missed (folded `run: >` one-liners, `-fsSLo`, `--output=`, `> f`, wget,
+ * curl-wrapping helpers, `URL=…; apply -f "$URL"`, a new `.sh` outside the
+ * scanned set, `-f-`, `create -f -`, `-f <(curl …)`, `|| exit 0`, `set +e`,
+ * `if ! fetch …`, a checksum of a DIFFERENT file…). So the rule is no longer
+ * enumerated here. It lives in `scripts/lib/apply-safety-scan.mjs`, a shell
+ * lexer + dataflow walk that FAILS CLOSED: every `apply|create|replace -f/-k`
+ * (by verb, whatever invokes it) must be provably a checksum-verified local
+ * file whose `sha256sum -c` line names THAT file and dominates the apply, or
+ * content with no network provenance. Anything it cannot classify is an
+ * offender.
  *
- * #1410 review round 3: the round-2 scanner still worked at LINE granularity
- * and only looked FORWARD from a curl for its checksum, which several shapes
- * defeated:
- *   1. a single physical line chaining fetch-then-apply (`curl -o f URL &&
- *      kubectl apply -f f`) — exactly what a folded YAML `run: >` block
- *      produces — plus combined short flags (`-fsSLo f`), `--output=f`,
- *      a bare shell redirect (`> f`), `wget`, and a helper function that
- *      wraps `curl` (so the literal string never appears at the apply site);
- *   2. the bare-URL check ran on kind workflows only and matched a literal
- *      string, missing `URL=https://…; kubectl apply -f "$URL"`, a NEW `.sh`
- *      script (any script, not just a kind workflow), `-f-`/`-f -`, `kubectl
- *      create -f -`, and `-f <(curl …)`;
- *   3. the `|| true`/`|| :` defeat scan missed `|| exit 0`, `|| /bin/true`,
- *      `set +e`, and wrapping the check in `if ! fetch …; then …`.
- *
- * `unsafeApplies()` below replaces the old per-line, per-shape regexes with
- * one ordered scan: it tracks, per source, which local files were EVER the
- * target of a `curl`/`wget` fetch (`pendingFetch`), which of those were
- * subsequently checksum-verified (`verified` — by a direct `sha256sum -c`
- * naming that same token, OR by a call to a shell function whose OWN body
- * fetches-then-checksums one of its positional args, the `fetch()` pattern
- * both real scripts use), and which shell variables were ever assigned a
- * bare URL literal (`urlVars`). A `kubectl apply|create -f <arg>` is then
- * judged in this order:
- *   - `<(…)` containing curl/wget, or `-f -`/`-f-` fed by a pipeline
- *     containing curl/wget → ALWAYS unsafe (a stream can never be
- *     checksummed before `apply` reads it);
- *   - a literal `http(s)://` URL, or a variable known to hold one → unsafe;
- *   - a token that WAS fetched by curl/wget in this source but is not (yet)
- *     in `verified` at this point in the scan → unsafe;
- *   - anything else (a token never seen as a curl/wget target at all, e.g. a
- *     repo-committed manifest applied directly) → out of scope for this
- *     checksum-pinning concern, not flagged.
- * The last bullet is deliberate, not an oversight: `manifestInstallScripts()`
- * now scans broadly (any `.sh` file, any `kubectl apply|create -f`), and
- * several of those apply locally-authored manifests
- * (`apps/file-manager/platform-e2e/data-plane.yaml`,
- * `benchmarks/image-prewarm-oke/nodesh.sh`'s heredoc-generated job) that were
- * never fetched over the network and have nothing to checksum-verify.
- * Flagging every `kubectl apply -f <local-file>` in the repo would be a
- * different, much broader policy than #1289 asked for.
+ * This spec (1) runs that scanner over EVERY tracked shell script and EVERY
+ * workflow/composite-action job — discovered, never listed — and requires the
+ * real tree to be clean; (2) proves each reviewer bypass class is caught; and
+ * (3) proves the legitimate shapes the real scripts use are not flagged.
+ * `scripts/mutation-prove-kind-manifest-apply-safety.mjs` breaks each rule and
+ * requires this spec to go red.
  */
 
 const ROOT = join(import.meta.dirname, '..');
@@ -66,6 +39,13 @@ const KNATIVE_SCRIPT = 'scripts/kind-manifests/apply-knative-kourier.sh';
 const PIN_SCRIPT = 'scripts/kind-manifests/pin-known-images.sh';
 const DIGEST_TABLE = 'scripts/kind-manifests/image-digest-pins.json';
 const NETPOL_DRILL_SCRIPT = 'packages/kn-next-operator/test/networkpolicy-enforcement-drill.sh';
+const SZPG_PROFILE_B_SCRIPT = 'packages/kn-next-operator/test/e2e/szpg/setup-profile-b.sh';
+
+function gitLsFiles(...pathspecs: string[]): string[] {
+  return execFileSync('git', ['ls-files', '--', ...pathspecs], { cwd: ROOT, encoding: 'utf8' })
+    .split('\n')
+    .filter(Boolean);
+}
 
 function grepRepo(pattern: string): string[] {
   try {
@@ -81,464 +61,60 @@ function grepRepo(pattern: string): string[] {
   }
 }
 
-/**
- * Every kind-based workflow, discovered by scanning — NEVER a hand-maintained
- * list (#1413 review). A workflow is "kind-based" if it stands up a kind
- * cluster, directly or via the `helm/kind-action` install step.
- */
+/** Every kind-based workflow, discovered by scanning, never a hand-kept list. */
 function kindWorkflows(): string[] {
   return grepRepo('kind create cluster|helm/kind-action').filter((f) =>
     f.startsWith('.github/workflows/'),
   );
 }
 
-/**
- * Every shell script this repo ships that installs a cluster manifest by
- * URL — scanned the same way, so a new kind-drill script added later is
- * covered automatically rather than needing this file edited. #1410 review
- * round 3: broadened from `kubectl apply -f` to also catch `kubectl create
- * -f` (finding 2's exact bypass: a new script that uses `create` instead of
- * `apply` was previously invisible to this scan entirely).
- */
-function manifestInstallScripts(): string[] {
-  return grepRepo('kubectl (apply|create) -f').filter(
-    (f) => f.endsWith('.sh') && !f.startsWith('.claude/'),
+const SHELL_SOURCES = () => gitLsFiles('*.sh', '*.bash');
+const WORKFLOW_SOURCES = () =>
+  gitLsFiles(
+    '.github/workflows/*.yml',
+    '.github/workflows/*.yaml',
+    '.github/actions/**/action.yml',
+    '.github/actions/**/action.yaml',
   );
-}
 
-/**
- * A named shell script body — one entry per `.sh` file, and one per GitHub
- * Actions workflow `run:` step (`<workflow>#<job>[<stepIndex>]`). #1413
- * review round 2: the earlier scan ONLY looked at `.sh` files, so a
- * `curl`-then-`apply` sequence inlined directly in a workflow's `run:` block
- * (never extracted into a `.sh` file) was invisible to it — exactly the
- * pattern file-manager-platform-e2e-nightly.yml used to have before it was
- * moved to the shared scripts (#1413 round 1).
- */
-interface ScriptSource {
-  id: string;
-  text: string;
-}
-
-interface WorkflowStep {
-  run?: string;
-  uses?: string;
-}
-interface WorkflowJob {
-  steps?: WorkflowStep[];
-}
-interface WorkflowDoc {
-  jobs?: Record<string, WorkflowJob>;
-}
-
-function allScriptSources(): ScriptSource[] {
-  const sources: ScriptSource[] = [];
-  for (const f of manifestInstallScripts()) {
-    sources.push({ id: f, text: readFileSync(join(ROOT, f), 'utf8') });
-  }
-  sources.push({
-    id: NETPOL_DRILL_SCRIPT,
-    text: readFileSync(join(ROOT, NETPOL_DRILL_SCRIPT), 'utf8'),
-  });
-  for (const wf of grepRepo('kubectl (apply|create) -f|curl\\b|wget\\b').filter((f) =>
-    f.startsWith('.github/workflows/'),
-  )) {
-    const doc = parse(readFileSync(join(ROOT, wf), 'utf8')) as WorkflowDoc;
-    for (const [jobId, job] of Object.entries(doc.jobs ?? {})) {
-      (job.steps ?? []).forEach((step, i) => {
-        if (
-          typeof step.run === 'string' &&
-          /kubectl (apply|create) -f|curl\b|wget\b/.test(step.run)
-        ) {
-          sources.push({ id: `${wf}#${jobId}[${i}]`, text: step.run });
-        }
-      });
-    }
-  }
-  return sources;
-}
-
-// ---------------------------------------------------------------------------
-// Low-level shell-text helpers shared by the unified apply-safety scanner.
-// ---------------------------------------------------------------------------
-
-/** Strips a trailing `# comment`, honoring simple quoting (not inside `'...'`/`"..."`). */
-function stripComment(line: string): string {
-  let inS = false;
-  let inD = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === "'" && !inD) inS = !inS;
-    else if (c === '"' && !inS && line[i - 1] !== '\\') inD = !inD;
-    else if (c === '#' && !inS && !inD && (i === 0 || /\s/.test(line[i - 1]))) {
-      return line.slice(0, i);
-    }
-  }
-  return line;
-}
-
-/** Strips surrounding quotes and collapses `${NAME}` to `$NAME` for lexical token matching. */
-function normalizeToken(tok: string): string {
-  let t = tok.trim();
-  t = t.replace(/^["']|["']$/g, '');
-  t = t.replace(/^\$\{(\w+)\}$/, '$$$1');
-  return t;
-}
-
-/**
- * Splits shell text into ordered "clauses" at top-level `&&`, `;`, and
- * newline boundaries, honoring quotes and `(...)`/`$(...)`/`<(...)` nesting
- * so those are never split. Deliberately does NOT split on `|`/`||` — a
- * pipeline (`curl … | kubectl apply -f -`, `echo … | sha256sum -c -`) must
- * stay one clause so its shape can be recognized as a whole.
- */
-function splitClauses(text: string): string[] {
-  const clauses: string[] = [];
-  let cur = '';
-  let depth = 0;
-  let inS = false;
-  let inD = false;
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i];
-    if (inS) {
-      cur += c;
-      if (c === "'") inS = false;
-      i++;
-      continue;
-    }
-    if (inD) {
-      cur += c;
-      if (c === '"' && text[i - 1] !== '\\') inD = false;
-      i++;
-      continue;
-    }
-    if (c === "'") {
-      inS = true;
-      cur += c;
-      i++;
-      continue;
-    }
-    if (c === '"') {
-      inD = true;
-      cur += c;
-      i++;
-      continue;
-    }
-    if (c === '(') {
-      depth++;
-      cur += c;
-      i++;
-      continue;
-    }
-    if (c === ')') {
-      depth = Math.max(0, depth - 1);
-      cur += c;
-      i++;
-      continue;
-    }
-    if (depth === 0) {
-      if (text.slice(i, i + 2) === '&&') {
-        clauses.push(cur);
-        cur = '';
-        i += 2;
-        continue;
-      }
-      if (c === ';' || c === '\n') {
-        clauses.push(cur);
-        cur = '';
-        i++;
-        continue;
-      }
-    }
-    cur += c;
-    i++;
-  }
-  if (cur.trim()) clauses.push(cur);
-  return clauses.map((c) => stripComment(c).trim()).filter(Boolean);
-}
-
-/** Splits a shell argument string into tokens, honoring simple quoting. */
-function splitArgs(rest: string): string[] {
-  const args: string[] = [];
-  let cur = '';
-  let inS = false;
-  let inD = false;
-  for (let i = 0; i < rest.length; i++) {
-    const c = rest[i];
-    if (inS) {
-      cur += c;
-      if (c === "'") inS = false;
-      continue;
-    }
-    if (inD) {
-      cur += c;
-      if (c === '"' && rest[i - 1] !== '\\') inD = false;
-      continue;
-    }
-    if (c === "'") {
-      inS = true;
-      cur += c;
-      continue;
-    }
-    if (c === '"') {
-      inD = true;
-      cur += c;
-      continue;
-    }
-    if (/\s/.test(c)) {
-      if (cur) {
-        args.push(cur);
-        cur = '';
-      }
-      continue;
-    }
-    cur += c;
-  }
-  if (cur) args.push(cur);
-  return args;
-}
-
-/**
- * Extracts the output-file token a `curl`/`wget` clause writes to, in ANY
- * flag spelling: `-o file`, a combined short-flag cluster ending in the
- * output letter (`-fsSLo file` for curl), `--output(-document)[= ]file`, a
- * bare shell redirect (`> file`, never `2>`/`&>`), or — with no explicit
- * target at all — the URL's own basename. curl and wget use DIFFERENT
- * letters for "write the body to this file" (`-o` vs `-O`), so they are
- * matched separately rather than treating `o`/`O` as interchangeable.
- */
-function fetchTargetOf(clause: string): string | null {
-  const hasCurl = /\bcurl\b/.test(clause);
-  const hasWget = /\bwget\b/.test(clause);
-  if (!hasCurl && !hasWget) return null;
-
-  let m = clause.match(/--output(?:-document)?(?:=|\s+)"?(\S+?)"?(?:\s|$)/);
-  if (m) return m[1];
-
-  if (hasCurl) {
-    m = clause.match(/(?:^|\s)-[a-zA-Z]*o[a-zA-Z]*\s+"?(\S+?)"?(?:\s|$)/);
-    if (m) return m[1];
-  } else {
-    m = clause.match(/(?:^|\s)-[a-zA-Z]*O[a-zA-Z]*\s+"?(\S+?)"?(?:\s|$)/);
-    if (m) return m[1];
-  }
-
-  m = clause.match(/(?<![012&>])>\s*"?(\S+?)"?(?:\s|$)/);
-  if (m) return m[1];
-
-  const urlM = clause.match(/https?:\/\/\S+/);
-  if (urlM) {
-    const url = urlM[0].replace(/["')]+$/, '');
-    const base = url.split('/').filter(Boolean).pop();
-    if (base) return base;
-  }
-  return null;
-}
-
-/**
- * Extracts the file token a `sha256sum -c` clause verifies, from the two
- * shapes both real scripts use: `echo "<hash>  <file>" | sha256sum -c -`
- * and `sha256sum -c <(echo "<hash>  <file>")`. Returns null for any other
- * shape (e.g. `sha256sum -c checksums.txt`, verifying a separate checksums
- * file) — such a clause verifies nothing this scanner can match to a
- * specific fetched token, so it correctly does NOT clear that token from
- * `pendingFetch`.
- */
-function checksumTargetOf(clause: string): string | null {
-  if (!/sha256sum\s+-c\b/.test(clause)) return null;
-  let m = clause.match(/echo\s+"([^"]*)"\s*\|\s*sha256sum\s+-c\s+-/);
-  if (!m) m = clause.match(/sha256sum\s+-c\s+<\(\s*echo\s+"([^"]*)"\s*\)/);
-  if (!m) return null;
-  const parts = m[1].trim().split(/\s+/);
-  return parts.length >= 2 ? parts[parts.length - 1] : null;
-}
-
-/**
- * A clause "defeats" its own checksum/fetch verification if its exit status
- * is discarded — `|| <anything>` (not just `|| true`/`|| :`; `|| exit 0`,
- * `|| /bin/true`, `|| echo warn` are equally a discard) — if it runs under
- * `set +e` (errexit disabled, so a nonzero status here would not abort the
- * script), or if it is itself the test of an `if`/`elif` (the THEN branch's
- * handling can't be verified by a textual scan, so it fails closed).
- */
-function isDefeated(clause: string, errexitDisabled: boolean): boolean {
-  if (errexitDisabled) return true;
-  if (/^\s*(if|elif)\b/.test(clause)) return true;
-  const withoutLeadingIf = clause.replace(/^\s*(if|elif)\s+!?\s*/, '');
-  return /\|\|/.test(withoutLeadingIf);
-}
-
-/** 1-based file-argument position for a helper function recognized as a trusted fetcher. */
-interface FetcherInfo {
-  fileArgIndex: number;
-  selfVerifies: boolean;
-}
-
-/**
- * Finds `name() { ... }` single-level function definitions, analyzes each
- * body for the "fetches to a positional arg, then checksums that SAME arg"
- * shape (`fetch()` in both real scripts), and returns the body text with
- * those definitions spliced out (so the definition's own statements are not
- * re-scanned as if they executed at the top level) plus a name→FetcherInfo
- * map for recognizing CALL SITES later.
- */
-function extractFunctions(text: string): { body: string; functions: Map<string, FetcherInfo> } {
-  const functions = new Map<string, FetcherInfo>();
-  const fnRe = /(^|\n)(\w+)\s*\(\)\s*\{([^{}]*)\}/g;
-  let out = text;
-  let m: RegExpExecArray | null;
-  // biome-ignore lint/suspicious/noAssignInExpressions: standard regex-exec loop
-  while ((m = fnRe.exec(text))) {
-    const [whole, , name, rawBody] = m;
-    const bodyClauses = splitClauses(rawBody);
-    let fileArgIndex: number | null = null;
-    let selfVerifies = false;
-    for (const c of bodyClauses) {
-      const fetched = fetchTargetOf(c);
-      if (fetched && /^\$\d+$/.test(fetched)) {
-        fileArgIndex = Number(fetched.slice(1));
-      }
-    }
-    if (fileArgIndex !== null) {
-      for (const c of bodyClauses) {
-        const verified = checksumTargetOf(c);
-        if (verified === `$${fileArgIndex}` && !isDefeated(c, false)) {
-          selfVerifies = true;
-        }
-      }
-      functions.set(name, { fileArgIndex, selfVerifies });
-    }
-    out = out.replace(whole, '\n');
-  }
-  return { body: out, functions };
-}
-
-/**
- * Extracts the `kubectl apply|create -f` argument from a clause, in ANY
- * spacing: `-f -`/`-f-` (stdin), `-f <(...)` (process substitution),
- * `-f file`, `--filename[= ]file`. Quotes are left on the returned token;
- * callers normalize as needed.
- *
- * Only searches the text AFTER the `kubectl apply|create` verb, never the
- * whole clause — a clause like `curl -fsSL … | kubectl apply -f -` also
- * contains a literal `-f` inside curl's OWN combined short-flag cluster
- * (`-fsSL`), and an unanchored search would match THAT `-f` and misread its
- * following characters as the apply target instead of the real `-f -`.
- */
-function applyTargetOf(clause: string): string | null {
-  const verbM = clause.match(/\bkubectl\s+(?:apply|create)\b/);
-  if (!verbM || verbM.index === undefined) return null;
-  const rest = clause.slice(verbM.index + verbM[0].length);
-  let m = rest.match(/-f\s*(<\([^()]*\))/);
-  if (m) return m[1];
-  m = rest.match(/--filename(?:=|\s+)(\S+)/);
-  if (m) return m[1];
-  m = rest.match(/-f\s*(\S+)/);
-  if (m) return m[1];
-  return null;
-}
-
-/**
- * The unified apply-safety scanner (#1410 review round 3). Walks a source's
- * clauses in order, tracking which local tokens were fetched, which of
- * those are checksum-verified at each point, which shell variables hold a
- * bare URL, and known trusted-fetcher functions — then judges every
- * `kubectl apply|create -f` against that running state. Returns one string
- * per offending clause.
- */
-function unsafeApplies(rawText: string): string[] {
-  const joined = rawText.replace(/\\\s*\n\s*/g, ' ');
-  const { body, functions } = extractFunctions(joined);
+/** Scans every tracked shell script and every workflow/composite-action job. */
+function scanRealTree(): { scanned: string[]; offenders: string[] } {
+  const scanned: string[] = [];
   const offenders: string[] = [];
-
-  const verified = new Set<string>();
-  const pendingFetch = new Set<string>();
-  const urlVars = new Set<string>();
-  let errexitDisabled = false;
-
-  for (const clause of splitClauses(body)) {
-    if (/^set\s+\+e\b/.test(clause)) {
-      errexitDisabled = true;
-      continue;
-    }
-    if (/^set\s+-e\b/.test(clause)) {
-      errexitDisabled = false;
-      continue;
-    }
-
-    const assign = clause.match(/^(\w+)=(.*)$/);
-    if (assign && !/^(if|elif|while|for)\b/.test(clause)) {
-      const rhs = assign[2].replace(/^"/, '');
-      if (/^https?:\/\//.test(rhs)) urlVars.add(`$${assign[1]}`);
-    }
-
-    const checksumTarget = checksumTargetOf(clause);
-    // A fetcher call site can be wrapped in `if`/`elif`/`while` and/or a
-    // leading `!` (`if ! fetch …; then …`) — strip that prefix before
-    // looking for the call, or the "first word" would be `if`/`!` instead
-    // of the function name and the call site would never be recognized.
-    const callBody = clause.replace(/^\s*(if|elif|while)\b\s*/, '').replace(/^!\s*/, '');
-    const callMatch = callBody.match(/^(\w+)\s+(.*)$/);
-    const calledFetcher =
-      callMatch && functions.has(callMatch[1]) ? functions.get(callMatch[1])! : null;
-
-    if (checksumTarget || calledFetcher) {
-      const defeated = isDefeated(clause, errexitDisabled);
-      if (defeated) offenders.push(`defeated verification: ${clause}`);
-
-      if (checksumTarget) {
-        const norm = normalizeToken(checksumTarget);
-        if (!defeated) verified.add(norm);
-        pendingFetch.delete(norm);
-      }
-      if (calledFetcher && callMatch) {
-        const args = splitArgs(callMatch[2]);
-        const tok = args[calledFetcher.fileArgIndex - 1];
-        if (tok) {
-          const norm = normalizeToken(tok);
-          if (calledFetcher.selfVerifies && !defeated) verified.add(norm);
-          else pendingFetch.add(norm);
-        }
-      }
-      continue;
-    }
-
-    const fetched = fetchTargetOf(clause);
-    if (fetched) pendingFetch.add(normalizeToken(fetched));
-
-    const target = applyTargetOf(clause);
-    if (!target) continue;
-
-    if (target.startsWith('<(')) {
-      const inner = target.slice(2, -1);
-      if (/\b(curl|wget)\b/.test(inner)) {
-        offenders.push(`unverifiable process-substitution apply: ${clause}`);
-      }
-      continue;
-    }
-    if (target === '-') {
-      if (/\b(curl|wget)\b/.test(clause)) {
-        offenders.push(`unverifiable stdin-piped apply (fed by a network fetch): ${clause}`);
-      }
-      continue;
-    }
-    const bare = target.replace(/^["']|["']$/g, '');
-    if (/^https?:\/\//.test(bare)) {
-      offenders.push(`bare URL apply, no checksum possible: ${clause}`);
-      continue;
-    }
-    const norm = normalizeToken(target);
-    if (urlVars.has(norm)) {
-      offenders.push(`apply of a variable known to hold a bare URL: ${clause}`);
-      continue;
-    }
-    if (pendingFetch.has(norm) && !verified.has(norm)) {
-      offenders.push(`apply of a fetched-but-not-checksum-verified file: ${clause}`);
-    }
+  for (const f of SHELL_SOURCES()) {
+    scanned.push(f);
+    for (const o of unsafeApplies(readFileSync(join(ROOT, f), 'utf8')))
+      offenders.push(`${f}: ${o}`);
   }
+  for (const f of WORKFLOW_SOURCES()) {
+    scanned.push(f);
+    const doc = parse(readFileSync(join(ROOT, f), 'utf8'));
+    for (const o of unsafeAppliesInWorkflow(doc)) offenders.push(`${f}#${o}`);
+  }
+  return { scanned, offenders };
+}
 
-  return offenders;
+const STRICT = 'set -euo pipefail\n';
+const URL = 'https://example.com/m.yaml';
+const SHA = 'aaaa000000000000000000000000000000000000000000000000000000000000';
+
+/** Asserts every fixture is flagged; reports which one slipped through. */
+function expectAllFlagged(fixtures: Record<string, string>) {
+  const missed = Object.entries(fixtures)
+    .filter(([, src]) => unsafeApplies(src).length === 0)
+    .map(([name]) => name);
+  expect(missed).toEqual([]);
+}
+
+function expectNoneFlagged(fixtures: Record<string, string>) {
+  const flagged = Object.entries(fixtures)
+    .map(([name, src]) => [name, unsafeApplies(src)] as const)
+    .filter(([, off]) => off.length > 0);
+  expect(flagged).toEqual([]);
+}
+
+function workflow(run: string, extra = ''): unknown {
+  return parse(`on: push\n${extra}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n${run}`);
 }
 
 describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + image-digest pinned (#1289)', () => {
@@ -553,7 +129,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
   it('every workflow that installs cert-manager calls the shared script', () => {
     for (const wf of kindWorkflows()) {
       const text = readFileSync(join(ROOT, wf), 'utf8');
-      if (!/cert-manager/i.test(text)) continue; // this lane doesn't touch cert-manager at all
+      if (!/cert-manager/i.test(text)) continue;
       expect(text).toContain(CERT_MANAGER_SCRIPT);
     }
   });
@@ -566,107 +142,179 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     }
   });
 
-  it('no manifest-install source anywhere (script OR workflow run: step) has an unsafe kubectl apply|create -f — real scripts scan clean', () => {
-    // Runs the unified scanner against every real source this repo ships.
-    // Anything it flags here is either a real gap (fix the source) or a
-    // false positive in the scanner itself (fix the scanner) — either way
-    // this must be empty for the ACTUAL repo, distinct from the fixture
-    // tests below which prove the scanner catches BAD constructs.
-    const offenders: string[] = [];
-    for (const src of allScriptSources()) {
-      for (const bad of unsafeApplies(src.text)) {
-        offenders.push(`${src.id}: ${bad}`);
+  it('the source scan covers EVERY tracked shell script and workflow — not a kubectl-grep subset', () => {
+    const { scanned } = scanRealTree();
+    // Exactly the tracked set: a new script anywhere in the tree is scanned
+    // the moment it is committed.
+    expect(scanned.length).toBe(SHELL_SOURCES().length + WORKFLOW_SOURCES().length);
+    expect(scanned).toContain(CERT_MANAGER_SCRIPT);
+    expect(scanned).toContain(KNATIVE_SCRIPT);
+    expect(scanned).toContain(NETPOL_DRILL_SCRIPT);
+    // Outside scripts/, invokes kubectl as `$K`, and was a live bare-URL gap
+    // the round-3 scanner never saw.
+    expect(scanned).toContain(SZPG_PROFILE_B_SCRIPT);
+    expect(scanned).toContain('.github/workflows/operator-e2e-nightly.yml');
+    expect(SHELL_SOURCES().length).toBeGreaterThan(100);
+  });
+
+  it('the real tree has NO unsafe apply anywhere (every script, every workflow job)', () => {
+    expect(scanRealTree().offenders).toEqual([]);
+  });
+
+  // ---- bypass class 1: fetch spellings and one-line chains ---------------
+
+  it('class 1: catches every fetch spelling, a one-line chain, and a curl-wrapping helper', () => {
+    expectAllFlagged({
+      oneLineChain: `${STRICT}curl -sSL -o f "${URL}" && kubectl apply -f f`,
+      combinedShortFlags: `${STRICT}curl -fsSLo f "${URL}"\nkubectl apply -f f`,
+      outputEquals: `${STRICT}curl -sSL --output=f "${URL}"\nkubectl apply -f f`,
+      bareRedirect: `${STRICT}curl -sSL "${URL}" > f\nkubectl apply -f f`,
+      teeTarget: `${STRICT}curl -sSL "${URL}" | tee f >/dev/null\nkubectl apply -f f`,
+      wgetO: `${STRICT}wget -O f "${URL}"\nkubectl apply -f f`,
+      wgetDefaultName: `${STRICT}wget -q "${URL}"\nkubectl apply -f m.yaml`,
+      curlRemoteName: `${STRICT}curl -fsSLO "${URL}"\nkubectl apply -f m.yaml`,
+      copiedAfterFetch: `${STRICT}curl -o f "${URL}"\ncp f g\nkubectl apply -f g`,
+      helper: `${STRICT}dl() { curl -fsSL -o "$2" "$1"; }\ndl "${URL}" f\nkubectl apply -f f`,
+      helperBracedPositional: `${STRICT}dl() { local out="\${2}"; curl -fsSL -o "\${out}" "$1"; }\ndl "${URL}" f\nkubectl apply -f f`,
+      helperWrappedByRetry: `${STRICT}dl() { curl -fsSL -o "$2" "$1"; }\nretry 3 dl "${URL}" f\nkubectl apply -f f`,
+      applierHelper: `${STRICT}ap() { kubectl apply -f "$1"; }\ncurl -o f "${URL}"\nap f`,
+      varIndirectPath: `${STRICT}D=/tmp\ncurl -o "\${D}/f" "${URL}"\nOUT="$D/f"\nkubectl apply -f "$OUT"`,
+      dirApply: `${STRICT}curl -o d/f.yaml "${URL}"\nkubectl apply -f d/`,
+      twoFilesOneVerified: `${STRICT}curl -o f U1 && curl -o g U2 && echo "${SHA}  f" | sha256sum -c - && kubectl apply -f g`,
+    });
+  });
+
+  it('class 1: a folded YAML `run: >` block and a fetch in an EARLIER step are caught', () => {
+    const folded = workflow(
+      `      - run: >\n          curl -sSL -o f "${URL}" &&\n          kubectl apply -f f\n`,
+    );
+    expect(unsafeAppliesInWorkflow(folded).length).toBeGreaterThan(0);
+    const crossStep = workflow(
+      `      - run: curl -sSL -o /tmp/m.yaml "${URL}"\n      - run: echo hi\n      - run: kubectl apply -f /tmp/m.yaml\n`,
+    );
+    expect(unsafeAppliesInWorkflow(crossStep).length).toBeGreaterThan(0);
+  });
+
+  // ---- bypass class 2: bare URLs, indirection, streams --------------------
+
+  it('class 2: catches bare URLs through any invoker, indirection, and stream applies', () => {
+    expectAllFlagged({
+      direct: `kubectl apply -f ${URL}`,
+      globalFlagsBeforeVerb: `kubectl --context kind-x apply -f ${URL}`,
+      aliasVar: `K="kubectl --context=x"\n$K apply -f "${URL}"`,
+      helperInvoker: `K() { kubectl --context x "$@"; }\nK apply -f "${URL}"`,
+      filenameEquals: `kubectl apply --filename=${URL}`,
+      fEquals: `kubectl apply -f=${URL}`,
+      fAttached: `kubectl apply -f${URL}`,
+      varIndirection: `URL=${URL}\nkubectl apply -f "$URL"`,
+      stdinDash: `curl -fsSL "${URL}" | kubectl apply -f-`,
+      createStdin: `curl -fsSL "${URL}" | kubectl create -f -`,
+      replaceStdin: `curl -fsSL "${URL}" | kubectl replace -f -`,
+      processSubstitution: `kubectl apply -f <(curl -fsSL "${URL}")`,
+      capturedContent: `M="$(curl -fsSL "${URL}")"\necho "$M" | kubectl apply -f -`,
+      hereString: `M="$(curl -fsSL "${URL}")"\nkubectl apply -f - <<< "$M"`,
+      kustomizeRemote: `kubectl apply -k github.com/org/repo/config?ref=main`,
+      kustomizeBuildUrl: `kustomize build ${URL} | kubectl apply -f -`,
+      bashDashC: `bash -c "kubectl apply -f ${URL}"`,
+      evalString: `eval "kubectl apply -f ${URL}"`,
+    });
+  });
+
+  it('class 2: a workflow `env:` URL and a `$GITHUB_ENV` URL from an earlier step are caught', () => {
+    const envUrl = workflow(`      - run: kubectl apply -f "$M"\n`, `env:\n  M: ${URL}\n`);
+    expect(unsafeAppliesInWorkflow(envUrl).length).toBeGreaterThan(0);
+    const ghEnv = workflow(
+      `      - run: echo "M=${URL}" >> "$GITHUB_ENV"\n      - run: kubectl apply -f "$M"\n`,
+    );
+    expect(unsafeAppliesInWorkflow(ghEnv).length).toBeGreaterThan(0);
+  });
+
+  // ---- bypass class 3: defeated or non-dominating verification ------------
+
+  it('class 3: a checksum that can be ignored, or does not dominate the apply, verifies nothing', () => {
+    const fetch = `curl -fsSL -o f "${URL}"\n`;
+    const check = `echo "${SHA}  f" | sha256sum -c -`;
+    expectAllFlagged({
+      orTrue: `${STRICT}${fetch}${check} || true\nkubectl apply -f f`,
+      orExit0: `${STRICT}${fetch}${check} || exit 0\nkubectl apply -f f`,
+      orBinTrue: `${STRICT}${fetch}${check} || /bin/true\nkubectl apply -f f`,
+      setPlusE: `${STRICT}set +e\n${fetch}${check}\nset -e\nkubectl apply -f f`,
+      noErrexitAtAll: `${fetch}${check}\nkubectl apply -f f`,
+      ifNotFetch: `${STRICT}fetch() { curl -fsSL -o "$3" "$1"; echo "$2  $3" | sha256sum -c -; }\nif ! fetch "${URL}" "${SHA}" f; then echo warn; fi\nkubectl apply -f f`,
+      commentOnly: `${STRICT}${fetch}# echo "${SHA}  f" | sha256sum -c -\nkubectl apply -f f`,
+      otherFilesChecksum: `${STRICT}${fetch}echo "${SHA}  other.yaml" | sha256sum -c -\nkubectl apply -f f`,
+      checksumsFileShape: `${STRICT}${fetch}sha256sum -c checksums.txt\nkubectl apply -f f`,
+      insideIfBlock: `${STRICT}${fetch}if [ -n "$X" ]; then ${check}; fi\nkubectl apply -f f`,
+      notLastInChain: `${STRICT}${fetch}${check} && echo ok\nkubectl apply -f f`,
+      skippedByAnd: `${STRICT}${fetch}false && ${check}\nkubectl apply -f f`,
+      afterOr: `${STRICT}${fetch}true || ${check}\nkubectl apply -f f`,
+      pipedOnward: `${STRICT}${fetch}${check} | tee log\nkubectl apply -f f`,
+      backgrounded: `${STRICT}${fetch}${check} &\nkubectl apply -f f`,
+      refetchedAfterCheck: `${STRICT}${fetch}${check}\n${fetch}kubectl apply -f f`,
+      verifyAfterApply: `${STRICT}${fetch}kubectl apply -f f\n${check}`,
+    });
+  });
+
+  // ---- fail closed on what cannot be classified ---------------------------
+
+  it('fails closed on constructs it cannot classify', () => {
+    expectAllFlagged({
+      unterminatedHeredoc: `kubectl apply -f - <<EOF\nkind: Pod\n`,
+      stdinWithNoProducer: `kubectl apply -f -`,
+      emptyTarget: `kubectl apply -f`,
+    });
+    // A GitHub expression is substituted before bash runs: unknowable here.
+    const expr = workflow(`      - run: kubectl apply -f ${'$'}{{ inputs.manifest }}\n`);
+    expect(unsafeAppliesInWorkflow(expr).length).toBeGreaterThan(0);
+  });
+
+  // ---- the legitimate shapes the real scripts use -------------------------
+
+  it('does NOT flag a dominating checksum, a trusted helper, local renders, or committed manifests', () => {
+    expectNoneFlagged({
+      verified: `${STRICT}curl -fsSL -o f "${URL}"\necho "${SHA}  f" | sha256sum -c -\nkubectl apply -f f`,
+      verifiedSameChain: `${STRICT}curl -fsSL -o f "${URL}" && echo "${SHA}  f" | sha256sum -c - && kubectl apply -f f`,
+      trustedHelper: `${STRICT}fetch() { curl -fsSL -o "$3" "$1"; echo "$2  $3" | sha256sum -c -; }\nfetch "${URL}" "${SHA}" f\nkubectl apply -f f`,
+      localRenderStdin: `POLICY=$(go run ./cmd/policygen)\necho "$POLICY" | kubectl apply -f -`,
+      committedManifest: 'kubectl apply -f apps/file-manager/platform-e2e/data-plane.yaml',
+      literalHeredoc: `kubectl apply -f - <<'YAML'\nkind: ConfigMap\nmetadata: { name: x, annotations: { docs: "${URL}" } }\nYAML`,
+      sedOfLocalFile: `sed -e "s#a#${URL}#" deploy/x.yaml | kubectl apply -f -`,
+      loopbackScalarInHeredoc: `LSN="$(kubectl exec sts/ps -- curl -s "http://localhost:9898/v1/t")"\nkubectl apply -f - <<YAML\ndata: { lsn: "$LSN" }\nYAML`,
+    });
+  });
+
+  it('the loopback exemption is strict: a variable host, a userinfo trick, or a nested URL is still network', () => {
+    expectAllFlagged({
+      varHost: `V="$(curl -s "http://$HOST:9898/x")"\necho "$V" | kubectl apply -f -`,
+      userinfoTrick: `V="$(curl -s "http://localhost:9898$P")"\necho "$V" | kubectl apply -f -`,
+      nestedUrl: `V="$(curl -s "http://localhost:8080/proxy?u=${URL}")"\necho "$V" | kubectl apply -f -`,
+    });
+  });
+
+  it('pin-known-images.sh fails closed on a second image on one line, a comment-borne digest, and a block-scalar value (#1410 round 4)', () => {
+    const cases = {
+      secondOnLine: `x: [{image: "docker.io/a/b@sha256:${'0'.repeat(64)}"}, {image: docker.io/new/img:v1}]`,
+      digestInComment: 'image: docker.io/new/img:v1 # @sha256:',
+      blockScalar: 'image: >-\n  docker.io/new/img:v1',
+    };
+    for (const [name, body] of Object.entries(cases)) {
+      const dir = mkdtempSync(join(tmpdir(), 'pin-known-images-test-'));
+      try {
+        const manifest = join(dir, 'manifest.yaml');
+        writeFileSync(manifest, `apiVersion: v1\nkind: Pod\nspec:\n${body}\n`);
+        let exitCode = 0;
+        try {
+          execFileSync('bash', [join(ROOT, PIN_SCRIPT), manifest, '--expect', '0'], {
+            cwd: ROOT,
+            stdio: 'pipe',
+          });
+        } catch (e) {
+          exitCode = (e as { status?: number }).status ?? 1;
+        }
+        expect({ name, exitCode: exitCode !== 0 }).toEqual({ name, exitCode: true });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
-    }
-    expect(offenders).toEqual([]);
-  });
-
-  it('unsafeApplies() catches a single-line fetch-then-apply chain — the exact shape a folded YAML `run: >` block produces', () => {
-    // #1410 review round 3, finding 1: the old scanner only looked at lines
-    // AFTER the curl for a checksum, so everything on ONE line (as a folded
-    // `run: >` block collapses to) sailed through.
-    const offenders = unsafeApplies(
-      'curl -sSL -o f "https://example.com/m.yaml" && kubectl apply -f f',
-    );
-    expect(offenders.length).toBeGreaterThan(0);
-  });
-
-  it('unsafeApplies() catches an unverified apply that shares a single `&&`-joined line with an UNRELATED, correctly-verified fetch', () => {
-    // A stronger version of the fixture above: fetches TWO files on one
-    // folded line, checksum-verifies only the first, and applies the
-    // SECOND (never verified). This is the case that actually depends on
-    // splitting `&&`-joined statements into separate clauses — treating
-    // the whole line as one clause lets the genuine `sha256sum -c` match
-    // anywhere in the string short-circuit the scan before the apply of
-    // the OTHER, unverified file is ever reached.
-    const offenders = unsafeApplies(
-      'curl -o f URL1 && curl -o g URL2 && echo "h  f" | sha256sum -c - && kubectl apply -f g',
-    );
-    expect(offenders.length).toBeGreaterThan(0);
-  });
-
-  it('unsafeApplies() catches every curl/wget output-flag spelling finding 1 named', () => {
-    const bad = [
-      'curl -fsSLo f "https://example.com/m.yaml"\nkubectl apply -f f', // combined short flags
-      'curl -sSL --output=f "https://example.com/m.yaml"\nkubectl apply -f f', // --output=
-      'curl -sSL "https://example.com/m.yaml" > f\nkubectl apply -f f', // bare redirect
-      'wget -O f "https://example.com/m.yaml"\nkubectl apply -f f', // wget
-      // a helper function that wraps curl but never checksums its own output
-      'download() { curl -fsSL -o "$2" "$1"; }\ndownload "https://example.com/m.yaml" f\nkubectl apply -f f',
-    ];
-    for (const src of bad) {
-      expect(unsafeApplies(src).length).toBeGreaterThan(0);
-    }
-  });
-
-  it('unsafeApplies() does NOT flag a genuinely checksum-verified fetch, including through a trusted-fetcher helper function', () => {
-    const good = [
-      'curl -fsSL -o f "https://example.com/m.yaml"\necho "abc  f" | sha256sum -c -\nkubectl apply -f f',
-      'fetch() { curl -fsSL -o "$3" "$1"; echo "$2  $3" | sha256sum -c -; }\nfetch "https://example.com/m.yaml" "$SHA" f\nkubectl apply -f f',
-    ];
-    for (const src of good) {
-      expect(unsafeApplies(src)).toEqual([]);
-    }
-  });
-
-  it('unsafeApplies() catches every bare-URL / indirection shape finding 2 named, and does so on ANY script (not just kind workflows)', () => {
-    const bad = [
-      'kubectl apply -f https://example.com/m.yaml', // direct
-      'URL=https://example.com/m.yaml\nkubectl apply -f "$URL"', // variable indirection
-      'curl -fsSL "https://example.com/m.yaml" | kubectl apply -f -', // stdin from curl
-      'curl -fsSL "https://example.com/m.yaml" | kubectl create -f -', // create verb, stdin
-      'kubectl apply -f <(curl -fsSL "https://example.com/m.yaml")', // process substitution
-    ];
-    for (const src of bad) {
-      expect(unsafeApplies(src).length).toBeGreaterThan(0);
-    }
-  });
-
-  it('unsafeApplies() does NOT flag stdin/process-substitution applies fed by LOCAL/generated content, not a network fetch', () => {
-    // The NetworkPolicy drill applies the operator's OWN rendered policy via
-    // `echo "$POLICY" | kubectl apply -f -` — this is locally computed
-    // content, not a downloaded release asset, so it is out of scope for
-    // #1289's checksum-pinning concern and must not become a new false
-    // positive under the stricter scanner.
-    const good = 'POLICY=$(go run ./cmd/policygen)\necho "$POLICY" | kubectl apply -f -';
-    expect(unsafeApplies(good)).toEqual([]);
-  });
-
-  it('unsafeApplies() does NOT flag an apply of a file that was never fetched by this source at all (a repo-committed manifest)', () => {
-    const good = 'kubectl apply -f apps/file-manager/platform-e2e/data-plane.yaml';
-    expect(unsafeApplies(good)).toEqual([]);
-  });
-
-  it('unsafeApplies() catches every verification-defeat shape finding 3 named', () => {
-    const bad = [
-      'curl -fsSL -o f "https://example.com/m.yaml"\necho "abc  f" | sha256sum -c - || true\nkubectl apply -f f',
-      'curl -fsSL -o f "https://example.com/m.yaml"\necho "abc  f" | sha256sum -c - || exit 0\nkubectl apply -f f',
-      'curl -fsSL -o f "https://example.com/m.yaml"\necho "abc  f" | sha256sum -c - || /bin/true\nkubectl apply -f f',
-      'set +e\ncurl -fsSL -o f "https://example.com/m.yaml"\necho "abc  f" | sha256sum -c -\nset -e\nkubectl apply -f f',
-      'fetch() { curl -fsSL -o "$3" "$1"; echo "$2  $3" | sha256sum -c -; }\nif ! fetch "https://example.com/m.yaml" "$SHA" f; then echo warn; fi\nkubectl apply -f f',
-    ];
-    for (const src of bad) {
-      expect(unsafeApplies(src).length).toBeGreaterThan(0);
     }
   });
 

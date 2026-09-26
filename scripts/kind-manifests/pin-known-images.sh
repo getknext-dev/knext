@@ -78,29 +78,41 @@ fi
 # the colon on that same line at all — treats the NEXT non-blank,
 # non-comment line as the value. Any of those forms lacking `@sha256:`
 # fails closed, exactly like the anchored case already did.
+#
+# #1410 review round 4: that scan still judged only the FIRST `image` match on
+# a line (`{image: a@sha256:…}, {image: b:tag}` passed on the first one), and
+# accepted any value merely CONTAINING "@sha256:" — so `image: evil:tag #
+# @sha256:` passed on its own trailing comment. Now every `image` key on a line
+# is judged, the value is exactly one token (quotes stripped, stopping at
+# whitespace, `,`, `}` or `]`), and it must END in `@sha256:<64 hex>`. A
+# block-scalar indicator (`|`, `>`, `|-`, …) or an empty value means the value
+# is the next non-blank, non-comment line, judged the same way.
+digest_pinned() { [[ "$1" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; }
+image_key_re='(^|[^A-Za-z0-9_-])["'"'"']?image["'"'"']?[[:space:]]*:([[:space:]]*|$)'
 unpinned=""
 pending=0
 while IFS= read -r rawline || [[ -n "$rawline" ]]; do
-  if [[ "$rawline" =~ (^|[^A-Za-z0-9_])\"?image\"?[[:space:]]*:[[:space:]]*\"?([^\",}[:space:]][^\",}]*)? ]]; then
-    val="${BASH_REMATCH[2]}"
-    if [[ -z "$val" ]]; then
-      # `image:` with nothing after it on this line — the value, if any, is
-      # the next non-blank/non-comment line (valid YAML block-scalar form).
-      pending=1
-      continue
-    fi
-    pending=0
-    if [[ "$val" != *"@sha256:"* ]]; then
-      unpinned+="${rawline}"$'\n'
-    fi
-    continue
-  fi
   if [[ "$pending" == 1 ]] && [[ "$rawline" =~ ^[[:space:]]*[^[:space:]#] ]]; then
     pending=0
-    if [[ "$rawline" != *"@sha256:"* ]]; then
-      unpinned+="${rawline}"$'\n'
-    fi
+    val="${rawline#"${rawline%%[![:space:]]*}"}"
+    val="${val%%[[:space:]]*}"
+    val="${val//\"/}"
+    val="${val//\'/}"
+    digest_pinned "$val" || unpinned+="${rawline}"$'\n'
+    continue
   fi
+  rest="$rawline"
+  while [[ "$rest" =~ $image_key_re ]]; do
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+    val="${rest%%[[:space:],\}\]]*}"
+    val="${val//\"/}"
+    val="${val//\'/}"
+    if [[ -z "$val" || "$val" == \#* || "$val" =~ ^[\|\>][-+0-9]*$ ]]; then
+      pending=1
+      break
+    fi
+    digest_pinned "$val" || unpinned+="${rawline}"$'\n'
+  done
 done < "$file"
 
 if [[ -n "$unpinned" ]]; then

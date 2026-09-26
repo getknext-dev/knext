@@ -107,7 +107,8 @@ cmd_up() {
   fi
   $K cluster-info >/dev/null || die "cluster $CLUSTER_NAME not reachable"
 
-  # 2. Knative + Kourier + cert-manager (versions match operator-e2e-nightly.yml)
+  # 2. Knative + Kourier + cert-manager, via the same checksum-pinned shared
+  #    scripts the kind CI lanes use (scripts/kind-manifests/)
   install_knative
 
   # 3. szpg plane
@@ -125,14 +126,17 @@ cmd_up() {
 
 install_knative() {
   local KN_VER="${KNATIVE_VERSION:-v1.16.0}"
-  local CM_VER="${CERT_MANAGER_VERSION:-v1.16.1}"
-  log "installing cert-manager $CM_VER"
-  $K apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CM_VER}/cert-manager.yaml"
+  # The shared kind-manifest scripts fetch, checksum-verify and image-digest-pin
+  # each release manifest before applying it (a moved or edited release asset
+  # fails the checksum). They apply with the CURRENT context of $KUBECONFIG, so
+  # prove that is this drill's throwaway kind cluster first.
+  [ "$(kubectl config current-context)" = "$KCTX" ] \
+    || die "current context of $KUBECONFIG is not $KCTX; refusing to install cluster manifests"
+  log "installing cert-manager (checksum-pinned)"
+  "$REPO_ROOT/scripts/kind-manifests/apply-cert-manager.sh"
   $K -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s
-  log "installing Knative Serving $KN_VER + Kourier"
-  $K apply -f "https://github.com/knative/serving/releases/download/knative-${KN_VER}/serving-crds.yaml"
-  $K apply -f "https://github.com/knative/serving/releases/download/knative-${KN_VER}/serving-core.yaml"
-  $K apply -f "https://github.com/knative/net-kourier/releases/download/knative-${KN_VER}/kourier.yaml"
+  log "installing Knative Serving $KN_VER + Kourier (checksum-pinned)"
+  "$REPO_ROOT/scripts/kind-manifests/apply-knative-kourier.sh" "knative-${KN_VER}"
   $K patch configmap/config-network -n knative-serving --type merge \
     -p '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
   # REAL cold start: no pod retention, short stable window (design A1).
