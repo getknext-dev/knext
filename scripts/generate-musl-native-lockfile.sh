@@ -59,43 +59,49 @@ fi
 # bare dotted-numeric version (with an optional prerelease/build suffix)
 # before ever touching the network.
 case "${VERSION}" in
-  [0-9]*.[0-9]*.[0-9]* | [0-9]*.[0-9]* | [0-9]*) : ;;
-  *)
-    echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
-    exit 2
-    ;;
-esac
-case "${VERSION}" in
   *'^'* | *'~'* | *'*'* | *'<'* | *'>'* | *'='* | *' '*)
     echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
     exit 2
     ;;
 esac
-# An x-RANGE (npm's `1.2.x` / `1.x` / `x` syntax) is only ever a WHOLE
-# dot-delimited segment — round-3 review finding: the previous blanket
-# `*'x'*`/`*'X'*` substring check also rejected any legitimate prerelease
-# tag that merely CONTAINS the letter x inside a word (e.g. `next`, `hex`),
-# contradicting this file's own header promise of an "optional
-# prerelease/build suffix". Wrapping in literal dots turns "1.2.x" into
-# ".1.2.x." (a whole-segment match) while "1.0.0-next.1" becomes
-# ".1.0.0-next.1." (no ".x."/".X." segment anywhere in it).
+# jev 0.94 follow-up finding: the previous `[0-9]*.[0-9]*.[0-9]* |
+# [0-9]*.[0-9]* | [0-9]*` case-glob accepted a BARE or PARTIAL version too
+# — "1" and "1.2" both matched their own alternative outright (neither is a
+# real pinned MAJOR.MINOR.PATCH), and shell glob `*` is not anchored to
+# non-dot characters, so even the strictest-looking alternative is looser
+# than it reads (`[0-9]*.[0-9]*.[0-9]*` also happily matches "1.2.x+build"
+# once `*` is allowed to swallow across segment boundaries). Require
+# EXACTLY three dot-separated, ALL-DIGIT core segments instead — the only
+# shape POSIX `case` can't fake past with a loose `*`.
 #
-# jev 0.49 finding: checking the FULL version string missed an x-range
-# segment with a prerelease suffix glued directly onto it — "1.2.x-foo"
-# wraps to ".1.2.x-foo." (no ".x." substring), so it slipped through, even
-# though npm itself still reads the "x" segment there as the wildcard, not
-# as a literal patch version with a "-foo" prerelease tag. The wildcard
-# check must only ever look at the VERSION CORE — everything before the
-# first "-" — never a prerelease SUFFIX after it (a real prerelease tag
-# that happens to literally be "x", e.g. "1.2.3-x", is legitimate and must
-# not be rejected). `${VERSION%%-*}` strips from the first "-" onward.
-VERSION_CORE="${VERSION%%-*}"
-case ".${VERSION_CORE}." in
-  *'.x.'* | *'.X.'*)
-    echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
-    exit 2
-    ;;
-esac
+# The core is everything before the first "-" (prerelease) OR "+" (build
+# metadata) — semver's own suffix order is always
+# <core>[-prerelease][+build] — so strip build first, then prerelease, to
+# isolate just MAJOR.MINOR.PATCH. Stripping only "-" (as the previous x-range
+# check below already did) missed a build-metadata suffix glued directly
+# onto a wildcard segment: "1.2.x+build" has no "-", so its VERSION_CORE
+# stayed "1.2.x+build" verbatim, and neither this check nor the old
+# whole-segment ".x." check (looking for a literal ".x." substring, absent
+# here since "x" is immediately followed by "+" not ".") ever caught it.
+VERSION_CORE="${VERSION%%+*}"
+VERSION_CORE="${VERSION_CORE%%-*}"
+OLD_IFS="${IFS}"
+IFS='.'
+# shellcheck disable=SC2086 # intentional word-splitting on IFS='.'
+set -- ${VERSION_CORE}
+IFS="${OLD_IFS}"
+if [ "$#" -ne 3 ]; then
+  echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — need MAJOR.MINOR.PATCH (e.g. 1.2.4), not a bare or partial version like '1' or '1.2'" >&2
+  exit 2
+fi
+for _seg in "$1" "$2" "$3"; do
+  case "${_seg}" in
+    '' | *[!0-9]*)
+      echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
+      exit 2
+      ;;
+  esac
+done
 
 KEY="$(lockfile_key "${NAME}")-${VERSION}"
 TARGET_DIR="${SCRIPT_DIR}/musl-native-lockfiles/${KEY}"
