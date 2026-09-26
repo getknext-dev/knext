@@ -76,19 +76,26 @@ describe('the sqlite3 lockfile pin is mounted by scripts/e2e-deploy.sh (#1426)',
 });
 
 describe('.gitignore does not swallow the new committed lockfile (#1426, the #1415 incident this guards against)', () => {
-  it('git actually tracks scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json once added', () => {
-    // A real `.gitignore` check, not a text scan of the ignore file itself
-    // (the exact incident from #1415: a blanket `package-lock.json` rule
+  it('git actually TRACKS scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json (not merely "not ignored")', () => {
+    // `git check-ignore` only answers whether a path WOULD be ignored if it
+    // were untracked and newly added — it says nothing about whether the
+    // file is actually committed, and its own exit code 128 (e.g. a bad
+    // pathspec, or not run inside a git repo) was previously swallowed by a
+    // bare `catch { ignored = false }`, which made an environment/tooling
+    // failure read as a pass. `git ls-files --error-unmatch` is the
+    // authoritative "is this path tracked right now" check (the exact
+    // incident from #1415: a blanket `package-lock.json` .gitignore rule
     // silently swallowed a new pin until a negation was added for that one
-    // directory) — `git check-ignore` is the authoritative answer.
+    // directory) — it exits 0 with the path on stdout when tracked, and
+    // non-zero (1 = not tracked, 128 = git/environment error) otherwise, so
+    // any git error surfaces as a real test failure rather than a false pass.
     const { execFileSync } = require('node:child_process');
-    let ignored = false;
-    try {
-      execFileSync('git', ['check-ignore', LOCK_JSON_REL], { cwd: REPO_ROOT, stdio: 'pipe' });
-      ignored = true; // exit 0 means it WOULD be ignored
-    } catch {
-      ignored = false; // non-zero exit means it is NOT ignored
-    }
-    expect(ignored).toBe(false);
+    const out = execFileSync('git', ['ls-files', '--error-unmatch', LOCK_JSON_REL], {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+      .toString('utf8')
+      .trim();
+    expect(out).toBe(LOCK_JSON_REL);
   });
 });

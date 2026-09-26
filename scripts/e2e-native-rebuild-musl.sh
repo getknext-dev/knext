@@ -260,7 +260,14 @@ musl_install_sibling() { # <spec> <dest-name>
     cp "${_pinned_dir}/package-lock.json" "${_pkg_scratch}/package-lock.json"
     chown builder:builder "${_pkg_scratch}/package.json" "${_pkg_scratch}/package-lock.json"
     echo "[native-rebuild] ${_spec}: using the committed, reproducible lockfile at ${_pinned_dir}"
-    if ! (cd "${_pkg_scratch}" && run_as_builder npm ci --no-audit --no-fund >"${_pkg_scratch}.log" 2>&1); then
+    # npm_config_build_from_source=true (#1426 — same reasoning as the fresh
+    # `npm install` fallback below, and as the pinned `npm ci` path in the
+    # main *.node loop below): without it, npm's node-pre-gyp/node-gyp-build
+    # tooling tries a PREBUILT download FIRST regardless of libc, so a
+    # network-connected runner "succeeds" with a GLIBC prebuilt and
+    # ERR_DLOPEN_FAILED resurfaces under musl at runtime, unmasked by a
+    # green `npm ci`.
+    if ! (cd "${_pkg_scratch}" && run_as_builder env npm_config_build_from_source=true npm ci --no-audit --no-fund >"${_pkg_scratch}.log" 2>&1); then
       echo "[native-rebuild] WARNING: reproducible 'npm ci' of ${_spec} failed (the committed lockfile may be stale)"
       tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
       return 1
@@ -431,7 +438,12 @@ echo "${HITS}" | while IFS= read -r f; do
     cp "${PINNED_DIR}/package-lock.json" "${PKG_SCRATCH}/package-lock.json"
     chown builder:builder "${PKG_SCRATCH}/package.json" "${PKG_SCRATCH}/package-lock.json"
     echo "[native-rebuild] ${NAME}@${VERSION}: using the committed, reproducible lockfile at ${PINNED_DIR}"
-    if ! (cd "${PKG_SCRATCH}" && run_as_builder npm ci --no-audit --no-fund >"${PKG_SCRATCH}.log" 2>&1); then
+    # npm_config_build_from_source=true (#1426 — CI run 35862123588, see the
+    # non-pinned fallback's comment below for the full explanation): without
+    # it, npm's node-pre-gyp tooling tries a PREBUILT download FIRST without
+    # checking libc, so this "reproducible" `npm ci` can still resolve to a
+    # GLIBC prebuilt and defer ERR_DLOPEN_FAILED to musl runtime, unmasked.
+    if ! (cd "${PKG_SCRATCH}" && run_as_builder env npm_config_build_from_source=true npm ci --no-audit --no-fund >"${PKG_SCRATCH}.log" 2>&1); then
       echo "[native-rebuild] WARNING: reproducible 'npm ci' of ${NAME}@${VERSION} failed (the committed lockfile may be stale) — this addon may still fail to dlopen under musl at runtime (original error will resurface, not masked)"
       tail -c 4096 "${PKG_SCRATCH}.log" 2>/dev/null || true
       continue
