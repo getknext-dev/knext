@@ -56,6 +56,10 @@ build
 # the ship binaries, which are exactly what `COPY ${BINARY}` needs.
 knext-exec*
 !knext-exec-linux-*
+# The standalone target's ship binary (a DIFFERENT basename, not matched by
+# `knext-exec*` above) — this Dockerfile (the vinext bun-compile image) never
+# COPYs it, so it stays fully excluded, no re-include.
+knext-standalone-exec*
 server
 
 # ── Test, coverage and editor noise ──────────────────────────────────────────

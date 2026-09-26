@@ -213,6 +213,27 @@ function tmpHoistedWorkspaceApp(
     return { workspaceRoot, appDir };
 }
 
+/**
+ * A throwaway app dir with a package.json carrying MULTIPLE scripts (e.g. a
+ * `build` that delegates to `build:*` via `run-s`/`npm-run-all`) AND an
+ * installed-looking next version.
+ */
+function tmpAppWithScripts(
+    scripts: Record<string, string>,
+    nextVersion: string | undefined,
+): string {
+    const dir = mkdtempSync(join(tmpdir(), "knext-turbo-regr-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts }));
+    if (nextVersion !== undefined) {
+        mkdirSync(join(dir, "node_modules", "next"), { recursive: true });
+        writeFileSync(
+            join(dir, "node_modules", "next", "package.json"),
+            JSON.stringify({ version: nextVersion }),
+        );
+    }
+    return dir;
+}
+
 describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
     it("next@16.3.3 + turbopack + a bare `next build` script throws, naming the fix", () => {
         const dir = tmpAppWithNext("next build", "16.3.3");
@@ -388,6 +409,58 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
             }
             expect(caught).toMatchObject({ code: USAGE_ERROR_CODE });
             expect((caught as Error).message).toContain("--webpack");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("#1378: a `build` script that DELEGATES to another script carrying --webpack is not blocked (escape hatch 3)", () => {
+        const dir = tmpAppWithScripts(
+            {
+                build: "run-s build:*",
+                "build:next": "next build --webpack",
+            },
+            "16.3.3",
+        );
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).not.toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("#1378: a delegating `build` script with NO --webpack anywhere still throws", () => {
+        const dir = tmpAppWithScripts(
+            {
+                build: "run-s build:*",
+                "build:next": "next build",
+                "build:other": "echo done",
+            },
+            "16.3.3",
+        );
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).toThrow();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("#1393 (rev-1393): a `dev --webpack` script next to a bare `build` script does NOT count as the escape hatch", () => {
+        const dir = tmpAppWithScripts(
+            {
+                dev: "next dev --webpack",
+                build: "next build",
+            },
+            "16.3.3",
+        );
+        try {
+            expect(() =>
+                checkTurbopackAdapterStandaloneRegression(dir, "turbopack"),
+            ).toThrow();
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }

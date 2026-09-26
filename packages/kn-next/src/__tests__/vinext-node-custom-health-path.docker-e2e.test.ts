@@ -48,6 +48,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderScaffold } from "../cli/create";
 import { stageVinextNodeDockerfile } from "../cli/runtime-image";
+import { stageSharpForVinextNode } from "../cli/vinext-build";
 import { assertNodePresetOutput } from "../cli/vinext-node-build";
 
 // packages/kn-next/src/__tests__ -> package root (../..)
@@ -79,9 +80,12 @@ const RENDERED_TEMPLATES = [
 
 /**
  * Packages the node server entry imports that the fixture does NOT declare
- * itself: taken from the rendered template package.json (see 2b).
+ * itself: taken from the rendered template package.json (see 2b). `sharp`
+ * joined this list with #1298's direct-pass fix — the node entry now
+ * statically imports it, so an undeclared template dependency fails this
+ * fixture's OWN `vite build`, exactly like `srvx` already does.
  */
-const ENTRY_RUNTIME_DEPS = ["srvx"] as const;
+const ENTRY_RUNTIME_DEPS = ["srvx", "sharp"] as const;
 
 /** A throwaway build dir; removed in afterAll (D9 temp-dir pairing). */
 let workDir = "";
@@ -236,6 +240,16 @@ beforeAll(() => {
     }
     // The shipped gate `knext build` runs; throws on a bun-preset output.
     assertNodePresetOutput(appDir);
+
+    // #1298: this fixture declares sharp (see ENTRY_RUNTIME_DEPS above), so
+    // nitro's own trace into `.output/server/node_modules` needs the same
+    // fix `kn-next build` applies before either image below is built.
+    const sharpStaged = stageSharpForVinextNode(appDir, { arch: "linux-x64" });
+    if (!sharpStaged.staged) {
+        throw new Error(
+            "stageSharpForVinextNode reported nothing staged for a fixture that declares sharp",
+        );
+    }
 
     // 3. Build WITH the build-arg — must SUCCEED.
     const withArg = run(

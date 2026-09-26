@@ -875,3 +875,98 @@ func TestDatabaseEnvMapCollisions(t *testing.T) {
 		})
 	}
 }
+
+// TestEnvMapReservedCollisions covers the #1391 webhook-side collision
+// detector for spec.secrets.envMap names that collide with an
+// operator-managed reserved env name. Unconditional names (HOSTNAME,
+// NODE_ENV) always count; conditional names (e.g. STORAGE_PROVIDER) only
+// count when the spec actually triggers the operator to inject them — this
+// exercises ReservedOperatorEnvNames' conditionals directly, the same
+// function the reconciler's buildKsvcEnv relies on to avoid drift.
+func TestEnvMapReservedCollisions(t *testing.T) {
+	envMap := func(names ...string) *appsv1alpha1.SecretsSpec {
+		m := map[string]appsv1alpha1.EnvMapEntry{}
+		for _, n := range names {
+			m[n] = appsv1alpha1.EnvMapEntry{SecretName: "other", SecretKey: "k"}
+		}
+		return &appsv1alpha1.SecretsSpec{EnvMap: m}
+	}
+
+	tests := []struct {
+		name string
+		spec *appsv1alpha1.NextAppSpec
+		want []string
+	}{
+		{
+			name: "nil secrets — none",
+			spec: &appsv1alpha1.NextAppSpec{},
+			want: nil,
+		},
+		{
+			name: "HOSTNAME and NODE_ENV are unconditional",
+			spec: &appsv1alpha1.NextAppSpec{Secrets: envMap("HOSTNAME", "NODE_ENV")},
+			want: []string{"HOSTNAME", "NODE_ENV"},
+		},
+		{
+			name: "STORAGE_PROVIDER collides only when spec.storage is set",
+			spec: &appsv1alpha1.NextAppSpec{Secrets: envMap("STORAGE_PROVIDER")},
+			want: nil,
+		},
+		{
+			name: "STORAGE_PROVIDER collides once spec.storage IS set",
+			spec: &appsv1alpha1.NextAppSpec{
+				Storage: &appsv1alpha1.StorageSpec{Provider: "s3", Bucket: "b"},
+				Secrets: envMap("STORAGE_PROVIDER"),
+			},
+			want: []string{"STORAGE_PROVIDER"},
+		},
+		{
+			name: "unrelated env var never collides",
+			spec: &appsv1alpha1.NextAppSpec{Secrets: envMap("STRIPE_KEY")},
+			want: nil,
+		},
+		{
+			// #1391 round 2: REDIS_URL/KAFKA_BROKER_URL/OTEL_EXPORTER_OTLP_ENDPOINT
+			// have no secretRef field — spec.cache.url is plaintext — so
+			// rejecting the collision would force a credential into the CR.
+			// These names are EXEMPT from EnvMapReservedCollisions entirely,
+			// even though ReservedOperatorEnvNames still lists them (the
+			// reconciler still needs to know they're operator-managed to
+			// resolve who wins).
+			name: "connection-string names are EXEMPT even when the operator would otherwise inject them",
+			spec: &appsv1alpha1.NextAppSpec{
+				Cache:        &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+				Revalidation: &appsv1alpha1.RevalidationSpec{Queue: "kafka", KafkaBrokerUrl: "kafka:9092"},
+				Observability: &appsv1alpha1.ObservabilitySpec{
+					Enabled: true,
+					Tracing: &appsv1alpha1.TracingSpec{Enabled: true, Endpoint: "http://otel:4318"},
+				},
+				Secrets: envMap("REDIS_URL", "KAFKA_BROKER_URL", "OTEL_EXPORTER_OTLP_ENDPOINT"),
+			},
+			want: nil,
+		},
+		{
+			name: "connection-string exemption does not exempt OTHER reserved names in the same envMap",
+			spec: &appsv1alpha1.NextAppSpec{
+				Cache:   &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+				Storage: &appsv1alpha1.StorageSpec{Provider: "s3", Bucket: "b"},
+				Secrets: envMap("REDIS_URL", "STORAGE_PROVIDER"),
+			},
+			want: []string{"STORAGE_PROVIDER"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EnvMapReservedCollisions(tc.spec)
+			if len(got) != len(tc.want) {
+				t.Fatalf("EnvMapReservedCollisions() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("EnvMapReservedCollisions() = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
