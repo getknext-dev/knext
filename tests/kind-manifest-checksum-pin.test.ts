@@ -342,6 +342,8 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       varHost: 'curl -s "http://$HOST:9898/x" | kubectl apply -f -',
       userinfoTrick: 'curl -s "http://localhost:9898$P" | kubectl apply -f -',
       nestedUrl: `curl -s "http://localhost:8080/proxy?u=${URL}" | kubectl apply -f -`,
+      // As a $(…) scalar, ONLY the loopback test decides whether it is data.
+      nestedUrlScalar: `X=$(curl -s "http://localhost:8080/proxy?u=${URL}")\npython3 gen "$X" | kubectl apply -f -`,
     });
   });
 
@@ -362,8 +364,8 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
         'curl --resolve localhost:80:203.0.113.9 http://localhost/x | kubectl apply -f -',
       hostHeader: "curl -H 'Host: evil.example' http://localhost/x | kubectl apply -f -",
       // Content copied out of a remote-derived variable is not a scalar.
-      remoteVarLaundered:
-        'X=$(curl -s https://example.com/m)\nY="$X"\npython3 gen "$Y" | kubectl apply -f -',
+      remoteVarLaundered: 'X=$(curl -s "$SRC")\nY="$X"\npython3 gen "$Y" | kubectl apply -f -',
+      remoteVarAsDataArg: 'X=$(curl -s "$SRC")\npython3 gen "$X" | kubectl apply -f -',
       loopbackGitFetch:
         'git fetch http://localhost:3000/r.git\ngit checkout FETCH_HEAD -- x.yaml\nkubectl apply -f x.yaml',
       loopbackVarPrintf:
