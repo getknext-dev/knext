@@ -122,7 +122,11 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
                 if (e.isDirectory()) {
                     if (e.name !== "__tests__") walk(p);
                 } else if (/\.(ts|mts|js|mjs|cjs)$/.test(e.name)) {
-                    if (p === join(ADAPTERS, "bun-base-exe.mjs")) continue;
+                    if (
+                        p === join(ADAPTERS, "bun-base-exe.mjs") ||
+                        p === join(ADAPTERS, "bun-base-exe.d.mts")
+                    )
+                        continue;
                     if (readFileSync(p, "utf8").includes(BUN_BASE_EXE_ENV))
                         offenders.push(p);
                 }
@@ -135,17 +139,36 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
 
 // ── 2. fail-closed table ─────────────────────────────────────────────────────
 
+/** The seam is CI-only: every positive case runs as a GitHub Actions job. */
+const inCI = (value: string) => ({
+    GITHUB_ACTIONS: "true",
+    [BUN_BASE_EXE_ENV]: value,
+});
+
 describe("bunBaseExeCompileOptions — fail closed", () => {
     it("absent → {} with no own keys (compile options unchanged)", () => {
-        const out = bunBaseExeCompileOptions({});
-        expect(Object.keys(out)).toEqual([]);
-        const base = { outfile: "x", target: "bun-linux-x64" };
-        expect({ ...base, ...out }).toStrictEqual(base);
+        for (const env of [{}, { GITHUB_ACTIONS: "true" }]) {
+            const out = bunBaseExeCompileOptions(env);
+            expect(Object.keys(out)).toEqual([]);
+            const base = { outfile: "x", target: "bun-linux-x64" };
+            expect({ ...base, ...out }).toStrictEqual(base);
+        }
+    });
+
+    it("outside GitHub Actions → throws CI-only, even for a verified base", () => {
+        const exe = verifiedBase();
+        for (const gha of [undefined, "", "false", "1", "TRUE"]) {
+            const env: Record<string, string | undefined> = {
+                [BUN_BASE_EXE_ENV]: exe,
+            };
+            if (gha !== undefined) env.GITHUB_ACTIONS = gha;
+            expect(() => bunBaseExeCompileOptions(env)).toThrow(/is CI-only/);
+        }
     });
 
     it("a verified base → its absolute executablePath", () => {
         const exe = verifiedBase();
-        expect(bunBaseExeCompileOptions({ [BUN_BASE_EXE_ENV]: exe })).toEqual({
+        expect(bunBaseExeCompileOptions(inCI(exe))).toEqual({
             executablePath: exe,
         });
     });
@@ -153,10 +176,13 @@ describe("bunBaseExeCompileOptions — fail closed", () => {
     it("accepts a bare-hex .sha256 as well as sha256sum format", () => {
         const exe = verifiedBase();
         writeFileSync(`${exe}.sha256`, sha256(readFileSync(exe)).toUpperCase());
-        expect(
-            bunBaseExeCompileOptions({ [BUN_BASE_EXE_ENV]: exe })
-                .executablePath,
-        ).toBe(exe);
+        expect(bunBaseExeCompileOptions(inCI(exe)).executablePath).toBe(exe);
+    });
+
+    it("accepts sha256sum binary-mode (`*name`) and a trailing blank line", () => {
+        const exe = verifiedBase();
+        writeFileSync(`${exe}.sha256`, `${sha256(readFileSync(exe))} *bun\n\n`);
+        expect(bunBaseExeCompileOptions(inCI(exe)).executablePath).toBe(exe);
     });
 
     const cases: Array<[string, () => string, RegExp]> = [
@@ -204,12 +230,34 @@ describe("bunBaseExeCompileOptions — fail closed", () => {
             },
             /sha256 mismatch/,
         ],
+        [
+            ".sha256 names a different file",
+            () => {
+                const exe = verifiedBase();
+                writeFileSync(
+                    `${exe}.sha256`,
+                    `${sha256(readFileSync(exe))}  bun-linux-aarch64-musl\n`,
+                );
+                return exe;
+            },
+            /names bun-linux-aarch64-musl, not bun/,
+        ],
+        [
+            "multi-line .sha256 (a SHA256SUMS, not a per-file sum)",
+            () => {
+                const exe = verifiedBase();
+                const h = sha256(readFileSync(exe));
+                writeFileSync(`${exe}.sha256`, `${h}  bun\n${h}  other\n`);
+                return exe;
+            },
+            /exactly one line, found 2/,
+        ],
     ];
     for (const [name, value, message] of cases) {
         it(`${name} → throws`, () => {
-            expect(() =>
-                bunBaseExeCompileOptions({ [BUN_BASE_EXE_ENV]: value() }),
-            ).toThrow(message);
+            expect(() => bunBaseExeCompileOptions(inCI(value()))).toThrow(
+                message,
+            );
         });
     }
 });
@@ -282,11 +330,8 @@ startServer({ dir, isDev: false, config: nextConfig, port: currentPort }).catch(
     ];
 }
 
-function run(argv: string[], base: string | undefined) {
-    const env: Record<string, string> = { ...process.env } as Record<
-        string,
-        string
-    >;
+function run(argv: string[], base: string | undefined, gha = "true") {
+    const env: NodeJS.ProcessEnv = { ...process.env, GITHUB_ACTIONS: gha };
     delete env[BUN_BASE_EXE_ENV];
     if (base !== undefined) env[BUN_BASE_EXE_ENV] = base;
     const r = spawnSync(
@@ -331,6 +376,19 @@ for (const [name, fixture] of [
             expect(r.status).toBe(1);
             expect(r.compile).toBeUndefined();
             expect(r.stderr).toContain(`${BUN_BASE_EXE_ENV}: sha256 mismatch`);
+        });
+
+        it("a verified base outside GitHub Actions → exit 1, CI-only", () => {
+            const r = run(fixture(), verifiedBase(), "false");
+            expect(r.status).toBe(1);
+            expect(r.compile).toBeUndefined();
+            expect(r.stderr).toContain(`${BUN_BASE_EXE_ENV}: is CI-only`);
+        });
+
+        it("absent outside GitHub Actions → unaffected, reaches Bun.build", () => {
+            const r = run(fixture(), undefined, "false");
+            expect(r.status).toBe(0);
+            expect(Object.hasOwn(r.compile, "executablePath")).toBe(false);
         });
 
         it("set but empty → exit 1 (no silent fallback to stock Bun)", () => {
