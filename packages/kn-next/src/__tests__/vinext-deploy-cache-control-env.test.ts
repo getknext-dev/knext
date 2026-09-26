@@ -49,6 +49,9 @@
  * scan proves no repo file overrides the switch, not that a deployer's
  * cluster does not.
  *
+ * The comment exemption is NOT a prefix test: a raw line the scrubber dropped
+ * is exempt only when it is wholly a comment (`isPureComment`).
+ *
  * `isBunEntryWired` accepts one shape: inside the exported config, a
  * `nitro({ ... })` call whose own top-level `entry:` is the literal
  * `'./knext-bun-entry.mjs'` (optionally as the else-branch of a ternary whose
@@ -56,8 +59,10 @@
  * conditional spread `...(cond ? { entry: '…' } : {})` at nitro's top level. Strings are blanked first, so
  * `note: "entry: './knext-bun-entry.mjs'"` is text; an object outside
  * `export default`, one nested deeper than the `nitro(` argument, or one in a
- * comment does not count. Limit: a `nitro({ entry })` that is built inside the
- * export but never put in `plugins` still counts.
+ * comment does not count. Limits: a `nitro({ entry })` built inside the
+ * export but never put in `plugins` still counts, and a duplicate `entry:` key
+ * inside `nitro({...})` counts as wired if either is the bun literal (at
+ * runtime the last key wins).
  */
 
 import { describe, expect, it } from "bun:test";
@@ -161,7 +166,7 @@ function codeLines(src: string, path: string): string[] {
             .map((l, i) =>
                 raw[i]?.includes(NAME) &&
                 !l.includes(NAME) &&
-                !/^\s*(?:\/\/|\/\*|\*|#)/.test(raw[i])
+                !isPureComment(raw[i])
                     ? raw[i]
                     : l,
             )
@@ -171,10 +176,39 @@ function codeLines(src: string, path: string): string[] {
             .split("\n")
             .map((l) => (/^\s*#/.test(l) ? "" : l))
             .join("\n");
-    return text
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l !== "");
+    // Indentation is kept: YAML item boundaries are decided by it.
+    return text.split("\n").filter((l) => l.trim() !== "");
+}
+
+/**
+ * Whether a RAW line that mentions the name is wholly a comment (so a scrubber
+ * that dropped it lost nothing). A prefix test is not enough — a leading block
+ * comment followed by code, or a `*` line that is really a continuation of
+ * code — so: leading block-comment groups are removed first, and what remains
+ * must be empty, a `//` comment, or a `*`/`#`/unclosed-opener prose line whose
+ * every mention of the name sits in a backtick span that follows a word (never
+ * `(`, `[`, `,`, `=`) with no `=` outside the spans.
+ */
+function isPureComment(raw: string): boolean {
+    let r = raw.trim();
+    while (r.startsWith("/*")) {
+        const c = r.indexOf("*/", 2);
+        if (c < 0) {
+            r = r.replace(/^\/\*+/, "*");
+            break;
+        }
+        r = r.slice(c + 2).trim();
+    }
+    if (r === "" || r.startsWith("//")) return true;
+    if (!/^[*#]/.test(r)) return false;
+    const outside = r.replace(/`[^`]*`/g, "");
+    if (outside.includes(NAME) || outside.includes("=")) return false;
+    for (const m of r.matchAll(/`[^`]*`/g)) {
+        if (!m[0].includes(NAME)) continue;
+        const before = r.slice(0, m.index);
+        if (!/[A-Za-z][ \t]+$/.test(before)) return false;
+    }
+    return true;
 }
 
 const N = NAME;
@@ -215,7 +249,8 @@ const READ_SAFE: [RegExp, RegExp][] = [
 export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     const lines = codeLines(src, path);
     const hits: string[] = [];
-    lines.forEach((l, idx) => {
+    lines.forEach((line, idx) => {
+        const l = line.trim();
         if (!l.includes(N)) return;
         if (ASSIGN_SAFE.some((re) => re.test(l))) return;
         if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) return;
@@ -224,10 +259,36 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
             // (`-` or `{`) to the next line that opens or closes one. It must
             // hold exactly one value key, equal to 1, and no `valueFrom`; a
             // name never borrows a value across an item boundary.
-            let start = idx;
-            while (start > 0 && !/^[-{]/.test(lines[start])) start--;
+            const ind = (x: string) => x.length - x.trimStart().length;
+            const opens = (t: string) => /^[-{]/.test(t) || t.endsWith("{");
+            // Walk back to the opener. A closing `}` or a parent line with
+            // less indentation than the name means there is no opener of ITS
+            // item on the way: fail.
+            let start = -1;
+            for (let k = idx; k >= 0; k--) {
+                const t = lines[k].trim();
+                if (opens(t)) {
+                    start = k;
+                    break;
+                }
+                if (t.startsWith("}")) break;
+                if (k < idx && ind(lines[k]) < ind(line)) break;
+            }
+            if (start < 0) {
+                hits.push(`${l}  [name outside any item]`);
+                return;
+            }
+            const keyCol = /^-/.test(l)
+                ? ind(line) + (l.match(/^-\s*/)?.[0].length ?? 1)
+                : ind(line);
             let end = idx + 1;
-            while (end < lines.length && !/^[-{}]/.test(lines[end])) end++;
+            while (end < lines.length) {
+                const t = lines[end].trim();
+                if (ind(lines[end]) < keyCol || t.startsWith("}")) break;
+                if (/^[-{]/.test(t) && ind(lines[end]) <= ind(lines[start]))
+                    break;
+                end++;
+            }
             const item = lines.slice(start, end);
             const values = item.filter((x) => VALUE_KEY.test(x));
             const ok =
@@ -389,6 +450,20 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.yaml", `- name: ${NAME}\n  value: "1"\n  x: y\n  value: "0"`],
         // a block-comment INTERIOR line without a leading `*` is not pure comment
         ["x.mjs", `/*\n process.env.${NAME} = "0";\n*/`],
+        // commented-out code that names the switch fails closed
+        ["x.mjs", `/*\n * process.env.${NAME} = "0";\n */`],
+        // round-5 reviewer inputs
+        [
+            "x.go",
+            `a := corev1.EnvVar{\n\tName: "OTHER",\n\tValue: "1",\n}\nb := corev1.EnvVar{\n\tName: "${NAME}",\n}`,
+        ],
+        ["x.yaml", `env:\n  - name: ${NAME}\nother:\n  value: "1"`],
+        ["x.mjs", `/* c */ const r = /\\/\\//; process.env.${NAME} = "0";`],
+        ["x.mjs", `const r = /x\\/*/;\n  * 2; process.env.${NAME} = "0";`],
+        ["x.mjs", `#r = /\\/\\//; x = (process.env.${NAME} = "0");`],
+        ["x.mjs", `/* c */ Reflect.set(process.env, \`${NAME}\`, "0");`],
+        ["x.mjs", `* Object.assign(process.env, { [\`${NAME}\`]: "0" });`],
+        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  valueFrom: {}`],
         // an ambiguous neighbour on both sides is refused
         ["x.yaml", `value: "1"\nname: ${NAME}\nvalue: "1"`],
         // unrecognised file type: comments are not stripped, so a mention fails
@@ -403,6 +478,16 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
     }
 
     const GOOD: [string, string][] = [
+        [
+            "x.go",
+            `a := corev1.EnvVar{\n\tName: "OTHER",\n\tValue: "0",\n}\nb := corev1.EnvVar{\n\tName: "${NAME}",\n\tValue: "1",\n}`,
+        ],
+        [
+            "x.yaml",
+            `env:\n  - name: ${NAME}\n    value: "1"\nother:\n  value: "0"`,
+        ],
+        ["x.mjs", `/**\n * page) when \`${NAME}=1\`; it reads it.\n */`],
+        ["x.mjs", `/* the switch \`${NAME}\` is documented here */`],
         // neighbouring items with other values must not bleed into this one
         [
             "x.yaml",
@@ -427,7 +512,7 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.go", `{\n  Name:  "${NAME}",\n  Value: "1",\n}`],
         ["Dockerfile", `# ${NAME}=0 documents the opt-out`],
         ["x.mjs", `// ${NAME}=0 documents the opt-out\nx();`],
-        ["x.mjs", `/*\n * process.env.${NAME} = "0";\n */`],
+
         [
             "packages/kn-next/src/adapters/response-cache-control.mjs",
             `if (!env || env.${NAME} !== undefined) return;`,
