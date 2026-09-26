@@ -515,20 +515,27 @@ export function isLoopbackUrl(u) {
   return LOOPBACK_URL.test(u) && u.split('://').length === 2 && !/\$/.test(u.split('/')[2]);
 }
 
-export function isFetchSegment(ws, st) {
+export function isFetchSegment(ws, st, { looseLoopback = false } = {}) {
   for (let k = 0; k < ws.length; k++) {
     const w = canonical(ws[k], st.vars).replace(/^\\/, '');
     const base = w.split('/').pop();
     if (base === 'gh' && /^(api|release|run)$/.test(unquote(ws[k + 1] ?? ''))) return true;
     if (INTERPRETERS.has(base) && INTERPRETER_FETCH.test(ws.slice(k + 1).join(' '))) return true;
     if (!FETCH_WORDS.has(base)) continue;
-    // A fetcher whose every URL is loopback reads local state; any other
-    // host — or no determinable URL at all — is network content.
-    const urls = ws
-      .slice(k + 1)
-      .map((a) => canonical(a, st.vars))
-      .filter((a) => /:\/\//.test(a));
-    if (urls.length === 0 || !urls.every(isLoopbackUrl)) return true;
+    // Every fetcher is a taint source — a loopback URL included: `localhost`
+    // is only local until a port-forward, `--connect-to`, `--resolve`, a proxy
+    // or a Host header says otherwise, and `kubectl exec … curl` reads
+    // whatever the pod serves. The ONLY loosening is `looseLoopback`, used
+    // solely to decide whether a `$(…)` variable is a loopback SCALAR (data
+    // that may be interpolated, never a manifest that may be applied).
+    if (looseLoopback) {
+      const urls = ws
+        .slice(k + 1)
+        .map((a) => canonical(a, st.vars))
+        .filter((a) => /:\/\//.test(a));
+      if (urls.length > 0 && urls.every(isLoopbackUrl)) continue;
+    }
+    return true;
   }
   return false;
 }
@@ -582,11 +589,28 @@ function subcommand(args, valued) {
   return { sub: '', rest: [] };
 }
 
-const hasRemoteArg = (args) => args.some((a) => REMOTE_ARG_RE.test(a) && !isLoopbackUrl(a));
+const hasRemoteArg = (args) => args.some((a) => REMOTE_ARG_RE.test(a));
+
+/** git clone options that take a separate value (so it is not the source). */
+const CLONE_VALUED = new Set(
+  '-b --branch --depth -o --origin --reference --config -c --jobs -j --separate-git-dir --template --filter'.split(
+    ' ',
+  ),
+);
+
+/**
+ * A clone whose source is a plain filesystem path (no `://`, no `host:` form,
+ * no variable) reads a local repository, not a remote one.
+ */
+function cloneSourceIsLocalPath(rest) {
+  const { sub: source } = subcommand(rest, CLONE_VALUED);
+  return source !== '' && !/:\/\//.test(source) && !/^[^/]*:/.test(source) && !/[$`]/.test(source);
+}
 
 function gitFetches(args) {
   const { sub, rest } = subcommand(args, new Set(['-C', '-c', '--git-dir', '--work-tree']));
-  if (sub === 'clone' || sub === 'svn') return true;
+  if (sub === 'svn') return true;
+  if (sub === 'clone') return !cloneSourceIsLocalPath(rest);
   if (/^(fetch|pull|ls-remote|archive|submodule|remote)$/.test(sub)) return hasRemoteArg(rest);
   return false;
 }
@@ -733,14 +757,20 @@ function unresolvedCallWithUrl(ws, st) {
  * expansions) carries network content. Returns a reason string (truthy) or
  * false, so an offender says WHY.
  */
-export function textIsNetwork(text, st, depth, { urlLiteralCounts = true, seen = new Set() } = {}) {
+export function textIsNetwork(
+  text,
+  st,
+  depth,
+  { urlLiteralCounts = true, seen = new Set(), looseLoopback = false } = {},
+) {
   if (depth > MAX_DEPTH) return 'nesting too deep to classify'; // fail closed
-  const opts = { seen };
+  const opts = { seen, looseLoopback };
   const { code } = lex(text);
   for (const cl of splitClauses(code)) {
     for (const seg of splitPipeline(cl.text)) {
       const ws = words(seg);
-      if (isFetchSegment(ws, st)) return `fetch command in \`${seg.slice(0, 80)}\``;
+      if (isFetchSegment(ws, st, { looseLoopback }))
+        return `fetch command in \`${seg.slice(0, 80)}\``;
       for (let k = 0; k < ws.length; k++) {
         const w = ws[k];
         const u = unquote(w);
@@ -777,12 +807,29 @@ export function textIsNetwork(text, st, depth, { urlLiteralCounts = true, seen =
         if (urlLiteralCounts && wholeVar && st.vars.get(wholeVar[1])?.url)
           return `URL variable ${u}`;
         for (const r of varRefs(w)) {
-          if (st.vars.get(r)?.content) return `variable $${r} holds network content`;
+          if (varIsNetworkIn(r, ws, st, looseLoopback))
+            return `variable $${r} holds network content`;
         }
       }
     }
   }
   return false;
+}
+
+/** Commands that emit their argument as a whole document. */
+const EMITTERS = new Set(['echo', 'printf', 'cat', 'tee', 'print', 'yes']);
+
+/**
+ * Whether `$name`, used in segment `ws`, carries network content. A loopback
+ * scalar is exempt everywhere except where it IS the document: a command that
+ * emits its argument (`echo "$X" | kubectl apply -f -`).
+ */
+function varIsNetworkIn(name, ws, st, looseLoopback = false) {
+  const v = st.vars.get(name);
+  if (!v?.content) return false;
+  if (!v.scalar) return true;
+  if (looseLoopback) return false;
+  return ws.some((w) => EMITTERS.has(unquote(w).split('/').pop()));
 }
 
 function innerSubstitutions(w) {
@@ -966,10 +1013,22 @@ function recordAssignments(ws, st, depth) {
     const refs = varRefs(value)
       .map((r) => st.vars.get(r))
       .filter(Boolean);
+    const subs = innerSubstitutions(value);
     const content =
-      innerSubstitutions(value).some((inner) => textIsNetwork(inner, st, depth + 1)) ||
-      refs.some((r) => r.content);
-    st.vars.set(m[1], { value, url: URL_RE.test(expanded) || refs.some((r) => r.url), content });
+      subs.some((inner) => textIsNetwork(inner, st, depth + 1)) || refs.some((r) => r.content);
+    // A loopback SCALAR: content whose only network source is a loopback
+    // fetch. It may be interpolated as data (a heredoc field, a sed/awk
+    // argument), never emitted or applied as a document.
+    const scalar =
+      content &&
+      !subs.some((inner) => textIsNetwork(inner, st, depth + 1, { looseLoopback: true })) &&
+      refs.every((r) => !r.content || r.scalar);
+    st.vars.set(m[1], {
+      value,
+      url: URL_RE.test(expanded) || refs.some((r) => r.url),
+      content,
+      scalar,
+    });
   }
   return any && k >= ws.length;
 }
@@ -1185,7 +1244,7 @@ function walk(code, st, ctx) {
         networkSoFar ||
         ws.some((w) => {
           const c = canonical(w, st.vars);
-          return isTaintedPath(c, st) || varRefs(w).some((r) => st.vars.get(r)?.content);
+          return isTaintedPath(c, st) || varRefs(w).some((r) => varIsNetworkIn(r, ws, st));
         });
       if (readsNetwork) networkSoFar = true;
 
@@ -1463,7 +1522,13 @@ function heredocExpansions(body) {
   const bits = [];
   for (const m of body.matchAll(/\$\(([^()]*(?:\([^()]*\)[^()]*)*)\)|`([^`]*)`/g))
     bits.push(m[1] ?? m[2]);
-  for (const m of body.matchAll(/\$\{?([A-Za-z_]\w*)\}?/g)) bits.push(`echo "$${m[1]}"`);
+  // `:` emits nothing, so a loopback scalar interpolated into a field is data;
+  // a line that is JUST the variable is the whole document and is emitted.
+  const wholeLine = new Set(
+    [...body.matchAll(/^\s*\$\{?([A-Za-z_]\w*)\}?\s*$/gm)].map((m) => m[1]),
+  );
+  for (const m of body.matchAll(/\$\{?([A-Za-z_]\w*)\}?/g))
+    bits.push(`${wholeLine.has(m[1]) ? 'echo' : ':'} "$${m[1]}"`);
   return bits.join('\n');
 }
 
