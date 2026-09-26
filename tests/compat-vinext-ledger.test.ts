@@ -1909,7 +1909,8 @@ describe('CLI wiring: the verify command checks isShallowRepo before trusting ve
     expect(verifyBranchStart).toBeGreaterThan(-1);
     const shallowCallIdx = source.indexOf('isShallowRepo(git)', verifyBranchStart);
     const addedDatesCallIdx = source.indexOf(
-      'verifyAddedDates(ledger, git, ledgerPath)',
+      // #1357 — the run lookup must be wired, or no renewal can ever verify.
+      'verifyAddedDates(ledger, git, ledgerPath, runCreatedAt)',
       verifyBranchStart,
     );
     expect(shallowCallIdx).toBeGreaterThan(verifyBranchStart);
@@ -1985,6 +1986,115 @@ describe("verifyAddedDates: every entry's `added` must match its git-derived fir
     expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
       /does not match git history/,
     );
+  });
+});
+
+// #1357 — the RENEWAL RULE. Renewing an entry has to move `added` forward
+// (that is what restarts its 30-day window), and the git check above flags
+// every forward move. Without an exception no entry could ever be renewed:
+// the only way to keep a still-failing test quarantined past its expiry
+// would be to delete it and re-add it, which is churn, not evidence. So a
+// forward `added` is accepted ONLY when every run the entry cites was
+// created on or after it — i.e. the new window is anchored on evidence that
+// did not exist before it. `verifyEvidence` separately re-derives the cases
+// from those same runs, so fresh-but-irrelevant runs cannot carry a renewal.
+describe('verifyAddedDates: the renewal rule — a forward added is accepted only when every cited run is at least as new (#1357)', () => {
+  const LEDGER_REL_PATH = 'test/compat-vinext-ledger.json';
+  const gitSince = (date: string, testName: string) => (args: string[]) => {
+    if (args[0] === 'log') return `c1 ${date}T10:00:00+00:00`;
+    if (args[0] === 'show') return JSON.stringify({ entries: [{ test: testName }] });
+    throw new Error(`unexpected git invocation: ${args.join(' ')}`);
+  };
+  const createdAt =
+    (dates: Record<string, string>) =>
+    (id: string): string => {
+      if (!(id in dates)) throw new Error(`HTTP 404: run ${id} not found`);
+      return dates[id];
+    };
+  const renewed = (over: Record<string, unknown> = {}) =>
+    entry({
+      added: '2026-09-26',
+      expires: '2026-10-26',
+      evidence: {
+        fail: [
+          { run: '10', cases: ['a', 'b'] },
+          { run: '11', cases: ['a', 'b'] },
+        ],
+      },
+      ...over,
+    });
+
+  it('accepts a forward re-date whose every cited run was created on or after the new added date', () => {
+    const e = renewed();
+    const runs = createdAt({ '10': '2026-09-26T16:32:39Z', '11': '2026-09-27T01:00:00Z' });
+    expect(
+      verifyAddedDates(ledger([e]), gitSince('2026-09-01', e.test), LEDGER_REL_PATH, runs),
+    ).toEqual([]);
+  });
+
+  it('rejects a forward re-date when one cited run predates the new added date', () => {
+    const e = renewed();
+    const runs = createdAt({ '10': '2026-09-25T06:00:10Z', '11': '2026-09-27T01:00:00Z' });
+    const out = verifyAddedDates(
+      ledger([e]),
+      gitSince('2026-09-01', e.test),
+      LEDGER_REL_PATH,
+      runs,
+    );
+    expect(out.join()).toMatch(/does not match git history/);
+    expect(out.join()).toMatch(/run 10 was created 2026-09-25/);
+  });
+
+  it('still rejects the plain forward re-date — added moved, evidence left on the old runs', () => {
+    const e = renewed({
+      evidence: {
+        fail: [
+          { run: '1', cases: ['a', 'b'] },
+          { run: '2', cases: ['a', 'b'] },
+        ],
+      },
+    });
+    const runs = createdAt({ '1': '2026-09-01T12:00:00Z', '2': '2026-09-02T12:00:00Z' });
+    expect(
+      verifyAddedDates(ledger([e]), gitSince('2026-09-01', e.test), LEDGER_REL_PATH, runs).join(),
+    ).toMatch(/does not match git history/);
+  });
+
+  it("counts a flaky entry's PASSING runs too — an old passing run cannot sit under a renewed window", () => {
+    const e = renewed({
+      class: 'flaky',
+      expires: '2026-10-10',
+      evidence: {
+        fail: [
+          { run: '10', cases: ['a', 'b'] },
+          { run: '11', cases: ['a', 'b'] },
+        ],
+        pass: ['3'],
+      },
+    });
+    const runs = createdAt({
+      '10': '2026-09-26T16:32:39Z',
+      '11': '2026-09-27T01:00:00Z',
+      '3': '2026-09-03T00:00:00Z',
+    });
+    expect(
+      verifyAddedDates(ledger([e]), gitSince('2026-09-01', e.test), LEDGER_REL_PATH, runs).join(),
+    ).toMatch(/run 3 was created 2026-09-03/);
+  });
+
+  it('fails closed when a cited run cannot be fetched — an unreadable run never covers a renewal', () => {
+    const e = renewed();
+    const runs = createdAt({ '10': '2026-09-26T16:32:39Z' }); // run 11 missing
+    expect(
+      verifyAddedDates(ledger([e]), gitSince('2026-09-01', e.test), LEDGER_REL_PATH, runs).join(),
+    ).toMatch(/run 11 could not be fetched/);
+  });
+
+  it('without a run lookup, a forward re-date is never accepted (no evidence, no renewal)', () => {
+    const e = renewed();
+    expect(
+      verifyAddedDates(ledger([e]), gitSince('2026-09-01', e.test), LEDGER_REL_PATH).join(),
+    ).toMatch(/does not match git history/);
   });
 });
 
