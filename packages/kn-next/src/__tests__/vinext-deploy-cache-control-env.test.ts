@@ -27,8 +27,8 @@
  *   - exactly two READ shapes, each bound to its file: the early-return guard
  *     inside `applyVinextDeployDefault` (`adapters/response-cache-control.mjs`)
  *     and the fixture probe `process.env.NAME ?? null`.
- * A line may mention the name only ONCE, so a second mention on a safe-looking
- * line cannot smuggle an override. Consequences, all intended: `??=`, `||=`,
+ * Every safe form is matched against the WHOLE line, so a second statement on
+ * the same line cannot ride along. Consequences, all intended: `??=`, `||=`,
  * `Reflect.set`, `Object.defineProperty`, `Object.assign`, `os.Setenv`,
  * `unset`, `env -u`, `delete`, `valueFrom`, a `["NAME","0"]` tuple and even a
  * `const K = "NAME"` (which is what a computed key needs) are all unknown
@@ -203,10 +203,6 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     const hits: string[] = [];
     lines.forEach((l, idx) => {
         if (!l.includes(N)) return;
-        if (l.split(N).length - 1 !== 1) {
-            hits.push(`${l}  [mentioned more than once on one line]`);
-            return;
-        }
         if (ASSIGN_SAFE.some((re) => re.test(l))) return;
         if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) return;
         if (NAME_KEY.test(l)) {
@@ -412,6 +408,16 @@ describe("bun-entry wiring fixture", () => {
             "the other key's string mentions it",
             wrap(
                 `{ entry: './other.mjs', note: "entry: './knext-bun-entry.mjs'" }`,
+            ),
+        ],
+        [
+            "a nitro call BEFORE the export",
+            `const p = nitro({ entry: './knext-bun-entry.mjs' });\nexport default defineConfig({ plugins: [] });`,
+        ],
+        [
+            "a string that spells the whole property",
+            wrap(
+                `{ entry: './other.mjs', note: " entry: './knext-bun-entry.mjs', " }`,
             ),
         ],
         [
