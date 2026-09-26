@@ -82,6 +82,12 @@ function run(scriptPath = SCRIPT_PATH): { status: number | null; calls: Call[]; 
       version: '0.34.5',
       optionalDependencies: { '@img/sharp-libvips-linux-x64': '1.2.4' },
     });
+    // No committed lockfile for these versions: both sharp siblings take the fresh `npm install` fallback.
+    pkg(root, '@img/sharp-linux-arm64', {
+      name: '@img/sharp-linux-arm64',
+      version: '0.0.1',
+      optionalDependencies: { '@img/sharp-libvips-linux-arm64': '0.0.1' },
+    });
     pkg(root, 'nolock', { name: 'nolock', version: '1.0.0' });
     const r = spawnSync('sh', [scriptPath, root, LOCKFILES_DIR], {
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REC: rec },
@@ -109,15 +115,17 @@ describe('the musl rebuild runs every npm install with npm_config_build_from_sou
   it('static anchor: exactly four run_as_builder npm ci/install invocations exist (the behaviour run below must reach all four)', () => {
     const lines = readFileSync(SCRIPT_PATH, 'utf8')
       .split('\n')
-      .filter((l) => !/^\s*#/.test(l) && /run_as_builder\b.*\bnpm (ci|install)\b/.test(l));
+      .filter((l) => !/^\s*#/.test(l) && /run_as_builder\b.*\bnpm\b.*\b(ci|install)\b/.test(l));
     expect(lines.length).toBe(4);
   });
 
   it('every npm invocation the real script makes sees the flag exactly `true` and no argv override', () => {
     const { status, calls, out } = run();
     expect(status, out).toBe(0);
-    // sqlite3 ci, sharp musl ci, libvips musl ci, nolock install.
-    expect(calls.map((c) => c.argv[0]).sort(), out).toEqual(['ci', 'ci', 'ci', 'install']);
+    // ci: sqlite3, sharp musl, libvips musl; install: nolock, unpinned sharp musl + libvips musl.
+    expect(calls.length, out).toBe(6);
+    expect(calls.filter((c) => c.argv.includes('ci')).length, out).toBe(3);
+    expect(calls.filter((c) => c.argv.includes('install')).length, out).toBe(3);
     expect(offenders(calls)).toEqual([]);
   });
 
