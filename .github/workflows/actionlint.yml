@@ -38,11 +38,17 @@ on:
       # issue's own "once (or before) a composite action lands") so the gate
       # does not need a second PR the day one is added.
       - '.github/actions/**'
+      # #1397 review — this gate's own regression suite. General CI skips its
+      # real-binary half (no actionlint on PATH there), so a PR touching only
+      # the test file (or a local helper it imports) must trigger THIS
+      # workflow or that half never runs. Guarded by the test itself.
+      - 'tests/actionlint-workflow.test.ts'
   push:
     branches: [main]
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
+      - 'tests/actionlint-workflow.test.ts'
 
 permissions:
   contents: read

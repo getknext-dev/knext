@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { parse } from 'yaml';
 
 /**
@@ -140,6 +140,48 @@ describe('#1352: actionlint gate covers .github/actions/** composite actions', (
     expect(parsed.on.push?.paths).toContain('.github/actions/**');
   });
 
+  // #1397 review: the real-binary half of THIS file only runs inside
+  // actionlint.yml (general CI has no actionlint on PATH, so describe.skipIf
+  // skips it there). If a PR editing only this file — or a helper it imports —
+  // does not trigger actionlint.yml, that half never runs on the change that
+  // most needs it. So the file and every LOCAL module it imports (scanned from
+  // its own source, not a hand-kept list) must be in both path filters.
+  const SELF = 'tests/actionlint-workflow.test.ts';
+  /** Repo-relative paths of every RELATIVE module `source` (a file in tests/) imports — `from '…'`, bare `import '…'`, and `import('…')`. */
+  const localImportsOf = (source: string): string[] =>
+    [...source.matchAll(/\b(?:from|import)\s*\(?\s*['"](\.{1,2}\/[^'"]+)['"]/g)].map((m) =>
+      relative(REPO_ROOT, resolve(REPO_ROOT, 'tests', m[1])),
+    );
+
+  it('localImportsOf finds static, side-effect and dynamic relative imports (and ignores packages)', () => {
+    // The quote is interpolated so THIS file's raw source never carries a
+    // matching import — the real-file test below scans this very file.
+    const q = "'";
+    const src = [
+      `import { a } from ${q}./lib/helper-a.ts${q};`,
+      `import ${q}./lib/helper-b.ts${q};`,
+      `const c = await import(${q}../scripts/helper-c.mjs${q});`,
+      `import { parse } from ${q}yaml${q};`,
+      `import { join } from ${q}node:path${q};`,
+    ].join('\n');
+    expect(localImportsOf(src)).toEqual([
+      'tests/lib/helper-a.ts',
+      'tests/lib/helper-b.ts',
+      'scripts/helper-c.mjs',
+    ]);
+  });
+
+  it('the pull_request AND push path filters include this test file and every local helper it imports', () => {
+    const required = [SELF, ...localImportsOf(readFileSync(resolve(REPO_ROOT, SELF), 'utf8'))];
+    const parsed = parse(readFileSync(ACTIONLINT_WORKFLOW_PATH, 'utf8')) as {
+      on: { pull_request?: { paths?: string[] }; push?: { paths?: string[] } };
+    };
+    for (const path of required) {
+      expect(parsed.on.pull_request?.paths ?? []).toContain(path);
+      expect(parsed.on.push?.paths ?? []).toContain(path);
+    }
+  });
+
   it('the diff-computing step globs .github/actions/**/action.yml AND .yaml, not just workflows', () => {
     const { steps } = jobSteps();
     const diffStep = steps.find(
@@ -167,22 +209,32 @@ describe('#1352: actionlint gate covers .github/actions/** composite actions', (
   // action landing without the workflow being updated to cover it is exactly
   // the failure this test exists to catch, so a conditional guard around it
   // would just move the same blind spot one file over.
-  it('every real .github/actions/**/action.y(a)ml file in the repo is coverable by the widened glob (scan, not "if any exist today")', () => {
-    const actionsDir = resolve(REPO_ROOT, '.github/actions');
-    const found: string[] = [];
-    const walk = (dir: string) => {
-      if (!existsSync(dir)) return;
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) {
-          walk(full);
-        } else if (/^action\.ya?ml$/.test(entry)) {
-          found.push(full);
-        }
+  //
+  // #1397 review (low): while `.github/actions` is absent this scan has
+  // nothing to check, and it used to pass without saying so. The state is now
+  // computed up front and put in the TEST TITLE, so a green run reads as
+  // "no composite actions present" rather than as "covered".
+  const actionsDir = resolve(REPO_ROOT, '.github/actions');
+  const composites: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+      } else if (/^action\.ya?ml$/.test(entry)) {
+        composites.push(full);
       }
-    };
-    walk(actionsDir);
+    }
+  };
+  const actionsDirExists = existsSync(actionsDir);
+  if (actionsDirExists) walk(actionsDir);
+  const scanState = !actionsDirExists
+    ? 'VACUOUS: no composite actions present (.github/actions does not exist)'
+    : composites.length === 0
+      ? 'VACUOUS: no composite actions present (.github/actions has no action.y(a)ml)'
+      : `${composites.length} composite action(s) present`;
 
+  it(`every real .github/actions/**/action.y(a)ml file in the repo is coverable by the widened glob — ${scanState}`, () => {
     const { steps } = jobSteps();
     const diffStep = steps.find(
       (s) => s.name && /Compute the .*files this diff actually changed/.test(String(s.name)),
@@ -192,16 +244,15 @@ describe('#1352: actionlint gate covers .github/actions/** composite actions', (
       run.includes('.github/actions/**/action.yml') &&
       run.includes('.github/actions/**/action.yaml');
 
-    // If ANY composite action exists, the gate's glob MUST cover it — this is
-    // the assertion that goes red the day one lands without matching wiring.
-    if (found.length > 0) {
+    if (composites.length > 0) {
+      // The assertion that goes red the day one lands without matching wiring.
       expect(globbed).toBe(true);
-    } else {
-      // Documents WHY this passes vacuously today, rather than silently
-      // doing nothing — a reader of a green run can tell the difference
-      // between "covered" and "nothing to cover yet".
-      expect(found).toEqual([]);
+      return;
     }
+    // Nothing to cover: say so explicitly, and pin WHY, so a green run here
+    // can never be mistaken for a checked one.
+    console.info(`actionlint coverage scan: ${scanState} — nothing checked.`);
+    expect(scanState).toMatch(/^VACUOUS: no composite actions present/);
   });
 });
 
