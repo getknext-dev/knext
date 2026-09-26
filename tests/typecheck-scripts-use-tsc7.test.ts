@@ -372,10 +372,16 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
       }
     }
     let i = 0;
+    let wrapped = false;
     for (;;) {
       while (i < tokens.length && ENV_ASSIGN.test(tokens[i])) i++;
-      if (i >= tokens.length) return; // assignments only
+      if (i >= tokens.length) {
+        // bare assignments run nothing; a wrapper with nothing after it fails closed
+        if (wrapped) out.unresolved.push(`${key}: wrapper with no program: ${text}`);
+        return;
+      }
       const t = tokens[i];
+      wrapped = true;
       if (EXEC_WRAPPERS.has(t)) {
         i++;
         while (i < tokens.length && tokens[i].startsWith('-')) {
@@ -392,10 +398,6 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
         }
       }
       break;
-    }
-    if (i >= tokens.length) {
-      out.unresolved.push(`${key}: wrapper with no program: ${text}`);
-      return;
     }
     const prog = tokens[i];
     const args = tokens.slice(i + 1);
@@ -519,6 +521,7 @@ describe('#1402 — resolveChain self-test (each known bypass is caught)', () =>
     expect(chainOf({ typecheck: 'turbo run nope' }).unresolved).toEqual([
       'root#typecheck: turbo task nope declared nowhere',
     ]);
+    expect(chainOf({ other: TSC7 }).unresolved).toEqual(['root#typecheck']);
   });
 
   it('flags the plain typescript package bin/lib, including `_tsc.js`', () => {
@@ -526,6 +529,10 @@ describe('#1402 — resolveChain self-test (each known bypass is caught)', () =>
       chainOf({ typecheck: 'node node_modules/typescript/lib/_tsc.js' }).plainTsc,
     ).toHaveLength(1);
     expect(chainOf({ typecheck: 'node_modules/typescript/bin/tsc' }).plainTsc).toHaveLength(1);
+    // under the plain package's lib/ even when the file is not named like tsc
+    expect(
+      chainOf({ typecheck: 'node node_modules/typescript/lib/typescript.js' }).plainTsc,
+    ).toHaveLength(1);
     expect(chainOf({ typecheck: 'node_modules/.bin/tsc --noEmit' }).plainTsc).toHaveLength(1);
     expect(chainOf({ typecheck: 'node node_modules/typescript-tsc7/lib/_tsc.js -p .' }).tsc7).toBe(
       1,
@@ -564,10 +571,17 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['turbo run with a --filter', `${TSC7} && turbo run typecheck:x --filter=@getknext/ui`],
     ['npm --prefix <dir> run', `${TSC7} && npm --prefix ../ui run tc`],
     ['pnpm --filter <name> run', `${TSC7} && pnpm --filter @getknext/ui run tc`],
+    ['yarn workspace <name>', `${TSC7} && yarn workspace @getknext/ui tc`],
   ])('%s: follows into the plain-tsc target', (_label, typecheck) => {
     const c = run(lib({ typecheck, test: 'echo ok' }), [PLAIN_UI]);
     expect(c.unresolved).toEqual([]);
     expect(c.plainTsc.length).toBeGreaterThan(0);
+  });
+
+  it('turbo `<owner>#task` runs only the owner package', () => {
+    const own = lib({ typecheck: 'turbo run @getknext/lib#tc', tc: TSC7 });
+    const c = run(own, [PLAIN_UI]);
+    expect(c).toEqual({ tsc7: 1, plainTsc: [], unresolved: [] });
   });
 
   it('bun --bun run follows the script in the same package', () => {
@@ -607,6 +621,9 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['python3 -c', `${TSC7} && python3 -c "import os"`, 'unknown program python3'],
     ['deno eval', `${TSC7} && deno eval "1"`, 'unknown program deno'],
     ['node with no file', `${TSC7} && node --version`, 'node runs no file'],
+    ['turbo naming no task', `${TSC7} && turbo run`, 'turbo names no task'],
+    ['a runner naming no script', `${TSC7} && bun run`, 'bun names no script'],
+    ['a wrapper with no program', `${TSC7} && env FOO=1`, 'wrapper with no program'],
   ])('%s: is UNRESOLVED (fails closed)', (_label, typecheck, reason) => {
     const { unresolved } = run(lib({ typecheck }), [PLAIN_UI]);
     expect(unresolved).toHaveLength(1);
@@ -631,6 +648,7 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     mkdirSync(join(dir, 'packages/lib/scripts'), { recursive: true });
     writeFileSync(join(dir, 'packages/lib/scripts/tc.sh'), '#!/bin/sh\n# comment\ntsc -p .\n');
     writeFileSync(join(dir, 'packages/lib/scripts/ok.sh'), `set -eu\n${TSC7}\n`);
+    writeFileSync(join(dir, 'packages/lib/scripts/errexit.sh'), `set -e\n${TSC7}\necho done\n`);
     writeFileSync(join(dir, 'packages/lib/scripts/masked.sh'), `${TSC7}\necho done\n`);
     writeFileSync(join(dir, 'packages/lib/scripts/late-set.sh'), `${TSC7}\nset -e\necho done\n`);
     writeFileSync(join(dir, 'packages/lib/scripts/unset.sh'), `set -e\n${TSC7}\nset +e\necho x\n`);
@@ -641,6 +659,8 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
       expect(at('bash ./scripts/tc.sh').plainTsc).toHaveLength(1);
       expect(at('./scripts/tc.sh').plainTsc).toHaveLength(1);
       expect(at('sh scripts/ok.sh')).toEqual({ tsc7: 1, plainTsc: [], unresolved: [] });
+      // with `set -e` in effect, a tsc7 line that is not last is still enforced
+      expect(at('sh scripts/errexit.sh')).toEqual({ tsc7: 1, plainTsc: [], unresolved: [] });
       // without `set -e` the LAST line's exit code is the script's, so the tsc7 line is masked
       expect(at('sh scripts/masked.sh').tsc7).toBe(0);
       // `set -e` must be in effect BEFORE the tsc7 line, and `set +e` turns it off again
@@ -683,6 +703,10 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['-b', '../../node_modules/typescript-tsc7/bin/tsc -b'],
     ['after && and ;', `echo a; echo b && ${TSC7}`],
     ['through an unmasked hop', 'echo a && bun run tc'],
+    ['bun x', `bun x ${TSC7}`],
+    ['pnpm exec', `pnpm exec ${TSC7}`],
+    ['npm exec --', `npm exec -- ${TSC7}`],
+    ['yarn exec', `yarn exec ${TSC7}`],
   ])('an enforced tsc7 typecheck counts: %s', (_l, typecheck) => {
     expect(run(lib({ typecheck, tc: TSC7 })).tsc7).toBe(1);
   });
