@@ -225,6 +225,21 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
     runList(p, `${p.path}>${rel}`, lines.join(errexit ? ' && ' : ' ; '), masked);
   };
 
+  /** Union of the packages `filters` select; undefined (and reported) if any is not understood or selects none. */
+  const select = (p: Pkg, key: string, prog: string, filters: string[]): Pkg[] | undefined => {
+    const picked = new Set<Pkg>();
+    for (const f of filters) {
+      const m = matchFilter(f, p, universe);
+      if (m === undefined)
+        out.unresolved.push(`${key}: ${prog} filter ${f}: syntax not understood`);
+      else if (m.length === 0)
+        out.unresolved.push(`${key}: ${prog} filter ${f} selects no package`);
+      if (m === undefined || m.length === 0) return undefined;
+      for (const q of m) picked.add(q);
+    }
+    return [...picked];
+  };
+
   const turbo = (p: Pkg, key: string, args: string[], masked: boolean, text: string) => {
     const flags = parseFlags('turbo', args);
     const tasks = flags.rest[0] === 'run' ? flags.rest.slice(1) : flags.rest;
@@ -232,19 +247,8 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
       out.unresolved.push(`${key}: turbo names no task: ${text}`);
       return;
     }
-    let targets = universe;
-    if (flags.filters.length > 0) {
-      const picked = new Set<Pkg>();
-      for (const f of flags.filters) {
-        const m = matchFilter(f, p, universe);
-        if (m === undefined || m.length === 0) {
-          out.unresolved.push(`${key}: turbo --filter ${f} selects nothing resolvable`);
-          return;
-        }
-        for (const q of m) picked.add(q);
-      }
-      targets = [...picked];
-    }
+    const targets = flags.filters.length > 0 ? select(p, key, 'turbo', flags.filters) : universe;
+    if (targets === undefined) return;
     for (const token of tasks) {
       let scoped = targets;
       let task = token;
@@ -286,16 +290,9 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
     let targets: Pkg[];
     if (flags.all) targets = universe;
     else if (flags.filters.length > 0) {
-      const picked = new Set<Pkg>();
-      for (const f of flags.filters) {
-        const m = matchFilter(f, p, universe);
-        if (m === undefined || m.length === 0) {
-          out.unresolved.push(`${key}: ${prog} filter ${f} selects nothing resolvable`);
-          return;
-        }
-        for (const q of m) picked.add(q);
-      }
-      targets = [...picked];
+      const picked = select(p, key, prog, flags.filters);
+      if (picked === undefined) return;
+      targets = picked;
     } else if (flags.cwd !== undefined) {
       const manifest = posix.normalize(posix.join(pkgDir(p), flags.cwd, 'package.json'));
       const q = universe.find((u) => u.path === manifest);
@@ -371,7 +368,7 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
       let j = 0;
       while (j < args.length && args[j].startsWith('-')) {
         flags.push(args[j]);
-        j += args[j] === '-o' ? 2 : 1;
+        j += /^[-+][a-z]*o$/.test(args[j]) ? 2 : 1; // `-o opt` / `-euo pipefail`
       }
       if (flags.some((f) => /^-[a-z]*c/.test(f)) || args[j] === undefined) {
         out.unresolved.push(`${key}: inline shell: ${text}`);
@@ -529,22 +526,36 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
   });
 
   it.each([
-    ['turbo task nobody declares', 'turbo typecheck:nope'],
-    ['--prefix to a directory with no manifest', 'npm --prefix ../nowhere run tc'],
-    ['--filter matching no package', 'turbo run typecheck:x --filter=@getknext/nope'],
-    ['a --filter with graph syntax', 'turbo run typecheck:x --filter=...@getknext/ui'],
-    ['a runner verb that is not a script', 'bun scripts/tc.ts'],
-    ['sh -c', 'sh -c "echo hi"'],
-    ['sh of a missing file', 'sh scripts/does-not-exist.sh'],
-    ['bash', 'bash -euo pipefail -c true'],
-    ['node -e', `node -e "require('typescript/lib/tsc')"`],
-    ['node --eval', 'node --eval "1"'],
-    ['a $VAR program', 'TSC=tsc; $TSC -p .'],
+    ['turbo task nobody declares', 'turbo typecheck:nope', 'declared nowhere'],
+    [
+      '--prefix to a directory with no manifest',
+      'npm --prefix ../nowhere run tc',
+      'not a known manifest',
+    ],
+    [
+      '--filter matching no package',
+      'turbo run typecheck:x --filter=@getknext/nope',
+      'selects no package',
+    ],
+    [
+      'a --filter with graph syntax',
+      'turbo run typecheck:x --filter=...@getknext/ui',
+      'syntax not understood',
+    ],
+    ['a runner verb that is not a script', 'bun scripts/tc.ts', 'is not a script'],
+    ['sh -c', 'sh -c scripts/tc.sh', 'inline shell'],
+    ['sh of a missing file', 'sh scripts/does-not-exist.sh', 'not found'],
+    ['bash -c', 'bash -euo pipefail -c true', 'inline shell'],
+    ['node -e', `node -e "require('typescript/lib/tsc')"`, 'node inline code'],
+    ['node --eval', 'node --eval "1"', 'node inline code'],
+    ['a $VAR program', 'TSC=tsc; $TSC -p .', 'dynamic program'],
     // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal shell expansion
-    ['a ${VAR} program', '${TSC} -p .'],
-    ['a $(…) program', '$(npm bin)/tsc -p .'],
-  ])('%s: is UNRESOLVED (fails closed)', (_label, typecheck) => {
-    expect(run(lib({ typecheck }), [PLAIN_UI]).unresolved.length).toBeGreaterThan(0);
+    ['a ${VAR} program', '${TSC} -p .', 'dynamic program'],
+    ['a $(…) program', '$(npm bin)/tsc -p .', 'dynamic program'],
+  ])('%s: is UNRESOLVED (fails closed)', (_label, typecheck, reason) => {
+    const { unresolved } = run(lib({ typecheck }), [PLAIN_UI]);
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0]).toContain(reason);
   });
 
   it('sh <file> follows the file and classifies its lines', () => {
