@@ -550,6 +550,14 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             'const f = (...a) => a;\nmodule.exports = (n) => f(0, require(n.replace(/"/g, "_")), String(")) {"));\n',
             '__require(n.replace(/"/g, "_")), String(")) {")',
         ],
+        [
+            // #1384 round 8: a backtick inside a string inside a template's
+            // `${…}` must not close the template and let a later string's
+            // quote land the head scan on the `) {` inside it.
+            "a require whose argument is a template nesting a backtick string",
+            'const f = (...a) => a;\nmodule.exports = (n, c) => f(0, require(n + `${c ? "`" : ""}`), String(") {"));\n',
+            '__require(n + `${c ? "`" : ""}`), String(") {")',
+        ],
     ] as const) {
         it(`${label} is a non-literal/unbundlable require: strict fails (#1384 round 5)`, async () => {
             const { work, server, out } = await rolldownFrom({

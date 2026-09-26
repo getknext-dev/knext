@@ -210,6 +210,19 @@ describe("analyzeServerModule (unit)", () => {
                 flagged(`x = [0, __require(n /* it's */)]; a('x'); b(') {')`),
             ).toBe(true);
         });
+        it("a quote inside a template's `${…}` cannot close the template early and pair with a later `) {` (#1384 round 8)", () => {
+            // Real rolldown 1.2.6 output for `require(n + `${c ? "`" : ""}`)`.
+            expect(
+                flagged(
+                    'x = f(0, __require(n + `${c ? "`" : ""}`), String(") {"));',
+                ),
+            ).toBe(true);
+        });
+        it("a `${` in a real method's parameter list makes it a call (fail safe)", () => {
+            expect(
+                flagged("class K { __require(a = `${b}`) { return a; } }"),
+            ).toBe(true);
+        });
         it("a `/` in a real method's parameter list makes it a call (fail safe)", () => {
             expect(
                 flagged("class K { __require(a = 1 / 2) { return a; } }"),

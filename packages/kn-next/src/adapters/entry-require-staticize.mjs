@@ -118,12 +118,18 @@ function previousToken(src, index) {
     }
 }
 
-/** Past a string or template literal starting at `i`; -1 if unterminated. */
+/**
+ * Past a string or template literal starting at `i`; -1 if unterminated, or
+ * if a template holds a `${…}` substitution: its expression can nest strings
+ * and templates (`${c ? "`" : ""}`), and a flat scan would close the template
+ * on the inner backtick. Rather than lex the nesting, the caller bails.
+ */
 function skipStringLiteral(src, i) {
     const quote = src[i];
     for (let j = i + 1; j < src.length; j++) {
         if (src[j] === "\\") j++;
         else if (src[j] === quote) return j;
+        else if (quote === "`" && src[j] === "$" && src[j + 1] === "{") return -1;
     }
     return -1;
 }
@@ -135,7 +141,8 @@ function skipStringLiteral(src, i) {
  * head — a long argument list is a call, and the bound keeps a multi-MB bundle
  * linear).
  *
- * Also -1 on any `/` before the close: a regex literal or a comment can hold
+ * Also -1 on any `/` before the close, and on any `${` inside a template: a
+ * regex literal, a comment or a substitution's nested strings can hold
  * a quote this scan would pair with a later string's quote, landing it on an
  * unrelated `) {` and hiding a call. Rather than lex regexes and comments, the
  * scan bails — a real method head almost never has `/` in its parameters, and
@@ -166,7 +173,7 @@ function closingParen(src, open) {
  *     is followed by `{` on the SAME line, same-line comments allowed (a call
  *     cannot be; a call followed by a block on the next line is ASI, and stays
  *     a call). A parameter list longer than HEAD_SCAN_LIMIT, or holding any
- *     `/` (regex, comment or division), is not a head.
+ *     `/` (regex, comment or division) or template `${`, is not a head.
  * Every other context (`extends`, `=`, `(`, `return`, operators …) is a call.
  */
 const SAME_LINE_BRACE = /^(?:[ \t]|\/\*[^*\n]*\*+(?:[^*/\n][^*\n]*\*+)*\/)*\{/;
