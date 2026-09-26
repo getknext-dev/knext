@@ -7,10 +7,13 @@
  *  2. every registry entry's repro still reproduces its upstream problem. When
  *     one stops reproducing, the bump that did it must delete the shim in the
  *     same PR: this test stays red until the entry and its markers are gone;
+ *  2b. every upstream issue/PR the registry cites exists with the title it
+ *     records (a typo'd number that happens to exist still reds);
  *  3. every `// @knext-shim <id>` marker under packages/kn-next/src/adapters has
  *     an entry, every entry has at least one marker, and no marker is malformed.
  */
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -56,6 +59,74 @@ describe('upstream-retirement: every registered upstream problem still reproduce
       PROBE_TIMEOUT,
     );
   }
+});
+
+/** Every upstream ref the registry cites, with the title fragment it claims. */
+function citedRefs(): { ref: string; title: string; mustBePr: boolean; by: string }[] {
+  const out: { ref: string; title: string; mustBePr: boolean; by: string }[] = [];
+  for (const e of REGISTRY) {
+    out.push({ ref: e.upstream, title: e.upstreamTitle, mustBePr: false, by: e.id });
+    if (e.fixedBy)
+      out.push({ ref: e.fixedBy.ref, title: e.fixedBy.title, mustBePr: true, by: e.id });
+  }
+  return out;
+}
+
+function githubToken(): string | undefined {
+  const env = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  if (env) return env;
+  const gh = Bun.which('gh');
+  if (!gh) return undefined;
+  const r = spawnSync(gh, ['auth', 'token'], { encoding: 'utf8', timeout: 10_000 });
+  return r.status === 0 ? r.stdout.trim() || undefined : undefined;
+}
+
+describe('upstream-retirement: every cited upstream ref is the issue/PR it claims to be', () => {
+  it(
+    'each ref exists on GitHub with the recorded title (checked once per run; skipped with a reason only when GitHub is unreachable)',
+    async () => {
+      const token = githubToken();
+      const failures: string[] = [];
+      for (const { ref, title, mustBePr, by } of citedRefs()) {
+        const [repo, num] = ref.split('#');
+        let res: Response;
+        try {
+          res = await fetch(`https://api.github.com/repos/${repo}/issues/${num}`, {
+            headers: {
+              accept: 'application/vnd.github+json',
+              'user-agent': 'knext-upstream-retirement',
+              ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
+            signal: AbortSignal.timeout(15_000),
+          });
+        } catch (e) {
+          console.warn(
+            `SKIPPED upstream-ref validation: GitHub unreachable (${String((e as Error)?.message ?? e)})`,
+          );
+          return;
+        }
+        if (
+          res.status === 429 ||
+          (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0')
+        ) {
+          console.warn(
+            `SKIPPED upstream-ref validation: GitHub API rate limit (HTTP ${res.status}, ${token ? 'authenticated' : 'unauthenticated'})`,
+          );
+          return;
+        }
+        if (res.status !== 200) {
+          failures.push(`${by}: ${ref} → HTTP ${res.status}`);
+          continue;
+        }
+        const body = (await res.json()) as { title: string; pull_request?: unknown };
+        if (!body.title.includes(title))
+          failures.push(`${by}: ${ref} is "${body.title}", not "…${title}…" — wrong number?`);
+        if (mustBePr && !body.pull_request) failures.push(`${by}: fixedBy ${ref} is not a PR`);
+      }
+      expect(failures).toEqual([]);
+    },
+    PROBE_TIMEOUT,
+  );
 });
 
 describe('upstream-retirement: @knext-shim markers ↔ registry', () => {

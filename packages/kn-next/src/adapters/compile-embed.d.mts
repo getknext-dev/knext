@@ -33,4 +33,10 @@ export declare function unembeddedDynamicReport(
     serverOutputDir: string,
 ): { file: string; computedSites: number; dynamicRequireBindings: string[] }[];
 
-export declare function detectCompileInclude(): Promise<{ supported: boolean; evidence: string }>;
+export declare function detectCompileInclude(): Promise<{
+    supported: boolean;
+    landed: boolean;
+    conclusive: boolean;
+    forms: Record<string, string>;
+    evidence: string;
+}>;

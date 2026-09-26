@@ -21,9 +21,11 @@
  *   - `import.meta.dirname` in an ESM-format module is `/$bunfs/root/<dir>` at
  *     runtime, but `__dirname`/`__filename` in a CommonJS module (and
  *     `import.meta.dirname` under `format: "cjs"`) are inlined as the BUILD
- *     directory. A CommonJS module that anchors a computed require on
- *     `__dirname` therefore does not resolve from an empty directory; a
- *     RELATIVE computed require (`require("./" + n)`) does.
+ *     directory (oven-sh/bun#44068, fixed by oven-sh/bun#29066). A CommonJS
+ *     module that anchors a computed require on `__dirname` therefore does not
+ *     resolve from an empty directory; a RELATIVE computed require
+ *     (`require("./" + n)`) does. Delete this constraint once the
+ *     `bun-cjs-dirname-inlined` retirement probe goes red.
  *   - with `format: "esm"`, a CommonJS file passed as an entrypoint is
  *     converted to ESM and `require()` of it returns `{ default }`, not its
  *     `module.exports` — CommonJS trees must be compiled with `format: "cjs"`.
@@ -35,6 +37,7 @@
  * Dependency-free over node builtins and the sibling scanners, so a compile
  * script can bundle it and a fixture entry can import `runEmbedProbe`.
  */
+// @knext-shim bun-cjs-dirname-inlined
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -282,60 +285,140 @@ export function unembeddedDynamicReport(serverOutputDir) {
 
 let includeDetection;
 
+/** One detection compile: its label, how it embeds `plugins/p.js`, and the expected outcome. */
+const INCLUDE_FORMS = /** @type {const} */ ({
+  // Probes — the shapes oven-sh/bun#44059 adds.
+  jsFiles: 'Bun.build compile.include = [file] (the embedBuildOptions shape)',
+  jsDir: 'Bun.build compile.include = [directory]',
+  cliDir: '`bun build --compile --include=<directory>`',
+});
+
+function classifyIncludeRun(line) {
+  if (line === 'RESULT plugin-ok') return 'embedded';
+  if (/^RESULT fail Cannot find module '\.\/plugins\/p\.js'/.test(line)) return 'not-embedded';
+  return 'odd';
+}
+
 /**
- * Does the pinned Bun embed a DIRECTORY through `Bun.build({ compile: { include } })`
- * (oven-sh/bun#44059)? Answered by a real compile: a directory is included,
- * the source tree is deleted, and the binary — run from an empty directory —
- * must load a computed `import()` from it. Cached per process.
+ * Does the pinned Bun embed through `compile.include` (oven-sh/bun#44059)?
+ * Answered by real compiles of one fixture — an entry that computes
+ * `import("./plugins/" + n + ".js")` — run from an empty directory after the
+ * source tree is deleted:
  *
- * @returns {Promise<{ supported: boolean, evidence: string }>}
+ *   - CONTROL (positive): the plugin passed as an extra entrypoint (the stock
+ *     fallback) must load — proves compile + run + the oracle work here;
+ *   - CONTROL (negative): no include, no extra entrypoint, must NOT load —
+ *     proves the binary does not read the deleted source from disk;
+ *   - PROBES: `compile.include` as a FILE list (what `embedBuildOptions`
+ *     passes), as a DIRECTORY, and the CLI `--include=<dir>`.
+ *
+ * `supported` (what a build uses) is the file-list form alone. `landed` is true
+ * when ANY probe form embeds, so a CLI-only or directory-only landing is not
+ * missed by the retirement harness. `conclusive` is false when a control fails
+ * or a probe neither embeds nor cleanly misses (a rejected build, a crash): the
+ * caller must not read that as "not supported" OR "supported". Cached per
+ * process.
+ *
+ * @returns {Promise<{ supported: boolean, landed: boolean, conclusive: boolean,
+ *   forms: Record<string, string>, evidence: string }>}
  */
 export function detectCompileInclude() {
   includeDetection ??= (async () => {
     const dir = mkdtempSync(join(tmpdir(), 'knext-include-detect-'));
+    const forms = {};
+    const fail = (why) => ({
+      supported: false,
+      landed: false,
+      conclusive: false,
+      forms,
+      evidence: `Bun ${Bun.version}: inconclusive — ${why}`,
+    });
     try {
       const src = join(dir, 'src');
       mkdirSync(join(src, 'plugins'), { recursive: true });
-      writeFileSync(join(src, 'plugins', 'p.js'), 'export default "plugin-ok";\n');
+      const plugin = join(src, 'plugins', 'p.js');
+      writeFileSync(plugin, 'export default "plugin-ok";\n');
       writeFileSync(
         join(src, 'main.mjs'),
         'const n = process.env.PLUGIN || "p";\n' +
           'try { const m = await import("./plugins/" + n + ".js"); console.log("RESULT " + m.default); }\n' +
           'catch (e) { console.log("RESULT fail " + String(e.message).split("\\n")[0]); }\n',
       );
-      const outfile = join(dir, 'run', 'app');
-      let built;
-      try {
-        built = await Bun.build({
-          entrypoints: [join(src, 'main.mjs')],
-          root: src,
-          target: 'bun',
-          compile: { outfile, include: [join(src, 'plugins')] },
-        });
-      } catch (e) {
-        return {
-          supported: false,
-          evidence: `Bun.build rejected compile.include: ${String(e?.message ?? e).split('\n')[0]}`,
-        };
-      }
-      if (!built.success) {
-        return {
-          supported: false,
-          evidence: `compile failed: ${built.logs.map(String).join(' | ')}`,
-        };
-      }
+      const entry = join(src, 'main.mjs');
+      const outOf = (name) => join(dir, `out-${name}`, 'app');
+      const jsBuild = async (name, extraEntries, include) => {
+        const compile = { outfile: outOf(name) };
+        if (include) compile.include = include;
+        try {
+          const built = await Bun.build({
+            entrypoints: [entry, ...extraEntries],
+            root: src,
+            target: 'bun',
+            naming: '[dir]/[name].[ext]',
+            compile,
+          });
+          return built.success ? null : `build failed: ${built.logs.map(String).join(' | ')}`;
+        } catch (e) {
+          return `Bun.build threw: ${String(e?.message ?? e).split('\n')[0]}`;
+        }
+      };
+      const buildErrors = {
+        controlExtra: await jsBuild('controlExtra', [plugin]),
+        controlNone: await jsBuild('controlNone', []),
+        jsFiles: await jsBuild('jsFiles', [], [plugin]),
+        jsDir: await jsBuild('jsDir', [], [join(src, 'plugins')]),
+      };
+      // `--include=<v>`: stock Bun ignores the unknown `=` form and still builds,
+      // while `--include <v>` would make the directory a positional entry point.
+      const cli = spawnSync(
+        process.execPath,
+        ['build', '--compile', './main.mjs', '--include=./plugins', '--outfile', outOf('cliDir')],
+        { cwd: src, encoding: 'utf8', timeout: 120_000 },
+      );
+      buildErrors.cliDir =
+        cli.status === 0
+          ? null
+          : `CLI exit ${cli.status}: ${`${cli.stderr ?? ''}`.trim().split('\n')[0]}`;
+
       rmSync(src, { recursive: true, force: true });
-      const r = spawnSync(outfile, [], {
-        cwd: dirname(outfile),
-        encoding: 'utf8',
-        timeout: 60_000,
-      });
-      const line =
-        (r.stdout ?? '').split('\n').find((l) => l.startsWith('RESULT ')) ??
-        `(no RESULT, exit ${r.status})`;
+      const empty = join(dir, 'empty');
+      mkdirSync(empty);
+      const runOf = (name) => {
+        if (buildErrors[name]) return `rejected (${buildErrors[name]})`;
+        const r = spawnSync(outOf(name), [], {
+          cwd: empty,
+          encoding: 'utf8',
+          timeout: 60_000,
+          env: { PATH: process.env.PATH ?? '', TMPDIR: dir },
+        });
+        const line =
+          (r.stdout ?? '').split('\n').find((l) => l.startsWith('RESULT ')) ??
+          `(no RESULT, exit ${r.status}${r.error ? `, ${r.error.message}` : ''})`;
+        return `${classifyIncludeRun(line)} (${line})`;
+      };
+
+      const controlExtra = runOf('controlExtra');
+      const controlNone = runOf('controlNone');
+      const controls = `control extra-entrypoint → ${controlExtra}; control no-embed → ${controlNone}`;
+      if (!controlExtra.startsWith('embedded ')) return fail(`positive control: ${controls}`);
+      if (!controlNone.startsWith('not-embedded ')) return fail(`negative control: ${controls}`);
+
+      for (const name of Object.keys(INCLUDE_FORMS)) forms[name] = runOf(name);
+      const outcome = (name) => forms[name].split(' ')[0];
+      const landed = Object.keys(INCLUDE_FORMS).some((n) => outcome(n) === 'embedded');
+      const conclusive =
+        landed || Object.keys(INCLUDE_FORMS).every((n) => outcome(n) === 'not-embedded');
+      const evidence =
+        `Bun ${Bun.version}: ${controls}; ` +
+        Object.entries(INCLUDE_FORMS)
+          .map(([n, label]) => `${label} → ${forms[n]}`)
+          .join('; ');
       return {
-        supported: line === 'RESULT plugin-ok',
-        evidence: `Bun ${Bun.version}: directory via compile.include → ${line}`,
+        supported: outcome('jsFiles') === 'embedded',
+        landed,
+        conclusive,
+        forms,
+        evidence: conclusive ? evidence : `inconclusive — ${evidence}`,
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });

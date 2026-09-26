@@ -55,6 +55,8 @@ export type Sandbox = {
   /** Write `files` (relative path → contents) under `sub`. */
   write: (files: Record<string, string>, sub?: string) => void;
   copy: (from: string, toRel: string) => void;
+  /** Delete `<sandbox>/<rel>` (a source tree, before running the binary from an empty dir). */
+  remove: (rel: string) => void;
   /** Run `cmd` with the sandbox as TMPDIR; returns the `RESULT …` line (or throws). */
   run: (
     cmd: string[],
@@ -107,6 +109,7 @@ export function sandbox(name: string): Sandbox {
       copyFileSync(from, to);
     },
     run,
+    remove: (rel) => rmSync(join(dir, rel), { recursive: true, force: true }),
     compile: (sub, options) => {
       const script =
         `let line;\n` +

@@ -101,7 +101,7 @@ function run(binary: string, cwd: string, env: Record<string, string> = {}) {
             PATH: process.env.PATH ?? "",
             TMPDIR: cwd,
             ...env,
-        } as NodeJS.ProcessEnv,
+        } as unknown as NodeJS.ProcessEnv,
     });
     return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -281,7 +281,10 @@ describe("compiled from an EMPTY dir on the pinned Bun (extra entrypoints)", () 
         // (`eval("__dirname")`) is correct — `/$bunfs/root/<dir>` — but the
         // bundled code never reads it. This test PINS that: if it goes red
         // because the join form now resolves, Bun stopped inlining `__dirname`
-        // and the Next-track anchor rewrite (N1) may be unnecessary.
+        // and the Next-track anchor rewrite (N1) may be unnecessary. Upstream:
+        // oven-sh/bun#44068, fixed by oven-sh/bun#29066 (verified from source:
+        // this test flips). Retire together with the `bun-cjs-dirname-inlined`
+        // entry in tests/upstream-retirement/registry.ts.
         const src = tempDir("cjs");
         writeTree(src, {
             "main.cjs":
@@ -324,7 +327,10 @@ describe("compiled from an EMPTY dir on the pinned Bun (extra entrypoints)", () 
         expect(result.relative).toBe("n1-ok");
         expect(result.runtimeDirname).toBe("/$bunfs/root/chunks");
         expect(result.inlinedDirname).toBe(buildDir);
-        expect(result.dirnameJoin).toMatch(/^ERR Cannot find module/);
+        expect(
+            result.dirnameJoin,
+            "require(join(__dirname, …)) now resolves: oven-sh/bun#29066 (fix for #44068) landed — retire bun-cjs-dirname-inlined",
+        ).toMatch(/^ERR Cannot find module/);
         expect(result.dirnameJoin).toContain(buildDir);
     }, 120_000);
 
