@@ -75,17 +75,17 @@ const MUTATIONS = [
     label: 'runsRepoScript: drop the execution-verb requirement (bare-mention false positive)',
     subject: 'checkoutTest',
     anchor:
-      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|tsx)\\s+"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
+      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|bunx|tsx|source)\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\\.\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
     replacement: "const SCRIPT_EXEC_RE = new RegExp(SCRIPT_PATH, 'm');",
   },
   {
     // #1422 — revert to the pre-#1422 invoker set (node/bash/sh/python3 and
-    // `./scripts/…` only): bun/bun run/tsx, the workspace prefixes and the
-    // knext/ prefix all go invisible.
+    // `./scripts/…` only): bun/bun run/tsx/bunx/source, flags, the workspace prefixes
+    // and the knext/ prefix all go invisible.
     label: 'SCRIPT_EXEC_RE: revert to the pre-#1422 invoker/path set',
     subject: 'checkoutTest',
     anchor:
-      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|tsx)\\s+"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
+      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|bunx|tsx|source)\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\\.\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
     replacement:
       'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?)\\s+scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b/m;',
   },
@@ -94,8 +94,10 @@ const MUTATIONS = [
     // the dominant real shape (`node knext/scripts/…`) goes invisible again.
     label: 'SCRIPT_PATH: drop the optional knext/ prefix',
     subject: 'checkoutTest',
-    anchor: 'const SCRIPT_PATH = String.raw`(?:knext\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)`;',
-    replacement: 'const SCRIPT_PATH = String.raw`scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)`;',
+    anchor:
+      'const SCRIPT_PATH = String.raw`(?:knext\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts|cjs|mts|py)`;',
+    replacement:
+      'const SCRIPT_PATH = String.raw`scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts|cjs|mts|py)`;',
   },
   {
     // Drop the tar-extract recognition entirely: the guard would then

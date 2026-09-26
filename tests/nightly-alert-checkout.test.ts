@@ -60,23 +60,25 @@ const WORKSPACE_PREFIX = String.raw`(?:\$\{?GITHUB_WORKSPACE\}?|\$\{\{\s*github\
  * shape; the sibling scan in `compat-window-fingerprint-execution-scan.test.ts`
  * accepts the same prefix.
  */
-const SCRIPT_PATH = String.raw`(?:knext\/)?scripts\/[\w./-]+\.(?:mjs|sh|js|ts)`;
+const SCRIPT_PATH = String.raw`(?:knext\/)?scripts\/[\w./-]+\.(?:mjs|sh|js|ts|cjs|mts|py)`;
 /**
  * Requires an execution verb (or `./`, or a direct workspace-prefixed
  * reference) immediately before the path — not a bare mention.
  *
- * #1422 — widened past `node|bash|sh|python3?`: `bun`/`bun run`/`tsx` are
- * real invokers for `.mjs`/`.ts` scripts; the path may carry the optional
- * `knext/` checkout-dir prefix and/or a workspace prefix; and a step can
- * reference a workspace-prefixed script with no invoker in front. The
- * `knext/` prefix is not hypothetical — before it was accepted, 10
- * `node knext/scripts/…` invocations in compat-vinext.yml and
+ * #1422 — widened past `node|bash|sh|python3?`: `bun`/`bun run`/`tsx`/`bunx`
+ * and `source`/`.` are real invokers for scripts; the path may carry the
+ * optional `knext/` checkout-dir prefix and/or a workspace prefix; flags
+ * between the verb and path are accepted (e.g. `node --test`, `bash -euo
+ * pipefail`); and a step can reference a workspace-prefixed script with no
+ * invoker in front. The `knext/` prefix is not hypothetical — before it was
+ * accepted, 10 `node knext/scripts/…` invocations in compat-vinext.yml and
  * test-e2e-deploy.yml were invisible to this scan, and deleting
  * `shard-ledger`'s checkout stayed green.
  */
 const SCRIPT_EXEC_RE = new RegExp(
   [
-    String.raw`\b(?:node|bash|sh|python3?|bun(?:\s+run)?|tsx)\s+"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\b`,
+    String.raw`\b(?:node|bash|sh|python3?|bun(?:\s+run)?|bunx|tsx|source)\s+(?:[^\s"]+\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\b`,
+    String.raw`(?:^|\s)"?\.\s+(?:[^\s"]+\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\b`,
     String.raw`(?:^|\s)"?\.\/${SCRIPT_PATH}\b`,
     String.raw`(?:^|\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\b`,
   ].join('|'),
@@ -156,8 +158,10 @@ function uploadedTarballsOf(jobs: Record<string, YamlJob>): UploadedTarballs {
 /**
  * The tarball basenames a `download-artifact` step makes available — resolved
  * through the `name:` it downloads to what an `upload-artifact` step in the
- * same workflow uploaded under that name. A `pattern:` download, an unresolved
- * `${{ }}` name, or a name nothing in this workflow uploads yields nothing.
+ * same workflow uploaded under that name. A `pattern:` download or a name
+ * nothing in this workflow uploads yields nothing. An unresolved `${{ }}`
+ * expression in the download name DOES match an upload with the identical
+ * expression (that is fine — both refer to the same artifact).
  */
 function downloadedTarballs(step: YamlStep, uploads: UploadedTarballs): string[] {
   if (typeof step.uses !== 'string' || !DOWNLOAD_ARTIFACT_USES_RE.test(step.uses)) return [];
@@ -354,6 +358,21 @@ describe('#1406 — every job that executes a repo script provides the repo firs
     // Still requires the .mjs/.sh/.js/.ts extension — a non-executable
     // reference (e.g. a --pin JSON path) is out of this detector's scope.
     expect(runsRepoScript({ run: '--pin "$GITHUB_WORKSPACE/scripts/foo.json"' })).toBe(false);
+  });
+
+  it('#1422: SCRIPT_EXEC_RE accepts flags between verb and path, new verbs (bunx, source), and new extensions (.cjs, .mts, .py)', () => {
+    // Flags between verb and path
+    expect(runsRepoScript({ run: 'node --test scripts/x.mjs' })).toBe(true);
+    expect(runsRepoScript({ run: 'node --experimental-strip-types scripts/x.ts' })).toBe(true);
+    expect(runsRepoScript({ run: 'bash -euo pipefail scripts/x.sh' })).toBe(true);
+    // New verbs
+    expect(runsRepoScript({ run: 'bunx scripts/foo.ts' })).toBe(true);
+    expect(runsRepoScript({ run: 'source scripts/setup.sh' })).toBe(true);
+    expect(runsRepoScript({ run: '. scripts/setup.sh' })).toBe(true);
+    // New extensions
+    expect(runsRepoScript({ run: 'node scripts/foo.cjs' })).toBe(true);
+    expect(runsRepoScript({ run: 'bun run scripts/foo.mts' })).toBe(true);
+    expect(runsRepoScript({ run: 'python3 scripts/foo.py' })).toBe(true);
   });
 
   it('no job executes a scripts/ file with no earlier checkout or tar-extract step', () => {
