@@ -9,6 +9,7 @@
 # Output: gs://gsw-mcp-bun-base/<upstream-sha>-<patchset-hash>/<BUILD_ID>/
 #   bun-linux-{x64,aarch64}-musl (+ .sha256)   release binaries
 #   bun-source.cdx.json (+ .sha256)            CycloneDX SBOM (syft) of the patched source tree
+#   bun-artifacts.cdx.json (+ .sha256)         CycloneDX SBOM (syft) of the built binaries themselves
 #   manifest.json (+ .sha256)                  pin, patches, patched HEAD, build id
 #   SHA256SUMS                                 every artifact's sha256, in one file
 #
@@ -16,6 +17,11 @@
 # (builds e72ee4a0, 536543d1), the metadata server's `identity` endpoint returns 404 and
 # `gcloud auth print-identity-token` reports "No identity token can be obtained". Keyless signing
 # happens in .github/workflows/bun-base-build.yml with GitHub's OIDC token instead, over SHA256SUMS.
+# Runs as a DEDICATED build service account, never the project's default compute SA (which holds
+# project Editor). Its grants are the provisioning block in README.md: object create/view on
+# gs://gsw-mcp-bun-base only, plus logging.logWriter. A user-specified SA requires an explicit
+# logging mode, hence CLOUD_LOGGING_ONLY (no logs bucket to grant).
+serviceAccount: projects/gsw-mcp/serviceAccounts/bun-base-build@gsw-mcp.iam.gserviceaccount.com
 options:
   machineType: E2_HIGHCPU_32
   diskSizeGb: 300
@@ -32,6 +38,14 @@ steps:
   - id: sbom
     name: anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02
     args: [scan, dir:/workspace/bun, --exclude, ./build, -o, cyclonedx-json=/workspace/out/bun-source.cdx.json]
+  # The source SBOM above does not describe the shipped bytes; this one scans the artifact dir (the
+  # built binaries), so each binary's digest and whatever syft can identify inside it is recorded.
+  - id: sbom-artifacts
+    name: anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02
+    # Default syft records only package-owned files; a Bun binary owns no package, so ask for every
+    # file's metadata + sha256 or the SBOM would describe nothing.
+    env: [SYFT_FILE_METADATA_SELECTION=all, SYFT_FILE_METADATA_DIGESTS=sha256]
+    args: [scan, dir:/workspace/out, --exclude, ./*.json, --exclude, ./*.revision, -o, cyclonedx-json=/workspace/out/bun-artifacts.cdx.json]
   - id: digests-and-upload
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim@sha256:cfca8415b7ce1abccf4c7a1a9c78b4da2c3718ac668806480a4471cb052e1ca9
     entrypoint: bash
@@ -41,8 +55,8 @@ steps:
       - -c
       - |
         cd /workspace/out
-        for f in bun-linux-*-musl bun-source.cdx.json manifest.json; do sha256sum "$$f" > "$$f.sha256"; done
-        cat bun-linux-*-musl.sha256 bun-source.cdx.json.sha256 manifest.json.sha256 > SHA256SUMS
+        for f in bun-linux-*-musl bun-source.cdx.json bun-artifacts.cdx.json manifest.json; do sha256sum "$$f" > "$$f.sha256"; done
+        cat bun-linux-*-musl.sha256 bun-source.cdx.json.sha256 bun-artifacts.cdx.json.sha256 manifest.json.sha256 > SHA256SUMS
         cat SHA256SUMS
         dest="gs://gsw-mcp-bun-base/$(cat /workspace/.prefix)/$BUILD_ID/"
         gcloud storage cp /workspace/out/* "$$dest"

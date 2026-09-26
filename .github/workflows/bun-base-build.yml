@@ -2,8 +2,10 @@
 #
 # What runs where:
 #   Cloud Build (gsw-mcp, E2_HIGHCPU_32)  build.sh: UPSTREAM_SHA + patches/*.patch → release
-#                                         bun-linux-{x64,aarch64}-musl, a syft CycloneDX SBOM,
-#                                         manifest.json, per-file .sha256 and SHA256SUMS → GCS.
+#                                         bun-linux-{x64,aarch64}-musl, syft CycloneDX SBOMs of
+#                                         the source tree and of the built binaries, manifest.json,
+#                                         per-file .sha256 and SHA256SUMS → GCS. It runs as the
+#                                         dedicated bun-base-build SA, not the default compute SA.
 #   This workflow                         submits that build, waits, downloads it, checks every
 #                                         sha256 and the manifest against what it submitted, signs
 #                                         SHA256SUMS keyless with GitHub OIDC (Cloud Build has no
@@ -11,8 +13,9 @@
 #                                         the signature, smoke-tests the x64 binary, and keeps the
 #                                         verified set as a 7-day workflow artifact.
 #
-# Consumption: a lane downloads the artifact and sets KNEXT_BUN_BASE_EXE to bun-linux-x64-musl;
-# the compile scripts refuse it unless the sibling .sha256 matches (bun-base-exe.mjs).
+# Consumption: a GitHub Actions lane downloads the artifact and sets KNEXT_BUN_BASE_EXE to
+# bun-linux-x64-musl; the compile scripts refuse it outside GitHub Actions or unless the sibling
+# .sha256 matches (bun-base-exe.mjs).
 #
 # GCP access is Workload Identity Federation. No secrets: the provider and service account are
 # repository VARIABLES (not sensitive). Provisioning is in infra/bun-base/README.md; until both
