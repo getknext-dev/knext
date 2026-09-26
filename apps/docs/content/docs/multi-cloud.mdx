@@ -71,6 +71,10 @@ reports which mode your app is in.
 
 ## Custom Dockerfiles that rebuild in-image
 
+This section applies to the **vinext build** (`build: 'vinext'`), which ships with its own
+`Dockerfile`. On the default build, `knext` stages the runtime image for you and copies your host
+build into it, so there is no in-image build to wire up.
+
 The scaffolded `Dockerfile` copies your app's already-built output into the image — `next
 build`/`vite build` runs once, on the host, where `knext deploy` has already set `ASSET_PREFIX`
 and the deploy's build id in the environment. If you maintain your own `Dockerfile` that instead
@@ -89,7 +93,7 @@ ENV ASSET_PREFIX=${ASSET_PREFIX}
 RUN ./node_modules/.bin/vite build
 ```
 
-`knext deploy`/`knext preview` pass both automatically as `--build-arg`s to any Dockerfile that
+`knext deploy` and `preview` pass both automatically as `--build-arg`s to any Dockerfile that
 rebuilds in-image — an unused build-arg is silently ignored by Docker, so nothing breaks until you
 add the two lines above. Without them:
 

@@ -179,12 +179,12 @@ it passes the scan, and signing happens on the digest that was actually pushed.
   asserts it survived the push before anything is signed.
 - **Digest-pinned release bundle** — the operator's `install.yaml` release asset is regenerated
   with the **real pushed digest** of the operator image, so what you `kubectl apply` is exactly
-  what was scanned and signed. See [Installing knext](/docs/install#5--install-the-operator).
+  what was scanned and signed. See [Installing knext](/docs/install#4--install-the-operator).
 
 ## Runtime hardening
 
 - **Distroless, non-root.** The operator image is `gcr.io/distroless/static:nonroot` running as
-  UID `65532`; the app image runs as a non-root `node` user.
+  UID `65532`; the app image runs as non-root UID `65532`.
 - **No token automount.** knext sets `AutomountServiceAccountToken: false` on the app's
   ServiceAccount.
 - **Graceful shutdown.** On `SIGTERM` the server **drains in-flight requests and runs `after()`

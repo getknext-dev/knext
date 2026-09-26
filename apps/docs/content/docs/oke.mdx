@@ -49,7 +49,7 @@ owns rather than clobbering it.
 
 ## 3 · Storage — OCI Object Storage via the `s3` provider
 
-knext storage accepts exactly `gcs`, `s3`, and `minio` (see
+knext storage accepts `gcs`, `s3`, `minio`, and `azure` (see
 [Multi-cloud deploy](/docs/multi-cloud)). OCI Object Storage exposes an **S3-compatible** endpoint,
 so use `provider: 's3'` with the OCI S3-compat `endpoint` and a **Customer Secret Key** (an
 S3-compatible access-key/secret pair you generate against your OCI user).
@@ -129,6 +129,6 @@ kubectl get ksvc acme -o jsonpath='{.status.url}'
 ```
 
 A cold request reprovisions a pod; the compile cache baked into your image shortens that cold start
-by reusing pre-compiled V8 bytecode — no configuration needed. (The older opt-in
+by reusing precompiled bytecode (the Bun executable's own, or V8's compile cache with `runtime: 'node'`) — no configuration needed. (The older opt-in
 volume-backed cache has been removed.) See [Bytecode caching](/docs/bytecode) and
 [Scale to zero](/docs/scale-to-zero).
