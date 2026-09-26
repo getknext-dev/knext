@@ -103,6 +103,7 @@ describe('shell-statements lexer', () => {
 
   it('a nested brace and a quoted } inside ${...} do not end the frame early', () => {
     expect(texts('x=${v:-${w:-y}}; npm ci')).toEqual(['x=${v:-${w:-y}}', 'npm ci']);
+    expect(texts('x=${v:-{a}b;c}; npm ci')).toEqual(['x=${v:-{a}b;c}', 'npm ci']);
     expect(texts('x=${v:-"}"}; npm ci')).toEqual(['x=${v:-"}"}', 'npm ci']);
     expect(texts("x=${v:-'}'}; npm ci")).toEqual(["x=${v:-'}'}", 'npm ci']);
   });
