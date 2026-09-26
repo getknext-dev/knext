@@ -24,9 +24,10 @@
  * assignment, Dockerfile `ENV NAME value`, empty value, `unset`, `env -u`,
  * `env -i`, and `delete process.env.NAME`.
  */
+
+import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { describe, expect, it } from "vitest";
 
 const NAME = "VINEXT_NEXT_DEPLOY_CACHE_CONTROL";
 const REPO = join(__dirname, "..", "..", "..", "..");
@@ -221,7 +222,7 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
                 new RegExp(`const ${id} = \\[([\\s\\S]*?)\\]`),
             );
             const name = decl?.[1].match(/"([\w-]+)\.(?:m?js)"/)?.[1];
-            expect(name, `${id} resolves to a module`).toBeTruthy();
+            if (!name) throw new Error(`${id} does not resolve to a module`);
             return join(REPO, "packages/kn-next/src/adapters", `${name}.mjs`);
         });
     }
@@ -232,10 +233,11 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
             const raw = readFileSync(f, "utf8");
             const viaNode = /srvx\/node/.test(raw);
             const viaBun = /srvx\/bun/.test(raw) || /Bun\.serve/.test(raw);
-            expect(
-                viaNode || viaBun,
-                "unclassified entry: serves through neither srvx/node nor srvx/bun",
-            ).toBe(true);
+            if (!(viaNode || viaBun)) {
+                throw new Error(
+                    `${rel(f)}: unclassified entry (serves through neither srvx/node nor srvx/bun)`,
+                );
+            }
             if (viaNode) {
                 expect(code).toMatch(CALL);
             }
@@ -250,9 +252,11 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
                             readFileSync(join(dir, n), "utf8"),
                         ),
                     );
-                expect(wired, `${rel(f)} is wired into a vite.config*`).toBe(
-                    true,
-                );
+                if (!wired) {
+                    throw new Error(
+                        `${rel(f)} is not wired into a vite.config*`,
+                    );
+                }
             }
         });
     }
