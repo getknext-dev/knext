@@ -7,7 +7,7 @@
     "dev": "vinext dev",
     "build": "vite build",
     "start": "bun .output/server/index.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "typecheck": "../../node_modules/typescript-tsc7/bin/tsc --noEmit -p tsconfig.typecheck.json",
     "e2e": "node scripts/e2e-round.mjs",
     "compat-smoke": "node scripts/compat-smoke.mjs",
     "prod-image-probe": "node scripts/prod-image-probe.mjs",

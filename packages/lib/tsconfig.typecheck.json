@@ -4,7 +4,19 @@
   // strict typecheck scope. CI runs `pnpm --filter @getknext/lib typecheck`.
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    // TS7 does not auto-include @types/* packages the way 5.x/6.x does — an
+    // explicit `types` is required for the `bun:test` ambient module @types/bun
+    // declares to resolve, or every test file in scope here 404s on its own
+    // import (TS2307). Harmless under 5.x too (verified): @types/bun was
+    // already auto-included there, so this is additive, not a behavior change.
+    "types": ["bun"],
+    // TS7 enforces rootDir even under noEmit, where 5.x/6.x did not (verified:
+    // identical program, red only under TS7). Test files here import a
+    // repo-root test helper (tests/helpers/bun-test-helpers.ts), which is
+    // legitimately outside this package's src/ — widen rootDir to the repo
+    // root rather than move the shared helper, since nothing is emitted here.
+    "rootDir": "../.."
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
