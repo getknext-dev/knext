@@ -119,7 +119,7 @@ git checkout -q FETCH_HEAD
 test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"
 if [ ${#PATCHES[@]} -gt 0 ]; then
   # Fixed committer + author date keeps the patched HEAD (embedded as Bun's revision) reproducible.
-  GIT_COMMITTER_NAME=knext-bun-base GIT_COMMITTER_EMAIL=bun-base@knext.invalid \
+  GIT_COMMITTER_NAME=knext-bun-base GIT_COMMITTER_EMAIL=bun-base@getknext.invalid \
     git am --committer-date-is-author-date "${PATCHES[@]}"
 fi
 HEAD_SHA="$(git rev-parse HEAD)"

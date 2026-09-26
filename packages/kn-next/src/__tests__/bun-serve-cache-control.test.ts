@@ -296,6 +296,8 @@ describe("vinext-compile bakes it into the executable", () => {
             "sidecar-install.mjs",
             "sidecar-runtime.mjs",
             "entry-external-sidecar.mjs",
+            // the patched-Bun base seam, imported unconditionally
+            "bun-base-exe.mjs",
         ]) {
             copyFileSync(join(here, f), join(alone, f));
         }
