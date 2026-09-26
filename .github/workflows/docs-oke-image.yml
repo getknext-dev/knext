@@ -1,0 +1,200 @@
+name: docs-oke-image
+
+# Publishes the docs site's OKE image (apps/docs/Dockerfile.oke, linux/amd64) to
+# OCIR, then commits a digest bump of apps/docs/deploy/oke/docs-ksvc.yaml to a
+# branch. Actions cannot open PRs in this org, so the summary prints the
+# `gh pr create` command instead.
+#
+# Needs two repository secrets: OCIR_USER (`<tenancy-namespace>/<user>`) and
+# OCIR_TOKEN (an OCI auth token). Without them the workflow fails closed before
+# anything is checked out.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or SHA to build'
+        required: false
+        default: main
+  push:
+    branches: [main]
+    paths:
+      - 'apps/docs/**'
+      - 'packages/kn-next/**'
+      - 'packages/lib/**'
+      - 'packages/db/**'
+      - '.github/workflows/docs-oke-image.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-oke-image
+  cancel-in-progress: false
+
+env:
+  REGISTRY: me-abudhabi-1.ocir.io
+  IMAGE: me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      # Fail closed FIRST — before checkout, before any third-party action runs.
+      # Values are read from env and only their emptiness is tested; they are
+      # never printed.
+      - name: Require OCIR credentials
+        env:
+          OCIR_USER: ${{ secrets.OCIR_USER }}
+          OCIR_TOKEN: ${{ secrets.OCIR_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$OCIR_USER" ] || missing="$missing OCIR_USER"
+          [ -n "$OCIR_TOKEN" ] || missing="$missing OCIR_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing. Create them (see apps/docs/deploy/oke/README.md, 'Publishing the image from CI') and re-run."
+            exit 1
+          fi
+
+      - name: Resolve the commit to build
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.ref }}
+          EVENT: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${INPUT_REF:-main}" --jq .sha)"
+          else
+            sha="$EVENT_SHA"
+          fi
+          case "$sha" in
+            *[!0-9a-f]* | "") echo "::error::could not resolve a commit SHA"; exit 1 ;;
+          esac
+          [ "${#sha}" -eq 40 ] || { echo "::error::resolved ref is not a 40-hex SHA"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${sha:0:7}-amd64" >> "$GITHUB_OUTPUT"
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.meta.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to OCIR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.OCIR_USER }}
+          password: ${{ secrets.OCIR_TOKEN }}
+
+      # Build into the local daemon first and boot it: a node image serving a
+      # bun-preset build (or a build with no server entry) exits 0 at build time
+      # and only dies at runtime. Nothing is pushed until it answers HTTP.
+      - name: Build (local, for the smoke test)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: apps/docs/Dockerfile.oke
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: knext-docs:smoke
+          cache-from: type=gha,scope=docs-oke
+          cache-to: type=gha,scope=docs-oke,mode=max
+
+      - name: Smoke-boot the image
+        run: |
+          docker run -d --name docs-smoke -p 3000:3000 knext-docs:smoke
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://localhost:3000/; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" != 1 ]; then
+            docker logs docs-smoke | tail -50
+            echo "::error::the image did not answer HTTP on :3000"
+            exit 1
+          fi
+          docker rm -f docs-smoke
+
+      # Immutable tag only (sha-<short>-amd64). No moving `latest`/`main` tag:
+      # the manifest pins by digest anyway, and a mutable tag would let a later
+      # run silently repoint what a bare tag pull returns. provenance is off:
+      # OCIR does not reliably accept the attestation manifest index.
+      - name: Push
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: apps/docs/Dockerfile.oke
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=docs-oke
+          cache-to: type=gha,scope=docs-oke,mode=max
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          {
+            echo "### docs OKE image pushed"
+            echo
+            echo "\`${IMAGE}:${TAG}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  bump:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Pushes one branch. Nothing else needs write access.
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+
+      - name: Commit the digest bump to a branch
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          TAG: ${{ needs.publish.outputs.tag }}
+          SHA: ${{ needs.publish.outputs.sha }}
+        run: |
+          case "$DIGEST" in sha256:[0-9a-f]*) ;; *) echo "::error::no pushed digest"; exit 1 ;; esac
+          f=apps/docs/deploy/oke/docs-ksvc.yaml
+          [ "$(grep -c "image: ${IMAGE}:" "$f")" = 1 ] || { echo "::error::expected exactly one image line in $f"; exit 1; }
+          sed -i "s|image: ${IMAGE}:.*|image: ${IMAGE}:${TAG}@${DIGEST}|" "$f"
+          git diff --quiet -- "$f" && { echo "manifest already up to date"; exit 0; }
+          branch="docs-image/${SHA:0:7}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add "$f"
+          git commit -m "chore(docs): pin the OKE docs image to ${TAG}"
+          git push origin "$branch"
+          {
+            echo "### Digest bump pushed to \`${branch}\`"
+            echo
+            echo "Actions cannot open PRs in this org; open it yourself:"
+            echo
+            echo "\`\`\`sh"
+            echo "gh pr create --base main --head ${branch} --title 'chore(docs): pin the OKE docs image to ${TAG}' --body 'Digest bump from the docs-oke-image workflow. No user-visible surface changed.'"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

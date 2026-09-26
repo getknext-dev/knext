@@ -140,10 +140,8 @@ describe('.dockerignore patterns are recursion-correct (#1293)', () => {
     expect(found).toContain('apps/file-manager/Dockerfile');
     expect(found).toContain('apps/docs/Dockerfile.trivyscan');
     expect(found).toContain('examples/bun-exec/Dockerfile.node.trivyscan');
-    // Never built with context: . by any workflow — a manual/OKE-deploy
-    // artifact, not a CI-audited one. If a workflow ever DOES build it,
-    // this scan picks it up automatically; nothing to update by hand.
-    expect(found).not.toContain('apps/docs/Dockerfile.oke');
+    // Built with context: . by docs-oke-image.yml (the OKE docs image).
+    expect(found).toContain('apps/docs/Dockerfile.oke');
   });
 
   describe('cross-check against every root-context Dockerfile COPY', () => {

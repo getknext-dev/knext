@@ -35,14 +35,50 @@ The `ClusterDomainClaim` entries are required because `autocreate-cluster-domain
 
 **2026-09-27:** The OKE cluster was rebuilt. The Kourier LoadBalancer IP changed from `51.170.86.139` to `51.170.89.13`. The site was redeployed from the July image; a fresh amd64 build is needed in CI (the lead's Mac cannot build Docker images for amd64).
 
-## Redeploy (fresh machine)
+## Publishing the image from CI
+
+The `docs-oke-image` workflow builds `Dockerfile.oke` (linux/amd64), smoke-boots
+it, pushes `me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs:sha-<short>-amd64`, and
+commits the digest bump of `docs-ksvc.yaml` to a branch `docs-image/<short>`. It
+runs on `workflow_dispatch` (input `ref`, default `main`) and on pushes to `main`
+that touch the docs or the packages they consume. The job summary prints the
+`gh pr create` command for the bump (Actions cannot open PRs in this org).
+
+It fails closed, before checking anything out, if either secret is missing.
+
+### One-time setup: the two secrets
+
+```sh
+# namespace of the tenancy (the first path segment of the registry repo)
+oci os ns get                                   # -> axfqznklsd2t
+# your user's OCID and login (identity-domain users: <namespace>/<domain>/<user>)
+oci iam user list --query 'data[].{name:name,id:id}' --output table
+
+# auth token: the value is shown ONCE
+oci iam auth-token create --user-id <user-ocid> --description "github docs-oke-image"
+
+gh secret set OCIR_TOKEN --repo getknext-dev/knext          # paste the token
+gh secret set OCIR_USER  --repo getknext-dev/knext --body "axfqznklsd2t/<user login>"
+```
+
+`OCIR_USER` is `<tenancy-namespace>/<username>`; for identity-domain users it is
+`<tenancy-namespace>/<domain>/<username>`. A wrong username shows up as a login
+failure in the workflow's "Log in to OCIR" step.
+
+Then run it: `gh workflow run docs-oke-image.yml -f ref=main`, open the PR from
+the summary, merge, and `kubectl apply` the manifest as in step 2 below.
+
+## Redeploy (manual fallback, fresh machine)
+
+Prefer the workflow above. Build from the **repo root** (the docs depend on
+`@getknext/core` through the workspace):
 
 ```sh
 # 1. build amd64 + push to OCIR (now public; no pull secret needed)
-docker build --platform linux/amd64 -f Dockerfile.oke -t me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs:sha-<short>-amd64 .
+docker build --platform linux/amd64 -f apps/docs/Dockerfile.oke -t me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs:sha-<short>-amd64 .
 docker push me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs:sha-<short>-amd64
 # 2. pin the new image (with @sha256 digest) in docs-ksvc.yaml, then:
-kubectl apply --context knext-oke-sa -f deploy/oke/docs-ksvc.yaml
+kubectl apply --context knext-oke-sa -f apps/docs/deploy/oke/docs-ksvc.yaml
 kubectl -n knext-docs rollout status ksvc/knext-docs   # or check .status.latestReadyRevisionName
 # 3. verify live (retry through any ISP interstitial):
 #    http://knext-docs.knext-docs.51.170.89.13.sslip.io/docs/scale-zero-pg
