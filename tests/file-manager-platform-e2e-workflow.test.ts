@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
+import { unsafeAppliesInWorkflow } from '../scripts/lib/apply-safety-scan.mjs';
 
 /**
  * WIRING GUARD for the nightly file-manager platform e2e (#1282).
@@ -80,14 +81,17 @@ describe('file-manager platform e2e nightly - wiring', () => {
     expect(text).toMatch(/registry:2\.8\.3@sha256:[0-9a-f]{64}/);
   });
 
-  it('every downloaded cluster manifest is sha256-verified before it is applied', () => {
-    const downloads = [...text.matchAll(/releases\/download\/[^\s"]+\.yaml/g)];
-    expect(downloads.length).toBe(4);
-    // each is fetched into a file and checked with `sha256sum -c` (4 pinned hashes)
-    const hashes = [...text.matchAll(/\b[0-9a-f]{64}\b(?=\s+\/tmp\/[\w-]+\.yaml)/g)];
-    expect(hashes.length).toBe(4);
-    expect(text).not.toMatch(/kubectl apply -f https?:/);
-    expect(text.match(/sha256sum -c/g)?.length).toBeGreaterThanOrEqual(2);
+  it('every cluster manifest is sha256-verified before it is applied', () => {
+    // The fetch + checksum + digest-pin now lives in the shared kind-manifest
+    // scripts (#1289); this workflow must delegate to them rather than
+    // download release assets inline…
+    expect(text).toContain('scripts/kind-manifests/apply-cert-manager.sh');
+    expect(text).toContain('scripts/kind-manifests/apply-knative-kourier.sh');
+    expect(text).not.toMatch(/releases\/download\//);
+    // …and the fail-closed apply-safety scanner (the same one
+    // kind-manifest-checksum-pin.test.ts runs over the whole tree) must find
+    // nothing unverified in any of its jobs.
+    expect(unsafeAppliesInWorkflow(wf)).toEqual([]);
   });
 
   it('the red alert is schedule-only and keyed on the check job FAILING', () => {
