@@ -424,13 +424,21 @@ export function publishedNumber(summaries) {
 
 /**
  * Where a file stands in one run: its failing cases, a pass, or no result.
- * @param {any[]} summaries one run's (unapplied) shard summaries
+ *
+ * The summaries may be APPLIED — every compat-vinext run publishes them after
+ * the ledger moved an entry's failing cases from `failures` into `quarantined`
+ * — so both lists count as failures, as in flakyStatus. Reading `failures`
+ * alone made every ledgered file look like a pass, so no entry could ever be
+ * refreshed or verified from a run taken after the ledger existed (#1357).
+ * @param {any[]} summaries one run's shard summaries, applied or not
  * @param {string} test
  * @returns {{ state: 'fail', cases: string[] } | { state: 'pass' } | { state: 'none' }}
  */
 function fileInRun(summaries, test) {
   if (summaries.some((s) => (s.notRunFiles ?? []).includes(test))) return { state: 'none' };
-  const fs = summaries.flatMap((s) => s.failures ?? []).filter((f) => f.file === test);
+  const fs = summaries
+    .flatMap((s) => [...(s.failures ?? []), ...(s.quarantined ?? [])])
+    .filter((f) => f.file === test);
   if (fs.length === 0) return { state: 'pass' };
   if (fs.some((f) => !(f.cases ?? []).length)) return { state: 'none' }; // no case detail
   return { state: 'fail', cases: [...new Set(fs.flatMap((f) => f.cases))].sort() };
@@ -1176,13 +1184,16 @@ function toUtcDateString(isoDateWithOffset) {
  * which is never before the day a contributor actually wrote the entry, so
  * an honest `added` may legitimately PRECEDE the derived date. Only `added`
  * being LATER than the derived date is flagged — that is the only shape a
- * forward re-date can take.
+ * forward re-date can take — unless it is a RENEWAL covered by fresh
+ * evidence (`renewalGap`, #1357): every cited run created on or after the new
+ * `added`. Without `runCreatedAt` no forward move is ever accepted.
  * @param {any} ledger
  * @param {(args: string[]) => string} execGit
  * @param {string} ledgerRelPath
+ * @param {(runId: string) => string} [runCreatedAt] a run's ISO `created_at` (throws if unfetchable)
  * @returns {string[]}
  */
-export function verifyAddedDates(ledger, execGit, ledgerRelPath) {
+export function verifyAddedDates(ledger, execGit, ledgerRelPath, runCreatedAt) {
   const errors = [];
   for (const e of ledger.entries) {
     const derived = deriveAddedFromGitLog(execGit, ledgerRelPath, e.test);
@@ -1201,12 +1212,49 @@ export function verifyAddedDates(ledger, execGit, ledgerRelPath) {
     // equality would false-red every honest entry the next time its PR is
     // squash-merged or rebased.
     if (e.added > derived) {
-      errors.push(
-        `${e.test}: added (${e.added}) does not match git history — this entry first appears on main in a commit dated ${derived}; added must never be re-dated forward`,
-      );
+      const why = renewalGap(e, runCreatedAt);
+      if (why !== null)
+        errors.push(
+          `${e.test}: added (${e.added}) does not match git history — this entry first appears on main in a commit dated ${derived}; added may move forward only as a renewal, when every cited evidence run was created on or after it (${why})`,
+        );
     }
   }
   return errors;
+}
+
+/**
+ * The RENEWAL RULE (#1357): why a forward-moved `added` is NOT covered by
+ * its evidence, or null when it is. Renewing an entry must move `added` (that
+ * is what restarts its window), so `verifyAddedDates` cannot flag every
+ * forward move — but a forward move is only honest when the new window is
+ * anchored on runs that did not exist before it. Covered means: the entry
+ * cites at least one run, every cited run (failing AND, for a flaky entry,
+ * passing) was fetched, and each was created on or after `added` — i.e.
+ * `added` ≤ the oldest cited run's UTC creation date. That is the same
+ * inequality `verifyEvidence` enforces per run, so a renewal that passes here
+ * also passes there; `verifyEvidence` additionally re-derives the cases from
+ * those runs, so a fresh-but-irrelevant run cannot carry a renewal.
+ * @param {any} e
+ * @param {((runId: string) => string) | undefined} runCreatedAt ISO `created_at` of a run
+ * @returns {string | null}
+ */
+function renewalGap(e, runCreatedAt) {
+  if (!runCreatedAt) return 'no evidence run lookup was available';
+  const ids = [
+    ...(e.evidence?.fail ?? []).map((r) => String(r?.run)),
+    ...(e.evidence?.pass ?? []).map(String),
+  ];
+  if (ids.length === 0) return 'the entry cites no evidence runs';
+  for (const id of ids) {
+    let created;
+    try {
+      created = toUtcDateString(runCreatedAt(id));
+    } catch (err) {
+      return `evidence run ${id} could not be fetched (${err?.message ?? err})`;
+    }
+    if (created < e.added) return `evidence run ${id} was created ${created}, before added`;
+  }
+  return null;
 }
 
 const gh = (a) => execFileSync('gh', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1306,16 +1354,24 @@ function main(argv) {
       );
       return 1;
     }
+    // One `gh api` per run, shared by the evidence check and the renewal rule.
+    const metas = new Map();
+    const metaOnce = (id) => {
+      if (!metas.has(id)) metas.set(id, runMeta(repo, id));
+      return metas.get(id);
+    };
     const evidenceFailures = withRuns((root) =>
       verifyEvidence(ledger, (id) => {
         const dir = join(root, id);
         downloadRun(gh, { repo, runId: id, dir });
-        return { meta: runMeta(repo, id), summaries: readSummaries(dir) };
+        return { meta: metaOnce(id), summaries: readSummaries(dir) };
       }),
     );
     // #1348 — never trust `added` from the JSON field alone; re-derive it
-    // from the ledger file's own git history.
-    const addedFailures = verifyAddedDates(ledger, git, ledgerPath);
+    // from the ledger file's own git history. #1357 — a forward `added` is
+    // accepted only as a renewal whose every cited run is at least as new.
+    const runCreatedAt = (id) => metaOnce(id).createdAt;
+    const addedFailures = verifyAddedDates(ledger, git, ledgerPath, runCreatedAt);
     const failures = [...evidenceFailures, ...addedFailures];
     for (const f of failures) console.error(`::error::vinext quarantine ledger — ${f}`);
     if (failures.length === 0)
