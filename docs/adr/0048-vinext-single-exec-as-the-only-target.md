@@ -290,7 +290,7 @@ until the founder revisits it.
 
 ## Amendment 6 — cross-reference: the self-contained single executable (ADR-0060, 2026-09-26)
 
-- **Status:** Accepted with ADR-0060, pending the same sprint-close design gate. A cross-reference;
+- **Status:** **Proposed (2026-09-26)**, with ADR-0060; decided at the same sprint-close design gate. A cross-reference;
   it does not reopen this ADR's decision or Amendment 5's.
 
 1. **The single executable is the artifact shape for both runtimes' Bun cells**, not a vinext-only

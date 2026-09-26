@@ -1,6 +1,6 @@
 # ADR-0060: The self-contained single executable — both compiled shapes, opt-in
 
-- **Status:** **Accepted, pending the sprint-close design gate (2026-09-26).** Records founder
+- **Status:** **Proposed (2026-09-26).** Records founder
   decisions taken on 2026-09-26 (plan "single-exec dynamic imports, end to end", milestone
   *Self-contained single-exec*, #1450–#1464). Trigger-class (ADR; it names a CLI flag and a config
   key, #1454), so the architect and system designer review it at sprint close per
@@ -30,6 +30,10 @@ compiled shapes ship today, and **neither is self-contained**:
    else. Everything Next loads by a *computed path at request time* — every route chunk under
    `.next/server/**`, the `*.runtime.prod.js` renderers, the manifests — stays **on disk beside the
    binary, with no bytecode**, resolved through `compile.autoloadPackageJson` (ADR-0054 A7). The
+   disk closure exists for **two** reasons, not one: those paths are computed, and A7 deliberately
+   keeps the `*.runtime.prod.js` renderers and every module literally required from
+   `.next/server/**` on disk so that **each exists exactly once** — a second, inlined copy in the
+   entry bundle split module identity and produced a 500-vs-404 `NoFallbackError` (ADR-0054 A7). The
    runtime image (`templates/runtime-standalone/Dockerfile.standalone.hbs:113-152`) therefore copies
    the whole `.next/standalone` tree plus `node_modules`, and its entrypoint runs
    `bun run /app/knext-entry.mjs`, which spawns the binary: two processes. This is knext's largest
@@ -38,14 +42,15 @@ compiled shapes ship today, and **neither is self-contained**:
    `sharp` (the `native/` directory) and `public/`. The `.output/server/node_modules` sidecar exists
    only in CI.
 
-Making either shape self-contained needs the same three Bun primitives, all upstream work in
-flight:
+Making either shape self-contained needs the same Bun primitives (three missing features and one
+bundler bug), all upstream work in flight:
 
 | primitive | upstream | state (2026-09-26) |
 |---|---|---|
 | `--include` with path fidelity | oven-sh/bun#44059 (ours) | ready for review; 19/19 build tests pass on the patched build, 0/19 on system Bun |
 | exe-dir resolution of what stays on disk | oven-sh/bun#44053 | a maintainer bot is implementing; no PR yet |
 | multi-file native addons (sharp) | oven-sh/bun#44063 | a maintainer bot is reproducing |
+| `__dirname`/`__filename` in an included CommonJS module | oven-sh/bun#44068 (issue); fix PR oven-sh/bun#29066 | fix verified on a Cloud Build from source; not merged. On stock Bun 1.4.2 the bundler inlines both as the **build** directory, so `require(join(__dirname, x))` misses `$bunfs` (measured in PR #1468). knext carries a named, registered shim for it (Decision 3) that is deleted on the Bun release containing #29066 |
 
 Two facts discovered while planning constrain the carrier:
 
@@ -70,10 +75,17 @@ What the cold-start evidence says today, stated before the decision because it l
 - The #1341 spike's prod-server base (vinext app fully embedded) was **335 ms slower** at the OKE
   median than the nitro base (n=10 each, permutation p=0.16, not significant), despite a faster local
   boot (183 vs 241 ms). The gap is not attributed.
-- Locally, first execution of a large compiled binary costs **1789 ms cold vs 83 ms warm**, and
-  eager sharp extraction adds **≈375 ms** to the first request.
+- Locally, first execution of a large compiled binary costs **1789 ms cold vs 83 ms** for the
+  interpreted output (`.claude/bytecode-coldstart-bench.md`).
+- The self-contained spike (`.claude/research/self-contained-exec-spike-2026-09-27.md`, vinext
+  file-manager, local darwin, n=11): a **92.5 MiB** binary serves all 13 measurement routes from an
+  empty directory, and its local boot is at **parity with the nitro binary — 88 ms vs 85 ms**
+  median (77 ms without sharp; 157 ms for prod-server disk mode). With a fresh sharp extract every
+  boot it is **463 ms**; that ≈375 ms is a **boot** cost per fresh extract, and treating it as the
+  Knative cost (every pod a fresh container) is **inferred, not measured** on a cluster.
 
-So a Knative cold-start win from self-containment is **a hypothesis this ADR sets up to test**, not
+Self-containment therefore buys no measured local boot win for vinext; any win must come from the
+cluster. So a Knative cold-start win from self-containment is **a hypothesis this ADR sets up to test**, not
 a result it relies on.
 
 ## Decision
@@ -115,7 +127,8 @@ a result it relies on.
      **B's median below A's median by more than A's IQR**.
    - **Compat parity from an empty dir:** the lane in (5) on the self-contained binary scores at
      least the cell's current disk-mode pass count, with no new deterministic reds, on two
-     consecutive runs.
+     consecutive runs. For vinext × bun that bar is **≥ 715/778** (V0 measured the disk-mode
+     baseline on vinext 1.0.0-beta.12 at **728 / 38 / 12**, run 36266774820).
 
    If the cold-start criterion is not met, the capability **stays behind the flag** and the track
    is recorded as not done. The remaining self-containment benefits (one artifact, no
@@ -123,11 +136,11 @@ a result it relies on.
 
 ## Options considered
 
-The facts in the table are measurements unless marked *(est.)* or *(unmeasured)*.
+The facts in the table are measurements unless marked *(extrapolation)* or *(unmeasured)*.
 
 | Option | Cold start | Image / binary size | Upstream risk | Security surface | Verdict |
 |---|---|---|---|---|---|
-| **(a) Self-contained as the default now** | OKE win unproven: last two cluster A/Bs are a tie (3401 vs 3610 ms) and a 335 ms loss (not significant); +1789 ms cold first-exec locally | binary grows ≈3.9× the embedded JS (≈+100 MB for a full standalone tree *(est.)*) | high: depends on 3 unmerged Bun primitives; every user build hits the shims on day one | smaller image, no `node_modules` layer; new writable-tmp need for sharp | rejected — ships an unmeasured claim to every user and breaks the "prove parity first" rule |
+| **(a) Self-contained as the default now** | OKE win unproven: last two cluster A/Bs are a tie (3401 vs 3610 ms) and a 335 ms loss (not significant); local boot is at parity (88 vs 85 ms), not a win | vinext: 92.5 MiB binary; +19.1 MB for embedded sharp; embedded app JS 77.8 MB vs 65.3 MB disk-mode binary. Next standalone tree *(unmeasured until N1)*; ~170 MB if all 44 MB of `node_modules` were embedded *(extrapolation)* | high: depends on 3 unmerged Bun primitives; every user build hits the shims on day one | smaller image, no `node_modules` layer; new writable-tmp need for sharp | rejected — ships an unmeasured claim to every user and breaks the "prove parity first" rule |
 | **(b) Opt-in behind a flag, lanes + OKE gate (chosen)** | measured per track by the A/B in Decision 7 before any claim | same growth, paid only by opt-in users; pull time reported separately | contained: shims are registered, probed and deleted on the fixing bump | same as (a), limited to opt-in; base-exe stays in CI | **chosen** — the only option that turns the hypothesis into a measurement without exposing defaults |
 | **(c) Never (disk mode only)** | today's numbers: route chunks and renderers load as source, no bytecode | unchanged (image carries `.next/standalone` + `node_modules`) | none | unchanged (a `node_modules` tree in every Bun image) | rejected — forfeits the largest untapped bytecode surface and the upstream work that is the credibility lever |
 | **(d) Ship a patched Bun base executable to users** | would remove the shims' overhead *(unmeasured)* | same as (a)/(b) | lowest shim debt, but knext becomes a Bun distributor tracking an unmerged fork | **largest**: a knext-built runtime binary in every user image, needing its own SBOM, signing, CVE response and release cadence | rejected — founder decision A: the base executable is verification-only |
@@ -149,19 +162,30 @@ win nobody has measured yet.
 
 **Honest risks (each has the measurement that decides it)**
 
-- **Included modules may get no bytecode.** Embedding a module is not the same as compiling it to
-  bytecode. The #1341 spike proved *embedding* (all 159 server chunks deleted from disk, every route
-  still served) but no verifier has yet shown bytecode on an included module. #1451's
-  `bytecode-exec-verify` on an included chunk is the killing measurement: if it fails, the Next
-  track becomes self-containment only and its cold-start criterion is at risk.
+- **Single-instance identity (`NoFallbackError`) — the Next track's first risk.** ADR-0054 A7 keeps
+  the `*.runtime.prod.js` renderers and the modules literally required from `.next/server/**` on
+  disk precisely so each exists **once**; N1 embeds exactly those files. Path fidelity (I1) makes
+  an embedded file *resolvable* — it does not dedupe it against a copy the entry bundle already
+  inlines. If both copies load, React/renderer state splits and the 500-vs-404 `NoFallbackError`
+  returns. The killing measurement is a **module-identity probe in N1**: the same React / renderer
+  module object reached from the entry bundle and from an included route chunk must be `===`; if it
+  is not, N1 does not ship, even behind the flag.
+- **Included modules get bytecode — measured, not assumed (PR #1468).** F2 marker-verified that
+  modules embedded as extra entrypoints are compiled to bytecode on **stock Bun 1.4.2**. What is
+  still open is coverage of *Next's* route chunks specifically, which #1456 extends the verifier to.
+- **`__dirname`/`__filename` inlining in included CJS** (bun#44068). Measured in PR #1468; carried
+  as a registered shim (Decision 3) whose probe goes red, and the shim is deleted, on the Bun
+  release containing bun#29066.
 - **The OKE result may stay a tie.** Two of two cluster measurements so far are a tie or a
   not-significant loss. If N3/V2 repeat that, the feature stays flag-only and "done" fails, as
   Decision 7 says.
-- **Binary growth ≈3.9× the embedded JS** (≈+100 MB for a full standalone tree, an estimate). Pull
-  time is reported separately in the A/B; a large first-exec cost is tested by an eager-extract arm
-  (C) against the lazy one (B).
+- **Binary growth.** Measured for vinext: 92.5 MiB total, +19.1 MB for embedded sharp. The Next
+  standalone tree's growth is **unquantified until N1**; the only figure is an extrapolation (~170 MB
+  if all 44 MB of `node_modules` were embedded). Pull time is reported separately in the A/B; a
+  large first-exec cost is tested by an eager-extract arm (C) against the lazy one (B).
 - **Read-only root filesystems vs sharp extraction.** Embedded sharp must be extracted to `$TMPDIR`
-  at run time (lazily, on the first image request, so `/api/health` does not pay ≈375 ms). A pod
+  at run time (lazily, on the first image request, so boot does not pay the ≈375 ms fresh-extract
+  cost, inferred for Knative from the local 463 vs 88 ms). A pod
   with a read-only root filesystem and no writable tmp cannot do that; the fix would be an
   operator-rendered `emptyDir`, which is a CRD change and returns to the design gate.
 - **Next's `require-hook` may reject `$bunfs` paths** (N1). The fallback is an
@@ -198,15 +222,15 @@ it can ship even behind a flag. Nitro-only shims are retired only once V3 is the
 | id | issue | what | exit |
 |---|---|---|---|
 | F1 | #1450 | retirement harness: registry, probes against the pinned Bun/vinext, `@knext-shim` marker scan | both halves mutation-proved red |
-| F2 | #1451 | shared embed module (extra entrypoints, I1 assertions, unembedded-dynamic report) | computed import/require resolve from an empty dir on stock Bun; bytecode proven on ≥1 included module |
+| F2 | #1451 | shared embed module (extra entrypoints, I1 assertions, unembedded-dynamic report) | computed import/require resolve from an empty dir on stock Bun; bytecode proven on ≥1 included module (measured on stock Bun 1.4.2, PR #1468) |
 | F3 | #1452 | patched Bun base-exe pipeline, CI-only | cosign verify in CI; reproducible sha256 or documented delta |
-| F4 | #1453 | this ADR | accepted at the sprint-close gate |
+| F4 | #1453 | this ADR | Proposed → accepted at the sprint-close gate |
 | F5 | #1454 | `--self-contained` / `selfContained`, default off | byte-identical default output |
 | F6 | #1455 | empty-dir lane mode + fingerprint | guard reds on a planted `node_modules`; fingerprint changes with the mode |
-| N1 | #1456 | Next: embed `.next/server/**`, renderers, manifests; `$bunfs` `distDir` anchor | turbopack and webpack serve every route from an empty dir |
+| N1 | #1456 | Next: embed `.next/server/**`, renderers, manifests; `$bunfs` `distDir` anchor | turbopack and webpack serve every route from an empty dir; module-identity probe `===` |
 | N2 | #1457 | self-contained `Dockerfile.standalone` variant | no `node_modules` in the image; kind boot; Trivy clean |
 | N3 | #1458 | Next exit: bun lanes in empty-dir mode + OKE A/B/C | Decision 7 |
-| V0 | #1459 | re-baseline vinext disk-mode compat on beta.12 | number published; below 715 escalates |
+| V0 | #1459 | re-baseline vinext disk-mode compat on beta.12 | done: 728 / 38 / 12 (run 36266774820); below 715 escalates |
 | V1 | #1460 | vinext nitro: embed the plan + public, strict requires, lazy sharp, `$bunfs` read-stream shim | 13/13 file-manager routes from an empty dir |
 | V2 | #1461 | vinext exit: compat-vinext in empty-dir mode + OKE A/B | Decision 7 |
 | V3 | #1462 | prod-server base on the foundation (after V2) | the draft's result reproduced from an empty dir; gaps attributed |
