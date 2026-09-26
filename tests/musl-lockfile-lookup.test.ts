@@ -82,13 +82,6 @@ describe('pinned_lockfile_dir_for: finds a committed lockfile only when BOTH fil
     // Node's own mkdtempSync, not a bare `$TMPDIR` reference inside the `sh
     // -c` script — `$TMPDIR` is unset on the GitHub runner, so `mkdir -p
     // "$TMPDIR/partial-pin/..."` expanded to `mkdir -p "/partial-pin/..."`
-    // and failed with EACCES/"Permission denied" against the filesystem
-    // root, not against a real scratch dir — this test file is new on this
-    // branch (#1257), not present on main, so this is fixed as part of
-    // making #1257 itself green, not a pre-existing main regression.
-    // Node's own mkdtempSync, not a bare `$TMPDIR` reference inside the `sh
-    // -c` script — `$TMPDIR` is unset on the GitHub runner, so `mkdir -p
-    // "$TMPDIR/partial-pin/..."` expanded to `mkdir -p "/partial-pin/..."`
     // and failed against the filesystem root, not a real scratch dir. This
     // test file is new on this branch (#1257), not present on main, so this
     // is fixed as part of making #1257 itself green, not a pre-existing
