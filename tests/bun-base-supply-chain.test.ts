@@ -69,7 +69,7 @@ describe('build.sh verifies every pinnable fetch', () => {
   });
 
   it('secret-scan hygiene: no NAME=<32+ hex> assignment in build.sh', () => {
-    expect(build).not.toMatch(/^\s*[A-Za-z_]+=['"]?[0-9A-Fa-f]{32,}/m);
+    expect(build).not.toMatch(/^\s*(export\s+)?[A-Za-z_][A-Za-z0-9_]*=['"]?[0-9A-Fa-f]{32,}/m);
   });
 
   it('verifies Alpine packages against the checked-in keys', () => {
