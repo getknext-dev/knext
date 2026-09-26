@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 /**
  * #1225 shipped `turbopack × bun` as a `bun build --compile --bytecode`
@@ -39,95 +50,101 @@ const DOCKERFILE_PATH = resolve(
 const NATIVE_REBUILD_SH_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 const src = readFileSync(DEPLOY_SH_PATH, 'utf8');
 
-/**
- * The shell WORDS of the single `docker run --rm` command in `text`, modelled
- * on bash rather than on regexes over lines:
- *   - a backslash IMMEDIATELY before the newline joins the next line; any
- *     other trailing character (`\ ` with a space) does not — the command
- *     ends there;
- *   - a `#` at the start of a word (outside quotes) begins a comment that runs
- *     to the end of the LINE and ends the command — a comment line inside a
- *     continuation block truncates it, it is not skipped;
- *   - `'..'` and `".."` (with `\`-escapes) keep their contents inside ONE word,
- *     so a flag quoted inside another flag's value is never a flag.
- * Returns [] when there is no `docker run --rm` line. THROWS on more than one
- * (fail closed: a guard that reads only the first of two blocks certifies
- * whichever one it did not read).
- */
-function dockerRunWords(text: string): string[] {
-  const lines = text.split('\n');
-  const starts = lines.flatMap((l, i) => (/^\s*docker run --rm\b/.test(l) ? [i] : []));
-  if (starts.length === 0) return [];
-  if (starts.length > 1) {
-    throw new Error(`expected exactly one docker run --rm block, found ${starts.length}`);
-  }
-  const src = lines.slice(starts[0]).join('\n');
-  const words: string[] = [];
-  let cur = '';
-  let quote: '"' | "'" | null = null;
-  const push = () => {
-    if (cur !== '') words.push(cur);
-    cur = '';
-  };
-  const fail = (what: string): never => {
-    throw new Error(`docker run block uses ${what}, which this guard does not model — fail closed`);
-  };
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    // FAIL CLOSED on anything that can make bash build the argv differently
-    // from the literal words read here. A quoted `${NAME}` is one word and
-    // cannot add flags, so it is allowed inside "..." (the real block needs
-    // it); command substitution and backticks are refused everywhere
-    // outside single quotes, and every expansion/operator is refused unquoted.
-    if (quote !== "'") {
-      if (src.startsWith('$(', i) || c === '`') fail(c === '`' ? 'a backtick' : '$(');
-    }
-    if (!quote) {
-      if (src.startsWith('${', i)) fail('an unquoted ${');
-      if (src.startsWith("$'", i)) fail("$'…'");
-      if (src.startsWith('<(', i) || src.startsWith('>(', i)) fail('process substitution');
-      if (c === ';' || c === '|' || src.startsWith('&&', i)) fail(`the operator ${c}`);
-    }
-    if (quote) {
-      cur += c;
-      if (c === '\\' && quote === '"' && i + 1 < src.length) cur += src[++i];
-      else if (c === quote) quote = null;
-    } else if (c === '\\') {
-      if (src[i + 1] === '\n') {
-        i++; // line continuation: joins, and separates words
-        push();
-      } else {
-        cur += c + (src[i + 1] ?? '');
-        i++;
-      }
-    } else if (c === '"' || c === "'") {
-      quote = c;
-      cur += c;
-    } else if (c === '#' && cur === '') {
-      const nl = src.indexOf('\n', i);
-      i = nl === -1 ? src.length : nl - 1; // comment to EOL; the newline then ends the command
-    } else if (c === '\n') {
-      break;
-    } else if (/[ \t]/.test(c)) push();
-    else cur += c;
-  }
-  push();
-  return words;
-}
+const SECTION_START = '# ── 3b. compile the standalone-on-Bun bytecode executable';
+const SECTION_END = '# ── 3d. bake the V8 compile cache';
 
 /**
- * How many times `flag` is immediately followed by a value word satisfying
- * `ok`, counting only words BEFORE `stopAt` — docker stops reading options at
- * the image name, so a `-v` after it is an argument to the container command,
- * not a mount.
+ * BEHAVIOUR, not text. Rounds 1–10 tried to prove "the rebuild `docker run`
+ * mounts STANDALONE_ROOT before the image" by tokenising the script like bash,
+ * and every round lost to a shell semantic the tokenizer did not model (a
+ * `: \` line turning the whole command into arguments of `:`, a trailing `&`
+ * backgrounding it, `${X:+…}`, `$(…)`, `<(…)`, …). This runs the REAL section
+ * of `scripts/e2e-deploy.sh` (from the 3b marker to the 3d marker) under
+ * `bash -e` with stub `docker`/`bun` first on PATH, and asserts what the stub
+ * OBSERVED: however the text is spelled, bash either executed a docker with
+ * these argv, synchronously, or it did not.
  */
-const countFlagPairs = (
-  words: string[],
-  flag: string,
-  ok: (v: string) => boolean,
-  stopAt = words.length,
-): number =>
-  words.slice(0, stopAt).filter((w, i, a) => w === flag && i + 1 < a.length && ok(a[i + 1])).length;
+function runCompileSection(
+  script: string,
+  dockerStub: 'ok' | 'fail',
+): {
+  status: number | null;
+  out: string;
+  dockerCalls: string[][];
+  finishedBeforeExit: boolean;
+  reachedEnd: boolean;
+  root: string;
+  scriptDir: string;
+} {
+  const start = script.indexOf(SECTION_START);
+  const end = script.indexOf(SECTION_END);
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('the 3b/3d section markers are missing from scripts/e2e-deploy.sh');
+  }
+  const section = script.slice(start, end);
+  const tmp = mkdtempSync(join(tmpdir(), 'bun-lane-'));
+  try {
+    const bin = join(tmp, 'bin');
+    const rec = join(tmp, 'rec');
+    const adapter = join(tmp, 'adapter');
+    const app = join(tmp, 'app');
+    const scriptDir = join(tmp, 'scripts');
+    const standaloneApp = join(app, '.next', 'standalone', 'pkg');
+    for (const d of [bin, rec, adapter, standaloneApp, scriptDir]) {
+      mkdirSync(d, { recursive: true });
+    }
+    writeFileSync(join(adapter, 'standalone-compile.js'), '');
+    const stub = (name: string, body: string) => {
+      const p = join(bin, name);
+      writeFileSync(p, `#!/bin/sh\n${body}\n`);
+      chmodSync(p, 0o755);
+    };
+    stub('bun', 'exit 0');
+    stub(
+      'docker',
+      [
+        'echo x >> "$REC/calls"',
+        `printf '%s\\n' "$@" > "$REC/argv.$$"`,
+        'sleep 0.4', // a backgrounded docker would still be running when the script exits
+        dockerStub === 'ok' ? 'touch "$REC/finished"; exit 0' : 'exit 1',
+      ].join('\n'),
+    );
+    const root = join(app, '.next', 'standalone');
+    const wrapper = [
+      'set -euo pipefail',
+      'log() { echo "[t] $*" >&2; }',
+      'RUNTIME=bun',
+      `APP_DIR='${app}'`,
+      `SERVER_JS='${join(standaloneApp, 'server.js')}'`,
+      `STANDALONE_APP_DIR='${standaloneApp}'`,
+      `SCRIPT_DIR='${scriptDir}'`,
+      `NEXT_ADAPTER_PATH='${join(adapter, 'index.js')}'`,
+      'KNEXT_COMPAT_MODE=credential',
+      section,
+      'echo BLOCK_DONE',
+    ].join('\n');
+    const wrapperPath = join(tmp, 'wrapper.sh');
+    writeFileSync(wrapperPath, wrapper);
+    const r = spawnSync('bash', [wrapperPath], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REC: rec },
+      encoding: 'utf8',
+    });
+    const dockerCalls = readdirSync(rec)
+      .filter((n) => n.startsWith('argv.'))
+      .map((n) => readFileSync(join(rec, n), 'utf8').split('\n').slice(0, -1));
+    return {
+      status: r.status,
+      out: `${r.stdout}\n${r.stderr}`,
+      dockerCalls,
+      finishedBeforeExit: existsSync(join(rec, 'finished')),
+      reachedEnd: r.stdout.includes('BLOCK_DONE'),
+      root,
+      scriptDir,
+    };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec (#1166/#1225)', () => {
   it('compiles the standalone server via the shipped standalone-compile script', () => {
@@ -236,125 +253,47 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     expect(/-a -p "\$\{OWNER_PID\}"/.test(src)).toBe(true);
   });
 
-  it('rebuilds native (*.node) addons for musl inside the pinned image before boot (review finding, hypothesis A — glibc-installed addons cannot dlopen under musl)', () => {
-    const compileBlock = src.slice(
-      src.indexOf('# ── 3b. compile the standalone-on-Bun bytecode executable'),
-      src.indexOf('# ── 4. boot the standalone server on a free port'),
-    );
-    // Flag order within the `docker run --rm ...` invocation is not load-bearing
-    // (docker does not care whether `-e` or `-v` comes first) — #1257 inserted
-    // `-e "KNEXT_COMPAT_MODE=..."` ahead of the `-v` mounts to forward compat
-    // mode into the rebuild container (see musl-rebuild-credential-mode.test.ts),
-    // so this asserts the required flags as a SET, each exactly once, rather
-    // than pinning a specific adjacency.
-    expect(compileBlock.includes('docker run --rm'), 'must invoke docker run --rm').toBe(true);
-    const runWords = dockerRunWords(compileBlock);
-    expect(runWords.length, 'the docker run --rm command must be found').toBeGreaterThan(0);
-    const imageIdx = runWords.indexOf('"${STANDALONE_BUN_IMAGE}"');
-    expect(imageIdx).toBeGreaterThan(-1);
-    const standaloneRootMounts = countFlagPairs(
-      runWords,
-      '-v',
-      (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
-      imageIdx,
-    );
-    expect(
-      standaloneRootMounts,
-      'must mount STANDALONE_ROOT into the rebuild container exactly once',
-    ).toBe(1);
-    const rebuildScriptMounts = countFlagPairs(
-      runWords,
-      '-v',
-      (v) => v.startsWith('"${SCRIPT_DIR}/e2e-native-rebuild-musl.sh'),
-      imageIdx,
-    );
-    expect(
-      rebuildScriptMounts,
-      'must mount e2e-native-rebuild-musl.sh into the rebuild container exactly once',
-    ).toBe(1);
-    expect(runWords.slice(imageIdx + 1, imageIdx + 4)).toEqual([
-      'sh',
-      '/e2e-native-rebuild-musl.sh',
-      '"${STANDALONE_ROOT}"',
-    ]);
-  });
+  describe('the musl native-addon rebuild `docker run` — observed by running the real section (#1257)', () => {
+    const IMAGE_PIN = (src.match(/STANDALONE_BUN_IMAGE="([^"]+)"/) as RegExpMatchArray)[1];
 
-  describe('dockerRunWords models bash, so none of these bypasses keep the mount "present"', () => {
-    const MOUNT = '-v "${STANDALONE_ROOT}:${STANDALONE_ROOT}"';
-    const mounts = (t: string) => {
-      const w = dockerRunWords(t);
-      const img = w.indexOf('img'); // fixtures' image word; real block: STANDALONE_BUN_IMAGE
-      return countFlagPairs(
-        w,
-        '-v',
-        (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
-        img === -1 ? w.length : img,
+    it('invokes docker exactly once, synchronously, with STANDALONE_ROOT mounted BEFORE the pinned image and the rebuild script after it', () => {
+      const r = runCompileSection(src, 'ok');
+      expect(r.status, r.out).toBe(0);
+      expect(r.reachedEnd, r.out).toBe(true);
+      expect(r.dockerCalls.length, 'docker must be invoked exactly once').toBe(1);
+      expect(r.finishedBeforeExit, 'docker must have COMPLETED before the script exited').toBe(
+        true,
       );
-    };
-
-    it('sanity: the real block yields the mount exactly once', () => {
-      expect(mounts(src)).toBe(1);
+      const argv = r.dockerCalls[0];
+      expect(argv.slice(0, 2)).toEqual(['run', '--rm']);
+      const imageIdx = argv.indexOf(IMAGE_PIN);
+      expect(imageIdx, 'the pinned image ref must be an argument').toBeGreaterThan(-1);
+      const before = argv.slice(0, imageIdx);
+      const mounts = before.flatMap((w, i) => (w === '-v' ? [before[i + 1]] : []));
+      expect(
+        mounts.filter((m) => m === `${r.root}:${r.root}`).length,
+        'STANDALONE_ROOT mounted once',
+      ).toBe(1);
+      expect(
+        mounts.filter((m) =>
+          m.startsWith(`${r.scriptDir}/e2e-native-rebuild-musl.sh:/e2e-native-rebuild-musl.sh`),
+        ).length,
+        'the rebuild script mounted once',
+      ).toBe(1);
+      expect(before).toContain('KNEXT_COMPAT_MODE=credential');
+      expect(argv.slice(imageIdx + 1)).toEqual([
+        'sh',
+        '/e2e-native-rebuild-musl.sh',
+        r.root,
+        '/musl-native-lockfiles',
+      ]);
     });
 
-    // `C` is a backslash immediately followed by a newline (a continuation).
-    const C = '\\\n';
-    const IMG = 'img sh /x.sh';
-
-    it('a comment ABOVE the block quoting the mount is ignored', () => {
-      const t = `# in place: ${MOUNT}\ndocker run --rm ${C}  -e X=1 ${C}  ${IMG}`;
-      expect(mounts(t)).toBe(0);
-    });
-
-    it('a comment line INSIDE the continuation ends the command (bash runs docker with no mounts/image)', () => {
-      const t = `docker run --rm ${C}  # note ${C}  ${MOUNT} ${C}  ${IMG}`;
-      expect(mounts(t)).toBe(0);
-      expect(dockerRunWords(t)).toEqual(['docker', 'run', '--rm']);
-    });
-
-    it('the mount text inside a QUOTED value of another flag is not a mount', () => {
-      const t = `docker run --rm ${C}  -e 'N=${MOUNT}' ${C}  ${IMG}`;
-      expect(mounts(t)).toBe(0);
-    });
-
-    it('a backslash followed by a trailing space does NOT continue the command', () => {
-      const t = `docker run --rm \\ \n  ${MOUNT} ${C}  ${IMG}`;
-      expect(mounts(t)).toBe(0);
-    });
-
-    it('a mount placed AFTER the image name is an argument to the container command, not a mount', () => {
-      const t = `docker run --rm ${C}  ${IMG} ${C}  ${MOUNT}`;
-      expect(mounts(t)).toBe(0);
-    });
-
-    it('a mount hidden in a ${X:+ …} expansion fails closed', () => {
-      const t = `docker run --rm ${C}  \${KNEXT_NOPE_UNSET:+ ${MOUNT} } ${C}  ${IMG}`;
-      expect(() => dockerRunWords(t)).toThrow(/fail closed/);
-    });
-
-    it('a mount hidden in $(…) or backticks fails closed (unquoted and inside double quotes)', () => {
-      for (const frag of [`\$(: ${MOUNT} )`, `\`: ${MOUNT}\``, `-e "N=\$(id)"`, '-e "N=`id`"']) {
-        expect(() => dockerRunWords(`docker run --rm ${C}  ${frag} ${C}  ${IMG}`), frag).toThrow(
-          /fail closed/,
-        );
-      }
-    });
-
-    it('command separators and pipes in the block fail closed', () => {
-      for (const op of [';', '&&', '|']) {
-        expect(
-          () => dockerRunWords(`docker run --rm ${C}  ${MOUNT} ${C}  ${IMG} ${op} true`),
-          op,
-        ).toThrow(/fail closed/);
-      }
-    });
-
-    it('a quoted "${NAME}" (single word) stays allowed — the real block needs it', () => {
-      expect(mounts(`docker run --rm ${C}  ${MOUNT} ${C}  ${IMG} >&2`)).toBe(1);
-    });
-
-    it('TWO docker run blocks fail closed', () => {
-      const t = `docker run --rm ${C}  ${MOUNT} ${C}  ${IMG}\ndocker run --rm alpine true`;
-      expect(() => dockerRunWords(t)).toThrow(/exactly one/);
+    it('a failing docker fails the section (set -e propagates; nothing after it runs)', () => {
+      const r = runCompileSection(src, 'fail');
+      expect(r.dockerCalls.length).toBe(1);
+      expect(r.status).not.toBe(0);
+      expect(r.reachedEnd).toBe(false);
     });
   });
 
