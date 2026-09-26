@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@img/sharp-libvips-linuxmusl-x64": "^1.2.4"
+  }
+}

@@ -39,6 +39,69 @@ const DOCKERFILE_PATH = resolve(
 const NATIVE_REBUILD_SH_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 const src = readFileSync(DEPLOY_SH_PATH, 'utf8');
 
+/**
+ * The shell WORDS of the single `docker run --rm` command in `text`, modelled
+ * on bash rather than on regexes over lines:
+ *   - a backslash IMMEDIATELY before the newline joins the next line; any
+ *     other trailing character (`\ ` with a space) does not — the command
+ *     ends there;
+ *   - a `#` at the start of a word (outside quotes) begins a comment that runs
+ *     to the end of the LINE and ends the command — a comment line inside a
+ *     continuation block truncates it, it is not skipped;
+ *   - `'..'` and `".."` (with `\`-escapes) keep their contents inside ONE word,
+ *     so a flag quoted inside another flag's value is never a flag.
+ * Returns [] when there is no `docker run --rm` line. THROWS on more than one
+ * (fail closed: a guard that reads only the first of two blocks certifies
+ * whichever one it did not read).
+ */
+function dockerRunWords(text: string): string[] {
+  const lines = text.split('\n');
+  const starts = lines.flatMap((l, i) => (/^\s*docker run --rm\b/.test(l) ? [i] : []));
+  if (starts.length === 0) return [];
+  if (starts.length > 1) {
+    throw new Error(`expected exactly one docker run --rm block, found ${starts.length}`);
+  }
+  const src = lines.slice(starts[0]).join('\n');
+  const words: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  const push = () => {
+    if (cur !== '') words.push(cur);
+    cur = '';
+  };
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      cur += c;
+      if (c === '\\' && quote === '"' && i + 1 < src.length) cur += src[++i];
+      else if (c === quote) quote = null;
+    } else if (c === '\\') {
+      if (src[i + 1] === '\n') {
+        i++; // line continuation: joins, and separates words
+        push();
+      } else {
+        cur += c + (src[i + 1] ?? '');
+        i++;
+      }
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      cur += c;
+    } else if (c === '#' && cur === '') {
+      const nl = src.indexOf('\n', i);
+      i = nl === -1 ? src.length : nl - 1; // comment to EOL; the newline then ends the command
+    } else if (c === '\n') {
+      break;
+    } else if (/[ \t]/.test(c)) push();
+    else cur += c;
+  }
+  push();
+  return words;
+}
+
+/** How many times `flag` is immediately followed by a value word satisfying `ok`. */
+const countFlagPairs = (words: string[], flag: string, ok: (v: string) => boolean): number =>
+  words.filter((w, i) => w === flag && i + 1 < words.length && ok(words[i + 1])).length;
+
 describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec (#1166/#1225)', () => {
   it('compiles the standalone server via the shipped standalone-compile script', () => {
     expect(
@@ -151,17 +214,82 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
       src.indexOf('# ── 3b. compile the standalone-on-Bun bytecode executable'),
       src.indexOf('# ── 4. boot the standalone server on a free port'),
     );
+    // Flag order within the `docker run --rm ...` invocation is not load-bearing
+    // (docker does not care whether `-e` or `-v` comes first) — #1257 inserted
+    // `-e "KNEXT_COMPAT_MODE=..."` ahead of the `-v` mounts to forward compat
+    // mode into the rebuild container (see musl-rebuild-credential-mode.test.ts),
+    // so this asserts the required flags as a SET, each exactly once, rather
+    // than pinning a specific adjacency.
+    expect(compileBlock.includes('docker run --rm'), 'must invoke docker run --rm').toBe(true);
+    const runWords = dockerRunWords(compileBlock);
+    expect(runWords.length, 'the docker run --rm command must be found').toBeGreaterThan(0);
+    const standaloneRootMounts = countFlagPairs(
+      runWords,
+      '-v',
+      (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
+    );
     expect(
-      /docker run --rm \\\s*\n\s*-v "\$\{STANDALONE_ROOT\}:\$\{STANDALONE_ROOT\}" \\\s*\n\s*-v "\$\{SCRIPT_DIR\}\/e2e-native-rebuild-musl\.sh/.test(
-        compileBlock,
-      ),
-      'must run e2e-native-rebuild-musl.sh inside STANDALONE_BUN_IMAGE against the STANDALONE_ROOT before boot',
-    ).toBe(true);
+      standaloneRootMounts,
+      'must mount STANDALONE_ROOT into the rebuild container exactly once',
+    ).toBe(1);
+    const rebuildScriptMounts = countFlagPairs(runWords, '-v', (v) =>
+      v.startsWith('"${SCRIPT_DIR}/e2e-native-rebuild-musl.sh'),
+    );
     expect(
-      /"\$\{STANDALONE_BUN_IMAGE\}"\s*\\\s*\n\s*sh \/e2e-native-rebuild-musl\.sh "\$\{STANDALONE_ROOT\}"/.test(
-        compileBlock,
-      ),
-    ).toBe(true);
+      rebuildScriptMounts,
+      'must mount e2e-native-rebuild-musl.sh into the rebuild container exactly once',
+    ).toBe(1);
+    const imageIdx = runWords.indexOf('"${STANDALONE_BUN_IMAGE}"');
+    expect(imageIdx).toBeGreaterThan(-1);
+    expect(runWords.slice(imageIdx + 1, imageIdx + 4)).toEqual([
+      'sh',
+      '/e2e-native-rebuild-musl.sh',
+      '"${STANDALONE_ROOT}"',
+    ]);
+  });
+
+  describe('dockerRunWords models bash, so none of these bypasses keep the mount "present"', () => {
+    const MOUNT = '-v "${STANDALONE_ROOT}:${STANDALONE_ROOT}"';
+    const mounts = (t: string) =>
+      countFlagPairs(
+        dockerRunWords(t),
+        '-v',
+        (v) => v === '"${STANDALONE_ROOT}:${STANDALONE_ROOT}"',
+      );
+
+    it('sanity: the real block yields the mount exactly once', () => {
+      expect(mounts(src)).toBe(1);
+    });
+
+    // `C` is a backslash immediately followed by a newline (a continuation).
+    const C = '\\\n';
+    const IMG = 'img sh /x.sh';
+
+    it('a comment ABOVE the block quoting the mount is ignored', () => {
+      const t = `# in place: ${MOUNT}\ndocker run --rm ${C}  -e X=1 ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+    });
+
+    it('a comment line INSIDE the continuation ends the command (bash runs docker with no mounts/image)', () => {
+      const t = `docker run --rm ${C}  # note ${C}  ${MOUNT} ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+      expect(dockerRunWords(t)).toEqual(['docker', 'run', '--rm']);
+    });
+
+    it('the mount text inside a QUOTED value of another flag is not a mount', () => {
+      const t = `docker run --rm ${C}  -e 'N=${MOUNT}' ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+    });
+
+    it('a backslash followed by a trailing space does NOT continue the command', () => {
+      const t = `docker run --rm \\ \n  ${MOUNT} ${C}  ${IMG}`;
+      expect(mounts(t)).toBe(0);
+    });
+
+    it('TWO docker run blocks fail closed', () => {
+      const t = `docker run --rm ${C}  ${MOUNT} ${C}  ${IMG}\ndocker run --rm alpine true`;
+      expect(() => dockerRunWords(t)).toThrow(/exactly one/);
+    });
   });
 
   it('e2e-native-rebuild-musl.sh is a fast no-op when the standalone tree has no native addons', () => {
@@ -178,8 +306,13 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
   it('e2e-native-rebuild-musl.sh is best-effort per package (a rebuild failure warns, never aborts the whole script)', () => {
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
     expect(/^set -eu$/m.test(rebuildSrc)).toBe(true);
+    // #1257 round 7 — the fresh-install branch now lives inside an `else`
+    // (the pinned-lockfile `npm ci` branch runs first when a committed
+    // lockfile matches), and the install itself runs via `run_as_builder`
+    // (su-exec'd to the unprivileged `builder` user) rather than directly
+    // as root.
     expect(
-      /if ! \(cd "\$\{PKG_SCRATCH\}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
+      /if ! \(cd "\$\{PKG_SCRATCH\}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
         rebuildSrc,
       ),
       'a per-package fresh-install failure must be caught (the `if !` guard), not let a failing `npm install` kill the whole script under set -e',
@@ -256,12 +389,15 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
 
   it('e2e-native-rebuild-musl.sh sends apk output to stderr, not /dev/null (round-6 review finding — set -eu gave an opaque abort on an apk failure)', () => {
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    // #1257 round 7 — `su-exec` joined the apk package list (needed to drop
+    // root before any install-time code runs); the stdout-only-silenced
+    // shape this test protects is otherwise unchanged.
     expect(
-      /apk add --no-cache python3 make g\+\+ npm >\/dev\/null$/m.test(rebuildSrc),
+      /apk add --no-cache python3 make g\+\+ npm su-exec >\/dev\/null$/m.test(rebuildSrc),
       'apk stdout may still be silenced, but stderr must flow (no trailing 2>&1 redirecting it into /dev/null too) so a failure under set -eu is diagnosable',
     ).toBe(true);
     expect(
-      rebuildSrc.includes('apk add --no-cache python3 make g++ npm >/dev/null 2>&1'),
+      rebuildSrc.includes('apk add --no-cache python3 make g++ npm su-exec >/dev/null 2>&1'),
       'the old shape swallowed BOTH streams — must be gone',
     ).toBe(false);
   });

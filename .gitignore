@@ -69,6 +69,10 @@ cors.json
 *.log
 
 package-lock.json
+# #1257 — the committed musl-native-addon lockfiles are the whole point
+# (npm ci needs a REAL, tracked package-lock.json to be reproducible) —
+# negate the blanket ignore above for this one directory.
+!scripts/musl-native-lockfiles/**/package-lock.json
 
 # Testing
 coverage/

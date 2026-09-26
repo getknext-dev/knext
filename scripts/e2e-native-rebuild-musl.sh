@@ -99,9 +99,63 @@
 #      round-6 note because it was found and fixed alongside the three
 #      defects above: `docker run` now passes `--user "$(id -u):$(id -g)"`,
 #      which also stops the container leaving root-owned files behind.
+#
+# ROUND 7 (#1257 — CI supply-chain surface): this whole SCRIPT still runs as
+# root inside the container (apk add needs it), and every `npm install`
+# — install scripts included — ran as that same root, with no lockfile, so
+# npm resolved whatever the registry currently serves for a name's
+# TRANSITIVE deps on every single deploy. Two independent fixes, addressing
+# each acceptance criterion in #1257:
+#
+#   - INSTALL SCRIPTS NO LONGER RUN AS ROOT. `apk add`s `su-exec` (the
+#     standard Alpine lightweight `su`/`gosu` equivalent) alongside the
+#     toolchain, creates an unprivileged `builder` user, and every
+#     `npm install`/`npm ci` call is `su-exec`'d to that user, each into a
+#     freshly `chown`'d scratch dir it owns. `apk add` itself is the only
+#     step that still needs root — it is the last root-run step before any
+#     package.json's install script (or npm/node-gyp's own machinery) ever
+#     executes. The final ownership restore (the EXIT trap below) already
+#     re-chowns everything under ROOT back to the invoking host user
+#     regardless of which container-internal user wrote it, so this changes
+#     WHO the install-time code runs as, not the end result on disk.
+#   - NPM RESOLUTION IS REPRODUCIBLE FOR THE KNOWN CORPUS. For every
+#     name@version this script has a COMMITTED, real `npm ci`-compatible
+#     lockfile for (`scripts/musl-native-lockfiles/<safe-name>-<version>/`,
+#     generated once via `npm install --package-lock-only`, mounted
+#     alongside this script — see scripts/e2e-deploy.sh), it runs `npm ci`
+#     against that lockfile instead of a fresh `npm install`: every
+#     transitive dependency's exact version AND its registry-recorded
+#     integrity hash are fixed, not re-resolved against whatever the
+#     registry serves today. A name@version this script has NOT seen before
+#     (no committed lockfile — e.g. a new fixture's addon) falls back to the
+#     pre-existing best-effort fresh `npm install`, loudly marked as the
+#     non-reproducible path so it is never confused with the pinned one.
+#     `scripts/generate-musl-native-lockfile.sh` is the (real-network,
+#     contributor-run, not CI-run) tool that adds a new pin to that corpus.
+#
+# NOT done here, and stated rather than left implicit (#1257's other
+# acceptance leg): the `apk add` toolchain packages themselves are pinned by
+# NAME only, not by an exact NEVRA version or content digest — this script
+# cannot safely author those pins without a live container to resolve
+# against (no local docker in this environment; guessing a version risks
+# either being wrong, in which case CI reds outright, or being silently
+# stale). Alpine's package index IS signature-verified by `apk` itself
+# against Alpine's own trusted keys (not a bare unauthenticated mirror
+# fetch), and the base image `apk add` runs inside is already pinned by OCI
+# digest (`STANDALONE_BUN_IMAGE` in scripts/e2e-deploy.sh) — so this is a
+# real, if narrower, gap than a full digest pin: a mirror-side security
+# patch to python3/make/g++/npm/su-exec between two runs of this script can
+# still shift the exact toolchain build without either pin changing. Tracked
+# to close in a follow-up once a live CI run's `apk add` output supplies the
+# exact resolved versions to pin against (see the PR description).
 set -eu
 
-ROOT="${1:?usage: e2e-native-rebuild-musl.sh <standalone-root>}"
+ROOT="${1:?usage: e2e-native-rebuild-musl.sh <standalone-root> [lockfiles-dir]}"
+# Optional: a bind-mounted copy of scripts/musl-native-lockfiles/ (#1257) —
+# absent (back-compat / the pre-#1257 call shape) means every install falls
+# back to the non-reproducible fresh-install path, same as before this
+# round. See scripts/e2e-deploy.sh for how this is mounted in practice.
+LOCKFILES_DIR="${2:-}"
 
 HITS="$(find "${ROOT}" -name '*.node' -type f 2>/dev/null || true)"
 if [ -z "${HITS}" ]; then
@@ -129,13 +183,56 @@ trap restore_ownership EXIT
 # python3/make/g++: the node-gyp toolchain a from-source rebuild needs (see
 # the header's toolchain tradeoff note). npm: the pinned alpine base ships
 # bun only (no npm) — see Dockerfile.standalone.hbs's "oven/bun ships bun
-# ONLY" note. stdout only is suppressed — an apk failure under `set -eu`
-# must not abort with zero diagnostic output (review finding): stderr
-# reaches the caller's log.
-apk add --no-cache python3 make g++ npm >/dev/null
+# ONLY" note. su-exec: what drops root before any install-time code runs
+# (#1257 round 7 — see the header note). stdout only is suppressed — an apk
+# failure under `set -eu` must not abort with zero diagnostic output (review
+# finding): stderr reaches the caller's log.
+apk add --no-cache python3 make g++ npm su-exec >/dev/null
+
+# #1257 round 7 — an unprivileged user every npm install/ci below is
+# `su-exec`'d to, so install scripts (and anything node-gyp/npm itself runs)
+# never execute as root. `-D` (no password), `-H` (no default /home/<user>
+# creation — BUILD_HOME below is created explicitly instead, since it needs
+# to exist and be owned by `builder` before `adduser` would otherwise try to
+# create+chown it under a path this script does not control).
+BUILD_HOME="$(mktemp -d)"
+# -s /bin/sh, not /sbin/nologin: su-exec execs the target command directly
+# (never a login shell), so the shell field is inert either way — /bin/sh is
+# used only because it is guaranteed present on every Alpine image via
+# busybox, whereas /sbin/nologin is not always installed.
+adduser -D -H -h "${BUILD_HOME}" -s /bin/sh builder
+chown -R builder:builder "${BUILD_HOME}"
 
 SCRATCH_ROOT="$(mktemp -d)"
+# #1257 round 7 — LIVE-VERIFIED bug (a direct `docker run` repro, not
+# reasoned from docs): `mktemp -d` makes SCRATCH_ROOT `drwx------` root-owned.
+# Chowning a per-package dir NESTED under it to `builder` is not enough —
+# directory TRAVERSAL requires execute permission on every ANCESTOR
+# directory too, and SCRATCH_ROOT itself had none for `builder`. Without
+# this, `su-exec builder ... npm ci` inside a per-package dir failed with
+# npm's generic "can only install with an existing package-lock.json" (npm
+# could not even STAT the files, let alone read them) — a misleading error
+# that looks like a missing/corrupt lockfile, not a permissions problem.
+# 0711: execute-only for group/other (traversal into a NAMED child works;
+# `ls`/`cat` directly against SCRATCH_ROOT itself still does not) — the
+# actual package dirs underneath stay individually `chown`'d to `builder`.
+chmod 0711 "${SCRATCH_ROOT}"
 DONE=""
+
+# Run <cmd...> as the unprivileged `builder` user, with HOME pointed at the
+# dedicated (builder-owned) home dir so npm's own cache/config never touches
+# anything root-owned. `env` (not a bare `su-exec builder VAR=val cmd`,
+# which su-exec/exec would treat `VAR=val` as the command name, not an
+# assignment) applies the extra env vars to the exec'd process only.
+run_as_builder() { # [VAR=val ...] -- <cmd...>
+  su-exec builder:builder env HOME="${BUILD_HOME}" "$@"
+}
+
+# lockfile_key / pinned_lockfile_dir_for: pure lookup helpers, kept in a
+# separate side-effect-free lib so they are independently testable without
+# docker/apk — see that file's header and tests/musl-lockfile-lookup.test.ts.
+# shellcheck source=./lib/musl-lockfile-lookup.sh
+. "$(dirname "$0")/lib/musl-lockfile-lookup.sh"
 
 # Install <spec> (name@version) for musl and copy the resulting
 # node_modules/<dest-name> in at ${ROOT}/node_modules/<dest-name> — used by
@@ -143,18 +240,65 @@ DONE=""
 # package) differs from nothing else in scope but must be threaded through
 # explicitly. Best-effort: a failure WARNs and returns non-zero, never
 # aborts the script (the caller decides whether that's fatal for it).
+#
+# #1257 round 7 — REPRODUCIBLE when a committed lockfile matches <spec>'s
+# own name@version: `npm ci` against it installs the exact transitive
+# closure (versions AND integrity hashes) that lockfile records, never
+# re-resolving against whatever the registry serves right now. Otherwise
+# falls back to the pre-existing fresh `npm install` (best-effort, not
+# reproducible) — both paths now run as the unprivileged `builder` user.
 musl_install_sibling() { # <spec> <dest-name>
   _spec="$1"
   _dest_name="$2"
+  _spec_name="${_spec%@*}"
+  _spec_version="${_spec##*@}"
   _pkg_scratch="$(mktemp -d "${SCRATCH_ROOT}/pkg.XXXXXX")"
-  if ! (cd "${_pkg_scratch}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${_spec}" >"${_pkg_scratch}.log" 2>&1); then
-    echo "[native-rebuild] WARNING: fresh musl install of ${_spec} failed"
-    tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
-    return 1
+  chown builder:builder "${_pkg_scratch}"
+  _pinned_dir="$(pinned_lockfile_dir_for "${_spec_name}" "${_spec_version}")"
+  if [ -n "${_pinned_dir}" ]; then
+    cp "${_pinned_dir}/package.json" "${_pkg_scratch}/package.json"
+    cp "${_pinned_dir}/package-lock.json" "${_pkg_scratch}/package-lock.json"
+    chown builder:builder "${_pkg_scratch}/package.json" "${_pkg_scratch}/package-lock.json"
+    echo "[native-rebuild] ${_spec}: using the committed, reproducible lockfile at ${_pinned_dir}"
+    if ! (cd "${_pkg_scratch}" && run_as_builder npm ci --no-audit --no-fund >"${_pkg_scratch}.log" 2>&1); then
+      echo "[native-rebuild] WARNING: reproducible 'npm ci' of ${_spec} failed (the committed lockfile may be stale)"
+      tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
+      return 1
+    fi
+  else
+    # techdebt-3 fix: a credential run's whole point is a REPRODUCIBLE
+    # result — silently falling back to an unpinned, registry-resolved-at-
+    # rebuild-time install would make a "credential" claim about a tree
+    # whose native-addon transitive deps were never actually pinned. An
+    # early-warning run may still take the best-effort fallback (that is
+    # what it exists to surface), so this only refuses in credential mode.
+    if [ "${KNEXT_COMPAT_MODE:-}" = "credential" ]; then
+      # techdebt-4 fix (round-2 finding): a bare `return 1` here was
+      # swallowed identically to a real network failure by this function's
+      # caller (which just logs a fallback warning and moves on) — a
+      # credential run could silently skip an unpinned addon's reproducible
+      # rebuild and still exit 0. `::error::` surfaces in the GitHub Actions
+      # UI even if something downstream swallows the exit code; `exit 1`
+      # terminates the `while read` subshell this runs inside, which makes
+      # the enclosing pipeline (and, under `set -eu`, the whole script)
+      # fail loudly instead.
+      echo "::error::[native-rebuild] no committed, reproducible lockfile for ${_spec} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
+      exit 1
+    fi
+    if ! (cd "${_pkg_scratch}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${_spec}" >"${_pkg_scratch}.log" 2>&1); then
+      echo "[native-rebuild] WARNING: fresh (non-reproducible — no committed lockfile for ${_spec}) musl install of ${_spec} failed"
+      tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
+      return 1
+    fi
+    # Loud on SUCCESS too (techdebt-3 fix) — a silent-on-success fallback
+    # means the ONLY signal that this run was non-reproducible was a WARNING
+    # that never printed, because nothing failed. `::warning::` surfaces in
+    # the GitHub Actions UI even on a fully green job.
+    echo "::warning::[native-rebuild] ${_spec}: installed via the NON-REPRODUCIBLE fresh-install fallback (no committed lockfile) — transitive dependency versions were resolved against the registry at rebuild time, not pinned"
   fi
   _fresh_dir="${_pkg_scratch}/node_modules/${_dest_name}"
   if [ ! -d "${_fresh_dir}" ]; then
-    echo "[native-rebuild] WARNING: fresh install of ${_spec} produced no node_modules/${_dest_name}"
+    echo "[native-rebuild] WARNING: install of ${_spec} produced no node_modules/${_dest_name}"
     return 1
   fi
   _dest="${ROOT}/node_modules/${_dest_name}"
@@ -275,26 +419,63 @@ echo "${HITS}" | while IFS= read -r f; do
     ;;
   esac
 
-  echo "[native-rebuild] fresh-installing ${NAME}@${VERSION} for musl (the traced tree at ${d} lacks install-time tooling like node-pre-gyp — a rebuild IN PLACE cannot run its own install script)"
+  echo "[native-rebuild] installing ${NAME}@${VERSION} for musl (the traced tree at ${d} lacks install-time tooling like node-pre-gyp — a rebuild IN PLACE cannot run its own install script)"
   PKG_SCRATCH="$(mktemp -d "${SCRATCH_ROOT}/pkg.XXXXXX")"
-  # npm_config_build_from_source=true (review finding, round 4 — live CI
-  # evidence, run 35862123588): WITHOUT this, `npm install` runs sqlite3's
-  # own `node-pre-gyp install --fallback-to-build`, which tries a PREBUILT
-  # download FIRST. That old node-pre-gyp does not check libc at all when
-  # picking a prebuilt — it only matches platform+arch (e.g.
-  # "linux-x64") — so on a network-connected runner it happily downloads
-  # the (only ever published) GLIBC prebuilt, "succeeds" with no warning,
-  # and the exact same ERR_DLOPEN_FAILED resurfaces. `--fallback-to-build`
-  # only triggers when the prebuilt fetch itself FAILS, which is what
-  # happened in every local repro here (this sandbox's network could not
-  # reach the prebuilt host) — that let round 2/3's local proof pass while
-  # the identical fix still failed on CI's well-connected runner. Forcing
-  # build-from-source removes the prebuilt-fetch path entirely, so the
-  # result is never network-dependent.
-  if ! (cd "${PKG_SCRATCH}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${NAME}@${VERSION}" >"${PKG_SCRATCH}.log" 2>&1); then
-    echo "[native-rebuild] WARNING: fresh musl install of ${NAME}@${VERSION} failed — this addon may still fail to dlopen under musl at runtime (original error will resurface, not masked)"
-    tail -c 4096 "${PKG_SCRATCH}.log" 2>/dev/null || true
-    continue
+  chown builder:builder "${PKG_SCRATCH}"
+  # #1257 round 7 — reproducible via a committed lockfile when this exact
+  # name@version has one (same mechanism as musl_install_sibling above);
+  # otherwise the pre-existing best-effort fresh install, now non-root.
+  PINNED_DIR="$(pinned_lockfile_dir_for "${NAME}" "${VERSION}")"
+  if [ -n "${PINNED_DIR}" ]; then
+    cp "${PINNED_DIR}/package.json" "${PKG_SCRATCH}/package.json"
+    cp "${PINNED_DIR}/package-lock.json" "${PKG_SCRATCH}/package-lock.json"
+    chown builder:builder "${PKG_SCRATCH}/package.json" "${PKG_SCRATCH}/package-lock.json"
+    echo "[native-rebuild] ${NAME}@${VERSION}: using the committed, reproducible lockfile at ${PINNED_DIR}"
+    if ! (cd "${PKG_SCRATCH}" && run_as_builder npm ci --no-audit --no-fund >"${PKG_SCRATCH}.log" 2>&1); then
+      echo "[native-rebuild] WARNING: reproducible 'npm ci' of ${NAME}@${VERSION} failed (the committed lockfile may be stale) — this addon may still fail to dlopen under musl at runtime (original error will resurface, not masked)"
+      tail -c 4096 "${PKG_SCRATCH}.log" 2>/dev/null || true
+      continue
+    fi
+  else
+    # techdebt-3 fix — same credential-mode refusal as musl_install_sibling
+    # above: a credential run's claim is a REPRODUCIBLE result, so it must
+    # not silently take the unpinned fallback.
+    if [ "${KNEXT_COMPAT_MODE:-}" = "credential" ]; then
+      # techdebt-4 fix (round-2 finding): a bare `continue` here just moved
+      # to the next *.node hit in this SAME `while read` loop, so a
+      # credential run could silently skip an unpinned addon's reproducible
+      # rebuild (e.g. sqlite3, no lockfile yet — #1426) and still exit 0,
+      # with the actual failure only surfacing later as ERR_DLOPEN_FAILED in
+      # a downstream fixture, unattributed to the credential-mode
+      # violation. `::error::` surfaces in the GitHub Actions UI even if
+      # something downstream swallows the exit code; `exit 1` terminates
+      # this subshell, which makes the enclosing pipeline (and, under
+      # `set -eu`, the whole script) fail loudly instead.
+      echo "::error::[native-rebuild] no committed, reproducible lockfile for ${NAME}@${VERSION} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
+      exit 1
+    fi
+    # npm_config_build_from_source=true (review finding, round 4 — live CI
+    # evidence, run 35862123588): WITHOUT this, `npm install` runs sqlite3's
+    # own `node-pre-gyp install --fallback-to-build`, which tries a PREBUILT
+    # download FIRST. That old node-pre-gyp does not check libc at all when
+    # picking a prebuilt — it only matches platform+arch (e.g.
+    # "linux-x64") — so on a network-connected runner it happily downloads
+    # the (only ever published) GLIBC prebuilt, "succeeds" with no warning,
+    # and the exact same ERR_DLOPEN_FAILED resurfaces. `--fallback-to-build`
+    # only triggers when the prebuilt fetch itself FAILS, which is what
+    # happened in every local repro here (this sandbox's network could not
+    # reach the prebuilt host) — that let round 2/3's local proof pass while
+    # the identical fix still failed on CI's well-connected runner. Forcing
+    # build-from-source removes the prebuilt-fetch path entirely, so the
+    # result is never network-dependent.
+    if ! (cd "${PKG_SCRATCH}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "${NAME}@${VERSION}" >"${PKG_SCRATCH}.log" 2>&1); then
+      echo "[native-rebuild] WARNING: fresh (non-reproducible — no committed lockfile for ${NAME}@${VERSION}) musl install failed — this addon may still fail to dlopen under musl at runtime (original error will resurface, not masked)"
+      tail -c 4096 "${PKG_SCRATCH}.log" 2>/dev/null || true
+      continue
+    fi
+    # Loud on SUCCESS too (techdebt-3 fix) — see musl_install_sibling above
+    # for why a silent-on-success fallback is the actual gap.
+    echo "::warning::[native-rebuild] ${NAME}@${VERSION}: installed via the NON-REPRODUCIBLE fresh-install fallback (no committed lockfile) — transitive dependency versions were resolved against the registry at rebuild time, not pinned"
   fi
   FRESH_PKG_DIR="${PKG_SCRATCH}/node_modules/${NAME}"
   if [ ! -d "${FRESH_PKG_DIR}" ]; then
