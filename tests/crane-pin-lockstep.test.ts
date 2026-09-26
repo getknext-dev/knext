@@ -437,6 +437,16 @@ describe('scanCraneVersionComments (the scanner itself, against synthetic snippe
     expect(scanCraneVersionComments(text)).toEqual([[]]);
   });
 
+  it('a comment containing "go 1.22.3" (a Go release version, not crane) is correctly ignored — v-prefix required', () => {
+    const text = '# built with go 1.22.3\n' + `CRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([[]]);
+  });
+
+  it('a comment containing "10.0.0.1" (an IP address, not crane) is correctly ignored — v-prefix required', () => {
+    const text = '# from release published to 10.0.0.1\n' + `CRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([[]]);
+  });
+
   it('non-vacuity: the real workflows carry this comment, and every occurrence resolves to a real version', () => {
     let total = 0;
     for (const file of [
@@ -474,7 +484,7 @@ describe("scanCranePins — a crane pin's accompanying comment must track ITS OW
         readSource: () => text,
         listFiles: () => ['synthetic.yml'],
       }),
-    ).toThrow(/comment has drifted/);
+    ).toThrow(/comment block names.*but its own CRANE_VERSION is/);
   });
 
   it('no comment at all is now a VIOLATION (fail if absent) — every pinned crane URL must carry one', () => {
@@ -501,7 +511,7 @@ describe("scanCranePins — a crane pin's accompanying comment must track ITS OW
         readSource: () => text,
         listFiles: () => ['synthetic.yml'],
       }),
-    ).toThrow(/comment has drifted/);
+    ).toThrow(/comment block names.*but its own CRANE_VERSION is/);
   });
 
   it('a comment naming the pin AND a stale version is rejected — every version token in the block must match', () => {

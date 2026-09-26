@@ -125,12 +125,13 @@ function countDownloadUrlOccurrences(text) {
  *
  * For each (non-comment) `CRANE_SHA256` line, walks UPWARD collecting the
  * contiguous block of full-line `#` comments directly above it (stopping at
- * the first non-comment line), then extracts EVERY `v?X.Y.Z`-shaped token in
- * that block. Deliberately loose about the surrounding prose — only the
- * version TOKEN is pinned to a shape, not the sentence around it — because
- * the point is which version the comment NAMES, not which phrasing it uses.
- * All tokens are returned (not just the first) so the caller can also reject
- * a block that names the pin's version AND a stale one.
+ * the first non-comment line), then extracts EVERY `vX.Y.Z`-shaped token in
+ * that block (v-prefix REQUIRED — accepts `vX.Y.Z` only, not bare X.Y.Z like
+ * `go 1.22.3` or IP addresses like `10.0.0.1`). Deliberately loose about the
+ * surrounding prose — only the version TOKEN is pinned to a shape, not the
+ * sentence around it — because the point is which version the comment NAMES,
+ * not which phrasing it uses. All tokens are returned (not just the first) so
+ * the caller can also reject a block that names the pin's version AND a stale one.
  *
  * A `CRANE_SHA256` line that is itself a full-line `#` comment is skipped,
  * exactly as `scanCraneChecksums` never sees it (it runs on stripped text) —
@@ -151,14 +152,17 @@ export function scanCraneVersionComments(text) {
   const lines = text.split('\n');
   const shaAssignRe = /\bCRANE_SHA256\b\s*[:=]\s*['"]?[0-9a-f]{64}['"]?/i;
   const commentLineRe = /^[ \t]*#/;
-  const versionTokenRe = /\bv?\d+\.\d+\.\d+\b/gi;
+  // v-prefix REQUIRED: matches vX.Y.Z only, not bare X.Y.Z like "go 1.22.3"
+  // or IP addresses like "10.0.0.1". Word boundary after Z ensures we don't
+  // capture the X.Y.Z part of a longer dotted number.
+  const versionTokenRe = /\bv\d+\.\d+\.\d+\b/gi;
   const out = [];
   for (let i = 0; i < lines.length; i++) {
     if (commentLineRe.test(lines[i]) || !shaAssignRe.test(lines[i])) continue;
     const block = [];
     for (let j = i - 1; j >= 0 && commentLineRe.test(lines[j]); j--) block.unshift(lines[j]);
     const tokens = block.join('\n').match(versionTokenRe) ?? [];
-    out.push(tokens.map((t) => `v${t.replace(/^v/i, '')}`));
+    out.push(tokens.map((t) => t.toLowerCase()));
   }
   return out;
 }
@@ -233,9 +237,10 @@ export function scanCranePins(workflowsDir, deps = {}) {
       const stale = named.filter((cv) => cv !== versions[i]);
       if (stale.length > 0) {
         throw new Error(
-          `${file}: crane pin #${i + 1}'s accompanying comment names ${stale.join(', ')}, but its ` +
-            `own CRANE_VERSION is ${versions[i]} — the comment has drifted from the pin it ` +
-            `describes (#1429).`,
+          `${file}: crane pin #${i + 1}'s accompanying comment block names ${stale.join(', ')}, but its ` +
+            `own CRANE_VERSION is ${versions[i]} — every vX.Y.Z token in the comment block must ` +
+            `equal the pin's version (one version per block; tokens without v prefix like 'go 1.22.3' ` +
+            `or IP addresses like '10.0.0.1' are intentionally rejected) (#1429).`,
         );
       }
     }
