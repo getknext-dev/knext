@@ -17,7 +17,8 @@ It is **not** a general-purpose PaaS, and **not** "Coolify for Kubernetes." The 
 <Callout type="info">
 **Validated against the official suite.** knext passes the official Next.js deploy-mode e2e suite
 on the Node runtime — **778 tests, zero failures**, re-verified **nightly** against Next.js 16.2.
-The exact scope (including documented exclusions and the Bun lane's most recently observed 775/778) is on
+The default Bun cell has one 778/0 run on the compiled executable. The exact scope (including
+documented exclusions and per-cell status) is on
 [Verified compatibility](/docs/compat-suite); per-feature status lives in the
 [compatibility matrix](/docs/compat-matrix).
 </Callout>
@@ -76,7 +77,7 @@ deployability, and pay-per-use — per self-contained system.
 
 <Callout type="info">
 **Honest scope — substrate today, framework tomorrow.** What ships in knext core *today* is the
-substrate: the compiled single-executable build, per-zone scale-to-zero deploy, `assetPrefix` wiring, and serving
+substrate: the compiled build, per-zone scale-to-zero deploy, `assetPrefix` wiring, and serving
 the App Shell. The full SCS toolkit — a `generate zone` scaffolder, micro-frontend (asset +
 Module-Federation) isolation, and the PWA stitching layer — is the **end goal**; today those are
 app-level recipes, not framework code. They will be promoted into core only **after** the
@@ -88,7 +89,7 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 
 - **Honest claims, verified in the open.** The default build (`next build`) uses knext's adapter on
   the official Next.js Deployment Adapter API (`@getknext/core/adapter`) — the lane where its
-  778/778 suite credential was earned. A selectable **vinext** build (an open-source Vite-based
+  778/778 suite result was earned. A selectable **vinext** build (an open-source Vite-based
   Next.js implementation, compiled into a single executable) is also available, and knext never
   blurs which claim covers which path. See
   [The adapter and the compiled build](/docs/official-adapter).
@@ -97,14 +98,16 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
   [Verified compatibility](/docs/compat-suite).
 - **True scale-to-zero.** Knative's autoscaler + activator take idle services to `0` replicas and
   wake them on the first request. See [Scale-to-zero & cold starts](/docs/scale-to-zero).
-- **A compiled single executable by default.** The server bundle is minified and precompiled to
-  bytecode at build time, then baked together with the Bun runtime into one binary — measured
-  **61 ms** process boot and **1103 req/s** against the Node standalone's 884 ms / 630 req/s (boot
+- **A compiled executable by default.** The standalone server is minified and precompiled to
+  bytecode at build time, then baked together with the Bun runtime into one binary that runs inside
+  the standalone folder. The optional `vinext` build's whole-app executable measured **61 ms**
+  process boot and **1103 req/s** against the Node standalone's 884 ms / 630 req/s — local numbers
+  from a warm binary, not a cluster cold start (boot
   is one component of the Knative cold-start budget, which the platform's scheduling dominates —
   see [Scale-to-zero & cold starts](/docs/scale-to-zero)). See
   [Bun & the compiled executable](/docs/bun-runtime) and [Bytecode caching](/docs/bytecode).
-- **The standalone shape remains supported** for existing deployments: the same `server.js` runs
-  under Node or Bun (`runtime: 'bun'`), exercised against the official suite. See
+- **Node stays available.** Set `runtime: 'node'` and the same standalone `server.js` runs under
+  Node with a baked V8 compile cache, exercised against the official suite. See
   [Bun & the compiled executable](/docs/bun-runtime).
 - **The operator is the source of truth.** A Go operator reconciles a `NextApp` custom resource
   into a Knative Service, reports honest `Ready`/`Degraded` conditions, and rejects
@@ -117,22 +120,20 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 - **Signed, scanned supply chain.** Every published image is Trivy-gated before push, carries an
   SBOM attestation and SLSA provenance, and is cosign-signed on the pushed digest. See
   [Security](/docs/security#supply-chain).
-- **Multi-cloud object storage.** Assets go to `gcs`, `s3`, or `minio`. See
+- **Multi-cloud object storage.** Assets go to `gcs`, `s3`, `minio`, or `azure`. See
   [Multi-cloud deploy](/docs/multi-cloud).
 
 ## This site is built to run on knext
 
 This documentation site is itself a Next.js App-Router app (Fumadocs + MDX). It is **built to deploy
-on knext**: with `KNEXT_ADAPTER=1` it builds with `output: 'standalone'` and the knext official
-adapter — the same path it documents — and its dogfood config
-([`kn-next.config.ts`](https://github.com/getknext-dev/docs)) and deploy runbook (`DEPLOY.md`) live
-in this repo.
+on knext**: it builds with the selectable `vinext` build (`build: 'vinext'`) and deploys as a
+scale-to-zero Knative Service. Its dogfood config (`kn-next.config.ts`) and deploy runbook
+(`DEPLOY.md`) live in the knext repository, under `apps/docs`.
 
 <Callout type="info">
 **Honest status.** Right now this site is served on **Vercel** at `knext.dev` while the self-host
-cluster is being stood up. Without `KNEXT_ADAPTER=1` the repo builds as a vanilla Next.js app
-(which is what the managed host runs). **Migrating it onto knext is the dogfood target** — it is
-not the live deployment today.
+cluster is being stood up. The repository builds the same app for Vercel with a different build
+preset. **Migrating it onto knext is the dogfood target** — it is not the live deployment today.
 </Callout>
 
 ## License

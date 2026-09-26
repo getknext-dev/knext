@@ -29,12 +29,15 @@ closer one.
 ## Turning it on
 
 ```ts title="kn-next.config.ts"
-import { defineConfig } from '@getknext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
-export default defineConfig({
+const config: KnativeNextConfig = {
   name: 'shop',
+  registry: 'registry.example.com/shop',
   scaling: { minScale: 0, imagePrewarm: true },
-});
+};
+
+export default config;
 ```
 
 Deploy as usual. knext then keeps a copy of your application image **pulled and resident on every

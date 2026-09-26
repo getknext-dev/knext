@@ -22,8 +22,8 @@ npx @getknext/core --version
 ```
 
 `@getknext/core` is the whole deploy path in one package: the official Next.js adapter, the typed
-config, and the `knext` CLI. The CLI lands on your `PATH` via `node_modules/.bin`, so `npx
-knext` works without a global install.
+config, and the `knext` CLI. The CLI lands on your `PATH` via `node_modules/.bin`, so
+`npx @getknext/core <command>` works without a global install.
 
 ## Point Next.js at the adapter
 
@@ -58,7 +58,6 @@ framework, compiled into one executable — does not use this adapter; see
 
 - forces `output: 'standalone'`, so `next build` emits a self-contained server — you do not add this
   yourself;
-- wires the Redis cache handler, if you configure one;
 - uploads your static assets after the build, keyed by build ID.
 
 The practical consequence: **your app is a normal Next.js app.** If you removed knext tomorrow, the
