@@ -1822,11 +1822,20 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
   // ElementAccessExpression SPELLING (`globalThis[k]`). The same channels are
   // reachable through reflection (`Reflect.get(process, k)`), by letting a
   // global object escape as a value (`const R = Reflect; R.get(globalThis,
-  // k)`, a helper call), through a computed `constructor` key (`fn['constr'
-  // + 'uctor']`, `Reflect.get(fnProto, 'constructor')`, `({})[a][b]`), and by
+  // k)`, a helper call), and through a computed `constructor` key
+  // (`fn['constr' + 'uctor']`, `Reflect.get(fnProto, 'constructor')`), and by
   // importing code straight out of a `data:`/`blob:` URL. Each is scanned as
   // a CHANNEL, not a spelling. Every case names its class's message, so a
   // mutation removing one class reds exactly its own rows.
+  //
+  // (round 8 review) A chained-key rule (`x[a][b]` → `Function`) used to live
+  // here too, but it false-positived on ordinary code — a nested-object
+  // assignment (`scaffoldPkg[field][dep] = …`, `scripts/install-smoke.mjs`)
+  // or a matrix loop (`g[y][x]`) — while the actual bypass channels, a
+  // split-local (`const t = ({})[a]; t[a]('…')()`) or a `reduce`-built key
+  // path (`ks.reduce((o, k) => o[k], {})`), passed clean through it. It was
+  // dropped rather than fixed; both bypasses are out of scope for a static
+  // scan and are tracked on #1441 instead.
   describe('reflection / escaping globals / computed constructor / data: URLs fail closed (#1388 round 6)', () => {
     const cases: { name: string; src: string; error: RegExp }[] = [
       // (a) reflective APIs handed a global object or a getBuiltinModule() result
@@ -1898,11 +1907,6 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
         src: "const k = 'constr' + 'uctor';\nexport const y = Reflect.get(() => 0, k)('return 1');\n",
         error:
           /non-literal key on a function or prototype through the reflective API `Reflect\.get`/,
-      },
-      {
-        name: '({})[a][b] — two chained non-literal keys (Object → Function)',
-        src: "const a = 'constr' + 'uctor';\nconst r = ({})[a][a]('return require')();\nexport const y = r('./lib/real.cjs');\n",
-        error: /chains two non-literal computed \(bracket\) property accesses/,
       },
       // (c) code imported from a data:/blob: URL — non-relative, so it used
       // to pass as a "bare" specifier.

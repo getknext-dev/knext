@@ -1075,18 +1075,6 @@ function jsLocalImportSpecifiers(src, absPath) {
         node,
         'uses a non-literal computed (bracket) property access on a function or prototype — the key can name `constructor`, which is `Function`, a string-to-code channel',
       );
-    } else if (
-      ts.isElementAccessExpression(node) &&
-      isUnknownKey(node.argumentExpression) &&
-      ts.isElementAccessExpression(unwrapParens(node.expression)) &&
-      isUnknownKey(unwrapParens(node.expression).argumentExpression)
-    ) {
-      // #1388 round 6 (b) — `({})[a][b]`: any object's `constructor` is a
-      // function, whose `constructor` is `Function` — two unreadable hops.
-      failClosed(
-        node,
-        'chains two non-literal computed (bracket) property accesses — `x[a][b]` reaches `x.constructor.constructor`, which is `Function`, under keys no static scan can read',
-      );
     } else if (isAmbientRootEscape(node)) {
       failClosed(
         node,
