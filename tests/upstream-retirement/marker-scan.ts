@@ -1,5 +1,5 @@
 /**
- * The `// @knext-shim <id>` marker scan (#1450).
+ * The `// @upstream-shim <id>` marker scan (#1450).
  *
  * SCANS the shim tree rather than enumerating files: a new shim file is found
  * because it carries a marker, and a marker that does not parse is an error,
@@ -9,9 +9,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-export const MARKER_TOKEN = '@knext-shim';
-/** The only accepted form: a whole line, `// @knext-shim <kebab-id>`. */
-const MARKER_LINE = /^\s*\/\/ @knext-shim ([a-z0-9]+(?:-[a-z0-9]+)*)\s*$/;
+// Deliberately not prefixed with the retired npm scope ("@" + "knext"): tests/npm-scope-getknext.test.ts reds on that token in any tracked file.
+export const MARKER_TOKEN = '@upstream-shim';
+/** The only accepted form: a whole line, `// @upstream-shim <kebab-id>`. */
+const MARKER_LINE = /^\s*\/\/ @upstream-shim ([a-z0-9]+(?:-[a-z0-9]+)*)\s*$/;
 const SOURCE = /\.(?:[cm]?[jt]s|tsx|jsx)$/;
 
 export type Marker = { id: string; file: string; line: number };

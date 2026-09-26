@@ -9,7 +9,7 @@
  *     same PR: this test stays red until the entry and its markers are gone;
  *  2b. every upstream issue/PR the registry cites exists with the title it
  *     records (a typo'd number that happens to exist still reds);
- *  3. every `// @knext-shim <id>` marker under packages/kn-next/src/adapters has
+ *  3. every `// @upstream-shim <id>` marker under packages/kn-next/src/adapters has
  *     an entry, every entry has at least one marker, and no marker is malformed.
  */
 import { describe, expect, it } from 'bun:test';
@@ -50,7 +50,7 @@ describe('upstream-retirement: every registered upstream problem still reproduce
           throw new Error(
             `upstream fixed — delete shim ${entry.id} and close ${entry.issue} ` +
               `(${entry.upstream} no longer reproduces on the pinned ${entry.against}). ` +
-              `Remove every \`// @knext-shim ${entry.id}\` shim and this registry entry in the same PR as the bump.\n` +
+              `Remove every \`// @upstream-shim ${entry.id}\` shim and this registry entry in the same PR as the bump.\n` +
               `evidence: ${probe.evidence}`,
           );
         }
@@ -129,7 +129,7 @@ describe('upstream-retirement: every cited upstream ref is the issue/PR it claim
   );
 });
 
-describe('upstream-retirement: @knext-shim markers ↔ registry', () => {
+describe('upstream-retirement: @upstream-shim markers ↔ registry', () => {
   const ids = REGISTRY.map((e) => e.id);
 
   it('no marker is malformed', () => {
@@ -151,13 +151,13 @@ describe('upstream-retirement: @knext-shim markers ↔ registry', () => {
     try {
       mkdirSync(join(dir, 'nested/deep'), { recursive: true });
       mkdirSync(join(dir, '__tests__'));
-      writeFileSync(join(dir, 'a.mjs'), '// @knext-shim alpha\nexport {};\n');
-      writeFileSync(join(dir, 'nested/deep/b.cjs'), 'x;\n  // @knext-shim beta-two\n');
+      writeFileSync(join(dir, 'a.mjs'), '// @upstream-shim alpha\nexport {};\n');
+      writeFileSync(join(dir, 'nested/deep/b.cjs'), 'x;\n  // @upstream-shim beta-two\n');
       writeFileSync(
         join(dir, 'c.ts'),
-        '/* @knext-shim gamma */\n// @knext-shim Bad_Id\n// @knext-shim\n',
+        '/* @upstream-shim gamma */\n// @upstream-shim Bad_Id\n// @upstream-shim\n',
       );
-      writeFileSync(join(dir, '__tests__/d.test.ts'), '// @knext-shim ignored\n');
+      writeFileSync(join(dir, '__tests__/d.test.ts'), '// @upstream-shim ignored\n');
       const { markers, malformed } = scanMarkers(dir);
       expect(markers.map((m) => `${m.file}:${m.id}`).sort()).toEqual([
         'a.mjs:alpha',

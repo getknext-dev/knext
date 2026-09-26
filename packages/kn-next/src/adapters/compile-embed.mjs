@@ -37,7 +37,7 @@
  * Dependency-free over node builtins and the sibling scanners, so a compile
  * script can bundle it and a fixture entry can import `runEmbedProbe`.
  */
-// @knext-shim bun-cjs-dirname-inlined
+// @upstream-shim bun-cjs-dirname-inlined
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -174,7 +174,7 @@ export function embedBuildOptions(plan, opts) {
   if (opts.includeSupported) {
     compile.include = plan.entrypoints;
   } else {
-    // @knext-shim embed-extra-entrypoints
+    // @upstream-shim embed-extra-entrypoints
     entrypoints = [...entrypoints, ...plan.entrypoints];
   }
   return {

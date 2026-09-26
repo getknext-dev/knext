@@ -9,7 +9,7 @@
  * (plan: "Patch carrier"): a shim is deleted in the SAME PR as the bump that
  * turns its probe red — never kept "just in case".
  *
- * Each shim's source carries a one-line `// @knext-shim <id>` marker; the
+ * Each shim's source carries a one-line `// @upstream-shim <id>` marker; the
  * marker scan in retirement.test.ts ties markers and entries in both
  * directions, so a shim cannot exist without a probe, nor a probe without a
  * shim.
@@ -30,7 +30,7 @@ export type UpstreamRef = `${'oven-sh/bun' | 'cloudflare/vinext' | 'vercel/next.
 export type Probe = { stillBroken: boolean; evidence: string };
 
 export type RetirementEntry = {
-  /** The id used by the `// @knext-shim <id>` marker(s). */
+  /** The id used by the `// @upstream-shim <id>` marker(s). */
   id: string;
   /** The upstream issue or PR whose fix retires the shim. */
   upstream: UpstreamRef;
