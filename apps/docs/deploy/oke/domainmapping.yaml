@@ -1,0 +1,33 @@
+apiVersion: networking.internal.knative.dev/v1alpha1
+kind: ClusterDomainClaim
+metadata:
+  name: knext-dev
+spec:
+  namespace: knext-docs
+---
+apiVersion: networking.internal.knative.dev/v1alpha1
+kind: ClusterDomainClaim
+metadata:
+  name: www-knext-dev
+spec:
+  namespace: knext-docs
+---
+apiVersion: serving.knative.dev/v1beta1
+kind: DomainMapping
+metadata:
+  name: knext.dev
+  namespace: knext-docs
+spec:
+  ref:
+    name: knext-docs
+    kind: Service
+---
+apiVersion: serving.knative.dev/v1beta1
+kind: DomainMapping
+metadata:
+  name: www.knext.dev
+  namespace: knext-docs
+spec:
+  ref:
+    name: knext-docs
+    kind: Service
