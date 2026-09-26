@@ -106,8 +106,23 @@ const MUTATIONS = [
     // ("from the vX.Y.Z"). A single-line "from v9.9.9" comment then yields
     // no token and the loose-parse end-to-end test goes red.
     label: 'scanCraneVersionComments: parse only the exact "from the vX.Y.Z" phrasing',
-    anchor: 'const versionTokenRe = /\\bv?\\d+\\.\\d+\\.\\d+\\b/gi;',
-    replacement: 'const versionTokenRe = /(?<=from the )v?\\d+\\.\\d+\\.\\d+\\b/gi;',
+    anchor: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+    replacement: 'const versionTokenRe = /(?<=from the )v\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+  },
+  {
+    // #1429 — make the v prefix OPTIONAL again. "go 1.22.3" / "10.0.0.1" in a
+    // comment block then become tokens that differ from the pin's version,
+    // so a block that names the correct version plus those throws.
+    label: 'scanCraneVersionComments: accept bare X.Y.Z tokens (v prefix optional)',
+    anchor: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+    replacement: 'const versionTokenRe = /\\bv?\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+  },
+  {
+    // #1429 — drop the ".<digit>" exclusion. The trailing \b then matches
+    // before the "." of "v9.9.9.1", reading it as v9.9.9 and passing.
+    label: 'scanCraneVersionComments: drop the ".<digit>" exclusion (v0.20.2.1 reads as v0.20.2)',
+    anchor: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b(?!\\.\\d)/gi;',
+    replacement: 'const versionTokenRe = /\\bv\\d+\\.\\d+\\.\\d+\\b/gi;',
   },
   {
     // #1429 finding 2 — compare each comment against ANY CRANE_VERSION in
@@ -127,7 +142,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(16);
+declareMutations(18);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -139,8 +154,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 16) {
-  console.error(`FATAL: declared 16 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 18) {
+  console.error(`FATAL: declared 18 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

@@ -127,7 +127,8 @@ function countDownloadUrlOccurrences(text) {
  * contiguous block of full-line `#` comments directly above it (stopping at
  * the first non-comment line), then extracts EVERY `vX.Y.Z`-shaped token in
  * that block (v-prefix REQUIRED — accepts `vX.Y.Z` only, not bare X.Y.Z like
- * `go 1.22.3` or IP addresses like `10.0.0.1`). Deliberately loose about the
+ * `go 1.22.3` or IP addresses like `10.0.0.1`, which are ignored; and never
+ * followed by `.<digit>`, so `v0.20.2.1` is not read as v0.20.2). Deliberately loose about the
  * surrounding prose — only the version TOKEN is pinned to a shape, not the
  * sentence around it — because the point is which version the comment NAMES,
  * not which phrasing it uses. All tokens are returned (not just the first) so
@@ -152,10 +153,12 @@ export function scanCraneVersionComments(text) {
   const lines = text.split('\n');
   const shaAssignRe = /\bCRANE_SHA256\b\s*[:=]\s*['"]?[0-9a-f]{64}['"]?/i;
   const commentLineRe = /^[ \t]*#/;
-  // v-prefix REQUIRED: matches vX.Y.Z only, not bare X.Y.Z like "go 1.22.3"
-  // or IP addresses like "10.0.0.1". Word boundary after Z ensures we don't
-  // capture the X.Y.Z part of a longer dotted number.
-  const versionTokenRe = /\bv\d+\.\d+\.\d+\b/gi;
+  // v-prefix REQUIRED: matches vX.Y.Z only, so bare X.Y.Z like "go 1.22.3"
+  // or IP addresses like "10.0.0.1" are never tokens (ignored, not rejected).
+  // The trailing `\b` alone still matches BEFORE a "." — "v0.20.2.1" would
+  // read as v0.20.2 — hence the `(?!\.\d)` exclusion: a token must not be
+  // followed by ".<digit>". A sentence-ending "v0.20.2." is still a token.
+  const versionTokenRe = /\bv\d+\.\d+\.\d+\b(?!\.\d)/gi;
   const out = [];
   for (let i = 0; i < lines.length; i++) {
     if (commentLineRe.test(lines[i]) || !shaAssignRe.test(lines[i])) continue;
@@ -239,8 +242,9 @@ export function scanCranePins(workflowsDir, deps = {}) {
         throw new Error(
           `${file}: crane pin #${i + 1}'s accompanying comment block names ${stale.join(', ')}, but its ` +
             `own CRANE_VERSION is ${versions[i]} — every vX.Y.Z token in the comment block must ` +
-            `equal the pin's version (one version per block; tokens without v prefix like 'go 1.22.3' ` +
-            `or IP addresses like '10.0.0.1' are intentionally rejected) (#1429).`,
+            `equal the pin's version. Tokens without a v prefix (e.g. 'go 1.22.3', '10.0.0.1') are ` +
+            `ignored; a changelog note naming another release (e.g. 'was v0.20.2') is rejected by ` +
+            `design — one version per block (#1429).`,
         );
       }
     }

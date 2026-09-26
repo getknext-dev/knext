@@ -447,6 +447,16 @@ describe('scanCraneVersionComments (the scanner itself, against synthetic snippe
     expect(scanCraneVersionComments(text)).toEqual([[]]);
   });
 
+  it('a four-part "v0.20.2.1" is NOT read as v0.20.2 — a token followed by ".<digit>" is not a version token', () => {
+    const text = `# from the v0.20.2.1 release\nCRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([[]]);
+  });
+
+  it('a version ending a sentence ("from v0.20.2.") IS still a token — only ".<digit>" is excluded', () => {
+    const text = `# pinned from v0.20.2.\nCRANE_SHA256: ${'a'.repeat(64)}\n`;
+    expect(scanCraneVersionComments(text)).toEqual([['v0.20.2']]);
+  });
+
   it('non-vacuity: the real workflows carry this comment, and every occurrence resolves to a real version', () => {
     let total = 0;
     for (const file of [
@@ -522,6 +532,42 @@ describe("scanCranePins — a crane pin's accompanying comment must track ITS OW
         listFiles: () => ['synthetic.yml'],
       }),
     ).toThrow(/names v9\.8\.0, but its own CRANE_VERSION is v9\.9\.9/);
+  });
+
+  it('the stale-token error states the real rule: non-v tokens are IGNORED, changelog notes are rejected by design', () => {
+    const text = syntheticCraneStepWithComment('v9.9.9', 'a'.repeat(64), 'v9.9.9 (was v9.8.0)');
+    let message = '';
+    try {
+      scanCranePins(WORKFLOWS_DIR, { readSource: () => text, listFiles: () => ['synthetic.yml'] });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/without a v prefix .* are ignored/);
+    expect(message).toMatch(/'was v0\.20\.2'.* rejected by design/);
+    expect(message).not.toMatch(/intentionally rejected/);
+  });
+
+  it('a block naming the correct version PLUS "go 1.22.3" and "10.0.0.1" PASSES end-to-end — non-v tokens are ignored, not rejected', () => {
+    const text = syntheticCraneStepWithComment(
+      'v9.9.9',
+      'a'.repeat(64),
+      'v9.9.9 (built with go 1.22.3, mirrored via 10.0.0.1)',
+    );
+    const pins = scanCranePins(WORKFLOWS_DIR, {
+      readSource: () => text,
+      listFiles: () => ['synthetic.yml'],
+    });
+    expect(pins).toEqual([{ file: 'synthetic.yml', version: 'v9.9.9', sha256: 'a'.repeat(64) }]);
+  });
+
+  it('a comment naming "v9.9.9.1" does NOT satisfy a v9.9.9 pin (the trailing \\b would otherwise match before ".1")', () => {
+    const text = syntheticCraneStepWithComment('v9.9.9', 'a'.repeat(64), 'v9.9.9.1');
+    expect(() =>
+      scanCranePins(WORKFLOWS_DIR, {
+        readSource: () => text,
+        listFiles: () => ['synthetic.yml'],
+      }),
+    ).toThrow(/no accompanying/);
   });
 
   it('a SINGLE-LINE "from v9.9.9" comment satisfies the requirement end-to-end (loose parse, not one phrasing)', () => {
