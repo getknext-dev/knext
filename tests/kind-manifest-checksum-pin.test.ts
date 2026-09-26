@@ -343,7 +343,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       userinfoTrick: 'curl -s "http://localhost:9898$P" | kubectl apply -f -',
       nestedUrl: `curl -s "http://localhost:8080/proxy?u=${URL}" | kubectl apply -f -`,
       // As a $(…) scalar, ONLY the loopback test decides whether it is data.
-      nestedUrlScalar: `X=$(curl -s "http://localhost:8080/proxy?u=${URL}")\npython3 gen "$X" | kubectl apply -f -`,
+      nestedUrlScalar: `X=$(curl -s "http://localhost:8080/proxy?u=${URL}")\npython3 gen --v="$X" | kubectl apply -f -`,
     });
   });
 
