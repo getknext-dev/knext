@@ -1,14 +1,17 @@
+# Domain mappings for the docs site. Knative needs a ClusterDomainClaim per host
+# because autocreate-cluster-domain-claims is off on this cluster; the claim's
+# name MUST equal the host. Cloudflare's origin must point at the Kourier LB.
 apiVersion: networking.internal.knative.dev/v1alpha1
 kind: ClusterDomainClaim
 metadata:
-  name: knext-dev
+  name: knext.dev
 spec:
   namespace: knext-docs
 ---
 apiVersion: networking.internal.knative.dev/v1alpha1
 kind: ClusterDomainClaim
 metadata:
-  name: www-knext-dev
+  name: www.knext.dev
 spec:
   namespace: knext-docs
 ---
@@ -19,8 +22,9 @@ metadata:
   namespace: knext-docs
 spec:
   ref:
-    name: knext-docs
+    apiVersion: serving.knative.dev/v1
     kind: Service
+    name: knext-docs
 ---
 apiVersion: serving.knative.dev/v1beta1
 kind: DomainMapping
@@ -29,5 +33,6 @@ metadata:
   namespace: knext-docs
 spec:
   ref:
-    name: knext-docs
+    apiVersion: serving.knative.dev/v1
     kind: Service
+    name: knext-docs
