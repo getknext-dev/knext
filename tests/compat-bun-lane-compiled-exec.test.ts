@@ -151,12 +151,27 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
       src.indexOf('# ── 3b. compile the standalone-on-Bun bytecode executable'),
       src.indexOf('# ── 4. boot the standalone server on a free port'),
     );
+    // Flag order within the `docker run --rm ...` invocation is not load-bearing
+    // (docker does not care whether `-e` or `-v` comes first) — #1257 inserted
+    // `-e "KNEXT_COMPAT_MODE=..."` ahead of the `-v` mounts to forward compat
+    // mode into the rebuild container (see musl-rebuild-credential-mode.test.ts),
+    // so this asserts the required flags as a SET, each exactly once, rather
+    // than pinning a specific adjacency.
+    expect(compileBlock.includes('docker run --rm'), 'must invoke docker run --rm').toBe(true);
+    const standaloneRootMounts = (
+      compileBlock.match(/-v "\$\{STANDALONE_ROOT\}:\$\{STANDALONE_ROOT\}"/g) ?? []
+    ).length;
     expect(
-      /docker run --rm \\\s*\n\s*-v "\$\{STANDALONE_ROOT\}:\$\{STANDALONE_ROOT\}" \\\s*\n\s*-v "\$\{SCRIPT_DIR\}\/e2e-native-rebuild-musl\.sh/.test(
-        compileBlock,
-      ),
-      'must run e2e-native-rebuild-musl.sh inside STANDALONE_BUN_IMAGE against the STANDALONE_ROOT before boot',
-    ).toBe(true);
+      standaloneRootMounts,
+      'must mount STANDALONE_ROOT into the rebuild container exactly once',
+    ).toBe(1);
+    const rebuildScriptMounts = (
+      compileBlock.match(/-v "\$\{SCRIPT_DIR\}\/e2e-native-rebuild-musl\.sh/g) ?? []
+    ).length;
+    expect(
+      rebuildScriptMounts,
+      'must mount e2e-native-rebuild-musl.sh into the rebuild container exactly once',
+    ).toBe(1);
     expect(
       /"\$\{STANDALONE_BUN_IMAGE\}"\s*\\\s*\n\s*sh \/e2e-native-rebuild-musl\.sh "\$\{STANDALONE_ROOT\}"/.test(
         compileBlock,

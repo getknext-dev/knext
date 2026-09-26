@@ -59,17 +59,89 @@ fi
 # bare dotted-numeric version (with an optional prerelease/build suffix)
 # before ever touching the network.
 case "${VERSION}" in
-  [0-9]*.[0-9]*.[0-9]* | [0-9]*.[0-9]* | [0-9]*) : ;;
-  *)
+  *'^'* | *'~'* | *'*'* | *'<'* | *'>'* | *'='* | *' '*)
     echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
     exit 2
     ;;
 esac
-case "${VERSION}" in
-  *'^'* | *'~'* | *'*'* | *'x'* | *'X'* | *'<'* | *'>'* | *'='* | *' '*)
-    echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
-    exit 2
+# jev 0.94 follow-up finding: the previous `[0-9]*.[0-9]*.[0-9]* |
+# [0-9]*.[0-9]* | [0-9]*` case-glob accepted a BARE or PARTIAL version too
+# — "1" and "1.2" both matched their own alternative outright (neither is a
+# real pinned MAJOR.MINOR.PATCH), and shell glob `*` is not anchored to
+# non-dot characters, so even the strictest-looking alternative is looser
+# than it reads (`[0-9]*.[0-9]*.[0-9]*` also happily matches "1.2.x+build"
+# once `*` is allowed to swallow across segment boundaries). Require
+# EXACTLY three dot-separated, ALL-DIGIT core segments instead — the only
+# shape POSIX `case` can't fake past with a loose `*`.
+#
+# The core is everything before the first "-" (prerelease) OR "+" (build
+# metadata) — semver's own suffix order is always
+# <core>[-prerelease][+build] — so strip build first, then prerelease, to
+# isolate just MAJOR.MINOR.PATCH. Stripping only "-" (as the previous x-range
+# check below already did) missed a build-metadata suffix glued directly
+# onto a wildcard segment: "1.2.x+build" has no "-", so its VERSION_CORE
+# stayed "1.2.x+build" verbatim, and neither this check nor the old
+# whole-segment ".x." check (looking for a literal ".x." substring, absent
+# here since "x" is immediately followed by "+" not ".") ever caught it.
+VERSION_CORE="${VERSION%%+*}"
+VERSION_CORE="${VERSION_CORE%%-*}"
+OLD_IFS="${IFS}"
+IFS='.'
+# shellcheck disable=SC2086 # intentional word-splitting on IFS='.'
+set -- ${VERSION_CORE}
+IFS="${OLD_IFS}"
+if [ "$#" -ne 3 ]; then
+  echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — need MAJOR.MINOR.PATCH (e.g. 1.2.4), not a bare or partial version like '1' or '1.2'" >&2
+  exit 2
+fi
+for _seg in "$1" "$2" "$3"; do
+  case "${_seg}" in
+    '' | *[!0-9]*)
+      echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Round-6 review nit: the checks above still accepted a leading-zero segment
+# ("01.2.3" — invalid semver, and not the string npm records, so the pin
+# dir's name could never match), an EMPTY or malformed suffix ("1.2.3+",
+# "1.2.3-", "1.2.3-a..b"), and a trailing dot ("1.2.3." — POSIX field
+# splitting drops the empty last field, so it still counted three).
+not_exact() {
+  echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — need MAJOR.MINOR.PATCH[-prerelease][+build] with no leading zeros and no empty parts (e.g. 1.2.4)" >&2
+  exit 2
+}
+# A non-empty, dot-separated list of non-empty [0-9A-Za-z-] identifiers.
+valid_idents() {
+  case "$1" in
+    '' | .* | *. | *..* | *[!0-9A-Za-z.-]*) return 1 ;;
+  esac
+  return 0
+}
+case "${VERSION_CORE}" in
+  *.) not_exact ;;
+esac
+for _seg in "$1" "$2" "$3"; do
+  case "${_seg}" in
+    0?*) not_exact ;;
+  esac
+done
+_suffix="${VERSION#"${VERSION_CORE}"}"
+case "${_suffix}" in
+  '') ;;
+  -*)
+    _pre="${_suffix#-}"
+    case "${_pre}" in
+      *+*)
+        valid_idents "${_pre#*+}" || not_exact
+        _pre="${_pre%%+*}"
+        ;;
+    esac
+    valid_idents "${_pre}" || not_exact
     ;;
+  +*) valid_idents "${_suffix#+}" || not_exact ;;
+  *) not_exact ;;
 esac
 
 KEY="$(lockfile_key "${NAME}")-${VERSION}"
