@@ -1,5 +1,5 @@
 /**
- * ADR-0047 — `kn-next gc` and `kn-next build` in the no-storage mode,
+ * ADR-0047 — `knext gc` and `knext build` in the no-storage mode,
  * hermetically. Pinned:
  *
  *   - gcMain: storage-less config ⇒ "no object storage configured — nothing
@@ -193,7 +193,7 @@ afterEach(() => {
     jest.restoreAllMocks();
 });
 
-describe("kn-next gc without storage (ADR-0047 condition 3)", () => {
+describe("knext gc without storage (ADR-0047 condition 3)", () => {
     it("says nothing-to-reap, exits 0, and never touches the cluster or a bucket", async () => {
         const { gcMain } = await import("../cli/gc");
         const code = await gcMain([]);
@@ -223,7 +223,7 @@ describe("kn-next gc without storage (ADR-0047 condition 3)", () => {
     });
 });
 
-describe("kn-next build without storage (ADR-0047 conditions 1 + 3)", () => {
+describe("knext build without storage (ADR-0047 conditions 1 + 3)", () => {
     it("skips the upload with the announced-mode notice", async () => {
         // runtime: "node" EXPLICIT — bun is the default since #1183, which
         // would hit the bytecode-compile branch against a `.next/standalone`

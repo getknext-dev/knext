@@ -63,8 +63,17 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
-          args: [server, /data]
+          # #1403: quay.io/minio/minio (and docker.io/minio/minio) now
+          # UNAUTHORIZE every anonymous pull, repo-wide — verified against
+          # several tags including this one, not a transient flake. Switched
+          # to Bitnami's post-license-change "legacy" free mirror: unmaintained
+          # but genuine MinIO software, S3-API-compatible (bucket create,
+          # anonymous-read bucket policy, GetObject all verified live before
+          # this pin). NO `args: [server, /data]` override — Bitnami's own
+          # entrypoint runs `minio server` internally via its setup wrapper;
+          # overriding CMD bypasses that wrapper and the backend fails to
+          # initialize ("Unable to initialize backend: file access denied").
+          image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
           env:
             - name: MINIO_ROOT_USER
               valueFrom: { secretKeyRef: { name: fm-e2e-minio, key: access } }

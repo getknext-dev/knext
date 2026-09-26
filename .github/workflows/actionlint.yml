@@ -14,16 +14,41 @@ name: actionlint (changed workflows)
 # The binary is pinned by SHA256 checksum, the same immutability standard
 # `.claude/rules/security.md` sets for third-party Actions — a version tag
 # alone is not enough, the checksum is what makes the download verifiable.
+#
+# SCOPE CAVEAT (#1397): composite action internals are never linted by this
+# gate. actionlint 1.7.12 refuses an action.yml passed as a direct CLI
+# argument, so a changed composite action instead re-lints every WORKFLOW
+# that `uses:` it — that lints the REFERENCE, not the composite action's own
+# `runs.steps` body. There is no coverage of a composite action's internal
+# step syntax here.
+#
+# tests/actionlint-workflow.test.ts (below) exercises the real "Compute the
+# workflow files" script against the real pinned binary — it RUNS as part of
+# this job, right after the binary is installed, and the job fails if any of
+# its tests came back skipped (which would mean actionlint silently was not
+# on PATH for it, making the coverage inert without turning the job red).
 
 on:
   pull_request:
     branches: ['**']
     paths:
       - '.github/workflows/**'
+      # #1352 — actionlint also lints composite action definitions directly.
+      # This repo has none today, but the glob is widened NOW (per the
+      # issue's own "once (or before) a composite action lands") so the gate
+      # does not need a second PR the day one is added.
+      - '.github/actions/**'
+      # #1397 review — this gate's own regression suite. General CI skips its
+      # real-binary half (no actionlint on PATH there), so a PR touching only
+      # the test file (or a local helper it imports) must trigger THIS
+      # workflow or that half never runs. Guarded by the test itself.
+      - 'tests/actionlint-workflow.test.ts'
   push:
     branches: [main]
     paths:
       - '.github/workflows/**'
+      - '.github/actions/**'
+      - 'tests/actionlint-workflow.test.ts'
 
 permissions:
   contents: read
@@ -51,6 +76,41 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
           chmod +x actionlint
           ./actionlint -version
+          # On PATH (not just ./actionlint) so tests/actionlint-workflow.test.ts's
+          # own `actionlintAvailable()` probe (`spawnSync('actionlint', ...)`)
+          # finds the exact pinned binary this job just verified.
+          echo "$PWD" >>"$GITHUB_PATH"
+
+      - name: Set up bun (lockstep pin, #1310)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Install workspace deps (needed to run tests/actionlint-workflow.test.ts)
+        run: bun install --frozen-lockfile
+
+      - name: Run tests/actionlint-workflow.test.ts for real (fails on any skipped test)
+        run: |
+          set -euo pipefail
+          bun test tests/actionlint-workflow.test.ts --reporter=junit --reporter-outfile=actionlint-test-results.xml
+          if [ ! -f actionlint-test-results.xml ]; then
+            echo "::error::actionlint-test-results.xml was not produced by the test run — cannot verify the skip count, failing closed rather than assuming 0 skips."
+            exit 1
+          fi
+          skipped="$(grep -m1 '<testsuites ' actionlint-test-results.xml | grep -oE 'skipped="[0-9]+"' | grep -oE '[0-9]+' || true)"
+          if [ -z "${skipped}" ]; then
+            echo "::error::no skipped=\"N\" attribute found on the <testsuites> line of actionlint-test-results.xml — failing closed rather than assuming 0 skips (a missing attribute is not the same as a verified zero)."
+            exit 1
+          fi
+          tests="$(grep -m1 '<testsuites ' actionlint-test-results.xml | grep -oE 'tests="[0-9]+"' | grep -oE '[0-9]+' || true)"
+          if [ -z "${tests}" ] || [ "${tests}" -eq 0 ]; then
+            echo "::error::actionlint-test-results.xml reports zero tests — the suite did not actually run, failing closed rather than treating an empty run as a pass."
+            exit 1
+          fi
+          if [ "${skipped}" -ne 0 ]; then
+            echo "::error::${skipped} test(s) in tests/actionlint-workflow.test.ts were SKIPPED — that means actionlint was NOT on PATH for this run (the describe.skipIf guard), so this gate's own regression coverage did not execute. Composite action internals are never linted by this gate (see the header note above)."
+            exit 1
+          fi
 
       - name: Compute the workflow files this diff actually changed
         id: diff
@@ -61,23 +121,67 @@ jobs:
           set -euo pipefail
           base="${BASE_SHA}"
           head="${HEAD_SHA}"
+          workflow_globs=('.github/workflows/*.yml' '.github/workflows/*.yaml')
+          action_globs=('.github/actions/**/action.yml' '.github/actions/**/action.yaml')
           # A push with no prior commit (`before` all-zeros, first push to a
           # new branch) has nothing to diff against — fall back to lint every
           # workflow file rather than silently linting nothing.
           if [ -z "${base}" ] || [ "${base}" = "0000000000000000000000000000000000000000" ]; then
-            files="$(git -C . ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')"
+            changed_workflows="$(git -C . ls-files "${workflow_globs[@]}")"
+            changed_actions="$(git -C . ls-files "${action_globs[@]}")"
           else
             # #1300 review round 4 (finding 3) — no `|| true`: a real `git
             # diff` error (e.g. `base` unresolvable) must fail this step, not
             # silently fall through to an empty/partial file list that then
-            # reads as "nothing changed, nothing to lint".
-            files="$(git diff --name-only "${base}" "${head}" -- '.github/workflows/*.yml' '.github/workflows/*.yaml')"
+            # reads as "nothing changed, nothing to lint". #1352 review —
+            # `--diff-filter=d` excludes DELETED paths: without it, a PR that
+            # only deletes a workflow/composite-action file fails this step
+            # with a false "file not found" instead of correctly linting
+            # nothing.
+            changed_workflows="$(git diff --name-only --diff-filter=d "${base}" "${head}" -- "${workflow_globs[@]}")"
+            changed_actions="$(git diff --name-only --diff-filter=d "${base}" "${head}" -- "${action_globs[@]}")"
           fi
+          # #1397 review — actionlint 1.7.12 REJECTS a composite `action.yml`
+          # passed as a CLI argument outright ("jobs section is missing",
+          # "unexpected key runs": explicit file args are always treated as
+          # WORKFLOW files, never as composite-action manifests — verified
+          # live against the exact pinned binary, not assumed from docs).
+          # `action.yml`/`action.yaml` paths are therefore NEVER added to the
+          # lint list. Instead, when a composite action changed, every
+          # WORKFLOW that consumes ANY local composite action (`uses: ./...`)
+          # is re-linted — that IS how actionlint validates a local composite
+          # action's `uses:` reference (as part of the referencing workflow),
+          # and it is the only way this gate can react to a composite-action
+          # change at all without ever handing actionlint a file type it
+          # rejects.
+          # #1397 round 2 — the regex only matched an UNQUOTED
+          # `uses: ./.github/actions/...`; `uses: './.github/actions/...'`
+          # and `uses: "./.github/actions/..."` (both valid YAML) silently
+          # escaped detection. `[\"']?` makes the optional quote explicit.
+          referencing_workflows=""
+          if [ -n "${changed_actions}" ]; then
+            set +e
+            referencing_workflows="$(grep -lE "uses:[[:space:]]*[\"']?\./\.github/actions/" .github/workflows/*.y*ml 2>/tmp/actionlint-grep-stderr)"
+            grep_status=$?
+            set -e
+            # grep exit codes: 0 = matches found, 1 = no matches (fine — no
+            # workflow references the changed action), 2 = a REAL failure
+            # (e.g. the `.github/workflows/*.y*ml` glob not expanding because
+            # no workflow file exists, so grep gets handed the literal glob
+            # string as a nonexistent filename). The old `|| true` treated
+            # all three identically, so a broken scan silently read as
+            # "nothing references it" instead of failing loudly.
+            if [ "${grep_status}" -eq 2 ]; then
+              echo "::error::grep failed while scanning workflows for composite-action references: $(cat /tmp/actionlint-grep-stderr)"
+              exit 1
+            fi
+          fi
+          files="$(printf '%s\n%s\n' "${changed_workflows}" "${referencing_workflows}" | sed '/^$/d' | sort -u)"
           if [ -z "${files}" ]; then
-            echo "no workflow files changed in this diff — nothing to lint"
+            echo "no workflow files (directly changed, or referencing a changed composite action) — nothing to lint"
             echo "files=" >>"$GITHUB_OUTPUT"
           else
-            echo "changed workflow files:"
+            echo "changed/composite-action-referencing workflow files:"
             echo "${files}"
             {
               echo "files<<ACTIONLINT_FILES_EOF"

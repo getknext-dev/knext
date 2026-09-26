@@ -120,6 +120,15 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'a working docker on the machine, which every CI runner that boots the bun lane already ' +
       'requires (scripts/e2e-deploy.sh itself refuses to run without docker once RUNTIME=bun).',
   },
+  'tests/actionlint-workflow.test.ts': {
+    skips: { 'describe.skipIf': 2 },
+    reason:
+      'ENVIRONMENT-availability gate (actionlint on PATH), not artifact-gated — same class as ' +
+      'the dockerAvailable/bunAvailable pattern this scanner already treats as non-artifact ' +
+      '(#1397 review). Executes the REAL pinned actionlint binary against a real composite-' +
+      "action fixture, so it is not vacuous where actionlint is installed, and the gate's own " +
+      'workflow already installs the same pinned binary fresh for the real check on every PR.',
+  },
   'packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts': {
     skips: { 'it.skipIf': 3 },
     reason:

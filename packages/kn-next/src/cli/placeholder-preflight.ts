@@ -5,7 +5,7 @@
  * that value flowing SILENTLY into the build: the persona burns a full
  * multi-minute `next build` and fails at the image push — the most expensive
  * possible place to learn the config is unfinished. This module makes deploy
- * (and `kn-next validate`) say so up front, per field, in plain English.
+ * (and `knext validate`) say so up front, per field, in plain English.
  *
  * The scan is GENERIC over the config object — every string field, however
  * nested, wherever it lives (workflow rule: scan, don't enumerate). An
@@ -113,7 +113,7 @@ const FIELD_GUIDANCE: Record<string, string> = {
         "    Put your bucket's public base URL — or delete the whole `storage` block to serve those files from the image instead.",
     "database.secretRef.name":
         "This names the Kubernetes Secret holding your database connection string.\n" +
-        "    Put the name of a Secret that exists in your cluster (see `kn-next db bind`), or remove the `database` block.",
+        "    Put the name of a Secret that exists in your cluster (see `knext db bind`), or remove the `database` block.",
 };
 
 const GENERIC_GUIDANCE =
@@ -139,7 +139,7 @@ export function formatPlaceholderFindings(
     }
     lines.push(
         "Nothing was built or deployed. Fix the values above, then run",
-        "`kn-next validate` to re-check without touching anything.",
+        "`knext validate` to re-check without touching anything.",
         "",
         `Docs: ${DOCS_URL}`,
     );

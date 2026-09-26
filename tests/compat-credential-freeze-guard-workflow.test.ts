@@ -270,7 +270,9 @@ describe('bootstrap: base-checkout has no guard script (#1370 review round 4)', 
   function runStepScript(fixture: {
     /** Create base-checkout/scripts/compat-credential-freeze-guard.mjs? */
     guardScriptPresent: boolean;
-    basePinRcTag: unknown;
+    basePinRcTag?: unknown;
+    /** Write this exact (possibly corrupt) text instead of JSON.stringify-ing basePinRcTag. */
+    basePinRawText?: string;
   }): { status: number | null; stdout: string; stderr: string } {
     const { wf } = load();
     const step = wf.jobs['freeze-guard'].steps.find((s) =>
@@ -280,7 +282,10 @@ describe('bootstrap: base-checkout has no guard script (#1370 review round 4)', 
 
     const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-bootstrap-'));
     try {
-      writeFileSync(join(dir, 'base-pin.json'), JSON.stringify({ rcTag: fixture.basePinRcTag }));
+      writeFileSync(
+        join(dir, 'base-pin.json'),
+        fixture.basePinRawText ?? JSON.stringify({ rcTag: fixture.basePinRcTag }),
+      );
       writeFileSync(join(dir, 'head-pin.json'), JSON.stringify({ rcTag: null }));
       writeFileSync(join(dir, 'changed-files.txt'), '');
       if (fixture.guardScriptPresent) {
@@ -332,6 +337,48 @@ describe('bootstrap: base-checkout has no guard script (#1370 review round 4)', 
     const r = runStepScript({ guardScriptPresent: true, basePinRcTag: null });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('stand-in guard ran');
+  });
+
+  // #1374 — the two divergences from the guard script's own readPin()/
+  // isFrozen() semantics, both fail-OPEN in the wrong direction.
+  describe("aligned with the guard script's own parse/isFrozen semantics (#1374)", () => {
+    it("EXIT 2: no guard script at base, base-pin.json is UNPARSABLE — fails closed (mirrors readPin()'s exit 2), never silently treated as unfrozen", () => {
+      const r = runStepScript({ guardScriptPresent: false, basePinRawText: '{ this is not json' });
+      expect(r.status).toBe(2);
+      const out = r.stdout + r.stderr;
+      expect(out).toMatch(/ERROR/);
+      expect(out).toMatch(/could not be parsed/);
+      expect(out).toMatch(/failing closed/);
+      expect(out).toMatch(/[Nn]ever falling back to the PR's own head copy/);
+      // Must NOT take the "unfrozen, passing" exit — that would be the
+      // exact fail-open bug this test exists to catch.
+      expect(out).not.toMatch(/base is unfrozen/);
+    });
+
+    it('EXIT 1: no guard script at base, base rcTag is the literal STRING "null" — isFrozen() treats this as FROZEN, so the bootstrap branch must too', () => {
+      // JSON.stringify({ rcTag: "null" }) writes `"rcTag":"null"` — a real
+      // JSON string, not the JSON `null` literal. isFrozen() in the guard
+      // script treats ANY non-null/non-undefined rcTag as frozen (its own
+      // doc comment: "ANY non-null rcTag counts, even a malformed one").
+      const r = runStepScript({ guardScriptPresent: false, basePinRcTag: 'null' });
+      expect(r.status).not.toBe(0);
+      expect(r.status).not.toBe(2);
+      const out = r.stdout + r.stderr;
+      expect(out).toMatch(/ERROR/);
+      expect(out).toMatch(/FROZEN/);
+      expect(out).toMatch(/failing closed/);
+      expect(out).toMatch(/[Nn]ever falling back to the PR's own head copy/);
+      // The old bash `[ "${BASE_RCTAG}" = "null" ]` comparison could not
+      // distinguish the string "null" from the true absence of a tag — this
+      // is the assertion that catches a regression back to that comparison.
+      expect(out).not.toMatch(/base is unfrozen/);
+    });
+
+    it('sanity: the true JSON null (no rcTag set) is still UNFROZEN and passes — the fix does not overcorrect', () => {
+      const r = runStepScript({ guardScriptPresent: false, basePinRcTag: null });
+      expect(r.status).toBe(0);
+      expect(r.stdout + r.stderr).toMatch(/base is unfrozen/);
+    });
   });
 });
 

@@ -63,7 +63,7 @@ function withTempFile(
 
 describe("no-.ts-import-extension guard (#289, TS5097 class)", () => {
     it("PASSES on the real packages/kn-next/src tree (no .ts import extensions today)", () => {
-        // Default (no explicit files) scans the whole kn-next src tree.
+        // Default (no explicit files) scans the whole knext src tree.
         const { code, out } = runGuard([KN_NEXT_SRC]);
         expect(code, out).toBe(0);
     });

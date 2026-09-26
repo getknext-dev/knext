@@ -249,8 +249,14 @@ export interface ImageRouteOptions {
      * runtime-resolve path below can never serve the compiled target; sharp has
      * to be in the bundle, which means the ENTRY has to hand it over.
      *
-     * Optional: the node/uncompiled targets leave it unset and keep using the
-     * runtime resolve, which is what keeps sharp out of their static graph.
+     * Optional in the type only, for the runtime-resolve fallback below (still
+     * exercised by direct callers/tests that omit it). The shipped vinext ×
+     * node entry passes it too, since #1298: `createRequire(cwd)` can never
+     * find `.output/server/node_modules` in the deployed image (`cwd` is
+     * `/app`, and node's resolution never walks INTO subdirectories) — the
+     * runtime-resolve path was silently dead there, which is exactly how
+     * `/_next/image` came to serve unoptimized originals with only a log
+     * warning to show for it.
      */
     sharp?: SharpModule;
 }

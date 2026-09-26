@@ -46,7 +46,7 @@ TIMELINE=0b1ec700000000000000000000000002
 REATTACH_GEN=2
 IMG_NEON=neondatabase/neon:8464
 IMG_COMPUTE=neondatabase/compute-node-v17:8464
-IMG_MC=minio/mc:RELEASE.2023-01-28T20-29-38Z
+IMG_MC=docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511  # #1403: quay.io/minio/mc is UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror
 DRILL_STORAGE=6Gi
 DRILL_MINIO_STORAGE=8Gi
 # WAL volume to push over the 256MB default checkpoint_distance so the pageserver
@@ -156,12 +156,18 @@ spec:
   template:
     metadata: { labels: { app: minio } }
     spec:
-      securityContext: { seccompProfile: { type: RuntimeDefault } }
+      # fsGroup: 1001 matches Bitnami minio's runtime UID so it can write the PVC
+      # root on block-volume storage classes (default root:root 0755 on OKE/GKE).
+      securityContext: { fsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z@sha256:cc144348ad1e4126766279b042804fa4f130da531cc811e91fdbcb12c6bc8881
-          args: ["server","/data","--address",":9000"]
+          # #1403: quay.io/minio/minio UNAUTHORIZED for anonymous pull repo-wide;
+          # Bitnami legacy mirror (genuine MinIO, verified S3-API-compatible).
+          # NO args override - Bitnami's own entrypoint runs `minio server`
+          # internally; MINIO_DATA_DIR redirects it onto the volumeMount below.
+          image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
           env:
+            - { name: MINIO_DATA_DIR, value: /data }
             - { name: MINIO_ROOT_USER, valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } } }
             - { name: MINIO_ROOT_PASSWORD, valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } } }
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * kn-next preview — per-PR ephemeral preview environments (issue #91).
+ * knext preview — per-PR ephemeral preview environments (issue #91).
  *
  * Usage:
- *   kn-next preview deploy  --pr <n> --branch <ref> [-n <namespace>]
- *   kn-next preview destroy --pr <n>                [-n <namespace>]
+ *   knext preview deploy  --pr <n> --branch <ref> [-n <namespace>]
+ *   knext preview destroy --pr <n>                [-n <namespace>]
  *
  * MODEL (ADR-0013): a preview is EPHEMERAL. It is a fresh build deployed under a
  * NEW NextApp CR named `<app>-pr-<n>`. Because the asset prefix, ksvc URL, and the
@@ -393,10 +393,10 @@ export async function defaultBuildAndPush(
     // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile for
     // the standalone-bun target (the DEFAULT since #1183) and for vinext both
     // do an UNCONDITIONAL `COPY` of a compiled executable that only
-    // `kn-next build` used to produce — `preview` ran the project build above
+    // `knext build` used to produce — `preview` ran the project build above
     // and stopped there, so its docker build either failed the COPY or ran a
     // stale binary already sitting in this checkout. Shares the EXACT compile
-    // step `kn-next build` uses (build-artifact.ts) — preview has no
+    // step `knext build` uses (build-artifact.ts) — preview has no
     // `--skip-build` flag, so this always runs fresh here, right after the
     // project build that just produced what it compiles from.
     compileArtifactForDeploy(config, process.cwd());
@@ -468,7 +468,7 @@ export function parsePreviewArgs(argv: readonly string[]): PreviewArgs {
     const command = positionals[0];
     if (command !== "deploy" && command !== "destroy") {
         throw new UsageError(
-            `kn-next preview: expected subcommand "deploy" or "destroy", got "${command ?? ""}"`,
+            `knext preview: expected subcommand "deploy" or "destroy", got "${command ?? ""}"`,
         );
     }
     return {
@@ -483,7 +483,7 @@ export function parsePreviewArgs(argv: readonly string[]): PreviewArgs {
 async function preview() {
     const args = parsePreviewArgs(process.argv.slice(2));
     if (!args.prId) {
-        throw new UsageError("kn-next preview: --pr <n> is required");
+        throw new UsageError("knext preview: --pr <n> is required");
     }
     const config = await loadConfig();
 
@@ -503,7 +503,7 @@ async function preview() {
 
     if (!args.branch) {
         throw new UsageError(
-            "kn-next preview deploy: --branch <ref> is required",
+            "knext preview deploy: --branch <ref> is required",
         );
     }
 
