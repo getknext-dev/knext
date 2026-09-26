@@ -118,6 +118,27 @@ function deadExceptions(entries: { path: string; sources: readonly string[] }[])
 }
 
 /**
+ * Exceptions whose declared source no longer exists or no longer references
+ * the exception's FULL path. `read` returns the source's text, or null when
+ * the file is gone. Full-path match, never basename: a source that merely
+ * names `other/<basename>` is not a reference to `path`.
+ */
+function staleExceptions(
+  entries: { path: string; sources: readonly string[] }[],
+  read: (source: string) => string | null,
+): string[] {
+  const stale: string[] = [];
+  for (const { path, sources } of entries) {
+    for (const source of sources) {
+      const text = read(source);
+      if (text === null) stale.push(`${source} -> ${path} (source is gone)`);
+      else if (!text.includes(path)) stale.push(`${source} -> ${path} (no longer references it)`);
+    }
+  }
+  return stale;
+}
+
+/**
  * True only when `source` (repo-relative file containing the reference) is
  * explicitly listed for `ref` — exact string match on both, no wildcards.
  */
@@ -427,22 +448,29 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
     expect(isNamedException('scripts/e2e-deploy.sh', 'scripts/anything-else.sh')).toBe(false);
   });
 
-  it('deadExceptions: flags an entry with sources: [] and passes the real list (#1422)', () => {
+  it('deadExceptions: flags an entry with sources: [] (rejected as dead) and passes the real list (#1422)', () => {
     expect(deadExceptions([{ path: 'x/y.mjs', sources: [] }])).toEqual(['x/y.mjs']);
     expect(deadExceptions(NAMED_EXCEPTIONS)).toEqual([]);
   });
 
-  it('every named-exception source exists and references its FULL path (no stale exemption); sources is never empty', () => {
-    for (const { path, sources } of NAMED_EXCEPTIONS) {
-      for (const source of sources) {
-        const abs = resolve(REPO_ROOT, source);
-        expect(existsSync(abs), `${source} is gone — remove the exception`).toBe(true);
-        expect(
-          readFileSync(abs, 'utf8').includes(path),
-          `${source} no longer references ${path} — remove the exception`,
-        ).toBe(true);
-      }
-    }
+  it('staleExceptions: every declared source exists and references its FULL path (real list is clean)', () => {
+    const read = (source: string) => {
+      const abs = resolve(REPO_ROOT, source);
+      return existsSync(abs) ? readFileSync(abs, 'utf8') : null;
+    };
+    expect(staleExceptions(NAMED_EXCEPTIONS, read)).toEqual([]);
+  });
+
+  it('staleExceptions: a missing source, and a source naming only the basename under another directory, are reported (#1422)', () => {
+    const entry = [{ path: 'scripts/cache-control-normalize.cjs', sources: ['a.sh', 'b.sh'] }];
+    // a.sh is gone; b.sh names the SAME basename under a different directory.
+    const read = (source: string) =>
+      source === 'b.sh' ? 'node other/cache-control-normalize.cjs' : null;
+    expect(staleExceptions(entry, read)).toEqual([
+      'a.sh -> scripts/cache-control-normalize.cjs (source is gone)',
+      'b.sh -> scripts/cache-control-normalize.cjs (no longer references it)',
+    ]);
+    expect(staleExceptions(entry, () => 'node scripts/cache-control-normalize.cjs')).toEqual([]);
   });
 
   // #1422 — NEGATIVE SCAN FIXTURES through the real call-site code paths. An
