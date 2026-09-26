@@ -74,11 +74,30 @@ const SCRIPT_PATH = String.raw`(?:knext\/)?scripts\/[\w./-]+\.(?:mjs|sh|js|ts|cj
  * accepted, 10 `node knext/scripts/…` invocations in compat-vinext.yml and
  * test-e2e-deploy.yml were invisible to this scan, and deleting
  * `shard-ledger`'s checkout stayed green.
+ *
+ * KNOWN GAP: the scan checks that SOME checkout precedes the script, not that
+ * it checked out to the directory the path names. A job that checks out to
+ * the default path and then runs `node knext/scripts/…` passes this scan but
+ * fails at run time.
  */
+/**
+ * The tokens that may sit between the verb and the path: OPTIONS ONLY. Each is
+ * a flag (`-x`, `--test`, `--flag=value`, `-euo`) optionally followed by ONE
+ * option argument (`-m pip`, `-o pipefail`, `--require ./x.cjs`). Separators
+ * are `[ \t]+` — never a newline — and neither a flag nor an argument may
+ * contain a quote or a shell operator (`&`, `;`, `|`), so the skip can never
+ * cross into a second command: `node --version && cat scripts/x.sh`,
+ * `node --version\necho scripts/x.sh`, and `sh -c 'echo scripts/x.sh'` are
+ * bare mentions, not executions. (An earlier `(?:[^\s"]+\s+)*` skipped ANY
+ * tokens, operators and newlines included.)
+ */
+const OPTION_FLAG = String.raw`-[\w.=:/@+,-]*`;
+const OPTION_ARG = String.raw`[\w./:=@+,][\w./:=@+,-]*`;
+const OPTIONS = String.raw`(?:${OPTION_FLAG}(?:[ \t]+${OPTION_ARG})?[ \t]+)*`;
 const SCRIPT_EXEC_RE = new RegExp(
   [
-    String.raw`\b(?:node|bash|sh|python3?|bun(?:\s+run)?|bunx|tsx|source)\s+(?:[^\s"]+\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\b`,
-    String.raw`(?:^|\s)"?\.\s+(?:[^\s"]+\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\b`,
+    String.raw`\b(?:node|bash|sh|python3?|bun(?:[ \t]+run)?|bunx|tsx|source)[ \t]+${OPTIONS}"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\b`,
+    String.raw`(?:^|\s)"?\.[ \t]+${OPTIONS}"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\b`,
     String.raw`(?:^|\s)"?\.\/${SCRIPT_PATH}\b`,
     String.raw`(?:^|\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\b`,
   ].join('|'),
@@ -373,6 +392,23 @@ describe('#1406 — every job that executes a repo script provides the repo firs
     expect(runsRepoScript({ run: 'node scripts/foo.cjs' })).toBe(true);
     expect(runsRepoScript({ run: 'bun run scripts/foo.mts' })).toBe(true);
     expect(runsRepoScript({ run: 'python3 scripts/foo.py' })).toBe(true);
+    // Option arguments (`-m <mod>`, `-e <expr>`, `--require <mod>`) are skipped too.
+    expect(runsRepoScript({ run: 'node --require ./x.cjs scripts/x.mjs' })).toBe(true);
+    expect(runsRepoScript({ run: 'python3 -X utf8 scripts/foo.py' })).toBe(true);
+  });
+
+  it('#1422: flag tolerance skips ONLY options — never crosses `&&`, `;`, `|`, a newline, or a quoted command string', () => {
+    // Each is a BARE MENTION of a scripts/ path after an unrelated invocation.
+    expect(runsRepoScript({ run: 'node --version && cat scripts/x.sh' })).toBe(false);
+    expect(runsRepoScript({ run: 'node --version\necho scripts/x.sh changed' })).toBe(false);
+    expect(runsRepoScript({ run: 'python3 -m pip install foo\ngrep -q x scripts/y.py' })).toBe(
+      false,
+    );
+    expect(runsRepoScript({ run: 'node --version; cat scripts/x.sh' })).toBe(false);
+    expect(runsRepoScript({ run: 'bash -x | tee scripts/x.sh' })).toBe(false);
+    expect(runsRepoScript({ run: "sh -c 'echo scripts/x.sh'" })).toBe(false);
+    // A non-option word between verb and path is not skipped either.
+    expect(runsRepoScript({ run: 'node build.mjs scripts/x.mjs' })).toBe(false);
   });
 
   it('no job executes a scripts/ file with no earlier checkout or tar-extract step', () => {

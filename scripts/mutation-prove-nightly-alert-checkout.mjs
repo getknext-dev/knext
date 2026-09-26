@@ -43,6 +43,23 @@ function specPasses() {
   return r.status === 0;
 }
 
+/** The whole `SCRIPT_EXEC_RE` declaration, verbatim, as the spec carries it. */
+const SCRIPT_EXEC_BLOCK = [
+  'const SCRIPT_EXEC_RE = new RegExp(',
+  '  [',
+  '    String.raw`\\b(?:node|bash|sh|python3?|bun(?:[ \\t]+run)?|bunx|tsx|source)[ \\t]+${OPTIONS}"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,',
+  '    String.raw`(?:^|\\s)"?\\.[ \\t]+${OPTIONS}"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\\b`,',
+  '    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,',
+  '    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,',
+  "  ].join('|'),",
+  "  'm',",
+  ');',
+].join('\n');
+
+/** The options-only skip between verb and path, verbatim. */
+const OPTIONS_DECL =
+  'const OPTIONS = String.raw`(?:${OPTION_FLAG}(?:[ \\t]+${OPTION_ARG})?[ \\t]+)*`;';
+
 const MUTATIONS = [
   {
     // Remove the fix itself: drop the checkout step this PR added back out
@@ -74,8 +91,7 @@ const MUTATIONS = [
     // such a mention), turning "0 findings" into a nonempty list.
     label: 'runsRepoScript: drop the execution-verb requirement (bare-mention false positive)',
     subject: 'checkoutTest',
-    anchor:
-      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|bunx|tsx|source)\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\\.\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
+    anchor: SCRIPT_EXEC_BLOCK,
     replacement: "const SCRIPT_EXEC_RE = new RegExp(SCRIPT_PATH, 'm');",
   },
   {
@@ -84,8 +100,7 @@ const MUTATIONS = [
     // and the knext/ prefix all go invisible.
     label: 'SCRIPT_EXEC_RE: revert to the pre-#1422 invoker/path set',
     subject: 'checkoutTest',
-    anchor:
-      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|bunx|tsx|source)\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\\.\\s+(?:[^\\s"]+\\s+)*"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
+    anchor: SCRIPT_EXEC_BLOCK,
     replacement:
       'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?)\\s+scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b/m;',
   },
@@ -98,6 +113,24 @@ const MUTATIONS = [
       'const SCRIPT_PATH = String.raw`(?:knext\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts|cjs|mts|py)`;',
     replacement:
       'const SCRIPT_PATH = String.raw`scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts|cjs|mts|py)`;',
+  },
+  {
+    // #1422 round 4 — drop the flag tolerance: nothing may sit between the
+    // verb and the path, so `node --test scripts/x.mjs` and
+    // `bash -euo pipefail scripts/x.sh` go invisible again.
+    label: 'OPTIONS: drop the flag tolerance (no options between verb and path)',
+    subject: 'checkoutTest',
+    anchor: OPTIONS_DECL,
+    replacement: "const OPTIONS = '';",
+  },
+  {
+    // #1422 round 4 — widen the skip back to ANY tokens, operators and
+    // newlines included: `node --version && cat scripts/x.sh` becomes an
+    // "execution" again (the round-3 bare-mention false positive).
+    label: 'OPTIONS: skip ANY tokens (crosses &&, ;, | and newlines)',
+    subject: 'checkoutTest',
+    anchor: OPTIONS_DECL,
+    replacement: 'const OPTIONS = String.raw`(?:[^\\s"]+\\s+)*`;',
   },
   {
     // Drop the tar-extract recognition entirely: the guard would then
@@ -130,10 +163,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(8);
+declareMutations(10);
 
-if (MUTATIONS.length !== 8) {
-  console.error(`FATAL: declared 8 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 10) {
+  console.error(`FATAL: declared 10 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
