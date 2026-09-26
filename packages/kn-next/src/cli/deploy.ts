@@ -28,6 +28,7 @@ import {
     NO_STORAGE_MODE_NOTICE,
     reclaimBuildPrefix,
     uploadAssets,
+    uploadAssetsFromImage,
     verifyBuiltImageLockstep,
     verifyVinextStaticPrefix,
 } from "../utils/asset-upload";
@@ -713,6 +714,29 @@ export async function deploy() {
         imageRef = taggedRef;
     }
 
+    // #1447 — ONE BUILD, ONE ARTIFACT. An in-image build (an app Dockerfile that
+    // runs `vite build` itself) produces its own client chunks; a HOST build
+    // uploaded in parallel produced different ones (the vinext chunk hash is a
+    // function of build inputs — NEXT_DEPLOYMENT_ID alone changes it), so the
+    // bucket held chunks the image never references: a 404 on the main chunk.
+    // For that shape the assets are therefore taken FROM THE IMAGE, after it is
+    // built, and proven to cover what its server references. The shipped
+    // template Dockerfiles COPY the host build, so the host build IS the image's
+    // build there — the parallel host upload stays correct and stays parallel.
+    // `--image` deploys a prebuilt image whose provenance we cannot see: same
+    // rule, its own tree is the source.
+    const imageSourcedAssets =
+        uploadsAssets &&
+        resolvedBuild === "vinext" &&
+        (Boolean(options.image) ||
+            (() => {
+                const sel = selectRuntimeImage(config, process.cwd());
+                return (
+                    sel.kind === "app-dockerfile" &&
+                    !isKnownGoodTemplateDockerfile(sel.dockerfile)
+                );
+            })());
+
     if (!options.dryRun) {
         const tasks: Promise<void>[] = [];
 
@@ -723,7 +747,7 @@ export async function deploy() {
         let uploadSucceeded = false;
         let uploadPromise: Promise<void> | undefined;
 
-        if (!options.skipUpload && hasStorage(config)) {
+        if (!options.skipUpload && hasStorage(config) && !imageSourcedAssets) {
             log.info("Running parallel tasks: asset upload + Docker build");
             uploadPromise = (async () => {
                 // The build id is PASSED, not rediscovered: it is what the
@@ -916,6 +940,32 @@ export async function deploy() {
                 }
             }
             throw err;
+        }
+
+        // #1447: image-sourced upload — AFTER the build/push, from the image.
+        if (imageSourcedAssets && hasStorage(config)) {
+            log.info(
+                "Uploading the assets the image serves (extracted from it)",
+            );
+            try {
+                await uploadAssetsFromImage(
+                    config,
+                    buildId,
+                    options.image ?? taggedRef,
+                    { verify: !options.skipImageLockstepCheck },
+                );
+            } catch (err) {
+                try {
+                    reclaimBuildPrefix(config, buildId);
+                } catch (cleanupErr) {
+                    log.warn(
+                        { cleanupErr },
+                        "Orphan asset-prefix reclaim failed (non-fatal)",
+                    );
+                }
+                throw err;
+            }
+            log.info("Assets uploaded");
         }
 
         // Resolve the real content-digest after push so the CR image ref is pinned.

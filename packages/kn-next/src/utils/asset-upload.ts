@@ -1024,6 +1024,170 @@ export function verifyBuiltImageLockstep(opts: {
     }
 }
 
+export type ChunkReferenceCheck =
+    | { ok: true; referenced: number }
+    | {
+          ok: false;
+          reason:
+              | "server-artifact-missing"
+              | "no-chunk-references"
+              | "chunk-missing";
+          /** Chunk files the server references that the asset set lacks. */
+          missing: string[];
+      };
+
+/** `chunks/<hashed-file>` as the vinext server output spells a client chunk. */
+const CHUNK_REFERENCE = /\bchunks\/([A-Za-z0-9_.~-]+\.(?:js|mjs|css))/g;
+
+/**
+ * The one-build-one-artifact guard (#1447). `appDir` is a `/app` tree (an image
+ * extraction). Asserts EVERY client chunk the image's SERVER output references
+ * exists in the asset set that will be uploaded (`.output/public/_next/static/
+ * chunks`). A mismatch is exactly the shape of the bug it guards: HTML that
+ * names `chunks/vinext-A.js` while the bucket holds `vinext-B.js` is a 404 for
+ * the app's main chunk, discovered by a user instead of by the deploy.
+ *
+ * Fail-closed on both blind spots: no server artifact, and a server artifact
+ * that references no chunk at all (an unrecognised layout — the guard cannot
+ * observe, which is not the same as passing). Searched in both encodings a
+ * `bun build --compile` bundle stores modules in (see LITERAL_SEARCH_ENCODINGS).
+ */
+export function verifyAssetsCoverServerReferences(
+    appDir: string,
+): ChunkReferenceCheck {
+    const chunkDir = join(
+        appDir,
+        ".output",
+        "public",
+        "_next",
+        "static",
+        "chunks",
+    );
+    const files: string[] = [];
+    const collect = (p: string): void => {
+        let entries: Dirent[];
+        try {
+            entries = readdirSync(p, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const e of entries) {
+            const full = join(p, e.name);
+            if (e.isDirectory()) collect(full);
+            else files.push(full);
+        }
+    };
+    const compiled = join(appDir, "server");
+    if (existsSync(compiled)) files.push(compiled);
+    collect(join(appDir, ".output", "server"));
+    if (files.length === 0) {
+        return { ok: false, reason: "server-artifact-missing", missing: [] };
+    }
+    const referenced = new Set<string>();
+    for (const f of files) {
+        let buf: Buffer;
+        try {
+            buf = readFileSync(f);
+        } catch {
+            continue;
+        }
+        for (const text of [buf.toString("latin1"), buf.toString("utf16le")]) {
+            for (const m of text.matchAll(CHUNK_REFERENCE))
+                referenced.add(m[1]);
+        }
+        // utf16le at an odd byte offset — the second alignment.
+        const odd = buf.subarray(1).toString("utf16le");
+        for (const m of odd.matchAll(CHUNK_REFERENCE)) referenced.add(m[1]);
+    }
+    if (referenced.size === 0) {
+        return { ok: false, reason: "no-chunk-references", missing: [] };
+    }
+    const uploaded = new Set(
+        existsSync(chunkDir)
+            ? readdirSync(chunkDir, { withFileTypes: true })
+                  .filter((e) => e.isFile())
+                  .map((e) => e.name)
+            : [],
+    );
+    const missing = [...referenced].filter((n) => !uploaded.has(n)).sort();
+    if (missing.length > 0)
+        return { ok: false, reason: "chunk-missing", missing };
+    return { ok: true, referenced: referenced.size };
+}
+
+/**
+ * Upload the static assets the IMAGE serves (#1447), not the ones a separate
+ * host build produced. The image is the source of truth: it was built once,
+ * and its `/app/.output/public` is byte-for-byte what its server references.
+ * Extracts `/app` from `imageRef`, proves the extracted assets cover every
+ * chunk the image's server output references, then uploads that tree.
+ *
+ * @throws when the image cannot be extracted or the guard finds a mismatch —
+ *   the deploy aborts before the CR apply (ADR-0001).
+ */
+export async function uploadAssetsFromImage(
+    config: StorageBackedConfig,
+    buildId: string,
+    imageRef: string,
+    opts: {
+        verify?: boolean;
+        /** Test seam: the actual provider upload. */
+        upload?: typeof uploadAssets;
+    } = {},
+): Promise<void> {
+    const verify = opts.verify ?? true;
+    const workDir = mkdtempSync(join(tmpdir(), "knext-image-assets-"));
+    let containerId: string | undefined;
+    try {
+        try {
+            containerId = runCapture([
+                "docker",
+                "create",
+                "--platform",
+                "linux/amd64",
+                imageRef,
+            ]);
+            runQuiet([
+                "docker",
+                "cp",
+                `${containerId}:/app`,
+                join(workDir, "app"),
+            ]);
+        } catch {
+            throw new Error(
+                `could not extract /app from image ${imageRef} (docker create/cp ` +
+                    "failed) — the assets to upload are read from the image the " +
+                    "deploy is about to serve, so the deploy cannot proceed.",
+            );
+        }
+        const appDir = join(workDir, "app");
+        // `verify: false` is the documented `--skip-image-lockstep-check` opt-out
+        // for a non-standard server layout. The upload is STILL sourced from the
+        // image, so it stays correct by construction; only the cross-check goes.
+        const check: ChunkReferenceCheck = verify
+            ? verifyAssetsCoverServerReferences(appDir)
+            : { ok: true, referenced: 0 };
+        if (!check.ok) {
+            throw new Error(
+                "Asset/image mismatch: " +
+                    (check.reason === "chunk-missing"
+                        ? `the image's server references client chunks absent from ` +
+                          `its own asset tree: ${check.missing.join(", ")}`
+                        : check.reason === "no-chunk-references"
+                          ? "the image's server output references no client chunks, " +
+                            "so the asset set cannot be verified against it"
+                          : "the image has no recognisable server artifact " +
+                            "(/app/server or /app/.output/server)") +
+                    ". Refusing to upload assets the image does not serve.",
+            );
+        }
+        await (opts.upload ?? uploadAssets)(config, buildId, { cwd: appDir });
+    } finally {
+        if (containerId) runQuietAllowFail(["docker", "rm", "-f", containerId]);
+        rmSync(workDir, { recursive: true, force: true });
+    }
+}
+
 /**
  * @param buildId this deploy's id. Threaded from the caller rather than read
  *   back off disk — see {@link stageNitroPublicAssets}. Omitted by
@@ -1032,14 +1196,16 @@ export function verifyBuiltImageLockstep(opts: {
 export async function uploadAssets(
     config: StorageBackedConfig,
     buildId?: string,
+    opts: { cwd?: string } = {},
 ): Promise<void> {
+    const cwd = opts.cwd ?? process.cwd();
     // Shape dispatch — the builder decides where served assets live, so the
     // staging step must ask (the resolved default, not the raw field: an
     // absent `build` means vinext, ADR-0048).
     const nitroShape = (config.build ?? DEFAULT_BUILDER_ID) === "vinext";
     const assetsDir = nitroShape
-        ? stageNitroPublicAssets(process.cwd(), buildId)
-        : stageStandaloneAssets(process.cwd(), buildId);
+        ? stageNitroPublicAssets(cwd, buildId)
+        : stageStandaloneAssets(cwd, buildId);
 
     try {
         log.info(
