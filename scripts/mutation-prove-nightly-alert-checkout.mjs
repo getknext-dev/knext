@@ -29,6 +29,7 @@ const PROOF = {
   subjects: {
     actionPinWorkflow: '.github/workflows/action-pin-resolution-nightly.yml',
     checkoutTest: 'tests/nightly-alert-checkout.test.ts',
+    compatVinextWorkflow: '.github/workflows/compat-vinext.yml',
   },
 };
 
@@ -55,64 +56,82 @@ const MUTATIONS = [
       '      - name: Create or update the "Action pin SHA↔tag mismatch" issue (idempotent)',
   },
   {
+    // #1422 round 2 — the exact replacement the reviewer used as proof the
+    // scan was blind to `node knext/scripts/…`: delete shard-ledger's own
+    // checkout in compat-vinext.yml. Its steps then run
+    // `node knext/scripts/compat-run-ledger.mjs` cold, and the scan must see it.
+    label:
+      "compat-vinext.yml: drop shard-ledger's checkout (its `node knext/scripts/…` steps run cold)",
+    subject: 'compatVinextWorkflow',
+    anchor:
+      '      - name: Checkout knext (the ledger script + its guards)\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          path: knext\n\n',
+    replacement: '',
+  },
+  {
     // Drop the execution-verb requirement from the detector: a bare mention
     // of a scripts/ path (e.g. inside a message string) would then falsely
-    // trip the guard on the tree as it stands today — the tree has such
-    // mentions (test-e2e-deploy.yml), so this mutation must be caught by
-    // the "no job executes a scripts/ file..." assertion going from
-    // "0 findings" to a nonempty list, which fails a DIFFERENT, unrelated,
-    // job that never lacked a checkout.
+    // trip the guard on the tree as it stands today (test-e2e-deploy.yml has
+    // such a mention), turning "0 findings" into a nonempty list.
     label: 'runsRepoScript: drop the execution-verb requirement (bare-mention false positive)',
     subject: 'checkoutTest',
     anchor:
-      'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?|bun|tsx)\\s+"?(?:\\$\\{?GITHUB_WORKSPACE\\}?\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)"?\\$\\{?GITHUB_WORKSPACE\\}?\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b/m;',
-    replacement: 'const SCRIPT_EXEC_RE = /scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b/m;',
+      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|tsx)\\s+"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
+    replacement: "const SCRIPT_EXEC_RE = new RegExp(SCRIPT_PATH, 'm');",
   },
   {
-    // Drop the tar-extract recognition: the guard would then falsely accuse
-    // `deploy-tests` (which legitimately restores the repo via a downloaded
-    // workspace tarball, never `actions/checkout`) of missing a checkout —
-    // a DIFFERENT false positive than the one above, on a real job in the
-    // tree today.
-    label: 'isTarExtractStep: stop recognising the tar-extract workspace-restore pattern',
+    // #1422 — revert to the pre-#1422 invoker set (node/bash/sh/python3 and
+    // `./scripts/…` only): bun/bun run/tsx, the workspace prefixes and the
+    // knext/ prefix all go invisible.
+    label: 'SCRIPT_EXEC_RE: revert to the pre-#1422 invoker/path set',
     subject: 'checkoutTest',
     anchor:
-      'function providesRepoContent(step: YamlStep, precededByDownloadArtifact: boolean): boolean {\n  return isCheckoutStep(step) || isTarExtractStep(step, precededByDownloadArtifact);\n}',
-    replacement:
-      'function providesRepoContent(step: YamlStep, precededByDownloadArtifact: boolean): boolean {\n  return isCheckoutStep(step);\n}',
-  },
-  {
-    // #1422 — the TIGHTENED tar-extract check reverts to the pre-#1422 bare
-    // `tar x…f` (any tarball at all is "repo-providing", ignoring
-    // `precededByDownloadArtifact` entirely). A job that unpacks an
-    // UNRELATED tarball (an adapter package, a prebuilt Next.js bundle)
-    // would then be silently accepted as having provided the repo.
-    label:
-      'isTarExtractStep: revert to bare tar x…f, ignoring the workspace-tarball name / download-artifact requirement (#1422)',
-    subject: 'checkoutTest',
-    anchor:
-      "function isTarExtractStep(step: YamlStep, precededByDownloadArtifact: boolean): boolean {\n  if (typeof step.run !== 'string') return false;\n  if (WORKSPACE_TARBALL_TAR_EXTRACT_RE.test(step.run)) return true;\n  return precededByDownloadArtifact && GENERIC_TAR_EXTRACT_RE.test(step.run);\n}",
-    replacement:
-      "function isTarExtractStep(step: YamlStep, _precededByDownloadArtifact: boolean): boolean {\n  return typeof step.run === 'string' && GENERIC_TAR_EXTRACT_RE.test(step.run);\n}",
-  },
-  {
-    // #1422 — the WIDENED SCRIPT_EXEC_RE reverts to the pre-#1422 invoker
-    // set (drops bun/tsx and the $GITHUB_WORKSPACE/scripts/... forms). A
-    // future `bun scripts/x.mjs` or `$GITHUB_WORKSPACE/scripts/x.sh` step
-    // with no checkout would then be silently invisible to the scan.
-    label: 'SCRIPT_EXEC_RE: revert to the pre-#1422 invoker set (drop bun/tsx/$GITHUB_WORKSPACE)',
-    subject: 'checkoutTest',
-    anchor:
-      'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?|bun|tsx)\\s+"?(?:\\$\\{?GITHUB_WORKSPACE\\}?\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)"?\\$\\{?GITHUB_WORKSPACE\\}?\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)"?\\b/m;',
+      'const SCRIPT_EXEC_RE = new RegExp(\n  [\n    String.raw`\\b(?:node|bash|sh|python3?|bun(?:\\s+run)?|tsx)\\s+"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\\b`,\n    String.raw`(?:^|\\s)"?\\.\\/${SCRIPT_PATH}\\b`,\n    String.raw`(?:^|\\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\\b`,\n  ].join(\'|\'),\n  \'m\',\n);',
     replacement:
       'const SCRIPT_EXEC_RE =\n  /\\b(?:node|bash|sh|python3?)\\s+scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b|(?:^|\\s)\\.\\/scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)\\b/m;',
   },
+  {
+    // #1422 round 2 — drop ONLY the optional `knext/` checkout-dir prefix:
+    // the dominant real shape (`node knext/scripts/…`) goes invisible again.
+    label: 'SCRIPT_PATH: drop the optional knext/ prefix',
+    subject: 'checkoutTest',
+    anchor: 'const SCRIPT_PATH = String.raw`(?:knext\\/)?scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)`;',
+    replacement: 'const SCRIPT_PATH = String.raw`scripts\\/[\\w./-]+\\.(?:mjs|sh|js|ts)`;',
+  },
+  {
+    // Drop the tar-extract recognition entirely: the guard would then
+    // falsely accuse `deploy-tests` (which restores the repo from the
+    // downloaded workspace tarball, never `actions/checkout`).
+    label: 'providesRepoContent: stop recognising the tar-extract workspace-restore pattern',
+    subject: 'checkoutTest',
+    anchor:
+      'function providesRepoContent(step: YamlStep, downloaded: ReadonlySet<string>): boolean {\n  return isCheckoutStep(step) || isTarExtractStep(step, downloaded);\n}',
+    replacement:
+      'function providesRepoContent(step: YamlStep, _downloaded: ReadonlySet<string>): boolean {\n  return isCheckoutStep(step);\n}',
+  },
+  {
+    // #1422 — revert to a bare `tar x…f` (any tarball at all is
+    // "repo-providing", with or without a download).
+    label: 'isTarExtractStep: revert to bare tar x…f, ignoring what was downloaded',
+    subject: 'checkoutTest',
+    anchor:
+      '  for (const m of stripBashCommentLines(step.run).matchAll(TAR_EXTRACT_ARCHIVE_RE)) {\n    if (downloaded.has(basename(m[2]))) return true;\n  }\n  return false;',
+    replacement: '  return /\\btar\\s+x[a-z]*f\\b/.test(step.run);',
+  },
+  {
+    // #1422 round 2 — un-tie the tar exception from the artifact NAME: any
+    // download-artifact step makes every tarball this workflow uploads
+    // "available" (the round-1 "any earlier download" shape).
+    label: 'downloadedTarballs: ignore the downloaded artifact name (any download counts)',
+    subject: 'checkoutTest',
+    anchor: "  return typeof name === 'string' ? [...(uploads.get(name) ?? [])] : [];",
+    replacement: '  return [...uploads.values()].flatMap((s) => [...s]);',
+  },
 ];
 
-declareMutations(5);
+declareMutations(8);
 
-if (MUTATIONS.length !== 5) {
-  console.error(`FATAL: declared 5 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 8) {
+  console.error(`FATAL: declared 8 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

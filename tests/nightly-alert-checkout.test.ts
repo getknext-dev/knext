@@ -18,7 +18,9 @@ import { parse } from 'yaml';
  * `scripts/*` file, requires an earlier step in that same job to provide the
  * repo — either `actions/checkout`, or (the OTHER pattern this repo actually
  * uses, in `test-e2e-deploy.yml`/`compat-vinext.yml`'s `deploy-tests`) a
- * `tar x...f` extraction of a downloaded workspace tarball. A future job
+ * `tar x...f` extraction of the tarball an earlier `download-artifact` step
+ * in the same job fetched (resolved by artifact name to what the workflow's
+ * `upload-artifact` step uploaded under it). A future job
  * added to any workflow that shells out to a repo script with neither trips
  * this immediately.
  *
@@ -27,9 +29,10 @@ import { parse } from 'yaml';
  *   1. `scripts/*.mjs` mentioned in a bash COMMENT or inside a quoted
  *      message STRING (`test-e2e-deploy.yml`'s `nightly-red-alert` names
  *      `scripts/e2e-bytecode-liveness.mjs` in prose, never executes it) —
- *      the detector requires an EXECUTION VERB (`node`/`bash`/`sh`/`python3`)
- *      or a `./scripts/...` direct-exec form immediately before the path,
- *      not a bare substring match.
+ *      the detector requires an EXECUTION VERB (`node`/`bash`/`sh`/`python3`/
+ *      `bun`/`bun run`/`tsx`), a `./` direct-exec form, or a workspace-prefixed
+ *      path immediately before the (optionally `knext/`-prefixed) path — see
+ *      `SCRIPT_EXEC_RE` — not a bare substring match.
  *   2. `deploy-tests` in `compat-vinext.yml`/`test-e2e-deploy.yml` never
  *      checks out — it downloads a pre-built workspace tarball and
  *      `tar xzf`s it (`Unpack workspace tarball`), which is this repo's
@@ -45,37 +48,50 @@ type YamlJob = { steps?: unknown } & Record<string, unknown>;
 type YamlDoc = { jobs?: Record<string, YamlJob> };
 
 /**
- * Requires an execution verb (or `./`, or a direct `$GITHUB_WORKSPACE/`
+ * The workspace prefix a script path may carry: `$GITHUB_WORKSPACE/`,
+ * `${GITHUB_WORKSPACE}/`, or the expression form `${{ github.workspace }}/`
+ * (which survives YAML parsing verbatim inside a `run:` string).
+ */
+const WORKSPACE_PREFIX = String.raw`(?:\$\{?GITHUB_WORKSPACE\}?|\$\{\{\s*github\.workspace\s*\}\})\/`;
+/**
+ * The repo-script path itself. `knext/` is optional because the jobs that
+ * check the repo out alongside next.js (`path: knext` — compat-vinext.yml,
+ * test-e2e-deploy.yml) invoke `knext/scripts/…`, which is the dominant real
+ * shape; the sibling scan in `compat-window-fingerprint-execution-scan.test.ts`
+ * accepts the same prefix.
+ */
+const SCRIPT_PATH = String.raw`(?:knext\/)?scripts\/[\w./-]+\.(?:mjs|sh|js|ts)`;
+/**
+ * Requires an execution verb (or `./`, or a direct workspace-prefixed
  * reference) immediately before the path — not a bare mention.
  *
- * #1422 — widened past `node|bash|sh|python3?`: `bun`/`tsx` are real
- * invokers this repo uses for `.mjs`/`.ts` scripts, and a step can reference
- * `$GITHUB_WORKSPACE/scripts/...` directly (with or without an invoker in
- * front) rather than the bare `scripts/...` form — none of these shapes
- * appear in a workflow TODAY, but the guard's job is to survive the NEXT
- * edit, not just describe the current one (the same reasoning
- * `compat-window-fingerprint-execution-scan.test.ts`'s sibling scan
- * documents for its own subprocess-ref regex).
+ * #1422 — widened past `node|bash|sh|python3?`: `bun`/`bun run`/`tsx` are
+ * real invokers for `.mjs`/`.ts` scripts; the path may carry the optional
+ * `knext/` checkout-dir prefix and/or a workspace prefix; and a step can
+ * reference a workspace-prefixed script with no invoker in front. The
+ * `knext/` prefix is not hypothetical — before it was accepted, 10
+ * `node knext/scripts/…` invocations in compat-vinext.yml and
+ * test-e2e-deploy.yml were invisible to this scan, and deleting
+ * `shard-ledger`'s checkout stayed green.
  */
-const SCRIPT_EXEC_RE =
-  /\b(?:node|bash|sh|python3?|bun|tsx)\s+"?(?:\$\{?GITHUB_WORKSPACE\}?\/)?scripts\/[\w./-]+\.(?:mjs|sh|js|ts)"?\b|(?:^|\s)\.\/scripts\/[\w./-]+\.(?:mjs|sh|js|ts)\b|(?:^|\s)"?\$\{?GITHUB_WORKSPACE\}?\/scripts\/[\w./-]+\.(?:mjs|sh|js|ts)"?\b/m;
+const SCRIPT_EXEC_RE = new RegExp(
+  [
+    String.raw`\b(?:node|bash|sh|python3?|bun(?:\s+run)?|tsx)\s+"?(?:${WORKSPACE_PREFIX})?${SCRIPT_PATH}"?\b`,
+    String.raw`(?:^|\s)"?\.\/${SCRIPT_PATH}\b`,
+    String.raw`(?:^|\s)"?${WORKSPACE_PREFIX}${SCRIPT_PATH}"?\b`,
+  ].join('|'),
+  'm',
+);
 const CHECKOUT_USES_RE = /^actions\/checkout@/;
 const DOWNLOAD_ARTIFACT_USES_RE = /^actions\/download-artifact@/;
+const UPLOAD_ARTIFACT_USES_RE = /^actions\/upload-artifact@/;
+const TARBALL_RE = /\.(?:tgz|tar(?:\.(?:gz|xz|zst|bz2))?)$/;
 /**
- * This repo's other established way to make the repo tree available to a
- * job: unpacking the `compat-workspace.tgz` tarball a `download-artifact`
- * step fetched.
- *
- * #1422 — tightened from a bare `tar x…f` (which would treat ANY tarball
- * extraction as repo-providing — a job that unpacks something unrelated,
- * e.g. `next.tgz`, `*.tgz` adapter tarballs, would have passed with no repo
- * content at all). Now requires EITHER the literal workspace tarball name in
- * the command, OR — for a differently-named/future workspace tarball — an
- * earlier `actions/download-artifact` step in the SAME job (checked by the
- * caller, `isTarExtractStep`'s second parameter).
+ * The archive operand of every `tar x…f <archive>` in a command. Only the
+ * basename is compared; a glob (`"$work"/*.tgz`) or an unresolved variable
+ * never equals a real uploaded tarball name, so it fails closed.
  */
-const WORKSPACE_TARBALL_TAR_EXTRACT_RE = /\btar\s+x[a-z]*f\s+(?:\S*\/)?compat-workspace\.tgz\b/;
-const GENERIC_TAR_EXTRACT_RE = /\btar\s+x[a-z]*f\b/;
+const TAR_EXTRACT_ARCHIVE_RE = /\btar\s+-?x[a-z]*f\s+("?)([^\s"]+)\1/g;
 
 function stripBashCommentLines(text: string): string {
   return text.replace(/^\s*#.*$/gm, '');
@@ -106,27 +122,67 @@ function isCheckoutStep(step: YamlStep): boolean {
   return typeof step.uses === 'string' && CHECKOUT_USES_RE.test(step.uses);
 }
 
-/** True if the step downloads a build artifact via `actions/download-artifact`. */
-function isDownloadArtifactStep(step: YamlStep): boolean {
-  return typeof step.uses === 'string' && DOWNLOAD_ARTIFACT_USES_RE.test(step.uses);
+function withOf(step: YamlStep): Record<string, unknown> {
+  const w = step.with;
+  return w && typeof w === 'object' ? (w as Record<string, unknown>) : {};
+}
+
+function basename(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+/** artifact name -> the tarball basenames an `upload-artifact` step in this workflow uploads under it. */
+type UploadedTarballs = ReadonlyMap<string, ReadonlySet<string>>;
+
+function uploadedTarballsOf(jobs: Record<string, YamlJob>): UploadedTarballs {
+  const out = new Map<string, Set<string>>();
+  for (const job of Object.values(jobs)) {
+    for (const step of stepsOf(job)) {
+      if (typeof step.uses !== 'string' || !UPLOAD_ARTIFACT_USES_RE.test(step.uses)) continue;
+      const { name, path } = withOf(step);
+      if (typeof name !== 'string' || typeof path !== 'string') continue;
+      for (const line of path.split('\n')) {
+        const file = basename(line.trim());
+        if (TARBALL_RE.test(file)) {
+          if (!out.has(name)) out.set(name, new Set());
+          out.get(name)?.add(file);
+        }
+      }
+    }
+  }
+  return out;
 }
 
 /**
- * True if the step extracts a downloaded workspace tarball — this repo's
- * other pattern. Matches the literal `compat-workspace.tgz` name directly;
- * otherwise only counts when an earlier step in the SAME job downloaded an
- * artifact (`precededByDownloadArtifact`) — a bare `tar x…f` extracting
- * something else entirely (an adapter tarball, a prebuilt Next.js bundle)
- * must NOT be mistaken for providing the repo.
+ * The tarball basenames a `download-artifact` step makes available — resolved
+ * through the `name:` it downloads to what an `upload-artifact` step in the
+ * same workflow uploaded under that name. A `pattern:` download, an unresolved
+ * `${{ }}` name, or a name nothing in this workflow uploads yields nothing.
  */
-function isTarExtractStep(step: YamlStep, precededByDownloadArtifact: boolean): boolean {
-  if (typeof step.run !== 'string') return false;
-  if (WORKSPACE_TARBALL_TAR_EXTRACT_RE.test(step.run)) return true;
-  return precededByDownloadArtifact && GENERIC_TAR_EXTRACT_RE.test(step.run);
+function downloadedTarballs(step: YamlStep, uploads: UploadedTarballs): string[] {
+  if (typeof step.uses !== 'string' || !DOWNLOAD_ARTIFACT_USES_RE.test(step.uses)) return [];
+  const { name } = withOf(step);
+  return typeof name === 'string' ? [...(uploads.get(name) ?? [])] : [];
 }
 
-function providesRepoContent(step: YamlStep, precededByDownloadArtifact: boolean): boolean {
-  return isCheckoutStep(step) || isTarExtractStep(step, precededByDownloadArtifact);
+/**
+ * True if the step extracts a tarball an EARLIER `download-artifact` step in
+ * the same job fetched (`downloaded`) — this repo's other way to provide the
+ * repo (`deploy-tests` unpacks `compat-workspace.tgz`). #1422: tied to the
+ * artifact that step downloaded, not merely to "some download happened": a
+ * job that downloads shard summaries and then unpacks an unrelated tarball
+ * (`next.tgz`, an adapter `*.tgz`) has not provided the repo.
+ */
+function isTarExtractStep(step: YamlStep, downloaded: ReadonlySet<string>): boolean {
+  if (typeof step.run !== 'string') return false;
+  for (const m of stripBashCommentLines(step.run).matchAll(TAR_EXTRACT_ARCHIVE_RE)) {
+    if (downloaded.has(basename(m[2]))) return true;
+  }
+  return false;
+}
+
+function providesRepoContent(step: YamlStep, downloaded: ReadonlySet<string>): boolean {
+  return isCheckoutStep(step) || isTarExtractStep(step, downloaded);
 }
 
 interface Finding {
@@ -136,32 +192,49 @@ interface Finding {
 }
 
 /**
- * For every job in every workflow, find any step that executes a repo script
- * with no EARLIER repo-providing step (checkout or tar-extract) in the same
- * job.
+ * For one job, every step that executes a repo script with no EARLIER
+ * repo-providing step (checkout, or tar-extract of a downloaded tarball).
  */
-function findMissingCheckoutBeforeScriptSteps(): Finding[] {
+function findingsForJob(
+  file: string,
+  jobName: string,
+  job: YamlJob,
+  uploads: UploadedTarballs,
+): Finding[] {
   const findings: Finding[] = [];
-  for (const file of listWorkflowFiles()) {
-    const jobs = loadJobs(file);
-    for (const [jobName, job] of Object.entries(jobs)) {
-      const steps = stepsOf(job);
-      let sawRepoContent = false;
-      let sawDownloadArtifact = false;
-      steps.forEach((step, index) => {
-        if (isDownloadArtifactStep(step)) sawDownloadArtifact = true;
-        if (providesRepoContent(step, sawDownloadArtifact)) {
-          sawRepoContent = true;
-          return;
-        }
-        if (runsRepoScript(step) && !sawRepoContent) {
-          const label = typeof step.name === 'string' ? step.name : `step #${index + 1}`;
-          findings.push({ file, job: jobName, scriptStepLabel: label });
-        }
-      });
+  const downloaded = new Set<string>();
+  let sawRepoContent = false;
+  stepsOf(job).forEach((step, index) => {
+    for (const t of downloadedTarballs(step, uploads)) downloaded.add(t);
+    if (providesRepoContent(step, downloaded)) {
+      sawRepoContent = true;
+      return;
     }
-  }
+    if (runsRepoScript(step) && !sawRepoContent) {
+      const label = typeof step.name === 'string' ? step.name : `step #${index + 1}`;
+      findings.push({ file, job: jobName, scriptStepLabel: label });
+    }
+  });
   return findings;
+}
+
+function findingsForWorkflow(file: string, jobs: Record<string, YamlJob>): Finding[] {
+  const uploads = uploadedTarballsOf(jobs);
+  return Object.entries(jobs).flatMap(([name, job]) => findingsForJob(file, name, job, uploads));
+}
+
+/** Every workflow, every job. */
+function findMissingCheckoutBeforeScriptSteps(): Finding[] {
+  return listWorkflowFiles().flatMap((file) => findingsForWorkflow(file, loadJobs(file)));
+}
+
+/** The set of tarballs downloaded by steps [0, index) of a job — for the per-job floor test. */
+function downloadedBefore(
+  steps: YamlStep[],
+  index: number,
+  uploads: UploadedTarballs,
+): Set<string> {
+  return new Set(steps.slice(0, index).flatMap((s) => downloadedTarballs(s, uploads)));
 }
 
 describe('#1406 — every job that executes a repo script provides the repo first', () => {
@@ -187,23 +260,86 @@ describe('#1406 — every job that executes a repo script provides the repo firs
     expect(runsRepoScript(commentOnly)).toBe(false);
   });
 
-  it('non-vacuity: a tar-extract step counts as repo-providing (the deploy-tests pattern)', () => {
-    const jobs = loadJobs('test-e2e-deploy.yml');
-    const steps = stepsOf(jobs['deploy-tests']);
-    // Matches the literal workspace tarball name directly, so this is true
-    // even without a preceding download-artifact step in view here.
-    expect(steps.some((s) => isTarExtractStep(s, false))).toBe(true);
+  it('non-vacuity: a tar-extract of the DOWNLOADED workspace tarball counts as repo-providing (the deploy-tests pattern, both workflows)', () => {
+    for (const file of ['test-e2e-deploy.yml', 'compat-vinext.yml']) {
+      const jobs = loadJobs(file);
+      const uploads = uploadedTarballsOf(jobs);
+      const steps = stepsOf(jobs['deploy-tests']);
+      const tarIndex = steps.findIndex((s, i) =>
+        isTarExtractStep(s, downloadedBefore(steps, i, uploads)),
+      );
+      expect(tarIndex, `${file}/deploy-tests: workspace unpack not recognised`).toBeGreaterThan(0);
+    }
   });
 
-  it('#1422: a tar-extract of an UNRELATED tarball (not compat-workspace.tgz, no preceding download-artifact step) does NOT count as repo-providing', () => {
-    const unrelatedTarExtract: YamlStep = { run: 'tar xzf "$work"/*.tgz -C "$work"' };
-    expect(isTarExtractStep(unrelatedTarExtract, false)).toBe(false);
+  it('#1422: a tar-extract with NO preceding download of that tarball does not count — not even the literal workspace name', () => {
+    expect(isTarExtractStep({ run: 'tar xzf compat-workspace.tgz' }, new Set())).toBe(false);
+    expect(isTarExtractStep({ run: 'tar xzf "$work"/*.tgz -C "$work"' }, new Set())).toBe(false);
   });
 
-  it('#1422: a differently-named workspace tarball DOES count when preceded by a download-artifact step in the same job', () => {
-    const genericTarExtract: YamlStep = { run: 'tar xzf some-other-workspace.tgz' };
-    expect(isTarExtractStep(genericTarExtract, false)).toBe(false);
-    expect(isTarExtractStep(genericTarExtract, true)).toBe(true);
+  it('#1422: the tar exception is tied to the artifact NAME downloaded, not to "some download happened"', () => {
+    const uploadJob: YamlJob = {
+      steps: [
+        {
+          uses: 'actions/upload-artifact@x',
+          with: { name: 'ws', path: '${{ runner.temp }}/workspace.tgz' },
+        },
+        {
+          uses: 'actions/upload-artifact@x',
+          with: { name: 'summaries', path: 'out/summary.json' },
+        },
+      ],
+    };
+    const consumer = (download: Record<string, unknown>, tar: string): YamlJob => ({
+      steps: [
+        { uses: 'actions/download-artifact@x', with: download },
+        { name: 'unpack', run: tar },
+        { name: 'run it', run: 'node knext/scripts/foo.mjs' },
+      ],
+    });
+    const scan = (job: YamlJob) =>
+      findingsForWorkflow('synthetic.yml', { build: uploadJob, consume: job }).map(
+        (f) => f.scriptStepLabel,
+      );
+    // Downloads the workspace artifact and unpacks exactly its tarball: provided.
+    expect(scan(consumer({ name: 'ws' }, 'tar xzf workspace.tgz'))).toEqual([]);
+    // Downloads an UNRELATED artifact, then unpacks some tarball: not provided.
+    expect(scan(consumer({ name: 'summaries' }, 'tar xzf workspace.tgz'))).toEqual(['run it']);
+    // Downloads the workspace artifact but unpacks a DIFFERENT tarball: not provided.
+    expect(scan(consumer({ name: 'ws' }, 'tar xzf next.tgz'))).toEqual(['run it']);
+    // A pattern download cannot be resolved to a tarball name: fail closed.
+    expect(scan(consumer({ pattern: 'ws*' }, 'tar xzf workspace.tgz'))).toEqual(['run it']);
+  });
+
+  it('#1422: SCRIPT_EXEC_RE recognises the knext/ checkout-dir prefix, bun run, and ${{ github.workspace }}', () => {
+    expect(runsRepoScript({ run: 'node knext/scripts/compat-run-ledger.mjs' })).toBe(true);
+    expect(runsRepoScript({ run: 'bun run scripts/foo.mjs' })).toBe(true);
+    expect(runsRepoScript({ run: 'node ${{ github.workspace }}/scripts/foo.mjs' })).toBe(true);
+    expect(runsRepoScript({ run: '"${{ github.workspace }}/knext/scripts/foo.sh"' })).toBe(true);
+    expect(runsRepoScript({ run: './knext/scripts/foo.sh' })).toBe(true);
+    // Still a bare mention, not an execution.
+    expect(runsRepoScript({ run: 'echo "see knext/scripts/foo.mjs"' })).toBe(false);
+  });
+
+  it('non-vacuity: the real `node knext/scripts/…` invocations are all seen (compat-vinext.yml + test-e2e-deploy.yml)', () => {
+    let seen = 0;
+    for (const file of ['compat-vinext.yml', 'test-e2e-deploy.yml']) {
+      for (const job of Object.values(loadJobs(file))) {
+        for (const step of stepsOf(job)) {
+          if (typeof step.run !== 'string') continue;
+          const invocations = step.run.match(/\bnode knext\/scripts\//g)?.length ?? 0;
+          if (invocations > 0) {
+            expect(runsRepoScript(step), `${file}: ${String(step.name)}`).toBe(true);
+            seen += invocations;
+          }
+        }
+      }
+    }
+    expect(seen).toBeGreaterThanOrEqual(10);
+    // shard-ledger in compat-vinext.yml is one of them — the job whose
+    // checkout could be deleted with this scan staying green before #1422.
+    const shardLedger = stepsOf(loadJobs('compat-vinext.yml')['shard-ledger']);
+    expect(shardLedger.some(runsRepoScript)).toBe(true);
   });
 
   it('#1422: SCRIPT_EXEC_RE recognises bun/tsx invokers and a $GITHUB_WORKSPACE/scripts/... reference', () => {
@@ -248,8 +384,9 @@ describe('#1406 — every job that executes a repo script provides the repo firs
       const jobDef = jobs[job];
       expect(jobDef, `${file} no longer has a job named "${job}"`).toBeTruthy();
       const steps = stepsOf(jobDef);
+      const uploads = uploadedTarballsOf(jobs);
       const repoIndex = steps.findIndex((step, idx) =>
-        providesRepoContent(step, steps.slice(0, idx).some(isDownloadArtifactStep)),
+        providesRepoContent(step, downloadedBefore(steps, idx, uploads)),
       );
       const scriptIndex = steps.findIndex(runsRepoScript);
       expect(
