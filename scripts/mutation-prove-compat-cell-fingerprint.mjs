@@ -59,6 +59,13 @@
  *      equality operand, or the right side of `in`. Disarming it (short-
  *      circuiting to `return false` at the top) must silently let both
  *      shapes back through as clean.
+ *  11. #1422 — `NAMED_EXCEPTIONS` in
+ *      `tests/compat-window-fingerprint-execution-scan.test.ts` must stay
+ *      SCOPED PER SOURCE FILE via `isNamedException` (exact (source, path)
+ *      pair), never per lane or global. Five mutations: the helper ignoring
+ *      `source`, the helper ignoring `path`, EACH of the two scan call sites
+ *      (workflow key, harness key) reverted to a global exemption, and
+ *      `sources: []` no longer being rejected — each must go RED.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -87,6 +94,10 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FINGERPRINT = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
+const EXECUTION_SCAN_SPEC_PATH = resolve(
+  REPO_ROOT,
+  'tests/compat-window-fingerprint-execution-scan.test.ts',
+);
 const SPECS = [
   'tests/compat-window-fingerprint.test.ts',
   'tests/compat-vinext-lane.test.ts',
@@ -95,7 +106,7 @@ const SPECS = [
   'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(10);
+declareMutations(15);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -109,6 +120,17 @@ function specsPass() {
     if (r.status !== 0) return false;
   }
   return true;
+}
+
+/** Exit code of ONLY the mutated spec — no timing, no output parsing. */
+function execScanSpecPasses() {
+  const spec = 'tests/compat-window-fingerprint-execution-scan.test.ts';
+  const { runner } = RUNNERS.find((r) => r.spec === spec);
+  const r = spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+  return r.status === 0;
 }
 
 let pass = 0;
@@ -128,6 +150,32 @@ function prove(label, anchor, replacement) {
     mutate(snap, anchor, replacement);
     if (specsPass()) {
       console.log('   x DECORATION: the specs stayed GREEN with the behaviour removed');
+      fail += 1;
+    } else {
+      console.log('   ok went RED as required');
+      pass += 1;
+    }
+    recordMutation();
+  } finally {
+    restore(snap);
+  }
+  if (!specsPass()) {
+    console.error(`   FATAL: ${SPECS.join(', ')} did not go green again after restore`);
+    process.exit(1);
+  }
+}
+
+// #1422 — same contract as `prove` above, but the subject is
+// EXECUTION_SCAN_SPEC_PATH (the execution-scan spec's own guard logic, not
+// FINGERPRINT). A SEPARATE function, not a `target` parameter on `prove`,
+// for the same static-audit reason documented above `prove`.
+function proveOnExecutionScanSpec(label, anchor, replacement) {
+  console.log(`── mutation: ${label}`);
+  const snap = snapshot(EXECUTION_SCAN_SPEC_PATH);
+  try {
+    mutate(snap, anchor, replacement);
+    if (execScanSpecPasses()) {
+      console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       fail += 1;
     } else {
       console.log('   ok went RED as required');
@@ -259,6 +307,38 @@ prove(
   'a global object escaping as a value stops being a hard error: isAmbientRootEscape always returns false',
   'const isAmbientRootEscape = (node) => {\n    if (',
   'const isAmbientRootEscape = (node) => {\n    return false;\n    if (',
+);
+
+// 11. #1422 — `isNamedException` must key on the exact (source, path) pair,
+//     AND both real scan call sites must consult it with their own source key.
+//     Each anchor is asserted to occur exactly once by `mutate` (abort
+//     otherwise); the verdict is the spec's exit code, never its output.
+const IS_NAMED_ANCHOR =
+  'return NAMED_EXCEPTIONS.some((e) => e.path === ref && e.sources.includes(source));';
+proveOnExecutionScanSpec(
+  'isNamedException stops checking the source file: any file referencing a named path is exempt (#1422)',
+  IS_NAMED_ANCHOR,
+  'return NAMED_EXCEPTIONS.some((e) => e.path === ref);',
+);
+proveOnExecutionScanSpec(
+  'isNamedException stops checking the path: any reference from a named source is exempt (#1422)',
+  IS_NAMED_ANCHOR,
+  'return NAMED_EXCEPTIONS.some((e) => e.sources.includes(source));',
+);
+proveOnExecutionScanSpec(
+  'workflow scan call site reverts to a global exemption (#1422)',
+  'isNamedException(`.github/workflows/${workflowFile}`, ref)',
+  'true',
+);
+proveOnExecutionScanSpec(
+  'harness scan call site reverts to a global exemption (#1422)',
+  'isNamedException(relPath, ref)',
+  'true',
+);
+proveOnExecutionScanSpec(
+  'a named exception with sources: [] is no longer rejected as dead (#1422)',
+  'return entries.filter((e) => e.sources.length === 0).map((e) => e.path);',
+  'return entries.filter((e) => false).map((e) => e.path);',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

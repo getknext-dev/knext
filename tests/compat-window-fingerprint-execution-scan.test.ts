@@ -49,8 +49,15 @@ const SCRIPT = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
  * PERMANENT exceptions (#1294 round 3) — structurally dead code, verified by
  * a standing check below (not a clock): re-verified every run, so staying on
  * this list forever is correct as long as the verification keeps passing.
+ *
+ * #1422 — each exception is scoped to EXACTLY the source file(s) that
+ * reference the path (`sources`), never to a lane or the whole repo. The
+ * exemption key is the pair (source file, referenced path): a second file
+ * (another workflow, another harness script) referencing the same path gets
+ * no exemption and must be frozen or named on its own. `isNamedException`
+ * below is the only place the pair is consulted.
  */
-const NAMED_EXCEPTIONS: { path: string; reason: string }[] = [
+const NAMED_EXCEPTIONS: { path: string; reason: string; sources: readonly string[] }[] = [
   // scripts/e2e-deploy.sh's contract-test-mode (KNEXT_E2E_SKIP_PACK=1)
   // fallback resolves these FOUR preloads from in-repo SOURCE rather than the
   // installed tarball. VERIFIED DEAD on every CI run: KNEXT_E2E_SKIP_PACK is
@@ -65,21 +72,25 @@ const NAMED_EXCEPTIONS: { path: string; reason: string }[] = [
     path: 'packages/kn-next/src/adapters/cache-control-normalize.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
+    sources: ['scripts/e2e-deploy.sh'],
   },
   {
     path: 'packages/kn-next/src/adapters/bun-keepalive-guard.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
+    sources: ['scripts/e2e-deploy.sh'],
   },
   {
     path: 'packages/kn-next/src/adapters/sandbox-fetch-debug.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
+    sources: ['scripts/e2e-deploy.sh'],
   },
   {
     path: 'packages/kn-next/src/adapters/sandbox-fetch-realm-debug.cjs',
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
+    sources: ['scripts/e2e-deploy.sh'],
   },
   // #1347/#1406 — compat-vinext.yml's `vinext-red-alert` job shells out to
   // scripts/nightly-alert-issue.mjs. VERIFIED structurally outside the
@@ -97,8 +108,74 @@ const NAMED_EXCEPTIONS: { path: string; reason: string }[] = [
     path: 'scripts/nightly-alert-issue.mjs',
     reason:
       "invoked only by compat-vinext.yml's vinext-red-alert job (and the 8 sibling nightly-red-alert jobs, none of which are CREDENTIAL_CELLS lanes), which needs the other jobs only for status gating and runs strictly after the credential build/test work — never part of the fingerprint-relevant harness.",
+    sources: ['.github/workflows/compat-vinext.yml'],
   },
 ];
+
+/** Entries that declare no source file — dead exceptions that exempt nothing. */
+function deadExceptions(entries: { path: string; sources: readonly string[] }[]): string[] {
+  return entries.filter((e) => e.sources.length === 0).map((e) => e.path);
+}
+
+/**
+ * True only when `source` (repo-relative file containing the reference) is
+ * explicitly listed for `ref` — exact string match on both, no wildcards.
+ */
+function isNamedException(source: string, ref: string): boolean {
+  return NAMED_EXCEPTIONS.some((e) => e.path === ref && e.sources.includes(source));
+}
+
+/**
+ * The REAL scan code path for the workflow half — the lane tests and the
+ * negative fixtures below both go through it, so a call-site exemption that
+ * goes global is visible to the fixtures. `source` for the exemption key is
+ * the workflow's repo path.
+ */
+function unresolvedWorkflowRefs(
+  workflowFile: string,
+  workflowText: string,
+  harness: Set<string>,
+  datedPaths: Set<string>,
+): string[] {
+  const unresolved: string[] = [];
+  for (const ref of workflowSubprocessRefs(workflowText)) {
+    // compat-window-fingerprint.mjs itself is the TOOL computing the digest,
+    // never a subject of it — excluded by construction, not by exception.
+    if (ref === 'scripts/compat-window-fingerprint.mjs') continue;
+    if (
+      !(
+        harness.has(ref) ||
+        isNamedException(`.github/workflows/${workflowFile}`, ref) ||
+        datedPaths.has(ref)
+      )
+    ) {
+      unresolved.push(ref);
+    }
+  }
+  return unresolved;
+}
+
+/** The REAL scan code path for the harness-file half; key = the file's relPath. */
+function unresolvedHarnessRefs(
+  files: { relPath: string; text: string }[],
+  harness: Set<string>,
+  datedPaths: Set<string>,
+): string[] {
+  const unresolved: string[] = [];
+  for (const { relPath, text } of files) {
+    const fromDir = dirname(resolve(REPO_ROOT, relPath));
+    const refs = [
+      ...scriptDirRefs(text, fromDir),
+      ...(/\.(mjs|cjs|js)$/.test(relPath) ? jsImportRefs(text, fromDir) : []),
+    ];
+    for (const ref of refs) {
+      if (!(harness.has(ref) || isNamedException(relPath, ref) || datedPaths.has(ref))) {
+        unresolved.push(`${relPath} -> ${ref}`);
+      }
+    }
+  }
+  return unresolved;
+}
 
 /**
  * DATED exceptions (#1294 round 4, jev 0.75) — real, temporary tech debt,
@@ -324,6 +401,87 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
     }
   });
 
+  // #1422 — NAMED_EXCEPTIONS is scoped per SOURCE FILE. Direct unit coverage
+  // of `isNamedException`, independent of what the repo references today.
+  it('isNamedException: exempts exactly the (source, path) pairs declared', () => {
+    for (const { path, sources } of NAMED_EXCEPTIONS) {
+      for (const source of sources) {
+        expect(isNamedException(source, path), `${source} -> ${path}`).toBe(true);
+      }
+    }
+  });
+
+  it('isNamedException: a different source file referencing the same path is NOT exempt (#1422)', () => {
+    for (const { path, sources } of NAMED_EXCEPTIONS) {
+      for (const other of [
+        '.github/workflows/compat-window-other.yml',
+        'scripts/some-other-harness.sh',
+        `${sources[0]}.bak`,
+      ]) {
+        expect(isNamedException(other, path), `${other} must not inherit ${path}`).toBe(false);
+      }
+    }
+  });
+
+  it('isNamedException: a declared source is not exempt for a path it was not declared for (#1422)', () => {
+    expect(isNamedException('scripts/e2e-deploy.sh', 'scripts/anything-else.sh')).toBe(false);
+  });
+
+  it('deadExceptions: flags an entry with sources: [] and passes the real list (#1422)', () => {
+    expect(deadExceptions([{ path: 'x/y.mjs', sources: [] }])).toEqual(['x/y.mjs']);
+    expect(deadExceptions(NAMED_EXCEPTIONS)).toEqual([]);
+  });
+
+  it('every named-exception source exists and references its FULL path (no stale exemption); sources is never empty', () => {
+    for (const { path, sources } of NAMED_EXCEPTIONS) {
+      for (const source of sources) {
+        const abs = resolve(REPO_ROOT, source);
+        expect(existsSync(abs), `${source} is gone — remove the exception`).toBe(true);
+        expect(
+          readFileSync(abs, 'utf8').includes(path),
+          `${source} no longer references ${path} — remove the exception`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  // #1422 — NEGATIVE SCAN FIXTURES through the real call-site code paths. An
+  // undeclared source referencing an exempt path must be REPORTED; declared
+  // sources must not be. Workflow key and harness key are proved separately,
+  // so reverting either call site to a global exemption goes red.
+  it('workflow scan: an undeclared workflow referencing an exempt path is reported; the declared one is not (#1422)', () => {
+    const { path, sources } = NAMED_EXCEPTIONS.find((e) =>
+      e.sources.some((s) => s.startsWith('.github/workflows/')),
+    ) as (typeof NAMED_EXCEPTIONS)[number];
+    const declared = (sources.find((s) => s.startsWith('.github/workflows/')) as string).replace(
+      '.github/workflows/',
+      '',
+    );
+    const text = `jobs:\n  j:\n    steps:\n      - run: node ${path}\n`;
+    expect(workflowSubprocessRefs(text)).toContain(path);
+    expect(unresolvedWorkflowRefs('undeclared-fixture.yml', text, new Set(), new Set())).toEqual([
+      path,
+    ]);
+    expect(unresolvedWorkflowRefs(declared, text, new Set(), new Set())).toEqual([]);
+  });
+
+  it('harness scan: an undeclared harness file referencing an exempt path is reported; the declared one is not (#1422)', () => {
+    const { path, sources } = NAMED_EXCEPTIONS.find((e) =>
+      e.sources.includes('scripts/e2e-deploy.sh'),
+    ) as (typeof NAMED_EXCEPTIONS)[number];
+    expect(sources).toContain('scripts/e2e-deploy.sh');
+    // Real, existing directory so `${SCRIPT_DIR}/../<path>` resolves the same
+    // way for the declared and the undeclared source.
+    const text = `KNEXT_PRELOAD="\${SCRIPT_DIR}/../${path}"\n`;
+    const undeclared = [{ relPath: 'scripts/undeclared-fixture.sh', text }];
+    const declared = [{ relPath: 'scripts/e2e-deploy.sh', text }];
+    expect(scriptDirRefs(text, resolve(REPO_ROOT, 'scripts'))).toContain(path);
+    expect(unresolvedHarnessRefs(undeclared, new Set(), new Set())).toEqual([
+      `scripts/undeclared-fixture.sh -> ${path}`,
+    ]);
+    expect(unresolvedHarnessRefs(declared, new Set(), new Set())).toEqual([]);
+  });
+
   // #1294 round 6 — DATED_EXCEPTIONS is empty right now (its one real
   // subject was removed once #1311 landed and deleted the file it excused),
   // so these exercise `activeExemptions`'s lifecycle directly against a
@@ -385,40 +543,28 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
         resolve(REPO_ROOT, '.github/workflows', workflowFile),
         'utf8',
       );
-      const harness = harnessFor(lane);
-      const permanentPaths = new Set(NAMED_EXCEPTIONS.map((e) => e.path));
-      const datedPaths = activeDatedExceptionPaths();
-
-      for (const ref of workflowSubprocessRefs(workflowText)) {
-        // compat-window-fingerprint.mjs itself is the TOOL computing the
-        // digest, never a subject of it — excluded by construction, not by
-        // exception.
-        if (ref === 'scripts/compat-window-fingerprint.mjs') continue;
-        expect(
-          harness.has(ref) || permanentPaths.has(ref) || datedPaths.has(ref),
-          `${workflowFile} invokes ${ref} by subprocess; missing from lane "${lane}"'s harness and not a named exception`,
-        ).toBe(true);
-      }
+      const unresolved = unresolvedWorkflowRefs(
+        workflowFile,
+        workflowText,
+        harnessFor(lane),
+        activeDatedExceptionPaths(),
+      );
+      expect(
+        unresolved,
+        `${workflowFile} invokes these by subprocess; missing from lane "${lane}"'s harness and not a named exception`,
+      ).toEqual([]);
     });
 
     it(`lane "${lane}": every ${'${SCRIPT_DIR}'}/${'${KNEXT_REPO_ROOT}'} reference AND every local import, in every harness file this lane actually includes, is frozen or named`, () => {
-      const harness = harnessFor(lane);
-      const permanentPaths = new Set(NAMED_EXCEPTIONS.map((e) => e.path));
-      const datedPaths = activeDatedExceptionPaths();
-
-      for (const { relPath, text } of harnessCodeFiles(lane)) {
-        const fromDir = dirname(resolve(REPO_ROOT, relPath));
-        const refs = [
-          ...scriptDirRefs(text, fromDir),
-          ...(/\.(mjs|cjs|js)$/.test(relPath) ? jsImportRefs(text, fromDir) : []),
-        ];
-        for (const ref of refs) {
-          expect(
-            harness.has(ref) || permanentPaths.has(ref) || datedPaths.has(ref),
-            `${relPath} references ${ref}; missing from lane "${lane}"'s harness and not a named exception`,
-          ).toBe(true);
-        }
-      }
+      const unresolved = unresolvedHarnessRefs(
+        harnessCodeFiles(lane),
+        harnessFor(lane),
+        activeDatedExceptionPaths(),
+      );
+      expect(
+        unresolved,
+        `these harness references are missing from lane "${lane}"'s harness and not a named exception`,
+      ).toEqual([]);
     });
   }
 
