@@ -98,16 +98,18 @@ function splitStatements(source: string): string[] {
   return out;
 }
 
-/** An `apk` word anywhere in a statement — bare, path-qualified, quoted, or behind a wrapper. */
-const APK_WORD_RE = /(?<![\w.-])apk(?![\w.-])/;
+/** The substring `apk` anywhere in a statement — no word boundaries, so `${APK:-apk}`, `apk.static`, `/sbin/apk`, `sh -c 'apk …'` and wrappers all match (fails closed; today only the install line contains it). */
+const APK_WORD_RE = /apk/;
+/** The only flags an install may carry: none of them weakens signature checking. */
+const ALLOWED_APK_FLAGS = new Set(['--no-cache', '-q', '--quiet', '--no-progress']);
 /** The ONLY accepted shape: `apk add [-flags] pkg pkg ... [>/dev/null]`. */
 const APK_ADD_SHAPE_RE =
-  /^apk\s+add(\s+-[-\w=]+)*((?:\s+[A-Za-z0-9_.+][A-Za-z0-9_.+~=-]*)+)(\s*>\s*\/dev\/null)?$/;
+  /^apk\s+add((?:\s+-[-\w=]+)*)((?:\s+[A-Za-z0-9_.+][A-Za-z0-9_.+~=-]*)+)(\s*>\s*\/dev\/null)?$/;
 
 /**
  * Every `apk add` package token (flags excluded) in a script. Fails CLOSED:
- * ANY non-comment statement mentioning an `apk` word that is not exactly the
- * accepted `apk add` shape — `apk --no-cache add`, `/sbin/apk add`,
+ * ANY non-comment statement containing the substring `apk` that is not exactly the
+ * accepted `apk add` shape with only allowlisted flags — `apk --no-cache add`, `/sbin/apk add`,
  * `sh -c 'apk add x'`, `su-exec root apk add x`, `apk upgrade`, a
  * continuation, a variable/command substitution — lands in `unparseable`.
  */
@@ -119,6 +121,11 @@ function scanApkAdd(source: string): ApkScan {
     const m = APK_ADD_SHAPE_RE.exec(stmt);
     if (!m) {
       unparseable.push(stmt);
+      continue;
+    }
+    const flags = (m[1] as string).trim().split(/\s+/).filter(Boolean);
+    if (flags.some((f) => !ALLOWED_APK_FLAGS.has(f))) {
+      unparseable.push(stmt); // e.g. --allow-untrusted disables the signature check the pins rely on
       continue;
     }
     for (const w of (m[2] as string).trim().split(/\s+/)) tokens.push(w);
@@ -192,6 +199,9 @@ describe('every apk package in scripts/e2e-native-rebuild-musl.sh carries a mino
       "sh -c 'apk add make'",
       'su-exec root apk add make',
       'apk upgrade --no-cache',
+      `\${APK:-apk} add make`,
+      'apk.static add make',
+      'apk add --no-cache --allow-untrusted python3~3.12',
     ];
     for (const bad of smuggles) {
       const { tokens, unparseable } = scanApkAdd(`${pinned}\n${bad}\n`);
