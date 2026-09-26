@@ -22,6 +22,7 @@ import {
   assertAssetPrefixReferenced,
   assertAssetUrlsServeOk,
   assertBuildIdMatchesTag,
+  assertBuildMarkerMatchesTag,
   extractBucketAssetRefs,
 } from './storage-mode-checks.mjs';
 
@@ -230,6 +231,33 @@ await (async () => {
     caught ? '' : 'stayed green',
   );
 })();
+
+await (async () => {
+  let err = '';
+  try {
+    await assertBuildMarkerMatchesTag({
+      prefix: PREFIX,
+      tag: TAG,
+      fetchOne: async () => ({ status: 200, text: `${TAG}\n` }),
+    });
+  } catch (e) {
+    err = String(e instanceof Error ? e.message : e);
+  }
+  report('assertBuildMarkerMatchesTag is green on a matching bucket marker', !err, err);
+})();
+
+for (const [label, res] of [
+  ['marker missing (404)', { status: 404, text: '' }],
+  ['marker names a different build', { status: 200, text: 'other-build\n' }],
+]) {
+  let caught = false;
+  try {
+    await assertBuildMarkerMatchesTag({ prefix: PREFIX, tag: TAG, fetchOne: async () => res });
+  } catch {
+    caught = true;
+  }
+  report(`RED on: ${label}`, caught, caught ? '' : 'stayed green');
+}
 
 mustPass(
   'extractBucketAssetRefs finds nothing when no prefix is present (no false positives)',

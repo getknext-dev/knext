@@ -332,6 +332,14 @@ jobs:
           done
           kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
 
+      - name: Diagnostics - storage bucket contents
+        if: failure()
+        run: |
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" AWS_DEFAULT_REGION=us-east-1
+          aws s3 ls s3://fm-e2e-storage-assets/ --recursive --endpoint-url http://127.0.0.1:9000 2>&1 \
+            | awk '{print $4}' | sed -E 's#/[^/]*$##' | sort | uniq -c | head -40 || true
+          aws s3 ls s3://fm-e2e-storage-assets/file-manager-storage/_next/static/chunks/ --endpoint-url http://127.0.0.1:9000 2>&1 | head -30 || true
+
       - name: Tear down
         if: always()
         run: |

@@ -142,6 +142,28 @@ export async function assertAssetUrlsServeOk({ urls, fetchOne }) {
 }
 
 /**
+ * vinext's served HTML references only SHARED static dirs (`chunks/`, `css/`,
+ * ...), never `_next/static/<buildId>/`, so the build id cannot be read off the
+ * asset URLs. The live proof of the lock-step is the `.knext-build` marker the
+ * deploy writes at `<prefix>_next/static/<tag>/.knext-build` (content `<tag>`):
+ * it exists only if the uploaded prefix IS the deploy tag.
+ *
+ * @param {{ prefix: string, tag: string, fetchOne: (url: string) => Promise<{ status: number, text: string }> }} args
+ * @returns {Promise<string>}
+ */
+export async function assertBuildMarkerMatchesTag({ prefix, tag, fetchOne }) {
+  const url = `${prefix}_next/static/${tag}/.knext-build`;
+  const res = await fetchOne(url);
+  if (res.status !== 200) {
+    throw new Error(`GET ${url} -> HTTP ${res.status}, expected the build marker in the bucket`);
+  }
+  if (res.text.trim() !== tag) {
+    throw new Error(`build marker at ${url} says "${res.text.trim()}", expected deploy tag "${tag}"`);
+  }
+  return `bucket marker _next/static/${tag}/.knext-build == deploy tag`;
+}
+
+/**
  * Extracts the `<buildId>` segment from a `.../_next/static/<buildId>/...`
  * asset URL and asserts it equals the given deploy `tag`. This is the live
  * proof of ADR-0011's skew-protection lock-step (`NEXT_DEPLOYMENT_ID` ===

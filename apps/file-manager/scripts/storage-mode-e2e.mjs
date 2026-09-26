@@ -40,6 +40,7 @@ import {
   assertAssetPrefixReferenced,
   assertAssetUrlsServeOk,
   assertBuildIdMatchesTag,
+  assertBuildMarkerMatchesTag,
 } from './storage-mode-checks.mjs';
 
 const KUBECTL_TIMEOUT_MS = 120000;
@@ -151,9 +152,18 @@ async function main() {
     },
   );
 
-  await check('build id embedded in the bucket URLs equals the deploy tag', () => {
+  await check('bucket build-id marker equals the deploy tag', () => {
     if (!refs) throw new Error('no refs captured from the previous check');
-    return assertBuildIdMatchesTag({ refs: refs.refs, tag });
+    const local = new URL(minioLocal);
+    return assertBuildMarkerMatchesTag({
+      prefix: refs.prefix,
+      tag,
+      fetchOne: async (url) => {
+        const u = new URL(url);
+        const res = await get(minioLocal, u.pathname + u.search, { host: local.host });
+        return { status: res.status, text: res.text };
+      },
+    });
   });
 
   await check(
