@@ -16,6 +16,7 @@ import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
 import type { KnativeNextConfig, StorageConfig } from "../config";
 import { classifyBuilds, DEFAULT_RETAIN } from "./asset-gc";
 import { createLogger } from "./logger";
+import { RESERVED_STATIC_DIRS } from "./reserved-static-dirs";
 
 /**
  * Lists the top-level entries inside a directory as absolute paths. Used to
@@ -1241,40 +1242,12 @@ export async function uploadAssets(
  */
 const STATIC_NS = "_next/static/";
 
-/**
- * First-level directories under `.next/static/` that `next build` emits but
- * that are NOT build-id prefixes: content-hashed `chunks/`, `css/`, `media/`
- * shared by the pages of EVERY build (plus dev-mode `webpack/` and
- * `development/`). They MUST be excluded from the prune-candidate set — a
- * naive first-segment listing classifies them as "build-ids", and once they
- * fall outside the retain window the GC would reap them, 404ing the CURRENT
- * build's own JS/CSS (over-delete; found while building the e2e_gc suite).
- * Never add a real build-id shape here: deploy tags are user-chosen.
- *
- * `_vinext_fonts` is the vinext equivalent: `createGoogleFontsPlugin`'s
- * `writeBundle` hook copies every `next/font` file into
- * `<outDir>/<assetsDir>/_vinext_fonts/`, and `assetsDir` is `_next/static`. So
- * on any app using `next/font` it is a first-level sibling of the build prefix,
- * shared across builds exactly like `chunks/`.
- *
- * **What this list is and is not, since round 1 got it wrong.** It is
- * defense-in-depth for the PRUNER, layered on top of the marker inversion that
- * already does the real work: an unmarked prefix is kept regardless, so a
- * namespace missing from this list is over-KEPT (noisy, safe), never reaped.
- * It is NOT a way to identify the build prefix — nothing may classify siblings
- * to find the build id, because that turns a missing entry here into an aborted
- * deploy. {@link verifyVinextStaticPrefix} exists so the id never has to be
- * inferred from this list. Enumerating is acceptable here precisely because
- * being short an entry is harmless.
- */
-const RESERVED_STATIC_DIRS: ReadonlySet<string> = new Set([
-    "chunks",
-    "css",
-    "media",
-    "webpack",
-    "development",
-    "_vinext_fonts",
-]);
+// RESERVED_STATIC_DIRS (first-level `_next/static/` siblings that are never a
+// build-id prefix — `chunks/`, `css/`, `media/`, `webpack/`, `development/`,
+// `_vinext_fonts/`) now lives in `./reserved-static-dirs` (its own tsup entry,
+// so a plain-`node` script outside this build can import it too — see that
+// module's doc comment for what the list is and is not, and why it is
+// enumerated at all despite "prefer scanning to enumerating").
 
 /**
  * The marker OBJECT every knext upload writes at
