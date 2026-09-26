@@ -295,11 +295,8 @@ function splitSourceIntoStatements(source: string, firstLine = 1): Statement[] {
         append('`');
         openSubst('`');
       }
-    } else if (ch === '<' && nx === '<' && source[i + 2] === '<') {
-      append('<<<'); // here-string, not a heredoc
-      i += 2;
-      wordStart = true;
     } else if (ch === '<' && nx === '<') {
+      // A here-string `<<<` never matches: the delimiter class excludes `<`.
       const m = source.slice(i).match(HEREDOC_OP_RE);
       if (m) {
         append(m[0]);
@@ -710,6 +707,8 @@ describe('every real package-manager invocation runs via run_as_builder — broa
         'run_as_builder echo `npm ci --no-audit`',
         'run_as_builder cat <(npm ci --no-audit)',
         'run_as_builder tee >(npm ci --no-audit)',
+        // a subshell's `)` inside the substitution must not close it early
+        'run_as_builder echo "$( (true); npm ci --no-audit )"',
       ]) {
         expect(offendersOf(src).map((o) => o.text)).toEqual(['npm ci --no-audit']);
       }
@@ -726,7 +725,11 @@ describe('every real package-manager invocation runs via run_as_builder — broa
     });
 
     it('a redirect `2>&1` is not a background separator (the guarded statement stays whole)', () => {
-      expect(offendersOf('run_as_builder npm ci >log 2>&1').length).toBe(0);
+      // Split at the `&`, the tail `1 --prefix ./npm` would read as a
+      // second, unguarded mention.
+      expect(offendersOf('run_as_builder npm ci 2>&1 --prefix ./npm').length).toBe(0);
+      expect(offendersOf('run_as_builder npm ci <&0 --prefix ./npm').length).toBe(0);
+      expect(offendersOf('run_as_builder npm ci &>log --prefix ./npm').length).toBe(0);
     });
   });
 
