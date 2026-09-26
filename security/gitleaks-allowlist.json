@@ -9,6 +9,15 @@
       "justification": "Ed25519 private key committed with the local Neon compose experiment (2026-07-02); its public half was the live compute_ctl trust anchor until rotation. History is never rewritten, so the finding is permanent.",
       "rotationEvidence": "Rotated on the live OKE cluster 2026-08-15 (verified: compute-jwt-trust Secret created via gen-secrets.sh, rotated ConfigMap applied, 0 occurrences of the leaked key in the live ConfigMap, wake drill 0->1->0->1 passed twice). Tracked in PR #730 (open, all four gates passed: code+spec APPROVE, architect+system-designer SIGN-OFF), which lands the repo-side rotation and the tests/compute-jwt-trust-guard.test.ts guard banning all four encodings. Merge order: #730 before or with this gate.",
       "added": "2026-08-15"
+    },
+    {
+      "fingerprint": "9e13947f597a8a9ee6b8742982d87de9d09dfc18:infra/bun-base/build.sh:generic-api-key:22",
+      "rule": "generic-api-key",
+      "path": "infra/bun-base/build.sh",
+      "class": "false-positive",
+      "justification": "LLVM_KEY_FPR is the PUBLIC apt.llvm.org archive signing key fingerprint pinned so the build verifies the key it downloads; a GPG fingerprint is a public identifier, not a credential. Commit 9e13947f is on the feat/1452-bun-base-exe-pipeline branch (PR #1469); history is never rewritten, so the reference stays.",
+      "added": "2026-09-27",
+      "expires": "2026-12-27"
     }
   ]
 }
