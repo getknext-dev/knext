@@ -8,7 +8,7 @@
  * standalone (`next build`) shape — but any app whose OWN build script still
  * runs `vite build` and ships a vinext single-exec Dockerfile does not
  * produce a `.next/standalone` tree at all, so the new default would break it
- * silently: `kn-next build`/`deploy` would look for an artifact the app's
+ * silently: `knext build`/`deploy` would look for an artifact the app's
  * build script never produces.
  *
  * SCANNED, not enumerated (workflow.md: "prefer scanning to enumerating; an

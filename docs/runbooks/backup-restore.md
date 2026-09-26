@@ -82,7 +82,7 @@ no change. If the restore lands behind a new host/credentials:
 # Update the Secret the NextApp references, then re-roll the app to pick up new env:
 kubectl get nextapp <app> -n <ns> -o jsonpath='{.spec.database}{"\n"}'   # which Secret/key
 # edit that Secret, then force a fresh revision so the pod re-reads env:
-kn-next deploy        # from the app dir (re-emits the CR)
+knext deploy      # from the app dir (re-emits the CR)
 ```
 
 ---
@@ -127,17 +127,17 @@ files. Two properties make its "backup" story trivial:
   clobbers a prior build's chunks — that is what lets a canary/rollback serve the
   old build's assets (skew protection).
 - **It is regenerable.** The assets are a deterministic output of the app build;
-  a `kn-next deploy` re-uploads them.
+  a `knext deploy` re-uploads them.
 
 Therefore:
 
 - **Backup = the bucket's own durability + (optionally) object versioning.** Enable
   the provider's versioning/lifecycle so an accidental delete is recoverable.
-- **Restore = re-deploy.** If a bucket/prefix is lost, `kn-next deploy` re-uploads
+- **Restore = re-deploy.** If a bucket/prefix is lost, `knext deploy` re-uploads
   the current build's assets. Older builds no longer in your CI history are gone,
   but only *in-flight* clients on those exact builds are affected (skew), and they
   refresh on next navigation.
-- **Retention is governed, not manual:** the build-id GC (`kn-next gc`, ADR-0011)
+- **Retention is governed, not manual:** the build-id GC (`knext gc`, ADR-0011)
   is **fail-safe — it over-keeps, never over-deletes**, and it treats any revision
   named in `status.currentTraffic` as live. Do not hand-delete asset prefixes; let
   the GC reap them.
@@ -146,8 +146,8 @@ Therefore:
 # Inspect what a live app has in the object store (assets are under <app>/_next/static/<build-id>/):
 mc ls "<store-alias>/<bucket>/<app>/_next/static/"
 
-# Re-upload the current build's assets (the exact path kn-next deploy runs):
-kn-next deploy        # from the app dir
+# Re-upload the current build's assets (the exact path knext deploy runs):
+knext deploy      # from the app dir
 ```
 
 ---

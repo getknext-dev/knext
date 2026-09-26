@@ -70,7 +70,7 @@ export function preflightEsmPackage(cwd: string): void {
         throw new UsageError(
             'The vinext single-executable target requires the app to be an ES module: its package.json must have `"type": "module"`.\n\n' +
                 "vinext builds with Vite/Rollup (ESM); a CommonJS app fails to resolve the rsc↔ssr entry graph and dies mid-build.\n" +
-                'Add `"type": "module"` to package.json (apps scaffolded with `kn-next create` already have it).',
+                'Add `"type": "module"` to package.json (apps scaffolded with `knext create` already have it).',
         );
     }
 }
@@ -102,90 +102,73 @@ export interface RunProjectBuildOptions {
 }
 
 /**
- * The exact 16.3.0 canary at which the regression was introduced (confirmed
- * by bisection, #1372) — 16.3.0 canaries below this are unaffected.
- */
-const AFFECTED_16_3_0_CANARY_FLOOR = 20;
-
-/**
  * The 16.3.x PATCH that carries the upstream fix (confirmed release, #1372
- * close-out) — 16.3.0 through 16.3.4 (stable or any canary/prerelease of
- * those) are affected; 16.3.5+ is fixed.
+ * close-out) — 16.3.0 through 16.3.4 (STABLE releases only) are affected;
+ * 16.3.5+ is fixed.
  */
 const FIXED_16_3_PATCH = 5;
 
 /**
- * The earliest 16.4.0 canary confirmed to carry the fix (#97287, merged
- * upstream 2026-08-14). 16.4.0-canary.0 was cut 2026-08-21 — AFTER that
- * merge — so in practice every published 16.4.0 canary already has it; this
- * constant exists so the boundary is named and provable rather than assumed,
- * the same way the 16.3.0 floor above is.
+ * A parsed `major.minor.patch` Next.js version — STABLE releases only.
+ *
+ * Founder directive: knext supports stable Next releases, not
+ * canary/rc/preview/beta prereleases, so this guard does not attempt to
+ * bisect or gate any prerelease version at all — see
+ * {@link parseNextVersion}'s doc comment for how that is enforced.
  */
-const FIXED_16_4_0_CANARY = 0;
-
-/** A parsed `major.minor.patch[-canary.N]` Next.js version. */
 interface ParsedNextVersion {
     major: number;
     minor: number;
     patch: number;
-    /** `undefined` for a stable release (no prerelease tag). */
-    canary: number | undefined;
 }
 
+/**
+ * Parses a STABLE `major.minor.patch` version, or `undefined` for anything
+ * else — including every prerelease shape (`-canary.N`, `-rc.N`,
+ * `-preview.N`, `-beta.N`, or any other `-`-suffixed tag). The regex is
+ * anchored at both ends (`^...$`), so a prerelease version fails to parse
+ * and {@link checkTurbopackAdapterStandaloneRegression} falls through its
+ * existing "cannot evaluate, don't block" path — the guard is SKIPPED for
+ * any prerelease, not special-cased, per the founder directive that knext
+ * only supports and tests against stable Next releases.
+ */
 function parseNextVersion(version: string): ParsedNextVersion | undefined {
-    const m = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-canary\.(\d+))?/);
+    const m = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
     if (!m) return undefined;
     return {
         major: Number(m[1]),
         minor: Number(m[2]),
         patch: Number(m[3]),
-        canary: m[4] !== undefined ? Number(m[4]) : undefined,
     };
 }
 
 /**
- * Whether a parsed Next.js version falls inside the CONFIRMED #1372 window:
- * `16.3.0-canary.20` through `16.3.4` inclusive on the 16.3.x line (16.2.x
- * was never affected — the credentialed compat lane's 16.2.0 pin proves it
- * builds this exact combination fine), fixed from `16.3.5` onward; the
- * 16.4.0 canary line is fixed from its very first published canary (see
- * {@link FIXED_16_4_0_CANARY}). A version this function cannot place in the
- * 16.x line (any other major) is treated as unaffected — this is a CLOSED,
- * bisected range now, not an open-ended "anything new might be broken"
- * guess.
+ * Whether a parsed STABLE Next.js version falls inside the CONFIRMED #1372
+ * window: `16.3.0` through `16.3.4` inclusive (16.2.x was never affected —
+ * the credentialed compat lane's 16.2.0 pin proves it builds this exact
+ * combination fine; fixed from `16.3.5` onward; 16.4.x is a different minor
+ * line, unaffected by construction). A version this function cannot place
+ * in the 16.3.x patch range (any other major/minor) is also unaffected —
+ * this is a CLOSED, bisected range now, not an open-ended "anything new
+ * might be broken" guess.
  */
 function isAffectedNextVersion(v: ParsedNextVersion): boolean {
-    if (v.major !== 16) return false;
-    if (v.minor < 3) return false;
-    if (v.minor === 3) {
-        if (v.patch === 0) {
-            // A 16.3.0 canary is affected only from the confirmed floor
-            // onward; the 16.3.0 STABLE release (no canary suffix) shipped
-            // AFTER that floor and before the fix, so it is affected too.
-            return (
-                v.canary === undefined ||
-                v.canary >= AFFECTED_16_3_0_CANARY_FLOOR
-            );
-        }
-        return v.patch < FIXED_16_3_PATCH;
-    }
-    if (v.minor === 4 && v.patch === 0) {
-        // Only relevant for a 16.4.0 CANARY — 16.4.0 stable (no canary
-        // suffix) ships well after the fix landed, so it is never affected.
-        return v.canary !== undefined && v.canary < FIXED_16_4_0_CANARY;
-    }
-    return false;
+    return v.major === 16 && v.minor === 3 && v.patch < FIXED_16_3_PATCH;
 }
 
 /**
  * #1372 pre-build guard: a confirmed, now-BISECTED-AND-FIXED Next.js
  * regression — `.next/next-server.js.nft.json` was never written when
- * `adapterPath` + `output:'standalone'` were built under Turbopack, from
- * `16.3.0-canary.20` through `16.3.4` (16.2.x was never affected; fixed
- * upstream at `16.3.5`, and on the 16.4 canary line from its first canary —
- * see {@link isAffectedNextVersion}). Every app on the `turbopack` builder
+ * `adapterPath` + `output:'standalone'` were built under Turbopack, on
+ * STABLE Next `16.3.0` through `16.3.4` (16.2.x was never affected; fixed
+ * upstream at `16.3.5` — see {@link isAffectedNextVersion}). knext supports
+ * stable Next releases only: a prerelease version (`-canary`, `-rc`,
+ * `-preview`, `-beta`, or any other prerelease tag) is NOT bisected or
+ * gated by this check — {@link parseNextVersion} fails to parse it, and the
+ * guard falls through to its existing "cannot evaluate, don't block" path,
+ * the same as an unresolvable `next` install. Every app on the `turbopack` builder
  * wires `adapterPath` by construction (it is what that target IS), so this
- * is not scaffold-specific: ANY `kn-next build` on the default target with
+ * is not scaffold-specific: ANY `knext build` on the default target with
  * an affected Next version hits it, including apps this CLI did not
  * scaffold. Fail BEFORE the (guaranteed-to-fail) build runs, with the actual
  * fix named, rather than let the raw Next stack trace ("ENOENT
@@ -198,13 +181,13 @@ function isAffectedNextVersion(v: ParsedNextVersion): boolean {
  * (2) the app's OWN package.json `build` script already passing
  * `--webpack`; (3) (#1378) the `build` script DELEGATES to another script
  * (e.g. `"build": "run-s build:*"` with `--webpack` on `"build:next"`) — the
- * check scans EVERY script in `package.json`, not just `build`, for the
- * flag, since a delegating `build` script's own text never contains it.
- * This is best-effort, not exact: an unrelated script that happens to
- * contain `--webpack` (e.g. a `build:storybook` step) would also suppress
- * the guard. That false-negative is accepted — it trades a rare missed
- * warning for not falsely blocking the common delegation shape, which is
- * the defect #1378 reported. `--turbopack` is deliberately NOT an escape
+ * check scans EVERY script in `package.json` for the flag, since a
+ * delegating `build` script's own text never contains it. Scoped since
+ * rev-1393 to scripts that themselves invoke `next build` (`/\bnext\s+build\b/`)
+ * — the earlier, looser version counted ANY script containing `--webpack`,
+ * so a common `"dev": "next dev --webpack"` sitting next to a bare
+ * `"build": "next build"` silently disabled the guard for a build script
+ * that was never actually fixed. `--turbopack` is deliberately NOT an escape
  * hatch — it is the exact broken configuration this guard exists to catch
  * (explicitly requesting Turbopack does not un-break it), so a script that
  * names `--turbopack` still hits the check and gets the guard message
@@ -219,7 +202,8 @@ function isAffectedNextVersion(v: ParsedNextVersion): boolean {
  * the regression. Best-effort either way: an unresolvable `next` (offline
  * install, unusual layout, or a `next` too old to carry `adapterPath` at
  * all) is not itself a guard failure — skip silently rather than block a
- * build this check cannot evaluate.
+ * build this check cannot evaluate. A prerelease `next` version is the SAME
+ * kind of "cannot evaluate" case, by design (see the header doc comment).
  */
 export function checkTurbopackAdapterStandaloneRegression(
     cwd: string,
@@ -240,7 +224,9 @@ export function checkTurbopackAdapterStandaloneRegression(
         scripts !== undefined &&
         Object.values(scripts).some(
             (script) =>
-                typeof script === "string" && /--webpack\b/.test(script),
+                typeof script === "string" &&
+                /\bnext\s+build\b/.test(script) &&
+                /--webpack\b/.test(script),
         )
     ) {
         // Already opted out of the ambient Turbopack default — either the
@@ -271,7 +257,7 @@ export function checkTurbopackAdapterStandaloneRegression(
         `next@${nextVersion} does not build on the turbopack target: it never writes ` +
             "`.next/next-server.js.nft.json` when the official Next.js Deployment Adapter " +
             "(`adapterPath`) is combined with `output:'standalone'` under Turbopack — a " +
-            "confirmed Next.js regression (16.3.0-canary.20 through 16.3.4), fixed upstream " +
+            "confirmed Next.js regression (stable 16.3.0 through 16.3.4), fixed upstream " +
             "in 16.3.5, not a knext defect. " +
             "See https://github.com/getknext-dev/knext/issues/1372 for the full trace.\n\n" +
             "Fix: upgrade to next ≥ 16.3.5, or add `--webpack` to this app's package.json " +

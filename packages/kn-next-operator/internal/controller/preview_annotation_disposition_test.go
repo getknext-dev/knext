@@ -456,7 +456,7 @@ func buildFixtureKsvc(t *testing.T, f guardFixture, preview bool) *servingv1.Ser
 	ksvc := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
 	}
-	if err := r.buildDesiredKsvc(app, ksvc); err != nil {
+	if _, err := r.buildDesiredKsvc(app, ksvc); err != nil {
 		t.Fatalf("buildDesiredKsvc(fixture=%s, preview=%v) returned an unexpected error: %v",
 			f.name, preview, err)
 	}

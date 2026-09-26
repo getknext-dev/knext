@@ -1,5 +1,5 @@
 /**
- * #1342 (ADR-0058) — `kn-next create` defaults to the STANDALONE target
+ * #1342 (ADR-0058) — `knext create` defaults to the STANDALONE target
  * (plain `next build`, `output: 'standalone'`, the official Next.js
  * Deployment Adapter) now that #1183/ADR-0058 flipped `DEFAULT_BUILDER_ID`
  * to `"turbopack"`. `--builder vinext` scaffolds the previous shape (the
@@ -51,7 +51,7 @@ function scaffold(
     return { appDir, files };
 }
 
-describe("kn-next create — default target is standalone (#1342/ADR-0058)", () => {
+describe("knext create — default target is standalone (#1342/ADR-0058)", () => {
     it("emits output:'standalone' and adapterPath in next.config.ts", () => {
         const { appDir } = scaffold("std-default");
         const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
@@ -68,13 +68,14 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
     it("package.json builds with plain `next build` (Turbopack default), not vite/vinext", () => {
         // #1372 close-out — `next build` ALONE (ambient Turbopack default,
         // ADR-0058/#1183) was broken for this exact combination — Turbopack +
-        // `adapterPath` + `output:'standalone'` — on Next 16.3.0-canary.20
-        // through 16.3.4 (bisected, getknext-dev/knext#1372). The scaffold
+        // `adapterPath` + `output:'standalone'` — on stable Next 16.3.0
+        // through 16.3.4 (bisected, getknext-dev/knext#1372; the guard tests
+        // stable releases only, not canary/rc/preview/beta prereleases). The scaffold
         // pinned `--webpack` as a workaround for that window. Fixed upstream
         // in 16.3.5 (the scaffold's pin as of this bump, confirmed by a live
         // local repro of this exact config: `next build` exits 0 and writes
         // `.next/next-server.js.nft.json`), so the scaffold now matches the
-        // DEFAULT builder's own naming again. `kn-next build`/`deploy` still
+        // DEFAULT builder's own naming again. `knext build`/`deploy` still
         // carry a pre-build guard
         // (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`)
         // for apps pinned to an Next version inside the confirmed-affected
@@ -100,7 +101,7 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
         expect(code).not.toMatch(/build:\s*["']vinext["']/);
     });
 
-    it("emits NO Dockerfile — kn-next build/deploy stage the standalone runtime image automatically", () => {
+    it("emits NO Dockerfile — knext build/deploy stage the standalone runtime image automatically", () => {
         // The same rationale runtime-image.ts already documents for why the
         // standalone recipe stays OUT of templates/app: staging it here would
         // ship a scaffold-time copy that build-time silently overwrites
@@ -132,7 +133,7 @@ describe("kn-next create — default target is standalone (#1342/ADR-0058)", () 
     });
 });
 
-describe("kn-next create --builder vinext — unchanged shape (#1342)", () => {
+describe("knext create --builder vinext — unchanged shape (#1342)", () => {
     it("emits the vinext Dockerfile, vite.config.ts and the bun entry", () => {
         const { appDir } = scaffold("vinext-shape", "vinext");
         expect(existsSync(join(appDir, "Dockerfile"))).toBe(true);
@@ -171,7 +172,7 @@ describe("kn-next create --builder vinext — unchanged shape (#1342)", () => {
     });
 });
 
-describe("kn-next create --builder — CLI flag validation", () => {
+describe("knext create --builder — CLI flag validation", () => {
     async function capture(
         argv: string[],
     ): Promise<{ code: number; err: string }> {
@@ -266,7 +267,7 @@ describe("selectBuilderTemplates — order-independent (#1342)", () => {
     });
 });
 
-describe("kn-next create — the real shipped templates load through selectBuilderTemplates without throwing", () => {
+describe("knext create — the real shipped templates load through selectBuilderTemplates without throwing", () => {
     it("loadTemplates() + selectBuilderTemplates() resolve for both builders", () => {
         const all = loadTemplates();
         expect(selectBuilderTemplates(all, "default").size).toBeGreaterThan(0);

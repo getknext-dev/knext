@@ -11,7 +11,7 @@ import type { KnativeNextConfig } from "../config";
  * so a stored NextApp carrying such a value wedges a workqueue worker.
  *
  * The CLI's regex mirror accepted the whole class (`[eE][+-]?\d+`), so
- * `kn-next deploy` would happily push the value to the cluster. This test pins
+ * `knext deploy` would happily push the value to the cluster. This test pins
  * the mirror to the operator's bound: an exponent beyond ±9999, or a quantity
  * string longer than the bound, is rejected here too — before an image is even
  * built.

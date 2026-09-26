@@ -1,5 +1,5 @@
 /**
- * preview.ts — parsePreviewArgs (the `kn-next preview <deploy|destroy>` argv
+ * preview.ts — parsePreviewArgs (the `knext preview <deploy|destroy>` argv
  * parser). Pins the subcommand contract, flag mapping, namespace default, and
  * the loud rejection of an unknown/missing subcommand.
  */

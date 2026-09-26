@@ -24,7 +24,12 @@ spec:
       # reachability instead). mc talks SigV4 + path-style, exactly like neon.
       initContainers:
         - name: ensure-bucket
-          image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned (matches backup mirror)
+          # #1423 (KNOWN BREAK, NOT FIXED HERE — needs szpg's own review, not a
+          # knext-side CI repin): docker.io/minio/mc now UNAUTHORIZES every
+          # anonymous pull, repo-wide (#1403). This LIVE bucket-init Job was
+          # deliberately left pinned to the broken tag; see
+          # getknext-dev/knext#1423 for the tracked fix.
+          image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned (matches backup mirror) — UNPULLABLE, see #1423
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }

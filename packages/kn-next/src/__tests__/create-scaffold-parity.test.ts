@@ -3,7 +3,7 @@
  * paths.
  *
  * ADR-0031 put the guarded-instrumentation shape in ONE place: the in-repo
- * `turbo gen zone` template. #407 adds a second emitter (`kn-next create`, for
+ * `turbo gen zone` template. #407 adds a second emitter (`knext create`, for
  * apps outside this monorepo), and two copies of a 200-line safety-critical
  * guard drift — silently, and in the direction that matters least visibly (the
  * published one, which nobody in this repo builds).
@@ -116,7 +116,7 @@ const CLI_ONLY: Record<string, string> = {
         "the node twin of knext-bun-entry.mjs for runtime: 'node'; the zone app builds only the bun target",
     "public/.gitkeep.hbs":
         "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
-    // #1342 (ADR-0058): `kn-next create` defaults to the standalone target —
+    // #1342 (ADR-0058): `knext create` defaults to the standalone target —
     // these four exist ONLY in the CLI tree. `next-adapter.ts.hbs` is the
     // official Next.js Deployment Adapter re-export the standalone target
     // wires through `adapterPath` (a webpack/turbopack mechanism vinext never
@@ -204,7 +204,7 @@ const SHAPE_FROZEN = [
  *
  * #1342/ADR-0058 removed `instrumentation-edge-safe.test.ts.hbs` from
  * SHAPE_FROZEN/VERBATIM, moving it to LAYOUT — NOT deleted, and NOT left
- * uncompared. `kn-next create`'s default builder now wires `adapterPath`
+ * uncompared. `knext create`'s default builder now wires `adapterPath`
  * (ADR-0058's standalone target), so the CLI base template's fence assertions
  * genuinely diverge from the zone template's (which stays vinext-shaped, no
  * adapter). The safety-critical property this bucket exists to protect —
@@ -237,11 +237,11 @@ function withoutPlaceholderLines(source: string): string {
         .join("\n");
 }
 
-describe("kn-next create — the CLI ships its own template tree", () => {
+describe("knext create — the CLI ships its own template tree", () => {
     it("packages/kn-next/templates/app exists", () => {
         expect(
             existsSync(CLI_TEMPLATE),
-            "packages/kn-next/templates/app is missing — `kn-next create` has nothing to emit",
+            "packages/kn-next/templates/app is missing — `knext create` has nothing to emit",
         ).toBe(true);
     });
 
@@ -254,7 +254,7 @@ describe("kn-next create — the CLI ships its own template tree", () => {
         expect(offenders).toEqual([]);
     });
 
-    it("the published package includes the templates (else `kn-next create` 404s post-install)", () => {
+    it("the published package includes the templates (else `knext create` 404s post-install)", () => {
         const manifest = JSON.parse(
             readFileSync(join(PKG_ROOT, "package.json"), "utf8"),
         ) as { files?: string[] };
@@ -262,7 +262,7 @@ describe("kn-next create — the CLI ships its own template tree", () => {
     });
 });
 
-describe("kn-next create — no drift from the turbo zone template (#356/#407)", () => {
+describe("knext create — no drift from the turbo zone template (#356/#407)", () => {
     it("classifies EVERY zone template file (fails closed on a new one)", () => {
         const classified = new Set<string>([
             ...VERBATIM,
@@ -374,6 +374,6 @@ describe("kn-next create — no drift from the turbo zone template (#356/#407)",
         // in half the apps that carry it.
         const src = readFileSync(join(CLI_TEMPLATE, rel), "utf8");
         expect(src).toContain("turbo gen zone");
-        expect(src).toContain("kn-next create");
+        expect(src).toContain("knext create");
     });
 });

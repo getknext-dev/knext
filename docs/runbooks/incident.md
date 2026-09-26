@@ -21,7 +21,7 @@ route never programs, webhook down), see the
 >    panels are blank — that is normal, not an outage. Trust the alerts/SLIs over
 >    a blank dashboard.
 > 2. The **operator is the single source of truth** (ADR-0001). You change desired
->    state by editing the `NextApp` CR (or via `kn-next` which only patches the
+>    state by editing the `NextApp` CR (or via `knext` which only patches the
 >    CR) — never by `kubectl edit` on the Knative Service directly.
 
 ## Quick reference
@@ -164,13 +164,13 @@ Preferred (CLI, which **only** `kubectl patch`es the CR — never mutates the ks
 directly, honoring ADR-0001):
 ```sh
 # 100% back to the last-good revision:
-kn-next rollback <app> --to <app>-00007 -n <ns>
+knext rollback <app> --to <app>-00007 -n <ns>
 
 # Or a cautious canary: send N% to latest-ready, the rest to the pinned revision:
-kn-next rollback <app> --to <app>-00007 --canary 10 -n <ns>
+knext rollback <app> --to <app>-00007 --canary 10 -n <ns>
 
 # Once the fix is deployed, clear the pin to resume latest-ready:
-kn-next rollback <app> -n <ns>
+knext rollback <app> -n <ns>
 ```
 Equivalent raw CR edit (`spec.traffic`, fields from
 `packages/kn-next-operator/api/v1alpha1/nextapp_types.go`):

@@ -289,11 +289,22 @@ export async function checkPullable(ref, { exec = defaultExec, crane = 'crane' }
 }
 
 /**
- * Full resolution: an explicit `input` (the workflow_dispatch override) is
- * returned verbatim and short-circuits GHCR — the human takes responsibility and
- * the downstream shape guard still validates it. Otherwise list versions, pick
- * the newest signed publish digest, build the ref, and confirm it is pullable.
- * Any failure throws (fail closed).
+ * Full resolution: an explicit `input` (the workflow_dispatch override)
+ * SHORT-CIRCUITS GHCR — the human takes responsibility for WHICH digest to
+ * deploy, never for WHETHER it is actually pullable. That is `checkPullable`'s
+ * job on every path, the override included (#1211 item 3): the override is
+ * documented as "Digest-pinned file-manager image", i.e. it carries exactly
+ * the `@sha256:<digest>` shape `checkPullable` already requires, so it gets
+ * the identical crane-backed proof the resolved path always had — never a
+ * second, weaker standard for the human-supplied ref. Before this, a
+ * mistyped/never-pushed override digest sailed through here and only failed
+ * later inside the scale job's `continue-on-error`-adjacent crane copy /
+ * crictl pull, indistinguishable there from a real Knative scale-timing
+ * flake (#659's defect, reopened by a second door). GHCR's packages API
+ * (`http`) is still never touched on this path — only `exec`/crane are.
+ * Otherwise (no override) list versions, pick the newest signed publish
+ * digest, build the ref, and confirm it is pullable. Any failure throws
+ * (fail closed).
  */
 export async function resolveScaleTestImage({
   input = '',
@@ -306,7 +317,10 @@ export async function resolveScaleTestImage({
   crane = 'crane',
 }) {
   const override = (input ?? '').trim();
-  if (override) return override;
+  if (override) {
+    await checkPullable(override, { exec, crane });
+    return override;
+  }
 
   const versions = await listPackageVersions({ owner, repo, token, http });
   const { digest } = selectNewestSignedDigest(versions);
