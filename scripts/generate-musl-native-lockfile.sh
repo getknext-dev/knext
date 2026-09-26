@@ -103,6 +103,47 @@ for _seg in "$1" "$2" "$3"; do
   esac
 done
 
+# Round-6 review nit: the checks above still accepted a leading-zero segment
+# ("01.2.3" — invalid semver, and not the string npm records, so the pin
+# dir's name could never match), an EMPTY or malformed suffix ("1.2.3+",
+# "1.2.3-", "1.2.3-a..b"), and a trailing dot ("1.2.3." — POSIX field
+# splitting drops the empty last field, so it still counted three).
+not_exact() {
+  echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — need MAJOR.MINOR.PATCH[-prerelease][+build] with no leading zeros and no empty parts (e.g. 1.2.4)" >&2
+  exit 2
+}
+# A non-empty, dot-separated list of non-empty [0-9A-Za-z-] identifiers.
+valid_idents() {
+  case "$1" in
+    '' | .* | *. | *..* | *[!0-9A-Za-z.-]*) return 1 ;;
+  esac
+  return 0
+}
+case "${VERSION_CORE}" in
+  *.) not_exact ;;
+esac
+for _seg in "$1" "$2" "$3"; do
+  case "${_seg}" in
+    0?*) not_exact ;;
+  esac
+done
+_suffix="${VERSION#"${VERSION_CORE}"}"
+case "${_suffix}" in
+  '') ;;
+  -*)
+    _pre="${_suffix#-}"
+    case "${_pre}" in
+      *+*)
+        valid_idents "${_pre#*+}" || not_exact
+        _pre="${_pre%%+*}"
+        ;;
+    esac
+    valid_idents "${_pre}" || not_exact
+    ;;
+  +*) valid_idents "${_suffix#+}" || not_exact ;;
+  *) not_exact ;;
+esac
+
 KEY="$(lockfile_key "${NAME}")-${VERSION}"
 TARGET_DIR="${SCRIPT_DIR}/musl-native-lockfiles/${KEY}"
 

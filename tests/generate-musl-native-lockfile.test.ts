@@ -340,4 +340,41 @@ describe('exact-version pin, real network (round-2 finding — the caret-range b
     expect(r.stderr).not.toMatch(/not an exact version/);
     expect(r.stderr).toMatch(/resolving @img/);
   });
+
+  /**
+   * Round-6 review nit: the all-digit segment check still accepted a
+   * leading-zero segment ("01.2.3" — not valid semver, and not the string
+   * npm would record, so the pin dir's name would never match), an EMPTY
+   * suffix ("1.2.3+", "1.2.3-"), and a trailing dot ("1.2.3." — POSIX
+   * field splitting drops the empty last field, so it still counted 3).
+   */
+  it('rejects a leading-zero segment, an empty or malformed suffix, and a trailing dot', () => {
+    for (const v of [
+      '01.2.3',
+      '1.02.3',
+      '1.2.03',
+      '1.2.3+',
+      '1.2.3-',
+      '1.2.3-+b',
+      '1.2.3-a..b',
+      '1.2.3-a.',
+      '1.2.3+b+c',
+      '1.2.3-a+',
+      '1.2.3-a_b',
+      '1.2.3.',
+    ]) {
+      const { script } = makeIsolatedCopy();
+      const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', v]);
+      expect({ v, status: r.status === 0 }).toEqual({ v, status: false });
+      expect({ v, stderr: /not an exact version/.test(r.stderr) }).toEqual({ v, stderr: true });
+      expect(r.stderr).not.toMatch(/resolving @img/);
+    }
+  });
+
+  it('still accepts a zero segment and a hyphenated prerelease (e.g. "0.10.0-rc-1.0+sha.0a1")', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '0.10.0-rc-1.0+sha.0a1']);
+    expect(r.stderr).not.toMatch(/not an exact version/);
+    expect(r.stderr).toMatch(/resolving @img/);
+  });
 });
