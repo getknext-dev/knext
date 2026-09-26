@@ -62,7 +62,19 @@ networking:
 YAML
 
 log "installing Calico (a policy-capable CNI — this is what makes the drill meaningful)"
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.2/manifests/calico.yaml
+# Checksum-pinned AND image-digest-pinned (#1413 review, rounds 1410-1 and
+# 1410-2): a moved/edited release asset fails the checksum; Calico's three
+# images (docker.io/calico/{cni,node,kube-controllers}:v3.28.2) are
+# tag-only releases, same discipline as
+# scripts/kind-manifests/apply-cert-manager.sh / apply-knative-kourier.sh.
+CALICO_VERSION="v3.28.2"
+CALICO_SHA256="be59408bf990e96276f631d2f9285c2a0f9802194c0ad1cecdb6d9c52623a1c8"
+CALICO_OUT="${TMPDIR:-/tmp}/calico-${CALICO_VERSION}.yaml"
+curl -fsSL -o "$CALICO_OUT" \
+  "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
+echo "${CALICO_SHA256}  ${CALICO_OUT}" | sha256sum -c -
+"$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/kind-manifests" && pwd)/pin-known-images.sh" "$CALICO_OUT" --expect 3
+kubectl apply -f "$CALICO_OUT"
 kubectl -n kube-system rollout status daemonset/calico-node --timeout=300s
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
 
