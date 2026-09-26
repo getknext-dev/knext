@@ -93,7 +93,7 @@ const NON_INVOCATION_ALLOWLIST = [
   // The apk TOOLCHAIN install — "npm" here is an apk PACKAGE NAME (the
   // pinned Alpine base ships bun only, no npm binary at all — see the
   // script's own header), never a package-manager invocation.
-  'apk add --no-cache python3 make g++ npm su-exec >/dev/null',
+  'apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 su-exec~0.2 >/dev/null',
 ];
 
 function isAllowlistedNonInvocation(text: string): boolean {
@@ -492,7 +492,8 @@ describe('every real package-manager invocation runs via run_as_builder — broa
   });
 
   it('the allowlisted apk-toolchain-install line is not counted as an invocation (npm is an apk PACKAGE NAME there)', () => {
-    const line = 'apk add --no-cache python3 make g++ npm su-exec >/dev/null';
+    const line =
+      'apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 su-exec~0.2 >/dev/null';
     expect(packageManagerMentionLines(line)).toEqual([]);
   });
 
@@ -556,7 +557,7 @@ describe('every real package-manager invocation runs via run_as_builder — broa
    */
   it('a statement that only STARTS WITH the allowlisted apk line, with a real invocation appended in the SAME statement, is NOT excused by the allowlist (jev 0.59 finding)', () => {
     const trojan =
-      'apk add --no-cache python3 make g++ npm su-exec >/dev/null $(npm ci --no-audit)';
+      'apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 su-exec~0.2 >/dev/null $(npm ci --no-audit)';
     // The substitution is lexed as its own statement (also an offender);
     // what THIS test pins is that the apk statement itself is not excused.
     expect(offendersOf(trojan).some((o) => o.text.startsWith('apk add'))).toBe(true);
