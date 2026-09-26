@@ -49,6 +49,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { bunBaseExeCompileOptions } from "./bun-base-exe.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -81,6 +82,14 @@ const TARGET = args.target?.trim();
 // package that cannot be bundled. The default only warns, because an optional
 // dependency that is absent throws only if its code path actually runs.
 const STRICT_REQUIRES = process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1";
+// CI-only patched Bun base executable (infra/bun-base/); `{}` when unset.
+let BUN_BASE_EXE;
+try {
+    BUN_BASE_EXE = bunBaseExeCompileOptions();
+} catch (err) {
+    console.error(`[knext compile] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+}
 
 if (!existsSync(ENTRY)) {
     console.error(
@@ -523,6 +532,7 @@ const result = await Bun.build({
         // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
         // server/node_modules (#1320).
         ...(TARGET ? { target: TARGET } : {}),
+        ...BUN_BASE_EXE,
     },
 });
 
