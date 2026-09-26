@@ -26,7 +26,13 @@ import { REPO_ROOT, readManifest, workspaceManifests } from './helpers/workspace
  *  - `sh|bash <file>` / `./x.sh` follow the file and classify its lines;
  *  - UNRESOLVED (red, fail closed): any runner/turbo command the parser cannot
  *    resolve, `sh -c`, `node -e|--eval|-p|--print`, a program that is a
- *    `$VAR`/`$(…)`/backtick expansion, a missing script/file/manifest.
+ *    `$VAR`/`$(…)`/backtick expansion, a missing script/file/manifest, and ANY
+ *    OTHER PROGRAM (`make`, `node x.mjs`, `python3`, `deno`, …) that is neither a
+ *    compiler entry nor on the small non-compiler allowlist (`echo`, `true`,
+ *    `test`/`[`, `node --check`; plus the shell builtins `set`/`exit`/`return`,
+ *    which the classifier models itself);
+ *  - everything after an `exit`/`return` is masked; in a shell file a line is
+ *    enforced only when `set -e` is in effect on an EARLIER line.
  *
  * Rules:
  *  - no command in any chain may invoke plain tsc: a bare `tsc` token, a
@@ -34,7 +40,7 @@ import { REPO_ROOT, readManifest, workspaceManifests } from './helpers/workspace
  *    `lib/` (e.g. `node node_modules/typescript/lib/_tsc.js`);
  *  - the known tsc7 consumers' chains MUST reach an ENFORCED typecheck: a
  *    typescript-tsc7 invocation carrying `-p`/`--project`/`--noEmit`/`-b`
- *    (not `--version`/`--help`), whose exit code is not masked — not behind
+ *    (not `--version`/`--help`/`--noCheck`/`--watch`/`--clean`), whose exit code is not masked — not behind
  *    `||`, not followed by `||`/`;`/`|`/`&`, and not inside a masked hop;
  *  - scripts that never run a compiler (`packages/kn-next-alias`'s
  *    `node --check`) are otherwise unaffected.
@@ -61,7 +67,18 @@ const TSC7_BIN = /(^|\/)typescript-tsc7\/(bin\/tsc|lib\/_?tsc\.js)$/;
 const PLAIN_TS_PKG = /(^|\/)typescript\/(bin|lib)\//;
 const TSC_LIKE = /(^|\/)(tsc|_?tsc\.js)$/;
 const TYPECHECK_FLAG = /^(-p|--project|--noEmit|-b|--build)(=.*)?$/;
-const INFO_FLAG = /^(-v|--version|-h|--help|--all|--init|--showConfig|--listFilesOnly)$/;
+/**
+ * Flags that make a tsc7 run NOT an enforced typecheck: info-only runs, `--noCheck`
+ * (TS 7.0.2 exits 0 on a type error), `--watch` (never exits on errors) and
+ * `-b --clean` (deletes outputs, checks nothing).
+ */
+const DISQUALIFYING_FLAG =
+  /^(-v|--version|-h|--help|--all|--init|--showConfig|--listFilesOnly|--noCheck(=.*)?|-w|--watch(=.*)?|--clean)$/;
+/** Programs known NOT to be compilers. Anything else that is not a tsc7 entry fails closed. */
+const NON_COMPILERS = new Set(['echo', 'true', 'test', '[']);
+/** Shell builtins whose effect the classifier models itself (`set -e`, `exit`/`return` masking). */
+const SHELL_CONTROL = new Set(['set', 'exit', 'return']);
+const EXITS = new Set(['exit', 'return']);
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const DYNAMIC = /^[$`({]|\$\(/;
 const RUNNERS = new Set(['bun', 'npm', 'pnpm', 'yarn']);
@@ -103,20 +120,31 @@ interface Segment {
   masked: boolean;
 }
 
-/** Split a command list on `&&`, `||`, `;`, `|`, `&` (not `2>&1`), newline; mark masked commands. */
+const firstProgram = (tokens: string[]) => tokens.find((t) => !ENV_ASSIGN.test(t));
+
+/**
+ * Split a command list on `&&`, `||`, `;`, `|`, `&` (not `2>&1`), newline; mark masked
+ * commands. Everything after an `exit`/`return` is masked (a `cmd || exit 1; next` form is
+ * already masked by the `||` rule, so no exit is treated as conditional).
+ */
 function segments(script: string, inherited: boolean): Segment[] {
   const parts = script.split(/(&&|\|\||;|\||(?<![<>])&(?!>)|\n)/);
   const cmds = parts.filter((_, i) => i % 2 === 0);
   const seps = parts.filter((_, i) => i % 2 === 1);
+  let exited = false;
   return cmds.map((text, k) => {
     const before = seps.slice(0, k);
     const after = seps.slice(k);
+    const tokens = tokenize(text);
     const masked =
       inherited ||
+      exited ||
       before.includes('||') ||
       after[0] === '|' ||
       after.some((s) => s === '||' || s === ';' || s === '&' || s === '\n');
-    return { text, tokens: tokenize(text), masked };
+    const prog = firstProgram(tokens);
+    if (prog !== undefined && EXITS.has(prog)) exited = true;
+    return { text, tokens, masked };
   });
 }
 
@@ -220,9 +248,17 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
-    const errexit = lines.some((l) => /^set\s+(-[a-z]*e[a-z]*\b|-o\s+errexit)/.test(l));
-    // Without `set -e`, only the last line's exit code is the script's.
-    runList(p, `${p.path}>${rel}`, lines.join(errexit ? ' && ' : ' ; '), masked);
+    // A line's exit code is enforced only once `set -e` is in effect (set on an EARLIER
+    // line, not undone by `set +e`); otherwise only the last line's exit code is the script's.
+    let errexit = false;
+    let joined = '';
+    for (const [n, l] of lines.entries()) {
+      if (n > 0) joined += errexit ? ' && ' : ' ; ';
+      joined += l;
+      if (/^set\s+(-[a-z]*e[a-z]*\b|-o\s+errexit)/.test(l)) errexit = true;
+      else if (/^set\s+(\+[a-z]*e[a-z]*\b|\+o\s+errexit)/.test(l)) errexit = false;
+    }
+    runList(p, `${p.path}>${rel}`, joined, masked);
   };
 
   /** Union of the packages `filters` select; undefined (and reported) if any is not understood or selects none. */
@@ -305,17 +341,24 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
     const declaring = targets.filter((q) => q.scripts[script] !== undefined);
     if (declaring.length === 0) {
       // `bun <file>` runs the file: acceptable only when it IS a compiler entry.
-      if (prog === 'bun' && TSC7_BIN.test(script)) return compiler(script, rest.slice(1), masked);
+      if (prog === 'bun' && TSC7_BIN.test(script))
+        return compiler(key, script, rest.slice(1), masked, text);
       out.unresolved.push(`${key}: ${prog} ${script} is not a script of the targeted package(s)`);
       return;
     }
     for (const q of declaring) visitScript(q, script, masked);
   };
 
-  const compiler = (prog: string, args: string[], masked: boolean) => {
-    const enforced =
-      args.some((a) => TYPECHECK_FLAG.test(a)) && !args.some((a) => INFO_FLAG.test(a));
-    if (TSC7_BIN.test(prog) && enforced && !masked) out.tsc7++;
+  /** A program that is not a runner/turbo/shell: a tsc7 entry, plain tsc, a known non-compiler — or unknown (red). */
+  const compiler = (key: string, prog: string, args: string[], masked: boolean, text: string) => {
+    if (TSC7_BIN.test(prog)) {
+      const enforced =
+        args.some((a) => TYPECHECK_FLAG.test(a)) && !args.some((a) => DISQUALIFYING_FLAG.test(a));
+      if (enforced && !masked) out.tsc7++;
+      return;
+    }
+    if (PLAIN_TS_PKG.test(prog) || TSC_LIKE.test(prog)) return; // already reported as plain tsc
+    out.unresolved.push(`${key}: unknown program ${prog} (not a known non-compiler): ${text}`);
   };
 
   const classify = (p: Pkg, key: string, seg: Segment) => {
@@ -361,6 +404,7 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
       out.unresolved.push(`${key}: dynamic program: ${text}`);
       return;
     }
+    if (NON_COMPILERS.has(prog) || SHELL_CONTROL.has(prog)) return;
     if (base === 'turbo') return turbo(p, key, args, masked, text);
     if (RUNNERS.has(prog)) return runner(p, key, prog, args, masked, text);
     if (SHELLS.has(base)) {
@@ -379,17 +423,23 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
     if (prog.endsWith('.sh')) return followFile(p, key, prog, masked);
     if (base === 'node') {
       let j = 0;
+      let check = false;
       while (j < args.length && args[j].startsWith('-')) {
         if (/^(-e|--eval|-p|--print)(=.*)?$/.test(args[j])) {
           out.unresolved.push(`${key}: node inline code: ${text}`);
           return;
         }
+        if (args[j] === '--check' || args[j] === '-c') check = true;
         j += /^(-r|--require|--import)$/.test(args[j]) ? 2 : 1;
       }
-      if (args[j] !== undefined) compiler(args[j], args.slice(j + 1), masked);
-      return;
+      if (check) return; // `node --check <file>` only parses the file
+      if (args[j] === undefined) {
+        out.unresolved.push(`${key}: node runs no file: ${text}`);
+        return;
+      }
+      return compiler(key, args[j], args.slice(j + 1), masked, text);
     }
-    compiler(prog, args, masked);
+    compiler(key, prog, args, masked, text);
   };
 
   visitScript(pkg, start, false);
@@ -552,10 +602,28 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal shell expansion
     ['a ${VAR} program', '${TSC} -p .', 'dynamic program'],
     ['a $(…) program', '$(npm bin)/tsc -p .', 'dynamic program'],
+    ['make', `${TSC7} && make typecheck`, 'unknown program make'],
+    ['node running a script', `${TSC7} && node scripts/tc.mjs`, 'unknown program scripts/tc.mjs'],
+    ['python3 -c', `${TSC7} && python3 -c "import os"`, 'unknown program python3'],
+    ['deno eval', `${TSC7} && deno eval "1"`, 'unknown program deno'],
+    ['node with no file', `${TSC7} && node --version`, 'node runs no file'],
   ])('%s: is UNRESOLVED (fails closed)', (_label, typecheck, reason) => {
     const { unresolved } = run(lib({ typecheck }), [PLAIN_UI]);
     expect(unresolved).toHaveLength(1);
     expect(unresolved[0]).toContain(reason);
+  });
+
+  it.each([
+    ['echo', `${TSC7} && echo ok`],
+    ['true', `${TSC7} && true`],
+    ['test', `test -d src && ${TSC7}`],
+    ['[', `[ -d src ] && ${TSC7}`],
+    ['node --check', `node --check bin/x.js && ${TSC7}`],
+    ['set', `set -e && ${TSC7}`],
+    ['exit', `${TSC7} && exit 0`],
+    ['return', `${TSC7} && return 0`],
+  ])('allowlisted non-compiler %s resolves cleanly', (_l, typecheck) => {
+    expect(run(lib({ typecheck }))).toEqual({ tsc7: 1, plainTsc: [], unresolved: [] });
   });
 
   it('sh <file> follows the file and classifies its lines', () => {
@@ -564,6 +632,9 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     writeFileSync(join(dir, 'packages/lib/scripts/tc.sh'), '#!/bin/sh\n# comment\ntsc -p .\n');
     writeFileSync(join(dir, 'packages/lib/scripts/ok.sh'), `set -eu\n${TSC7}\n`);
     writeFileSync(join(dir, 'packages/lib/scripts/masked.sh'), `${TSC7}\necho done\n`);
+    writeFileSync(join(dir, 'packages/lib/scripts/late-set.sh'), `${TSC7}\nset -e\necho done\n`);
+    writeFileSync(join(dir, 'packages/lib/scripts/unset.sh'), `set -e\n${TSC7}\nset +e\necho x\n`);
+    writeFileSync(join(dir, 'packages/lib/scripts/exit.sh'), `set -e\nexit 0\n${TSC7}\n`);
     const at = (typecheck: string) => resolveChain(lib({ typecheck }), 'typecheck', [], dir);
     try {
       expect(at('sh scripts/tc.sh').plainTsc).toHaveLength(1);
@@ -572,6 +643,11 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
       expect(at('sh scripts/ok.sh')).toEqual({ tsc7: 1, plainTsc: [], unresolved: [] });
       // without `set -e` the LAST line's exit code is the script's, so the tsc7 line is masked
       expect(at('sh scripts/masked.sh').tsc7).toBe(0);
+      // `set -e` must be in effect BEFORE the tsc7 line, and `set +e` turns it off again
+      expect(at('sh scripts/late-set.sh').tsc7).toBe(0);
+      expect(at('sh scripts/unset.sh').tsc7).toBe(0);
+      // lines after an unconditional `exit` never run
+      expect(at('sh scripts/exit.sh').tsc7).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -579,6 +655,15 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
 
   it.each([
     ['--version', '../../node_modules/typescript-tsc7/bin/tsc --version'],
+    ['-p with --version', '../../node_modules/typescript-tsc7/bin/tsc -p x --version'],
+    ['--noCheck', `${TSC7} --noCheck`],
+    ['--noCheck=true', `${TSC7} --noCheck=true`],
+    ['--watch', `${TSC7} --watch`],
+    ['-w', `${TSC7} -w`],
+    ['-b --clean', '../../node_modules/typescript-tsc7/bin/tsc -b --clean'],
+    ['after `exit 0;`', `exit 0; ${TSC7}`],
+    ['after `exit 0 &&`', `exit 0 && ${TSC7}`],
+    ['after `return;`', `return; ${TSC7}`],
     ['no project/noEmit/build flag', '../../node_modules/typescript-tsc7/bin/tsc'],
     ['behind ||', `echo skip || ${TSC7}`],
     ['followed by || true', `${TSC7} || true`],
