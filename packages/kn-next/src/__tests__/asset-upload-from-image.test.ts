@@ -61,6 +61,20 @@ describe("uploadAssetsFromImage (#1447)", () => {
         expect(runQuietAllowFail).toHaveBeenCalled(); // container removed
     });
 
+    it("extracts with `docker create --platform linux/amd64`", async () => {
+        const upload = mock<AnyFn>(async () => {});
+        await uploadAssetsFromImage(config, "t1", "reg/app:t1", {
+            upload: upload as never,
+        });
+        expect(runCapture.mock.calls[0]?.[0]).toEqual([
+            "docker",
+            "create",
+            "--platform",
+            "linux/amd64",
+            "reg/app:t1",
+        ]);
+    });
+
     it("REFUSES to upload when the image references a chunk its assets lack", async () => {
         state.server = 'x="chunks/vinext-BBB.js"';
         const upload = mock<AnyFn>(async () => {});

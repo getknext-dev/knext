@@ -107,7 +107,7 @@ independent builds do not reliably produce the same names, and a bucket filled f
 not hold the chunks the other build's HTML asks for. Extracting the assets from the image
 guarantees the bucket holds exactly what the image serves. Before uploading, `knext deploy` checks
 that every client chunk the image's server references exists in the extracted assets, and aborts
-the deploy if any is missing. With the scaffolded `Dockerfile`, which copies your host build into
+the deploy if any is missing (`--skip-image-lockstep-check` skips that check, not the extraction). With the scaffolded `Dockerfile`, which copies your host build into
 the image, that host build is the image's build, so the upload still runs from it in parallel with
 the image build.
 

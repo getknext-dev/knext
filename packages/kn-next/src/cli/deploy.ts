@@ -429,7 +429,8 @@ export async function deploy() {
     if (options.skipImageLockstepCheck) {
         log.warn(
             "--skip-image-lockstep-check: skipping the post-build ASSET_PREFIX/" +
-                "build-id lock-step check against the pushed image. If this " +
+                "build-id lock-step check and the check that every client chunk " +
+                "the image's server references was uploaded. If this " +
                 "deploy's Dockerfile rebuilds in-image and the lock-step is " +
                 "actually broken (ADR-0011 — skew protection, asset GC), this " +
                 "deploy will NOT catch it before the cluster write.",
@@ -723,19 +724,17 @@ export async function deploy() {
     // built, and proven to cover what its server references. The shipped
     // template Dockerfiles COPY the host build, so the host build IS the image's
     // build there — the parallel host upload stays correct and stays parallel.
-    // `--image` deploys a prebuilt image whose provenance we cannot see: same
-    // rule, its own tree is the source.
+    // (`--image` forces --skip-upload, so `uploadsAssets` is already false there.)
     const imageSourcedAssets =
         uploadsAssets &&
         resolvedBuild === "vinext" &&
-        (Boolean(options.image) ||
-            (() => {
-                const sel = selectRuntimeImage(config, process.cwd());
-                return (
-                    sel.kind === "app-dockerfile" &&
-                    !isKnownGoodTemplateDockerfile(sel.dockerfile)
-                );
-            })());
+        (() => {
+            const sel = selectRuntimeImage(config, process.cwd());
+            return (
+                sel.kind === "app-dockerfile" &&
+                !isKnownGoodTemplateDockerfile(sel.dockerfile)
+            );
+        })();
 
     if (!options.dryRun) {
         const tasks: Promise<void>[] = [];
@@ -948,12 +947,9 @@ export async function deploy() {
                 "Uploading the assets the image serves (extracted from it)",
             );
             try {
-                await uploadAssetsFromImage(
-                    config,
-                    buildId,
-                    options.image ?? taggedRef,
-                    { verify: !options.skipImageLockstepCheck },
-                );
+                await uploadAssetsFromImage(config, buildId, taggedRef, {
+                    verify: !options.skipImageLockstepCheck,
+                });
             } catch (err) {
                 try {
                     reclaimBuildPrefix(config, buildId);

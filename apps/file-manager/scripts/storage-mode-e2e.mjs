@@ -39,7 +39,6 @@ import http from 'node:http';
 import {
   assertAssetPrefixReferenced,
   assertAssetUrlsServeOk,
-  assertBuildIdMatchesTag,
   assertBuildMarkerMatchesTag,
 } from './storage-mode-checks.mjs';
 

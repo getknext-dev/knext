@@ -1182,6 +1182,12 @@ export async function uploadAssetsFromImage(
                     ". Refusing to upload assets the image does not serve.",
             );
         }
+        if (check.ok && verify) {
+            log.info(
+                { referencedChunks: check.referenced },
+                "Image assets cover every chunk the server references",
+            );
+        }
         await (opts.upload ?? uploadAssets)(config, buildId, { cwd: appDir });
     } finally {
         if (containerId) runQuietAllowFail(["docker", "rm", "-f", containerId]);

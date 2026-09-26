@@ -158,7 +158,9 @@ export async function assertBuildMarkerMatchesTag({ prefix, tag, fetchOne }) {
     throw new Error(`GET ${url} -> HTTP ${res.status}, expected the build marker in the bucket`);
   }
   if (res.text.trim() !== tag) {
-    throw new Error(`build marker at ${url} says "${res.text.trim()}", expected deploy tag "${tag}"`);
+    throw new Error(
+      `build marker at ${url} says "${res.text.trim()}", expected deploy tag "${tag}"`,
+    );
   }
   return `bucket marker _next/static/${tag}/.knext-build == deploy tag`;
 }
