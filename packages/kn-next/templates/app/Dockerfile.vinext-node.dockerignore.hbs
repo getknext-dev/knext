@@ -33,6 +33,10 @@ dist
 build
 *.tsbuildinfo
 knext-exec*
+# The standalone target's ship binary (a DIFFERENT basename, not matched by
+# `knext-exec*` above) — this Dockerfile runs `.output/server` instead, so it
+# never COPYs this binary either.
+knext-standalone-exec*
 knext-smoke-*
 native
 server

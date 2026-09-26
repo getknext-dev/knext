@@ -10,7 +10,7 @@ import type { KnativeNextConfig, ScalingConfig } from "../config";
  * #455 (2) — CLI-regex ↔ operator ParseQuantity parity.
  *
  * `validate.ts` hand-mirrors the Kubernetes quantity grammar as a regex so
- * `kn-next deploy` gives fast feedback on a typo like "1GB" without a cluster
+ * `knext deploy` gives fast feedback on a typo like "1GB" without a cluster
  * round-trip. The OPERATOR stays the source of truth (ADR-0001) — but a mirror
  * that silently drifts is worse than no mirror: it either rejects a value the
  * cluster would accept, or waves through one the operator will reject after the

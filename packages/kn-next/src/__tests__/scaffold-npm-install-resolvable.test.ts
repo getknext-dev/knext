@@ -1,5 +1,5 @@
 /**
- * #985 — a stranger who runs `kn-next create` then `npm install` (the exact
+ * #985 — a stranger who runs `knext create` then `npm install` (the exact
  * command the CLI's own output prescribes) must get a tree npm can actually
  * resolve against the PUBLIC registry.
  *

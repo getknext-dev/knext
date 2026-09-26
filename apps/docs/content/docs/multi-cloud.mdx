@@ -10,7 +10,7 @@ by build ID, and served from `assetPrefix`. Object storage is **optional** — s
 
 ## Supported storage providers
 
-The `kn-next` config validator accepts exactly these `storage.provider` values:
+The `knext` config validator accepts exactly these `storage.provider` values:
 
 ```ts
 const SUPPORTED_STORAGE_PROVIDERS = ['gcs', 's3', 'minio', 'azure'] as const;
@@ -47,7 +47,7 @@ browser fetches static chunks from object storage rather than the pod.
 You can leave `storage` out of `kn-next.config.ts` entirely. Your app then serves its own static
 files from the container image — exactly how `next start` works — and every deploy prints a notice
 saying it is running in this mode. Nothing else changes: deploys, scale-to-zero, rollback, and
-`next/image` all keep working. It is the right starting point for a new app; `kn-next create`
+`next/image` all keep working. It is the right starting point for a new app; `knext create`
 scaffolds the storage block commented out for exactly this reason.
 
 What you give up until you add a bucket:
@@ -66,13 +66,13 @@ Rollback actually gets **simpler** in this mode: a pinned revision serves assets
 image, so they can never be cleaned up out from under it.
 
 Add the `storage` block when static delivery speed matters, or when your traffic holds long-lived
-sessions open across deploys — pick a provider from the table above and redeploy. `kn-next doctor`
+sessions open across deploys — pick a provider from the table above and redeploy. `knext doctor`
 reports which mode your app is in.
 
 ## Custom Dockerfiles that rebuild in-image
 
 The scaffolded `Dockerfile` copies your app's already-built output into the image — `next
-build`/`vite build` runs once, on the host, where `kn-next deploy` has already set `ASSET_PREFIX`
+build`/`vite build` runs once, on the host, where `knext deploy` has already set `ASSET_PREFIX`
 and the deploy's build id in the environment. If you maintain your own `Dockerfile` that instead
 runs the build a second time **inside** the image (for example a monorepo image that does `bun
 install` + `vite build` in a builder stage), that in-image build never sees those two values unless
@@ -89,7 +89,7 @@ ENV ASSET_PREFIX=${ASSET_PREFIX}
 RUN ./node_modules/.bin/vite build
 ```
 
-`kn-next deploy`/`kn-next preview` pass both automatically as `--build-arg`s to any Dockerfile that
+`knext deploy`/`knext preview` pass both automatically as `--build-arg`s to any Dockerfile that
 rebuilds in-image — an unused build-arg is silently ignored by Docker, so nothing breaks until you
 add the two lines above. Without them:
 
@@ -100,7 +100,7 @@ add the two lines above. Without them:
 
 ### The post-build check, its scope, and the opt-out
 
-For a Dockerfile that rebuilds in-image and uploads assets, `kn-next deploy` checks the ACTUAL
+For a Dockerfile that rebuilds in-image and uploads assets, `knext deploy` checks the ACTUAL
 pushed image after the build — not just your Dockerfile's `ARG` declarations, which can be present
 and unused. It briefly extracts the image's server artifact and static output (`docker create` /
 `docker cp`, no traffic ever served) and confirms the static build namespace matches the deploy
@@ -115,6 +115,6 @@ cost to every other deploy.
 The check assumes your custom Dockerfile follows the same layout the scaffolded templates use — the
 compiled server at `/app/server`, or the uncompiled entry at `/app/.output/server/index.mjs`. If
 your image's layout genuinely differs and the check reports a false failure, pass
-`--skip-image-lockstep-check` to `kn-next deploy` to opt out. Understand the tradeoff before you
+`--skip-image-lockstep-check` to `knext deploy` to opt out. Understand the tradeoff before you
 do: skipping it means the CLI can no longer catch a broken `ASSET_PREFIX`/build-id lock-step before
 it reaches your cluster.

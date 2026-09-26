@@ -1,7 +1,7 @@
 /**
  * ADR-0047 — the PREVIEW path in the no-storage mode (review F1). A preview
  * builds, pushes, and applies a NextApp CR — it IS a deploy — so condition 1
- * binds it the same way it binds `kn-next deploy`. Pinned, mirroring
+ * binds it the same way it binds `knext deploy`. Pinned, mirroring
  * deploy-no-storage.test.ts:
  *
  *   - a storage-less preview COMPLETES (the CR still applies) but ANNOUNCES

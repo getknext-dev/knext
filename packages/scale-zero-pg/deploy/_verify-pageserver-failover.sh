@@ -105,12 +105,15 @@ spec:
   template:
     metadata: { labels: { app: minio } }
     spec:
-      securityContext: { seccompProfile: { type: RuntimeDefault } }
+      # fsGroup: 1001 matches Bitnami minio's runtime UID so it can write the PVC
+      # root on block-volume storage classes (default root:root 0755 on OKE/GKE).
+      securityContext: { fsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z
-          args: ["server","/data","--address",":9000"]
+          # #1403: quay.io/minio/minio UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror (genuine MinIO, verified S3-API-compatible). NO args override - Bitnami's own entrypoint runs `minio server` internally.
+          image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
           env:
+            - { name: MINIO_DATA_DIR, value: /data }
             - { name: MINIO_ROOT_USER, valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } } }
             - { name: MINIO_ROOT_PASSWORD, valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } } }
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
@@ -136,7 +139,7 @@ data: { PG_VERSION: "$PG_VERSION", PAGESERVER_HOST: "pageserver-a", TENANT_ID: "
 YAML
 $KD rollout status deploy/minio --timeout=120s >/dev/null || fail "drill minio not ready"
 # create the bucket
-$KD run mc-mb --restart=Never --image=minio/mc:RELEASE.2023-01-28T20-29-38Z \
+$KD run mc-mb --restart=Never --image=docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 \
   --env=U=drilladmin --env=P=drillpasslocal123 --command -- /bin/sh -c '
   export HOME=/tmp
   n=0; until mc alias set dst http://minio:9000 "$U" "$P"; do n=$((n+1)); [ $n -gt 30 ] && exit 1; sleep 2; done

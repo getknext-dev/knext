@@ -150,7 +150,7 @@ export function buildNextAppCRObject(
     // no PVC, no `enableBytecodeCache`, and no `bytecodeCacheSize`.
     //
     // The CRD no longer defines either field, so emitting one would now be an
-    // ERROR, not dead weight: every kn-next apply passes `--validate=strict`
+    // ERROR, not dead weight: every knext apply passes `--validate=strict`
     // (#547), and the apiserver rejects unknown fields under it. That is why this
     // had to be removed in lockstep with the operator rather than left to rot.
     const cache = config.cache
@@ -600,7 +600,7 @@ export async function resolveDigest(
  * dryRunDeploy renders the NextApp CR YAML and returns it WITHOUT
  * executing any cluster or shell commands.
  *
- * @param config   - kn-next config
+ * @param config   - knext config
  * @param image    - resolved, digest-pinned image ref
  * @param namespace - target k8s namespace
  * @param execFn   - injected exec boundary (spy target in tests; never called in dry-run)

@@ -13,7 +13,20 @@
   "compilerOptions": {
     "noEmit": true,
     "module": "ESNext",
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    // TS7 does not auto-include @types/* packages the way 5.x/6.x does — an
+    // explicit `types` is required for the `bun:test` ambient module @types/bun
+    // declares to resolve, or every test file in scope here 404s on its own
+    // import (TS2307). Harmless under 5.x too (verified): @types/bun was
+    // already auto-included there, so this is additive, not a behavior change.
+    "types": ["bun"],
+    // TS7 enforces rootDir even under noEmit, where 5.x/6.x did not (verified:
+    // identical program, red only under TS7). An integration test here
+    // imports across package boundaries (packages/kn-next/src/cli/db-migrate.ts,
+    // apps/db-demo/src/db/schema.ts) — legitimately outside this package's
+    // src/ — widen rootDir to the repo root rather than restructure those
+    // imports, since nothing is emitted here.
+    "rootDir": "../.."
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

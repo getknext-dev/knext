@@ -31,7 +31,19 @@
 # script drives it live via ../szpg_profile_b_test.go (`-tags e2e_szpg`).
 #
 # KNOWN DRILL GOTCHAS baked in (from the szpg-d8 exit-gate run, design §4.5):
-#   - docker.io/minio/mc is access-denied; we retag quay.io/minio/mc and kind load it.
+#   - docker.io/minio/mc and quay.io/minio/mc are BOTH access-denied for anonymous
+#     pull, repo-wide (#1403). THROWAWAY drill/CI fixtures were repinned to
+#     docker.io/bitnamilegacy/minio-client@<digest>, which still pulls anonymously
+#     — we pre-pull + kind load it as cheap insurance against a flaky mid-drill pull.
+#   - STILL BROKEN, NOT FIXED HERE (tracked in getknext-dev/knext#1423, szpg's own
+#     review, not a knext-side tech-debt pass): deploy_szpg_plane() below applies
+#     the WHOLE deploy/ directory verbatim, which includes the LIVE szpg manifests
+#     `50-minio.yaml` (still pins the now-unpullable quay.io/minio/minio),
+#     `62-backup.yaml`, and `55-storage-init.yaml` (both still pin the bare,
+#     now-unpullable `minio/mc:RELEASE.2023-01-28T20-29-38Z`). This drill WILL
+#     ImagePullBackOff on the minio Deployment and the storage-init/backup Jobs
+#     until #1423 lands. The pre-pull/kind-load above only covers the `mc` CLIENT
+#     image used elsewhere in this script — it does not fix the live manifests.
 #   - several deploy/_verify-*.sh default KCTX/KSPG_CONTEXT to the OKE production
 #     context. We set KUBECONFIG to a throwaway file and pass the kind context
 #     EXPLICITLY so a "local" drill can never touch a real cluster.
@@ -177,12 +189,22 @@ build_and_load_gateway() {
   docker build -t "$GW_LOCAL_IMAGE" "$SZPG_DIR/gateway"
   log "kind load $GW_LOCAL_IMAGE"
   kind load docker-image "$GW_LOCAL_IMAGE" --name "$CLUSTER_NAME"
-  # mc gotcha (design §4.5): docker.io/minio/mc is access-denied on this network.
-  # Pre-pull the quay mirror and load it so the storage-init bucket step never
-  # blocks on a docker.io pull.
-  docker pull quay.io/minio/mc:latest >/dev/null 2>&1 || warn "could not pre-pull quay.io/minio/mc (storage-init may retry)"
-  docker tag quay.io/minio/mc:latest minio/mc:latest 2>/dev/null || true
-  kind load docker-image minio/mc:latest --name "$CLUSTER_NAME" 2>/dev/null || true
+  # mc gotcha (design §4.5, UPDATED #1403): docker.io/minio/mc AND
+  # quay.io/minio/mc now UNAUTHORIZE every anonymous pull repo-wide (verified
+  # — not a transient rate limit).
+  # STALE AS OF getknext-dev/knext#1423: 55-storage-init.yaml and 62-backup.yaml
+  # were REVERTED back to the bare, now-unpullable `minio/mc:RELEASE.2023-01-28T20-29-38Z`
+  # pin — they are LIVE szpg manifests, out of scope for a knext-side CI repin, and
+  # tracked for szpg's own review in #1423. The pre-pull/kind-load below therefore
+  # currently loads an image NOTHING in the applied manifests references — it is
+  # dead weight until #1423 repins those two files, kept here (not deleted) so it
+  # activates for free the moment that lands.
+  docker pull docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 \
+    >/dev/null 2>&1 || warn "could not pre-pull the mc mirror image (storage-init may retry)"
+  if ! kind load docker-image docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 \
+    --name "$CLUSTER_NAME" 2>/dev/null; then
+    warn "kind load of the mc mirror image failed (non-fatal: unused until #1423 repins the live manifests)"
+  fi
 }
 
 deploy_szpg_plane() {

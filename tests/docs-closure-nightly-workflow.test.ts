@@ -32,6 +32,18 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const CI_WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/ci.yml');
 const NIGHTLY_WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/docs-closure-nightly.yml');
 
+/**
+ * #1421 review round 1 (jev 0.83) — the real INVOCATION, not a mere mention.
+ * A comment line's first non-whitespace character is `#`, so `[^#\n]*`
+ * greedily matching everything up to (but never past) a `#` cannot span one:
+ * a comment like `# See scripts/lib/nightly-alert-issue.mjs's own header`
+ * never matches, because the character immediately after `^\s*` IS `#`, and
+ * `[^#\n]*` cannot cross it to reach `node`. The real invocation line
+ * (`TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs`)
+ * has no `#` before `node`, so it matches.
+ */
+const NIGHTLY_ALERT_INVOCATION_RE = /^\s*[^#\n]*\bnode scripts\/nightly-alert-issue\.mjs\b/m;
+
 function read(path: string): string {
   return readFileSync(path, 'utf8');
 }
@@ -215,29 +227,44 @@ describe('#320 idempotent pinned alert (mirrors nightly-red-alert)', () => {
     ).toBe(true);
   });
 
-  it('is IDEMPOTENT: looks up ONE open pinned issue and comments on it instead of opening a new one', () => {
+  it('is IDEMPOTENT: delegates lookup/create/comment to the shared nightly-alert-issue.mjs helper (#1347)', () => {
+    // #1347 moved the inline `gh issue list`/`comment`/`create`/`pin` tail
+    // (previously asserted directly here) into ONE shared, never-pinning
+    // helper every nightly-alert job now routes through — see
+    // scripts/lib/nightly-alert-issue.mjs's own header and
+    // tests/nightly-alert-issue.test.ts, which is what actually proves the
+    // lookup-existing/comment-if-present/create-if-absent idempotent
+    // behavior this test used to assert inline. This test now proves
+    // DELEGATION, not the behavior a second time.
     const text = read(NIGHTLY_WORKFLOW_PATH);
-    // dedup lookup: gh issue list filtered by the fixed alert title.
+    // #1421 review round 1 (jev 0.83): a bare `.includes('nightly-alert-issue.mjs')`
+    // matches the migration note's OWN prose ("See scripts/lib/nightly-alert-issue.mjs")
+    // just as readily as the real invocation — the reviewer deleted the real
+    // `node scripts/nightly-alert-issue.mjs` line and this stayed green.
+    // Require the real INVOCATION shape on a non-comment line instead.
     expect(
-      /gh issue list/.test(text),
-      'the alert must look up the existing pinned issue (gh issue list)',
+      NIGHTLY_ALERT_INVOCATION_RE.test(text),
+      'the alert must actually INVOKE (not merely mention) scripts/nightly-alert-issue.mjs on a real, non-comment line',
     ).toBe(true);
-    // #187-class guard mirrored from nightly-red-alert: --limit must be raised
-    // above gh's default 30 so a busy backlog can't hide the pinned issue and
-    // cause daily NEW-issue spam.
-    const limitMatch = text.match(/gh issue list[\s\S]*?--limit\s+(\d+)/);
-    expect(limitMatch, 'the lookup must pass an explicit --limit').toBeTruthy();
-    expect(
-      Number((limitMatch as RegExpMatchArray)[1]),
-      'the --limit must be well above gh default 30 so the pinned issue is not missed',
-    ).toBeGreaterThanOrEqual(100);
-    // comment-if-exists / create-if-absent branch.
-    expect(
-      /gh issue comment/.test(text),
-      'an existing alert issue must be UPDATED via gh issue comment (idempotent, not a new issue)',
-    ).toBe(true);
-    expect(/gh issue create/.test(text), 'a first red must CREATE the alert issue').toBe(true);
-    expect(/gh issue pin/.test(text), 'the created alert issue must be pinned').toBe(true);
+    // No inline gh issue list/comment/create/pin calls: those would
+    // duplicate — and risk drifting from — the shared helper's own logic,
+    // and pinning here specifically would reintroduce the exact 9-workflow
+    // pin-cap race #1347 fixed (see tests/nightly-alert-pin-policy.test.ts).
+    // Comment-stripped first: the migration note above literally SAYS
+    // "This alert used to `gh issue pin`", which would otherwise
+    // false-positive a bare substring check.
+    const stripped = stripComments(text);
+    for (const forbidden of [
+      'gh issue list',
+      'gh issue comment',
+      'gh issue create',
+      'gh issue pin',
+    ]) {
+      expect(
+        stripped.includes(forbidden),
+        `${forbidden} must not appear as a real (non-comment) call — the shared helper owns this now`,
+      ).toBe(false);
+    }
   });
 
   it('the alert title is a fixed literal (a stable idempotency key)', () => {

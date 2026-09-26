@@ -37,7 +37,7 @@ RT="--request-timeout=60s"
 
 SRC_NS=scale-zero-pg
 DRILL_NS=backup-port-drill
-IMG_MC=minio/mc:RELEASE.2023-01-28T20-29-38Z
+IMG_MC=docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511  # #1403: quay.io/minio/mc is UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror
 # Drill-only tenant/timeline — DISTINCT from primary (f000…) / apps (a000…).
 TENANT=0bacc0de00000000000000000000d120
 TIMELINE=0bacc0de00000000000000000000d121
