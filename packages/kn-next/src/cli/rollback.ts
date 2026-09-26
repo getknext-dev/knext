@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * kn-next rollback — shifts serving traffic to a prior Knative Revision by
+ * knext rollback — shifts serving traffic to a prior Knative Revision by
  * patching the NextApp CR's spec.traffic (issue #92).
  *
  * Usage:
- *   kn-next rollback [<app>] --to <revision> [--canary <n>] [-n <namespace>]
- *   kn-next rollback [<app>]                  # revert to latest-ready (clear pin)
+ *   knext rollback [<app>] --to <revision> [--canary <n>] [-n <namespace>]
+ *   knext rollback [<app>]                  # revert to latest-ready (clear pin)
  *
  * ADR-0001 (operator = single source of truth):
  *   The CLI emits INTENT, it does NOT mutate the cluster out-of-band. Rollback
@@ -105,7 +105,7 @@ interface RollbackArgs {
  * Parse argv into rollback options. Positional <app> is optional.
  *
  * STRICT by design (PR #232 review): rollback is a MUTATING command whose
- * bare form (`kn-next rollback <app>`) clears the traffic pin — so a dangling
+ * bare form (`knext rollback <app>`) clears the traffic pin — so a dangling
  * `--to` or a typo'd flag must be a hard error, never a silent fall-through
  * to the OPPOSITE mutation (un-pinning when the user asked to pin).
  */
@@ -115,7 +115,7 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
             throw new UsageError(
-                `${flag} requires a value (see kn-next rollback --help)`,
+                `${flag} requires a value (see knext rollback --help)`,
             );
         }
         return v;
@@ -142,33 +142,33 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
             out.context = takeValue("--context", ++i);
         } else if (a.startsWith("-")) {
             throw new UsageError(
-                `unknown flag "${a}" (see kn-next rollback --help)`,
+                `unknown flag "${a}" (see knext rollback --help)`,
             );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
             throw new UsageError(
-                `unexpected positional ${JSON.stringify(a)} — only one <app> positional is accepted (see kn-next rollback --help)`,
+                `unexpected positional ${JSON.stringify(a)} — only one <app> positional is accepted (see knext rollback --help)`,
             );
         }
     }
     if (out.canaryPercent !== undefined && out.toRevision === undefined) {
         throw new UsageError(
-            "--canary requires --to <revision> (see kn-next rollback --help)",
+            "--canary requires --to <revision> (see knext rollback --help)",
         );
     }
     return out;
 }
 
-const ROLLBACK_HELP = `kn-next rollback — shift serving traffic to a prior Knative Revision
+const ROLLBACK_HELP = `knext rollback — shift serving traffic to a prior Knative Revision
 
 Patches ONLY the NextApp CR's spec.traffic (one kubectl merge-patch); the
 operator reconciles the ksvc traffic split (ADR-0001). Uploaded assets are
 untouched, so the rolled-away revision remains serviceable (#93 skew note).
 
 Usage:
-  kn-next rollback [<app>] --to <revision> [--canary <n>] [options]
-  kn-next rollback [<app>]                  # clear the pin (back to latest-ready)
+  knext rollback [<app>] --to <revision> [--canary <n>] [options]
+  knext rollback [<app>]                  # clear the pin (back to latest-ready)
 
 Options:
   --to <revision>       Prior Knative Revision to pin (e.g. my-app-00001).
@@ -180,11 +180,11 @@ Options:
   -h, --help            Show this help
 `;
 
-/** Entry for \`kn-next rollback\`. Returns the process exit code. */
+/** Entry for \`knext rollback\`. Returns the process exit code. */
 export async function rollbackMain(argv: readonly string[]): Promise<number> {
     if (argv.includes("-h") || argv.includes("--help")) {
         // Written synchronously to fd 1 (not via the async pino transport) so
-        // `kn-next rollback --help | cat` is never truncated — same contract as
+        // `knext rollback --help | cat` is never truncated — same contract as
         // the status/doctor help paths.
         writeSync(1, ROLLBACK_HELP);
         return 0;
@@ -195,11 +195,11 @@ export async function rollbackMain(argv: readonly string[]): Promise<number> {
 
 async function rollback(argv: readonly string[]) {
     // Parse BEFORE announcing: a rejected flag would otherwise print the
-    // banner first and leave the user reading "⏪ kn-next rollback" above their
+    // banner first and leave the user reading "⏪ knext rollback" above their
     // error — the same ordering fixed on the deploy path (ADR-0046).
     const args = parseRollbackArgs(argv);
 
-    log.info("⏪ kn-next rollback");
+    log.info("⏪ knext rollback");
 
     // Resolve the app name: positional arg wins, else the config's name.
     // (Canary/flag validation already happened in parseRollbackArgs — strict,
@@ -251,6 +251,6 @@ async function rollback(argv: readonly string[]) {
 }
 
 // NO self-entry block here, DELIBERATELY — this module is reached ONLY via
-// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// the knext bin's subcommand dispatch (see the hazard note atop deploy.ts's
 // dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
 // tsup-inlining hijack, #263).

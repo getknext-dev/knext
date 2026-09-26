@@ -239,13 +239,13 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
 
     it("injects the guard as the entry’s FIRST import (mutation anchor)", () => {
         // The compiled entry's source is built as a list of injected imports
-        // followed by the #1309-staticized entry: `const src = \`import
-        // ${JSON.stringify(A)};\n\` + … + staticized.contents;`. The guard must be
+        // followed by the #1309/#1314 require-wrapped entry: `const src = \`import
+        // ${JSON.stringify(A)};\n\` + … + wrapped.contents;`. The guard must be
         // the FIRST injected import so it patches Bun.serve before srvx/bun calls
         // it; later injections (the sidecar resolver, the Cache-Control
         // normalization) run after it, in that order.
         const s = src();
-        const block = s.match(/const src =([\s\S]*?)staticized\.contents;/);
+        const block = s.match(/const src =([\s\S]*?)wrapped\.contents;/);
         expect(
             block,
             "the entry-source construction was not found",

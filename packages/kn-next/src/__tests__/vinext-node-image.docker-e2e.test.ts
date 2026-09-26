@@ -7,13 +7,13 @@
 //
 // 1. The SHIPPED scaffold templates build a node-runnable artifact. The suite
 //    renders `vite.config.ts`, `knext-node-entry.mjs` and `runtime-contract.mjs`
-//    through `renderScaffold` (the function `kn-next create` uses) over a
+//    through `renderScaffold` (the function `knext create` uses) over a
 //    minimal fixture app whose kn-next.config.ts says `runtime: 'node'`, then
 //    runs the app's own `vite build`. `.output/nitro.json` must say
 //    `node-server` — checked by the SHIPPED `assertNodePresetOutput`, the same
-//    gate `kn-next build` runs.
+//    gate `knext build` runs.
 // 2. The image recipe is staged by the SHIPPED `stageVinextNodeDockerfile`
-//    (what `kn-next build` does for an app that lacks it) and built with
+//    (what `knext build` does for an app that lacks it) and built with
 //    `docker build`. Its bake step boots the server once, as the runtime uid,
 //    and fails the build on an undersized cache — so a green build is already
 //    evidence the bake ran.
@@ -25,6 +25,14 @@
 //    `/app/.output/server/index.mjs` "was accepted". Node keys the cache
 //    subdirectory by uid, so a bake run as root leaves (4) green and turns (5)
 //    red — which is exactly why (5) exists.
+// 6. #1298: `/_next/image` actually RESIZES, through the shipped image. The
+//    SHIPPED `stageSharpForVinextNode` (what `kn-next build` runs) replaces
+//    nitro's own host-platform/incomplete trace before the docker build, and
+//    the node entry direct-passes sharp to the image optimizer (`sharp` no
+//    longer relies on a `createRequire(cwd)` resolve that can never find
+//    `.output/server/node_modules` in the deployed image). A negotiated-format
+//    response that is SMALLER than the source PNG is proof the real sharp
+//    ran, not the fail-open passthrough.
 //
 // ── Discipline mirrored from standalone-webpack-build.docker-e2e ───────────
 //
@@ -44,6 +52,7 @@ import {
     mkdtempSync,
     readFileSync,
     rmSync,
+    statSync,
     symlinkSync,
     writeFileSync,
 } from "node:fs";
@@ -52,6 +61,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderScaffold } from "../cli/create";
 import { stageVinextNodeDockerfile } from "../cli/runtime-image";
+import { stageSharpForVinextNode } from "../cli/vinext-build";
 import { assertNodePresetOutput } from "../cli/vinext-node-build";
 
 // packages/kn-next/src/__tests__ -> package root (../..)
@@ -78,7 +88,7 @@ const EPOCH_LABEL_KEY = `${LABEL_KEY}.epoch`;
 const EPOCH_LABEL = `${EPOCH_LABEL_KEY}=${Date.now()}`;
 const LEAK_AGE_MS = 2 * 60 * 60 * 1000;
 
-/** The templates the node cell ships, rendered exactly as `kn-next create` would. */
+/** The templates the node cell ships, rendered exactly as `knext create` would. */
 const RENDERED_TEMPLATES = [
     "vite.config.ts",
     "knext-node-entry.mjs",
@@ -94,9 +104,21 @@ const RENDERED_TEMPLATES = [
 
 /**
  * Packages the node server entry imports that the fixture does NOT declare
- * itself: taken from the rendered template package.json (see 2b).
+ * itself: taken from the rendered template package.json (see 2b). `sharp`
+ * moved here with #1298's direct-pass fix — the entry now statically imports
+ * it (like the bun entry always has), so an undeclared template dependency
+ * fails the fixture's OWN build, exactly like `srvx`.
  */
-const ENTRY_RUNTIME_DEPS = ["srvx"] as const;
+const ENTRY_RUNTIME_DEPS = ["srvx", "sharp"] as const;
+
+/** The real, decodable PNG `/_next/image` resizes in the tests below. */
+const TEST_IMAGE = join(
+    __dirname,
+    "fixtures",
+    "vinext-node-app",
+    "public",
+    "test-image.png",
+);
 
 let workDir = "";
 let appDir = "";
@@ -278,7 +300,7 @@ beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "knext-vinext-node-"));
     appDir = join(workDir, "app");
     cpSync(FIXTURE_SRC, appDir, { recursive: true });
-    // #1342/ADR-0058: `kn-next create`'s DEFAULT builder no longer renders
+    // #1342/ADR-0058: `knext create`'s DEFAULT builder no longer renders
     // these vinext-shaped files at all — request the `--builder vinext`
     // override explicitly, matching what this suite actually exercises (the
     // vinext × node runtime image).
@@ -296,7 +318,7 @@ beforeAll(async () => {
         }
         writeFileSync(join(appDir, rel), text, "utf8");
     }
-    // What `kn-next build` does for an app that has no recipe yet.
+    // What `knext build` does for an app that has no recipe yet.
     const staged = stageVinextNodeDockerfile({ cwd: appDir });
     if (!staged.staged) {
         throw new Error(
@@ -305,7 +327,7 @@ beforeAll(async () => {
     }
 
     // 2b. The runtime dependencies the SERVER ENTRY imports come from the
-    //     rendered `kn-next create` package.json — never from the fixture — so
+    //     rendered `knext create` package.json — never from the fixture — so
     //     a template that forgets to declare one fails here, not in a user's
     //     repo. (The fixture deliberately omits srvx.) Only the packages the
     //     entry needs: the rest of the template's deps (@getknext/lib, otel…)
@@ -362,8 +384,20 @@ beforeAll(async () => {
             ) as { preset?: unknown }
         ).preset,
     );
-    // The shipped gate `kn-next build` runs; throws on a bun-preset output.
+    // The shipped gate `knext build` runs; throws on a bun-preset output.
     assertNodePresetOutput(appDir);
+
+    // 4b. #1298: nitro's own trace into `.output/server/node_modules` copies
+    //     the BUILD HOST's sharp addon and an incomplete JS package — exactly
+    //     what `kn-next build` fixes before the image is built. Re-run that
+    //     fix here for the same reason the other shipped gates run here: this
+    //     proves the SHIPPED function, not a copy of its logic.
+    const sharpStaged = stageSharpForVinextNode(appDir, { arch: "linux-x64" });
+    if (!sharpStaged.staged) {
+        throw new Error(
+            "stageSharpForVinextNode reported nothing staged for a fixture that declares sharp",
+        );
+    }
 
     // 5. The image, from the staged recipe. Its bake RUN fails the build on
     //    a failed warm or an undersized cache.
@@ -468,6 +502,36 @@ describe("the vinext × node image serves", () => {
         // `docker exec` + a node boot under linux/amd64 emulation outlives
         // bun's 5s default on a loaded host — measured, with four containers up.
     }, 60_000);
+});
+
+describe("#1298 /_next/image resizes for real, through the shipped image", () => {
+    const SOURCE_BYTES = statSync(TEST_IMAGE).size;
+
+    it("a webp-negotiated request is smaller than the source and decodes as webp", async () => {
+        const res = await fetch(
+            `http://127.0.0.1:${port}/_next/image?url=%2Ftest-image.png&w=32&q=75`,
+            { headers: { accept: "image/webp" } },
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("image/webp");
+        const bytes = await res.arrayBuffer();
+        // A passthrough (sharp missing/failed) would serve the source PNG
+        // byte-for-byte — same size, same content-type. A real resize to 32px
+        // wide + webp is a two-orders-of-magnitude shrink on this fixture
+        // (measured locally: 49456 -> 376 bytes); assert an order of
+        // magnitude margin rather than the exact figure.
+        expect(bytes.byteLength).toBeLessThan(SOURCE_BYTES / 10);
+        expect(bytes.byteLength).toBeGreaterThan(0);
+    });
+
+    it("an unnegotiated request (no Accept) still resizes, kept in the source format", async () => {
+        const res = await fetch(
+            `http://127.0.0.1:${port}/_next/image?url=%2Ftest-image.png&w=32&q=75`,
+        );
+        expect(res.status).toBe(200);
+        const bytes = await res.arrayBuffer();
+        expect(bytes.byteLength).toBeLessThan(SOURCE_BYTES / 5);
+    });
 });
 
 const DEPLOY_CACHE_CONTROL = "public, max-age=0, must-revalidate";

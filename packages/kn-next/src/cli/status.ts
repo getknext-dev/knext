@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * kn-next status — surface the NextApp CR's honest conditions.
+ * knext status — surface the NextApp CR's honest conditions.
  *
  * Usage:
- *   kn-next status [<app>] [-n <namespace>] [--json] [--watch]
+ *   knext status [<app>] [-n <namespace>] [--json] [--watch]
  *
  * The operator reports rich truth on the CR — Ready (with reasons like
  * IngressNotProgrammed and the #208 guidance in the message), Degraded,
@@ -60,14 +60,14 @@ export interface StatusOptions {
     /**
      * kubectl context to target. `--context` wins over `KN_CONTEXT`, else
      * undefined ⇒ the ambient current-context. The read must honour it so
-     * `kn-next status --context staging` reports staging's CR, never whatever
+     * `knext status --context staging` reports staging's CR, never whatever
      * cluster the kubeconfig happens to point at (the #978 wrong-cluster class,
      * read-side).
      */
     context?: string;
 }
 
-/** Parse `kn-next status` argv (after the `status` word). */
+/** Parse `knext status` argv (after the `status` word). */
 export function parseStatusArgs(argv: readonly string[]): StatusOptions {
     const out: StatusOptions = {
         namespace: "default",
@@ -82,7 +82,7 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
             throw new UsageError(
-                `${flag} requires a value (see kn-next status --help)`,
+                `${flag} requires a value (see knext status --help)`,
             );
         }
         return v;
@@ -101,13 +101,13 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
             out.watch = true;
         } else if (a.startsWith("-")) {
             throw new UsageError(
-                `unknown flag "${a}" (see kn-next status --help)`,
+                `unknown flag "${a}" (see knext status --help)`,
             );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
             throw new UsageError(
-                `unexpected positional "${a}" — only one <app> positional is accepted (see kn-next status --help)`,
+                `unexpected positional "${a}" — only one <app> positional is accepted (see knext status --help)`,
             );
         }
     }
@@ -116,7 +116,7 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
         // would choke on. If NDJSON streaming is ever wanted, it gets designed
         // deliberately — not implied by a flag combination.
         throw new UsageError(
-            "--json cannot be combined with --watch (a 5s poll would emit concatenated JSON documents); poll `kn-next status --json` from your script instead (see kn-next status --help)",
+            "--json cannot be combined with --watch (a 5s poll would emit concatenated JSON documents); poll `knext status --json` from your script instead (see knext status --help)",
         );
     }
     return out;
@@ -143,6 +143,7 @@ export interface StatusModel {
     degraded?: ConditionView;
     databaseReady?: ConditionView;
     reconciling?: ConditionView;
+    envMapCollision?: ConditionView;
     database: { mode: DatabaseMode; secretName?: string };
 }
 
@@ -207,6 +208,7 @@ export function extractStatus(cr: unknown): StatusModel {
         degraded: byType("Degraded"),
         databaseReady: byType("DatabaseReady"),
         reconciling: byType("Reconciling"),
+        envMapCollision: byType("EnvMapCollision"),
         database: {
             mode,
             secretName:
@@ -241,6 +243,7 @@ const LABELS = [
     "Reconciling",
     "Database",
     "DatabaseReady",
+    "EnvMapCollision",
     "Image",
 ] as const;
 const LABEL_WIDTH = Math.max(...LABELS.map((l) => l.length));
@@ -254,24 +257,49 @@ const LABEL_WIDTH = Math.max(...LABELS.map((l) => l.length));
  */
 type BadWhen = "True" | "False";
 
+/**
+ * #1391 round 3: EnvMapCollision reasons that must render as INFORMATIONAL
+ * even though status=True — the documented connection-string envMap pattern
+ * (REDIS_URL / KAFKA_BROKER_URL / OTEL_EXPORTER_OTLP_ENDPOINT have no typed
+ * `*SecretRef` CRD field yet, so binding them via envMap is the sanctioned
+ * way), for which the operator emits a Normal event, not a Warning. Without
+ * this exception, every app binding REDIS_URL the recommended way would show
+ * the same alarm formatting (reason + full message dump) as a real,
+ * grandfathered collision — training users to ignore it. Kept as a mirror of
+ * the Go `controller.ReasonEnvMapExpectedOverride` reason string; the two
+ * are hand-maintained on either side of a language boundary, so a rename on
+ * one side needs the other kept in sync by hand.
+ */
+export const ENVMAP_COLLISION_INFORMATIONAL_REASONS = [
+    "EnvMapExpectedOverride",
+] as const;
+
 function conditionLine(
     label: (typeof LABELS)[number],
     c: ConditionView | undefined,
     now: Date,
     badWhen: BadWhen,
+    informationalReasons: readonly string[] = [],
 ): string {
     if (!c) {
         return `${label.padEnd(LABEL_WIDTH)} ${NOT_REPORTED}`;
     }
+    const informational =
+        c.reason !== undefined && informationalReasons.includes(c.reason);
     // Unknown is never the healthy state — surface its reason/message too.
-    const bad = c.status === badWhen || c.status === "Unknown";
+    // An informational reason overrides badWhen: status=True is this
+    // condition's documented steady state, not an alarm (#1391 round 3).
+    const bad =
+        (c.status === badWhen || c.status === "Unknown") && !informational;
     const age = c.lastTransitionTime
         ? ` (${humanizeAge(c.lastTransitionTime, now)})`
         : "";
     let line = `${label.padEnd(LABEL_WIDTH)} ${c.status}${age}`;
     // Ready's reason is informative even when healthy; other conditions only
-    // carry a meaningful reason in their bad state.
-    if ((bad || label === "Ready") && c.reason) {
+    // carry a meaningful reason in their bad state, OR when the reason
+    // itself is documented as informational (same treatment as Ready — a
+    // calm one-line reason, never the alarm's message dump below).
+    if ((bad || label === "Ready" || informational) && c.reason) {
         line += `  ${c.reason}`;
     }
     if (bad && c.message) {
@@ -294,6 +322,15 @@ export function renderStatusHuman(model: StatusModel, now: Date): string {
     lines.push(conditionLine("Ready", model.ready, now, "False"));
     lines.push(conditionLine("Degraded", model.degraded, now, "True"));
     lines.push(conditionLine("Reconciling", model.reconciling, now, "True"));
+    lines.push(
+        conditionLine(
+            "EnvMapCollision",
+            model.envMapCollision,
+            now,
+            "True",
+            ENVMAP_COLLISION_INFORMATIONAL_REASONS,
+        ),
+    );
     const dbLabel =
         model.database.mode === "none"
             ? "none"
@@ -320,6 +357,7 @@ export function statusModelToJson(model: StatusModel): string {
             degraded: model.degraded ?? null,
             databaseReady: model.databaseReady ?? null,
             reconciling: model.reconciling ?? null,
+            envMapCollision: model.envMapCollision ?? null,
             database: {
                 mode: model.database.mode,
                 ...(model.database.secretName !== undefined
@@ -370,11 +408,11 @@ function fetchModel(
         const stderr = r.stderr.trim();
         if (/notfound|not found/i.test(stderr)) {
             throw new Error(
-                `NextApp "${appName}" not found in namespace "${namespace}" — deploy it first (\`kn-next deploy\`); \`kn-next doctor\` checks the cluster prereqs (CRD installed, operator Ready).`,
+                `NextApp "${appName}" not found in namespace "${namespace}" — deploy it first (\`knext deploy\`); \`knext doctor\` checks the cluster prereqs (CRD installed, operator Ready).`,
             );
         }
         throw new Error(
-            `cluster unreachable (${excerpt(stderr) || "kubectl failed with no stderr"}) — check your kubeconfig/context; \`kn-next doctor\` diagnoses cluster prereqs.`,
+            `cluster unreachable (${excerpt(stderr) || "kubectl failed with no stderr"}) — check your kubeconfig/context; \`knext doctor\` diagnoses cluster prereqs.`,
         );
     }
     let parsed: unknown;
@@ -382,7 +420,7 @@ function fetchModel(
         parsed = JSON.parse(r.stdout);
     } catch {
         throw new Error(
-            "kubectl returned unparseable JSON for the NextApp — re-run with -v or `kn-next doctor` to check the cluster.",
+            "kubectl returned unparseable JSON for the NextApp — re-run with -v or `knext doctor` to check the cluster.",
         );
     }
     return extractStatus(parsed);
@@ -446,7 +484,7 @@ export async function runStatus(
         }
         if (deps.now().getTime() - start >= opts.timeoutMs) {
             deps.write(
-                `watch timed out after ${Math.round(opts.timeoutMs / 60000)}m without Ready=True — the CR above is the operator's last honest word; \`kn-next doctor\` checks the cluster prereqs.\n`,
+                `watch timed out after ${Math.round(opts.timeoutMs / 60000)}m without Ready=True — the CR above is the operator's last honest word; \`knext doctor\` checks the cluster prereqs.\n`,
             );
             return 1;
         }
@@ -454,17 +492,17 @@ export async function runStatus(
     }
 }
 
-const STATUS_HELP = `kn-next status — show the NextApp's honest conditions (read-only)
+const STATUS_HELP = `knext status — show the NextApp's honest conditions (read-only)
 
 Renders the operator-reported truth from the NextApp CR: URL, Ready (with the
 operator's reason + guidance verbatim when False, e.g. IngressNotProgrammed),
 Degraded, Reconciling, Database (bound|none + bound Secret), image.
 Conditions an older operator does not report render as "not reported".
 
-Exit code: 1 iff Ready=False — usable as a CI gate after kn-next deploy.
+Exit code: 1 iff Ready=False — usable as a CI gate after knext deploy.
 
 Usage:
-  kn-next status [<app>] [options]
+  knext status [<app>] [options]
 
 Options:
   -n, --namespace <ns>  Kubernetes namespace (default: default)
@@ -480,7 +518,7 @@ Options:
   -h, --help            Show this help
 `;
 
-/** Entry for `kn-next status`. Returns the process exit code. */
+/** Entry for `knext status`. Returns the process exit code. */
 export async function statusMain(argv: readonly string[]): Promise<number> {
     if (argv.includes("-h") || argv.includes("--help")) {
         writeSync(1, STATUS_HELP);
@@ -492,7 +530,7 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
     opts.context = resolveKubeContext(opts.context);
 
     // Resolve the app name: positional wins, else the local config's name —
-    // the same resolution `kn-next db bind` uses.
+    // the same resolution `knext db bind` uses.
     let localConfig: KnativeNextConfig | undefined;
     if (opts.app === undefined && existsSync("kn-next.config.ts")) {
         localConfig = await loadConfig();
@@ -500,7 +538,7 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
     const appName = opts.app ?? localConfig?.name;
     if (!appName) {
         throw new UsageError(
-            "app name required: pass it as a positional (kn-next status <app>) or run from a directory with kn-next.config.ts",
+            "app name required: pass it as a positional (knext status <app>) or run from a directory with kn-next.config.ts",
         );
     }
 
@@ -513,6 +551,6 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
 }
 
 // NO self-entry block here, DELIBERATELY — this module is reached ONLY via
-// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// the knext bin's subcommand dispatch (see the hazard note atop deploy.ts's
 // dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
 // tsup-inlining hijack, #263).

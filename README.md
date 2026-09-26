@@ -96,7 +96,7 @@ flowchart LR
 - ✅ **V8 Bytecode Caching** – the compile cache is populated at build time and baked into the image (Vercel-Fluid-style), so it is present from the very first cold pod on a stock cluster. Nothing to enable, no volume, no storage class, and no limit on how wide the app scales
 - ✅ **Fluid Compute** – Scale-to-zero, high concurrency, auto-scaling
 - ✅ **Distributed Caching** – Redis-backed caching with automatic tag invalidation
-- 🟡 **Portable by design** – GKE/kind-verified, and the **core operator/CLI deploy path is now verified end-to-end on EKS** (`kn-next deploy` → NextApp CR → operator reconciles → Knative Service → live `200` route); AKS/OKE remain portable by design. Remaining EKS data-plane/CI legs (S3 asset upload, ISR/tag invalidation, CI smoke) are in progress (tracked in [#46](https://github.com/getknext-dev/knext/issues/46)). See [Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)
+- 🟡 **Portable by design** – GKE/kind-verified, and the **core operator/CLI deploy path is now verified end-to-end on EKS** (`knext deploy` → NextApp CR → operator reconciles → Knative Service → live `200` route); AKS/OKE remain portable by design. Remaining EKS data-plane/CI legs (S3 asset upload, ISR/tag invalidation, CI smoke) are in progress (tracked in [#46](https://github.com/getknext-dev/knext/issues/46)). See [Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)
 - ✅ **Cache Monitoring** – Built-in cache event dashboard
 - ✅ **Single-Command Deploy** – Automated build, push, and deploy
 - ✅ **Monorepo Ready** – Turborepo for efficient builds

@@ -97,7 +97,7 @@ describe("runRollback (#92 — CR-only traffic patch)", () => {
 
 describe("parseRollbackArgs hardening (PR #232 review — no silent opposite-intent mutations)", () => {
     it("dangling --to is a HARD ERROR, never a clear-the-pin", () => {
-        // `kn-next rollback my-app --to` must not degrade to the bare-rollback
+        // `knext rollback my-app --to` must not degrade to the bare-rollback
         // patch ({spec:{traffic:null}}) — that MUTATES traffic OPPOSITE to the
         // user's stated intent to pin.
         expect(() => parseRollbackArgs(["my-app", "--to"])).toThrow(

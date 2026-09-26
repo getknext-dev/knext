@@ -386,7 +386,7 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.detail).toContain("marker 2");
         expect(r?.detail).not.toContain("#1353");
         // The exact fix: copy the current entry.
-        expect(r?.hint).toContain("kn-next create --force");
+        expect(r?.hint).toContain("knext create --force");
         expect(r?.hint).toContain("knext-node-entry.mjs");
     });
 

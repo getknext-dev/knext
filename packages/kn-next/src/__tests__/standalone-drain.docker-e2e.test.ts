@@ -40,7 +40,7 @@
 // ── The bun image's child is a COMPILED bytecode executable ─────────────────
 //
 // Bytecode caching is mandatory for every runtime cell, so the bun image no
-// longer runs `bun server.js`: `kn-next build` compiles the standalone server
+// longer runs `bun server.js`: `knext build` compiles the standalone server
 // into a Bun single executable with bytecode, and the supervisor spawns it via
 // STANDALONE_SERVER_EXEC. This suite builds that executable through the SHIPPED
 // `buildStandaloneExecutable()` and asserts the supervisor ran it (exec mode),
@@ -312,7 +312,7 @@ beforeAll(async () => {
 
     // 3c. The bun image runs the Next server as a COMPILED bytecode executable
     //     (bytecode is mandatory on every runtime cell). Produced by the SHIPPED
-    //     `buildStandaloneExecutable()` — the exact step `kn-next build` runs for
+    //     `buildStandaloneExecutable()` — the exact step `knext build` runs for
     //     build: turbopack + runtime: bun, including its fail-closed bytecode
     //     check — for the image's arch (linux/amd64 -> bun-linux-x64-musl).
     buildStandaloneExecutable({

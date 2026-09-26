@@ -66,7 +66,7 @@ func buildProbeTestKsvc(t *testing.T) (*appsv1alpha1.NextApp, *servingv1.Service
 	ksvc := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default"},
 	}
-	if err := r.buildDesiredKsvc(app, ksvc); err != nil {
+	if _, err := r.buildDesiredKsvc(app, ksvc); err != nil {
 		t.Fatalf("buildDesiredKsvc: %v", err)
 	}
 	return app, ksvc

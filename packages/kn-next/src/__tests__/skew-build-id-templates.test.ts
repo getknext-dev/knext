@@ -44,7 +44,7 @@ const NEXT_CONFIG_TEMPLATES = execFileSync(
 /**
  * True when the source mints the build id from `NEXT_DEPLOYMENT_ID` via
  * `generateBuildId`, with an explicit `|| null` fallback (null ⇒ vinext's own
- * UUID, so a plain `vite build` outside `kn-next deploy` is unchanged).
+ * UUID, so a plain `vite build` outside `knext deploy` is unchanged).
  *
  * **`||`, not `??`, and the difference is behavioural.** With `??` an
  * `NEXT_DEPLOYMENT_ID` exported as the EMPTY STRING yields `""` — which is not

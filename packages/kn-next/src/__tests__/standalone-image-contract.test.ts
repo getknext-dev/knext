@@ -16,7 +16,7 @@
  * by a Handlebars mustache. It has to be: `packages/kn-next/src/cli/create.ts`'s
  * `renderScaffold` is a pure `{{var}}` substitutor that runs over EVERY `.hbs`
  * under `templates/app` and THROWS on any leftover `{{`, so a `{{ runtime }}`
- * mustache in this file would break `kn-next create`. Docker-native `--target`
+ * mustache in this file would break `knext create`. Docker-native `--target`
  * selection keeps the two digest-pinned base images literal and auditable in the
  * file (reused verbatim from the repo's existing pins) and gives each runtime its
  * own correct ENTRYPOINT (`node file` is not `node run file`). The build wiring
@@ -39,7 +39,7 @@ import { startImageCacheSync } from "../adapters/image-cache-sync";
 // packages/kn-next/src/__tests__ -> package root (../..)
 const PKG_ROOT = resolve(__dirname, "..", "..");
 // NOT templates/app — see the relocation note in Dockerfile.standalone.hbs's
-// own header: this template lives outside the tree `kn-next create` walks
+// own header: this template lives outside the tree `knext create` walks
 // with no allowlist, so it is not (yet) emitted into a scaffolded app (#1155
 // Blocker 2 — templates/app/ had no allowlist, so every `.hbs` under it was
 // shipped into every new app, including this not-yet-buildable recipe).
@@ -263,7 +263,7 @@ describe("Dockerfile.standalone.hbs — ADR-0055 image-owned start contract", ()
         expect(body).not.toMatch(/STANDALONE_SERVER_EXEC/);
     });
 
-    it("the executable's COPY source is the name `kn-next build` writes", async () => {
+    it("the executable's COPY source is the name `knext build` writes", async () => {
         const { standaloneExecFileName } = await import(
             "../cli/standalone-exec-build"
         );

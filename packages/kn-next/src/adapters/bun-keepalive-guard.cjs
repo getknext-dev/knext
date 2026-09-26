@@ -35,7 +35,7 @@
 
 const INSTALLED = Symbol.for('knext.bunKeepaliveGuard.installed');
 // First Bun version where the keep-alive reuse reset no longer reproduces
-// (verified on oven/bun:canary 1.4.0, 2026-07-02).
+// (verified on oven/bun:canary 1.4.0, 2026-07-02). oven-bun-pin-exempt: historical
 const FIXED_MAJOR = 1;
 const FIXED_MINOR = 4;
 

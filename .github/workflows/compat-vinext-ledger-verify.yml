@@ -9,7 +9,11 @@
 # "passing" run and escape the stale rule. This job downloads every listed
 # run's shard summaries plus its `gh api` metadata and re-runs `refresh` on
 # them: any difference, an unfetchable run, a run off `main`/off this
-# workflow/with a custom ref/missing a shard fails the check.
+# workflow/with a custom ref/missing a shard/created before the entry's own
+# `added` date fails the check. It also re-derives `added` itself from the
+# ledger file's OWN git history (#1348) rather than trusting the JSON
+# field, which a PR could otherwise re-date to reset the 30-day clock — this
+# needs the FULL history checkout below, not the default shallow one.
 #
 # ADVISORY ONLY — this workflow is deliberately NOT a required status check
 # (nothing in branch protection references its job name). A red run here is a
@@ -45,8 +49,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout
+      - name: Checkout (full history — #1348 needs it to derive `added` from git log)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Re-derive every entry from the runs it lists
         env:

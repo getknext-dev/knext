@@ -3,7 +3,7 @@ title: How your app is built
 description: knext's default build compiles your Next.js app with next build into a standalone server, run by a small supervisor — the official-adapter-verified target. vinext (a single self-contained executable) stays selectable.
 ---
 
-When you run `kn-next build`, knext turns your Next.js app into a deployable artifact your image
+When you run `knext build`, knext turns your Next.js app into a deployable artifact your image
 runs directly. This page explains the build target, the pipeline that produces it, and what your
 app has to satisfy to build on it.
 
@@ -69,25 +69,25 @@ const config: KnativeNextConfig = {
 ```
 
 Both the `turbopack` and `webpack` targets have a prerequisite in your project, not just in the
-config: `kn-next build` runs your app's own build script, so that script must run `next build`
+config: `knext build` runs your app's own build script, so that script must run `next build`
 (with `--webpack` for the webpack target) and `output: 'standalone'` set in `next.config.ts` —
-otherwise there is no standalone server for the image to copy. Apps created by `kn-next create` are
+otherwise there is no standalone server for the image to copy. Apps created by `knext create` are
 vinext apps whose build script runs `vite build` and whose `next.config.ts` deliberately omits
 `output`, so switching such an app to either of these targets means changing both first.
 
 If you select `build: 'turbopack'` or `build: 'webpack'` and your build script still doesn't
-produce `.next/standalone` (for example, the build script wasn't updated), `kn-next build` fails
+produce `.next/standalone` (for example, the build script wasn't updated), `knext build` fails
 immediately with an actionable error telling you to set `output: 'standalone'` in
 `next.config.ts` and make sure your build script runs `next build`. This is a hard failure on
 purpose: without it, the first sign of the missing artifact used to be an opaque error deep
 inside the Docker image build at deploy time.
 
-`kn-next` stages and builds the matching standalone runtime image for you. On the vinext target,
+`knext` stages and builds the matching standalone runtime image for you. On the vinext target,
 `runtime: 'node'` switches from the Bun executable to a Node server — see
 [vinext on Node](#vinext-on-node) below. On the standalone targets (`turbopack` and `webpack`,
 identically) it decides how the server is packaged:
 
-- **`runtime: 'bun'`** (the default) — `kn-next build` compiles the standalone `server.js` into a
+- **`runtime: 'bun'`** (the default) — `knext build` compiles the standalone `server.js` into a
   Bun single executable with bytecode, verifies the bytecode is actually there (the build fails
   otherwise), and the image runs that executable inside the standalone folder. Needs Bun 1.4 or
   newer where you build. Details on the
@@ -114,14 +114,14 @@ Nothing is compiled into an executable on this target. Instead:
   Bun one, with `knext-node-entry.mjs` as the server entry. That entry provides what the Bun entry
   does: the health route, the `:9464` metrics endpoint, and draining in-flight requests on
   `SIGTERM`. `vite.config.ts` picks the preset from the `runtime` in `kn-next.config.ts`, so
-  `kn-next build`, `kn-next deploy` and a plain `npm run build` all agree.
+  `knext build`, `knext deploy` and a plain `npm run build` all agree.
 - **Bytecode caching is the V8 compile cache, baked into the image.** The image
   (`Dockerfile.vinext-node`, next to your `Dockerfile`) boots the server once during
   `docker build` and warms your configured **health check path** (`healthCheckPath` in
   `kn-next.config.ts`, default `/api/health`) before shipping the compiled code as a layer.
-  `kn-next deploy` and `kn-next preview` — the two commands that actually run `docker build` —
+  `knext deploy` and `knext preview` — the two commands that actually run `docker build` —
   thread a custom `healthCheckPath` through automatically as a `--build-arg`, so a custom health
-  route works with nothing extra to configure through either of them. `kn-next build` does **not**:
+  route works with nothing extra to configure through either of them. `knext build` does **not**:
   it only stages `Dockerfile.vinext-node` into your app (and never runs docker itself), so if you
   build the staged Dockerfile by hand, pass `--build-arg KNEXT_HEALTH_CHECK_PATH=<your path>`
   yourself. Every pod starts with the cache, including the first one after scaling to zero. The
@@ -132,15 +132,15 @@ Nothing is compiled into an executable on this target. Instead:
   `/app/.output/server/index.mjs` **was accepted**.
   <br /><br />
   A `Dockerfile.vinext-node` staged before this fix (no `ARG KNEXT_HEALTH_CHECK_PATH`) needs
-  re-staging if your app uses a custom `healthCheckPath`: delete the file and re-run `kn-next
+  re-staging if your app uses a custom `healthCheckPath`: delete the file and re-run `knext
   build`, which never overwrites an existing one.
 - **Bun is not needed to build it.** Only the Bun executable target requires Bun 1.4 on the build
   machine.
-- **`kn-next build` checks the preset.** If the build produced the Bun preset (see below), it
+- **`knext build` checks the preset.** If the build produced the Bun preset (see below), it
   stops before uploading anything and tells you what to change. Running a Bun-preset server under
   Node would crash on startup.
 
-**Apps created before this target existed** need two changes. `kn-next build` adds
+**Apps created before this target existed** need two changes. `knext build` adds
 `Dockerfile.vinext-node` and its ignore file to your app if they are missing, and it never
 overwrites your own copies. It does **not** edit your `vite.config.ts`, which may still hardcode
 `preset: 'bun'`. Make the nitro plugin follow the runtime:
@@ -172,7 +172,7 @@ Two differences from the Bun executable, stated plainly:
 
 ## The pipeline
 
-`kn-next build` produces the executable in two stages:
+`knext build` produces the executable in two stages:
 
 1. **`vite build`** — vinext compiles your app and emits a [nitro](https://nitro.build) server
    bundle targeting the **Bun** preset (a `.output` directory whose entry is an ES module).
@@ -192,16 +192,39 @@ as it does on a folder deployment. See [image optimization](/docs/image-optimiza
 Some server dependencies stay **outside** the nitro bundle and are loaded when the server runs. For
 example, vinext keeps every `@opentelemetry/*` package your app depends on external. On a folder
 deployment those load from `.output/server/node_modules`, which does not exist next to the
-executable, so `kn-next build` bakes them **into** the binary. If one of them cannot be resolved at
-build time, the build still succeeds but prints a warning:
+executable, so `knext build` bakes them **into** the binary. This covers every file of the server
+bundle, including the chunks nitro splits off next to the entry. If one of them cannot be resolved at
+build time, the build still succeeds but prints a warning naming the package and the file that loads
+it:
 
 ```text
-[knext compile] WARNING: the entry runtime-requires package(s) that do not resolve from … and
-cannot be bundled: <package> — the binary throws if that code path runs
+[knext compile] WARNING: the server output runtime-requires package(s) that do not resolve and
+cannot be bundled: <package> (chunks/<file>.mjs) — the binary throws if that code path runs
 ```
 
 Install the named package as a dependency of your app and rebuild. Otherwise, any request that
 reaches code using that package fails with `Cannot find module '<package>'`.
+
+The build also warns, naming the file, in two cases where it cannot know what to bundle:
+
+- a dependency calls `require()` with a package name computed at runtime (for example
+  `require(name)`), so the package is only known when that code runs;
+- the bundle creates its `require` in a form the build does not recognise.
+
+In both cases the binary throws `Cannot find module` if that code loads a package that was not bundled
+and is not deployed next to the binary.
+
+To make these warnings a build failure (for example in CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when
+you run `knext build`. Two limits apply:
+
+- **Minified server bundles.** When the server bundle is minified, other code can reuse the short name
+  of the bundle's `require`, so the build cannot always tell a real `require` from an unrelated call. It
+  then reports the finding as `WARNING: possibly a runtime require of …`. These warnings do not fail a
+  strict build, because they can be false alarms. The server bundle is not minified by default.
+- **Optional dependencies.** Some packages `require()` another package only if it is installed, for
+  example `ws` (`bufferutil`, `utf-8-validate`) or `pg` (`pg-native`). If your app does not install
+  those, the build correctly warns that they cannot be bundled, and a strict build fails on that
+  warning. Leave strict mode off for such apps, or install the optional packages.
 
 The same applies to packages you list in `serverExternalPackages` and to the packages Next.js keeps
 external by default (for example `typescript`, `sqlite3`, `prisma`). The binary carries a bundled
@@ -248,7 +271,7 @@ vinext builds through Vite, whose server/client (RSC ↔ SSR) module graph requi
 }
 ```
 
-`kn-next create` sets this for you, so a freshly scaffolded app already satisfies it. It matters only
+`knext create` sets this for you, so a freshly scaffolded app already satisfies it. It matters only
 when you point the compiled build at an **existing** app that was written as CommonJS. In that case:
 
 - add `"type": "module"` to `package.json`;
@@ -264,7 +287,7 @@ app is not supported on this target.
 ### Building requires Bun 1.4 or newer
 
 The compile step shells out to `bun build --compile`, so the machine doing the build needs
-**Bun 1.4.0 or newer** on its `PATH`. (The `kn-next` CLI itself runs under plain Node; only this one
+**Bun 1.4.0 or newer** on its `PATH`. (The `knext` CLI itself runs under plain Node; only this one
 step needs Bun.) The floor is enforced, not advisory: an older Bun cannot serve the compiled tree
 correctly, so the build refuses to run under it rather than quietly producing a binary that boots
 roughly twice as slowly. Upgrade with `bun upgrade`. If Bun is missing entirely the build stops and

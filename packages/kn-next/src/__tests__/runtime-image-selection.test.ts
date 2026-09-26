@@ -2,7 +2,7 @@
  * runtime-image-selection — the CLI-selection wiring for ADR-0055.
  *
  * ADR-0055 ships two runtime image shapes: the vinext single-executable image
- * (`templates/app/Dockerfile.hbs`, scaffolded by `kn-next create`) and the
+ * (`templates/app/Dockerfile.hbs`, scaffolded by `knext create`) and the
  * node/bun STANDALONE runtime image (`templates/runtime-standalone/`,
  * deliberately kept OUT of scaffold-emission by the #1177 increment). This
  * suite pins the wiring that selects between them at build/deploy time:
@@ -408,7 +408,7 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         expect(text).toMatch(/AS standalone-bun\b/);
         expect(text).toMatch(/AS standalone-node\b/);
         // Digest-pinned bases (reused from the repo's pins).
-        expect(text).toContain("oven/bun:1.4.2-alpine@sha256:");
+        expect(text).toContain("oven/bun:1.4.2-alpine@sha256:"); // oven-bun-pin-exempt: prefix-only assertion, not a selection
         expect(text).toContain("node:22-alpine@sha256:");
         // The staged file is byte-identical to the source template.
         const template = readFileSync(

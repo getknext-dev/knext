@@ -1,5 +1,5 @@
 /**
- * exec.ts — node:child_process exec helpers for the kn-next CLI.
+ * exec.ts — node:child_process exec helpers for the knext CLI.
  *
  * Replaces Bun's `$` shell-template tag. Every former `` $`a b ${c}` `` call
  * becomes an ARGV array `["a", "b", c]` passed to one of these helpers.
@@ -22,11 +22,17 @@ import { fileURLToPath } from "node:url";
  * process entry (i.e. `node <thisfile>`), false when it was imported (e.g. by a
  * test). Node-correct replacement for Bun's `import.meta.main`.
  *
- * CRITICAL: npm installs the CLI bin as a SYMLINK (node_modules/.bin/kn-next →
- * .../dist/cli/kn-next.js). When run via that symlink, `process.argv[1]` is the
- * symlink path while `import.meta.url` resolves to the REAL file. Both sides are
- * therefore passed through realpathSync so the comparison holds for symlinked
- * bins — without this, the entry guard never fires and the CLI silently no-ops.
+ * CRITICAL: npm installs the CLI bins as SYMLINKS — both node_modules/.bin/
+ * knext AND node_modules/.bin/kn-next point at the SAME real file,
+ * .../dist/cli/kn-next.js (#1369, rev-1380: a second dist file broke `npx
+ * @getknext/core`'s bin auto-pick for every consumer). When run via either
+ * symlink, `process.argv[1]` is the symlink path while `import.meta.url`
+ * resolves to the REAL file. Both sides are therefore passed through
+ * realpathSync so the comparison holds for symlinked bins — without this,
+ * the entry guard never fires and the CLI silently no-ops. (The deprecation
+ * notice in shared.ts relies on the OPPOSITE fact — that `argv[1]` is the
+ * symlink path, NOT yet realpath-resolved — to tell `knext` and `kn-next`
+ * apart; it deliberately does not call this function.)
  */
 export function isEntrypoint(importMetaUrl: string): boolean {
     const argv1 = process.argv[1];
@@ -83,23 +89,90 @@ export function runInherit(argv: readonly string[]): void {
     });
 }
 
+export interface RunQuietOptions {
+    /**
+     * #1385 — `runQuiet` discards stdout wholesale, so any diagnostic a
+     * child process prints THERE never reached `kn-next build` users, even
+     * though `apps/docs/content/docs/build-pipeline.mdx` quotes some of them
+     * verbatim. Precisely: the vinext compile step's `WARNING:` lines
+     * (`console.warn`, stderr) were always visible — `runQuiet` already
+     * inherits stderr. What was actually lost is its `console.log` lines
+     * (stdout) — e.g. which server externals load from
+     * `.output/server/node_modules` vs. stay bundled.
+     *
+     * When set, stdout lines starting with this exact prefix are printed
+     * (via `console.log`, one call per line) AFTER the command finishes —
+     * even on a non-zero exit, before the error is rethrown, since a
+     * warning printed right before a failure is exactly the context a user
+     * needs. Every other stdout line stays discarded: normal build noise
+     * (e.g. `npx vite build`'s own chatter) is unaffected. Undefined
+     * (default) preserves the original fully-quiet behaviour byte for byte.
+     */
+    readonly surfaceStdoutPrefix?: string;
+}
+
+/** Prints each line of `output` that starts with `prefix`, in order. */
+function surfacePrefixedLines(output: string, prefix: string): void {
+    for (const line of output.split("\n")) {
+        if (line.startsWith(prefix)) {
+            console.log(line);
+        }
+    }
+}
+
 /**
  * Run a command (argv array) QUIETLY — discard stdout, inherit stderr. A
  * non-zero exit throws. Use where the former code called `.quiet()` purely to
  * silence stdout.
  *
  * @param argv - command + args
+ * @param options - see {@link RunQuietOptions}
  */
-export function runQuiet(argv: readonly string[]): void {
+export function runQuiet(
+    argv: readonly string[],
+    options: RunQuietOptions = {},
+): void {
     const [cmd, ...args] = argv;
     if (!cmd) {
         throw new Error("runQuiet: empty argv");
     }
-    execFileSync(cmd, args, {
-        shell: false,
-        stdio: ["ignore", "ignore", "inherit"],
-        maxBuffer: 64 * 1024 * 1024,
-    });
+    const { surfaceStdoutPrefix } = options;
+    if (!surfaceStdoutPrefix) {
+        execFileSync(cmd, args, {
+            shell: false,
+            stdio: ["ignore", "ignore", "inherit"],
+            maxBuffer: 64 * 1024 * 1024,
+        });
+        return;
+    }
+    // stdout must be CAPTURED (not discarded) to filter it, but is never
+    // otherwise printed — only the matching lines are, via
+    // `surfacePrefixedLines` below. stderr stays inherited, same as the
+    // fully-quiet path.
+    try {
+        const out = execFileSync(cmd, args, {
+            shell: false,
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "inherit"],
+            maxBuffer: 64 * 1024 * 1024,
+        });
+        surfacePrefixedLines(out, surfaceStdoutPrefix);
+    } catch (error) {
+        // execFileSync attaches captured stdout to the thrown error even on
+        // a non-zero exit (Node's child_process contract) — surface a
+        // warning that was printed right before the failure, then rethrow
+        // unchanged so callers' error handling is unaffected.
+        const captured = (error as { stdout?: string | Buffer }).stdout;
+        if (typeof captured === "string") {
+            surfacePrefixedLines(captured, surfaceStdoutPrefix);
+        } else if (Buffer.isBuffer(captured)) {
+            surfacePrefixedLines(
+                captured.toString("utf-8"),
+                surfaceStdoutPrefix,
+            );
+        }
+        throw error;
+    }
 }
 
 /**

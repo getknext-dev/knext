@@ -9,7 +9,7 @@ failure mode you are in.
 Two facts shape every entry (both from ADR-0001):
 
 1. **The operator is the single source of truth.** You change desired state by
-   editing the `NextApp` CR (or via `kn-next`, which only patches the CR) — never
+   editing the `NextApp` CR (or via `knext`, which only patches the CR) — never
    by `kubectl edit` on the Knative Service, Deployment, or NetworkPolicy the
    operator owns. Hand-edits are reconciled away.
 2. **The operator narrates itself.** Every reconcile writes status **Conditions**
@@ -26,11 +26,11 @@ call is a `kubectl get`; ADR-0001) and catches the majority of "won't deploy"
 causes in one shot:
 
 ```sh
-kn-next doctor            # human table
-kn-next doctor --json     # machine-readable, exit 1 on any FAIL/ERROR
+knext doctor            # human table
+knext doctor --json     # machine-readable, exit 1 on any FAIL/ERROR
 ```
 
-`kn-next doctor` checks: NextApp CRD present + served, operator Deployment Ready,
+`knext doctor` checks: NextApp CRD present + served, operator Deployment Ready,
 cert-manager webhook prereq, Knative ingress-class vs the reconciler that serves
 it (#208), operator-image anonymous pullability (#198), and Knative Serving
 installed. A FAIL prints a one-line repair hint. If `doctor` is green and you
@@ -69,7 +69,7 @@ every reason to a section.
 
 ## 1 — Image rejected (`:latest` or tag-only, not digest-pinned)
 
-**Symptom.** `kn-next deploy` or `kubectl apply` is accepted but the app never
+**Symptom.** `knext deploy` or `kubectl apply` is accepted but the app never
 rolls out; `kubectl describe nextapp <app>` shows a Warning Event with
 `reason: InvalidImage` and the status carries `Degraded=True`
 (`reason: InvalidSpec`). The Event message reads, verbatim from the validator:
@@ -98,7 +98,7 @@ docker buildx imagetools inspect ghcr.io/you/myapp:v1 --format '{{json .Manifest
 # then set image: ghcr.io/you/myapp:v1@sha256:<hash>  in the NextApp / kn-next.config
 ```
 
-`kn-next deploy` resolves the digest for you; if you author the CR by hand, the
+`knext deploy` resolves the digest for you; if you author the CR by hand, the
 `@sha256:` suffix is mandatory. Note the rejection happens **twice** — once at
 admission (webhook, synchronous) and again in the reconciler — so a webhook that
 is down (§11) does not let a bad image slip through the operator.
@@ -134,7 +134,7 @@ requeues with backoff, so a transient cause self-heals; a persistent one keeps
 **Symptom.** The app deploys and the ksvc exists, but requests never reach it
 (DNS resolves, connection hangs or 404s). `Ready` sits at `Unknown`/`False` with
 `reason: IngressNotProgrammed`; a Warning Event with that reason fires once the
-stall window elapses. `kn-next doctor`'s ingress check WARNs.
+stall window elapses. `knext doctor`'s ingress check WARNs.
 
 **Cause (#208, the silent one).** Knative's Route created a `KIngress`, but **no
 ingress reconciler serves the configured class**, so it is never programmed — no
@@ -151,12 +151,12 @@ kubectl get deploy net-kourier-controller -n knative-serving   # or kourier-syst
 Set the class to `kourier.ingress.networking.knative.dev` **where it is
 authored** — if a `KnativeServing` CR manages the cluster, edit it there;
 editing the ConfigMap directly gets clobbered by the KnativeServing operator.
-Confirm a Ready `net-kourier-controller` exists. `kn-next doctor` fails/ warns
+Confirm a Ready `net-kourier-controller` exists. `knext doctor` fails/ warns
 this exact mismatch.
 
 ## 4 — Pinned rollback revision missing (`PinnedRevisionNotFound`)
 
-**Symptom.** After a rollback (`kn-next rollback <app> --to <rev>`, ADR-0014),
+**Symptom.** After a rollback (`knext rollback <app> --to <rev>`, ADR-0014),
 `Ready=False` with `reason: PinnedRevisionNotFound`; a Warning Event names the
 revision.
 
@@ -171,8 +171,8 @@ doesn't flap on API hiccups.)
 ```sh
 kubectl get revision -n <ns> -l serving.knative.dev/service=<app> \
   --sort-by=.metadata.creationTimestamp
-kn-next rollback <app> --to <app>-00007 -n <ns>     # a revision that exists
-kn-next rollback <app> -n <ns>                       # or clear the pin -> latest-ready
+knext rollback <app> --to <app>-00007 -n <ns>     # a revision that exists
+knext rollback <app> -n <ns>                       # or clear the pin -> latest-ready
 ```
 
 ## 5 — DATABASE_URL binding / envMap collision (`EnvVarIgnored`)
@@ -205,7 +205,7 @@ connect timeout ≥ 10s to survive a ~2.5s cold DB wake).
 
 **Symptom.** The app (or the operator itself) is stuck `ImagePullBackOff` /
 `ErrImagePull`, often only on newly-added nodes while existing pods run fine.
-`kn-next doctor`'s image check WARNs ("NOT anonymously pullable") or FAILs
+`knext doctor`'s image check WARNs ("NOT anonymously pullable") or FAILs
 ("does not exist on the registry").
 
 **Cause (#198).** The image is in a **private** registry package (e.g. a private
@@ -216,7 +216,7 @@ new nodes cannot pull.
 **Fix.**
 ```sh
 kubectl describe pod -n <ns> <pod>        # confirm the pull error + which image
-kn-next doctor                             # image check names the exact ref
+knext doctor                             # image check names the exact ref
 ```
 Either make the registry package **public**, or attach an `imagePullSecret`
 (namespace default service account / `spec.imagePullSecrets`). If the digest is
@@ -478,7 +478,7 @@ mode is not exported regardless — so this section is the detection story.
 
 ## 12 — Apply rejected (admission webhook not ready)
 
-**Symptom.** `kn-next deploy` / `kubectl apply` of a `NextApp` fails with a
+**Symptom.** `knext deploy` / `kubectl apply` of a `NextApp` fails with a
 webhook error like `failed calling webhook … connection refused` or
 `x509 … certificate`. **Nothing** deploys, even a valid CR.
 
@@ -493,10 +493,10 @@ and **rejects every mutating request** to `NextApp`.
 kubectl get deploy -n kn-next-operator-system            # controller-manager Ready?
 kubectl get validatingwebhookconfiguration | grep kn-next
 kubectl get deploy cert-manager-webhook -n cert-manager  # cert-manager up?
-kn-next doctor                                            # checks both prereqs
+knext doctor                                            # checks both prereqs
 ```
 Bring the operator Deployment and cert-manager back to Ready (they serve the
-webhook + issue its cert). `kn-next doctor` verifies the operator readiness and
+webhook + issue its cert). `knext doctor` verifies the operator readiness and
 cert-manager webhook prereq directly. Once the webhook endpoint answers, re-apply.
 
 ---
@@ -509,7 +509,7 @@ request-metrics protocol is prometheus, and the app metrics port therefore moved
 - **Crash-loop, log says `Failed to start server. Is port … in use?` / `EADDRINUSE` naming the
   metrics port.** The pod is racing queue-proxy — either the image predates the `:9464` default or
   the CR pins `METRICS_PORT` onto a queue-proxy-owned port (`8012/8013/8022/8112/9090/9091`).
-  Run `kn-next doctor` (the `metrics-port` check names the offending app and the governing
+  Run `knext doctor` (the `metrics-port` check names the offending app and the governing
   ConfigMap key); redeploy with a current build or drop the override.
 - **Metrics dark after upgrading the operator.** The scrape contract
   (annotation/NetworkPolicy/PodMonitor) now targets `:9464`, but a pod running a pre-upgrade image
@@ -524,7 +524,7 @@ request-metrics protocol is prometheus, and the app metrics port therefore moved
 
 ## When none of these match
 
-- Re-run `kn-next doctor --json` and attach the output.
+- Re-run `knext doctor --json` and attach the output.
 - Capture the app's narration:
   `kubectl get nextapp <app> -n <ns> -o yaml` (status.conditions + events) and
   `kubectl logs -n kn-next-operator-system deploy/kn-next-operator-controller-manager`.
