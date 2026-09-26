@@ -306,7 +306,7 @@ async function importDeploy(): Promise<() => Promise<void>> {
     return mod.deploy;
 }
 
-/** Set process.argv to a `kn-next deploy` invocation with the given flags. */
+/** Set process.argv to a `knext deploy` invocation with the given flags. */
 function setArgv(flags: string[]): void {
     process.argv = ["node", "/path/to/kn-next.js", ...flags];
 }
@@ -395,7 +395,7 @@ describe("deploy() happy-path ordering", () => {
  * #1339 review finding #1 (jev 0.90, BLOCKER) — `deploy()` must compile the
  * standalone-bun/vinext executable itself; it used to stop after the
  * project's own build, so a bare-config deploy shipped either no binary
- * (docker COPY failure) or a STALE one from an earlier `kn-next build`.
+ * (docker COPY failure) or a STALE one from an earlier `knext build`.
  */
 describe("deploy() compiles the exec via the shared build-artifact step (#1339 finding #1)", () => {
     it("a bare-config (fresh-build) deploy invokes compileArtifactForDeploy exactly once", async () => {

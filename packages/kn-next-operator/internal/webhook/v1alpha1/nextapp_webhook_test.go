@@ -281,3 +281,113 @@ func TestDatabaseCollisionRatchet(t *testing.T) {
 		}
 	})
 }
+
+// #1391 — spec.secrets.envMap colliding with an operator-managed reserved env
+// name (NODE_ENV, STORAGE_PROVIDER, ...) gets the SAME ratcheting shape as
+// the DATABASE_URL collision above: reject unratcheted on CREATE, reject an
+// UPDATE only when it ADDS a NEW collision, allow a pre-existing collision to
+// be carried forward on an unrelated update (see validation.EnvMapReservedCollisions
+// / OperatorAlwaysWinsEnvNames doc comments for why the RECONCILER'S
+// resolution of a grandfathered collision differs from DATABASE_URL's).
+func TestEnvMapReservedCollisionRatchet(t *testing.T) {
+	v := &NextAppCustomValidator{}
+	ctx := context.Background()
+
+	collisionSpec := func() appsv1alpha1.NextAppSpec {
+		return appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					"NODE_ENV": {SecretName: "stale", SecretKey: "mode"},
+				},
+			},
+		}
+	}
+	cleanSpec := func() appsv1alpha1.NextAppSpec {
+		return appsv1alpha1.NextAppSpec{Image: digestImage}
+	}
+
+	t.Run("CREATE with a collision is rejected", func(t *testing.T) {
+		_, err := v.ValidateCreate(ctx, newNextApp(collisionSpec()))
+		if err == nil || !strings.Contains(err.Error(), "NODE_ENV") {
+			t.Fatalf("expected NODE_ENV collision rejection on create, got err=%v", err)
+		}
+	})
+
+	t.Run("UPDATE that ADDS a collision is rejected", func(t *testing.T) {
+		_, err := v.ValidateUpdate(ctx, newNextApp(cleanSpec()), newNextApp(collisionSpec()))
+		if err == nil || !strings.Contains(err.Error(), "NODE_ENV") {
+			t.Fatalf("expected rejection when the update introduces the collision, got err=%v", err)
+		}
+	})
+
+	t.Run("UPDATE carrying a PRE-EXISTING collision forward is allowed (ratchet)", func(t *testing.T) {
+		oldApp := newNextApp(collisionSpec())
+		newSpec := collisionSpec()
+		newSpec.Image = "registry.example.com/app:v2@sha256:def456abc123" // unrelated change
+		_, err := v.ValidateUpdate(ctx, oldApp, newNextApp(newSpec))
+		if err != nil {
+			t.Fatalf("a stored collision CR must remain updatable (image bump), got err=%v", err)
+		}
+	})
+
+	t.Run("UPDATE that RESOLVES the collision is allowed", func(t *testing.T) {
+		_, err := v.ValidateUpdate(ctx, newNextApp(collisionSpec()), newNextApp(cleanSpec()))
+		if err != nil {
+			t.Fatalf("removing the collision must be allowed, got err=%v", err)
+		}
+	})
+
+	t.Run("HOSTNAME collision is also rejected at CREATE (same admission path as every other reserved name)", func(t *testing.T) {
+		spec := appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					"HOSTNAME": {SecretName: "stale", SecretKey: "host"},
+				},
+			},
+		}
+		_, err := v.ValidateCreate(ctx, newNextApp(spec))
+		if err == nil || !strings.Contains(err.Error(), "HOSTNAME") {
+			t.Fatalf("expected HOSTNAME collision rejection on create, got err=%v", err)
+		}
+	})
+
+	// #1391 round 2: a REDIS_URL/KAFKA_BROKER_URL/OTEL_EXPORTER_OTLP_ENDPOINT
+	// collision must be ACCEPTED, never rejected — these connection-string
+	// names have no secretRef field, so rejecting them would force the
+	// credential into the CR in plaintext.
+	t.Run("connection-string collision (REDIS_URL) is accepted at CREATE, not rejected", func(t *testing.T) {
+		spec := appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Cache: &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+			Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					"REDIS_URL": {SecretName: "redis-creds", SecretKey: "url"},
+				},
+			},
+		}
+		if _, err := v.ValidateCreate(ctx, newNextApp(spec)); err != nil {
+			t.Fatalf("REDIS_URL is a connection-string exemption — CREATE must be accepted, got err=%v", err)
+		}
+	})
+
+	t.Run("connection-string collision (REDIS_URL) is accepted at UPDATE too, not just carried forward", func(t *testing.T) {
+		clean := appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Cache: &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+		}
+		withCollision := appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Cache: &appsv1alpha1.CacheSpec{Provider: "redis", URL: "redis://x"},
+			Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					"REDIS_URL": {SecretName: "redis-creds", SecretKey: "url"},
+				},
+			},
+		}
+		if _, err := v.ValidateUpdate(ctx, newNextApp(clean), newNextApp(withCollision)); err != nil {
+			t.Fatalf("REDIS_URL is a connection-string exemption — an UPDATE that ADDS it must still be accepted, got err=%v", err)
+		}
+	})
+}

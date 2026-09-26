@@ -89,11 +89,14 @@ import {
   createGracefulShutdown,
   createMetricsState,
   drainPending,
+  drainWarmBody,
   METRICS_CONTENT_TYPE,
   METRICS_MAX_REQUEST_BYTES,
   observeRequest,
   recordStartupComplete,
+  rejectMalformedPath,
   renderMetrics,
+  requestErrorResponse,
   resolveAssetAnchor,
   resolveBindHost,
   resolveMaxRequestBytes,
@@ -194,6 +197,9 @@ const appSrvx = serve({
   maxRequestBodySize: REQUEST_CAP.bytes,
   gracefulShutdown: false,
   silent: true,
+  // Any throw on the request path becomes a plain 500 (runtime-contract.mjs),
+  // never an exited process or Bun's development error page.
+  error: requestErrorResponse,
   middleware: [
     // ONE middleware, wrapping every request — which is why the full RED
     // contract (rate / errors / duration) is cheap here and nowhere else. It
@@ -219,6 +225,10 @@ const appSrvx = serve({
         metrics.inflight--;
       }
     },
+    // Malformed request paths answer 400 here, before h3 decodes them (see
+    // runtime-contract.mjs). Inside the counting middleware, so they are
+    // counted as 4xx.
+    rejectMalformedPath,
     // Image optimization — see the note above on why this is an intercept and
     // not a registered optimizer. Inside the counting middleware, so optimized
     // requests are still counted like any other.
@@ -283,7 +293,7 @@ const metricsServer = (() => {
       `[knext] failed to bind the metrics listener on :${METRICS_PORT}` +
         (err?.code ? ` (${err.code})` : '') +
         ' — if this is EADDRINUSE, another listener owns the port; on Knative, queue-proxy' +
-        ' binds :9091 whenever request metrics are enabled. Run `kn-next doctor`' +
+        ' binds :9091 whenever request metrics are enabled. Run `knext doctor`' +
         ' (metrics-port check), or move METRICS_PORT off the queue-proxy-owned ports.',
     );
     throw err;
@@ -348,7 +358,15 @@ if (process.env.KNEXT_EAGER_WARM !== '0') {
     for (const path of WARM_PATHS) {
       const warmT0 = Date.now();
       try {
-        const res = await nitro.fetch(new Request(`http://127.0.0.1:${appServer.port}${path}`));
+        // Inside the execution context, like a live request: `after()` work a warm
+        // route schedules registers with the drain, so the bake / SIGTERM awaits it.
+        const res = await runWithExecutionContext(EXECUTION_CONTEXT, () =>
+          nitro.fetch(new Request(`http://127.0.0.1:${appServer.port}${path}`)),
+        );
+        // Read the body to its end (bounded — runtime-contract.mjs): vinext settles a
+        // warm route's after() work only once its response body has been consumed, so
+        // an unread body leaves that work pending and the drain would wait it out.
+        await drainWarmBody(res, path, GRACE_MS);
         console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - warmT0}`);
       } catch (err) {
         console.log(

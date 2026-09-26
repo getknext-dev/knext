@@ -51,7 +51,7 @@ describe("initCiMain — help and argv strictness", () => {
         const r = await runInitCi(["--help"]);
 
         expect(r.code).toBe(0);
-        expect(r.stdout).toContain("kn-next init-ci");
+        expect(r.stdout).toContain("knext init-ci");
         expect(existsSync(join(dir, WORKFLOW_PATH))).toBe(false);
         expect(existsSync(join(dir, RBAC_PATH))).toBe(false);
     });
@@ -59,7 +59,7 @@ describe("initCiMain — help and argv strictness", () => {
     it("-h is the same as --help", async () => {
         const r = await runInitCi(["-h"]);
         expect(r.code).toBe(0);
-        expect(r.stdout).toContain("kn-next init-ci");
+        expect(r.stdout).toContain("knext init-ci");
     });
 
     it("missing --namespace is a usage error, exit 1, no files written", async () => {

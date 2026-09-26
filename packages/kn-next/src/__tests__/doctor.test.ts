@@ -1,5 +1,5 @@
 /**
- * `kn-next doctor` — cluster-prereq preflight (Workstream C).
+ * `knext doctor` — cluster-prereq preflight (Workstream C).
  *
  * Every check is field-learned:
  *   (a) NextApp CRD present + served version
@@ -529,7 +529,7 @@ describe("runDoctor — check (f) Knative Serving", () => {
 // ---------------------------------------------------------------------------
 // (g) client kubectl strict-validation support.
 //
-// `kn-next deploy` now passes `--validate=strict` EXPLICITLY on the NextApp CR
+// `knext deploy` now passes `--validate=strict` EXPLICITLY on the NextApp CR
 // apply, so a field the operator's CRD does not know (e.g. `spec.database.roSecretRef`
 // against a CRD that predates it) is REJECTED by the apiserver, not silently pruned.
 // That flag VALUE only exists from kubectl v1.25 — on an older client the deploy

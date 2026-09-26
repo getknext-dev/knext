@@ -5,7 +5,7 @@
 // `describeArtifact()` asserted the descriptor equals turbopack's, but no
 // real `next build --webpack` had ever run and nothing had booted. This
 // suite closes that gap with a REAL build, on the pinned Next version, going
-// through the same shipped functions `kn-next build` uses.
+// through the same shipped functions `knext build` uses.
 //
 // ── What this proves, and how ────────────────────────────────────────────
 //
@@ -33,7 +33,7 @@
 //        `NODE_COMPILE_CACHE` to the baked dir by default (#1264); no extra
 //        env needed to exercise that path.
 //      - **bun** — via the shipped `buildStandaloneExecutable()`, the exact
-//        function `kn-next build` runs for `runtime: 'bun'` on the standalone
+//        function `knext build` runs for `runtime: 'bun'` on the standalone
 //        shape. That function is fail-closed on the bytecode check (it throws
 //        if the compiled binary was not verified bytecode), so a green
 //        `beforeAll` here already proves "bytecode verifier passes" — a
@@ -253,7 +253,7 @@ beforeAll(async () => {
     // 3a. Select webpack EXPLICITLY, the same way a real app does: its own
     //     build script runs `next build --webpack` — never a `--webpack` flag
     //     this suite bolts on outside the project's own command. This is the
-    //     "project build" path `kn-next build`'s runProjectBuild seam runs
+    //     "project build" path `knext build`'s runProjectBuild seam runs
     //     (`npm run build` / `bun run build`), so it exercises the real thing
     //     a user selecting `build: 'webpack'` in kn-next.config.ts relies on.
     const pkgJsonPath = join(appDir, "package.json");
@@ -342,7 +342,7 @@ beforeAll(async () => {
     });
 
     // 3c. Compile the bun-target executable via the SHIPPED, fail-closed
-    //     `buildStandaloneExecutable()` — the exact function `kn-next build`
+    //     `buildStandaloneExecutable()` — the exact function `knext build`
     //     runs for `build: 'webpack'` (or 'turbopack') + `runtime: 'bun'`. It
     //     throws if the produced binary is not verified bytecode, so a green
     //     `beforeAll` here IS the bytecode-verifier-passes proof; the `it`

@@ -136,6 +136,10 @@ API_RETRY_MAX_MS="${API_RETRY_MAX_MS:-8000}"       # per-step backoff ceiling
 # the retry *scheduling*: the worst case is then attempts x per-call duration,
 # and the run says so at startup.
 API_RETRY_DEADLINE_S="${API_RETRY_DEADLINE_S:-60}"
+# Test-only clock injection for api_retry's deadline bookkeeping — see
+# _retry_clock's doc comment below. Empty/unset means "use the real clock",
+# which is every real invocation of this script.
+API_RETRY_CLOCK_FILE="${API_RETRY_CLOCK_FILE:-}"
 # Per-CALL cap, distinct from the TOTAL budget above. Making one knob do both
 # jobs made API_RETRY_ATTEMPTS dead for the case this feature exists for: a hung
 # first attempt consumed the entire budget, so a stalled apiserver got exactly
@@ -533,6 +537,22 @@ api_call_cap() {
 API_RETRY_LAST_OUT=""
 API_RETRY_LAST_ATTEMPTS=0
 
+# _retry_clock — seconds used for the API_RETRY_DEADLINE_S bookkeeping in
+# api_retry. Real wall clock by default. When API_RETRY_CLOCK_FILE is set to an
+# existing file, its (integer) contents are used instead of date(1) — this lets
+# a test drive the DEADLINE ACCOUNTING deterministically (e.g. from a stub's own
+# attempt counter) so the retry-count assertion does not race real-world
+# CPU-scheduling jitter on a loaded machine (#1371). It does NOT touch the
+# per-call enforcement itself: that is still the real timeout(1) wrapping each
+# attempt in kc(), so a hung call is still genuinely bounded in wall time.
+_retry_clock() {
+  if [ -n "$API_RETRY_CLOCK_FILE" ] && [ -f "$API_RETRY_CLOCK_FILE" ]; then
+    cat "$API_RETRY_CLOCK_FILE"
+  else
+    date +%s
+  fi
+}
+
 # ── per-call enforcement of API_RETRY_DEADLINE_S ─────────────────────────────
 # The deadline used to be checked only BETWEEN attempts, so a *hung* call was
 # not bounded at all: a 25s-hanging kubectl under API_RETRY_DEADLINE_S=5 still
@@ -546,7 +566,7 @@ api_retry() {
   local attempts="$API_RETRY_ATTEMPTS"
   local backoff_ms="$API_RETRY_BASE_MS" n=1 rc=0 class="" start now
   [ "$backoff_ms" -ge 0 ] 2>/dev/null || backoff_ms=0
-  start=$(date +%s)
+  start=$(_retry_clock)
   local per_call
   per_call=$(api_call_cap "$attempts")
   while :; do
@@ -579,7 +599,7 @@ api_retry() {
     # stretch a run. Without it, this check only bounds *scheduling*.
     # The abandonment is RECORDED before returning: this return used to be the
     # one exit that left no trace, which is how a stalled run got filed as clean.
-    now=$(date +%s)
+    now=$(_retry_clock)
     if [ $((now - start)) -ge "$API_RETRY_DEADLINE_S" ] 2>/dev/null; then
       record_api_abandon "$op" "the API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s budget was spent after ${n} attempt(s)"
       return "$rc"

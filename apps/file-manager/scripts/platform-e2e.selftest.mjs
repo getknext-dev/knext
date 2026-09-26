@@ -18,6 +18,7 @@ import {
   assertUploadStored,
   checkImageOptimization,
   checkInvalidationEndpoint,
+  checkMalformedUrls,
   checkPublicFiles,
   checkStaticAssets,
   checkStreaming,
@@ -27,7 +28,7 @@ import { createClient } from './platform-e2e-http.mjs';
 const TOKEN = 'selftest-token';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 
-/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, noFontRef?: boolean, fontMissing?: boolean, noCssFont?: boolean, notChunked?: boolean, jsCache?: string }} Defects */
+/** @typedef {{ cssType?: string, immutable?: boolean, buffered?: boolean, openInvalidate?: boolean, deadOptimizer?: boolean, bigImage?: boolean, noFontRef?: boolean, fontMissing?: boolean, noCssFont?: boolean, notChunked?: boolean, jsCache?: string, malformed500?: boolean, malformedReset?: boolean, malformedKills?: boolean, dead?: boolean }} Defects */
 
 /** @param {Defects} d */
 function makeServer(d) {
@@ -41,6 +42,19 @@ function makeServer(d) {
       res.writeHead(status, h);
       res.end(body);
     };
+    // Malformed percent-encoding in the path: a healthy app refuses it with 400.
+    let malformed = false;
+    try {
+      decodeURI(url.split('?')[0]);
+    } catch {
+      malformed = true;
+    }
+    if (malformed) {
+      if (d.malformedReset) return req.socket.destroy();
+      if (d.malformedKills) d.dead = true;
+      return send(d.malformed500 ? 500 : 400, { 'content-type': 'text/plain' }, 'bad');
+    }
+    if (d.dead) return send(503, { 'content-type': 'text/plain' }, 'down');
     if (url === '/') {
       return send(
         200,
@@ -143,6 +157,7 @@ const suite = {
   stream: (/** @type {any} */ r) => checkStreaming(r),
   image: (/** @type {any} */ r) => checkImageOptimization(r),
   invalidate: (/** @type {any} */ r) => checkInvalidationEndpoint(r, TOKEN, 'products'),
+  malformed: (/** @type {any} */ r) => checkMalformedUrls(r),
 };
 
 let failures = 0;
@@ -180,6 +195,9 @@ const defects = [
   // No font referenced at all (the layout uses next/font, so this must never
   // silently pass).
   ['no font referenced', { noFontRef: true, noCssFont: true }, 'static'],
+  ['malformed request path answered 500', { malformed500: true }, 'malformed'],
+  ['malformed request path drops the connection', { malformedReset: true }, 'malformed'],
+  ['app stops serving after a malformed request path', { malformedKills: true }, 'malformed'],
 ];
 for (const [label, defect, name] of defects) {
   let caught = false;

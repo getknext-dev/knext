@@ -111,7 +111,7 @@ NetworkPolicy (Calico, Cilium, etc.) — on a non-enforcing CNI the policy is a 
 (Calico, Cilium, kube-router, Weave Net, Antrea, Canal) is detected on the cluster, `False` when
 flannel is the CNI — there the policy is **declarative only**: it is written but enforces nothing —
 and `Unknown` when the CNI cannot be identified. Treat `Unknown` as unenforced until you verify it;
-a detector that guessed "enforced" would be worse than none. `kn-next doctor` runs the same
+a detector that guessed "enforced" would be worse than none. `knext doctor` runs the same
 read-only detection as a preflight check. Note that flannel is what OrbStack and stock OKE clusters
 run — on those, treat network isolation as absent unless you install a policy-capable CNI.
 
@@ -140,7 +140,7 @@ back onto a build-output path this cannot make writable without deleting your ap
 — that specific write is rejected under a read-only root. It degrades gracefully (Next logs the
 failure and keeps serving from its in-memory cache; the page still returns successfully — ISR just
 falls back to memory-only instead of persisting across pods/restarts), but if you rely on
-Redis-backed ISR, configure a `cacheHandler` — `kn-next create` and the reference app do this by
+Redis-backed ISR, configure a `cacheHandler` — `knext create` and the reference app do this by
 default — to avoid it entirely.
 </Callout>
 

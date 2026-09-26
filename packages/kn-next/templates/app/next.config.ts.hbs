@@ -3,48 +3,44 @@ import type { NextConfig } from "next";
 /**
  * {{ name }} — Next.js options.
  *
- * Standalone-by-default: knext builds this app with `next build --webpack`
- * (see the `build` script in package.json). `output: 'standalone'` is what
- * makes that build emit a self-contained `.next/standalone/server.js` — the
- * knext runtime
- * image's supervisor (`knext-standalone-entry.mjs`) spawns that server and
- * drains it on SIGTERM. Deleting `output: 'standalone'` does not fail the
- * build locally, but `kn-next deploy` has nothing to COPY into the runtime
- * image and fails loudly instead.
+ * Standalone-by-default: knext builds this app with plain `next build`
+ * (Turbopack, the ambient Next 16.2+ default — see the `build` script in
+ * package.json). `output: 'standalone'` is what makes that build emit a
+ * self-contained `.next/standalone/server.js` — the knext runtime image's
+ * supervisor (`knext-standalone-entry.mjs`) spawns that server and drains it
+ * on SIGTERM. Deleting `output: 'standalone'` does not fail the build
+ * locally, but `knext deploy` has nothing to COPY into the runtime image
+ * and fails loudly instead.
  *
  * `adapterPath` wires the official Next.js Deployment Adapter
  * (`./next-adapter.ts` → `@getknext/core/adapter`) — this is what injects the
- * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on (#342),
- * and what reports build completion back to `kn-next build`. Building with
+ * edge-safe `IgnorePlugin` fence `src/instrumentation.ts` depends on, and
+ * what reports build completion back to `knext build`. Building with
  * `next build` and NOT wiring this adapter is a silent correctness gap, not a
  * build failure — don't delete it.
  *
- * Why `package.json`'s `build` script pins `next build --webpack` instead of
- * the ambient Turbopack default (Next 16.2+): combining `adapterPath` with
- * `output: 'standalone'` under Turbopack throws
- * `ENOENT: .next/next-server.js.nft.json` at `next build` time — a CONFIRMED
- * Next.js REGRESSION, bisected between 16.2.0 (builds this exact combination
- * fine) and 16.3.0 (already broken); 16.3.3 (pinned below) inherits it. Not a
- * knext defect, and not (as first suspected) a permanent Turbopack/adapter
- * architecture gap. See
+ * A HISTORICAL NOTE, since it is easy to reintroduce by accident: combining
+ * `adapterPath` with `output: 'standalone'` under Turbopack threw `ENOENT:
+ * .next/next-server.js.nft.json` at `next build` time on stable Next 16.3.0
+ * through 16.3.4 — a confirmed upstream regression, not a knext
+ * defect and not a permanent Turbopack/adapter architecture gap. Fixed
+ * upstream in 16.3.5 (pinned below), confirmed by a live local repro of
+ * this exact config. See
  * https://github.com/getknext-dev/knext/issues/1372 for the full trace and
- * the bisection. `--webpack` is not a stopgap hack: node/bun × webpack is an
- * already-verified knext build target, so this pins the scaffold to a path
- * knext verifies end-to-end. `kn-next build`/`deploy` carry the same check
- * for apps that did NOT go through this scaffold
+ * bisection. `knext build`/`deploy` still carry a pre-build guard for the
+ * confirmed-affected range
  * (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`) — it
- * fails fast with this same explanation rather than the raw ENOENT. Do not
- * "fix" this by dropping `--webpack` without first confirming the linked
- * issue is resolved upstream at whatever Next version you are bumping to.
+ * only fires below 16.3.5, so it does not gate this app's pinned version; it
+ * exists for apps that pin an OLDER Next this scaffold did not generate.
  */
 const nextConfig: NextConfig = {
-    // Asset prefix is injected by `kn-next deploy` from `kn-next.config.ts`
+    // Asset prefix is injected by `knext deploy` from `kn-next.config.ts`
     // storage settings. In dev mode (`next dev`) ASSET_PREFIX is unset, so
     // assets serve locally.
     assetPrefix: process.env.ASSET_PREFIX || "",
-    // #93 skew protection (ADR-0011): pin every client to the build it
+    // Skew protection: pin every client to the build it
     // loaded — `deploymentId` makes Next append `?dpl=<id>` to asset/RSC
-    // requests. `kn-next deploy` sets NEXT_DEPLOYMENT_ID = the deploy tag;
+    // requests. `knext deploy` sets NEXT_DEPLOYMENT_ID = the deploy tag;
     // unset in `next dev` → no pinning.
     deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
     // `deploymentId` alone only sets the `?dpl=` query param — it does NOT
@@ -59,7 +55,7 @@ const nextConfig: NextConfig = {
     cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,
     // Per-pod memory caches diverge across pods — Redis is the one cache.
     cacheMaxMemorySize: 0,
-    // ADR-0006: next/image optimization via sharp (in deps + the runtime
+    // next/image optimization via sharp (in deps + the runtime
     // image). remotePatterns is an EXPLICIT allowlist — empty means local
     // images only (no open optimizer / SSRF). Add trusted hosts as needed.
     images: {
@@ -68,7 +64,7 @@ const nextConfig: NextConfig = {
     },
     // The official Next.js Deployment Adapter (top-level since next 16.2).
     adapterPath: new URL("./next-adapter.ts", import.meta.url).pathname,
-    // #342/#356 (ADR-0031): `instrumentation.ts` is compiled for BOTH the
+    // `instrumentation.ts` is compiled for BOTH the
     // `nodejs` AND `edge` runtimes. Its Node-only body lives in
     // `src/instrumentation-node.ts`, loaded via a dynamic import guarded at
     // RUNTIME — but webpack/turbopack STATICALLY trace that import into the

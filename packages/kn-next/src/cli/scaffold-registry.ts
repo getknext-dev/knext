@@ -1,7 +1,7 @@
 /**
  * #950 — honesty about whether the scaffold's @getknext/* pins can install.
  *
- * `kn-next create` pins the generated app's `@getknext/*` deps at the CLI's
+ * `knext create` pins the generated app's `@getknext/*` deps at the CLI's
  * OWN version (`^{{ version }}` in the template — the packages are a
  * changesets `fixed` group, so one version speaks for all of them). That is
  * correct by construction for a PUBLISHED CLI: the version it carries is on
@@ -112,7 +112,7 @@ export async function checkPinsPublished(
     const timeoutMs = opts.timeoutMs ?? 3000;
 
     // Probed in PARALLEL so the offline worst case is one timeout, not one
-    // per pin — this runs inline in `kn-next create`.
+    // per pin — this runs inline in `knext create`.
     const results = await Promise.all(
         pins.map(async (pin): Promise<"ok" | "missing" | "unreachable"> => {
             if (pin.version === null) return "ok";
@@ -168,7 +168,7 @@ export function unpublishedPinsWarning(missing: ScaffoldPin[]): string {
         "\nWARNING: this app depends on package versions that are not on the npm registry yet:\n" +
         `${list}\n` +
         "`npm install` will fail with 'notarget' until they are published. This usually\n" +
-        "means the kn-next CLI you ran is newer than the latest published release (for\n" +
+        "means the knext CLI you ran is newer than the latest published release (for\n" +
         "example, a build from a source checkout). Until a release carrying these\n" +
         "versions lands on the registry, either point the generated package.json at\n" +
         "locally packed tarballs of the same source tree (`file:` references), or wait\n" +

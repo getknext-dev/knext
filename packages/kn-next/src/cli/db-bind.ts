@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * kn-next db bind — one-command BYO Postgres binding (ADR-0019).
+ * knext db bind — one-command BYO Postgres binding (ADR-0019).
  *
  * Usage:
- *   kn-next db bind [<app>] --secret <name> [--key K]
+ *   knext db bind [<app>] --secret <name> [--key K]
  *                   [--ro-secret <name>] [--ro-key K]
  *                   [-n <namespace>] [--dry-run]
  *                   [--dsn <dsn>] [--secret-file <path>]
@@ -75,7 +75,7 @@ export interface DbBindOptions {
     context?: string;
 }
 
-/** Parse `kn-next db bind` argv (after the `db bind` words). */
+/** Parse `knext db bind` argv (after the `db bind` words). */
 export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
     const out: DbBindOptions = { namespace: "default", dryRun: false };
     // A value-taking flag must actually have a value: a trailing `--secret` /
@@ -85,7 +85,7 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
             throw new UsageError(
-                `${flag} requires a value (see kn-next db bind --help)`,
+                `${flag} requires a value (see knext db bind --help)`,
             );
         }
         return v;
@@ -114,13 +114,13 @@ export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
             // Unknown flags fail loudly — a typo like `--secert` must not
             // silently bind with defaults.
             throw new UsageError(
-                `unknown flag "${a}" (see kn-next db bind --help)`,
+                `unknown flag "${a}" (see knext db bind --help)`,
             );
         } else if (out.app === undefined) {
             out.app = a;
         } else {
             throw new UsageError(
-                `unexpected positional "${a}" — only one <app> positional is accepted (see kn-next db bind --help)`,
+                `unexpected positional "${a}" — only one <app> positional is accepted (see knext db bind --help)`,
             );
         }
     }
@@ -147,7 +147,7 @@ function assertDns1123(flag: string, value: string): void {
 export function validateDbBindOptions(opts: DbBindOptions): void {
     if (!opts.secret) {
         throw new UsageError(
-            "--secret <name> is required: the Secret carrying the DATABASE_URL DSN (kn-next db bind --secret <name>).",
+            "--secret <name> is required: the Secret carrying the DATABASE_URL DSN (knext db bind --secret <name>).",
         );
     }
     assertDns1123("--secret", opts.secret);
@@ -390,7 +390,7 @@ export async function runDbBind(
         );
     } catch (err) {
         throw new Error(
-            `NextApp "${appName}" not found in namespace "${opts.namespace}" — run \`kn-next deploy\` first, or use --dry-run to preview the patch. (${(err as Error).message})`,
+            `NextApp "${appName}" not found in namespace "${opts.namespace}" — run \`knext deploy\` first, or use --dry-run to preview the patch. (${(err as Error).message})`,
         );
     }
     const live = JSON.parse(liveRaw) as { spec?: BindTargetSpec };
@@ -447,10 +447,10 @@ export async function runDbBind(
     printDsnContract(opts, deps);
 }
 
-const DB_BIND_HELP = `kn-next db bind — bind an existing Postgres Secret to the NextApp CR (ADR-0019)
+const DB_BIND_HELP = `knext db bind — bind an existing Postgres Secret to the NextApp CR (ADR-0019)
 
 Usage:
-  kn-next db bind [<app>] --secret <name> [options]
+  knext db bind [<app>] --secret <name> [options]
 
 Options:
   --secret <name>       Secret carrying the DATABASE_URL DSN (required)
@@ -465,17 +465,17 @@ Options:
   -h, --help            Show this help
 `;
 
-/** Top-level `kn-next db` help — lists the subcommand family. */
-const DB_HELP = `kn-next db — database subcommands
+/** Top-level `knext db` help — lists the subcommand family. */
+const DB_HELP = `knext db — database subcommands
 
 Subcommands:
   bind      Bind an existing Postgres Secret to the NextApp CR (ADR-0019)
   migrate   Apply pending migrations against the writer, once (ADR-0021 §3)
 
-Run \`kn-next db <subcommand> --help\` for subcommand options.
+Run \`knext db <subcommand> --help\` for subcommand options.
 `;
 
-/** Entry for the `kn-next db …` subcommand family. */
+/** Entry for the `knext db …` subcommand family. */
 export async function dbMain(argv: readonly string[]): Promise<void> {
     const [sub, ...rest] = argv;
     if (sub === undefined || sub === "-h" || sub === "--help") {
@@ -492,7 +492,7 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
     }
     if (sub !== "bind") {
         throw new UsageError(
-            `unknown db subcommand "${sub}" — available: bind, migrate (kn-next db --help)`,
+            `unknown db subcommand "${sub}" — available: bind, migrate (knext db --help)`,
         );
     }
     if (rest.includes("-h") || rest.includes("--help")) {
@@ -502,7 +502,7 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
 
     const opts = parseDbBindArgs(rest);
     // Validate BEFORE announcing (and before touching the config): a missing
-    // `--secret` otherwise printed the "kn-next db bind …" banner above the
+    // `--secret` otherwise printed the "knext db bind …" banner above the
     // error. runDbBind re-validates — this is the cheap early exit, not a
     // replacement for it.
     validateDbBindOptions(opts);
@@ -517,13 +517,13 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
     const appName = opts.app ?? localConfig?.name;
     if (!appName) {
         throw new UsageError(
-            "app name required: pass it as a positional (kn-next db bind <app> …) or run from a directory with kn-next.config.ts",
+            "app name required: pass it as a positional (knext db bind <app> …) or run from a directory with kn-next.config.ts",
         );
     }
 
     log.info(
         { app: appName, namespace: opts.namespace, dryRun: opts.dryRun },
-        "kn-next db bind (CR merge-patch only — the operator reconciles the env wiring)",
+        "knext db bind (CR merge-patch only — the operator reconciles the env wiring)",
     );
 
     await runDbBind(
@@ -542,6 +542,6 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
 }
 
 // NO self-entry block here, DELIBERATELY — this module is reached ONLY via
-// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// the knext bin's subcommand dispatch (see the hazard note atop deploy.ts's
 // dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
 // tsup-inlining hijack, #263).

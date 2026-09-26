@@ -1,5 +1,5 @@
 /**
- * ADR-0001 read-only pin for `kn-next doctor` (#1055).
+ * ADR-0001 read-only pin for `knext doctor` (#1055).
  *
  * The operator is the single source of truth for cluster state; `doctor` is a
  * PREFLIGHT and must never mutate the cluster. Every kubectl call it issues is

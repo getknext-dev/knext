@@ -1,5 +1,5 @@
 /**
- * Track B3 — `kn-next build` resolves its expected artifact from the contract.
+ * Track B3 — `knext build` resolves its expected artifact from the contract.
  *
  * Before this, `build.ts` hardcoded `.next/standalone` everywhere: the log
  * lines, the bun-exports heal, the bytecode pass, and the "is output:'standalone'
@@ -52,7 +52,7 @@ describe("#B3 resolveBuildArtifact", () => {
     });
 
     it("RESOLVES vinext + runtime node to the node-preset shape (#1260)", () => {
-        // The runtime is threaded into the contract: `kn-next build` must not
+        // The runtime is threaded into the contract: `knext build` must not
         // look for (and compile) a bun-preset artifact for a node app.
         const r = resolveBuildArtifact(
             cfg({ build: "vinext", runtime: "node" }),

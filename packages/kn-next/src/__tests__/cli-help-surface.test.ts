@@ -1,5 +1,5 @@
 /**
- * `kn-next --help` must describe the REAL user-facing surface (UX ledger 1d).
+ * `knext --help` must describe the REAL user-facing surface (UX ledger 1d).
  *
  * The help text used to list seven commands while the bin dispatched more, and
  * README advertised `npx @getknext/core cleanup`, a verb the bin did not route
