@@ -10,7 +10,7 @@
   },
   "scripts": {
     "test": "node ../../scripts/bun-test.mjs packages/ui",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "../../node_modules/typescript-tsc7/bin/tsc --noEmit"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
@@ -23,7 +23,7 @@
     "@types/react-dom": "^19",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "typescript": "^5",
+    "typescript": "^5.9.3",
     "tailwindcss": "^4"
   },
   "peerDependencies": {

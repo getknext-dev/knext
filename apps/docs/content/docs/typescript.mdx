@@ -1,0 +1,50 @@
+---
+title: TypeScript version
+description: Scaffolded apps pin TypeScript 5.9.x by default. TypeScript 7 (the native compiler) works for your app's own build and typecheck, but breaks editor TypeScript support today — switch only if you've read what that costs.
+---
+
+A `knext create`-scaffolded app pins `typescript@^5.9.3`. This page explains why that's the
+default, what TypeScript 7 actually gets you, and how to opt in if you want it anyway.
+
+## The default: TypeScript 5.9.x
+
+TypeScript 7 is the new Go-native compiler, and it's real: a scaffolded app builds and runs its
+tests cleanly under it on either build target, and Next.js's own typecheck step during `next
+build` works correctly under TS7 (verified directly: a scaffolded app builds clean, 0 errors) —
+it needs none of the classic TypeScript compiler API.
+
+It is not the default anyway, because of one real gap: **TypeScript 7 ships no `tsserver.js`.**
+That's the specific protocol editors like VS Code speak when you tell them to "use the workspace
+version" of TypeScript — inline errors, autocomplete, go-to-definition, and the `next` tsconfig
+plugin all go through it. TS7 does have a language server (`tsc --lsp --stdio`, a JSON-RPC LSP
+implementation), but it's a different protocol than `tsserver.js` — an editor extension built
+around "use workspace version" doesn't pick it up automatically, so it breaks until editor tooling
+catches up.
+
+Nothing else about a scaffolded app needs the change flagged: it ships no linter (no `eslint`, no
+lint script, no `eslint-config-next`), so there's no lint-toolchain breakage to speak of.
+
+## Opting in to TypeScript 7
+
+If you don't need editor TypeScript support (for example, a CI-only build, or you're comfortable
+running without it until editor tooling catches up), you can switch a scaffolded app to TS7
+yourself:
+
+```json title="package.json"
+{
+  "devDependencies": {
+-   "typescript": "^5.9.3",
++   "typescript": "^7.0.2"
+  }
+}
+```
+
+Reinstall after changing it. `next build`'s own typecheck step and your app's own type-checking
+will keep working. What you lose the moment you do this:
+
+- Editor inline type errors, autocomplete, and go-to-definition for TypeScript files that rely on
+  "use workspace version" — your editor falls back to its own bundled TypeScript (which may not
+  understand `next.config.ts`'s types the same way), or errors trying to start `tsserver.js`.
+
+If you hit that and want it back, pin `typescript` back to `^5.9.3` and reinstall — nothing else
+about your app changes either way.
