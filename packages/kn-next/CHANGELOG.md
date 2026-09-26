@@ -1,5 +1,159 @@
 # @getknext/core
 
+## 0.5.0
+
+### Minor Changes
+
+- 59ef1d9: `kn-next create` now scaffolds the **standalone target** by default (matching the CLI's own
+  default build, `build: 'turbopack'`): plain `next build`, `output: 'standalone'` in
+  `next.config.ts`, and the official Next.js Deployment Adapter wired through `adapterPath` via a
+  generated `next-adapter.ts`. `kn-next build`/`deploy` stage the matching runtime image
+  automatically, so the scaffold ships no `Dockerfile` for this target.
+  
+  Pass `--builder vinext` to scaffold the previous shape instead — the compiled single-executable
+  target, with its own `Dockerfile`, `vite.config.ts`, and `build: 'vinext'` pinned explicitly in
+  `kn-next.config.ts`. That shape is unchanged.
+  
+  This only affects apps scaffolded from here on; an existing app's own files are never rewritten.
+- 2622780: **Existing apps without a `build` key switch builders on upgrade.** The default build target changed from `vinext` (the compiled single executable) to `turbopack` (`next build` -> the standalone runtime image), and the default runtime for that shape is `bun` (the compiled bytecode executable) — the credentialed v1.0 default per ADR-0054/ADR-0058. If your `kn-next.config.ts` omits `build`, your next deploy will try to build and ship a completely different artifact.
+  
+  **If your app builds with vinext (its build script runs `vite build`), you MUST add `build: 'vinext'` to `kn-next.config.ts` before upgrading**, or `kn-next build`/`deploy` will look for a `.next/standalone` tree your build script never produces and fail:
+  
+  ```ts
+  const config: KnativeNextConfig = {
+    name: 'acme',
+    registry: 'registry.example.com/acme',
+    build: 'vinext',
+  };
+  ```
+  
+  Apps already on the standalone target (`build: 'turbopack'`/`'webpack'`, or building with `next build`) are unaffected by the `build` change. If you had `runtime` unset there too, it now defaults to `bun` (compiled bytecode) instead of `node` — set `runtime: 'node'` explicitly if you want the uncompiled fallback.
+  
+  Newly scaffolded apps pin `build: 'vinext'` explicitly (`kn-next create`'s templates), since their `next.config.ts` and `Dockerfile` are still vinext-shaped. A standalone-by-default scaffold is tracked as separate follow-up work.
+- 8c238f3: The CLI command is now `knext` (was `kn-next`). `@getknext/core` ships both
+  bins — `knext` is canonical, and `kn-next` keeps working as a deprecated
+  alias: same dispatch, same flags, same exit codes, with one added line on
+  stderr pointing at `knext`. Existing scripts and CI invoking `kn-next` are
+  not broken by this release.
+  
+  `knext create` now scaffolds apps whose generated `package.json`, README-style
+  comments, and printed "next steps" all say `knext`. The config file itself is
+  unchanged — it is still named `kn-next.config.ts` (not renamed in this
+  release).
+  
+  CLI help/usage text, error messages, and the docs site (getting-started, CLI
+  reference, examples) were updated to say `knext` throughout, with a short note
+  in the getting-started guide about the `kn-next` alias, plus a warning not to
+  run bare `npx knext` on its own — the unscoped `knext` name on the public npm
+  registry belongs to an unrelated package. Always use `npx @getknext/core ...`
+  or a locally installed `knext`.
+
+### Patch Changes
+
+- 08661bd: `kn-next doctor` now checks whether a scaffolded `knext-node-entry.mjs` (used
+  by `build: 'vinext'` + `runtime: 'node'` apps) is behind the version shipped
+  in the installed `@getknext/core` package, and warns with the exact fix when
+  it is stale — the entry is written once by `kn-next create` and never
+  re-rendered by later builds or deploys, so an app scaffolded before a runtime
+  fix keeps running the old behavior silently.
+  
+  The deployed Cache-Control normalization (both the `vinext`-on-Node middleware
+  and the compiled executable's `Bun.serve` seam share one implementation) now
+  falls back to rebuilding the `Response` when its headers are immutable — a
+  proxied `fetch()` response or `Response.redirect()` — instead of silently
+  skipping the rewrite and shipping the origin `s-maxage=…` value to clients.
+- 40a7323: `kn-next status` now surfaces an `EnvMapCollision` row (human output) and an
+  `envMapCollision` key (`--json` output) when a `spec.secrets.envMap` entry
+  collides with a platform-managed system environment variable (e.g.
+  `HOSTNAME`, `NODE_ENV`, or a conditionally-injected one like
+  `STORAGE_PROVIDER`). The row/key mirror the operator's `EnvMapCollision`
+  status condition: `True` while a collision exists (naming which side won),
+  `False`/not reported otherwise. The documented connection-string pattern
+  (binding `REDIS_URL`, `KAFKA_BROKER_URL`, or `OTEL_EXPORTER_OTLP_ENDPOINT`
+  via `envMap`) renders calmly as informational rather than as an alarm.
+- d727053: Harden request URL decoding in the scaffolded `vinext` server entries. A request
+  whose path is not valid percent-encoding is now answered with `400 Bad Request`
+  before routing, and any other failure on the request path becomes a plain `500`
+  response instead of an error page or a process exit. The change lives in the
+  scaffolded `runtime-contract.mjs`, `knext-bun-entry.mjs` and
+  `knext-node-entry.mjs`; existing apps pick it up by copying those files from a
+  fresh `kn-next create --builder vinext` (`kn-next doctor` flags a stale Node
+  entry).
+- 848f0ac: Bumped the scaffold's `next` pin to `16.3.5`, which fixes the confirmed
+  upstream Turbopack + `adapterPath` + `output:'standalone'` regression
+  (`ENOENT: .next/next-server.js.nft.json`) that affected stable Next 16.3.0
+  through 16.3.4. `knext create` now scaffolds a plain
+  `"build": "next build"` script again (Turbopack, the default builder) —
+  the `--webpack` workaround pinned during the affected window is no longer
+  needed and has been removed.
+  
+  The pre-build guard (`knext build`/`deploy`) that catches this regression
+  for apps on an affected Next version is narrowed to fire only inside the
+  confirmed window; apps on Next 16.3.5+ (or 16.2.x, which was never
+  affected) are unblocked, with an "upgrade to next >= 16.3.5" fix suggestion.
+  knext supports and tests against stable Next releases only — a
+  canary/rc/preview/beta prerelease is not gated by this guard.
+- 641c4e0: `kn-next deploy` no longer uploads static assets from a separate host build
+  when your Dockerfile rebuilds in-image (vinext + object storage). The assets
+  are now extracted from the image you are about to serve, and the deploy aborts
+  if the image's server references a client chunk the extracted assets lack.
+  Previously the two builds could produce different chunk hashes and the app's
+  main chunk 404'd from the bucket.
+- 68ea771: Three scaffold/CLI follow-ups from the #1368 review:
+  
+  - The turbopack pre-build guard (`checkTurbopackAdapterStandaloneRegression`)
+    no longer falsely blocks an app whose `build` script delegates to other
+    scripts (e.g. `"build": "run-s build:*"` with `--webpack` on a
+    `"build:next"` script) — it now scans every script in `package.json`, not
+    just `build`, for the escape-hatch flag, and the error message documents
+    the delegation case.
+  - The scaffolded `next.config.ts` (both the default and `--builder vinext`
+    variants) no longer carries internal issue/PR/ADR references in its
+    comments.
+  - `kn-next build` on the default (standalone) target writes a compiled
+    `knext-standalone-exec-<arch>` ship binary into the app root. It was not
+    covered by any `knext-exec*` ignore pattern (a different, older binary
+    name) — this repo's own root `.gitignore` and the scaffold's
+    `.dockerignore.hbs` / `Dockerfile.vinext-node.dockerignore.hbs` now exclude
+    it too.
+- f068e36: `knext create` now scaffolds a `.gitignore` (both the default and `--builder vinext` variants). Previously scaffolded apps shipped none at all, so `node_modules`, `.next`, `.output`, compiled `knext-exec*`/`knext-standalone-exec*` binaries, and `.env` files were all committable by default — the `.env` case is a secret-leak risk. The template ships internally as `gitignore.hbs` (npm strips a file literally named `.gitignore` from a published tarball) and is renamed to `.gitignore` when an app is scaffolded.
+- 30ff477: The compiled Bun standalone build now reports how many computed
+  `require`/`import` call sites its bundled server code contains. These specifiers
+  resolve from disk at runtime, where the build's module-sharing scan cannot see
+  them. Set `KNEXT_STANDALONE_COMPILE_VERBOSE=1` to list them. This is
+  informational only and does not change the build output.
+- 17ccfc2: The monorepo's own toolchain now runs `tsc` typechecking on TypeScript 7
+  (the native compiler) for speed, while its `typescript` devDependency stays
+  on 5.9.x — `tsup`'s declaration-file bundler needs the classic TypeScript
+  compiler API, which TypeScript 7 does not yet expose.
+  
+  Scaffolded apps are unaffected: `knext create` still pins
+  `typescript@^5.9.3` by default. TypeScript 7 works for a scaffolded app's
+  own build and typecheck (verified: `next build` succeeds clean under it),
+  but it ships no `tsserver.js`, so editor TypeScript support that relies on
+  "use workspace version" (VS Code's default) breaks today — see the
+  TypeScript version doc for the opt-in path and what it costs.
+- 2e136d6: `kn-next build` (vinext target) now bundles packages that nitro's server chunks load at runtime with `createRequire(import.meta.url)`, not only the ones the entry loads, so a chunked server bundle no longer produces a binary that fails with `Cannot find module` once deployed. Set `KNEXT_COMPILE_STRICT_REQUIRES=1` to fail the build, instead of warning, when such a package cannot be resolved.
+- 3c94226: `kn-next build` on the vinext target now prints the compile step's informational output (e.g. which server externals load from `.output/server/node_modules` vs. stay bundled — the lines `docs/build-pipeline.mdx` quotes verbatim) instead of silently discarding it. `WARNING:` lines were already visible (they print via `console.warn`, to stderr); the discarded lines were the ones the compile step prints via `console.log`, to stdout. Normal build output stays quiet; only lines starting with `[knext compile]` are surfaced.
+- 298de3c: vinext on Node (`runtime: 'node'` with the default build) now sends `public, max-age=0, must-revalidate` in place of Next.js's shared-cache directives, the same as the compiled executable and the standalone server. The scaffolded `knext-node-entry.mjs` turns on vinext's own deploy mode (`VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1`) and rewrites `s-maxage` headers your own code sets. Set `KNEXT_CACHE_CONTROL_NORMALIZE=0` to keep the original headers. An app created before this change has an older `knext-node-entry.mjs`; replace it with the one from a freshly created app to pick this up.
+- fa9e55a: Image optimization for the vinext × node target (`runtime: 'node'`, not the default single
+  executable) now actually resizes images instead of silently serving originals. Two fixes,
+  both needed: `kn-next build` restages sharp's package and its platform addon into the image's
+  build output on every build — nitro's own trace previously copied an incomplete package and the
+  build host's addon rather than the image's `linuxmusl-x64` one — and the scaffolded
+  `knext-node-entry.mjs` now passes sharp directly to knext's image optimizer, the same way the Bun
+  single-executable entry already does, instead of a runtime resolve that can never find
+  `.output/server/node_modules` from the image's working directory. An app scaffolded before this
+  behaviour existed has an older `knext-node-entry.mjs` — rebuilding is not enough on its own, since
+  that file's old resolve strategy keeps serving originals regardless; replace it with the one from
+  a freshly created app to pick this up.
+- 8326926: The scaffolded `vinext` server entries now warm `KNEXT_WARM_PATH` inside the
+  same execution context as live requests. Work a warm route schedules with
+  `after()` is therefore awaited by the image's compile-cache bake and by the
+  SIGTERM drain, instead of being cut off when the process exits.
+- @getknext/db@0.5.0
+  - @getknext/lib@0.5.0
+
 ## 0.4.3
 
 ### Patch Changes
