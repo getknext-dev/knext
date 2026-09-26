@@ -1818,6 +1818,170 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     });
   });
 
+  // #1388 round 6: round 5 closed the string-to-key channel only for the
+  // ElementAccessExpression SPELLING (`globalThis[k]`). The same channels are
+  // reachable through reflection (`Reflect.get(process, k)`), by letting a
+  // global object escape as a value (`const R = Reflect; R.get(globalThis,
+  // k)`, a helper call), through a computed `constructor` key (`fn['constr'
+  // + 'uctor']`, `Reflect.get(fnProto, 'constructor')`, `({})[a][b]`), and by
+  // importing code straight out of a `data:`/`blob:` URL. Each is scanned as
+  // a CHANNEL, not a spelling. Every case names its class's message, so a
+  // mutation removing one class reds exactly its own rows.
+  describe('reflection / escaping globals / computed constructor / data: URLs fail closed (#1388 round 6)', () => {
+    const cases: { name: string; src: string; error: RegExp }[] = [
+      // (a) reflective APIs handed a global object or a getBuiltinModule() result
+      {
+        name: 'Reflect.get(process, k)',
+        src: "const k = 'getBuiltin' + 'Module';\nexport const y = Reflect.get(process, k)('module');\n",
+        error: /passes a global object .* to the reflective API `Reflect\.get`/,
+      },
+      {
+        name: 'Reflect.get(globalThis, k)',
+        src: "const k = 'req' + 'uire';\nexport const y = Reflect.get(globalThis, k)('./lib/real.cjs');\n",
+        error: /passes a global object .* to the reflective API `Reflect\.get`/,
+      },
+      {
+        name: "Object.getOwnPropertyDescriptor(process, 'getBuiltinModule').value(...)",
+        src: "export const y = Object.getOwnPropertyDescriptor(process, 'getBuiltinModule').value('module');\n",
+        error: /passes a global object .* to the reflective API `Object\.getOwnPropertyDescriptor`/,
+      },
+      {
+        name: 'Object.entries(globalThis)',
+        src: 'export const y = Object.entries(globalThis);\n',
+        error: /passes a global object .* to the reflective API `Object\.entries`/,
+      },
+      {
+        name: 'Object.keys(g) — an ALIASED global object',
+        src: 'const g = globalThis;\nexport const y = Object.keys(g);\n',
+        error: /passes a global object .* to the reflective API `Object\.keys`/,
+      },
+      {
+        name: "Reflect.get(process.getBuiltinModule('fs'), k) — a getBuiltinModule() result",
+        src: "const k = 'read' + 'FileSync';\nexport const y = Reflect.get(process.getBuiltinModule('fs'), k);\n",
+        error: /passes a getBuiltinModule\(\) result to the reflective API `Reflect\.get`/,
+      },
+      // (a') a global object ESCAPING as a value — the reflective function
+      // aliased, or the global handed to a helper, reaches the same place.
+      {
+        name: 'const R = Reflect; R.get(process, k) — an ALIASED reflective API',
+        src: "const R = Reflect;\nconst k = 'getBuiltin' + 'Module';\nexport const y = R.get(process, k)('module');\n",
+        error: /uses a global object .* as a value/,
+      },
+      {
+        name: 'pick(globalThis) — a global object handed to a helper',
+        src: "function pick(o, k) { return o[k]; }\nexport const y = pick(globalThis, 'req' + 'uire')('./lib/real.cjs');\n",
+        error: /uses a global object .* as a value/,
+      },
+      // (b) a computed key that reaches `constructor` (Function by another name)
+      {
+        name: '(() => 0)[k] — a non-literal key on a function expression',
+        src: "const k = 'constr' + 'uctor';\nconst r = (() => 0)[k]('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /non-literal computed \(bracket\) property access on a function or prototype/,
+      },
+      {
+        name: 'function f() {} f[k] — a non-literal key on a declared function',
+        src: "function f() {}\nconst k = 'constr' + 'uctor';\nexport const y = f[k]('return 1');\n",
+        error: /non-literal computed \(bracket\) property access on a function or prototype/,
+      },
+      {
+        name: "(() => 0)['constr' + 'uctor'] — a constant-folded key naming constructor",
+        src: "const r = (() => 0)['constr' + 'uctor']('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /computed \(bracket\) property access on a tracked name \(`constructor`\)/,
+      },
+      {
+        name: "Reflect.get(fnProto, 'constructor')",
+        src: "const fnProto = Object.getPrototypeOf(() => 0);\nconst r = Reflect.get(fnProto, 'constructor')('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /names the tracked key `constructor` through the reflective API `Reflect\.get`/,
+      },
+      {
+        name: 'Reflect.get(fn, k) — a non-literal key on a function through reflection',
+        src: "const k = 'constr' + 'uctor';\nexport const y = Reflect.get(() => 0, k)('return 1');\n",
+        error:
+          /non-literal key on a function or prototype through the reflective API `Reflect\.get`/,
+      },
+      {
+        name: '({})[a][b] — two chained non-literal keys (Object → Function)',
+        src: "const a = 'constr' + 'uctor';\nconst r = ({})[a][a]('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /chains two non-literal computed \(bracket\) property accesses/,
+      },
+      // (c) code imported from a data:/blob: URL — non-relative, so it used
+      // to pass as a "bare" specifier.
+      {
+        name: "import('data:text/javascript,...')",
+        src: "export const y = await import('data:text/javascript,export default 1');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "import('data:text/javascript;base64,...')",
+        src: "export const y = await import('data:text/javascript;base64,ZXhwb3J0IGRlZmF1bHQgMQ==');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "static import from 'data:...'",
+        src: "import z from 'data:text/javascript,export default 1';\nexport const y = z;\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "require('data:...')",
+        src: "export const y = require('data:text/javascript,module.exports=1');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+      {
+        name: "import('blob:...')",
+        src: "export const y = await import('blob:nodedata:abc');\n",
+        error: /imports from a `data:` or `blob:` URL/,
+      },
+    ];
+
+    for (const { name, src, error } of cases) {
+      it(`${name} is a hard error`, () => {
+        const { repoRoot, tarballsDir } = makeFixture();
+        writeFileSync(join(repoRoot, 'scripts/e2e-summary.mjs'), src);
+        expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(error);
+      });
+    }
+
+    // (d) The other half. ADR-0027 MANDATES a `globalThis` slot keyed by a
+    // registry `Symbol.for('knext.lib.*')` in packages/lib — a symbol key can
+    // never name `require`/`eval`/`Function`, so the seam shape must pass,
+    // in both its inline and its const-bound form. Ordinary use of global
+    // objects (base of a property access, typeof, comparisons) must too.
+    it('the ADR-0027 Symbol.for seam shape and ordinary global-object use still fingerprint cleanly', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        [
+          "const STATE_KEY = Symbol.for('knext.lib.context.state');",
+          'const stateGlobal = globalThis;',
+          'stateGlobal[STATE_KEY] ??= { n: 0 };',
+          'const s = stateGlobal[STATE_KEY];',
+          "const t = globalThis[Symbol.for('knext.lib.x')];",
+          "const isBrowser = typeof window !== 'undefined';",
+          'const same = globalThis === global;',
+          "const has = 'fetch' in globalThis;",
+          'const env = process.env;',
+          'const rows = [[1]];',
+          'const cell = rows[0][0];',
+          'const kv = Object.entries(env);',
+          'export const y = [s, t, isBrowser, same, has, cell, kv];',
+          '',
+        ].join('\n'),
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+
+    it('a Symbol.for key bound with `let` (re-assignable) is NOT exempt', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        "let key = Symbol.for('knext.lib.x');\nkey = 'req' + 'uire';\nexport const y = globalThis[key];\n",
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(
+        /non-literal computed \(bracket\) property access on a global object/,
+      );
+    });
+  });
+
   it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {
     const tarballsDir = tempDir('knext-fp-lib-real-');
     packFixtureTarball(tarballsDir, 'core', '0.3.0');

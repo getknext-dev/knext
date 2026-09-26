@@ -341,9 +341,164 @@ function jsLocalImportSpecifiers(src, absPath) {
       isGetBuiltinModuleCall(n) || (ts.isIdentifier(n) && builtinModuleResultNames.has(n.text))
     );
   };
-  /** A key a static scan can read: a string/number literal. Anything else names a property through a value. */
+  /** `Symbol.for(<string literal>)` — a registry symbol. */
+  const isSymbolForLiteralCall = (node) => {
+    const n = unwrapParens(node);
+    return (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === 'Symbol' &&
+      n.expression.name.text === 'for' &&
+      n.arguments.length === 1 &&
+      ts.isStringLiteralLike(n.arguments[0])
+    );
+  };
+  // #1388 round 6 (d) — `const K = Symbol.for('knext.lib.x')`. ADR-0027
+  // MANDATES this seam shape in packages/lib (a `globalThis` slot keyed by a
+  // registry symbol). A SYMBOL key can never name `require`/`eval`/`Function`
+  // (those are string-keyed), so it is exempt from every non-literal-key rule.
+  // Only a `const` binding counts — a `let`/`var` can be re-assigned a string.
+  const symbolForKeyNames = new Set();
+  const collectSymbolForKeys = (node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      isSymbolForLiteralCall(node.initializer) &&
+      ts.isVariableDeclarationList(node.parent) &&
+      (node.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      symbolForKeyNames.add(node.name.text);
+    }
+    ts.forEachChild(node, collectSymbolForKeys);
+  };
+  collectSymbolForKeys(sourceFile);
+  /**
+   * A key a static scan can read: a string/number literal, or a registry
+   * symbol (`Symbol.for(<literal>)`, inline or const-bound — #1388 round 6
+   * (d)). Anything else names a property through a value.
+   */
   const isLiteralKey = (expr) =>
-    !!expr && (ts.isStringLiteralLike(expr) || ts.isNumericLiteral(expr));
+    !!expr &&
+    (ts.isStringLiteralLike(expr) ||
+      ts.isNumericLiteral(expr) ||
+      isSymbolForLiteralCall(expr) ||
+      (ts.isIdentifier(expr) && symbolForKeyNames.has(expr.text)));
+  /**
+   * The STRING a key expression statically evaluates to, if it is built only
+   * from literals (`'constr' + 'uctor'`) — else undefined. Lets a concatenated
+   * key be compared against the tracked names instead of slipping past a
+   * literal-only comparison (#1388 round 6 (b)).
+   */
+  const foldStringKey = (node) => {
+    const n = unwrapParens(node);
+    if (ts.isStringLiteralLike(n) || ts.isNumericLiteral(n)) return n.text;
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const l = foldStringKey(n.left);
+      const r = foldStringKey(n.right);
+      return l === undefined || r === undefined ? undefined : l + r;
+    }
+    return undefined;
+  };
+  // #1388 round 6 (a) — REFLECTIVE channels. Handed a global object (or a
+  // getBuiltinModule() result), each of these reaches any property of it —
+  // `require`, `getBuiltinModule`, `eval` — through a key no scan can read,
+  // exactly like the bracket form round 5 closed.
+  const REFLECTIVE_APIS = new Map([
+    ['Reflect', new Set(['get', 'getOwnPropertyDescriptor', 'ownKeys'])],
+    [
+      'Object',
+      new Set([
+        'getOwnPropertyDescriptor',
+        'getOwnPropertyDescriptors',
+        'getOwnPropertyNames',
+        'entries',
+        'values',
+        'keys',
+        'assign',
+      ]),
+    ],
+  ]);
+  /** The reflective API a call's callee names (`Reflect.get`, `Object['entries']`), or undefined. */
+  const reflectiveApiName = (call) => {
+    if (!ts.isCallExpression(call)) return undefined;
+    const callee = unwrapParens(call.expression);
+    let base;
+    let member;
+    if (ts.isPropertyAccessExpression(callee)) {
+      base = callee.expression;
+      member = callee.name.text;
+    } else if (ts.isElementAccessExpression(callee) && callee.argumentExpression) {
+      base = callee.expression;
+      member = foldStringKey(callee.argumentExpression);
+    }
+    if (!base || member === undefined || !ts.isIdentifier(base)) return undefined;
+    return REFLECTIVE_APIS.get(base.text)?.has(member) ? `${base.text}.${member}` : undefined;
+  };
+  /** The reflective APIs whose SECOND argument is a property key on the first. */
+  const KEYED_REFLECTIVE_APIS = new Set([
+    'Reflect.get',
+    'Reflect.getOwnPropertyDescriptor',
+    'Object.getOwnPropertyDescriptor',
+  ]);
+  // #1388 round 6 (b) — `fn.constructor` IS `Function`, and every function
+  // (and `Object`, `Array`, …) carries it. Names bound to a function-valued
+  // expression are tracked so a non-literal key on one fails closed.
+  const WELL_KNOWN_CONSTRUCTORS = new Set([
+    'Object',
+    'Function',
+    'Array',
+    'String',
+    'Number',
+    'Boolean',
+    'Symbol',
+    'BigInt',
+    'Promise',
+    'Map',
+    'Set',
+    'WeakMap',
+    'WeakSet',
+    'Date',
+    'RegExp',
+    'Error',
+    'Proxy',
+    'Reflect',
+    'URL',
+    'Buffer',
+  ]);
+  const functionishNames = new Set();
+  /** `Object.getPrototypeOf(...)` / `Reflect.getPrototypeOf(...)` — a prototype object. */
+  const isGetPrototypeOfCall = (n) =>
+    ts.isCallExpression(n) &&
+    ts.isPropertyAccessExpression(n.expression) &&
+    ts.isIdentifier(n.expression.expression) &&
+    (n.expression.expression.text === 'Object' || n.expression.expression.text === 'Reflect') &&
+    n.expression.name.text === 'getPrototypeOf';
+  /** An expression evaluating to a function or a prototype object — one hop from `Function`. */
+  const isFunctionishExpr = (node) => {
+    const n = unwrapParens(node);
+    return (
+      ts.isArrowFunction(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isClassExpression(n) ||
+      isGetPrototypeOfCall(n) ||
+      (ts.isPropertyAccessExpression(n) &&
+        (n.name.text === 'prototype' || n.name.text === '__proto__')) ||
+      (ts.isElementAccessExpression(n) &&
+        !!n.argumentExpression &&
+        (foldStringKey(n.argumentExpression) === 'prototype' ||
+          foldStringKey(n.argumentExpression) === '__proto__')) ||
+      (ts.isIdentifier(n) && (functionishNames.has(n.text) || WELL_KNOWN_CONSTRUCTORS.has(n.text)))
+    );
+  };
+  const collectFunctionishDeclarations = (node) => {
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+      functionishNames.add(node.name.text);
+    }
+    ts.forEachChild(node, collectFunctionishDeclarations);
+  };
+  collectFunctionishDeclarations(sourceFile);
 
   // Import aliasing (`import { createRequire as cr } from 'node:module'`)
   // and node:module namespace/default bindings: one pass — an import
@@ -379,6 +534,17 @@ function jsLocalImportSpecifiers(src, absPath) {
   while (grew) {
     grew = false;
     const pass = (node) => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer &&
+        isFunctionishExpr(node.initializer) &&
+        !functionishNames.has(node.name.text)
+      ) {
+        // #1388 round 6 (b) — `const f = () => 0`, `const p = Object.getPrototypeOf(f)`, `const g = f`.
+        functionishNames.add(node.name.text);
+        grew = true;
+      }
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
         const name = node.name.text;
         const init = node.initializer;
@@ -554,8 +720,68 @@ function jsLocalImportSpecifiers(src, absPath) {
   const isTrackedBracketPropertyAccess = (node) =>
     ts.isElementAccessExpression(node) &&
     !!node.argumentExpression &&
-    ts.isStringLiteralLike(node.argumentExpression) &&
-    BRACKET_TRACKED_KEYS.has(node.argumentExpression.text);
+    BRACKET_TRACKED_KEYS.has(foldStringKey(node.argumentExpression));
+  /**
+   * A computed key this scanner cannot evaluate at all — neither a literal /
+   * registry symbol (`isLiteralKey`) nor a constant-foldable string
+   * (`foldStringKey`, compared against the tracked names separately).
+   */
+  const isUnknownKey = (expr) => !!expr && !isLiteralKey(expr) && foldStringKey(expr) === undefined;
+  /**
+   * #1388 round 6 (a') — a global object used as a VALUE: anywhere other than
+   * the base of a property/element access, an alias or destructuring
+   * declaration (both tracked above), a `typeof` operand, an equality
+   * comparison, or the right side of `in`. Handed to anything else — a
+   * helper, an aliased `Reflect.get`, `Object.assign`, a spread — any
+   * property of it is reachable through a key no scan can read.
+   */
+  const isDeclarationOrLabelName = (node) => {
+    const p = node.parent;
+    if (!p || ts.isShorthandPropertyAssignment(p)) return false; // `{ process }` is a VALUE reference
+    return p.name === node || p.propertyName === node;
+  };
+  const EQUALITY_OPERATORS = new Set([
+    ts.SyntaxKind.EqualsEqualsEqualsToken,
+    ts.SyntaxKind.ExclamationEqualsEqualsToken,
+    ts.SyntaxKind.EqualsEqualsToken,
+    ts.SyntaxKind.ExclamationEqualsToken,
+  ]);
+  const isAmbientRootEscape = (node) => {
+    if (
+      !(
+        ts.isIdentifier(node) ||
+        ts.isPropertyAccessExpression(node) ||
+        ts.isElementAccessExpression(node) ||
+        ts.isParenthesizedExpression(node)
+      )
+    ) {
+      return false;
+    }
+    if (ts.isIdentifier(node) && isDeclarationOrLabelName(node)) return false;
+    if (!isAmbientRootExpr(node)) return false;
+    const p = node.parent;
+    if (!p || ts.isParenthesizedExpression(p)) return false; // judged at the outer paren
+    if (
+      (ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) &&
+      p.expression === node
+    ) {
+      return false;
+    }
+    if (
+      ts.isVariableDeclaration(p) &&
+      p.initializer === node &&
+      (ts.isIdentifier(p.name) || ts.isObjectBindingPattern(p.name))
+    ) {
+      return false;
+    }
+    if (ts.isTypeOfExpression(p)) return false;
+    if (ts.isBinaryExpression(p)) {
+      if (EQUALITY_OPERATORS.has(p.operatorToken.kind)) return false;
+      if (p.operatorToken.kind === ts.SyntaxKind.InKeyword && p.right === node) return false;
+    }
+    return true;
+  };
+  const DATA_OR_BLOB_URL = /^\s*(data|blob):/i;
   /**
    * `await import('node:module')` used INLINE, as the base of a further
    * access, with no name ever bound to it at all — e.g.
@@ -675,6 +901,13 @@ function jsLocalImportSpecifiers(src, absPath) {
   /** @param {ts.Node} node @param {ts.Node} callOrDeclNode */
   const addSpecifier = (node, callOrDeclNode) => {
     if (ts.isStringLiteralLike(node)) {
+      if (DATA_OR_BLOB_URL.test(node.text)) {
+        // #1388 round 6 (c) — the module's code IS the URL, never a file.
+        failClosed(
+          callOrDeclNode,
+          'imports from a `data:` or `blob:` URL — the loaded code is carried in the specifier itself, never a file this scanner can hash',
+        );
+      }
       specs.push(node.text);
       return;
     }
@@ -793,12 +1026,71 @@ function jsLocalImportSpecifiers(src, absPath) {
         node,
         `uses a non-literal computed (bracket) property access on ${isAmbientRootExpr(node.parent.parent.initializer) ? 'a global object' : 'a getBuiltinModule() result'} (via a computed destructuring key)`,
       );
+    } else if (
+      reflectiveApiName(node) &&
+      node.arguments.some((a) => isAmbientRootExpr(a) || isBuiltinModuleResultExpr(a))
+    ) {
+      // #1388 round 6 (a) — the reflective spelling of a non-literal bracket key.
+      const onBuiltin = !node.arguments.some((a) => isAmbientRootExpr(a));
+      failClosed(
+        node,
+        `passes ${onBuiltin ? 'a getBuiltinModule() result' : 'a global object (globalThis/global/self/window/process, or an alias of one)'} to the reflective API \`${reflectiveApiName(node)}\` — it reaches any property, including require/eval/getBuiltinModule, by a key no static scan can read`,
+      );
+    } else if (
+      KEYED_REFLECTIVE_APIS.has(reflectiveApiName(node)) &&
+      node.arguments[1] &&
+      BRACKET_TRACKED_KEYS.has(foldStringKey(node.arguments[1])) &&
+      // a node:module binding keeps its own, more specific, message below
+      !(node.arguments[0] && isNodeModuleNamespaceExpr(node.arguments[0]))
+    ) {
+      // #1388 round 6 (b) — `Reflect.get(fnProto, 'constructor')` is `fnProto.constructor`.
+      failClosed(
+        node,
+        `names the tracked key \`${foldStringKey(node.arguments[1])}\` through the reflective API \`${reflectiveApiName(node)}\` — the same channel as a literal \`.${foldStringKey(node.arguments[1])}\` access`,
+      );
+    } else if (
+      KEYED_REFLECTIVE_APIS.has(reflectiveApiName(node)) &&
+      node.arguments[0] &&
+      isFunctionishExpr(node.arguments[0]) &&
+      isUnknownKey(node.arguments[1])
+    ) {
+      failClosed(
+        node,
+        `passes a non-literal key on a function or prototype through the reflective API \`${reflectiveApiName(node)}\` — the key can name \`constructor\`, which is \`Function\``,
+      );
     } else if (isResolveCall(node)) {
       // Never treated as a dependency — do not descend into its argument.
     } else if (isTrackedBracketPropertyAccess(node)) {
       failClosed(
         node,
-        `uses a computed (bracket) property access on a tracked name (\`${node.argumentExpression.text}\`) — this scanner only resolves literal \`.name\` property access`,
+        `uses a computed (bracket) property access on a tracked name (\`${foldStringKey(node.argumentExpression)}\`) — this scanner only resolves literal \`.name\` property access`,
+      );
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      isUnknownKey(node.argumentExpression) &&
+      isFunctionishExpr(node.expression)
+    ) {
+      // #1388 round 6 (b) — `fn[k]` with k === 'constructor' is `Function`.
+      failClosed(
+        node,
+        'uses a non-literal computed (bracket) property access on a function or prototype — the key can name `constructor`, which is `Function`, a string-to-code channel',
+      );
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      isUnknownKey(node.argumentExpression) &&
+      ts.isElementAccessExpression(unwrapParens(node.expression)) &&
+      isUnknownKey(unwrapParens(node.expression).argumentExpression)
+    ) {
+      // #1388 round 6 (b) — `({})[a][b]`: any object's `constructor` is a
+      // function, whose `constructor` is `Function` — two unreadable hops.
+      failClosed(
+        node,
+        'chains two non-literal computed (bracket) property accesses — `x[a][b]` reaches `x.constructor.constructor`, which is `Function`, under keys no static scan can read',
+      );
+    } else if (isAmbientRootEscape(node)) {
+      failClosed(
+        node,
+        'uses a global object (globalThis/global/self/window/process, or an alias of one) as a value — handed to a helper, an aliased reflective API or a spread, any property of it (require, eval, getBuiltinModule) is reachable by a key no static scan can read',
       );
     } else if (isNonLiteralElementAccessOnModuleBinding(node)) {
       const baseDescription = ts.isIdentifier(node.expression)
@@ -852,6 +1144,8 @@ function jsLocalImportSpecifiers(src, absPath) {
         failClosed(node, 'calls a createRequire()-derived function with no argument');
       } else if (!ts.isStringLiteralLike(arg)) {
         failClosed(node, 'calls a createRequire()-derived function with a non-literal specifier');
+      } else if (DATA_OR_BLOB_URL.test(arg.text)) {
+        addSpecifier(arg, node); // fails closed — #1388 round 6 (c)
       } else if (/^\.\.?\//.test(arg.text)) {
         failClosed(
           node,
