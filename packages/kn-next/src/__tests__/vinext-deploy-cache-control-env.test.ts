@@ -452,6 +452,19 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.mjs", `/*\n process.env.${NAME} = "0";\n*/`],
         // commented-out code that names the switch fails closed
         ["x.mjs", `/*\n * process.env.${NAME} = "0";\n */`],
+        // scrubber desync (`/x\/*/` opens a "comment") drops a `*` line whose
+        // name sits in a span after `[` — not prose
+        [
+            "x.mjs",
+            `const r = /x\\/*/;\n  * Object.assign(process.env, { [\`${NAME}\`]: "0" }); /* */`,
+        ],
+        // a `}` between the opener and the name, at the name's own indent
+        [
+            "x.go",
+            `    a := X{\n        Value: "1",\n    }\n    Name: "${NAME}",`,
+        ],
+        // a parent line with less indent between the opener and the name
+        ["x.yaml", `- a: 1\ntop:\n  value: "1"\n  name: ${NAME}`],
         // round-5 reviewer inputs
         [
             "x.go",
