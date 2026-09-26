@@ -71,6 +71,103 @@ describe("runQuiet", () => {
     it("throws when the child exits non-zero", () => {
         expect(() => runQuiet([NODE, "-e", "process.exit(4)"])).toThrow();
     });
+
+    // #1385 — the vinext compile step's stdout (console.log lines the docs
+    // quote, e.g. which server externals load from
+    // .output/server/node_modules vs. stay bundled) was silently discarded,
+    // exactly like the noise above. Its console.warn lines were already
+    // visible (stderr, already inherited) — only the console.log half was
+    // ever at risk. `surfaceStdoutPrefix` opts a call site INTO surfacing
+    // only the lines it cares about — everything else stays quiet.
+    describe("surfaceStdoutPrefix", () => {
+        it("prints only the lines starting with the given prefix, via console.log, after the run completes", () => {
+            const originalLog = console.log;
+            const printed: unknown[][] = [];
+            console.log = (...args: unknown[]) => {
+                printed.push(args);
+            };
+            try {
+                runQuiet(
+                    [
+                        NODE,
+                        "-e",
+                        "process.stdout.write('noise line\\n[marker] a warning\\nmore noise\\n[marker] a second warning\\n')",
+                    ],
+                    { surfaceStdoutPrefix: "[marker]" },
+                );
+            } finally {
+                console.log = originalLog;
+            }
+            expect(printed).toEqual([
+                ["[marker] a warning"],
+                ["[marker] a second warning"],
+            ]);
+        });
+
+        it("prints nothing extra when no line matches the prefix (stays quiet)", () => {
+            const originalLog = console.log;
+            const printed: unknown[][] = [];
+            console.log = (...args: unknown[]) => {
+                printed.push(args);
+            };
+            try {
+                runQuiet(
+                    [NODE, "-e", "process.stdout.write('just noise\\n')"],
+                    { surfaceStdoutPrefix: "[marker]" },
+                );
+            } finally {
+                console.log = originalLog;
+            }
+            expect(printed).toEqual([]);
+        });
+
+        it("without the option, behaves exactly as before (fully quiet, no console.log)", () => {
+            const originalLog = console.log;
+            const printed: unknown[][] = [];
+            console.log = (...args: unknown[]) => {
+                printed.push(args);
+            };
+            try {
+                runQuiet([
+                    NODE,
+                    "-e",
+                    "process.stdout.write('[marker] would surface if asked\\n')",
+                ]);
+            } finally {
+                console.log = originalLog;
+            }
+            expect(printed).toEqual([]);
+        });
+
+        it("still surfaces matching lines even when the child exits non-zero, then rethrows", () => {
+            const originalLog = console.log;
+            const printed: unknown[][] = [];
+            console.log = (...args: unknown[]) => {
+                printed.push(args);
+            };
+            try {
+                expect(() =>
+                    runQuiet(
+                        [
+                            NODE,
+                            "-e",
+                            "process.stdout.write('[marker] warned before failing\\n'); process.exit(3)",
+                        ],
+                        { surfaceStdoutPrefix: "[marker]" },
+                    ),
+                ).toThrow();
+            } finally {
+                console.log = originalLog;
+            }
+            expect(printed).toEqual([["[marker] warned before failing"]]);
+        });
+
+        it("throws on empty argv even with the option set", () => {
+            expect(() =>
+                runQuiet([], { surfaceStdoutPrefix: "[marker]" }),
+            ).toThrow(/empty argv/);
+        });
+    });
 });
 
 describe("runQuietAllowFail", () => {

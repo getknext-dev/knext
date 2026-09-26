@@ -103,6 +103,46 @@ database), or a managed/serverless provider with a scale-to-zero gateway. Swappi
 Secret change, zero app or CR schema change. knext binds the Secret; it does not create it or
 provision the database.
 
+An `envMap` name can also collide with a **platform-managed system variable** — `HOSTNAME`,
+`NODE_ENV`, or a conditionally-injected one like `STORAGE_PROVIDER` when `spec.storage` is set.
+Applying the resource **rejects** this collision (same no-silent-precedence rule as the
+`DATABASE_URL` case below), so a new or updated CR can never carry one — except the **connection-
+string names** below, which are always allowed. For every other reserved name your `envMap`
+override is surfaced on the `EnvMapCollision` condition (see the table below for the exact reason
+and event type per case); for `HOSTNAME` the platform's own value always wins instead (request
+routing depends on it). Remove the `envMap` entry to fall back to the platform's default.
+
+**Connection-string names are exempt from rejection: `REDIS_URL`, `KAFKA_BROKER_URL`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`.** These are the values behind `spec.cache.url`,
+`spec.revalidation.kafkaBrokerUrl`, and the tracing endpoint — all **plain, non-secret CR
+fields** today (there is no `secretRef` equivalent for them yet, unlike `spec.database`).
+Rejecting an `envMap` override for one of these would force you to choose between admission
+failure and writing the credential into the CR in plaintext, which is exactly what this platform's
+secret handling forbids. So your `envMap` entry always wins for these three names, on every CR —
+**this is the recommended way to keep a Redis/Kafka/OTel credential out of the CR**: bind it via
+`spec.secrets.envMap` pointing at a Secret, the same way you would bind `DATABASE_URL`, rather
+than putting the URL in `spec.cache.url` / `spec.revalidation.kafkaBrokerUrl` directly. Using this
+pattern still sets the `EnvMapCollision` condition (it is a real collision at the env-render
+level), but with the **informational** reason/event below — not the same alarm treatment as an
+actual conflict.
+
+#### `EnvMapCollision` reasons
+
+`kubectl describe nextapp <name>` and `knext status` both surface this condition. The reason
+tells you which case you are in; the event type tells you whether it needs attention:
+
+| Reason | When | Event type | Meaning |
+| --- | --- | --- | --- |
+| `EnvVarIgnored` | `envMap` names a platform-managed variable that **always** wins on the platform side (currently only `HOSTNAME`) | Warning | Your `envMap` entry is ignored outright; the platform's own value is what the app actually gets. Remove the entry — it has no effect. |
+| `EnvMapUserOverride` | `envMap` names any other reserved system variable, and this CR **predates** admission rejection for that collision (or reconciled while the validating webhook was briefly unavailable) | Warning | Your `envMap` value is used **instead of** the platform's own default for that name. A new or updated CR can never reach this state — admission rejects the collision going forward — so seeing it means an existing CR is grandfathered. Remove the `envMap` entry to fall back to the platform's default. |
+| `EnvMapExpectedOverride` | `envMap` names **only** connection-string exempt name(s) (`REDIS_URL` / `KAFKA_BROKER_URL` / `OTEL_EXPORTER_OTLP_ENDPOINT`) — the documented, sanctioned pattern above | Normal | Informational only — no action needed. This is what binding a Redis/Kafka/OTel credential via `envMap` is supposed to look like. |
+
+A report can mix reasons — e.g. an `EnvVarIgnored`-class collision on `HOSTNAME` alongside an
+exempt `REDIS_URL` entry. Whenever **any** real collision (`EnvVarIgnored` or
+`EnvMapUserOverride`) is present, the condition reports that reason and a Warning event, even if
+an exempt name is also present in the same report — the informational downgrade only applies when
+the **entire** report is exempt names.
+
 ### Databases: `spec.database`
 
 knext is **engine-agnostic** — it does **not** provision or manage a database. `spec.database` is
@@ -137,7 +177,7 @@ URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who 
 | Field | Notes |
 |---|---|
 | `url` | The resolved Knative Service URL. |
-| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady` — see below. |
+| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady`, `EnvMapCollision` — see below. |
 | `currentTraffic` | Mirror of the ksvc traffic split. |
 
 The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own

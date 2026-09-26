@@ -92,7 +92,7 @@ spec:
   securityContext: { seccompProfile: { type: RuntimeDefault } }
   containers:
     - name: mc
-      image: minio/mc:RELEASE.2023-01-28T20-29-38Z
+      image: docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511
       command: ["/bin/sh","-c","sleep 900"]
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
       env:

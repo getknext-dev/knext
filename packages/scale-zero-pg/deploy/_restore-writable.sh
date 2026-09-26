@@ -38,7 +38,7 @@ RT="${RT:---request-timeout=60s}"
 DRILL_NS="${DRILL_NS:-restore-drill}"
 TENANT="${TENANT:-f000f000f000f000f000f000f000f001}"
 TIMELINE="${TIMELINE:-f000f000f000f000f000f000f000f002}"
-IMG_MC="${IMG_MC:-minio/mc:RELEASE.2023-01-28T20-29-38Z}"
+IMG_MC="${IMG_MC:-docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511}"
 SK_PVC="${SK_PVC:-data-safekeeper-0}"
 SRC_NS="${SRC_NS:-scale-zero-pg}"      # namespace stamped in 54-compute-files.yaml
 HERE="$(dirname "$0")"
