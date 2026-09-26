@@ -295,6 +295,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     const cases = {
       secondOnLine: `x: [{image: "docker.io/a/b@sha256:${'0'.repeat(64)}"}, {image: docker.io/new/img:v1}]`,
       digestInComment: 'image: docker.io/new/img:v1 # @sha256:',
+      truncatedDigest: 'image: docker.io/new/img@sha256:',
       blockScalar: 'image: >-\n  docker.io/new/img:v1',
     };
     for (const [name, body] of Object.entries(cases)) {
