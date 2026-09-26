@@ -8,8 +8,11 @@
  * security boundary against an adversarial contributor — code review and the
  * compat lanes are that. The override scan therefore covers the runtime SURFACE
  * only (`inScope`): `packages/kn-next/src/**`, `packages/kn-next/templates/**`,
- * `apps/*\/vite.config*`, every `Dockerfile*`, `apps/*\/deploy/**`,
- * `.github/workflows/**` and `.env*` files. Everything else — the Go operator,
+ * `apps/*\/vite.config*`, `apps/*\/kn-next.config*` (its `env` becomes pod env and an
+ * explicit value is never overridden), every `knext-(node|bun)-entry.*` (they run
+ * after the injected install module), `turbo/generators/templates/**` (scaffolder
+ * output), every `Dockerfile*`, `apps/*\/deploy/**`, `.github/workflows/**` and
+ * `.env*` files. Everything else — the Go operator,
  * `packages/lib`, app source, examples, scripts — is OUT of scope, deliberately,
  * and the "documented limits" block below asserts it so the limit is visible.
  *
@@ -36,6 +39,14 @@
  *     line that mentions the name must be an exact safe form. A full-line `#` or
  *     `//` comment is skipped only when the ENTIRE line is a comment (starts with
  *     the marker and contains none of `= ( :`).
+ *
+ * TWO SWITCHES ARE SCANNED, with the same forms: the deploy switch above and its
+ * opt-out `KNEXT_CACHE_CONTROL_NORMALIZE` (runtime code treats ONLY the exact
+ * string `0` as off, and `applyVinextDeployDefault` then skips the default). For
+ * the opt-out the known-safe forms are an assignment of the literal `1` and the
+ * three runtime reads (`adapters/response-cache-control.mjs`,
+ * `adapters/bun-serve-cache-control.mjs`, `adapters/cache-control-normalize.cjs`),
+ * each bound to its file; any other mention is red.
  *
  * THE OVERRIDE SCAN IS AN ALLOWLIST. Every non-test line that mentions the
  * variable must match a KNOWN-SAFE form, else it is red with the line printed:
@@ -102,6 +113,15 @@ import { basename, dirname, join, relative } from "node:path";
 import { isNode, parseAllDocuments, visit } from "yaml";
 
 const NAME = "VINEXT_NEXT_DEPLOY_CACHE_CONTROL";
+/**
+ * The opt-out of the very behaviour this file guards: runtime code treats ONLY the
+ * exact string "0" as off (`=== "0"` / `!== "0"`), and `applyVinextDeployDefault`
+ * then leaves NAME unset. So it gets the same scan as NAME — every mention must be
+ * a known-safe form (assignment of the literal `1`, or one of the file-bound read
+ * shapes below); `0`, `"0"`, `'0'`, unset, `??=`, YAML tags/merges all go red.
+ */
+const NORM = "KNEXT_CACHE_CONTROL_NORMALIZE";
+const SWITCHES = [NAME, NORM];
 const REPO = join(__dirname, "..", "..", "..", "..");
 const SKIP_DIRS = new Set([
     "node_modules",
@@ -182,7 +202,7 @@ const CALL = /^applyVinextDeployDefault\(process\.env\);$/m;
 
 const N = NAME;
 const ONE = `["']?1["']?`;
-const ASSIGN_SAFE = [
+const assignSafe = (N: string) => [
     new RegExp(`^(?:(?:ENV|export)\\s+)?${N}=${ONE}(?:\\s+\\\\)?$`),
     new RegExp(`^ENV\\s+${N}\\s+${ONE}$`),
     new RegExp(`^["']?${N}["']?\\s*:\\s*${ONE},?$`),
@@ -195,18 +215,41 @@ const ASSIGN_SAFE = [
 const PAIR = /^[A-Za-z_][A-Za-z0-9_]*=\S*(?:\s+\\)?$/;
 
 /** The only READ shapes, each bound to the file it is legitimate in. */
-const READ_SAFE: [RegExp, RegExp][] = [
-    [
-        /adapters\/response-cache-control\.mjs$/,
-        new RegExp(
-            `^if \\(!env \\|\\| env\\.${N} !== undefined\\)(?: return;)?$`,
-        ),
+const READ_SAFE: Record<string, [RegExp, RegExp][]> = {
+    [NAME]: [
+        [
+            /adapters\/response-cache-control\.mjs$/,
+            new RegExp(
+                `^if \\(!env \\|\\| env\\.${N} !== undefined\\)(?: return;)?$`,
+            ),
+        ],
+        [
+            /__tests__\/fixtures\/vinext-node-app\/app\/api\/cache-probe\/route\.ts$/,
+            new RegExp(`^vinextDeploy: process\\.env\\.${N} \\?\\? null,?$`),
+        ],
     ],
-    [
-        /__tests__\/fixtures\/vinext-node-app\/app\/api\/cache-probe\/route\.ts$/,
-        new RegExp(`^vinextDeploy: process\\.env\\.${N} \\?\\? null,?$`),
+    // The three runtime READS of the off switch (each bound to its file).
+    [NORM]: [
+        [
+            /adapters\/response-cache-control\.mjs$/,
+            new RegExp(`^if \\(env\\.${NORM} === ["']0["']\\)(?: return;)?$`),
+        ],
+        [
+            /adapters\/response-cache-control\.mjs$/,
+            new RegExp(
+                `^const enabled = !\\(env && env\\.${NORM} === ["']0["']\\);$`,
+            ),
+        ],
+        [
+            /adapters\/bun-serve-cache-control\.mjs$/,
+            new RegExp(`^return !\\(env && env\\.${NORM} === ["']0["']\\);$`),
+        ],
+        [
+            /adapters\/cache-control-normalize\.cjs$/,
+            new RegExp(`^if \\(process\\.env\\.${NORM} !== ["']0["']\\) \\{$`),
+        ],
     ],
-];
+};
 
 /**
  * YAML is parsed with the `failsafe` schema, so every scalar stays its SOURCE
@@ -245,7 +288,7 @@ function decodeEscapes(s: string): string {
 }
 
 /** Unsafe mentions in a YAML document: walk the parsed value, not the text. */
-function yamlHits(src: string, mentioned: boolean): string[] {
+function yamlHits(src: string, mentioned: boolean, N: string): string[] {
     let docs: ReturnType<typeof parseAllDocuments>;
     try {
         docs = parseAllDocuments(src, { merge: true, schema: "failsafe" });
@@ -305,12 +348,16 @@ function yamlHits(src: string, mentioned: boolean): string[] {
  * safe form, printed with its reason. Empty = every mention is known-safe.
  */
 export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
+    return [...new Set(SWITCHES.flatMap((n) => unsafeFor(n, src, path)))];
+}
+
+function unsafeFor(N: string, src: string, path: string): string[] {
     const file = basename(path);
     // Pre-filter on the DECODED text, so an escaped spelling of the name is
     // still looked at. A file that never names the switch cannot override it,
     // so a parse error there is irrelevant.
     const norm = looseText(src);
-    if (/\.ya?ml$/i.test(file)) return yamlHits(src, norm.includes(N));
+    if (/\.ya?ml$/i.test(file)) return yamlHits(src, norm.includes(N), N);
     if (/\\N\{/.test(src))
         return [`${file}  [\\N{…} named-character escape cannot be decoded]`];
     if (!norm.includes(N)) return [];
@@ -336,7 +383,7 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     for (const [i, raw] of lines.entries()) {
         const l = raw.trim();
         if (!l.includes(N)) continue;
-        if (ASSIGN_SAFE.some((re) => re.test(l))) {
+        if (assignSafe(N).some((re) => re.test(l))) {
             if (l.endsWith("\\")) {
                 const next = lines.slice(i + 1).find((x) => x.trim() !== "");
                 if (next !== undefined && !PAIR.test(next.trim()))
@@ -346,7 +393,8 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
             }
             continue;
         }
-        if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) continue;
+        if ((READ_SAFE[N] ?? []).some(([f, re]) => f.test(path) && re.test(l)))
+            continue;
         hits.push(`${l}  [unknown form]`);
     }
     return hits;
@@ -434,6 +482,12 @@ export function inScope(relPath: string): boolean {
         p.startsWith("packages/kn-next/templates/") ||
         /^apps\/[^/]+\/vite\.config[^/]*$/.test(p) ||
         /^apps\/[^/]+\/deploy\//.test(p) ||
+        // env: {} in kn-next.config* becomes pod env, an explicit value wins
+        /^apps\/[^/]+\/kn-next\.config[^/]*$/.test(p) ||
+        // runtime entries (they run after the injected install module)
+        /^knext-(node|bun)-entry\./.test(b) ||
+        // scaffolder templates emit the entries, vite/kn-next configs
+        p.startsWith("turbo/generators/templates/") ||
         p.startsWith(".github/workflows/") ||
         /^Dockerfile/.test(b) ||
         /^\.env/.test(b)
@@ -683,6 +737,74 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
     }
 });
 
+describe(`the opt-out switch ${NORM} is scanned like ${NAME}`, () => {
+    const off: [string, string][] = [
+        ["apps/docs/Dockerfile.oke", `ENV ${NORM}=0`],
+        ["Dockerfile", `ENV ${NORM}="0"`],
+        ["Dockerfile", `ENV ${NORM} 0`],
+        ["Dockerfile", `ENV A=1 \\\n  ${NORM}='0'`],
+        ["x.sh", `export ${NORM}=0`],
+        ["x.sh", `${NORM}=0 node x`],
+        ["x.env", `${NORM}=0`],
+        ["x.mjs", `process.env.${NORM} = '0';`],
+        ["x.mjs", `process.env["${NORM}"] = "0";`],
+        ["x.mjs", `process.env.${NORM} ??= "0";`],
+        ["x.yaml", `env:\n  - name: ${NORM}\n    value: "0"`],
+        ["x.yaml", `env:\n  ${NORM}: "0"`],
+        ["x.yaml", `env:\n  ${NORM}: !!str "0"`],
+        ["x.yaml", `a: &a\n  ${NORM}: "0"\nenv:\n  <<: *a`],
+        [
+            "apps/file-manager/kn-next.config.ts",
+            `export default { env: { ${NORM}: '0' } };`,
+        ],
+        ["apps/docs/knext-bun-entry.mjs", `process.env.${NORM}='0';`],
+        [
+            "turbo/generators/templates/zone/knext-bun-entry.mjs.hbs",
+            `process.env.${NAME}='0';`,
+        ],
+        ["apps/docs/knext-bun-entry.mjs", `process.env.${NAME}='0';`],
+        [
+            "apps/file-manager/kn-next.config.ts",
+            `export default { env: { ${NAME}: "0" } };`,
+        ],
+    ];
+    for (const [path, src] of off)
+        it(`red: ${path} ${JSON.stringify(src)}`, () => {
+            expect(findUnsafeMentions(src, path)).not.toEqual([]);
+        });
+    it("the runtime's own reads (bound to their files) stay green", () => {
+        const c = "packages/kn-next/src/adapters";
+        expect(
+            findUnsafeMentions(
+                `if (env.${NORM} === "0") return;\nconst enabled = !(env && env.${NORM} === "0");`,
+                `${c}/response-cache-control.mjs`,
+            ),
+        ).toEqual([]);
+        expect(
+            findUnsafeMentions(
+                `export const on = (env) => {\n    return !(env && env.${NORM} === "0");\n};`,
+                `${c}/bun-serve-cache-control.mjs`,
+            ),
+        ).toEqual([]);
+        expect(
+            findUnsafeMentions(
+                `if (process.env.${NORM} !== '0') {\n  x();\n}`,
+                `${c}/cache-control-normalize.cjs`,
+            ),
+        ).toEqual([]);
+        // ...but the same read shape in an arbitrary file is unknown, so red
+        expect(
+            findUnsafeMentions(
+                `if (process.env.${NORM} !== '0') {\n}`,
+                "x.cjs",
+            ),
+        ).not.toEqual([]);
+    });
+    it("setting it to 1 is safe", () => {
+        expect(findUnsafeMentions(`ENV ${NORM}=1`, "Dockerfile")).toEqual([]);
+    });
+});
+
 describe("runtime-surface scope (the guard is a regression net, not a boundary)", () => {
     const IN = [
         "packages/kn-next/src/adapters/x.mjs",
@@ -696,6 +818,14 @@ describe("runtime-surface scope (the guard is a regression net, not a boundary)"
         "examples/bun-exec/Dockerfile.oke",
         ".env.example",
         "apps/file-manager/.env.local",
+        "apps/file-manager/kn-next.config.ts",
+        "apps/docs/kn-next.config.ts",
+        "apps/docs/knext-bun-entry.mjs",
+        "apps/file-manager/knext-bun-entry.mjs",
+        "examples/bun-exec/knext-bun-entry.mjs",
+        "turbo/generators/templates/zone/knext-bun-entry.mjs.hbs",
+        "turbo/generators/templates/zone/vite.config.ts.hbs",
+        "turbo/generators/templates/zone/kn-next.config.ts.hbs",
     ];
     for (const p of IN)
         it(`in scope: ${p}`, () => {
@@ -713,6 +843,11 @@ describe("runtime-surface scope (the guard is a regression net, not a boundary)"
         "scripts/deploy.sh",
         "benchmarks/run.sh",
         "docs/x.yaml",
+        "apps/file-manager/src/kn-next.config.ts",
+        "apps/file-manager/next.config.ts",
+        "turbo/generators/config.ts",
+        "turbo/generatorsX/templates/x.hbs",
+        "examples/bun-exec/kn-next.config.ts",
     ];
     for (const p of OUT)
         it(`documented limit — out of scope, ignored: ${p}`, () => {
