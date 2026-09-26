@@ -192,16 +192,39 @@ as it does on a folder deployment. See [image optimization](/docs/image-optimiza
 Some server dependencies stay **outside** the nitro bundle and are loaded when the server runs. For
 example, vinext keeps every `@opentelemetry/*` package your app depends on external. On a folder
 deployment those load from `.output/server/node_modules`, which does not exist next to the
-executable, so `knext build` bakes them **into** the binary. If one of them cannot be resolved at
-build time, the build still succeeds but prints a warning:
+executable, so `knext build` bakes them **into** the binary. This covers every file of the server
+bundle, including the chunks nitro splits off next to the entry. If one of them cannot be resolved at
+build time, the build still succeeds but prints a warning naming the package and the file that loads
+it:
 
 ```text
-[knext compile] WARNING: the entry runtime-requires package(s) that do not resolve from … and
-cannot be bundled: <package> — the binary throws if that code path runs
+[knext compile] WARNING: the server output runtime-requires package(s) that do not resolve and
+cannot be bundled: <package> (chunks/<file>.mjs) — the binary throws if that code path runs
 ```
 
 Install the named package as a dependency of your app and rebuild. Otherwise, any request that
 reaches code using that package fails with `Cannot find module '<package>'`.
+
+The build also warns, naming the file, in two cases where it cannot know what to bundle:
+
+- a dependency calls `require()` with a package name computed at runtime (for example
+  `require(name)`), so the package is only known when that code runs;
+- the bundle creates its `require` in a form the build does not recognise.
+
+In both cases the binary throws `Cannot find module` if that code loads a package that was not bundled
+and is not deployed next to the binary.
+
+To make these warnings a build failure (for example in CI), set `KNEXT_COMPILE_STRICT_REQUIRES=1` when
+you run `knext build`. Two limits apply:
+
+- **Minified server bundles.** When the server bundle is minified, other code can reuse the short name
+  of the bundle's `require`, so the build cannot always tell a real `require` from an unrelated call. It
+  then reports the finding as `WARNING: possibly a runtime require of …`. These warnings do not fail a
+  strict build, because they can be false alarms. The server bundle is not minified by default.
+- **Optional dependencies.** Some packages `require()` another package only if it is installed, for
+  example `ws` (`bufferutil`, `utf-8-validate`) or `pg` (`pg-native`). If your app does not install
+  those, the build correctly warns that they cannot be bundled, and a strict build fails on that
+  warning. Leave strict mode off for such apps, or install the optional packages.
 
 The same applies to packages you list in `serverExternalPackages` and to the packages Next.js keeps
 external by default (for example `typescript`, `sqlite3`, `prisma`). The binary carries a bundled
