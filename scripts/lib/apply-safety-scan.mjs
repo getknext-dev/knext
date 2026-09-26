@@ -52,6 +52,8 @@
  * with fixtures and the mutation prover can break each rule independently.
  */
 
+import { createHash } from 'node:crypto';
+
 /** Commands whose output is network content. */
 const FETCH_WORDS = new Set(['curl', 'wget', 'aria2c', 'http', 'https', 'xh', 'httpie']);
 const INTERPRETERS = new Set(['node', 'bun', 'deno', 'python', 'python3', 'ruby', 'perl']);
@@ -466,6 +468,8 @@ class State {
     this.curChainTag = null;
     /** (path) => text | null: reads a `source`d file (the caller knows the tree). */
     this.resolveSource = null;
+    /** repo-relative path of the source being scanned (keys STATEMENT_ALLOWLIST). */
+    this.file = null;
     /** canonical paths already loaded via `source`, to stop cycles. */
     this.sourced = new Set();
     /** the first `source`d path that could not be resolved, if any. */
@@ -515,7 +519,7 @@ export function isLoopbackUrl(u) {
   return LOOPBACK_URL.test(u) && u.split('://').length === 2 && !/\$/.test(u.split('/')[2]);
 }
 
-export function isFetchSegment(ws, st, { looseLoopback = false } = {}) {
+export function isFetchSegment(ws, st) {
   for (let k = 0; k < ws.length; k++) {
     const w = canonical(ws[k], st.vars).replace(/^\\/, '');
     const base = w.split('/').pop();
@@ -525,16 +529,10 @@ export function isFetchSegment(ws, st, { looseLoopback = false } = {}) {
     // Every fetcher is a taint source — a loopback URL included: `localhost`
     // is only local until a port-forward, `--connect-to`, `--resolve`, a proxy
     // or a Host header says otherwise, and `kubectl exec … curl` reads
-    // whatever the pod serves. The ONLY loosening is `looseLoopback`, used
-    // solely to decide whether a `$(…)` variable is a loopback SCALAR (data
-    // that may be interpolated, never a manifest that may be applied).
-    if (looseLoopback) {
-      const urls = ws
-        .slice(k + 1)
-        .map((a) => canonical(a, st.vars))
-        .filter((a) => /:\/\//.test(a));
-      if (urls.length > 0 && urls.every(isLoopbackUrl)) continue;
-    }
+    // whatever the pod serves. There is NO generic "loopback scalar" carve-out:
+    // a fetched value can carry newlines, `---` and arbitrary YAML, so it can
+    // never be interpolated into a document. The few real sites that do it are
+    // named, byte-exact, in STATEMENT_ALLOWLIST.
     return true;
   }
   return false;
@@ -757,20 +755,14 @@ function unresolvedCallWithUrl(ws, st) {
  * expansions) carries network content. Returns a reason string (truthy) or
  * false, so an offender says WHY.
  */
-export function textIsNetwork(
-  text,
-  st,
-  depth,
-  { urlLiteralCounts = true, seen = new Set(), looseLoopback = false } = {},
-) {
+export function textIsNetwork(text, st, depth, { urlLiteralCounts = true, seen = new Set() } = {}) {
   if (depth > MAX_DEPTH) return 'nesting too deep to classify'; // fail closed
-  const opts = { seen, looseLoopback };
+  const opts = { seen };
   const { code } = lex(text);
   for (const cl of splitClauses(code)) {
     for (const seg of splitPipeline(cl.text)) {
       const ws = words(seg);
-      if (isFetchSegment(ws, st, { looseLoopback }))
-        return `fetch command in \`${seg.slice(0, 80)}\``;
+      if (isFetchSegment(ws, st)) return `fetch command in \`${seg.slice(0, 80)}\``;
       for (let k = 0; k < ws.length; k++) {
         const w = ws[k];
         const u = unquote(w);
@@ -807,29 +799,12 @@ export function textIsNetwork(
         if (urlLiteralCounts && wholeVar && st.vars.get(wholeVar[1])?.url)
           return `URL variable ${u}`;
         for (const r of varRefs(w)) {
-          if (varIsNetworkIn(r, ws, st, looseLoopback))
-            return `variable $${r} holds network content`;
+          if (st.vars.get(r)?.content) return `variable $${r} holds network content`;
         }
       }
     }
   }
   return false;
-}
-
-/** Commands that emit their argument as a whole document. */
-const EMITTERS = new Set(['echo', 'printf', 'cat', 'tee', 'print', 'yes']);
-
-/**
- * Whether `$name`, used in segment `ws`, carries network content. A loopback
- * scalar is exempt everywhere except where it IS the document: a command that
- * emits its argument (`echo "$X" | kubectl apply -f -`).
- */
-function varIsNetworkIn(name, ws, st, looseLoopback = false) {
-  const v = st.vars.get(name);
-  if (!v?.content) return false;
-  if (!v.scalar) return true;
-  if (looseLoopback) return false;
-  return ws.some((w) => EMITTERS.has(unquote(w).split('/').pop()));
 }
 
 function innerSubstitutions(w) {
@@ -1013,22 +988,10 @@ function recordAssignments(ws, st, depth) {
     const refs = varRefs(value)
       .map((r) => st.vars.get(r))
       .filter(Boolean);
-    const subs = innerSubstitutions(value);
     const content =
-      subs.some((inner) => textIsNetwork(inner, st, depth + 1)) || refs.some((r) => r.content);
-    // A loopback SCALAR: content whose only network source is a loopback
-    // fetch. It may be interpolated as data (a heredoc field, a sed/awk
-    // argument), never emitted or applied as a document.
-    const scalar =
-      content &&
-      !subs.some((inner) => textIsNetwork(inner, st, depth + 1, { looseLoopback: true })) &&
-      refs.every((r) => !r.content || r.scalar);
-    st.vars.set(m[1], {
-      value,
-      url: URL_RE.test(expanded) || refs.some((r) => r.url),
-      content,
-      scalar,
-    });
+      innerSubstitutions(value).some((inner) => textIsNetwork(inner, st, depth + 1)) ||
+      refs.some((r) => r.content);
+    st.vars.set(m[1], { value, url: URL_RE.test(expanded) || refs.some((r) => r.url), content });
   }
   return any && k >= ws.length;
 }
@@ -1053,6 +1016,77 @@ export const REMOTE_FETCH_ALLOWLIST = [
       /^node -e '\s*const r = await fetch\(process\.argv\[1\]\);\s*const b = await r\.text\(\);/,
   },
 ];
+
+/**
+ * Statements that interpolate a value read from an IN-CLUSTER endpoint (the
+ * pageserver's own `last_record_lsn`, a `compute_ctl` control blob this drill
+ * crafted a few lines earlier) into a manifest that is applied to the same
+ * throwaway drill cluster. A fetched value can carry newlines and `---`, so
+ * this can NEVER be a generic rule ("loopback scalar", "field position",
+ * "data not document"): each site is named here, byte-exact, per file.
+ *
+ * `anchor` is a raw single-line substring of the file that must occur exactly
+ * once in it (the spec asserts it), so a copy-pasted second site is red even
+ * though the scanner sees it through helper inlining more than once.
+ * `statement` is the whole clause exactly as the scanner sees it (line
+ * continuations folded, each heredoc body inlined as `<<[body]`). An entry
+ * matches only that text in that file, so widening it to a prefix or a
+ * pattern is impossible by construction, and the spec asserts every entry is
+ * matched by the real tree and its anchor occurs EXACTLY ONCE in its file — an
+ * entry that goes stale, or a second copy of the same text, is red.
+ */
+export const STATEMENT_ALLOWLIST = [
+  {
+    id: 'lsn-inject-objstore',
+    anchor: 'awk -v lsn="$STATIC_LSN"',
+    file: 'packages/scale-zero-pg/deploy/_verify-objstore.sh',
+    statement:
+      'sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g"     -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/"     "$COMPUTE_FILES_SRC"   | awk -v lsn="$STATIC_LSN" \'{print} /"format_version": 1.0,/{print "            \\"mode\\": {\\"Static\\": \\"" lsn "\\"},"}\'   | $KD apply -f - >/dev/null',
+  },
+  {
+    id: 'lsn-inject-restore',
+    anchor: 'awk -v lsn="$STATIC_LSN"',
+    file: 'packages/scale-zero-pg/deploy/_verify-restore.sh',
+    statement:
+      'sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g"     -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/"     "$COMPUTE_FILES_SRC"   | awk -v lsn="$STATIC_LSN" \'{print} /"format_version": 1.0,/{print "            \\"mode\\": {\\"Static\\": \\"" lsn "\\"},"}\'   | $KD apply -f - >/dev/null',
+  },
+  {
+    id: 'lsn-inject-app-restore',
+    anchor: 'awk -v lsn="$MODE_LSN"',
+    file: 'packages/scale-zero-pg/deploy/_verify-app-restore.sh',
+    statement:
+      'sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g"       -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/"       -e "s/f000f000f000f000f000f000f000f001/$APPS_TENANT/g"       -e "s/f000f000f000f000f000f000f000f002/$VICTIM_TL/g"       "$COMPUTE_FILES_SRC"   | if [ -n "$_inject" ]; then awk -v lsn="$MODE_LSN" \'{print} /"format_version": 1.0,/{print "            \\"mode\\": {\\"Static\\": \\"" lsn "\\"},"}\'; else cat; fi   | $KD apply -f - >/dev/null',
+  },
+  {
+    id: 'ctl-seed-heredoc',
+    anchor: '{ name: CTL_B64, value: "$_ctl" }',
+    file: 'packages/scale-zero-pg/deploy/_restore-writable.sh',
+    // `value: "$_ctl"` inside the sk-seed Pod heredoc: the base64 control blob
+    // this same script crafts with `python3 "$SKCTL" craft` two lines earlier.
+    // The heredoc body is committed by hash, so editing it re-reviews the entry.
+    statement:
+      'cat <<[sha256:cd45b43f7d259d912957deba67fadacf777dcb4b899162e959eb699ef70b15a4] | $KD apply -f - >/dev/null',
+  },
+];
+
+/** The clause with each heredoc placeholder replaced by its literal body. */
+function statementText(clause, st) {
+  return clause.replace(/<<__HD(\d+)__/g, (m, n) =>
+    st.heredocs[Number(n)]
+      ? `<<[sha256:${createHash('sha256').update(st.heredocs[Number(n)].body).digest('hex')}]`
+      : m,
+  );
+}
+
+function reportStdinApply(st, why, clause) {
+  const stmt = statementText(clause, st);
+  const entry = STATEMENT_ALLOWLIST.find((e) => e.file === st.file && e.statement === stmt);
+  if (entry) {
+    st.allowHits?.set(entry.id, (st.allowHits.get(entry.id) ?? 0) + 1);
+    return;
+  }
+  offend(st, why, clause);
+}
 
 function reportRemoteFetch(st, why, seg) {
   const entry = REMOTE_FETCH_ALLOWLIST.find((e) => e.segment.test(seg));
@@ -1244,7 +1278,7 @@ function walk(code, st, ctx) {
         networkSoFar ||
         ws.some((w) => {
           const c = canonical(w, st.vars);
-          return isTaintedPath(c, st) || varRefs(w).some((r) => varIsNetworkIn(r, ws, st));
+          return isTaintedPath(c, st) || varRefs(w).some((r) => st.vars.get(r)?.content);
         });
       if (readsNetwork) networkSoFar = true;
 
@@ -1479,7 +1513,7 @@ function classifyTarget(t, { producerText, clause, st, ctx }) {
       return;
     }
     const why = producerIsNetwork(producerText, st, ctx.depth + 1);
-    if (why) offend(st, `stdin apply fed by network content (${why})`, clause);
+    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause);
     return;
   }
   if (/^[<>]\(/.test(raw)) {
@@ -1522,13 +1556,9 @@ function heredocExpansions(body) {
   const bits = [];
   for (const m of body.matchAll(/\$\(([^()]*(?:\([^()]*\)[^()]*)*)\)|`([^`]*)`/g))
     bits.push(m[1] ?? m[2]);
-  // `:` emits nothing, so a loopback scalar interpolated into a field is data;
-  // a line that is JUST the variable is the whole document and is emitted.
-  const wholeLine = new Set(
-    [...body.matchAll(/^\s*\$\{?([A-Za-z_]\w*)\}?\s*$/gm)].map((m) => m[1]),
-  );
-  for (const m of body.matchAll(/\$\{?([A-Za-z_]\w*)\}?/g))
-    bits.push(`${wholeLine.has(m[1]) ? 'echo' : ':'} "$${m[1]}"`);
+  // Every interpolated variable is EMITTED: a fetched value can carry newlines
+  // and `---`, so it can never be data inside a document.
+  for (const m of body.matchAll(/\$\{?([A-Za-z_]\w*)\}?/g)) bits.push(`echo "$${m[1]}"`);
   return bits.join('\n');
 }
 
@@ -1539,7 +1569,20 @@ function heredocExpansions(body) {
  * may be passed in to carry FILE state across the steps of one job.
  * `resolveSource(path)` returns the text of a `source`d file, or null when it
  * cannot be read (then a URL-taking call that may live in it fails closed).
- * `allowHits` (a Map) counts REMOTE_FETCH_ALLOWLIST matches for the spec.
+ * `allowHits` (a Map) counts REMOTE_FETCH_ALLOWLIST / STATEMENT_ALLOWLIST
+ * matches for the spec; `file` (repo-relative) keys STATEMENT_ALLOWLIST.
+ * @param {string} rawText
+ * @param {{
+ *   errexit?: boolean,
+ *   vars?: Array<[string, {value: string, url: boolean, content: boolean}]>,
+ *   carry?: {tainted: Set<string>, verified: Map<string, unknown>} | null,
+ *   persisted?: Map<string, unknown> | null,
+ *   finalCheck?: boolean,
+ *   resolveSource?: ((path: string) => string | null) | null,
+ *   allowHits?: Map<string, number> | null,
+ *   file?: string | null,
+ * }} [options]
+ * @returns {string[]}
  */
 export function unsafeApplies(
   rawText,
@@ -1551,12 +1594,14 @@ export function unsafeApplies(
     finalCheck = true,
     resolveSource = null,
     allowHits = null,
+    file = null,
   } = {},
 ) {
   const { code, heredocs, error } = lex(rawText);
   const st = new State({ errexit: errexit || /^#!.*\s-[a-z]*e/.test(rawText), vars });
   st.resolveSource = resolveSource;
   st.allowHits = allowHits;
+  st.file = file;
   if (carry) {
     st.tainted = carry.tainted;
     st.verified = carry.verified;
@@ -1577,7 +1622,8 @@ export function unsafeApplies(
     sub.tainted = new Set(st.tainted);
     sub.verified = new Map(st.verified);
     sub.resolveSource = st.resolveSource;
-    sub.allowHits = st.allowHits;
+    sub.allowHits = null; // a helper body is judged again at its call sites, which count
+    sub.file = st.file;
     sub.sourced = new Set(st.sourced);
     sub.unresolvedSource = st.unresolvedSource;
     walk(body, sub, {
@@ -1665,6 +1711,12 @@ export function stepGuaranteed(step) {
  * `>> $GITHUB_ENV` writes from earlier steps, so `env: { M: https://… }` +
  * `apply -f "$M"` is a bare-URL apply. The YAML parser has already folded
  * `run: >` blocks — exactly the single-line form bash receives.
+ * @param {unknown} doc
+ * @param {{
+ *   resolveSource?: ((path: string) => string | null) | null,
+ *   allowHits?: Map<string, number> | null,
+ * }} [options]
+ * @returns {string[]}
  */
 export function unsafeAppliesInWorkflow(doc, { resolveSource = null, allowHits = null } = {}) {
   const offenders = [];

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,6 +6,7 @@ import { dirname, join, normalize } from 'node:path';
 import { parse } from 'yaml';
 import {
   REMOTE_FETCH_ALLOWLIST,
+  STATEMENT_ALLOWLIST,
   unsafeApplies,
   unsafeAppliesInWorkflow,
 } from '../scripts/lib/apply-safety-scan.mjs';
@@ -72,14 +73,19 @@ function kindWorkflows(): string[] {
   );
 }
 
-const SHELL_SOURCES = () => gitLsFiles('*.sh', '*.bash');
+// Lazy, once per file: the tracked lists never change while the spec runs, and
+// re-running `git ls-files` per scanned file (the resolver did, ~300 times)
+// was most of the whole-tree scan's wall time.
+let shellSources: string[] | undefined;
+let workflowSources: string[] | undefined;
+const SHELL_SOURCES = () => (shellSources ??= gitLsFiles('*.sh', '*.bash'));
 const WORKFLOW_SOURCES = () =>
-  gitLsFiles(
+  (workflowSources ??= gitLsFiles(
     '.github/workflows/*.yml',
     '.github/workflows/*.yaml',
     '.github/actions/**/action.yml',
     '.github/actions/**/action.yaml',
-  );
+  ));
 
 /**
  * Resolves a `source`d path the way the tree spells it: the tail after the
@@ -87,9 +93,11 @@ const WORKFLOW_SOURCES = () =>
  * `/compute-files/lib.sh` inside an image), tried next to the sourcing file,
  * at the repo root, then as a unique suffix of a tracked script.
  */
+let trackedShell: Set<string> | undefined;
 function sourceResolver(from: string): (p: string) => string | null {
   const shell = SHELL_SOURCES();
-  const tracked = new Set(shell);
+  trackedShell ??= new Set(shell);
+  const tracked = trackedShell;
   return (p) => {
     const tail = p
       .replace(/^.*[)}]/, '')
@@ -103,18 +111,19 @@ function sourceResolver(from: string): (p: string) => string | null {
   };
 }
 
-/** Scans every tracked shell script and every workflow/composite-action job. */
-function scanRealTree(): {
-  scanned: string[];
-  offenders: string[];
-  allowHits: Map<string, number>;
-} {
+type TreeScan = { scanned: string[]; offenders: string[]; allowHits: Map<string, number> };
+
+/** Scans the tree ONCE per spec file; every whole-tree test reads the same result. */
+let treeScan: TreeScan | undefined;
+const scanRealTree = (): TreeScan => (treeScan ??= scanRealTreeUncached());
+
+function scanRealTreeUncached(): TreeScan {
   const scanned: string[] = [];
   const offenders: string[] = [];
   const allowHits = new Map<string, number>();
   for (const f of SHELL_SOURCES()) {
     scanned.push(f);
-    const opts = { resolveSource: sourceResolver(f), allowHits };
+    const opts = { resolveSource: sourceResolver(f), allowHits, file: f };
     for (const o of unsafeApplies(readFileSync(join(ROOT, f), 'utf8'), opts))
       offenders.push(`${f}: ${o}`);
   }
@@ -131,10 +140,23 @@ const STRICT = 'set -euo pipefail\n';
 const URL = 'https://example.com/m.yaml';
 const SHA = 'aaaa000000000000000000000000000000000000000000000000000000000000';
 
-/** Asserts every fixture is flagged; reports which one slipped through. */
-function expectAllFlagged(fixtures: Record<string, string>) {
+/** A fixture, optionally with the offender KIND it must be flagged for. */
+type Fixture = string | { src: string; kind: RegExp };
+
+/**
+ * Asserts every fixture is flagged FOR ITS REASON; reports which one slipped
+ * through. A fixture with a `kind` needs an offender matching it; one without
+ * needs an offender that is not merely "unparseable" — a lexer choke proves
+ * nothing about the rule the fixture is named for.
+ */
+function expectAllFlagged(fixtures: Record<string, Fixture>) {
   const missed = Object.entries(fixtures)
-    .filter(([, src]) => unsafeApplies(src).length === 0)
+    .filter(([, fx]) => {
+      const { src, kind } = typeof fx === 'string' ? { src: fx, kind: undefined } : fx;
+      const offenders = unsafeApplies(src);
+      if (kind) return !offenders.some((o) => kind.test(o));
+      return offenders.filter((o) => !/^unparseable/.test(o)).length === 0;
+    })
     .map(([name]) => name);
   expect(missed).toEqual([]);
 }
@@ -171,6 +193,14 @@ function runStubbed(script: string, args: string[], env: Record<string, string>)
 }
 
 describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + image-digest pinned (#1289)', () => {
+  // The whole-tree scan (~2.7 s here, more on a loaded CI runner) runs ONCE, up
+  // front, under an explicit timeout — never inside whichever test happens to
+  // touch it first, where it ate ~90% of bun's 5000 ms per-test default and
+  // flaked. Every test below reads the cached result.
+  beforeAll(() => {
+    scanRealTree();
+  }, 60_000);
+
   it('the kind-workflow scan itself is alive (finds all four known lanes)', () => {
     const found = kindWorkflows();
     expect(found).toContain('.github/workflows/operator-e2e-nightly.yml');
@@ -312,7 +342,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
 
   it('fails closed on constructs it cannot classify', () => {
     expectAllFlagged({
-      unterminatedHeredoc: `kubectl apply -f - <<EOF\nkind: Pod\n`,
+      unterminatedHeredoc: { src: `kubectl apply -f - <<EOF\nkind: Pod\n`, kind: /^unparseable/ },
       stdinWithNoProducer: `kubectl apply -f -`,
       emptyTarget: `kubectl apply -f`,
     });
@@ -332,7 +362,6 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       committedManifest: 'kubectl apply -f apps/file-manager/platform-e2e/data-plane.yaml',
       literalHeredoc: `kubectl apply -f - <<'YAML'\nkind: ConfigMap\nmetadata: { name: x, annotations: { docs: "${URL}" } }\nYAML`,
       sedOfLocalFile: `sed -e "s#a#${URL}#" deploy/x.yaml | kubectl apply -f -`,
-      loopbackScalarInHeredoc: `LSN="$(kubectl exec sts/ps -- curl -s "http://localhost:9898/v1/t")"\nkubectl apply -f - <<YAML\ndata: { lsn: "$LSN" }\nYAML`,
     });
   });
 
@@ -396,6 +425,81 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     expectAllFlagged({
       httpsClone: 'git clone https://example.com/r.git work\nkubectl apply -f work/x.yaml',
       scpClone: 'git clone git@example.com:o/r.git work\nkubectl apply -f work/x.yaml',
+    });
+  });
+
+  // ---- #1410 round 7: a fetched value is never data ----------------------
+  //
+  // A value read from a loopback endpoint can still hold a newline, `---` and
+  // a whole second document. There is no "scalar" carve-out: every way a
+  // fetched value can reach an applied manifest is an offender. (The four
+  // real sites are named in STATEMENT_ALLOWLIST, below.)
+
+  const LB = 'X=$(curl -s http://localhost:8080/x)\n';
+  const LB2 = `${LB}Y=$(curl -s http://localhost:8080/y)\n`;
+  const APPLY_STDIN = 'kubectl apply -f - <<YAML\n';
+
+  it('round 7: a loopback curl piped straight into an apply is flagged', () => {
+    expectAllFlagged({
+      piped: {
+        src: 'curl -s http://127.0.0.1:9000/x | kubectl apply -f -',
+        kind: /fed by network content \(fetch command/,
+      },
+    });
+  });
+
+  it('round 7: git fetch of a loopback URL is a remote fetch', () => {
+    expectAllFlagged({
+      loopbackGitFetch: {
+        src: 'git fetch http://localhost:3000/r.git\ngit checkout FETCH_HEAD -- x.yaml\nkubectl apply -f x.yaml',
+        kind: /unclassified remote fetch \(git fetches a remote repository\)/,
+      },
+    });
+  });
+
+  it('round 7: a fetched value interpolated into an unquoted heredoc is an offender in every position', () => {
+    const inHeredoc = (body: string, pre = LB) => `${pre}${APPLY_STDIN}${body}\nYAML`;
+    const kind = /heredoc expands variable \$\w+ holds network content/;
+    expectAllFlagged({
+      // `foo\n---\nkind: ClusterRoleBinding…` in $X adds a second document.
+      field: { src: inHeredoc('name: $X'), kind },
+      quotedField: { src: inHeredoc('name: "$X"'), kind },
+      bracedField: { src: inHeredoc('name: ${X}'), kind },
+      blockScalar: { src: inHeredoc('data: |\n  $X'), kind },
+      foldedScalar: { src: inHeredoc('data: >-\n  $X'), kind },
+      listItem: { src: inHeredoc('items:\n  - $X'), kind },
+      concatenated: { src: inHeredoc('name: $X$Y', LB2), kind },
+      wholeLineQuoted: { src: inHeredoc('"$X"'), kind },
+      wholeLineBare: { src: inHeredoc('$X'), kind },
+      copiedVar: { src: inHeredoc('name: $Y', `${LB}Y="$X"\n`), kind },
+      wholeManifestCopiedIntoField: {
+        src: inHeredoc('data: "$F"', 'M=$(curl -s http://localhost:8080/m.yaml)\nF="$M"\n'),
+        kind,
+      },
+    });
+  });
+
+  it('round 7: a fetched value handed to sed / awk / yq before an apply is an offender', () => {
+    const kind = /fed by network content \(variable \$X holds network content\)/;
+    const piped = (cmd: string) => `${LB}${cmd} | kubectl apply -f -`;
+    expectAllFlagged({
+      // BSD sed: a backslash-newline in $X adds a `---` document; GNU sed: `;e cmd` runs one.
+      sedSubstitute: { src: piped('sed "s/P/$X/" t.yaml'), kind },
+      sedBraced: { src: piped('sed -e "s/P/${X}/g" -e "s/^/  /" t.yaml'), kind },
+      sedExec: { src: piped('sed "s/P/y/;$X" t.yaml'), kind },
+      awkVar: { src: piped('awk -v v="$X" \'{print} END{print v}\' t.yaml'), kind },
+      yqExpression: { src: piped('yq ".metadata.name = \\"$X\\"" t.yaml'), kind },
+    });
+  });
+
+  it('round 7: a fetched value emitted or applied as the document is an offender', () => {
+    expectAllFlagged({
+      echoed: { src: `${LB}echo "$X" | kubectl apply -f -`, kind: /fed by network content/ },
+      printfed: { src: `${LB}printf %s "$X" | kubectl apply -f -`, kind: /fed by network content/ },
+      asTarget: {
+        src: 'X=$(curl -s "$SRC")\nkubectl apply -f "$X"',
+        kind: /apply of a variable holding network content/,
+      },
     });
   });
 
@@ -517,6 +621,71 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     expect(REMOTE_FETCH_ALLOWLIST.length).toBeGreaterThan(0);
     for (const e of REMOTE_FETCH_ALLOWLIST)
       expect({ id: e.id, hits: allowHits.get(e.id) ?? 0 }).toEqual({ id: e.id, hits: 1 });
+  });
+
+  // ---- #1410 round 7: the statement allowlist (the four real interpolations) --
+
+  const readTracked = (p: string) => readFileSync(join(ROOT, p), 'utf8');
+  const scanFile = (p: string, text = readTracked(p)) =>
+    unsafeApplies(text, { file: p, resolveSource: sourceResolver(p), allowHits: new Map() });
+
+  it('round 7: the statement allowlist names exactly the four known sites', () => {
+    expect(STATEMENT_ALLOWLIST.length).toBe(4);
+    expect(new Set(STATEMENT_ALLOWLIST.map((e) => e.id)).size).toBe(4);
+    expect(
+      STATEMENT_ALLOWLIST.map((e) => `${e.file.split('/').pop()}: ${e.anchor}`).sort(),
+    ).toEqual(
+      [
+        '_restore-writable.sh: { name: CTL_B64, value: "$_ctl" }',
+        '_verify-app-restore.sh: awk -v lsn="$MODE_LSN"',
+        '_verify-objstore.sh: awk -v lsn="$STATIC_LSN"',
+        '_verify-restore.sh: awk -v lsn="$STATIC_LSN"',
+      ].sort(),
+    );
+  });
+
+  it('round 7: every statement-allowlist entry is live and its anchor occurs EXACTLY ONCE in its file', () => {
+    const { allowHits } = scanRealTree();
+    for (const e of STATEMENT_ALLOWLIST) {
+      expect({ id: e.id, live: (allowHits.get(e.id) ?? 0) > 0 }).toEqual({ id: e.id, live: true });
+      expect({ id: e.id, occurrences: readTracked(e.file).split(e.anchor).length - 1 }).toEqual({
+        id: e.id,
+        occurrences: 1,
+      });
+    }
+  });
+
+  it('round 7: removing ANY statement-allowlist entry reds the real-tree scan of its file', () => {
+    for (const e of [...STATEMENT_ALLOWLIST]) {
+      expect({ id: e.id, offenders: scanFile(e.file) }).toEqual({ id: e.id, offenders: [] });
+      const at = STATEMENT_ALLOWLIST.indexOf(e);
+      STATEMENT_ALLOWLIST.splice(at, 1);
+      try {
+        expect({ id: e.id, flagged: scanFile(e.file).length > 0 }).toEqual({
+          id: e.id,
+          flagged: true,
+        });
+      } finally {
+        STATEMENT_ALLOWLIST.splice(at, 0, e);
+      }
+    }
+    expect(STATEMENT_ALLOWLIST.length).toBe(4);
+  });
+
+  it('round 7: an entry matches its statement byte-exactly — one changed byte in the site, or the same text in another file, is an offender', () => {
+    for (const e of STATEMENT_ALLOWLIST) {
+      const text = readTracked(e.file);
+      // One extra space INSIDE the statement (a prefix/pattern match would still pass).
+      const widened = text.replace(e.anchor, e.anchor.replace(' ', '  '));
+      expect({ id: e.id, changed: widened !== text }).toEqual({ id: e.id, changed: true });
+      expect({ id: e.id, flagged: scanFile(e.file, widened).length > 0 }).toEqual({
+        id: e.id,
+        flagged: true,
+      });
+      // The allowlist is keyed by file: the same text elsewhere is not blessed.
+      const elsewhere = unsafeApplies(text, { file: 'scripts/not-the-allowlisted-file.sh' });
+      expect({ id: e.id, flagged: elsewhere.length > 0 }).toEqual({ id: e.id, flagged: true });
+    }
   });
 
   // ---- #1410 round 5, finding 3: pinned versions fail fast, by name --------

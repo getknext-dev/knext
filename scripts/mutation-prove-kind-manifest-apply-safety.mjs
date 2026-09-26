@@ -22,7 +22,10 @@
  *   round 5 — step shell / errexit:         M15 M16 M17 M18 M19 M20
  *   round 5 — unclassified remote fetch:    M21 … M31
  *   round 5 — pinned versions fail fast:    M32 M33 M34
- *   round 6 — loopback stays a taint source: M35 … M42
+ *   round 6 — loopback stays a taint source: M35 M36 M41 M42
+ *   round 7 — a fetched value is never data:  M37 M38 (no scalar exemption),
+ *             M39 M40 M43 M44 (each allowlist entry), M45 (prefix match),
+ *             M46 (file key ignored)
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -45,7 +48,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(42);
+declareMutations(46);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -326,8 +329,9 @@ prove(
 prove(
   'M35 loopback: a fetch whose every URL is loopback is no longer a taint source',
   SCANNER,
-  '    if (looseLoopback) {',
-  '    if (true) {',
+  '    if (!FETCH_WORDS.has(base)) continue;',
+  `    if (!FETCH_WORDS.has(base)) continue;
+    if (ws.some((a) => /:\\/\\//.test(a)) && ws.filter((a) => /:\\/\\//.test(a)).every(isLoopbackUrl)) continue;`,
 );
 prove(
   'M36 loopback: git fetch of a loopback URL is exempt from the remote-fetch rule',
@@ -336,28 +340,16 @@ prove(
   'const hasRemoteArg = (args) => args.some((a) => REMOTE_ARG_RE.test(a) && !isLoopbackUrl(a));',
 );
 prove(
-  'M37 loopback scalar: a scalar may be EMITTED (echo/printf) into an apply',
+  'M37 no scalar exemption: a variable interpolated into a heredoc is data, not the document',
   SCANNER,
-  "  return ws.some((w) => EMITTERS.has(unquote(w).split('/').pop()));",
-  '  return false;',
+  'for (const m of body.matchAll(/\\$\\{?([A-Za-z_]\\w*)\\}?/g)) bits.push(`echo "$${m[1]}"`);',
+  'for (const m of body.matchAll(/\\$\\{?([A-Za-z_]\\w*)\\}?/g)) bits.push(`: "$${m[1]}"`);',
 );
 prove(
-  'M38 loopback scalar: a heredoc line that is just the variable is not the whole document',
+  'M38 no scalar exemption: a fetched variable is only network content where a command emits it',
   SCANNER,
-  "wholeLine.has(m[1]) ? 'echo' : ':'",
-  "':'",
-);
-prove(
-  'M39 loopback scalar: content copied from a remote variable counts as a scalar',
-  SCANNER,
-  '      refs.every((r) => !r.content || r.scalar);',
-  '      true;',
-);
-prove(
-  'M40 loopback scalar: every content variable is a scalar (the exemption is dropped)',
-  SCANNER,
-  '  if (!v.scalar) return true;',
-  '  if (false) return true;',
+  '          if (st.vars.get(r)?.content) return `variable $${r} holds network content`;',
+  '          if (st.vars.get(r)?.content && ws.some((x) => /^(echo|printf|cat)$/.test(unquote(x)))) return `variable $${r} holds network content`;',
 );
 prove(
   'M41 clone: a clone of a local path is flagged as remote',
@@ -370,6 +362,44 @@ prove(
   SCANNER,
   "  return source !== '' && !/:\\/\\//.test(source) && !/^[^/]*:/.test(source) && !/[$`]/.test(source);",
   '  return true;',
+);
+
+// round 7 — the statement allowlist: exactly four named sites, byte-exact, per file
+prove(
+  'M39 allowlist: the _verify-objstore.sh entry is dropped',
+  SCANNER,
+  "    file: 'packages/scale-zero-pg/deploy/_verify-objstore.sh',",
+  "    file: 'packages/scale-zero-pg/deploy/dropped.sh',",
+);
+prove(
+  'M40 allowlist: the _verify-restore.sh entry is dropped',
+  SCANNER,
+  "    file: 'packages/scale-zero-pg/deploy/_verify-restore.sh',",
+  "    file: 'packages/scale-zero-pg/deploy/dropped.sh',",
+);
+prove(
+  'M43 allowlist: the _verify-app-restore.sh entry is dropped',
+  SCANNER,
+  "    file: 'packages/scale-zero-pg/deploy/_verify-app-restore.sh',",
+  "    file: 'packages/scale-zero-pg/deploy/dropped.sh',",
+);
+prove(
+  'M44 allowlist: the _restore-writable.sh entry is dropped',
+  SCANNER,
+  "    file: 'packages/scale-zero-pg/deploy/_restore-writable.sh',",
+  "    file: 'packages/scale-zero-pg/deploy/dropped.sh',",
+);
+prove(
+  'M45 allowlist: an entry matches by PREFIX instead of the whole statement',
+  SCANNER,
+  'e.file === st.file && e.statement === stmt',
+  'e.file === st.file && stmt.startsWith(e.statement.slice(0, 60))',
+);
+prove(
+  'M46 allowlist: an entry is honoured in ANY file (the file key is ignored)',
+  SCANNER,
+  'e.file === st.file && e.statement === stmt',
+  'e.statement === stmt',
 );
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);
