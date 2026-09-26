@@ -21,7 +21,16 @@ export default defineConfig([
   {
     entry: {
       // --- CLI entries -----------------------------------------------------
-      // dist/cli/kn-next.js — the bin (deploy entry)
+      // dist/cli/kn-next.js — the dispatcher bin (deploy entry). #1369: BOTH
+      // `bin.knext` and `bin.kn-next` in package.json point at this SAME
+      // file (rev-1380: a second tsup entry — even a thin runtime proxy —
+      // broke `npx @getknext/core` for every consumer; npm's default-bin
+      // picker only resolves automatically when every declared bin points at
+      // one file, proven against real npm 11.12.1). The two bin NAMES still
+      // read differently at the shell (`knext` vs `kn-next`) because npm
+      // creates two differently-named symlinks to this one file — see
+      // `isDeprecatedAliasInvocation` in shared.ts for how the deprecation
+      // notice tells them apart post-hoc, from argv, not from a second build.
       'cli/kn-next': 'src/cli/deploy.ts',
       // also ship the DOCUMENTED directly-runnable build/cleanup entries
       // (docs-site cli.mdx "Directly runnable entries")

@@ -72,13 +72,42 @@
  * backfill.
  *
  * LISTING candidates in the first place is different from fetching one:
- * `collectHistory` only ever runs when there is a flaky entry to judge, so an
- * auth/API error (`isAuthOrApiError`) listing is FATAL — throws immediately
- * (round-3 finding 2; round-2's fix made a listing failure ONE soft skip
- * with zero candidates, which meant it could never reach the threshold and
- * every such run silently warned and exited 0, i.e. the window was
- * effectively disabled the moment the token broke). Fetching one CANDIDATE's
- * summaries, once listing succeeded, still uses the softer per-run budget:
+ * `collectHistory` only ever runs when there is a flaky entry to judge, so
+ * classifying that failure correctly matters more here than anywhere else
+ * (`classifyListingError`, #1400 review — the FIRST version of this bucket
+ * used the coarser `isAuthOrApiError`, which put 401/a plain 403 in the SAME
+ * bucket as 5xx/429/a rate-limited 403, so the retry added for #1365 fired
+ * on exactly the wrong errors: fatal ones got retried, transient ones did
+ * not, and a JSON.parse failure — no HTTP status at all — fell into "retry"
+ * purely by not matching anything):
+ *
+ *   - 'fatal' (401, "authenticat…", a plain non-rate-limit 403) throws
+ *     immediately, NEVER retried (round-3 finding 2; round-2's fix made a
+ *     listing failure ONE soft skip with zero candidates, which meant it
+ *     could never reach the threshold and every such run silently warned
+ *     and exited 0, i.e. the window was effectively disabled the moment the
+ *     token broke). Not transient — retrying just delays the same failure.
+ *   - 'local' (e.g. a JSON.parse failure on gh's own output) ALSO throws
+ *     immediately, never retried, but for a different reason: a
+ *     deterministic local error cannot change on a second attempt.
+ *   - 'retryable' (5xx, 429, a RATE-LIMITED 403, DNS "could not resolve", a
+ *     connection reset, a timeout) is plausibly transient, so it gets
+ *     `LISTING_RETRY_ATTEMPTS` total attempts with exponential backoff
+ *     (`LISTING_RETRY_BASE_MS * 2^n`), or the server's own `Retry-After`
+ *     hint when `gh` surfaces one (`retryAfterMs`), before failing closed.
+ *     Still fail-closed at the end — a listing failure that PERSISTS across
+ *     every attempt is exactly as fatal as before, just no longer on the
+ *     very first blip. Each retry is logged to `warnings` so a run that
+ *     limped through a flaky network window is visible, not silently equal
+ *     to a clean one.
+ *
+ * Fetching one CANDIDATE's summaries, once listing succeeded, still
+ * uses the softer per-run budget (unchanged, still keyed on the coarser
+ * `isAuthOrApiError` — that budget's failure mode, an endless string of
+ * per-run skips, is bounded by `MAX_CONSECUTIVE_HISTORY_SKIPS` regardless of
+ * which sub-class of error caused each skip, so the fatal/retryable/local
+ * split that matters for the ONE listing call does not carry the same
+ * weight there):
  * an auth/API error there is a WARNING (that run is skipped), and
  * `MAX_CONSECUTIVE_HISTORY_SKIPS` such errors IN A ROW fail closed, rather
  * than silently returning an ever-smaller window; a successful fetch
@@ -133,8 +162,16 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+/** The SAME manifest `tests/nextjs-credential-lockstep.test.ts` guards
+ * (#1376) — read here rather than copied, so this lane's rejection check
+ * cannot silently drift from the workflow's real credentialed ref (#1376
+ * round 3 review: this constant used to be a hardcoded THIRD copy the
+ * lockstep test never saw). */
+const CREDENTIAL_MANIFEST_PATH = join(REPO_ROOT, '.github/compat-credentialed-next-version.json');
 
 export const LEDGER_FILE_CAP = 15;
 export const MAX_EXPIRY_DAYS = 30;
@@ -149,12 +186,19 @@ export const FLAKY_WINDOW = 3;
 /** The lane's workflow: its name (for `gh run list`) and its checked-out path (for `gh api`). */
 export const LANE_WORKFLOW = 'compat-vinext.yml';
 export const LANE_WORKFLOW_PATH = `.github/workflows/${LANE_WORKFLOW}`;
-/** The pinned ref this lane's credentialed runs use (`compat-vinext.yml`'s default input). */
-export const DEFAULT_NEXTJS_REF = 'v16.2.0';
+/** The pinned ref this lane's credentialed runs use (`compat-vinext.yml`'s default input),
+ * read from `.github/compat-credentialed-next-version.json` rather than hardcoded. */
+export const DEFAULT_NEXTJS_REF = JSON.parse(
+  readFileSync(CREDENTIAL_MANIFEST_PATH, 'utf8'),
+).credentialedNextRef;
 /** Every shard must be present for a run to inform the flaky window or `verify`. */
 export const EXPECTED_SHARD_TOTAL = 16;
 /** Consecutive per-run history fetch failures (auth/API errors) before `report` fails closed. */
 export const MAX_CONSECUTIVE_HISTORY_SKIPS = 3;
+/** Total attempts (including the first) for a NON-auth history-LISTING error before failing closed (#1365). Auth/API errors are never retried — see collectHistory's doc comment. */
+export const LISTING_RETRY_ATTEMPTS = 3;
+/** Backoff base, doubled per retry: attempt 2 waits this long, attempt 3 waits 2x this. */
+export const LISTING_RETRY_BASE_MS = 500;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UPSTREAM_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+$/;
@@ -529,6 +573,86 @@ export function isAuthOrApiError(err) {
 }
 
 /**
+ * Three-way classification for a LISTING (`gh run list`) failure — #1400
+ * review. `isAuthOrApiError` above answers a coarser, different question
+ * ("does this look like it came from gh's API layer at all", used by the
+ * per-RUN fetch budget) and conflating it with the LISTING retry added for
+ * #1365 retried exactly the errors that should fail fast (401/a plain
+ * permission 403) and failed fast on exactly the ones a bounded retry
+ * exists for (5xx/429/a RATE-LIMIT 403/DNS/connection reset/timeout) —
+ * because a plain 403 and a rate-limited 403 both matched the SAME `\b403\b`
+ * branch, and a JSON parse failure (a deterministic LOCAL bug, no HTTP
+ * status at all) matched NEITHER branch and fell into "retry" by default.
+ *
+ *   'fatal'     — 401, any "authenticat…" wording, or a 403 that is NOT
+ *                 itself a rate-limit response. Never retried: retrying an
+ *                 invalid/expired token just delays the identical failure.
+ *   'retryable' — 5xx, 429, a RATE-LIMIT 403, "could not resolve" (DNS),
+ *                 a connection reset, or a timeout. Plausibly transient —
+ *                 the bounded retry applies.
+ *   'local'     — everything else, e.g. a JSON.parse failure on `gh`'s own
+ *                 output. Also never retried (a deterministic local bug
+ *                 cannot change on a second attempt), but for a DIFFERENT
+ *                 reason than 'fatal' — kept as its own bucket so a caller
+ *                 can report "the API said no" and "we could not even read
+ *                 what it said" with distinct, honest messages.
+ * @param {unknown} err
+ * @returns {'fatal' | 'retryable' | 'local'}
+ */
+export function classifyListingError(err) {
+  const msg = String(err?.message ?? err ?? '');
+  // #1400 round 2 — an HTTP status is only ever meaningful right after the
+  // literal `HTTP ` gh itself prints ("HTTP 401: Bad credentials"); matching
+  // a bare `\b403\b` anywhere in the message let an UNRELATED number in the
+  // command line (a `--limit 401`, a run id) be mistaken for a status code.
+  const statusMatch = /\bHTTP\s+(\d{3})\b/.exec(msg);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const isRateLimited403 = status === 403 && /rate.?limit/i.test(msg);
+  if (status === 401 || /authenticat/i.test(msg)) return 'fatal';
+  if (status === 403 && !isRateLimited403) return 'fatal';
+  if (
+    status === 429 ||
+    (status !== null && status >= 500 && status < 600) ||
+    isRateLimited403 ||
+    /could not resolve|no such host/i.test(msg) ||
+    /connection reset|ECONNRESET|connection refused/i.test(msg) ||
+    // #1400 round 2 — real `gh`/Go network-error wordings this bucket
+    // missed: a truncated TLS/HTTP response ("unexpected EOF"), gh's own
+    // friendly network-failure banner ("error connecting to <host>"), and
+    // the Go net package's timeout suffix ("i/o timeout", distinct text
+    // from the "timeout"/"timed out" wording already matched below).
+    /error connecting to/i.test(msg) ||
+    /unexpected EOF/i.test(msg) ||
+    /i\/o timeout/i.test(msg) ||
+    /\btimeout\b|timed out|ETIMEDOUT/i.test(msg)
+  ) {
+    return 'retryable';
+  }
+  return 'local';
+}
+
+/**
+ * A `Retry-After: <seconds>`-shaped hint in an error's own text, when `gh`
+ * surfaces one (secondary rate-limit responses sometimes do). Honoured in
+ * PREFERENCE to the exponential backoff for that one attempt — the server
+ * told us exactly how long to wait, so guessing shorter just re-triggers
+ * the same limit, and guessing longer wastes the window needlessly.
+ *
+ * Capped at 60s (#1400 round 2): an implausibly large hint (a misparsed
+ * value, or a server genuinely asking for an unreasonable wait) must not
+ * turn a bounded-retry helper into an effectively-unbounded stall — this
+ * script's own LISTING_RETRY_ATTEMPTS budget assumes each wait is on the
+ * order of the exponential-backoff schedule it otherwise uses.
+ * @param {string} msg
+ * @returns {number | null} milliseconds, or null if no hint was found
+ */
+export function retryAfterMs(msg) {
+  const m = /retry.?after[:\s]+(\d+)/i.exec(msg);
+  if (!m) return null;
+  return Math.min(Number(m[1]) * 1000, 60_000);
+}
+
+/**
  * True when `gh run download` failed because the run simply has no matching
  * artifact — never uploaded (artifactless), aged past GitHub's 90-day
  * retention, or the run had zero artifacts at all. `gh` uses at least TWO
@@ -598,6 +722,21 @@ export function downloadRun(exec, { repo, runId, dir }) {
 }
 
 /**
+ * A synchronous, real backoff sleep for `collectHistory`'s listing retry
+ * (#1365) — this whole file is synchronous throughout (`execFileSync`), so
+ * `collectHistory` stays synchronous too rather than forcing every existing
+ * call site (production and the whole test suite) to become async just for
+ * this one retry loop. `Atomics.wait` genuinely blocks the calling thread
+ * for `ms`, which Node (unlike browsers) permits on the main thread. Tests
+ * inject `deps.sleep` (a no-op or a recording stub) so the retry-with-backoff
+ * behaviour is provable without a real test suite actually sleeping.
+ * @param {number} ms
+ */
+function defaultSyncSleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
  * One "step" fetching one candidate's summaries — succeeded, was skipped as
  * an auth/API error (consuming the `consecutiveSkips` budget), or is a plain
  * "not informative, keep backfilling" outcome that never touches the budget
@@ -643,12 +782,15 @@ function attemptStep(attempt, label, budget) {
  * retention) is not evidence either, and NOT a skip.
  *
  * `collectHistory` is only ever called when there IS at least one flaky
- * entry to judge (`flakyHistory` checks that first), so LISTING candidates
- * failing on an auth/API error is FATAL (throws immediately) — round-2
- * finding 2: there is nothing to fall back to, and treating a listing
- * failure as one soft skip meant every such failure warned and exited 0,
- * silently disabling the whole window. Any non-auth listing error was
- * already, and remains, never swallowed.
+ * entry to judge (`flakyHistory` checks that first). LISTING candidates
+ * failing on an auth/API error is FATAL, on the FIRST attempt, never
+ * retried — round-2 finding 2: there is nothing to fall back to, and
+ * treating a listing failure as one soft skip meant every such failure
+ * warned and exited 0, silently disabling the whole window. A NON-auth
+ * listing error (#1365 follow-up) gets `LISTING_RETRY_ATTEMPTS` total
+ * attempts with exponential backoff before it, too, fails closed — see the
+ * module doc's "#1365 follow-up" paragraph for why the two are treated
+ * differently.
  *
  * Fetching one CANDIDATE's summaries, once listing succeeded, is different:
  * an auth/API error there is a WARNING (that run is skipped), and
@@ -657,7 +799,7 @@ function attemptStep(attempt, label, budget) {
  * (informative or not) resets that budget to zero. This budget is
  * per-CALL, not persisted across separate invocations of this script — see
  * the module doc.
- * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string, createdAt?: string}[], fetchSummaries: (id: string) => any[] }} deps
+ * @param {{ list: (opts: {repo: string, currentRunId?: string, limit: number}) => {id: string, status: string, createdAt?: string}[], fetchSummaries: (id: string) => any[], sleep?: (ms: number) => void }} deps
  * @param {{ repo: string, currentRunId?: string, want: number, since?: string }} opts
  * @returns {{ history: any[][], warnings: string[] }}
  */
@@ -674,13 +816,53 @@ export function collectHistory(deps, { repo, currentRunId, want, since }) {
     },
     count: () => consecutiveSkips,
   };
+  const sleep = deps.sleep ?? defaultSyncSleep;
   let candidates;
-  try {
-    candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
-  } catch (err) {
-    if (!isAuthOrApiError(err)) throw err;
+  let listErr;
+  for (let attempt = 1; attempt <= LISTING_RETRY_ATTEMPTS; attempt++) {
+    try {
+      candidates = deps.list({ repo, currentRunId, limit: want * 4 + 10 });
+      listErr = undefined;
+      break;
+    } catch (err) {
+      const msg = String(err?.message ?? err ?? '');
+      const kind = classifyListingError(err);
+      if (kind === 'fatal') {
+        // Never retried: an expired/invalid token or a plain permission
+        // denial is not transient, and retrying it just delays the
+        // identical failure instead of surfacing it promptly.
+        throw new Error(
+          `could not list the lane's history runs (${msg}); failing closed — ` +
+            'there is nothing to backfill from and the flaky window cannot be judged',
+        );
+      }
+      if (kind === 'local') {
+        // Also never retried, but for a different reason: a deterministic
+        // local error (e.g. a JSON.parse failure on gh's own output) cannot
+        // change on a second attempt — retrying it only wastes the backoff
+        // window on a failure that was never going to clear.
+        throw new Error(
+          `could not list the lane's history runs (${msg}); failing closed — this does not look ` +
+            'like a transient API/network error, so it is not retried; there is nothing to ' +
+            'backfill from and the flaky window cannot be judged',
+        );
+      }
+      listErr = err;
+      if (attempt >= LISTING_RETRY_ATTEMPTS) break;
+      const delayMs = retryAfterMs(msg) ?? LISTING_RETRY_BASE_MS * 2 ** (attempt - 1);
+      warnings.push(
+        `listing the lane's history runs failed on attempt ${attempt}/${LISTING_RETRY_ATTEMPTS} ` +
+          `(${msg}); retrying after ${delayMs}ms`,
+      );
+      sleep(delayMs);
+    }
+  }
+  if (listErr) {
+    // Persisted across every attempt — fail closed exactly as before, just
+    // not on the very first transient blip.
     throw new Error(
-      `could not list the lane's history runs (${err?.message ?? err}); failing closed — ` +
+      `could not list the lane's history runs after ${LISTING_RETRY_ATTEMPTS} attempts ` +
+        `(${listErr?.message ?? listErr}); failing closed — ` +
         'there is nothing to backfill from and the flaky window cannot be judged',
     );
   }
@@ -712,11 +894,13 @@ const canonical = (e) =>
  * Re-derive every entry from the runs it lists and compare. Catches evidence
  * that is invented (the run does not exist), cited from another lane, cited
  * from a non-`main`/wrong-workflow run, cited with a custom ref, missing a
- * shard (never counted as a pass), or that does not say what the entry
- * claims, e.g. an unsupported entry relabelled flaky with a "passing" run
- * where the file actually failed.
+ * shard (never counted as a pass), cited from BEFORE the entry's own `added`
+ * date (#1348 — a run cannot be evidence for a quarantine window that did
+ * not exist yet), or that does not say what the entry claims, e.g. an
+ * unsupported entry relabelled flaky with a "passing" run where the file
+ * actually failed.
  * @param {any} ledger
- * @param {(runId: string) => { meta: { headBranch: string, path: string }, summaries: any[] }} fetchRun
+ * @param {(runId: string) => { meta: { headBranch: string, path: string, createdAt?: string }, summaries: any[] }} fetchRun
  * @returns {string[]}
  */
 export function verifyEvidence(ledger, fetchRun) {
@@ -753,6 +937,24 @@ export function verifyEvidence(ledger, fetchRun) {
       if (meta?.headBranch !== 'main') {
         errors.push(
           `${e.test}: evidence run ${id} is not on main (head_branch=${meta?.headBranch})`,
+        );
+        continue;
+      }
+      // #1348 — a run created before the entry's own `added` date cannot be
+      // evidence for it: the quarantine window it is cited from did not
+      // exist yet. Compared as dates (createdAt's first 10 chars,
+      // YYYY-MM-DD) against `added`, which is date-only by design
+      // (validateLedger). Only checked when both are present/well-formed —
+      // an unparseable createdAt is caught by the shape checks below it
+      // instead of silently passing here.
+      if (
+        typeof e.added === 'string' &&
+        typeof meta?.createdAt === 'string' &&
+        meta.createdAt.length >= 10 &&
+        meta.createdAt.slice(0, 10) < e.added
+      ) {
+        errors.push(
+          `${e.test}: evidence run ${id} was created (${meta.createdAt}) before the entry's added date (${e.added}) — a run cannot be evidence for a quarantine window that did not exist yet`,
         );
         continue;
       }
@@ -796,7 +998,219 @@ export function verifyEvidence(ledger, fetchRun) {
   return errors;
 }
 
+/**
+ * Whether the checkout `execGit` operates against is a SHALLOW clone
+ * (`git rev-parse --is-shallow-repository`, the documented, git-native way
+ * to ask this — never inferred from `git log`'s own output, which degrades
+ * silently on a shallow checkout rather than signalling it). `verify`
+ * MUST fail closed on `true`: `deriveAddedFromGitLog`'s whole premise is a
+ * full history on `ledgerRelPath`, and a shallow clone makes every entry
+ * look "just introduced right now" regardless of its real history (#1348,
+ * techdebt-3).
+ * @param {(args: string[]) => string} execGit
+ * @returns {boolean}
+ */
+export function isShallowRepo(execGit) {
+  return execGit(['rev-parse', '--is-shallow-repository']).trim() === 'true';
+}
+
+/**
+ * The date (YYYY-MM-DD) an entry with `test === testName` FIRST appears in
+ * `ledgerRelPath`'s git history, walked oldest-commit-first — never trusted
+ * from the entry's own `added` field, which a PR could re-date to reset the
+ * 30-day clock (#1348). `execGit` is injected (real CLI: `git`) so this is
+ * testable without a real repo.
+ *
+ * Needs FULL history (a shallow checkout, `fetch-depth: 1` — this job's old
+ * default — would only ever see the single most recent commit, making every
+ * entry look "first introduced right now" regardless of its real history),
+ * walked via `--first-parent` on the branch actually being verified, NOT
+ * `--follow` (techdebt-4 round-2 finding). Two reasons together:
+ *
+ *   1. `--follow` DROPS merge commits outright (git's own documented
+ *      behaviour — across a rename it can only follow a single parent, and
+ *      a merge commit has more than one), so a squash merge or a real
+ *      `--no-ff` merge commit could make this return null for an entry
+ *      that unquestionably IS in the branch's history — an honest entry
+ *      then fails "cannot be verified" instead of passing.
+ *   2. Walking every commit reachable (not just the branch's OWN
+ *      first-parent history) means a PR that removed-then-re-added an
+ *      entry entirely WITHIN its own branch — a sequence that never
+ *      existed as a state on the target branch itself — could reset the
+ *      derived "added" date to the PR's internal re-addition commit,
+ *      resetting the 30-day quarantine clock on churn nobody outside the
+ *      PR ever saw. `--first-parent` treats each merged PR as ONE step, so
+ *      only a GAP on the branch's own history (the entry genuinely absent
+ *      at some point after landing) counts.
+ *
+ * (Renames are out of scope for this fix — `--first-parent` does not track
+ * across a rename the way `--follow` did; this trades that narrower gap for
+ * closing the two above, which are the live, evidenced findings.)
+ *
+ * COMPOUND GAP (round-3 review): a rename ALSO resets what this function can
+ * see, which combines badly with a re-date in the SAME commit. If a PR
+ * renames `ledgerRelPath` and re-dates an entry's `added` in that one
+ * commit, the rename commit becomes the FIRST commit this walk finds for the
+ * new path — no history under the old path name is visible at all — so the
+ * derived date IS the rename commit's own date, and any `added` value at or
+ * before that date (including the rename commit's own date) passes the
+ * `e.added > derived` check with nothing to catch it. This is a real bypass
+ * of the whole verification, not just the narrower "renames aren't
+ * tracked" limitation above — recorded here rather than left implied.
+ *
+ * HONEST SCOPE LIMIT on point 2, LIVE not merely theoretical (round-3
+ * review, re-confirmed against the repo's actual settings): "treating each
+ * merged PR as ONE step" only holds when the merge itself compresses the PR
+ * into a single commit on the target branch — a squash merge, or a real
+ * `--no-ff` merge commit. `allow_rebase_merge` is on with no restriction to
+ * squash-only, AND the repo's one active branch ruleset (`main`, id
+ * 13073078) carries a `merge_queue` rule whose `merge_method` is `MERGE`
+ * (real merge commits) — but that ruleset's own `enforcement` is
+ * `"disabled"`, so that rule enforces NOTHING today. Nothing in this repo
+ * currently prevents a "rebase and merge", which — like a plain
+ * fast-forward — replays every one of the PR's individual commits directly
+ * onto the target branch's own first-parent line. A remove-then-re-add
+ * WITHIN a rebase-merged PR is therefore NOT compressed away by this fix:
+ * it would still show up as a real gap on the target branch's own history
+ * and reset the derived date to the re-addition commit, exactly the class
+ * this fix otherwise closes — this is a live, exploitable gap on this repo
+ * today, not a hypothetical one that would need a settings change to
+ * matter. Not solvable from git history alone (nothing in a rebase-merged
+ * commit sequence marks "these N commits were one PR"); closing it fully
+ * needs either enforcing squash-only merges repo-wide (a founder-level
+ * settings decision, out of scope for this function to make) or reading
+ * GitHub's PR-to-commit mapping (PR metadata this git-log-only function
+ * does not have).
+ *
+ * Returns null when no commit in the queried history contains this entry —
+ * a caller MUST treat that as "cannot verify" (an error), never as a silent
+ * pass: with a full-history checkout of the ref actually being verified,
+ * this should only happen if the entry is not committed at all.
+ * @param {(args: string[]) => string} execGit
+ * @param {string} ledgerRelPath
+ * @param {string} testName
+ * @returns {string | null}
+ */
+export function deriveAddedFromGitLog(execGit, ledgerRelPath, testName) {
+  let log;
+  try {
+    // COMMITTER date (%cI), not author date (%aI) — the committer date is
+    // what GitHub's own UI shows and is stable across a rebase/amend that
+    // only touches authorship; either way, the RAW string carries the
+    // commit's own timezone offset, never sliced directly below (see
+    // toUtcDateString) — a late-night commit in a negative-offset zone can
+    // land on a different UTC calendar date than its local one (techdebt-3).
+    log = execGit(['log', '--first-parent', '--format=%H %cI', '--', ledgerRelPath]);
+  } catch {
+    return null;
+  }
+  const commits = log
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const sp = line.indexOf(' ');
+      return { sha: line.slice(0, sp), date: line.slice(sp + 1) };
+    }); // newest first (git log's natural order) — kept newest-first below,
+  // not reversed, because the LATEST contiguous run of presence (not the
+  // first-ever appearance) is what "added" must track (see below).
+
+  /** Whether `testName` is present in `ledgerRelPath` AT this commit — false for a missing file, unparseable content, or an absent entry, never thrown. */
+  const presentAt = (sha) => {
+    let content;
+    try {
+      content = execGit(['show', `${sha}:${ledgerRelPath}`]);
+    } catch {
+      return false; // the file did not exist at this commit (e.g. a rename edge)
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return false; // not valid JSON at this point in history
+    }
+    return (parsed.entries ?? []).some((e) => e.test === testName);
+  };
+
+  // A test REMOVED and then RE-ADDED must be re-quarantinable — its `added`
+  // has to track the RE-addition, not the entry's very first-ever
+  // appearance somewhere deep in history (techdebt-3). Walk NEWEST to
+  // OLDEST; the entry must be present at the most recent commit that
+  // touched this file (otherwise it is not currently in the ledger at
+  // all — nothing to derive an `added` date FOR), then keep walking
+  // backward while it stays present, stopping at the first gap. The last
+  // commit still inside that unbroken run is where the CURRENT stint began.
+  if (commits.length === 0 || !presentAt(commits[0].sha)) return null;
+  let start = commits[0];
+  for (let i = 1; i < commits.length; i++) {
+    if (!presentAt(commits[i].sha)) break;
+    start = commits[i];
+  }
+  return toUtcDateString(start.date);
+}
+
+/**
+ * A commit date string (`git log --format=%cI`, e.g.
+ * `2026-09-24T23:30:00-07:00`) normalised to its UTC calendar date
+ * (`YYYY-MM-DD`) — via `Date`, never a raw slice of the first 10
+ * characters, which reads the date in whatever OFFSET the string itself
+ * carries, not UTC. `added` fields are UTC dates; comparing a local-offset
+ * slice against them is exactly the false-red (and false-green) class this
+ * closes (techdebt-3).
+ * @param {string} isoDateWithOffset
+ * @returns {string}
+ */
+function toUtcDateString(isoDateWithOffset) {
+  return new Date(isoDateWithOffset).toISOString().slice(0, 10);
+}
+
+/**
+ * Cross-check every entry's self-reported `added` against git history
+ * (#1348): a PR could otherwise invent evidence or silently re-date `added`
+ * FORWARD to reset the 30-day clock, and nothing short of the commit graph
+ * itself can catch a re-date (the JSON field alone is exactly what would
+ * have been edited). Every entry must resolve to SOME commit (a real one is
+ * always discoverable with a full-history checkout, since the entry's own
+ * introducing commit is part of that history). The resolved date is NOT
+ * required to equal `added` exactly (techdebt-4 round-2 finding): a squash
+ * merge or rebase moves the commit git log sees to the day the PR LANDED,
+ * which is never before the day a contributor actually wrote the entry, so
+ * an honest `added` may legitimately PRECEDE the derived date. Only `added`
+ * being LATER than the derived date is flagged — that is the only shape a
+ * forward re-date can take.
+ * @param {any} ledger
+ * @param {(args: string[]) => string} execGit
+ * @param {string} ledgerRelPath
+ * @returns {string[]}
+ */
+export function verifyAddedDates(ledger, execGit, ledgerRelPath) {
+  const errors = [];
+  for (const e of ledger.entries) {
+    const derived = deriveAddedFromGitLog(execGit, ledgerRelPath, e.test);
+    if (derived === null) {
+      errors.push(
+        `${e.test}: no commit in ${ledgerRelPath}'s git history introduces this entry — added cannot be verified (needs a full-history checkout)`,
+      );
+      continue;
+    }
+    // Only `added` being LATER than the derived date is the attack —
+    // re-dating forward to reset the 30-day clock (techdebt-4 round-2
+    // finding). `added` legitimately being EARLIER than derived is the
+    // honest, expected shape after a squash merge or rebase: the commit
+    // git history sees on main is dated the day the PR LANDED, which is
+    // never before the day a contributor actually wrote the entry. Exact
+    // equality would false-red every honest entry the next time its PR is
+    // squash-merged or rebased.
+    if (e.added > derived) {
+      errors.push(
+        `${e.test}: added (${e.added}) does not match git history — this entry first appears on main in a commit dated ${derived}; added must never be re-dated forward`,
+      );
+    }
+  }
+  return errors;
+}
+
 const gh = (a) => execFileSync('gh', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const git = (a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 /** Fetch runs into a temp dir, read their summaries, and always remove the dir. */
 function withRuns(fn) {
@@ -808,11 +1222,11 @@ function withRuns(fn) {
   }
 }
 
-/** One run's `head_branch` and checked-out workflow `path`, via `gh api`. */
+/** One run's `head_branch`, checked-out workflow `path`, and `created_at` (#1348), via `gh api`. */
 function runMeta(repo, runId) {
   const raw = gh(['api', `repos/${repo}/actions/runs/${runId}`]);
   const parsed = JSON.parse(raw);
-  return { headBranch: parsed.head_branch, path: parsed.path };
+  return { headBranch: parsed.head_branch, path: parsed.path, createdAt: parsed.created_at };
 }
 
 function args(argv, name) {
@@ -881,16 +1295,33 @@ function main(argv) {
       console.error('::error::verify needs GITHUB_REPOSITORY (owner/name) and a gh token');
       return 1;
     }
-    const failures = withRuns((root) =>
+    // techdebt-3 — deriveAddedFromGitLog's whole premise is a FULL history
+    // on the ledger file; a shallow checkout (fetch-depth: 1, or any
+    // partial clone) silently makes every entry look "just introduced
+    // right now" instead of surfacing as a re-date attack. Fail closed
+    // BEFORE trusting anything verifyAddedDates derives, never after.
+    if (isShallowRepo(git)) {
+      console.error(
+        "::error::vinext quarantine ledger — verify needs a FULL-history checkout (this one is shallow); deriveAddedFromGitLog cannot see past a shallow clone's single commit, so every entry would falsely look brand new — fetch-depth: 0 (or unshallow) before running verify",
+      );
+      return 1;
+    }
+    const evidenceFailures = withRuns((root) =>
       verifyEvidence(ledger, (id) => {
         const dir = join(root, id);
         downloadRun(gh, { repo, runId: id, dir });
         return { meta: runMeta(repo, id), summaries: readSummaries(dir) };
       }),
     );
+    // #1348 — never trust `added` from the JSON field alone; re-derive it
+    // from the ledger file's own git history.
+    const addedFailures = verifyAddedDates(ledger, git, ledgerPath);
+    const failures = [...evidenceFailures, ...addedFailures];
     for (const f of failures) console.error(`::error::vinext quarantine ledger — ${f}`);
     if (failures.length === 0)
-      console.log(`verified ${ledger.entries.length} ledger entries against their listed runs`);
+      console.log(
+        `verified ${ledger.entries.length} ledger entries against their listed runs and git history`,
+      );
     return failures.length ? 1 : 0;
   }
   if (cmd === 'apply') {

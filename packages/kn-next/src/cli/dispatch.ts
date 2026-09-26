@@ -3,13 +3,13 @@
  *
  * Two behaviours, deliberately separated:
  *
- *   - A bare `kn-next` and a flags-only `kn-next --skip-build` **deploy**. That
+ *   - A bare `knext` and a flags-only `knext --skip-build` **deploy**. That
  *     is the advertised front door (`npx @getknext/core` in every README
  *     example) and the ADR ratifies it rather than changing it. A leading `-`
  *     is a flag, never a verb.
  *   - An unrecognised first token is an **error**, not a silent deploy. Before
- *     ADR-0046, `kn-next deplyo --dry-run` ran a full deploy, and once
- *     `cleanup` became a routed verb, `kn-next celanup` did too — a typo in a
+ *     ADR-0046, `knext deplyo --dry-run` ran a full deploy, and once
+ *     `cleanup` became a routed verb, `knext celanup` did too — a typo in a
  *     teardown command shipping a deploy is the same hazard class this CLI
  *     surface work set out to remove.
  *
@@ -92,7 +92,7 @@ export function suggestVerb(input: string): string | undefined {
 /**
  * The message for a stray positional on the DEFAULT deploy path.
  *
- * `parseArgs` accepted positionals and ignored them, so `kn-next -n prod
+ * `parseArgs` accepted positionals and ignored them, so `knext -n prod
  * cleanup` deployed to prod with the verb silently swallowed — the same
  * "opposite action" hazard as an unknown first token, reached through the
  * flags-first door. When the swallowed word IS a verb, the fix the user needs
@@ -105,23 +105,23 @@ export function formatStrayPositional(token: string): string {
     if (KNOWN_VERBS.has(token)) {
         lines.push(
             `\`${token}\` is a command, and the command comes first:`,
-            `  kn-next ${token} [options]`,
+            `  knext ${token} [options]`,
         );
     } else {
         const suggestion = suggestVerb(token);
         if (suggestion) {
             lines.push(
                 `Did you mean the \`${suggestion}\` command? It comes first:`,
-                `  kn-next ${suggestion} [options]`,
+                `  knext ${suggestion} [options]`,
             );
         } else {
             lines.push(
-                "kn-next deploy takes no positional arguments — the app it deploys",
+                "knext deploy takes no positional arguments — the app it deploys",
                 "comes from kn-next.config.ts in the current directory.",
             );
         }
     }
-    lines.push("", "Run `kn-next --help` to see the available commands.");
+    lines.push("", "Run `knext --help` to see the available commands.");
     return `${lines.join("\n")}\n`;
 }
 
@@ -135,8 +135,8 @@ export function formatUnknownCommand(input: string): string {
         input === "" || /\s/.test(input) ? JSON.stringify(input) : input;
     return `${[
         `unknown command: ${display}`,
-        ...(suggestion ? ["", `Did you mean: kn-next ${suggestion}?`] : []),
+        ...(suggestion ? ["", `Did you mean: knext ${suggestion}?`] : []),
         "",
-        "Run `kn-next --help` to see the available commands.",
+        "Run `knext --help` to see the available commands.",
     ].join("\n")}\n`;
 }

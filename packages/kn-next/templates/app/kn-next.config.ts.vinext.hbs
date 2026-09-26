@@ -10,9 +10,9 @@ const config: KnativeNextConfig = {
 
   // This scaffold builds with vinext (the Vite/rolldown Next reimplementation,
   // compiled to a single Bun executable) — see vite.config.ts and Dockerfile.
-  // You asked for it explicitly with `kn-next create --builder vinext`.
+  // You asked for it explicitly with `knext create --builder vinext`.
   // knext's CLI default is "turbopack" (`next build` -> a standalone runtime
-  // image, ADR-0058) — `kn-next create` (no --builder flag) scaffolds that
+  // image, ADR-0058) — `knext create` (no --builder flag) scaffolds that
   // shape instead. `build` is pinned here so this app stays internally
   // consistent with its own vinext-shaped next.config.ts and Dockerfile
   // rather than silently inheriting the ambient default.

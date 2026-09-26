@@ -429,7 +429,7 @@ describe("#1279 deploy.ts's isEntrypoint dispatcher — the usage-error path (de
         expect(handleConfigNotFoundCalls).toHaveLength(1);
         expect(fatal).not.toHaveBeenCalled();
         expect(capturedWrites.join("")).toContain("--bogus");
-        expect(capturedWrites.join("")).toContain("kn-next --help");
+        expect(capturedWrites.join("")).toContain("knext --help");
     });
 });
 

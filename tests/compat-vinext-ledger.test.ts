@@ -41,8 +41,10 @@ import { buildLedger, renderTable } from '../scripts/compat-run-ledger.mjs';
 import {
   applyLedger,
   CLASSES,
+  classifyListingError,
   collectHistory,
   DEFAULT_NEXTJS_REF,
+  deriveAddedFromGitLog,
   downloadRun,
   EXPECTED_SHARD_TOTAL,
   FLAKY_FILE_CAP,
@@ -52,16 +54,21 @@ import {
   isAuthOrApiError,
   isCompleteDefaultRun,
   isNoArtifactError,
+  isShallowRepo,
   LEDGER_FILE_CAP,
+  LISTING_RETRY_ATTEMPTS,
+  LISTING_RETRY_BASE_MS,
   MAX_CONSECUTIVE_HISTORY_SKIPS,
   MAX_EXPIRY_DAYS,
   previousRunCandidates,
   publishedNumber,
   readSummaries,
   refreshSnapshots,
+  retryAfterMs,
   skippedWarnings,
   staleEntries,
   validateLedger,
+  verifyAddedDates,
   verifyEvidence,
 } from '../scripts/compat-vinext-ledger.mjs';
 
@@ -741,17 +748,222 @@ describe('collectHistory: backfill past uninformative runs, fail closed on repea
     // reach the 3-consecutive threshold and every such run silently passed.
     expect(() =>
       collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
-    ).toThrow(/could not list.*401/);
+    ).toThrow(/could not list[\s\S]*401/);
   });
 
-  it('a non-auth listing error is never swallowed either', () => {
+  // #1400 review — every listing-error fixture below uses a REALISTIC `gh`
+  // stderr string (the shape `gh` actually prints, "Command failed: gh run
+  // list ... HTTP <code>: <reason>"), never a raw Node network-error string
+  // like `ECONNRESET`/`ENOTFOUND` — `gh` wraps those in its own wording
+  // before they ever reach this script, so testing against the RAW Node
+  // shape proves nothing about what classifyListingError actually has to
+  // parse in production.
+  const GH_502 =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 502: Bad Gateway (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  // Realistic Go/gh network-error wordings (#1400 round 2) — "could not
+  // resolve host" was this suite's OWN invention, not what `gh`'s Go HTTP
+  // stack actually prints. The real shapes, verified against gh's own
+  // source/observed output:
+  //   - DNS failure:        "dial tcp: lookup api.github.com: no such host"
+  //   - refused connection: "dial tcp ...: connect: connection refused"
+  //   - truncated response:  "unexpected EOF"
+  //   - a Go net timeout:    "dial tcp: i/o timeout"
+  //   - gh's own friendly network-failure banner: "error connecting to
+  //     api.github.com"
+  const GH_DNS =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp: lookup api.github.com: no such host';
+  const GH_CONN_REFUSED =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp 140.82.121.6:443: connect: connection refused';
+  const GH_UNEXPECTED_EOF =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": unexpected EOF';
+  const GH_IO_TIMEOUT =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nGet "https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs": dial tcp: i/o timeout';
+  const GH_ERROR_CONNECTING =
+    'error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com';
+  const GH_401 =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 401: Bad credentials (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  const GH_403_PERMISSION =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  const GH_403_RATE_LIMIT =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 46 --json databaseId,status,createdAt\nHTTP 403: API rate limit exceeded for installation ID 123456. (https://api.github.com/repos/o/r/actions/workflows/compat-vinext.yml/runs)';
+  const GH_JSON_PARSE = 'unexpected: JSON.parse failed on gh run list output';
+  // #1400 round 2 — a status code must NOT match from an unrelated number in
+  // the command line (a --limit value, a run id, a port). No "HTTP NNN"
+  // prefix anywhere in this message, so it must fall through to 'local', not
+  // 'fatal' or 'retryable' by accident of "401" or "403" appearing bounded
+  // by word boundaries somewhere in the text.
+  const GH_NUMBER_IN_COMMAND_LINE =
+    'Command failed: gh run list --workflow compat-vinext.yml --branch main --repo o/r --limit 401 --json databaseId,status,createdAt\nsome unrelated local failure unpacking run 403 from the response';
+
+  it("classifyListingError: 'fatal' for 401, a plain 403, and 'authenticat...' wording — never retried (#1400)", () => {
+    expect(classifyListingError(new Error(GH_401))).toBe('fatal');
+    expect(classifyListingError(new Error(GH_403_PERMISSION))).toBe('fatal');
+    expect(classifyListingError(new Error('gh: authentication required'))).toBe('fatal');
+  });
+
+  it("classifyListingError: 'retryable' for 5xx, 429, a RATE-LIMIT 403, DNS, connection reset, timeout (#1400)", () => {
+    expect(classifyListingError(new Error(GH_502))).toBe('retryable');
+    expect(classifyListingError(new Error('HTTP 429: too many requests'))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_403_RATE_LIMIT))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_DNS))).toBe('retryable');
+    expect(classifyListingError(new Error('read: connection reset by peer'))).toBe('retryable');
+    expect(classifyListingError(new Error('context deadline exceeded (Client.Timeout)'))).toBe(
+      'retryable',
+    );
+  });
+
+  it("classifyListingError: 'retryable' for the real gh/Go network wordings round 2 found missing (#1400 round 2)", () => {
+    expect(classifyListingError(new Error(GH_CONN_REFUSED))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_UNEXPECTED_EOF))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_IO_TIMEOUT))).toBe('retryable');
+    expect(classifyListingError(new Error(GH_ERROR_CONNECTING))).toBe('retryable');
+  });
+
+  it("classifyListingError: 'local' for a JSON parse failure — not an HTTP/network shape at all (#1400)", () => {
+    expect(classifyListingError(new Error(GH_JSON_PARSE))).toBe('local');
+  });
+
+  it('classifyListingError: a bare number in the command line (a --limit value, a run id) is NOT mistaken for an HTTP status (#1400 round 2)', () => {
+    expect(classifyListingError(new Error(GH_NUMBER_IN_COMMAND_LINE))).toBe('local');
+  });
+
+  it('retryAfterMs: parses a Retry-After hint from the error text when gh surfaces one, else null (#1400)', () => {
+    expect(retryAfterMs('secondary rate limit hit. retry after: 30')).toBe(30_000);
+    expect(retryAfterMs('Retry-After 12')).toBe(12_000);
+    expect(retryAfterMs(GH_502)).toBeNull();
+  });
+
+  it('retryAfterMs: caps an implausibly large Retry-After hint at 60s, never waits longer (#1400 round 2)', () => {
+    expect(retryAfterMs('Retry-After 300')).toBe(60_000);
+    expect(retryAfterMs('secondary rate limit hit. retry after: 3600')).toBe(60_000);
+    // Under the cap is untouched.
+    expect(retryAfterMs('Retry-After 45')).toBe(45_000);
+  });
+
+  it('a LOCAL listing error (JSON parse failure) is never swallowed and NEVER retried — distinct from a retryable one (#1400)', () => {
+    let calls = 0;
     const list = () => {
-      throw new Error('unexpected: JSON.parse failed');
+      calls += 1;
+      throw new Error(GH_JSON_PARSE);
     };
     const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    // sleep: (ms) => sleeps.push(ms) — asserted empty below: a local/
+    // deterministic failure must not cost a single backoff wait.
     expect(() =>
-      collectHistory({ list, fetchSummaries }, { repo: 'o/r', currentRunId: '11', want: 1 }),
-    ).toThrow(/unexpected/);
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(/does not look like a transient API\/network error/);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it(`a persisting RETRYABLE listing error (HTTP 502) is retried exactly ${LISTING_RETRY_ATTEMPTS} times total (${LISTING_RETRY_ATTEMPTS - 1} retries) before failing closed, and the failure message says so (#1365/#1400)`, () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error(GH_502);
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(new RegExp(`after ${LISTING_RETRY_ATTEMPTS} attempts[\\s\\S]*HTTP 502`));
+    expect(calls).toBe(LISTING_RETRY_ATTEMPTS);
+    // Exponential backoff: base, 2x base, 4x base, ... — one sleep between
+    // each pair of attempts, so ATTEMPTS-1 sleeps total, never one PER
+    // attempt (that would sleep needlessly after the last, doomed attempt).
+    expect(sleeps).toHaveLength(LISTING_RETRY_ATTEMPTS - 1);
+    expect(sleeps).toEqual(
+      Array.from({ length: LISTING_RETRY_ATTEMPTS - 1 }, (_, i) => LISTING_RETRY_BASE_MS * 2 ** i),
+    );
+  });
+
+  it('a RETRYABLE listing error (DNS) that clears on the SECOND attempt succeeds — the retry is what makes this NOT red (#1365/#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      if (calls === 1) throw new Error(GH_DNS);
+      return [candidate('10'), candidate('9')];
+    };
+    const fetchSummaries = (id: string) =>
+      fullRun({
+        shard: '1/16',
+        failed: id === '10' ? 1 : 0,
+        failures: id === '10' ? ['a.spec.ts'] : [],
+      });
+    const sleeps: number[] = [];
+    const { history, warnings } = collectHistory(
+      { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+      { repo: 'o/r', currentRunId: '11', want: 2 },
+    );
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([LISTING_RETRY_BASE_MS]);
+    expect(history).toHaveLength(2);
+    // The blip is visible in warnings — a run that limped through a flaky
+    // network window must not read identically to a clean first-try run
+    // (the same discipline this repo's other retry-with-backoff guards use).
+    expect(warnings.some((w) => /attempt 1[\s\S]*no such host[\s\S]*retrying/.test(w))).toBe(true);
+  });
+
+  it('a RETRY-AFTER hint (a rate-limited 403 with a numeric wait) is honoured in PREFERENCE to the exponential backoff (#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error(`${GH_403_RATE_LIMIT}\nsecondary rate limit hit. retry after: 7 seconds`);
+      }
+      return [candidate('10')];
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    collectHistory(
+      { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+      { repo: 'o/r', currentRunId: '11', want: 1 },
+    );
+    // 7s from the hint, NOT LISTING_RETRY_BASE_MS from the exponential default.
+    expect(sleeps).toEqual([7_000]);
+  });
+
+  it('a FATAL listing error (401) is NEVER retried — fails closed on the very first attempt (#1365/#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error(GH_401);
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(/could not list[\s\S]*401/);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('a FATAL listing error (plain permission 403, not rate-limited) is NEVER retried (#1400)', () => {
+    let calls = 0;
+    const list = () => {
+      calls += 1;
+      throw new Error(GH_403_PERMISSION);
+    };
+    const fetchSummaries = () => fullRun({ shard: '1/16', failed: 0, failures: [] });
+    const sleeps: number[] = [];
+    expect(() =>
+      collectHistory(
+        { list, fetchSummaries, sleep: (ms) => sleeps.push(ms) },
+        { repo: 'o/r', currentRunId: '11', want: 1 },
+      ),
+    ).toThrow(/could not list[\s\S]*403/);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
   });
 
   it('a "no artifact" failure downloading a run is NOT an auth/API error: skipped, not warned, not a fail-closed contributor', () => {
@@ -1074,6 +1286,10 @@ describe('verifyEvidence: every entry re-derives from the branch/workflow/ref/sh
   const meta = (over: Record<string, unknown> = {}) => ({
     headBranch: 'main',
     path: WORKFLOW,
+    // #1348 — safely AFTER every default entry() fixture's `added`
+    // ('2026-09-24') so the existing "clean verify" tests are unaffected;
+    // overridden per-run below for the before-added test.
+    createdAt: '2026-09-25T00:00:00Z',
     ...over,
   });
   const RUNS: Record<string, Any> = {
@@ -1104,6 +1320,12 @@ describe('verifyEvidence: every entry re-derives from the branch/workflow/ref/sh
     },
     '109': { meta: meta(), summaries: vinextRun().slice(0, 15) }, // missing a shard
     '110': { meta: meta(), summaries: vinextRun({ ref: 'v16.3.0-canary' }) }, // custom ref
+    // #1348 — a real run, correctly on main/this workflow/default ref/full
+    // shard set, but created WELL BEFORE the entry's own `added` date.
+    '111': {
+      meta: meta({ createdAt: '2026-08-01T00:00:00Z' }),
+      summaries: vinextRun({ failures: [{ file: NAV, kind: 'timeout', cases: ['hash'] }] }),
+    },
   };
   const fetchRun = (id: string) => {
     if (!RUNS[id]) throw new Error(`run ${id} not found`);
@@ -1181,6 +1403,539 @@ describe('verifyEvidence: every entry re-derives from the branch/workflow/ref/sh
     const other = navEntry(['hash']);
     other.evidence = { fail: [{ run: '104', cases: ['hash'] }], pass: ['110', '106'] };
     expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(/default nextjsRef/);
+  });
+
+  // #1348 — a run created BEFORE the entry's own `added` date cannot be
+  // evidence for it: the quarantine window did not exist yet when that run
+  // happened.
+  it("a run created before the entry's added date cannot be cited", () => {
+    const other = navEntry(['hash']);
+    other.evidence = { fail: [{ run: '111', cases: ['hash'] }], pass: ['105', '106'] };
+    expect(verifyEvidence(ledger([other]), fetchRun).join()).toMatch(
+      /before the entry's added date/,
+    );
+  });
+
+  it("a run created ON the entry's added date (same day) IS accepted — the check is inclusive", () => {
+    const other = navEntry(['hash']);
+    other.evidence = {
+      fail: [{ run: '104', cases: ['hash'] }],
+      pass: ['105', '106'],
+    };
+    // meta()'s default createdAt ('2026-09-25') is the day AFTER the
+    // default entry()'s added ('2026-09-24') — this case exercises the
+    // boundary directly by citing a run created exactly on `added`.
+    const sameDayRuns: Record<string, Any> = {
+      ...RUNS,
+      '104': { ...RUNS['104'], meta: meta({ createdAt: `${other.added}T23:59:59Z` }) },
+    };
+    const fetchSameDay = (id: string) => {
+      if (!sameDayRuns[id]) throw new Error(`run ${id} not found`);
+      return sameDayRuns[id];
+    };
+    expect(verifyEvidence(ledger([other]), fetchSameDay).join()).not.toMatch(
+      /before the entry's added date/,
+    );
+  });
+});
+
+describe('deriveAddedFromGitLog: the FIRST commit introducing an entry, never the JSON field (#1348)', () => {
+  const LEDGER_REL_PATH = 'test/compat-vinext-ledger.json';
+
+  // A fake `git` — canned `log --follow --format=%H %aI` output plus
+  // per-SHA `show <sha>:<path>` content, matching the exact two commands
+  // deriveAddedFromGitLog issues (proving the function against its REAL
+  // git-invocation shape, not a hand-simplified stand-in).
+  function fakeGit(
+    commits: { sha: string; date: string }[],
+    contentBySha: Record<string, string>,
+  ): (args: string[]) => string {
+    return (args: string[]) => {
+      if (args[0] === 'log') {
+        return commits.map((c) => `${c.sha} ${c.date}`).join('\n');
+      }
+      if (args[0] === 'show') {
+        const spec = args[1] ?? '';
+        const sha = spec.split(':')[0];
+        if (!(sha in contentBySha)) throw new Error(`fatal: path does not exist in ${sha}`);
+        return contentBySha[sha];
+      }
+      throw new Error(`unexpected git invocation: ${args.join(' ')}`);
+    };
+  }
+
+  it('returns the date of the OLDEST commit (by git log order, newest-first) whose content includes the entry', () => {
+    // git log lists newest first — c3, c2, c1 — the function must walk it
+    // in REVERSE (oldest first) to find the true FIRST introduction.
+    const execGit = fakeGit(
+      [
+        { sha: 'c3', date: '2026-09-24T10:00:00+00:00' },
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' },
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' },
+      ],
+      {
+        c1: JSON.stringify({ entries: [] }),
+        c2: JSON.stringify({ entries: [{ test: SHELLS }] }),
+        c3: JSON.stringify({ entries: [{ test: SHELLS }] }),
+      },
+    );
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-10');
+  });
+
+  it('returns null when no commit in history contains the entry', () => {
+    const execGit = fakeGit([{ sha: 'c1', date: '2026-09-01T10:00:00+00:00' }], {
+      c1: JSON.stringify({ entries: [] }),
+    });
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBeNull();
+  });
+
+  it('returns null when `git log` itself fails (e.g. a shallow checkout with no history at all)', () => {
+    const execGit = () => {
+      throw new Error('fatal: not a git repository');
+    };
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBeNull();
+  });
+
+  it('skips a commit whose content is not valid JSON at that point in history, and keeps looking forward', () => {
+    const execGit = fakeGit(
+      [
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' },
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' },
+      ],
+      {
+        c1: 'not valid json at all',
+        c2: JSON.stringify({ entries: [{ test: SHELLS }] }),
+      },
+    );
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-10');
+  });
+
+  // techdebt-3 round — two more gaps.
+  //
+  // (a) A commit's AUTHOR date (`%aI`) carries the AUTHOR's local timezone
+  // offset, and the old code sliced the first 10 characters of that raw
+  // string — which reads the LOCAL-ZONE calendar date, not the UTC one
+  // `added` is recorded in. A commit made late at night in a negative-offset
+  // zone can be a DIFFERENT UTC date than its local one. Fixed by switching
+  // to the COMMITTER date (`%cI` — what GitHub's own UI shows, and stable
+  // across a rebase/amend that only touches authorship) and normalising via
+  // `Date`/`toISOString`, never a raw string slice.
+  it('normalises a non-UTC offset commit date to its UTC calendar date, not a raw string slice of the local offset', () => {
+    // 23:30 on 2026-09-24 at UTC-07:00 is 06:30 UTC on 2026-09-25 — a raw
+    // slice of the offset string reads "2026-09-24" (WRONG); UTC
+    // normalisation reads "2026-09-25" (correct).
+    const execGit = fakeGit([{ sha: 'c1', date: '2026-09-24T23:30:00-07:00' }], {
+      c1: JSON.stringify({ entries: [{ test: SHELLS }] }),
+    });
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-25');
+  });
+
+  // (b) A test REMOVED and then RE-ADDED could never be re-quarantined: the
+  // old code returned the FIRST-EVER commit containing the entry (walking
+  // oldest-to-newest, stopping at the first hit), so a re-added entry's
+  // `added` date would always be judged against its ORIGINAL introduction,
+  // even if it was absent from the ledger for months in between. Fixed by
+  // returning the start of the LATEST CONTIGUOUS run of presence — walking
+  // newest-to-oldest and stopping at the first gap.
+  it('returns the start of the LATEST contiguous run, not the first-ever appearance, when an entry was removed then re-added', () => {
+    const execGit = fakeGit(
+      [
+        { sha: 'c3', date: '2026-09-24T10:00:00+00:00' }, // re-added here
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' }, // REMOVED (gap)
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' }, // originally added here
+      ],
+      {
+        c1: JSON.stringify({ entries: [{ test: SHELLS }] }),
+        c2: JSON.stringify({ entries: [] }), // the gap
+        c3: JSON.stringify({ entries: [{ test: SHELLS }] }),
+      },
+    );
+    // NOT '2026-09-01' (the original, now-irrelevant introduction) —
+    // '2026-09-24', the re-addition that starts the CURRENT run.
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBe('2026-09-24');
+  });
+
+  it('returns null (not the stale historical date) when the entry was removed and never re-added — absent at the most recent commit', () => {
+    const execGit = fakeGit(
+      [
+        { sha: 'c2', date: '2026-09-10T10:00:00+00:00' }, // removed, currently absent
+        { sha: 'c1', date: '2026-09-01T10:00:00+00:00' }, // was present once
+      ],
+      {
+        c1: JSON.stringify({ entries: [{ test: SHELLS }] }),
+        c2: JSON.stringify({ entries: [] }),
+      },
+    );
+    expect(deriveAddedFromGitLog(execGit, LEDGER_REL_PATH, SHELLS)).toBeNull();
+  });
+});
+
+describe('deriveAddedFromGitLog against a REAL temp git repo (techdebt-3 — not just a fake git)', () => {
+  function realGitRepo(): { dir: string; execGit: (args: string[]) => string } {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-git-history-'));
+    const run = (args: string[], env?: Record<string, string>) =>
+      execFileSync('git', args, {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+      });
+    run(['init', '-q']);
+    run(['config', 'user.email', 'test@example.com']);
+    run(['config', 'user.name', 'Test']);
+    run(['config', 'commit.gpgsign', 'false']);
+    const execGit = (args: string[]) => run(args);
+    return { dir, execGit };
+  }
+
+  function commitLedger(dir: string, relPath: string, content: unknown, isoDate: string) {
+    writeFileSync(join(dir, relPath), `${JSON.stringify(content)}\n`);
+    execFileSync('git', ['add', relPath], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', 'ledger update'], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: isoDate,
+        GIT_COMMITTER_DATE: isoDate,
+      },
+    });
+  }
+
+  it('derives the correct date from a real 3-commit history (add, unrelated no-op, no gap)', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      commitLedger(dir, relPath, { entries: [] }, '2026-09-01T10:00:00+00:00');
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-10T10:00:00+00:00');
+      // An unrelated content change (a second, irrelevant entry) — the
+      // point of this third commit is that it must NOT move the derived
+      // date, since SHELLS was already present in the previous commit.
+      commitLedger(
+        dir,
+        relPath,
+        { entries: [{ test: SHELLS }, { test: 'unrelated-noop-entry' }] },
+        '2026-09-15T10:00:00+00:00',
+      );
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-10');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a real remove-then-re-add sequence resolves to the RE-ADDITION commit, not the original one', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-01T10:00:00+00:00'); // original add
+      commitLedger(dir, relPath, { entries: [] }, '2026-09-10T10:00:00+00:00'); // removed
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-20T10:00:00+00:00'); // re-added
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-20');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * techdebt-4 round-2 findings 2+3: `--follow` DROPS merge commits (git's
+   * own documented behaviour — it only ever follows a SINGLE parent across
+   * a rename, and a merge commit has more than one), so a non-linear
+   * history could make `deriveAddedFromGitLog` return null for an entry
+   * that unquestionably IS in main's history — an honest entry then fails
+   * "cannot be verified" instead of passing. Separately, walking every
+   * commit reachable (not just main's own first-parent history) means a
+   * PR that removed-then-re-added an entry WITHIN its own branch — a
+   * sequence that never actually existed as a state on `main` — could
+   * still reset the derived "added" date to the PR's own internal
+   * re-addition commit. Both close together: derive strictly from main's
+   * `--first-parent` history, treating each merged PR as ONE step, with no
+   * `--follow` (renames are out of scope for this fix; only real git
+   * — not a canned fixture — can prove a merge commit is not silently
+   * dropped, since `--follow`'s merge-dropping behaviour is git's own
+   * plumbing, not something a fake `execGit` could either exhibit or hide).
+   */
+  function initialBranchName(dir: string): string {
+    return execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+      cwd: dir,
+      encoding: 'utf8',
+    }).trim();
+  }
+
+  function mergeFeatureBranch(
+    dir: string,
+    relPath: string,
+    baseContent: unknown,
+    baseDate: string,
+    featureCommits: { content: unknown; date: string }[],
+    mergeDate: string,
+  ) {
+    commitLedger(dir, relPath, baseContent, baseDate);
+    const base = initialBranchName(dir);
+    execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: dir });
+    for (const { content, date } of featureCommits) {
+      commitLedger(dir, relPath, content, date);
+    }
+    execFileSync('git', ['checkout', '-q', base], { cwd: dir });
+    execFileSync('git', ['merge', '--no-ff', '-q', '-m', 'merge feature', 'feature'], {
+      cwd: dir,
+      env: { ...process.env, GIT_AUTHOR_DATE: mergeDate, GIT_COMMITTER_DATE: mergeDate },
+    });
+  }
+
+  it('resolves through a REAL merge commit (non-linear history) — --follow alone would drop it and return null', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      mergeFeatureBranch(
+        dir,
+        relPath,
+        { entries: [] },
+        '2026-09-01T10:00:00+00:00',
+        [{ content: { entries: [{ test: SHELLS }] }, date: '2026-09-05T10:00:00+00:00' }],
+        '2026-09-10T10:00:00+00:00', // the PR lands on main 5 days later
+      );
+      // On main's first-parent history the entry first appears at the
+      // MERGE commit (main's own base commit had no entries) — the feature
+      // branch's own internal commit date is not directly reachable via
+      // first-parent, which is the whole point: main's history is what
+      // matters, not a branch that was never itself `main`.
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-10');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a remove-then-re-add INSIDE one PR (never a distinct state on main) does not reset the derived date', () => {
+    const { dir, execGit } = realGitRepo();
+    const relPath = 'ledger.json';
+    try {
+      // main already carries the entry BEFORE this PR starts.
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-01T10:00:00+00:00');
+      const base = initialBranchName(dir);
+      execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: dir });
+      // The PR branch removes it, then re-adds it — net no-op — entirely
+      // WITHIN the branch; main itself never shows the entry absent.
+      commitLedger(dir, relPath, { entries: [] }, '2026-09-05T10:00:00+00:00');
+      commitLedger(dir, relPath, { entries: [{ test: SHELLS }] }, '2026-09-06T10:00:00+00:00');
+      execFileSync('git', ['checkout', '-q', base], { cwd: dir });
+      execFileSync('git', ['merge', '--no-ff', '-q', '-m', 'merge feature', 'feature'], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: '2026-09-10T10:00:00+00:00',
+          GIT_COMMITTER_DATE: '2026-09-10T10:00:00+00:00',
+        },
+      });
+      // Must still resolve to the ORIGINAL 2026-09-01 commit — main's own
+      // first-parent history never shows a gap (the removal only ever
+      // existed inside the feature branch, never as a state main was
+      // actually at), so the "latest contiguous run" logic must not treat
+      // this PR's internal churn as a reset.
+      expect(deriveAddedFromGitLog(execGit, relPath, SHELLS)).toBe('2026-09-01');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Round-3 review finding: a rename COMBINED with a re-date in the same
+   * commit is a real bypass, not just the narrower "renames aren't tracked"
+   * limitation the function's own doc comment already states. Pinned here
+   * as a KNOWN, documented limitation (not a regression to fix in this
+   * round) — see the "COMPOUND GAP" note on deriveAddedFromGitLog's doc
+   * comment.
+   */
+  it('KNOWN LIMITATION: a rename that also re-dates `added` in the SAME commit is not caught — the rename becomes the earliest visible commit for the new path', () => {
+    const { dir, execGit } = realGitRepo();
+    const oldPath = 'ledger.json';
+    const newPath = 'renamed-ledger.json';
+    try {
+      // The entry has REALLY been in the ledger since 2026-01-01 — under
+      // the old filename.
+      commitLedger(dir, oldPath, { entries: [{ test: SHELLS }] }, '2026-01-01T10:00:00+00:00');
+      // One commit does BOTH: renames the file AND forges a much later
+      // `added` date for the same entry — the attack this pin documents.
+      writeFileSync(
+        join(dir, newPath),
+        `${JSON.stringify({ entries: [{ test: SHELLS, added: '2026-09-20' }] })}\n`,
+      );
+      execFileSync('git', ['rm', '-q', oldPath], { cwd: dir });
+      execFileSync('git', ['add', newPath], { cwd: dir });
+      execFileSync('git', ['commit', '-q', '-m', 'rename + re-date'], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: '2026-09-20T10:00:00+00:00',
+          GIT_COMMITTER_DATE: '2026-09-20T10:00:00+00:00',
+        },
+      });
+      // `--first-parent` (no `--follow`) sees NOTHING under the old path —
+      // the rename commit is the only, and therefore "first", commit this
+      // walk finds for the NEW path, so it resolves to the rename commit's
+      // own date, not the entry's real 2026-01-01 introduction.
+      expect(deriveAddedFromGitLog(execGit, newPath, SHELLS)).toBe('2026-09-20');
+      // Which means the forged `added: '2026-09-20'` in the ledger content
+      // passes verifyAddedDates cleanly — added === derived, no error —
+      // even though the entry's real history goes back to January.
+      const errors = verifyAddedDates(
+        { entries: [{ test: SHELLS, added: '2026-09-20' }] },
+        execGit,
+        newPath,
+      );
+      expect(errors).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * `isShallowRepo` (techdebt-3) — `deriveAddedFromGitLog`'s whole premise
+ * (walking a ledger file's FULL git history) is silently defeated by a
+ * shallow checkout: `git log` on a `--depth=1` clone only ever sees the
+ * single most recent commit, so every entry looks "just introduced right
+ * now" regardless of its real history — the exact false-pass a shallow
+ * checkout was already called out as needing (`deriveAddedFromGitLog`'s own
+ * doc comment). `verify` must fail closed rather than silently accept a
+ * shallow clone's uninformative answer.
+ */
+describe('isShallowRepo: detects a shallow clone so verify can fail closed rather than trust a truncated history (techdebt-3)', () => {
+  function fakeGit(output: string): (args: string[]) => string {
+    return (args: string[]) => {
+      if (args[0] === 'rev-parse' && args[1] === '--is-shallow-repository') return output;
+      throw new Error(`unexpected git invocation: ${args.join(' ')}`);
+    };
+  }
+
+  it('returns true for a shallow repository', () => {
+    expect(isShallowRepo(fakeGit('true'))).toBe(true);
+  });
+
+  it('returns false for a full (unshallow) repository', () => {
+    expect(isShallowRepo(fakeGit('false'))).toBe(false);
+  });
+
+  it('tolerates trailing whitespace/newline in the git output', () => {
+    expect(isShallowRepo(fakeGit('true\n'))).toBe(true);
+    expect(isShallowRepo(fakeGit('false\n'))).toBe(false);
+  });
+
+  it('a real (unshallow) temp git repo reports false', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-shallow-check-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+      execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: dir });
+      writeFileSync(join(dir, 'x.txt'), 'x');
+      execFileSync('git', ['add', 'x.txt'], { cwd: dir });
+      execFileSync('git', ['commit', '-q', '-m', 'x'], { cwd: dir });
+      const execGit = (args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+      expect(isShallowRepo(execGit)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a real SHALLOW clone (--depth=1 of the real repo) reports true', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-shallow-clone-'));
+    try {
+      execFileSync('git', ['clone', '-q', '--depth=1', `file://${repoRoot}`, dir]);
+      const execGit = (args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+      expect(isShallowRepo(execGit)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The CLI `verify` command's own `main()` is not exported (no test in this
+// file exercises the CLI dispatch directly, for `verify` or any other
+// subcommand) — this is a SCAN of the wiring instead: `isShallowRepo` must
+// be called, and checked, BEFORE `verifyAddedDates` ever runs in the
+// `verify` branch, so a shallow checkout is caught before its truncated
+// history is trusted for anything.
+describe('CLI wiring: the verify command checks isShallowRepo before trusting verifyAddedDates (techdebt-3)', () => {
+  it('scripts/compat-vinext-ledger.mjs calls isShallowRepo(git) inside the verify branch, before verifyAddedDates', () => {
+    const source = readFileSync(resolve(repoRoot, 'scripts/compat-vinext-ledger.mjs'), 'utf8');
+    const verifyBranchStart = source.indexOf("cmd === 'verify'");
+    expect(verifyBranchStart).toBeGreaterThan(-1);
+    const shallowCallIdx = source.indexOf('isShallowRepo(git)', verifyBranchStart);
+    const addedDatesCallIdx = source.indexOf(
+      'verifyAddedDates(ledger, git, ledgerPath)',
+      verifyBranchStart,
+    );
+    expect(shallowCallIdx).toBeGreaterThan(verifyBranchStart);
+    expect(addedDatesCallIdx).toBeGreaterThan(shallowCallIdx);
+  });
+
+  it('the shallow-repo branch returns 1 (fails the job) rather than continuing', () => {
+    const source = readFileSync(resolve(repoRoot, 'scripts/compat-vinext-ledger.mjs'), 'utf8');
+    const shallowCallIdx = source.indexOf('isShallowRepo(git)');
+    const nearby = source.slice(shallowCallIdx, shallowCallIdx + 400);
+    expect(nearby).toMatch(/return 1;/);
+    expect(nearby).toMatch(/::error::/);
+  });
+});
+
+describe("verifyAddedDates: every entry's `added` must match its git-derived first-introduction date (#1348)", () => {
+  const LEDGER_REL_PATH = 'test/compat-vinext-ledger.json';
+
+  function fakeGitFor(introducedDate: string, testName: string): (args: string[]) => string {
+    return (args: string[]) => {
+      if (args[0] === 'log') return `c1 ${introducedDate}T10:00:00+00:00`;
+      if (args[0] === 'show') return JSON.stringify({ entries: [{ test: testName }] });
+      throw new Error(`unexpected git invocation: ${args.join(' ')}`);
+    };
+  }
+
+  it('accepts an entry whose added date matches its git-derived first-introduction date', () => {
+    const e = entry({ added: '2026-09-01' });
+    const execGit = fakeGitFor('2026-09-01', e.test);
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH)).toEqual([]);
+  });
+
+  // The exact attack this closes: a PR quietly bumps `added` forward to
+  // reset the 30-day clock, without touching anything git history would
+  // show as "new" — the entry has been in the file since 2026-09-01, but
+  // its `added` field now claims 2026-09-20.
+  it('catches a RE-DATED added field — the entry has been in git history since an earlier commit', () => {
+    const e = entry({ added: '2026-09-20' });
+    const execGit = fakeGitFor('2026-09-01', e.test);
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
+      /does not match git history/,
+    );
+  });
+
+  it('flags an entry with no discoverable introducing commit as unverifiable, never as a silent pass', () => {
+    const e = entry({ added: '2026-09-01' });
+    const execGit = () => {
+      throw new Error('fatal: not a git repository');
+    };
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
+      /cannot be verified/,
+    );
+  });
+
+  // techdebt-4 round-2 finding: exact-date equality false-reds an HONEST
+  // entry after a squash merge or rebase, because the commit git log sees
+  // on main is dated the day the PR LANDED, not the day the contributor
+  // actually wrote it — `added` legitimately claims an EARLIER date than
+  // the derived one. Only `added` being LATER than the derived date is the
+  // actual attack (re-dating forward to reset the 30-day clock); a
+  // squash/rebase can only ever move the derived date FORWARD relative to
+  // the true authoring date, never backward, so `added < derived` is
+  // exactly the honest, expected shape and must not be flagged.
+  it('accepts an entry whose added date is EARLIER than the git-derived date (squash-merge/rebase honesty — jev 0.72)', () => {
+    const e = entry({ added: '2026-09-01' });
+    const execGit = fakeGitFor('2026-09-05', e.test); // landed on main 4 days after being written
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH)).toEqual([]);
+  });
+
+  it('still catches an added date LATER than the git-derived date — the actual re-dating attack', () => {
+    const e = entry({ added: '2026-09-20' });
+    const execGit = fakeGitFor('2026-09-01', e.test);
+    expect(verifyAddedDates(ledger([e]), execGit, LEDGER_REL_PATH).join()).toMatch(
+      /does not match git history/,
+    );
   });
 });
 
@@ -1284,6 +2039,9 @@ describe('workflow wiring', () => {
     const paths = verify.on.pull_request.paths as string[];
     expect(paths).toContain('test/compat-vinext-ledger.json');
     expect(paths).toContain('scripts/compat-vinext-ledger.mjs');
+    // #1376 round 3: DEFAULT_NEXTJS_REF now reads this manifest directly, so
+    // a manifest-only edit must re-run this check too.
+    expect(paths).toContain('.github/compat-credentialed-next-version.json');
     expect(verify.permissions).toEqual({ contents: 'read', actions: 'read' });
     const job = Object.values(verify.jobs)[0] as Any;
     const step = job.steps.find((st: Any) => /compat-vinext-ledger\.mjs verify/.test(st.run ?? ''));

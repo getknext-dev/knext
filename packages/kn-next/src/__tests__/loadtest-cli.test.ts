@@ -1,5 +1,5 @@
 /**
- * Contract tests (v3-P6a) for the `kn-next loadtest` CLI wrapper.
+ * Contract tests (v3-P6a) for the `knext loadtest` CLI wrapper.
  *
  * Two guarantees:
  *  1. The entrypoint guard uses the SHARED `isEntrypoint(import.meta.url)` helper

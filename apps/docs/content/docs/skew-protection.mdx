@@ -22,7 +22,7 @@ generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
 ```
 
 Scaffolded apps ship that line already. Returning `null` keeps a plain local build on its own
-generated id, so building outside `kn-next deploy` is unchanged. Use `||` rather than `??` — with
+generated id, so building outside `knext deploy` is unchanged. Use `||` rather than `??` — with
 `??`, an environment that exports `NEXT_DEPLOYMENT_ID` as an empty string produces an empty build
 id rather than falling back.
 
@@ -33,7 +33,7 @@ ever resolves chunks for its own build — and the deploy carries the same id in
 environment.
 
 <Callout type="warn">
-If the deploy tag's asset prefix is not there after the build, `kn-next deploy` **aborts before
+If the deploy tag's asset prefix is not there after the build, `knext deploy` **aborts before
 anything is uploaded or applied**. It never warns and continues. The two ways to see this are a
 `next.config.ts` with no `generateBuildId`, and `--skip-build` run against a build directory left
 over from an earlier tag — in that second case the assets would otherwise be uploaded under the old
@@ -54,7 +54,7 @@ const nextConfig: NextConfig = {
 };
 ```
 
-Local `next dev` and `next build` are unaffected — outside `kn-next deploy` the variable is unset
+Local `next dev` and `next build` are unaffected — outside `knext deploy` the variable is unset
 and the fallback keeps Next's own id.
 
 ## Uploads are additive
@@ -81,8 +81,8 @@ teardown-only and is never a prune target. Shared, content-hashed directories (`
 candidates for pruning.
 
 The GC runs automatically after every deploy (best-effort — a GC failure never fails a deploy that
-has already shipped) and is also available as a standalone command, `kn-next gc`, for scheduled or
-manual runs — see the [CLI reference](/docs/cli#kn-next-gc).
+has already shipped) and is also available as a standalone command, `knext gc`, for scheduled or
+manual runs — see the [CLI reference](/docs/cli#knext-gc).
 
 <Callout type="warn">
 The GC is **fail-safe**: if any live revision cannot be resolved to a build-id (label missing or
@@ -129,7 +129,7 @@ image, and this page's guarantees split in two:
 - **Rollback gets safer.** A pinned revision's assets live in its own image, so no retention rule
   can ever reap them.
 
-Every storage-less deploy announces this mode explicitly, and `kn-next gc` reports there is
+Every storage-less deploy announces this mode explicitly, and `knext gc` reports there is
 nothing to reap. See [Starting without object
 storage](/docs/multi-cloud#starting-without-object-storage) for the full trade-off and the growth
 path.

@@ -123,11 +123,23 @@ const (
 	gcBucket  = "gc-e2e-assets"
 
 	// gcMinioName is the in-cluster MinIO the suite deploys INSIDE its
-	// throwaway namespace. Digest-pinned (multi-arch amd64+arm64:
-	// minio/minio:RELEASE.2025-04-22T22-12-26Z), never :latest.
+	// throwaway namespace. Digest-pinned (multi-arch amd64+arm64), never
+	// :latest. #1403: docker.io/minio/minio and quay.io/minio/minio now
+	// UNAUTHORIZE every anonymous pull repo-wide (verified with `crane
+	// manifest`/`crane ls` against several tags, not just this digest) — a
+	// durable MinIO registry-policy break, not a transient flake. Switched to
+	// Bitnami's post-license-change "legacy" free mirror: unmaintained but
+	// genuine MinIO software (proven S3-API-compatible: bucket create,
+	// anonymous-read bucket policy, GetObject all verified against a live
+	// container before this pin). NOTE the container's own entrypoint script
+	// does the `minio server` invocation internally — do NOT pass `args:
+	// ["server", "/data"]` like the old minio/minio image needed; overriding
+	// CMD bypasses Bitnami's setup wrapper and the backend fails to
+	// initialize (verified: "Unable to initialize backend: file access
+	// denied"). See gcMinioSpec below.
 	gcMinioName  = "gc-minio"
-	gcMinioImage = "docker.io/minio/minio@sha256:" +
-		"a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
+	gcMinioImage = "docker.io/bitnamilegacy/minio@sha256:" +
+		"451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c"
 
 	// gcAppImage is the same REAL, SERVABLE, public, digest-pinned,
 	// multi-arch image the rollback suite uses (ghcr.io/knative/helloworld-go)
@@ -453,7 +465,15 @@ spec:
       containers:
         - name: minio
           image: %[5]s
-          args: ["server", "/data"]
+          # NO args override (#1403): Bitnami's minio image runs its own
+          # setup wrapper via CMD before exec-ing the real "minio server"
+          # invocation; overriding CMD with a raw "server /data" bypasses
+          # that wrapper and the backend fails to initialize. MINIO_DATA_DIR
+          # redirects Bitnami's own default (/bitnami/minio/data) onto the
+          # volumeMount below, which otherwise goes unused.
+          env:
+            - name: MINIO_DATA_DIR
+              value: /data
           envFrom:
             - secretRef:
                 name: %[1]s-creds

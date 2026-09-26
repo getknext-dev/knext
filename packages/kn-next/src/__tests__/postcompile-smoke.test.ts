@@ -1,7 +1,7 @@
 /**
  * #894 — the post-compile RuntimeContract smoke.
  *
- * `kn-next build` compiles `.output/server/index.mjs` whatever it contains. The
+ * `knext build` compiles `.output/server/index.mjs` whatever it contains. The
  * obligations the operator depends on — the health route it probes, the
  * `:9091` metrics exposition, the SIGTERM drain — live in the app's own entry,
  * so an app that swapped or broke that entry still COMPILES, still deploys, and
@@ -257,7 +257,7 @@ describe("#894 a late spawn error never crashes the CLI", () => {
     it("keeps an 'error' listener for the child's whole lifetime", () => {
         // Node throws on an 'error' event with no listener, and the only
         // listener used to be removed once startup succeeded — so an EPERM from
-        // the later kill() would take down `kn-next build` with an uncaught
+        // the later kill() would take down `knext build` with an uncaught
         // exception instead of a build failure. Proved on a bare emitter, both
         // halves: unguarded throws, guarded does not.
         const bare = new EventEmitter();

@@ -1,5 +1,5 @@
 /**
- * #407 / ADR-0041 (amends ADR-0031) — `kn-next create` must scaffold the SAME
+ * #407 / ADR-0041 (amends ADR-0031) — `knext create` must scaffold the SAME
  * guarded-instrumentation shape the in-repo `turbo gen zone` template emits, so
  * an app created through the published CLI is correct by construction rather
  * than hand-writing the #342 edge fence.
@@ -120,7 +120,7 @@ const NODE_ONLY_MODULES = [
     "minio",
 ];
 
-describe("kn-next create — edge-clean instrumentation.ts (#342/#407)", () => {
+describe("knext create — edge-clean instrumentation.ts (#342/#407)", () => {
     it("emits src/instrumentation.ts and src/instrumentation-node.ts", () => {
         const { appDir } = scaffoldApp();
         expect(existsSync(join(appDir, "src", "instrumentation.ts"))).toBe(
@@ -157,7 +157,7 @@ describe("kn-next create — edge-clean instrumentation.ts (#342/#407)", () => {
     });
 });
 
-describe("kn-next create — seam-alive instrumentation-node.ts (#352/ADR-0027)", () => {
+describe("knext create — seam-alive instrumentation-node.ts (#352/ADR-0027)", () => {
     it("exports registerNode and keeps tracing behind the default-off gate", () => {
         const { appDir } = scaffoldApp();
         const src = readFileSync(
@@ -185,7 +185,7 @@ describe("kn-next create — seam-alive instrumentation-node.ts (#352/ADR-0027)"
     });
 });
 
-describe("kn-next create --builder vinext — next.config is minimal under vinext (ADR-0048)", () => {
+describe("knext create --builder vinext — next.config is minimal under vinext (ADR-0048)", () => {
     it("does NOT wire turbopack-only machinery", () => {
         // `output: 'standalone'`, `adapterPath` and the @getknext/lib
         // externalisation were all webpack/turbopack mechanisms. vinext is
@@ -232,7 +232,7 @@ describe("kn-next create --builder vinext — next.config is minimal under vinex
 
     it("wires the Redis cache handler — a scaffold without one has NO ISR/data cache at all (#895)", () => {
         // The silent-degradation defect the stability planning gate found:
-        // nothing wired `cacheHandler`, so every `kn-next create` app served
+        // nothing wired `cacheHandler`, so every `knext create` app served
         // 200s with no ISR cache and no data cache — full recompute per
         // render, the provisioned Redis unused, and nothing red anywhere.
         const { appDir } = scaffoldVinextApp();
@@ -261,7 +261,7 @@ describe("kn-next create --builder vinext — next.config is minimal under vinex
     });
 });
 
-describe("kn-next create — graduated per-app guards ship with the app (#344/#408)", () => {
+describe("knext create — graduated per-app guards ship with the app (#344/#408)", () => {
     it("ships the edge-safety guard, which still applies", () => {
         // #342 is a Next-level concern (instrumentation compiled for BOTH the
         // nodejs and edge runtimes), independent of which bundler builds it.
@@ -298,7 +298,7 @@ describe("kn-next create — graduated per-app guards ship with the app (#344/#4
     });
 });
 
-describe("kn-next create --builder vinext — the generated package.json is runnable OUTSIDE this monorepo", () => {
+describe("knext create --builder vinext — the generated package.json is runnable OUTSIDE this monorepo", () => {
     it("builds with vite/vinext and declares no workspace: protocol deps", () => {
         const { appDir } = scaffoldVinextApp();
         const raw = readFileSync(join(appDir, "package.json"), "utf8");
@@ -377,7 +377,7 @@ describe("kn-next create --builder vinext — the generated package.json is runn
     it("ships the vinext × node cell too: a node entry, a node-preset arm, and its image (#1260)", () => {
         // runtime: 'node' in kn-next.config.ts must produce a node-runnable
         // artifact with no hand edits. The vite config reads the runtime from
-        // kn-next.config.ts (the one source `kn-next build` and `kn-next
+        // kn-next.config.ts (the one source `knext build` and `knext
         // deploy` also read), so both halves of the preset choice live there.
         const { appDir } = scaffoldVinextApp();
 
@@ -505,10 +505,10 @@ describe("kn-next create --builder vinext — the generated package.json is runn
  * check passes on a Dockerfile that cannot build, which is what shipped in the
  * first round. These tests interpret the instruction stream instead.
  */
-describe("kn-next create --builder vinext — the generated Dockerfile ships the compiled binary (ADR-0048)", () => {
+describe("knext create --builder vinext — the generated Dockerfile ships the compiled binary (ADR-0048)", () => {
     it("copies a prebuilt binary and runs it directly", () => {
         // No builder stage, no install, no `npm run build`. The binary is built
-        // by `kn-next build` outside the image, because cross-compiling inside
+        // by `knext build` outside the image, because cross-compiling inside
         // it would force a Bun toolchain into the runtime layer for nothing.
         const { appDir } = scaffoldVinextApp();
         const df = readFileSync(join(appDir, "Dockerfile"), "utf8");
@@ -557,7 +557,7 @@ describe("kn-next create --builder vinext — the generated Dockerfile ships the
     });
 });
 
-describe("kn-next create — the CLI entry (createMain)", () => {
+describe("knext create — the CLI entry (createMain)", () => {
     // #950: createMain now probes the registry for the scaffold's @getknext
     // pins. Point it at a closed local port so these tests stay offline and
     // deterministic — connection refused is the probe's silent path. The
@@ -601,7 +601,7 @@ describe("kn-next create — the CLI entry (createMain)", () => {
     it("--help exits 0 and documents the scaffolded guards and --builder flag", async () => {
         const { code, out } = await capture(["--help"]);
         expect(code).toBe(0);
-        expect(out).toContain("kn-next create");
+        expect(out).toContain("knext create");
         expect(out).toContain("instrumentation-edge-safe");
         expect(out).toContain("--builder");
         expect(out).toContain("vinext");
@@ -611,7 +611,7 @@ describe("kn-next create — the CLI entry (createMain)", () => {
     it("an unknown flag is a hard error, never a silent default", async () => {
         const { code, err } = await capture(["--not-a-flag"]);
         expect(code).toBe(1);
-        expect(err).toContain("kn-next create");
+        expect(err).toContain("knext create");
     });
 
     it("scaffolds into the positional directory and reports the files", async () => {
@@ -660,7 +660,7 @@ describe("kn-next create — the CLI entry (createMain)", () => {
 
     it("scaffolding a REAL app prints the parting next-steps line, not just a file list", async () => {
         // The success message is the only place a stranger sees `npm install` /
-        // `npm run dev` / `kn-next doctor` / `kn-next deploy` — the exact
+        // `npm run dev` / `knext doctor` / `knext deploy` — the exact
         // commands they need to type next, in order. Assert its presence, not
         // just that createMain returned 0.
         const appDir = join(root, "apps", "parting-words");
@@ -670,8 +670,8 @@ describe("kn-next create — the CLI entry (createMain)", () => {
         expect(out).toContain("Next steps:");
         expect(out).toContain("npm install");
         expect(out).toContain("npm run dev");
-        expect(out).toContain("kn-next doctor");
-        expect(out).toContain("kn-next deploy");
+        expect(out).toContain("knext doctor");
+        expect(out).toContain("knext deploy");
         expect(out).toContain("npm test");
     });
 
@@ -709,7 +709,7 @@ describe("kn-next create — the CLI entry (createMain)", () => {
             }
             const { code, err } = await capture([appDir]);
             expect(code).toBe(1);
-            expect(err).toContain("kn-next create:");
+            expect(err).toContain("knext create:");
             expect(err.toLowerCase()).toMatch(/eacces|permission/);
         } finally {
             chmodSync(appDir, 0o700);
@@ -717,7 +717,7 @@ describe("kn-next create — the CLI entry (createMain)", () => {
     });
 });
 
-describe("kn-next create — the app name is VALIDATED, never escaped-and-shipped", () => {
+describe("knext create — the app name is VALIDATED, never escaped-and-shipped", () => {
     /**
      * The name is interpolated into JSON (`package.json`), TypeScript
      * (`kn-next.config.ts`) and JSX (the page) — and it becomes the NextApp /
@@ -806,7 +806,7 @@ describe("kn-next create — the app name is VALIDATED, never escaped-and-shippe
     });
 });
 
-describe("kn-next create — the renderer leaves no unsubstituted placeholder", () => {
+describe("knext create — the renderer leaves no unsubstituted placeholder", () => {
     it("no emitted file contains a `{{ … }}` template placeholder", () => {
         const { files } = scaffoldApp();
         const leftovers = [...files.entries()]
@@ -849,7 +849,7 @@ describe("kn-next create — the renderer leaves no unsubstituted placeholder", 
     });
 });
 
-describe("kn-next create — file safety", () => {
+describe("knext create — file safety", () => {
     it("refuses to overwrite an existing file unless --force", () => {
         const { appDir } = scaffoldApp();
         writeFileSync(join(appDir, "next.config.ts"), "// mine\n");
@@ -878,7 +878,7 @@ describe("kn-next create — file safety", () => {
     });
 });
 
-describe("kn-next create — the seam-guard CI matrix no longer applies (ADR-0048)", () => {
+describe("knext create — the seam-guard CI matrix no longer applies (ADR-0048)", () => {
     it("does not require a scaffolded app to carry the standalone seam guard", () => {
         // The matrix pairs "apps that NEED the guard" with "apps that CARRY
         // it". Under ADR-0048 a scaffolded app needs neither, so it must sit
@@ -893,7 +893,7 @@ describe("kn-next create — the seam-guard CI matrix no longer applies (ADR-004
     });
 });
 
-describe("kn-next create — the scaffolded config keeps the last pod warm (ADR-0045)", () => {
+describe("knext create — the scaffolded config keeps the last pod warm (ADR-0045)", () => {
     /**
      * ADR-0045 Decision 2: the field itself defaults to UNSET (byte-identical
      * back-compat for every existing NextApp); the zero-devops posture ships in

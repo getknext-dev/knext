@@ -93,7 +93,7 @@ describe("renderNextAppCR", () => {
     // The CR must carry NO code-cache fields. The V8 compile cache is baked into
     // the image at build time (ADR-0035), and the CRD no longer defines
     // enableBytecodeCache/bytecodeCacheSize — so emitting either would be REJECTED
-    // by the apiserver under `--validate=strict`, which every kn-next apply passes.
+    // by the apiserver under `--validate=strict`, which every knext apply passes.
     // Asserted with a redis provider precisely because redis used to imply the
     // bytecode cache on: the data cache must still be emitted, and only that.
     it("CR carries the data cache but NO bytecode fields when cache.provider=redis", () => {
