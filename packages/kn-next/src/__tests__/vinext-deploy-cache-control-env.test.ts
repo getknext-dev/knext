@@ -8,31 +8,61 @@
  *   - serves through `srvx/node` (vinext on Node) → the entry itself must call
  *     `applyVinextDeployDefault(process.env)`;
  *   - serves through `srvx/bun` (compiled executable) → it must be wired into a
- *     `vite.config*` build, and `vinext-compile.mjs` must inject an install
- *     module that calls it ahead of the entry;
+ *     `vite.config*` build (see `isBunEntryWired`), and `vinext-compile.mjs` must
+ *     inject an install module that calls it ahead of the entry;
  *   - neither → red (an unclassified entry is an unguarded runtime path).
  *
- * Source is scrubbed before matching: comments removed and string/template
- * contents blanked by a QUOTE-AWARE scanner, so neither a comment nor a call
- * inside a multi-line template literal can satisfy the guard, and a `/*` inside
- * a string cannot swallow real code after it.
+ * THE OVERRIDE SCAN IS AN ALLOWLIST, NOT A BLACKLIST. Three rounds of
+ * blacklisting (`=0`, `unset`, `??=`, `os.Setenv`, comment-split pairs, ...)
+ * each leaked the next spelling, so the question is inverted: every non-test
+ * line that mentions the variable must match a KNOWN-SAFE form, and anything
+ * else — including a form nobody has thought of — fails closed with the line
+ * printed. The safe forms (`findUnsafeMentions`):
+ *   - assignment of the literal `1`: `NAME=1`, `ENV NAME=1`, `ENV NAME 1`,
+ *     `export NAME=1`, `NAME: "1"`, `env.NAME = "1"` / `process.env["NAME"] = "1"`;
+ *   - a k8s / Go name-value pair whose value line is exactly `1` (a comment
+ *     between the two lines is stripped first; `valueFrom`, an ambiguous
+ *     neighbour or a non-`1` value fails);
+ *   - the Go one-line struct `{Name: "NAME", Value: "1"}` (either order);
+ *   - exactly two READ shapes, each bound to its file: the early-return guard
+ *     inside `applyVinextDeployDefault` (`adapters/response-cache-control.mjs`)
+ *     and the fixture probe `process.env.NAME ?? null`.
+ * A line may mention the name only ONCE, so a second mention on a safe-looking
+ * line cannot smuggle an override. Consequences, all intended: `??=`, `||=`,
+ * `Reflect.set`, `Object.defineProperty`, `Object.assign`, `os.Setenv`,
+ * `unset`, `env -u`, `delete`, `valueFrom`, a `["NAME","0"]` tuple and even a
+ * `const K = "NAME"` (which is what a computed key needs) are all unknown
+ * shapes and red.
  *
- * The override scan covers the whole repo (dotfiles included) except
- * `node_modules`, build output, `.claude`, `docs/` and `apps/docs/content`
- * (user-facing prose that documents the `=0` opt-out) and test files (which set
- * `0` on purpose to prove the opt-out; only test FILES are skipped, never a
- * whole `__tests__` directory). It rejects every override form: `=`/`:`
- * assignment, Dockerfile `ENV NAME value`, empty value, `unset`, `env -u`,
- * `env -i`, `delete process.env.NAME`, the bracket-literal `process.env["NAME"]`,
- * JSON `"NAME": "0"`, a k8s `name: NAME` / `value: …` pair and the Go struct
- * `Name: "NAME", Value: "…"` (either order). KNOWN LIMIT: a computed key
- * (`const K = "NAME"; process.env[K] = "0"`) is not caught — the scan is
- * textual, and the literal name never appears next to the assignment.
+ * Skipped: `node_modules`, build output, `.claude`, `docs/` and
+ * `apps/docs/content` (user-facing prose that documents the `=0` opt-out), any
+ * `*.md`/`*.mdx` (prose — it cannot execute) and test FILES (`*.test.*`, which
+ * set `0` on purpose; never a whole `__tests__` directory).
+ * Comments are stripped before matching, and ONLY where the syntax is known: JS/
+ * TS/Go via the quote-aware `scrub`, `#` full-line comments for Dockerfile /
+ * yaml / sh / .env. An unrecognised file type strips nothing, so a mention in
+ * its comment fails closed rather than passing.
+ *
+ * REAL LIMITS: the name split across a string concatenation
+ * (`"VINEXT_NEXT_" + "DEPLOY_CACHE_CONTROL"`) never appears whole, so it is
+ * invisible; a JS regex literal holding a quote can desync `scrub`; and the
+ * scan proves no repo file overrides the switch, not that a deployer's
+ * cluster does not.
+ *
+ * `isBunEntryWired` accepts one shape: inside the exported config, a
+ * `nitro({ ... })` call whose own top-level `entry:` is the literal
+ * `'./knext-bun-entry.mjs'` (optionally as the else-branch of a ternary whose
+ * other branch is `'./knext-node-entry.mjs'`), or that same literal in a
+ * conditional spread `...(cond ? { entry: '…' } : {})` at nitro's top level. Strings are blanked first, so
+ * `note: "entry: './knext-bun-entry.mjs'"` is text; an object outside
+ * `export default`, one nested deeper than the `nitro(` argument, or one in a
+ * comment does not count. Limit: a `nitro({ entry })` that is built inside the
+ * export but never put in `plugins` still counts.
  */
 
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 
 const NAME = "VINEXT_NEXT_DEPLOY_CACHE_CONTROL";
 const REPO = join(__dirname, "..", "..", "..", "..");
@@ -54,7 +84,8 @@ function walk(dir: string, out: string[] = []): string[] {
         if (rel === "docs" || rel === join("apps", "docs", "content")) continue;
         const st = statSync(p);
         if (st.isDirectory()) walk(p, out);
-        else if (!/\.test\.[cm]?[tj]sx?$/.test(name)) out.push(p);
+        else if (!/\.test\.[cm]?[tj]sx?$/.test(name) && !/\.mdx?$/.test(name))
+            out.push(p);
     }
     return out;
 }
@@ -62,9 +93,14 @@ function walk(dir: string, out: string[] = []): string[] {
 /**
  * Remove comments and (optionally) blank string/template contents, keeping
  * newlines so line numbers survive. Quote-aware: a comment opener inside a string
- * is text, and a quote inside a comment is text.
+ * is text, and a quote inside a comment is text. A string whose content matches
+ * `keep` is left intact (used to keep the entry-path literals).
  */
-export function scrub(src: string, blankStrings: boolean): string {
+export function scrub(
+    src: string,
+    blankStrings: boolean,
+    keep?: RegExp,
+): string {
     let out = "";
     let i = 0;
     while (i < src.length) {
@@ -80,19 +116,19 @@ export function scrub(src: string, blankStrings: boolean): string {
             }
             i += 2;
         } else if (c === '"' || c === "'" || c === "`") {
-            out += c;
-            i++;
-            while (i < src.length && src[i] !== c) {
-                if (src[i] === "\\") {
-                    out += blankStrings ? " " : src[i];
-                    i++;
+            let raw = "";
+            let j = i + 1;
+            while (j < src.length && src[j] !== c) {
+                if (src[j] === "\\") {
+                    raw += src[j];
+                    j++;
                 }
-                const ch = src[i] ?? "";
-                out += blankStrings && ch !== "\n" ? " " : ch;
-                i++;
+                raw += src[j] ?? "";
+                j++;
             }
-            out += c;
-            i++;
+            const blank = blankStrings && !(keep?.test(raw) ?? false);
+            out += c + (blank ? raw.replace(/[^\n]/g, " ") : raw) + c;
+            i = j + 1;
         } else {
             out += c;
             i++;
@@ -103,67 +139,150 @@ export function scrub(src: string, blankStrings: boolean): string {
 
 const CALL = /^applyVinextDeployDefault\(process\.env\);$/m;
 
-/** Every override form of the switch found in `src`, one string per hit. */
-export function findOverrides(src: string): string[] {
-    const hits: string[] = [];
-    for (const raw of src.split("\n")) {
-        const line = raw.trim();
-        if (/^(#|\/\/|\*|\/\*)/.test(line)) continue;
-        if (
-            !line.includes(NAME) &&
-            !/\benv\s+(-\w*i\b|--ignore-environment)/.test(line)
-        )
-            continue;
-        const assign = line.match(
-            new RegExp(
-                `${NAME}["']?\\]?\\s*[=:](?![=])\\s*["']?([^\\s"',;)\`}]*)`,
-            ),
-        );
-        if (assign && assign[1] !== "1") hits.push(line);
-        const envSpace = line.match(
-            new RegExp(
-                `^ENV\\s+${NAME}(?:\\s+["']?([^\\s"']*)["']?)?\\s*$`,
-                "i",
-            ),
-        );
-        if (envSpace && envSpace[1] !== "1") hits.push(line);
-        if (new RegExp(`\\bunset\\b[^\\n]*${NAME}`).test(line)) hits.push(line);
-        if (
-            new RegExp(`\\benv\\b[^\\n]*(?:-u\\s*|--unset[=\\s])${NAME}`).test(
-                line,
-            )
-        )
-            hits.push(line);
-        if (/\benv\s+(-\w*i\b|--ignore-environment)/.test(line))
-            hits.push(line);
-        if (new RegExp(`\\bdelete\\s+process\\.env\\.${NAME}`).test(line))
-            hits.push(line);
-    }
-    // Name/value pairs split across lines: k8s `- name: NAME` + `value: "x"` and
-    // the Go struct `Name: "NAME", Value: "x"`, in either order.
-    const V = `["']?([^\\s"',}]*)["']?`;
-    const pairs = [
-        new RegExp(
-            `\\bname:\\s*["']?${NAME}["']?\\s*,?\\s*\\n?\\s*value:\\s*${V}`,
-            "gi",
-        ),
-        new RegExp(
-            `\\bvalue:\\s*${V}\\s*,?\\s*\\n?\\s*name:\\s*["']?${NAME}["']?`,
-            "gi",
-        ),
-    ];
-    for (const re of pairs) {
-        for (const m of src.matchAll(re))
-            if (m[1] !== "1") hits.push(m[0].replace(/\s+/g, " "));
-    }
-    return [...new Set(hits)];
+const JS_FAMILY = /\.(?:[mc]?[jt]sx?|go)(?:\.\w+)*$/;
+const HASH_COMMENT =
+    /^(?:Dockerfile|\.env)|\.(?:ya?ml|sh|env|toml)(?:\.\w+)*$/i;
+
+/** Lines of `src` with comments removed where the syntax is known. */
+function codeLines(src: string, path: string): string[] {
+    const file = basename(path);
+    let text = src;
+    if (JS_FAMILY.test(file)) text = scrub(src, false);
+    else if (HASH_COMMENT.test(file))
+        text = src
+            .split("\n")
+            .map((l) => (/^\s*#/.test(l) ? "" : l))
+            .join("\n");
+    return text
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l !== "");
 }
 
-/** Whether a vite config wires the bun entry as the build entry (comments ignored). */
+const N = NAME;
+const ONE = `["']?1["']?`;
+const VALUE_KEY = /^-?\s*["']?(?:value|Value)["']?\s*:/;
+const VALUE_ONE = new RegExp(
+    `^-?\\s*["']?(?:value|Value)["']?\\s*:\\s*${ONE},?\\}?,?$`,
+);
+const NAME_KEY = new RegExp(
+    `^(-)?\\s*(\\{\\s*)?["']?(?:name|Name)["']?\\s*:\\s*["']?${N}["']?,?$`,
+);
+const ASSIGN_SAFE = [
+    new RegExp(`^(?:(?:ENV|export)\\s+)?${N}=${ONE}(?:\\s*\\\\)?$`),
+    new RegExp(`^ENV\\s+${N}\\s+${ONE}(?:\\s*\\\\)?$`),
+    new RegExp(`^["']?${N}["']?\\s*:\\s*${ONE},?$`),
+    new RegExp(
+        `^(?:[\\w$.]*env)(?:\\.${N}|\\[["']${N}["']\\])\\s*=\\s*["']1["'];?$`,
+    ),
+    new RegExp(
+        `^\\{?\\s*Name:\\s*"${N}",\\s*Value:\\s*"1",?\\s*\\}?,?$`,
+    ),
+    new RegExp(
+        `^\\{?\\s*Value:\\s*"1",\\s*Name:\\s*"${N}",?\\s*\\}?,?$`,
+    ),
+];
+/** The only READ shapes, each bound to the file it is legitimate in. */
+const READ_SAFE: [RegExp, RegExp][] = [
+    [
+        /adapters\/response-cache-control\.mjs$/,
+        new RegExp(`^if \\(!env \\|\\| env\\.${N} !== undefined\\) return;$`),
+    ],
+    [
+        /__tests__\/fixtures\/vinext-node-app\/app\/api\/cache-probe\/route\.ts$/,
+        new RegExp(`^vinextDeploy: process\\.env\\.${N} \\?\\? null,$`),
+    ],
+];
+
+/**
+ * Every line of `src` (a file at `path`) that mentions the switch in a form NOT
+ * on the allowlist, printed with its reason. Empty = every mention is known-safe.
+ */
+export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
+    const lines = codeLines(src, path);
+    const hits: string[] = [];
+    lines.forEach((l, idx) => {
+        if (!l.includes(N)) return;
+        if (l.split(N).length - 1 !== 1) {
+            hits.push(`${l}  [mentioned more than once on one line]`);
+            return;
+        }
+        if (ASSIGN_SAFE.some((re) => re.test(l))) return;
+        if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) return;
+        if (NAME_KEY.test(l)) {
+            const next = lines[idx + 1] ?? "";
+            const prev = lines[idx - 1] ?? "";
+            const nextIsValue = VALUE_KEY.test(next);
+            const prevIsValue = VALUE_KEY.test(prev);
+            const dashed = /^(-|\{)/.test(l);
+            // `- name: N` (or `{ name: N`) opens its entry, so its value is
+            // the NEXT line; otherwise the value is whichever neighbour is a
+            // value key, and two candidates is ambiguous → unsafe.
+            const partner = dashed
+                ? nextIsValue
+                    ? next
+                    : ""
+                : nextIsValue !== prevIsValue
+                  ? nextIsValue
+                      ? next
+                      : prev
+                  : "";
+            const doubled = dashed && VALUE_KEY.test(lines[idx + 2] ?? "");
+            if (partner && !doubled && VALUE_ONE.test(partner)) return;
+            hits.push(`${l}  [name without a value of exactly 1]`);
+            return;
+        }
+        hits.push(`${l}  [unknown form]`);
+    });
+    return hits;
+}
+
+/**
+ * Whether a vite config wires the bun entry: a `nitro({...})` inside
+ * `export default` whose own top-level `entry:` is the bun-entry literal.
+ */
 export function isBunEntryWired(viteSrc: string): boolean {
-    return /\bentry\s*:[^\n]*["']\.\/knext-bun-entry\.mjs["']/.test(
-        scrub(viteSrc, false),
-    );
+    const code = scrub(viteSrc, true, /^\.\/knext-(?:bun|node)-entry\.mjs$/);
+    const at = code.indexOf("export default");
+    if (at < 0) return false;
+    const exported = code.slice(at);
+    const re = /\bnitro\s*\(\s*\{/g;
+    for (let m = re.exec(exported); m; m = re.exec(exported)) {
+        const start = m.index + m[0].length - 1;
+        let depth = 0;
+        let top = "";
+        const depthAt: number[] = [];
+        let end = exported.length;
+        for (let i = start; i < exported.length; i++) {
+            const c = exported[i];
+            if ("{([".includes(c)) {
+                depth++;
+                if (depth > 1) top += " ";
+            } else if ("})]".includes(c)) {
+                depth--;
+                if (depth === 0) {
+                    end = i;
+                    break;
+                }
+                top += " ";
+            } else top += depth === 1 ? c : " ";
+            depthAt[i - start] = depth;
+        }
+        if (
+            /(?:^|[\s,])entry\s*:\s*(?:\w+\s*\?\s*['"]\.\/knext-node-entry\.mjs['"]\s*:\s*)?['"]\.\/knext-bun-entry\.mjs['"]\s*(?:,|$)/.test(
+                top,
+            )
+        )
+            return true;
+        // `...(cond ? { entry: '<bun>' } : {})` — a conditional spread that is
+        // itself a top-level member of nitro's argument.
+        const body = exported.slice(start, end);
+        const spread =
+            /\.\.\.\(\s*\w+\s*\?\s*\{\s*entry\s*:\s*['"]\.\/knext-bun-entry\.mjs['"]\s*,?\s*\}\s*:\s*\{\s*\}\s*\)/g;
+        for (let sm = spread.exec(body); sm; sm = spread.exec(body))
+            if (depthAt[sm.index] === 1) return true;
+    }
+    return false;
 }
 
 const FILES = walk(REPO);
@@ -188,64 +307,162 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ).not.toMatch(CALL);
     });
 
-    const BAD = [
-        `ENV ${NAME}=0`,
-        `ENV ${NAME} 0`,
-        `ENV ${NAME}=`,
-        `ENV ${NAME}`,
-        `${NAME}=0 node x`,
-        `${NAME}=`,
-        `  ${NAME}: "0"`,
-        `RUN unset ${NAME}`,
-        `RUN env -u ${NAME} node x`,
-        `RUN env --unset=${NAME} node x`,
-        `RUN env -i PATH=$PATH node x`,
-        `delete process.env.${NAME};`,
-        `ENV ${NAME} "0"`,
-        `process.env["${NAME}"] = "0";`,
-        `{"${NAME}": "0"}`,
-        `- name: ${NAME}\n  value: "0"`,
-        `- value: "0"\n  name: ${NAME}`,
-        `{Name: "${NAME}", Value: "0"}`,
-        `{\n  Name:  "${NAME}",\n  Value: "0",\n}`,
-        `{Value: "", Name: "${NAME}"}`,
+    // [path, source]. Each is a way to leave the switch off (or unknowable).
+    const BAD: [string, string][] = [
+        ["Dockerfile", `ENV ${NAME}=0`],
+        ["Dockerfile", `ENV ${NAME} 0`],
+        ["Dockerfile", `ENV ${NAME}=`],
+        ["Dockerfile", `ENV ${NAME}`],
+        ["Dockerfile", `ENV ${NAME} "0"`],
+        ["Dockerfile", `ENV A=1 \\\n  ${NAME}=0`],
+        ["x.sh", `${NAME}=0 node x`],
+        ["x.env", `${NAME}=`],
+        ["x.yaml", `  ${NAME}: "0"`],
+        ["x.sh", `RUN unset ${NAME}`],
+        ["x.sh", `RUN env -u ${NAME} node x`],
+        ["x.sh", `RUN env --unset=${NAME} node x`],
+        ["x.mjs", `delete process.env.${NAME};`],
+        ["x.mjs", `process.env["${NAME}"] = "0";`],
+        ["x.json", `{"${NAME}": "0"}`],
+        ["x.yaml", `- name: ${NAME}\n  value: "0"`],
+        ["x.yaml", `- value: "0"\n  name: ${NAME}`],
+        ["x.go", `{Name: "${NAME}", Value: "0"}`],
+        ["x.go", `{\n  Name:  "${NAME}",\n  Value: "0",\n}`],
+        ["x.go", `{Value: "", Name: "${NAME}"}`],
+        // round-3 reviewer inputs
+        ["x.mjs", `process.env.${NAME} ??= "0";`],
+        ["x.mjs", `process.env.${NAME} ||= "0";`],
+        ["x.mjs", `Reflect.set(process.env, "${NAME}", "0");`],
+        [
+            "x.mjs",
+            `Object.defineProperty(process.env, "${NAME}", { value: "0" });`,
+        ],
+        ["x.mjs", `Object.assign(process.env, { ${NAME}: "0" });`],
+        ["x.mjs", `const pairs = ["${NAME}", "0"];`],
+        ["x.mjs", `/* opt out */ process.env.${NAME} = "0";`],
+        ["x.mjs", `const K = "${NAME}";\nprocess.env[K] = "0";`],
+        ["x.go", `os.Setenv("${NAME}", "0")`],
+        ["x.yaml", `- name: ${NAME}\n  # opt out\n  value: "0"`],
+        [
+            "x.yaml",
+            `- name: ${NAME}\n  valueFrom:\n    configMapKeyRef:\n      name: c`,
+        ],
+        ["x.yaml", `- name: ${NAME}`],
+        ["x.mjs", `env.${NAME} = "1"; env.${NAME} = "0";`],
+        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  value: "0"`],
+        // an ambiguous neighbour on both sides is refused
+        ["x.yaml", `value: "1"\nname: ${NAME}\nvalue: "1"`],
+        // unrecognised file type: comments are not stripped, so a mention fails
+        ["x.txt", `# ${NAME}=0 documents the opt-out`],
+        // the read shapes are bound to their own files
+        ["src/other.mjs", `if (!env || env.${NAME} !== undefined) return;`],
     ];
-    for (const b of BAD) {
-        it(`flags: ${JSON.stringify(b)}`, () => {
-            expect(findOverrides(b)).not.toEqual([]);
+    for (const [path, b] of BAD) {
+        it(`flags: ${path} ${JSON.stringify(b)}`, () => {
+            expect(findUnsafeMentions(b, path)).not.toEqual([]);
         });
     }
 
-    for (const g of [
-        `ENV ${NAME}=1`,
-        `ENV ${NAME} 1`,
-        `  ${NAME}: "1"`,
-        `# ${NAME}=0 documents the opt-out`,
-        `if (env.${NAME} !== undefined) return;`,
-        `env.${NAME} = "1";`,
-        `ENV ${NAME} "1"`,
-        `- name: ${NAME}\n  value: "1"`,
-        `{Name: "${NAME}", Value: "1"}`,
-    ]) {
-        it(`allows: ${JSON.stringify(g)}`, () => {
-            expect(findOverrides(g)).toEqual([]);
+    const GOOD: [string, string][] = [
+        ["Dockerfile", `ENV ${NAME}=1`],
+        ["Dockerfile", `ENV ${NAME}=1 \\`],
+        ["Dockerfile", `ENV ${NAME} 1`],
+        ["Dockerfile", `ENV ${NAME} "1"`],
+        ["x.sh", `export ${NAME}=1`],
+        ["x.yaml", `  ${NAME}: "1"`],
+        ["x.yaml", `- name: ${NAME}\n  value: "1"`],
+        ["x.yaml", `- name: ${NAME}\n  # note\n  value: "1"`],
+        ["x.yaml", `- value: "1"\n  name: ${NAME}`],
+        ["x.mjs", `env.${NAME} = "1";`],
+        ["x.mjs", `process.env["${NAME}"] = "1";`],
+        ["x.go", `{Name: "${NAME}", Value: "1"}`],
+        ["x.go", `{\n  Name:  "${NAME}",\n  Value: "1",\n}`],
+        ["Dockerfile", `# ${NAME}=0 documents the opt-out`],
+        ["x.mjs", `// ${NAME}=0 documents the opt-out\nx();`],
+        ["x.mjs", `/*\n process.env.${NAME} = "0";\n*/`],
+        [
+            "packages/kn-next/src/adapters/response-cache-control.mjs",
+            `if (!env || env.${NAME} !== undefined) return;`,
+        ],
+        [
+            "packages/kn-next/src/__tests__/fixtures/vinext-node-app/app/api/cache-probe/route.ts",
+            `vinextDeploy: process.env.${NAME} ?? null,`,
+        ],
+    ];
+    for (const [path, g] of GOOD) {
+        it(`allows: ${path} ${JSON.stringify(g)}`, () => {
+            expect(findUnsafeMentions(g, path)).toEqual([]);
         });
     }
 });
 
 describe("bun-entry wiring fixture", () => {
-    it("a renamed reference plus a trailing comment is not wired; a real entry is", () => {
-        expect(
-            isBunEntryWired(
-                "nitro({ preset: 'bun', entry: './other.mjs' }) // knext-bun-entry",
+    const wrap = (nitroArg: string, before = "") =>
+        `${before}\nexport default defineConfig({ plugins: [nitro(${nitroArg})] });`;
+    const NOT_WIRED: [string, string][] = [
+        [
+            "renamed entry + trailing comment",
+            "export default nitro({ preset: 'bun', entry: './other.mjs' }) // knext-bun-entry",
+        ],
+        [
+            "only in a block comment",
+            "/* entry: './knext-bun-entry.mjs' */ export default x",
+        ],
+        [
+            "the other key's string mentions it",
+            wrap(
+                `{ entry: './other.mjs', note: "entry: './knext-bun-entry.mjs'" }`,
             ),
-        ).toBe(false);
-        expect(isBunEntryWired("/* entry: './knext-bun-entry.mjs' */ x")).toBe(
-            false,
-        );
+        ],
+        [
+            "an unused object before the export",
+            wrap(
+                `{ entry: './other.mjs' }`,
+                `const unused = { entry: './knext-bun-entry.mjs' };`,
+            ),
+        ],
+        [
+            "an object in the export that is not nitro's argument",
+            `export default defineConfig({ plugins: [], other: { entry: './knext-bun-entry.mjs' } });`,
+        ],
+        [
+            "nested deeper than nitro's own object",
+            wrap(`{ opts: { entry: './knext-bun-entry.mjs' } }`),
+        ],
+        [
+            "a conditional spread nested deeper than nitro's own object",
+            wrap(
+                `{ opts: { ...(c ? { entry: './knext-bun-entry.mjs' } : {}) } }`,
+            ),
+        ],
+        [
+            "the node entry only",
+            wrap(`{ entry: './knext-node-entry.mjs' }`),
+        ],
+    ];
+    for (const [why, src] of NOT_WIRED) {
+        it(`is NOT wired: ${why}`, () => {
+            expect(isBunEntryWired(src)).toBe(false);
+        });
+    }
+    it("is wired: the conditional spread the docs app uses", () => {
         expect(
             isBunEntryWired(
-                "nitro({ preset: 'bun', entry: './knext-bun-entry.mjs' })",
+                wrap(
+                    `{ preset, ...(usesBunEntry ? { entry: './knext-bun-entry.mjs' } : {}), x: 1 }`,
+                ),
+            ),
+        ).toBe(true);
+    });
+    it("is wired: a plain entry, and the runtime ternary the template uses", () => {
+        expect(
+            isBunEntryWired(wrap(`{ preset: 'bun', entry: './knext-bun-entry.mjs' }`)),
+        ).toBe(true);
+        expect(
+            isBunEntryWired(
+                wrap(
+                    `{ entry: onNode ? './knext-node-entry.mjs' : './knext-bun-entry.mjs', x: 1 }`,
+                ),
             ),
         ).toBe(true);
     });
@@ -332,7 +549,7 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
         expect(compileCode).toMatch(/wrapped\.contents/);
     });
 
-    it("nothing in the repo overrides the switch to anything but 1", () => {
+    it("every mention of the switch in the repo is a known-safe form", () => {
         const bad: string[] = [];
         for (const f of FILES) {
             let src: string;
@@ -341,8 +558,9 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
             } catch {
                 continue;
             }
-            if (!src.includes(NAME) && !/\benv\s+-/.test(src)) continue;
-            for (const h of findOverrides(src)) bad.push(`${rel(f)}: ${h}`);
+            if (!src.includes(NAME)) continue;
+            for (const h of findUnsafeMentions(src, rel(f)))
+                bad.push(`${rel(f)}: ${h}`);
         }
         expect(bad).toEqual([]);
     });
