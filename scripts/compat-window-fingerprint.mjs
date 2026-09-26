@@ -273,8 +273,77 @@ function jsLocalImportSpecifiers(src, absPath) {
   // is invisible to every literal-key check above it (#1388/#1392 review;
   // techdebt-3 round).
   const nodeModuleBindingNames = new Set();
+  // #1388 round 5 — STRING-TO-KEY channels. A non-literal computed key on a
+  // global object (`globalThis['req'+'uire']`) or on `process`
+  // (`process[k]` → getBuiltinModule) names ANY property through a string
+  // this scanner cannot read, so enumerating spellings of `require` can
+  // never close it. Seeded with the ambient roots; the alias fixpoint below
+  // grows it (`const g = globalThis`, `const { process: p } = globalThis`).
+  const ambientRootNames = new Set(['globalThis', 'global', 'self', 'window', 'process']);
+  // Locals bound to a `getBuiltinModule(...)` RESULT (`const fs =
+  // process.getBuiltinModule('fs')`) — a non-literal key on one reaches any
+  // export of that builtin.
+  const builtinModuleResultNames = new Set();
+  // #1388 round 5 — STRING-TO-CODE channels. `eval` and `Function` turn a
+  // string into code, and that string can spell `require` any way it likes
+  // (`eval('req'+'uire')`, `new Function('return require')()`). No AST check
+  // can read a computed string, so ANY reference to either identifier —
+  // callee, indirect `(0, eval)`, `globalThis.eval`, a `{ eval: true }`
+  // option key (worker_threads) — fails closed.
+  const STRING_CODE_IDENTIFIERS = new Set(['eval', 'Function']);
+  // A LITERAL bracket key naming one of these reaches the same place as the
+  // identifier would — `x['eval']` has no Identifier node for the check above.
+  const BRACKET_TRACKED_KEYS = new Set([
+    'require',
+    'createRequire',
+    ...STRING_CODE_IDENTIFIERS,
+    'getBuiltinModule',
+    'constructor',
+  ]);
+  const isVmSpecifierText = (text) => text === 'vm' || text === 'node:vm';
 
   const isNodeModuleSpecifierText = (text) => text === 'node:module' || text === 'module';
+
+  /** `X.getBuiltinModule` or a bare `getBuiltinModule` — the callee of a getBuiltinModule call. */
+  const isGetBuiltinModuleCallee = (expr) =>
+    (ts.isIdentifier(expr) && expr.text === 'getBuiltinModule') ||
+    (ts.isPropertyAccessExpression(expr) && expr.name.text === 'getBuiltinModule');
+  const isGetBuiltinModuleCall = (node) =>
+    ts.isCallExpression(node) && isGetBuiltinModuleCallee(node.expression);
+  const unwrapParens = (node) => {
+    let n = node;
+    while (ts.isParenthesizedExpression(n)) n = n.expression;
+    return n;
+  };
+  /**
+   * An expression that evaluates to an ambient root (a global object or
+   * `process`): a tracked identifier, or a chain of ambient-root-NAMED
+   * property accesses on one (`globalThis.process`, `global['globalThis']`).
+   */
+  const isAmbientRootExpr = (node) => {
+    const n = unwrapParens(node);
+    if (ts.isIdentifier(n)) return ambientRootNames.has(n.text);
+    if (ts.isPropertyAccessExpression(n)) {
+      return ambientRootNames.has(n.name.text) && isAmbientRootExpr(n.expression);
+    }
+    if (
+      ts.isElementAccessExpression(n) &&
+      n.argumentExpression &&
+      ts.isStringLiteralLike(n.argumentExpression)
+    ) {
+      return ambientRootNames.has(n.argumentExpression.text) && isAmbientRootExpr(n.expression);
+    }
+    return false;
+  };
+  const isBuiltinModuleResultExpr = (node) => {
+    const n = unwrapParens(node);
+    return (
+      isGetBuiltinModuleCall(n) || (ts.isIdentifier(n) && builtinModuleResultNames.has(n.text))
+    );
+  };
+  /** A key a static scan can read: a string/number literal. Anything else names a property through a value. */
+  const isLiteralKey = (expr) =>
+    !!expr && (ts.isStringLiteralLike(expr) || ts.isNumericLiteral(expr));
 
   // Import aliasing (`import { createRequire as cr } from 'node:module'`)
   // and node:module namespace/default bindings: one pass — an import
@@ -331,6 +400,21 @@ function jsLocalImportSpecifiers(src, absPath) {
             nodeModuleBindingNames.add(name);
             grew = true;
           }
+          if (ambientRootNames.has(initName) && !ambientRootNames.has(name)) {
+            ambientRootNames.add(name);
+            grew = true;
+          }
+          if (builtinModuleResultNames.has(initName) && !builtinModuleResultNames.has(name)) {
+            builtinModuleResultNames.add(name);
+            grew = true;
+          }
+        } else if (isAmbientRootExpr(init) && !ambientRootNames.has(name)) {
+          // `const p = globalThis.process` — an alias through a property chain.
+          ambientRootNames.add(name);
+          grew = true;
+        } else if (isGetBuiltinModuleCall(init) && !builtinModuleResultNames.has(name)) {
+          builtinModuleResultNames.add(name);
+          grew = true;
         } else if (
           ts.isCallExpression(init) &&
           ts.isIdentifier(init.expression) &&
@@ -352,6 +436,27 @@ function jsLocalImportSpecifiers(src, absPath) {
           // namespace object, not a specific export.
           nodeModuleBindingNames.add(name);
           grew = true;
+        }
+      } else if (
+        ts.isVariableDeclaration(node) &&
+        ts.isObjectBindingPattern(node.name) &&
+        node.initializer &&
+        isAmbientRootExpr(node.initializer)
+      ) {
+        // `const { process: p } = globalThis` — a DESTRUCTURED ambient root.
+        for (const el of node.name.elements) {
+          const key = el.propertyName ?? el.name;
+          const keyText =
+            ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? key.text : undefined;
+          if (
+            keyText !== undefined &&
+            ambientRootNames.has(keyText) &&
+            ts.isIdentifier(el.name) &&
+            !ambientRootNames.has(el.name.text)
+          ) {
+            ambientRootNames.add(el.name.text);
+            grew = true;
+          }
         }
       }
       ts.forEachChild(node, pass);
@@ -450,8 +555,7 @@ function jsLocalImportSpecifiers(src, absPath) {
     ts.isElementAccessExpression(node) &&
     !!node.argumentExpression &&
     ts.isStringLiteralLike(node.argumentExpression) &&
-    (node.argumentExpression.text === 'require' ||
-      node.argumentExpression.text === 'createRequire');
+    BRACKET_TRACKED_KEYS.has(node.argumentExpression.text);
   /**
    * `await import('node:module')` used INLINE, as the base of a further
    * access, with no name ever bound to it at all — e.g.
@@ -593,6 +697,101 @@ function jsLocalImportSpecifiers(src, absPath) {
       failClosed(
         node,
         'calls import.meta.require(), a Bun-specific form this scanner never resolves',
+      );
+    } else if (ts.isIdentifier(node) && STRING_CODE_IDENTIFIERS.has(node.text)) {
+      // Any position, including a property name (`globalThis.eval`) or an
+      // object key — see STRING_CODE_IDENTIFIERS.
+      failClosed(
+        node,
+        `references the \`${node.text}\` identifier — code built from a string can reach require/node:module under a spelling no static scan can read`,
+      );
+    } else if (ts.isPropertyAccessExpression(node) && node.name.text === 'constructor') {
+      // `(() => {}).constructor` IS `Function` (or AsyncFunction) — the same
+      // string-to-code channel reached without naming it.
+      failClosed(
+        node,
+        'accesses `.constructor` — on a function that is `Function` itself, a string-to-code channel no static scan can read',
+      );
+    } else if (
+      ts.isStringLiteralLike(node) &&
+      isVmSpecifierText(node.text) &&
+      !!node.parent &&
+      (((ts.isImportDeclaration(node.parent) || ts.isExportDeclaration(node.parent)) &&
+        node.parent.moduleSpecifier === node) ||
+        (ts.isCallExpression(node.parent) && node.parent.arguments[0] === node))
+    ) {
+      // node:vm evaluates strings as code — the same channel as eval.
+      failClosed(
+        node,
+        'imports node:vm — it evaluates strings as code, which can reach require/node:module under a spelling no static scan can read',
+      );
+    } else if (
+      ts.isIdentifier(node) &&
+      node.text === 'getBuiltinModule' &&
+      !(
+        node.parent &&
+        ((ts.isCallExpression(node.parent) && node.parent.expression === node) ||
+          (ts.isPropertyAccessExpression(node.parent) &&
+            node.parent.name === node &&
+            !!node.parent.parent &&
+            ts.isCallExpression(node.parent.parent) &&
+            node.parent.parent.expression === node.parent))
+      )
+    ) {
+      failClosed(
+        node,
+        'references `getBuiltinModule` in a form this scanner does not track — only a direct `process.getBuiltinModule(<literal>)` call is recognised',
+      );
+    } else if (
+      isGetBuiltinModuleCall(node) &&
+      !(node.arguments[0] && ts.isStringLiteralLike(node.arguments[0]))
+    ) {
+      failClosed(
+        node,
+        'calls getBuiltinModule() with a non-literal argument — this scanner cannot determine which builtin it loads',
+      );
+    } else if (isGetBuiltinModuleCall(node) && isNodeModuleSpecifierText(node.arguments[0].text)) {
+      // node:module reached WITHOUT an import — every createRequire/_load
+      // path on it is untracked. Fail closed on the call itself, however
+      // the result is used.
+      failClosed(
+        node,
+        'calls getBuiltinModule() for node:module — its createRequire/_load reach relative paths this scanner cannot resolve',
+      );
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      !isLiteralKey(node.argumentExpression) &&
+      isAmbientRootExpr(node.expression)
+    ) {
+      failClosed(
+        node,
+        'uses a non-literal computed (bracket) property access on a global object (globalThis/global/self/window/process, or an alias of one) — the key can name require, eval or getBuiltinModule under any spelling',
+      );
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      !isLiteralKey(node.argumentExpression) &&
+      isBuiltinModuleResultExpr(node.expression)
+    ) {
+      failClosed(
+        node,
+        'uses a non-literal computed (bracket) property access on a getBuiltinModule() result — this scanner cannot determine which export is accessed',
+      );
+    } else if (
+      ts.isBindingElement(node) &&
+      node.propertyName &&
+      ts.isComputedPropertyName(node.propertyName) &&
+      !isLiteralKey(node.propertyName.expression) &&
+      ts.isObjectBindingPattern(node.parent) &&
+      ts.isVariableDeclaration(node.parent.parent) &&
+      !!node.parent.parent.initializer &&
+      (isAmbientRootExpr(node.parent.parent.initializer) ||
+        isBuiltinModuleResultExpr(node.parent.parent.initializer))
+    ) {
+      // `const { [k]: r } = globalThis` — the destructuring form of a
+      // non-literal bracket key.
+      failClosed(
+        node,
+        `uses a non-literal computed (bracket) property access on ${isAmbientRootExpr(node.parent.parent.initializer) ? 'a global object' : 'a getBuiltinModule() result'} (via a computed destructuring key)`,
       );
     } else if (isResolveCall(node)) {
       // Never treated as a dependency — do not descend into its argument.

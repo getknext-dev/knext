@@ -1668,6 +1668,145 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
     expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(/does not parse as JavaScript/);
   });
 
+  // #1388 round 5: every shape below reached `require`/`node:module` with
+  // NO error. Enumerating spellings of `require` cannot close this — a
+  // string-built name (`'req'+'uire'`) defeats any literal comparison. So
+  // the scanner fails closed on the CHANNELS that let a string become code
+  // or a property key: the `eval`/`Function` identifiers (any reference at
+  // all), `.constructor` (Function by another name), node:vm, a non-literal
+  // computed key on a global object or on a getBuiltinModule() result, and
+  // getBuiltinModule itself used any way but a direct literal-argument call.
+  // Each case names the class its failure message must cite, so a mutation
+  // removing one class reds exactly its own rows.
+  describe('string-to-code / string-to-key channels fail closed (#1388 round 5)', () => {
+    const cases: { name: string; src: string; error: RegExp }[] = [
+      {
+        name: "new Function('return require')()",
+        src: "const r = new Function('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `Function` identifier/,
+      },
+      {
+        name: "Function('return req'+'uire')()",
+        src: "const r = Function('return req' + 'uire')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `Function` identifier/,
+      },
+      {
+        name: "eval('req'+'uire')",
+        src: "const r = eval('req' + 'uire');\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `eval` identifier/,
+      },
+      {
+        name: '(0, eval)(...) — indirect eval',
+        src: "const r = (0, eval)('req' + 'uire');\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `eval` identifier/,
+      },
+      {
+        name: 'globalThis.eval(...) — eval as a property name',
+        src: "const r = globalThis.eval('req' + 'uire');\nexport const y = r('./lib/real.cjs');\n",
+        error: /references the `eval` identifier/,
+      },
+      {
+        name: "globalThis['req'+'uire']",
+        src: "const r = globalThis['req' + 'uire'];\nexport const y = r('./lib/real.cjs');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: 'const g = global; g[k] — an ALIASED global object',
+        src: "const g = global;\nconst k = 'req' + 'uire';\nexport const y = g[k]('./lib/real.cjs');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: 'globalThis.process[k] — a chain rooted at a global object',
+        src: "const k = 'getBuiltin' + 'Module';\nexport const y = globalThis.process[k]('module');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: "process.getBuiltinModule('mod'+'ule')._load",
+        src: "const m = process.getBuiltinModule('mod' + 'ule');\nexport const y = m._load('./lib/real.cjs');\n",
+        error: /calls getBuiltinModule\(\) with a non-literal argument/,
+      },
+      {
+        name: "process.getBuiltinModule('module')._load — a LITERAL node:module",
+        src: "export const y = process.getBuiltinModule('module')._load('./lib/real.cjs');\n",
+        error: /calls getBuiltinModule\(\) for node:module/,
+      },
+      {
+        name: "process.getBuiltinModule('node:module') bound to a local",
+        src: "const m = process.getBuiltinModule('node:module');\nexport const y = m._load('./lib/real.cjs');\n",
+        error: /calls getBuiltinModule\(\) for node:module/,
+      },
+      {
+        name: "process.getBuiltinModule('fs')[k] — non-literal key on the result",
+        src: "const k = 'read' + 'FileSync';\nexport const y = process.getBuiltinModule('fs')[k];\n",
+        error: /non-literal computed \(bracket\) property access on a getBuiltinModule\(\) result/,
+      },
+      {
+        name: "const fs = process.getBuiltinModule('fs'); fs[k] — an ALIASED result",
+        src: "const fs = process.getBuiltinModule('fs');\nconst k = 'read' + 'FileSync';\nexport const y = fs[k];\n",
+        error: /non-literal computed \(bracket\) property access on a getBuiltinModule\(\) result/,
+      },
+      {
+        name: 'const { getBuiltinModule } = process — destructured',
+        src: "const { getBuiltinModule } = process;\nexport const y = getBuiltinModule('fs');\n",
+        error: /references `getBuiltinModule` in a form this scanner does not track/,
+      },
+      {
+        name: "globalThis['eval'] — a LITERAL bracket key naming eval",
+        src: "const r = globalThis['eval'];\nexport const y = r('1');\n",
+        error: /computed \(bracket\) property access on a tracked name \(`eval`\)/,
+      },
+      {
+        name: "process['getBuiltinModule']('module') — literal bracket key",
+        src: "export const y = process['getBuiltinModule']('module');\n",
+        error: /computed \(bracket\) property access on a tracked name \(`getBuiltinModule`\)/,
+      },
+      {
+        name: "(() => {}).constructor('return require')() — Function via .constructor",
+        src: "const r = (() => {}).constructor('return require')();\nexport const y = r('./lib/real.cjs');\n",
+        error: /accesses `\.constructor`/,
+      },
+      {
+        name: "import vm from 'node:vm' — string code via vm",
+        src: "import vm from 'node:vm';\nexport const y = vm.runInThisContext('1');\n",
+        error: /imports node:vm/,
+      },
+      {
+        name: "require('vm') — string code via vm, CJS form",
+        src: "const vm = require('vm');\nexport const y = vm.runInThisContext('1');\n",
+        error: /imports node:vm/,
+      },
+    ];
+
+    for (const { name, src, error } of cases) {
+      it(`${name} is a hard error`, () => {
+        const { repoRoot, tarballsDir } = makeFixture();
+        writeFileSync(join(repoRoot, 'scripts/e2e-summary.mjs'), src);
+        expect(() => fingerprint(repoRoot, tarballsDir)).toThrow(error);
+      });
+    }
+
+    // The other half: the rules must not fire on the ordinary, LITERAL uses
+    // of the same objects — or the guard is unusable and gets deleted.
+    it('literal-keyed global/process access and a literal non-module getBuiltinModule call still fingerprint cleanly', () => {
+      const { repoRoot, tarballsDir } = makeFixture();
+      writeFileSync(
+        join(repoRoot, 'scripts/e2e-summary.mjs'),
+        [
+          "const a = globalThis.process.env['HOME'];",
+          "const b = globalThis['structuredClone'];",
+          "const fs = process.getBuiltinModule('node:fs');",
+          'const c = fs.existsSync;',
+          "const key = 'PATH';",
+          'const d = process.env[key];',
+          'const e = { evaluate: 1, FunctionName: 2 };',
+          'export const y = [a, b, c, d, e];',
+          '',
+        ].join('\n'),
+      );
+      expect(() => fingerprint(repoRoot, tarballsDir)).not.toThrow();
+    });
+  });
+
   it('names BOTH scripts/lib/e2e-state-snapshot.sh (sourced) and scripts/lib/knext-closure.mjs (imported, no e2e- prefix) in the real repo harness (node lane)', () => {
     const tarballsDir = tempDir('knext-fp-lib-real-');
     packFixtureTarball(tarballsDir, 'core', '0.3.0');
