@@ -79,7 +79,18 @@ esac
 # prerelease/build suffix". Wrapping in literal dots turns "1.2.x" into
 # ".1.2.x." (a whole-segment match) while "1.0.0-next.1" becomes
 # ".1.0.0-next.1." (no ".x."/".X." segment anywhere in it).
-case ".${VERSION}." in
+#
+# jev 0.49 finding: checking the FULL version string missed an x-range
+# segment with a prerelease suffix glued directly onto it — "1.2.x-foo"
+# wraps to ".1.2.x-foo." (no ".x." substring), so it slipped through, even
+# though npm itself still reads the "x" segment there as the wildcard, not
+# as a literal patch version with a "-foo" prerelease tag. The wildcard
+# check must only ever look at the VERSION CORE — everything before the
+# first "-" — never a prerelease SUFFIX after it (a real prerelease tag
+# that happens to literally be "x", e.g. "1.2.3-x", is legitimate and must
+# not be rejected). `${VERSION%%-*}` strips from the first "-" onward.
+VERSION_CORE="${VERSION%%-*}"
+case ".${VERSION_CORE}." in
   *'.x.'* | *'.X.'*)
     echo "generate-musl-native-lockfile: '${VERSION}' is not an exact version — no ranges (^ ~ x * latest etc.) are accepted; pass a literal version like 1.2.4" >&2
     exit 2

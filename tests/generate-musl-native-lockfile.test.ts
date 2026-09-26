@@ -257,4 +257,38 @@ describe('exact-version pin, real network (round-2 finding — the caret-range b
       expect(r.stderr).toMatch(/not an exact version/);
     }
   });
+
+  /**
+   * jev 0.49 finding: the ".x."/".X." whole-segment check wraps the FULL
+   * VERSION argument in dots, so an x-range segment with a prerelease
+   * suffix glued directly onto it (e.g. "1.2.x-foo") wraps to ".1.2.x-foo."
+   * — which contains no ".x." substring, so it slipped through. npm itself
+   * still reads "1.2.x-foo" as an x-range (the wildcard segment), not a
+   * literal prerelease tag on a "x" patch version, so this must be rejected
+   * the same as a bare "1.2.x". The check must consider only the VERSION
+   * CORE — everything before the first "-" — when looking for a whole
+   * x/X/* segment, never the full string with a prerelease suffix attached.
+   */
+  it('rejects an x-range segment with a prerelease suffix glued onto it (e.g. "1.2.x-foo") — jev 0.49 finding', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.x-foo']);
+    expect(r.stderr).toMatch(/not an exact version/);
+    expect(r.stderr).not.toMatch(/resolving @img/);
+  });
+
+  it('rejects a bare "x"/"X" version with a prerelease suffix glued onto it (e.g. "x-foo")', () => {
+    for (const v of ['x-foo', 'X-foo']) {
+      const { script } = makeIsolatedCopy();
+      const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', v]);
+      expect(r.stderr).toMatch(/not an exact version/);
+      expect(r.stderr).not.toMatch(/resolving @img/);
+    }
+  });
+
+  it('still does NOT reject a legitimate prerelease SUFFIX that is literally "x" (e.g. "1.2.3-x") — the wildcard check only applies to the version CORE, never the suffix', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.3-x']);
+    expect(r.stderr).not.toMatch(/not an exact version/);
+    expect(r.stderr).toMatch(/resolving @img/);
+  });
 });
