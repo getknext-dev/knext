@@ -46,10 +46,21 @@
  * `*.md` (prose — it cannot execute) and test FILES (`*.test.*`, which set `0`
  * on purpose; never a whole `__tests__` directory).
  *
- * REAL LIMITS: the name split by string concatenation
- * (`"VINEXT_NEXT_" + "DEPLOY_CACHE_CONTROL"`) never appears whole, so it is
- * invisible; the scan proves no repo file overrides the switch, not that a
- * deployer's cluster does not; a `/*!` legal comment is preserved by the
+ * YAML is parsed with `merge: true` (`<<` keys applied, as kubectl/compose do) and
+ * the `failsafe` schema, so a scalar is its SOURCE text: `1.0`, `0x1`, `01` are
+ * not `1`. A parse error or an unresolvable alias is red.
+ *
+ * Every file is looked at, but first pre-filtered on its ESCAPE-DECODED text
+ * (`\xHH`, `\uHHHH`, `\u{H}`, octal), so an escaped spelling of the name is not
+ * skipped. In JS the transpiler decodes it; in other file types an escaped
+ * spelling is red outright. A parse error in a file that never names the switch
+ * is irrelevant and ignored.
+ *
+ * REAL LIMITS: the name never appearing whole is invisible when it is built by
+ * string concatenation (`"VINEXT_NEXT_" + "DEPLOY_CACHE_CONTROL"`), split by a
+ * shell/Dockerfile backslash-newline, or assembled by a JSON-driven script.
+ * The scan proves no repo file overrides the switch, not that a deployer's
+ * cluster does not; a `/*!` legal comment is preserved by the
  * transpiler and so is red, not skipped.
  *
  * `isBunEntryWired` accepts one shape: inside the exported config, a
