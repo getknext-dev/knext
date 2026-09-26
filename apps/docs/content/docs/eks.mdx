@@ -3,13 +3,13 @@ title: Deploy on Amazon EKS
 description: A documented procedure for running knext on EKS — S3 for assets, ElastiCache/Redis for the cache, ECR for digest-pinned images.
 ---
 
-This is a **documented procedure** for EKS. The steps below are documented but **not yet validated
-on a live EKS cluster** — see the callout below before relying on it in production.
+The core deploy path — `knext deploy` → `NextApp` resource → operator → Knative Service → a live
+route — has been validated end to end on a live EKS cluster. The data-plane steps in this guide
+(S3 assets, ElastiCache) are documented but have not each been validated there.
 
 <Callout type="warn">
-**Not yet validated on a live EKS cluster.** knext's deployment has been exercised live on other
-clouds, not on EKS. Treat this guide as a procedure to validate in your own environment, not a
-battle-tested runbook.
+**Validate the data plane in your own environment.** The S3 and ElastiCache steps below are a
+documented procedure, not a battle-tested runbook.
 </Callout>
 
 This guide assumes Knative Serving, Kourier, cert-manager, and the knext operator are already
@@ -195,8 +195,9 @@ export default config;
 ## 7. Build and deploy
 
 ```bash
-knext build     # builds the standalone image, pushes a digest-pinned ref
-knext deploy    # emits the NextApp CR; the operator reconciles it
+knext deploy --registry <account>.dkr.ecr.<region>.amazonaws.com/acme
+# builds the standalone image, pushes it, resolves the digest, and applies the NextApp CR;
+# the operator reconciles it
 ```
 
 The CLI never touches Knative directly — it applies a `NextApp` resource and the operator

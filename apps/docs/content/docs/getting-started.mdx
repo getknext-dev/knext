@@ -6,7 +6,7 @@ description: Take a Next.js app from next build to a scale-to-zero Knative servi
 Take an existing Next.js app from `next build` to a scale-to-zero Knative service. knext's default
 build uses Next.js's own **official Deployment Adapter API** — a plain `next build`, wired through
 `adapterPath`. A selectable **vinext** target — an open-source, Vite-based implementation of
-Next.js, compiled into a single fast executable — is also available; see [the adapter and the
+Next.js, compiled into a single executable — is also available; see [the adapter and the
 compiled build](/docs/official-adapter) for the trade-off.
 
 <Callout type="info">
@@ -116,8 +116,8 @@ const config: KnativeNextConfig = {
     publicUrl: 'https://storage.googleapis.com/acme-assets',
   },
   scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
-  // The default build compiles your app into a single executable (bundled,
-  // minified, bytecode-precompiled, Bun baked in). See /docs/bun-runtime.
+  // The default build compiles your standalone server into a Bun bytecode
+  // executable. See /docs/bun-runtime. Set runtime: 'node' to run it under Node.
 };
 
 export default config;
@@ -149,8 +149,9 @@ $ knext deploy --registry registry.example.com/acme
 ```
 
 `knext deploy` flags: `-r/--registry`, `-b/--bucket`, `-t/--tag`, `-n/--namespace`,
-`--skip-build`, `--skip-upload`, `--dry-run` (print the CR without applying), `-h/--help`,
-`-v/--version`.
+`--context`, `--image`, `--skip-build`, `--skip-upload`, `--skip-image-lockstep-check`,
+`--dry-run` (print the CR without applying), `-h/--help`, `-v/--version`. See the
+[CLI reference](/docs/cli#knext-deploy-default) for what each does.
 
 Then watch the rollout to real readiness — `status` exits non-zero if the app fails to come up, so
 this pair works as a CI gate:
@@ -161,22 +162,28 @@ $ knext status acme --watch   # polls until Ready=True (bounded)
 
 <Callout type="info">
 **The operator is the source of truth.** The CLI only ever *applies the `NextApp` CR*. The Go
-operator reconciles it into a Knative Service — wiring autoscaling, optionally the bytecode-cache
-volume, and rejecting any image that is not digest-pinned. See
+operator reconciles it into a Knative Service — wiring autoscaling, networking, and the
+runtime environment, and rejecting any image that is not digest-pinned. See
 [Operator & the NextApp CRD](/docs/operator).
 </Callout>
 
 ## The whole CLI at a glance
 
-Every command below is `npx @getknext/core <verb>`. Anything that is **not** one of these words runs the
-default `deploy` flow. Full flag tables are on the [CLI reference](/docs/cli).
+Every command below is `npx @getknext/core <verb>`. With no command, or with flags only, the CLI runs
+the default `deploy` flow. An unrecognised first word is an error, not a deploy. Full flag tables
+are on the [CLI reference](/docs/cli).
 
 | Command | What it does | What it writes |
 |---|---|---|
+| `npx @getknext/core create` | Scaffold a new knext-ready Next.js app. | New files only — no cluster changes. |
+| `npx @getknext/core init-ci` | Generate a deploy workflow and the scoped RBAC it needs. | Two files — no cluster changes. |
+| `npx @getknext/core validate` | Check `kn-next.config.ts` is complete and valid. | Nothing — reads only your config file. |
 | `npx @getknext/core deploy` | Build → push → apply the digest-pinned `NextApp` CR. The default. | Applies the `NextApp` CR; with object storage configured, also uploads static assets to your bucket. |
+| `npx @getknext/core build` | The build and asset-upload steps only, without deploying. | With object storage configured, uploads static assets to your bucket; no cluster write. |
 | `npx @getknext/core doctor` | Cluster-prereq preflight: CRD, operator, admission webhook, ingress class, Knative Serving. | Nothing — read-only. |
 | `npx @getknext/core status` | The operator's honest `Ready` / `Degraded` / `Reconciling` / `DatabaseReady` conditions. | Nothing — read-only. |
 | `npx @getknext/core rollback` | Pin serving traffic to a prior Knative Revision (or clear the pin). | One merge-patch of `spec.traffic` on the `NextApp` CR. |
+| `npx @getknext/core cleanup` | Remove the app from the cluster. | Deletes the `NextApp` CR; the operator removes what it owns. |
 | `npx @getknext/core db bind` | Bind an existing Postgres Secret as `DATABASE_URL`. | One merge-patch of `spec.database.secretRef` on the `NextApp` CR. |
 | `npx @getknext/core db migrate` | Apply pending drizzle migrations against the **writer**, once. | Your database only — no cluster write. |
 | `npx @getknext/core gc` | Reap superseded `_next/static/<build-id>/` prefixes (over-keep, never over-delete). | With object storage configured, deletes old asset prefixes from your bucket (reads the CR only); with none, reports there is nothing to reap. |
@@ -191,6 +198,5 @@ npx @getknext/core db migrate --dir ./drizzle                         # writer-o
 npx @getknext/core gc --dry-run                                       # print the reap/keep plan only
 ```
 
-`build`, `cleanup`, `preview`, and `loadtest` are **not** `knext` subcommands — they ship as
-directly runnable entries in the package. See
-[Directly runnable entries](/docs/cli#directly-runnable-entries).
+`preview` and `loadtest` are **not** `knext` subcommands — they ship as directly runnable entries
+in the package. See [Directly runnable entries](/docs/cli#directly-runnable-entries).

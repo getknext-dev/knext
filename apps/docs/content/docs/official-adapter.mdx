@@ -6,7 +6,7 @@ description: How knext's default (standalone) build uses the official Next.js ad
 <Callout type="info">
 **Scope, stated plainly.** knext's **default build** (`build: 'turbopack'`) uses this adapter: the
 adapter hooks described below run on `next build`, producing the standalone output the **778/778
-official-suite credential** was earned on. The selectable **`build: 'vinext'`** target — which
+official-suite result** was earned on. The selectable **`build: 'vinext'`** target — which
 compiles your app with [vinext](https://vinext.dev), an open-source, Vite-based implementation of
 the Next.js framework, into a [single executable](/docs/bun-runtime) — does **not** use this
 adapter; the hooks below are never called on that path. Which claim covers which path is tracked
@@ -64,19 +64,19 @@ import adapter from '@getknext/core/adapter';
 export default adapter;
 ```
 
-This is the same pattern used by the example apps in the knext repo, and by **this docs site**
-(the dogfood target).
+This is the same pattern that `knext create` scaffolds and the example apps in the knext repo use.
 
 ## Verified against the official suite
 
 knext validates the adapter against the official Next.js compatibility suite: the
 `vercel/next.js` deploy-mode e2e harness runs through knext's lifecycle scripts and passes
-**778 tests with zero failures** on the Node runtime, re-verified **nightly** (Next.js v16.2.0). A
+**778 tests with zero failures** on the Node runtime, re-verified **nightly** (Next.js v16.2.0).
+The default Bun cell, which compiles the same standalone server, passed once at 778/0. A
 fast smoke gate additionally runs a Node + Bun matrix on every change.
 
 <Callout type="info">
 The exact scope of that claim — including the four documented architectural exclusions (edge
-runtime, edge middleware, PPR, cache components) and the Bun lane's most recently observed 775/778 — is on
+runtime, edge middleware, PPR, cache components) and per-cell status — is on
 [Verified compatibility](/docs/compat-suite). Row-by-row feature status lives in the
 [compatibility matrix](/docs/compat-matrix).
 </Callout>
