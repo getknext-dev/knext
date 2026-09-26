@@ -116,6 +116,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // count RISING is a decision, per the rule above.
       'compat-credential-freeze-guard.yml': 1,
       'docs-closure-nightly.yml': 1,
+      // docs-oke-image.yml: the publish job audits the apps/docs closure with the
+      // bun the Dockerfile builder uses (1.4.2) before it builds or pushes.
+      'docs-oke-image.yml': 1,
       'file-manager-platform-e2e-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
