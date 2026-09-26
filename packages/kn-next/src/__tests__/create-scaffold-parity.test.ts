@@ -101,6 +101,13 @@ const CLI_ONLY: Record<string, string> = {
         "the zone app is built by this repo's pipeline; a created app needs its own image recipe",
     ".dockerignore.hbs":
         "paired with Dockerfile.hbs — it bounds THAT image recipe's build context, so it is CLI-only for the same reason",
+    "gitignore.hbs":
+        "#1394: an app created OUTSIDE this monorepo needs its own .gitignore " +
+        "(secrets, node_modules, build scratch); the zone app already lives " +
+        "under this repo's own root .gitignore and needs no per-app copy. " +
+        "Ships as `gitignore.hbs` (no leading dot) — npm strips a file literally " +
+        "named `.gitignore` from a published tarball; `knext create` renders it " +
+        "to `.gitignore` at write time.",
     "Dockerfile.vinext-node.hbs":
         "the vinext × node image recipe (baked V8 compile cache); the zone app is imaged by this repo's pipeline",
     "Dockerfile.vinext-node.dockerignore.hbs":

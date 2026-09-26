@@ -30,69 +30,268 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { staticizeEntryRequires } from "../adapters/entry-require-staticize.mjs";
+import {
+    analyzeServerModule,
+    wrapRequireBindings,
+} from "../adapters/entry-require-staticize.mjs";
 
 const COMPILE = resolve(import.meta.dir, "../adapters/vinext-compile.mjs");
-const all = () => true;
 
-describe("staticizeEntryRequires (unit)", () => {
-    it("rewrites nitro's createRequire(import.meta.url) call for an external package into a static require", () => {
-        const src =
+// Verbatim rolldown 1.2.6 shapes (see vinext-compile-chunk-requires.test.ts,
+// which regenerates them with the real bundler end to end).
+const ROLLDOWN_PLAIN =
+    'import { createRequire } from "node:module";\n' +
+    "var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();\n" +
+    'var x = () => __require("@opentelemetry/api");\n';
+const ROLLDOWN_MIN =
+    'import{createRequire as e}from"node:module";var u=/* @__PURE__ */ e(import.meta.url);var x=()=>u(`@opentelemetry/api`);';
+const ROLLDOWN_RUNTIME =
+    'import{createRequire as e}from"node:module";var s=1,u=/* @__PURE__ */ e(import.meta.url);export{u as n,s as t};';
+const ROLLDOWN_CONSUMER =
+    'import{n as e,t as n}from"./rolldown-runtime.mjs";var r=()=>e(`chunk-dep`);export{r as default};';
+
+describe("analyzeServerModule (unit)", () => {
+    it("finds rolldown's IIFE require binding and its literal calls", () => {
+        const a = analyzeServerModule(ROLLDOWN_PLAIN);
+        expect(a.aliases).toEqual(["createRequire"]);
+        expect(a.requireBindings).toEqual(["__require"]);
+        expect([...(a.literalCalls.get("__require") ?? [])]).toEqual([
+            "@opentelemetry/api",
+        ]);
+        expect(a.unrecognizedBinding).toBe(false);
+    });
+
+    it("finds the minified binding through the createRequire import alias", () => {
+        const a = analyzeServerModule(ROLLDOWN_MIN);
+        expect(a.aliases).toEqual(["e"]);
+        expect(a.requireBindings).toEqual(["u"]);
+        expect([...(a.literalCalls.get("u") ?? [])]).toEqual([
+            "@opentelemetry/api",
+        ]);
+    });
+
+    it("maps a hoisted binding's export and a consumer chunk's import alias", () => {
+        const runtime = analyzeServerModule(ROLLDOWN_RUNTIME);
+        expect(runtime.requireBindings).toEqual(["u"]);
+        expect(runtime.exports.get("u")).toEqual(["n"]);
+        const consumer = analyzeServerModule(ROLLDOWN_CONSUMER);
+        expect(consumer.imports).toEqual([
+            {
+                from: "./rolldown-runtime.mjs",
+                names: new Map([
+                    ["n", "e"],
+                    ["t", "n"],
+                ]),
+            },
+        ]);
+        expect([...(consumer.literalCalls.get("e") ?? [])]).toEqual([
+            "chunk-dep",
+        ]);
+    });
+
+    it("keeps the older direct form (`X = createRequire(import.meta.url)`) and any quote style", () => {
+        const a = analyzeServerModule(
+            'import { createRequire as createRequire$1 } from "module";\n' +
+                "const req = createRequire$1(import.meta.url);\nreq('pkg-a'); req(\"@scope/pkg-b/sub\");",
+        );
+        expect(a.requireBindings).toEqual(["req"]);
+        expect([...(a.literalCalls.get("req") ?? [])].sort()).toEqual([
+            "@scope/pkg-b/sub",
+            "pkg-a",
+        ]);
+    });
+
+    it("ignores builtins, dynamic and interpolated specifiers, and member calls", () => {
+        const a = analyzeServerModule(
+            'import{createRequire}from"node:module";var r=createRequire(import.meta.url);' +
+                // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal JS source under test, not a template
+                "r(`util`);r(`node:fs`);r(name);r(`a-${b}`);o.r(`pkg`);",
+        );
+        expect(a.literalCalls.size).toBe(0);
+    });
+
+    it("counts declarations of a name (var list, function, parameters, catch), so a reused require name reads as ambiguous", () => {
+        const a = analyzeServerModule(
+            'import{createRequire as e}from"node:module";var t=1,u=e(import.meta.url);' +
+                "function u(e,r){}var f=(u,x)=>u(x);var g=u=>u;try{}catch(u){}" +
+                "var o={m(u){return u(1)}};",
+        );
+        expect(a.requireBindings).toEqual(["u"]);
+        // binding + function + 2 arrow params + catch + method param
+        expect(a.declarationCounts.get("u")).toBeGreaterThanOrEqual(6);
+        expect(a.nonLiteralCallees.has("u")).toBe(true);
+        // a name declared only as the binding stays unambiguous
+        const b = analyzeServerModule(ROLLDOWN_MIN);
+        expect(b.declarationCounts.get("u")).toBe(1);
+    });
+
+    it("counts function DECLARATIONS but not named function EXPRESSIONS (esbuild's __commonJS helper)", () => {
+        const decl = (src: string, id: string) =>
+            analyzeServerModule(src).declarationCounts.get(id) ?? 0;
+        // expressions: after =>, =, (, ,, ?, :, return
+        expect(decl("var c=(cb,mod)=>function u(){return 1};", "u")).toBe(0);
+        expect(decl("var c=function u(){};", "u")).toBe(0);
+        expect(decl("f(function u(){});g(1,function u(){});", "u")).toBe(0);
+        expect(decl("var c=x?function u(){}:function u(){};", "u")).toBe(0);
+        expect(decl("function g(){return function u(){}}", "u")).toBe(0);
+        // declarations: file start, after ; { }, export / default / async, comments
+        expect(decl("function u(){}", "u")).toBe(1);
+        expect(decl("x=1;function u(){}", "u")).toBe(1);
+        expect(decl("{function u(){}}", "u")).toBe(1);
+        expect(decl("export function u(){}", "u")).toBe(1);
+        expect(decl("export default async function u(){}", "u")).toBe(1);
+        expect(decl("x=1;/* c */ function u(){}", "u")).toBe(1);
+    });
+
+    describe("only a positively identified function/method HEAD is not a call (#1384 round 5)", () => {
+        const flagged = (src: string) =>
+            analyzeServerModule(
+                'import{createRequire}from"node:module";var __require=createRequire(import.meta.url);' +
+                    src,
+            ).nonLiteralCallees.has("__require");
+        it("a call after `extends` is a call", () => {
+            expect(flagged("class X extends __require(n) {}")).toBe(true);
+        });
+        it("a call followed by a block on the NEXT line (ASI) is a call", () => {
+            expect(flagged("x=1;\n__require(n)\n{ y(); }")).toBe(true);
+        });
+        it("a string argument containing `) {` does not make a call a head", () => {
+            expect(flagged('x=1;__require("a) {");')).toBe(true);
+        });
+        it("a call in expression position is a call", () => {
+            expect(flagged("x=__require(n);")).toBe(true);
+        });
+        it("function, generator, method, object-method and getter heads are not calls", () => {
+            expect(
+                flagged("var c=(cb,mod)=>function __require() {return 1};"),
+            ).toBe(false);
+            expect(flagged("var g=function* __require(){};")).toBe(false);
+            expect(flagged("class K { __require() { return 1; } }")).toBe(
+                false,
+            );
+            expect(
+                flagged("var o = { a: 1, __require(x) { return x; } };"),
+            ).toBe(false);
+            expect(flagged("var o = { get __require() { return 1; } };")).toBe(
+                false,
+            );
+        });
+        it("heads whose parameters hold nested parens are still heads", () => {
+            expect(flagged("function __require(a = g()) { }")).toBe(false);
+            expect(flagged("var o = { __require(a = g(1)) { } };")).toBe(false);
+        });
+        it("a function head is a head even with its `{` on the next line", () => {
+            expect(flagged("var c=function __require()\n{return 1};")).toBe(
+                false,
+            );
+            expect(flagged("var g=function* __require()\n{};")).toBe(false);
+        });
+        it("a class member after another member's `}` is a head", () => {
+            expect(flagged("class K{a(){}__require(n){return n}}")).toBe(false);
+        });
+        it("a same-line comment between a method's `)` and `{` keeps it a head", () => {
+            expect(
+                flagged("class K { __require(x) /* c */ { return x; } }"),
+            ).toBe(false);
+        });
+        it("a call in an if/while/for condition followed by a block stays a call", () => {
+            expect(flagged("if (__require(n)) { y(); }")).toBe(true);
+            expect(flagged("while (__require(n)) { y(); }")).toBe(true);
+            expect(flagged("for (;__require(n);) { y(); }")).toBe(true);
+            expect(flagged("if(__require(n)){y()}")).toBe(true);
+        });
+        it("a quote inside a regex literal in the argument list cannot pair with a later string's `) {`", () => {
+            expect(
+                flagged(`x=[0,__require(n.replace(/'/g,""))];a('x');b(')) {')`),
+            ).toBe(true);
+        });
+        it("a quote inside a comment in the argument list cannot pair with a later string's `) {`", () => {
+            expect(
+                flagged(`x = [0, __require(n /* it's */)]; a('x'); b(') {')`),
+            ).toBe(true);
+        });
+        it("a quote inside a template's `${…}` cannot close the template early and pair with a later `) {` (#1384 round 8)", () => {
+            // Real rolldown 1.2.6 output for `require(n + `${c ? "`" : ""}`)`.
+            expect(
+                flagged(
+                    'x = f(0, __require(n + `${c ? "`" : ""}`), String(") {"));',
+                ),
+            ).toBe(true);
+        });
+        it("an escaped quote inside a string argument does not end the string early and pair with a later `) {` (#1384 round 9)", () => {
+            // Without the escape-skip in skipStringLiteral, the string
+            // `"\") {"` is (mis)read as closing right after the escaped
+            // quote, so the remaining `) {` on the same line pairs with the
+            // call's own `(` and misidentifies this call as a head — hiding
+            // a dynamic require instead of flagging it.
+            expect(flagged('x = [0, __require(n + "\\") {")];')).toBe(true);
+        });
+        it("a `${` in a real method's parameter list makes it a call (fail safe)", () => {
+            expect(
+                flagged("class K { __require(a = `${b}`) { return a; } }"),
+            ).toBe(true);
+        });
+        it("a `/` in a real method's parameter list makes it a call (fail safe)", () => {
+            expect(
+                flagged("class K { __require(a = 1 / 2) { return a; } }"),
+            ).toBe(true);
+        });
+    });
+
+    it("one comment cannot span code into the next: `/* a */ n /* b */` hides no argument", () => {
+        const a = analyzeServerModule(
             'import{createRequire}from"node:module";var __require=createRequire(import.meta.url);' +
-            "var x=(()=>{var Bh=__require(`@opentelemetry/api`);return Bh})();";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toContain('require("@opentelemetry/api")');
-        expect(out.contents).not.toContain("__require(`@opentelemetry/api`)");
-        expect(out.rewritten).toEqual(["@opentelemetry/api"]);
-        // The binding itself is untouched — builtins still go through it.
+                'x=__require(/* a */ n /* b */ "pkg");',
+        );
+        expect(a.nonLiteralCallees.has("__require")).toBe(true);
+    });
+
+    it("flags a createRequire(import.meta.url) call it cannot attribute to a binding", () => {
+        const a = analyzeServerModule(
+            'import{createRequire as e}from"node:module";use(e(import.meta.url));',
+        );
+        expect(a.unrecognizedBinding).toBe(true);
+    });
+
+    it("does not treat a createRequire anchored anywhere but import.meta.url as a require binding (sharp's own loader)", () => {
+        const a = analyzeServerModule(
+            'import{createRequire as e}from"node:module";let Rh=e(join(p,`x`));Rh(`sharp`);',
+        );
+        expect(a.requireBindings).toEqual([]);
+        expect(a.unrecognizedBinding).toBe(false);
+    });
+});
+
+describe("wrapRequireBindings (unit)", () => {
+    it("wraps only the binding expression, embedding the given specifiers as static requires", () => {
+        const out = wrapRequireBindings(
+            ROLLDOWN_MIN,
+            ["e"],
+            ["@opentelemetry/api"],
+        );
+        expect(out.count).toBe(1);
         expect(out.contents).toContain(
-            "__require=createRequire(import.meta.url)",
+            'case "@opentelemetry/api":return require("@opentelemetry/api");',
+        );
+        // the call site is untouched: callers of any name get the embedded copy
+        expect(out.contents).toContain("var x=()=>u(`@opentelemetry/api`);");
+        // the original require is the fallback for everything else
+        expect(out.contents).toContain("return __knextBase(__knextSpec)");
+        expect(out.contents).toContain("(e(import.meta.url))");
+    });
+
+    it("is a no-op with no aliases or nothing to embed", () => {
+        expect(wrapRequireBindings(ROLLDOWN_MIN, [], ["x"]).contents).toBe(
+            ROLLDOWN_MIN,
+        );
+        expect(wrapRequireBindings(ROLLDOWN_MIN, ["e"], []).contents).toBe(
+            ROLLDOWN_MIN,
         );
     });
 
-    it("handles quoted forms and any binding name (declared with const, aliased createRequire)", () => {
-        const src =
-            "const req = createRequire$1(import.meta.url);\n" +
-            "const a = req('pkg-a'); const b = req(\"@scope/pkg-b/sub\");";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toContain('require("pkg-a")');
-        expect(out.contents).toContain('require("@scope/pkg-b/sub")');
-        expect(out.rewritten.sort()).toEqual(["@scope/pkg-b/sub", "pkg-a"]);
-    });
-
-    it("leaves node builtins on the runtime require", () => {
-        const src =
-            "var __require=createRequire(import.meta.url);__require(`util`);__require(`node:string_decoder`);";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toBe(src);
-        expect(out.rewritten).toEqual([]);
-    });
-
-    it("leaves a specifier it cannot resolve untouched and reports it (never breaks the build on an optional dep)", () => {
-        const src =
-            "var __require=createRequire(import.meta.url);__require(`optional-missing`);";
-        const out = staticizeEntryRequires(src, () => false);
-        expect(out.contents).toBe(src);
-        expect(out.unresolved).toEqual(["optional-missing"]);
-    });
-
-    it("does not touch a createRequire anchored anywhere but import.meta.url (sharp's own loader)", () => {
-        const src = "let Rh=createRequire$1(join(p,`x`));Rh(`sharp`);";
-        const out = staticizeEntryRequires(src, all);
-        expect(out.contents).toBe(src);
-    });
-
-    it("does not touch dynamic (non-literal) or interpolated specifiers", () => {
-        const src =
-            // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal JS source under test, not a template
-            "var __require=createRequire(import.meta.url);__require(name);__require(`a-${b}`);";
-        expect(staticizeEntryRequires(src, all).contents).toBe(src);
-    });
-
-    it("does not rewrite a same-named member call (obj.__require) or a longer identifier", () => {
-        const src =
-            "var __require=createRequire(import.meta.url);o.__require(`pkg`);my__require(`pkg`);";
-        expect(staticizeEntryRequires(src, all).contents).toBe(src);
+    it("does not touch a same-named member call or a longer identifier", () => {
+        const src = "o.e(import.meta.url);ee(import.meta.url);";
+        expect(wrapRequireBindings(src, ["e"], ["pkg"]).count).toBe(0);
     });
 });
 

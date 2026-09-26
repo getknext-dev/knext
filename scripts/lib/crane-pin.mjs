@@ -111,6 +111,66 @@ function countDownloadUrlOccurrences(text) {
 }
 
 /**
+ * One entry per `CRANE_SHA256` assignment, in the SAME order
+ * `scanCraneChecksums`/`scanCraneVersions` already produce theirs in — the
+ * position-based replacement for an earlier version of this scan that (a)
+ * only matched this repo's exact two-line phrasing ("# sha256 of X from the
+ * vX.Y.Z\n# release's checksums.txt"), so a single-line comment, "from
+ * v0.21.7" without "the", or "checksum of vX.Y.Z" wording all slipped past
+ * it, and (b) returned a flat, file-wide list, so the caller could only ask
+ * "does this version appear ANYWHERE in the file" rather than "does THIS
+ * pin's own comment match THIS pin" — on a file with two pins (this repo's
+ * `operator-e2e-nightly.yml` has exactly that shape), two comments that
+ * each named the OTHER pin's version passed undetected (#1429 follow-up).
+ *
+ * For each (non-comment) `CRANE_SHA256` line, walks UPWARD collecting the
+ * contiguous block of full-line `#` comments directly above it (stopping at
+ * the first non-comment line), then extracts EVERY `vX.Y.Z`-shaped token in
+ * that block (v-prefix REQUIRED — accepts `vX.Y.Z` only, not bare X.Y.Z like
+ * `go 1.22.3` or IP addresses like `10.0.0.1`, which are ignored; and never
+ * followed by `.<digit>`, so `v0.20.2.1` is not read as v0.20.2). Deliberately loose about the
+ * surrounding prose — only the version TOKEN is pinned to a shape, not the
+ * sentence around it — because the point is which version the comment NAMES,
+ * not which phrasing it uses. All tokens are returned (not just the first) so
+ * the caller can also reject a block that names the pin's version AND a stale one.
+ *
+ * A `CRANE_SHA256` line that is itself a full-line `#` comment is skipped,
+ * exactly as `scanCraneChecksums` never sees it (it runs on stripped text) —
+ * otherwise a commented-out old pin would shift this list's ordinals off the
+ * `versions`/`checksums` pairing the caller indexes by.
+ *
+ * An EMPTY array for an occurrence means it has no comment block at all (or
+ * one with no parseable version token) — every pinned crane URL must carry
+ * one, so `scanCranePins` treats that as a violation, not "comment optional."
+ *
+ * Operates on the RAW, un-stripped text: this function's whole job is to read
+ * a `#` comment, not to have one stripped out from under it.
+ *
+ * @param {string} text
+ * @returns {string[][]} one array of `vX.Y.Z` tokens per CRANE_SHA256 line
+ */
+export function scanCraneVersionComments(text) {
+  const lines = text.split('\n');
+  const shaAssignRe = /\bCRANE_SHA256\b\s*[:=]\s*['"]?[0-9a-f]{64}['"]?/i;
+  const commentLineRe = /^[ \t]*#/;
+  // v-prefix REQUIRED: matches vX.Y.Z only, so bare X.Y.Z like "go 1.22.3"
+  // or IP addresses like "10.0.0.1" are never tokens (ignored, not rejected).
+  // The trailing `\b` alone still matches BEFORE a "." — "v0.20.2.1" would
+  // read as v0.20.2 — hence the `(?!\.\d)` exclusion: a token must not be
+  // followed by ".<digit>". A sentence-ending "v0.20.2." is still a token.
+  const versionTokenRe = /\bv\d+\.\d+\.\d+\b(?!\.\d)/gi;
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (commentLineRe.test(lines[i]) || !shaAssignRe.test(lines[i])) continue;
+    const block = [];
+    for (let j = i - 1; j >= 0 && commentLineRe.test(lines[j]); j--) block.unshift(lines[j]);
+    const tokens = block.join('\n').match(versionTokenRe) ?? [];
+    out.push(tokens.map((t) => t.toLowerCase()));
+  }
+  return out;
+}
+
+/**
  * Scans every `.github/workflows/*.yml`/`*.yaml` file for CRANE_VERSION /
  * CRANE_SHA256 pairs, TEXT-based (no YAML parser — see the module header).
  * `deps.listFiles`/`deps.readSource` are injectable so the test suite can
@@ -154,6 +214,39 @@ export function scanCranePins(workflowsDir, deps = {}) {
           `\${{ }} expression, an inline literal with no named env var, or a genuinely missing ` +
           `half of a pair) — #1211 item 2 exists precisely to catch that, not to skip past it.`,
       );
+    }
+
+    // #1429 follow-up — every pinned crane URL must carry its OWN version
+    // comment, checked against its OWN CRANE_VERSION, not a file-wide
+    // "does this version appear anywhere" scan: on a file with two pins
+    // (operator-e2e-nightly.yml has exactly that shape), two comments that
+    // each named the OTHER pin's version passed the old `.includes()` check
+    // undetected. `scanCraneVersionComments` returns one entry per
+    // CRANE_SHA256 occurrence, in the same order `versions`/`checksums`
+    // above are already ordinally paired in, so index `i` here is the SAME
+    // pin throughout.
+    const commentVersions = scanCraneVersionComments(readSource(file));
+    for (let i = 0; i < checksums.length; i++) {
+      // `?? []` fails closed (as "no comment") should the raw-text ordinals
+      // ever disagree with the stripped-text ones.
+      const named = commentVersions[i] ?? [];
+      if (named.length === 0) {
+        throw new Error(
+          `${file}: crane pin #${i + 1} (CRANE_VERSION ${versions[i]}) has no accompanying ` +
+            `version comment directly above its CRANE_SHA256 line — every pinned crane URL must ` +
+            `carry one naming the release its checksum came from (#1429).`,
+        );
+      }
+      const stale = named.filter((cv) => cv !== versions[i]);
+      if (stale.length > 0) {
+        throw new Error(
+          `${file}: crane pin #${i + 1}'s accompanying comment block names ${stale.join(', ')}, but its ` +
+            `own CRANE_VERSION is ${versions[i]} — every vX.Y.Z token in the comment block must ` +
+            `equal the pin's version. Tokens without a v prefix (e.g. 'go 1.22.3', '10.0.0.1') are ` +
+            `ignored; a changelog note naming another release (e.g. 'was v0.20.2') is rejected by ` +
+            `design — one version per block (#1429).`,
+        );
+      }
     }
 
     for (let i = 0; i < versions.length; i++) {

@@ -22,7 +22,7 @@ const dir = mkdtempSync(join(tmpdir(), 'bytecode-chain-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const BUN_LIVE =
-  'mode=compiled-exec runtime=bun image=oven/bun:1.4.0-alpine@sha256:abc bytecode_verified=true';
+  'mode=compiled-exec runtime=bun image=oven/bun:1.4.0-alpine@sha256:abc bytecode_verified=true'; // oven-bun-pin-exempt: synthetic fixture (fake version + digest), not a real selection
 const NODE_LIVE =
   'mode=server-js runtime=node image=- bytecode_verified=- compile_cache_bake=ok compile_cache_accepted=416 compile_cache_missed=9 compile_cache_rejected=0';
 const NODE_COLD =
