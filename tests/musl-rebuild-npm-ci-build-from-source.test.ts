@@ -123,14 +123,22 @@ function npmCiInvocationLines(source: string): { line: number; text: string }[] 
 
 /**
  * Whether an `npm ci` invocation STATEMENT sets `npm_config_build_from_source=true`
- * as an assignment within THAT SAME statement — checked against the masked
- * (quote-blind) text, so a comment or quoted string that merely NAMES the flag
- * cannot make an unset statement read as set, and a flag set on a different
- * statement (split on `;`/`&&`/`||`) never leaks across the boundary.
+ * as an assignment PREFIX of that same statement's `npm` command — checked
+ * against the masked (quote-blind) text, so a comment or quoted string that
+ * merely NAMES the flag cannot make an unset statement read as set, and a
+ * flag set on a different statement (split on `;`/`&&`/`||`) never leaks
+ * across the boundary. Position-checked, not just substring-present: a shell
+ * env assignment only takes effect when it PRECEDES the command word, so
+ * `npm ci npm_config_build_from_source=true` (the flag trailing as a bare
+ * argument, not a leading assignment) must not read as flagged.
  */
 function setsBuildFromSource(text: string): boolean {
   const masked = maskQuotedSpans(text);
-  return /\bnpm_config_build_from_source=true\b/.test(masked);
+  const flagMatch = masked.match(/\bnpm_config_build_from_source=true\b/);
+  if (!flagMatch || flagMatch.index === undefined) return false;
+  const invocationMatch = masked.match(/\bnpm\s+(ci|clean-install|install-clean)\b/);
+  if (!invocationMatch || invocationMatch.index === undefined) return true;
+  return flagMatch.index < invocationMatch.index;
 }
 
 describe('every npm ci invocation for a native corpus package sets npm_config_build_from_source=true (#1426)', () => {
@@ -225,6 +233,14 @@ describe('every npm ci invocation for a native corpus package sets npm_config_bu
       // not the `npm_config_build_from_source=true true` statement — proving
       // the flag-bearing statement is not itself mistaken for an invocation.
       expect(invocations[0].text).toMatch(/run_as_builder npm ci/);
+      const offenders = invocations.filter(({ text }) => !setsBuildFromSource(text));
+      expect(offenders.length).toBe(1);
+    });
+
+    it('"npm ci npm_config_build_from_source=true" — the flag TRAILS the command, so it is a bare argument, not a leading env assignment', () => {
+      const line = 'npm ci npm_config_build_from_source=true';
+      const invocations = npmCiInvocationLines(line);
+      expect(invocations.length).toBe(1);
       const offenders = invocations.filter(({ text }) => !setsBuildFromSource(text));
       expect(offenders.length).toBe(1);
     });
