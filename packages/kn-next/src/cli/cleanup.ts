@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * kn-next cleanup — tears down a deployed app by deleting its NextApp CR.
+ * knext cleanup — tears down a deployed app by deleting its NextApp CR.
  *
  * Usage:
  *   node packages/kn-next/src/cli/cleanup.ts
@@ -64,11 +64,11 @@ export function runCleanup(
 
 /**
  * Tear down the app described by the local kn-next.config.ts. Exported so the
- * `kn-next cleanup` bin subcommand can dispatch to it (the module also remains
+ * `knext cleanup` bin subcommand can dispatch to it (the module also remains
  * a documented directly-runnable entry — see the self-entry block below).
  */
 export async function cleanup(context?: string) {
-    log.info("🧹 kn-next cleanup");
+    log.info("🧹 knext cleanup");
 
     log.info("Loading configuration...");
     const config = await loadConfig();
@@ -87,10 +87,10 @@ export async function cleanup(context?: string) {
     log.info("✨ Cleanup complete!");
 }
 
-const CLEANUP_HELP = `kn-next cleanup — remove the app in this directory from the cluster
+const CLEANUP_HELP = `knext cleanup — remove the app in this directory from the cluster
 
 Usage:
-  kn-next cleanup
+  knext cleanup
 
 Issues exactly ONE cluster write: \`kubectl delete nextapp <name>\` for the app
 named in kn-next.config.ts. Owned resources (Knative Service, ServiceAccount,
@@ -107,10 +107,10 @@ Options:
 `;
 
 /**
- * argv entry for `kn-next cleanup`.
+ * argv entry for `knext cleanup`.
  *
  * Exists because the first version of the dispatch branch called `cleanup()`
- * with no argument parsing at all: `kn-next cleanup --help` DELETED the app
+ * with no argument parsing at all: `knext cleanup --help` DELETED the app
  * instead of printing help (reproduced by a reviewer against a live CR). Any
  * argument other than the help flags is now a hard error — for a destructive
  * verb, "ignored the flag and did it anyway" is the worst possible reading.
@@ -131,7 +131,7 @@ export async function cleanupMain(argv: readonly string[]): Promise<number> {
             const v = argv[++i];
             if (v === undefined || v.startsWith("-")) {
                 throw new UsageError(
-                    "--context requires a value (see kn-next cleanup --help)",
+                    "--context requires a value (see knext cleanup --help)",
                 );
             }
             contextFlag = v;
@@ -139,11 +139,11 @@ export async function cleanupMain(argv: readonly string[]): Promise<number> {
             contextFlag = a.slice("--context=".length);
         } else if (a.startsWith("-")) {
             throw new UsageError(
-                `unknown flag "${a}" — kn-next cleanup accepts only --context (see kn-next cleanup --help)`,
+                `unknown flag "${a}" — knext cleanup accepts only --context (see knext cleanup --help)`,
             );
         } else {
             throw new UsageError(
-                `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see kn-next cleanup --help)`,
+                `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see knext cleanup --help)`,
             );
         }
     }

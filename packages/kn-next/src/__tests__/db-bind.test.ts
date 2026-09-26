@@ -1,5 +1,5 @@
 /**
- * `kn-next db bind` — one-command BYO Postgres binding (ADR-0019, Workstream C).
+ * `knext db bind` — one-command BYO Postgres binding (ADR-0019, Workstream C).
  *
  * ADR-0001 discipline: the CLI emits INTENT only. `db bind` issues exactly ONE
  * cluster write — `kubectl patch nextapp <name> --type merge -p <json>` setting
@@ -338,7 +338,7 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
         });
         await expect(
             runDbBind("my-app", opts(), { exec, write: mock() }),
-        ).rejects.toThrow(/kn-next deploy|--dry-run/);
+        ).rejects.toThrow(/knext deploy|--dry-run/);
     });
 
     it("warns on sslmode=disable and prints the pool contract when a DSN is given", async () => {

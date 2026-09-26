@@ -5,7 +5,7 @@
  * `apps/file-manager/Dockerfile` rebuilds the app INSIDE the image (`RUN
  * ./node_modules/.bin/vite build`) rather than copying host-built artifacts
  * like the scaffolded template — so unlike the template, it never saw the
- * host's `NEXT_DEPLOYMENT_ID`/`ASSET_PREFIX` env before `kn-next deploy`'s
+ * host's `NEXT_DEPLOYMENT_ID`/`ASSET_PREFIX` env before `knext deploy`'s
  * general in-image-build fix (`dockerBuildxArgs` passing them as
  * `--build-arg`s, `runtime-image.ts`). Passing the build-arg is necessary but
  * NOT sufficient — the Dockerfile must also declare the `ARG` and export it

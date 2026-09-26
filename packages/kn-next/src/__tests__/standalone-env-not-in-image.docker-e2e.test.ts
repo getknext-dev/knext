@@ -131,7 +131,7 @@ beforeAll(() => {
     // inherits it — which would make Next load `.env.test` instead of
     // `.env.production` and copy nothing, silently making this suite prove
     // nothing. Force NODE_ENV=production for the build subprocess, matching
-    // the real `kn-next build`/`next build` deploy path (unset NODE_ENV,
+    // the real `knext build`/`next build` deploy path (unset NODE_ENV,
     // which `next build` itself treats as production).
     const build = run("bun", ["run", "build"], {
         cwd: appDir,

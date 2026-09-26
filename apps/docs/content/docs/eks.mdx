@@ -195,8 +195,8 @@ export default config;
 ## 7. Build and deploy
 
 ```bash
-kn-next build     # builds the standalone image, pushes a digest-pinned ref
-kn-next deploy    # emits the NextApp CR; the operator reconciles it
+knext build     # builds the standalone image, pushes a digest-pinned ref
+knext deploy    # emits the NextApp CR; the operator reconciles it
 ```
 
 The CLI never touches Knative directly — it applies a `NextApp` resource and the operator

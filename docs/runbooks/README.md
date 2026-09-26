@@ -6,7 +6,7 @@ CLI verbs, and ADRs.
 
 > Two invariants shape every procedure here:
 > 1. **The operator is the single source of truth (ADR-0001).** You change
->    desired state by editing the `NextApp` CR (or via `kn-next`, which only
+>    desired state by editing the `NextApp` CR (or via `knext`, which only
 >    patches the CR) — never by `kubectl edit` on the Knative Service directly.
 > 2. **When an app is scaled to zero it exports no app metrics** and its Grafana
 >    panels are blank — that is normal, not an outage.

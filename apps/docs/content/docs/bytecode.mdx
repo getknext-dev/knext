@@ -25,7 +25,7 @@ produced:
 
 - It sends a request to your configured **health check path** (`healthCheckPath` in
   `kn-next.config.ts`, default `/api/health`) and requires a **2xx response within 30 seconds**. A
-  custom health route works automatically through `kn-next deploy` and `kn-next preview` — the two
+  custom health route works automatically through `knext deploy` and `knext preview` — the two
   commands that actually run `docker build` — which thread it through as a `--build-arg`
   automatically, nothing extra to configure. A manual `docker build` of a staged Dockerfile (this
   page's Node image, or the vinext-on-Node image — see [vinext on
@@ -34,7 +34,7 @@ produced:
   the configured path, this step, and the image build with it, fails.
 
   `healthCheckPath` must start with a leading slash (e.g. `/api/health`), and must not contain a
-  comma or any whitespace — `kn-next deploy`/`preview`/`build` validate this up front and refuse to
+  comma or any whitespace — `knext deploy`/`preview`/`build` validate this up front and refuse to
   run rather than fail deep inside the image build. A comma is rejected because the value is joined
   into a comma-separated list of paths to warm before this step; a comma in a single path would
   silently split it into two.
@@ -165,7 +165,7 @@ Both runtimes get a compile cache, built at image build time, via different mech
 | Runtime | Bytecode mechanism |
 |---|---|
 | **Node** (default) | V8 compile cache, populated during the image build and shipped in the image. Read by every pod from its first boot. The vinext build on Node bakes it the same way, and fails the image build if the bake produces no usable cache (see [vinext on Node](/docs/build-pipeline#vinext-on-node)). |
-| **Bun** (`runtime: 'bun'`) | **Whole-bundle bytecode in a compiled executable**: `kn-next build` compiles the server into a Bun single executable with bytecode — `next build`'s standalone server on the default (turbopack/webpack) target, and the vinext build on the selectable `build: 'vinext'` target — and fails the build if the bytecode is missing. See [Bun runtime](/docs/bun-runtime). |
+| **Bun** (`runtime: 'bun'`) | **Whole-bundle bytecode in a compiled executable**: `knext build` compiles the server into a Bun single executable with bytecode — `next build`'s standalone server on the default (turbopack/webpack) target, and the vinext build on the selectable `build: 'vinext'` target — and fails the build if the bytecode is missing. See [Bun runtime](/docs/bun-runtime). |
 
 <Callout type="warn">
 A Bun bytecode-built image is **Bun-only** — booting it with Node exits 1 with a `FATAL` message
@@ -194,10 +194,10 @@ build-time cache does not:
 Leaving the old settings in place makes your deploy **fail**, in two different places
 depending on where they are:
 
-- **In `kn-next.config.ts`** — `kn-next` rejects a `bytecodeCache` block up front, and tells you what
+- **In `kn-next.config.ts`** — `knext` rejects a `bytecodeCache` block up front, and tells you what
   replaced it. It is refused rather than ignored on purpose: a setting that is quietly dropped looks
   exactly like a setting that is working.
-- **In a `NextApp` you apply by hand** — the fields no longer exist on the resource, and `kn-next`
+- **In a `NextApp` you apply by hand** — the fields no longer exist on the resource, and `knext`
   applies with strict validation, so the cluster rejects the unknown field.
 
 Remove them:

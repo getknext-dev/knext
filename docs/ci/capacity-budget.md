@@ -157,3 +157,18 @@ Enforced by `tests/ci-capacity-budget.test.ts`, in the same style as
   window as a credential run. `max-parallel: 8` per credential run is what
   keeps a single credential night from itself exhausting the cap; it is not
   a global scheduler.
+
+## 5. The shipped-pin early-warning lane (#1376 option b)
+
+`compat-shipped-pin-early-warning.yml` — a non-credential lane that tests
+the SCAFFOLD's shipped Next.js pin (`shippedNextPin` in
+`.github/compat-credentialed-next-version.json`), not the `v16.2.0`
+credential — costs 4 `test-e2e-deploy.yml` dispatches (node/bun x
+turbopack/webpack), each `smoke=true` (the same reduced-cost branch
+selection §3 describes), on a **weekly** cron rather than nightly: the
+existing 4 credential/early-warning crons plus `compat-vinext.yml`'s own
+weekly slot already leave limited headroom, and a non-credential
+informational signal does not need nightly cadence to be useful. The
+dispatching job itself is cheap (mostly idle polling, not compute); the real
+cost is the 4 dispatched smoke runs, each bounded by the same
+`max-parallel: 8` §2 already enforces on `test-e2e-deploy.yml`.

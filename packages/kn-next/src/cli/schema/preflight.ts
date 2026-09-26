@@ -322,7 +322,7 @@ export function formatPreflightFailure(
             `${UPGRADE_ORDER}\n` +
             "Nothing was built, uploaded or applied — this ran before any side effect.\n" +
             "  kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'\n" +
-            "  kn-next doctor"
+            "  knext doctor"
         );
     }
 
@@ -346,7 +346,7 @@ export function formatPreflightFailure(
             "CLI/operator field skew — do not upgrade anything on the strength of it.\n" +
             `kubectl said: ${firstLine(outcome.stderr)}\n` +
             "  kubectl -n kn-next-operator-system get deploy,pods\n" +
-            "  kn-next doctor"
+            "  knext doctor"
         );
     }
 
@@ -358,7 +358,7 @@ export function formatPreflightFailure(
         "The preflight needs exactly what the deploy needs — `create`/`patch` on nextapps in the " +
         "target namespace — so a denial here is a denial of the deploy itself, surfaced before " +
         "any side effect rather than after.\n" +
-        "  kn-next doctor"
+        "  knext doctor"
     );
 }
 

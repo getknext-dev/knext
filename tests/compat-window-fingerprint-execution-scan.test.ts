@@ -81,6 +81,23 @@ const NAMED_EXCEPTIONS: { path: string; reason: string }[] = [
     reason:
       'contract-test-mode-only fallback (KNEXT_E2E_SKIP_PACK=1), verified never set in CI; the active path is covered by the packed tarball hash.',
   },
+  // #1347/#1406 — compat-vinext.yml's `vinext-red-alert` job shells out to
+  // scripts/nightly-alert-issue.mjs. VERIFIED structurally outside the
+  // fingerprint-relevant harness for the "bun-vinext" lane: that job
+  // `needs: [build-next, deploy-tests, shard-ledger]` ONLY for its own `if:`
+  // status gating (always() + schedule + a failure result), so it never runs
+  // as part of — or before — the credential build/test work the fingerprint
+  // exists to freeze; it runs strictly AFTER, and only on a scheduled RED
+  // night, to file/update a pinned issue. Its own steps touch no build
+  // output, so a change to nightly-alert-issue.mjs cannot move the fingerprint
+  // and must not be required to appear in the harness closure. Permanent
+  // (not dated): this is what the alert job STRUCTURALLY is, not temporary
+  // tech debt with a clock.
+  {
+    path: 'scripts/nightly-alert-issue.mjs',
+    reason:
+      "invoked only by compat-vinext.yml's vinext-red-alert job (and the 8 sibling nightly-red-alert jobs, none of which are CREDENTIAL_CELLS lanes), which needs the other jobs only for status gating and runs strictly after the credential build/test work — never part of the fingerprint-relevant harness.",
+  },
 ];
 
 /**

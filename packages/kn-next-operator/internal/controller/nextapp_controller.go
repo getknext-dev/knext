@@ -70,6 +70,28 @@ const (
 	// built (issue #95) and opt-in (spec.revalidation.provisionKafkaSource) is off.
 	// It is informational/non-fatal — Ready stays True.
 	ConditionRevalidationDeferred = "RevalidationDeferred"
+	// ConditionEnvMapCollision indicates one or more spec.secrets.envMap
+	// entries collide with an operator-injected system env var (HOSTNAME,
+	// NODE_ENV, STORAGE_PROVIDER, ...). Before #1288 such an entry was
+	// silently appended a second time — kubelet's last-wins duplicate-env
+	// semantics decided which value actually reached the container, with no
+	// signal that it happened. Admission REJECTS any NEW such collision
+	// (#1391), EXCEPT validation.EnvMapUserAlwaysWinsEnvNames (connection-
+	// string names — REDIS_URL, KAFKA_BROKER_URL, OTEL_EXPORTER_OTLP_ENDPOINT
+	// — which have no secretRef field today and would otherwise force a
+	// credential into the CR in plaintext to pass admission). So this
+	// condition fires for two DIFFERENT reasons, and neither implies the
+	// other: a CR reconciling with a collision the webhook would now reject
+	// (predates the rule, or reconciled while the webhook was unavailable —
+	// never assume "predates" is the only path), or an always-exempt
+	// connection-string name on ANY CR, new or old. Informational/non-fatal —
+	// Ready stays True. Resolution differs by name: for
+	// validation.OperatorAlwaysWinsEnvNames (HOSTNAME) the operator's own
+	// value always wins; for every other reserved name the envMap value WINS
+	// instead, preserving the value the app was actually getting before
+	// #1288 (kubelet's real last-wins semantics already favored envMap
+	// there) rather than silently swapping it for the operator's default.
+	ConditionEnvMapCollision = "EnvMapCollision"
 )
 
 // ksvcNotReadyRequeueAfter bounds how often the reconciler re-checks a child
@@ -136,6 +158,28 @@ const (
 	// (#186). Warning, not error: the reconcile proceeds, but the user must be
 	// able to see via `kubectl describe nextapp` why their flag didn't land.
 	ReasonEnvVarIgnored = "EnvVarIgnored"
+	// ReasonEnvMapUserOverride marks a spec.secrets.envMap entry that
+	// collides with an operator-managed reserved env name AND the envMap
+	// value WINS (see ConditionEnvMapCollision's doc comment for why the
+	// direction differs from ReasonEnvVarIgnored/DATABASE_URL). Deliberately
+	// NEUTRAL wording (#1391 round 2), not "grandfathered": the collision
+	// reaching the reconciler does not always mean the CR predates admission
+	// rejection — it also covers EnvMapUserAlwaysWinsEnvNames (connection-
+	// string names exempt from rejection entirely) and a CR that reconciled
+	// while the validating webhook was unavailable. Labelling either of those
+	// "grandfathered" would misleadingly imply a legacy-only condition.
+	ReasonEnvMapUserOverride = "EnvMapUserOverride"
+	// ReasonEnvMapExpectedOverride marks an EnvMapCollision condition whose
+	// ONLY member is validation.EnvMapUserAlwaysWinsEnvNames (connection-
+	// string names) — the documented, sanctioned pattern for a value the CRD
+	// has no typed `*SecretRef` field for yet. computeStatusVerdict emits a
+	// Normal event (not Warning) and this reason for that case, so the
+	// documented pattern doesn't train users to ignore Warnings on this
+	// condition (#1391 round 3). If any real collision (operatorWins or
+	// userWinsGrandfathered) also fires alongside it, the reason/event
+	// upgrade to the alarm-worthy ones instead — this reason is reserved for
+	// the exempt-only case.
+	ReasonEnvMapExpectedOverride = "EnvMapExpectedOverride"
 	// ReasonIngressNotProgrammed marks a NextApp whose route has sat in
 	// IngressNotConfigured past the stall window — i.e. NO ingress controller
 	// reconciles the cluster's configured ingress-class, so the app will never
@@ -454,8 +498,15 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			Namespace: nextApp.Namespace,
 		},
 	}
+	// #1288/#1391: captured from the closure so the pure verdict (computed
+	// below) can report/warn on any spec.secrets.envMap entry colliding with
+	// an operator-managed reserved env name on a GRANDFATHERED CR (admission
+	// rejects any new such collision).
+	var envMapCollision envMapCollisionReport
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
-		return r.buildDesiredKsvc(&nextApp, ksvc)
+		var buildErr error
+		envMapCollision, buildErr = r.buildDesiredKsvc(&nextApp, ksvc)
+		return buildErr
 	})
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Knative Service")
@@ -656,7 +707,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		np.verdict, np.evidence = r.detectNetworkPolicyEnforcement(ctx)
 	}
 
-	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, time.Now())
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, time.Now())
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -855,7 +906,7 @@ func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool) ([
 	return volumes, volumeMounts
 }
 
-func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) error {
+func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) (envMapCollisionReport, error) {
 	// Determine the SHALLOW readiness/liveness probe path (#338).
 	healthPath := readinessProbePath(nextApp)
 
@@ -1002,7 +1053,7 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		delete(annotations, "autoscaling.knative.dev/scale-down-delay")
 	}
 
-	envVars, envFrom := r.buildKsvcEnv(nextApp)
+	envVars, envFrom, envMapCollision := r.buildKsvcEnv(nextApp)
 
 	// readOnlyRootFilesystem (#1332): default-on, same posture as the
 	// image-prewarm job container (image_prewarm.go) and the same
@@ -1048,28 +1099,28 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		if v := nextApp.Spec.Resources.CPURequest; v != "" {
 			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
-				return fmt.Errorf("spec.resources.cpuRequest %q is not a valid Kubernetes quantity: %w", v, err)
+				return envMapCollisionReport{}, fmt.Errorf("spec.resources.cpuRequest %q is not a valid Kubernetes quantity: %w", v, err)
 			}
 			resourceRequests[corev1.ResourceCPU] = q
 		}
 		if v := nextApp.Spec.Resources.MemoryRequest; v != "" {
 			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
-				return fmt.Errorf("spec.resources.memoryRequest %q is not a valid Kubernetes quantity: %w", v, err)
+				return envMapCollisionReport{}, fmt.Errorf("spec.resources.memoryRequest %q is not a valid Kubernetes quantity: %w", v, err)
 			}
 			resourceRequests[corev1.ResourceMemory] = q
 		}
 		if v := nextApp.Spec.Resources.CPULimit; v != "" {
 			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
-				return fmt.Errorf("spec.resources.cpuLimit %q is not a valid Kubernetes quantity: %w", v, err)
+				return envMapCollisionReport{}, fmt.Errorf("spec.resources.cpuLimit %q is not a valid Kubernetes quantity: %w", v, err)
 			}
 			resourceLimits[corev1.ResourceCPU] = q
 		}
 		if v := nextApp.Spec.Resources.MemoryLimit; v != "" {
 			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
-				return fmt.Errorf("spec.resources.memoryLimit %q is not a valid Kubernetes quantity: %w", v, err)
+				return envMapCollisionReport{}, fmt.Errorf("spec.resources.memoryLimit %q is not a valid Kubernetes quantity: %w", v, err)
 			}
 			resourceLimits[corev1.ResourceMemory] = q
 		}
@@ -1190,7 +1241,45 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// 100% latest-ready (no stale pin on transition back).
 	ksvc.Spec.Traffic = buildTrafficTargets(nextApp)
 
-	return ctrl.SetControllerReference(nextApp, ksvc, r.Scheme)
+	return envMapCollision, ctrl.SetControllerReference(nextApp, ksvc, r.Scheme)
+}
+
+// envMapCollisionReport records the two GRANDFATHERED resolution outcomes
+// buildKsvcEnv can produce for a spec.secrets.envMap entry that collides with
+// an operator-managed reserved env name (#1391 — admission REJECTS any NEW
+// such collision; this only fires for a CR that predates that rule). Zero
+// value = no collision.
+type envMapCollisionReport struct {
+	// operatorWins is the sorted set of collision names where the operator's
+	// own value was kept and the envMap entry dropped —
+	// validation.OperatorAlwaysWinsEnvNames (currently only HOSTNAME).
+	operatorWins []string
+	// userWinsGrandfathered is the sorted set of collision names — EXCLUDING
+	// validation.EnvMapUserAlwaysWinsEnvNames — where the envMap value
+	// REPLACED the operator's own entry in place, preserving the value the
+	// app was actually getting before #1288 shipped (kubelet's real
+	// last-wins duplicate-env semantics already favored the later-appended
+	// envMap entry there). Reaching this for a NEW CR is impossible —
+	// admission rejects it — so every name here means the CR predates that
+	// rule, or reconciled while the validating webhook was unavailable: a
+	// real, alarm-worthy collision (#1391 round 3).
+	userWinsGrandfathered []string
+	// userWinsExempt is the sorted set of collision names IN
+	// validation.EnvMapUserAlwaysWinsEnvNames (REDIS_URL, KAFKA_BROKER_URL,
+	// OTEL_EXPORTER_OTLP_ENDPOINT) where the envMap value replaced the
+	// operator's own entry. This is the DOCUMENTED, expected pattern — these
+	// names have no typed `*SecretRef` CRD field yet, so envMap is the
+	// sanctioned way to source them from a Secret — never rejected at
+	// admission, on any CR. Kept separate from userWinsGrandfathered so the
+	// status verdict can treat a report that ONLY contains exempt names as
+	// informational (Normal event) rather than an alarm (#1391 round 3: users
+	// must not learn to ignore Warnings because the documented pattern keeps
+	// firing one).
+	userWinsExempt []string
+}
+
+func (r envMapCollisionReport) empty() bool {
+	return len(r.operatorWins) == 0 && len(r.userWinsGrandfathered) == 0 && len(r.userWinsExempt) == 0
 }
 
 // buildKsvcEnv assembles the container env (operator-managed system env,
@@ -1198,7 +1287,14 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 // envFrom/envMap entries) and finishes with the spec.env merge. Moved VERBATIM
 // out of buildDesiredKsvc (#254 companion move) — behavior-preserving; the env
 // ordering is part of the rendered-output characterization (spec_env_test.go).
-func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev1.EnvVar, []corev1.EnvFromSource) {
+//
+// The third return value reports any spec.secrets.envMap entry that collides
+// with an operator-injected system env var — see the envMap loop below for
+// resolution. Reconcile threads it into computeStatusVerdict, which owns the
+// EnvMapCollision condition + Warning event (#1288/#1391; architecture.md:
+// new honest-status conditions/events go in computeStatusVerdict, never as
+// new branches in Reconcile).
+func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev1.EnvVar, []corev1.EnvFromSource, envMapCollisionReport) {
 	var envVars []corev1.EnvVar
 	// HOSTNAME=0.0.0.0 overrides kubelet's HOSTNAME=<pod-name> so a bare
 	// `next start`/server.js entrypoint binds all interfaces instead of the
@@ -1324,9 +1420,28 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 			envNames = append(envNames, envName)
 		}
 		sort.Strings(envNames)
+
+		// #1288/#1391: a name already claimed by operator-injected system env
+		// (HOSTNAME, NODE_ENV, STORAGE_PROVIDER, ...) must never be appended
+		// a SECOND time. Before #1288 it silently was — Kubernetes/kubelet
+		// applies later entries LAST-WINS, so which value actually reached
+		// the container depended on append order, an implementation detail
+		// no user should have had to reason about, with no Warning naming
+		// what happened. Admission now REJECTS any NEW such collision
+		// (validation.EnvMapReservedCollisions), so reaching this branch
+		// means the CR predates that rule (ratcheting). Snapshotted BEFORE
+		// this loop appends anything, so envMap entries can never collide
+		// with each other, only with the operator-managed env built above.
+		reservedByOperator := make(map[string]struct{}, len(envVars))
+		reservedIndex := make(map[string]int, len(envVars))
+		for i, ev := range envVars {
+			reservedByOperator[ev.Name] = struct{}{}
+			reservedIndex[ev.Name] = i
+		}
+		var report envMapCollisionReport
 		for _, envName := range envNames {
 			entry := nextApp.Spec.Secrets.EnvMap[envName]
-			envVars = append(envVars, corev1.EnvVar{
+			fromSecret := corev1.EnvVar{
 				Name: envName,
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
@@ -1334,11 +1449,47 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 						Key:                  entry.SecretKey,
 					},
 				},
-			})
+			}
+			if _, collides := reservedByOperator[envName]; collides {
+				if _, operatorAlwaysWins := validation.OperatorAlwaysWinsEnvNames[envName]; operatorAlwaysWins {
+					// HOSTNAME-class: the operator's own plain entry stays;
+					// the envMap entry is dropped outright — correctness
+					// (queue-proxy routing), not just precedence, depends on
+					// the operator's value.
+					report.operatorWins = append(report.operatorWins, envName)
+					continue
+				}
+				// Every other reserved name (whether the collision predates
+				// admission rejection, reached us while the webhook was
+				// unavailable, or is an always-exempt connection-string name
+				// — validation.EnvMapUserAlwaysWinsEnvNames): the envMap
+				// value REPLACES the operator's plain entry IN PLACE
+				// — deterministic, never an appended duplicate whose winner
+				// depends on kubelet's last-wins resolution (the pre-#1288
+				// bug). This is also the value that actually reached the
+				// container before #1288 shipped (the operator's own entry
+				// was built FIRST, so the later envMap append used to win
+				// under kubelet's real last-wins semantics) — flipping it to
+				// "operator wins" for an existing CR would be an
+				// undocumented breaking change on upgrade (e.g. a bound
+				// REDIS_URL Secret silently replaced by an empty default).
+				envVars[reservedIndex[envName]] = fromSecret
+				if _, exempt := validation.EnvMapUserAlwaysWinsEnvNames[envName]; exempt {
+					// The documented pattern, not a real collision — kept
+					// out of userWinsGrandfathered so computeStatusVerdict
+					// can report it as informational (#1391 round 3).
+					report.userWinsExempt = append(report.userWinsExempt, envName)
+				} else {
+					report.userWinsGrandfathered = append(report.userWinsGrandfathered, envName)
+				}
+				continue
+			}
+			envVars = append(envVars, fromSecret)
 		}
+		return r.appendUserEnv(nextApp, envVars), envFrom, report
 	}
 
-	return r.appendUserEnv(nextApp, envVars), envFrom
+	return r.appendUserEnv(nextApp, envVars), envFrom, envMapCollisionReport{}
 }
 
 // appendUserEnv merges spec.env (#186) into the assembled env. Moved VERBATIM

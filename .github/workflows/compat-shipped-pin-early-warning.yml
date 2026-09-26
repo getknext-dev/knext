@@ -1,0 +1,136 @@
+# Shipped-pin early-warning lane (#1376 option b, founder-approved
+# 2026-09-25) — a NON-credential, informational-only lane that runs the
+# official deploy-test harness against the Next.js version the SCAFFOLD
+# actually ships (`manifest.shippedNextPin`), not the credentialed
+# `v16.2.0`. It exists because #1376's lockstep guard documents a real
+# divergence (see `.github/compat-credentialed-next-version.json`) without
+# ever telling anyone whether the shipped pin actually WORKS — this lane is
+# that signal, cheaply, without touching the credential.
+#
+# DELIBERATELY dispatches the EXISTING `test-e2e-deploy.yml` workflow rather
+# than duplicating its ~2000 lines of checkout/build/pack/deploy machinery.
+# Every dispatch runs `smoke=true` (test/deploy-tests-manifest.smoke.knext.json
+# — the branch-smoke selection from docs/ci/capacity-budget.md #3), keeping
+# this lane's cost in the same class as a routine branch dispatch, not a
+# full 16-shard credential night.
+#
+# NEVER a credential run, by construction of code this workflow does not
+# touch: `test-e2e-deploy.yml`'s `KNEXT_COMPAT_MODE` is `'credential'` for
+# exactly 4 named `schedule` cron literals and `'early-warning'` for
+# everything else — every trigger this lane ever uses is
+# `workflow_dispatch`, never `schedule`. See
+# `scripts/lib/dispatch-poll.mjs` and `tests/compat-shipped-pin-early-warning.test.ts`
+# (the round-3-style scan + a direct assertion on that expression).
+#
+# ALL 4 cells (node/bun x turbopack/webpack) are REAL, not allowed-to-fail:
+# #1372 (the Turbopack + adapterPath + output:'standalone' regression that
+# motivated excluding turbopack from the CREDENTIAL cells at v16.2.0) is
+# FIXED upstream in next@16.3.5, and area-build is moving the shipped pin to
+# >=16.3.5 before 0.5.0 — so both turbopack cells are expected to pass once
+# that lands (and this lane's own red, before then, IS the forecast).
+#
+# CADENCE: weekly (docs/ci/capacity-budget.md's headroom is already tight at
+# nightly cadence for the 4 existing credential/early-warning crons plus
+# bun-vinext's own weekly slot; this lane follows the SAME weekly precedent
+# rather than adding a 5th nightly consumer). See
+# tests/ci-capacity-budget.test.ts for the enforced cron-collision check.
+#
+# ALERTING: on red, the SAME idempotent single-tracking-issue pattern
+# test-e2e-deploy.yml's own `nightly-red-alert` job uses (search by title,
+# comment if open, create if not) — under its OWN, distinct title, and
+# deliberately NEVER pinned (#1347: pin-slot competition among several
+# per-lane titles already starves the third-plus pinned issue). rev-1382
+# finding 3: this now lives in its OWN job, `needs:` the matrix job — NOT a
+# step inside it — so a red night files exactly ONE issue/comment
+# regardless of how many of the 4 legs went red, mirroring
+# test-e2e-deploy.yml's `nightly-red-alert` shape exactly.
+name: Compat shipped-pin early-warning (informational, non-credential)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 08:17 UTC Monday — an unused minute-of-day (tests/ci-capacity-budget.test.ts
+    # asserts no collision), weekly like compat-vinext.yml's own axis.
+    - cron: '17 8 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-shipped-pin-early-warning
+  cancel-in-progress: false
+
+jobs:
+  dispatch-and-wait:
+    name: 'dispatch + wait: ${{ matrix.runtime }} x ${{ matrix.builder }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+        builder: [turbopack, webpack]
+    runs-on: ubuntu-latest
+    # rev-1382 finding 4: strictly greater than the dispatch script's own
+    # MAX_WAIT_MS default (90 min — tests/compat-shipped-pin-dispatch-isolation.test.ts
+    # enforces this stays true). Equal or less lets GitHub's hard job-kill
+    # race the script's own deadline: a job killed by ITS OWN timeout reports
+    # step status `cancelled`, never `failure`, so the alert job's
+    # `result == 'failure'` condition below would silently never fire on a
+    # hang — the exact way a timeout used to go unalerted.
+    timeout-minutes: 100
+    permissions:
+      actions: write # to dispatch test-e2e-deploy.yml and read its runs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rev-1382 finding 2: a fixed per-leg id, unique to THIS workflow run
+      # (github.run_id) and THIS matrix cell, so 4 legs dispatched within
+      # seconds of each other never share an identity to latch onto — the
+      # dispatched test-e2e-deploy.yml run's own `run-name:` becomes this
+      # exact string, and the poll below matches it exactly.
+      - name: Dispatch test-e2e-deploy.yml and wait for its conclusion
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          KNEXT_RUNTIME: ${{ matrix.runtime }}
+          KNEXT_BUILDER: ${{ matrix.builder }}
+          DISPATCH_REF: ${{ github.ref_name }}
+          DISPATCH_ID: ${{ github.run_id }}-${{ matrix.runtime }}-${{ matrix.builder }}
+        run: node scripts/compat-shipped-pin-dispatch-and-wait.mjs
+
+  # rev-1382 finding 3: ONE job, run once after the whole matrix, never a
+  # per-leg step — so a red night files/updates exactly one tracking issue no
+  # matter how many of the 4 legs went red. `always()` so this job is not
+  # itself skipped by a sibling matrix-instance failure; the `needs`-result
+  # check scopes it to an actual failure and the event check scopes it to the
+  # real weekly schedule, mirroring test-e2e-deploy.yml's own
+  # `nightly-red-alert` job exactly.
+  alert:
+    name: Create or update the tracking issue (idempotent, never pinned)
+    needs: [dispatch-and-wait]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.dispatch-and-wait.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Compat shipped-pin early-warning RED" issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='Compat shipped-pin early-warning RED'
+          body="At least one leg (node/bun x turbopack/webpack) went red on the shipped-pin early-warning lane (#1376 option b). This is NON-credentialing — it tests the SCAFFOLD's shipped Next.js pin, not the v16.2.0 credential, and cannot affect any v1.0 credential streak. Open the run to see which leg(s) failed: ${RUN_URL}"
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}" >/dev/null
+            # Deliberately NOT pinned — see #1347 (pin-slot competition).
+          fi

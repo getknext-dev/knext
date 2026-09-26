@@ -23,7 +23,7 @@ and the CRD-versioning decision in
 | --- | --- |
 | **CRD API version** | Stays `v1alpha1`; single served/stored version, **no conversion webhook** (ADR-0017). Kubernetes' own convention is that `vNalphaM` carries **no** compatibility guarantee — knext honours that honestly. **Breaking CRD schema changes are allowed at alpha and are called out in the release notes** for that version. |
 | **Interim stability surface** | What you may build CI/CD and dashboards on is the **status contract**, not the API version: honest `.status.conditions[Ready]` (gated on the child Knative Service's own readiness, #145) plus the `URL` / `Ready` / `Age` printcolumns. Those do not break silently. |
-| **Operator ⇄ CLI (`kn-next`)** | The CLI only ever emits intent (patches the `NextApp` CR); it never writes Knative objects (ADR-0001/0014). Run a CLI whose `NextApp` fields the deployed operator understands. On a breaking CRD bump, upgrade the operator **first**, then the CLI. |
+| **Operator ⇄ CLI (`knext`)** | The CLI only ever emits intent (patches the `NextApp` CR); it never writes Knative objects (ADR-0001/0014). Run a CLI whose `NextApp` fields the deployed operator understands. On a breaking CRD bump, upgrade the operator **first**, then the CLI. |
 | **Operator ⇄ Knative** | The operator reconciles Knative Serving objects and ships the `config-network` / `config-features` ConfigMaps it needs. Follow Knative's own skew policy for Serving itself; the operator does not pin a Knative version. |
 | **Asset / build-id skew** | Independent of operator version: in-flight clients on an older build keep working because assets are build-id-namespaced and uploads are additive (ADR-0011). Upgrading the operator does not reap live builds. |
 
@@ -158,7 +158,7 @@ be auto-migrated. When the release notes flag a breaking CRD change:
 4. **Re-apply each `NextApp` with the corrected fields.** Because the CLI only
    emits intent, the cleanest path is to re-run your source of truth:
    ```sh
-   kn-next deploy         # from the app dir — re-emits the CR in the new shape
+   knext deploy         # from the app dir — re-emits the CR in the new shape
    # or hand-edit + re-apply the CR:
    kubectl apply -f <app>-nextapp.yaml
    ```

@@ -166,6 +166,12 @@ sandbox-fetch-debug-*/
 .vinext/
 knext-exec*
 
+# The standalone target's compiled ship binary (ADR-0055,
+# `STANDALONE_EXEC_BASENAME`), 60-90MB and a build OUTPUT the same way — but a
+# DIFFERENT basename from the vinext one above, so `knext-exec*` does not
+# match it (#1378).
+knext-standalone-exec*
+
 # Agent-workflow scratch output (prewarm/triage). Random-suffixed dirs of
 # results.jsonl / wf-*.yml — build/analysis artifacts, never source. Removed
 # from tracking in chore/remove-stray-automation-dirs.

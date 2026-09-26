@@ -86,6 +86,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
     // step: its pnpm drives the next.js compat harness (next.js's own repo uses
     // pnpm), not knext's workspace, so it was left alone.
     expect(byFile).toEqual({
+      // NEW (#1397 round 2): the actionlint gate now runs
+      // tests/actionlint-workflow.test.ts for real (so its describe.skipIf
+      // regression coverage cannot go silently inert), which needs the
+      // workspace's bun to execute `bun test`. A count RISING is a
+      // decision, per the rule above.
+      'actionlint.yml': 1,
       // 11, was 13: two jobs (compat-smoke, compile-cache-bun-probe) each set up
       // bun TWICE — 1.4.0, then 1.3.14 underneath it — so the second step
       // silently took the first one away, and every install in those jobs ran on

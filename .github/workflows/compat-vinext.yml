@@ -938,6 +938,14 @@ jobs:
     permissions:
       issues: write
     steps:
+      # #1406 — this job's own steps shell out to scripts/nightly-alert-issue.mjs,
+      # which requires the repo to be checked out; nothing upstream shares a
+      # checkout across jobs.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Create or update the "Compat weekly RED (vinext axis)" issue (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -970,13 +978,9 @@ jobs:
 
           Record the run's total in docs/compat-matrix.md (the vinext axis row).
           Never soften the fail-on-red gate to raise it."
-          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
-            --json number,title \
-            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
-          if [ -n "${existing}" ]; then
-            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
-          else
-            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
-            new_num="${new_url##*/}"
-            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
-          fi
+          # #1347 — create-or-update via the shared, never-pinning helper.
+          # This alert used to `gh issue pin` its own issue, racing 9 OTHER
+          # nightly workflows for GitHub's hard 3-pinned-issue cap (a failed
+          # pin was only `::warning::`, so a red beyond the third pinned
+          # issue went genuinely unseen). See scripts/lib/nightly-alert-issue.mjs.
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs

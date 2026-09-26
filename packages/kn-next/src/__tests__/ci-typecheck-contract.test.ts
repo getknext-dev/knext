@@ -47,7 +47,7 @@ const DOCUMENTED_EXCLUSIONS: Record<string, string> = {
     // deliberately NOT here: the credential classifier lives in
     // @getknext/core (`cli/ci/credential-scope.ts`), where it is covered by
     // that package's typecheck and sits beside the Role definition
-    // `kn-next init-ci` generates from. The runner is thin on purpose.
+    // `knext init-ci` generates from. The runner is thin on purpose.
     "@getknext/action":
         "composite action — action.yml + one .mjs runner, no TS source and no tsconfig; its logic lives in @getknext/core, which IS covered",
     // file-manager was excluded here until #804: its next-adapter.test.ts

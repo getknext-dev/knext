@@ -299,7 +299,7 @@ describe("native tree integrity manifest — staging", () => {
 describe("#954 two coexisting sharp versions in one lockfile", () => {
     // The scaffold's REAL dependency shape: the app depends on sharp ^0.35
     // while its `next` devDependency pins its own sharp@0.34.x, so a fresh
-    // `kn-next create` app's bun.lock legitimately holds TWO versions of every
+    // `knext create` app's bun.lock legitimately holds TWO versions of every
     // @img package — one under the bare root key, the other under a nested
     // `parent/…` key. A name-only lookup keeps exactly one of them, and
     // whichever it keeps, the other version's staging false-fails (#954).

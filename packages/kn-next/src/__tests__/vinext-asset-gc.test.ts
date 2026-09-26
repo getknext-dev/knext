@@ -232,7 +232,7 @@ describe("T2b (#892) — a vinext build is markered, protected, and reapable", (
     });
 
     it("an upload with NO stated build id is over-kept, never reaped (the fail-safe)", () => {
-        // `kn-next build`: assets uploaded, no deploy id, no revision. No
+        // `knext build`: assets uploaded, no deploy id, no revision. No
         // marker ⇒ the pruner cannot classify it ⇒ it survives even outside
         // the window. The alternative — marking whatever id vinext minted —
         // would make it reapable while no revision label could ever protect it.

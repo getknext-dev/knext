@@ -1,11 +1,11 @@
 /**
- * kn-next runtime-image — selects and stages the runtime image per build target
+ * knext runtime-image — selects and stages the runtime image per build target
  * (ADR-0055 CLI-selection wiring).
  *
  * knext ships two runtime image shapes:
  *
  *   - the **vinext single-executable** image (`templates/app/Dockerfile.hbs`),
- *     scaffolded into every app by `kn-next create`. The binary IS the server;
+ *     scaffolded into every app by `knext create`. The binary IS the server;
  *     the operator leaves the container command nil and kubelet runs the image's
  *     own CMD.
  *   - the **node/bun standalone** runtime image (`templates/runtime-standalone/`,
@@ -22,7 +22,7 @@
  * default `bun`). Both are read from `kn-next.config.ts` and can change AFTER
  * an app is scaffolded, while `deploy` builds from a fixed build context. The
  * #1177 increment deliberately kept the standalone template OUT of
- * `templates/app/` (which `kn-next create` walks with no allowlist) precisely
+ * `templates/app/` (which `knext create` walks with no allowlist) precisely
  * so a not-yet-selectable recipe is never emitted into — and never built by —
  * a scaffolded app (which pins `build: 'vinext'` explicitly, since its
  * scaffolded `next.config.ts`/`Dockerfile` are vinext-shaped, not the ambient
@@ -93,8 +93,8 @@ export const STANDALONE_DOCKERFILE_NAME = "Dockerfile.standalone";
 
 /**
  * The vinext × node image recipe's name in the app (#1260). Scaffolded by
- * `kn-next create` beside the bun `Dockerfile` (inert unless `runtime: 'node'`
- * selects it), and staged by `kn-next build` into apps scaffolded before it
+ * `knext create` beside the bun `Dockerfile` (inert unless `runtime: 'node'`
+ * selects it), and staged by `knext build` into apps scaffolded before it
  * existed — never over an existing one.
  */
 export const VINEXT_NODE_DOCKERFILE_NAME = "Dockerfile.vinext-node";
