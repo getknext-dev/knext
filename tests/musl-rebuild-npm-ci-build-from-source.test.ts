@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { splitSourceIntoStatements } from './helpers/shell-statements';
 
 /**
  * #1426 — the committed `sqlite3-5.0.2` lockfile now makes
@@ -24,213 +25,138 @@ import { resolve } from 'node:path';
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const SCRIPT_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 
+const CI_ALIASES = new Set(['ci', 'ic', 'cit', 'clean-install', 'install-clean']);
+const FLAG = 'npm_config_build_from_source';
+/** Words that may legitimately sit BEFORE the program word (wrappers, keywords, env plumbing). */
+const WRAPPERS = new Set([
+  'run_as_builder',
+  'su-exec',
+  'sudo',
+  'env',
+  'command',
+  'exec',
+  'time',
+  '!',
+  'if',
+  'then',
+  'do',
+  'else',
+  'elif',
+  'while',
+  'until',
+  '(',
+  '{',
+]);
+
 /**
- * Replace every character INSIDE a quoted span (single or double) with a
- * space, keeping the delimiters and the string length unchanged — so an
- * operator or the phrase "npm ci" mentioned inside an echo message's quotes
- * cannot be mistaken for real shell syntax, while every index in the masked
- * string still lines up with the same index in the original.
+ * Split ONE already-lexed statement into shell words: whitespace separates,
+ * quotes (`'..'`, `".."`) and `${...}` keep their contents inside one word.
+ * Leading `(` and trailing `)` (subshell punctuation) are peeled off.
  */
-function maskQuotedSpans(text: string): string {
-  let out = '';
+function shellWords(statement: string): string[] {
+  const words: string[] = [];
+  let cur = '';
   let quote: '"' | "'" | null = null;
-  for (const ch of text) {
+  let brace = 0;
+  const push = () => {
+    if (cur !== '') words.push(cur);
+    cur = '';
+  };
+  for (let i = 0; i < statement.length; i++) {
+    const c = statement[i];
     if (quote) {
-      out += ch === quote ? ch : ' ';
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      out += ch;
-      continue;
-    }
-    out += ch;
+      cur += c;
+      if (c === '\\' && quote === '"' && i + 1 < statement.length) cur += statement[++i];
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      cur += c;
+    } else if (c === '$' && statement[i + 1] === '{') {
+      brace++;
+      cur += '${';
+      i++;
+    } else if (brace > 0) {
+      cur += c;
+      if (c === '}') brace--;
+    } else if (/\s/.test(c)) push();
+    else cur += c;
   }
-  return out;
+  push();
+  return words
+    .map((w) => (w.startsWith('(') && w.length > 1 ? w.slice(1) : w))
+    .map((w) => (/[^$]\)+$/.test(w) && !w.includes('$(') ? w.replace(/\)+$/, '') : w))
+    .filter((w) => w !== '');
 }
 
+const unquote = (w: string): string => w.replace(/^(['"])(.*)\1$/, '$2');
+/** A word whose value the scan cannot know statically (expansion or substitution). */
+const isUnresolvable = (w: string): boolean => /[$`]/.test(w);
+const isNpmWord = (w: string): boolean => /(^|\/)npm$/.test(unquote(w));
+const isPreProgramFiller = (w: string): boolean =>
+  WRAPPERS.has(w) ||
+  /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) ||
+  /^-/.test(w) ||
+  /^[\w-]+:[\w-]+$/.test(w);
+
+type Program = { npmIdx: number; ciIdx: number };
+
 /**
- * Split a line's CODE portion into individual shell statements on unquoted
- * `;`, `&&`, `||`, a lone (non-redirect) `&` or `|`, and the CONTENTS of any
- * `$( ... )` command substitution — ported/adapted from #1415's quote-aware
- * statement splitter, extended per round-3 review (jev 0.90 gap: a bare `&`
- * backgrounds a command, a bare `|` pipes into a new one, and a command
- * substitution runs its contents as an independent word-expansion step —
- * none of the three inherits an outer prefix-assignment like
- * `npm_config_build_from_source=true`, so each must be scored as its OWN
- * statement, not folded into the one that happens to precede it textually).
- *
- * The lone `&`/`|` split deliberately excludes REDIRECT forms (`2>&1`,
- * `&>out`) — those are not job-control operators, and this script's real
- * invocations end in `2>&1`. A `&` is treated as a redirect, not a split
- * point, when the character immediately before or after it is `>` (`>&`,
- * `&>`, or the digit-prefixed `2>&1`); a `|` is always a real pipe once
- * `||` has already been ruled out above it.
- *
- * `$( ... )` contents are extracted (recursively, so a nested substitution
- * is scored as its own statement too) and BLANKED OUT of the outer text
- * (same length, so indices stay aligned) before the outer text is split —
- * so an outer statement's own scan can never re-match an invocation that
- * actually lives inside the substitution's independent scope.
- *
- * Returns [{ original, masked }] pairs so callers can regex-match on the
- * masked (quote-blind) text while still reporting the real source text.
+ * Locate the `npm ... ci` program in a statement. A LITERAL `npm` word counts
+ * anywhere; an UNRESOLVABLE word (`${NPM:-npm}`, `$NPM`) counts when it sits
+ * in command position — we cannot tell it is not npm, so it FAILS CLOSED
+ * (treated as npm) rather than hiding the invocation.
  */
-function splitUnquotedStatements(codeOriginal: string): { original: string; masked: string }[] {
-  const statements: { original: string; masked: string }[] = [];
-
-  // Extract `$( ... )` spans first — matching depth against the MASKED text
-  // (quote interiors already blanked, so a `(`/`)` inside a quoted string
-  // never perturbs paren counting), recursing into their contents, then
-  // blanking the whole span (same length) out of the working text.
-  let workingOriginal = codeOriginal;
-  let workingMasked = maskQuotedSpans(codeOriginal);
-  {
-    let i = 0;
-    while (i < workingMasked.length - 1) {
-      if (workingMasked[i] === '$' && workingMasked[i + 1] === '(') {
-        let depth = 1;
-        let j = i + 2;
-        while (j < workingMasked.length && depth > 0) {
-          if (workingMasked[j] === '(') depth += 1;
-          else if (workingMasked[j] === ')') depth -= 1;
-          j += 1;
-        }
-        const innerOriginal = workingOriginal.slice(i + 2, depth === 0 ? j - 1 : j);
-        statements.push(...splitUnquotedStatements(innerOriginal));
-        const blankLen = (depth === 0 ? j : j) - i;
-        const blank = ' '.repeat(blankLen);
-        workingOriginal = workingOriginal.slice(0, i) + blank + workingOriginal.slice(i + blankLen);
-        workingMasked = workingMasked.slice(0, i) + blank + workingMasked.slice(i + blankLen);
-        i += blankLen;
-        continue;
-      }
-      i += 1;
+function findNpmCi(words: string[]): Program | null {
+  for (let i = 0; i < words.length; i++) {
+    const isProgram =
+      isNpmWord(words[i]) ||
+      (isUnresolvable(words[i]) && words.slice(0, i).every((w) => isPreProgramFiller(w)));
+    if (!isProgram) continue;
+    for (let j = i + 1; j < words.length; j++) {
+      if (CI_ALIASES.has(unquote(words[j]))) return { npmIdx: i, ciIdx: j };
     }
   }
-
-  const isRedirectAmpersand = (masked: string, idx: number): boolean =>
-    masked[idx - 1] === '>' || masked[idx + 1] === '>';
-
-  let start = 0;
-  let i = 0;
-  while (i < workingMasked.length) {
-    const ch = workingMasked[i];
-    if (ch === ';') {
-      statements.push({
-        original: workingOriginal.slice(start, i),
-        masked: workingMasked.slice(start, i),
-      });
-      i += 1;
-      start = i;
-      continue;
-    }
-    if (
-      (ch === '&' && workingMasked[i + 1] === '&') ||
-      (ch === '|' && workingMasked[i + 1] === '|')
-    ) {
-      statements.push({
-        original: workingOriginal.slice(start, i),
-        masked: workingMasked.slice(start, i),
-      });
-      i += 2;
-      start = i;
-      continue;
-    }
-    if (ch === '&' && !isRedirectAmpersand(workingMasked, i)) {
-      statements.push({
-        original: workingOriginal.slice(start, i),
-        masked: workingMasked.slice(start, i),
-      });
-      i += 1;
-      start = i;
-      continue;
-    }
-    if (ch === '|') {
-      statements.push({
-        original: workingOriginal.slice(start, i),
-        masked: workingMasked.slice(start, i),
-      });
-      i += 1;
-      start = i;
-      continue;
-    }
-    i += 1;
-  }
-  statements.push({ original: workingOriginal.slice(start), masked: workingMasked.slice(start) });
-  return statements;
+  return null;
 }
 
-/**
- * Matches an `npm` invocation of the `ci` subcommand under ANY of its
- * aliases (`ci`, `ic`, `cit`, `clean-install`, `install-clean`) — round-3
- * gap (:116): the previous `(ci|clean-install|install-clean)` alternation
- * required the subcommand to sit DIRECTLY after `npm`, so an option
- * inserted between them (`npm --prefix x ci`) was never counted as an
- * invocation at all. `(?:\s+\S+)*?` (non-greedy) absorbs any number of
- * npm-level options/values before the subcommand word, so the subcommand
- * can appear anywhere later in the same statement.
- */
-const NPM_CI_RE = /\bnpm\b(?:\s+\S+)*?\s+(ci|ic|cit|clean-install|install-clean)\b/;
-
-/** Every STATEMENT that actually INVOKES `npm ci` or one of its aliases
- * (`ic`, `cit`, `clean-install`, `install-clean`), optionally with npm-level
- * options ahead of the subcommand (`npm --prefix x ci`) — not prose
- * mentioning it in a comment or inside a quoted echo message, and not a
- * sibling statement on the same line that merely sets an env var for a
- * DIFFERENT command — e.g. `npm_config_build_from_source=true true &&
- * run_as_builder npm ci`). */
+/** Every STATEMENT (per the shared shell lexer) that invokes `npm ci` or an alias — comments,
+ * line continuations, `${v#x}`, heredocs and nested substitutions are the lexer's problem. */
 function npmCiInvocationLines(source: string): { line: number; text: string }[] {
-  const results: { line: number; text: string }[] = [];
-  const lines = source.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const rawLine = lines[i];
-    const trimmed = rawLine.trim();
-    if (trimmed.startsWith('#')) continue; // comment/prose
-
-    // Drop a trailing `#...` comment, but only an UNQUOTED one.
-    const maskedLine = maskQuotedSpans(rawLine);
-    const hashIdx = maskedLine.indexOf('#');
-    const codeOriginal = hashIdx === -1 ? rawLine : rawLine.slice(0, hashIdx);
-
-    for (const { original, masked } of splitUnquotedStatements(codeOriginal)) {
-      // Must actually invoke npm ci/clean-install as a command word, not
-      // merely mention the phrase inside a quoted string — matched against
-      // the MASKED statement so quoted content can never satisfy this.
-      if (NPM_CI_RE.test(masked)) {
-        results.push({ line: i + 1, text: original });
-      }
-    }
-  }
-  return results;
+  return splitSourceIntoStatements(source)
+    .filter(({ text }) => findNpmCi(shellWords(text)) !== null)
+    .map(({ text, line }) => ({ line, text }));
 }
 
 /**
- * Whether an `npm ci` invocation STATEMENT sets `npm_config_build_from_source=true`
- * as an assignment PREFIX of that same statement's `npm` command — checked
- * against the masked (quote-blind) text, so a comment or quoted string that
- * merely NAMES the flag cannot make an unset statement read as set, and a
- * flag set on a different statement (split on `;`/`&&`/`||`) never leaks
- * across the boundary. Position-checked, not just substring-present: a shell
- * env assignment only takes effect when it PRECEDES the command word, so
- * `npm ci npm_config_build_from_source=true` (the flag trailing as a bare
- * argument, not a leading assignment) must not read as flagged.
- *
- * The flag match requires an EXACT `=true` token (:137 gap): a trailing
- * `\b` word boundary after `true` is satisfied by ANY non-word character —
- * including `-`, so `npm_config_build_from_source=true-ish` (a different,
- * truthy-looking but not-actually-`true` value) used to read as flagged.
- * The lookahead below requires whatever follows `true` (if anything) to be
- * whitespace or a shell statement/redirect terminator, never a value byte.
+ * Whether the invocation's EFFECTIVE `npm_config_build_from_source` is exactly
+ * `true`. Env phase (words BEFORE the npm word): the LAST event wins — a bare
+ * `FLAG=value` assignment, `env FLAG=value`, `env -u FLAG` / `--unset` /
+ * `-i` (unset). CLI phase (words AFTER the npm word): `--build-from-source[=true]`
+ * sets, `--build-from-source=<other>` / `--no-build-from-source` unset; if any
+ * CLI event exists the last one overrides the env phase (npm CLI flags beat env).
+ * A FLAG mention after the program is a bare argument, never an assignment.
  */
 function setsBuildFromSource(text: string): boolean {
-  const masked = maskQuotedSpans(text);
-  const flagMatch = masked.match(/\bnpm_config_build_from_source=true(?=[\s;&|)"']|$)/);
-  if (!flagMatch || flagMatch.index === undefined) return false;
-  const invocationMatch = masked.match(NPM_CI_RE);
-  if (!invocationMatch || invocationMatch.index === undefined) return true;
-  return flagMatch.index < invocationMatch.index;
+  const words = shellWords(text);
+  const prog = findNpmCi(words);
+  if (!prog) return false;
+  let effective = false;
+  for (let i = 0; i < prog.npmIdx; i++) {
+    const w = words[i];
+    const m = w.match(new RegExp(`^${FLAG}=(.*)$`, 's'));
+    if (m) effective = unquote(m[1]) === 'true';
+    else if (w === '-i' || w === '--ignore-environment') effective = false;
+    else if (w === '-u' || w === '--unset') {
+      if (unquote(words[i + 1] ?? '') === FLAG) effective = false;
+    } else if (w === `-u${FLAG}` || w === `--unset=${FLAG}`) effective = false;
+  }
+  for (let j = prog.npmIdx + 1; j < words.length; j++) {
+    const w = unquote(words[j]);
+    if (w === '--build-from-source' || w === '--build-from-source=true') effective = true;
+    else if (w.startsWith('--build-from-source=') || w === '--no-build-from-source')
+      effective = false;
+  }
+  return effective;
 }
 
 describe('every npm ci invocation for a native corpus package sets npm_config_build_from_source=true (#1426)', () => {
@@ -402,6 +328,48 @@ describe('every npm ci invocation for a native corpus package sets npm_config_bu
       const invocations = npmCiInvocationLines(line);
       expect(invocations.length).toBe(1);
       expect(setsBuildFromSource(invocations[0].text)).toBe(true);
+    });
+
+    const offends = (src: string) =>
+      npmCiInvocationLines(src).filter(({ text }) => !setsBuildFromSource(text));
+
+    it('a `npm` and `ci` split across a line continuation is still ONE invocation and an offender (:184)', () => {
+      const src = 'run_as_builder npm \\\n  ci --no-audit';
+      expect(npmCiInvocationLines(src).length).toBe(1);
+      expect(offends(src).length).toBe(1);
+    });
+
+    it('a `${y#z}` parameter expansion earlier on the line is not a comment that hides the invocation (:192)', () => {
+      const src = 'x=${y#z}; run_as_builder npm ci';
+      expect(npmCiInvocationLines(src).length).toBe(1);
+      expect(offends(src).length).toBe(1);
+    });
+
+    it('an unresolvable program token (`${NPM:-npm}`, `$NPM`) FAILS CLOSED as an offender (:175)', () => {
+      for (const src of ['${NPM:-npm} ci', 'run_as_builder $NPM ci --no-audit']) {
+        expect(npmCiInvocationLines(src).length).toBe(1);
+        expect(offends(src).length).toBe(1);
+      }
+    });
+
+    it('an assignment that is overridden back to false / unset / a false CLI flag is NOT flagged (:227)', () => {
+      for (const src of [
+        'env npm_config_build_from_source=true npm_config_build_from_source=false npm ci',
+        'env npm_config_build_from_source=true npm ci --build-from-source=false',
+        'env npm_config_build_from_source=true env -u npm_config_build_from_source npm ci',
+      ]) {
+        expect(npmCiInvocationLines(src).length).toBe(1);
+        expect(offends(src).length).toBe(1);
+      }
+    });
+
+    it('the last assignment being `=true` (after an earlier false) IS flagged, and quoted "true" counts', () => {
+      for (const src of [
+        'env npm_config_build_from_source=false npm_config_build_from_source=true npm ci',
+        'env npm_config_build_from_source="true" npm ci',
+      ]) {
+        expect(offends(src).length).toBe(0);
+      }
     });
 
     it('"npm_config_build_from_source=true-ish npm ci" — a trailing word-boundary let a truthy-LOOKING, not-actually-`true` value read as flagged (:137)', () => {
