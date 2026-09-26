@@ -136,7 +136,7 @@
 # apk toolchain pins (#1425): each `apk add` package carries a `~X.Y`
 # minor-lock (Alpine's fuzzy prefix match), resolved against the Alpine 3.22
 # index the digest-pinned base image ships (python3~3.12, make~4.4, g++~14.2,
-# npm~11.6, nodejs~22 [npm's own dep], su-exec~0.2). Deliberately NOT an exact `=X.Y.Z-rN` pin: Alpine
+# npm~11.6, nodejs~22.23 [npm's own dep], su-exec~0.2). Deliberately NOT an exact `=X.Y.Z-rN` pin: Alpine
 # mirrors keep only the latest build per release branch, so an exact pin
 # reds CI the next time Alpine ships a routine security bump. The minor-lock
 # rejects a minor/major drift while accepting patch-level bumps. Guarded by
@@ -180,7 +180,7 @@ trap restore_ownership EXIT
 # (#1257 round 7 — see the header note). stdout only is suppressed — an apk
 # failure under `set -eu` must not abort with zero diagnostic output (review
 # finding): stderr reaches the caller's log.
-apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 nodejs~22 su-exec~0.2 >/dev/null
+apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 nodejs~22.23 su-exec~0.2 >/dev/null
 # #1257 round 7 — an unprivileged user every npm install/ci below is
 # `su-exec`'d to, so install scripts (and anything node-gyp/npm itself runs)
 # never execute as root. `-D` (no password), `-H` (no default /home/<user>

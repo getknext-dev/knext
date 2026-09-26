@@ -142,7 +142,7 @@ function shellScripts(dir: string): string[] {
 }
 
 /** A `pkg~X.Y` (or deeper, `pkg~X.Y.Z`) minor-locked fuzzy version constraint — Alpine's `~` prefix-match operator, never a full `=X.Y.Z-rN` exact pin (which this repo has deliberately chosen NOT to use — see the file header). */
-const MINOR_LOCK_RE = /^[^=~]+~\d+(\.\d+)*$/;
+const MINOR_LOCK_RE = /^[^=~]+~\d+(\.\d+)+$/;
 
 describe('every apk package in scripts/e2e-native-rebuild-musl.sh carries a minor-locked constraint (#1425)', () => {
   it('finds at least one apk add invocation — the scan must not pass vacuously', () => {
