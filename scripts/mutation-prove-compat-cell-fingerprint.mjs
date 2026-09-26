@@ -337,8 +337,8 @@ proveOnExecutionScanSpec(
 );
 proveOnExecutionScanSpec(
   'a named exception with sources: [] is no longer rejected as dead (#1422)',
-  'declares no sources — a dead exception`).toBeGreaterThan(0);',
-  'declares no sources — a dead exception`).toBeGreaterThan(-1);',
+  'return entries.filter((e) => e.sources.length === 0).map((e) => e.path);',
+  'return entries.filter((e) => false).map((e) => e.path);',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

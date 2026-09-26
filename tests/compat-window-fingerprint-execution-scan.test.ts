@@ -112,6 +112,11 @@ const NAMED_EXCEPTIONS: { path: string; reason: string; sources: readonly string
   },
 ];
 
+/** Entries that declare no source file — dead exceptions that exempt nothing. */
+function deadExceptions(entries: { path: string; sources: readonly string[] }[]): string[] {
+  return entries.filter((e) => e.sources.length === 0).map((e) => e.path);
+}
+
 /**
  * True only when `source` (repo-relative file containing the reference) is
  * explicitly listed for `ref` — exact string match on both, no wildcards.
@@ -422,9 +427,13 @@ describe('compat-window fingerprint — execution scan: every node/bash/import/$
     expect(isNamedException('scripts/e2e-deploy.sh', 'scripts/anything-else.sh')).toBe(false);
   });
 
+  it('deadExceptions: flags an entry with sources: [] and passes the real list (#1422)', () => {
+    expect(deadExceptions([{ path: 'x/y.mjs', sources: [] }])).toEqual(['x/y.mjs']);
+    expect(deadExceptions(NAMED_EXCEPTIONS)).toEqual([]);
+  });
+
   it('every named-exception source exists and references its FULL path (no stale exemption); sources is never empty', () => {
     for (const { path, sources } of NAMED_EXCEPTIONS) {
-      expect(sources.length, `${path} declares no sources — a dead exception`).toBeGreaterThan(0);
       for (const source of sources) {
         const abs = resolve(REPO_ROOT, source);
         expect(existsSync(abs), `${source} is gone — remove the exception`).toBe(true);
