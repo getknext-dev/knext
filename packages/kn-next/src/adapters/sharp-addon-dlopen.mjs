@@ -48,6 +48,7 @@
  * `sharp/dist/`, not against this directory. The file must stay self-contained
  * over node builtins — that constraint is pinned by a test, not just stated.
  */
+// @knext-shim sharp-addon-dlopen
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";

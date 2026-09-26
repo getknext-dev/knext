@@ -28,6 +28,7 @@
  * patch is on `Bun.serve` before `srvx/bun` calls it. This module itself has no
  * side effects, so tests can import it without patching their own process.
  */
+// @knext-shim bun-serve-cache-control
 import { applyVinextDeployDefault, normalizeResponse } from "./response-cache-control.mjs";
 
 // The runtime-agnostic half lives in response-cache-control.mjs (vinext on Node

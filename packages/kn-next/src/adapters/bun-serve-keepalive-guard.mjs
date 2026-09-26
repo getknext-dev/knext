@@ -49,6 +49,7 @@
  *     `bun --preload <this file>` installs the patch before the entry evaluates.
  */
 
+// @knext-shim bun-serve-keepalive
 const INSTALLED = Symbol.for('knext.bunServeKeepaliveGuard.installed');
 
 /**

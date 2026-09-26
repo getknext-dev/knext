@@ -32,6 +32,7 @@
  * Dependency-free (node:fs, node:path, node:module) because it is bundled into
  * the binary.
  */
+// @knext-shim sidecar-cjs-resolve
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join, resolve, sep } from "node:path";

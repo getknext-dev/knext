@@ -5,6 +5,7 @@
  * vinext's own deploy Cache-Control switch by default (#1322). Both run at
  * process start, before any request. See bun-serve-cache-control.mjs.
  */
+// @knext-shim bun-serve-cache-control
 import { applyVinextDeployDefault, install } from "./bun-serve-cache-control.mjs";
 
 const env = typeof process !== "undefined" ? process.env : undefined;
