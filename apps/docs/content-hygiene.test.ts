@@ -206,8 +206,8 @@ describe('docs content — CLI reference matches the real verb set', () => {
     // — both list and comment here track the dispatcher's truth, and this
     // enumeration is the guard's known weakness: it names non-verbs, so a verb
     // GAINING routing must remove its entry in the same PR.)
-    for (const notAVerb of ['knext deploy-all', 'knext init ']) {
-      expect(cli).not.toContain(notAVerb);
+    for (const notAVerb of [/knext deploy-all/, /knext init(?![-\w])/]) {
+      expect(cli).not.toMatch(notAVerb);
     }
   });
 });

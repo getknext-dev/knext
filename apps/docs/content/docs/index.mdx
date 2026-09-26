@@ -100,8 +100,9 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
   wake them on the first request. See [Scale-to-zero & cold starts](/docs/scale-to-zero).
 - **A compiled executable by default.** The standalone server is minified and precompiled to
   bytecode at build time, then baked together with the Bun runtime into one binary that runs inside
-  the standalone folder — measured
-  **61 ms** process boot and **1103 req/s** against the Node standalone's 884 ms / 630 req/s (boot
+  the standalone folder. The optional `vinext` build's whole-app executable measured **61 ms**
+  process boot and **1103 req/s** against the Node standalone's 884 ms / 630 req/s — local numbers
+  from a warm binary, not a cluster cold start (boot
   is one component of the Knative cold-start budget, which the platform's scheduling dominates —
   see [Scale-to-zero & cold starts](/docs/scale-to-zero)). See
   [Bun & the compiled executable](/docs/bun-runtime) and [Bytecode caching](/docs/bytecode).
