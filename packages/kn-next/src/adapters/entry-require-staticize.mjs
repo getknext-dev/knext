@@ -40,8 +40,13 @@ import { builtinModules } from "node:module";
 const BUILTINS = new Set(builtinModules);
 
 const IDENT = "[A-Za-z_$][\\w$]*";
-/** A `/* … *\/` comment and surrounding whitespace, e.g. rolldown's `/* #__PURE__ *\/`. */
-const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/)*";
+/**
+ * Whitespace and `/* … *\/` comments, e.g. rolldown's `/* #__PURE__ *\/`. A
+ * comment body never contains `*\/`, so backtracking cannot stretch one comment
+ * across code into the next (`/* a *\/ n /* b *\/` is two comments around `n`).
+ */
+const COMMENT = "/\\*[^*]*\\*+(?:[^*/][^*]*\\*+)*/";
+const GAP = `(?:\\s|${COMMENT})*`;
 
 function escapeRe(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -94,6 +99,79 @@ function isStatementPosition(src, index) {
         }
         return false;
     }
+}
+
+/** The previous significant token before `index` (whitespace and comments skipped). */
+function previousToken(src, index) {
+    let i = index - 1;
+    for (;;) {
+        while (i >= 0 && /\s/.test(src[i])) i--;
+        if (i >= 1 && src[i] === "/" && src[i - 1] === "*") {
+            const open = src.lastIndexOf("/*", i - 2);
+            if (open < 0) return { char: "", word: "", at: -1 };
+            i = open - 1;
+            continue;
+        }
+        if (i < 0) return { char: "", word: "", at: -1 };
+        const word = /[A-Za-z_$][\w$]*$/.exec(src.slice(Math.max(0, i - 15), i + 1))?.[0] ?? "";
+        return { char: src[i], word, at: word ? i - word.length + 1 : i };
+    }
+}
+
+/** Past a string or template literal starting at `i`; -1 if unterminated. */
+function skipStringLiteral(src, i) {
+    const quote = src[i];
+    for (let j = i + 1; j < src.length; j++) {
+        if (src[j] === "\\") j++;
+        else if (src[j] === quote) return j;
+    }
+    return -1;
+}
+
+/**
+ * The `)` closing the parameter list opened at `open`, with nested parens and
+ * string/template literals (which may hold `(`, `)` or `) {`) balanced; -1 if
+ * not found within HEAD_SCAN_LIMIT characters (then it is not treated as a
+ * head — a long argument list is a call, and the bound keeps a multi-MB bundle
+ * linear).
+ */
+const HEAD_SCAN_LIMIT = 512;
+function closingParen(src, open) {
+    let depth = 0;
+    const end = Math.min(src.length, open + HEAD_SCAN_LIMIT);
+    for (let i = open; i < end; i++) {
+        const c = src[i];
+        if (c === '"' || c === "'" || c === "`") {
+            i = skipStringLiteral(src, i);
+            if (i < 0) return -1;
+        } else if (c === "(") depth++;
+        else if (c === ")" && --depth === 0) return i;
+    }
+    return -1;
+}
+
+/**
+ * Whether `name(` at `nameIndex` (its `(` at `paren`) DEFINES a function
+ * rather than calling one. Only these are heads:
+ *   - `function name(` / `function* name(` / `function *name(`;
+ *   - a method or class member — the previous token is `{`, `,`, `}`, `;` or
+ *     `*`, or `get` / `set` / `static` / `async` — whose balanced parameter list
+ *     is followed by `{` on the SAME line, same-line comments allowed (a call
+ *     cannot be; a call followed by a block on the next line is ASI, and stays
+ *     a call). A parameter list longer than HEAD_SCAN_LIMIT is not a head.
+ * Every other context (`extends`, `=`, `(`, `return`, operators …) is a call.
+ */
+const SAME_LINE_BRACE = /^(?:[ \t]|\/\*[^*\n]*\*+(?:[^*/\n][^*\n]*\*+)*\/)*\{/;
+function isDefinitionHead(src, nameIndex, paren) {
+    const prev = previousToken(src, nameIndex);
+    if (prev.word === "function") return true;
+    if (prev.char === "*" && previousToken(src, prev.at).word === "function") return true;
+    const memberPosition =
+        (prev.char !== "" && "{,};*".includes(prev.char)) ||
+        ["get", "set", "static", "async"].includes(prev.word);
+    if (!memberPosition) return false;
+    const close = closingParen(src, paren);
+    return close >= 0 && SAME_LINE_BRACE.test(src.slice(close + 1, close + 256));
 }
 
 /**
@@ -194,15 +272,11 @@ export function analyzeServerModule(src) {
     const nonLiteralCallees = new Set();
     // Sticky, positioned at each call's `(`: no per-call copy of a multi-MB bundle.
     const literalArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
-    // Not every `name(` is a call. A parameter list followed by `{` is a
-    // function HEAD — `function name(…) {`, `function* name(…) {` (esbuild/tsup's
-    // `(cb, mod) => function __require() {`), a method, class member or getter
-    // `name(…) {` — and its `)` is not a non-literal argument. (A call is never
-    // directly followed by `{`, so one check covers every head form.)
-    const memberHeadRe = new RegExp(`[^()]*\\)${GAP}\\{`, "y");
+    // Not every `name(` is a call, but only a POSITIVELY identified definition
+    // head is skipped (isDefinitionHead): anything else — `extends __require(n) {`,
+    // `x = __require(n)`, a call followed by a block on the next line — is a call.
     for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}\\(`, "g"))) {
-        memberHeadRe.lastIndex = m.index + m[0].length;
-        if (memberHeadRe.test(src)) continue;
+        if (isDefinitionHead(src, m.index, m.index + m[0].length - 1)) continue;
         literalArgRe.lastIndex = m.index + m[0].length;
         if (!literalArgRe.test(src)) nonLiteralCallees.add(m[1]);
     }

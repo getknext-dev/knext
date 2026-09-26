@@ -531,4 +531,34 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
         expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(run.stdout).toContain(`RESULT:${A}lib`);
     }, 120_000);
+
+    for (const [label, dep, marker] of [
+        [
+            "`class … extends require(name)`",
+            "module.exports = (name) => { class X extends require(name) {} return X; };\n",
+            "extends __require(name)",
+        ],
+        [
+            "a require whose string argument contains `) {`",
+            'module.exports = () => { try { return require("a) {"); } catch { return 0; } };\n',
+            '__require("a) {")',
+        ],
+    ] as const) {
+        it(`${label} is a non-literal/unbundlable require: strict fails (#1384 round 5)`, async () => {
+            const { work, server, out } = await rolldownFrom({
+                "dep.cjs": dep,
+                "index.mjs":
+                    'import d from "./dep.cjs";\nconsole.log("RESULT:" + typeof d);\n',
+            });
+            expect(out).toContain(marker);
+            const build = compile(work, server, {
+                KNEXT_COMPILE_STRICT_REQUIRES: "1",
+            });
+            expect(build.status, `${build.stdout}\n${build.stderr}`).not.toBe(
+                0,
+            );
+            expect(build.stderr).toContain("non-literal package name");
+            expect(build.stderr).not.toContain("possibly");
+        }, 120_000);
+    }
 });

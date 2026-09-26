@@ -143,6 +143,64 @@ describe("analyzeServerModule (unit)", () => {
         expect(decl("x=1;/* c */ function u(){}", "u")).toBe(1);
     });
 
+    describe("only a positively identified function/method HEAD is not a call (#1384 round 5)", () => {
+        const flagged = (src: string) =>
+            analyzeServerModule(
+                'import{createRequire}from"node:module";var __require=createRequire(import.meta.url);' +
+                    src,
+            ).nonLiteralCallees.has("__require");
+        it("a call after `extends` is a call", () => {
+            expect(flagged("class X extends __require(n) {}")).toBe(true);
+        });
+        it("a call followed by a block on the NEXT line (ASI) is a call", () => {
+            expect(flagged("x=1;\n__require(n)\n{ y(); }")).toBe(true);
+        });
+        it("a string argument containing `) {` does not make a call a head", () => {
+            expect(flagged('x=1;__require("a) {");')).toBe(true);
+        });
+        it("a call in expression position is a call", () => {
+            expect(flagged("x=__require(n);")).toBe(true);
+        });
+        it("function, generator, method, object-method and getter heads are not calls", () => {
+            expect(
+                flagged("var c=(cb,mod)=>function __require() {return 1};"),
+            ).toBe(false);
+            expect(flagged("var g=function* __require(){};")).toBe(false);
+            expect(flagged("class K { __require() { return 1; } }")).toBe(
+                false,
+            );
+            expect(
+                flagged("var o = { a: 1, __require(x) { return x; } };"),
+            ).toBe(false);
+            expect(flagged("var o = { get __require() { return 1; } };")).toBe(
+                false,
+            );
+        });
+        it("heads whose parameters hold nested parens are still heads", () => {
+            expect(flagged("function __require(a = g()) { }")).toBe(false);
+            expect(flagged("var o = { __require(a = g(1)) { } };")).toBe(false);
+        });
+        it("a same-line comment between a method's `)` and `{` keeps it a head", () => {
+            expect(
+                flagged("class K { __require(x) /* c */ { return x; } }"),
+            ).toBe(false);
+        });
+        it("a call in an if/while/for condition followed by a block stays a call", () => {
+            expect(flagged("if (__require(n)) { y(); }")).toBe(true);
+            expect(flagged("while (__require(n)) { y(); }")).toBe(true);
+            expect(flagged("for (;__require(n);) { y(); }")).toBe(true);
+            expect(flagged("if(__require(n)){y()}")).toBe(true);
+        });
+    });
+
+    it("one comment cannot span code into the next: `/* a */ n /* b */` hides no argument", () => {
+        const a = analyzeServerModule(
+            'import{createRequire}from"node:module";var __require=createRequire(import.meta.url);' +
+                'x=__require(/* a */ n /* b */ "pkg");',
+        );
+        expect(a.nonLiteralCallees.has("__require")).toBe(true);
+    });
+
     it("flags a createRequire(import.meta.url) call it cannot attribute to a binding", () => {
         const a = analyzeServerModule(
             'import{createRequire as e}from"node:module";use(e(import.meta.url));',
