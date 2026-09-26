@@ -18,12 +18,10 @@ on:
         default: main
   push:
     branches: [main]
+    # Docs changes only. A library change that should reach the docs image goes
+    # through workflow_dispatch, so this push trigger stays narrow.
     paths:
       - 'apps/docs/**'
-      - 'packages/kn-next/**'
-      - 'packages/lib/**'
-      - 'packages/db/**'
-      - '.github/workflows/docs-oke-image.yml'
 
 permissions:
   contents: read
@@ -120,32 +118,45 @@ jobs:
           docker run -d --name docs-smoke -p 3000:3000 knext-docs:smoke
           ok=0
           for _ in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://localhost:3000/; then ok=1; break; fi
+            code="$(curl -sS -o /tmp/page.html -w '%{http_code}' http://localhost:3000/docs/scale-to-zero || true)"
+            if [ "$code" = "200" ]; then ok=1; break; fi
             sleep 2
           done
           if [ "$ok" != 1 ]; then
             docker logs docs-smoke | tail -50
-            echo "::error::the image did not answer HTTP on :3000"
+            echo "::error::/docs/scale-to-zero did not return 200 on :3000 (last status: ${code:-none})"
             exit 1
           fi
+          grep -q 'cold starts' /tmp/page.html || { echo "::error::200 but the page lacks its content marker"; exit 1; }
           docker rm -f docs-smoke
+
+      # Scan the very image that was smoke-booted, before it can be pushed.
+      - name: Trivy scan (HIGH/CRITICAL fails the build)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: knext-docs:smoke
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
 
       # Immutable tag only (sha-<short>-amd64). No moving `latest`/`main` tag:
       # the manifest pins by digest anyway, and a mutable tag would let a later
-      # run silently repoint what a bare tag pull returns. provenance is off:
-      # OCIR does not reliably accept the attestation manifest index.
+      # run silently repoint what a bare tag pull returns. This pushes the SAME
+      # local image that was smoke-booted and Trivy-scanned (never a second
+      # build), then checks the registry serves the digest that was pushed.
       - name: Push
         id: push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/docs/Dockerfile.oke
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          tags: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
-          cache-from: type=gha,scope=docs-oke
-          cache-to: type=gha,scope=docs-oke,mode=max
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker tag knext-docs:smoke "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:${TAG}" | tee /tmp/push.log
+          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' /tmp/push.log | tail -1)"
+          [ -n "$digest" ] || { echo "::error::could not read the pushed digest"; exit 1; }
+          remote="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
+          [ "$remote" = "$digest" ] || { echo "::error::registry digest $remote != pushed $digest"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         env:
@@ -181,6 +192,7 @@ jobs:
           f=apps/docs/deploy/oke/docs-ksvc.yaml
           [ "$(grep -c "image: ${IMAGE}:" "$f")" = 1 ] || { echo "::error::expected exactly one image line in $f"; exit 1; }
           sed -i "s|image: ${IMAGE}:.*|image: ${IMAGE}:${TAG}@${DIGEST}|" "$f"
+          grep -qF "@${DIGEST}" "$f" || { echo "::error::manifest does not carry the pushed digest"; exit 1; }
           git diff --quiet -- "$f" && { echo "manifest already up to date"; exit 0; }
           branch="docs-image/${SHA:0:7}"
           git config user.name "github-actions[bot]"
