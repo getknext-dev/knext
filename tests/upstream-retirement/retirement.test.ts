@@ -81,52 +81,128 @@ function githubToken(): string | undefined {
   return r.status === 0 ? r.stdout.trim() || undefined : undefined;
 }
 
+/**
+ * Unreachable GitHub is a hard failure in CI (`CI`/`GITHUB_ACTIONS` set) — a
+ * check that goes green when it cannot reach its oracle is worse than none.
+ * Locally it is a skip: every ref is still tried independently and each skip
+ * prints a warning (bun-test.mjs shows only `ok` per file in CI, so this
+ * local-only warning is not relied on there).
+ */
+export const inCI = (env: Record<string, string | undefined> = process.env): boolean =>
+  Boolean(env.CI || env.GITHUB_ACTIONS);
+
+export type RefCheckDeps = {
+  fetch: typeof fetch;
+  ci: boolean;
+  token?: string;
+  warn: (msg: string) => void;
+};
+
+/** Check every ref independently; returns the failures (empty = all verified or locally skipped). */
+export async function checkRefs(
+  refs: ReturnType<typeof citedRefs>,
+  deps: RefCheckDeps,
+): Promise<string[]> {
+  const failures: string[] = [];
+  for (const { ref, title, mustBePr, by } of refs) {
+    const [repo, num] = ref.split('#');
+    let res: Response;
+    try {
+      res = await deps.fetch(`https://api.github.com/repos/${repo}/issues/${num}`, {
+        headers: {
+          accept: 'application/vnd.github+json',
+          'user-agent': 'knext-upstream-retirement',
+          ...(deps.token ? { authorization: `Bearer ${deps.token}` } : {}),
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (e) {
+      const why = `GitHub unreachable (${String((e as Error)?.message ?? e)})`;
+      if (deps.ci) failures.push(`${by}: ${ref} could not be verified in CI — ${why}`);
+      else deps.warn(`SKIPPED upstream-ref validation of ${ref}: ${why}`);
+      continue;
+    }
+    if (
+      res.status === 429 ||
+      (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0')
+    ) {
+      const why = `GitHub API rate limit (HTTP ${res.status}, ${deps.token ? 'authenticated' : 'unauthenticated'})`;
+      if (deps.ci) failures.push(`${by}: ${ref} could not be verified in CI — ${why}`);
+      else deps.warn(`SKIPPED upstream-ref validation of ${ref}: ${why}`);
+      continue;
+    }
+    if (res.status !== 200) {
+      failures.push(`${by}: ${ref} → HTTP ${res.status}`);
+      continue;
+    }
+    const body = (await res.json()) as { title: string; pull_request?: unknown };
+    if (!body.title.includes(title))
+      failures.push(`${by}: ${ref} is "${body.title}", not "…${title}…" — wrong number?`);
+    if (mustBePr && !body.pull_request) failures.push(`${by}: fixedBy ${ref} is not a PR`);
+  }
+  return failures;
+}
+
 describe('upstream-retirement: every cited upstream ref is the issue/PR it claims to be', () => {
   it(
-    'each ref exists on GitHub with the recorded title (checked once per run; skipped with a reason only when GitHub is unreachable)',
+    'each ref exists on GitHub with the recorded title (unreachable = red in CI, a warned skip only locally)',
     async () => {
-      const token = githubToken();
-      const failures: string[] = [];
-      for (const { ref, title, mustBePr, by } of citedRefs()) {
-        const [repo, num] = ref.split('#');
-        let res: Response;
-        try {
-          res = await fetch(`https://api.github.com/repos/${repo}/issues/${num}`, {
-            headers: {
-              accept: 'application/vnd.github+json',
-              'user-agent': 'knext-upstream-retirement',
-              ...(token ? { authorization: `Bearer ${token}` } : {}),
-            },
-            signal: AbortSignal.timeout(15_000),
-          });
-        } catch (e) {
-          console.warn(
-            `SKIPPED upstream-ref validation: GitHub unreachable (${String((e as Error)?.message ?? e)})`,
-          );
-          return;
-        }
-        if (
-          res.status === 429 ||
-          (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0')
-        ) {
-          console.warn(
-            `SKIPPED upstream-ref validation: GitHub API rate limit (HTTP ${res.status}, ${token ? 'authenticated' : 'unauthenticated'})`,
-          );
-          return;
-        }
-        if (res.status !== 200) {
-          failures.push(`${by}: ${ref} → HTTP ${res.status}`);
-          continue;
-        }
-        const body = (await res.json()) as { title: string; pull_request?: unknown };
-        if (!body.title.includes(title))
-          failures.push(`${by}: ${ref} is "${body.title}", not "…${title}…" — wrong number?`);
-        if (mustBePr && !body.pull_request) failures.push(`${by}: fixedBy ${ref} is not a PR`);
-      }
+      const failures = await checkRefs(citedRefs(), {
+        fetch,
+        ci: inCI(),
+        token: githubToken(),
+        warn: (m) => process.stderr.write(`${m}\n`),
+      });
       expect(failures).toEqual([]);
     },
     PROBE_TIMEOUT,
   );
+
+  const refs = [
+    { ref: 'oven-sh/bun#1', title: 'expected-fragment', mustBePr: false, by: 'first' },
+    { ref: 'oven-sh/bun#2', title: 'expected-fragment', mustBePr: false, by: 'second' },
+  ];
+  const ok = (title: string) => new Response(JSON.stringify({ title }), { status: 200 });
+
+  it('CI: an unreachable GitHub fails closed, naming the ref and the cause', async () => {
+    const down = (() => Promise.reject(new Error('ECONNREFUSED'))) as unknown as typeof fetch;
+    const f = await checkRefs(refs, { fetch: down, ci: true, warn: () => {} });
+    expect(f).toHaveLength(2);
+    expect(f[0]).toContain('first: oven-sh/bun#1 could not be verified in CI');
+    expect(f[0]).toContain('ECONNREFUSED');
+  });
+
+  it('CI: a rate limit fails closed', async () => {
+    const limited = (() =>
+      Promise.resolve(new Response('', { status: 429 }))) as unknown as typeof fetch;
+    expect(await checkRefs(refs, { fetch: limited, ci: true, warn: () => {} })).toHaveLength(2);
+  });
+
+  it('local: unreachable is a warned skip, one warning per ref', async () => {
+    const down = (() => Promise.reject(new Error('offline'))) as unknown as typeof fetch;
+    const warned: string[] = [];
+    expect(await checkRefs(refs, { fetch: down, ci: false, warn: (m) => warned.push(m) })).toEqual(
+      [],
+    );
+    expect(warned).toHaveLength(2);
+  });
+
+  it('each ref is checked independently: an unreachable first ref does not skip the second', async () => {
+    let n = 0;
+    const flaky = (() =>
+      ++n === 1
+        ? Promise.reject(new Error('blip'))
+        : Promise.resolve(ok('WRONG TITLE'))) as unknown as typeof fetch;
+    const f = await checkRefs(refs, { fetch: flaky, ci: false, warn: () => {} });
+    expect(f).toHaveLength(1);
+    expect(f[0]).toContain('second: oven-sh/bun#2 is "WRONG TITLE"');
+  });
+
+  it('inCI reads CI and GITHUB_ACTIONS', () => {
+    expect(inCI({})).toBe(false);
+    expect(inCI({ CI: 'true' })).toBe(true);
+    expect(inCI({ GITHUB_ACTIONS: 'true' })).toBe(true);
+  });
 });
 
 describe('upstream-retirement: @upstream-shim markers ↔ registry', () => {

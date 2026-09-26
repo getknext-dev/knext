@@ -219,6 +219,11 @@ jobs:
       # below; `check-coverage.mjs` supplies the honest DENOMINATOR itself by
       # enumerating the source tree and folding untested files in at 0%.
       - name: Run tests (bun — the suite)
+        # Read-only default token, this step only: tests/upstream-retirement
+        # verifies every cited upstream issue/PR against api.github.com and FAILS
+        # CLOSED in CI when it cannot (unauthenticated = 60 req/h on a shared IP).
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/bun-test.mjs --coverage
 
       # The gate itself: merge the bun per-file lcov, add the 0% denominator, then

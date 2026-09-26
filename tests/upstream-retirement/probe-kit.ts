@@ -4,7 +4,8 @@
  * Every probe is a real run of the PINNED toolchain: it writes a tiny fixture
  * into a fresh temp dir, compiles it with the `bun` on PATH (asserted equal to
  * the repo's Bun pin by retirement.test.ts), runs the result, and reads one
- * `RESULT …` line from stdout. No network, no shared state: the temp dir is
+ * `RESULT …` line from stdout. The probes use no network (the upstream-ref
+ * check in retirement.test.ts is separate) and no shared state: the temp dir is
  * also the spawned process's TMPDIR, so anything Bun extracts at runtime (a
  * `.node` addon) lands there and is removed with it.
  */

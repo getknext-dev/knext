@@ -9,6 +9,9 @@
  * (plan: "Patch carrier"): a shim is deleted in the SAME PR as the bump that
  * turns its probe red — never kept "just in case".
  *
+ * `kind` says what the marker sits on: 'shim' (code to delete) or 'constraint'
+ * (a documented limitation + its pinned test; e.g. bun-cjs-dirname-inlined).
+ *
  * Each shim's source carries a one-line `// @upstream-shim <id>` marker; the
  * marker scan in retirement.test.ts ties markers and entries in both
  * directions, so a shim cannot exist without a probe, nor a probe without a
@@ -43,6 +46,12 @@ export type RetirementEntry = {
   fixedBy?: { ref: UpstreamRef; title: string };
   /** The knext issue that tracks the retirement. */
   issue: `#${number}`;
+  /**
+   * `shim` = code that is deleted on the upstream fix; `constraint` = what the
+   * marker sits on is a documented limitation plus its pinned test (the
+   * upstream fix retires the documented workaround, not a code path).
+   */
+  kind: 'shim' | 'constraint';
   /** Which single-exec shape ships the shim. */
   shape: 'next' | 'vinext' | 'both';
   /** Which pinned dependency the repro runs against. */
@@ -101,6 +110,7 @@ export const REGISTRY: RetirementEntry[] = [
     upstream: 'oven-sh/bun#44053',
     upstreamTitle: 'an --external package is resolved from process.cwd()',
     issue: '#1463',
+    kind: 'shim',
     shape: 'vinext',
     against: 'bun',
     // A compiled binary resolves a bare `require` of an --external package from
@@ -140,6 +150,7 @@ export const REGISTRY: RetirementEntry[] = [
     upstream: 'oven-sh/bun#44063',
     upstreamTitle: 'an embedded native addon is extracted alone',
     issue: '#1463',
+    kind: 'shim',
     shape: 'vinext',
     against: 'bun',
     // An embedded `.node` is extracted ALONE to a temp file before dlopen, so
@@ -195,6 +206,7 @@ export const REGISTRY: RetirementEntry[] = [
     upstream: 'oven-sh/bun#43848',
     upstreamTitle: 'send Keep-Alive: timeout=<idleTimeout> by default',
     issue: '#1463',
+    kind: 'shim',
     shape: 'vinext',
     against: 'bun',
     // Bun.serve keeps HTTP/1.1 connections alive but never announces its idle
@@ -244,11 +256,17 @@ export const REGISTRY: RetirementEntry[] = [
     upstream: 'cloudflare/vinext#3487',
     upstreamTitle: 'also normalise an app-set s-maxage',
     issue: '#1437',
+    kind: 'shim',
     shape: 'vinext',
     against: 'vinext',
     // With VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1, vinext normalises the shared-cache
     // Cache-Control it COMPUTES, but passes an app-set `s-maxage` through
-    // untouched. bun-serve-cache-control.mjs normalises every response.
+    // untouched — and so does a `headers()` s-maxage from next.config, applied
+    // later. bun-serve-cache-control.mjs normalises every response. KNOWN BLIND
+    // SPOT: the Pages-router handler needs a full page-render harness and is not
+    // probed, so a fix landing App-side only would turn this red while Pages
+    // still leaks — whoever acts on the red must confirm the upstream fix
+    // covers the Pages path before deleting the shim.
     repro: async () => {
       const { dir } = pinnedVinext();
       const box = sandbox('3487');
@@ -265,8 +283,19 @@ export const REGISTRY: RetirementEntry[] = [
             'const SHARED = "s-maxage=2, stale-while-revalidate=31535998";\n' +
             'const h = new Headers(); cc.applyCdnResponseHeaders(h, { cacheControl: SHARED });\n' +
             'console.log("CONTROL " + h.get("cache-control"));\n' +
-            'const r = await fin.finalizeAppRscResponse(new Response("ok", { headers: { "cache-control": SHARED } }), new Request("http://localhost/api/probe"), { configHeaders: [] });\n' +
-            'console.log("RESULT " + r.headers.get("cache-control"));\n',
+            // Three response shapes, all through the finalizer every App Router
+            // response passes: (A) an app-set s-maxage with no config headers,
+            // (B) next.config `headers()` setting s-maxage on a response with
+            // no Cache-Control of its own (applied later, by
+            // applyAppRscConfigHeaders), (C) `headers()` over an app-set policy.
+            // The shim normalises ALL of them, so upstream has only caught up
+            // when every one is normalised.
+            'const CH = [{ source: "/api/:path*", headers: [{ key: "Cache-Control", value: SHARED }] }];\n' +
+            'const req = () => new Request("http://localhost/api/probe");\n' +
+            'const A = await fin.finalizeAppRscResponse(new Response("ok", { headers: { "cache-control": SHARED } }), req(), { configHeaders: [] });\n' +
+            'const B = await fin.finalizeAppRscResponse(new Response("ok"), req(), { configHeaders: CH });\n' +
+            'const C = await fin.finalizeAppRscResponse(new Response("ok", { headers: { "cache-control": "public, max-age=5" } }), req(), { configHeaders: CH });\n' +
+            'console.log("RESULT " + JSON.stringify({ A: A.headers.get("cache-control"), B: B.headers.get("cache-control"), C: C.headers.get("cache-control") }));\n',
         });
         const { result, output } = box.run([bunOnPath(), 'probe.mjs'], box.dir, {
           VINEXT_NEXT_DEPLOY_CACHE_CONTROL: '1',
@@ -278,9 +307,15 @@ export const REGISTRY: RetirementEntry[] = [
             `the deploy switch did not normalise a COMPUTED shared policy: ${control}`,
           );
         }
+        const shapes = JSON.parse(result) as Record<'A' | 'B' | 'C', string | null>;
+        const leaking = (Object.keys(shapes) as ('A' | 'B' | 'C')[]).filter((k) =>
+          /s-maxage/.test(shapes[k] ?? ''),
+        );
+        // "Fixed" needs EVERY shape normalised: a partial upstream fix leaves the
+        // shim needed, so it must stay "still broken", never order a delete.
         return {
-          stillBroken: /s-maxage/.test(result),
-          evidence: `computed policy → ${control}; app-set policy through finalizeAppRscResponse → ${result}`,
+          stillBroken: leaking.length > 0,
+          evidence: `computed policy → ${control}; still leaking s-maxage in [${leaking.join(',')}] of A(app-set)/B(config headers())/C(config over app-set): ${result}`,
         };
       } finally {
         box.dispose();
@@ -292,6 +327,7 @@ export const REGISTRY: RetirementEntry[] = [
     upstream: 'oven-sh/bun#44059',
     upstreamTitle: '--include embeds extra files',
     issue: '#1478',
+    kind: 'shim',
     shape: 'both',
     against: 'bun',
     // Stock Bun has no `compile.include`, so compile-embed.mjs passes the
@@ -316,6 +352,7 @@ export const REGISTRY: RetirementEntry[] = [
       title: 'Use the virtual $bunfs path for __dirname/__filename',
     },
     issue: '#1451',
+    kind: 'constraint',
     shape: 'both',
     against: 'bun',
     // The bundler inlines `__dirname` in an embedded CommonJS module as the
