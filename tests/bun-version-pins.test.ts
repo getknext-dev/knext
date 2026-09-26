@@ -255,7 +255,23 @@ function isMarkerRejectedPath(f: string): boolean {
   return false;
 }
 
-type ExemptedEntry = { file: string; reason: string };
+// round 6: the exemption identity below used to be keyed by file+reason
+// ALONE, never by the line's actual image ref — so swapping a waived line's
+// real ref (e.g. a non-selecting informal tag such as `canary` for a
+// genuine stale pin such as `1.3.0-alpine`) while keeping the same reason
+// text ("historical") was invisible to `verifyPinnedExemptions`: same file,
+// same reason, same multiset count, no PINNED_EXEMPTIONS edit required.
+// `refKey` closes that —
+// it is the matched image ref with `/` replaced by `-` (never a literal
+// "oven/bun" substring, so storing it in PINNED_EXEMPTIONS below does not
+// retrigger this file's own real-repo scan, the same self-scan hazard the
+// REASON-only design already had to dodge).
+function refKeyOf(ref: string): string {
+  return ref.replace(/\//g, '-');
+}
+
+type ExemptedEntry = { file: string; reason: string; refKey: string };
+type ExemptionRecord = { reason: string; refKey: string };
 type ScanResult = {
   selecting: number;
   exempted: number;
@@ -280,7 +296,13 @@ function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanRe
             );
             return;
           }
-          if (/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/.test(line)) {
+          // EVERY ref on the line, not just the first — otherwise a second
+          // ref appended to an already-pinned exempted line would ride along
+          // under the first ref's identity with no list edit.
+          const refs = [
+            ...line.matchAll(/oven\/bun(?::\w(?:[\w.-]*\w)?)?(?:@sha256:[0-9a-f]+)?/g),
+          ].map((m) => m[0]);
+          if (refs.length > 0) {
             exempted++;
             // The REASON is everything after the marker's own `:` — the
             // stable, human-readable identity of an exemption. The rest of
@@ -291,7 +313,9 @@ function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanRe
             const markerIdx = line.indexOf(LINE_EXEMPT_MARKER);
             const afterMarker = line.slice(markerIdx + LINE_EXEMPT_MARKER.length);
             const reason = afterMarker.replace(/^:\s*/, '').trim();
-            exemptedEntries.push({ file: f, reason });
+            // round 6: the WAIVED REF itself is part of the identity — see
+            // refKeyOf above.
+            exemptedEntries.push({ file: f, reason, refKey: refs.map(refKeyOf).join(' + ') });
           }
           return;
         }
@@ -310,43 +334,58 @@ function scanOvenBunImageRefs(root: string, tag: string, pinned: string): ScanRe
 /**
  * The reviewed, exact allowlist of every exemption the real repo is allowed
  * to make via LINE_EXEMPT_MARKER — keyed by FILE, each value the list of
- * REASON texts (the text after the marker's own `:`) that file is allowed
- * to carry, in the order they appear top-to-bottom. A NEW exemption
- * ANYWHERE (even in a file class the marker is otherwise permitted in)
- * means editing THIS list, not just adding the marker in the diff — the gap
- * this closes (#1392 round 3 review; techdebt-3 rounds 1 and 2): the marker
- * could waive any line in a non-rejected file class silently, with no
- * reviewer-visible signal that the exempt SET grew.
+ * `{ reason, refKey }` records that file is allowed to carry, in the order
+ * they appear top-to-bottom. A NEW exemption ANYWHERE (even in a file class
+ * the marker is otherwise permitted in) means editing THIS list, not just
+ * adding the marker in the diff — the gap this closes (#1392 round 3
+ * review; techdebt-3 rounds 1 and 2): the marker could waive any line in a
+ * non-rejected file class silently, with no reviewer-visible signal that
+ * the exempt SET grew.
+ *
+ * `refKey` (round 6): the identity above is by REASON alone, which a PR can
+ * defeat without editing this list — swap the waived line's actual image
+ * ref (e.g. a non-selecting informal tag such as `canary` for a real stale
+ * pin such as `1.3.0-alpine`) while keeping an already-allowed reason string
+ * ("historical"), and the multiset comparison sees no change. `refKey` is
+ * the normalized ref (`refKeyOf` above) each entry's line actually carries,
+ * so retagging the waived ref itself now requires a list edit too.
  *
  * Plain, readable text — not base64 (techdebt-3 round 2 correction to round
- * 1's encoding). A REASON string never contains the literal marker text nor
- * an image-tag-shaped substring (that's what makes it a "reason", not a
- * selection or a marker use), so storing it verbatim here does not
- * retrigger this file's own real-repo scan the way the FULL line (marker +
- * image ref included) did.
+ * 1's encoding). Neither `reason` nor `refKey` ever contains the literal
+ * marker text or a literal "oven/bun" substring (refKey is normalized by
+ * `refKeyOf`, which replaces `/` — that's what makes it storable here
+ * without retriggering this file's own real-repo scan, the same hazard the
+ * REASON-only design already had to dodge).
  *
  * Stored as a per-file ARRAY, compared as a MULTISET (counts, not a Set) —
- * two DIFFERENT lines can carry the IDENTICAL reason text (a real one
- * exists nowhere in this file today, but nothing rules it out for a future
- * exemption), and a Set-based comparison would silently collapse them,
- * letting a genuine extra exemption hide behind an already-allowed reason
- * string undetected — proved directly below (`multisetDiff` describe block)
+ * two DIFFERENT lines can carry the IDENTICAL `{reason, refKey}` pair (a
+ * real one exists nowhere in this file today, but nothing rules it out for
+ * a future exemption), and a Set-based comparison would silently collapse
+ * them, letting a genuine extra exemption hide behind an already-allowed
+ * pair undetected — proved directly below (`multisetDiff` describe block)
  * against a synthetic duplicate, since the real corpus has none to exercise
  * this against today.
  */
-const PINNED_EXEMPTIONS: Record<string, string[]> = {
+const PINNED_EXEMPTIONS: Record<string, ExemptionRecord[]> = {
   'packages/kn-next/src/__tests__/runtime-image-selection.test.ts': [
-    'prefix-only assertion, not a selection',
+    { reason: 'prefix-only assertion, not a selection', refKey: 'oven-bun:1.4.2-alpine' },
   ],
-  'packages/kn-next/src/adapters/bun-keepalive-guard.cjs': ['historical'],
-  'tests/base-image-cve-hygiene.test.ts': ['descriptive label, `ref` below carries the real pin'],
-  'tests/built-image-trivy.test.ts': ['historical'],
+  'packages/kn-next/src/adapters/bun-keepalive-guard.cjs': [
+    { reason: 'historical', refKey: 'oven-bun:canary' },
+  ],
+  'tests/base-image-cve-hygiene.test.ts': [
+    {
+      reason: 'descriptive label, `ref` below carries the real pin',
+      refKey: 'oven-bun:1.4.2-alpine',
+    },
+  ],
+  'tests/built-image-trivy.test.ts': [{ reason: 'historical', refKey: 'oven-bun:1.4.0-alpine' }],
   'tests/bun-version-pins.test.ts': [
     // The design-comment paragraph above (explaining the marker itself)
     // happens to also match the real scan's marker+oven/bun trigger —
     // documented here rather than reworded away, since the paragraph's
     // wording is the more important thing to keep readable.
-    '...` in a Dockerfile would',
+    { reason: '...` in a Dockerfile would', refKey: 'oven-bun:1.4.0-alpine' },
     // Only ONE occurrence, not two: `fixtureTag` below is a literal string
     // containing "oven/bun:1.4.2-alpine", so it matches the scan's
     // oven/bun regex on that line — but `fixturePinned` is a TEMPLATE
@@ -356,25 +395,43 @@ const PINNED_EXEMPTIONS: Record<string, string[]> = {
     // comment. (An earlier round of this file wrongly assumed both lines
     // counted — the multiset mechanism below is still correct and still
     // needed for a REAL duplicate, just not this particular pair.)
-    'test fixture argument, not a real selection',
-    // These two carry a trailing `\n',` — that is literal SOURCE TEXT (the
-    // scan reads raw file bytes, not JS string semantics), because both
-    // reasons sit at the end of a JS string-literal fixture line
-    // (`'...# oven-bun-pin-exempt: pretend this is reviewed\n',`) whose
-    // `\n` escape and closing `'` / `,` are all part of the RAW line text
-    // after the marker's `:` — not stripped, since only the text UP TO the
-    // marker is special-cased, not what follows it.
-    "pretend this is reviewed\\n',",
-    "prose, not a selection\\n',",
+    { reason: 'test fixture argument, not a real selection', refKey: 'oven-bun:1.4.2-alpine' },
+    // These two carry a trailing `\n',` in their REASON — that is literal
+    // SOURCE TEXT (the scan reads raw file bytes, not JS string semantics),
+    // because both reasons sit at the end of a JS string-literal fixture
+    // line (`'...# oven-bun-pin-exempt: pretend this is reviewed\n',`)
+    // whose `\n` escape and closing `'` / `,` are all part of the RAW line
+    // text after the marker's `:` — not stripped, since only the text UP TO
+    // the marker is special-cased, not what follows it. `refKey` below is
+    // filled in from the real scan output (`git grep` / the "matches
+    // exactly" test's own failure message when it disagrees), not
+    // hand-derived, since the Dockerfile fixture's digest is a long run of zeros.
+    {
+      reason: "pretend this is reviewed\\n',",
+      refKey:
+        'oven-bun:1.4.0-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000',
+    },
+    { reason: "prose, not a selection\\n',", refKey: 'oven-bun:1.4.0-alpine' },
   ],
   'tests/bytecode-liveness-chain.test.ts': [
-    'synthetic fixture (fake version + digest), not a real selection',
+    {
+      reason: 'synthetic fixture (fake version + digest), not a real selection',
+      refKey: 'oven-bun:1.4.0-alpine@sha256:abc',
+    },
   ],
   'tests/bytecode-liveness.test.ts': [
-    'synthetic fixture (fake version + digest), not a real selection',
-    'synthetic fixture, not a real selection',
+    {
+      reason: 'synthetic fixture (fake version + digest), not a real selection',
+      refKey: 'oven-bun:1.4.0-alpine@sha256:abc',
+    },
+    {
+      reason: 'synthetic fixture, not a real selection',
+      refKey: 'oven-bun:1.4.0-alpine@sha256:abc',
+    },
   ],
-  'tests/declared-test-skips.test.ts': ['descriptive prose, not a selection'],
+  'tests/declared-test-skips.test.ts': [
+    { reason: 'descriptive prose, not a selection', refKey: 'oven-bun:1.4.2-alpine' },
+  ],
 };
 
 /**
@@ -411,23 +468,39 @@ function multisetDiff(found: string[], allowed: string[]): { extra: string[]; mi
  * reason not (enough times) present (the guard's own list going stale) are
  * both reported, never silently accepted.
  */
+// round 6: the composite key binds reason AND refKey together, so a match
+// requires both to agree — a `\u0000` separator can never appear in either
+// half (neither is user-typeable in a marker comment), so it cannot be
+// forged by a crafted reason/ref string.
+function exemptionKey(reason: string, refKey: string): string {
+  return `${reason}\u0000${refKey}`;
+}
+
+function describeKey(key: string): string {
+  const [reason, refKey] = key.split('\u0000');
+  return `reason=${JSON.stringify(reason)} refKey=${JSON.stringify(refKey)}`;
+}
+
 function verifyPinnedExemptions(
   entries: ExemptedEntry[],
-  allowlist: Record<string, string[]>,
+  allowlist: Record<string, ExemptionRecord[]>,
 ): string[] {
   const foundByFile = new Map<string, string[]>();
-  for (const { file, reason } of entries) {
+  for (const { file, reason, refKey } of entries) {
     if (!foundByFile.has(file)) foundByFile.set(file, []);
-    foundByFile.get(file)!.push(reason);
+    foundByFile.get(file)!.push(exemptionKey(reason, refKey));
   }
   const off: string[] = [];
   for (const file of new Set([...foundByFile.keys(), ...Object.keys(allowlist)])) {
-    const { extra, missing } = multisetDiff(foundByFile.get(file) ?? [], allowlist[file] ?? []);
-    for (const reason of extra)
-      off.push(`NEW, unreviewed exemption — add it to PINNED_EXEMPTIONS['${file}']: ${reason}`);
-    for (const reason of missing)
+    const allowedKeys = (allowlist[file] ?? []).map((e) => exemptionKey(e.reason, e.refKey));
+    const { extra, missing } = multisetDiff(foundByFile.get(file) ?? [], allowedKeys);
+    for (const key of extra)
       off.push(
-        `STALE pinned exemption in PINNED_EXEMPTIONS['${file}'] — no longer present, remove it: ${reason}`,
+        `NEW, unreviewed exemption — add it to PINNED_EXEMPTIONS['${file}']: ${describeKey(key)}`,
+      );
+    for (const key of missing)
+      off.push(
+        `STALE pinned exemption in PINNED_EXEMPTIONS['${file}'] — no longer present, remove it: ${describeKey(key)}`,
       );
   }
   return off;
@@ -549,20 +622,26 @@ describe('multisetDiff: the primitive verifyPinnedExemptions is built on (techde
 describe('verifyPinnedExemptions pins the exempt set exactly, per file, as a multiset (#1392 round 3/4, techdebt-3)', () => {
   it("a reason not in that file's allowlist (a NEW, unreviewed exemption) is flagged", () => {
     const off = verifyPinnedExemptions(
-      [{ file: 'lib/example.cjs', reason: 'new, unreviewed' }],
+      [{ file: 'lib/example.cjs', reason: 'new, unreviewed', refKey: 'oven-bun:1.0.0' }],
       {},
     );
     expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
   });
 
   it('an allowlist reason no longer present in the scan (STALE) is flagged, not silently accepted', () => {
-    const off = verifyPinnedExemptions([], { 'lib/example.cjs': ['historical'] });
+    const off = verifyPinnedExemptions([], {
+      'lib/example.cjs': [{ reason: 'historical', refKey: 'oven-bun:1.0.0' }],
+    });
     expect(off.some((o) => o.includes('STALE pinned exemption'))).toBe(true);
   });
 
   it('a matching entry set (found === allowlist) is clean', () => {
-    const entries = [{ file: 'lib/example.cjs', reason: 'historical' }];
-    expect(verifyPinnedExemptions(entries, { 'lib/example.cjs': ['historical'] })).toEqual([]);
+    const entries = [{ file: 'lib/example.cjs', reason: 'historical', refKey: 'oven-bun:1.0.0' }];
+    expect(
+      verifyPinnedExemptions(entries, {
+        'lib/example.cjs': [{ reason: 'historical', refKey: 'oven-bun:1.0.0' }],
+      }),
+    ).toEqual([]);
   });
 
   // The exact bug round 2 closes: a Set-based comparison treats a SECOND,
@@ -570,21 +649,49 @@ describe('verifyPinnedExemptions pins the exempt set exactly, per file, as a mul
   // the first. The multiset diff must not.
   it('a genuine SECOND exemption with the SAME reason text as an already-pinned one is still flagged as NEW', () => {
     const entries = [
-      { file: 'lib/example.cjs', reason: 'historical' },
-      { file: 'lib/example.cjs', reason: 'historical' }, // a real 2nd line, unreviewed
+      { file: 'lib/example.cjs', reason: 'historical', refKey: 'oven-bun:1.0.0' },
+      { file: 'lib/example.cjs', reason: 'historical', refKey: 'oven-bun:1.0.0' }, // a real 2nd line, unreviewed
     ];
-    const off = verifyPinnedExemptions(entries, { 'lib/example.cjs': ['historical'] });
+    const off = verifyPinnedExemptions(entries, {
+      'lib/example.cjs': [{ reason: 'historical', refKey: 'oven-bun:1.0.0' }],
+    });
     expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
   });
 
-  it('PINNED_EXEMPTIONS is real, readable text — no base64, every file has at least one reason', () => {
+  // round 6 — the exact bypass an adversarial review found: SAME file, SAME
+  // reason, but the line's ACTUAL waived ref changed (a stale/real pin swapped
+  // in under an already-allowed "historical" reason). Before refKey, this was
+  // invisible: file+reason multiset counts were unchanged (1 in, 1 allowed),
+  // so `off` was `[]`. Now the composite key differs and it must be flagged
+  // as BOTH a new exemption (the ref that's actually there) and a stale one
+  // (the ref the allowlist still claims).
+  it('the SAME file+reason but a DIFFERENT waived ref is flagged — reason text alone is not the identity', () => {
+    const entries = [
+      {
+        file: 'packages/kn-next/src/adapters/bun-keepalive-guard.cjs',
+        reason: 'historical',
+        refKey: 'oven-bun:1.3.0-alpine',
+      },
+    ];
+    const off = verifyPinnedExemptions(entries, {
+      'packages/kn-next/src/adapters/bun-keepalive-guard.cjs': [
+        { reason: 'historical', refKey: 'oven-bun:canary' },
+      ],
+    });
+    expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
+    expect(off.some((o) => o.includes('STALE pinned exemption'))).toBe(true);
+  });
+
+  it('PINNED_EXEMPTIONS is real, readable text — no base64, every file has at least one record', () => {
     const files = Object.keys(PINNED_EXEMPTIONS);
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       expect(PINNED_EXEMPTIONS[file].length).toBeGreaterThan(0);
-      for (const reason of PINNED_EXEMPTIONS[file]) {
+      for (const { reason, refKey } of PINNED_EXEMPTIONS[file]) {
         expect(reason).not.toMatch(/oven-bun-pin-exempt/);
         expect(reason).not.toMatch(/oven\/bun:/);
+        expect(refKey).not.toMatch(/oven-bun-pin-exempt/);
+        expect(refKey).not.toMatch(/oven\/bun:/);
       }
     }
   });
@@ -594,6 +701,42 @@ describe('verifyPinnedExemptions pins the exempt set exactly, per file, as a mul
     const pinned = `${tag}@${PINNED_BUN_IMAGE_DIGEST}`;
     const { exemptedEntries } = scanOvenBunImageRefs(REPO_ROOT, tag, pinned);
     expect(verifyPinnedExemptions(exemptedEntries, PINNED_EXEMPTIONS)).toEqual([]);
+  });
+
+  // round 6, reproduced exactly against the REAL corpus: the review's own
+  // example — bun-keepalive-guard.cjs's exempted "historical" line swaps its
+  // non-selecting informal `canary` mention for a real, stale, selecting pin
+  // (informal tag `1.3.0-alpine`) under the SAME marker+reason. Scanned via
+  // a synthetic git fixture (marker-branch matching doesn't consult
+  // tag/pinned, so arbitrary values are fine here) and checked against the
+  // REAL PINNED_EXEMPTIONS, not a synthetic allowlist.
+  //
+  // The fixture's image ref and marker are assembled from pieces so this
+  // file's OWN source line never carries both — otherwise the real-repo scan
+  // would pick this fixture up and it would need an allowlist entry of its own.
+  const OVEN = 'oven/';
+  it('round 6: retagging bun-keepalive-guard.cjs\'s exempted ref under the same "historical" reason is caught, not silently green', () => {
+    const dir = makeGitFixture({
+      'packages/kn-next/src/adapters/bun-keepalive-guard.cjs': `const IMG = '${OVEN}bun:1.3.0-alpine'; // ${LINE_EXEMPT_MARKER}: historical\n`,
+    });
+    const { exemptedEntries } = scanOvenBunImageRefs(dir, 'irrelevant', 'irrelevant');
+    // Precondition: file and reason are IDENTICAL to the pinned entry — the
+    // only thing that differs is the waived ref, so this is exactly the bypass.
+    expect(exemptedEntries.map((e) => [e.file, e.reason])).toEqual([
+      ['packages/kn-next/src/adapters/bun-keepalive-guard.cjs', 'historical'],
+    ]);
+    const off = verifyPinnedExemptions(exemptedEntries, PINNED_EXEMPTIONS);
+    expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
+    expect(off.some((o) => o.includes('oven-bun:1.3.0-alpine'))).toBe(true);
+  });
+
+  it('round 6: a SECOND ref appended to an already-pinned exempted line is caught — every ref on the line is part of the identity', () => {
+    const dir = makeGitFixture({
+      'packages/kn-next/src/adapters/bun-keepalive-guard.cjs': `// ${OVEN}bun:canary and ${OVEN}bun:1.3.0-alpine ${LINE_EXEMPT_MARKER}: historical\n`,
+    });
+    const { exemptedEntries } = scanOvenBunImageRefs(dir, 'irrelevant', 'irrelevant');
+    const off = verifyPinnedExemptions(exemptedEntries, PINNED_EXEMPTIONS);
+    expect(off.some((o) => o.includes('NEW, unreviewed exemption'))).toBe(true);
   });
 });
 
