@@ -1,26 +1,17 @@
 /**
- * deploy-image-lockstep-wiring — #1283 round 2 review finding #4.
+ * deploy-one-build-one-artifact — #1447.
  *
- * `deploy-orchestrator.test.ts` covers the pre-build vinext skew guard
- * (T2a, `verifyVinextStaticPrefix`) but never asserted on the POST-build
- * image guard (`verifyBuiltImageLockstep`) introduced alongside it — the
- * round-1 wiring for that guard shipped with no dedicated test proving deploy
- * actually CALLS it in scope, SKIPS it out of scope, and ABORTS the deploy
- * before the mutating `kubectl apply` when it fails. This suite closes that.
+ * On the vinext target an in-image build (an app Dockerfile that runs
+ * `vite build` itself) and a HOST build uploaded in parallel produce different
+ * `vinext-*.js` chunk hashes, so storage mode served a 404 for the app's main
+ * chunk. The invariant: the uploaded asset set is derived from the SAME build
+ * that produced the image. These tests pin the pipeline SHAPE:
  *
- * Hermetic, same treatment as deploy-orchestrator.test.ts: every side-effecting
- * seam module-mocked, no live docker/cluster. `../cli/runtime-image` is FULLY
- * replaced (not spread from the real module) so `selection.kind` and
- * `isKnownGoodTemplateDockerfile`'s answer are both directly controllable per
- * test, rather than depending on what happens to exist on disk at
- * `process.cwd()`.
- *
- * MUTATION-PROOF (by construction, not a side note): the "aborts before CR
- * apply" test asserts BOTH that `deploy()` rejects AND that `kubectl apply`
- * never ran. Delete deploy.ts's call to `verifyBuiltImageLockstep` (or the
- * `if (!imageCheck.ok) throw` that follows it) and this test goes red — the
- * mocked guard's `{ ok: false }` would simply be ignored and the deploy would
- * proceed to a successful apply, which the assertion below fails on.
+ *  - app-dockerfile + vinext + storage: NO host upload; the assets are
+ *    uploaded FROM THE IMAGE, after the image build/push.
+ *  - a shipped template Dockerfile (COPYs the host build): the host upload
+ *    stays (the host build IS the image's build) and stays parallel.
+ *  - a failed asset/image guard aborts before the CR apply.
  */
 
 import {
@@ -60,6 +51,7 @@ const getAssetPrefix = mock<AnyFn>(() => "https://cdn.example.com/my-app");
 const reclaimBuildPrefix = mock<AnyFn>();
 const verifyVinextStaticPrefix = mock<AnyFn>(() => ({ ok: true }));
 const verifyBuiltImageLockstep = mock<AnyFn>(() => ({ ok: true }));
+const uploadAssetsFromImage = mock<AnyFn>(async () => {});
 
 const __knextRealAssetUpload = { ...(await import("../utils/asset-upload")) };
 mock.module("../utils/asset-upload", () => ({
@@ -71,7 +63,7 @@ mock.module("../utils/asset-upload", () => ({
         verifyVinextStaticPrefix(...a),
     verifyBuiltImageLockstep: (...a: unknown[]) =>
         verifyBuiltImageLockstep(...a),
-    uploadAssetsFromImage: async () => {},
+    uploadAssetsFromImage: (...a: unknown[]) => uploadAssetsFromImage(...a),
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");
@@ -234,6 +226,7 @@ beforeEach(() => {
     runInherit.mockImplementation(() => {});
     runCapture.mockReturnValue("");
     uploadAssets.mockImplementation(async () => {});
+    uploadAssetsFromImage.mockImplementation(async () => {});
     resolveDigest.mockResolvedValue(
         "registry.example.com/my-app@sha256:deadbeef",
     );
@@ -250,96 +243,83 @@ afterEach(() => {
     process.env = { ...savedEnv };
 });
 
-describe("deploy() — verifyBuiltImageLockstep scope (#1283 round 2, finding #4)", () => {
-    it("CALLS the guard: app-dockerfile + vinext + storage + NOT a known-good template", async () => {
+describe("deploy() — one build, one artifact (#1447)", () => {
+    const buildOrder = (): number =>
+        runInherit.mock.invocationCallOrder[
+            runInherit.mock.calls.findIndex(
+                (c) => (c[0] as string[])?.[0] === "docker",
+            )
+        ];
+
+    it("app-dockerfile + vinext + storage: does NOT upload from the host build", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);
         const deploy = await importDeploy();
         await deploy();
-        expect(verifyBuiltImageLockstep).toHaveBeenCalledTimes(1);
-        expect(verifyBuiltImageLockstep).toHaveBeenCalledWith(
-            expect.objectContaining({
-                expectedId: "deploytag",
-                assetPrefix: "https://cdn.example.com/my-app",
-            }),
+        expect(uploadAssets).not.toHaveBeenCalled();
+    });
+
+    it("uploads FROM THE IMAGE, after the image was built and pushed", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(uploadAssetsFromImage).toHaveBeenCalledTimes(1);
+        expect(uploadAssetsFromImage.mock.calls[0]?.[1]).toBe("deploytag");
+        expect(String(uploadAssetsFromImage.mock.calls[0]?.[2])).toContain(
+            "my-app:deploytag",
         );
+        expect(
+            uploadAssetsFromImage.mock.invocationCallOrder[0],
+        ).toBeGreaterThan(buildOrder());
     });
 
-    it("SKIPS the guard for the standalone (--target) shape", async () => {
-        selectRuntimeImageKind = "standalone";
-        setArgv(["deploy", "--tag", "deploytag"]);
-        const deploy = await importDeploy();
-        await deploy();
-        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
-    });
-
-    it("SKIPS the guard when no storage is configured (uploadsAssets false)", async () => {
-        loadConfig.mockResolvedValue(noStorageConfig);
-        setArgv(["deploy", "--tag", "deploytag"]);
-        const deploy = await importDeploy();
-        await deploy();
-        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
-    });
-
-    it("SKIPS the guard for a byte-identical, unmodified shipped template (isKnownGoodTemplateDockerfile: true) — this is what stops round 1 from blocking EVERY vinext+storage deploy", async () => {
+    it("a shipped template Dockerfile keeps the parallel host upload (host build IS the image's build)", async () => {
         isKnownGoodTemplate = true;
         setArgv(["deploy", "--tag", "deploytag"]);
         const deploy = await importDeploy();
         await deploy();
-        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
-        // The deploy still succeeds — nothing else about it changed.
-        expect(applied()).toBe(true);
+        expect(uploadAssets).toHaveBeenCalledTimes(1);
+        expect(uploadAssetsFromImage).not.toHaveBeenCalled();
     });
 
-    it("SKIPS the guard when --skip-image-lockstep-check is passed (the documented opt-out for a non-standard layout)", async () => {
-        setArgv([
-            "deploy",
-            "--tag",
-            "deploytag",
-            "--skip-image-lockstep-check",
-        ]);
-        const deploy = await importDeploy();
-        await deploy();
-        expect(verifyBuiltImageLockstep).not.toHaveBeenCalled();
-        expect(applied()).toBe(true);
-    });
-
-    it("--skip-image-lockstep-check logs a warn naming what is skipped and the risk (#1283 round 3) — never silent", async () => {
-        setArgv([
-            "deploy",
-            "--tag",
-            "deploytag",
-            "--skip-image-lockstep-check",
-        ]);
-        const deploy = await importDeploy();
-        await deploy();
-        expect(logWarn).toHaveBeenCalledWith(
-            expect.stringContaining("--skip-image-lockstep-check"),
-        );
-        expect(logWarn).toHaveBeenCalledWith(
-            expect.stringMatching(/lock-step|ASSET_PREFIX|skew|asset GC/i),
-        );
-    });
-
-    it("does NOT warn when --skip-image-lockstep-check is absent", async () => {
+    it("the standalone shape keeps the host upload", async () => {
+        selectRuntimeImageKind = "standalone";
         setArgv(["deploy", "--tag", "deploytag"]);
         const deploy = await importDeploy();
         await deploy();
-        expect(logWarn).not.toHaveBeenCalledWith(
-            expect.stringContaining("--skip-image-lockstep-check"),
-        );
+        expect(uploadAssetsFromImage).not.toHaveBeenCalled();
     });
 
-    it("ABORTS before the mutating CR apply when the guard fails — mutation-proof: deleting the call site or its throw makes this pass wrongly (see file header)", async () => {
-        verifyBuiltImageLockstep.mockReturnValue({
-            ok: false,
-            reason: "prefix-missing",
-            siblings: ["some-other-id"],
+    it("--skip-image-lockstep-check turns off only the cross-check, not the image sourcing", async () => {
+        setArgv([
+            "deploy",
+            "--tag",
+            "deploytag",
+            "--skip-image-lockstep-check",
+        ]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(uploadAssetsFromImage.mock.calls[0]?.[3]).toEqual({
+            verify: false,
         });
+        expect(uploadAssets).not.toHaveBeenCalled();
+    });
+
+    it("no storage: uploads nothing from anywhere", async () => {
+        loadConfig.mockResolvedValue(noStorageConfig);
         setArgv(["deploy", "--tag", "deploytag"]);
         const deploy = await importDeploy();
-        await expect(deploy()).rejects.toThrow(
-            /In-image build lock-step check failed/,
+        await deploy();
+        expect(uploadAssets).not.toHaveBeenCalled();
+        expect(uploadAssetsFromImage).not.toHaveBeenCalled();
+    });
+
+    it("an asset/image mismatch aborts the deploy BEFORE the CR apply", async () => {
+        uploadAssetsFromImage.mockRejectedValue(
+            new Error("Asset/image mismatch: chunk-missing"),
         );
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toThrow(/Asset\/image mismatch/);
         expect(applied()).toBe(false);
     });
 });
