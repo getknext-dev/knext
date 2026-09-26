@@ -677,6 +677,10 @@ describe('every real package-manager invocation runs via run_as_builder — broa
 
     it('a `#` inside ${...} is parameter expansion, not a comment (x=${v#*/} npm ci)', () => {
       expect(offendersOf('x=${v#*/} npm ci --no-audit').length).toBe(1);
+      // `#` at WORD START but inside ${...}: only the brace frame keeps it literal.
+      expect(offendersOf('x=${v:- #} npm ci --no-audit').length).toBe(1);
+      // `;` inside ${...} is not a separator either.
+      expect(offendersOf('run_as_builder npm ci --tag ${v//;/npm}').length).toBe(0);
     });
 
     it('an unquoted heredoc body is opaque to the lexer: its apostrophe does not swallow a later real line', () => {
