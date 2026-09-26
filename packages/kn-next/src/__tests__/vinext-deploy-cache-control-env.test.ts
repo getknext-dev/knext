@@ -12,62 +12,63 @@
  *     inject an install module that calls it ahead of the entry;
  *   - neither → red (an unclassified entry is an unguarded runtime path).
  *
- * THE OVERRIDE SCAN IS AN ALLOWLIST, NOT A BLACKLIST. Three rounds of
- * blacklisting (`=0`, `unset`, `??=`, `os.Setenv`, comment-split pairs, ...)
- * each leaked the next spelling, so the question is inverted: every non-test
- * line that mentions the variable must match a KNOWN-SAFE form, and anything
- * else — including a form nobody has thought of — fails closed with the line
- * printed. The safe forms (`findUnsafeMentions`):
+ * NO HAND-ROLLED LEXER. Six rounds of hand-written comment/string scrubbing each
+ * leaked (regex literals, nested backticks, `*` continuation lines...). Source
+ * is now read by real parsers:
+ *   - JS/TS (`.js .mjs .cjs .ts .mts .cts .jsx .tsx`, also under `.hbs`): the
+ *     file goes through `Bun.Transpiler`; the OUTPUT (comments removed by Bun's
+ *     own lexer; strings and template literals kept as code) is checked line by
+ *     line. A parse error is red ("unparseable JS"). There are no comment
+ *     exemptions at all.
+ *   - YAML (`.yaml .yml`): parsed with the `yaml` package (duplicate keys and
+ *     parse errors are red) and the document walked — see `yamlHits`.
+ *   - everything else (Dockerfile, sh, .env, json, Go, `.hbs`, unknown): every
+ *     line that mentions the name must be an exact safe form. A full-line `#` or
+ *     `//` comment is skipped only when the ENTIRE line is a comment (starts with
+ *     the marker and contains none of `= ( :`).
+ *
+ * THE OVERRIDE SCAN IS AN ALLOWLIST. Every non-test line that mentions the
+ * variable must match a KNOWN-SAFE form, else it is red with the line printed:
  *   - assignment of the literal `1`: `NAME=1`, `ENV NAME=1`, `ENV NAME 1`,
  *     `export NAME=1`, `NAME: "1"`, `env.NAME = "1"` / `process.env["NAME"] = "1"`;
- *   - a k8s / Go name-value pair whose value line is exactly `1` (a comment
- *     between the two lines is stripped first; `valueFrom`, an ambiguous
- *     neighbour or a non-`1` value fails);
  *   - the Go one-line struct `{Name: "NAME", Value: "1"}` (either order);
- *   - exactly two READ shapes, each bound to its file: the early-return guard
- *     inside `applyVinextDeployDefault` (`adapters/response-cache-control.mjs`)
- *     and the fixture probe `process.env.NAME ?? null`.
- * Every safe form is matched against the WHOLE line, so a second statement on
- * the same line cannot ride along. Consequences, all intended: `??=`, `||=`,
- * `Reflect.set`, `Object.defineProperty`, `Object.assign`, `os.Setenv`,
- * `unset`, `env -u`, `delete`, `valueFrom`, a `["NAME","0"]` tuple and even a
- * `const K = "NAME"` (which is what a computed key needs) are all unknown
- * shapes and red.
+ *   - two READ shapes, each bound to its own file: the early-return guard in
+ *     `adapters/response-cache-control.mjs` and the fixture probe
+ *     `process.env.NAME ?? null`;
+ *   - in YAML, a mapping `{name: NAME, value: "1"|1}` with no `valueFrom`, or a
+ *     key `NAME` whose value is `"1"|1`.
+ * So `??=`, `||=`, `Reflect.set`, `Object.defineProperty`, `Object.assign`,
+ * `os.Setenv`, `unset`, `env -u`, `delete`, `valueFrom`, tuples, `const K =
+ * "NAME"`, and a multi-line Go struct (write it on one line) are all red.
  *
  * Skipped: `node_modules`, build output, `.claude`, `docs/` and
  * `apps/docs/content` (user-facing prose that documents the `=0` opt-out), any
- * `*.md`/`*.mdx` (prose — it cannot execute) and test FILES (`*.test.*`, which
- * set `0` on purpose; never a whole `__tests__` directory).
- * Comments are stripped before matching, and ONLY where the syntax is known: JS/
- * TS/Go via the quote-aware `scrub`, `#` full-line comments for Dockerfile /
- * yaml / sh / .env. An unrecognised file type strips nothing, so a mention in
- * its comment fails closed rather than passing.
+ * `*.md` (prose — it cannot execute) and test FILES (`*.test.*`, which set `0`
+ * on purpose; never a whole `__tests__` directory).
  *
- * REAL LIMITS: the name split across a string concatenation
+ * REAL LIMITS: the name split by string concatenation
  * (`"VINEXT_NEXT_" + "DEPLOY_CACHE_CONTROL"`) never appears whole, so it is
- * invisible; a JS regex literal holding a quote can desync `scrub`; and the
- * scan proves no repo file overrides the switch, not that a deployer's
- * cluster does not.
- *
- * The comment exemption is NOT a prefix test: a raw line the scrubber dropped
- * is exempt only when it is wholly a comment (`isPureComment`).
+ * invisible; the scan proves no repo file overrides the switch, not that a
+ * deployer's cluster does not; a `/*!` legal comment is preserved by the
+ * transpiler and so is red, not skipped.
  *
  * `isBunEntryWired` accepts one shape: inside the exported config, a
  * `nitro({ ... })` call whose own top-level `entry:` is the literal
- * `'./knext-bun-entry.mjs'` (optionally as the else-branch of a ternary whose
- * other branch is `'./knext-node-entry.mjs'`), or that same literal in a
- * conditional spread `...(cond ? { entry: '…' } : {})` at nitro's top level. Strings are blanked first, so
- * `note: "entry: './knext-bun-entry.mjs'"` is text; an object outside
- * `export default`, one nested deeper than the `nitro(` argument, or one in a
- * comment does not count. Limits: a `nitro({ entry })` built inside the
- * export but never put in `plugins` still counts, and a duplicate `entry:` key
- * inside `nitro({...})` counts as wired if either is the bun literal (at
- * runtime the last key wins).
+ * `'./knext-bun-entry.mjs'` (optionally the else-branch of `onNode ? node : bun`),
+ * or that literal in a conditional spread `...(cond ? { entry: '…' } : {})` at
+ * nitro's top level. The file is transpiled first (comments gone), then string
+ * contents are blanked (except the entry paths) so `note: "entry: '…'"` is text.
+ * Limits: a `nitro({ entry })` built inside the export but never put in
+ * `plugins` still counts; a duplicate `entry:` key counts if either is the bun
+ * literal (at runtime the last key wins); the string blanker does not parse regex
+ * literals (a quote inside one can desync it — that fails toward "not wired" on
+ * every real config).
  */
 
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
+import { parseAllDocuments } from "yaml";
 
 const NAME = "VINEXT_NEXT_DEPLOY_CACHE_CONTROL";
 const REPO = join(__dirname, "..", "..", "..", "..");
@@ -95,43 +96,44 @@ function walk(dir: string, out: string[] = []): string[] {
     return out;
 }
 
+/** Loader for `Bun.Transpiler` from the file's JS/TS extension (also under `.hbs`), or null. */
+function loaderFor(file: string): "js" | "jsx" | "ts" | "tsx" | null {
+    const ext = file.match(/\.([mc]?[jt]sx?)(?:\.\w+)*$/)?.[1];
+    if (!ext) return null;
+    if (ext.endsWith("tsx")) return "tsx";
+    if (ext.endsWith("jsx")) return "jsx";
+    return ext.includes("t") ? "ts" : "js";
+}
+
+/** Transpile with Bun's real lexer: comments gone, strings/templates kept. Throws on a parse error. */
+export function transpile(src: string, file: string): string {
+    const loader = loaderFor(file);
+    if (!loader) throw new Error(`not a JS/TS file: ${file}`);
+    return new Bun.Transpiler({ loader }).transformSync(src);
+}
+
 /**
- * Remove comments and (optionally) blank string/template contents, keeping
- * newlines so line numbers survive. Quote-aware: a comment opener inside a string
- * is text, and a quote inside a comment is text. A string whose content matches
- * `keep` is left intact (used to keep the entry-path literals).
+ * Blank the contents of string/template literals in ALREADY comment-free code
+ * (transpiler output), keeping newlines. A string whose content matches `keep`
+ * is left intact. Does not parse regex literals (stated limit).
  */
-export function scrub(
-    src: string,
-    blankStrings: boolean,
-    keep?: RegExp,
-): string {
+function blankStringLiterals(code: string, keep?: RegExp): string {
     let out = "";
     let i = 0;
-    while (i < src.length) {
-        const c = src[i];
-        const n = src[i + 1];
-        if (c === "/" && n === "/") {
-            while (i < src.length && src[i] !== "\n") i++;
-        } else if (c === "/" && n === "*") {
-            i += 2;
-            while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
-                if (src[i] === "\n") out += "\n";
-                i++;
-            }
-            i += 2;
-        } else if (c === '"' || c === "'" || c === "`") {
+    while (i < code.length) {
+        const c = code[i];
+        if (c === '"' || c === "'" || c === "`") {
             let raw = "";
             let j = i + 1;
-            while (j < src.length && src[j] !== c) {
-                if (src[j] === "\\") {
-                    raw += src[j];
+            while (j < code.length && code[j] !== c) {
+                if (code[j] === "\\") {
+                    raw += code[j];
                     j++;
                 }
-                raw += src[j] ?? "";
+                raw += code[j] ?? "";
                 j++;
             }
-            const blank = blankStrings && !(keep?.test(raw) ?? false);
+            const blank = !(keep?.test(raw) ?? false);
             out += c + (blank ? raw.replace(/[^\n]/g, " ") : raw) + c;
             i = j + 1;
         } else {
@@ -147,79 +149,8 @@ const VITE_CONFIG_NAME = /^vite\.config\.m?[jt]s(?:\.hbs)?$/;
 
 const CALL = /^applyVinextDeployDefault\(process\.env\);$/m;
 
-const JS_FAMILY = /\.(?:[mc]?[jt]sx?|go)(?:\.\w+)*$/;
-const HASH_COMMENT =
-    /^(?:Dockerfile|\.env)|\.(?:ya?ml|sh|env|toml)(?:\.\w+)*$/i;
-
-/** Lines of `src` with comments removed where the syntax is known. */
-function codeLines(src: string, path: string): string[] {
-    const file = basename(path);
-    let text = src;
-    if (JS_FAMILY.test(file)) {
-        // No regex-literal parsing (a `/^https?:\/\//` desyncs any scanner).
-        // Fail closed instead: `scrub` keeps line numbering, so a line that
-        // mentions the name RAW but not SCRUBBED was eaten as a "comment"; keep
-        // its raw text (an unknown form → red) unless it is a pure comment line.
-        const raw = src.split("\n");
-        text = scrub(src, false)
-            .split("\n")
-            .map((l, i) =>
-                raw[i]?.includes(NAME) &&
-                !l.includes(NAME) &&
-                !isPureComment(raw[i])
-                    ? raw[i]
-                    : l,
-            )
-            .join("\n");
-    } else if (HASH_COMMENT.test(file))
-        text = src
-            .split("\n")
-            .map((l) => (/^\s*#/.test(l) ? "" : l))
-            .join("\n");
-    // Indentation is kept: YAML item boundaries are decided by it.
-    return text.split("\n").filter((l) => l.trim() !== "");
-}
-
-/**
- * Whether a RAW line that mentions the name is wholly a comment (so a scrubber
- * that dropped it lost nothing). A prefix test is not enough — a leading block
- * comment followed by code, or a `*` line that is really a continuation of
- * code — so: leading block-comment groups are removed first, and what remains
- * must be empty, a `//` comment, or a `*`/`#`/unclosed-opener prose line whose
- * every mention of the name sits in a backtick span that follows a word (never
- * `(`, `[`, `,`, `=`) with no `=` outside the spans.
- */
-function isPureComment(raw: string): boolean {
-    let r = raw.trim();
-    while (r.startsWith("/*")) {
-        const c = r.indexOf("*/", 2);
-        if (c < 0) {
-            r = r.replace(/^\/\*+/, "*");
-            break;
-        }
-        r = r.slice(c + 2).trim();
-    }
-    if (r === "" || r.startsWith("//")) return true;
-    if (!/^[*#]/.test(r)) return false;
-    const outside = r.replace(/`[^`]*`/g, "");
-    if (outside.includes(NAME) || outside.includes("=")) return false;
-    for (const m of r.matchAll(/`[^`]*`/g)) {
-        if (!m[0].includes(NAME)) continue;
-        const before = r.slice(0, m.index);
-        if (!/[A-Za-z][ \t]+$/.test(before)) return false;
-    }
-    return true;
-}
-
 const N = NAME;
 const ONE = `["']?1["']?`;
-const VALUE_KEY = /^-?\s*["']?(?:value|Value)["']?\s*:/;
-const VALUE_ONE = new RegExp(
-    `^-?\\s*["']?(?:value|Value)["']?\\s*:\\s*${ONE},?\\}?,?$`,
-);
-const NAME_KEY = new RegExp(
-    `^(-)?\\s*(\\{\\s*)?["']?(?:name|Name)["']?\\s*:\\s*["']?${N}["']?,?$`,
-);
 const ASSIGN_SAFE = [
     new RegExp(`^(?:(?:ENV|export)\\s+)?${N}=${ONE}(?:\\s*\\\\)?$`),
     new RegExp(`^ENV\\s+${N}\\s+${ONE}(?:\\s*\\\\)?$`),
@@ -234,73 +165,92 @@ const ASSIGN_SAFE = [
 const READ_SAFE: [RegExp, RegExp][] = [
     [
         /adapters\/response-cache-control\.mjs$/,
-        new RegExp(`^if \\(!env \\|\\| env\\.${N} !== undefined\\) return;$`),
+        new RegExp(
+            `^if \\(!env \\|\\| env\\.${N} !== undefined\\)(?: return;)?$`,
+        ),
     ],
     [
         /__tests__\/fixtures\/vinext-node-app\/app\/api\/cache-probe\/route\.ts$/,
-        new RegExp(`^vinextDeploy: process\\.env\\.${N} \\?\\? null,$`),
+        new RegExp(`^vinextDeploy: process\\.env\\.${N} \\?\\? null,?$`),
     ],
 ];
 
+const isOne = (v: unknown) => v === 1 || v === "1";
+
+/** Unsafe mentions in a YAML document: walk the parsed value, not the text. */
+function yamlHits(src: string): string[] {
+    let docs: ReturnType<typeof parseAllDocuments>;
+    try {
+        docs = parseAllDocuments(src);
+    } catch (e) {
+        return [`unparseable YAML: ${String(e).slice(0, 80)}`];
+    }
+    const hits: string[] = [];
+    const walk = (node: unknown): void => {
+        if (typeof node === "string") {
+            if (node.includes(N))
+                hits.push(`${node}  [bare string mentioning the switch]`);
+        } else if (Array.isArray(node)) {
+            for (const x of node) walk(x);
+        } else if (node && typeof node === "object") {
+            const m = node as Record<string, unknown>;
+            const named = m.name === N;
+            if (named && (!isOne(m.value) || "valueFrom" in m))
+                hits.push(
+                    `name: ${N} with ${"valueFrom" in m ? "valueFrom" : `value ${JSON.stringify(m.value)}`}  [not exactly 1]`,
+                );
+            for (const [k, v] of Object.entries(m)) {
+                if (k === N) {
+                    if (!isOne(v))
+                        hits.push(
+                            `${N}: ${JSON.stringify(v)}  [not exactly 1]`,
+                        );
+                    continue;
+                }
+                if (k.includes(N))
+                    hits.push(`${k}  [key mentioning the switch]`);
+                if (named && k === "name") continue;
+                walk(v);
+            }
+        }
+    };
+    for (const d of docs) {
+        for (const e of d.errors)
+            hits.push(`YAML error: ${e.message.slice(0, 80)}`);
+        walk(d.toJS({ maxAliasCount: -1 }));
+    }
+    return hits;
+}
+
 /**
- * Every line of `src` (a file at `path`) that mentions the switch in a form NOT
- * on the allowlist, printed with its reason. Empty = every mention is known-safe.
+ * Every mention of the switch in `src` (a file at `path`) that is NOT a known-
+ * safe form, printed with its reason. Empty = every mention is known-safe.
  */
 export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
-    const lines = codeLines(src, path);
-    const hits: string[] = [];
-    lines.forEach((line, idx) => {
-        const l = line.trim();
-        if (!l.includes(N)) return;
-        if (ASSIGN_SAFE.some((re) => re.test(l))) return;
-        if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) return;
-        if (NAME_KEY.test(l)) {
-            // The ITEM is the run of lines from the nearest line opening one
-            // (`-` or `{`) to the next line that opens or closes one. It must
-            // hold exactly one value key, equal to 1, and no `valueFrom`; a
-            // name never borrows a value across an item boundary.
-            const ind = (x: string) => x.length - x.trimStart().length;
-            const opens = (t: string) => /^[-{]/.test(t) || t.endsWith("{");
-            // Walk back to the opener. A closing `}` or a parent line with
-            // less indentation than the name means there is no opener of ITS
-            // item on the way: fail.
-            let start = -1;
-            for (let k = idx; k >= 0; k--) {
-                const t = lines[k].trim();
-                if (opens(t)) {
-                    start = k;
-                    break;
-                }
-                if (t.startsWith("}")) break;
-                if (k < idx && ind(lines[k]) < ind(line)) break;
-            }
-            if (start < 0) {
-                hits.push(`${l}  [name outside any item]`);
-                return;
-            }
-            const keyCol = /^-/.test(l)
-                ? ind(line) + (l.match(/^-\s*/)?.[0].length ?? 1)
-                : ind(line);
-            let end = idx + 1;
-            while (end < lines.length) {
-                const t = lines[end].trim();
-                if (ind(lines[end]) < keyCol || t.startsWith("}")) break;
-                if (/^[-{]/.test(t) && ind(lines[end]) <= ind(lines[start]))
-                    break;
-                end++;
-            }
-            const item = lines.slice(start, end);
-            const values = item.filter((x) => VALUE_KEY.test(x));
-            const ok =
-                values.length === 1 &&
-                VALUE_ONE.test(values[0]) &&
-                !item.some((x) => /valueFrom/i.test(x));
-            if (ok) return;
-            hits.push(`${l}  [name without a single value of exactly 1]`);
-            return;
+    const file = basename(path);
+    let lines: string[];
+    if (loaderFor(file)) {
+        try {
+            lines = transpile(src, file).split("\n");
+        } catch (e) {
+            return [`unparseable JS (${file}): ${String(e).slice(0, 80)}`];
         }
+    } else if (/\.ya?ml$/i.test(file)) {
+        return yamlHits(src);
+    } else {
+        // Only a line that is ENTIRELY a comment is skipped.
+        lines = src
+            .split("\n")
+            .filter((l) => !(/^\s*(?:#|\/\/)/.test(l) && !/[=(:]/.test(l)));
+    }
+    const hits: string[] = [];
+    for (const raw of lines) {
+        const l = raw.trim();
+        if (!l.includes(N)) continue;
+        if (ASSIGN_SAFE.some((re) => re.test(l))) continue;
+        if (READ_SAFE.some(([f, re]) => f.test(path) && re.test(l))) continue;
         hits.push(`${l}  [unknown form]`);
-    });
+    }
     return hits;
 }
 
@@ -309,7 +259,16 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
  * `export default` whose own top-level `entry:` is the bun-entry literal.
  */
 export function isBunEntryWired(viteSrc: string): boolean {
-    const code = scrub(viteSrc, true, /^\.\/knext-(?:bun|node)-entry\.mjs$/);
+    let transpiled: string;
+    try {
+        transpiled = transpile(viteSrc, "vite.config.ts");
+    } catch {
+        return false;
+    }
+    const code = blankStringLiterals(
+        transpiled,
+        /^\.\/knext-(?:bun|node)-entry\.mjs$/,
+    );
     const at = code.indexOf("export default");
     if (at < 0) return false;
     // Bracket-match the exported expression: text after it is not the config.
@@ -361,7 +320,7 @@ export function isBunEntryWired(viteSrc: string): boolean {
         // itself a top-level member of nitro's argument.
         const body = exported.slice(start, end);
         const spread =
-            /\.\.\.\(\s*\w+\s*\?\s*\{\s*entry\s*:\s*['"]\.\/knext-bun-entry\.mjs['"]\s*,?\s*\}\s*:\s*\{\s*\}\s*\)/g;
+            /\.\.\.\(?\s*\w+\s*\?\s*\{\s*entry\s*:\s*['"]\.\/knext-bun-entry\.mjs['"]\s*,?\s*\}\s*:\s*\{\s*\}\s*\)?/g;
         for (let sm = spread.exec(body); sm; sm = spread.exec(body))
             if (depthAt[sm.index] === 1) return true;
     }
@@ -370,24 +329,32 @@ export function isBunEntryWired(viteSrc: string): boolean {
 
 const FILES = walk(REPO);
 const rel = (p: string) => relative(REPO, p);
-const readCode = (p: string) => scrub(readFileSync(p, "utf8"), true);
+const readCode = (p: string) =>
+    blankStringLiterals(transpile(readFileSync(p, "utf8"), basename(p)));
 
 describe("scanner fixtures (each form must be caught, each safe form must not)", () => {
-    it("scrub is quote-aware: a call inside a template literal is not code", () => {
+    it("the transpiler strips comments and keeps strings: a call in a template literal is not code", () => {
         const src = "const s = `\napplyVinextDeployDefault(process.env);\n`;\n";
-        expect(scrub(src, true)).not.toMatch(CALL);
-        expect(scrub("applyVinextDeployDefault(process.env);\n", true)).toMatch(
-            CALL,
-        );
+        expect(blankStringLiterals(transpile(src, "x.mjs"))).not.toMatch(CALL);
+        expect(
+            blankStringLiterals(
+                transpile("applyVinextDeployDefault(process.env);\n", "x.mjs"),
+            ),
+        ).toMatch(CALL);
+        expect(
+            blankStringLiterals(
+                transpile(
+                    "/* applyVinextDeployDefault(process.env);\n*/\nx();",
+                    "x.mjs",
+                ),
+            ),
+        ).not.toMatch(CALL);
     });
 
-    it("scrub: a block-comment opener inside a string does not eat real code", () => {
-        const src =
-            'const a = "a/**/b";\napplyVinextDeployDefault(process.env);\n';
-        expect(scrub(src, true)).toMatch(CALL);
+    it("an unparseable JS file is red, never skipped", () => {
         expect(
-            scrub("/* applyVinextDeployDefault(process.env);\n*/\nx", true),
-        ).not.toMatch(CALL);
+            findUnsafeMentions(`const = ;\n// ${NAME}`, "x.mjs"),
+        ).not.toEqual([]);
     });
 
     // [path, source]. Each is a way to leave the switch off (or unknowable).
@@ -400,19 +367,40 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["Dockerfile", `ENV A=1 \\\n  ${NAME}=0`],
         ["x.sh", `${NAME}=0 node x`],
         ["x.env", `${NAME}=`],
-        ["x.yaml", `  ${NAME}: "0"`],
         ["x.sh", `RUN unset ${NAME}`],
         ["x.sh", `RUN env -u ${NAME} node x`],
         ["x.sh", `RUN env --unset=${NAME} node x`],
+        ["x.json", `{"${NAME}": "0"}`],
         ["x.mjs", `delete process.env.${NAME};`],
         ["x.mjs", `process.env["${NAME}"] = "0";`],
-        ["x.json", `{"${NAME}": "0"}`],
+        ["x.go", `{Name: "${NAME}", Value: "0"}`],
+        ["x.go", `{Value: "", Name: "${NAME}"}`],
+        ["x.go", `os.Setenv("${NAME}", "0")`],
+        // a multi-line Go struct is unsupported by design (write it on one line)
+        ["x.go", `{\n  Name:  "${NAME}",\n  Value: "0",\n}`],
+        ["x.go", `{\n  Name:  "${NAME}",\n  Value: "1",\n}`],
+        // YAML: parsed, then walked
+        ["x.yaml", `  ${NAME}: "0"`],
         ["x.yaml", `- name: ${NAME}\n  value: "0"`],
         ["x.yaml", `- value: "0"\n  name: ${NAME}`],
-        ["x.go", `{Name: "${NAME}", Value: "0"}`],
-        ["x.go", `{\n  Name:  "${NAME}",\n  Value: "0",\n}`],
-        ["x.go", `{Value: "", Name: "${NAME}"}`],
-        // round-3 reviewer inputs
+        ["x.yaml", `- name: ${NAME}\n  # opt out\n  value: "0"`],
+        [
+            "x.yaml",
+            `- name: ${NAME}\n  valueFrom:\n    configMapKeyRef:\n      name: c`,
+        ],
+        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  valueFrom: {}`],
+        ["x.yaml", `- name: ${NAME}`],
+        ["x.yaml", `env:\n  - name: ${NAME}\nother:\n  value: "1"`],
+        [
+            "x.yaml",
+            `env:\n- value: "0"\n  valueFrom: null\n  name: ${NAME}\n- value: "1"\n  name: OTHER`,
+        ],
+        // duplicate keys are a parse error, so red whichever comes last
+        ["x.yaml", `- name: ${NAME}\n  value: "0"\n  value: "1"`],
+        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  value: "0"`],
+        ["x.yaml", `args: ["unset ${NAME}"]`],
+        ["x.yaml", `- {{ broken`],
+        // JS: real lexer, allowlist on the output
         ["x.mjs", `process.env.${NAME} ??= "0";`],
         ["x.mjs", `process.env.${NAME} ||= "0";`],
         ["x.mjs", `Reflect.set(process.env, "${NAME}", "0");`],
@@ -424,65 +412,35 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.mjs", `const pairs = ["${NAME}", "0"];`],
         ["x.mjs", `/* opt out */ process.env.${NAME} = "0";`],
         ["x.mjs", `const K = "${NAME}";\nprocess.env[K] = "0";`],
-        ["x.go", `os.Setenv("${NAME}", "0")`],
-        ["x.yaml", `- name: ${NAME}\n  # opt out\n  value: "0"`],
-        [
-            "x.yaml",
-            `- name: ${NAME}\n  valueFrom:\n    configMapKeyRef:\n      name: c`,
-        ],
-        ["x.yaml", `- name: ${NAME}`],
         ["x.mjs", `env.${NAME} = "1"; env.${NAME} = "0";`],
-        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  value: "0"`],
-        // round-4 reviewer inputs
+        ["x.mjs", `/*! ${NAME}=0 */\nx();`],
+        // round-3 .. round-5 desync inputs (a real lexer does not desync)
         ["x.mjs", `const re = /^https?:\\/\\//; process.env.${NAME} = "0";`],
         [
             "x.mjs",
             `const q = /'/; const u = 'http://x'; process.env.${NAME} = "0";`,
         ],
-        [
-            "x.yaml",
-            `env:\n- value: "0"\n  valueFrom: null\n  name: ${NAME}\n- value: "1"\n  name: OTHER`,
-        ],
-        [
-            "x.yaml",
-            `- name: ${NAME}\n  value: "1"\n  valueFrom: null\n  value: "0"`,
-        ],
-        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  x: y\n  value: "0"`],
-        // a block-comment INTERIOR line without a leading `*` is not pure comment
-        ["x.mjs", `/*\n process.env.${NAME} = "0";\n*/`],
-        // commented-out code that names the switch fails closed
-        ["x.mjs", `/*\n * process.env.${NAME} = "0";\n */`],
-        // scrubber desync (`/x\/*/` opens a "comment") drops a `*` line whose
-        // name sits in a span after `[` — not prose
+        ["x.mjs", `/* c */ const r = /\\/\\//; process.env.${NAME} = "0";`],
         [
             "x.mjs",
-            `const r = /x\\/*/;\n  * Object.assign(process.env, { [\`${NAME}\`]: "0" }); /* */`,
+            `const r = /x\\/*/;\n  const y = 2\n  * 2; process.env.${NAME} = "0";`,
         ],
-        // a `}` between the opener and the name, at the name's own indent
         [
-            "x.go",
-            `    a := X{\n        Value: "1",\n    }\n    Name: "${NAME}",`,
+            "x.mjs",
+            `class A { #r = /\\/\\//; x = (process.env.${NAME} = "0"); }`,
         ],
-        // a parent line with less indent between the opener and the name
-        ["x.yaml", `- a: 1\ntop:\n  value: "1"\n  name: ${NAME}`],
-        // round-5 reviewer inputs
-        [
-            "x.go",
-            `a := corev1.EnvVar{\n\tName: "OTHER",\n\tValue: "1",\n}\nb := corev1.EnvVar{\n\tName: "${NAME}",\n}`,
-        ],
-        ["x.yaml", `env:\n  - name: ${NAME}\nother:\n  value: "1"`],
-        ["x.mjs", `/* c */ const r = /\\/\\//; process.env.${NAME} = "0";`],
-        ["x.mjs", `const r = /x\\/*/;\n  * 2; process.env.${NAME} = "0";`],
-        ["x.mjs", `#r = /\\/\\//; x = (process.env.${NAME} = "0");`],
         ["x.mjs", `/* c */ Reflect.set(process.env, \`${NAME}\`, "0");`],
-        ["x.mjs", `* Object.assign(process.env, { [\`${NAME}\`]: "0" });`],
-        ["x.yaml", `- name: ${NAME}\n  value: "1"\n  valueFrom: {}`],
-        // an ambiguous neighbour on both sides is refused
-        ["x.yaml", `value: "1"\nname: ${NAME}\nvalue: "1"`],
-        // unrecognised file type: comments are not stripped, so a mention fails
-        ["x.txt", `# ${NAME}=0 documents the opt-out`],
+        // round-6 reviewer input: a nested quoted backtick / `"a/*b"` string
+        // and a multiplication continuation carrying a tagged template
+        [
+            "x.mjs",
+            `const s = "a/*b"; const x = 2\n  * Reflect.set(process.env, String.raw\`${NAME}\`, "0");`,
+        ],
         // the read shapes are bound to their own files
         ["src/other.mjs", `if (!env || env.${NAME} !== undefined) return;`],
+        // unrecognised type: a comment containing `=` is not "entirely a comment"
+        ["x.txt", `# ${NAME}=0 documents the opt-out`],
+        ["Dockerfile", `# ${NAME}=0 documents the opt-out`],
     ];
     for (const [path, b] of BAD) {
         it(`flags: ${path} ${JSON.stringify(b)}`, () => {
@@ -491,17 +449,21 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
     }
 
     const GOOD: [string, string][] = [
-        [
-            "x.go",
-            `a := corev1.EnvVar{\n\tName: "OTHER",\n\tValue: "0",\n}\nb := corev1.EnvVar{\n\tName: "${NAME}",\n\tValue: "1",\n}`,
-        ],
+        ["Dockerfile", `ENV ${NAME}=1`],
+        ["Dockerfile", `ENV ${NAME}=1 \\`],
+        ["Dockerfile", `ENV ${NAME} 1`],
+        ["Dockerfile", `ENV ${NAME} "1"`],
+        ["x.sh", `export ${NAME}=1`],
+        ["x.go", `{Name: "${NAME}", Value: "1"}`],
+        ["x.yaml", `  ${NAME}: "1"`],
+        ["x.yaml", `- name: ${NAME}\n  value: "1"`],
+        ["x.yaml", `- name: ${NAME}\n  value: 1`],
+        ["x.yaml", `- name: ${NAME}\n  # note\n  value: "1"`],
+        ["x.yaml", `- value: "1"\n  name: ${NAME}`],
         [
             "x.yaml",
             `env:\n  - name: ${NAME}\n    value: "1"\nother:\n  value: "0"`,
         ],
-        ["x.mjs", `/**\n * page) when \`${NAME}=1\`; it reads it.\n */`],
-        ["x.mjs", `/* the switch \`${NAME}\` is documented here */`],
-        // neighbouring items with other values must not bleed into this one
         [
             "x.yaml",
             `- name: ${NAME}\n  value: "1"\n- name: OTHER\n  value: "0"`,
@@ -510,30 +472,28 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
             "x.yaml",
             `- name: OTHER\n  value: "0"\n- name: ${NAME}\n  value: "1"`,
         ],
-        ["Dockerfile", `ENV ${NAME}=1`],
-        ["Dockerfile", `ENV ${NAME}=1 \\`],
-        ["Dockerfile", `ENV ${NAME} 1`],
-        ["Dockerfile", `ENV ${NAME} "1"`],
-        ["x.sh", `export ${NAME}=1`],
-        ["x.yaml", `  ${NAME}: "1"`],
-        ["x.yaml", `- name: ${NAME}\n  value: "1"`],
-        ["x.yaml", `- name: ${NAME}\n  # note\n  value: "1"`],
-        ["x.yaml", `- value: "1"\n  name: ${NAME}`],
+        ["x.yaml", `# ${NAME}=0 documents the opt-out\nx: 1`],
         ["x.mjs", `env.${NAME} = "1";`],
         ["x.mjs", `process.env["${NAME}"] = "1";`],
-        ["x.go", `{Name: "${NAME}", Value: "1"}`],
-        ["x.go", `{\n  Name:  "${NAME}",\n  Value: "1",\n}`],
-        ["Dockerfile", `# ${NAME}=0 documents the opt-out`],
+        // comments are stripped by the real lexer — however they are shaped
         ["x.mjs", `// ${NAME}=0 documents the opt-out\nx();`],
-
+        ["x.mjs", `/*\n process.env.${NAME} = "0";\n*/`],
+        ["x.mjs", `/*\n * process.env.${NAME} = "0";\n */`],
+        ["x.mjs", `/**\n * page) when \`${NAME}=1\`; it reads it.\n */`],
+        ["x.mjs", `/* the switch \`${NAME}\` is documented here */`],
+        ["x.mjs", `const s = "a/*b"; x();\n// ${NAME}=0`],
         [
             "packages/kn-next/src/adapters/response-cache-control.mjs",
             `if (!env || env.${NAME} !== undefined) return;`,
         ],
         [
             "packages/kn-next/src/__tests__/fixtures/vinext-node-app/app/api/cache-probe/route.ts",
-            `vinextDeploy: process.env.${NAME} ?? null,`,
+            `const a = { vinextDeploy: process.env.${NAME} ?? null };`.replace(
+                "const a = { ",
+                "const a = {\n",
+            ),
         ],
+        ["Dockerfile", `# ${NAME} opt-out is documented elsewhere`],
     ];
     for (const [path, g] of GOOD) {
         it(`allows: ${path} ${JSON.stringify(g)}`, () => {
@@ -676,14 +636,12 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
         join(REPO, "packages/kn-next/src/adapters/vinext-compile.mjs"),
         "utf8",
     );
-    const compileCode = scrub(compile, false);
+    const compileCode = transpile(compile, "vinext-compile.mjs");
 
     /** Modules the compile step imports ahead of the entry. */
     function injectedInstallModules(): string[] {
         const ids = [
-            ...compileCode.matchAll(
-                /`import \$\{JSON\.stringify\((\w+)\)\};\\n`/g,
-            ),
+            ...compileCode.matchAll(/`import \$\{JSON\.stringify\((\w+)\)\};/g),
         ].map((m) => m[1]);
         return ids.map((id) => {
             const decl = compileCode.match(
