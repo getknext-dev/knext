@@ -902,11 +902,13 @@ const canonical = (e) =>
  * Re-derive every entry from the runs it lists and compare. Catches evidence
  * that is invented (the run does not exist), cited from another lane, cited
  * from a non-`main`/wrong-workflow run, cited with a custom ref, missing a
- * shard (never counted as a pass), or that does not say what the entry
- * claims, e.g. an unsupported entry relabelled flaky with a "passing" run
- * where the file actually failed.
+ * shard (never counted as a pass), cited from BEFORE the entry's own `added`
+ * date (#1348 — a run cannot be evidence for a quarantine window that did
+ * not exist yet), or that does not say what the entry claims, e.g. an
+ * unsupported entry relabelled flaky with a "passing" run where the file
+ * actually failed.
  * @param {any} ledger
- * @param {(runId: string) => { meta: { headBranch: string, path: string }, summaries: any[] }} fetchRun
+ * @param {(runId: string) => { meta: { headBranch: string, path: string, createdAt?: string }, summaries: any[] }} fetchRun
  * @returns {string[]}
  */
 export function verifyEvidence(ledger, fetchRun) {
@@ -943,6 +945,24 @@ export function verifyEvidence(ledger, fetchRun) {
       if (meta?.headBranch !== 'main') {
         errors.push(
           `${e.test}: evidence run ${id} is not on main (head_branch=${meta?.headBranch})`,
+        );
+        continue;
+      }
+      // #1348 — a run created before the entry's own `added` date cannot be
+      // evidence for it: the quarantine window it is cited from did not
+      // exist yet. Compared as dates (createdAt's first 10 chars,
+      // YYYY-MM-DD) against `added`, which is date-only by design
+      // (validateLedger). Only checked when both are present/well-formed —
+      // an unparseable createdAt is caught by the shape checks below it
+      // instead of silently passing here.
+      if (
+        typeof e.added === 'string' &&
+        typeof meta?.createdAt === 'string' &&
+        meta.createdAt.length >= 10 &&
+        meta.createdAt.slice(0, 10) < e.added
+      ) {
+        errors.push(
+          `${e.test}: evidence run ${id} was created (${meta.createdAt}) before the entry's added date (${e.added}) — a run cannot be evidence for a quarantine window that did not exist yet`,
         );
         continue;
       }
@@ -986,7 +1006,219 @@ export function verifyEvidence(ledger, fetchRun) {
   return errors;
 }
 
+/**
+ * Whether the checkout `execGit` operates against is a SHALLOW clone
+ * (`git rev-parse --is-shallow-repository`, the documented, git-native way
+ * to ask this — never inferred from `git log`'s own output, which degrades
+ * silently on a shallow checkout rather than signalling it). `verify`
+ * MUST fail closed on `true`: `deriveAddedFromGitLog`'s whole premise is a
+ * full history on `ledgerRelPath`, and a shallow clone makes every entry
+ * look "just introduced right now" regardless of its real history (#1348,
+ * techdebt-3).
+ * @param {(args: string[]) => string} execGit
+ * @returns {boolean}
+ */
+export function isShallowRepo(execGit) {
+  return execGit(['rev-parse', '--is-shallow-repository']).trim() === 'true';
+}
+
+/**
+ * The date (YYYY-MM-DD) an entry with `test === testName` FIRST appears in
+ * `ledgerRelPath`'s git history, walked oldest-commit-first — never trusted
+ * from the entry's own `added` field, which a PR could re-date to reset the
+ * 30-day clock (#1348). `execGit` is injected (real CLI: `git`) so this is
+ * testable without a real repo.
+ *
+ * Needs FULL history (a shallow checkout, `fetch-depth: 1` — this job's old
+ * default — would only ever see the single most recent commit, making every
+ * entry look "first introduced right now" regardless of its real history),
+ * walked via `--first-parent` on the branch actually being verified, NOT
+ * `--follow` (techdebt-4 round-2 finding). Two reasons together:
+ *
+ *   1. `--follow` DROPS merge commits outright (git's own documented
+ *      behaviour — across a rename it can only follow a single parent, and
+ *      a merge commit has more than one), so a squash merge or a real
+ *      `--no-ff` merge commit could make this return null for an entry
+ *      that unquestionably IS in the branch's history — an honest entry
+ *      then fails "cannot be verified" instead of passing.
+ *   2. Walking every commit reachable (not just the branch's OWN
+ *      first-parent history) means a PR that removed-then-re-added an
+ *      entry entirely WITHIN its own branch — a sequence that never
+ *      existed as a state on the target branch itself — could reset the
+ *      derived "added" date to the PR's internal re-addition commit,
+ *      resetting the 30-day quarantine clock on churn nobody outside the
+ *      PR ever saw. `--first-parent` treats each merged PR as ONE step, so
+ *      only a GAP on the branch's own history (the entry genuinely absent
+ *      at some point after landing) counts.
+ *
+ * (Renames are out of scope for this fix — `--first-parent` does not track
+ * across a rename the way `--follow` did; this trades that narrower gap for
+ * closing the two above, which are the live, evidenced findings.)
+ *
+ * COMPOUND GAP (round-3 review): a rename ALSO resets what this function can
+ * see, which combines badly with a re-date in the SAME commit. If a PR
+ * renames `ledgerRelPath` and re-dates an entry's `added` in that one
+ * commit, the rename commit becomes the FIRST commit this walk finds for the
+ * new path — no history under the old path name is visible at all — so the
+ * derived date IS the rename commit's own date, and any `added` value at or
+ * before that date (including the rename commit's own date) passes the
+ * `e.added > derived` check with nothing to catch it. This is a real bypass
+ * of the whole verification, not just the narrower "renames aren't
+ * tracked" limitation above — recorded here rather than left implied.
+ *
+ * HONEST SCOPE LIMIT on point 2, LIVE not merely theoretical (round-3
+ * review, re-confirmed against the repo's actual settings): "treating each
+ * merged PR as ONE step" only holds when the merge itself compresses the PR
+ * into a single commit on the target branch — a squash merge, or a real
+ * `--no-ff` merge commit. `allow_rebase_merge` is on with no restriction to
+ * squash-only, AND the repo's one active branch ruleset (`main`, id
+ * 13073078) carries a `merge_queue` rule whose `merge_method` is `MERGE`
+ * (real merge commits) — but that ruleset's own `enforcement` is
+ * `"disabled"`, so that rule enforces NOTHING today. Nothing in this repo
+ * currently prevents a "rebase and merge", which — like a plain
+ * fast-forward — replays every one of the PR's individual commits directly
+ * onto the target branch's own first-parent line. A remove-then-re-add
+ * WITHIN a rebase-merged PR is therefore NOT compressed away by this fix:
+ * it would still show up as a real gap on the target branch's own history
+ * and reset the derived date to the re-addition commit, exactly the class
+ * this fix otherwise closes — this is a live, exploitable gap on this repo
+ * today, not a hypothetical one that would need a settings change to
+ * matter. Not solvable from git history alone (nothing in a rebase-merged
+ * commit sequence marks "these N commits were one PR"); closing it fully
+ * needs either enforcing squash-only merges repo-wide (a founder-level
+ * settings decision, out of scope for this function to make) or reading
+ * GitHub's PR-to-commit mapping (PR metadata this git-log-only function
+ * does not have).
+ *
+ * Returns null when no commit in the queried history contains this entry —
+ * a caller MUST treat that as "cannot verify" (an error), never as a silent
+ * pass: with a full-history checkout of the ref actually being verified,
+ * this should only happen if the entry is not committed at all.
+ * @param {(args: string[]) => string} execGit
+ * @param {string} ledgerRelPath
+ * @param {string} testName
+ * @returns {string | null}
+ */
+export function deriveAddedFromGitLog(execGit, ledgerRelPath, testName) {
+  let log;
+  try {
+    // COMMITTER date (%cI), not author date (%aI) — the committer date is
+    // what GitHub's own UI shows and is stable across a rebase/amend that
+    // only touches authorship; either way, the RAW string carries the
+    // commit's own timezone offset, never sliced directly below (see
+    // toUtcDateString) — a late-night commit in a negative-offset zone can
+    // land on a different UTC calendar date than its local one (techdebt-3).
+    log = execGit(['log', '--first-parent', '--format=%H %cI', '--', ledgerRelPath]);
+  } catch {
+    return null;
+  }
+  const commits = log
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const sp = line.indexOf(' ');
+      return { sha: line.slice(0, sp), date: line.slice(sp + 1) };
+    }); // newest first (git log's natural order) — kept newest-first below,
+  // not reversed, because the LATEST contiguous run of presence (not the
+  // first-ever appearance) is what "added" must track (see below).
+
+  /** Whether `testName` is present in `ledgerRelPath` AT this commit — false for a missing file, unparseable content, or an absent entry, never thrown. */
+  const presentAt = (sha) => {
+    let content;
+    try {
+      content = execGit(['show', `${sha}:${ledgerRelPath}`]);
+    } catch {
+      return false; // the file did not exist at this commit (e.g. a rename edge)
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return false; // not valid JSON at this point in history
+    }
+    return (parsed.entries ?? []).some((e) => e.test === testName);
+  };
+
+  // A test REMOVED and then RE-ADDED must be re-quarantinable — its `added`
+  // has to track the RE-addition, not the entry's very first-ever
+  // appearance somewhere deep in history (techdebt-3). Walk NEWEST to
+  // OLDEST; the entry must be present at the most recent commit that
+  // touched this file (otherwise it is not currently in the ledger at
+  // all — nothing to derive an `added` date FOR), then keep walking
+  // backward while it stays present, stopping at the first gap. The last
+  // commit still inside that unbroken run is where the CURRENT stint began.
+  if (commits.length === 0 || !presentAt(commits[0].sha)) return null;
+  let start = commits[0];
+  for (let i = 1; i < commits.length; i++) {
+    if (!presentAt(commits[i].sha)) break;
+    start = commits[i];
+  }
+  return toUtcDateString(start.date);
+}
+
+/**
+ * A commit date string (`git log --format=%cI`, e.g.
+ * `2026-09-24T23:30:00-07:00`) normalised to its UTC calendar date
+ * (`YYYY-MM-DD`) — via `Date`, never a raw slice of the first 10
+ * characters, which reads the date in whatever OFFSET the string itself
+ * carries, not UTC. `added` fields are UTC dates; comparing a local-offset
+ * slice against them is exactly the false-red (and false-green) class this
+ * closes (techdebt-3).
+ * @param {string} isoDateWithOffset
+ * @returns {string}
+ */
+function toUtcDateString(isoDateWithOffset) {
+  return new Date(isoDateWithOffset).toISOString().slice(0, 10);
+}
+
+/**
+ * Cross-check every entry's self-reported `added` against git history
+ * (#1348): a PR could otherwise invent evidence or silently re-date `added`
+ * FORWARD to reset the 30-day clock, and nothing short of the commit graph
+ * itself can catch a re-date (the JSON field alone is exactly what would
+ * have been edited). Every entry must resolve to SOME commit (a real one is
+ * always discoverable with a full-history checkout, since the entry's own
+ * introducing commit is part of that history). The resolved date is NOT
+ * required to equal `added` exactly (techdebt-4 round-2 finding): a squash
+ * merge or rebase moves the commit git log sees to the day the PR LANDED,
+ * which is never before the day a contributor actually wrote the entry, so
+ * an honest `added` may legitimately PRECEDE the derived date. Only `added`
+ * being LATER than the derived date is flagged — that is the only shape a
+ * forward re-date can take.
+ * @param {any} ledger
+ * @param {(args: string[]) => string} execGit
+ * @param {string} ledgerRelPath
+ * @returns {string[]}
+ */
+export function verifyAddedDates(ledger, execGit, ledgerRelPath) {
+  const errors = [];
+  for (const e of ledger.entries) {
+    const derived = deriveAddedFromGitLog(execGit, ledgerRelPath, e.test);
+    if (derived === null) {
+      errors.push(
+        `${e.test}: no commit in ${ledgerRelPath}'s git history introduces this entry — added cannot be verified (needs a full-history checkout)`,
+      );
+      continue;
+    }
+    // Only `added` being LATER than the derived date is the attack —
+    // re-dating forward to reset the 30-day clock (techdebt-4 round-2
+    // finding). `added` legitimately being EARLIER than derived is the
+    // honest, expected shape after a squash merge or rebase: the commit
+    // git history sees on main is dated the day the PR LANDED, which is
+    // never before the day a contributor actually wrote the entry. Exact
+    // equality would false-red every honest entry the next time its PR is
+    // squash-merged or rebased.
+    if (e.added > derived) {
+      errors.push(
+        `${e.test}: added (${e.added}) does not match git history — this entry first appears on main in a commit dated ${derived}; added must never be re-dated forward`,
+      );
+    }
+  }
+  return errors;
+}
+
 const gh = (a) => execFileSync('gh', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const git = (a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 /** Fetch runs into a temp dir, read their summaries, and always remove the dir. */
 function withRuns(fn) {
@@ -998,11 +1230,11 @@ function withRuns(fn) {
   }
 }
 
-/** One run's `head_branch` and checked-out workflow `path`, via `gh api`. */
+/** One run's `head_branch`, checked-out workflow `path`, and `created_at` (#1348), via `gh api`. */
 function runMeta(repo, runId) {
   const raw = gh(['api', `repos/${repo}/actions/runs/${runId}`]);
   const parsed = JSON.parse(raw);
-  return { headBranch: parsed.head_branch, path: parsed.path };
+  return { headBranch: parsed.head_branch, path: parsed.path, createdAt: parsed.created_at };
 }
 
 function args(argv, name) {
@@ -1071,16 +1303,33 @@ function main(argv) {
       console.error('::error::verify needs GITHUB_REPOSITORY (owner/name) and a gh token');
       return 1;
     }
-    const failures = withRuns((root) =>
+    // techdebt-3 — deriveAddedFromGitLog's whole premise is a FULL history
+    // on the ledger file; a shallow checkout (fetch-depth: 1, or any
+    // partial clone) silently makes every entry look "just introduced
+    // right now" instead of surfacing as a re-date attack. Fail closed
+    // BEFORE trusting anything verifyAddedDates derives, never after.
+    if (isShallowRepo(git)) {
+      console.error(
+        "::error::vinext quarantine ledger — verify needs a FULL-history checkout (this one is shallow); deriveAddedFromGitLog cannot see past a shallow clone's single commit, so every entry would falsely look brand new — fetch-depth: 0 (or unshallow) before running verify",
+      );
+      return 1;
+    }
+    const evidenceFailures = withRuns((root) =>
       verifyEvidence(ledger, (id) => {
         const dir = join(root, id);
         downloadRun(gh, { repo, runId: id, dir });
         return { meta: runMeta(repo, id), summaries: readSummaries(dir) };
       }),
     );
+    // #1348 — never trust `added` from the JSON field alone; re-derive it
+    // from the ledger file's own git history.
+    const addedFailures = verifyAddedDates(ledger, git, ledgerPath);
+    const failures = [...evidenceFailures, ...addedFailures];
     for (const f of failures) console.error(`::error::vinext quarantine ledger — ${f}`);
     if (failures.length === 0)
-      console.log(`verified ${ledger.entries.length} ledger entries against their listed runs`);
+      console.log(
+        `verified ${ledger.entries.length} ledger entries against their listed runs and git history`,
+      );
     return failures.length ? 1 : 0;
   }
   if (cmd === 'apply') {
