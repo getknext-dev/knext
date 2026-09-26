@@ -415,6 +415,7 @@ describe('every npm ci invocation for a native corpus package sets npm_config_bu
         '--BUILD_FROM_SOURCE=false',
         '--no_build_from_source',
         '--build_from_source false',
+        '--build-from-source "false"',
       ]) {
         const src = `env npm_config_build_from_source=true npm ci ${flag}`;
         expect(npmCiInvocationLines(src).length, flag).toBe(1);
@@ -437,6 +438,7 @@ describe('every npm ci invocation for a native corpus package sets npm_config_bu
         'npm ci --build-from-source=true=x',
         'env npm_config_build_from_source=true npm ci --foo=build_from_source',
         'env NPM_CONFIG_BUILD_FROM_SOURCE=true npm ci',
+        'env npm_config_build_from_source=true NPM_CONFIG_BUILD_FROM_SOURCE=false npm ci',
       ]) {
         expect(offends(src).length, src).toBe(1);
       }
