@@ -1082,16 +1082,21 @@ function reportStdinApply(st, why, clause) {
   const stmt = statementText(clause, st);
   const entry = STATEMENT_ALLOWLIST.find((e) => e.file === st.file && e.statement === stmt);
   if (entry) {
-    st.allowHits?.set(entry.id, (st.allowHits.get(entry.id) ?? 0) + 1);
+    countAllowHit(st, entry.id);
     return;
   }
   offend(st, why, clause);
 }
 
+/** Counts one allowlist match for the spec's exactly-once / liveness checks. */
+function countAllowHit(st, id) {
+  st.allowHits?.set(id, (st.allowHits.get(id) ?? 0) + 1);
+}
+
 function reportRemoteFetch(st, why, seg) {
   const entry = REMOTE_FETCH_ALLOWLIST.find((e) => e.segment.test(seg));
   if (entry) {
-    st.allowHits?.set(entry.id, (st.allowHits.get(entry.id) ?? 0) + 1);
+    countAllowHit(st, entry.id);
     return;
   }
   offend(st, `unclassified remote fetch (${why})`, seg);

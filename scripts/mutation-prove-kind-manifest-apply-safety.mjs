@@ -139,7 +139,7 @@ prove(
 prove(
   'M6 class 2: a stdin apply fed by network content is no longer rejected',
   SCANNER,
-  '    if (why) offend(st, `stdin apply fed by network content (${why})`, clause);',
+  '    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause);',
   '    void why;',
 );
 
@@ -301,8 +301,8 @@ prove(
 prove(
   'M31 remote: allowlist matches are no longer counted (the exactly-once check goes blind)',
   SCANNER,
-  '    st.allowHits?.set(entry.id, (st.allowHits.get(entry.id) ?? 0) + 1);',
-  '    void entry;',
+  '  st.allowHits?.set(id, (st.allowHits.get(id) ?? 0) + 1);',
+  '  void id;',
 );
 
 // round 5, finding 3 — pinned versions fail fast, by name
