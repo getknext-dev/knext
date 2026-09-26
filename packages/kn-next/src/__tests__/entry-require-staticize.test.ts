@@ -180,6 +180,15 @@ describe("analyzeServerModule (unit)", () => {
             expect(flagged("function __require(a = g()) { }")).toBe(false);
             expect(flagged("var o = { __require(a = g(1)) { } };")).toBe(false);
         });
+        it("a function head is a head even with its `{` on the next line", () => {
+            expect(flagged("var c=function __require()\n{return 1};")).toBe(
+                false,
+            );
+            expect(flagged("var g=function* __require()\n{};")).toBe(false);
+        });
+        it("a class member after another member's `}` is a head", () => {
+            expect(flagged("class K{a(){}__require(n){return n}}")).toBe(false);
+        });
         it("a same-line comment between a method's `)` and `{` keeps it a head", () => {
             expect(
                 flagged("class K { __require(x) /* c */ { return x; } }"),
