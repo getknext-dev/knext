@@ -18,6 +18,7 @@
     "bytecode",
     "bun-runtime",
     "image-optimization",
+    "typescript",
     "---Deploy lifecycle---",
     "versioning",
     "upgrading",

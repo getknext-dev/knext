@@ -143,15 +143,15 @@ const MUTATIONS = [
     subject: 'vinextCompileMjs',
     spec: SCAN_SPEC,
     anchor:
-      '                console.log(\n' +
-      '                    `[knext compile] bundling ${staticized.rewritten.length} package(s) the entry ` +\n' +
-      '                        `loads via createRequire(import.meta.url): ${staticized.rewritten.join(", ")}`,\n' +
-      '                );',
+      '    console.log(\n' +
+      '        `[knext compile] bundling ${PLAN.embed.size} package(s) the server output loads ` +\n' +
+      '            `via createRequire(import.meta.url): ${describeSpecs(PLAN.embed)}`,\n' +
+      '    );',
     replacement:
-      '                console.info(\n' +
-      '                    `bundling ${staticized.rewritten.length} package(s) the entry ` +\n' +
-      '                        `loads via createRequire(import.meta.url): ${staticized.rewritten.join(", ")}`,\n' +
-      '                );',
+      '    console.info(\n' +
+      '        `bundling ${PLAN.embed.size} package(s) the server output loads ` +\n' +
+      '            `via createRequire(import.meta.url): ${describeSpecs(PLAN.embed)}`,\n' +
+      '    );',
   },
   {
     // #1421 review round 2, bypass 3 — process.stdout.write was never

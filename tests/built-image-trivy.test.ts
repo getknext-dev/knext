@@ -9,7 +9,9 @@ import { parse } from 'yaml';
  * ## Why this exists
  *
  * #971 added `base-image-trivy`, which scans the pinned alpine BASE references
- * (`oven/bun:1.4.0-alpine`, `node:22-alpine`). It landed enforce-on-main and
+ * (`oven/bun:1.4.0-alpine`, `node:22-alpine`). oven-bun-pin-exempt: historical
+ * — records the Bun THAT WAS PINNED when #971 landed, not the current pin.
+ * It landed enforce-on-main and
  * immediately red-lined main, because the base-ref carries the very HIGH/CRITICAL
  * CVEs the Dockerfiles' build-time `apk upgrade --no-cache` clears in the SHIPPED
  * image. #982 made that base-ref scan REPORT-ONLY (a digest-bump signal). That

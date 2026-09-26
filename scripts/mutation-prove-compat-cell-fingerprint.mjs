@@ -52,6 +52,13 @@
  *      BEFORE the (deliberately error-tolerant) AST walk — must let an
  *      unterminated string/regex silently fall through to a best-effort,
  *      possibly-wrong parse instead of refusing outright.
+ *  10. A GLOBAL OBJECT ESCAPING AS A VALUE MUST FAIL CLOSED (round 6 (a'),
+ *      #1388): `isAmbientRootEscape` is the guard behind `const R = Reflect;
+ *      R.get(process, k)` and `pick(globalThis, k)` — a global object handed
+ *      to anything other than a property base, an alias, `typeof`, an
+ *      equality operand, or the right side of `in`. Disarming it (short-
+ *      circuiting to `return false` at the top) must silently let both
+ *      shapes back through as clean.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires
@@ -62,8 +69,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 8-of-9 from
- *     9-of-9;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 9-of-10 from
+ *     10-of-10;
  *   * judged on EXIT CODES, never on grepped output — vitest/bun:test write
  *     ANSI, and a pass/fail grep over it once certified fourteen decorative
  *     mutations green.
@@ -88,7 +95,7 @@ const SPECS = [
   'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(9);
+declareMutations(10);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -239,6 +246,19 @@ prove(
   'the syntax-error fail-closed check is disarmed: a file that does not parse is walked anyway',
   'if (syntaxErrors.length > 0) {',
   'if (false) {',
+);
+
+// 10. Round 6 (a')'s fail-closed fix: a global object (globalThis/global/
+//     self/window/process, or an alias of one) escaping as a VALUE — handed
+//     to a helper, an aliased reflective API, Object.assign, a spread — is
+//     as reachable as `globalThis[k]` itself, just one hop further out.
+//     Disarming `isAmbientRootEscape` (short-circuiting it to always return
+//     false) must silently let both `const R = Reflect; R.get(process, k)`
+//     and `pick(globalThis, k)` back through unflagged.
+prove(
+  'a global object escaping as a value stops being a hard error: isAmbientRootEscape always returns false',
+  'const isAmbientRootEscape = (node) => {\n    if (',
+  'const isAmbientRootEscape = (node) => {\n    return false;\n    if (',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

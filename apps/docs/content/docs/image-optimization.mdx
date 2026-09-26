@@ -26,7 +26,7 @@ empty local cache. Without intervention, each freshly-woken pod would re-optimiz
 already produced — burning the cold-start CPU budget on redundant work.
 
 knext closes this with an **object-store sync** for the optimized-variant cache. The optimized
-variants persist to the object store (GCS / S3 / MinIO — knext's data plane), so a variant computed
+variants persist to the object store (GCS / S3 / MinIO / Azure — knext's data plane), so a variant computed
 once is reused by every later pod. This is the same "survives the cold start" property as the
 [bytecode cache](/docs/bytecode): the work outlives the pod that did it.
 
@@ -48,7 +48,10 @@ local-only optimization rather than crashing the pod.
 
 ## Shipping sharp with your image
 
-Your app compiles to a single executable, and sharp is not entirely JavaScript — the part that
+This section is about the vinext build. On the default standalone build, sharp ships in the
+standalone output's `node_modules` that Next traces into the image, and you do nothing extra.
+
+On the **vinext build**, your app compiles to a single executable, and sharp is not entirely JavaScript — the part that
 actually resizes pixels is a native library. A compiled executable can only load code that was
 built into it, so that native library has to travel as a **real file next to the binary**, in a
 `native/` directory.
@@ -76,7 +79,7 @@ path of the `.node` file inside its `@img` tree.
 selection is baked into that binary — rebuild and redeploy with the current `knext build` to get
 working image optimization; no configuration change is needed.
 
-The `runtime: 'node'` target (uncompiled vinext on Node, not the default single executable) gets
+The vinext build with `runtime: 'node'` (uncompiled vinext on Node, not the compiled executable) gets
 the same treatment: `knext build` restages sharp's package and its platform addon into the
 image's build output on every build, so the same platform mismatch a macOS build host would
 otherwise produce is fixed automatically. An app scaffolded before this behaviour existed has an
@@ -112,4 +115,4 @@ so it cannot pass by accident.
 
 - [Scale to zero](/docs/scale-to-zero) — why a cold pod must not re-do work, and the autoscaling model.
 - [Bytecode cache](/docs/bytecode) — the sibling "survives the cold start" feature for V8 bytecode.
-- [Multi-cloud](/docs/multi-cloud) — the object store (GCS / S3 / MinIO) that holds the persisted variants.
+- [Multi-cloud](/docs/multi-cloud) — the object store (GCS / S3 / MinIO / Azure) that holds the persisted variants.
