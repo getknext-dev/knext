@@ -137,6 +137,13 @@ describe('docs-oke-image workflow', () => {
     expect(paths).toEqual(["      - 'apps/docs/**'"]);
   });
 
+  it('audits the apps/docs JS closure BEFORE the image is built', () => {
+    const audit = lines.findIndex((l) => l.includes('precompile-closure-audit.mjs --app apps/docs'));
+    const build = lines.findIndex((l) => l.includes('- name: Build (local'));
+    expect(audit).toBeGreaterThan(-1);
+    expect(audit).toBeLessThan(build);
+  });
+
   it('never persists checkout credentials', () => {
     expect(CODE).not.toMatch(/persist-credentials:\s*true/);
     const publish = WF.slice(WF.indexOf('  publish:'), WF.indexOf('  bump:'));

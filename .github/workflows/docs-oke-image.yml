@@ -97,6 +97,38 @@ jobs:
           username: ${{ secrets.OCIR_USER }}
           password: ${{ secrets.OCIR_TOKEN }}
 
+      # The runtime image is a vinext build whose JS closure is invisible to an
+      # image scanner, so audit the pre-compile closure of apps/docs (SBOM +
+      # HIGH/CRITICAL, dated allowlist) BEFORE anything is built or pushed.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Install the workspace closure (the tree the builder compiles)
+        run: bun install --frozen-lockfile
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Install grype
+        id: grype
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+
+      - name: Put grype on PATH
+        run: dirname "${{ steps.grype.outputs.cmd }}" >> "$GITHUB_PATH"
+
+      - name: SBOM + HIGH/CRITICAL scan of the published app's JS closure
+        run: node scripts/precompile-closure-audit.mjs --app apps/docs
+
+      - name: Upload the app closure SBOM
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-closure-sbom-${{ steps.meta.outputs.sha }}
+          path: sbom/app-closure.cdx.json
+          if-no-files-found: error
+
       # Build into the local daemon first and boot it: a node image serving a
       # bun-preset build (or a build with no server entry) exits 0 at build time
       # and only dies at runtime. Nothing is pushed until it answers HTTP.
