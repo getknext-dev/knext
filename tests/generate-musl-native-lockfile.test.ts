@@ -218,4 +218,163 @@ describe('exact-version pin, real network (round-2 finding — the caret-range b
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * Round-3 review finding (techdebt-4): the `*'x'*` substring check
+   * rejects the LETTER x/X anywhere in the version string, contradicting
+   * this file's own header comment ("Reject anything that is not a bare
+   * dotted-numeric version WITH AN OPTIONAL PRERELEASE/BUILD SUFFIX") — a
+   * real, legitimate prerelease tag containing the letter x as part of a
+   * WORD (e.g. `next`, `hex`, `experimental`) is not an x-RANGE wildcard
+   * and must not be rejected. The x-range check must only fire when
+   * `x`/`X` is a whole DOT-DELIMITED SEGMENT (npm's actual `1.2.x` syntax),
+   * never a substring inside an unrelated word.
+   */
+  it('does NOT reject a legitimate prerelease tag that merely CONTAINS the letter x as part of a word (e.g. "1.0.0-next.1") — jev 0.68 finding', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.0.0-next.1']);
+    // Must pass the upfront validation stage — proven by reaching the real
+    // network call (a different, later failure than the validation
+    // rejection), not by asserting overall success (this prerelease
+    // version does not actually exist on the registry, so the network
+    // call itself fails — that failure is fine and expected; what must
+    // NOT happen is the validation-stage rejection).
+    expect(r.stderr).not.toMatch(/not an exact version/);
+    expect(r.stderr).toMatch(/resolving @img/);
+  });
+
+  it('still rejects a REAL x-range even with prerelease-shaped digits around it (e.g. "1.2.x")', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.x']);
+    expect(r.stderr).toMatch(/not an exact version/);
+    expect(r.stderr).not.toMatch(/resolving @img/);
+  });
+
+  it('still rejects a bare "x" or "X" version', () => {
+    for (const v of ['x', 'X']) {
+      const { script } = makeIsolatedCopy();
+      const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', v]);
+      expect(r.stderr).toMatch(/not an exact version/);
+    }
+  });
+
+  /**
+   * jev 0.94 follow-up finding: the previous
+   * `[0-9]*.[0-9]*.[0-9]* | [0-9]*.[0-9]* | [0-9]*` case-glob accepted a
+   * BARE or PARTIAL version outright — "1" and "1.2" each matched their own
+   * alternative exactly, reaching the real network with something that was
+   * never a real pinned MAJOR.MINOR.PATCH. Proven the same way the other
+   * validation-stage rejections above are: no network call is ever reached
+   * (`resolving @img` never printed).
+   */
+  it('rejects a bare MAJOR version with no MINOR/PATCH at all (e.g. "1") — jev 0.94 finding', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/not an exact version/);
+    expect(r.stderr).not.toMatch(/resolving @img/);
+  });
+
+  it('rejects a partial MAJOR.MINOR version with no PATCH (e.g. "1.2") — jev 0.94 finding', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/not an exact version/);
+    expect(r.stderr).not.toMatch(/resolving @img/);
+  });
+
+  /**
+   * jev 0.94 follow-up finding: the x-range whole-segment check only ever
+   * stripped a "-" (prerelease) suffix before looking for a literal ".x."
+   * segment — a BUILD-metadata suffix ("+build") glued directly onto the
+   * wildcard segment left VERSION_CORE as "1.2.x+build" (no "-" to strip),
+   * which contains no ".x." substring (it's ".x+", not ".x."), so both the
+   * old digit-prefix case-glob (looose enough to match it anyway) and the
+   * old x-range check let it through untouched.
+   */
+  it('rejects an x-range segment with a BUILD-metadata suffix glued onto it (e.g. "1.2.x+build") — jev 0.94 finding', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.x+build']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/not an exact version/);
+    expect(r.stderr).not.toMatch(/resolving @img/);
+  });
+
+  it('still accepts a real version with BOTH a prerelease and a build-metadata suffix (e.g. "1.2.4-rc.1+build.5")', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.4-rc.1+build.5']);
+    expect(r.stderr).not.toMatch(/not an exact version/);
+    expect(r.stderr).toMatch(/resolving @img/);
+  });
+
+  /**
+   * jev 0.49 finding: the ".x."/".X." whole-segment check wraps the FULL
+   * VERSION argument in dots, so an x-range segment with a prerelease
+   * suffix glued directly onto it (e.g. "1.2.x-foo") wraps to ".1.2.x-foo."
+   * — which contains no ".x." substring, so it slipped through. npm itself
+   * still reads "1.2.x-foo" as an x-range (the wildcard segment), not a
+   * literal prerelease tag on a "x" patch version, so this must be rejected
+   * the same as a bare "1.2.x". The check must consider only the VERSION
+   * CORE — everything before the first "-" — when looking for a whole
+   * x/X/* segment, never the full string with a prerelease suffix attached.
+   */
+  it('rejects an x-range segment with a prerelease suffix glued onto it (e.g. "1.2.x-foo") — jev 0.49 finding', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.x-foo']);
+    expect(r.stderr).toMatch(/not an exact version/);
+    expect(r.stderr).not.toMatch(/resolving @img/);
+  });
+
+  it('rejects a bare "x"/"X" version with a prerelease suffix glued onto it (e.g. "x-foo")', () => {
+    for (const v of ['x-foo', 'X-foo']) {
+      const { script } = makeIsolatedCopy();
+      const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', v]);
+      expect(r.stderr).toMatch(/not an exact version/);
+      expect(r.stderr).not.toMatch(/resolving @img/);
+    }
+  });
+
+  it('still does NOT reject a legitimate prerelease SUFFIX that is literally "x" (e.g. "1.2.3-x") — the wildcard check only applies to the version CORE, never the suffix', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '1.2.3-x']);
+    expect(r.stderr).not.toMatch(/not an exact version/);
+    expect(r.stderr).toMatch(/resolving @img/);
+  });
+
+  /**
+   * Round-6 review nit: the all-digit segment check still accepted a
+   * leading-zero segment ("01.2.3" — not valid semver, and not the string
+   * npm would record, so the pin dir's name would never match), an EMPTY
+   * suffix ("1.2.3+", "1.2.3-"), and a trailing dot ("1.2.3." — POSIX
+   * field splitting drops the empty last field, so it still counted 3).
+   */
+  it('rejects a leading-zero segment, an empty or malformed suffix, and a trailing dot', () => {
+    for (const v of [
+      '01.2.3',
+      '1.02.3',
+      '1.2.03',
+      '1.2.3+',
+      '1.2.3-',
+      '1.2.3-+b',
+      '1.2.3-a..b',
+      '1.2.3-a.',
+      '1.2.3+b+c',
+      '1.2.3-a+',
+      '1.2.3-a_b',
+      '1.2.3.',
+    ]) {
+      const { script } = makeIsolatedCopy();
+      const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', v]);
+      expect({ v, status: r.status === 0 }).toEqual({ v, status: false });
+      expect({ v, stderr: /not an exact version/.test(r.stderr) }).toEqual({ v, stderr: true });
+      expect(r.stderr).not.toMatch(/resolving @img/);
+    }
+  });
+
+  it('still accepts a zero segment and a hyphenated prerelease (e.g. "0.10.0-rc-1.0+sha.0a1")', () => {
+    const { script } = makeIsolatedCopy();
+    const r = run(script, ['@img/sharp-libvips-linuxmusl-x64', '0.10.0-rc-1.0+sha.0a1']);
+    expect(r.stderr).not.toMatch(/not an exact version/);
+    expect(r.stderr).toMatch(/resolving @img/);
+  });
 });
