@@ -218,6 +218,14 @@ describe("analyzeServerModule (unit)", () => {
                 ),
             ).toBe(true);
         });
+        it("an escaped quote inside a string argument does not end the string early and pair with a later `) {` (#1384 round 9)", () => {
+            // Without the escape-skip in skipStringLiteral, the string
+            // `"\") {"` is (mis)read as closing right after the escaped
+            // quote, so the remaining `) {` on the same line pairs with the
+            // call's own `(` and misidentifies this call as a head — hiding
+            // a dynamic require instead of flagging it.
+            expect(flagged('x = [0, __require(n + "\\") {")];')).toBe(true);
+        });
         it("a `${` in a real method's parameter list makes it a call (fail safe)", () => {
             expect(
                 flagged("class K { __require(a = `${b}`) { return a; } }"),
