@@ -22,6 +22,7 @@
  *   round 5 — step shell / errexit:         M15 M16 M17 M18 M19 M20
  *   round 5 — unclassified remote fetch:    M21 … M31
  *   round 5 — pinned versions fail fast:    M32 M33 M34
+ *   round 6 — loopback stays a taint source: M35 … M42
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -44,7 +45,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(34);
+declareMutations(42);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -319,6 +320,56 @@ prove(
   DRILL_SCRIPT,
   'OPERATOR_DIR="$(cd "$HERE/../../.." && pwd)"',
   'OPERATOR_DIR="$(cd "$HERE/../.." && pwd)"',
+);
+
+// round 6 — a loopback fetch is still a taint source
+prove(
+  'M35 loopback: a fetch whose every URL is loopback is no longer a taint source',
+  SCANNER,
+  '    if (looseLoopback) {',
+  '    if (true) {',
+);
+prove(
+  'M36 loopback: git fetch of a loopback URL is exempt from the remote-fetch rule',
+  SCANNER,
+  'const hasRemoteArg = (args) => args.some((a) => REMOTE_ARG_RE.test(a));',
+  'const hasRemoteArg = (args) => args.some((a) => REMOTE_ARG_RE.test(a) && !isLoopbackUrl(a));',
+);
+prove(
+  'M37 loopback scalar: a scalar may be EMITTED (echo/printf) into an apply',
+  SCANNER,
+  "  return ws.some((w) => EMITTERS.has(unquote(w).split('/').pop()));",
+  '  return false;',
+);
+prove(
+  'M38 loopback scalar: a heredoc line that is just the variable is not the whole document',
+  SCANNER,
+  "wholeLine.has(m[1]) ? 'echo' : ':'",
+  "':'",
+);
+prove(
+  'M39 loopback scalar: content copied from a remote variable counts as a scalar',
+  SCANNER,
+  '      refs.every((r) => !r.content || r.scalar);',
+  '      true;',
+);
+prove(
+  'M40 loopback scalar: every content variable is a scalar (the exemption is dropped)',
+  SCANNER,
+  '  if (!v.scalar) return true;',
+  '  if (false) return true;',
+);
+prove(
+  'M41 clone: a clone of a local path is flagged as remote',
+  SCANNER,
+  "  if (sub === 'clone') return !cloneSourceIsLocalPath(rest);",
+  "  if (sub === 'clone') return true;",
+);
+prove(
+  'M42 clone: any clone source counts as a local path',
+  SCANNER,
+  "  return source !== '' && !/:\\/\\//.test(source) && !/^[^/]*:/.test(source) && !/[$`]/.test(source);",
+  '  return true;',
 );
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);

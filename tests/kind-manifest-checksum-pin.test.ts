@@ -361,6 +361,11 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       resolveRedirect:
         'curl --resolve localhost:80:203.0.113.9 http://localhost/x | kubectl apply -f -',
       hostHeader: "curl -H 'Host: evil.example' http://localhost/x | kubectl apply -f -",
+      // Content copied out of a remote-derived variable is not a scalar.
+      remoteVarLaundered:
+        'X=$(curl -s https://example.com/m)\nY="$X"\npython3 gen "$Y" | kubectl apply -f -',
+      loopbackGitFetch:
+        'git fetch http://localhost:3000/r.git\ngit checkout FETCH_HEAD -- x.yaml\nkubectl apply -f x.yaml',
       loopbackVarPrintf:
         'X=$(curl -s http://localhost:8080/m)\nprintf %s "$X" | kubectl apply -f -',
       loopbackVarWholeHeredocLine:
