@@ -49,6 +49,12 @@ describe('shell-statements lexer', () => {
     expect(r).toContain('npm ci');
     expect(r).toContain('after');
     expect(r[0]).toBe("cat <<'EOF'");
+    // The terminator line is consumed, never lexed as a statement of its own.
+    expect(r).not.toContain('EOF');
+    const body = splitSourceIntoStatements("cat <<'EOF'\nnpm ci\nEOF\nafter").find(
+      (x) => x.text.trim() === 'npm ci',
+    );
+    expect(body?.line).toBe(2);
   });
 
   it('reports the 1-based line each statement starts on', () => {
