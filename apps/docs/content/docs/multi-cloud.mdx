@@ -71,6 +71,10 @@ reports which mode your app is in.
 
 ## Custom Dockerfiles that rebuild in-image
 
+This section applies to the **vinext build** (`build: 'vinext'`), which ships with its own
+`Dockerfile`. On the default build, `knext` stages the runtime image for you and copies your host
+build into it, so there is no in-image build to wire up.
+
 The scaffolded `Dockerfile` copies your app's already-built output into the image — `next
 build`/`vite build` runs once, on the host, where `knext deploy` has already set `ASSET_PREFIX`
 and the deploy's build id in the environment. If you maintain your own `Dockerfile` that instead
@@ -89,7 +93,7 @@ ENV ASSET_PREFIX=${ASSET_PREFIX}
 RUN ./node_modules/.bin/vite build
 ```
 
-`knext deploy`/`knext preview` pass both automatically as `--build-arg`s to any Dockerfile that
+`knext deploy` and `preview` pass both automatically as `--build-arg`s to any Dockerfile that
 rebuilds in-image — an unused build-arg is silently ignored by Docker, so nothing breaks until you
 add the two lines above. Without them:
 
@@ -97,6 +101,19 @@ add the two lines above. Without them:
   the uploaded objects go unreferenced;
 - the image's build id diverges from the deploy tag, breaking [skew protection](/docs/skew-protection)
   and the asset-retention cleanup that key off it.
+
+### Where the uploaded assets come from
+
+For a Dockerfile that rebuilds in-image, the assets uploaded to your bucket are taken **from the
+image itself**, after it is built and pushed — never from a separate build on your machine. Chunk
+file names are content-hashed from the build's inputs (the deploy's build id among them), so two
+independent builds do not reliably produce the same names, and a bucket filled from one build would
+not hold the chunks the other build's HTML asks for. Extracting the assets from the image
+guarantees the bucket holds exactly what the image serves. Before uploading, `knext deploy` checks
+that every client chunk the image's server references exists in the extracted assets, and aborts
+the deploy if any is missing (`--skip-image-lockstep-check` skips that check, not the extraction). With the scaffolded `Dockerfile`, which copies your host build into
+the image, that host build is the image's build, so the upload still runs from it in parallel with
+the image build.
 
 ### The post-build check, its scope, and the opt-out
 

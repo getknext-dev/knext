@@ -64,8 +64,9 @@ const config: KnativeNextConfig = {
 export default config;
 ```
 
-Only three things are required: `name`, `registry`, and a `storage` block with `provider`, `bucket`
-and `publicUrl`.
+Only two things are required: `name` and `registry`. The `storage` block is optional — without it,
+your app serves its static files from its own image. This example configures a bucket; if you do,
+`provider`, `bucket` and `publicUrl` are all required.
 
 <Callout type="warn">
 **Substitute your own registry, bucket and `publicUrl`.** The values above are placeholders and will

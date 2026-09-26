@@ -1,6 +1,6 @@
 ---
 title: Deploy on Azure Kubernetes Service (AKS)
-description: Run knext on AKS with MinIO (or an S3 gateway) for assets, Azure Cache for Redis, and ACR — Azure Blob is not a knext storage provider.
+description: Run knext on AKS with Azure Blob Storage (or MinIO) for assets, Azure Cache for Redis, and ACR.
 ---
 
 knext runs on any Kubernetes cluster with Knative Serving, including AKS. The general
@@ -42,14 +42,15 @@ prerequisites — Knative Serving + Kourier, cert-manager, and a StorageClass �
 the Kourier ingress-class; apply it with `kubectl apply --server-side` so it merges into Knative
 Serving's own ConfigMap.
 
-## 3 · Storage — MinIO or an S3 gateway (not Azure Blob)
+## 3 · Storage — Azure Blob or MinIO
 
-<Callout type="warn">
-**Azure Blob Storage is not a knext storage provider.** knext storage accepts exactly `gcs`,
-`s3`, and `minio`. See [Multi-cloud deploy](/docs/multi-cloud) for the supported providers. On AKS,
-use one of:
-</Callout>
+knext storage accepts `gcs`, `s3`, `minio`, and `azure`. See [Multi-cloud deploy](/docs/multi-cloud)
+for the supported providers. On AKS, use one of:
 
+- **Azure Blob Storage**: `provider: 'azure'`, with `bucket` set to the blob container name. knext
+  uploads through the `az` CLI, so `az` must be installed and authenticated in your build
+  environment (for example `az login` and `AZURE_STORAGE_ACCOUNT`). `publicUrl` is the public URL
+  the container is served from.
 - **Self-hosted MinIO** (S3-API, runs in-cluster): `provider: 'minio'` with `endpoint` pointing at
   the in-cluster MinIO Service.
 - **An S3-compatible gateway** in front of object storage: `provider: 's3'` with `endpoint` set to
@@ -79,7 +80,7 @@ const config: KnativeNextConfig = {
   registry: '<registry>.azurecr.io/acme',
 
   storage: {
-    provider: 'minio', // self-hosted MinIO (S3-API). Azure Blob is NOT supported.
+    provider: 'minio', // self-hosted MinIO (S3-API). Use 'azure' for Azure Blob.
     bucket: 'acme-assets',
     endpoint: 'http://minio.minio.svc.cluster.local:9000',
     publicUrl: 'https://assets.example.com/acme-assets',

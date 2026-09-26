@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: The knext CLI — create, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc.
+description: The knext CLI — create, init-ci, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc.
 ---
 
 The `knext` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
@@ -16,6 +16,7 @@ installed, `npx knext` runs someone else's code instead of this CLI.
 
 ```bash
 knext create         # scaffold a new knext-ready app (writes files, no cluster changes)
+knext init-ci        # generate a deploy workflow and its scoped RBAC (writes files, no cluster changes)
 knext validate       # check kn-next.config.ts is filled in and valid (no cluster needed)
 knext doctor         # cluster-prereq preflight (read-only)
 knext [deploy]       # default — build → push → apply the NextApp CR
@@ -29,6 +30,9 @@ knext gc             # reap old _next/static/<build-id>/ asset prefixes
 ```
 
 `knext --help` lists exactly this set, `create` first.
+
+The CLI was renamed; the old command name still works as a deprecated alias. See
+[Getting started](/docs/getting-started) for the details.
 
 <Callout type="info">
 **Strict parsing, plain errors.** Every command — including the default `deploy` — fails loudly on
@@ -52,12 +56,6 @@ the package (see [Directly runnable entries](#directly-runnable-entries) below).
 </Callout>
 
 ## `knext create`
-
-<Callout type="warn">
-`knext create` ships in an **upcoming release** — it is not yet included in any published
-`@getknext/core` version. An installed CLI that does not recognize the command is current, not
-broken; this page documents `create` ahead of that release.
-</Callout>
 
 Scaffolds a new knext-ready Next.js app into the current directory (or the one you name). It writes
 files and makes **no** cluster changes, so it is safe to run and inspect before anything is deployed.
@@ -90,7 +88,16 @@ the compiled single-executable target — its own `Dockerfile`, `vite.config.ts`
 ```bash title="shell"
 knext create my-app                    # standalone target (default)
 knext create my-app --builder vinext   # compiled single-executable target
+knext create my-app --dry-run          # list the files it would write, write nothing
 ```
+
+| Flag | Notes |
+|---|---|
+| `--name <name>` | App name. Defaults to the directory name. |
+| `--builder <default\|vinext>` | Target to scaffold. `default` is the standalone shape; `vinext` is the compiled single-executable shape. Any other value is an error. |
+| `--force` | Overwrite existing files. |
+| `--dry-run` | List the files that would be written and write nothing. |
+| `-h`, `--help` | Show the usage help. |
 
 The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the
 CLI and those packages release together, so a published CLI always scaffolds versions that exist on
@@ -99,11 +106,32 @@ a source checkout), `create` checks the registry and prints a warning telling yo
 `npm install` would fail and what to do instead. The check is best-effort: with no network access,
 `create` still scaffolds normally and stays quiet.
 
+## `knext init-ci`
+
+Sets up push-to-deploy against **your** cluster. It writes two files and touches no cluster: a
+deploy workflow (`.github/workflows/`) and a manifest with a ServiceAccount, Role, and RoleBinding
+that grant permission to write one kind of object in one namespace. knext hosts nothing and never
+holds your credentials. See [Deploy from GitHub Actions](/docs/github-action).
+
+```bash
+knext init-ci --namespace my-app
+```
+
+| Flag | Notes |
+|---|---|
+| `--namespace <name>` | **Required.** The namespace to deploy into; it bounds what the credential can do. |
+| `--app-dir <path>` | App directory, relative to the repository root (default `.`). |
+| `--force` | Overwrite files that already exist. |
+| `-h`, `--help` | Show the usage help. |
+
 ## `knext deploy` (default)
 
-Loads and validates `kn-next.config.ts`, runs `next build` (standalone output), uploads static
-assets (with object storage configured), builds and pushes the container image, resolves its
-**digest**, and applies a digest-pinned `NextApp` CR. After a successful deploy it also runs a
+Loads and validates `kn-next.config.ts`, runs your build (`next build` with standalone output on the
+default target), uploads static assets (with object storage configured), builds and pushes the
+container image, resolves its **digest**, and applies a digest-pinned `NextApp` CR. On the vinext
+build with your own Dockerfile that rebuilds in-image, the assets are extracted from the pushed
+image and uploaded from there — see
+[Custom Dockerfiles that rebuild in-image](/docs/multi-cloud#custom-dockerfiles-that-rebuild-in-image). After a successful deploy it also runs a
 best-effort [asset-retention GC](#knext-gc) — a GC failure never fails a deploy that has already
 shipped.
 
@@ -129,12 +157,12 @@ run `npm install` instead of printing a crash.
 | `--image <ref>` | Deploy a **pre-built** image instead of building one. Applies a `NextApp` CR pointing at `<ref>` and does **no** docker build or push (env fallback `KN_IMAGE`). The ref must be **digest-pinned** (`registry/name@sha256:…`) — a tag-only ref is rejected, matching what the operator's admission accepts. Use it when you already have a published image or have no working `docker buildx`. A pre-built image is the source of truth for **both** its server and the static assets baked into it, so `--image` **implies `--skip-build` and `--skip-upload`**: knext does not re-run `next build` or upload assets, because it cannot know the image's baked `BUILD_ID` and any freshly-uploaded `_next/static/<id>/` prefix would not match what the deployed server serves (see [Skew protection](/docs/skew-protection)). `--registry` has no effect alongside it (the ref is already fully qualified) and is reported as ignored. |
 | `--skip-build` | Skip the `next build` step. |
 | `--skip-upload` | Skip the asset-upload step (also skips the post-deploy GC). |
-| `--skip-image-lockstep-check` | For a custom in-image-build Dockerfile only (see [Custom Dockerfiles that rebuild in-image](/docs/multi-cloud#custom-dockerfiles-that-rebuild-in-image)): skip the post-build check that the pushed image's server actually embeds `ASSET_PREFIX` and matches the deploy's build id. knext logs a warning every time this is used. Skipping it means a genuinely broken `ASSET_PREFIX`/build-id lock-step (see [Skew protection](/docs/skew-protection)) is no longer caught before the cluster write — use it only when the check misidentifies your Dockerfile's server layout. |
+| `--skip-image-lockstep-check` | For a custom in-image-build Dockerfile only (see [Custom Dockerfiles that rebuild in-image](/docs/multi-cloud#custom-dockerfiles-that-rebuild-in-image)): skip the post-build check that the pushed image's server actually embeds `ASSET_PREFIX` and matches the deploy's build id, and the check that every client chunk the image's server references was uploaded (assets are still taken from the image). knext logs a warning every time this is used. Skipping it means a genuinely broken `ASSET_PREFIX`/build-id lock-step (see [Skew protection](/docs/skew-protection)) is no longer caught before the cluster write — use it only when the check misidentifies your Dockerfile's server layout. |
 | `--dry-run` | Print the `NextApp` CR without applying it. |
 | `-h`, `--help` / `-v`, `--version` | Help / version. |
 
-Config validation runs automatically when the config loads — there is no separate `validate`
-command.
+Config validation runs automatically when the config loads. [`knext validate`](#knext-validate) runs
+the same checks on their own.
 
 <Callout type="info">
 **No `kn-next.config.ts` in this directory?** That is treated as an expected state, not an error:
@@ -144,13 +172,13 @@ app, and exits with status 1 — no stack trace.
 
 ## `knext build`
 
-The build half of `deploy`, on its own: runs the project's build script (`next build`,
-`output: 'standalone'`), heals the standalone output, and — with object storage configured —
+The build half of `deploy`, on its own: runs the project's build script (`next build` with
+`output: 'standalone'` on the default target), heals the standalone output, and — with object storage configured —
 uploads static assets to the bucket (with no `storage` block, the upload is skipped with a notice;
 assets ship inside the image). It makes **no** cluster writes.
 
-After compiling the single executable, `build` **boots it once** and checks the three things the
-platform depends on: your health path answers `200`, the metrics port serves `/metrics`, and the
+On the vinext build (`build: 'vinext'`), after compiling the single executable, `build` **boots it
+once** and checks the three things the platform depends on: your health path answers `200`, the metrics port serves `/metrics`, and the
 process exits cleanly on `SIGTERM`. Those obligations live in your app's server entry, so an entry
 that was swapped or broken still compiles — this catches it on your machine instead of on the
 cluster, and the error names the obligation that is missing.
@@ -159,8 +187,9 @@ The smoke boots a binary built for **your** machine's architecture; the binary t
 image is built for Linux and is verified separately when the image is built.
 
 <Callout type="info">
-**The compile step needs Bun.** The CLI runs under plain Node, but compiling the single
-executable shells out to `bun` (1.4 or newer) on your PATH. A missing Bun stops the build with
+**The compile step needs Bun.** The CLI runs under plain Node, but compiling the executable for
+`runtime: 'bun'` (the default) or the vinext build shells out to `bun` (1.4 or newer) on your PATH.
+`runtime: 'node'` on the standalone targets needs no Bun. A missing Bun stops the build with
 install guidance; a Bun that is present but cannot report its version stops the build with that
 underlying error — the two are never conflated. See [the Bun runtime](/docs/bun-runtime).
 </Callout>
@@ -217,6 +246,16 @@ never touch the cluster, so they still run even when nothing above is reachable:
 
 - **Static asset mode** — states whether object storage is configured for this app, or assets are
   served from the image.
+- **CRD schema coverage** — whether the installed `NextApp` CRD defines every field this CLI can
+  emit. An older CRD than your CLI is reported here; `knext deploy` also dry-runs the apply on the
+  server before touching the cluster.
+- **kubectl strict validation** — a local check that your `kubectl` is v1.25 or newer, because
+  `knext deploy` applies the CR with `--validate=strict` so an unknown field is rejected instead of
+  silently dropped.
+- **Metrics port** — whether Knative's queue-proxy binds `:9091` on your cluster, which matters only
+  if you override `METRICS_PORT` (the default is `9464`).
+- **App image pullability** — whether each `NextApp`'s image can be pulled, and whether a pull
+  credential is attached to the app's ServiceAccount.
 - **vinext-on-node entry freshness** — if your app uses `build: 'vinext'` with `runtime: 'node'`,
   its `knext-node-entry.mjs` was written once by `knext create` and is never re-rendered by later
   builds or deploys. When a newer `@getknext/core` release changes that entry's runtime behavior

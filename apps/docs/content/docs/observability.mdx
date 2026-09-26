@@ -25,7 +25,8 @@ observability: {
 The runtime exposes a Prometheus endpoint on **port `9464`**, at `/metrics` — separate from the
 app's `$PORT`/3000. That is the port knext ships scrape configuration for: the pod is annotated with
 `prometheus.io/port: "9464"` and `prometheus.io/path: /metrics`, and the shipped `PodMonitor`
-targets nothing else. The compiled executable serves it in-process; there is no sidecar.
+targets nothing else. On the vinext build the server entry serves it in-process. On the default
+standalone build the supervisor that starts Next's `server.js` serves it.
 
 Why `9464` and not the more common `9091`: on a stock Knative Serving install (default
 `config-observability`), the **queue-proxy sidecar binds `:9091`** in every revision pod for its own
@@ -40,7 +41,7 @@ Your app may additionally serve its own **`GET /api/metrics`** route — that is
 Vitals histograms below land. It is a route in your application, not part of the runtime, and the
 default scrape does **not** reach it.
 
-The series the shipped scrape exposes:
+The series depend on the build. The **vinext build** exposes:
 
 | Metric | Type | Meaning |
 |---|---|---|
@@ -51,7 +52,20 @@ The series the shipped scrape exposes:
 | `knext_bunexec_process_resident_memory_bytes` | Gauge | Resident set size. |
 | `knext_bunexec_process_uptime_seconds` | Gauge | Seconds since the process started. |
 
-Ready-made Grafana dashboards ship with knext (see [Dashboards](#dashboards) below).
+The **default standalone build** exposes a different family, with an `app` label on every series:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `knext_http_requests_total` | Counter | Requests served, labelled `method` and `status_class`. |
+| `knext_http_request_duration_seconds` | Histogram | Request latency. |
+| `knext_http_inflight_requests` | Gauge | Current concurrency (saturation). |
+| `knext_coldstart_total`, `knext_coldstart_duration_seconds` | Counter, Histogram | Cold-start count and wake latency. |
+| `knext_db_wake_total`, `knext_db_wake_duration_seconds` | Counter, Histogram | Database wake count and latency, labelled `role`. |
+| `knext_deep_health_state` | Gauge | The deep-health verdict per dependency; the active state is `1`. |
+
+Ready-made Grafana dashboards ship with knext (see [Dashboards](#dashboards) below). The request
+panels on the RED and load-testing dashboards query the vinext family (`knext_bunexec_*`), so on the
+default standalone build point them at the `knext_http_*` series instead.
 
 <Callout type="info">
 There is no bytecode-cache metric family any more, because there is no cache to be warm or cold
@@ -174,10 +188,11 @@ no exporter, no span processors, **zero overhead**.
 
 ## Load testing
 
-knext ships a **k6** load-test harness invoked with `knext loadtest`:
+knext ships a **k6** load-test harness. It is a directly runnable entry, not a `knext` subcommand
+(see [Directly runnable entries](/docs/cli#directly-runnable-entries)):
 
 ```bash
-knext loadtest --url https://app.example.com --type scale-to-zero --namespace default
+node node_modules/@getknext/core/dist/cli/loadtest.js --url https://app.example.com --type scale-to-zero --namespace default
 ```
 
 It generates a Kubernetes `ConfigMap` + `Job` (image `grafana/k6`) that runs the k6 script
