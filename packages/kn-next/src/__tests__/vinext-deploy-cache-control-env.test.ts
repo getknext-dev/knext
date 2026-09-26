@@ -50,9 +50,11 @@
  * the `failsafe` schema, so a scalar is its SOURCE text: `1.0`, `0x1`, `01` are
  * not `1`. A parse error or an unresolvable alias is red.
  *
- * Every file is looked at, but first pre-filtered on its ESCAPE-DECODED text
- * (`\xHH`, `\uHHHH`, `\u{H}`, octal), so an escaped spelling of the name is not
- * skipped. In JS the transpiler decodes it; in other file types an escaped
+ * Every file is looked at, but first pre-filtered on a LOOSE text: escapes
+ * decoded (`\xHH`, `\uHHHH`, `\u{H}`, octal), then every backslash and
+ * backslash-newline continuation removed (`\_`, string line-continuations), so the
+ * filter is more permissive than any decoder downstream and an escaped spelling
+ * of the name is not skipped. In JS the transpiler decodes it; in other file types an escaped
  * spelling is red outright. A parse error in a file that never names the switch
  * is irrelevant and ignored.
  *
@@ -193,6 +195,16 @@ const READ_SAFE: [RegExp, RegExp][] = [
  */
 const isOne = (v: unknown) => v === "1";
 
+/**
+ * The pre-filter text: escapes decoded, then EVERY backslash and any
+ * backslash-newline continuation removed, so it is strictly more permissive than
+ * any decoder downstream (JS treats `\_` as `_` and a backslash-newline in a
+ * string as nothing; so do YAML double-quoted scalars and the shell).
+ */
+function looseText(s: string): string {
+    return decodeEscapes(s).replace(/\\(?:\r?\n[ \t]*)?/g, "");
+}
+
 /** `\xHH`, `\uHHHH`, `\u{H+}` and octal escapes decoded (for the mention pre-filter). */
 function decodeEscapes(s: string): string {
     return s.replace(
@@ -268,7 +280,8 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     // Pre-filter on the DECODED text, so an escaped spelling of the name is
     // still looked at. A file that never names the switch cannot override it,
     // so a parse error there is irrelevant.
-    if (!decodeEscapes(src).includes(N)) return [];
+    const norm = looseText(src);
+    if (!norm.includes(N)) return [];
     let lines: string[];
     if (loaderFor(file)) {
         try {
@@ -279,7 +292,10 @@ export function findUnsafeMentions(src: string, path = "x.txt"): string[] {
     } else if (/\.ya?ml$/i.test(file)) {
         return yamlHits(src);
     } else {
-        if (!src.includes(N))
+        // Any spelling the loose pre-filter sees that the exact-line check
+        // below cannot (escapes, `\_`, backslash-newline) is red outright —
+        // including one that sits next to a legitimate literal mention.
+        if (norm.split(N).length !== src.split(N).length)
             return [`${file}  [escaped spelling of the switch name]`];
         // Only a line that is ENTIRELY a comment is skipped.
         lines = src
@@ -458,6 +474,20 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
         ["x.yaml", `- name: ${NAME}\n  value: 1.0`],
         ["x.yaml", `- name: ${NAME}\n  value: 0x1`],
         ["x.yaml", `- name: ${NAME}\n  value: 01`],
+        // identity escapes and backslash-newline continuations (round-8 inputs)
+        ["x.mjs", `process.env["VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL"] = "0";`],
+        ["x.mjs", `process.env[\`VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL\`] = "0";`],
+        ["x.mjs", `process.env["VINEXT_NEXT_\\\nDEPLOY_CACHE_CONTROL"] = "0";`],
+        [
+            "x.yaml",
+            `- name: "VINEXT_NEXT_\\\n    DEPLOY_CACHE_CONTROL"\n  value: "0"`,
+        ],
+        ["x.sh", `export VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL=0`],
+        // ...also next to a legitimate literal mention in the same file
+        [
+            "Dockerfile",
+            `ENV ${NAME}=1\nENV VINEXT\\_NEXT_DEPLOY_CACHE_CONTROL=0`,
+        ],
         // an escaped spelling of the name is decoded before the pre-filter
         ["x.mjs", `process.env["VINEXT\\x5fNEXT_DEPLOY_CACHE_CONTROL"] = "0";`],
         [
