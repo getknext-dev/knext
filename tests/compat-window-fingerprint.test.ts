@@ -1721,6 +1721,17 @@ describe('compat-window fingerprint — the entry scripts’ import/source closu
         error: /non-literal computed \(bracket\) property access on a global object/,
       },
       {
+        name: 'const { process: p } = globalThis; p[k] — a DESTRUCTURED global alias',
+        src: "const { process: p } = globalThis;\nconst k = 'getBuiltin' + 'Module';\nexport const y = p[k]('module');\n",
+        error: /non-literal computed \(bracket\) property access on a global object/,
+      },
+      {
+        name: 'const { [k]: r } = globalThis — a computed destructuring key',
+        src: "const k = 'req' + 'uire';\nconst { [k]: r } = globalThis;\nexport const y = r('./lib/real.cjs');\n",
+        error:
+          /non-literal computed \(bracket\) property access on a global object \(via a computed destructuring key\)/,
+      },
+      {
         name: "process.getBuiltinModule('mod'+'ule')._load",
         src: "const m = process.getBuiltinModule('mod' + 'ule');\nexport const y = m._load('./lib/real.cjs');\n",
         error: /calls getBuiltinModule\(\) with a non-literal argument/,
