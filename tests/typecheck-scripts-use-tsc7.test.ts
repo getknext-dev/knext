@@ -505,7 +505,8 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
     if (declaring.length === 0) {
       // `bun <file>` runs the file: acceptable only when it IS a compiler entry.
       if (prog === 'bun' && TSC7_BIN.test(script))
-        return compiler(key, script, rest.slice(1), masked, text);
+        // the file's own arguments INCLUDING its flags (`rest` has the flags stripped)
+        return compiler(key, script, args.slice(args.indexOf(script) + 1), masked, text);
       out.unresolved.push(`${key}: ${prog} ${script} is not a script of the targeted package(s)`);
       return;
     }
@@ -898,6 +899,16 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['conditional `true && set -e`', `true && set -e; ${TSC7}; echo done`],
     ['`set -e` in a pipeline (subshell)', `set -e | cat; ${TSC7}; echo done`],
     ['`set -e` backgrounded (subshell)', `set -e & ${TSC7}; echo done`],
+    // a newline right after `||` continues the list, so tsc7 is still behind `||`
+    ['behind || across a newline', `echo skip ||\n  ${TSC7}`],
+    // info-only runs, whatever else they carry
+    ['-v', `${TSC7} -v`],
+    ['-h', `${TSC7} -h`],
+    ['--help', `${TSC7} --help`],
+    ['--all', `${TSC7} --all`],
+    ['--init', `${TSC7} --init`],
+    ['--showConfig', `${TSC7} --showConfig`],
+    ['--listFilesOnly', `${TSC7} --listFilesOnly`],
     ['non-final && operand under set -e', `set -e; ${TSC7} && echo ok; echo done`],
   ])('a tsc7 invocation that is not an enforced typecheck does not count: %s', (_l, typecheck) => {
     expect(run(lib({ typecheck, tc: TSC7 })).tsc7).toBe(0);
@@ -914,6 +925,7 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['pnpm exec', `pnpm exec ${TSC7}`],
     ['npm exec --', `npm exec -- ${TSC7}`],
     ['yarn exec', `yarn exec ${TSC7}`],
+    ['bun <tsc7 entry>', `bun ${TSC7}`],
     ['--build', '../../node_modules/typescript-tsc7/bin/tsc --build'],
     ['--NOEMIT (case-insensitive)', '../../node_modules/typescript-tsc7/bin/tsc --NOEMIT'],
     ['-d outside build mode (--declaration)', `${TSC7} -d`],
