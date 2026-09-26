@@ -101,7 +101,7 @@ a result it relies on.
    (sharp, public assets) resolves under I2.
 3. **Ship-side carrier: knext-side shims only, each with a retirement path.** Workarounds for the
    missing primitives are JS shims, vite/Bun build plugins or compile-script logic in
-   `packages/kn-next/src/adapters/*`. Each carries an `@knext-shim <id>` marker and a registry entry
+   `packages/kn-next/src/adapters/*`. Each carries an `@upstream-shim <id>` marker and a registry entry
    whose probe runs the upstream repro against the **pinned** Bun / vinext and asserts the bug is
    still present (#1450). A probe going red on a version bump means "upstream fixed — delete shim
    X", and **the shim is deleted in the same PR as that bump.** The shim count must not rise
@@ -224,7 +224,7 @@ it can ship even behind a flag. Nitro-only shims are retired only once V3 is the
 
 | id | issue | what | exit |
 |---|---|---|---|
-| F1 | #1450 | retirement harness: registry, probes against the pinned Bun/vinext, `@knext-shim` marker scan | both halves mutation-proved red |
+| F1 | #1450 | retirement harness: registry, probes against the pinned Bun/vinext, `@upstream-shim` marker scan | both halves mutation-proved red |
 | F2 | #1451 | shared embed module (extra entrypoints, I1 assertions, unembedded-dynamic report) | computed import/require resolve from an empty dir on stock Bun; bytecode proven on ≥1 included module (measured on stock Bun 1.4.2, PR #1468) |
 | F3 | #1452 | patched Bun base-exe pipeline, CI-only | cosign verify in CI; reproducible sha256 or documented delta |
 | F4 | #1453 | this ADR | Proposed → accepted at the sprint-close gate |
