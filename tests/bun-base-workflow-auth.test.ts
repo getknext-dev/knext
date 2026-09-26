@@ -44,7 +44,9 @@ describe('bun-base-build.yml authenticates keyless only', () => {
     expect(guard).toBeGreaterThan(-1);
     expect(guard).toBeLessThan(auth);
     expect(code).toMatch(
-      /if \[ -z "\$WIF_PROVIDER" \] \|\| \[ -z "\$WIF_SA" \]; then[\s\S]*?exit 1/,
+      // The exact block — a lazy `[\s\S]*?exit 1` matched a LATER exit and let
+      // a guard with no exit pass (mutation-proved).
+      /if \[ -z "\$WIF_PROVIDER" \] \|\| \[ -z "\$WIF_SA" \]; then\n\s+echo "::error::[^\n]*"\n\s+exit 1\n\s+fi\n/,
     );
   });
 });
