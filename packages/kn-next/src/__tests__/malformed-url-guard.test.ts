@@ -600,6 +600,12 @@ function writeEntryApp(): string {
             `node_modules/${name}/package.json`,
             JSON.stringify({ name, type: "module", exports: exportsMap }),
         );
+    // #1298: the entry now statically `import sharp from 'sharp'` (direct-pass
+    // to the image optimizer, like the bun entry) — a bare stub satisfies
+    // module resolution; nothing here calls it, since handleImageRequest is
+    // itself stubbed to a no-op below.
+    pkg("sharp", { ".": "./index.mjs" });
+    w("node_modules/sharp/index.mjs", "export default {};\n");
     pkg("nitro", { "./app": "./app.mjs" });
     w(
         "node_modules/nitro/app.mjs",

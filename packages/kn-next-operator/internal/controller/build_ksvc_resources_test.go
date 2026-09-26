@@ -66,7 +66,7 @@ func TestBuildDesiredKsvcRejectsMalformedResourceQuantity(t *testing.T) {
 						t.Fatalf("buildDesiredKsvc PANICKED on malformed %s (would crash the shared reconcile loop): %v", tc.field, rec)
 					}
 				}()
-				err = r.buildDesiredKsvc(app, ksvc)
+				_, err = r.buildDesiredKsvc(app, ksvc)
 			}()
 
 			if err == nil {
@@ -204,7 +204,7 @@ func TestBuildDesiredKsvcAppliesDefaultResources(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
 			}
 
-			if err := r.buildDesiredKsvc(app, ksvc); err != nil {
+			if _, err := r.buildDesiredKsvc(app, ksvc); err != nil {
 				t.Fatalf("buildDesiredKsvc returned an unexpected error: %v", err)
 			}
 

@@ -19,13 +19,17 @@
  * `.hbs` so this repo's own vitest/biome/tsc never collect them as sources.
  */
 
+import { spawnSync } from "node:child_process";
 import {
     existsSync,
     mkdirSync,
+    mkdtempSync,
     readdirSync,
     readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -251,6 +255,19 @@ const DEFAULT_ONLY_TEMPLATES: ReadonlySet<string> = new Set([
 const VINEXT_VARIANT_SUFFIX = ".vinext";
 
 /**
+ * `gitignore.hbs`'s rendered relPath (#1394). Ships under this name, NOT
+ * `.gitignore.hbs`: npm's packer strips any file literally named `.gitignore`
+ * from a published tarball no matter what `package.json`'s `files` says, so a
+ * template shipped under that exact name would silently vanish from
+ * `@getknext/core` on publish. Renamed to the real dotfile name here, at
+ * render time — after `loadTemplates()`'s `.hbs` strip, before anything else
+ * ever sees the relPath — so every consumer (dry-run listing, `writeScaffold`,
+ * tests) already sees `.gitignore`.
+ */
+const GITIGNORE_TEMPLATE_KEY = "gitignore";
+const GITIGNORE_TARGET_KEY = ".gitignore";
+
+/**
  * Select, from every loaded `.hbs` template, the ones `builder` actually
  * emits — resolving both axes: files present for one target only
  * ({@link VINEXT_ONLY_TEMPLATES}/{@link DEFAULT_ONLY_TEMPLATES}), and files
@@ -334,7 +351,9 @@ export function renderScaffold(opts: RenderOptions): Map<string, string> {
                 `unsubstituted template placeholder left in ${rel} — refusing to emit it`,
             );
         }
-        rendered.set(rel, out);
+        const targetRel =
+            rel === GITIGNORE_TEMPLATE_KEY ? GITIGNORE_TARGET_KEY : rel;
+        rendered.set(targetRel, out);
     }
     return rendered;
 }
@@ -400,6 +419,29 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
         }
     }
 
+    // #1398: `.gitignore` is the ONE emitted file that must never be
+    // silently clobbered under `--force` — a user's own `.gitignore`
+    // may ignore secrets (a private key, a local override file) knext's
+    // generated one knows nothing about, and overwriting it un-ignores
+    // them. Every other file's `--force` semantics are unchanged (that
+    // is the whole point of the flag: "add knext to an app I already
+    // have"); this is a narrow, named exception, not a general
+    // clobber-avoidance policy. Reaching this point with the file already
+    // present on disk only happens under `--force` — the clash check above
+    // already refused the run otherwise. Removed from the RETURNED map too
+    // (not just skipped on write): the caller (`createMain`) reports file
+    // counts/lists straight off this map's keys, so leaving the key in
+    // would print the false "Created … .gitignore" line for a file this
+    // call never touched (#1398 rev-2). `rmdirSync`-style skip vs. deletion
+    // has to happen before the `dryRun` early return too, so a dry-run
+    // listing is equally honest about what would (not) be written.
+    if (
+        files.has(GITIGNORE_TARGET_KEY) &&
+        existsSync(join(appDir, GITIGNORE_TARGET_KEY))
+    ) {
+        files.delete(GITIGNORE_TARGET_KEY);
+    }
+
     if (opts.dryRun) return files;
 
     for (const [rel, content] of files) {
@@ -408,6 +450,67 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
         writeFileSync(target, content, "utf8");
     }
     return files;
+}
+
+/**
+ * Whether a `.gitignore`'s CONTENT actually causes git to ignore `.env` —
+ * asks REAL `git check-ignore` in a throwaway scratch repo, not a hand-rolled
+ * pattern matcher (#1398 rev-3: a line-prefix regex disagreed with real git
+ * in both directions — it warned on `.env*`, `/.env`, and a leading double-
+ * star glob before `/.env` (all of which git DOES ignore), and stayed
+ * silent on `.env.local`-only, `.env.*`-only, `.env/`
+ * (directory-only, `.env` is a file), and `.env` immediately renegated by
+ * `!.env`, none of which git actually ignores).
+ *
+ * Checks only the bare `.env` FILE, not `.env.local` too, deliberately: a
+ * `/.env`-only pattern is real-world sufficient coverage (it is also what
+ * `.env*`, create-next-app's own default, reduces to), and requiring BOTH
+ * paths to be covered would turn `/.env` back into a false warning — exactly
+ * the case rev-3 named as one that must NOT warn.
+ *
+ * Returns `"unknown"` (never guesses) when git itself isn't usable in this
+ * environment, so the caller can say so honestly instead of asserting a
+ * verdict it cannot back up.
+ */
+export function checkGitignoreCoversEnv(
+    content: string,
+): "ignored" | "not-ignored" | "unknown" {
+    let scratch: string;
+    try {
+        scratch = mkdtempSync(join(tmpdir(), "knext-gitignore-env-check-"));
+    } catch {
+        return "unknown";
+    }
+    try {
+        const init = spawnSync("git", ["init", "-q"], { cwd: scratch });
+        if (init.error || init.status !== 0) return "unknown";
+        writeFileSync(join(scratch, ".gitignore"), content, "utf8");
+        writeFileSync(join(scratch, ".env"), "// probe\n", "utf8");
+        // `-c core.excludesFile=/dev/null`: isolate the probe from whatever
+        // global gitignore the running machine happens to have configured —
+        // same reasoning as install-smoke.mjs's `gitignoreReallyIgnores`.
+        const result = spawnSync(
+            "git",
+            [
+                "-c",
+                "core.excludesFile=/dev/null",
+                "check-ignore",
+                "--quiet",
+                ".env",
+            ],
+            { cwd: scratch },
+        );
+        if (result.error) return "unknown";
+        return result.status === 0 ? "ignored" : "not-ignored";
+    } catch {
+        return "unknown";
+    } finally {
+        try {
+            rmSync(scratch, { recursive: true, force: true });
+        } catch {
+            // best-effort cleanup
+        }
+    }
 }
 
 const HELP = `knext create — scaffold a knext app with guarded instrumentation
@@ -522,9 +625,39 @@ export async function createMain(argv: string[]): Promise<number> {
             dryRun: values["dry-run"],
         });
         const rels = [...files.keys()].sort();
+        // #1398 rev-2: `writeScaffold` already removes a KEPT `.gitignore`
+        // (an existing one under `--force`) from `files` — for BOTH the real
+        // write and the `dryRun` path — so it correctly never appears in the
+        // "Created"/"Would create" count/list above. Report it honestly
+        // instead of staying silent about it: a pre-existing `.gitignore` on
+        // disk that isn't in the returned map means it was (or, under
+        // `--dry-run`, would be) kept, not skipped-because-absent-from-the-
+        // scaffold.
+        const gitignoreWasKept =
+            !files.has(GITIGNORE_TARGET_KEY) &&
+            existsSync(join(appDir, GITIGNORE_TARGET_KEY));
+        let gitignoreNote = "";
+        if (gitignoreWasKept) {
+            gitignoreNote = values["dry-run"]
+                ? `\nWould keep your existing ${GITIGNORE_TARGET_KEY} (not overwritten).\n`
+                : `\nKept your existing ${GITIGNORE_TARGET_KEY} (not overwritten).\n`;
+            const existing = readFileSync(
+                join(appDir, GITIGNORE_TARGET_KEY),
+                "utf8",
+            );
+            const verdict = checkGitignoreCoversEnv(existing);
+            if (verdict === "not-ignored") {
+                gitignoreNote +=
+                    `WARNING: your existing ${GITIGNORE_TARGET_KEY} does not appear to ignore ` +
+                    `.env — secrets in that file could be committed.\n`;
+            } else if (verdict === "unknown") {
+                gitignoreNote += `could not verify your existing ${GITIGNORE_TARGET_KEY} ignores .env (git unavailable)\n`;
+            }
+        }
         process.stdout.write(
             `${values["dry-run"] ? "Would create" : "Created"} ${rels.length} file(s) in ${appDir}:\n` +
                 `${rels.map((r) => `  ${r}\n`).join("")}` +
+                gitignoreNote +
                 (values["dry-run"] ? "" : partingLine(positionals[0] ?? ".")),
         );
         // #950 honesty check, AFTER the success output so it reads as the last

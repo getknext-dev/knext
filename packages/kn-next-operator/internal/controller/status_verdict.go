@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -144,6 +145,7 @@ func computeStatusVerdict(
 	rev revisionCheck,
 	ic imageCacheState,
 	np netpolEnforcementState,
+	envMapCollision envMapCollisionReport,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -359,6 +361,83 @@ func computeStatusVerdict(
 			ObservedGeneration: app.Generation,
 			Reason:             "NotDeferred",
 			Message:            "Kafka revalidation not deferred",
+		})
+	}
+
+	// EnvMapCollision (#1288/#1391): non-fatal surface of a
+	// spec.secrets.envMap entry colliding with an operator-injected system
+	// env var. Admission rejects any NEW such collision except
+	// validation.EnvMapUserAlwaysWinsEnvNames (connection-string names,
+	// always exempt) — so reaching here for a NON-exempt name means either
+	// the CR predates that rule, or it reconciled while the validating
+	// webhook was unavailable (NEVER assume "predates" is the only path; the
+	// message below is deliberately neutral about which). Before #1288 the
+	// collision was resolved by kubelet's last-wins duplicate-env semantics
+	// with NO signal anywhere that it happened — a Ready=True app silently
+	// running on whichever value append-order happened to put last. Both
+	// lists in envMapCollision are already sorted (buildKsvcEnv iterates
+	// envMap in sorted key order).
+	if !envMapCollision.empty() {
+		var parts []string
+		reason := ReasonEnvVarIgnored
+		eventType := corev1.EventTypeWarning
+		if len(envMapCollision.operatorWins) > 0 {
+			parts = append(parts, fmt.Sprintf(
+				"%s: always managed by the operator, envMap ignored (no action needed unless "+
+					"the operator's own value is not what you intended)",
+				strings.Join(envMapCollision.operatorWins, ", "),
+			))
+		}
+		if len(envMapCollision.userWinsGrandfathered) > 0 {
+			parts = append(parts, fmt.Sprintf(
+				"%s: spec.secrets.envMap overrides the operator's own default value for these "+
+					"name(s) because this NextApp reconciled with the collision already present "+
+					"(predates admission rejection, or reconciled while the validating webhook was "+
+					"unavailable); remove the envMap entry to fall back to the operator's default",
+				strings.Join(envMapCollision.userWinsGrandfathered, ", "),
+			))
+			reason = ReasonEnvMapUserOverride
+		}
+		if len(envMapCollision.userWinsExempt) > 0 {
+			parts = append(parts, fmt.Sprintf(
+				"%s: connection-string name(s) always sourced from your spec.secrets.envMap "+
+					"Secret — the documented pattern for a value the CRD has no typed field for "+
+					"yet; no action needed",
+				strings.Join(envMapCollision.userWinsExempt, ", "),
+			))
+			// Informational ONLY when nothing else in this report is a real,
+			// alarm-worthy collision — a Ready/HOSTNAME-class or
+			// grandfathered name alongside it still deserves the Warning
+			// (#1391 round 3).
+			if len(envMapCollision.operatorWins) == 0 && len(envMapCollision.userWinsGrandfathered) == 0 {
+				reason = ReasonEnvMapExpectedOverride
+				eventType = corev1.EventTypeNormal
+			}
+		}
+		message := fmt.Sprintf(
+			"spec.secrets.envMap collides with operator-managed system env — %s.",
+			strings.Join(parts, "; "),
+		)
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionEnvMapCollision,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             reason,
+			Message:            message,
+		})
+		// Transition-gated (the #98 no-op contract): fire only when the
+		// collision set actually CHANGES, never on every converged reconcile.
+		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionEnvMapCollision)
+		if prev == nil || prev.Message != message {
+			v.events = append(v.events, verdictEvent{eventType, reason, message})
+		}
+	} else {
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionEnvMapCollision,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             "NoCollision",
+			Message:            "No spec.secrets.envMap entry collides with operator-managed system env",
 		})
 	}
 

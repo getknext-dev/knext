@@ -8,12 +8,13 @@ const config: KnativeNextConfig = {
   // Registry to push the image to (the app name is appended).
   registry: "ghcr.io/<your-user>",
 
-  // This scaffold builds with `next build --webpack` (see package.json's
-  // `build` script and next.config.ts's `output: 'standalone'` and
-  // `adapterPath`). `build` is left unset here: an absent `build` means the
-  // standalone (webpack) target, the same runtime image `knext deploy`
-  // stages automatically. Scaffold with `knext create --builder vinext`
-  // instead for the compiled single-executable target (`build: 'vinext'`).
+  // This scaffold builds with plain `next build` (Turbopack — see
+  // package.json's `build` script and next.config.ts's `output: 'standalone'`
+  // and `adapterPath`). `build` is left unset here: an absent `build` means
+  // the standalone (turbopack) target, the same runtime image `knext
+  // deploy` stages automatically. Scaffold with `knext create --builder
+  // vinext` instead for the compiled single-executable target
+  // (`build: 'vinext'`).
 
   // Object storage for static assets — OPTIONAL. Without it, your app serves
   // its own static files from the container image, just like `next start`.
