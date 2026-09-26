@@ -12,11 +12,18 @@ name: File-manager platform e2e (nightly / dispatch)
 #                           next/font/google (Geist) served at a real served URL
 #                           (#1284, fixed - no exemption; a font 404 or a leaked
 #                           build-machine path is an ordinary failure)
+#   D. storage-mode leg   - a SECOND NextApp (file-manager-storage) deployed
+#                           object-storage mode against the same in-cluster
+#                           MinIO: served HTML references <bucket-url>/<name>/
+#                           asset URLs, those URLs 200 from MinIO with the
+#                           right content-type, and the served build id equals
+#                           the deploy tag (#1292, closes the #1283 gap
+#                           `platform-e2e.mjs`'s own comment used to call out)
 #
 # NOT covered, by design (each is its own follow-up, never a skip):
 #   - browser-driven UI (the upload form is a client component; no Playwright dep)
-#   - object-storage asset prefix (file-manager Dockerfile builds without
-#     ASSET_PREFIX - tracked in #1283)
+#   - the `mc`-based `minio` storage provider specifically (area D uses the
+#     `s3` provider against the same MinIO - see kn-next.config.storage-e2e.ts)
 #   - rename / delete / download flows: the app has none (upload + list only)
 #
 # BUDGET: one ubuntu-latest job, timeout 45 min, measured ~8-10 min wall (dispatch
@@ -71,9 +78,25 @@ jobs:
       - name: Install workspace dependencies
         run: bun install --frozen-lockfile
 
+      # Moved ahead of the self-tests (was after cluster/operator setup):
+      # storage-mode-e2e.selftest.mjs imports the REAL RESERVED_STATIC_DIRS
+      # from the built @getknext/core dist rather than re-declaring it
+      # (#1292 round 2), so the dist must exist before the self-test runs.
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+          test -f packages/kn-next/dist/utils/reserved-static-dirs.js
+
       # The harness must be able to see red BEFORE its verdict on the cluster counts.
       - name: Self-test - the checks go red on deliberate defects
         run: node apps/file-manager/scripts/platform-e2e.selftest.mjs
+
+      - name: Self-test - the storage-mode leg's checks go red on deliberate defects
+        run: node apps/file-manager/scripts/storage-mode-e2e.selftest.mjs
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
@@ -154,14 +177,6 @@ jobs:
           kubectl rollout status deployment/kn-next-operator-controller-manager \
             -n kn-next-operator-system --timeout=180s
 
-      - name: Build the workspace packages + the kn-next CLI
-        run: |
-          set -euo pipefail
-          bun run --filter "@getknext/lib" build
-          bun run --filter "@getknext/db" build
-          bun run --filter "@getknext/core" build
-          test -f packages/kn-next/dist/cli/kn-next.js
-
       - name: Data plane (redis, postgres, minio) + Secrets
         run: |
           set -euo pipefail
@@ -230,11 +245,79 @@ jobs:
           export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
           node apps/file-manager/scripts/platform-e2e.mjs
 
+      # D. storage-mode leg (#1292). A SECOND NextApp, storage configured
+      # against the SAME in-cluster MinIO the app-functionality leg already
+      # uses. Reuses the standing cluster/operator/registry/MinIO rather than
+      # a second cluster, so the added cost is one more build+deploy+check,
+      # not another ~8-10min of cluster bring-up.
+      # `aws s3 mb` creates a PRIVATE bucket. The served HTML links assets
+      # straight at MinIO with no signing (a real browser can't sign a
+      # request), so without an explicit anonymous-read policy every GET the
+      # live-check step makes would 403 — a real failure mode, not a test
+      # artifact, so it needs a real fix here rather than a workaround in the
+      # checker.
+      - name: Storage-mode - create the MinIO bucket for the leg (anonymous-read)
+        run: |
+          set -euo pipefail
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
+          aws s3 mb s3://fm-e2e-storage-assets --endpoint-url http://127.0.0.1:9000 --region us-east-1
+          cat > /tmp/fm-e2e-storage-assets-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::fm-e2e-storage-assets/*"
+              }
+            ]
+          }
+          JSON
+          aws s3api put-bucket-policy --bucket fm-e2e-storage-assets \
+            --policy file:///tmp/fm-e2e-storage-assets-policy.json --endpoint-url http://127.0.0.1:9000
+
+      - name: Storage-mode - kn-next deploy (object storage against in-cluster MinIO)
+        env:
+          STORAGE_TAG: ${{ github.run_id }}-storage
+          KN_APP_NAMESPACE: ${{ env.APP_NS }}
+        run: |
+          set -euo pipefail
+          cp apps/file-manager/platform-e2e/kn-next.config.storage-e2e.ts apps/file-manager/kn-next.config.ts
+          cd apps/file-manager
+          # `kn-next deploy` runs `aws s3` ON THE RUNNER (not in-cluster), so
+          # AWS_ENDPOINT_URL must be the port-forward the runner can actually
+          # resolve — NOT the cluster-internal DNS name, which only resolves
+          # inside the cluster. `publicUrl` in the profile stays on cluster
+          # DNS deliberately: that is what the SERVED HTML embeds, and it is
+          # correct there because a real request to it comes from inside (or
+          # in front of) the cluster, not from this runner.
+          AWS_ENDPOINT_URL="http://127.0.0.1:9000" \
+          AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" \
+          AWS_DEFAULT_REGION=us-east-1 \
+            node ../../packages/kn-next/dist/cli/kn-next.js deploy \
+              --registry localhost:5001 --namespace "$APP_NS" --tag "$STORAGE_TAG"
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s nextapp/file-manager-storage \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe nextapp file-manager-storage; exit 1)
+
+      - name: Storage-mode - assets served from MinIO, build id matches the deploy tag
+        env:
+          PLATFORM_E2E_BASE_URL: http://127.0.0.1:8080
+          PLATFORM_E2E_NAMESPACE: ${{ env.APP_NS }}
+          STORAGE_APP_NAME: file-manager-storage
+          STORAGE_BUCKET_URL: http://minio.${{ env.APP_NS }}.svc.cluster.local:9000/fm-e2e-storage-assets
+          STORAGE_TAG: ${{ github.run_id }}-storage
+          MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
+        run: |
+          export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
+          node apps/file-manager/scripts/storage-mode-e2e.mjs
+
       - name: Diagnostics on failure
         if: failure()
         run: |
           kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods 2>&1 || true
           kubectl -n "$APP_NS" get nextapp file-manager -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get nextapp file-manager-storage -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
           kubectl -n "$APP_NS" get revision -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .status.conditions[*]}{.type}={.status} {.reason} {.message}{" | "}{end}{"\n"}{end}' 2>&1 || true
           kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
           revs="$(kubectl -n "$APP_NS" get revision -o name --sort-by=.metadata.creationTimestamp)"
@@ -248,6 +331,14 @@ jobs:
             kubectl -n "$APP_NS" logs "$p" --all-containers --tail=60 2>&1 || true
           done
           kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+
+      - name: Diagnostics - storage bucket contents
+        if: failure()
+        run: |
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" AWS_DEFAULT_REGION=us-east-1
+          aws s3 ls s3://fm-e2e-storage-assets/ --recursive --endpoint-url http://127.0.0.1:9000 2>&1 \
+            | awk '{print $4}' | sed -E 's#/[^/]*$##' | sort | uniq -c | head -40 || true
+          aws s3 ls s3://fm-e2e-storage-assets/file-manager-storage/_next/static/chunks/ --endpoint-url http://127.0.0.1:9000 2>&1 | head -30 || true
 
       - name: Tear down
         if: always()

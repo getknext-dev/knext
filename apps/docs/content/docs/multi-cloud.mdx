@@ -98,6 +98,19 @@ add the two lines above. Without them:
 - the image's build id diverges from the deploy tag, breaking [skew protection](/docs/skew-protection)
   and the asset-retention cleanup that key off it.
 
+### Where the uploaded assets come from
+
+For a Dockerfile that rebuilds in-image, the assets uploaded to your bucket are taken **from the
+image itself**, after it is built and pushed — never from a separate build on your machine. Chunk
+file names are content-hashed from the build's inputs (the deploy's build id among them), so two
+independent builds do not reliably produce the same names, and a bucket filled from one build would
+not hold the chunks the other build's HTML asks for. Extracting the assets from the image
+guarantees the bucket holds exactly what the image serves. Before uploading, `knext deploy` checks
+that every client chunk the image's server references exists in the extracted assets, and aborts
+the deploy if any is missing (`--skip-image-lockstep-check` skips that check, not the extraction). With the scaffolded `Dockerfile`, which copies your host build into
+the image, that host build is the image's build, so the upload still runs from it in parallel with
+the image build.
+
 ### The post-build check, its scope, and the opt-out
 
 For a Dockerfile that rebuilds in-image and uploads assets, `knext deploy` checks the ACTUAL

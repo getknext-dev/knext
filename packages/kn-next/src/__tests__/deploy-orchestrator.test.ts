@@ -99,6 +99,7 @@ mock.module("../utils/asset-upload", () => ({
     reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
     verifyVinextStaticPrefix: (...a: unknown[]) =>
         verifyVinextStaticPrefix(...a),
+    uploadAssetsFromImage: async () => {},
     verifyBuiltImageLockstep: (...a: unknown[]) =>
         verifyBuiltImageLockstep(...a),
 }));
