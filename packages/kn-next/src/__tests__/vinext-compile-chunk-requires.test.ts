@@ -543,6 +543,13 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             'module.exports = () => { try { return require("a) {"); } catch { return 0; } };\n',
             '__require("a) {")',
         ],
+        [
+            // #1384 round 7: the regex's `"` must not pair with a later
+            // string's quote and land the head scan on the `)) {` inside it.
+            "a require whose argument holds a regex with a quote",
+            'const f = (...a) => a;\nmodule.exports = (n) => f(0, require(n.replace(/"/g, "_")), String(")) {"));\n',
+            '__require(n.replace(/"/g, "_")), String(")) {")',
+        ],
     ] as const) {
         it(`${label} is a non-literal/unbundlable require: strict fails (#1384 round 5)`, async () => {
             const { work, server, out } = await rolldownFrom({

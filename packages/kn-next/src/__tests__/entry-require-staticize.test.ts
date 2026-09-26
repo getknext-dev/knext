@@ -200,6 +200,21 @@ describe("analyzeServerModule (unit)", () => {
             expect(flagged("for (;__require(n);) { y(); }")).toBe(true);
             expect(flagged("if(__require(n)){y()}")).toBe(true);
         });
+        it("a quote inside a regex literal in the argument list cannot pair with a later string's `) {`", () => {
+            expect(
+                flagged(`x=[0,__require(n.replace(/'/g,""))];a('x');b(')) {')`),
+            ).toBe(true);
+        });
+        it("a quote inside a comment in the argument list cannot pair with a later string's `) {`", () => {
+            expect(
+                flagged(`x = [0, __require(n /* it's */)]; a('x'); b(') {')`),
+            ).toBe(true);
+        });
+        it("a `/` in a real method's parameter list makes it a call (fail safe)", () => {
+            expect(
+                flagged("class K { __require(a = 1 / 2) { return a; } }"),
+            ).toBe(true);
+        });
     });
 
     it("one comment cannot span code into the next: `/* a */ n /* b */` hides no argument", () => {

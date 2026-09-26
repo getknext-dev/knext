@@ -134,6 +134,12 @@ function skipStringLiteral(src, i) {
  * not found within HEAD_SCAN_LIMIT characters (then it is not treated as a
  * head — a long argument list is a call, and the bound keeps a multi-MB bundle
  * linear).
+ *
+ * Also -1 on any `/` before the close: a regex literal or a comment can hold
+ * a quote this scan would pair with a later string's quote, landing it on an
+ * unrelated `) {` and hiding a call. Rather than lex regexes and comments, the
+ * scan bails — a real method head almost never has `/` in its parameters, and
+ * bailing means "call", which fails safe.
  */
 const HEAD_SCAN_LIMIT = 512;
 function closingParen(src, open) {
@@ -144,7 +150,8 @@ function closingParen(src, open) {
         if (c === '"' || c === "'" || c === "`") {
             i = skipStringLiteral(src, i);
             if (i < 0) return -1;
-        } else if (c === "(") depth++;
+        } else if (c === "/") return -1;
+        else if (c === "(") depth++;
         else if (c === ")" && --depth === 0) return i;
     }
     return -1;
@@ -158,7 +165,8 @@ function closingParen(src, open) {
  *     `*`, or `get` / `set` / `static` / `async` — whose balanced parameter list
  *     is followed by `{` on the SAME line, same-line comments allowed (a call
  *     cannot be; a call followed by a block on the next line is ASI, and stays
- *     a call). A parameter list longer than HEAD_SCAN_LIMIT is not a head.
+ *     a call). A parameter list longer than HEAD_SCAN_LIMIT, or holding any
+ *     `/` (regex, comment or division), is not a head.
  * Every other context (`extends`, `=`, `(`, `return`, operators …) is a call.
  */
 const SAME_LINE_BRACE = /^(?:[ \t]|\/\*[^*\n]*\*+(?:[^*/\n][^*\n]*\*+)*\/)*\{/;
