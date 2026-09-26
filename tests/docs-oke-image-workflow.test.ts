@@ -100,6 +100,12 @@ describe('docs-oke-image workflow', () => {
     // And the registry is asked which digest it serves; a mismatch fails.
     expect(WF).toMatch(/imagetools inspect "\$\{IMAGE\}:\$\{TAG\}"/);
     expect(WF).toMatch(/\[ "\$remote" = "\$digest" \]/);
+    // The pushed image's config digest equals the scanned local image's ID.
+    expect(WF).toContain("docker image inspect knext-docs:smoke -f '{{.Id}}'");
+    expect(WF).toMatch(
+      /imagetools inspect --raw "\$\{IMAGE\}:\$\{TAG\}" \| jq -r \.config\.digest/,
+    );
+    expect(WF).toMatch(/\[ "\$local_id" = "\$remote_cfg" \]/);
   });
 
   it('pushes only after the smoke boot AND the Trivy gate', () => {
@@ -167,5 +173,18 @@ describe('docs-oke-image workflow', () => {
     expect(df).toMatch(/^USER 65532:65532$/m);
     expect(df).toMatch(/^RUN apk upgrade --no-cache$/m);
     expect(df).not.toMatch(/apk add[^\n]*curl/);
+    // The base's bundled npm (unpatchable by apk) is stripped in its own RUN.
+    const strip =
+      df
+        .replace(/\\\n/g, ' ')
+        .split('\n')
+        .find((l) => /^RUN rm -rf /.test(l)) ?? '';
+    for (const t of [
+      '/usr/local/lib/node_modules/npm',
+      '/usr/local/lib/node_modules/corepack',
+      '/usr/local/bin/npm',
+      '/usr/local/bin/yarn',
+    ])
+      expect(strip).toContain(t);
   });
 });

@@ -188,6 +188,11 @@ jobs:
           [ -n "$digest" ] || { echo "::error::could not read the pushed digest"; exit 1; }
           remote="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
           [ "$remote" = "$digest" ] || { echo "::error::registry digest $remote != pushed $digest"; exit 1; }
+          # Same-image proof: the config digest the registry holds must equal the
+          # local image ID of the image that was smoke-booted and scanned.
+          local_id="$(docker image inspect knext-docs:smoke -f '{{.Id}}')"
+          remote_cfg="$(docker buildx imagetools inspect --raw "${IMAGE}:${TAG}" | jq -r .config.digest)"
+          [ "$local_id" = "$remote_cfg" ] || { echo "::error::pushed config $remote_cfg != scanned image $local_id"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Summary

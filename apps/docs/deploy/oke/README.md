@@ -81,5 +81,5 @@ docker push me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs:sha-<short>-amd64
 kubectl apply --context knext-oke-sa -f apps/docs/deploy/oke/docs-ksvc.yaml
 kubectl -n knext-docs rollout status ksvc/knext-docs   # or check .status.latestReadyRevisionName
 # 3. verify live (retry through any ISP interstitial):
-#    http://knext-docs.knext-docs.51.170.89.13.sslip.io/docs/scale-zero-pg
+#    http://knext-docs.knext-docs.51.170.89.13.sslip.io/docs/scale-to-zero
 ```
