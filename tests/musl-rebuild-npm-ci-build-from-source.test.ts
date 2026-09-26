@@ -25,7 +25,22 @@ import { splitSourceIntoStatements } from './helpers/shell-statements';
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const SCRIPT_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 
-const CI_ALIASES = new Set(['ci', 'ic', 'cit', 'clean-install', 'install-clean']);
+/**
+ * Every npm command name that runs a clean install, taken from npm 11.9.0's
+ * `lib/utils/cmd-list.js` (`aliases` entries resolving to `ci` or
+ * `install-ci-test`, plus those two names). Re-derive on an npm bump.
+ */
+const CI_ALIASES = new Set([
+  'ci',
+  'ic',
+  'clean-install',
+  'install-clean',
+  'isntall-clean',
+  'install-ci-test',
+  'cit',
+  'clean-install-test',
+  'sit',
+]);
 const FLAG = 'npm_config_build_from_source';
 /** Words that may legitimately sit BEFORE the program word (wrappers, keywords, env plumbing). */
 const WRAPPERS = new Set([
@@ -152,7 +167,14 @@ function setsBuildFromSource(text: string): boolean {
   }
   for (let j = prog.npmIdx + 1; j < words.length; j++) {
     const w = unquote(words[j]);
-    if (w === '--build-from-source' || w === '--build-from-source=true') effective = true;
+    if (w === '--build-from-source') {
+      // nopt consumes a FOLLOWING `true`/`false` word as the flag's value.
+      const next = unquote(words[j + 1] ?? '');
+      if (next === 'true' || next === 'false') {
+        effective = next === 'true';
+        j++;
+      } else effective = true;
+    } else if (w === '--build-from-source=true') effective = true;
     else if (w.startsWith('--build-from-source=') || w === '--no-build-from-source')
       effective = false;
   }
@@ -369,6 +391,29 @@ describe('every npm ci invocation for a native corpus package sets npm_config_bu
         'env npm_config_build_from_source="true" npm ci',
       ]) {
         expect(offends(src).length).toBe(0);
+      }
+    });
+
+    it('`--build-from-source false` (space-separated value) overrides the env flag; `--build-from-source true` keeps it', () => {
+      const off = 'env npm_config_build_from_source=true npm ci --build-from-source false';
+      expect(npmCiInvocationLines(off).length).toBe(1);
+      expect(offends(off).length).toBe(1);
+      expect(offends('npm ci --build-from-source true').length).toBe(0);
+      expect(offends('npm ci --build-from-source').length).toBe(0);
+    });
+
+    it('every npm alias that runs a clean install is an invocation (install-ci-test, sit, isntall-clean, clean-install-test, …)', () => {
+      for (const alias of [
+        'install-ci-test',
+        'sit',
+        'isntall-clean',
+        'clean-install-test',
+        'cit',
+        'ic',
+      ]) {
+        const src = `run_as_builder npm ${alias} --no-audit`;
+        expect(npmCiInvocationLines(src).length, alias).toBe(1);
+        expect(offends(src).length, alias).toBe(1);
       }
     });
 
