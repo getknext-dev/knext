@@ -138,7 +138,9 @@ describe('docs-oke-image workflow', () => {
   });
 
   it('audits the apps/docs JS closure BEFORE the image is built', () => {
-    const audit = lines.findIndex((l) => l.includes('precompile-closure-audit.mjs --app apps/docs'));
+    const audit = lines.findIndex((l) =>
+      l.includes('precompile-closure-audit.mjs --app apps/docs'),
+    );
     const build = lines.findIndex((l) => l.includes('- name: Build (local'));
     expect(audit).toBeGreaterThan(-1);
     expect(audit).toBeLessThan(build);
