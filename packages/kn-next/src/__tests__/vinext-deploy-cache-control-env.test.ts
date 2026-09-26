@@ -137,6 +137,9 @@ export function scrub(
     return out;
 }
 
+/** A real vite config file name (not `vite.config.bak.ts`). */
+const VITE_CONFIG_NAME = /^vite\.config\.m?[jt]s(?:\.hbs)?$/;
+
 const CALL = /^applyVinextDeployDefault\(process\.env\);$/m;
 
 const JS_FAMILY = /\.(?:[mc]?[jt]sx?|go)(?:\.\w+)*$/;
@@ -400,6 +403,15 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
     }
 
     const GOOD: [string, string][] = [
+        // neighbouring items with other values must not bleed into this one
+        [
+            "x.yaml",
+            `- name: ${NAME}\n  value: "1"\n- name: OTHER\n  value: "0"`,
+        ],
+        [
+            "x.yaml",
+            `- name: OTHER\n  value: "0"\n- name: ${NAME}\n  value: "1"`,
+        ],
         ["Dockerfile", `ENV ${NAME}=1`],
         ["Dockerfile", `ENV ${NAME}=1 \\`],
         ["Dockerfile", `ENV ${NAME} 1`],
@@ -430,6 +442,23 @@ describe("scanner fixtures (each form must be caught, each safe form must not)",
             expect(findUnsafeMentions(g, path)).toEqual([]);
         });
     }
+});
+
+describe("vite config file names", () => {
+    it("accepts real configs and the template, rejects backups and lookalikes", () => {
+        for (const n of [
+            "vite.config.ts",
+            "vite.config.mjs",
+            "vite.config.ts.hbs",
+        ])
+            expect(VITE_CONFIG_NAME.test(n)).toBe(true);
+        for (const n of [
+            "vite.config.bak.ts",
+            "vite.config.ts.bak",
+            "vite.config.d.ts",
+        ])
+            expect(VITE_CONFIG_NAME.test(n)).toBe(false);
+    });
 });
 
 describe("bun-entry wiring fixture", () => {
@@ -587,7 +616,7 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
                 // entry (or the scaffolder template) must wire it in...
                 const dir = dirname(f);
                 const wired = readdirSync(dir)
-                    .filter((n) => /^vite\.config\.m?[jt]s(?:\.hbs)?$/.test(n))
+                    .filter((n) => VITE_CONFIG_NAME.test(n))
                     .some((n) =>
                         isBunEntryWired(readFileSync(join(dir, n), "utf8")),
                     );
