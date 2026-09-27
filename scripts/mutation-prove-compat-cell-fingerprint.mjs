@@ -59,6 +59,8 @@
  *      equality operand, or the right side of `in`. Disarming it (short-
  *      circuiting to `return false` at the top) must silently let both
  *      shapes back through as clean.
+ *  (#1422's named-exception scoping guards live in their own prover,
+ *  `mutation-prove-execution-scan-spec.mjs`.)
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one piece of behaviour and requires

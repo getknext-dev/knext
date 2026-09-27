@@ -18,7 +18,7 @@ forwards once a pod is ready.
 |---|---|
 | **t+0ms** | Request arrives at the ingress; the service is at 0 replicas → routed to the activator. |
 | **buffer** | The activator holds the request and signals the autoscaler to scale 0→1. |
-| **start** | A pod is scheduled; the Node standalone server boots — V8 reads its bytecode cache. |
+| **start** | A pod is scheduled; the server boots — from its compiled bytecode (Bun executable) or V8's baked compile cache (Node). |
 | **serve** | The activator forwards the buffered request; later requests hit the pod directly. |
 
 ## Set it per app
@@ -101,10 +101,10 @@ app.
 A cold start is **pod scheduling + container start + the server boot + first-request work**. Only
 the last two are knext's to shave; the first two belong to the platform. The **boot** is where a
 Next.js app otherwise spends real CPU compiling JavaScript — so knext attacks exactly that by
-compiling **at build time**: the default target is a [compiled single executable](/docs/bun-runtime)
-whose whole server bundle is precompiled to bytecode (measured **61 ms** median process boot against
-the Node standalone's 884 ms); on the legacy Node standalone shape, a V8 compile cache baked into
-the image does the same job — see [bytecode caching](/docs/bytecode).
+compiling **at build time**: the default target is a [compiled Bun executable](/docs/bun-runtime)
+whose server is precompiled to bytecode (the vinext build's whole-app executable measured **61 ms**
+median process boot against the Node standalone's 884 ms); with `runtime: 'node'`, a V8 compile
+cache baked into the image does the same job — see [bytecode caching](/docs/bytecode).
 
 Be clear about where that win lands, though: on a real Knative cluster the **pod scheduling and
 container start dominate** the end-to-end budget — measured on the order of ~3.4–3.6 s from zero
@@ -132,7 +132,7 @@ boot is only observed at the next probe tick — the probe cadence is itself a f
 win. Treat any specific millisecond figure as environment-dependent, not a guaranteed number — and a
 typical figure is not a worst case: cold starts vary a lot run to run, and an occasional wake can
 take several times the typical one. Size your warm floor against that tail, not the average. Bun's
-build-time bytecode (the compiled single executable) is the default runtime; Node (with
+build-time bytecode (the compiled executable) is the default runtime; Node (with
 `NODE_COMPILE_CACHE`) is the uncompiled fallback, selectable via `runtime: 'node'`.
 </Callout>
 

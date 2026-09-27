@@ -1,6 +1,6 @@
 ---
 title: GitHub Action
-description: Deploy ACME from GitHub Actions with a kubeconfig — no cloud credentials, no provisioning.
+description: Deploy from GitHub Actions with a kubeconfig — no cloud credentials, no provisioning.
 ---
 
 Deploy on every push, from your own CI, to your own cluster.
@@ -163,6 +163,10 @@ that case, and turns the check off rather than satisfying it.
 | `registry` | **yes** | — | Registry host and repository, e.g. `ghcr.io/acme/app` |
 | `registry-token` | no | — | On GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
+| `tag` | no | `github.sha` | Image tag. The commit SHA traces an image to its commit |
+| `bucket` | no | from `kn-next.config.ts` | Object-storage bucket for static assets |
+| `skip-upload` | no | `false` | Skip the static-asset upload. Needs only a kubeconfig and registry auth |
+| `skip-build` | no | `false` | Skip `next build`, for when a previous job already produced the output |
 | `auth` | no | `kubeconfig` | Reserved for short-lived cloud credentials later |
 | `dry-run` | no | `false` | Prints the `NextApp` resource, applies nothing |
 | `working-directory` | no | `.` | Where `kn-next.config.ts` lives |

@@ -71,6 +71,7 @@ mock.module("../utils/asset-upload", () => ({
         verifyVinextStaticPrefix(...a),
     verifyBuiltImageLockstep: (...a: unknown[]) =>
         verifyBuiltImageLockstep(...a),
+    uploadAssetsFromImage: async () => {},
 }));
 
 const renderNextAppCR = mock<AnyFn>(() => "kind: NextApp\n");

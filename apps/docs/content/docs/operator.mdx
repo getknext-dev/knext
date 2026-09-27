@@ -48,7 +48,7 @@ status:
 | Field | Notes |
 |---|---|
 | `image` | **Required.** Container image — must be digest-pinned (`@sha256:`). |
-| `scaling` | `minScale`, `maxScale`, `containerConcurrency`. |
+| `scaling` | `minScale`, `maxScale`, `containerConcurrency`, plus `poolMax`, `warmSchedule`, `targetBurstCapacity`, `panicWindowPercentage`, `panicThresholdPercentage`, `scaleDownDelay`, and `imagePrewarm`. See [Scale to zero](/docs/scale-to-zero#set-it-per-app). |
 | `resources` | `cpuRequest`, `memoryRequest`, `cpuLimit`, `memoryLimit`. Each must be a positive Kubernetes quantity (`250m`, `512Mi`, `1Gi`), at most 64 characters, and — if it uses scientific notation — with an exponent no larger than `±9999`. A request may not exceed its own limit. |
 | `storage` | `provider`, `bucket`, `region`, `endpoint`. |
 | `cache` | `provider`, `url`, `keyPrefix` configure the **data cache** (ISR/data). There are no bytecode-cache fields: the boot compile cache is baked into your image by default. See [bytecode caching](/docs/bytecode). |
@@ -58,6 +58,10 @@ status:
 | `database` | Bind a **bring-your-own** Postgres by referencing an existing Secret (`secretRef` / optional `roSecretRef`). knext does not provision databases. See [Databases](#databases-specdatabase). |
 | `build` | `turbopack` (the standalone shape — `next build`, the default the CLI writes and what absence means), `webpack` (the same standalone shape with a different bundler), or `vinext` (the compiled single executable, selectable). Drives how the operator starts the container. See [Bun & the compiled executable](/docs/bun-runtime). |
 | `runtime` | `bun` (default) or `node`. Standalone shape only — for `build: "vinext"` the runtime ships inside the binary and this field has no effect on startup. |
+| `imagePullSecrets` | Names of Secrets the app's ServiceAccount uses to pull the image. See [Private registries](/docs/private-registries). |
+| `healthCheckPath` | Path Knative's readiness and liveness probes hit (default `/api/health`). |
+| `observability` | `enabled`, plus `rum` and `tracing` sub-blocks. See [Observability](/docs/observability). |
+| `preview` | `enabled`, `prId`, `branch` — marks the resource as a per-PR preview. See [Preview environments](/docs/previews). |
 | `security` | `networkPolicy` — pod-level L3/L4 isolation, default-on. |
 | `traffic` | `revisionName`, `canaryPercent` (rollback / canary). |
 | `buildId` | Next.js BUILD_ID, stamped as label `apps.kn-next.dev/build-id` (skew protection). |
