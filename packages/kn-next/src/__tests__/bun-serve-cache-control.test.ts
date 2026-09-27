@@ -21,6 +21,7 @@ import {
     copyFileSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     realpathSync,
     rmSync,
     writeFileSync,
@@ -283,21 +284,21 @@ describe("vinext-compile bakes it into the executable", () => {
     }
 
     it("refuses to compile (fail closed) when the normalization module is missing beside it", () => {
-        // A copy of the compile script with every sibling it needs EXCEPT the
-        // install module: the script must exit non-zero, naming what is missing.
+        // Copy vinext-compile.mjs's WHOLE local closure (every file directly
+        // beside it in adapters/) EXCEPT the install module under test: the
+        // script must exit non-zero, naming what is missing. Scan the
+        // directory rather than enumerate filenames — an enumerated list goes
+        // stale the moment vinext-compile.mjs gains a new sibling import
+        // (#1496 round 2: it silently broke on bytecode-exec-verify.mjs /
+        // compile-embed.mjs with "Cannot find module" instead of exercising
+        // this fail-closed path; the sibling repo hit the same class with
+        // bun-base-exe.mjs, #1469).
         const alone = temp("knext-1322-cc-missing-");
         const here = resolve(import.meta.dir, "../adapters");
-        for (const f of [
-            "vinext-compile.mjs",
-            "entry-require-staticize.mjs",
-            "bun-serve-keepalive-guard.mjs",
-            "sharp-addon-dlopen.mjs",
-            // the sidecar resolver is checked (fail-closed) before this module
-            "sidecar-install.mjs",
-            "sidecar-runtime.mjs",
-            "entry-external-sidecar.mjs",
-        ]) {
-            copyFileSync(join(here, f), join(alone, f));
+        const MISSING = "bun-serve-cache-control-install.mjs";
+        for (const entry of readdirSync(here, { withFileTypes: true })) {
+            if (!entry.isFile() || entry.name === MISSING) continue;
+            copyFileSync(join(here, entry.name), join(alone, entry.name));
         }
         const r = spawnSync(
             process.execPath,
