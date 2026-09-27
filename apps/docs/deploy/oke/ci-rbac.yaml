@@ -1,0 +1,57 @@
+# CI deploy credential for the docs site — the output of
+#   kn-next init-ci --namespace knext-docs --app-dir apps/docs
+# unchanged below the first `---`, plus one addition at the end: a
+# service-account-token Secret, so the kubeconfig CI holds does not expire
+# with a short-lived `kubectl create token`. The Secret manifest carries NO
+# token — Kubernetes fills it in after apply. See README.md "The CI credential"
+# for minting and rotation.
+#
+# Applied by a cluster admin, once. CI cannot apply it (the Role below does
+# not grant RBAC writes), which is the point.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: knext-deployer
+  namespace: knext-docs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: knext-deployer
+  namespace: knext-docs
+rules:
+  - apiGroups:
+      - apps.kn-next.dev
+    resources:
+      - nextapps
+    verbs:
+      - get
+      - list
+      - create
+      - patch
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: knext-deployer
+  namespace: knext-docs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: knext-deployer
+subjects:
+  - kind: ServiceAccount
+    name: knext-deployer
+    namespace: knext-docs
+---
+# Long-lived token for the knext-deployer ServiceAccount. Rotate by deleting
+# this Secret and re-applying the file; the old token dies with the Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: knext-deployer-token
+  namespace: knext-docs
+  annotations:
+    kubernetes.io/service-account.name: knext-deployer
+type: kubernetes.io/service-account-token

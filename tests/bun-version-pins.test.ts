@@ -116,6 +116,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // count RISING is a decision, per the rule above.
       'compat-credential-freeze-guard.yml': 1,
       'docs-closure-nightly.yml': 1,
+      // NEW (#1481): the docs deploy — the PR dry-run job and the main deploy
+      // job each install the workspace and build the CLI with bun.
+      'docs-deploy-oke.yml': 2,
       'file-manager-platform-e2e-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,

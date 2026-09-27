@@ -170,6 +170,22 @@ export function vinextAppDirs(repoRoot: string): string[] {
  */
 const PUBLISHES_IMAGE = /crane push|docker push|push:\s*true/;
 
+/**
+ * A step that deploys through the knext GitHub Action (`packages/kn-next-action`,
+ * used from the tree or as `getknext-dev/knext/packages/kn-next-action@…`). The
+ * action runs `kn-next deploy`, which builds AND pushes the app image inside
+ * that one step — no `docker push` or `push: true` ever appears in the
+ * workflow, so without this the lane is invisible to the scan. It is both the
+ * publish and the build. A `dry-run: true` use pushes nothing and is neither.
+ */
+export function deploysThroughKnextAction(text: string): boolean {
+  return /kn-next-action/.test(text) && !/dry-run:\s*['"]?true/.test(text);
+}
+
+function publishesImage(text: string): boolean {
+  return PUBLISHES_IMAGE.test(text) || deploysThroughKnextAction(text);
+}
+
 /** App dirs the given text runs the closure audit AGAINST. */
 export function auditedAppDirs(text: string): string[] {
   const dirs: string[] = [];
@@ -226,7 +242,9 @@ export function publishingVinextJobs(
       // `push: true`). Widening `jobText` itself would also widen the C6 scan
       // above onto ci.yml's local-only image probe, which is a different risk.
       const text = (job.steps ?? []).map(stepText).join('\n');
-      if (!PUBLISHES_IMAGE.test(text)) continue;
+      // Per step, not on the joined text: a dry-run action step must not be
+      // made a publish by some OTHER step's text, nor hide one.
+      if (!(job.steps ?? []).some((step) => publishesImage(stepText(step)))) continue;
       const built = appDirs.filter((dir) => text.includes(dir));
       if (built.length === 0) continue;
 
@@ -243,7 +261,10 @@ export function publishingVinextJobs(
       const lastAudit = indexes.filter((s) => auditedAppDirs(s.text).length > 0).pop()?.index ?? -1;
       const firstBuild =
         indexes.find(
-          (s) => BUILDS_VINEXT_ARTIFACT.test(s.text) || /docker\/build-push-action/.test(s.text),
+          (s) =>
+            BUILDS_VINEXT_ARTIFACT.test(s.text) ||
+            /docker\/build-push-action/.test(s.text) ||
+            deploysThroughKnextAction(s.text),
         )?.index ?? Number.POSITIVE_INFINITY;
 
       hits.push({

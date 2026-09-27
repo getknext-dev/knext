@@ -52,6 +52,38 @@ describe("ADR-0049 credential preflight (#874)", () => {
         expect(classifyCredentialScope(BASELINE).ok).toBe(true);
     });
 
+    it("accepts what a real cluster returns for the init-ci ServiceAccount", () => {
+        // Captured verbatim from `kubectl auth can-i --list -n knext-docs -o json`
+        // for the `knext-deployer` ServiceAccount on a live OKE cluster. Since
+        // Kubernetes 1.28, `system:basic-user` also grants
+        // authentication.k8s.io/selfsubjectreviews (`kubectl auth whoami`), so
+        // every authenticated subject carries it — refusing it refused the
+        // exact credential `kn-next init-ci` generates.
+        const live = [
+            {
+                apiGroups: ["authorization.k8s.io"],
+                resources: [
+                    "selfsubjectaccessreviews",
+                    "selfsubjectrulesreviews",
+                ],
+                verbs: ["create"],
+            },
+            {
+                apiGroups: ["authentication.k8s.io"],
+                resources: ["selfsubjectreviews"],
+                verbs: ["create"],
+            },
+            {
+                apiGroups: ["apps.kn-next.dev"],
+                resources: ["nextapps"],
+                verbs: ["get", "list", "create", "patch", "update"],
+            },
+        ];
+        const v = classifyCredentialScope(live);
+        expect(v.findings).toEqual([]);
+        expect(v.ok).toBe(true);
+    });
+
     it("refuses cluster-admin — the wildcard rule", () => {
         const v = classifyCredentialScope([
             ...BASELINE,

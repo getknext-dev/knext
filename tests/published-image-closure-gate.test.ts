@@ -118,6 +118,47 @@ describe('every job that PUBLISHES a vinext image audits that app’s closure fi
     ).not.toContain('apps/file-manager');
   });
 
+  it('sees a lane that publishes through the knext action (kn-next deploy builds + pushes inside it)', () => {
+    const lane = (audit: string, action: string[]) =>
+      parseWorkflow(
+        '.github/workflows/deploy.yml',
+        [
+          'jobs:',
+          '  deploy:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          ...audit.split('\n').filter(Boolean),
+          '      - uses: ./packages/kn-next-action',
+          '        with:',
+          '          working-directory: apps/docs',
+          ...action,
+        ].join('\n'),
+      );
+    // No audit: the lane is found, and nothing is credited.
+    const [unaudited] = publishingVinextJobs([lane('', [])], ['apps/docs']);
+    expect(unaudited?.appDirs, 'the action lane must be discovered').toEqual(['apps/docs']);
+    expect(unaudited?.auditedAppDirs).toEqual([]);
+    // Audit before the action step: credited, and ordered.
+    const [audited] = publishingVinextJobs(
+      [lane(`      - run: node ${AUDIT_SCRIPT} --app apps/docs`, [])],
+      ['apps/docs'],
+    );
+    expect(audited?.auditedAppDirs).toEqual(['apps/docs']);
+    expect(audited?.auditBeforeBuild).toBe(true);
+    // A dry run pushes nothing — not a publish lane.
+    expect(publishingVinextJobs([lane('', ["          dry-run: 'true'"])], ['apps/docs'])).toEqual(
+      [],
+    );
+  });
+
+  it('covers the docs deploy lane in the real tree (non-vacuity for the action matcher)', () => {
+    const hits = publishingVinextJobs(loadWorkflows(REPO_ROOT), vinextAppDirs(REPO_ROOT)).filter(
+      (h) => h.workflow.endsWith('docs-deploy-oke.yml'),
+    );
+    expect(hits.map((h) => h.job)).toEqual(['deploy']);
+    expect(hits[0]?.appDirs).toContain('apps/docs');
+  });
+
   it('credits an audit that runs in a separate job in the `needs` closure', () => {
     const synthetic = parseWorkflow(
       '.github/workflows/publish.yml',

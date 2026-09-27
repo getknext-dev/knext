@@ -65,6 +65,9 @@ export const CI_ROLE_RULES = [
 const ALWAYS_PRESENT = new Set([
     "authorization.k8s.io/selfsubjectaccessreviews",
     "authorization.k8s.io/selfsubjectrulesreviews",
+    // Kubernetes 1.28+: `system:basic-user` also grants this (`kubectl auth
+    // whoami`) — an identity read of the caller itself, nothing more.
+    "authentication.k8s.io/selfsubjectreviews",
 ]);
 
 /**
