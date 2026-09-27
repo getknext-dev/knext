@@ -569,7 +569,7 @@ prove(
 );
 
 prove(
-  'M83 write sites: a \`${V:=…}\` in an unquoted heredoc body is not seen',
+  'M83 write sites: a heredoc-body V:= default in an unquoted heredoc is not seen',
   SCANNER,
   '    if (hd.quoted) continue;',
   '    continue;',
