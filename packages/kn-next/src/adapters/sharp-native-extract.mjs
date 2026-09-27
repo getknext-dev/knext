@@ -40,6 +40,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   writeSync,
@@ -102,13 +103,40 @@ function assertPrivateDir(dir) {
  * the sticky bit lets another local user rename or replace entries out from
  * under this process between checks. `/tmp` is normally 1777 (world-writable,
  * sticky) and passes; a private directory this process owns outright also
- * passes without needing the sticky bit. Anything else is refused rather than
- * trusted.
+ * passes without needing the sticky bit.
+ *
+ * A world-writable, NON-sticky base also passes when it is ROOT-owned: that
+ * is the Kubernetes `emptyDir` default the operator mounts at `/tmp`
+ * (`nextapp_controller.go:894-897`) — kubelet's `setupDir` creates it 0777
+ * with no sticky bit (k8s 1.34 has no sticky-bit support there), and it is
+ * owned by root. Refusing that base would break image optimization under the
+ * operator's own default, for no real gain: the actual guard against a
+ * planted sibling is the per-uid `0700` subdir this function's caller creates
+ * NEXT and `assertPrivateDir()` enforces on it — not this base directory's
+ * mode. This does NOT extend to a base merely owned by THIS process: without
+ * the sticky bit, directory-write permission governs deletion/rename of
+ * every entry regardless of who owns the directory, so a self-owned 0777
+ * base is exactly as exposed to another local uid as a foreign-owned one —
+ * it stays refused, same as a base owned by any other non-root uid.
+ *
+ * `dir` is resolved through symlinks first (`realpathSync`) — `/tmp` is a
+ * symlink to `/private/tmp` on macOS, and `lstatSync` on the symlink itself
+ * would report `isSymbolicLink()` and get refused as "not a plain directory"
+ * even though the target is a perfectly normal, safe directory.
  */
 function assertSafeBase(dir) {
+  let real;
+  try {
+    real = realpathSync(dir);
+  } catch (error) {
+    throw new Error(
+      `knext: refusing to extract under ${dir} — it does not exist or is not accessible\n` +
+        `  underlying error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   let st;
   try {
-    st = lstatSync(dir);
+    st = lstatSync(real);
   } catch (error) {
     throw new Error(
       `knext: refusing to extract under ${dir} — it does not exist or is not accessible\n` +
@@ -120,15 +148,18 @@ function assertSafeBase(dir) {
   }
   const worldWritable = (st.mode & 0o002) !== 0;
   const sticky = (st.mode & 0o1000) !== 0;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const rootOwned = st.uid === 0;
   if (worldWritable && !sticky) {
+    if (rootOwned) return;
     throw new Error(
       `knext: refusing to extract under ${dir} — it is world-writable (mode ${(st.mode & 0o777).toString(8)}) ` +
-        'without the sticky bit set, so another local user could rename or replace entries here ' +
-        'between checks. Set KNEXT_NATIVE_TMPDIR to a directory with the sticky bit set (like a ' +
-        'normal /tmp) or one this process owns privately.',
+        `without the sticky bit set and owned by uid ${st.uid} (not root), so another local user could ` +
+        'rename or replace entries here between checks. Set KNEXT_NATIVE_TMPDIR to a directory with the ' +
+        'sticky bit set (like a normal /tmp), one root owns (like a kubelet emptyDir), or one this process ' +
+        'owns privately.',
     );
   }
-  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   if (uid !== null && !worldWritable && st.uid !== uid && st.uid !== 0) {
     throw new Error(
       `knext: refusing to extract under ${dir} — it is owned by uid ${st.uid}, not this process ` +
