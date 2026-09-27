@@ -188,6 +188,60 @@ describe('the .env-not-in-image e2e is wired into CI (#1327)', () => {
   });
 });
 
+// N2 (#1457) — the ONLY proof that the self-contained `--target
+// standalone-bun-self-contained` stage actually builds and boots (and REALLY
+// ships no node_modules / no .next/standalone, folds SIGTERM drain + :9464
+// metrics into one process) is this e2e: it rides in the same job (same
+// docker + bun + @getknext/core setup) and has the same no-skip contract, so
+// it needs the same wiring guard as its siblings above.
+const SELF_CONTAINED_IMAGE_E2E_PATH =
+  'packages/kn-next/src/__tests__/standalone-self-contained-image.docker-e2e.test.ts';
+
+describe('the self-contained image e2e is wired into CI (N2, #1457)', () => {
+  it('a `run:` in the job invokes it by its explicit path, as a blocking step', () => {
+    const runCommands = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)].map((m) => m[1]).join('\n');
+    expect(
+      runCommands,
+      'the job never runs the standalone-self-contained-image docker e2e',
+    ).toContain(SELF_CONTAINED_IMAGE_E2E_PATH);
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: 'standalone-drain-bun-image',
+      gateCommand: new RegExp(
+        SELF_CONTAINED_IMAGE_E2E_PATH.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'),
+      ),
+    });
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs the e2e').toBe(1);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
+  });
+
+  it('runs with KNEXT_REQUIRE_SC_EXEC=1 so a build that silently skipped self-contained cannot pass', () => {
+    const block = jobBlock();
+    const idx = block.indexOf(SELF_CONTAINED_IMAGE_E2E_PATH);
+    expect(idx, 'the step that runs the e2e is missing').toBeGreaterThan(-1);
+    // The step's own YAML (env: block sits above `run:`) — bounded to a
+    // reasonable window around the step rather than the whole job, so an
+    // unrelated step's env cannot false-positive this.
+    const stepWindowStart = block.lastIndexOf('- name:', idx);
+    const stepWindow = block.slice(
+      stepWindowStart,
+      idx + SELF_CONTAINED_IMAGE_E2E_PATH.length + 40,
+    );
+    expect(stepWindow, 'the step never sets KNEXT_REQUIRE_SC_EXEC=1').toMatch(
+      /KNEXT_REQUIRE_SC_EXEC:\s*['"]?1['"]?/,
+    );
+  });
+
+  it('the file exists, is a container e2e, and imports bun:test', () => {
+    const full = resolve(REPO_ROOT, SELF_CONTAINED_IMAGE_E2E_PATH);
+    expect(existsSync(full), `${SELF_CONTAINED_IMAGE_E2E_PATH} does not exist`).toBe(true);
+    expect(SELF_CONTAINED_IMAGE_E2E_PATH).toMatch(/\.docker-e2e\.test\.ts$/);
+    expect(readFileSync(full, 'utf8'), 'the e2e must import bun:test').toMatch(
+      /from ['"]bun:test['"]/,
+    );
+  });
+});
+
 describe('the CI path actually reaches the suite (both halves)', () => {
   it('the file the job names exists and is a container e2e', () => {
     const full = resolve(REPO_ROOT, E2E_PATH);

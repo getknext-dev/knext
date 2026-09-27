@@ -248,6 +248,12 @@ export default defineConfig([
       // #188 path 3 — IN-REALM sandbox-fetch instrumentation: patched into the
       // fixture's next sandbox context.js by e2e-deploy.sh (same debug gate).
       'adapters/sandbox-fetch-realm-debug': 'src/adapters/sandbox-fetch-realm-debug.cjs',
+      // N2 (#1457) — the self-contained image's folded SIGTERM-drain + :9464
+      // metrics preload, baked in ONLY when standalone-compile.mjs is invoked
+      // with --self-contained 1. Dependency-free by the same discipline as the
+      // preloads above.
+      'adapters/standalone-self-contained-supervisor':
+        'src/adapters/standalone-self-contained-supervisor.cjs',
     },
     format: ['cjs'],
     platform: 'node',

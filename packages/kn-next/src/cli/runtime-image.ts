@@ -44,12 +44,27 @@ import {
 import { packageRoot } from "./create";
 
 /** The Docker build `--target` for each standalone runtime. */
-export type StandaloneTarget = "standalone-bun" | "standalone-node";
+export type StandaloneTarget =
+    | "standalone-bun"
+    | "standalone-node"
+    | "standalone-bun-self-contained";
 
 /** The minimal config surface the selection reads. */
 export interface RuntimeImageConfig {
     build?: "turbopack" | "vinext" | "webpack";
     runtime?: "bun" | "node";
+    /**
+     * N2 (#1457): route the standalone-on-bun cell to the self-contained
+     * `--target standalone-bun-self-contained` stage, which ships no
+     * `node_modules` at all (the compiled executable embeds `.next` and the
+     * modules its route chunks load; see `Dockerfile.standalone.hbs`'s own
+     * comment on that stage). Ignored — same as `compileArtifactForDeploy`
+     * already does at the compile step — when `runtime` resolves to `"node"`:
+     * there is no compiled executable on that runtime to embed anything in,
+     * so `standalone-node` is unaffected either way. Off by default; byte-
+     * identical `standalone-bun` selection when absent or false.
+     */
+    selfContained?: boolean;
 }
 
 export interface RuntimeImageSelection {
@@ -248,16 +263,25 @@ export function selectRuntimeImage(
     // DEFAULT_RUNTIME_ID ("bun", #1183) — the actual ADR-0054 bun-standalone
     // cell (compiled bytecode exec), not node. Explicit `runtime: "node"` is
     // never overridden.
-    const target: StandaloneTarget =
-        (config.runtime ?? DEFAULT_RUNTIME_ID) === "bun"
-            ? "standalone-bun"
-            : "standalone-node";
+    const isBun = (config.runtime ?? DEFAULT_RUNTIME_ID) === "bun";
+    // N2 (#1457): `selfContained` only changes anything on the bun cell — the
+    // node cell has no compiled executable to embed anything in, so it is
+    // silently ignored there, mirroring `compileArtifactForDeploy`'s own
+    // `runtimeId !== "bun"` no-op at the compile step (build-artifact.ts).
+    // Off (absent/false), or on the node cell, this is byte-identical to
+    // before `selfContained` existed.
+    const target: StandaloneTarget = isBun
+        ? config.selfContained
+            ? "standalone-bun-self-contained"
+            : "standalone-bun"
+        : "standalone-node";
     return {
         kind: "standalone",
         dockerfile: join(cwd, STANDALONE_DOCKERFILE_NAME),
         target,
-        // Only standalone-node bakes; standalone-bun compiles bytecode and
-        // never boots the server to warm a health route.
+        // Only standalone-node bakes; both standalone-bun variants (disk and
+        // self-contained) compile bytecode and never boot the server to warm
+        // a health route.
         bakesCompileCache: target === "standalone-node",
     };
 }

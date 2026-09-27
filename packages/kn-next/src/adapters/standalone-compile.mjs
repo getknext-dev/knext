@@ -150,8 +150,18 @@ if (!isInside(realpathSync(SERVER), ROOT)) {
 
 // Preloads: shipped beside this script (dist: tsup emits them as .cjs; the
 // source tree has them under the same names).
+//
+// The self-contained supervisor preload (N2, #1457) is appended ONLY when
+// `--self-contained 1` is set: it folds the SIGTERM-drain + `:9464` metrics
+// behaviour the disk-mode image gets from a separate `knext-standalone-entry.mjs`
+// process directly into the compiled executable, so the self-contained image
+// can ship with no `node_modules` at all (see the preload's own header for the
+// fold-vs-sidecar decision). Disk mode's preload list — and therefore its
+// compiled output — is byte-identical to before this existed.
 const here = dirname(fileURLToPath(import.meta.url));
-const PRELOADS = ["cache-control-normalize.cjs", "bun-keepalive-guard.cjs"].map((f) => join(here, f));
+const PRELOAD_NAMES = ["cache-control-normalize.cjs", "bun-keepalive-guard.cjs"];
+if (SELF_CONTAINED) PRELOAD_NAMES.push("standalone-self-contained-supervisor.cjs");
+const PRELOADS = PRELOAD_NAMES.map((f) => join(here, f));
 for (const p of PRELOADS) {
     if (!existsSync(p)) {
         fail(`preload ${p} is missing beside the compile script — refusing to compile a server without it`);

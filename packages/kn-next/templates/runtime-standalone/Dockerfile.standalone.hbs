@@ -152,6 +152,81 @@ EXPOSE 3000
 ENTRYPOINT ["bun", "run", "/app/knext-entry.mjs"]
 
 # ---------------------------------------------------------------------------
+# bun runtime, SELF-CONTAINED (N2, #1457, opt-in via `selfContained: true` /
+# `--self-contained`) — ships ONLY the compiled executable + `public/` +
+# `.next/static`: no `.next/standalone` tree, no `node_modules` anywhere in
+# the image (neither `.next/standalone/node_modules` nor `/app/node_modules`).
+#
+# The disk-mode `standalone-bun` stage above still needs `.next/standalone`
+# beside the executable because Next loads its route chunks from there by
+# COMPUTED path at request time (`standalone-exec-build.ts`'s own doc comment:
+# "the executable replaces the script, not the tree"). Self-contained mode is
+# the other point on that same axis: `knext-standalone-exec-linux-x64` here was
+# compiled WITH `--self-contained 1` (`standalone-compile.mjs`), so `.next` and
+# every module its route chunks load are embedded INSIDE the executable's own
+# virtual filesystem (`$bunfs`) — only `.next/static` (bulky, served by path,
+# never executed) and `public/` stay on real disk beside it, at the paths the
+# embedded entry's disk aliases expect (`STANDALONE_DIR_BINDING` = the
+# executable's own directory, i.e. `/app`; `distDir` defaults to `.next`, so
+# static must sit at `/app/.next/static` and public at `/app/public` — see
+# `standalone-exec-entry.mjs`'s `selfContainedPrologue`).
+#
+# NO SUPERVISOR SHIM IN THIS STAGE, ON PURPOSE. The disk-mode stages' ENTRYPOINT
+# is `knext-standalone-entry.mjs` (importing `@getknext/core/internal/node-server`),
+# which spawns the server as a CHILD process so it can drain it on SIGTERM, and
+# needs pino/prom-client/@opentelemetry/api — resolved via the `standalone-deps`
+# npm-install stage and copied into `/app/node_modules` above. That whole
+# dependency closure is exactly what "no node_modules" rules out. Per the N2
+# decision (jev pick: fold 0.87 vs sidecar 0.13, confidence 0.73 — a sidecar
+# still needs node_modules unless rewritten dependency-free, at which point it
+# gains nothing over folding the same dependency-free logic into the one
+# process that already exists), the SIGTERM-drain + `:9464` metrics behaviour is
+# folded directly into the executable as a THIRD baked-in preload
+# (`standalone-self-contained-supervisor.cjs`, alongside the two the disk-mode
+# entry also carries) — baked in only when `--self-contained 1` compiles this
+# exact executable, never for the disk-mode ones above. So the ENTRYPOINT here
+# execs the compiled binary directly: one process, no shim, no spawn.
+#
+# NOT YET SUPPORTED HERE: a `native/` directory for native addons (e.g. sharp),
+# unlike the vinext single-executable image (`templates/app/Dockerfile.hbs`),
+# which stages one with an integrity manifest. `standalone-compile.mjs`'s
+# self-contained planner currently FAILS the build outright on any `.node` file
+# under the traced tree rather than staging it to a native dir (see
+# `standalone-native-addon-guard.test.ts`) — extending it to stage native
+# addons the way the vinext target already does is real, separate scope, not
+# a Dockerfile change, and is left as follow-up (an app using `next/image` with
+# sharp cannot use this target yet; it can still use the disk-mode stages
+# above, or the vinext self-contained binary, which does support `native/`).
+FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS standalone-bun-self-contained
+
+RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc
+
+WORKDIR /app
+
+# Static assets only — the app tree itself lives inside the executable.
+COPY public /app/public
+COPY .next/static /app/.next/static
+
+# The self-contained executable: `.next` + every module its route chunks load
+# are embedded inside it (compiled WITH `--self-contained 1`). No
+# `.next/standalone` COPY, no deps stage, no `/app/node_modules` — this stage
+# has neither.
+COPY knext-standalone-exec-linux-x64 /app/knext-standalone-exec
+
+USER 65532:65532
+
+ENV PORT=3000 \
+    HOSTNAME=0.0.0.0 \
+    NODE_ENV=production
+
+EXPOSE 3000
+
+# No shell, no supervisor, no spawned child — the compiled executable IS the
+# server, and (per the fold decision above) also owns its own SIGTERM drain and
+# `:9464` metrics endpoint directly.
+ENTRYPOINT ["/app/knext-standalone-exec"]
+
+# ---------------------------------------------------------------------------
 # node runtime — node:22-alpine. Same layout, same shim, node ENTRYPOINT.
 # ---------------------------------------------------------------------------
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS standalone-node

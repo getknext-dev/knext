@@ -120,6 +120,16 @@ rather than embedding it: a native addon loads from a real filesystem path, whic
 embedded filesystem cannot provide, so an embedded copy would only crash the first request that
 touches it.
 
+On the compiled standalone-on-Bun target this also changes what `knext deploy`/`knext preview`
+actually ship. With `selfContained` off, the runtime image carries the full `.next/standalone`
+tree plus its own `node_modules` (installed into the image at build time so a small set of
+supervisor dependencies — logging, metrics, tracing — are available at boot). With it on, the
+image instead builds from a dedicated recipe that copies in only the compiled executable,
+`public/` and `.next/static/` — no `node_modules` anywhere in the image, and no separate
+supervisor process. The one process that boots is the executable itself: it drains in-flight
+requests and exits cleanly on shutdown, and still serves Prometheus-formatted metrics on its usual
+port, the same way the regular image does — just without a second process alongside it.
+
 On the vinext target, the binary embeds the server runtime and your `public` files, and unpacks
 its native image libraries into the temp directory the first time an image is optimized — so
 nothing needs to sit beside the binary, and the temp directory must be writable **and
