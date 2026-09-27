@@ -54,9 +54,12 @@ set) is knext.
   On the Node runtime, `knext doctor` warns when the entry is behind the installed version. On the
   default **standalone build** (Turbopack or webpack, on Node or on the compiled Bun executable),
   the app port is served entirely by Next.js's own request handling — knext does not sit in front
-  of it for this — and a malformed path never reaches knext code. The one part of the standalone
-  runtime that is knext's own — the `:9464` metrics listener — matches the request target as a
-  plain string, never with a URL parser, so it is not exposed to this class of bug either.
+  of it for this — and a malformed path never reaches knext code. The `:9464` metrics listener *is*
+  knext's own code, and it ships as two separate implementations depending on how the app was
+  built: a regular `knext build` runs one metrics listener alongside the standalone server, while
+  `knext build --self-contained` folds an independent metrics listener directly into the compiled
+  executable instead (no separate process). Both match the request target with a plain string
+  comparison, never a URL parser, so neither is exposed to this class of bug.
 - **Metrics-port separation** — the app's Prometheus listener defaults to `:9464`, deliberately off
   `:9091`, which Knative's queue-proxy binds inside every pod on a stock Serving install (default
   `config-observability`). The NetworkPolicy's scrape grants, the `prometheus.io/port` annotation
