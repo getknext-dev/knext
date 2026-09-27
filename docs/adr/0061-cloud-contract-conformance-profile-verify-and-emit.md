@@ -1,4 +1,4 @@
-# ADR-0061: The cloud contract — a conformance profile and a verify-and-emit `kn-next cluster` surface
+# ADR-0061: The cloud contract — a conformance profile and a verify-and-emit `knext cluster` surface
 
 - **Status:** **Proposed (2026-09-27). Design only.** Founder decision of 2026-09-27: this sprint
   records the contract and files the open questions; **no cloud code lands this sprint.** Sprint C1
@@ -77,7 +77,7 @@ to it:
 
 The profile is **data**. It is consumed by the verifier and by the emitter; it is never a branch.
 
-### 2. A verify-and-emit `kn-next cluster` surface
+### 2. A verify-and-emit `knext cluster` surface
 
 ```
 ClusterTarget = (kube-context) → conformance verdict + emitted manifests/commands
@@ -93,18 +93,20 @@ ClusterTarget = (kube-context) → conformance verdict + emitted manifests/comma
 
 ### Each cloud is a data row, never a code path
 
-| Row | registry host pattern | storage provider | kubeconfig exec plugin | authorizer quirk |
-|---|---|---|---|---|
-| OCI / OKE | `<region-key>.ocir.io/<tenancy-namespace>/…` | `s3` (OCI S3-compat endpoint) or `minio` | `oci ce cluster generate-token` | webhook authorizer: rules review returns `incomplete: true` |
-| GCP / GKE | `<region>-docker.pkg.dev/<project>/…` | `gcs` | `gke-gcloud-auth-plugin` | IAM webhook: rules review may be `incomplete` |
-| AWS / EKS | `<account>.dkr.ecr.<region>.amazonaws.com/…` | `s3` | `aws eks get-token` | access entries / aws-auth map IAM → RBAC |
-| Azure / AKS | `<registry>.azurecr.io/…` | `azure` or `minio` | `kubelogin` | Entra ID / Azure RBAC may authorize outside Kubernetes RBAC |
-| generic (kind, on-prem) | any registry the nodes can pull | `minio` / `s3` | none / static | plain RBAC (baseline or first-class: open ticket 4) |
+| Row | registry host pattern | storage provider | kubeconfig exec plugin | authorizer quirk | source / verified |
+|---|---|---|---|---|---|
+| OCI / OKE | `<region-key>.ocir.io/<tenancy-namespace>/…` | `s3` (OCI S3-compat endpoint) or `minio` | `oci ce cluster generate-token` | webhook authorizer: rules review returns `incomplete: true` (#1495, measured) | #1495 (measured); docs/oke.mdx |
+| GCP / GKE | `<region>-docker.pkg.dev/<project>/…` | `gcs` | `gke-gcloud-auth-plugin` | IAM webhook: rules review may be `incomplete` | docs/gke.mdx; unverified (GKE exec plugin, GKE authorizer) |
+| AWS / EKS | `<account>.dkr.ecr.<region>.amazonaws.com/…` | `s3` | `aws eks get-token` | user mapping: access entries / aws-auth | docs/eks.mdx; unverified (EKS exec plugin, access entries) |
+| Azure / AKS | `<registry>.azurecr.io/…` | `azure` or `minio` | `kubelogin` | Entra ID / Azure RBAC may authorize outside Kubernetes RBAC | docs/aks.mdx; unverified (AKS exec plugin, Entra behavior) |
+| generic (kind, on-prem) | any registry the nodes can pull | `minio` / `s3` | none / static | plain RBAC (baseline or first-class: open ticket 4) | docs/generic.mdx |
 
-The row values above are the design's starting data, not a verified table; each row is verified on
-its cloud before it ships (OKE first). A new cloud is a new row plus its verification record.
-**If adding a cloud needs an `if (cloud === …)` anywhere, the design has failed** — the row is
-missing a column, and the fix is the column.
+Each row carries a source / verified note: sourced items are drawn from documented paths (ADRs,
+issue findings, or docs pages); unverified items are known unknowns pending live verification.
+OKE is the first reference implementation; additional clouds are added once verified on their
+own cluster. A new cloud is a new row plus its verification record. **If adding a cloud needs an
+`if (cloud === …)` anywhere, the design has failed** — the row is missing a column, and the fix
+is the column.
 
 **The cloud's own CLI / IaC owns:** cluster creation, node pools, IAM, the registry, buckets, and
 exec-plugin authentication. knext reads the kube-context the user already has; it never obtains
@@ -137,21 +139,47 @@ A PR that trips any line below does not merge on code review + CI; it is escalat
 security trigger (`workflow.md`), and the default answer is no:
 
 1. **A cloud SDK import** anywhere in `packages/` (`@aws-sdk/*`, `oci-*`, `@azure/*`,
-   `@google-cloud/*`). State at the time of writing: no source file under `packages/` imports one;
-   `@getknext/core` still declares `@google-cloud/storage` as a dependency (externalised in the
-   bundle, imported by nothing). That declaration is pre-existing debt to remove, not precedent to
-   build on.
+   `@google-cloud/*`, and Go modules: `github.com/aws/aws-sdk-go-v2/*`, `cloud.google.com/go/*`,
+   `github.com/Azure/azure-sdk-for-go/*`, `github.com/oracle/oci-go-sdk*`). State at the time of
+   writing: two bounded exceptions exist: `packages/kn-next-operator/internal/controller/external_cleaner.go:23-25`
+   imports `github.com/aws/aws-sdk-go-v2/{config,service/s3}` for S3 external cleanup (Go operator
+   data-plane exception), and `packages/lib/src/clients.ts:2` imports the `minio` S3 client
+   (storage client exception). `@getknext/core` still declares `@google-cloud/storage` as a dependency
+   (externalised in the bundle, imported by nothing). That declaration is pre-existing debt to remove,
+   not precedent to build on.
 2. **A cloud CLI invoked by knext** to create, mutate or authenticate cloud resources
    (`aws`, `oci`, `az`, `gcloud`, `eksctl`, …). The existing storage-upload shell-outs
    (`gsutil`/`aws s3`/`mc`/`az storage`), which the user authenticates and which touch only the
    user's own asset bucket, are the pre-existing, bounded exception; they do not widen.
-3. **A stored cloud credential** — in config, in a generated file, in a CRD field, in the operator,
-   or in any knext-owned state.
+3. **A stored cloud-account / IAM credential** — in config, in a generated file, in a CRD field, in the operator,
+   or in any knext-owned state. (Bucket-scoped or data-plane credentials held in Kubernetes Secrets
+   are permitted — e.g. the OKE docs' "Customer Secret Key".)&nbsp;
 4. **A per-cloud branch in the operator.** The operator reconciles `NextApp`; it does not know which
    cloud it runs on.
-5. **Any `kubectl apply` (or API write) from knext other than the `NextApp` CR.** The one sanctioned
-   exception is operator installation via the published `install.yaml`, **run by the user**, which
-   knext may *emit* as a command but never executes.
+5. **Any `kubectl apply` (or API write) from the CLI (`packages/kn-next/src/cli`) or the action
+   (`packages/kn-next-action`) other than the `NextApp` CR.** The one sanctioned exception is operator
+   installation via the published `install.yaml`, **run by the user**, which knext may *emit* as a
+   command but never executes. (Note: `packages/kn-next/src/cli/loadtest.ts:92` runs `kubectl apply`
+   of a ConfigMap + Job; this is pre-existing debt tracked in #1544, not precedent. The operator writes
+   Knative objects by design and is out of scope for this tripwire.)
+
+## Tripwire enforcement — scan-backed vs. review-only
+
+- **Tripwire 1** (cloud SDK imports): scan-backed via `package.json` / `go.mod` dependency graphs +
+  grep imports in `packages/*/src` and Go source.
+- **Tripwire 2** (cloud CLI invoked): scan-backed via argv scan for `aws|oci|az|gcloud|eksctl|gsutil|mc`
+  in `packages/kn-next/src/cli/`, against an allowlist of (CLI, subcommand) pairs in
+  `utils/asset-upload.ts`.
+- **Tripwire 3** (stored cloud-account credential): review-only + gitleaks for committed secrets.
+- **Tripwire 4** (per-cloud operator branch): heuristic Go scan for cloud-identity strings in
+  non-comment code. The storage-provider switch (e.g. `external_cleaner.go:59 case "s3","minio"`)
+  remains legal because it is a row attribute.
+- **Tripwire 5** (non-`NextApp` API write from CLI): scan-backed via argv scan for
+  `kubectl apply|create|patch|replace|delete` in `packages/kn-next/src/cli`, with resource-kind
+  checking for `apply -f` manifests.
+
+(Per `.claude/rules/workflow.md`: a documented expectation that is not scan-backed degrades over
+time. Tripwire 3 is review-only by necessity, not design.)
 
 ## knext does not own
 
@@ -186,10 +214,12 @@ design does not foreclose it.
 
 ## Consequences
 
-- **Positive.** ADR-0001 and credential custody stay intact with no exception. Adding a cloud is a
-  data row plus a verification record. The profile gives #1495's authorizer quirk a home that is
-  read, not rediscovered. `doctor` and `init-ci` converge into one surface instead of a third.
-  The emitted artifacts are diffable, reviewable and GitOps-compatible.
+- **Positive.** ADR-0001's `NextApp` CR invariant stays intact; tripwire 5 is scoped to the CLI and
+  action. Credential custody holds (cloud-account credentials never stored); bucket-scoped data-plane
+  credentials in K8s Secrets are permitted. Adding a cloud is a data row plus a verification record.
+  The profile gives #1495's authorizer quirk a home that is read, not rediscovered. `doctor` and
+  `init-ci` converge into one surface instead of a third. The emitted artifacts are diffable,
+  reviewable and GitOps-compatible.
 - **Negative, stated rather than dressed up.** The founder's "zero cloud knowledge" is **not fully
   met**: the user still runs the cloud's own cluster-create command and still owns IAM. The honest
   claim is "one cluster-create command from your cloud's docs, then knext tells you every remaining
@@ -207,7 +237,7 @@ compat credential is the north-star lever; this work does not compete with it fo
 
 1. **This sprint (done by landing this ADR):** the contract, the tripwires, the "does not own"
    list, #614 answered, the wayfinding map and its five decision tickets filed.
-2. **First implementation slice, after the windows bank:** `kn-next cluster verify` (read-only,
+2. **First implementation slice, after the windows bank:** `knext cluster verify` (read-only,
    profile-driven, subsuming `doctor`'s cluster checks) + cloud-aware emitted `init-ci` artifacts,
    on **one reference cloud: OKE, dogfooded** (the docs site already deploys there). The OKE row
    must carry the webhook-authorizer quirk and resolve #1495's fail-open behaviour through it.
@@ -215,6 +245,6 @@ compat credential is the north-star lever; this work does not compete with it fo
    the credential-window work already exercises clusters (GKE, EKS, AKS), with generic placed per
    ticket 4.
 4. **Before any slice:** the five wayfinding tickets (#1537–#1541) resolve — (1) verify-and-emit only vs. an
-   ADR-0001 exception for a `kn-next cluster install`; (2) token form and rotation; (3) profile
+   ADR-0001 exception for a `knext cluster install`; (2) token form and rotation; (3) profile
    versioned with the operator or the CLI; (4) generic as baseline row or first-class row;
    (5) storage/registry: docs only or emitted IaC snippets.
