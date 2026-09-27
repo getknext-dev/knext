@@ -194,7 +194,11 @@ it passes the scan, and signing happens on the digest that was actually pushed.
   every `after()` callback, including work that an `after()` callback schedules while the drain
   is already running. The drain has a hard cap (`SHUTDOWN_GRACE_MS`) kept below the pod's
   `terminationGracePeriodSeconds`; on the vinext targets, work still running at the cap is cut off
-  and the process exits with code 1.
+  and the process exits with code 1. On the standalone targets the process still exits with code 0
+  at the cap, but first logs a warning that starts with `[knext] shutdown` and says what it cut
+  off: the number of in-flight requests it dropped where the process can count them, or that the
+  number is unknown where it cannot. If that warning shows up in your pod logs, raise
+  `SHUTDOWN_GRACE_MS` or find the request or `after()` callback that never finishes.
   Apps created before this behaviour shipped carry an older `knext-bun-entry.mjs` that exits
   without waiting for `after()` work. Copy `knext-bun-entry.mjs` and `runtime-contract.mjs` from a
   freshly created app into yours to pick it up.

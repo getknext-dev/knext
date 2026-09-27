@@ -248,6 +248,41 @@ describe('the self-contained image e2e is wired into CI (N2, #1457)', () => {
     ).not.toMatch(/skipIf|\bit\.skip\b|\bdescribe\.skip\b/);
   });
 
+  // Round 3 (R2-B2): the suite's operator-command leg is the only proof that
+  // the image boots AND drains under the command `knext deploy` runs today
+  // (`bun run server.js`, PID 1 = the compat shim). Deleting those args from
+  // its `docker run` leaves the container on the default ENTRYPOINT, where
+  // every assertion still passes, so nothing inside the docker lane would
+  // notice. Scan for it here, in the fast lane.
+  it('the operator-command leg really runs `bun run server.js` and drains under it', () => {
+    const suite = readFileSync(resolve(REPO_ROOT, SELF_CONTAINED_IMAGE_E2E_PATH), 'utf8');
+    expect(
+      suite,
+      'the operator-command docker run no longer passes `bun run server.js` after the image',
+    ).toMatch(/IMAGE,\s*"bun",\s*"run",\s*"server\.js",?\s*\]/);
+    expect(
+      suite,
+      'the SIGTERM clean-drain proof is not run against the operator-command container',
+    ).toMatch(/assertCleanDrain\(\s*OPERATOR_CONTAINER,/);
+    expect(
+      suite,
+      'the SIGTERM clean-drain proof is not run against the default-ENTRYPOINT container',
+    ).toMatch(/assertCleanDrain\(\s*CONTAINER,/);
+    // Both containers run with a grace window far above the drain bound, so a
+    // hardcap exit cannot pass as a clean drain.
+    const grace = Number(
+      suite.match(/const SHUTDOWN_GRACE_MS = ([\d_]+);/)?.[1]?.replace(/_/g, ''),
+    );
+    const bound = Number(suite.match(/const DRAIN_BOUND_MS = ([\d_]+);/)?.[1]?.replace(/_/g, ''));
+    expect(grace, 'SHUTDOWN_GRACE_MS constant missing').toBeGreaterThan(0);
+    expect(bound, 'DRAIN_BOUND_MS constant missing').toBeGreaterThan(0);
+    expect(grace, 'the grace window must dwarf the drain bound').toBeGreaterThanOrEqual(bound * 4);
+    const graceEnvs = suite.match(/`SHUTDOWN_GRACE_MS=\$\{SHUTDOWN_GRACE_MS\}`/g) ?? [];
+    expect(graceEnvs.length, 'both containers must be started with the large grace window').toBe(2);
+    // The async after() is what makes the marker discriminating.
+    expect(suite).toMatch(/afterMs=\$\{AFTER_MS\}/);
+  });
+
   it('the file exists, is a container e2e, and imports bun:test', () => {
     const full = resolve(REPO_ROOT, SELF_CONTAINED_IMAGE_E2E_PATH);
     expect(existsSync(full), `${SELF_CONTAINED_IMAGE_E2E_PATH} does not exist`).toBe(true);

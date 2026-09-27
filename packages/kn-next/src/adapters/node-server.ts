@@ -297,6 +297,8 @@ const onSignal = (signal: string) => {
         closables: [metricsEndpoint.closable],
         graceMs: SHUTDOWN_GRACE_MS,
         exit: (code) => process.exit(code),
+        warn: (message) =>
+            log.warn({ signal, graceMs: SHUTDOWN_GRACE_MS }, message),
     });
 };
 

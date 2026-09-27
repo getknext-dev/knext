@@ -10,6 +10,8 @@
  */
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
@@ -21,10 +23,21 @@ const MODULE_PATH = resolve(
     import.meta.dirname,
     "../adapters/standalone-self-contained-supervisor.cjs",
 );
+// Round 3 (R2-B1): requiring the module runs its preload side effect, which is
+// `install()` against the REAL `node:http` + `process`. Clear the flag first so
+// the assertion below sees only what the preload itself sets.
+const SIG_HANDLE_BEFORE_REQUIRE = process.env.NEXT_MANUAL_SIG_HANDLE;
+delete process.env.NEXT_MANUAL_SIG_HANDLE;
 // biome-ignore lint/suspicious/noExplicitAny: untyped CJS runtime module
 const supervisor: any = require(MODULE_PATH);
+const SIG_HANDLE_AFTER_REQUIRE = process.env.NEXT_MANUAL_SIG_HANDLE;
+if (SIG_HANDLE_BEFORE_REQUIRE !== undefined) {
+    process.env.NEXT_MANUAL_SIG_HANDLE = SIG_HANDLE_BEFORE_REQUIRE;
+}
 const {
     drainHardcapMs,
+    hardcapWarning,
+    install,
     metricsPort,
     metricsBody,
     startMetricsServer,
@@ -300,5 +313,238 @@ describe("installDrainHandler", () => {
         // wrapped process.exit must rewrite it to 0.
         (proc as unknown as { exit: (c?: number) => void }).exit(143);
         expect(calls).toEqual([0]);
+    });
+});
+// ---------------------------------------------------------------------------
+// Round 3 (R2-B1): the B1 fix is "Next's OWN SIGTERM handler runs, and the
+// preload only normalises its exit code". Round 2's tests exercised the pieces
+// in isolation, so re-adding `NEXT_MANUAL_SIG_HANDLE=1` inside `install()`, or
+// dropping the line that arms the normaliser, stayed green. These drive the real
+// `install()` against a fake http + fake process and read the installed state.
+// ---------------------------------------------------------------------------
+
+type FakeServer = EventEmitter & {
+    listen: ReturnType<typeof mock>;
+    close: ReturnType<typeof mock>;
+    closeAllConnections: ReturnType<typeof mock>;
+};
+
+/** A fake `node:http` whose createServer returns an EventEmitter server. */
+function fakeHttp() {
+    const servers: FakeServer[] = [];
+    const http = {
+        createServer: (): FakeServer => {
+            const srv = Object.assign(new EventEmitter(), {
+                listen: mock(),
+                close: mock(),
+                closeAllConnections: mock(),
+            });
+            servers.push(srv);
+            return srv;
+        },
+    };
+    return { http, servers };
+}
+
+/** A fake process: records exit codes and captures signal listeners. */
+function fakeSignalProcess() {
+    const exits: Array<number | undefined> = [];
+    const handlers: Record<string, Array<() => void>> = {};
+    const proc = {
+        env: {} as Record<string, string | undefined>,
+        exit: (code?: number) => {
+            exits.push(code);
+        },
+        on: (sig: string, fn: () => void) => {
+            if (!handlers[sig]) handlers[sig] = [];
+            handlers[sig].push(fn);
+            return proc;
+        },
+    };
+    const signal = (sig: string) => {
+        for (const fn of handlers[sig] ?? []) fn();
+    };
+    return { proc, exits, handlers, signal };
+}
+
+/** A process.on stand-in that records one listener per signal. */
+// biome-ignore lint/suspicious/noExplicitAny: process.on shape
+function captureOn(handlers: Record<string, () => void>): any {
+    return (sig: string, fn: () => void) => {
+        handlers[sig] = fn;
+    };
+}
+
+/** Strip block and line comments so a source scan sees code only. */
+function codeOnly(src: string): string {
+    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
+describe("the preload never disables Next's own signal handler (R2-B1 guard)", () => {
+    it("requiring the preload (its real install() side effect) leaves NEXT_MANUAL_SIG_HANDLE unset", () => {
+        expect(
+            SIG_HANDLE_AFTER_REQUIRE,
+            "the preload set NEXT_MANUAL_SIG_HANDLE, which stops Next's own SIGTERM handler, and with it the after() drain",
+        ).toBeUndefined();
+    });
+
+    it("install() on a fresh http/process leaves NEXT_MANUAL_SIG_HANDLE unset in both the global and the given env", () => {
+        const saved = process.env.NEXT_MANUAL_SIG_HANDLE;
+        delete process.env.NEXT_MANUAL_SIG_HANDLE;
+        try {
+            const { http } = fakeHttp();
+            const { proc } = fakeSignalProcess();
+            install({
+                // biome-ignore lint/suspicious/noExplicitAny: fake http module
+                http: http as any,
+                env: proc.env,
+                // biome-ignore lint/suspicious/noExplicitAny: fake process
+                process: proc as any,
+            });
+            http.createServer();
+            expect(process.env.NEXT_MANUAL_SIG_HANDLE).toBeUndefined();
+            expect(proc.env.NEXT_MANUAL_SIG_HANDLE).toBeUndefined();
+        } finally {
+            if (saved !== undefined) process.env.NEXT_MANUAL_SIG_HANDLE = saved;
+        }
+    });
+
+    it("the supervisor's CODE (comments stripped) never references NEXT_MANUAL_SIG_HANDLE", () => {
+        const src = readFileSync(MODULE_PATH, "utf8");
+        // Both halves: the comments DO name it (they explain why it is gone),
+        // so a scan that forgot to strip comments would red on a correct file,
+        // and the stripped code must not name it at all.
+        expect(src).toContain("NEXT_MANUAL_SIG_HANDLE");
+        expect(codeOnly(src)).not.toContain("NEXT_MANUAL_SIG_HANDLE");
+    });
+});
+
+describe("install() arms the exit-code normaliser on the stop signal (R2-B1 guard)", () => {
+    function installed() {
+        const { http, servers } = fakeHttp();
+        const fp = fakeSignalProcess();
+        install({
+            // biome-ignore lint/suspicious/noExplicitAny: fake http module
+            http: http as any,
+            env: { KNEXT_SELF_CONTAINED_METRICS: "0" },
+            // biome-ignore lint/suspicious/noExplicitAny: fake process
+            process: fp.proc as any,
+            warn: () => {},
+        });
+        http.createServer();
+        return { ...fp, servers };
+    }
+
+    it("before any signal, Next's 143 passes through unchanged", () => {
+        const { proc, exits } = installed();
+        proc.exit(143);
+        expect(exits).toEqual([143]);
+    });
+
+    it("after SIGTERM, Next's own process.exit(143) becomes 0", () => {
+        const { proc, exits, handlers, signal } = installed();
+        expect(
+            handlers.SIGTERM?.length,
+            "install() registered no SIGTERM listener on the given process",
+        ).toBe(1);
+        signal("SIGTERM");
+        proc.exit(143);
+        expect(exits).toEqual([0]);
+    });
+
+    it("after SIGINT, Next's own process.exit(130) becomes 0", () => {
+        const { proc, exits, signal } = installed();
+        signal("SIGINT");
+        proc.exit(130);
+        expect(exits).toEqual([0]);
+    });
+
+    it("after SIGTERM, a real crash code still passes through", () => {
+        const { proc, exits, signal } = installed();
+        signal("SIGTERM");
+        proc.exit(1);
+        expect(exits).toEqual([1]);
+    });
+});
+
+describe("the hardcap is loud: it names the in-flight requests it drops (round 3)", () => {
+    it("hardcapWarning names the grace window and the dropped count", () => {
+        const msg = hardcapWarning(25_000, 3);
+        expect(msg).toContain("SHUTDOWN_GRACE_MS=25000ms");
+        expect(msg).toMatch(/DROPPING 3 in-flight request\(s\)/);
+    });
+
+    it("hardcapWarning says the count is unknown when it cannot be counted", () => {
+        expect(hardcapWarning(1000, undefined)).toMatch(
+            /DROPPING an unknown number of in-flight request\(s\)/,
+        );
+    });
+
+    it("installDrainHandler warns with the in-flight count at the cap, then still exits 0", async () => {
+        const appServer = { close: mock(), closeAllConnections: mock() };
+        const exit = mock();
+        const warn = mock();
+        const handlers: Record<string, () => void> = {};
+        installDrainHandler(appServer, {
+            env: { SHUTDOWN_GRACE_MS: "5" },
+            exit,
+            warn,
+            inFlight: () => 2,
+            on: captureOn(handlers),
+        });
+        handlers.SIGTERM();
+        await new Promise((r) => setTimeout(r, 30));
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0][0])).toMatch(
+            /DROPPING 2 in-flight request\(s\)/,
+        );
+        expect(exit).toHaveBeenCalledWith(0);
+    });
+
+    it("no warning while the cap has not fired (a clean drain is quiet)", async () => {
+        const appServer = { close: mock(), closeAllConnections: mock() };
+        const warn = mock();
+        const handlers: Record<string, () => void> = {};
+        installDrainHandler(appServer, {
+            env: { SHUTDOWN_GRACE_MS: "60000" },
+            exit: mock(),
+            warn,
+            on: captureOn(handlers),
+        });
+        handlers.SIGTERM();
+        await new Promise((r) => setTimeout(r, 30));
+        expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("install() counts the Next server's open requests and reports exactly those at the cap", async () => {
+        const { http, servers } = fakeHttp();
+        const fp = fakeSignalProcess();
+        const warn = mock();
+        install({
+            // biome-ignore lint/suspicious/noExplicitAny: fake http module
+            http: http as any,
+            env: { KNEXT_SELF_CONTAINED_METRICS: "0", SHUTDOWN_GRACE_MS: "5" },
+            // biome-ignore lint/suspicious/noExplicitAny: fake process
+            process: fp.proc as any,
+            warn,
+        });
+        http.createServer();
+        const server = servers[0];
+        const finished = new EventEmitter();
+        const open1 = new EventEmitter();
+        const open2 = new EventEmitter();
+        server.emit("request", {}, finished);
+        server.emit("request", {}, open1);
+        server.emit("request", {}, open2);
+        finished.emit("finish");
+        finished.emit("close"); // a response emitting both must count once
+        fp.signal("SIGTERM");
+        await new Promise((r) => setTimeout(r, 30));
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0][0])).toMatch(
+            /DROPPING 2 in-flight request\(s\)/,
+        );
+        expect(server.closeAllConnections).toHaveBeenCalledTimes(1);
+        expect(fp.exits).toEqual([0]);
     });
 });

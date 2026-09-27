@@ -15,12 +15,25 @@ export const dynamic = "force-dynamic";
  *
  * The id echoes the request's own query param so the assertion cannot pass on a
  * stale marker from an earlier request.
+ *
+ * `afterMs` (optional, default 0) makes the `after()` callback do real async
+ * work AFTER the response: it logs `AFTER_SENTINEL_START:<id>`, waits `afterMs`,
+ * and only then logs `AFTER_SENTINEL_RAN:<id>`. With a synchronous callback the
+ * marker prints the instant the response finishes, so a shutdown that never
+ * waits for `after()` work would still pass; with `afterMs` the final marker
+ * exists only if the process stayed up for that work to finish. Unset, the
+ * callback logs straight away, which is what the disk-mode sibling relies on.
  */
 export async function GET(req: Request) {
     const url = new URL(req.url);
     const ms = Number(url.searchParams.get("ms") ?? "4000");
+    const afterMs = Number(url.searchParams.get("afterMs") ?? "0");
     const id = url.searchParams.get("id") ?? "noid";
-    after(() => {
+    after(async () => {
+        if (afterMs > 0) {
+            console.log(`AFTER_SENTINEL_START:${id}`);
+            await new Promise((resolve) => setTimeout(resolve, afterMs));
+        }
         console.log(`AFTER_SENTINEL_RAN:${id}`);
     });
     await new Promise((resolve) => setTimeout(resolve, ms));

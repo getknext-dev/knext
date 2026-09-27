@@ -18,10 +18,15 @@
 # runtime link libs — so `supply-chain.yml`'s `built-image-trivy` job can
 # enforce-scan the PATCHED artifact on main (an actionable HIGH surviving the
 # upgrade fails; a base-ref-only CVE the upgrade clears does not — same
-# rationale as #981/#982). The app JS closure (the embedded `.next` tree) is
-# NOT reproduced here; this stage ships no `node_modules` at all (that is the
-# whole point of the mode), so there is no separate JS-dependency CVE surface
-# the way there is for the docs/bun-exec images.
+# rationale as #981/#982).
+#
+# WHAT THIS LEG DOES NOT COVER (round 3 correction): this is the OS layer ONLY,
+# and it is the same OS layer `apps/docs/Dockerfile.trivyscan` already scans
+# (same base digest, same `apk` line) — it adds lockstep, not new coverage.
+# The stage ships no `node_modules`, but it DOES ship a JS-dependency surface:
+# `next`, `react` and the rest of the app's server closure are embedded inside
+# the compiled executable, where Trivy cannot see them (no manifest or lockfile
+# on disk). Scanning that embedded closure is tracked in #1525.
 FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
 
 RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc

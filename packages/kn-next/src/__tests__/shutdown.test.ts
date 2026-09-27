@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import {
     clearShutdownDrains,
+    graceCapWarning,
     gracefulShutdown,
     registerShutdownDrain,
 } from "../adapters/shutdown";
@@ -187,5 +188,94 @@ describe("gracefulShutdown — DB drain on SIGTERM (PGS-1)", () => {
         child.emitExit();
         await new Promise((r) => setTimeout(r, 0));
         expect(exit).toHaveBeenCalledWith(0);
+    });
+});
+// The grace cap used to exit 0 with no log at all, so a pod that dropped
+// in-flight work looked exactly like a clean drain. It still exits 0 (parity
+// with the self-contained supervisor), but now says what it abandoned.
+describe("gracefulShutdown — the grace cap is loud, not silent", () => {
+    function capturingTimer() {
+        let fire: (() => void) | undefined;
+        return {
+            setTimeoutFn: (fn: () => void, _ms: number) => {
+                fire = fn;
+                return undefined;
+            },
+            fire: () => fire?.(),
+        };
+    }
+
+    it("warns that in-flight requests are being dropped when the child never drained, then exits 0", () => {
+        const child = makeChild();
+        const exit = mock();
+        const warn = mock();
+        const t = capturingTimer();
+        gracefulShutdown("SIGTERM", {
+            child,
+            closables: [],
+            graceMs: 25_000,
+            exit,
+            warn,
+            setTimeoutFn: t.setTimeoutFn,
+        });
+        t.fire();
+        expect(warn).toHaveBeenCalledTimes(1);
+        const msg = String(warn.mock.calls[0][0]);
+        expect(msg).toContain("SHUTDOWN_GRACE_MS=25000ms");
+        expect(msg).toContain("after SIGTERM");
+        expect(msg).toMatch(
+            /DROPPING an unknown number of in-flight request\(s\)/,
+        );
+        expect(exit).toHaveBeenCalledWith(0);
+    });
+
+    it("names the unfinished drain hooks when the child drained but a hook hung", () => {
+        registerShutdownDrain(() => new Promise<void>(() => {}));
+        const child = makeChild();
+        const exit = mock();
+        const warn = mock();
+        const t = capturingTimer();
+        gracefulShutdown("SIGTERM", {
+            child,
+            closables: [],
+            graceMs: 5_000,
+            exit,
+            warn,
+            setTimeoutFn: t.setTimeoutFn,
+        });
+        child.emitExit();
+        t.fire();
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0][0])).toMatch(
+            /the 1 registered shutdown drain hook\(s\) all finished/,
+        );
+        expect(exit).toHaveBeenCalledWith(0);
+    });
+
+    it("is quiet when the drain finished before the cap", () => {
+        const child = makeChild();
+        const warn = mock();
+        const t = capturingTimer();
+        gracefulShutdown("SIGTERM", {
+            child,
+            closables: [],
+            graceMs: 5_000,
+            exit: mock(),
+            warn,
+            setTimeoutFn: t.setTimeoutFn,
+        });
+        child.emitExit();
+        t.fire();
+        expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("graceCapWarning distinguishes the two cases", () => {
+        const base = { signal: "SIGINT", graceMs: 1000, pendingDrains: 2 };
+        expect(graceCapWarning({ ...base, childExited: false })).toContain(
+            "in-flight request(s)",
+        );
+        expect(graceCapWarning({ ...base, childExited: true })).toContain(
+            "the 2 registered shutdown drain hook(s)",
+        );
     });
 });

@@ -58,6 +58,19 @@ let workDir = "";
 let appPort = 0;
 let metricsPort = 0;
 
+// Round 3 (R2-B1/B2): the drain legs must tell a clean drain apart from the
+// hardcap backstop. Both exit 0, so the exit code alone cannot. The containers
+// run with a grace window far longer than the bound the test allows, so a
+// shutdown that only ends because the hardcap fired takes ~120 s and fails the
+// bound (and `docker wait`'s own timeout) instead of passing.
+const SHUTDOWN_GRACE_MS = 120_000;
+/** A clean drain must finish this soon after SIGTERM. */
+const DRAIN_BOUND_MS = 15_000;
+/** How long the fixture's after() callback keeps working after the response. */
+const AFTER_MS = 2_000;
+/** Logged by the supervisor only when the hardcap fires. */
+const HARDCAP_LOG = "shutdown hardcap reached";
+
 function run(
     cmd: string,
     args: string[],
@@ -117,6 +130,71 @@ async function waitForHealth(container: string, port: number) {
         }
         await new Promise((r) => setTimeout(r, 250));
     }
+}
+
+/**
+ * Put a slow request in flight, SIGTERM the container, and require a CLEAN
+ * drain: the in-flight response completes, the after() callback finishes its
+ * ~2 s of post-response async work (both markers logged), the container exits
+ * 0 within DRAIN_BOUND_MS of the signal (far under SHUTDOWN_GRACE_MS, so the
+ * hardcap cannot be what ended it), and the hardcap warning never appears.
+ */
+async function assertCleanDrain(container: string, port: number) {
+    const reqId = randomBytes(3).toString("hex");
+    const inFlight = fetch(
+        `http://127.0.0.1:${port}/api/slow?ms=4000&afterMs=${AFTER_MS}&id=${reqId}`,
+    );
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const termAt = Date.now();
+    const killed = run("docker", ["kill", "--signal=TERM", container], {
+        timeout: 60_000,
+    });
+    expect(killed.status, `docker kill failed:\n${killed.stderr}`).toBe(0);
+
+    const res = await inFlight;
+    expect(res.status, "the in-flight request was dropped by the drain").toBe(
+        200,
+    );
+    expect(await res.json()).toEqual({ ok: true, sleptMs: 4000, id: reqId });
+
+    // Well under SHUTDOWN_GRACE_MS: a hardcap exit times this out (non-zero).
+    const waited = run("docker", ["wait", container], {
+        timeout: DRAIN_BOUND_MS * 2,
+    });
+    const elapsedMs = Date.now() - termAt;
+    const logs = run("docker", ["logs", container], { timeout: 60_000 });
+    const out = `${logs.stdout}\n${logs.stderr}`;
+    expect(
+        waited.status,
+        `docker wait did not return within ${DRAIN_BOUND_MS * 2} ms of SIGTERM (a hardcap exit takes ${SHUTDOWN_GRACE_MS} ms):\n${waited.stderr}\n${out}`,
+    ).toBe(0);
+    expect(
+        waited.stdout.trim(),
+        `the container did not exit 0 on SIGTERM:\n${out}`,
+    ).toBe("0");
+    expect(
+        elapsedMs,
+        `exit took ${elapsedMs} ms after SIGTERM; a clean drain finishes well inside ${DRAIN_BOUND_MS} ms`,
+    ).toBeLessThan(DRAIN_BOUND_MS);
+    // The after() work (2 s after a response that lands ~3 s after TERM) has
+    // to have held the process up; an exit that skipped it would be faster.
+    expect(elapsedMs).toBeGreaterThanOrEqual(AFTER_MS);
+
+    const start = out.indexOf(`AFTER_SENTINEL_START:${reqId}`);
+    const done = out.indexOf(`AFTER_SENTINEL_RAN:${reqId}`);
+    expect(
+        start,
+        `the after() callback never started:\n${out}`,
+    ).toBeGreaterThan(-1);
+    expect(
+        done,
+        `the after() callback started but its post-response work never finished before exit:\n${out}`,
+    ).toBeGreaterThan(start);
+    expect(
+        out,
+        "the hardcap fired: the drain did not finish on its own",
+    ).not.toContain(HARDCAP_LOG);
 }
 
 beforeAll(async () => {
@@ -252,6 +330,8 @@ beforeAll(async () => {
             `${appPort}:3000`,
             "--publish",
             `${metricsPort}:9464`,
+            "--env",
+            `SHUTDOWN_GRACE_MS=${SHUTDOWN_GRACE_MS}`,
             IMAGE,
         ],
         { timeout: 120_000 },
@@ -383,6 +463,8 @@ describe("the image boots under the operator's exact forced command (B2, #1457 r
                 PLATFORM,
                 "--publish",
                 `${operatorPort}:3000`,
+                "--env",
+                `SHUTDOWN_GRACE_MS=${SHUTDOWN_GRACE_MS}`,
                 IMAGE,
                 "bun",
                 "run",
@@ -402,6 +484,17 @@ describe("the image boots under the operator's exact forced command (B2, #1457 r
             target: "standalone",
         });
     }, 150_000);
+
+    // Round 3 (R2-B2): under this command PID 1 is the `/app/server.js` shim,
+    // which must relay SIGTERM to the compiled executable that owns the
+    // drain. This is the path `knext deploy` runs today, so it gets the same
+    // clean-drain proof as the default ENTRYPOINT below.
+    it("under `bun run server.js`: SIGTERM drains the in-flight request, finishes after(), and exits 0 well before the hardcap", async () => {
+        expect(operatorPort, "the boot leg above did not run").toBeGreaterThan(
+            0,
+        );
+        await assertCleanDrain(OPERATOR_CONTAINER, operatorPort);
+    }, 120_000);
 });
 
 describe("the folded supervisor's :9464 metrics endpoint (N2 fold decision)", () => {
@@ -416,57 +509,20 @@ describe("the folded supervisor's :9464 metrics endpoint (N2 fold decision)", ()
 
 // SIGTERM drain — MUST BE LAST: it terminates the container.
 //
-// B1 round-2 fix (#1519): round 1 set `NEXT_MANUAL_SIG_HANDLE=1` so THIS
-// preload's own close+exit path was the sole SIGTERM owner, which raced away
-// Next's own `after()` drain — proven only by source reading (next@16.3.5
-// `start-server.js`'s `cleanup()`), because this suite only asserted the HTTP
-// response + exit code, never the after() side effect. Round 2 lets Next's
-// own handler run (it awaits `nextServer.close()`, which drains `after()`
-// via `cleanupListeners.runAll()`) and normalizes ITS exit code instead. The
-// fixture route already registers an `after()` callback that logs
-// `AFTER_SENTINEL_RAN:<id>` (see `fixtures/standalone-drain-app/app/api/slow/route.ts`,
-// reused unmodified from the disk-mode sibling `standalone-drain.docker-e2e.test.ts`),
-// so this test now also asserts that marker reached stdout — the exact
-// observable the round-1 defect would have failed.
+// B1 (#1519): round 1 set `NEXT_MANUAL_SIG_HANDLE=1`, so this preload's own
+// close+exit path was the only SIGTERM owner and it raced away Next's own
+// `after()` drain. Round 2 lets Next's handler run (it awaits
+// `nextServer.close()`, which drains `after()` work) and normalises its exit
+// code instead.
+//
+// Round 3: round 2's version of this test could not tell that fix from the
+// defect. Its after() callback was synchronous (the marker printed the moment
+// the response finished) and the container ran with the default 25 s hardcap,
+// which also exits 0 inside `docker wait`'s window. `assertCleanDrain` now
+// uses an after() that keeps working ~2 s past the response, a 120 s grace
+// window, and a 15 s bound, so only a clean drain passes.
 describe("SIGTERM drains in-flight work, runs after(), and exits 0, folded into the ONE process", () => {
-    it("completes an in-flight request across TERM, runs its after() callback, and exits 0", async () => {
-        const reqId = randomBytes(3).toString("hex");
-        const inFlight = fetch(
-            `http://127.0.0.1:${appPort}/api/slow?ms=4000&id=${reqId}`,
-        );
-        await new Promise((r) => setTimeout(r, 1000));
-
-        const killed = run("docker", ["kill", "--signal=TERM", CONTAINER], {
-            timeout: 60_000,
-        });
-        expect(killed.status, `docker kill failed:\n${killed.stderr}`).toBe(0);
-
-        const res = await inFlight;
-        expect(
-            res.status,
-            "the in-flight request was dropped by the drain",
-        ).toBe(200);
-        expect(await res.json()).toEqual({
-            ok: true,
-            sleptMs: 4000,
-            id: reqId,
-        });
-
-        const waited = run("docker", ["wait", CONTAINER], { timeout: 40_000 });
-        expect(waited.status, `docker wait failed:\n${waited.stderr}`).toBe(0);
-        expect(
-            waited.stdout.trim(),
-            "the folded drain handler did not exit 0 on SIGTERM",
-        ).toBe("0");
-
-        // B1: the after() callback registered by /api/slow must have RUN
-        // during the drain, not been dropped when Next's own handler raced
-        // (or was disabled by) this preload's exit.
-        const logs = run("docker", ["logs", CONTAINER], { timeout: 60_000 });
-        const out = `${logs.stdout}\n${logs.stderr}`;
-        expect(
-            out,
-            "the after() callback did not run during the folded-process drain",
-        ).toContain(`AFTER_SENTINEL_RAN:${reqId}`);
-    }, 90_000);
+    it("default ENTRYPOINT: completes an in-flight request, finishes after(), and exits 0 well before the hardcap", async () => {
+        await assertCleanDrain(CONTAINER, appPort);
+    }, 120_000);
 });

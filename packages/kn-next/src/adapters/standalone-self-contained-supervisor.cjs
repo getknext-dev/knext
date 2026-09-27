@@ -172,6 +172,29 @@ function installExitNormalizer(opts = {}) {
 }
 
 /**
+ * The warning the hardcap BACKSTOP logs when it fires (round-3, "loud
+ * hardcap"). Before round 3 the cap exited 0 silently, so a pod whose drain
+ * never finished looked exactly like a clean drain — the in-flight requests it
+ * dropped were invisible. Exit code stays 0 (parity with disk mode's
+ * `shutdown.ts` grace cap, which also exits 0); the log line is what makes the
+ * dropped work observable.
+ *
+ * @param {number} graceMs
+ * @param {number | undefined} inFlight requests still open when the cap fired
+ *   (`undefined` when the caller cannot count them)
+ * @returns {string}
+ */
+function hardcapWarning(graceMs, inFlight) {
+  const dropped =
+    typeof inFlight === 'number' ? `${inFlight}` : 'an unknown number of';
+  return (
+    `[knext] shutdown hardcap reached: SHUTDOWN_GRACE_MS=${graceMs}ms elapsed after the stop signal ` +
+    `before the server finished draining — forcing exit and DROPPING ${dropped} in-flight request(s). ` +
+    'Raise SHUTDOWN_GRACE_MS (keep it below the pod termination grace period) or find the request or after() callback that never finishes.'
+  );
+}
+
+/**
  * Install the SIGTERM/SIGINT drain handler. Deliberately does NOT call
  * `appServer.close()` itself (round-2 fix, B1): Next's own SIGTERM handler —
  * which now runs, because this preload no longer sets
@@ -189,7 +212,12 @@ function installExitNormalizer(opts = {}) {
  *      termination past `terminationGracePeriodSeconds`.
  *
  * @param {{ close: (cb: () => void) => void, closeAllConnections?: () => void }} appServer
- * @param {{ env?: Record<string, string | undefined>, metricsServer?: { close: () => void }, exit?: (code: number) => void, on?: typeof process.on, armExitNormalizer?: () => void }} [opts]
+ * The hardcap path logs `hardcapWarning(...)` via `opts.warn` (default
+ * `console.warn`, i.e. stderr) with the count `opts.inFlight()` reports at the
+ * moment the cap fires — read BEFORE `closeAllConnections()` so the number is
+ * what was actually dropped.
+ *
+ * @param {{ env?: Record<string, string | undefined>, metricsServer?: { close: () => void }, exit?: (code: number) => void, on?: typeof process.on, armExitNormalizer?: () => void, inFlight?: () => number, warn?: (msg: string) => void }} [opts]
  * @returns {{ isDraining: () => boolean }}
  */
 function installDrainHandler(appServer, opts = {}) {
@@ -197,6 +225,12 @@ function installDrainHandler(appServer, opts = {}) {
   const exit = opts.exit ?? ((code) => process.exit(code));
   const on = opts.on ?? process.on.bind(process);
   const armExitNormalizer = opts.armExitNormalizer ?? (() => {});
+  const warn =
+    opts.warn ??
+    ((msg) => {
+      // biome-ignore lint/suspicious/noConsole: dependency-free preload, no pino/logger available
+      console.warn(msg);
+    });
   let draining = false;
   let timer;
 
@@ -209,14 +243,20 @@ function installDrainHandler(appServer, opts = {}) {
     } catch {
       // metrics shutdown must never block the app drain
     }
+    const graceMs = drainHardcapMs(env);
     timer = setTimeout(() => {
+      try {
+        warn(hardcapWarning(graceMs, opts.inFlight ? opts.inFlight() : undefined));
+      } catch {
+        // a failing logger must never block the backstop exit below
+      }
       try {
         appServer.closeAllConnections?.();
       } catch {
         // best-effort; the exit below is the real backstop
       }
       exit(0);
-    }, drainHardcapMs(env));
+    }, graceMs);
     // `timer.unref()` — if this is Node's Timer — so an already-idle process
     // is free to exit as soon as Next's own handler finishes, rather than
     // waiting the full hardcap for a timer nothing else needs.
@@ -234,11 +274,16 @@ function installDrainHandler(appServer, opts = {}) {
  * drain handler + starts the metrics server. Idempotent; a second require of
  * this same module (bundlers can do that) is a no-op.
  *
- * @param {{ http?: typeof import('node:http'), env?: Record<string, string | undefined>, process?: NodeJS.Process }} [opts]
+ * Also counts in-flight requests on that server (a second `'request'`
+ * listener; Next's own handler is untouched) so the hardcap warning can name
+ * how many it dropped.
+ *
+ * @param {{ http?: typeof import('node:http'), env?: Record<string, string | undefined>, process?: NodeJS.Process, warn?: (msg: string) => void }} [opts]
  */
 function install(opts = {}) {
   const http = opts.http ?? require('node:http');
-  const exitState = installExitNormalizer({ process: opts.process });
+  const proc = opts.process ?? process;
+  const exitState = installExitNormalizer({ process: proc });
   if (http[INSTALLED]) return;
   http[INSTALLED] = true;
   const originalCreateServer = http.createServer;
@@ -246,6 +291,20 @@ function install(opts = {}) {
     const server = originalCreateServer.apply(this, args);
     if (!http[SERVER_REF]) {
       http[SERVER_REF] = server;
+      const inFlight = { count: 0 };
+      if (typeof server.on === 'function') {
+        server.on('request', (_req, res) => {
+          inFlight.count += 1;
+          let settled = false;
+          const settle = () => {
+            if (settled) return;
+            settled = true;
+            inFlight.count -= 1;
+          };
+          res?.once?.('finish', settle);
+          res?.once?.('close', settle);
+        });
+      }
       let drain;
       const metrics = startMetricsServer({
         env: opts.env,
@@ -255,6 +314,10 @@ function install(opts = {}) {
       drain = installDrainHandler(server, {
         env: opts.env,
         metricsServer: metrics,
+        on: proc.on.bind(proc),
+        exit: (code) => proc.exit(code),
+        inFlight: () => inFlight.count,
+        warn: opts.warn,
         armExitNormalizer: () => {
           exitState.normalize = true;
         },
@@ -288,6 +351,7 @@ install();
 
 module.exports = {
   drainHardcapMs,
+  hardcapWarning,
   metricsPort,
   metricsBody,
   startMetricsServer,
