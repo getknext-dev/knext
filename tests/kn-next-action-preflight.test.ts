@@ -35,7 +35,22 @@ afterEach(() => {
 function fakeKubectlDir(): string {
   const dir = tempDir('knext-preflight-bin-');
   const bin = join(dir, 'kubectl');
-  writeFileSync(bin, '#!/bin/sh\necho \'{"status":{"resourceRules":[]}}\'\n');
+  // Must answer the form the fix actually invokes (`create --raw <path> -f -`),
+  // not the pre-#1500 `create -o json -f -` shape.
+  writeFileSync(
+    bin,
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then',
+      '  cat >/dev/null',
+      '  echo \'{"status":{"resourceRules":[]}}\'',
+      '  exit 0',
+      'fi',
+      'echo "kubectl-stub: unrecognized invocation: $*" >&2',
+      'exit 1',
+      '',
+    ].join('\n'),
+  );
   chmodSync(bin, 0o755);
   return dir;
 }
@@ -148,24 +163,31 @@ describe('kn-next-action preflight resolves @getknext/core from the app', () => 
  *
  * `-o`/`--output` has never been a flag `kubectl auth can-i` accepts, on ANY
  * kubectl release — verified locally (client v1.33.3) and live against the
- * real OKE cluster (`kubectl --context knext-oke-sa auth can-i --list -n
- * default -o json` reproduces the identical error), and the runner's own
- * kubectl (ubuntu-latest/24.04 image 20260920.314.1 ships kubectl 1.37.0) has
- * the same `--help` output with no `-o`. So this was never a version-skew
- * bug; it could not have worked anywhere. The fix stops depending on that
- * subcommand's output format at all: it submits the `SelfSubjectRulesReview`
- * directly via `kubectl create -o json -f -`, a form `create` has supported
- * `-o json` on since the flag has existed — verified against the same live
- * cluster (`echo '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"default"}}' | kubectl --context knext-oke-sa create -o json -f -`
- * returns a populated `.status.resourceRules`).
+ * real OKE cluster. The fix landed as `kubectl create -o json -f -`.
+ *
+ * #1500 — the SECOND real docs deploy (run 36303738838) then failed with a
+ * different error, because the scoped `knext-deployer` ServiceAccount is not
+ * the admin credential #1493 was verified with:
+ *
+ *   error validating "STDIN": error validating data: failed to check CRD:
+ *   failed to list CRDs: customresourcedefinitions.apiextensions.k8s.io is
+ *   forbidden: User "system:serviceaccount:knext-docs:knext-deployer" cannot
+ *   list resource "customresourcedefinitions" in API group
+ *   "apiextensions.k8s.io" at the cluster scope
+ *
+ * `kubectl create` (without `--raw`) does client-side schema validation
+ * before submitting, and that validation itself lists CRDs — a permission
+ * the scoped SA was never granted, by design. The fix submits the review as
+ * a raw POST instead — `kubectl create --raw <path> -f -` — which talks to
+ * the apiserver directly with no client-side validation at all. Verified
+ * live against OKE with the actual `knext-deployer` ServiceAccount token
+ * (scoped: passes) and with the cluster-admin context (broad: still
+ * refused, on the wildcard grant, not on a permissions error from the
+ * review itself).
  */
-describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, not `auth can-i --list -o json`', () => {
-  /**
-   * A stub that answers the way a REAL cluster's kubectl does: it rejects `-o`
-   * on `auth can-i` (reproducing the exact runner failure) but answers the
-   * `create -o json -f -` form the fix actually uses. `createExit`/`createStdout`/
-   * `createStderr` let each case control what that second form returns.
-   */
+describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -`, not client-side-validated `create -o json -f -`', () => {
+  const RAW_PATH = '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews';
+
   /**
    * The file this stub writes into `dir` carries the SelfSubjectRulesReview
    * body the preflight piped on stdin to `kubectl create` — so a test can
@@ -175,38 +197,63 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
     return join(dir, 'create-input.json');
   }
 
+  /**
+   * A stub that answers the way a REAL cluster's kubectl does for a SCOPED
+   * credential: `create --raw <path> -f -` succeeds (no client-side
+   * validation to trip over), but the pre-#1500 `create -o json -f -` form
+   * reproduces the exact CRD-list-forbidden error from the live incident —
+   * so any regression back to that form is caught by this stub returning a
+   * refusal, not by a separate assertion.
+   */
   function stubKubectl(opts: {
-    createExit?: number;
-    createStdout?: string;
-    createStderr?: string;
+    rawExit?: number;
+    rawStdout?: string;
+    rawStderr?: string;
+    /** Simulate a kubectl release that doesn't understand `--raw` at all. */
+    rawFlagUnknown?: boolean;
+    /** What the FALLBACK form (`create -o json --validate=false -f -`) returns, when reached. */
+    fallbackStdout?: string;
+    fallbackExit?: number;
   }): string {
-    const dir = tempDir('knext-preflight-1493-bin-');
+    const dir = tempDir('knext-preflight-1500-bin-');
     const bin = join(dir, 'kubectl');
     const captureFile = capturedReviewPath(dir);
-    const createExit = opts.createExit ?? 0;
+    const rawExit = opts.rawExit ?? 0;
+    const fallbackExit = opts.fallbackExit ?? 0;
     const esc = (s: string) => s.replace(/'/g, `'\\''`);
     const script = [
       '#!/bin/sh',
-      '# reproduces the real #1493 runner failure for the OLD command shape',
-      'if [ "$1" = "auth" ] && [ "$2" = "can-i" ]; then',
-      '  echo "error: unknown shorthand flag: \'o\' in -o" >&2',
-      '  echo "See \'kubectl auth can-i --help\' for usage." >&2',
+      '# The OLD, client-side-validated form — reproduces the real #1500 runner',
+      '# failure verbatim. Any mutation that reverts to this shape, or drops',
+      "# '--raw' so the argv no longer matches the raw form below, lands HERE.",
+      `if [ "$1" = "create" ] && [ "$2" = "-o" ] && [ "$3" = "json" ] && [ "$4" = "-f" ] && [ "$5" = "-" ] && [ "$#" -eq 5 ]; then`,
+      '  cat >/dev/null',
+      '  echo "error validating \\"STDIN\\": error validating data: failed to check CRD: failed to list CRDs: customresourcedefinitions.apiextensions.k8s.io is forbidden: User \\"system:serviceaccount:knext-docs:knext-deployer\\" cannot list resource \\"customresourcedefinitions\\" in API group \\"apiextensions.k8s.io\\" at the cluster scope" >&2',
       '  exit 1',
       'fi',
-      '# the form the fix actually invokes — enforce the exact flags so a',
-      "# mutation that drops or reorders '-o json' fails HERE, not on a live",
-      '# cluster (a bare `create -f -` defaults to human-readable output, which',
-      '# `JSON.parse` in preflight.mjs would then throw on, fail-closed but for',
-      '# the wrong reason and on every cluster, not just a misbehaving one).',
-      'if [ "$1" = "create" ]; then',
-      '  if [ "$#" -ne 5 ] || [ "$2" != "-o" ] || [ "$3" != "json" ] || [ "$4" != "-f" ] || [ "$5" != "-" ]; then',
-      '    echo "kubectl-stub: create must be invoked as \\`create -o json -f -\\`, got: $*" >&2',
-      '    exit 1',
-      '  fi',
-      `  cat > '${captureFile}'`, // capture the piped review body instead of draining it
-      opts.createStderr ? `  echo '${esc(opts.createStderr)}' >&2` : '  :',
-      opts.createStdout ? `  echo '${esc(opts.createStdout)}'` : '  :',
-      `  exit ${createExit}`,
+      opts.rawFlagUnknown
+        ? [
+            `if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then`,
+            '  echo "error: unknown flag: --raw" >&2',
+            '  exit 1',
+            'fi',
+          ].join('\n')
+        : [
+            `# the raw form the fix invokes — enforce the exact flags so a mutation`,
+            `# that drops '--raw', reorders args, or points at the wrong path fails`,
+            `# HERE, not on a live cluster.`,
+            `if [ "$1" = "create" ] && [ "$2" = "--raw" ] && [ "$3" = "${RAW_PATH}" ] && [ "$4" = "-f" ] && [ "$5" = "-" ] && [ "$#" -eq 5 ]; then`,
+            `  cat > '${captureFile}'`,
+            opts.rawStderr ? `  echo '${esc(opts.rawStderr)}' >&2` : '  :',
+            opts.rawStdout ? `  echo '${esc(opts.rawStdout)}'` : '  :',
+            `  exit ${rawExit}`,
+            'fi',
+          ].join('\n'),
+      '# the explicit-fallback form, reached only when --raw itself is unknown',
+      `if [ "$1" = "create" ] && [ "$2" = "-o" ] && [ "$3" = "json" ] && [ "$4" = "--validate=false" ] && [ "$5" = "-f" ] && [ "$6" = "-" ] && [ "$#" -eq 6 ]; then`,
+      `  cat > '${captureFile}'`,
+      opts.fallbackStdout ? `  echo '${esc(opts.fallbackStdout)}'` : '  :',
+      `  exit ${fallbackExit}`,
       'fi',
       'echo "kubectl-stub: unrecognized invocation: $*" >&2',
       'exit 1',
@@ -219,7 +266,7 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
 
   /** An app dir whose stub classifier refuses any rule set carrying a wildcard grant. */
   function appWithWildcardAwareCore(): string {
-    const app = tempDir('knext-preflight-1493-app-');
+    const app = tempDir('knext-preflight-1500-app-');
     writeFileSync(join(app, 'package.json'), '{"name":"app","private":true}\n');
     const core = join(app, 'node_modules/@getknext/core');
     mkdirSync(core, { recursive: true });
@@ -270,8 +317,8 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
     status: { resourceRules: [{ apiGroups: ['*'], resources: ['*'], verbs: ['*'] }] },
   });
 
-  it('(a) kubectl rejects `-o` for `auth can-i` but answers `create -o json -f -` with scoped rules → PASSES', () => {
-    const r = run(appWithWildcardAwareCore(), stubKubectl({ createStdout: SCOPED_REVIEW }));
+  it('(a) kubectl answers `create --raw <path> -f -` with scoped rules → PASSES, and the old form is not what was called', () => {
+    const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: SCOPED_REVIEW }));
     expect(r.stderr).not.toContain('Could not determine what this credential can do');
     expect(r.stdout).toContain('correctly scoped');
     expect(r.status).toBe(0);
@@ -282,7 +329,7 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
     // actually received carries THAT namespace, not a literal like "default". Without
     // this, hardcoding `spec: { namespace: 'default' }` in preflight.mjs stays green:
     // every other test here happens to pass with the wrong namespace evaluated.
-    const kubectlDir = stubKubectl({ createStdout: SCOPED_REVIEW });
+    const kubectlDir = stubKubectl({ rawStdout: SCOPED_REVIEW });
     const r = run(appWithWildcardAwareCore(), kubectlDir);
     expect(r.status).toBe(0);
     const captured = JSON.parse(readFileSync(capturedReviewPath(kubectlDir), 'utf8'));
@@ -294,18 +341,18 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
   });
 
   it('(b) the review reports a wildcard rule → REFUSED, the same refusal message as before', () => {
-    const r = run(appWithWildcardAwareCore(), stubKubectl({ createStdout: WILDCARD_REVIEW }));
+    const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: WILDCARD_REVIEW }));
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('This kubeconfig grants more than knext needs. Refusing to use it.');
     expect(r.stderr).toContain('wildcard grant');
   });
 
-  it('(c) `kubectl create` itself fails → refused, fail CLOSED (never a silent pass)', () => {
+  it('(c) `kubectl create --raw` itself fails → refused, fail CLOSED (never a silent pass)', () => {
     const r = run(
       appWithWildcardAwareCore(),
       stubKubectl({
-        createExit: 1,
-        createStderr: 'error: the server could not find the requested resource',
+        rawExit: 1,
+        rawStderr: 'error: the server could not find the requested resource',
       }),
     );
     expect(r.status).toBe(1);
@@ -313,15 +360,15 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
     expect(r.stderr).toContain('the server could not find the requested resource');
   });
 
-  it('(d) kubectl has NEITHER working form (no `auth can-i -o`, no `create -o json -f -`) → refused, message names the cause', () => {
-    const dir = tempDir('knext-preflight-1493-bin-d-');
+  it('(d) kubectl has NEITHER working form (no `--raw`, no fallback) → refused, message names the cause', () => {
+    const dir = tempDir('knext-preflight-1500-bin-d-');
     const bin = join(dir, 'kubectl');
     writeFileSync(
       bin,
       [
         '#!/bin/sh',
-        'if [ "$1" = "auth" ] && [ "$2" = "can-i" ]; then',
-        '  echo "error: unknown shorthand flag: \'o\' in -o" >&2',
+        'if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then',
+        '  echo "error: unknown flag: --raw" >&2',
         '  exit 1',
         'fi',
         'echo "error: unknown command \\"create\\" for \\"kubectl\\"" >&2',
@@ -340,19 +387,68 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
     // Guards the fail-closed shape itself: a classifier fed `[]` reports
     // ok:true (nothing to complain about), so defaulting a missing `status` to
     // an empty rule set would turn "the cluster didn't answer" into a PASS.
-    const r = run(appWithWildcardAwareCore(), stubKubectl({ createStdout: '{}' }));
+    const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: '{}' }));
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('Could not determine what this credential can do');
   });
 
-  it('never depends on `kubectl auth can-i` succeeding at all (regression guard for the actual #1493 bug)', () => {
+  it('never depends on the client-side-validated `create -o json -f -` form succeeding (regression guard for #1500)', () => {
+    // If preflight.mjs regresses to submitting the old form, THIS stub reproduces the
+    // literal CRD-list-forbidden error from the live incident — the same string a mutation
+    // test would need to see fail. So a revert is caught by this test going red, not by a
+    // bespoke assertion elsewhere.
+    const kubectlDir = stubKubectl({ rawStdout: SCOPED_REVIEW });
+    const r = run(appWithWildcardAwareCore(), kubectlDir);
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain('customresourcedefinitions.apiextensions.k8s.io is forbidden');
+  });
+
+  it('the OLD `create -o json -f -` form, if invoked, reproduces the exact #1500 CRD-forbidden error', () => {
+    // Documents what the stub's old-form branch actually returns, independent of whether
+    // preflight.mjs calls it — pins the fixture itself against silent drift.
+    const kubectlDir = stubKubectl({ rawStdout: SCOPED_REVIEW });
+    const bin = join(kubectlDir, 'kubectl');
+    const direct = spawnSync(bin, ['create', '-o', 'json', '-f', '-'], {
+      input: '{}',
+      encoding: 'utf8',
+    });
+    expect(direct.status).toBe(1);
+    expect(direct.stderr).toContain('customresourcedefinitions.apiextensions.k8s.io is forbidden');
+  });
+
+  it('falls back, loudly, to `create -o json --validate=false -f -` only when `--raw` is unrecognized', () => {
+    const kubectlDir = stubKubectl({ rawFlagUnknown: true, fallbackStdout: SCOPED_REVIEW });
+    const r = run(appWithWildcardAwareCore(), kubectlDir);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('correctly scoped');
+    expect(r.stderr).toContain('::warning::');
+    expect(r.stderr).toContain('does not recognize');
+    const captured = JSON.parse(readFileSync(capturedReviewPath(kubectlDir), 'utf8'));
+    expect(captured).toEqual({
+      apiVersion: 'authorization.k8s.io/v1',
+      kind: 'SelfSubjectRulesReview',
+      spec: { namespace: 'knext-docs' },
+    });
+  });
+
+  it('does NOT fall back when `--raw` fails for a real (non-flag) reason — no silent retry into a different request', () => {
+    const r = run(
+      appWithWildcardAwareCore(),
+      stubKubectl({ rawExit: 1, rawStderr: 'Error from server (Forbidden): ...' }),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('Could not determine what this credential can do');
+    expect(r.stderr).not.toContain('does not recognize');
+  });
+
+  it('never depends on `kubectl auth can-i` succeeding at all (regression guard for the original #1493 bug)', () => {
     const dir = tempDir('knext-preflight-1493-bin-e-');
     const bin = join(dir, 'kubectl');
     writeFileSync(
       bin,
       [
         '#!/bin/sh',
-        'if [ "$1" = "create" ]; then',
+        'if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then',
         '  cat >/dev/null',
         `  echo '${SCOPED_REVIEW}'`,
         '  exit 0',
@@ -379,7 +475,7 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
         evaluationError: 'webhook authorizer does not support user rule resolution',
       },
     });
-    const r = run(appWithWildcardAwareCore(), stubKubectl({ createStdout: INCOMPLETE_REVIEW }));
+    const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: INCOMPLETE_REVIEW }));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('correctly scoped');
     expect(r.stderr).toContain('::warning::');

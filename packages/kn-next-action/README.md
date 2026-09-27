@@ -54,7 +54,9 @@ warning if you see it.
 
 This check does not depend on the `kubectl` version your runner happens to ship — it asks the
 cluster directly rather than parsing a command's table output, so it behaves the same on
-`ubuntu-latest` as it does on your laptop.
+`ubuntu-latest` as it does on your laptop. It submits that question as a raw POST to the apiserver,
+with no client-side validation, so it works with the scoped credential this action expects and not
+only with a cluster-admin one.
 
 ## Inputs
 
