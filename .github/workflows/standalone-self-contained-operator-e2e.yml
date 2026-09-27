@@ -129,6 +129,12 @@ jobs:
           npm pkg set scripts.build="next build --webpack"
           grep -q '"build": "next build --webpack"' package.json
           bun install
+          # Dockerfile.standalone's `standalone-bun-self-contained` stage COPYs
+          # `public` from the build context unconditionally (same as its
+          # disk-mode siblings, `standalone-deploy-kind-e2e.yml:156`) — the drain
+          # fixture ships no `public/` (it is a minimal SIGTERM-drain fixture,
+          # not a real scaffolded app), so stage an empty one here too.
+          mkdir -p public
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
 
       - name: Create kind cluster (registry certs.d config_path)
