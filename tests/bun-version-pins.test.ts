@@ -583,7 +583,10 @@ afterAll(() => {
 describe('LINE_EXEMPT_MARKER is rejected in image-selecting file classes (#1392 round 3)', () => {
   it.each([
     ['apps/docs/Dockerfile', true],
-    ['apps/docs/Dockerfile.oke', true],
+    // A synthetic Dockerfile-variant suffix, not a real path — #1488 retired
+    // the actual apps/docs/Dockerfile.oke, but the rejected-path SHAPE
+    // (basename starting with `Dockerfile`) still needs a variant-suffix case.
+    ['apps/docs/Dockerfile.variant', true],
     ['packages/kn-next/templates/app/Dockerfile.hbs', true],
     ['.github/workflows/ci.yml', true],
     ['scripts/e2e-summary.sh', true],
