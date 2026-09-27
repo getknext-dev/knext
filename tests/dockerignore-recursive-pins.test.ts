@@ -27,8 +27,8 @@ import { parse } from 'yaml';
 // #1413 review (round 1411): the earlier version of this file (a) hardcoded
 // the Dockerfile list by hand — it named `apps/docs/Dockerfile` and
 // `apps/docs/Dockerfile.oke`, NEITHER of which any workflow actually builds
-// with `context: .` (Dockerfile.oke is built manually for the OKE deploy,
-// outside CI entirely) — and (b) the COPY cross-check only looked at a
+// with `context: .` (Dockerfile.oke was built manually for the OKE deploy,
+// outside CI entirely; #1488 retired it) — and (b) the COPY cross-check only looked at a
 // source path's FIRST segment, so a nested `COPY packages/kn-next/dist ...`
 // (excluded basename in the SECOND segment) would sail through unnoticed.
 // Both are fixed: the Dockerfile list is DERIVED by parsing every workflow's
@@ -140,9 +140,10 @@ describe('.dockerignore patterns are recursion-correct (#1293)', () => {
     expect(found).toContain('apps/file-manager/Dockerfile');
     expect(found).toContain('apps/docs/Dockerfile.trivyscan');
     expect(found).toContain('examples/bun-exec/Dockerfile.node.trivyscan');
-    // Never built with context: . by any workflow — a manual/OKE-deploy
-    // artifact, not a CI-audited one. If a workflow ever DOES build it,
-    // this scan picks it up automatically; nothing to update by hand.
+    // Retired (#1488) and was never built with context: . by any workflow —
+    // a manual/OKE-deploy artifact, not a CI-audited one, even while it
+    // existed. If a workflow ever builds a same-named file again, this scan
+    // picks it up automatically; nothing to update by hand.
     expect(found).not.toContain('apps/docs/Dockerfile.oke');
   });
 
