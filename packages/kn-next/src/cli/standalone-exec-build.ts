@@ -111,6 +111,11 @@ export interface StandaloneExecBuildOptions {
     readonly bunVersion?: string;
     /** Injectable for tests: read the produced executable. */
     readonly readArtifact?: (path: string) => Uint8Array;
+    /**
+     * Opt-in self-contained mode. Accepted and recorded only — no embedding
+     * happens yet, so the compile argv is identical either way.
+     */
+    readonly selfContained?: boolean;
 }
 
 /**

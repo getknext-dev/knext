@@ -115,6 +115,18 @@ function vinextOutputSourceDirs(cwd: string): readonly string[] {
     return [join(cwd, ".output", "server"), join(cwd, ".output", "public")];
 }
 
+/**
+ * Resolve the self-contained mode: an explicit caller value (the
+ * `--self-contained` CLI flag) wins over the `selfContained` config key, which
+ * defaults to off. Opt-in only — nothing infers it.
+ */
+export function resolveSelfContained(
+    config: { selfContained?: boolean },
+    override?: boolean,
+): boolean {
+    return override ?? config.selfContained ?? false;
+}
+
 export interface CompileForDeployResult {
     /** Whether this config's target needed a compile step at all. */
     readonly compiled: boolean;
@@ -155,9 +167,14 @@ export interface CompileForDeployResult {
 export function compileArtifactForDeploy(
     config: KnativeNextConfig,
     cwd: string,
-    opts: { arch?: string } = {},
+    opts: { arch?: string; selfContained?: boolean } = {},
 ): CompileForDeployResult {
     const arch = opts.arch ?? DEPLOY_SHIP_ARCH;
+    // The single resolved value both compile paths receive, as an explicit
+    // option. Spread ONLY when on, so with the flag off each path's options
+    // are exactly the pre-flag shape.
+    const selfContained = resolveSelfContained(config, opts.selfContained);
+    const selfContainedOpt = selfContained ? { selfContained: true } : {};
     const { artifact, builder } = resolveBuildArtifact(config, cwd);
     const runtimeId = config.runtime ?? DEFAULT_RUNTIME_ID;
 
@@ -183,7 +200,11 @@ export function compileArtifactForDeploy(
                     "Check that next.config sets output: 'standalone' and that the project build ran.",
             );
         }
-        const binaryPath = buildStandaloneExecutable({ cwd, arch });
+        const binaryPath = buildStandaloneExecutable({
+            cwd,
+            arch,
+            ...selfContainedOpt,
+        });
         // #1351/#1414: stamp the exec with a hash of the WHOLE standalone
         // tree it was JUST compiled from (not just server.js — see
         // `buildStampPathFor`'s doc comment), so a later `--skip-build`
@@ -204,6 +225,7 @@ export function compileArtifactForDeploy(
             cwd,
             arch,
             skipViteBuild: true,
+            ...selfContainedOpt,
         });
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also

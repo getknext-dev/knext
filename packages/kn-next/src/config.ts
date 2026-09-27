@@ -327,6 +327,19 @@ export interface KnativeNextConfig {
      * shape the builder emits and the runtime must accept.
      */
     build?: "turbopack" | "vinext" | "webpack";
+    /**
+     * Opt in to a self-contained single executable: one binary that carries
+     * everything it needs to boot, with nothing beside it on disk. Defaults to
+     * `false` (the on-disk layout every build produces today).
+     *
+     * Overridden per build by `knext build --self-contained`.
+     *
+     * **No target honours this yet** — setting it currently changes nothing
+     * about the build output beyond being recorded in the build log. It is the
+     * switch the per-target embedding work reads; it is opt-in and stays opt-in
+     * (ADR-0060), so leaving it unset keeps the build output byte-identical.
+     */
+    selfContained?: boolean;
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
     // #417 — bring-your-own database binding (ADR-0019/ADR-0025): binds an
