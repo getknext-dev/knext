@@ -61,9 +61,12 @@ function sha256(buf) {
 function safeRel(rel) {
   const n = normalize(rel);
   if (
+    // No separate `n === '..'` disjunct: a bare '..' splits to ['..'], which
+    // `n.split(sep).includes('..')` below already matches — it was a
+    // redundant case of the same check (round-4, #1460 N3: confirmed by
+    // mutation, stayed green with it removed).
     !rel ||
     isAbsolute(rel) ||
-    n === '..' ||
     n.startsWith(`..${sep}`) ||
     n.split(sep).includes('..')
   ) {
@@ -79,7 +82,11 @@ function safeRel(rel) {
  */
 function assertPrivateDir(dir) {
   const st = lstatSync(dir);
-  if (!st.isDirectory() || st.isSymbolicLink()) {
+  // No separate `st.isSymbolicLink()` disjunct: under `lstatSync`, a symlink
+  // itself is never reported as a directory, so `!st.isDirectory()` alone
+  // already refuses it — the disjunct was unreachable dead code (round-4,
+  // #1460 N3: confirmed by mutation, stayed green with it removed).
+  if (!st.isDirectory()) {
     throw new Error(`knext: refusing to extract into ${dir} — it is not a plain directory`);
   }
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -110,14 +117,22 @@ function assertPrivateDir(dir) {
  * (`nextapp_controller.go:894-897`) — kubelet's `setupDir` creates it 0777
  * with no sticky bit (k8s 1.34 has no sticky-bit support there), and it is
  * owned by root. Refusing that base would break image optimization under the
- * operator's own default, for no real gain: the actual guard against a
- * planted sibling is the per-uid `0700` subdir this function's caller creates
- * NEXT and `assertPrivateDir()` enforces on it — not this base directory's
- * mode. This does NOT extend to a base merely owned by THIS process: without
- * the sticky bit, directory-write permission governs deletion/rename of
- * every entry regardless of who owns the directory, so a self-owned 0777
- * base is exactly as exposed to another local uid as a foreign-owned one —
- * it stays refused, same as a base owned by any other non-root uid.
+ * operator's own default, so this accepts a residual risk rather than
+ * closing it: without the sticky bit, directory-write permission — not
+ * ownership — governs rename/delete of every entry in the base, so ANY
+ * writer of a root-owned 0777 base can rename or replace the per-uid `0700`
+ * subdir `assertPrivateDir()` verifies NEXT, in the window between that
+ * verification (or the later integrity compare) and dlopen. This is not
+ * "the actual guard" in that case — it narrows who has to be hostile, it
+ * does not close the race. Accepted specifically for a kubelet `emptyDir`
+ * because the realistic writer set is limited to containers already
+ * co-resident in the same pod and mounting the same volume, not an
+ * arbitrary local user. This does NOT extend to a base merely owned by THIS
+ * process: without the sticky bit, directory-write permission governs
+ * deletion/rename of every entry regardless of who owns the directory, so a
+ * self-owned 0777 base is exactly as exposed to another local uid as a
+ * foreign-owned one — it stays refused, same as a base owned by any other
+ * non-root uid.
  *
  * `dir` is resolved through symlinks first (`realpathSync`) — `/tmp` is a
  * symlink to `/private/tmp` on macOS, and `lstatSync` on the symlink itself

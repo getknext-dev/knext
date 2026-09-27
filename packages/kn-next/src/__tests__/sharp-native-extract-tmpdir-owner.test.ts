@@ -13,6 +13,11 @@
  * including the ones this module's own real-fs helpers need — this file
  * grabs the REAL `node:fs` via `createRequire` first, the same pattern
  * `create-packageroot-fallback.test.ts` uses.
+ *
+ * round-4: also covers `assertPrivateDir`'s OWN owner check (the 0700
+ * per-uid subdir it enforces, distinct from `assertSafeBase`'s base check
+ * above) for the same reason — a real, self-owned directory can never make
+ * `st.uid !== uid` true.
  */
 import { afterAll, describe, expect, it, mock } from "bun:test";
 
@@ -33,10 +38,16 @@ function fakeStat({ uid, mode }: { uid: number; mode: number }) {
     };
 }
 
-const REAL_BASE = realFs.realpathSync(
-    realFs.mkdtempSync(join(tmpdir(), "knext-1460-owner-")),
-);
-const cleanupDirs: string[] = [REAL_BASE];
+const cleanupDirs: string[] = [];
+const REAL_BASE_RAW = realFs.mkdtempSync(join(tmpdir(), "knext-1460-owner-"));
+cleanupDirs.push(REAL_BASE_RAW);
+// Resolved separately from the mkdtemp call itself (rather than nested as
+// `realpathSync(mkdtempSync(...))`) so the repo static D9 scan in
+// tests/temp-dirs-outside-the-repo.test.ts, which credits a mkdtemp creation
+// only via a direct `rmSync(name)` or a `registry.push(name)` enrolment (an
+// array-literal initializer like `[REAL_BASE]` is neither), can see
+// REAL_BASE_RAW enrolled in cleanupDirs and drained by the afterAll below.
+const REAL_BASE = realFs.realpathSync(REAL_BASE_RAW);
 afterAll(() => {
     for (const d of cleanupDirs) {
         try {
@@ -52,14 +63,34 @@ const FOREIGN_UID = SELF_UID === 4242 ? 4243 : 4242; // anything that is neither
 let fakeBaseMode = 0o777;
 let fakeBaseUid = 0;
 
+/** Non-null only while the per-uid-subdir probe below is running. */
+let fakeSubdirUid: number | null = null;
+// The extractor's own DIR_PREFIX is not exported (sharp-native-extract.mjs is
+// dependency-free over node builtins on purpose); mirrored here as a literal
+// since it never changes independently of the string this file already reads
+// out of the thrown error message below.
+const DIR_PREFIX = "knext-native-";
+
 mock.module("node:fs", () => ({
     ...realFs,
     realpathSync: (p: string) =>
         p === REAL_BASE ? REAL_BASE : realFs.realpathSync(p),
-    lstatSync: (p: string) =>
-        p === REAL_BASE
-            ? fakeStat({ uid: fakeBaseUid, mode: fakeBaseMode })
-            : realFs.lstatSync(p),
+    lstatSync: (p: string) => {
+        if (p === REAL_BASE) {
+            return fakeStat({ uid: fakeBaseUid, mode: fakeBaseMode });
+        }
+        if (
+            fakeSubdirUid !== null &&
+            typeof p === "string" &&
+            p.startsWith(join(REAL_BASE, DIR_PREFIX))
+        ) {
+            // 0o700, never 0o777: this probe must trip ONLY assertPrivateDir's
+            // owner check, not its world-writable-mode check — otherwise a
+            // deleted owner check would still be masked by the mode branch.
+            return fakeStat({ uid: fakeSubdirUid, mode: 0o700 });
+        }
+        return realFs.lstatSync(p);
+    },
 }));
 
 const { extractEmbeddedNative } = await import(
@@ -123,5 +154,28 @@ describe("assertSafeBase ownership branches (mocked stat)", () => {
         });
         cleanupDirs.push(out.root);
         expect(out.extracted + out.reused).toBe(1);
+    });
+});
+
+describe("assertPrivateDir owner check (mocked stat)", () => {
+    it("refuses a pre-created per-uid subdir owned by some OTHER non-root uid, even under an otherwise-accepted root-owned 0777 base (proves assertPrivateDir's owner check is live, not decorative)", () => {
+        // round-4 (#1460): the base-level mock tests above prove assertSafeBase's
+        // owner branches; nothing before this proved assertPrivateDir's OWN owner
+        // check (sharp-native-extract.mjs:86) is load-bearing rather than dead —
+        // against a real, self-owned directory `st.uid !== uid` can never be true.
+        fakeBaseMode = 0o777;
+        fakeBaseUid = 0; // root-owned, world-writable, non-sticky base — accepted by assertSafeBase
+        fakeSubdirUid = FOREIGN_UID;
+        try {
+            expect(() =>
+                extractEmbeddedNative({ files: tree(), tmpRoot: REAL_BASE }),
+            ).toThrow(
+                new RegExp(
+                    `belongs to uid ${FOREIGN_UID}, not to this process`,
+                ),
+            );
+        } finally {
+            fakeSubdirUid = null;
+        }
     });
 });

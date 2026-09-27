@@ -243,6 +243,18 @@ describe("extractEmbeddedNative", () => {
         expect(out.extracted).toBe(3);
     });
 
+    it("refuses a TMPDIR base that is a real file, not a directory (round-4, #1460 N3: assertSafeBase's own plain-dir check — previously untested, confirmed by mutation to stay green when removed)", () => {
+        const parent = temp("knext-1460-baseisfile-");
+        const fileAsBase = join(parent, "not-a-directory");
+        writeFileSync(fileAsBase, "x");
+        expect(() =>
+            extractEmbeddedNative({
+                files: tree(LAYOUT),
+                tmpRoot: fileAsBase,
+            }),
+        ).toThrow(/refusing to extract under .* it is not a plain directory/);
+    });
+
     it("refuses a pre-created hostile per-uid subdir sitting inside an otherwise-allowed base — the base being writable does not excuse the subdir", () => {
         const tmpRoot = temp("knext-1460-hostile-subdir-");
         const files = tree(LAYOUT);
