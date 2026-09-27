@@ -445,6 +445,12 @@ jobs:
           # examples/bun-exec/Dockerfile.node OS layer.
           - name: examples/bun-exec Dockerfile.node
             file: examples/bun-exec/Dockerfile.node.trivyscan
+          # knext self-contained standalone runtime OS layer (M3, N2 round-2,
+          # #1457/#1519) — the standalone-bun-self-contained stage of
+          # Dockerfile.standalone.hbs, one of the images `knext deploy
+          # --self-contained` actually ships.
+          - name: kn-next standalone-bun-self-contained runtime
+            file: packages/kn-next/Dockerfile.standalone-self-contained.trivyscan
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

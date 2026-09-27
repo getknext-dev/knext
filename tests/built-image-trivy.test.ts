@@ -139,6 +139,64 @@ describe('#981 — the two shipped images are Trivy-scanned as BUILT, enforce-on
 });
 
 /**
+ * M3 (N2 round-2, #1457/#1519) — the knext self-contained standalone runtime
+ * image (`Dockerfile.standalone.hbs`'s `standalone-bun-self-contained` stage)
+ * had no built-image Trivy leg at all: `built-image-trivy` above covers only
+ * the docs and bun-exec images. This is a THIRD shipped image
+ * (`knext deploy --self-contained` builds it), so it gets the same
+ * enforce-on-main treatment.
+ *
+ * It cannot reuse the `IMAGES`/`runtimeFrom()` lockstep above unmodified:
+ * `Dockerfile.standalone.hbs` has FOUR `FROM` stages (deps, bun, bun
+ * self-contained, node), and `runtimeFrom()` takes the LAST one
+ * (`standalone-node`) — the wrong stage for this fixture. So this pins the
+ * SELF-CONTAINED stage specifically, using the same stage-scoped extraction
+ * `runtime-image-selection.test.ts` already uses for the same file
+ * (`selfContainedStageText`), rather than widening the shared helper's
+ * "last FROM" assumption to cover a file it was never designed for.
+ */
+describe('M3 — the knext self-contained standalone runtime image is Trivy-scanned as BUILT, enforce-on-main', () => {
+  const SHIPPED = 'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs';
+  const SCAN_FIXTURE = 'packages/kn-next/Dockerfile.standalone-self-contained.trivyscan';
+  const STAGE_FROM_MARKER = 'AS standalone-bun-self-contained';
+
+  /** The self-contained stage's own text, isolated from its sibling stages. */
+  function selfContainedStageText(): string {
+    const text = readJoinedDockerfile(SHIPPED);
+    // Find the START of the `FROM ... AS standalone-bun-self-contained` line
+    // itself (not just the `AS ...` suffix) so the slice below still includes
+    // the FROM's own pinned base ref.
+    const fromLine = [...text.matchAll(/^FROM\s+\S+.*$/gim)].find((m) =>
+      m[0].includes(STAGE_FROM_MARKER),
+    );
+    expect(fromLine, `${SHIPPED} must still contain a ${STAGE_FROM_MARKER} stage`).toBeDefined();
+    const start = (fromLine as RegExpMatchArray).index as number;
+    const next = text.indexOf('\nFROM ', start + 1);
+    return next === -1 ? text.slice(start) : text.slice(start, next);
+  }
+
+  it(`builds the fixture via ${SCAN_FIXTURE}`, () => {
+    const job = builtImageJob();
+    expect(job).toContain(SCAN_FIXTURE);
+  });
+
+  it(`${SCAN_FIXTURE} does not DRIFT from the standalone-bun-self-contained stage (same runtime base digest)`, () => {
+    const stage = selfContainedStageText();
+    const stageFrom = [...stage.matchAll(/FROM\s+(\S+)/gi)].map((m) => m[1])[0];
+    expect(stageFrom, 'the self-contained stage must have its own FROM').toBeDefined();
+    expect(runtimeFrom(SCAN_FIXTURE)).toBe(stageFrom);
+  });
+
+  it(`${SCAN_FIXTURE} reproduces the stage's whole-base apk upgrade`, () => {
+    const stage = selfContainedStageText();
+    expect(stage).toMatch(/apk\s+upgrade\s+--no-cache/);
+    const body = readJoinedDockerfile(SCAN_FIXTURE);
+    expect(body).toMatch(/apk\s+upgrade\s+--no-cache/);
+    expect(body).not.toMatch(/apk\s+(add|upgrade)[^\n]*=\d/);
+  });
+});
+
+/**
  * #703 — the node:22-alpine base ships a bundled npm whose vendored
  * `node_modules` carry HIGH/CRITICAL CVEs (tar gzip-bomb, pacote, sigstore, …)
  * under `/usr/local/lib/node_modules/npm/node_modules/...`. These are JS library

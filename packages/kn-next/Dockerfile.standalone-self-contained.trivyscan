@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+#
+# BUILT-image Trivy scan fixture for the knext self-contained standalone
+# runtime image (M3, N2 round-2, #1457/#1519) — NOT a shipped image, mirrors
+# apps/docs/Dockerfile.trivyscan's pattern one-for-one.
+#
+# `Dockerfile.standalone.hbs`'s `standalone-bun-self-contained` stage is one of
+# FOUR stages in that file, so it cannot be scanned via the shared
+# `IMAGES`/`runtimeFrom()` lockstep in tests/built-image-trivy.test.ts (that
+# helper takes the LAST `FROM` in a Dockerfile, which for
+# `Dockerfile.standalone.hbs` is the `standalone-node` stage, not this one).
+# This fixture gets its own describe block in that test file, using the same
+# stage-scoped extraction `runtime-image-selection.test.ts` already uses
+# (`selfContainedStageText`).
+#
+# Reproduces ONLY the runtime OS layer the self-contained stage actually ships
+# — same pinned base digest, same whole-base `apk upgrade --no-cache`, same
+# runtime link libs — so `supply-chain.yml`'s `built-image-trivy` job can
+# enforce-scan the PATCHED artifact on main (an actionable HIGH surviving the
+# upgrade fails; a base-ref-only CVE the upgrade clears does not — same
+# rationale as #981/#982). The app JS closure (the embedded `.next` tree) is
+# NOT reproduced here; this stage ships no `node_modules` at all (that is the
+# whole point of the mode), so there is no separate JS-dependency CVE surface
+# the way there is for the docs/bun-exec images.
+FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
+
+RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc

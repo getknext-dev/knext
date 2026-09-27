@@ -215,7 +215,15 @@ describe('the self-contained image e2e is wired into CI (N2, #1457)', () => {
     expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 
-  it('runs with KNEXT_REQUIRE_SC_EXEC=1 so a build that silently skipped self-contained cannot pass', () => {
+  // round-2 fix (m3): round 1 set KNEXT_REQUIRE_SC_EXEC=1 on this step "for
+  // parity" with the N1 self-contained-executable gate's env contract, and
+  // this test used to assert that env was present. But
+  // standalone-self-contained-image.docker-e2e.test.ts never reads that flag
+  // — it has NO skip path at all (its own header: "NO SKIP PATH — missing
+  // docker/bun is a FAILURE"), so the env was decorative and asserting its
+  // presence pinned decoration, not a real fail-closed guarantee. Assert the
+  // opposite instead: this step must NOT carry an env var its suite ignores.
+  it('does NOT set KNEXT_REQUIRE_SC_EXEC (the suite has no skip path to gate — the flag would be decorative)', () => {
     const block = jobBlock();
     const idx = block.indexOf(SELF_CONTAINED_IMAGE_E2E_PATH);
     expect(idx, 'the step that runs the e2e is missing').toBeGreaterThan(-1);
@@ -227,9 +235,17 @@ describe('the self-contained image e2e is wired into CI (N2, #1457)', () => {
       stepWindowStart,
       idx + SELF_CONTAINED_IMAGE_E2E_PATH.length + 40,
     );
-    expect(stepWindow, 'the step never sets KNEXT_REQUIRE_SC_EXEC=1').toMatch(
-      /KNEXT_REQUIRE_SC_EXEC:\s*['"]?1['"]?/,
-    );
+    expect(
+      stepWindow,
+      'the step sets KNEXT_REQUIRE_SC_EXEC, which the suite never reads — either remove the env or make the suite read it',
+    ).not.toMatch(/KNEXT_REQUIRE_SC_EXEC:\s*['"]?1['"]?/);
+    // And the suite itself really has no skip path — if it grows one later,
+    // this assertion (and the env removal above) need revisiting together.
+    const suiteText = readFileSync(resolve(REPO_ROOT, SELF_CONTAINED_IMAGE_E2E_PATH), 'utf8');
+    expect(
+      suiteText,
+      'the suite gained a skip path — KNEXT_REQUIRE_SC_EXEC may no longer be decorative',
+    ).not.toMatch(/skipIf|\bit\.skip\b|\bdescribe\.skip\b/);
   });
 
   it('the file exists, is a container e2e, and imports bun:test', () => {

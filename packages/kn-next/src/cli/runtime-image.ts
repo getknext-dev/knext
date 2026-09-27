@@ -486,6 +486,12 @@ docker-compose*.yml
  *   - `<buildContext>/knext-standalone-entry.mjs` — the supervisor shim, at the
  *     context root because the Dockerfile's `COPY knext-standalone-entry.mjs`
  *     resolves against the build CONTEXT, not cwd.
+ *   - `<buildContext>/knext-self-contained-server-shim.js` — the B2 operator
+ *     compat shim (N2 round-2, #1457): the `standalone-bun-self-contained`
+ *     stage's `COPY knext-self-contained-server-shim.js /app/server.js` names
+ *     it, again resolved against the build CONTEXT. See the template's own
+ *     header for why it exists (the operator's hardcoded `bun run server.js`
+ *     command does not yet know the self-contained shape).
  *   - `<cwd>/Dockerfile.standalone.dockerignore` — the per-Dockerfile ignore
  *     that keeps the standalone closure in the context.
  *
@@ -504,10 +510,15 @@ export function stageStandaloneBuildContext(opts: {
     const dockerfileSrc = join(templateDir, "Dockerfile.standalone.hbs");
     const entrySrc = join(templateDir, "knext-standalone-entry.mjs.hbs");
     const bakeSrc = join(templateDir, "knext-compile-cache-bake.mjs.hbs");
+    const scServerShimSrc = join(
+        templateDir,
+        "knext-self-contained-server-shim.js.hbs",
+    );
     if (
         !existsSync(dockerfileSrc) ||
         !existsSync(entrySrc) ||
-        !existsSync(bakeSrc)
+        !existsSync(bakeSrc) ||
+        !existsSync(scServerShimSrc)
     ) {
         throw new Error(
             `standalone runtime image template not found at ${templateDir} — ` +
@@ -519,6 +530,7 @@ export function stageStandaloneBuildContext(opts: {
     const dockerfileText = readFileSync(dockerfileSrc, "utf8");
     const entryText = readFileSync(entrySrc, "utf8");
     const bakeText = readFileSync(bakeSrc, "utf8");
+    const scServerShimText = readFileSync(scServerShimSrc, "utf8");
     // Neither template carries mustache; assert every staged half so a future
     // variable is not shipped raw (renderScaffold's own discipline). This
     // used to only cover the Dockerfile — the entry shim was `copyFileSync`'d
@@ -542,6 +554,12 @@ export function stageStandaloneBuildContext(opts: {
                 "placeholder — the standalone-node compile-cache bake driver must be literal",
         );
     }
+    if (scServerShimText.includes("{{")) {
+        throw new Error(
+            "knext-self-contained-server-shim.js.hbs contains an unsubstituted {{ }} " +
+                "placeholder — the self-contained operator-compat shim must be literal",
+        );
+    }
 
     const dockerfile = join(opts.cwd, STANDALONE_DOCKERFILE_NAME);
     writeFileSync(dockerfile, dockerfileText, "utf8");
@@ -553,6 +571,11 @@ export function stageStandaloneBuildContext(opts: {
     writeFileSync(
         join(opts.buildContext, "knext-compile-cache-bake.mjs"),
         bakeText,
+        "utf8",
+    );
+    writeFileSync(
+        join(opts.buildContext, "knext-self-contained-server-shim.js"),
+        scServerShimText,
         "utf8",
     );
     writeFileSync(

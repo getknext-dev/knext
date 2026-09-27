@@ -323,7 +323,7 @@ describe("the image REALLY has no node_modules or .next/standalone tree (N2 exit
         expect(found.stdout).not.toContain(".next/standalone");
     });
 
-    it("only public/ and .next/static are on disk beside the executable", () => {
+    it("only public/, .next/static, the executable, and the B2 operator-compat server.js shim are on disk", () => {
         const found = run(
             "docker",
             [
@@ -345,9 +345,63 @@ describe("the image REALLY has no node_modules or .next/standalone tree (N2 exit
             .map((l) => l.trim())
             .filter((l) => l.length > 0 && l !== "." && l !== "..");
         expect(entries.sort()).toEqual(
-            [".next", "knext-standalone-exec", "public"].sort(),
+            [".next", "knext-standalone-exec", "public", "server.js"].sort(),
         );
     });
+});
+
+// B2 (N2 round-2, #1457): the operator hardcodes
+// `Command: ["bun", "run", "server.js"]` for build != vinext && runtime ==
+// bun, which does not yet know this shape — proving the DEFAULT ENTRYPOINT
+// boots is not enough; this exercises the ACTUAL command an operator-rendered
+// pod runs today (mirrors the disk-mode sibling's
+// `ci.yml`'s "with the operator bun run server.js command" job).
+describe("the image boots under the operator's exact forced command (B2, #1457 round-2)", () => {
+    const OPERATOR_CONTAINER = `${CONTAINER}-operator-cmd`;
+    let operatorPort = 0;
+
+    afterAll(() => {
+        run("docker", ["rm", "--force", OPERATOR_CONTAINER], {
+            timeout: 60_000,
+        });
+    });
+
+    it("serves /api/health when started with `bun run server.js` (nextapp_controller.go's forced Command)", async () => {
+        [operatorPort] = await freePorts(1);
+        const started = run(
+            "docker",
+            [
+                "run",
+                "--detach",
+                "--name",
+                OPERATOR_CONTAINER,
+                "--label",
+                LABEL,
+                "--label",
+                EPOCH_LABEL,
+                "--platform",
+                PLATFORM,
+                "--publish",
+                `${operatorPort}:3000`,
+                IMAGE,
+                "bun",
+                "run",
+                "server.js",
+            ],
+            { timeout: 120_000 },
+        );
+        expect(
+            started.status,
+            `docker run (operator command) failed:\n${started.stdout}\n${started.stderr}`,
+        ).toBe(0);
+        await waitForHealth(OPERATOR_CONTAINER, operatorPort);
+        const res = await fetch(`http://127.0.0.1:${operatorPort}/api/health`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+            status: "ok",
+            target: "standalone",
+        });
+    }, 150_000);
 });
 
 describe("the folded supervisor's :9464 metrics endpoint (N2 fold decision)", () => {
@@ -361,8 +415,21 @@ describe("the folded supervisor's :9464 metrics endpoint (N2 fold decision)", ()
 });
 
 // SIGTERM drain — MUST BE LAST: it terminates the container.
-describe("SIGTERM drains in-flight work and exits 0, folded into the ONE process", () => {
-    it("completes an in-flight request across TERM and exits 0", async () => {
+//
+// B1 round-2 fix (#1519): round 1 set `NEXT_MANUAL_SIG_HANDLE=1` so THIS
+// preload's own close+exit path was the sole SIGTERM owner, which raced away
+// Next's own `after()` drain — proven only by source reading (next@16.3.5
+// `start-server.js`'s `cleanup()`), because this suite only asserted the HTTP
+// response + exit code, never the after() side effect. Round 2 lets Next's
+// own handler run (it awaits `nextServer.close()`, which drains `after()`
+// via `cleanupListeners.runAll()`) and normalizes ITS exit code instead. The
+// fixture route already registers an `after()` callback that logs
+// `AFTER_SENTINEL_RAN:<id>` (see `fixtures/standalone-drain-app/app/api/slow/route.ts`,
+// reused unmodified from the disk-mode sibling `standalone-drain.docker-e2e.test.ts`),
+// so this test now also asserts that marker reached stdout — the exact
+// observable the round-1 defect would have failed.
+describe("SIGTERM drains in-flight work, runs after(), and exits 0, folded into the ONE process", () => {
+    it("completes an in-flight request across TERM, runs its after() callback, and exits 0", async () => {
         const reqId = randomBytes(3).toString("hex");
         const inFlight = fetch(
             `http://127.0.0.1:${appPort}/api/slow?ms=4000&id=${reqId}`,
@@ -391,5 +458,15 @@ describe("SIGTERM drains in-flight work and exits 0, folded into the ONE process
             waited.stdout.trim(),
             "the folded drain handler did not exit 0 on SIGTERM",
         ).toBe("0");
+
+        // B1: the after() callback registered by /api/slow must have RUN
+        // during the drain, not been dropped when Next's own handler raced
+        // (or was disabled by) this preload's exit.
+        const logs = run("docker", ["logs", CONTAINER], { timeout: 60_000 });
+        const out = `${logs.stdout}\n${logs.stderr}`;
+        expect(
+            out,
+            "the after() callback did not run during the folded-process drain",
+        ).toContain(`AFTER_SENTINEL_RAN:${reqId}`);
     }, 90_000);
 });

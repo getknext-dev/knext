@@ -41,6 +41,7 @@ import {
     scanNameConstants,
     scanOperatorMetrics,
     scanPromClientMetrics,
+    scanStandaloneSelfContainedMetrics,
     seriesNames,
 } from "../adapters/metric-contract";
 
@@ -86,6 +87,24 @@ const read = (p: string) => readFileSync(p, "utf8");
 
 /** The compiled single executable's :9464 exposition (the scraped emitter). */
 const BUNEXEC = seriesNames(scanBunexecMetrics(read(BUNEXEC_TEMPLATE)));
+
+/**
+ * The self-contained STANDALONE runtime's folded `:9464` exposition
+ * (round-2 fix, M2/docs, #1457/#1519) — ADR-0055's fold decision, a different
+ * target from `bunexec` above (ADR-0048's compiled vinext single executable).
+ * Dependency-free (no prom-client), so its `# TYPE` lines are the only source
+ * of truth for what it emits — same mechanism `scanBunexecMetrics` already
+ * parses, reused through its own named export.
+ */
+const STANDALONE_SC_SUPERVISOR = join(
+    PKG_ROOT,
+    "src",
+    "adapters",
+    "standalone-self-contained-supervisor.cjs",
+);
+const STANDALONE_SC = seriesNames(
+    scanStandaloneSelfContainedMetrics(read(STANDALONE_SC_SUPERVISOR)),
+);
 
 /** The Go controller's own /metrics. */
 const OPERATOR_EMITTED = seriesNames(
@@ -134,6 +153,7 @@ for (const name of Object.keys(EXTERNAL)) {
 
 const EMITTERS = {
     bunexec: BUNEXEC,
+    "standalone-self-contained": STANDALONE_SC,
     operator: OPERATOR_EMITTED,
     "node-legacy": NODE_LEGACY,
     external: EXTERNAL_SERIES,
@@ -210,6 +230,14 @@ describe("emitted-metric scanners", () => {
     it("scans the bun-exec runtime contract's exposition", () => {
         expect(BUNEXEC.size).toBeGreaterThan(0);
         expect(BUNEXEC).toContain("knext_bunexec_http_requests_total");
+    });
+
+    it("scans the self-contained standalone supervisor's folded exposition (round-2, #1457/#1519)", () => {
+        expect(STANDALONE_SC.size).toBeGreaterThan(0);
+        expect(STANDALONE_SC).toContain("knext_up");
+        expect(STANDALONE_SC).toContain(
+            "knext_self_contained_process_uptime_seconds",
+        );
     });
 
     it("scans the operator's Go registry", () => {
@@ -508,7 +536,13 @@ const DOC_FILES = execFileSync("git", ["ls-files"], {
     .split("\n")
     .filter((f) => /\.mdx?$/.test(f));
 
-const ALL_EMITTED = allowed(["bunexec", "operator", "node-legacy", "external"]);
+const ALL_EMITTED = allowed([
+    "bunexec",
+    "standalone-self-contained",
+    "operator",
+    "node-legacy",
+    "external",
+]);
 
 describe("every metric a DOC names is one something emits (S5)", () => {
     it("finds doc files at all — a vacuous scan would pass everything", () => {

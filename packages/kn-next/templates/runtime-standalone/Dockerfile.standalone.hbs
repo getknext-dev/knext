@@ -187,6 +187,12 @@ ENTRYPOINT ["bun", "run", "/app/knext-entry.mjs"]
 # exact executable, never for the disk-mode ones above. So the ENTRYPOINT here
 # execs the compiled binary directly: one process, no shim, no spawn.
 #
+# `/app/server.js` further down IS a shim, but a different one for a different
+# reason (B2, round-2 fix, #1457) — it exists ONLY because the operator's
+# `Command` override does not yet know this shape and would CrashLoop without
+# it. It is not a supervisor: it adds no SIGTERM/metrics logic of its own (the
+# executable it execs already owns that) and no `node_modules`.
+#
 # NOT YET SUPPORTED HERE: a `native/` directory for native addons (e.g. sharp),
 # unlike the vinext single-executable image (`templates/app/Dockerfile.hbs`),
 # which stages one with an integrity manifest. `standalone-compile.mjs`'s
@@ -213,6 +219,24 @@ COPY .next/static /app/.next/static
 # has neither.
 COPY knext-standalone-exec-linux-x64 /app/knext-standalone-exec
 
+# R3 compat shim (B2, N2 round-2, #1457) — NOT a supervisor, NOT part of the
+# fold decision above. The operator hardcodes
+# `Command: ["bun", "run", "server.js"]` for any NextApp with
+# `spec.build != "vinext"` and `spec.runtime == "bun"`
+# (`nextapp_controller.go`'s `containerCommand` branch), and it does not yet
+# know this shape exists — unlike vinext, which the operator already leaves
+# `Command: nil` for. Extending the operator/CR to do the same for
+# self-contained is a CRD/operator change (trigger-class per
+# `.claude/rules/workflow.md`) and is tracked as a separate issue rather than
+# made here. Without this file, an operator-rendered pod runs
+# `bun run server.js` against an image with no `server.js` and CrashLoops —
+# this shim IS that file: it just execs the compiled binary next to it and
+# forwards stdio/signals/exit code. It adds no `node_modules` and no new
+# runtime dependency — `bun` is already present because this STAGE'S OWN
+# base image ships it (see the `FROM` line above), not something this file
+# pulls in.
+COPY knext-self-contained-server-shim.js /app/server.js
+
 USER 65532:65532
 
 ENV PORT=3000 \
@@ -221,9 +245,14 @@ ENV PORT=3000 \
 
 EXPOSE 3000
 
-# No shell, no supervisor, no spawned child — the compiled executable IS the
-# server, and (per the fold decision above) also owns its own SIGTERM drain and
-# `:9464` metrics endpoint directly.
+# No shell, no supervisor, no spawned child on the NORMAL boot path — the
+# compiled executable IS the server, and (per the fold decision above) also
+# owns its own SIGTERM drain and `:9464` metrics endpoint directly. This
+# ENTRYPOINT is what actually runs a container whose Command is nil (`docker
+# run` with no override, or a future operator that knows this shape).
+# TODAY's operator forces `Command: ["bun", "run", "server.js"]` for this
+# runtime regardless of shape, which bypasses this ENTRYPOINT and runs
+# `/app/server.js` (the compat shim above) instead — see its comment.
 ENTRYPOINT ["/app/knext-standalone-exec"]
 
 # ---------------------------------------------------------------------------
