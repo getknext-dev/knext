@@ -492,9 +492,15 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
     if ! ed_check_or_die "vinext" "${EMPTY_DIR}" "${KNEXT_EXEC}" "${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}" / "${EMPTY_DIR_PORT}" \
       "${APP_DIR}/.output/public:.output/public" "${APP_DIR}/native:native"; then
       log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until V1 (#1460) embeds what this exec still loads from disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
+      # round-2 review, finding 3: remove the pre-check's staged copy right
+      # after the probe, on every exit path — it is a second full copy of the
+      # binary + static assets + native/, on top of the suite's own empty dir
+      # below, and nothing else was ever removing it.
+      rm -rf "${EMPTY_DIR}"
       exit 1
     fi
     log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"
+    rm -rf "${EMPTY_DIR}"
   fi
 else
   KNEXT_EXEC=""

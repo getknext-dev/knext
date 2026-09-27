@@ -126,9 +126,13 @@ const VINEXT_TARGET = resolve(REPO_ROOT, 'scripts/e2e-deploy-vinext.sh');
 // #1514: the teardown restore and the fingerprint's served_from gate.
 const CLEANUP_TARGET = resolve(REPO_ROOT, 'scripts/e2e-cleanup.sh');
 const FINGERPRINT_TARGET = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
+// PR #1521 round-2 review additions: the basePath read is now its own file
+// (scripts/lib/e2e-read-base-path.mjs, review finding 2), same reasoning as
+// PROBE_TARGET above for why it is a separate snapshot target.
+const READ_BASE_PATH_TARGET = resolve(REPO_ROOT, 'scripts/lib/e2e-read-base-path.mjs');
 const SPEC = 'tests/e2e-empty-dir.test.ts';
 
-declareMutations(36);
+declareMutations(43);
 
 const { command, args, runArgs } = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -196,6 +200,9 @@ function proveCleanup(label, anchor, replacement) {
 }
 function proveFingerprint(label, anchor, replacement) {
   report(label, snapshot(FINGERPRINT_TARGET), anchor, replacement);
+}
+function proveReadBasePath(label, anchor, replacement) {
+  report(label, snapshot(READ_BASE_PATH_TARGET), anchor, replacement);
 }
 
 console.log('Baseline: the spec must be GREEN before anything is mutated.');
@@ -488,6 +495,72 @@ prove(
   '#1515 ed_check_or_die: never resolve the static-file sentinel',
   '  if [ "${health_path}" = "${ED_STATIC_PROBE}" ]; then',
   '  if false; then',
+);
+
+// ── PR #1521 round-2 review (review-1521.md) — findings 1-4 ─────────────────
+
+// 37. Finding 1 (mutation R16): e2e-cleanup.sh must STOP the server before
+//     restoring APP_DIR — restoring first lets a still-running server read
+//     the restored tree. Move the restore ahead of the stop; the R16
+//     order-sensitive test must red (it records, in the SIGTERM handler
+//     itself, whether the tree was restored before the signal arrived).
+proveCleanup(
+  '#1521 round-2 finding 1: restore APP_DIR BEFORE stopping the server',
+  'echo "[e2e-cleanup] stopping deployment pid=${PID:-?} port=${PORT:-?}" >&2\n',
+  'ed_suite_restore_app_dir "${APP_DIR}" || true\necho "[e2e-cleanup] stopping deployment pid=${PID:-?} port=${PORT:-?}" >&2\n',
+);
+
+// 38. Finding 2 (mutation R14): ed_probe_http must resolve its helper
+//     ABSOLUTELY (ED__LIB_DIR, computed once at source time), never via a
+//     BASH_SOURCE-relative path — the latter breaks once the caller has cd'd
+//     away from wherever the lib was sourced FROM, if it was sourced by a
+//     relative path (exactly the scenario the round-2 relative-source test
+//     sets up).
+prove(
+  '#1521 round-2 finding 2 (R14): ed_probe_http back to a BASH_SOURCE-relative helper path',
+  'node "${ED__LIB_DIR}/e2e-probe-http.mjs"',
+  'node "$(dirname "${BASH_SOURCE[0]}")/e2e-probe-http.mjs"',
+);
+
+// 39. Finding 2 (R13's root cause): an UNREADABLE/malformed manifest must
+//     fail LOUD (exit 1), never silently resolve to an empty basePath.
+proveReadBasePath(
+  '#1521 round-2 finding 2: swallow a read/parse error into "" again',
+  '} catch (err) {\n  process.stderr.write(\n    `ERROR: could not read/parse ${manifestPath} for basePath: ${err.message}\\n`,\n  );\n  process.exit(1);\n}',
+  '} catch (err) {\n  parsed = {};\n}',
+);
+
+// 40. Finding 2 (R13): a configured basePath must actually be read out, not
+//     hardcoded away.
+proveReadBasePath(
+  '#1521 round-2 finding 2 (R13): hardcode the resolved basePath to ""',
+  "process.stdout.write(String(parsed?.config?.basePath || ''));",
+  "process.stdout.write('');",
+);
+
+// 41. Finding 3 (runner disk): e2e-cleanup.sh must remove SERVED_FROM_DIR
+//     (the suite's staged empty-dir copy) once teardown is done.
+proveCleanup(
+  '#1521 round-2 finding 3: never remove SERVED_FROM_DIR',
+  'if [ -n "${SERVED_FROM_DIR:-}" ] && [ -d "${SERVED_FROM_DIR}" ]; then\n  rm -rf "${SERVED_FROM_DIR}"',
+  'if false; then\n  rm -rf "${SERVED_FROM_DIR}"',
+);
+
+// 42. Finding 3 (runner disk): the orphan sweep (the no-metadata path, for a
+//     deploy killed before it wrote SERVED_FROM_DIR) must actually remove
+//     what it finds.
+proveCleanup(
+  '#1521 round-2 finding 3: orphan sweep never removes anything',
+  'if [ "${mtime}" -lt "${now}" ]; then\n      rm -rf "${d}"',
+  'if false; then\n      rm -rf "${d}"',
+);
+
+// 43. Finding 4: the documented native-addon quarantine list must actually
+//     be readable by the helper function code claims reads it.
+prove(
+  '#1521 round-2 finding 4: quarantine helper never matches a known fixture',
+  '[ "${n}" = "${name}" ] && return 0',
+  '[ "${n}" = "${name}" ] && return 1',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

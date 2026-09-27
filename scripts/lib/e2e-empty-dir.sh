@@ -379,6 +379,10 @@ ed_static_probe_path() {
 # staged static file via ed_static_probe_path, prefixed with
 # ED_STATIC_PROBE_BASE (a Next basePath; empty unless the caller sets it).
 #
+# A fixture that fails here because it needs a native addon (node_modules,
+# necessarily hidden) is likely one of ED_SC_NATIVE_ADDON_QUARANTINE below
+# (#1515(c)) — check that list before treating the failure as a regression.
+#
 # The one call site scripts/e2e-deploy.sh and scripts/e2e-deploy-vinext.sh
 # make: stage, assert clean, (optionally hide) boot, probe, restore —
 # fail-closed and loud on ANY step, never a silent fallback to the disk-mode
@@ -633,9 +637,16 @@ ed_suite_hand_off() {
 #   * any symlink anywhere under the cwd (ed_assert_clean's rule, re-applied
 #     now that the server has been running in it);
 #   * via the hidden APP_DIR: node_modules, .next, .output present again under
-#     their real names — e.g. something re-created or symlinked them back.
+#     their real names — e.g. something re-created or symlinked them back;
+#   * round-2 review, finding 5: NODE_PATH, BUN_INSTALL or NODE_OPTIONS in the
+#     shell's OWN environment (the vinext lane's bare `exec` inherits it
+#     unchanged; the docker-isolated standalone lane does not pass it through
+#     unless the caller explicitly `-e`s it, but this check is cheap and
+#     correct either way) referencing anything under app_dir — every check
+#     above is filesystem-only, so a harness-inherited env var pointing back
+#     into the hidden tree reaches the suite server unnoticed.
 ed_assert_suite_isolated() {
-  local cwd="$1" app_dir="$2" rel p d leak
+  local cwd="$1" app_dir="$2" rel p d leak envvar val
   for rel in node_modules .next/server .output/server; do
     p="${cwd}/${rel}"
     if [ -e "${p}" ] || [ -L "${p}" ]; then
@@ -664,5 +675,47 @@ ed_assert_suite_isolated() {
       return 1
     fi
   done
+  for envvar in NODE_PATH BUN_INSTALL NODE_OPTIONS; do
+    val="${!envvar:-}"
+    case "${val}" in
+      *"${app_dir}"*)
+        ed_log "ERROR: suite: \$${envvar}=\"${val}\" references APP_DIR (${app_dir}) — an inherited env var can reach the hidden tree even though nothing on disk does"
+        return 1
+        ;;
+    esac
+  done
   return 0
+}
+
+# ══ #1515(c): self-contained native-addon limitation (documented, not code-
+# enforced) ═══════════════════════════════════════════════════════════════
+#
+# A fixture whose build depends on a native addon (e.g. sqlite3) cannot pass
+# the empty-dir/isolated-suite check by construction: the addon's compiled
+# `.node` binding lives inside `node_modules`, and the whole point of this
+# mode is that `node_modules` is NOT reachable. Two fixtures in the official
+# corpus hit this today: `turbopack-reports` (sqlite3) and
+# `prerender-native-module`. Neither is a regression of this lane.
+#
+# Neither scripts/e2e-deploy.sh nor scripts/e2e-deploy-vinext.sh threads a
+# fixture identifier through to this file — APP_DIR is just a path the
+# harness picked — so there is no per-fixture value to key a skip on HERE.
+# This list is documentation that code actually reads and a test actually
+# asserts against (tests/e2e-empty-dir.test.ts), not an enforced exemption;
+# see docs/compat-matrix.md row 61 ("Self-contained empty-dir mode") for the
+# user-facing statement of the same limitation.
+ED_SC_NATIVE_ADDON_QUARANTINE=(
+  "turbopack-reports"
+  "prerender-native-module"
+)
+
+# ed_sc_is_known_native_addon_limitation <fixture_name>
+#
+# True (rc 0) iff <fixture_name> is one of the fixtures documented above.
+ed_sc_is_known_native_addon_limitation() {
+  local name="$1" n
+  for n in "${ED_SC_NATIVE_ADDON_QUARANTINE[@]}"; do
+    [ "${n}" = "${name}" ] && return 0
+  done
+  return 1
 }

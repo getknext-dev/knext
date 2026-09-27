@@ -628,10 +628,12 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       log "KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check into ${EMPTY_DIR}"
       EMPTY_DIR_STAGED="$(ed_stage "${EMPTY_DIR}" "${STANDALONE_EXEC}" "${EMPTY_DIR_COPY_SPECS[@]}")" || {
         log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check failed"
+        rm -rf "${EMPTY_DIR}"
         exit 1
       }
       ed_assert_clean "${EMPTY_DIR}" "$(basename "${EMPTY_DIR_STAGED}")" || {
         log "ERROR: KNEXT_SELF_CONTAINED=1 — the staged empty dir is not clean — see above"
+        rm -rf "${EMPTY_DIR}"
         exit 1
       }
       # #1515: the 2xx check is a STAGED static file (ED_STATIC_PROBE) under
@@ -640,9 +642,18 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       # KNEXT_EMPTY_DIR_HEALTH_PATH.
       EMPTY_DIR_HEALTH="${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}"
       if [ "${EMPTY_DIR_HEALTH}" = "${ED_STATIC_PROBE}" ]; then
-        EMPTY_DIR_BASE_PATH="$(node -e 'try{process.stdout.write(String(require(process.argv[1]).config?.basePath||""))}catch{}' "${APP_DIR}/.next/required-server-files.json")"
+        # round-2 review, finding 2: the previous inline `try{}catch{}` turned
+        # an UNREADABLE/malformed manifest into a silent "" basePath — see
+        # scripts/lib/e2e-read-base-path.mjs's header for why that is a real
+        # defect, not a defensive fallback. Fail loud instead.
+        EMPTY_DIR_BASE_PATH="$(node "${ED__LIB_DIR}/e2e-read-base-path.mjs" "${APP_DIR}/.next/required-server-files.json")" || {
+          log "ERROR: KNEXT_SELF_CONTAINED=1 — could not resolve basePath from ${APP_DIR}/.next/required-server-files.json — refusing to probe with a silently-empty basePath (see above)"
+          rm -rf "${EMPTY_DIR}"
+          exit 1
+        }
         EMPTY_DIR_HEALTH="$(ed_static_probe_path "${EMPTY_DIR}" "${EMPTY_DIR_BASE_PATH}")" || {
           log "ERROR: KNEXT_SELF_CONTAINED=1 — no staged static file to probe"
+          rm -rf "${EMPTY_DIR}"
           exit 1
         }
       fi
@@ -659,10 +670,17 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
         "./$(basename "${EMPTY_DIR_STAGED}")"; then
         log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until N1 (#1456) embeds what this exec still loads from .next/server/** on disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
         docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true
+        # round-2 review, finding 3: this pre-check dir is a SECOND full copy
+        # of the binary + static assets, staged on top of the suite's own
+        # empty dir below — remove it right after the probe, on every exit
+        # path, rather than leaving it for e2e-cleanup.sh (which never knew
+        # about it) or the runner's own disk churn.
+        rm -rf "${EMPTY_DIR}"
         exit 1
       fi
       log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"
       docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true
+      rm -rf "${EMPTY_DIR}"
     fi
   else
     log "ERROR: KNEXT_E2E_SKIP_PACK=1 has no installed adapter to resolve the compile script from, but RUNTIME=bun was requested — refusing to silently fall back to server.js (contract-test mode is not expected to combine these)"
