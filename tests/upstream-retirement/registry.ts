@@ -471,6 +471,11 @@ export const REGISTRY: RetirementEntry[] = [
     upstream: 'oven-sh/bun#44101',
     upstreamTitle:
       'bun build --compile: a bare specifier required from an embedded module never resolves inside $bunfs',
+    fixedBy: {
+      ref: 'oven-sh/bun#44135',
+      title:
+        'compile: resolve bare specifiers from embedded modules against the embedded node_modules tree',
+    },
     issue: '#1456',
     kind: 'shim',
     shape: 'next',
@@ -497,6 +502,17 @@ export const REGISTRY: RetirementEntry[] = [
     // own copy of a bare-required module rather than the ONE shared instance
     // the relative rewrite guarantees, so the rewrite stays load-bearing for
     // (2) independent of whether (1) is ever fixed.
+    //
+    // 2026-09-27: oven-sh/bun#44135 (head 4bcfa8c) verified from source on
+    // Cloud Build against this repro's shape — stock bun-v1.4.2 fails (bare
+    // require unresolved from an empty dir, and falls through to a
+    // cwd-on-disk copy when one exists), the PR build passes both (embedded
+    // wins over a cwd-on-disk copy too), and the PR's own new bundler tests
+    // (`EmbeddedNodeModules*`) are red on stock / green on the PR build.
+    // Still OPEN, not merged, no release yet — do NOT delete this shim on
+    // this alone. When it merges, resolve which Bun release/commit first
+    // carries it, confirm condition (2) above (the dedupe) still holds
+    // independently, and only then retire.
     repro: async () => {
       const box = sandbox('bare-in-bunfs');
       try {
