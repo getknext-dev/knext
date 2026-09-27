@@ -486,7 +486,10 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
     # one by walking up from EMPTY_DIR or via the absolute path baked into the
     # binary at compile time (ADR-0060 §Context), producing a false pass.
     ED_HIDE_DURING_BOOT=("${APP_DIR}/node_modules" "${APP_DIR}/.output")
-    if ! ed_check_or_die "vinext" "${EMPTY_DIR}" "${KNEXT_EXEC}" /api/health / "${EMPTY_DIR_PORT}" \
+    # #1515: the 2xx check is a STAGED static file (ED_STATIC_PROBE) — the
+    # compat fixtures have no /api/health — and `/` stays non-5xx. A lane
+    # whose app has the route (file-manager) sets KNEXT_EMPTY_DIR_HEALTH_PATH.
+    if ! ed_check_or_die "vinext" "${EMPTY_DIR}" "${KNEXT_EXEC}" "${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}" / "${EMPTY_DIR_PORT}" \
       "${APP_DIR}/.output/public:.output/public" "${APP_DIR}/native:native"; then
       log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until V1 (#1460) embeds what this exec still loads from disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
       exit 1

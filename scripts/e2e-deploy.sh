@@ -634,8 +634,20 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
         log "ERROR: KNEXT_SELF_CONTAINED=1 — the staged empty dir is not clean — see above"
         exit 1
       }
-      log "KNEXT_SELF_CONTAINED=1 — booting $(basename "${EMPTY_DIR_STAGED}") from ${EMPTY_DIR} inside ${STANDALONE_BUN_IMAGE} (nothing else present)"
-      if ! ed_boot_probe_kill "${EMPTY_DIR_PORT}" /api/health / \
+      # #1515: the 2xx check is a STAGED static file (ED_STATIC_PROBE) under
+      # the fixture's basePath — the compat fixtures have no /api/health —
+      # and `/` stays non-5xx. A lane whose app has the route sets
+      # KNEXT_EMPTY_DIR_HEALTH_PATH.
+      EMPTY_DIR_HEALTH="${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}"
+      if [ "${EMPTY_DIR_HEALTH}" = "${ED_STATIC_PROBE}" ]; then
+        EMPTY_DIR_BASE_PATH="$(node -e 'try{process.stdout.write(String(require(process.argv[1]).config?.basePath||""))}catch{}' "${APP_DIR}/.next/required-server-files.json")"
+        EMPTY_DIR_HEALTH="$(ed_static_probe_path "${EMPTY_DIR}" "${EMPTY_DIR_BASE_PATH}")" || {
+          log "ERROR: KNEXT_SELF_CONTAINED=1 — no staged static file to probe"
+          exit 1
+        }
+      fi
+      log "KNEXT_SELF_CONTAINED=1 — booting $(basename "${EMPTY_DIR_STAGED}") from ${EMPTY_DIR} inside ${STANDALONE_BUN_IMAGE} (nothing else present); probing ${EMPTY_DIR_HEALTH} (2xx) and / (non-5xx)"
+      if ! ed_boot_probe_kill "${EMPTY_DIR_PORT}" "${EMPTY_DIR_HEALTH}" / \
         docker run --rm --name "${EMPTY_DIR_CONTAINER}" \
         --network host \
         --user "${EMPTY_DIR_UID_GID}" \

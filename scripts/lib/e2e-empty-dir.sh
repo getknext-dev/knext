@@ -31,6 +31,11 @@
 
 ed_log() { echo "[e2e-empty-dir] $*" >&2; }
 
+# Resolved ONCE, absolutely, at source time: ed_probe_http runs after
+# ed_check_or_die has cd'd into the staged dir, so a BASH_SOURCE-relative path
+# (a relative `. scripts/lib/…` source) would no longer resolve there.
+ED__LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ed_refuse_self_contained_noop <detail>
 #
 # Round-3 (non-blocking N3, promoted to load-bearing): scripts/e2e-deploy.sh
@@ -228,7 +233,7 @@ ed_assert_clean() {
 # scanner's scope, since it scans .sh/.bash text only).
 ed_probe_http() {
   local port="$1" path="$2" mode="$3"
-  node "$(dirname "${BASH_SOURCE[0]}")/e2e-probe-http.mjs" "${port}" "${path}" "${mode}"
+  node "${ED__LIB_DIR}/e2e-probe-http.mjs" "${port}" "${path}" "${mode}"
 }
 
 # ed_boot_probe_kill <port> <health_path> <extra_path> <cmd...>
@@ -244,7 +249,12 @@ ed_probe_http() {
 ed_boot_probe_kill() {
   local port="$1" health_path="$2" extra_path="$3"
   shift 3
-  ( exec "$@" ) &
+  # #1515: the probe server's stdout goes to STDERR, never the caller's
+  # stdout. The deploy scripts' stdout is the harness contract — exactly one
+  # line, the deployment URL — and nitro's `➜ Listening on: …` banner landing
+  # there was read by the Next harness as the URL ("invalid URL", 31 files in
+  # run 36312054519).
+  ( exec "$@" ) >&2 &
   local pid=$!
   local ready=0 i
   # Always attempted on every return path below, once the process has been
@@ -266,7 +276,9 @@ ed_boot_probe_kill() {
       ed_log "WARNING: pid ${target} ignored SIGTERM — escalating to SIGKILL"
       kill -KILL "${target}" 2>/dev/null || true
     fi
-    wait "${target}" 2>/dev/null
+    # `|| true`: a TERM-killed child makes `wait` return 143, which under a
+    # caller's `set -e` (outside an `if`) aborted the whole caller (#1515).
+    wait "${target}" 2>/dev/null || true
   }
   for i in $(seq 1 100); do
     if ! kill -0 "${pid}" 2>/dev/null; then
@@ -323,7 +335,49 @@ ed_restore_hidden_paths() {
   return "${rc}"
 }
 
+# ED_STATIC_PROBE — the <health_path> sentinel the compat lanes pass (#1515).
+#
+# The compat fixtures are arbitrary Next apps: almost none has `/api/health`,
+# so requiring it 2xx failed the deploy for every ordinary fixture (386 files
+# in run 36312054519) before a single suite case ran. With this sentinel the
+# 2xx check is made against ONE file the empty dir itself staged (a static
+# asset the binary must serve with nothing else present), and `/` stays the
+# non-5xx check. The file-manager lanes, whose app does have the route, keep
+# `/api/health` by setting KNEXT_EMPTY_DIR_HEALTH_PATH=/api/health.
+ED_STATIC_PROBE="@static"
+
+# ed_static_probe_path <staged_dir> [<base_path>]
+#
+# Prints the URL path of one regular file staged in <staged_dir>, preferring
+# `.output/public/<rel>` (vinext/nitro serves it at `/<rel>`), then
+# `.next/static/<rel>` (at `/_next/static/<rel>`), then `public/<rel>` (at
+# `/<rel>`), each prefixed with <base_path> (a Next `basePath`, or empty).
+# Deterministic (sorted). Fails when nothing static was staged — a build that
+# emitted no static asset at all cannot be probed this way, and saying so
+# beats silently probing nothing.
+ed_static_probe_path() {
+  local dir="$1" base="${2:-}" sub prefix rel
+  for sub in .output/public .next/static public; do
+    case "${sub}" in
+      .next/static) prefix="/_next/static" ;;
+      *) prefix="" ;;
+    esac
+    [ -d "${dir}/${sub}" ] || continue
+    rel="$(cd "${dir}/${sub}" && find . -type f 2>/dev/null | LC_ALL=C sort | head -n 1)"
+    if [ -n "${rel}" ]; then
+      printf '%s%s/%s\n' "${base}" "${prefix}" "${rel#./}"
+      return 0
+    fi
+  done
+  ed_log "ERROR: no static file was staged under ${dir} (.output/public, .next/static, public) — nothing to probe for a 2xx"
+  return 1
+}
+
 # ed_check_or_die <label> <fresh_dir> <binary_src> <health_path> <extra_path> <port> [<src>:<dest_rel>]...
+#
+# <health_path> may be ED_STATIC_PROBE (#1515): resolved, after staging, to a
+# staged static file via ed_static_probe_path, prefixed with
+# ED_STATIC_PROBE_BASE (a Next basePath; empty unless the caller sets it).
 #
 # The one call site scripts/e2e-deploy.sh and scripts/e2e-deploy-vinext.sh
 # make: stage, assert clean, (optionally hide) boot, probe, restore —
@@ -366,6 +420,13 @@ ed_check_or_die() {
     ed_log "ERROR: ${label}: the staged directory is not clean — see above"
     return 1
   }
+  if [ "${health_path}" = "${ED_STATIC_PROBE}" ]; then
+    health_path="$(ed_static_probe_path "${fresh_dir}" "${ED_STATIC_PROBE_BASE:-}")" || {
+      ed_log "ERROR: ${label}: could not pick a staged static file to probe"
+      return 1
+    }
+    ed_log "${label}: probing the staged static file ${health_path} (2xx) and ${extra_path} (non-5xx)"
+  fi
 
   local -a hide_targets=()
   if [ -n "${ED_HIDE_DURING_BOOT+set}" ]; then

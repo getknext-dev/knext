@@ -1223,3 +1223,133 @@ describe('#1514 (c) — a self-contained fingerprint requires served_from=empty-
     expect(out.recorded.selfContained).toEqual({ value: false, frozen: false, servedFrom: null });
   });
 });
+
+// ══ #1515 — the pre-check probe measured nothing in run 36312054519 ═══════════
+//
+// (1) the probe server's `➜ Listening on: …` banner went to the deploy
+//     script's STDOUT, which the Next harness reads as the deployment URL;
+// (2) the probe demanded /api/health 2xx, a route ordinary compat fixtures do
+//     not have. The compat lanes now probe ONE staged static file for 2xx and
+//     `/` for non-5xx; /api/health stays available via KNEXT_EMPTY_DIR_HEALTH_PATH.
+
+/**
+ * A stand-in for a compiled compat fixture: prints nitro's banner to STDOUT,
+ * serves files from `.output/public` (cwd-relative) with 200, has NO
+ * /api/health (404), and answers `/` with `rootStatus`.
+ */
+function makeCompatFixture(dir: string, rootStatus: number): string {
+  const p = join(dir, 'knext-exec-e2e');
+  writeFileSync(
+    p,
+    [
+      '#!/usr/bin/env node',
+      "const http = require('node:http');",
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      'const port = Number(process.env.PORT);',
+      'http.createServer((req, res) => {',
+      "  if (req.url === '/') { res.writeHead(" +
+        String(rootStatus) +
+        "); res.end('root'); return; }",
+      "  const f = path.join(process.cwd(), '.output/public', decodeURIComponent(req.url));",
+      '  if (fs.existsSync(f) && fs.statSync(f).isFile()) { res.writeHead(200); res.end(fs.readFileSync(f)); return; }',
+      "  res.writeHead(404); res.end('not found');",
+      "}).listen(port, '127.0.0.1', () => { console.log('➜ Listening on: http://localhost:' + port + '/ (all interfaces)'); });",
+      '',
+    ].join('\n'),
+  );
+  chmodSync(p, 0o755);
+  mkdirSync(join(dir, '.output/public/assets'), { recursive: true });
+  writeFileSync(join(dir, '.output/public/assets/app-abc.js'), 'console.log(1)');
+  return p;
+}
+
+/**
+ * The deploy-script shape around the pre-check: the probe, then the ONE
+ * stdout line. Its stdout must be exactly that line whatever the probe
+ * server prints.
+ */
+function miniDeploy(src: string, dest: string, health: string) {
+  return sh(`
+    set -e
+    PORT="$(${freePortExpr()})"
+    ed_check_or_die "compat" "${dest}" "${src}/knext-exec-e2e" "${health}" / "\${PORT}" \\
+      "${src}/.output/public:.output/public"
+    echo "http://localhost:4242"
+  `);
+}
+
+describe('#1515 — the empty-dir pre-check probe (stdout contract + per-lane health path)', () => {
+  it("the probe server's stdout banner never reaches the deploy script's stdout: it stays exactly the one URL line", () => {
+    const src = tempDir('ed-1515-stdout-src-');
+    makeCompatFixture(src, 200);
+    const r = miniDeploy(src, join(tempDir('ed-1515-stdout-dest-'), 'd'), '@static');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('http://localhost:4242\n');
+    // The banner WAS printed — it went to stderr, not nowhere.
+    expect(r.stderr).toContain('➜ Listening on:');
+  });
+
+  it('a compat fixture with NO /api/health (404) and a 404 at / passes the static-file probe', () => {
+    const src = tempDir('ed-1515-compat-src-');
+    makeCompatFixture(src, 404);
+    const r = miniDeploy(src, join(tempDir('ed-1515-compat-dest-'), 'd'), '@static');
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('probing the staged static file /assets/app-abc.js');
+  });
+
+  it('the SAME fixture fails when the lane demands /api/health (the run-36312054519 defect, reproduced)', () => {
+    const src = tempDir('ed-1515-oldhealth-src-');
+    makeCompatFixture(src, 200);
+    const r = miniDeploy(src, join(tempDir('ed-1515-oldhealth-dest-'), 'd'), '/api/health');
+    expect(r.status).not.toBe(0);
+  });
+
+  it('a 5xx at / fails the probe even when the static file answers 200', () => {
+    const src = tempDir('ed-1515-root500-src-');
+    makeCompatFixture(src, 500);
+    const r = miniDeploy(src, join(tempDir('ed-1515-root500-dest-'), 'd'), '@static');
+    expect(r.status).not.toBe(0);
+  });
+
+  it('a missing static file fails the probe (2xx is required of the staged asset)', () => {
+    const src = tempDir('ed-1515-nostatic-src-');
+    makeCompatFixture(src, 200);
+    rmSync(join(src, '.output/public/assets/app-abc.js'));
+    writeFileSync(join(src, '.output/public/assets/.keep-dir'), '');
+    // The staged file exists but the server is told a path it does not serve.
+    const dest = join(tempDir('ed-1515-nostatic-dest-'), 'd');
+    const r = sh(`
+      PORT="$(${freePortExpr()})"
+      ed_check_or_die "compat" "${dest}" "${src}/knext-exec-e2e" /assets/not-staged.js / "\${PORT}" \\
+        "${src}/.output/public:.output/public"
+    `);
+    expect(r.status).not.toBe(0);
+  });
+
+  it('ed_static_probe_path: .output/public first, .next/static under /_next/static, public, basePath prefix; fails on none', () => {
+    const d = tempDir('ed-1515-pick-');
+    mkdirSync(join(d, '.next/static/chunks'), { recursive: true });
+    writeFileSync(join(d, '.next/static/chunks/b.js'), 'x');
+    writeFileSync(join(d, '.next/static/chunks/a.js'), 'x');
+    mkdirSync(join(d, 'public'), { recursive: true });
+    writeFileSync(join(d, 'public/robots.txt'), 'x');
+    expect(sh(`ed_static_probe_path "${d}"`).stdout).toBe('/_next/static/chunks/a.js\n');
+    expect(sh(`ed_static_probe_path "${d}" /docs`).stdout).toBe('/docs/_next/static/chunks/a.js\n');
+    mkdirSync(join(d, '.output/public'), { recursive: true });
+    writeFileSync(join(d, '.output/public/favicon.ico'), 'x');
+    expect(sh(`ed_static_probe_path "${d}"`).stdout).toBe('/favicon.ico\n');
+    const empty = tempDir('ed-1515-pick-empty-');
+    const r = sh(`ed_static_probe_path "${empty}"`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('no static file was staged');
+  });
+
+  for (const script of ['scripts/e2e-deploy.sh', 'scripts/e2e-deploy-vinext.sh']) {
+    it(`${script}: the compat pre-check defaults to the staged static file, never a hardcoded /api/health`, () => {
+      const src = readRepo(script);
+      expect(src).toContain('"${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}"');
+      expect(src).not.toMatch(/(ed_check_or_die|ed_boot_probe_kill)\b[^\n]*\/api\/health/);
+    });
+  }
+});

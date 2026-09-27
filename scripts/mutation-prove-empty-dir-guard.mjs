@@ -80,6 +80,17 @@
  *      an axis with no compiled binary. Disarm the `return 1` so it reports
  *      the error and returns success anyway (non-blocking N3).
  *
+ * #1514 ADDITIONS — the SUITE server served from the empty dir. Three
+ * guards, each proved against every mechanism it depends on (13–31 below; #1515 adds 32–36):
+ *   (a) text: both deploy scripts' SC suite boot cds into EMPTY_DIR (the
+ *       standalone container mounts only EMPTY_DIR), records SERVED_FROM,
+ *       and runs the isolation check before handing the URL over;
+ *   (b) runtime: ed_assert_suite_isolated's four checks, the hide itself,
+ *       and restore-on-every-exit-path (EXIT trap, TERM conversion,
+ *       stop-before-restore, the hand-off gate, e2e-cleanup.sh's restore);
+ *   (c) fingerprint: a self-contained digest requires the harness to
+ *       declare served_from=empty-dir, and folds it.
+ *
  * Shared harness, for the reasons this repo has already paid for elsewhere
  * (scripts/mutation-prove-compat-cell-fingerprint.mjs):
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise;
@@ -112,9 +123,12 @@ const PROBE_TARGET = resolve(REPO_ROOT, 'scripts/lib/e2e-probe-http.mjs');
 // whether either caller still propagates its failure.
 const DEPLOY_TARGET = resolve(REPO_ROOT, 'scripts/e2e-deploy.sh');
 const VINEXT_TARGET = resolve(REPO_ROOT, 'scripts/e2e-deploy-vinext.sh');
+// #1514: the teardown restore and the fingerprint's served_from gate.
+const CLEANUP_TARGET = resolve(REPO_ROOT, 'scripts/e2e-cleanup.sh');
+const FINGERPRINT_TARGET = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint.mjs');
 const SPEC = 'tests/e2e-empty-dir.test.ts';
 
-declareMutations(12);
+declareMutations(36);
 
 const { command, args, runArgs } = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -176,6 +190,12 @@ function proveDeploy(label, anchor, replacement) {
 }
 function proveVinext(label, anchor, replacement) {
   report(label, snapshot(VINEXT_TARGET), anchor, replacement);
+}
+function proveCleanup(label, anchor, replacement) {
+  report(label, snapshot(CLEANUP_TARGET), anchor, replacement);
+}
+function proveFingerprint(label, anchor, replacement) {
+  report(label, snapshot(FINGERPRINT_TARGET), anchor, replacement);
 }
 
 console.log('Baseline: the spec must be GREEN before anything is mutated.');
@@ -296,6 +316,178 @@ proveVinext(
   'e2e-deploy-vinext.sh call site: drop || exit 1',
   'ed_refuse_self_contained_noop "KNEXT_COMPILE=0 — needs KNEXT_COMPILE unset/1" || exit 1',
   'ed_refuse_self_contained_noop "KNEXT_COMPILE=0 — needs KNEXT_COMPILE unset/1"',
+);
+
+// ── #1514 (a): the SC suite boot runs from EMPTY_DIR (text scan) ────────────
+
+// 13. vinext: the suite server's cwd pointed back at APP_DIR.
+proveVinext(
+  '#1514 (a) vinext SC suite boot: cd APP_DIR instead of EMPTY_DIR',
+  '    cd "${EMPTY_DIR}"\n    PORT="${PORT}"',
+  '    cd "${APP_DIR}"\n    PORT="${PORT}"',
+);
+
+// 14. standalone: the suite container's cwd pointed back at the disk tree.
+proveDeploy(
+  '#1514 (a) standalone SC suite boot: cd STANDALONE_APP_DIR instead of EMPTY_DIR',
+  '    cd "${EMPTY_DIR}"\n    exec docker run --rm --name "${ED_SUITE_CONTAINER}"',
+  '    cd "${STANDALONE_APP_DIR}"\n    exec docker run --rm --name "${ED_SUITE_CONTAINER}"',
+);
+
+// 15. standalone: the suite container also mounts the standalone root.
+proveDeploy(
+  '#1514 (a) standalone SC suite container: mount STANDALONE_ROOT beside EMPTY_DIR',
+  '      -v "${EMPTY_DIR}:${EMPTY_DIR}" \\\n      -w "${EMPTY_DIR}" \\\n      "${STANDALONE_BUN_IMAGE}" \\\n      "./$(basename "${EMPTY_DIR_STAGED}")"\n  fi',
+  '      -v "${EMPTY_DIR}:${EMPTY_DIR}" \\\n      -v "${STANDALONE_ROOT}:/knext-standalone-root" \\\n      -w "${EMPTY_DIR}" \\\n      "${STANDALONE_BUN_IMAGE}" \\\n      "./$(basename "${EMPTY_DIR_STAGED}")"\n  fi',
+);
+
+// 16. vinext: the SC branch records served_from=disk.
+proveVinext(
+  '#1514 (a) vinext SC branch: record SERVED_FROM=disk',
+  '  SERVED_FROM="${ED_SUITE_SERVED_FROM_SC}"\n  log "KNEXT_SELF_CONTAINED=1 — booting the SUITE server',
+  '  SERVED_FROM="disk"\n  log "KNEXT_SELF_CONTAINED=1 — booting the SUITE server',
+);
+
+// 17. standalone: SERVED_FROM dropped from the persisted metadata.
+proveDeploy(
+  '#1514 (a) standalone metadata: drop SERVED_FROM',
+  '  echo "SERVED_FROM=${SERVED_FROM}"\n',
+  '',
+);
+
+// 18. standalone: the isolation check never runs before hand-off.
+proveDeploy(
+  '#1514 (a) standalone: skip the isolation check before handing the URL over',
+  'if ! ed_assert_suite_isolated "${EMPTY_DIR}" "${APP_DIR}"; then',
+  'if false; then',
+);
+
+// 19. vinext: the isolation check never runs before hand-off.
+proveVinext(
+  '#1514 (a) vinext: skip the isolation check before handing the URL over',
+  'if ! ed_assert_suite_isolated "${EMPTY_DIR}" "${APP_DIR}"; then',
+  'if false; then',
+);
+
+// ── #1514 (b): runtime isolation + restore on every exit path ───────────────
+
+// 20. The cwd check (node_modules / .next/server / .output/server).
+prove(
+  '#1514 (b) ed_assert_suite_isolated: never check the cwd paths',
+  'for rel in node_modules .next/server .output/server; do',
+  'for rel in; do',
+);
+
+// 21. The ancestor walk (module resolution walks up).
+prove(
+  '#1514 (b) ed_assert_suite_isolated: never check ancestors for node_modules',
+  '    if [ -e "${d}/node_modules" ] || [ -L "${d}/node_modules" ]; then',
+  '    if false; then',
+);
+
+// 22. The symlink sweep under the cwd.
+prove(
+  '#1514 (b) ed_assert_suite_isolated: never sweep the cwd for symlinks',
+  '  leak="$(find "${cwd}" -type l -print -quit 2>/dev/null)"',
+  '  leak=""',
+);
+
+// 23. The hidden-APP_DIR re-exposure check.
+prove(
+  '#1514 (b) ed_assert_suite_isolated: never re-check the hidden APP_DIR',
+  '    p="${app_dir}/${rel}"\n    if [ -e "${p}" ] || [ -L "${p}" ]; then\n      ed_log "ERROR: suite: ${p} is reachable while',
+  '    p="${app_dir}/${rel}"\n    if false; then\n      ed_log "ERROR: suite: ${p} is reachable while',
+);
+
+// 24. The hide itself.
+prove(
+  '#1514 (b) ed_suite_hide_app_dir: never actually hide',
+  '      mv "${p}" "${p}.ed-hidden" || {\n        ed_log "ERROR: suite: failed to hide ${p}"',
+  '      true || {\n        ed_log "ERROR: suite: failed to hide ${p}"',
+);
+
+// 25. The EXIT trap's restore.
+prove(
+  '#1514 (b) EXIT trap: never restore APP_DIR on a failed deploy',
+  '  ed_suite_restore_app_dir "${ED__SUITE_APP_DIR}" || true',
+  '  true',
+);
+
+// 26. TERM converted into an exit (so the EXIT trap runs on it).
+prove('#1514 (b) arm: drop the TERM → exit conversion', "  trap 'exit 143' TERM\n", '');
+
+// 27. Stop the server BEFORE restoring.
+prove(
+  '#1514 (b) EXIT trap: never stop the suite server before restoring',
+  '  if [ -n "${ED_SUITE_SERVER_PID:-}" ] && kill -0 "${ED_SUITE_SERVER_PID}" 2>/dev/null; then',
+  '  if false; then',
+);
+
+// 28. The hand-off gate: after hand-off the tree must STAY hidden.
+prove(
+  '#1514 (b) EXIT trap: restore even after hand-off',
+  '  if [ "${ED_SUITE_HANDED_OFF:-0}" = "1" ]; then\n    return 0\n  fi\n',
+  '',
+);
+
+// 29. e2e-cleanup.sh's teardown restore.
+proveCleanup(
+  '#1514 (b) e2e-cleanup.sh: never restore APP_DIR at teardown',
+  'ed_suite_restore_app_dir "${APP_DIR}" || echo',
+  'true || echo',
+);
+
+// ── #1514 (c): the fingerprint's served_from gate ───────────────────────────
+
+// 30. The gate itself: served_from missing/disk no longer fails.
+proveFingerprint(
+  '#1514 (c) fingerprint: never assert served_from under --self-contained',
+  '  if (selfContained) assertSelfContainedServedFrom(servedFrom);\n',
+  '',
+);
+
+// 31. The fold: back to the pre-#1514 marker (a disk-served window's digest).
+proveFingerprint(
+  '#1514 (c) fingerprint: fold the pre-#1514 marker (no servedFrom)',
+  'sha256(`selfContained\\ttrue\\nservedFrom\\t${SC_SERVED_FROM}`)',
+  "sha256('selfContained\\ttrue')",
+);
+
+// ── #1515: the pre-check probe measured nothing in run 36312054519 ──────────
+
+// 32. The probe server's banner back on the caller's STDOUT (the URL line).
+prove(
+  '#1515 probe server stdout: no longer redirected to stderr',
+  '  ( exec "$@" ) >&2 &',
+  '  ( exec "$@" ) &',
+);
+
+// 33. The `/` (non-5xx) branch accepting a 5xx.
+proveProbe(
+  '#1515 probe non-5xx branch: accept a 5xx at /',
+  ': status < 500 || status >= 600;',
+  ': true;',
+);
+
+// 34. vinext lane back to demanding /api/health.
+proveVinext(
+  '#1515 vinext pre-check: hardcode /api/health again',
+  '"${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}" / "${EMPTY_DIR_PORT}"',
+  '/api/health / "${EMPTY_DIR_PORT}"',
+);
+
+// 35. standalone lane back to demanding /api/health.
+proveDeploy(
+  '#1515 standalone pre-check: hardcode /api/health again',
+  'EMPTY_DIR_HEALTH="${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}"',
+  'EMPTY_DIR_HEALTH="/api/health"',
+);
+
+// 36. The staged-static-file resolution never happens (the sentinel is probed literally).
+prove(
+  '#1515 ed_check_or_die: never resolve the static-file sentinel',
+  '  if [ "${health_path}" = "${ED_STATIC_PROBE}" ]; then',
+  '  if false; then',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
