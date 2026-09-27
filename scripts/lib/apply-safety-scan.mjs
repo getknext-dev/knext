@@ -537,11 +537,22 @@ const IMPLICIT_VARS = new Set([
 // unquoted-looking separator. Imprecise on purpose — a prefix it mis-splits
 // fails the shapes below and is therefore classed a write (fail closed).
 const COMMAND_START = /[;\n&|()`]|\{\s/g;
+/** Whether the `&` / `|` at `text[i]` belongs to a redirection (`>&2`, `2>&1`, `&>f`, `>|f`). */
+function isRedirectionChar(text, i) {
+  const c = text[i];
+  const prev = text[i - 1] ?? '';
+  const next = text[i + 1] ?? '';
+  if (c === '&') return /[<>]/.test(prev) || next === '>';
+  if (c === '|') return prev === '>';
+  return false;
+}
 function commandPrefix(before, frames = null) {
   let at = 0;
   for (const m of before.matchAll(COMMAND_START)) {
     // A separator inside quotes (`read -d ";" V`, `read -p "a|b" V`) is text.
     if (frames && frames[m.index] !== 'code' && frames[m.index] !== 'bq') continue;
+    // `>&2 read V`, `2>&1`, `&>f`, `>|f`: part of a redirection, not a separator.
+    if (isRedirectionChar(before, m.index)) continue;
     at = m.index + m[0].length;
   }
   return before.slice(at);
@@ -556,7 +567,8 @@ const ASSIGN_PREFIX =
 const DECLARE_ONLY =
   /^\s*(?:local|export|readonly|declare|typeset|unset)(?:\s+-[A-Za-z]+)*(?:\s+[A-Za-z_]\w*(?:=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"'])*)?)*\s+$/;
 const NAMEREF_FLAG = /^\s*(?:local|declare|typeset)\s(?:[^=]*\s)?-[A-Za-z]*n/;
-const LEADING_KEYWORDS = /^\s*(?:(?:if|then|else|elif|do|while|until|!|\{|time)\s+)*/;
+const LEADING_KEYWORDS =
+  /^\s*(?:(?:if|then|else|elif|do|while|until|!|\{|time(?:\s+(?:-p|--))*)\s+)*/;
 
 /**
  * Only the SHELL can bind one of its variables: a child process (jq, psql,
@@ -565,8 +577,12 @@ const LEADING_KEYWORDS = /^\s*(?:(?:if|then|else|elif|do|while|until|!|\{|time)\
  * or keyword, or is computed at run time (`$cmd V` may be `read V`). This is
  * bash's COMPLETE builtin + keyword set (`compgen -b`, `compgen -k`), not a
  * list of writers: a builtin that never binds a name is still classed a
- * writer here (fail closed). A user function is not: whatever it binds, it
- * binds in its own body, which is in the corpus and scanned there.
+ * writer here (fail closed). A user function is not a writer AT ITS CALL SITE,
+ * and that is sound only together with dynamicNameWrites: a body that binds a
+ * LITERAL name is scanned in the corpus like any other text, and a body that
+ * binds a name it is GIVEN (`read -r "$1"`, `printf -v "$1"`, `local -n
+ * r="$1"`) is a run-time-name write, which makes EVERY followed variable of
+ * that source opaque — so `setv STATIC_LSN …` needs no call-site rule.
  */
 const SHELL_COMMANDS = new Set(
   (
@@ -578,12 +594,62 @@ const SHELL_COMMANDS = new Set(
     'case coproc for select function [['
   ).split(' '),
 );
+/**
+ * Normalises a simple command's words to its COMMAND word: bash lets
+ * redirections (`2>/dev/null`, `<f`, `>&2`, `0<f`, `{fd}<f`, `< f`),
+ * assignment prefixes (`IFS=`, `V[i]=`, `V+=`), reserved words (`if`, `!`,
+ * `{`, `(` …) and pass-through wrappers (`time [-p]`, `command [-pVv]`,
+ * `builtin`, `exec [-cl] [-a N]`, `nohup`, `env [-i] [-u N] [K=V]`) all
+ * precede it, in any order and any number. Every one is stripped, so
+ * `2>/dev/null read V` and `time -p read V` are `read V`. `env`/`nohup`/`exec`
+ * run an EXTERNAL program that cannot bind the parent's variables, but they
+ * are stripped anyway: a false write only makes a variable opaque (fail
+ * closed), a false non-write is a bypass. Returns the remaining words; the
+ * first is the command (possibly undefined: the occurrence is itself in
+ * command position).
+ */
+const REDIR_BARE = /^(\d+|&|\{[A-Za-z_]\w*\})?(<<<|<<-?|<>|<&|>&|&>>|&>|>>|>\||<|>)$/;
+const REDIR_ATTACHED = /^(\d+|&|\{[A-Za-z_]\w*\})?(<<<|<<-?|<>|<&|>&|&>>|&>|>>|>\||<|>)/;
+const WRAPPER_OPTS = new Map(
+  Object.entries({
+    time: /^-p$|^--$/,
+    command: /^-[pVv]+$|^--$/,
+    builtin: /^--$/,
+    exec: /^-[cl]+$|^--$/,
+    nohup: /^--$/,
+    env: /^-[i0v]+$|^-$|^--$/,
+  }),
+);
+export function commandHead(ws) {
+  const out = [...ws];
+  for (;;) {
+    const w = out[0];
+    if (w === undefined) return out;
+    const u = unquote(w);
+    if (/^(if|then|else|elif|do|while|until|!|\{|\(|\}|\)|;|&&|\|\|)$/.test(w)) out.shift();
+    else if (REDIR_BARE.test(w)) out.splice(0, 2);
+    else if (REDIR_ATTACHED.test(w) && !/^<\(/.test(w)) out.shift();
+    else if (/^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/.test(w)) out.shift();
+    else if (WRAPPER_OPTS.has(u)) {
+      out.shift();
+      while (out.length && WRAPPER_OPTS.get(u).test(out[0])) out.shift();
+      // Option values: `exec -a NAME`, `env -u NAME`.
+      while (
+        out.length > 1 &&
+        ((u === 'exec' && out[0] === '-a') || (u === 'env' && /^-[uSC]$/.test(out[0])))
+      )
+        out.splice(0, 2);
+    } else return out;
+  }
+}
+/** A command word that is not a plain literal (`$cmd`, `{read,x}`, `r*d`) may be ANY command. */
+const PLAIN_COMMAND = /^[\w./:@%+,-]+$|^\[\[?$/;
 function shellCanBind(stmt, after) {
-  const ws = words(stmt.replace(LEADING_KEYWORDS, ''));
-  while (ws.length && /^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/.test(ws[0])) ws.shift();
+  const ws = commandHead(words(stmt.replace(LEADING_KEYWORDS, '')));
   // The occurrence IS the command position: `V[i]=…` / `V+=…` bind it.
   if (ws.length === 0) return /^(\[|\+?=)/.test(after);
   const cmd = unquote(ws[0]);
+  if (!RUNTIME.test(ws[0]) && !PLAIN_COMMAND.test(cmd)) return true;
   return SHELL_COMMANDS.has(cmd) || RUNTIME.test(ws[0]);
 }
 
@@ -693,6 +759,30 @@ const NAME_BINDERS = {
 const DECLARERS = new Set(['declare', 'typeset', 'local', 'export', 'readonly', 'let']);
 const RUNTIME = /[$`]/;
 
+/**
+ * Every simple command in `text`, at ANY nesting: split at each unquoted
+ * `;` `\n` `&` `|` `(` `)` `{` `}` — so a function body (`f() {\n read "$1"\n}`,
+ * `function f { … }`), a group, a subshell, a `case` arm and a `$( … )` are
+ * each seen as the commands they hold, not as one word headed by `f()`.
+ * Over-splitting only yields extra pieces with junk heads, which are not
+ * binders; every real command still starts a piece. `>&2`, `2>&1`, `&>f`
+ * and `>|f` are redirections, not separators.
+ */
+function commandPieces(text) {
+  const pieces = [];
+  let start = 0;
+  scanFrames(text, (i, _d, frame) => {
+    if (frame !== 'code') return undefined;
+    const c = text[i];
+    if (!/[;\n&|(){}]/.test(c) || isRedirectionChar(text, i)) return undefined;
+    pieces.push(text.slice(start, i));
+    start = i + 1;
+    return undefined;
+  });
+  pieces.push(text.slice(start));
+  return pieces.filter((p) => p.trim() !== '');
+}
+
 /** Sites in `text` that write a variable whose NAME is computed at run time. */
 export function dynamicNameWrites(text) {
   const out = [];
@@ -702,58 +792,66 @@ export function dynamicNameWrites(text) {
     )
   )
     out.push('an arithmetic assignment to a $-expanded name');
+  // `${!1:=v}` / `${!n=v}` ASSIGN the variable whose name `$1` / `$n` holds.
+  if (/\$\{![\w@*#?$-]+(?:\[[^\]]*\])?:?=/.test(text))
+    out.push('an indirect default assignment (`$' + '{!x:=…}`)');
   // An alias can make ANY word a writer (`alias rd=read; rd V`); bash expands
   // them in a script under `shopt -s expand_aliases` or POSIX mode.
   if (/(^|[\s;&|(])alias\s+[^\s=]+=|\bexpand_aliases\b/.test(text))
     out.push('an alias is defined, so any word may be a variable-writing builtin');
-  for (const cl of splitClauses(text)) {
-    for (const seg of splitPipeline(cl.text)) {
-      let ws = words(seg).map(unquote);
-      while (
-        ws.length &&
-        /^(if|then|else|elif|do|while|until|!|\{|\(|builtin|command|time)$/.test(ws[0])
-      )
-        ws = ws.slice(1);
-      while (ws.length && /^[A-Za-z_]\w*=/.test(ws[0])) ws = ws.slice(1);
-      const cmd = ws[0];
-      if (cmd === undefined) continue;
-      const args = withoutRedirects(ws.slice(1));
-      const hit = (w) => out.push(`\`${seg.trim().slice(0, 100)}\` (name \`${w}\`)`);
-      if (DECLARERS.has(cmd)) {
-        for (const a of args) if (!a.startsWith('-') && RUNTIME.test(a.split('=')[0])) hit(a);
+  for (const seg of commandPieces(text)) {
+    const raw = commandHead(words(seg));
+    const ws = raw.map(unquote);
+    const cmd = ws[0];
+    if (cmd === undefined) continue;
+    const args = withoutRedirects(ws.slice(1));
+    const hit = (w) => out.push(`\`${seg.trim().slice(0, 100)}\` (name \`${w}\`)`);
+    // `eval "$1=…"`: the evaluated text, and so the name it binds, is run-time.
+    if (cmd === 'eval') {
+      for (const a of raw.slice(1)) if (RUNTIME.test(a)) hit(a);
+      continue;
+    }
+    if (DECLARERS.has(cmd)) {
+      // A nameref (`local -n r="$1"`, or `declare -n r` bound later by `r=…`)
+      // writes whatever its target names: run-time unless given literally here.
+      const nameref = args.some((a) => /^-[A-Za-z]*n/.test(a));
+      for (const a of args) {
+        if (a.startsWith('-')) continue;
+        if (RUNTIME.test(a.split('=')[0])) hit(a);
+        else if (nameref && (!a.includes('=') || RUNTIME.test(a.slice(a.indexOf('=') + 1)))) hit(a);
+      }
+      continue;
+    }
+    const spec = NAME_BINDERS[cmd];
+    if (!spec) continue;
+    const positional = [];
+    for (let k = 0; k < args.length; k++) {
+      const a = args[k];
+      if (a === '--') {
+        positional.push(...args.slice(k + 1));
+        break;
+      }
+      const o = a.match(/^-([A-Za-z]+)(.*)$/);
+      if (!o) {
+        positional.push(a);
         continue;
       }
-      const spec = NAME_BINDERS[cmd];
-      if (!spec) continue;
-      const positional = [];
-      for (let k = 0; k < args.length; k++) {
-        const a = args[k];
-        if (a === '--') {
-          positional.push(...args.slice(k + 1));
-          break;
-        }
-        const o = a.match(/^-([A-Za-z]+)(.*)$/);
-        if (!o) {
-          positional.push(a);
-          continue;
-        }
-        const letters = o[1];
-        const vi = letters.split('').findIndex((c) => spec.valued.includes(c));
-        if (vi === -1) continue;
-        const attached = letters.slice(vi + 1) + o[2];
-        const val = attached !== '' ? attached : (args[++k] ?? '');
-        if (spec.nameOpts.includes(letters[vi]) && RUNTIME.test(val)) hit(val);
-      }
-      const names =
-        spec.positional === 'all'
-          ? positional
-          : spec.positional === 'first'
-            ? positional.slice(0, 1)
-            : spec.positional === 'second'
-              ? positional.slice(1, 2)
-              : [];
-      for (const n of names) if (RUNTIME.test(n)) hit(n);
+      const letters = o[1];
+      const vi = letters.split('').findIndex((c) => spec.valued.includes(c));
+      if (vi === -1) continue;
+      const attached = letters.slice(vi + 1) + o[2];
+      const val = attached !== '' ? attached : (args[++k] ?? '');
+      if (spec.nameOpts.includes(letters[vi]) && RUNTIME.test(val)) hit(val);
     }
+    const names =
+      spec.positional === 'all'
+        ? positional
+        : spec.positional === 'first'
+          ? positional.slice(0, 1)
+          : spec.positional === 'second'
+            ? positional.slice(1, 2)
+            : [];
+    for (const n of names) if (RUNTIME.test(n)) hit(n);
   }
   return out;
 }

