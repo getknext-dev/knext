@@ -271,6 +271,15 @@ describe("verifyBytecodeEmbedded — the self-contained proof (#1456)", () => {
         expect(r.ok).toBe(false);
     });
 
+    it("FAILS when a NON-route embedded module (a node_modules module) lost its bytecode while every route chunk kept it", () => {
+        const r = verifyBytecodeEmbedded(
+            bin(pool(1), head(BC, "entry"), head(PLAIN, "lib"), route(0)),
+            MARKER,
+            1,
+        );
+        expect(r).toEqual({ ok: false, reason: expect.stringContaining("no @bytecode") });
+    });
+
     it("FAILS when a marked route chunk is missing from the executable", () => {
         const r = verifyBytecodeEmbedded(
             bin(pool(1), head(BC, "entry"), route(0)),
