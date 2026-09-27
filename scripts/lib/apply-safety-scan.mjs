@@ -537,9 +537,13 @@ const IMPLICIT_VARS = new Set([
 // unquoted-looking separator. Imprecise on purpose — a prefix it mis-splits
 // fails the shapes below and is therefore classed a write (fail closed).
 const COMMAND_START = /[;\n&|()`]|\{\s/g;
-function commandPrefix(before) {
+function commandPrefix(before, frames = null) {
   let at = 0;
-  for (const m of before.matchAll(COMMAND_START)) at = m.index + m[0].length;
+  for (const m of before.matchAll(COMMAND_START)) {
+    // A separator inside quotes (`read -d ";" V`, `read -p "a|b" V`) is text.
+    if (frames && frames[m.index] !== 'code' && frames[m.index] !== 'bq') continue;
+    at = m.index + m[0].length;
+  }
   return before.slice(at);
 }
 // `NAME=v` is a write the recognizer MODELS only as recordAssignments reads
@@ -642,7 +646,7 @@ export function writeSites(text, name) {
       out.push({ kind: 'other', snippet });
       continue;
     }
-    const stmt = commandPrefix(before).replace(LEADING_KEYWORDS, '');
+    const stmt = commandPrefix(before, frames).replace(LEADING_KEYWORDS, '');
     if (!shellCanBind(stmt, after)) continue;
     if (!flagged && after.startsWith('=') && ASSIGN_PREFIX.test(stmt) && !NAMEREF_FLAG.test(stmt)) {
       out.push({ kind: 'assign', word: words(text.slice(at, at + 4000))[0] ?? '' });
@@ -698,6 +702,10 @@ export function dynamicNameWrites(text) {
     )
   )
     out.push('an arithmetic assignment to a $-expanded name');
+  // An alias can make ANY word a writer (`alias rd=read; rd V`); bash expands
+  // them in a script under `shopt -s expand_aliases` or POSIX mode.
+  if (/(^|[\s;&|(])alias\s+[^\s=]+=|\bexpand_aliases\b/.test(text))
+    out.push('an alias is defined, so any word may be a variable-writing builtin');
   for (const cl of splitClauses(text)) {
     for (const seg of splitPipeline(cl.text)) {
       let ws = words(seg).map(unquote);
@@ -761,6 +769,21 @@ function corpusDynamicWrites(st) {
   return d;
 }
 
+/**
+ * An UNQUOTED heredoc body is expanded by the current shell, so a `${V:=…}` /
+ * `${V=…}` / `$(( V = … ))` in it assigns V. Its literal text (YAML, prose) is
+ * not code, so only those expansions join the corpus.
+ */
+function heredocWriteText(heredocs) {
+  const out = [];
+  for (const hd of heredocs) {
+    if (hd.quoted) continue;
+    for (const m of hd.body.matchAll(/\$\{[A-Za-z_]\w*(?:\[[^\]]*\])?:?=|\$\(\([^)]*=/g))
+      out.push(`: ${hd.body.slice(m.index, m.index + 200)}`);
+  }
+  return out;
+}
+
 /** writeSites over this source's whole corpus (cached per corpus size). */
 function corpusWriteSites(name, st) {
   const key = `${name}\0${st.corpus.length}`;
@@ -791,7 +814,12 @@ function referencedVars(st) {
  * unknown (paths stay `$NAME`), and it holds network content / a URL if
  * that producer does. Implicitly-assigned names are bound from any network clause.
  */
-function bindUnmodeledWrites(clauseText, loopTail, st, depth) {
+function bindUnmodeledWrites(text, loopTail, st, depth) {
+  // The `${V:=…}` expansions of the unquoted heredocs this clause feeds.
+  const hd = [...`${text} ${loopTail}`.matchAll(/<<__HD(\d+)__/g)].flatMap((m) =>
+    heredocWriteText(st.heredocs[Number(m[1])] ? [st.heredocs[Number(m[1])]] : []),
+  );
+  const clauseText = hd.length > 0 ? `${text}\n${hd.join('\n')}` : text;
   const refs = referencedVars(st);
   let producer = null;
   let why;
@@ -801,7 +829,7 @@ function bindUnmodeledWrites(clauseText, loopTail, st, depth) {
         .flatMap((seg) => stdinSources(words(seg)))
         .filter((x) => !/^<<__HD/.test(x));
       producer = [clauseText, loopTail, ...stdin].filter(Boolean).join('\n');
-      why = textIsNetwork(producer, st, depth + 1);
+      why = producerIsNetwork(producer, st, depth + 1);
     }
   };
   const bind = (name) => {
@@ -1072,7 +1100,7 @@ function loadSource(word, st) {
     return;
   }
   const adopted = adoptHeredocs(code, heredocs, st);
-  st.corpus.push(adopted);
+  st.corpus.push(adopted, ...heredocWriteText(heredocs));
   const { functions: sourcedFns } = extractFunctions(adopted);
   for (const [n, fn] of sourcedFns) if (!st.functions.has(n)) st.functions.set(n, fn);
 }
@@ -1485,6 +1513,9 @@ function taintSources(text, st, depth, ctx) {
     // that can bind the name is opaque. Found by scanning every occurrence of
     // the name, so a write construct nobody listed is still opaque.
     if (IMPLICIT_VARS.has(r)) out.add(`opaque:$${r} is assigned implicitly by the shell`);
+    // A `source`d file the resolver could not read may write anything.
+    if (st.unresolvedSource !== null)
+      out.add(`opaque:$${r} may be written by unresolved sourced ${st.unresolvedSource}`);
     for (const d of corpusDynamicWrites(st))
       out.add(`opaque:$${r} may be written through a run-time variable name: ${d}`);
     for (const site of corpusWriteSites(r, st)) {
@@ -2099,7 +2130,7 @@ export function unsafeApplies(
     st.verified = carry.verified;
   }
   st.heredocs = heredocs;
-  st.corpus.push(code);
+  st.corpus.push(code, ...heredocWriteText(heredocs));
   // A `trap` handler is a string the CURRENT shell runs later: its writes count.
   for (const m of code.matchAll(/(?:^|[\s;&|(])trap\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")/g))
     st.corpus.push(m[1] ?? m[2]);

@@ -37,7 +37,9 @@
  *             M72 (run-time variable name), M73 (implicit REPLY/MAPFILE…),
  *             M74 ($(<file)), M75 (corpus scan off), M76 (opaque dropped),
  *             M77 (trap handler), M78 M79 M80 (general walk: producer, loop
- *             redirect, nameref)
+ *             redirect, nameref), M81 (quoted separator splits the command),
+ *             M82 (aliases ignored), M83 (heredoc `${V:=}` not scanned),
+ *             M84 (unresolved sourced file not opaque)
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -60,7 +62,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(80);
+declareMutations(84);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -551,6 +553,32 @@ prove(
   SCANNER,
   '    if (nameref) {',
   '    if (false) {',
+);
+
+prove(
+  'M81 write sites: a separator INSIDE quotes (`read -d ";" V`) splits the command',
+  SCANNER,
+  "    if (frames && frames[m.index] !== 'code' && frames[m.index] !== 'bq') continue;",
+  '    if (false) continue;',
+);
+prove(
+  'M82 run-time names: an alias (`alias rd=read; rd V`) is not treated as a possible writer',
+  SCANNER,
+  '  if (/(^|[\\s;&|(])alias\\s+[^\\s=]+=|\\bexpand_aliases\\b/.test(text))',
+  '  if (false)',
+);
+
+prove(
+  'M83 write sites: a \`${V:=…}\` in an unquoted heredoc body is not seen',
+  SCANNER,
+  '    if (hd.quoted) continue;',
+  '    continue;',
+);
+prove(
+  'M84 source pin: a sourced file the resolver cannot read is assumed to write nothing',
+  SCANNER,
+  '    if (st.unresolvedSource !== null)\n      out.add(',
+  '    if (false)\n      out.add(',
 );
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);

