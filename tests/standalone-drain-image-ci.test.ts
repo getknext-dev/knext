@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
+import { skipViolation } from '../scripts/lib/bun-test-no-skip.mjs';
 import { auditBlockingGate } from './helpers/blocking-gate';
 
 /**
@@ -507,21 +509,26 @@ describe('the self-contained drain legs cannot be switched off or weakened (roun
     expect(code).toMatch(/if \(afterMs > 0\) \{/);
   });
 
-  it('bun-test.mjs --no-skip fails a file that skips or todos, and only under the flag', () => {
+  // The canaries live in an OS temp dir, never the checkout (a transient file
+  // in the tree races every spec that walks it — temp-dirs-outside-the-repo).
+  // bun-test.mjs discovers targets through `git ls-files`, which cannot name a
+  // path outside the repo, so the parser is exercised on REAL bun output here
+  // and the runner's use of it is pinned separately below.
+  it('--no-skip rejects real bun output from a file that skips, todos or conditions a test off', () => {
     const canaries: Record<string, string> = {
       todo: "it.todo('not run', () => {});",
       if: "it.if(false)('not run', () => {});",
       skip: "it.skip('not run', () => {});",
+      skipIf: "it.skipIf(true)('not run', () => {});",
       clean: "it('runs', () => { expect(1).toBe(1); });",
     };
-    const results: Record<string, { strict: number | null; lax: number | null; out: string }> = {};
-    const written: string[] = [];
+    const dir = mkdtempSync(join(tmpdir(), 'knext-no-skip-'));
+    const results: Record<string, { status: number | null; out: string }> = {};
     try {
       for (const [kind, extra] of Object.entries(canaries)) {
-        const rel = `tests/__no-skip-canary-${kind}.test.ts`;
-        written.push(resolve(REPO_ROOT, rel));
+        const file = join(dir, `${kind}.test.ts`);
         writeFileSync(
-          resolve(REPO_ROOT, rel),
+          file,
           [
             "import { expect, it } from 'bun:test';",
             "it('a real test', () => { expect(1).toBe(1); });",
@@ -529,37 +536,51 @@ describe('the self-contained drain legs cannot be switched off or weakened (roun
             '',
           ].join('\n'),
         );
-        const run = (args: string[]) =>
-          spawnSync('node', [resolve(REPO_ROOT, 'scripts/bun-test.mjs'), ...args, rel], {
-            cwd: REPO_ROOT,
-            encoding: 'utf8',
-            timeout: 300_000,
-          });
-        const strict = run(['--no-skip']);
-        const lax = run([]);
-        results[kind] = {
-          strict: strict.status,
-          lax: lax.status,
-          out: `${strict.stdout}${strict.stderr}`,
-        };
+        const r = spawnSync(process.execPath, ['test', file], {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: 120_000,
+        });
+        results[kind] = { status: r.status, out: `${r.stdout}${r.stderr}` };
       }
     } finally {
-      for (const f of written) rmSync(f, { force: true });
+      rmSync(dir, { recursive: true, force: true });
     }
-    for (const kind of ['todo', 'if', 'skip']) {
+    for (const kind of ['todo', 'if', 'skip', 'skipIf']) {
+      // bun itself exits 0 — which is exactly why the flag exists.
       expect(
-        results[kind].strict,
-        `--no-skip let a file with it.${kind} pass:\n${results[kind].out}`,
-      ).toBe(1);
-      expect(results[kind].out).toContain('--no-skip:');
-      // Without the flag bun itself exits 0 — so the flag is what reds it.
-      expect(results[kind].lax, `without --no-skip, it.${kind} is expected to pass`).toBe(0);
+        results[kind].status,
+        `bun unexpectedly failed it.${kind}:\n${results[kind].out}`,
+      ).toBe(0);
+      expect(
+        skipViolation(results[kind].out),
+        `--no-skip would let it.${kind} pass:\n${results[kind].out}`,
+      ).toMatch(/^--no-skip: /);
     }
-    expect(
-      results.clean.strict,
-      `--no-skip failed a file with nothing skipped:\n${results.clean.out}`,
-    ).toBe(0);
+    expect(results.clean.status).toBe(0);
+    expect(skipViolation(results.clean.out), results.clean.out).toBeNull();
+    // No summary at all is a failure, not a pass.
+    expect(skipViolation('')).toMatch(/^--no-skip: no `N pass` summary/);
   }, 300_000);
+
+  it('bun-test.mjs applies --no-skip: reads the flag, and a violation fails the file', () => {
+    const runner = blankNonCode(readFileSync(resolve(REPO_ROOT, 'scripts/bun-test.mjs'), 'utf8'));
+    expect(runner).toMatch(/import \{ skipViolation \} from '[^']*';/);
+    expect(runner).toMatch(/const noSkip = argv\.includes\('[^']*'\);/);
+    expect(
+      readFileSync(resolve(REPO_ROOT, 'scripts/bun-test.mjs'), 'utf8'),
+      'the runner must read the --no-skip flag',
+    ).toContain("const noSkip = argv.includes('--no-skip');");
+    expect(runner, 'a zero-exit file must be checked under --no-skip').toMatch(
+      /const violation = noSkip && code === 0 \? skipViolation\(output\) : null;/,
+    );
+    expect(runner, 'a violation must make the file fail').toMatch(
+      /const ok = code === 0 && violation === null;/,
+    );
+    expect(runner, 'a failed file must be recorded as a failure').toMatch(
+      /if \(!ok\) failures\.push\(\{ file, output \}\);/,
+    );
+  });
 });
 
 describe('the CI path actually reaches the suite (both halves)', () => {
