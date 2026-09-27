@@ -139,6 +139,15 @@ const CLI_ONLY: Record<string, string> = {
         "the --builder vinext content override of instrumentation-edge-safe.test.ts.hbs — " +
         "byte-identical to the zone template's copy (asserted below), since vinext is the " +
         "shape the zone template still builds",
+    "Dockerfile.self-contained.hbs":
+        "the zone app is built and imaged by this repo's own pipeline and never runs " +
+        "`kn-next build --self-contained`, so it needs no copy of this reference recipe " +
+        "(#1460). Verified empirically (loadTemplates()/selectBuilderTemplates()): this " +
+        "file is NOT gated by VINEXT_ONLY_TEMPLATES/DEFAULT_ONLY_TEMPLATES, so it ships " +
+        "into every created app unconditionally today regardless of --builder — self- " +
+        "contained mode has no create-time flag yet (only `kn-next build " +
+        "--self-contained`). That gap is real but is a create.ts template-selection " +
+        "question, not something this zone-vs-CLI parity guard is scoped to fix.",
 };
 
 // `Dockerfile.standalone.hbs` and `knext-standalone-entry.mjs.hbs` (the
