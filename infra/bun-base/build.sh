@@ -38,8 +38,9 @@ pin() { # pin <file-in-cwd> — verify it against its fetch-pins.sha256 line, ex
 }
 TARGETS="${BUN_BASE_TARGETS:-x64 aarch64}"
 
-T0=$(date +%s)
-lap() { echo "### LAP $1 t=$(($(date +%s) - T0))s"; }
+# No arithmetic, array, subscript or slice anywhere in this file (the guard bans all of them): step
+# timing is a wall-clock stamp per phase, and Cloud Build's own step timing is the duration of record.
+lap() { echo "### LAP $1 at $(date -u +%T)"; }
 
 PREFIX="$(bash "$WS/prefix.sh")"
 UPSTREAM_SHA="${PREFIX%%-*}"
@@ -47,8 +48,9 @@ echo "prefix=$PREFIX"
 
 # ── patch header lint (before any expensive work) ────────────────────────────
 shopt -s nullglob
-PATCHES=("$WS"/patches/*.patch)
-for p in "${PATCHES[@]}"; do
+have_patches=no
+for p in "$WS"/patches/*.patch; do
+  have_patches=yes
   name="$(basename "$p")"
   [[ "$name" =~ ^[0-9]{3}-[a-z0-9-]+\.patch$ ]] || { echo "patch $name: bad filename (want <nnn>-<upstream-issue>-<slug>.patch)" >&2; exit 1; }
   grep -Eq 'oven-sh/bun#[0-9]+' "$p" || { echo "patch $name: header must name the upstream issue/PR (oven-sh/bun#N)" >&2; exit 1; }
@@ -126,10 +128,10 @@ git remote add origin https://github.com/oven-sh/bun.git
 git fetch -q --depth 1 origin "$UPSTREAM_SHA"
 git checkout -q FETCH_HEAD
 test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"
-if [ ${#PATCHES[@]} -gt 0 ]; then
+if [ "$have_patches" = yes ]; then
   # Fixed committer + author date keeps the patched HEAD (embedded as Bun's revision) reproducible.
   GIT_COMMITTER_NAME=knext-bun-base GIT_COMMITTER_EMAIL=bun-base@getknext.invalid \
-    git am --committer-date-is-author-date "${PATCHES[@]}"
+    git am --committer-date-is-author-date "$WS"/patches/*.patch
 fi
 HEAD_SHA="$(git rev-parse HEAD)"
 rustup toolchain install
@@ -137,34 +139,33 @@ rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 bun install --frozen-lockfile
 # Prebuilt WebKit/JSC (the largest binary input): Bun's build script would download it from a GitHub
 # release with no integrity check. Its downloader consults BUN_BUILD_PREFETCH_DIR/by-url/<sha256(url)[:32]>
-# first, so we fetch each tarball ourselves, verify it against fetch-pins.sha256, and seed that cache.
+# first, so for each target we fetch the tarball ourselves, verify it against fetch-pins.sha256, seed
+# that cache, build, and then prove from the build log that the seeded file is what got linked.
 # The version is read from the source at UPSTREAM_SHA; the pin is keyed by its first 16 hex chars, so a
 # WebKit bump upstream (or a bump of UPSTREAM_SHA) fails closed here until a maintainer re-pins.
 wk="$(grep -oE 'WEBKIT_VERSION = "[0-9a-f]{40}"' scripts/build/deps/webkit.ts | grep -oE '[0-9a-f]{40}')"
 [ "$(printf '%s\n' "$wk" | grep -c .)" = 1 ] || { echo "cannot read a single WEBKIT_VERSION from the source" >&2; exit 1; }
+wkshort="$(printf '%s' "$wk" | cut -c1-16)"
 export BUN_BUILD_PREFETCH_DIR=/tmp/bun-prefetch
 mkdir -p "$BUN_BUILD_PREFETCH_DIR/by-url" /tmp/wk
-declare -A WK_KEY
+lap source
+
+# ── build (per target: fetch + pin + seed its WebKit, build, prove the pinned tarball was linked) ──
+mkdir -p "$OUT"
 for arch in $TARGETS; do
   case "$arch" in x64) wkarch=amd64 ;; aarch64) wkarch=arm64 ;; *) echo "unknown target $arch" >&2; exit 1 ;; esac
   wkurl="https://github.com/oven-sh/WebKit/releases/download/autobuild-$wk/bun-webkit-linux-$wkarch-musl-lto.tar.gz"
-  wkfile="bun-webkit-linux-$wkarch-musl-lto-${wk:0:16}.tar.gz"
+  wkfile="bun-webkit-linux-$wkarch-musl-lto-$wkshort.tar.gz"
   curl -fsSL "$wkurl" -o "/tmp/wk/$wkfile"
   (cd /tmp/wk && pin "$wkfile")
-  WK_KEY[$arch]="$(printf '%s' "$wkurl" | sha256sum | cut -c1-32)"
-  cp "/tmp/wk/$wkfile" "$BUN_BUILD_PREFETCH_DIR/by-url/${WK_KEY[$arch]}"
-done
-lap source
-
-# ── build ────────────────────────────────────────────────────────────────────
-mkdir -p "$OUT"
-for arch in $TARGETS; do
+  wkkey="$(printf '%s' "$wkurl" | sha256sum | cut -c1-32)"
+  cp "/tmp/wk/$wkfile" "$BUN_BUILD_PREFETCH_DIR/by-url/$wkkey"
   bd="build/release-linux-$arch-musl"
   bun scripts/build.ts --profile=release --os=linux --arch="$arch" --abi=musl --canary=off \
     --build-dir="$bd" 2>&1 | tee "/tmp/build-$arch.log" | tail -n 60
   test -x "$bd/bun"
   # Proof the pinned tarball — not a fresh network fetch — is what got linked.
-  grep -qF "using prefetch cache: $BUN_BUILD_PREFETCH_DIR/by-url/${WK_KEY[$arch]}" "/tmp/build-$arch.log"
+  grep -qF "using prefetch cache: $BUN_BUILD_PREFETCH_DIR/by-url/$wkkey" "/tmp/build-$arch.log"
   install -m755 "$bd/bun" "$OUT/bun-linux-$arch-musl"
   file "$OUT/bun-linux-$arch-musl"
   lap "build-$arch"
@@ -175,7 +176,8 @@ if [ -x "$OUT/bun-linux-x64-musl" ]; then
   LD=/opt/linux-sysroot-musl/lib/ld-musl-x86_64.so.1
   "$LD" --library-path /opt/linux-sysroot-musl/usr/lib:/opt/linux-sysroot-musl/lib \
     "$OUT/bun-linux-x64-musl" --revision | tee "$OUT/bun-linux-x64-musl.revision"
-  grep -q "${HEAD_SHA:0:9}" "$OUT/bun-linux-x64-musl.revision"
+  headshort="$(printf '%s' "$HEAD_SHA" | cut -c1-9)"
+  grep -qF "$headshort" "$OUT/bun-linux-x64-musl.revision"
 fi
 
 cat >"$OUT/manifest.json" <<JSON
@@ -185,7 +187,7 @@ cat >"$OUT/manifest.json" <<JSON
   "upstream_sha": "$UPSTREAM_SHA",
   "patched_head": "$HEAD_SHA",
   "prefix": "$PREFIX",
-  "patches": [$(for p in "${PATCHES[@]}"; do printf '"%s",' "$(basename "$p")"; done | sed 's/,$//')],
+  "patches": [$(for p in "$WS"/patches/*.patch; do printf '"%s",' "$(basename "$p")"; done | sed 's/,$//')],
   "targets": [$(for a in $TARGETS; do printf '"bun-linux-%s-musl",' "$a"; done | sed 's/,$//')],
   "profile": "release (ThinLTO), canary=off",
   "build_id": "${BUILD_ID:-local}"

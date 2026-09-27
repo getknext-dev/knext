@@ -160,6 +160,17 @@ real bash parser (`mvdan-sh`, the parser behind `shfmt`) and walks the syntax tr
   reviewed `IFS=: read -r _ apkarch root <<<"$pair"`), because `read -r PATH <<<…` or
   `read -r HOME <<<…` binds those names without ever writing an `=` assignment (#1469 F2); every
   redirection reads or writes a reviewed path, so no spelling of `/dev/tcp` gets through;
+- **no arithmetic, array, subscript or slice, anywhere.** Bash evaluates `$(( ))`, `(( ))`, `let`,
+  `for (( ))`, array subscripts, `${x:offset:length}`, `declare -i`, `[[ -eq ]]`/`[ -eq ]` and `-v`
+  arithmetically, and that evaluator can assign variables and run command substitutions. Earlier
+  versions tried to judge which uses were safe and kept missing a context, so the scripts now use none
+  of them (`cut -c` instead of slices, a `case` and plain loops instead of arrays, a wall-clock stamp
+  instead of lap arithmetic) and the test bans every one of them, together with `${!…}`, `:=`/`@`
+  expansions, array assignments and any `declare`/`typeset`/`readonly` or flagged `export`/`local`;
+- the bans are found by a **generic** walk that reads every field of every syntax node rather than the
+  fields a visitor knows about, and every command, redirection, assignment, function, declaration and
+  `$( )` that walk finds must also have been reached by the rule checks above (the counts are
+  compared), so no part of the syntax tree can hold code the rules never saw;
 - each entry below matches exactly its stated number of calls, and its `match` regex is rendered here,
   so widening one is a visible change.
 
