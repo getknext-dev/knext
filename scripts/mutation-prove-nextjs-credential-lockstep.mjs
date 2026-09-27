@@ -197,7 +197,7 @@ const MUTATIONS = [
     label: 'compat-vinext-ledger.mjs: revert DEFAULT_NEXTJS_REF to a hardcoded (drifted) literal',
     subject: 'ledger',
     anchor:
-      "export const DEFAULT_NEXTJS_REF = JSON.parse(\n  readFileSync(CREDENTIAL_MANIFEST_PATH, 'utf8'),\n).credentialedNextRef;",
+      "export const DEFAULT_NEXTJS_REF =\n  credentialManifest.lockstepExceptions?.find(\n    (ex) => ex.file === LANE_WORKFLOW_PATH && ex.kind === 'dispatch-default',\n  )?.value ?? credentialManifest.credentialedNextRef;",
     replacement: "export const DEFAULT_NEXTJS_REF = 'v16.3.3';",
   },
 

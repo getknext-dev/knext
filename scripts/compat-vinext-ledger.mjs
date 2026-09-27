@@ -186,11 +186,23 @@ export const FLAKY_WINDOW = 3;
 /** The lane's workflow: its name (for `gh run list`) and its checked-out path (for `gh api`). */
 export const LANE_WORKFLOW = 'compat-vinext.yml';
 export const LANE_WORKFLOW_PATH = `.github/workflows/${LANE_WORKFLOW}`;
-/** The pinned ref this lane's credentialed runs use (`compat-vinext.yml`'s default input),
- * read from `.github/compat-credentialed-next-version.json` rather than hardcoded. */
-export const DEFAULT_NEXTJS_REF = JSON.parse(
-  readFileSync(CREDENTIAL_MANIFEST_PATH, 'utf8'),
-).credentialedNextRef;
+const credentialManifest = JSON.parse(readFileSync(CREDENTIAL_MANIFEST_PATH, 'utf8'));
+/** The pinned ref this lane's credentialed runs use (`compat-vinext.yml`'s default input) —
+ * this lane's own EFFECTIVE ref, not the manifest's blanket `credentialedNextRef`.
+ *
+ * The manifest documents per-workflow `lockstepExceptions` (#1376) precisely because a
+ * workflow can be deliberately left off a re-credential bump; `compat-vinext.yml` carries
+ * exactly that exception (vinext/bun is v1.x scope, credentialed on its own schedule — the
+ * manifest's own `lockstepExceptions` reason). #1570 bumped `credentialedNextRef` to
+ * v16.2.12 for the node/bun rc.1 cells while leaving this lane's `dispatch-default`
+ * exception at v16.2.0, so reading `credentialedNextRef` directly here made this lane
+ * reject its own correctly-pinned, evidence-backed runs the moment the two values
+ * diverged. Resolve the exception for THIS lane's workflow first; fall back to the
+ * blanket ref only when no exception exists for it. */
+export const DEFAULT_NEXTJS_REF =
+  credentialManifest.lockstepExceptions?.find(
+    (ex) => ex.file === LANE_WORKFLOW_PATH && ex.kind === 'dispatch-default',
+  )?.value ?? credentialManifest.credentialedNextRef;
 /** Every shard must be present for a run to inform the flaky window or `verify`. */
 export const EXPECTED_SHARD_TOTAL = 16;
 /** Consecutive per-run history fetch failures (auth/API errors) before `report` fails closed. */

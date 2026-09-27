@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { DEFAULT_NEXTJS_REF as LEDGER_DEFAULT_NEXTJS_REF } from '../scripts/compat-vinext-ledger.mjs';
+import {
+  DEFAULT_NEXTJS_REF as LEDGER_DEFAULT_NEXTJS_REF,
+  LANE_WORKFLOW_PATH as LEDGER_LANE_WORKFLOW_PATH,
+} from '../scripts/compat-vinext-ledger.mjs';
 
 /**
  * NEXTJS credential lockstep (#1376).
@@ -624,15 +627,28 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
   });
 
   describe('a THIRD copy of the credentialed ref (round-3 finding)', () => {
-    it("scripts/compat-vinext-ledger.mjs's DEFAULT_NEXTJS_REF matches the manifest's credentialedNextRef", () => {
+    it("scripts/compat-vinext-ledger.mjs's DEFAULT_NEXTJS_REF matches its lane's EFFECTIVE credentialed ref", () => {
       // rev-1379 round 3: this constant used to be a hardcoded 'v16.2.0'
       // literal that neither this test nor the manifest ever saw — a THIRD
       // copy of the credentialed ref, independent of the workflow scan
       // above. The script now READS the manifest directly (preferred over a
       // duplicated assertion), so this test is really asserting the read
       // wiring stayed intact, not re-deriving the value by hand.
+      //
+      // #1570/#1578: the ledger's lane (compat-vinext.yml) can carry its own
+      // `lockstepExceptions` `dispatch-default` entry — vinext/bun is v1.x
+      // scope, credentialed on its own schedule, so it is deliberately left
+      // off a node/bun-only re-credential bump (the manifest's
+      // `credentialedNextRef` moved to v16.2.12 for #1570 while this lane's
+      // exception stayed at v16.2.0). Asserting equality with the blanket
+      // `credentialedNextRef` here does not hold once the two diverge — the
+      // honest expectation is the lane's own EFFECTIVE ref: its
+      // `dispatch-default` exception when one exists, else the blanket ref.
       const manifest = loadManifest();
-      expect(LEDGER_DEFAULT_NEXTJS_REF).toBe(manifest.credentialedNextRef);
+      const laneException = manifest.lockstepExceptions.find(
+        (ex) => ex.file === LEDGER_LANE_WORKFLOW_PATH && ex.kind === 'dispatch-default',
+      );
+      expect(LEDGER_DEFAULT_NEXTJS_REF).toBe(laneException?.value ?? manifest.credentialedNextRef);
     });
 
     it('every NEXT_NPM_VERSION= assignment across .github/workflows/** uses the trusted "${NEXTJS_REF#v}" form', () => {
