@@ -1004,6 +1004,11 @@ describe('#1514 (b) — the suite server runs with the disk tree unreachable (ru
       'ln -s "${APP_DIR}/.output.ed-hidden/server" "${EMPTY_DIR}/.output/server"',
     'symlinked .next/server in the cwd':
       'mkdir -p "${EMPTY_DIR}/.next" && ln -s "${APP_DIR}/.next.ed-hidden/server" "${EMPTY_DIR}/.next/server"',
+    // Real directories, not symlinks — the symlink sweep cannot see these, so
+    // they isolate the cwd-path check itself (prover mutation 20).
+    'a REAL node_modules directory created in the cwd': 'mkdir "${EMPTY_DIR}/node_modules"',
+    'a REAL .output/server directory created in the cwd': 'mkdir "${EMPTY_DIR}/.output/server"',
+    'a REAL .next/server directory created in the cwd': 'mkdir -p "${EMPTY_DIR}/.next/server"',
     'a symlink nested under the staged static assets':
       'ln -s /nonexistent-knext-leak "${EMPTY_DIR}/.output/public/leak"',
     'node_modules in an ANCESTOR of the cwd (module resolution walks up)':
