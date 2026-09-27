@@ -201,6 +201,7 @@ describe('every apk package in scripts/e2e-native-rebuild-musl.sh carries a mino
       'apk upgrade --no-cache',
       `\${APK:-apk} add make`,
       'apk.static add make',
+      'my_apk_wrapper add make',
       'apk add --no-cache --allow-untrusted python3~3.12',
     ];
     for (const bad of smuggles) {
