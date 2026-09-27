@@ -68,6 +68,23 @@ export function scanBunexecMetrics(source: string): Map<string, string> {
 }
 
 /**
+ * Scan the self-contained STANDALONE runtime's dependency-free `:9464`
+ * exposition (`standalone-self-contained-supervisor.cjs`'s `metricsBody`,
+ * ADR-0055's fold decision) — a DIFFERENT runtime target from `bunexec`
+ * (ADR-0048's compiled vinext single executable), so it gets its own emitter
+ * classification below even though a `# TYPE` exposition is comment-typed the
+ * same way regardless of which runtime renders it, and `scanBunexecMetrics`'s
+ * regex is exactly what parses it correctly. Kept as a distinct named export
+ * (round-2 fix, M2/docs, #1457/#1519) so the two targets read as conceptually
+ * separate call sites here, not because the underlying scan differs.
+ */
+export function scanStandaloneSelfContainedMetrics(
+    source: string,
+): Map<string, string> {
+    return scanBunexecMetrics(source);
+}
+
+/**
  * Scan the operator's Go metric registry.
  *
  * Matches a `prometheus.New<Kind>[Vec](prometheus.<Kind>Opts{ … Name: "…" })`

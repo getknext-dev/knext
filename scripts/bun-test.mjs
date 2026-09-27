@@ -51,6 +51,7 @@ import { cpus } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blankNonCode } from './lib/blank-non-code.mjs';
+import { skipViolation } from './lib/bun-test-no-skip.mjs';
 import { BUN_COVERAGE_DIR } from './lib/coverage-policy.mjs';
 import { importsFrom } from './lib/test-framework-import.mjs';
 
@@ -61,6 +62,11 @@ const flag = (name, fallback) => {
 };
 
 const withCoverage = argv.includes('--coverage');
+/**
+ * `--no-skip`: a file that reports ANY skipped or todo test FAILS (see
+ * `lib/bun-test-no-skip.mjs` for why a green `bun test` is not enough).
+ */
+const noSkip = argv.includes('--no-skip');
 const bunBin = flag('bun', process.env.KNEXT_BUN ?? 'bun');
 
 /**
@@ -290,7 +296,9 @@ function runFile(file) {
           rmSync(covDir, { recursive: true, force: true });
         }
       }
-      const ok = code === 0;
+      const violation = noSkip && code === 0 ? skipViolation(output) : null;
+      if (violation) output += `\n${violation}\n`;
+      const ok = code === 0 && violation === null;
       if (!ok) failures.push({ file, output });
       process.stdout.write(`  ${ok ? 'ok  ' : 'FAIL'} [${done}/${files.length}] ${file}\n`);
       // Under a -t filter (#902: the prover lane runs single tests through this

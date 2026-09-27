@@ -440,6 +440,17 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         );
     });
 
+    it("writes knext-self-contained-server-shim.js into the build context root — the COPY source the self-contained stage's operator-compat shim needs (B2, N2 round-2, #1457)", () => {
+        const ctx = tmp();
+        stageStandaloneBuildContext({ cwd: ctx, buildContext: ctx });
+        const shim = join(ctx, "knext-self-contained-server-shim.js");
+        expect(existsSync(shim)).toBe(true);
+        const text = readFileSync(shim, "utf8");
+        // It execs the compiled binary sitting beside it — the whole point.
+        expect(text).toContain("knext-standalone-exec");
+        expect(text).toContain("spawn(");
+    });
+
     it("stages the entry at the build-context root even when it differs from cwd", () => {
         // COPY sources resolve against the build CONTEXT, not cwd, so the entry
         // must land in the context — otherwise `COPY knext-standalone-entry.mjs`
@@ -478,6 +489,11 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         writeFileSync(
             join(templateDir, "knext-compile-cache-bake.mjs.hbs"),
             "process.env.STANDALONE_SERVER_PATH;\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-self-contained-server-shim.js.hbs"),
+            "spawn('knext-standalone-exec');\n",
             "utf8",
         );
         const ctx = tmp();
@@ -551,6 +567,11 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
             "process.env.STANDALONE_SERVER_PATH;\n",
             "utf8",
         );
+        writeFileSync(
+            join(templateDir, "knext-self-contained-server-shim.js.hbs"),
+            "spawn('knext-standalone-exec');\n",
+            "utf8",
+        );
         const ctx = tmp();
         expect(() =>
             stageStandaloneBuildContext({
@@ -562,6 +583,47 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         // Nothing must have been written into the context on failure.
         expect(existsSync(join(ctx, "knext-standalone-entry.mjs"))).toBe(false);
         expect(existsSync(join(ctx, "Dockerfile.standalone"))).toBe(false);
+    });
+
+    it("aborts on an unsubstituted {{ }} placeholder left in the SELF-CONTAINED SERVER SHIM (B2, N2 round-2, #1457, both-halves guard)", () => {
+        const templateDir = tmp();
+        const dockerfileText = readFileSync(
+            join(runtimeStandaloneTemplateDir(), "Dockerfile.standalone.hbs"),
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "Dockerfile.standalone.hbs"),
+            dockerfileText,
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-standalone-entry.mjs.hbs"),
+            "import('@getknext/core/internal/node-server')();\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-compile-cache-bake.mjs.hbs"),
+            "process.env.STANDALONE_SERVER_PATH;\n",
+            "utf8",
+        );
+        writeFileSync(
+            join(templateDir, "knext-self-contained-server-shim.js.hbs"),
+            "spawn('{{ broken }}');\n",
+            "utf8",
+        );
+        const ctx = tmp();
+        expect(() =>
+            stageStandaloneBuildContext({
+                cwd: ctx,
+                buildContext: ctx,
+                templateDir,
+            }),
+        ).toThrow(
+            /knext-self-contained-server-shim\.js\.hbs contains an unsubstituted/,
+        );
+        expect(
+            existsSync(join(ctx, "knext-self-contained-server-shim.js")),
+        ).toBe(false);
     });
 
     it("writes a per-Dockerfile .dockerignore that keeps the standalone closure IN the context", () => {
@@ -580,6 +642,7 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
             "public",
             "node_modules/@getknext/core",
             "knext-standalone-entry.mjs",
+            "knext-self-contained-server-shim.js",
         ]) {
             expect(
                 dockerignoreExcludes(content, needed),
@@ -682,5 +745,169 @@ describe("isKnownGoodTemplateDockerfile — scopes verifyBuiltImageLockstep to D
         expect(
             isKnownGoodTemplateDockerfile(join(tmp(), "does-not-exist")),
         ).toBe(false);
+    });
+});
+
+describe("selectRuntimeImage — selfContained routing (N2, #1457)", () => {
+    it("off (absent) -> standalone-bun, byte-identical to before selfContained existed", () => {
+        const sel = selectRuntimeImage(
+            { build: "turbopack", runtime: "bun" },
+            "/app",
+        );
+        expect(sel.target).toBe("standalone-bun");
+    });
+
+    it("off (explicit false) -> standalone-bun", () => {
+        const sel = selectRuntimeImage(
+            { build: "turbopack", runtime: "bun", selfContained: false },
+            "/app",
+        );
+        expect(sel.target).toBe("standalone-bun");
+    });
+
+    it("on + runtime bun (default) -> standalone-bun-self-contained", () => {
+        const sel = selectRuntimeImage(
+            { build: "turbopack", selfContained: true },
+            "/app",
+        );
+        expect(sel.kind).toBe("standalone");
+        expect(sel.target).toBe("standalone-bun-self-contained");
+    });
+
+    it("on + runtime explicit bun -> standalone-bun-self-contained", () => {
+        const sel = selectRuntimeImage(
+            { build: "webpack", runtime: "bun", selfContained: true },
+            "/app",
+        );
+        expect(sel.target).toBe("standalone-bun-self-contained");
+    });
+
+    it("on + runtime node -> ignored, still standalone-node (no compiled executable to embed anything in)", () => {
+        const sel = selectRuntimeImage(
+            { build: "turbopack", runtime: "node", selfContained: true },
+            "/app",
+        );
+        expect(sel.target).toBe("standalone-node");
+    });
+
+    it("standalone-bun-self-contained -> bakesCompileCache is falsy, same as standalone-bun", () => {
+        const sel = selectRuntimeImage(
+            { build: "turbopack", selfContained: true },
+            "/app",
+        );
+        expect(sel.bakesCompileCache).toBeFalsy();
+    });
+
+    it("vinext ignores selfContained too — it has no standalone stages", () => {
+        const sel = selectRuntimeImage(
+            { build: "vinext", selfContained: true },
+            "/app",
+        );
+        expect(sel.kind).toBe("app-dockerfile");
+        expect(sel.target).toBeUndefined();
+    });
+});
+
+describe("Dockerfile.standalone.hbs — self-contained stage ships no node_modules (N2, #1457)", () => {
+    const dockerfileText = readFileSync(
+        join(runtimeStandaloneTemplateDir(), "Dockerfile.standalone.hbs"),
+        "utf8",
+    );
+
+    /** The self-contained stage's own text, isolated from its sibling stages. */
+    function selfContainedStageText(text: string): string {
+        const start = text.indexOf(
+            "FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS standalone-bun-self-contained",
+        );
+        expect(start).toBeGreaterThan(-1);
+        // Up to the NEXT `FROM` after the stage's own — every stage in this
+        // file is separated by a `FROM ... AS <name>` line, so scanning to the
+        // next one isolates exactly this stage's body.
+        const next = text.indexOf("\nFROM ", start + 1);
+        return next === -1 ? text.slice(start) : text.slice(start, next);
+    }
+
+    it("the stage exists", () => {
+        expect(dockerfileText).toContain("AS standalone-bun-self-contained");
+    });
+
+    it("carries no COPY/--from instruction naming node_modules (comments may still explain WHY there is none)", () => {
+        const stage = selfContainedStageText(dockerfileText);
+        const instructionLines = stage
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0 && !l.startsWith("#"));
+        expect(instructionLines.some((l) => l.includes("node_modules"))).toBe(
+            false,
+        );
+    });
+
+    it("does not COPY the full .next/standalone tree (the executable embeds it)", () => {
+        const stage = selfContainedStageText(dockerfileText);
+        expect(stage).not.toMatch(/COPY\s+\.next\/standalone\b/);
+    });
+
+    it("does COPY exactly public/, .next/static, the compiled executable, and the B2 operator-compat shim — nothing else", () => {
+        const stage = selfContainedStageText(dockerfileText);
+        const copyLines = stage
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.startsWith("COPY "));
+        expect(copyLines).toEqual([
+            "COPY public /app/public",
+            "COPY .next/static /app/.next/static",
+            "COPY knext-standalone-exec-linux-x64 /app/knext-standalone-exec",
+            "COPY knext-self-contained-server-shim.js /app/server.js",
+        ]);
+    });
+
+    it("still carries no node_modules even with the B2 compat shim added (the shim itself is dependency-free)", () => {
+        const stage = selfContainedStageText(dockerfileText);
+        const instructionLines = stage
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0 && !l.startsWith("#"));
+        expect(instructionLines.some((l) => l.includes("node_modules"))).toBe(
+            false,
+        );
+    });
+
+    it("the ENTRYPOINT execs the compiled binary directly — no supervisor shim as the entrypoint, no `bun run`", () => {
+        const stage = selfContainedStageText(dockerfileText);
+        expect(stage).toContain('ENTRYPOINT ["/app/knext-standalone-exec"]');
+        expect(stage).not.toContain("knext-standalone-entry.mjs");
+        expect(stage).not.toContain("knext-entry.mjs");
+    });
+
+    it("the disk-mode stages (standalone-bun, standalone-node) are unaffected — still copy the full standalone tree + node_modules", () => {
+        // Regression guard for the "default rendering is unchanged" exit
+        // criterion: this only checks the OTHER two stages still carry what
+        // they always carried, not a byte-snapshot of the whole file (the file
+        // gained a new stage, so it cannot be byte-identical as a whole).
+        const bunStageStart = dockerfileText.indexOf(
+            "FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS standalone-bun\n",
+        );
+        expect(bunStageStart).toBeGreaterThan(-1);
+        const nodeStageStart = dockerfileText.indexOf(
+            "FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS standalone-node",
+        );
+        expect(nodeStageStart).toBeGreaterThan(-1);
+        const bunStage = dockerfileText.slice(
+            bunStageStart,
+            dockerfileText.indexOf("\nFROM ", bunStageStart + 1),
+        );
+        expect(bunStage).toContain(
+            "COPY .next/standalone /app/.next/standalone",
+        );
+        expect(bunStage).toContain(
+            "COPY --from=standalone-deps /deps/node_modules /app/node_modules",
+        );
+        const nodeStage = dockerfileText.slice(nodeStageStart);
+        expect(nodeStage).toContain(
+            "COPY .next/standalone /app/.next/standalone",
+        );
+        expect(nodeStage).toContain(
+            "COPY --from=standalone-deps /deps/node_modules /app/node_modules",
+        );
     });
 });

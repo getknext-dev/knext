@@ -1,0 +1,65 @@
+/**
+ * R3 compat shim for the self-contained runtime image (B2, N2 round-2,
+ * #1457) — NOT a supervisor. Copied to `/app/server.js` by
+ * `Dockerfile.standalone.hbs`'s `standalone-bun-self-contained` stage ONLY
+ * because the operator hardcodes `Command: ["bun", "run", "server.js"]` for
+ * every NextApp with `spec.build != "vinext"` and `spec.runtime == "bun"`
+ * (`nextapp_controller.go`'s `containerCommand` branch) and does not yet know
+ * this shape exists — unlike vinext, for which the operator already leaves
+ * `Command: nil`. Teaching the operator/CR the same thing for the
+ * self-contained shape is a CRD/operator change (trigger-class per
+ * `.claude/rules/workflow.md`) and is filed as a separate issue rather than
+ * made in this round — see the N2 PR body's Round 2 section for the number.
+ *
+ * Without this file, an operator-rendered self-contained pod runs
+ * `bun run server.js` against an image that has no `server.js` and
+ * CrashLoops. This file IS that `server.js`: it does the absolute minimum —
+ * exec the compiled executable sitting next to it (`/app/knext-standalone-exec`,
+ * which already owns its own SIGTERM drain + `:9464` metrics, folded in at
+ * compile time by `standalone-self-contained-supervisor.cjs`) and forward
+ * stdio, signals, and the exit code/signal. No `node_modules`, no new
+ * dependency: `bun` is already present because this stage's BASE IMAGE is
+ * `oven/bun:1.4.2-alpine` — this file does not add it.
+ *
+ * Plain CommonJS (no package.json ships in this image to say otherwise, so
+ * `require` is what both bun and node resolve here) — same convention as the
+ * other dependency-free `.cjs` preloads in `packages/kn-next/src/adapters/`.
+ */
+
+'use strict';
+
+const { spawn } = require('node:child_process');
+const { join, dirname } = require('node:path');
+
+const bin = join(dirname(__filename), 'knext-standalone-exec');
+
+const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit' });
+
+// Forward the signals Knative/Kubernetes actually sends on scale-down to the
+// real executable, which owns the drain logic — this shim just relays.
+let forwardedSignal = false;
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    forwardedSignal = true;
+    child.kill(sig);
+  });
+}
+
+child.on('exit', (code, signal) => {
+  if (signal && !forwardedSignal) {
+    // The child died from a signal THIS shim never relayed (e.g. an
+    // out-of-memory kill) — re-raise the same signal on ourselves so the
+    // platform observes the real cause instead of a laundered exit code.
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code === null ? 1 : code);
+});
+
+child.on('error', (err) => {
+  // biome-ignore lint/suspicious/noConsole: dependency-free shim, no logger available
+  console.error(
+    `[knext] self-contained server.js compat shim failed to exec ${bin}: ${err && err.message ? err.message : err}`,
+  );
+  process.exit(1);
+});

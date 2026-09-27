@@ -602,6 +602,24 @@ jobs:
       - name: standalone-node bake honors config.healthCheckPath e2e
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-node-custom-health-path.docker-e2e.test.ts
 
+      # N2 (#1457) — the ONLY proof that the self-contained `--target
+      # standalone-bun-self-contained` stage of Dockerfile.standalone.hbs actually
+      # builds and boots: it ships no node_modules and no .next/standalone tree
+      # (asserted against the REAL built image, not just the Dockerfile's text —
+      # that half is packages/kn-next/src/__tests__/runtime-image-selection.test.ts,
+      # in the fast lane), serves through the folded SIGTERM-drain + :9464 metrics
+      # preload (no separate supervisor process), and exits 0 on SIGTERM. Rides in
+      # the same job (same docker + bun + @getknext/core setup) and has the same
+      # no-skip contract as its siblings above; guarded by
+      # tests/standalone-drain-image-ci.test.ts. Deliberately NO
+      # KNEXT_REQUIRE_SC_EXEC here (round-2 fix, m3): round 1 set it "for parity"
+      # with the N1 self-contained-executable gate's env contract, but this suite
+      # reads no such flag and has no skip path to convert — the env was inert.
+      # Setting an env var the suite never reads is worse than harmless: it reads
+      # as a real fail-closed guarantee this step does not actually have.
+      - name: Self-contained image (standalone-bun-self-contained) — build + boot + no-node_modules e2e
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/standalone-self-contained-image.docker-e2e.test.ts
+
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the
   # instrumentation and app-server chunks — cannot occur under the vinext

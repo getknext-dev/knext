@@ -95,16 +95,44 @@ export interface ShutdownOptions {
     exit: (code: number) => void;
     /** Injectable setTimeout (for deterministic tests). */
     setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+    /**
+     * Where the grace-cap warning goes (the supervisor's logger in prod;
+     * defaults to `console.warn`). Called only when the cap actually fires.
+     */
+    warn?: (message: string) => void;
+}
+
+/**
+ * The warning logged when the grace cap forces the exit. Before this the cap
+ * exited 0 silently, so a pod that dropped work looked exactly like a clean
+ * drain. The exit code stays 0; this line is what makes the drop visible.
+ *
+ * This process is the SUPERVISOR: the Next.js server runs in a child process
+ * whose sockets it cannot see, so when the child is still draining the number
+ * of dropped requests is stated as unknown rather than guessed.
+ */
+export function graceCapWarning(args: {
+    signal: string;
+    graceMs: number;
+    childExited: boolean;
+    /** How many drain hooks were registered (they run concurrently). */
+    pendingDrains: number;
+}): string {
+    const what = args.childExited
+        ? `the ${args.pendingDrains} registered shutdown drain hook(s) all finished (the server itself had drained) — forcing exit and abandoning the unfinished ones`
+        : "the Next.js server finished draining — forcing exit and DROPPING an unknown number of in-flight request(s) (the supervisor cannot see the server's connections)";
+    return (
+        `[knext] shutdown grace cap reached: SHUTDOWN_GRACE_MS=${args.graceMs}ms elapsed after ${args.signal} before ${what}. ` +
+        "Raise SHUTDOWN_GRACE_MS (keep it below the pod termination grace period) or find the request, after() callback or drain hook that never finishes."
+    );
 }
 
 /**
  * Drain the Next.js standalone child on `signal`, then exit at most once.
- * `signal` is informational (the caller logs it); the drain behaviour is the same
- * for SIGTERM/SIGINT.
+ * `signal` is informational (it appears in the grace-cap warning); the drain
+ * behaviour is the same for SIGTERM/SIGINT.
  */
 export function gracefulShutdown(signal: string, opts: ShutdownOptions): void {
-    void signal;
-
     // Re-entrancy guard (#494): a second signal (e.g. SIGTERM then SIGINT, or a
     // repeated SIGTERM) mid-shutdown must not start a duplicate drain + grace
     // timer or forward SIGTERM again — the FIRST invocation owns the drain and the
@@ -142,7 +170,9 @@ export function gracefulShutdown(signal: string, opts: ShutdownOptions): void {
     // When the child drains, run+await the registered drain hooks (DB pool, …)
     // before exiting. If a hook hangs, the grace-cap timer below still forces
     // exit, so the pod never exceeds terminationGracePeriodSeconds.
+    let childExited = false;
     opts.child.once("exit", () => {
+        childExited = true;
         if (shutdownDrains.length === 0) {
             // Nothing to drain — exit synchronously (the common no-DB case).
             finish(0);
@@ -154,10 +184,31 @@ export function gracefulShutdown(signal: string, opts: ShutdownOptions): void {
         );
     });
 
-    const timer = (opts.setTimeoutFn ?? setTimeout)(
-        () => finish(0),
-        opts.graceMs,
-    );
+    // The grace cap still exits 0 (unchanged), but no longer silently: it
+    // says what it abandoned, so a dropped drain is visible in the pod logs.
+    const timer = (opts.setTimeoutFn ?? setTimeout)(() => {
+        if (!exited) {
+            const warn =
+                opts.warn ??
+                ((message: string) => {
+                    // biome-ignore lint/suspicious/noConsole: fallback when no logger is injected
+                    console.warn(message);
+                });
+            try {
+                warn(
+                    graceCapWarning({
+                        signal,
+                        graceMs: opts.graceMs,
+                        childExited,
+                        pendingDrains: shutdownDrains.length,
+                    }),
+                );
+            } catch {
+                // a failing logger must never block the exit below
+            }
+        }
+        finish(0);
+    }, opts.graceMs);
     if (
         timer &&
         typeof (timer as { unref?: () => void }).unref === "function"
