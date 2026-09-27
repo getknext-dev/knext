@@ -148,6 +148,33 @@ describe("the standalone lock-step on Next >= 16.2.11 (constant BUILD_ID)", () =
         );
     });
 
+    it("the constant on disk gets the actionable sentence even when next.config already reads KNEXT_BUILD_ID (a deploymentId still reached next build)", () => {
+        // The template line is right, but the app also sets deploymentId —
+        // Next still takes the constant path. The config-text check alone
+        // would say "fine"; only the constant on disk tells the truth.
+        writeFileSync(
+            join(dir, "next.config.js"),
+            `module.exports = { output: "standalone", deploymentId: "pinned", ${templateGenerateBuildIdLine()} };\n`,
+        );
+        const env = cleanEnv();
+        exportBuildIdEnv(env, "tag-6", "turbopack");
+        fakeNextBuild(env);
+
+        expect(readFileSync(join(dir, ".next", "BUILD_ID"), "utf8")).toBe(
+            NEXT_CONSTANT_BUILD_ID,
+        );
+        let message = "";
+        try {
+            checkStandaloneBuildId(dir, "tag-6");
+        } catch (err) {
+            message = (err as Error).message;
+        }
+        expect(message).toStartWith(
+            "Update generateBuildId in next.config to read KNEXT_BUILD_ID",
+        );
+        expect(message).toContain("deploymentId");
+    });
+
     it("a config that DOES read KNEXT_BUILD_ID but still mismatches gets the plain lock-step message", () => {
         writeNextConfig(
             "generateBuildId: () => process.env.KNEXT_BUILD_ID || null",

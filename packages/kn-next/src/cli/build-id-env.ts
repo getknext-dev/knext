@@ -112,7 +112,8 @@ export function buildIdMismatchError(
         return new Error(
             "Update generateBuildId in next.config to read KNEXT_BUILD_ID: " +
                 "`generateBuildId: () => process.env.KNEXT_BUILD_ID || " +
-                "process.env.NEXT_DEPLOYMENT_ID || null` " +
+                "process.env.NEXT_DEPLOYMENT_ID || null`, and set no " +
+                "deploymentId or NEXT_DEPLOYMENT_ID for a standalone build " +
                 `(see ${SKEW_PROTECTION_DOCS_URL}). ${detail}`,
         );
     }
