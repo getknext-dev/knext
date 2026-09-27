@@ -422,11 +422,7 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
 
     it.each<[string, string, string]>([
         ["a Bun.build call", "m.js", "await Bun.build(o);"],
-        [
-            'the "bun" module',
-            "m.ts",
-            'const { build: b } = await import("bun");',
-        ],
+        ['the "bun" module', "m.ts", 'export const bun = await import("bun");'],
         [
             "a build reached through globalThis.Bun",
             "m.cjs",
