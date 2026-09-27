@@ -585,11 +585,22 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
 
     # ── 3c-ii. the empty-dir lane check (#1455, ADR-0060 F6) ─────────────────
     # Off by default; KNEXT_SELF_CONTAINED=1 is dispatch-only. Stages a FRESH
-    # directory holding only the compiled exec + .next/static + public/ (+
-    # native/, if the fixture staged any), asserts nothing else is present,
-    # then boots it — inside the SAME pinned musl image the main boot uses
-    # below (a musl exec cannot run bare on this glibc runner, so this is not
-    # optional plumbing).
+    # directory holding only the compiled exec + .next/static + public/,
+    # asserts nothing else is present, then boots it — inside the SAME pinned
+    # musl image the main boot uses below (a musl exec cannot run bare on
+    # this glibc runner, so this is not optional plumbing).
+    #
+    # ROUND-3 (non-blocking N5): this comment used to also promise "+ native/,
+    # if the fixture staged any", copied from the vinext lane's equivalent
+    # section below. That was never true HERE: EMPTY_DIR_COPY_SPECS (below)
+    # names only `.next/static` and `public`. This standalone-on-Bun lane
+    # never stages a separate top-level `native/` — §3c above rebuilds any
+    # native (*.node) addons for musl IN PLACE inside STANDALONE_ROOT
+    # (e2e-native-rebuild-musl.sh), so they stay wherever `next build`'s
+    # standalone output put them, not copied out to a sibling directory the
+    # way vinext's sharp staging (§6 of e2e-deploy-vinext.sh) does. Fixing the
+    # spec to match the comment would mean inventing a copy path nothing
+    # downstream reads; fixing the comment to match the spec is correct.
     #
     # EXPECTED TO FAIL against a real fixture until N1 (#1456) embeds what
     # this exec still loads from disk (ADR-0060 §Context) — the guard and its
@@ -648,9 +659,20 @@ elif [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
   # exec (the branch above) — RUNTIME=node boots the standalone server.js
   # interpreted, which always needs the traced node_modules on disk beside
   # it, and the sandbox-fetch-debug lane needs the SAME. There is no binary
-  # here for the empty-dir check to test, so this is a documented no-op, never
-  # a silent one.
-  log "WARNING: KNEXT_SELF_CONTAINED=1 has no effect on this deploy (RUNTIME=${RUNTIME}, KNEXT_SANDBOX_FETCH_DEBUG=${KNEXT_SANDBOX_FETCH_DEBUG:-0}) — the empty-dir lane check only applies to the compiled Bun executable"
+  # here for the empty-dir check to test.
+  #
+  # ROUND-3 (non-blocking N3, promoted to load-bearing): this used to be a
+  # WARNING and continue — the deploy ran anyway, in plain disk mode, but the
+  # compat-window fingerprint (set from the SAME `KNEXT_SELF_CONTAINED=1`
+  # dispatch input, upstream of this script) still recorded the run as
+  # self-contained. A disk-mode run could therefore carry the self-contained
+  # fingerprint. Harmless TODAY only because the workflow that can set this
+  # combination admits `schedule`/`workflow_dispatch` and is never the
+  # default path — but "harmless today" is exactly the kind of thing that
+  # stops being true the moment someone wires a new caller without reading
+  # this far, so refuse the combination outright instead of warning through
+  # it.
+  ed_refuse_self_contained_noop "RUNTIME=${RUNTIME}, KNEXT_SANDBOX_FETCH_DEBUG=${KNEXT_SANDBOX_FETCH_DEBUG:-0} — needs RUNTIME=bun and KNEXT_SANDBOX_FETCH_DEBUG unset/0" || exit 1
 fi
 
 # ── 3d. bake the V8 compile cache with KNEXT'S OWN driver (node runtime) ──────

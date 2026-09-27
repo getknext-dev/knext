@@ -50,6 +50,36 @@
  * which reproduce the reviewer's synthetic `require('leakpkg')` binary both
  * ways.)
  *
+ * ROUND-3 REVIEW ADDITIONS (BLOCKING-1 + three non-blocking items promoted
+ * to load-bearing). Five more independent mechanisms, same reason as above —
+ * each is a DIFFERENT branch than the four above, so none of them is
+ * incidentally covered by another's mutation:
+ *
+ *   5. `ed_probe_http`'s HEALTH-BRANCH threshold specifically (not the whole
+ *      status check mutation 4 already covers) — widen it back toward
+ *      "non5xx" so a health path answering 500, or 302, while every OTHER
+ *      route stays healthy, passes. Round-2's own fixture answered every
+ *      route identically, so THIS exact regression shape went undetected
+ *      even though mutation 4 existed (round-3 review, BLOCKING-1).
+ *   6. The top-level allowlist's two-dot-name coverage (`..leak`) — drop the
+ *      third glob pattern so a name starting with two literal dots is
+ *      invisible again, exactly as it was before this round (non-blocking
+ *      N2).
+ *   7. The symlink sweep — disarm it so a symlinked `native/node_modules`,
+ *      a symlinked `public`, a symlinked `.next/static`, or a symlink nested
+ *      inside one of them all pass silently again (non-blocking N2).
+ *   8. `ed_probe_http`'s 5s timeout — widen it past what a single test's own
+ *      bounded timeout can tolerate, so a route that hangs without
+ *      responding at all no longer fails within a reasonable time
+ *      (non-blocking N4).
+ *   9. The `<p>.ed-hidden`-already-exists fail-closed check — disarm it so a
+ *      stale hidden copy from a killed prior run is hidden INTO again,
+ *      nesting the fresh tree inside it (non-blocking N1).
+ *   10. `ed_refuse_self_contained_noop` — the extracted, shared refusal both
+ *      deploy scripts now call when `KNEXT_SELF_CONTAINED=1` is requested on
+ *      an axis with no compiled binary. Disarm the `return 1` so it reports
+ *      the error and returns success anyway (non-blocking N3).
+ *
  * Shared harness, for the reasons this repo has already paid for elsewhere
  * (scripts/mutation-prove-compat-cell-fingerprint.mjs):
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise;
@@ -71,7 +101,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/lib/e2e-empty-dir.sh');
 const SPEC = 'tests/e2e-empty-dir.test.ts';
 
-declareMutations(4);
+declareMutations(10);
 
 const { command, args, runArgs } = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -149,8 +179,66 @@ prove(
 //    every route must pass once "any complete response" is restored.
 prove(
   'ed_probe_http status requirement: accept any status again',
-  'const ok = mode === "2xx3xx" ? (status >= 200 && status < 400) : (status < 500 || status >= 600);',
+  'const ok = mode === "2xx3xx" ? (status >= 200 && status < 300) : (status < 500 || status >= 600);',
   'const ok = true;',
+);
+
+// 5. ROUND-3 BLOCKING-1: the HEALTH branch specifically, independent of
+//    mutation 4 above. Widening only the health threshold (not the whole
+//    line) must still be caught — by the health-only-500 and 302 fixtures in
+//    tests/e2e-empty-dir.test.ts, which answer the health path and every
+//    OTHER route differently, unlike round 2's onlyStatus fixture.
+prove(
+  'ed_probe_http health-branch threshold: widen it back toward non5xx',
+  'status >= 200 && status < 300',
+  'status >= 200 && status < 600',
+);
+
+// 6. Round-3 N2: the two-dot top-level name coverage. Dropping the third
+//    glob pattern must let a top-level "..leak" pass silently again.
+prove(
+  'top-level allowlist: drop the two-dot-name glob',
+  '"${dir}"/* "${dir}"/.[!.]* "${dir}"/..?*; do',
+  '"${dir}"/* "${dir}"/.[!.]*; do',
+);
+
+// 7. Round-3 N2: the symlink sweep. Disarming it must let a symlinked
+//    native/node_modules, a symlinked public, a symlinked .next/static, or a
+//    symlink nested inside one of them all pass silently again.
+prove(
+  'symlink sweep: never search',
+  'symlink_leak="$(find "${dir}" -type l -print -quit 2>/dev/null)"',
+  'symlink_leak=""',
+);
+
+// 8. Round-3 N4: ed_probe_http's 5s timeout, widened past what the hanging-
+//    route test's own bounded per-test timeout tolerates. bun:test's own
+//    per-test timeout (not this repo's harness) is what turns "the probe
+//    hangs longer than expected" into a graded RED here — see the test's
+//    explicit timeout argument.
+prove(
+  'ed_probe_http timeout: widen past the hanging-route test bound',
+  'port, path, timeout: 5000 }',
+  'port, path, timeout: 60000 }',
+);
+
+// 9. Round-3 N1: the <p>.ed-hidden-already-exists fail-closed check. Once
+//    disarmed, a stale hidden copy from a killed prior run is hidden INTO
+//    again — nesting the fresh tree inside it — instead of refusing.
+prove(
+  '<p>.ed-hidden-already-exists guard: never refuse',
+  'if [ -e "${p}.ed-hidden" ]; then\n        ed_log "ERROR: ${label}: ${p}.ed-hidden already exists',
+  'if false; then\n        ed_log "ERROR: ${label}: ${p}.ed-hidden already exists',
+);
+
+// 10. Round-3 N3: ed_refuse_self_contained_noop. Disarming its `return 1`
+//     must let both deploy scripts' "self-contained requested but no
+//     compiled binary on this axis" branch report the error and continue
+//     anyway, exactly the WARNING-and-continue shape this round removed.
+prove(
+  'ed_refuse_self_contained_noop: report but do not refuse',
+  'disk mode under a self-contained fingerprint."\n  return 1\n}',
+  'disk mode under a self-contained fingerprint."\n  return 0\n}',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

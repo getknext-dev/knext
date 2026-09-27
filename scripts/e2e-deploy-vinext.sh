@@ -500,7 +500,12 @@ else
     # #1455: self-containment is only meaningful for the COMPILED binary —
     # this diagnostic boot always needs the uncompiled nitro output +
     # node_modules on disk. No binary here for the empty-dir check to test.
-    log "WARNING: KNEXT_SELF_CONTAINED=1 has no effect on this deploy (KNEXT_COMPILE=0) — the empty-dir lane check only applies to the compiled single executable"
+    #
+    # ROUND-3 (non-blocking N3, promoted to load-bearing, mirrors the same
+    # fix in scripts/e2e-deploy.sh): was a WARNING-and-continue, which let a
+    # disk-mode run (KNEXT_COMPILE=0) carry the self-contained compat-window
+    # fingerprint set upstream from the same dispatch input. Refuse instead.
+    ed_refuse_self_contained_noop "KNEXT_COMPILE=0 — needs KNEXT_COMPILE unset/1" || exit 1
   fi
 fi
 

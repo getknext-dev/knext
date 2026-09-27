@@ -31,6 +31,31 @@
 
 ed_log() { echo "[e2e-empty-dir] $*" >&2; }
 
+# ed_refuse_self_contained_noop <detail>
+#
+# Round-3 (non-blocking N3, promoted to load-bearing): scripts/e2e-deploy.sh
+# and scripts/e2e-deploy-vinext.sh each have an axis where
+# `KNEXT_SELF_CONTAINED=1` was requested but there is no compiled binary on
+# that path to run the empty-dir check against (RUNTIME=node or
+# KNEXT_SANDBOX_FETCH_DEBUG=1 in the standalone lane; KNEXT_COMPILE=0 in the
+# vinext lane). Both used to log a WARNING and continue in plain disk mode —
+# but scripts/compat-window-fingerprint.mjs sets the self-contained
+# fingerprint bit from the SAME `KNEXT_SELF_CONTAINED=1` dispatch input,
+# upstream of and independent from this check, so a disk-mode run could carry
+# a self-contained fingerprint. Extracted into ITS OWN function (rather than
+# duplicated inline at each call site) so it is directly unit-testable
+# (tests/e2e-empty-dir.test.ts) and mutation-provable
+# (scripts/mutation-prove-empty-dir-guard.mjs) without a docker/kind
+# integration harness for the deploy scripts themselves — the earlier inline
+# WARNING-and-continue shape had neither a test nor a mutation, which is
+# precisely what let it regress from "documented no-op" to "silent
+# mislabeling risk" without anything catching it.
+ed_refuse_self_contained_noop() {
+  local detail="$1"
+  ed_log "ERROR: KNEXT_SELF_CONTAINED=1 was requested but has no effect on this deploy (${detail}) — the empty-dir lane check only applies to a compiled executable. Refusing rather than silently running disk mode under a self-contained fingerprint."
+  return 1
+}
+
 # ed_stage <fresh_dir> <binary_src> [<src>:<dest_rel>]...
 #
 # Copies ONLY the binary (made executable) and each existing <src> to
@@ -85,11 +110,31 @@ ed_stage() {
 # This is the mutation-proved guard (scripts/mutation-prove-empty-dir-guard.mjs):
 # reaching a version that never inspects these must let a PLANTED node_modules
 # — top-level or nested — pass.
+#
+# ROUND-3 (non-blocking N2, promoted): the top-level glob `.[!.]*` matches a
+# SINGLE leading dot followed by a non-dot character, so a name starting with
+# TWO dots (`..leak`) matches neither `*` nor `.[!.]*` and was invisible to
+# this function entirely — measured, rc 0. The third glob below
+# (`..?*` — two literal dots then one-or-more characters) closes that without
+# touching the two existing patterns.
+#
+# ROUND-3 (non-blocking N2, promoted): `find -type d -name node_modules`
+# (below) only matches real directories, so a SYMLINK named `node_modules`
+# under `native/`, or the allowlisted `public`/`.next/static`/`.output/public`
+# themselves being symlinks (to somewhere outside `fresh_dir` entirely, or to
+# a disk-mode sibling like `.next/server`), all pass silently — measured, rc 0
+# in every case. A correctly-staged tree never legitimately contains a
+# symlink: `ed_stage` copies with `cp -RP` (never follows, but also never
+# leaves a dangling link behind for a source that IS a symlink — see its own
+# copy of `native/`'s callers, which dereference with `-RL` upstream before
+# `ed_stage` ever runs). So the fix below is unconditional: ANY symlink
+# anywhere under `fresh_dir`, at any depth, reds — never just the specific
+# repro cases measured.
 ed_assert_clean() {
   local dir="$1" binary_name="$2"
   local entry name
-  for entry in "${dir}"/* "${dir}"/.[!.]*; do
-    [ -e "${entry}" ] || continue
+  for entry in "${dir}"/* "${dir}"/.[!.]* "${dir}"/..?*; do
+    [ -e "${entry}" ] || [ -L "${entry}" ] || continue
     name="$(basename "${entry}")"
     case "${name}" in
       "${binary_name}" | .next | public | native | .output) ;;
@@ -131,20 +176,49 @@ ed_assert_clean() {
     return 1
   fi
 
+  # ROUND-3 (non-blocking N2, promoted to load-bearing): a symlink anywhere
+  # under fresh_dir — `native/node_modules` linked to the real one, `public`
+  # itself linked outside fresh_dir entirely, `.next/static` linked to
+  # `.next/server`, or a symlink nested inside `static`/`public`/`.output`
+  # — is invisible to every check above (`find -type d`, the sub-dir name
+  # comparison) because none of them look at link type. Rejected
+  # unconditionally: a correctly-staged tree never legitimately contains one
+  # (ed_stage copies with `cp -RP`; native/ addons are dereferenced with
+  # `cp -RL` upstream of ed_stage, never inside it).
+  local symlink_leak
+  symlink_leak="$(find "${dir}" -type l -print -quit 2>/dev/null)"
+  if [ -n "${symlink_leak}" ]; then
+    ed_log "ERROR: ${symlink_leak} is a symlink — the empty-dir lane must contain only real files/directories that ed_stage copied, never a symlink that can point outside the staged tree or alias a disk-mode path"
+    return 1
+  fi
+
   return 0
 }
 
 # ed_probe_http <port> <path> <mode>
 #
 # One request. `mode` decides which statuses count as alive:
-#   * "2xx3xx" — 200–399 only. Used for the health path: a health check that
-#     itself errors is not "alive", it is a boot that half-started.
+#   * "2xx3xx" — 200–299 ONLY (see round-3 note below; the mode name is kept
+#     for call-site compatibility, its threshold is not). Used for the health
+#     path: a health check that itself errors is not "alive", it is a boot
+#     that half-started.
 #   * "non5xx" — anything except 500–599. Used for the general app route: a
 #     404 for an unrouted path is a legitimate "the runtime is alive and
 #     routing" answer; a 500 is not.
 # BLOCKING-4 (round-2 review): the previous version counted ANY complete
 # response, so a server 500-ing on every route — or a missing on-disk route
 # chunk surfacing as a 500 — passed. 5s timeout either way.
+#
+# ROUND-3 (non-blocking N4, promoted to load-bearing): the health path used to
+# accept 300-399 too, so a 302 (e.g. to a login page) counted as "alive" —
+# there is no `-L` here to follow it and confirm what is actually behind it,
+# so a redirect is not evidence of health, only evidence something answered.
+# Health is now 2xx ONLY. This also closes the B1 gap named in round-2 review
+# (tests/e2e-empty-dir.test.ts): a fixture where the health path alone 500s
+# (every OTHER route stays 200) previously had no test that isolated the
+# health branch from the extra-path (`non5xx`) branch, so widening the health
+# threshold back toward "non5xx" would have gone undetected — the same
+# comparison this file's mutation prover (mutation 5) now exercises directly.
 ed_probe_http() {
   local port="$1" path="$2" mode="$3"
   node -e '
@@ -156,7 +230,7 @@ ed_probe_http() {
       const status = res.statusCode || 0;
       res.resume();
       res.on("end", () => {
-        const ok = mode === "2xx3xx" ? (status >= 200 && status < 400) : (status < 500 || status >= 600);
+        const ok = mode === "2xx3xx" ? (status >= 200 && status < 300) : (status < 500 || status >= 600);
         process.exit(ok ? 0 : 1);
       });
       res.on("error", () => process.exit(1));
@@ -298,6 +372,19 @@ ed_check_or_die() {
   local p
   for p in "${hide_targets[@]+"${hide_targets[@]}"}"; do
     if [ -e "${p}" ]; then
+      # ROUND-3 (non-blocking N1, promoted to load-bearing): a SIGKILL of the
+      # whole process group (not just this function's own subshell) skips the
+      # subshell's own EXIT trap, so a previous run's hide is never restored.
+      # Measured: re-running against the same APP_DIR then hit this branch
+      # again and ran `mv node_modules node_modules.ed-hidden` INTO the
+      # existing hidden copy, nesting the fresh tree inside it
+      # (`node_modules/node_modules`) and silently keeping the stale copy as
+      # the one that gets restored. Fail closed instead — this state means a
+      # human has to look at the tree before anything runs again.
+      if [ -e "${p}.ed-hidden" ]; then
+        ed_log "ERROR: ${label}: ${p}.ed-hidden already exists — a previous empty-dir run was almost certainly killed before it could restore ${p} (e.g. a whole-process-group SIGKILL, which skips this function's EXIT trap). Refusing to hide ${p} again: doing so would nest the fresh tree inside the stale hidden copy and then restore THAT as if it were real. Restore by hand after checking which copy is the real one: mv '${p}.ed-hidden' '${p}' — then re-run."
+        return 1
+      fi
       mv "${p}" "${p}.ed-hidden" || {
         ed_log "ERROR: ${label}: failed to hide ${p} before the empty-dir boot"
         return 1

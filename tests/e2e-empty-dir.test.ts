@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -76,6 +76,54 @@ function makeServerFixture(
         '',
       ].join('\n');
   writeFileSync(p, body);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+// Round-3 review, B1/N4: a fixture that answers the HEALTH path differently
+// from every other route, so a health-mode regression is exercised in
+// isolation from ed_probe_http's `non5xx` (extra-path) branch. The round-2
+// `onlyStatus` fixture answers every route identically, which meant a
+// mutation that widened the health branch's threshold went undetected: the
+// extra-path probe failed regardless of what the health branch did, so the
+// overall check stayed red for the WRONG reason.
+function makeHealthSplitFixture(
+  dir: string,
+  name: string,
+  opts: { healthStatus: number; otherStatus: number },
+): string {
+  const p = join(dir, name);
+  writeFileSync(
+    p,
+    [
+      '#!/usr/bin/env node',
+      "const http = require('node:http');",
+      'const port = Number(process.env.PORT);',
+      `http.createServer((req, res) => { const status = req.url === '/api/health' ? ${opts.healthStatus} : ${opts.otherStatus}; res.writeHead(status, { 'content-type': 'text/plain' }); res.end('x'); }).listen(port, '127.0.0.1');`,
+      '',
+    ].join('\n'),
+  );
+  chmodSync(p, 0o755);
+  return p;
+}
+
+// Round-3 review, N4: a route that accepts the connection and never
+// responds at all (the socket stays open, unlike the existing
+// "never-answered" fixture, which destroys it) — used to prove
+// ed_probe_http's 5s timeout actually bounds the wait rather than hanging
+// forever.
+function makeHangingFixture(dir: string, name: string): string {
+  const p = join(dir, name);
+  writeFileSync(
+    p,
+    [
+      '#!/usr/bin/env node',
+      "const http = require('node:http');",
+      'const port = Number(process.env.PORT);',
+      "http.createServer((req, res) => { if (req.url === '/api/health') { res.writeHead(200); res.end('ok'); return; } /* never respond — socket left open on purpose */ }).listen(port, '127.0.0.1');",
+      '',
+    ].join('\n'),
+  );
   chmodSync(p, 0o755);
   return p;
 }
@@ -188,6 +236,71 @@ describe('e2e-empty-dir — ed_assert_clean allowlist (#1455, round-2 review)', 
     const r = sh(`ed_assert_clean "${dir}" app`);
     expect(r.status).toBe(0);
   });
+
+  // Round-3 review, N2 (promoted to load-bearing): the single-dot glob
+  // (`.[!.]*`) matches a name with exactly ONE leading dot followed by a
+  // non-dot character, so a name starting with TWO dots matched neither it
+  // nor the plain `*` — measured, rc 0 before this fix.
+  it('reds on a top-level name starting with two dots ("..leak"), which the single-dot glob used to miss', () => {
+    const dir = tempDir('ed-dotdot-leak-');
+    writeFileSync(join(dir, 'app'), '#!/bin/sh\n');
+    writeFileSync(join(dir, '..leak'), 'x');
+    const r = sh(`ed_assert_clean "${dir}" app`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('..leak');
+  });
+
+  // Round-3 review, N2 (promoted to load-bearing): `find -type d -name
+  // node_modules` only matches real directories, so a SYMLINK named
+  // node_modules under an allowlisted directory was invisible to the nested
+  // sweep — measured, rc 0 before this fix.
+  it('reds on native/node_modules planted as a SYMLINK, not just a real directory', () => {
+    const dir = tempDir('ed-native-nm-symlink-');
+    const outside = tempDir('ed-outside-nm-target-');
+    mkdirSync(join(outside, 'node_modules'), { recursive: true });
+    writeFileSync(join(dir, 'app'), '#!/bin/sh\n');
+    mkdirSync(join(dir, 'native'), { recursive: true });
+    symlinkSync(join(outside, 'node_modules'), join(dir, 'native/node_modules'));
+    const r = sh(`ed_assert_clean "${dir}" app`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('symlink');
+  });
+
+  it('reds on an allowlisted top-level name ("public") that is itself a symlink pointing outside the empty dir', () => {
+    const dir = tempDir('ed-public-symlink-');
+    const outside = tempDir('ed-outside-public-target-');
+    writeFileSync(join(dir, 'app'), '#!/bin/sh\n');
+    symlinkSync(outside, join(dir, 'public'));
+    const r = sh(`ed_assert_clean "${dir}" app`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('symlink');
+  });
+
+  it('reds on .next/static symlinked to .next/server (aliasing the disk-mode tree under an allowed name)', () => {
+    // The sub-dir check only inspects the NAME ("static" is the only
+    // permitted entry under .next), so a symlink literally named "static"
+    // that actually points at "server" content must be caught by the
+    // symlink sweep, not the name comparison.
+    const dir = tempDir('ed-next-static-symlink-');
+    writeFileSync(join(dir, 'app'), '#!/bin/sh\n');
+    mkdirSync(join(dir, '.next/server'), { recursive: true });
+    symlinkSync(join(dir, '.next/server'), join(dir, '.next/static'));
+    const r = sh(`ed_assert_clean "${dir}" app`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('symlink');
+  });
+
+  it('reds on a symlink nested inside an otherwise-real public/ directory', () => {
+    const dir = tempDir('ed-public-nested-symlink-');
+    const outsideFile = join(tempDir('ed-outside-file-'), 'leaked.txt');
+    writeFileSync(outsideFile, 'x');
+    writeFileSync(join(dir, 'app'), '#!/bin/sh\n');
+    mkdirSync(join(dir, 'public'), { recursive: true });
+    symlinkSync(outsideFile, join(dir, 'public/leaked.txt'));
+    const r = sh(`ed_assert_clean "${dir}" app`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('symlink');
+  });
 });
 
 describe('e2e-empty-dir — ed_stage (#1455)', () => {
@@ -268,6 +381,88 @@ describe('e2e-empty-dir — ed_probe_http status validation (#1455, round-2 revi
       ed_boot_probe_kill "\${PORT}" /api/health /nonexistent node ./server.js
     `);
     expect(r.status).toBe(0);
+  });
+
+  // Round-3 review, B1 (blocking): the round-2 `onlyStatus` fixture answers
+  // EVERY route identically, so a health-mode regression was invisible — the
+  // extra-path probe already failed for its own reason regardless of what
+  // the health branch did. This fixture answers the health path and every
+  // other route DIFFERENTLY, isolating the health branch.
+  it('a health path that answers 500 while every OTHER route is healthy still fails (B1: isolates the health branch from the extra-path branch)', () => {
+    const dir = tempDir('ed-health-only-500-');
+    makeHealthSplitFixture(dir, 'server.js', { healthStatus: 500, otherStatus: 200 });
+    const r = sh(`
+      PORT="$(${freePortExpr()})"
+      export PORT
+      cd "${dir}"
+      ed_boot_probe_kill "\${PORT}" /api/health / node ./server.js
+    `);
+    expect(r.status).not.toBe(0);
+  });
+
+  it('health 200 / extra-path 404 still passes even when isolated from the 500-only fixture (the good-path half of B1)', () => {
+    const dir = tempDir('ed-health-ok-extra-404-');
+    makeHealthSplitFixture(dir, 'server.js', { healthStatus: 200, otherStatus: 404 });
+    const r = sh(`
+      PORT="$(${freePortExpr()})"
+      export PORT
+      cd "${dir}"
+      ed_boot_probe_kill "\${PORT}" /api/health / node ./server.js
+    `);
+    expect(r.status).toBe(0);
+  });
+
+  // Round-3 review, N4 (promoted to load-bearing): the health path used to
+  // accept 2xx/3xx, so a redirect counted as "alive" with nothing behind it
+  // confirmed. Health is now 2xx only.
+  it('a 302 on the health path fails the health probe — 2xx only, not 2xx/3xx', () => {
+    const dir = tempDir('ed-health-302-');
+    makeHealthSplitFixture(dir, 'server.js', { healthStatus: 302, otherStatus: 200 });
+    const r = sh(`
+      PORT="$(${freePortExpr()})"
+      export PORT
+      cd "${dir}"
+      ed_boot_probe_kill "\${PORT}" /api/health / node ./server.js
+    `);
+    expect(r.status).not.toBe(0);
+  });
+
+  // Round-3 review, N4 (promoted to load-bearing): a route that hangs
+  // (accepts the connection, never responds) must fail WITHIN the 5s
+  // ed_probe_http timeout, never hang the whole check indefinitely.
+  it('a route that hangs without responding fails within a bounded time, never hangs the probe (N4)', () => {
+    const dir = tempDir('ed-hanging-');
+    makeHangingFixture(dir, 'server.js');
+    const start = Date.now();
+    const r = sh(`
+      PORT="$(${freePortExpr()})"
+      export PORT
+      cd "${dir}"
+      ed_boot_probe_kill "\${PORT}" /api/health /anything node ./server.js
+    `);
+    const elapsedMs = Date.now() - start;
+    expect(r.status).not.toBe(0);
+    // Bounded by ed_probe_http's own 5s timeout plus the kill escalation —
+    // must not approach the outer harness's much longer wrapper timeouts.
+    expect(elapsedMs).toBeLessThan(15_000);
+  }, 20_000);
+});
+
+describe('e2e-empty-dir — ed_refuse_self_contained_noop (#1455, round-3 review N3)', () => {
+  // scripts/e2e-deploy.sh (RUNTIME=node or KNEXT_SANDBOX_FETCH_DEBUG=1) and
+  // scripts/e2e-deploy-vinext.sh (KNEXT_COMPILE=0) each call this when
+  // KNEXT_SELF_CONTAINED=1 was requested on an axis with no compiled binary
+  // to check. It used to be a WARNING-and-continue at each call site (no
+  // shared function, no test, no mutation); this proves the extracted,
+  // shared refusal fails closed instead.
+  it('fails closed (non-zero) and names the reason, rather than warning and continuing', () => {
+    const r = sh(
+      `ed_refuse_self_contained_noop "RUNTIME=node, KNEXT_SANDBOX_FETCH_DEBUG=0 — needs RUNTIME=bun"`,
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('ERROR');
+    expect(r.stderr).toContain('KNEXT_SELF_CONTAINED=1');
+    expect(r.stderr).toContain('RUNTIME=node');
   });
 });
 
@@ -452,5 +647,47 @@ describe('e2e-empty-dir — ed_boot_probe_kill / ed_check_or_die (#1455)', () =>
     // assertion only proves the repro's premise (unhidden = reachable), not the
     // fix. The fix is proved by the test above.
     expect(r.status).not.toBe(0);
+  });
+
+  // Round-3 review, N1 (promoted to load-bearing): a SIGKILL of the whole
+  // process group skips the subshell's own EXIT trap, so a previous run's
+  // hide is never restored and "<p>.ed-hidden" is left on disk. A naive
+  // re-run would then `mv <p> <p>.ed-hidden` INTO the existing hidden copy,
+  // nesting the fresh tree inside the stale one. Must fail closed instead.
+  it('ed_check_or_die fails closed (never hides again) when a stale <p>.ed-hidden already exists from a killed prior run', () => {
+    // Reproduces the measured residue exactly: a prior run's SIGKILL (of the
+    // whole process group, so its EXIT trap never fired) left
+    // node_modules.ed-hidden on disk with the OLD tree inside. This run's
+    // own pipeline has since rebuilt a FRESH node_modules alongside it —
+    // both paths coexist, which is precisely when a naive `mv node_modules
+    // node_modules.ed-hidden` would move the fresh tree INTO the stale
+    // directory (nesting) rather than failing.
+    const parent = tempDir('ed-stale-hidden-parent-');
+    const staleHidden = join(parent, 'node_modules.ed-hidden');
+    mkdirSync(staleHidden, { recursive: true });
+    writeFileSync(join(staleHidden, 'MARKER-stale-real-copy'), 'x');
+    mkdirSync(join(parent, 'node_modules/freshpkg'), { recursive: true });
+    writeFileSync(join(parent, 'node_modules/freshpkg/index.js'), "module.exports = 'fresh';\n");
+
+    const src = tempDir('ed-stale-hidden-src-');
+    makeServerFixture(src, 'server.js');
+    const dest = join(parent, 'ed-empty-dir-inside-parent');
+    const r = sh(`
+      PORT="$(${freePortExpr()})"
+      ED_HIDE_DURING_BOOT=("${parent}/node_modules")
+      ed_check_or_die "stale-hidden-test" "${dest}" "${src}/server.js" /api/health / "\${PORT}"
+    `);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('already exists');
+    expect(r.stderr).toContain('restore');
+    // Neither copy may have moved: the stale hidden copy stays exactly as
+    // found (never nested into), and the fresh node_modules stays named
+    // node_modules (never renamed on top of it).
+    const staleSurvived = sh(`test -f "${staleHidden}/MARKER-stale-real-copy" && echo present`);
+    expect(staleSurvived.stdout.trim()).toBe('present');
+    const notNested = sh(`test -e "${staleHidden}/node_modules" && echo nested || echo clean`);
+    expect(notNested.stdout.trim()).toBe('clean');
+    const freshUntouched = sh(`test -d "${parent}/node_modules/freshpkg" && echo present`);
+    expect(freshUntouched.stdout.trim()).toBe('present');
   });
 });
