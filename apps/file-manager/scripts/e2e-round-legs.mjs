@@ -69,6 +69,12 @@ export const LEGS = Object.freeze([
     local: false, // containerised CI job — not part of the local round
     ciJob: 'bun-exec-alpine-image',
   }),
+  Object.freeze({
+    id: 'self-contained-exec',
+    title: 'self-contained vinext binary served from an empty directory (#1460)',
+    local: false, // needs a native `vite build` + compile on the host — CI-only
+    ciJob: 'self-contained-exec-e2e',
+  }),
 ]);
 
 /** Legs the local orchestrator runs, in order. */

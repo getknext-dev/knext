@@ -91,7 +91,7 @@ describe('#949 — template sharp pins stay inside the injection-proven range', 
       resolve(REPO_ROOT, 'packages/kn-next/src/adapters/vinext-compile.mjs'),
       'utf8',
     );
-    const filters = [...compile.matchAll(/filter:\s*\/(.+?)\/\s*\}/g)]
+    const filters = [...compile.matchAll(/onLoad\(\{\s*filter:\s*\/(.+?)\/\s*\}/g)]
       .map((m) => m[1])
       .filter((p) => p.includes('sharp'));
     expect(filters, 'exactly one sharp onLoad filter in vinext-compile').toHaveLength(1);

@@ -139,6 +139,13 @@ const CLI_ONLY: Record<string, string> = {
         "the --builder vinext content override of instrumentation-edge-safe.test.ts.hbs — " +
         "byte-identical to the zone template's copy (asserted below), since vinext is the " +
         "shape the zone template still builds",
+    "Dockerfile.self-contained.hbs":
+        "the zone app is built and imaged by this repo's own pipeline and never runs " +
+        "`kn-next build --self-contained`, so it needs no copy of this reference recipe " +
+        "(#1460). RESOLVED (#1460 round 3): this file is now in VINEXT_ONLY_TEMPLATES " +
+        "in create.ts — it ships only for `--builder vinext` (the only target " +
+        "`--self-contained` applies to), never for the default standalone target. See " +
+        "`create-scaffold-builder.test.ts`'s pair of tests proving each side.",
 };
 
 // `Dockerfile.standalone.hbs` and `knext-standalone-entry.mjs.hbs` (the
@@ -257,7 +264,9 @@ describe("knext create — the CLI ships its own template tree", () => {
     it("the published package includes the templates (else `knext create` 404s post-install)", () => {
         const manifest = JSON.parse(
             readFileSync(join(PKG_ROOT, "package.json"), "utf8"),
-        ) as { files?: string[] };
+        ) as {
+            files?: string[];
+        };
         expect(manifest.files ?? []).toContain("templates");
     });
 });

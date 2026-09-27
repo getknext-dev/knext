@@ -334,10 +334,11 @@ export interface KnativeNextConfig {
      *
      * Overridden per build by `knext build --self-contained`.
      *
-     * **No target honours this yet** — setting it currently changes nothing
-     * about the build output beyond being recorded in the build log. It is the
-     * switch the per-target embedding work reads; it is opt-in and stays opt-in
-     * (ADR-0060), so leaving it unset keeps the build output byte-identical.
+     * The vinext target honours it (the binary embeds the server runtime,
+     * `.output/public` and sharp's native libraries, unpacked to a writable temp
+     * directory on the first image request); the other targets only record it
+     * in the build log for now. It is opt-in and stays opt-in (ADR-0060), so
+     * leaving it unset keeps the build output byte-identical.
      */
     selfContained?: boolean;
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
