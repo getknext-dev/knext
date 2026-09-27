@@ -29,6 +29,15 @@
  *   round 8 — the allowlist pins where its variables get their values:
  *             M47 (source check off), M48 M49 M50 M51 (each entry blesses a remote fetch),
  *             M52 (`${!N}` indirection unflagged)
+ *   round 9 — every write to a followed variable is traced or opaque:
+ *             M53–M66 (one silent-write exemption per construct: read, mapfile,
+ *             readarray, printf -v, getopts, for, select, coproc, ${V:=}, V[i]=,
+ *             V+=, nameref, wait -p, let), M67 (quoted name), M68 (arithmetic
+ *             assignment), M69 ({V}>), M70 (run-time command), M71 (let modeled),
+ *             M72 (run-time variable name), M73 (implicit REPLY/MAPFILE…),
+ *             M74 ($(<file)), M75 (corpus scan off), M76 (opaque dropped),
+ *             M77 (trap handler), M78 M79 M80 (general walk: producer, loop
+ *             redirect, nameref)
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -51,7 +60,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(52);
+declareMutations(80);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -430,6 +439,118 @@ prove(
   SCANNER,
   '      if (/\\$\\{![A-Za-z_]/.test(hd.body)) {',
   '      if (false) {',
+);
+
+// round 9 — every write to a followed variable is traced or opaque. Each
+// construct gets a mutation that lets THAT construct write silently (an
+// exemption in the occurrence scan); the spec must notice every one.
+const OCCURRENCE_SCAN = "    if (!flagged && before.endsWith('-')) continue;\n";
+for (const [n, construct, predicate] of [
+  ['M53', '`read V`', '/(^|\\s)read\\s/.test(commandPrefix(before))'],
+  ['M54', '`mapfile V`', '/(^|\\s)mapfile\\s/.test(commandPrefix(before))'],
+  ['M55', '`readarray V`', '/(^|\\s)readarray\\s/.test(commandPrefix(before))'],
+  ['M56', '`printf -v V`', '/(^|\\s)printf\\s/.test(commandPrefix(before))'],
+  ['M57', '`getopts o V`', '/(^|\\s)getopts\\s/.test(commandPrefix(before))'],
+  ['M58', '`for V in …`', '/(^|\\s)for\\s+$/.test(commandPrefix(before))'],
+  ['M59', '`select V in …`', '/(^|\\s)select\\s+$/.test(commandPrefix(before))'],
+  ['M60', '`coproc V { … }`', '/(^|\\s)coproc\\s+$/.test(commandPrefix(before))'],
+  ['M61', '`${V:=…}` / `${V=…}`', '/\\$\\{$/.test(before) && /^:?=/.test(after)'],
+  ['M62', '`V[i]=…`', '/^\\[/.test(after)'],
+  ['M63', '`V+=…`', '/^\\+=/.test(after)'],
+  ['M64', '`declare -n R=V` (nameref target)', 'NAMEREF_FLAG.test(commandPrefix(before))'],
+  ['M65', '`wait -p V`', '/(^|\\s)wait\\s/.test(commandPrefix(before))'],
+  ['M66', '`let V=…`', '/(^|\\s)let\\s+$/.test(commandPrefix(before))'],
+]) {
+  prove(
+    `${n} write sites: ${construct} writes a followed variable without a trace`,
+    SCANNER,
+    OCCURRENCE_SCAN,
+    `${OCCURRENCE_SCAN}    if (${predicate}) continue;\n`,
+  );
+}
+prove(
+  'M67 write sites: a quoted name (`read "V"`) is treated as prose',
+  SCANNER,
+  '      if (!opensHere) continue;',
+  '      continue;',
+);
+prove(
+  'M68 write sites: an arithmetic assignment (`(( V = … ))`) is treated as a read',
+  SCANNER,
+  "        /(\\+\\+|--)\\s*$/.test(before)\n      )\n        out.push({ kind: 'other', snippet });",
+  '        /(\\+\\+|--)\\s*$/.test(before)\n      )\n        void 0;',
+);
+prove(
+  'M69 write sites: a `{V}>file` descriptor binding is not a write',
+  SCANNER,
+  '    if (!flagged && /\\{$/.test(before) && /^\\}\\s*[<>]/.test(after)) {',
+  '    if (false) {',
+);
+prove(
+  'M70 write sites: a run-time command word (`$cmd V`) cannot bind a name',
+  SCANNER,
+  '  return SHELL_COMMANDS.has(cmd) || RUNTIME.test(ws[0]);',
+  '  return SHELL_COMMANDS.has(cmd);',
+);
+prove(
+  'M71 write sites: `let` counts as a modeled `NAME=` assignment',
+  SCANNER,
+  '(?:(?:export|local|declare|readonly|typeset)(?:\\s+-[A-Za-z]+)*\\s+)?(?:[A-Za-z_]',
+  '(?:(?:export|local|declare|readonly|typeset|let)(?:\\s+-[A-Za-z]+)*\\s+)?(?:[A-Za-z_]',
+);
+prove(
+  'M72 run-time names: a write through a computed variable name is not detected',
+  SCANNER,
+  'export function dynamicNameWrites(text) {\n  const out = [];\n',
+  'export function dynamicNameWrites(text) {\n  const out = [];\n  if (text) return out;\n',
+);
+prove(
+  'M73 implicit variables: REPLY / MAPFILE / … are ordinary unassigned variables',
+  SCANNER,
+  'const IMPLICIT_VARS = new Set([',
+  'const IMPLICIT_VARS = new Set([]);\nconst _R9_UNUSED = new Set([',
+);
+prove(
+  'M74 `$(<file)` is not a read of file (unlike `$(cat file)`)',
+  SCANNER,
+  "w[i] === '$' && /^\\s*<(?![<(])/.test(inner) ? inner.replace(/^\\s*</, 'cat ') : inner,",
+  'inner,',
+);
+prove(
+  'M75 source pin: only the walk-time value is followed, not every write site in the corpus',
+  SCANNER,
+  '    for (const site of corpusWriteSites(r, st)) {',
+  '    for (const site of []) {',
+);
+prove(
+  'M76 source pin: an unmodeled write site is dropped instead of reported opaque',
+  SCANNER,
+  '        out.add(`opaque:$${r} is written by \\`${site.snippet}\\``);',
+  '        void site;',
+);
+prove(
+  'M77 corpus: a `trap` handler string is not scanned for writes',
+  SCANNER,
+  '    st.corpus.push(m[1] ?? m[2]);',
+  '    void m;',
+);
+prove(
+  'M78 general walk: a non-`NAME=` write does not carry its producer',
+  SCANNER,
+  '    bindUnmodeledWrites(text, loopTailOf(clauses, ci), st, ctx.depth);',
+  '    void loopTailOf;',
+);
+prove(
+  'M79 general walk: `while read V … done < <(fetch)` ignores the loop redirect',
+  SCANNER,
+  '    bindUnmodeledWrites(text, loopTailOf(clauses, ci), st, ctx.depth);',
+  "    bindUnmodeledWrites(text, '', st, ctx.depth);",
+);
+prove(
+  'M80 general walk: a nameref (`declare -n R=V`) is an ordinary literal assignment',
+  SCANNER,
+  '    if (nameref) {',
+  '    if (false) {',
 );
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);
