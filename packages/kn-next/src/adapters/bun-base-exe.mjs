@@ -39,6 +39,21 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
+/**
+ * Primordials (#1469 round 14): every intrinsic this module calls, captured ONCE at evaluation.
+ * `sealCompile()` decides with these and nothing looked up at call time, so a later
+ * `WeakSet.prototype.has = () => true`, `Object.hasOwn = () => false` or `Object.freeze = (o) => o`
+ * (in any module, however spelled) cannot change its answer. They are pristine because both
+ * compile scripts import this module FIRST (before any other relative module) and it imports only
+ * `node:` builtins, so no code in the compile scripts' import closure runs before these lines; the
+ * seam scan asserts that order. `uncurryThis(f)(self, ...args)` is `f.call(self, ...args)` through
+ * a BOUND `call`, so a later patch of `Function.prototype.call` or `.bind` does not reach it either.
+ */
+const uncurryThis = Function.prototype.bind.bind(Function.prototype.call);
+const WeakSetHas = uncurryThis(WeakSet.prototype.has);
+const WeakSetAdd = uncurryThis(WeakSet.prototype.add);
+const { assign: ObjectAssign, create: ObjectCreate, freeze: ObjectFreeze, hasOwn: ObjectHasOwn, keys: ObjectKeys } = Object;
+
 export const BUN_BASE_EXE_ENV = "KNEXT_BUN_BASE_EXE";
 
 export class BunBaseExeError extends Error {
@@ -53,7 +68,7 @@ export class BunBaseExeError extends Error {
  * @returns {{ executablePath?: string }} spread into Bun.build's `compile`
  */
 export function bunBaseExeCompileOptions(env = process.env) {
-    if (!Object.hasOwn(env, BUN_BASE_EXE_ENV)) return {};
+    if (!ObjectHasOwn(env, BUN_BASE_EXE_ENV)) return {};
     if (env.GITHUB_ACTIONS !== "true") {
         throw new BunBaseExeError(
             "is CI-only (a patched Bun base for verifying upstream fixes) and is refused outside GitHub Actions — unset it",
@@ -118,7 +133,7 @@ const [RESOLVED_BUN_BASE_EXE, BUN_BASE_EXE_ERROR] = loadBunBaseExe();
  * `sealCompile()` (the seam scan counts its references), so no compile script can rebind it,
  * `Object.assign` into it, or spread it anywhere a check does not see (#1469 round 13).
  */
-const BUN_BASE_EXE = Object.freeze({ ...RESOLVED_BUN_BASE_EXE });
+const BUN_BASE_EXE = ObjectFreeze({ ...RESOLVED_BUN_BASE_EXE });
 
 /** Throws the seam's resolution error, if any. The compile scripts call it first, before any work. */
 export function assertBunBaseExe() {
@@ -140,20 +155,26 @@ const SEALED = new WeakSet();
  * answer the check one way and the merge another. The one exemption is a value this function
  * returned earlier (a sealed compile re-sealed with more fields): its key can only be the seam's.
  *
+ * Every intrinsic it calls is a primordial captured at evaluation (above), and it walks arrays by
+ * index, never through an iterator: the seam scan reds a method call or a global name in its body.
+ *
  * @param {...(Record<string, unknown> | undefined)} parts
  * @returns {Readonly<Record<string, unknown>>}
  */
 export function sealCompile(...parts) {
     assertBunBaseExe();
-    const out = Object.create(null);
-    for (const part of parts) {
+    const out = ObjectCreate(null);
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
         if (part === undefined) continue;
         if (part === null || typeof part !== "object") {
             throw new BunBaseExeError(`sealCompile: a compile part must be an object, got ${part === null ? "null" : typeof part}`);
         }
         const copy = { ...part };
-        if (!SEALED.has(part)) {
-            let foreign = Object.keys(copy).includes(SEAM_KEY) || SEAM_KEY in part;
+        if (!WeakSetHas(SEALED, part)) {
+            let foreign = SEAM_KEY in part;
+            const keys = ObjectKeys(copy);
+            for (let j = 0; j < keys.length; j++) if (keys[j] === SEAM_KEY) foreign = true;
             for (const k in part) if (k === SEAM_KEY) foreign = true;
             if (foreign) {
                 throw new BunBaseExeError(
@@ -161,14 +182,14 @@ export function sealCompile(...parts) {
                 );
             }
         }
-        Object.assign(out, copy);
+        ObjectAssign(out, copy);
     }
-    Object.assign(out, BUN_BASE_EXE);
+    ObjectAssign(out, BUN_BASE_EXE);
     // A re-sealed part may carry the key only as the seam put it; the seam, last, overwrote it.
-    if (Object.hasOwn(out, SEAM_KEY) && out[SEAM_KEY] !== BUN_BASE_EXE[SEAM_KEY]) {
+    if (ObjectHasOwn(out, SEAM_KEY) && out[SEAM_KEY] !== BUN_BASE_EXE[SEAM_KEY]) {
         throw new BunBaseExeError(`sealCompile: ${SEAM_KEY} does not match the seam`);
     }
-    const sealed = Object.freeze(out);
-    SEALED.add(sealed);
+    const sealed = ObjectFreeze(out);
+    WeakSetAdd(SEALED, sealed);
     return sealed;
 }

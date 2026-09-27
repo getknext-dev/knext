@@ -240,23 +240,55 @@ These are stated so nobody reads more into a green run than it says.
 - **The build image's environment is trusted from a comment.** The only thing the test knows about
   the digest-pinned ubuntu image's config is a comment saying it sets only `PATH`. The digest is
   immutable, so that cannot change without a digest bump, but no test reads the image config.
-- **The seam scan does not see every road to `Bun.build`.** In the two compile scripts it bans the
-  `"bun"` module, `globalThis`, a non-literal `import()`/`require()`/`import.meta.require()`/
-  `createRequire(…)()` specifier, `build` under any other name, and computed element reads outside
-  a reviewed set. That still leaves spellings the ban list does not name (`Reflect.get`,
-  `Object.values` over a module), and a **helper module** is only checked for the literal roads, so
-  `globalThis[["B", "un"].join("")]` there is not seen. Such a second build is caught only if it runs
-  during the stubbed compile legs, so an environment-gated one is missed. On its own it lowers CI
-  verification fidelity: it runs stock Bun. It becomes a shipping problem only if it also builds its
-  own `compile` with an `executablePath` spelled so that no text scan sees it. That is outside what
-  `sealCompile()` can refuse, because such a build never calls it. Only diff review stops that
-  combination.
+- **What the seam scan covers.** It scans every module under `adapters/` **and** the full static
+  import closure of the two compile scripts: every module a relative `import`/`export … from`/
+  `import()`/`require()` reaches from `vinext-compile.mjs` or `standalone-compile.mjs`, at any depth,
+  in any directory, with any extension. That closure is what `tsup` inlines into
+  `dist/adapters/vinext-compile.js` and `dist/adapters/standalone-compile.js`, the files users'
+  compiled builds run. The suite checks the claim against the bundler: it bundles both entries with
+  esbuild (the bundler `tsup` runs) and requires the bundle's inputs to equal the scanned closure. It
+  also requires every bare import in the closure to be a `node:` builtin, because a package would be
+  inlined without being scanned.
+- **What the scan does not see.** In every closure module it bans `Bun.build` outside the two
+  scripts (and the reviewed probe module), `build` under any other name, the `"bun"` module, a use of
+  `Bun` other than `Bun.<name>`, `globalThis` and its aliases, a non-literal `import()`/`require()`
+  specifier, the text `executablePath` outside the seam module, computed keys outside a reviewed set,
+  and any write to a global (next item). It still reasons about text, so these are not seen:
+  - code evaluated from a string (`eval`, `new Function`, `node:vm`);
+  - a child process that runs a Bun, or any other tool, to write the output. Such a process uses its
+    own binary as the base, and `sealCompile()` never sees it.
+  - computed element reads in a helper module (`o[k]`, `Reflect.get`). Those are banned only inside
+    the two compile scripts.
+
+  A second build like this is caught only if it runs during the stubbed compile legs, so one gated
+  on an environment variable is missed. Only diff review stops it.
+- **Patched globals.** No module in the closure may write a global. The rule covers:
+  - an assignment (plain, compound, destructuring or `for…of` target), `++`/`--` or `delete` on a
+    target rooted at a global name (`Object.freeze = …`, `Bun.build = …`, `process.env.X = …`) or
+    passing through `.prototype`/`__proto__`;
+  - an `Object.defineProperty`/`defineProperties`/`setPrototypeOf`/`assign` or
+    `Reflect.defineProperty`/`set`/`setPrototypeOf`/`deleteProperty` call, or a `__defineGetter__`,
+    whose target is one of those.
+
+  One function is exempt by review: `installEmbeddedJsonRequire`, which patches
+  `Module.prototype.require`. It is only ever `.toString()`'d into the compiled output and never runs
+  in the compile process, and the suite checks that. The rule is keyed on names, so a write through
+  an alias (`const O = Object; O.freeze = …`) is not seen. That does not reach the seam:
+  `sealCompile()` calls only intrinsics it captured when its module was evaluated
+  (`WeakSet.prototype.has`/`add`, `Object.hasOwn`/`keys`/`assign`/`create`/`freeze`, through a
+  bound `call`). It walks arrays by index, never through an iterator. Both compile scripts import the
+  seam module before any other relative module, and the seam module imports only `node:` builtins,
+  so no closure code runs before those captures. A patch after import, however it is spelled,
+  changes nothing `sealCompile()` decides. The suite runs that attack in a real process to check it.
+  A patch that runs **before** the compile script starts (a `--preload`, `bunfig.toml`,
+  `NODE_OPTIONS`) comes from the build's environment, and whoever controls that already controls the
+  build.
 - **What the seam does guarantee.** Every `compile` value in the two compile scripts is a direct
-  `sealCompile(…)` call. `sealCompile()` refuses any part that carries `executablePath` by any route
-  (own or inherited, enumerable or not, however the key is spelled in the source, including a Proxy),
-  and appends the seam last into a frozen object. The seam value itself is a private frozen `const`
-  that only `sealCompile()` reads. So a foreign base executable has to get past a runtime throw, not
-  just a text scan.
+  `sealCompile(…)` call. `sealCompile()` refuses any part that carries `executablePath` by any route:
+  own or inherited, enumerable or not, however the key is spelled in the source, including a Proxy,
+  and with the realm's intrinsics patched after import. It appends the seam last into a frozen,
+  null-prototype object. The seam value itself is a private frozen `const` that only `sealCompile()`
+  reads. So a foreign base executable has to get past a runtime throw, not just a text scan.
 - **Out of the repo.** The Cloud Build worker pool and project settings, the environment Cloud Build
   injects, and the build service account's grants. See the provisioning block below.
 

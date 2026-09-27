@@ -19,6 +19,10 @@
  *      in bun-base-exe.mjs, read only by `sealCompile()`; every `compile:` value
  *      is a direct `sealCompile(…)` call, and no other adapter module spells
  *      `executablePath` or a computed key outside a reviewed set.
+ *      Round 14 (review-1469-r13): the scan covers the compile scripts' full static
+ *      import closure, wherever it lives (checked against esbuild's bundle inputs),
+ *      and reds any write to a global in it; `sealCompile()` uses only primordials
+ *      captured at evaluation, and the seam module is each script's first import.
  *   2. The fail-closed table of `bunBaseExeCompileOptions()`, and `sealCompile()`
  *      refusing a foreign `executablePath` by every runtime route (own,
  *      inherited, non-enumerable, computed spelling, a lying Proxy).
@@ -38,12 +42,14 @@ import { createHash } from "node:crypto";
 import {
     chmodSync,
     copyFileSync,
+    existsSync,
     mkdirSync,
     mkdtempSync,
     readdirSync,
     readFileSync,
     realpathSync,
     rmSync,
+    statSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -457,7 +463,7 @@ function seamModuleShape(source: string) {
                 const frozen =
                     !!d.initializer &&
                     ts.isCallExpression(d.initializer) &&
-                    d.initializer.expression.getText(sf) === "Object.freeze";
+                    d.initializer.expression.getText(sf) === "ObjectFreeze";
                 decls.push(
                     `${isConst ? "const" : "mutable"} ${exported ? "exported" : "private"} ${frozen ? "frozen" : "unfrozen"}`,
                 );
@@ -508,12 +514,363 @@ function nonCompileOffence(file: string, scan: ScriptScan) {
         : undefined;
 }
 
+// ── round 14 (review-1469-r13 MEDIUM-2): the scan covers what the bundle covers ──
+
+/** The compile scripts. `tsup.config.ts` makes each a bundle entry, so everything they import by a
+ *  relative path is INLINED into `dist/adapters/<name>.js` — the file users' compiled builds run. */
+const COMPILE_ENTRIES = ["vinext-compile.mjs", "standalone-compile.mjs"];
+const JS_EXTS = [".mjs", ".js", ".cjs", ".ts", ".mts", ".cts"];
+
+/** Every module specifier a file names with a literal: `import`/`export … from`, `import(…)`,
+ *  `require(…)`, `x.require(…)` and `createRequire(…)(…)`. */
+function moduleSpecifiers(file: string, source: string): string[] {
+    const sf = ts.createSourceFile(
+        file,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        /\.[mc]?ts$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.JS,
+    );
+    const out: string[] = [];
+    const visit = (n: ts.Node) => {
+        if (
+            (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) &&
+            n.moduleSpecifier &&
+            ts.isStringLiteralLike(n.moduleSpecifier)
+        )
+            out.push(n.moduleSpecifier.text);
+        if (
+            ts.isCallExpression(n) &&
+            n.arguments[0] &&
+            ts.isStringLiteralLike(n.arguments[0]) &&
+            (n.expression.kind === ts.SyntaxKind.ImportKeyword ||
+                (ts.isIdentifier(n.expression) &&
+                    n.expression.text === "require") ||
+                (ts.isPropertyAccessExpression(n.expression) &&
+                    n.expression.name.text === "require") ||
+                (ts.isCallExpression(n.expression) &&
+                    ts.isIdentifier(n.expression.expression) &&
+                    n.expression.expression.text === "createRequire"))
+        )
+            out.push(n.arguments[0].text);
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return out;
+}
+
+/** A relative specifier as a bundler resolves it: the exact file, else with each JS/TS extension,
+ *  else a directory's `index`. */
+function resolveRelative(from: string, spec: string): string | undefined {
+    const base = resolve(dirname(from), spec);
+    const tries = [
+        base,
+        ...JS_EXTS.map((e) => base + e),
+        ...JS_EXTS.map((e) => join(base, `index${e}`)),
+    ];
+    return tries.find((p) => existsSync(p) && statSync(p).isFile());
+}
+
+/**
+ * The transitive static import closure of `roots`: every module a relative import reaches, at any
+ * depth, in any directory, with any extension. `bare` is every non-relative specifier (a package
+ * would be inlined unscanned, so the suite requires `node:` builtins only); `unresolved` is every
+ * relative specifier that names no file (red — it cannot be scanned).
+ */
+function importClosure(roots: string[]): {
+    files: string[];
+    bare: string[];
+    unresolved: string[];
+} {
+    const files: string[] = [];
+    const bare = new Set<string>();
+    const unresolved: string[] = [];
+    const queue = [...roots];
+    while (queue.length > 0) {
+        const f = queue.shift() as string;
+        if (files.includes(f)) continue;
+        files.push(f);
+        for (const spec of moduleSpecifiers(f, readFileSync(f, "utf8"))) {
+            if (!spec.startsWith(".")) {
+                bare.add(spec);
+                continue;
+            }
+            const p = resolveRelative(f, spec);
+            if (p === undefined) unresolved.push(`${f} → ${spec}`);
+            else queue.push(p);
+        }
+    }
+    return { files, bare: [...bare].sort(), unresolved };
+}
+
+/** Relative specifiers in source order (the first one is the first module whose body runs). */
+function relativeImports(file: string, source: string): string[] {
+    return moduleSpecifiers(file, source).filter((s) => s.startsWith("."));
+}
+
+/** Every global the runtime defines (scanned, not enumerated), plus the aliases of the global
+ *  object. `undefined`, `NaN` and `Infinity` are read-only and are plain values in source. */
+const GLOBAL_NAMES = new Set(
+    [
+        ...Object.getOwnPropertyNames(globalThis),
+        "globalThis",
+        "self",
+        "global",
+        "window",
+    ].filter((n) => !["undefined", "NaN", "Infinity"].includes(n)),
+);
+/** `Object.*` / `Reflect.*` calls that write their first argument, and the legacy accessor writers. */
+const PATCHING_METHODS = new Set([
+    "defineProperty",
+    "defineProperties",
+    "setPrototypeOf",
+    "assign",
+    "set",
+    "deleteProperty",
+    "__defineGetter__",
+    "__defineSetter__",
+]);
+
+/**
+ * Round 14 (review-1469-r13 MEDIUM-1, H3/H3b/H3c): every write to a global in `source`: an
+ * assignment (plain, compound, destructuring, `for…of`/`for…in` target), `++`/`--` or `delete`
+ * whose target is rooted at a global name (`Object.freeze = …`, `globalThis.x = …`,
+ * `Bun.build = …`, `process.env.X = …`) or passes through `.prototype`/`__proto__`
+ * (`WeakSet.prototype.has = …`, `o.__proto__.x = …`); and an `Object.defineProperty`-family call
+ * (or `x.__defineGetter__`) whose target is one. `sealCompile()` no longer looks anything up at
+ * call time (primordials), so this rule is the belt to that braces: no module in the compile
+ * closure patches the realm the compile runs in, however late.
+ *
+ * `serializedOnly` names functions whose body is never RUN in the compile process — it is
+ * `.toString()`'d into the compiled output — so a patch inside one is skipped. The suite asserts
+ * each such name is only ever used that way (`SERIALIZED_ONLY_REVIEWED`).
+ */
+function globalPatches(
+    file: string,
+    source: string,
+    serializedOnly: ReadonlySet<string> = new Set(),
+): string[] {
+    const sf = ts.createSourceFile(
+        file,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        /\.[mc]?ts$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.JS,
+    );
+    const PROTO = ["prototype", "__proto__"];
+    const isGlobalTarget = (e0: ts.Expression): boolean => {
+        let e = e0;
+        let proto = false;
+        for (;;) {
+            if (
+                ts.isParenthesizedExpression(e) ||
+                ts.isNonNullExpression(e) ||
+                ts.isAsExpression(e)
+            )
+                e = e.expression;
+            else if (ts.isPropertyAccessExpression(e)) {
+                if (PROTO.includes(e.name.text)) proto = true;
+                e = e.expression;
+            } else if (ts.isElementAccessExpression(e)) {
+                const a = e.argumentExpression;
+                if (ts.isStringLiteralLike(a) && PROTO.includes(a.text))
+                    proto = true;
+                e = e.expression;
+            } else if (ts.isCallExpression(e)) e = e.expression;
+            else break;
+        }
+        return proto || (ts.isIdentifier(e) && GLOBAL_NAMES.has(e.text));
+    };
+    const targets = (e: ts.Expression): ts.Expression[] => {
+        if (ts.isParenthesizedExpression(e)) return targets(e.expression);
+        if (ts.isObjectLiteralExpression(e))
+            return e.properties.flatMap((p) =>
+                ts.isPropertyAssignment(p)
+                    ? targets(p.initializer)
+                    : ts.isShorthandPropertyAssignment(p)
+                      ? [p.name]
+                      : ts.isSpreadAssignment(p)
+                        ? targets(p.expression)
+                        : [],
+            );
+        if (ts.isArrayLiteralExpression(e))
+            return e.elements.flatMap((x) =>
+                ts.isOmittedExpression(x)
+                    ? []
+                    : ts.isSpreadElement(x)
+                      ? targets(x.expression)
+                      : targets(x),
+            );
+        if (
+            ts.isBinaryExpression(e) &&
+            e.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        )
+            return targets(e.left);
+        return [e];
+    };
+    const out: string[] = [];
+    const hit = (n: ts.Node) =>
+        out.push(
+            `${file}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1} ${n.getText(sf)}`,
+        );
+    const visit = (n: ts.Node) => {
+        let written: ts.Expression[] = [];
+        if (
+            ts.isBinaryExpression(n) &&
+            n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+        )
+            written = targets(n.left);
+        else if (
+            (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+            (n.operator === ts.SyntaxKind.PlusPlusToken ||
+                n.operator === ts.SyntaxKind.MinusMinusToken)
+        )
+            written = [n.operand];
+        else if (ts.isDeleteExpression(n)) written = [n.expression];
+        else if (
+            (ts.isForOfStatement(n) || ts.isForInStatement(n)) &&
+            !ts.isVariableDeclarationList(n.initializer)
+        )
+            written = targets(n.initializer);
+        else if (
+            ts.isCallExpression(n) &&
+            ts.isPropertyAccessExpression(n.expression) &&
+            PATCHING_METHODS.has(n.expression.name.text)
+        ) {
+            const callee = n.expression;
+            const on = callee.expression;
+            if (callee.name.text.startsWith("__define")) written = [on];
+            else if (
+                ts.isIdentifier(on) &&
+                (on.text === "Object" || on.text === "Reflect") &&
+                n.arguments[0]
+            )
+                written = [n.arguments[0]];
+        }
+        if (written.some(isGlobalTarget)) hit(n);
+        if (
+            !(
+                ts.isFunctionDeclaration(n) &&
+                n.name &&
+                serializedOnly.has(n.name.text)
+            )
+        )
+            ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return out;
+}
+
+/** Functions that patch a global but are only ever serialised into the compiled executable's
+ *  entry (`fn.toString()`), never run by the compile — each reviewed, per module. */
+const SERIALIZED_ONLY_REVIEWED: Record<string, ReadonlySet<string>> = {
+    // Module.prototype.require for embedded JSON on Bun 1.4.2 — runs inside the user's executable.
+    "standalone-embed.mjs": new Set(["installEmbeddedJsonRequire"]),
+};
+
+/** Every use of `name` in `source` other than its declaration, an import/export specifier, or
+ *  `name.toString()` — i.e. every place the compile process could RUN it. */
+function serializedOnlyViolations(
+    file: string,
+    source: string,
+    name: string,
+): string[] {
+    const sf = ts.createSourceFile(
+        file,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.JS,
+    );
+    const out: string[] = [];
+    const visit = (n: ts.Node) => {
+        if (ts.isIdentifier(n) && n.text === name) {
+            const p = n.parent;
+            const ok =
+                (ts.isFunctionDeclaration(p) && p.name === n) ||
+                ts.isImportSpecifier(p) ||
+                ts.isExportSpecifier(p) ||
+                (ts.isPropertyAccessExpression(p) &&
+                    p.expression === n &&
+                    p.name.text === "toString" &&
+                    ts.isCallExpression(p.parent) &&
+                    p.parent.expression === p);
+            if (!ok)
+                out.push(
+                    `${file}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1} ${p.getText(sf)}`,
+                );
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return out;
+}
+
+/**
+ * Round 14: what `sealCompile`'s body looks up when it is CALLED. A method call (`x.y(…)`,
+ * `x[k](…)`) resolves through a prototype a later patch can replace, and a global name
+ * (`Object`, `WeakSet`, …) can be reassigned; the body must use only the primordials captured at
+ * evaluation. Returns each offending expression's text.
+ */
+function sealLateLookups(source: string): string[] {
+    const sf = ts.createSourceFile(
+        "bun-base-exe.mjs",
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.JS,
+    );
+    const out: string[] = [];
+    let bodies = 0;
+    const inBody = (n: ts.Node) => {
+        if (
+            ts.isCallExpression(n) &&
+            (ts.isPropertyAccessExpression(n.expression) ||
+                ts.isElementAccessExpression(n.expression))
+        )
+            out.push(n.getText(sf));
+        if (
+            ts.isIdentifier(n) &&
+            GLOBAL_NAMES.has(n.text) &&
+            !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)
+        )
+            out.push(n.text);
+        if (ts.isForOfStatement(n)) out.push("for…of (an iterator)");
+        if (ts.isSpreadElement(n)) out.push("…spread (an iterator)");
+        ts.forEachChild(n, inBody);
+    };
+    const visit = (n: ts.Node) => {
+        if (
+            ts.isFunctionDeclaration(n) &&
+            n.name?.text === "sealCompile" &&
+            n.body
+        ) {
+            bodies++;
+            inBody(n.body);
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return bodies === 1 ? out : [`${bodies} sealCompile bodies`];
+}
+
 describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
-    const all = adapterModules().map((p) => {
-        const file = relative(ADAPTERS, p);
-        const source = readFileSync(p, "utf8");
-        return { file, source, scan: scanScript(file, source) };
-    });
+    // Round 14: every adapter module AND every module the compile scripts' bundles inline,
+    // wherever it lives (review-1469-r13 H1: `src/zz-fast.mjs` was outside adapters/).
+    const closure = importClosure(
+        COMPILE_ENTRIES.map((f) => join(ADAPTERS, f)),
+    );
+    const all = [...new Set([...adapterModules(), ...closure.files])].map(
+        (p) => {
+            const file = relative(ADAPTERS, p);
+            const source = readFileSync(p, "utf8");
+            return { file, source, scan: scanScript(file, source) };
+        },
+    );
+    const inClosure = all.filter((m) =>
+        closure.files.includes(join(ADAPTERS, m.file)),
+    );
     // SCAN, not enumerate: a compile script is any script that references Bun.build or sets a
     // compile property, however it is shaped.
     const touches = all.filter(
@@ -654,6 +1011,353 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
                 { file, source, scan: scanScript(file, source) },
             ]),
         ).toEqual(want);
+    });
+
+    // ── round 14 (review-1469-r13 MEDIUM-1 / MEDIUM-2) ──
+    it("the compile closure resolves every relative import, and imports nothing but node: builtins", () => {
+        expect(closure.unresolved).toEqual([]);
+        expect(closure.bare.filter((s) => !s.startsWith("node:"))).toEqual([]);
+        // It reaches past the entries (a closure of just the two roots would scan nothing new).
+        expect(closure.files.map((p) => relative(ADAPTERS, p)).sort()).toEqual(
+            expect.arrayContaining([
+                "bun-base-exe.mjs",
+                "compile-embed.mjs",
+                "sidecar-runtime.mjs",
+                ...COMPILE_ENTRIES,
+            ]),
+        );
+    });
+
+    it("no module in the compile closure writes a global, a prototype, or defineProperty's one (H3/H3b/H3c)", () => {
+        expect(
+            inClosure.flatMap((m) =>
+                globalPatches(
+                    m.file,
+                    m.source,
+                    SERIALIZED_ONLY_REVIEWED[m.file],
+                ),
+            ),
+        ).toEqual([]);
+    });
+
+    it("a serialized-only exemption is load-bearing, and its function is never run in the closure (only .toString()'d)", () => {
+        for (const [file, names] of Object.entries(SERIALIZED_ONLY_REVIEWED)) {
+            const m = inClosure.find((x) => x.file === file);
+            expect(m).toBeDefined();
+            // Without the exemption the rule sees the patch (not a stale entry).
+            expect(globalPatches(file, m?.source ?? "").length).toBeGreaterThan(
+                0,
+            );
+            for (const name of names)
+                expect(
+                    inClosure.flatMap((x) =>
+                        serializedOnlyViolations(x.file, x.source, name),
+                    ),
+                ).toEqual([]);
+        }
+        expect(
+            serializedOnlyViolations(
+                "m.mjs",
+                "import { f } from './x.mjs'; const s = '(' + f.toString() + ')()'; f(Module, fs, r);",
+                "f",
+            ),
+        ).toEqual(["m.mjs:1 f(Module, fs, r)"]);
+    });
+
+    it("every closure module reaches Bun only as the literal `Bun.<name>` (no alias, no global object, no bun module, no computed specifier)", () => {
+        expect(
+            inClosure
+                .map(({ file, scan }) => ({
+                    file,
+                    bunIndirect: scan.bunIndirect,
+                    globalRefs: scan.globalRefs,
+                    bunProp: scan.bunProp,
+                    bunModule: scan.bunModule,
+                    dynamicSpecifier: scan.dynamicSpecifier,
+                }))
+                .filter((o) =>
+                    [
+                        o.bunIndirect,
+                        o.globalRefs,
+                        o.bunProp,
+                        o.bunModule,
+                        o.dynamicSpecifier,
+                    ].some((a) => a.length > 0),
+                ),
+        ).toEqual([]);
+    });
+
+    it("each compile script imports the seam module FIRST, and the seam module imports only node: builtins", () => {
+        for (const f of COMPILE_ENTRIES) {
+            const src = readFileSync(join(ADAPTERS, f), "utf8");
+            expect({ f, first: relativeImports(f, src)[0] }).toEqual({
+                f,
+                first: "./bun-base-exe.mjs",
+            });
+        }
+        const seamSrc = readFileSync(
+            join(ADAPTERS, "bun-base-exe.mjs"),
+            "utf8",
+        );
+        expect(
+            moduleSpecifiers("bun-base-exe.mjs", seamSrc).filter(
+                (s) => !s.startsWith("node:"),
+            ),
+        ).toEqual([]);
+    });
+
+    it("sealCompile's body looks nothing up at call time (primordials only; no method call, global or iterator)", () => {
+        expect(
+            sealLateLookups(
+                readFileSync(join(ADAPTERS, "bun-base-exe.mjs"), "utf8"),
+            ),
+        ).toEqual([]);
+    });
+
+    it("esbuild (tsup's bundler) inlines exactly the scanned closure into each compile entry", async () => {
+        const esbuild = await import("esbuild");
+        for (const f of COMPILE_ENTRIES) {
+            const entry = join(ADAPTERS, f);
+            const r = await esbuild.build({
+                entryPoints: [entry],
+                bundle: true,
+                platform: "node",
+                format: "esm",
+                write: false,
+                metafile: true,
+                logLevel: "silent",
+                absWorkingDir: ADAPTERS,
+            });
+            const bundled = Object.keys(r.metafile.inputs)
+                .map((p) => resolve(ADAPTERS, p))
+                .sort();
+            expect({ f, bundled }).toEqual({
+                f,
+                bundled: importClosure([entry]).files.sort(),
+            });
+        }
+    });
+
+    it.each<[string, string, string[]]>([
+        [
+            "H3: WeakSet.prototype.has = …",
+            "WeakSet.prototype.has = () => true;",
+            ["m.mjs:1 WeakSet.prototype.has = () => true"],
+        ],
+        [
+            "Object.hasOwn = …",
+            "Object.hasOwn = () => false;",
+            ["m.mjs:1 Object.hasOwn = () => false"],
+        ],
+        [
+            "H3c: Object.freeze = …",
+            "Object.freeze = (o) => o;",
+            ["m.mjs:1 Object.freeze = (o) => o"],
+        ],
+        [
+            "globalThis.x = …",
+            "globalThis.Bun = b;",
+            ["m.mjs:1 globalThis.Bun = b"],
+        ],
+        [
+            "Bun.build = … (a wrapper that adds a base)",
+            "Bun.build = w;",
+            ["m.mjs:1 Bun.build = w"],
+        ],
+        [
+            'a computed write through ["prototype"]',
+            'Array["prototype"][k] = f;',
+            ['m.mjs:1 Array["prototype"][k] = f'],
+        ],
+        [
+            "a local's __proto__",
+            "o.__proto__.includes = f;",
+            ["m.mjs:1 o.__proto__.includes = f"],
+        ],
+        [
+            "a destructuring target",
+            "[Object.keys] = [f];",
+            ["m.mjs:1 [Object.keys] = [f]"],
+        ],
+        [
+            "a compound assignment",
+            "Object.x ??= f;",
+            ["m.mjs:1 Object.x ??= f"],
+        ],
+        [
+            "delete",
+            "delete Object.prototype.x;",
+            ["m.mjs:1 delete Object.prototype.x"],
+        ],
+        [
+            "a for…of target",
+            "for (Object.x of a);",
+            ["m.mjs:1 for (Object.x of a);"],
+        ],
+        [
+            "Object.defineProperty(Object, …)",
+            'Object.defineProperty(Object, "hasOwn", { value: f });',
+            ['m.mjs:1 Object.defineProperty(Object, "hasOwn", { value: f })'],
+        ],
+        [
+            "Reflect.set(WeakSet.prototype, …)",
+            'Reflect.set(WeakSet.prototype, "has", f);',
+            ['m.mjs:1 Reflect.set(WeakSet.prototype, "has", f)'],
+        ],
+        [
+            "Object.assign(Bun, …)",
+            "Object.assign(Bun, o);",
+            ["m.mjs:1 Object.assign(Bun, o)"],
+        ],
+        [
+            "Object.setPrototypeOf(globalThis, …)",
+            "Object.setPrototypeOf(globalThis, p);",
+            ["m.mjs:1 Object.setPrototypeOf(globalThis, p)"],
+        ],
+        [
+            "x.__defineGetter__ on a prototype",
+            'Object.prototype.__defineGetter__("k", g);',
+            ['m.mjs:1 Object.prototype.__defineGetter__("k", g)'],
+        ],
+        [
+            "a local write is not a global patch",
+            "let o = {}; o.x = 1; o.y += 2; delete o.x;",
+            [],
+        ],
+        [
+            "Object.assign into a local is not a global patch",
+            "Object.assign(out, copy);",
+            [],
+        ],
+        [
+            "a read of a global is not a patch",
+            "const k = Object.keys(o); const h = WeakSet.prototype.has;",
+            [],
+        ],
+    ])("the global-patch rule sees: %s", (_n, src, want) => {
+        expect(globalPatches("m.mjs", src)).toEqual(want);
+    });
+
+    it.each<[string, string, string[]]>([
+        [
+            "the primordial shape",
+            "export function sealCompile(...parts) { for (let i = 0; i < parts.length; i++) ObjectAssign(out, parts[i]); return ObjectFreeze(out); }",
+            [],
+        ],
+        [
+            "G2: SEALED.has (a prototype lookup)",
+            "export function sealCompile(p) { return SEALED.has(p); }",
+            ["SEALED.has(p)"],
+        ],
+        [
+            "Object.hasOwn (a global)",
+            "export function sealCompile(o) { return ObjectHasOwn(o, k) || Object.hasOwn(o, k); }",
+            ["Object.hasOwn(o, k)", "Object"],
+        ],
+        [
+            "G3: Object.freeze",
+            "export function sealCompile(o) { return Object.freeze(o); }",
+            ["Object.freeze(o)", "Object"],
+        ],
+        [
+            "a for…of over the parts",
+            "export function sealCompile(...parts) { for (const p of parts) f(p); }",
+            ["for…of (an iterator)"],
+        ],
+        [
+            "an array spread",
+            "export function sealCompile(...parts) { return f(...parts); }",
+            ["…spread (an iterator)"],
+        ],
+        [
+            "two sealCompile bodies",
+            "export function sealCompile() {}\nfunction sealCompile() {}",
+            ["2 sealCompile bodies"],
+        ],
+    ])("the late-lookup rule sees: %s", (_n, src, want) => {
+        expect(sealLateLookups(src)).toEqual(want);
+    });
+
+    it("H1: a helper OUTSIDE adapters/, imported by a compile script, is in the closure and reds the Bun.build and key rules", () => {
+        const d = tmp("knext-bun-base-h1-");
+        write(
+            join(d, "adapters/vinext-compile.mjs"),
+            'import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";\nimport { fast } from "../zz-fast";\nif (process.env.FAST) await fast();\n',
+        );
+        write(join(d, "adapters/bun-base-exe.mjs"), "export {};\n");
+        write(
+            join(d, "zz-fast.mjs"),
+            "export async function fast() { await Bun.build({ compile: { executablePath: process.env.FAST } }); }\n",
+        );
+        const c = importClosure([join(d, "adapters/vinext-compile.mjs")]);
+        const mods = c.files.map((p) => {
+            const file = relative(join(d, "adapters"), p);
+            const source = readFileSync(p, "utf8");
+            return { file, source, scan: scanScript(file, source) };
+        });
+        expect(mods.map((m) => m.file)).toContain("../zz-fast.mjs");
+        const helper = mods.find((m) => m.file === "../zz-fast.mjs");
+        expect(
+            helper && nonCompileOffence(helper.file, helper.scan),
+        ).toBeDefined();
+        expect(seamKeyOffenders(mods)).toContain(
+            "../zz-fast.mjs spells executablePath",
+        );
+    });
+
+    it("H3: a helper outside adapters/ that patches an intrinsic reds the global-patch rule", () => {
+        const d = tmp("knext-bun-base-h3-");
+        write(
+            join(d, "adapters/standalone-compile.mjs"),
+            'import { sealCompile } from "./bun-base-exe.mjs";\nimport "../lib/patch.ts";\n',
+        );
+        write(join(d, "adapters/bun-base-exe.mjs"), "export {};\n");
+        write(
+            join(d, "lib/patch.ts"),
+            "if (process.env.X) { WeakSet.prototype.has = () => true; Object.hasOwn = () => false; }\n",
+        );
+        const c = importClosure([join(d, "adapters/standalone-compile.mjs")]);
+        expect(
+            c.files.flatMap((p) =>
+                globalPatches(relative(d, p), readFileSync(p, "utf8")),
+            ),
+        ).toEqual([
+            "lib/patch.ts:1 WeakSet.prototype.has = () => true",
+            "lib/patch.ts:1 Object.hasOwn = () => false",
+        ]);
+    });
+
+    it("the closure walk: any extension, a directory index, a re-export, a require; an unresolved or bare import is reported", () => {
+        const d = tmp("knext-bun-base-closure-");
+        write(
+            join(d, "a/root.mjs"),
+            'import "./b";\nexport * from "../c/index.cts";\nconst m = require("./d.cjs");\nimport "pkg";\nimport "./missing";\n',
+        );
+        write(join(d, "a/b.ts"), 'import "../e";\n');
+        write(join(d, "e/index.mts"), "");
+        write(join(d, "c/index.cts"), "");
+        write(join(d, "a/d.cjs"), "");
+        const c = importClosure([join(d, "a/root.mjs")]);
+        expect(c.files.map((p) => relative(d, p)).sort()).toEqual([
+            "a/b.ts",
+            "a/d.cjs",
+            "a/root.mjs",
+            "c/index.cts",
+            "e/index.mts",
+        ]);
+        expect(c.bare).toEqual(["pkg"]);
+        expect(c.unresolved).toEqual([`${join(d, "a/root.mjs")} → ./missing`]);
+    });
+
+    it("H3b: a patch placed IN a compile script reds the global-patch rule on the real script's text", () => {
+        const src = readFileSync(join(ADAPTERS, "vinext-compile.mjs"), "utf8");
+        const anchor = "assertBunBaseExe();";
+        expect(src.split(anchor).length - 1).toBeGreaterThanOrEqual(1);
+        const patched = src.replace(
+            anchor,
+            `${anchor}\nif (process.env.K) { WeakSet.prototype.has = () => true; Object.hasOwn = () => false; }`,
+        );
+        expect(globalPatches("vinext-compile.mjs", patched).length).toBe(2);
     });
 
     it("the reviewed non-compile exemption stays load-bearing (not a stale entry)", () => {
@@ -1260,6 +1964,53 @@ console.log(JSON.stringify({ a: Object.entries(a), b: Object.entries(b), same })
         expect(got.same).toMatch(/carries executablePath/);
     });
 
+    it("G2/G3 (round 14): intrinsics patched AFTER import cannot make sealCompile accept a foreign base or leave its result writable", () => {
+        const probe = join(tmp("knext-bun-base-g2-"), "probe.mjs");
+        writeFileSync(
+            probe,
+            `import { sealCompile } from ${JSON.stringify(join(ADAPTERS, "bun-base-exe.mjs"))};
+const key = ["executable", "Path"].join("");
+const parts = [{ [key]: "/evil/bun" }, Object.fromEntries([[key, "/evil/bun"]]), Object.create({ [key]: "/evil/bun" })];
+const good = { outfile: "o" };
+const isFrozen = Object.isFrozen, entries = Object.entries, stringify = JSON.stringify, log = console.log;
+WeakSet.prototype.has = () => true;
+WeakSet.prototype.add = () => {};
+Object.hasOwn = () => false;
+Object.keys = () => [];
+Object.freeze = (o) => o;
+Object.assign = (t) => t;
+Object.create = () => ({});
+Reflect.ownKeys = () => [];
+Array.prototype.includes = () => false;
+Array.prototype[Symbol.iterator] = function* () {};
+Function.prototype.call = function () { return true; };
+const out = { refused: [] };
+for (let i = 0; i < parts.length; i++) {
+  try { sealCompile(parts[i]); out.refused.push("no-throw"); } catch (e) { out.refused.push(String(e.message).includes("carries " + key)); }
+}
+const s = sealCompile(good);
+out.frozen = isFrozen(s);
+try { s[key] = "/evil/bun"; out.write = "no-throw"; } catch (e) { out.write = e instanceof TypeError; }
+out.entries = entries(s);
+log(stringify(out));
+`,
+        );
+        // The seam is ABSENT — every user's build — which is where G2 leaked a foreign base.
+        const env = { ...process.env };
+        delete env[BUN_BASE_EXE_ENV];
+        const r = spawnSync(process.execPath, [probe], {
+            env,
+            encoding: "utf8",
+        });
+        expect(r.stderr).toBe("");
+        expect(JSON.parse(r.stdout.trim())).toEqual({
+            refused: [true, true, true],
+            frozen: true,
+            write: true,
+            entries: [["outfile", "o"]],
+        });
+    });
+
     it("a bad seam → assertBunBaseExe() and sealCompile() both throw it (no fall back to stock Bun)", () => {
         const exe = verifiedBase();
         writeFileSync(`${exe}.sha256`, `${"0".repeat(64)}  bun\n`);
@@ -1289,25 +2040,30 @@ console.log(JSON.stringify(out));
             expect(m).toContain(`${BUN_BASE_EXE_ENV}: sha256 mismatch`);
     });
 
-    it.each<[string, string, unknown]>([
+    it.each<[string, string, string[]]>([
         [
             "the shipped shape",
-            "const BUN_BASE_EXE = Object.freeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            "const BUN_BASE_EXE = ObjectFreeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
             ["const private frozen"],
         ],
         [
             "C5: a mutable binding",
-            "let BUN_BASE_EXE = Object.freeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            "let BUN_BASE_EXE = ObjectFreeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
             ["mutable private frozen"],
         ],
         [
             "an exported binding",
-            "export const BUN_BASE_EXE = Object.freeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            "export const BUN_BASE_EXE = ObjectFreeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
             ["const exported frozen"],
         ],
         [
             "an unfrozen value",
             "const BUN_BASE_EXE = {};\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            ["const private unfrozen"],
+        ],
+        [
+            "Object.freeze looked up at evaluation, not the captured primordial",
+            "const BUN_BASE_EXE = Object.freeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
             ["const private unfrozen"],
         ],
     ])("the seam-module shape sees: %s", (_n, src, want) => {
@@ -1316,7 +2072,7 @@ console.log(JSON.stringify(out));
 
     it("the seam-module shape sees C4: a reference outside sealCompile", () => {
         const src =
-            "const BUN_BASE_EXE = Object.freeze({});\nObject.assign(BUN_BASE_EXE, {});\nexport function sealCompile() { return BUN_BASE_EXE; }";
+            "const BUN_BASE_EXE = ObjectFreeze({});\nObject.assign(BUN_BASE_EXE, {});\nexport function sealCompile() { return BUN_BASE_EXE; }";
         expect(seamModuleShape(src)).toEqual({
             decls: ["const private frozen"],
             inside: 1,
