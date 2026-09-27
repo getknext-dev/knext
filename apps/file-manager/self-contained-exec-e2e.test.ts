@@ -147,6 +147,11 @@ describe.skipIf(skipReason !== null)(
 
       expect(readdirSync(dir)).toEqual(['server']);
       expect(log()).not.toContain('knext bun-exec:');
+      // #1460 round 2: scripts/build-self-contained.mjs embeds
+      // native/.integrity.json, so the dlopen shim must verify the extracted
+      // tree — never fall back to the permissive UNVERIFIED path (which
+      // would mean the manifest silently stopped being embedded).
+      expect(log()).not.toContain('UNVERIFIED');
     }, 120_000);
 
     it('an unwritable temp dir fails ONLY image optimization — health and static assets keep serving', async () => {
