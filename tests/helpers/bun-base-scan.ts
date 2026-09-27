@@ -21,7 +21,13 @@
  *     slices, `${!…}`, array assignments, `declare`/flagged `export`/`local`, `-eq`-family and `-v`
  *     tests — found by a GENERIC walk over every field of every node, never judged, only banned;
  * 10. every Stmt/CallExpr/Redirect/Assign/FuncDecl/DeclClause/CmdSubst/ProcSubst the generic walk
- *     finds was also reached by the rule walk (count-compared), so no field can hide code from it.
+ *     finds was also reached by the rule walk (count-compared), so no field can hide code from it;
+ * 11. (round 10) option/operator words are judged by their PARSED shape, never their source text:
+ *     printf's format must be one static literal part not starting with `-` (so no `-v`, however
+ *     quoted or expanded), and `[`/`test` must be one of the reviewed argc shapes with a plain
+ *     unquoted operator from a fixed allowlist and no operand that can split or glob;
+ * 12. (round 10) no word's static text may be re-evaluable as code — `$(`, `$[`, a backtick, or a
+ *     `NAME[` subscript (with every expansion counted as possibly-anything), and no `$'…'`/`$"…"`.
  */
 import sh, { type ShNode } from 'mvdan-sh';
 
@@ -47,7 +53,71 @@ export type Cmd = {
   fn: string | null;
   /** Static working directory when it runs ('?' when not known). */
   cwd: string;
+  /** Per word (aligned with `words`), its PARSED shape — CallExpr only (`[[ ]]` has none). */
+  shapes?: WordShape[];
 };
+
+/** What the parser — not the source text — says a word is. */
+export type WordShape = {
+  /** Exactly one unquoted Lit part with no backslash: the word IS its source text. */
+  plainLit: boolean;
+  /** Exactly one part that is a Lit or a plain '…' (no expansion, no concatenation). */
+  onePart: boolean;
+  /** Its value when fully static (quotes removed), else null. */
+  value: string | null;
+  /** An unquoted expansion ($x, $(…), …): its value may split into several words. */
+  unquotedDyn: boolean;
+  /** An unquoted glob / brace character: it may expand into several words. */
+  unquotedGlob: boolean;
+};
+
+/** Placeholder for an expansion's (unknown) text inside a word's static text (a private-use code
+ *  point: it cannot occur in the scripts' own text). */
+const DYN = '\uE000';
+const unescapeLit = (v: string) => v.replace(/\\([\s\S])/g, '$1');
+const unescapeDq = (v: string) => v.replace(/\\([$`"\\\n])/g, '$1');
+/** A word part's static text; every expansion becomes DYN (it could be anything). */
+function partText(p: ShNode): string {
+  const k = kindOf(p);
+  if (k === 'Lit') return unescapeLit(String(p.Value ?? ''));
+  if (k === 'SglQuoted') return String(p.Value ?? '');
+  if (k === 'DblQuoted')
+    return (p.Parts ?? [])
+      .map((q) => (kindOf(q) === 'Lit' ? unescapeDq(String(q.Value ?? '')) : DYN))
+      .join('');
+  return DYN;
+}
+/** The static text of a whole word — its parts CONCATENATED, so a split like `'x'"["'$(id)]'` or
+ *  `"\$"'(id)'` is judged as the one string bash builds from it. */
+export function wordText(w: ShNode): string {
+  return (w.Parts ?? []).map(partText).join('');
+}
+/** Text bash re-evaluates as code in some context (`printf -v`, `test -v`, `[[ ]]`, `declare`, `let`,
+ *  a subscript, `eval`): a command substitution, `$[`, a backtick, or `NAME[`. An expansion (DYN)
+ *  counts as both a `$` and a name character, since its value is unknown. */
+const RE_EVALUABLE = /[$\uE000][([]|`|\$\uE000|[A-Za-z_\uE000][A-Za-z0-9_\uE000]*\[/;
+
+function wordShape(w: ShNode): WordShape {
+  const parts = w.Parts ?? [];
+  const kinds = parts.map((x) => kindOf(x) ?? '?');
+  const statik = parts.every(
+    (x, i) =>
+      kinds[i] === 'Lit' ||
+      (kinds[i] === 'SglQuoted' && !x.Dollar) ||
+      (kinds[i] === 'DblQuoted' && !x.Dollar && (x.Parts ?? []).every((q) => kindOf(q) === 'Lit')),
+  );
+  const lit0 = kinds.length === 1 && kinds[0] === 'Lit' ? String(parts[0]!.Value ?? '') : null;
+  return {
+    plainLit: lit0 !== null && !lit0.includes('\\'),
+    onePart:
+      kinds.length === 1 && (kinds[0] === 'Lit' || (kinds[0] === 'SglQuoted' && !parts[0]!.Dollar)),
+    value: statik ? wordText(w) : null,
+    unquotedDyn: kinds.some((k) => k !== 'Lit' && k !== 'SglQuoted' && k !== 'DblQuoted'),
+    unquotedGlob: parts.some(
+      (x, i) => kinds[i] === 'Lit' && /[*?[{]/.test(String(x.Value ?? '').replace(/\\./g, '')),
+    ),
+  };
+}
 
 export type Parsed = {
   cmds: Cmd[];
@@ -108,9 +178,6 @@ const ARITH_TEST_OPS = new Set(
   ),
 );
 const SUBSCRIPT_TEST_OPS = new Set([probeTestOp('[[ -v x ]]', 'UnaryTest')]);
-/** The same operators as whole words in a classic `[ ]`/`test` argv (plain strings there — the
- *  BinaryTest/UnaryTest nodes only exist for `[[ ]]`). */
-const ARITH_OR_SUBSCRIPT_TEST_WORD = /^-(eq|ne|lt|le|gt|ge|v)$/;
 
 /** ── THE ARITHMETIC BAN (#1469 round 9) ──────────────────────────────────────────────────────────
  * Rounds 6-8 tried to JUDGE bash's arithmetic contexts (which names, which operators, which array is
@@ -157,6 +224,11 @@ function banned(n: ShNode, k: string, sl: (x: ShNode) => string): string | undef
     return '[[ ]] arithmetic comparison (-eq/-ne/-lt/-le/-gt/-ge) is banned — it evaluates both operands arithmetically';
   if (k === 'UnaryTest' && SUBSCRIPT_TEST_OPS.has(n.Op ?? -1))
     return '[[ -v ]] is banned — it evaluates an array subscript in its operand';
+  // ── round 10: no re-evaluable text ──
+  if ((k === 'SglQuoted' || k === 'DblQuoted') && n.Dollar)
+    return `${k === 'SglQuoted' ? "$'…'" : '$"…"'} quoting \`${sl(n)}\` is banned (escapes can spell any text)`;
+  if (k === 'Word' && RE_EVALUABLE.test(wordText(n)))
+    return `word \`${sl(n)}\` carries re-evaluable text ($( / $[ / backtick / NAME[) — bash re-runs such text in printf -v, test -v, [[ ]], declare, subscripts`;
   return undefined;
 }
 
@@ -306,8 +378,9 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
     return `${n}${op}${word}`;
   };
 
-  const emit = (s: ShNode, words: string[], redirs: string[], ctx: Ctx) => {
+  const emit = (s: ShNode, words: string[], redirs: string[], ctx: Ctx, shapes?: WordShape[]) => {
     out.cmds.push({
+      ...(shapes ? { shapes } : {}),
       words,
       redirs,
       line: s.Pos().Line(),
@@ -354,11 +427,12 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
       for (const a of args) expansions(a, ctx);
       if (!args.length) return; // assignment only
       const words = args.map(sl);
+      const shapes = args.map(wordShape);
       if (words[0] === 'cd') {
         if (ctx.kind !== 'top' && ctx.kind !== 'subst') bad(c, 'cd outside the top-level flow');
         ctx.cwd.v = words.length === 2 ? words[1]!.replace(/^"(.*)"$/, '$1') : '?';
       }
-      emit(s, words, redirs, ctx);
+      emit(s, words, redirs, ctx, shapes);
     } else if (t === 'DeclClause') {
       // Its shape (bare export/local, no flag) is judged by the generic ban at the end.
       reach('DeclClause');
@@ -718,6 +792,56 @@ function curlShape(
     : { dir: path.startsWith('/') ? path.slice(0, slash) : '?', file: path.slice(slash + 1) };
 }
 
+/** `[`/`test` operators allowed, as PLAIN UNQUOTED words only. None evaluates its operand: no
+ *  -eq/-ne/-lt/-le/-gt/-ge (arithmetic) and no -v (subscript). */
+const TEST_UNARY_OK = new Set(['-n', '-z', '-e', '-f', '-d', '-x', '-s']);
+const TEST_BINARY_OK = new Set(['=', '!=']);
+
+/** Rule 11 — option/operator words judged by their PARSED shape. `printf -v NAME[…]` and
+ *  `test -v NAME[…]` evaluate the subscript ARITHMETICALLY (command substitution included), and a
+ *  quoted or expanded `-v` (`printf "-v"`, `printf -""v`, `[ "$o" 'x[…]' ]`) is the same `-v` to
+ *  bash — so the rule never looks at spelling: a word that is not the one reviewed static shape in
+ *  an option/operator position is red. */
+export function optionWordProblems(c: Cmd, n: Norm): string[] {
+  const head = n.words[0] ?? '';
+  if (head !== 'printf' && head !== 'test' && head !== '[') return [];
+  if (n.wrapped.length) return [`${head} under a wrapper (${n.wrapped.join(' ')}) is not allowed`];
+  const sh = c.shapes;
+  if (!sh || sh.length !== c.words.length || !sh[0]!.plainLit)
+    return [`${head}: its words were not parsed as plain words`];
+  if (head === 'printf') {
+    const f = sh[1];
+    if (!f) return ['printf without a format'];
+    if (!f.onePart || f.value === null)
+      return ['printf format must be ONE static literal part (no quoting splice, no expansion)'];
+    if (f.value.startsWith('-'))
+      return [`printf format ${JSON.stringify(f.value)} is an option word (printf -v assigns)`];
+    return [];
+  }
+  let ops = sh.slice(1);
+  let words = c.words.slice(1);
+  if (head === '[') {
+    const last = ops[ops.length - 1];
+    if (!last?.plainLit || words[words.length - 1] !== ']') return ['[ without a plain closing ]'];
+    ops = ops.slice(0, -1);
+    words = words.slice(0, -1);
+  }
+  const out: string[] = [];
+  ops.forEach((o, i) => {
+    if (o.unquotedDyn)
+      out.push(`${head} operand ${words[i]} is an unquoted expansion (it can split)`);
+    if (o.unquotedGlob) out.push(`${head} operand ${words[i]} can glob/brace-expand`);
+  });
+  const lit = (i: number, set: Set<string>) => ops[i]!.plainLit && set.has(words[i]!);
+  if (ops.length === 1) return out;
+  if (ops.length === 2 && lit(0, TEST_UNARY_OK)) return out;
+  if (ops.length === 3 && lit(1, TEST_BINARY_OK)) return out;
+  out.push(
+    `${head} is not one of the reviewed shapes (X | OP X with OP in ${[...TEST_UNARY_OK].join(' ')} | X OP Y with OP in = !=), each OP a plain unquoted word — got: ${words.join(' ')}`,
+  );
+  return out;
+}
+
 export type Unpinned = { id: string; match: string | null; calls?: number };
 
 export function scanBuildScript(
@@ -796,15 +920,7 @@ export function scanBuildScript(
       );
     if (c.andLhs && (/^(pin|sha256sum|grep|test|\[|\[\[)$/.test(head) || net))
       v.push(`${at}: a check or fetch before && (its failure does not stop the script)`);
-    if (head === 'printf' && n.words.some((w) => /^-[a-zA-Z]*v/.test(w)))
-      v.push(`${at}: printf -v assigns a variable`);
-    // Classic `[ ]`/`test`: -eq/-ne/-lt/-le/-gt/-ge run their operands through bash's arithmetic
-    // evaluator and -v evaluates an array subscript, exactly as in `[[ ]]` (banned there by the
-    // generic ban). The scripts compare only strings, so these operators are banned here too.
-    if (/^(\[|test)$/.test(head))
-      for (const w of n.words)
-        if (ARITH_OR_SUBSCRIPT_TEST_WORD.test(w))
-          v.push(`${at}: ${head} ${w} is banned (arithmetic or subscript evaluation)`);
+    v.push(...optionWordProblems(c, n).map((b) => `${at}: ${b}`));
     // `read` is checked against its own fixed shape, not VARS: VARS also allows PATH/HOME/WS/… on
     // the left of `=` (the CONSTS one-line check covers that), and a `read` into one of those names
     // — `read -r PATH <<<…`, `read -r HOME <<<…`, `read -r WS <<<…` — bypassed that check entirely

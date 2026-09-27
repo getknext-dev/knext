@@ -513,9 +513,124 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
       () => add(`[[ -v 'a[$(id)]' ]]`),
       /\[\[ -v \]\] is banned/,
     ],
-    ['[ "$x" -eq 0 ]', () => add('[ "$wk" -eq 0 ]'), /\[ -eq is banned/],
-    ['[ 1 -gt 0 ] (even two literals)', () => add('[ 1 -gt 0 ]'), /\[ -gt is banned/],
-    ["test -v 'a[$(id)]'", () => add(`test -v 'a[$(id)]'`), /test -v is banned/],
+    ['[ "$x" -eq 0 ]', () => add('[ "$wk" -eq 0 ]'), /\[ is not one of the reviewed shapes/],
+    [
+      '[ 1 -gt 0 ] (even two literals)',
+      () => add('[ 1 -gt 0 ]'),
+      /\[ is not one of the reviewed shapes/,
+    ],
+    [
+      "test -v 'a[$(id)]'",
+      () => add(`test -v 'a[$(id)]'`),
+      /test is not one of the reviewed shapes/,
+    ],
+    // round 10 (review-1469-r9, HIGH-1): the option word was matched on its SOURCE text, so a quoted
+    // or expanded `-v` evaded it — and bash evaluates the subscript of `printf -v NAME[…]` /
+    // `test -v NAME[…]` arithmetically, running the `$( )` inside a single-quoted subscript. Rule 11
+    // judges the PARSED word; rule 12 bans the re-evaluable text itself. Each row names ONE rule's
+    // message, so disabling either rule reds exactly its own rows.
+    ...((
+      [
+        ['N1 printf "-v"', `printf "-v" 'x[$(id)]' %s y`],
+        ['N2 printf -""v', `printf -""v 'x[$(id)]' %s y`],
+        ['N3 [ "-v" … ]', `if [ "-v" 'x[$(id)]' ]; then echo; fi`],
+        ['N4 test -""v', `if test -""v 'x[$(id)]'; then echo; fi`],
+        ['N5 name=-v; printf "$name"', `name=-v\nprintf "$name" 'x[$(id)]' %s y`],
+        ['N6 name=-v; [ "$name" … ]', `name=-v\nif [ "$name" 'x[$(id)]' ]; then echo; fi`],
+        ["N7 printf '-v'", `printf '-v' 'x[$(id)]' %s y`],
+      ] as const
+    ).flatMap(([n, line]) => [
+      [
+        `${n} — rule 11 (parsed option word)`,
+        () => add(line),
+        /printf format|is not one of the reviewed shapes/,
+      ],
+      [`${n} — rule 12 (re-evaluable text)`, () => add(line), /carries re-evaluable text/],
+    ]) as [string, () => string, RegExp][]),
+    [
+      'rule 11: printf "-v" is not a static single part',
+      () => add(`printf "-v" x %s y`),
+      /printf format must be ONE static literal part/,
+    ],
+    [
+      'rule 11: printf -""v splices parts',
+      () => add(`printf -""v x %s y`),
+      /printf format must be ONE static literal part/,
+    ],
+    [
+      'rule 11: printf "$name" is an expansion',
+      () => add(`printf "$name" x %s y`),
+      /printf format must be ONE static literal part/,
+    ],
+    [
+      "rule 11: printf '-v' is a static option word",
+      () => add(`printf '-v' x %s y`),
+      /printf format "-v" is an option word/,
+    ],
+    [
+      'rule 11: printf -v (plain)',
+      () => add('printf -v x %s y'),
+      /printf format "-v" is an option word/,
+    ],
+    [
+      'rule 11: printf -- -v',
+      () => add('printf -- -v x %s y'),
+      /printf format "--" is an option word/,
+    ],
+    [
+      'rule 11: command printf (wrapper)',
+      () => add(`command printf '%s' y`),
+      /printf under a wrapper/,
+    ],
+    [
+      'rule 11: [ "-v" x ] quoted operator',
+      () => add('[ "-v" x ]'),
+      /\[ is not one of the reviewed shapes/,
+    ],
+    ['rule 11: test -""v x', () => add('test -""v x'), /test is not one of the reviewed shapes/],
+    [
+      'rule 11: [ "$name" x ] expanded operator',
+      () => add('[ "$name" x ]'),
+      /\[ is not one of the reviewed shapes/,
+    ],
+    [
+      'rule 11: [ $wk = x ] unquoted operand splits',
+      () => add('[ $wk = x ]'),
+      /unquoted expansion \(it can split\)/,
+    ],
+    ['rule 11: [ * = x ] glob operand', () => add('[ * = x ]'), /can glob\/brace-expand/],
+    [
+      'rule 12: printf \'%s\' "$x[$(id)]"',
+      () => add(`printf '%s' "$wk[$(id)]"`),
+      /carries re-evaluable text/,
+    ],
+    [
+      'rule 12: [[ "$x" == \'a[$(id)]\' ]]',
+      () => add(`[[ "$wk" == 'a[$(id)]' ]]`),
+      /carries re-evaluable text/,
+    ],
+    [
+      "rule 12: 'x'\"[\"'$(id)]' spliced across parts",
+      () => add(`echo 'x'"["'$(id)]'`),
+      /carries re-evaluable text/,
+    ],
+    [
+      'rule 12: "\\$"\'(id)\' spliced $ and (',
+      () => add(`echo "\\$"'(id)'`),
+      /carries re-evaluable text/,
+    ],
+    ['rule 12: backtick in single quotes', () => add("echo '`id`'"), /carries re-evaluable text/],
+    [
+      'rule 12: escaped \\$( in an unquoted word',
+      () => add('echo x\\$\\(id\\)'),
+      /carries re-evaluable text/,
+    ],
+    [
+      "rule 12: $'…' ANSI-C quoting",
+      () => add(`echo $'x[\\x24(id)]'`),
+      /\$'…' quoting .* is banned/,
+    ],
+    ['rule 12: $"…" locale quoting', () => add('echo $"x"'), /\$"…" quoting .* is banned/],
   ])('goes RED on: %s', (_n, mutate, why) => {
     const v = scan(mutate());
     expect(v.join('\n')).toMatch(why);
