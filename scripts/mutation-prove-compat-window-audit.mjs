@@ -24,6 +24,15 @@
  *   5. UNREADABLE LEDGER — a ledger file that will not parse is a hard failure,
  *      not a `return null` that a `.filter(Boolean)` then erases.
  *
+ * A #1520 round-1 VOID grade (a night whose only redness was a `kind:
+ * 'deploy'` shard failure counted as bridged/evidence-free rather than a real
+ * disqualifier) used to be mutation-proven here as guards #6 and #7. Round 2
+ * (#1550, lead-directed) REMOVED that grade entirely — a deploy-classified red
+ * now disqualifies a night exactly like any other red (see
+ * `isDeployOnlyRedShard`'s doc comment in the target file) — so there is no
+ * longer a VOID behaviour here to prove. #1553 tracks the open design
+ * question of whether some subset should someday be exempted.
+ *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one guard's behaviour and requires
  * the spec to go RED, then to go GREEN again after restore — both directions,
@@ -58,7 +67,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 const SPEC = 'tests/compat-window-audit.test.ts';
 
-declareMutations(5);
+declareMutations(6);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -147,6 +156,18 @@ prove(
   'unreadable ledger: swallow the parse error and return a ledger-shaped blank',
   '      } catch (err) {\n        throw new Error(',
   '      } catch (err) {\n        return { shards: [] };\n        throw new Error(',
+);
+
+// 6. COUNT-MATCH GUARD (#1520, N1 from the #1550 round-1 review): stop
+//    requiring `shard.failures` to cover every counted failure before
+//    labelling a shard `deploy-classified:`. Without this guard a PARTIALLY
+//    attributed red shard (e.g. failed=2, failures=[{kind:'deploy'}] naming
+//    only one of the two) would still get the readable deploy label even
+//    though it cannot vouch for the other, unnamed failure.
+prove(
+  'count-match guard removed: a partially-attributed shard still gets the deploy-classified label',
+  'if (!failures || failures.length !== failedCount) return false;',
+  'if (!failures) return false;',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

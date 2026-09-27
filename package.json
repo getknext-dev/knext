@@ -39,6 +39,7 @@
     "ioredis5": "npm:ioredis@^5.9.3",
     "jsdom": "^27.3.0",
     "minio": "^8.0.6",
+    "mvdan-sh": "0.10.1",
     "pg-connection-string": "^2.14.0",
     "tar": "^7.4.3",
     "tsup": "^8.5.1",

@@ -223,4 +223,12 @@ export interface CheckContext {
     kubectl: KubectlFn;
     skipAll: boolean;
     operatorImage?: string;
+    /**
+     * `--verbose` (#1535): when false (the default), a check's `detail` is ONE
+     * actionable sentence — no raw kubectl/API dump. When true, the raw
+     * diagnostic text is appended (see `./error-format.ts`). Optional so every
+     * existing hand-built `CheckContext` fixture keeps compiling; missing is
+     * the same as `false`.
+     */
+    verbose?: boolean;
 }

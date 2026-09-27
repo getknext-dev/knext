@@ -38,10 +38,21 @@ import {
     compileArtifactForDeploy,
 } from "./build-artifact";
 import {
+    checkStandaloneBuildId,
+    exportBuildIdEnv,
+    KNEXT_BUILD_ID_ENV,
+    NEXT_DEPLOYMENT_ID_ENV,
+} from "./build-id-env";
+import {
     renderNextAppCR,
     resolveDigest,
     validateCRImageRef,
 } from "./cr-builder";
+import {
+    noReconcileMessage,
+    RECONCILE_WAIT_MS_DEFAULT,
+    waitForOperatorReconcile,
+} from "./deploy-reconcile-wait";
 import {
     formatStrayPositional,
     formatUnknownCommand,
@@ -493,39 +504,54 @@ export async function deploy() {
         delete process.env.ASSET_PREFIX;
     }
 
-    // #93 skew protection (ADR-0011): pin this deploy's BUILD_ID. We export
-    // NEXT_DEPLOYMENT_ID = the deploy tag BEFORE `next build`. next.config reads it
-    // BOTH as `deploymentId` (Next appends `?dpl=<id>` to asset/RSC requests) AND,
-    // crucially (defect-A fix), as `generateBuildId: () => NEXT_DEPLOYMENT_ID` so
-    // `.next/BUILD_ID` == this tag — otherwise BUILD_ID would be a random nanoid
-    // and the `_next/static/<id>/` upload prefix would NOT match the tag the GC
-    // prunes by. Reusing the image tag keeps build-id, image, and static prefix in
-    // lock-step. MUST be set BEFORE `next build`.
+    // #93 skew protection (ADR-0011): pin this deploy's BUILD_ID to the deploy
+    // tag, so build-id, image tag and the `_next/static/<id>/` prefix the GC
+    // prunes by are one value. MUST be exported BEFORE the project build.
     const buildId = options.tag || `${Date.now()}`;
-    process.env.NEXT_DEPLOYMENT_ID = buildId;
-
-    // T2d: the deploy's id wins over a colliding `env.NEXT_DEPLOYMENT_ID` in
-    // the user's config (it is a fact about the artifact, not a preference) —
-    // but never silently, because the user wrote it expecting it to take.
-    if (
-        config.env?.NEXT_DEPLOYMENT_ID !== undefined &&
-        config.env.NEXT_DEPLOYMENT_ID !== buildId
-    ) {
-        log.warn(
-            { configured: config.env.NEXT_DEPLOYMENT_ID, buildId },
-            "Ignoring env.NEXT_DEPLOYMENT_ID from kn-next.config: this deploy's " +
-                "build id is the authority (it is what the assets are namespaced " +
-                "under and what the operator stamps on the revision). Remove it " +
-                "from the config, or set the deploy --tag instead.",
-        );
-    }
 
     // The resolved build target (#1183/ADR-0058: an absent `build` means
     // turbopack — the standalone shape — since v1.0; ADR-0048 originally made
-    // it vinext). Resolved once here because the lock-step guard below reads
-    // a DIFFERENT artifact per target — `.next/BUILD_ID` for standalone, the
+    // it vinext). Resolved here because the build-id env AND the lock-step
+    // guard below differ per target — `.next/BUILD_ID` for standalone, the
     // `.output/public/_next/static/<id>/` prefix for vinext.
     const resolvedBuild = config.build ?? DEFAULT_BUILDER_ID;
+
+    // #1417: knext owns the build-id variable. `next.config` reads
+    // `generateBuildId: () => process.env.KNEXT_BUILD_ID || ...`. The standalone
+    // build must NOT see NEXT_DEPLOYMENT_ID: on Next >= 16.2.11 it becomes
+    // `deploymentId`, and then `next build` ignores `generateBuildId` and
+    // writes the constant `build-TfctsWXpff2fKS`. vinext still gets
+    // NEXT_DEPLOYMENT_ID (its `?dpl=` source; no constant path there).
+    const removedDeploymentId = exportBuildIdEnv(
+        process.env,
+        buildId,
+        resolvedBuild,
+    );
+    if (removedDeploymentId !== undefined) {
+        log.warn(
+            { removed: removedDeploymentId, buildId },
+            "Unset NEXT_DEPLOYMENT_ID for this build: on Next 16.2.11+ it makes " +
+                "next build ignore generateBuildId. The build id comes from " +
+                "KNEXT_BUILD_ID instead.",
+        );
+    }
+
+    // T2d: the deploy's id wins over a colliding `env.NEXT_DEPLOYMENT_ID` /
+    // `env.KNEXT_BUILD_ID` in the user's config (it is a fact about the
+    // artifact, not a preference) — but never silently, because the user
+    // wrote it expecting it to take.
+    for (const key of [NEXT_DEPLOYMENT_ID_ENV, KNEXT_BUILD_ID_ENV]) {
+        const configured = config.env?.[key];
+        if (configured !== undefined && configured !== buildId) {
+            log.warn(
+                { configured, buildId },
+                `Ignoring env.${key} from kn-next.config: this deploy's ` +
+                    "build id is the authority (it is what the assets are namespaced " +
+                    "under and what the operator stamps on the revision). Remove it " +
+                    "from the config, or set the deploy --tag instead.",
+            );
+        }
+    }
 
     // #644: resolve the Docker build context HERE, in the same before-any-side-
     // effect phase as the prune preflight. "Which directory does Next trace
@@ -591,8 +617,10 @@ export async function deploy() {
                 : "Next.js build complete — standalone output in .next/standalone/",
         );
 
-        // Defect-A guard, STANDALONE leg: fail LOUDLY if `.next/BUILD_ID` is not
-        // the deploy tag. `_next/static/<BUILD_ID>/` is the upload prefix the GC
+        // Defect-A guard, STANDALONE leg (checkStandaloneBuildId,
+        // build-id-env.ts): fail LOUDLY if `.next/BUILD_ID` is not the deploy
+        // tag, and name the next.config fix when the cause is the old
+        // NEXT_DEPLOYMENT_ID wiring (#1417). `_next/static/<BUILD_ID>/` is the upload prefix the GC
         // prunes by; if Next ever ignores `generateBuildId` and falls back to a
         // random nanoid, the GC would silently match nothing and the
         // "just-deployed build is protected" guarantee would break. Better to
@@ -602,28 +630,13 @@ export async function deploy() {
         // turbopack app that writes no BUILD_ID is a shape we do not control.
         // The vinext leg — which NEVER writes this file, so it warn-skipped on
         // every single deploy — is checked separately, and loudly, below.
-        if (resolvedBuild !== "vinext") {
-            try {
-                const builtId = readFileSync(
-                    join(process.cwd(), ".next", "BUILD_ID"),
-                    "utf-8",
-                ).trim();
-                if (builtId !== buildId) {
-                    throw new Error(
-                        `.next/BUILD_ID "${builtId}" != deploy tag "${buildId}". ` +
-                            "Skew-protection asset retention requires BUILD_ID == NEXT_DEPLOYMENT_ID " +
-                            "(check next.config generateBuildId).",
-                    );
-                }
-            } catch (err) {
-                // Only swallow a missing-file error (e.g. an app that does not write it);
-                // a real mismatch above must propagate and fail the deploy.
-                const code = (err as NodeJS.ErrnoException)?.code;
-                if (code !== "ENOENT") throw err;
-                log.warn(
-                    ".next/BUILD_ID not found — skipping build-id lock-step check",
-                );
-            }
+        if (
+            resolvedBuild !== "vinext" &&
+            checkStandaloneBuildId(process.cwd(), buildId) === "missing"
+        ) {
+            log.warn(
+                ".next/BUILD_ID not found — skipping build-id lock-step check",
+            );
         }
 
         // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile
@@ -705,8 +718,8 @@ export async function deploy() {
             throw new Error(
                 `${detail}. Skew-protection asset retention requires the ` +
                     "static prefix to BE the deploy tag — check next.config " +
-                    "`generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID " +
-                    "|| null`.",
+                    "`generateBuildId: () => process.env.KNEXT_BUILD_ID " +
+                    "|| process.env.NEXT_DEPLOYMENT_ID || null`.",
             );
         }
     }
@@ -1091,26 +1104,37 @@ export async function deploy() {
         throw new Error(await describeFailedCRApply(), { cause: err });
     }
 
-    // Wait briefly for the operator to begin reconciling, then read the URL.
-    const result = runCapture(
-        withKubeContext(
-            [
-                "kubectl",
-                "get",
-                "nextapp",
-                config.name,
-                "-n",
-                options.namespace,
-                "-o",
-                "jsonpath={.status.url}",
-            ],
-            options.context,
+    // #1535: wait briefly for the operator to begin reconciling — polling
+    // status.conditions, not a single immediate read of status.url (which
+    // stays empty for a healthy app with no ingress yet, so it could never
+    // tell "the operator hasn't started" apart from "it's fine, just no URL
+    // yet"). Say so plainly, with the exact command to check, rather than
+    // silently logging an empty URL.
+    const reconcileWait = await waitForOperatorReconcile(() =>
+        captureKubectl(
+            withKubeContext(
+                [
+                    "kubectl",
+                    "get",
+                    "nextapp",
+                    config.name,
+                    "-n",
+                    options.namespace,
+                    "-o",
+                    "json",
+                ],
+                options.context,
+            ),
         ),
     );
-    log.info(
-        { url: result.replace(/'/g, "") },
-        "Deployment submitted — operator is reconciling",
-    );
+    if (reconcileWait.reconciled) {
+        log.info(
+            { url: reconcileWait.url },
+            "Deployment submitted — operator is reconciling",
+        );
+    } else {
+        log.warn({}, noReconcileMessage(RECONCILE_WAIT_MS_DEFAULT));
+    }
 
     // #93 skew-protection retention GC (ADR-0011). Reap old `_next/static/<id>/`
     // prefixes that are outside the retain window AND not currently serving

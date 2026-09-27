@@ -14,12 +14,21 @@
  * this module declares none of its own.
  */
 
+import { DOCS_URL } from "../../help";
 import { unknownEmittedFields } from "../../schema/crd-schema";
 import { EMITTED_CR_FIELD_PATHS } from "../../schema/emitted-fields.generated";
 import { readKnownCRDFields } from "../../schema/preflight";
+import { actionableDetail } from "../error-format";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
 import { SKIP_UNREACHABLE } from "../types";
+
+/**
+ * #1535 round 2 (N3): the previous hint cited `docs/RELEASING.md`, a repo
+ * path — meaningless to a `kn-next doctor` user who does not have this repo
+ * checked out. Point at the actual docs page that explains the ordering.
+ */
+const UPGRADE_ORDER_URL = `${DOCS_URL}/docs/upgrading`;
 
 export function crdSchemaCheck(ctx: CheckContext): CheckResult[] {
     if (ctx.skipAll) {
@@ -55,13 +64,23 @@ export function crdSchemaCheck(ctx: CheckContext): CheckResult[] {
             ),
         ];
     }
+    // #1535: the ONE actionable sentence. No literal "operator vX / CLI vY" —
+    // the operator is versioned by image digest, not semver (`:latest` is
+    // rejected cluster-wide), so no reliable operator version number exists to
+    // report; naming the field COUNT + the fix + the required order is what
+    // this CLI can say truthfully. The full field list + diagnosis source
+    // moves behind --verbose rather than disappearing.
     return [
         mk(
             "crd-schema",
             "NextApp CRD schema coverage",
             "fail",
-            `the installed NextApp CRD does not define ${missing.length} field(s) this CLI emits: ${missing.join(", ")} — a deploy setting one of them is rejected (or, without strict validation, SILENTLY PRUNED). Source: ${read.detail}`,
-            "upgrade the operator/CRD FIRST, then the CLI (docs/RELEASING.md)",
+            actionableDetail(
+                `operator behind CLI: the installed CRD is missing ${missing.length} field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI).`,
+                `does not define: ${missing.join(", ")} — a deploy setting one of them is rejected (or, without strict validation, SILENTLY PRUNED). Source: ${read.detail}`,
+                ctx.verbose ?? false,
+            ),
+            `upgrade the operator/CRD FIRST, then the CLI — see ${UPGRADE_ORDER_URL}`,
         ),
     ];
 }

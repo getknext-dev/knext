@@ -84,6 +84,7 @@ import {
 import { isBuiltin } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
 import { routeMarker, verifyBytecodeEmbedded, verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
 import {
     detectCompileInclude,
@@ -130,6 +131,13 @@ if (!args.outfile) fail("--outfile <path> is required");
 const SERVER = resolve(args.server);
 const OUTFILE = resolve(args.outfile);
 const TARGET = args.target?.trim();
+// CI-only patched Bun base executable (infra/bun-base/): resolved and verified once, at import,
+// inside bun-base-exe.mjs, and appended by sealCompile() to every compile value. Fail before any work.
+try {
+    assertBunBaseExe();
+} catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+}
 // Self-contained mode (#1456): `.next` and every module the route chunks load
 // go INTO the executable (see "Self-contained mode" below). Off unless asked.
 const SELF_CONTAINED = args["self-contained"] === "1";
@@ -673,7 +681,9 @@ async function selfContainedBuildOptions(base) {
         // Marker only: the banner heads EVERY embedded module, and the root
         // globals are set by the entry prologue before anything is required.
         banner: `globalThis.__knextStandaloneExecMarker=${JSON.stringify(MARKER)};`,
-        compile: { ...opts.compile, ...base.compile },
+        // `base.compile` is already sealed; sealing again appends the seam LAST, so no
+        // embed-plan field can displace the verified base executable.
+        compile: sealCompile(opts.compile, base.compile),
     };
 }
 
@@ -699,14 +709,13 @@ try {
             "process.env.NODE_ENV": '"production"',
             "process.env.NEXT_RUNTIME": '"nodejs"',
         },
-        compile: {
-            outfile: OUTFILE,
+        compile: sealCompile(
             // The load-bearing flag — see the header.
-            autoloadPackageJson: true,
-            ...(TARGET ? { target: TARGET } : {}),
-        },
+            { outfile: OUTFILE, autoloadPackageJson: true },
+            TARGET ? { target: TARGET } : undefined,
+        ),
     };
-    result = await Bun.build(SC ? await selfContainedBuildOptions(base) : base);
+    result = await Bun.build(sealBuild(SC ? await selfContainedBuildOptions(base) : base));
 } finally {
     rmSync(entry, { force: true });
     rmSync(EMPTY, { force: true });

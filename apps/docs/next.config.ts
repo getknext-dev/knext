@@ -29,7 +29,7 @@ const nextConfig: NextConfig = {
   assetPrefix: process.env.ASSET_PREFIX || '',
   // #93 skew protection (ADR-0011): pin every client to the build it loaded.
   deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
-  generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+  generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
 };
 
 const withMDX = createMDX();

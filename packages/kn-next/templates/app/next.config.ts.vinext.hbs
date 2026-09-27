@@ -31,8 +31,9 @@ import type { NextConfig } from "next";
  * it does not fail the build — it silently breaks the no-storage mode.
  *
  * `generateBuildId` is the other piece of knext's own skew-protection
- * wiring. `knext deploy` exports NEXT_DEPLOYMENT_ID = the deploy tag
- * BEFORE the build. vinext reads that env var by itself for `?dpl=` asset
+ * wiring. `knext deploy` exports KNEXT_BUILD_ID (and, for vinext,
+ * NEXT_DEPLOYMENT_ID) = the deploy tag BEFORE the build. vinext reads
+ * NEXT_DEPLOYMENT_ID by itself for `?dpl=` asset
  * suffixing, but the STATIC NAMESPACE (`_next/static/<id>/`) comes from
  * `generateBuildId` — and with no `generateBuildId`, vinext falls back to a
  * random UUID. That UUID is a namespace nothing can resolve: the asset GC
@@ -44,7 +45,7 @@ import type { NextConfig } from "next";
  */
 const nextConfig: NextConfig = {
     assetPrefix: process.env.ASSET_PREFIX || "",
-    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+    generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
     // NOT the live ISR wiring on this build target. vinext never reads
     // `cacheHandler` — it is a webpack/turbopack mechanism, like `adapterPath`
     // above — so for a while every request was a MISS and the provisioned

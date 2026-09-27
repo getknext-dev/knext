@@ -19,7 +19,10 @@ import type { CheckResult, DoctorDeps } from "../types";
  * Runs the reachability gate. Returns the single cluster CheckResult AND the
  * derived `reachable` flag the orchestrator turns into `skipAll`.
  */
-export function clusterCheck(deps: DoctorDeps): {
+export function clusterCheck(
+    deps: DoctorDeps,
+    verbose = false,
+): {
     checks: CheckResult[];
     reachable: boolean;
 } {
@@ -49,6 +52,7 @@ export function clusterCheck(deps: DoctorDeps): {
             : diagnoseNoCluster(
                   version.stderr,
                   (deps.inspectKubeconfig ?? inspectKubeconfig)(),
+                  verbose,
               );
     return {
         reachable,
