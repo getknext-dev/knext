@@ -201,6 +201,64 @@ describe('docs-deploy-oke.yml — pull requests get a credential-free dry run', 
   });
 });
 
+/**
+ * #1506 — the dry-run job never actually built `apps/docs/Dockerfile`; the
+ * deploy job's `docker buildx build ... --push` (inside the action) was the
+ * FIRST thing to exercise it, so a broken Dockerfile (the missing
+ * `/repo/node_modules/@img` COPY this issue fixes) only reds on the real
+ * deploy, after merge — Actions has docker, a contributor's local checkout is
+ * told not to run it here. The PR job now builds the same Dockerfile with the
+ * same platform/build-arg the CLI passes, with no `-t`/`--push`/registry
+ * credential at all.
+ */
+describe('docs-deploy-oke.yml — the PR job builds apps/docs/Dockerfile itself, credential-free', () => {
+  function findBuildStep(wf: Workflow): Step | undefined {
+    const prJobs = Object.entries(wf.jobs).filter(([, job]) => isPullRequestOnly(job));
+    const [, job] = (prJobs[0] as [string, Job] | undefined) ?? [undefined, undefined];
+    return (job?.steps ?? []).find((s) => /docker buildx build/.test(String(s.run ?? '')));
+  }
+
+  it('the dry-run job runs a no-push docker buildx build of apps/docs/Dockerfile', () => {
+    const step = findBuildStep(load());
+    expect(step, 'no docker buildx build step found in the PR job').toBeDefined();
+    const run = String(step?.run ?? '');
+    expect(run).toContain('-f apps/docs/Dockerfile');
+    expect(run).toContain('--platform linux/amd64');
+    expect(run).toContain('--build-arg NEXT_DEPLOYMENT_ID=');
+    expect(run).not.toMatch(/\s--push\b/);
+    expect(run).not.toMatch(/\s-t\s/);
+  });
+
+  it('the build step (and the whole PR job) references no secret and no registry login', () => {
+    const wf = load();
+    const prJobs = Object.entries(wf.jobs).filter(([, job]) => isPullRequestOnly(job));
+    const [, job] = prJobs[0] as [string, Job];
+    expect(jobText(job)).not.toMatch(/\$\{\{\s*secrets\./);
+    expect(jobText(job)).not.toMatch(/docker\/login-action/);
+  });
+
+  it('a Buildx setup step precedes the build step in the PR job', () => {
+    const wf = load();
+    const prJobs = Object.entries(wf.jobs).filter(([, j]) => isPullRequestOnly(j));
+    const [, job] = prJobs[0] as [string, Job];
+    const steps = job.steps ?? [];
+    const setupIdx = steps.findIndex((s) => /setup-buildx-action/.test(String(s.uses ?? '')));
+    const buildIdx = steps.findIndex((s) => /docker buildx build/.test(String(s.run ?? '')));
+    expect(setupIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeGreaterThan(-1);
+    expect(setupIdx).toBeLessThan(buildIdx);
+  });
+
+  it('REDS when the build step is removed from the workflow (mutation)', () => {
+    const mutated = raw().replace(
+      /\n {6}- name: Build the docs image \(dry run, no push\)[\s\S]*?\n {12}\.\n/,
+      '\n',
+    );
+    expect(mutated).not.toEqual(raw());
+    expect(findBuildStep(load(mutated))).toBeUndefined();
+  });
+});
+
 describe('docs-deploy-oke.yml — every third-party action is SHA-pinned', () => {
   it('pins every uses: by 40-hex SHA with a # vX.Y.Z comment', () => {
     expect(unpinnedUses(raw())).toEqual([]);

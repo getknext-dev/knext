@@ -54,6 +54,57 @@ RUN ./node_modules/.bin/vite build
 RUN test -f .output/server/index.mjs \
     || (echo "vite build produced no .output/server/index.mjs" && exit 1)
 
+# Stage sharp + its native `@img/*` platform packages into a layout-independent
+# location (#1506). bun's isolated-store install ("linker" default since
+# 1.4) does NOT hoist either one to a fixed path: `node_modules/sharp` under
+# an app is typically a SYMLINK out to the workspace root's
+# `node_modules/.bun/sharp@<ver>+<hash>/node_modules/sharp`, and the `@img/*`
+# platform packages (sharp has no code of its own — libvips ships as a
+# separate native addon) get hoisted to `node_modules/.bun/node_modules/@img`
+# at the WORKSPACE ROOT, never to a plain `node_modules/@img` at any fixed
+# depth. `COPY --from=builder /repo/node_modules/@img …` assumed the latter
+# and failed outright; it would have shipped a DANGLING symlink for `sharp`
+# even had that path existed, since a plain `COPY` of a symlink copies the
+# link, not its target, and the target directory it points at is never itself
+# copied into the runtime stage.
+#
+# The search order below mirrors the candidate walk `findSharpPackageDir` /
+# `findImgPackages` already use in `packages/kn-next/src/cli/vinext-build.ts`
+# for the compiled-target twin of this same problem (#949) — app dir, bun's
+# isolated store under the app dir, workspace root, bun's isolated store at
+# the workspace root — and `cp -L` DEREFERENCES whatever symlinks bun used, so
+# `/stage` holds real files, not pointers off the copied tree.
+RUN set -eu; \
+    sharp_dir=""; \
+    for c in \
+        node_modules/sharp \
+        node_modules/.bun/node_modules/sharp \
+        ../../node_modules/sharp \
+        ../../node_modules/.bun/node_modules/sharp \
+    ; do \
+        if [ -d "$c" ]; then sharp_dir="$c"; break; fi; \
+    done; \
+    if [ -z "$sharp_dir" ]; then \
+        echo "ERROR: could not locate the 'sharp' package under any known bun install layout (checked: apps/docs/node_modules/sharp, its .bun isolated store, and both at the workspace root)" >&2; \
+        exit 1; \
+    fi; \
+    img_dir=""; \
+    for c in \
+        node_modules/@img \
+        node_modules/.bun/node_modules/@img \
+        ../../node_modules/@img \
+        ../../node_modules/.bun/node_modules/@img \
+    ; do \
+        if [ -d "$c" ]; then img_dir="$c"; break; fi; \
+    done; \
+    if [ -z "$img_dir" ]; then \
+        echo "ERROR: could not locate the '@img' sharp platform packages under any known bun install layout (checked: apps/docs/node_modules/@img, its .bun isolated store, and both at the workspace root)" >&2; \
+        exit 1; \
+    fi; \
+    mkdir -p /stage/node_modules; \
+    cp -RL "$sharp_dir" /stage/node_modules/sharp; \
+    cp -RL "$img_dir" /stage/node_modules/@img
+
 # ---------------------------------------------------------------------------
 # Runtime — the nitro output and its assets. No node, no npm, no package
 # manager, no compile-cache volume to mount or warm.
@@ -73,9 +124,10 @@ WORKDIR /app
 
 COPY --from=builder /repo/apps/docs/.output /app/.output
 # sharp is a native module and cannot be bundled; it ships beside the server so
-# /_next/image can optimize instead of silently serving originals.
-COPY --from=builder /repo/apps/docs/node_modules/sharp /app/node_modules/sharp
-COPY --from=builder /repo/node_modules/@img /app/node_modules/@img
+# /_next/image can optimize instead of silently serving originals. Copied from
+# /stage (staged above, dereferenced), never straight off the workspace tree —
+# see the staging RUN step for why.
+COPY --from=builder /stage/node_modules /app/node_modules
 
 USER 65532:65532
 
