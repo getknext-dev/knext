@@ -1,0 +1,44 @@
+[
+  {
+    "id": "ubuntu-apt",
+    "scope": "build.sh",
+    "match": "^apt-get (update|install)\\b",
+    "what": "The Ubuntu archive packages (apt-get update / install of the build tools).",
+    "why": "Signed by the keyring in the digest-pinned ubuntu:24.04 image, but not version-pinned: the archive serves whatever security update is current, and there is no immutable snapshot source wired in yet. The package NAME set is pinned by the guard."
+  },
+  {
+    "id": "rustup-toolchain",
+    "scope": "build.sh",
+    "match": "^\\S*rustup(-init)?\\s",
+    "what": "The Rust toolchain and musl targets that rustup pulls for rust-toolchain.toml.",
+    "why": "rustup checks each component against the channel manifest from the same origin (static.rust-lang.org); the toolchain version comes from the source tree at the pinned SHA, but the component bytes are not sha256-pinned here."
+  },
+  {
+    "id": "alpine-packages",
+    "scope": "build.sh",
+    "match": "^\\S*apk\\.static\\s.*\\sadd\\b",
+    "what": "The Alpine musl sysroot packages (musl-dev, g++, libstdc++-dev, linux-headers).",
+    "why": "The index and every package are verified against the checked-in Alpine keys (no --allow-untrusted), but the package versions are whatever v3.23/main serves that day; they are not individually pinned."
+  },
+  {
+    "id": "bun-install",
+    "scope": "build.sh",
+    "match": "^bun install\\b",
+    "what": "npm packages installed by bun install --frozen-lockfile inside the Bun source tree.",
+    "why": "Integrity comes from the source tree's own lockfile at the pinned SHA, not from a pin held here."
+  },
+  {
+    "id": "upstream-dependency-sources",
+    "scope": "bun scripts/build.ts",
+    "match": null,
+    "what": "Bun's dependency source tarballs (github.com/<repo>/archive/<commit>.tar.gz, fetched by scripts/build/fetch-cli.ts).",
+    "why": "Addressed by a commit hash pinned in Bun's own source, but the tarball bytes are never hashed, and GitHub does not promise byte-stable archives, so a sha256 pin would rot. This script cannot prefetch them without first knowing every URL, which only a build run reveals."
+  },
+  {
+    "id": "upstream-cargo-crates",
+    "scope": "bun scripts/build.ts",
+    "match": null,
+    "what": "Cargo crates for Bun's Rust code.",
+    "why": "Resolved by cargo from the source tree's Cargo.lock (the build passes --locked, which pins versions and registry checksums), not re-checked by this script; git dependencies are pinned by commit."
+  }
+]

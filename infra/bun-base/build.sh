@@ -13,10 +13,13 @@ OUT=$WS/out
 # Toolchain pins. LLVM/Alpine track oven-sh/bun's scripts/build/ci-images/spec.ts at UPSTREAM_SHA;
 # rust comes from the repo's own rust-toolchain.toml.
 #
-# Every fetch below is checked against a value committed here, not against a digest served by the
-# same origin. When an upstream rotates a pinned artifact out (apt.llvm.org and the Alpine CDN keep
-# only the latest build), the build FAILS CLOSED and a maintainer bumps the pin — see README.md,
-# "Toolchain pins". What remains unpinned is listed there too.
+# Every fetch below is either checked against a value committed here (not against a digest served by
+# the same origin) or is listed in unpinned-fetches.json — the SAME list README.md renders. That list
+# is exhaustive for THIS script; it also names the fetches Bun's own build script makes at
+# UPSTREAM_SHA that this script cannot pin. tests/bun-base-supply-chain.test.ts SCANS this file: a
+# network fetch that is neither pinned nor listed fails CI. When an upstream rotates a pinned artifact
+# out (apt.llvm.org and the Alpine CDN keep only the latest build) the build FAILS CLOSED and a
+# maintainer bumps the pin — see README.md, "Toolchain pins".
 LLVM_MAJOR=23
 LLVM_PKG_VERSION='1:23.1.2~++20260919103626+4b1925210476-1~exp1~20260919223755.77'
 # apt.llvm.org archive signer, written as `gpg --fingerprint` prints it; compared with spaces stripped.
@@ -132,6 +135,25 @@ HEAD_SHA="$(git rev-parse HEAD)"
 rustup toolchain install
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 bun install --frozen-lockfile
+# Prebuilt WebKit/JSC (the largest binary input): Bun's build script would download it from a GitHub
+# release with no integrity check. Its downloader consults BUN_BUILD_PREFETCH_DIR/by-url/<sha256(url)[:32]>
+# first, so we fetch each tarball ourselves, verify it against fetch-pins.sha256, and seed that cache.
+# The version is read from the source at UPSTREAM_SHA; the pin is keyed by its first 16 hex chars, so a
+# WebKit bump upstream (or a bump of UPSTREAM_SHA) fails closed here until a maintainer re-pins.
+wk="$(grep -oE 'WEBKIT_VERSION = "[0-9a-f]{40}"' scripts/build/deps/webkit.ts | grep -oE '[0-9a-f]{40}')"
+[ "$(printf '%s\n' "$wk" | grep -c .)" = 1 ] || { echo "cannot read a single WEBKIT_VERSION from the source" >&2; exit 1; }
+export BUN_BUILD_PREFETCH_DIR=/tmp/bun-prefetch
+mkdir -p "$BUN_BUILD_PREFETCH_DIR/by-url" /tmp/wk
+declare -A WK_KEY
+for arch in $TARGETS; do
+  case "$arch" in x64) wkarch=amd64 ;; aarch64) wkarch=arm64 ;; *) echo "unknown target $arch" >&2; exit 1 ;; esac
+  wkurl="https://github.com/oven-sh/WebKit/releases/download/autobuild-$wk/bun-webkit-linux-$wkarch-musl-lto.tar.gz"
+  wkfile="bun-webkit-linux-$wkarch-musl-lto-${wk:0:16}.tar.gz"
+  curl -fsSL "$wkurl" -o "/tmp/wk/$wkfile"
+  (cd /tmp/wk && pin "$wkfile")
+  WK_KEY[$arch]="$(printf '%s' "$wkurl" | sha256sum | cut -c1-32)"
+  cp "/tmp/wk/$wkfile" "$BUN_BUILD_PREFETCH_DIR/by-url/${WK_KEY[$arch]}"
+done
 lap source
 
 # ── build ────────────────────────────────────────────────────────────────────
@@ -139,8 +161,10 @@ mkdir -p "$OUT"
 for arch in $TARGETS; do
   bd="build/release-linux-$arch-musl"
   bun scripts/build.ts --profile=release --os=linux --arch="$arch" --abi=musl --canary=off \
-    --build-dir="$bd" 2>&1 | tail -n 60
+    --build-dir="$bd" 2>&1 | tee "/tmp/build-$arch.log" | tail -n 60
   test -x "$bd/bun"
+  # Proof the pinned tarball — not a fresh network fetch — is what got linked.
+  grep -qF "using prefetch cache: $BUN_BUILD_PREFETCH_DIR/by-url/${WK_KEY[$arch]}" "/tmp/build-$arch.log"
   install -m755 "$bd/bun" "$OUT/bun-linux-$arch-musl"
   file "$OUT/bun-linux-$arch-musl"
   lap "build-$arch"

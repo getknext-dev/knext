@@ -17,6 +17,10 @@
 # bun-linux-x64-musl; the compile scripts refuse it outside GitHub Actions or unless the sibling
 # .sha256 matches (bun-base-exe.mjs).
 #
+# Every third-party action below is SHA-pinned (`@<40-hex> # vX.Y.Z`): this job holds `id-token: write`,
+# so a movable ref would run someone else's code with a federated identity in scope
+# (tests/release-action-pins.test.ts, scripts/verify-action-pins.mjs).
+#
 # GCP access is Workload Identity Federation. No secrets: the provider and service account are
 # repository VARIABLES (not sensitive). Provisioning is in infra/bun-base/README.md; until both
 # variables exist the job fails closed at its first step.
