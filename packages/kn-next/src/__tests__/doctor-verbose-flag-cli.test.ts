@@ -41,17 +41,13 @@ const cliSrcDir = join(pkgRoot, "src", "cli");
 const entry = join(cliSrcDir, "deploy.ts");
 const bun = process.env.BUN_PATH ?? "bun";
 
-/** A fake `kubectl` that always fails, fast and deterministically. */
-function makeFakeKubectlDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "knext-fake-kubectl-"));
-    writeFileSync(join(dir, "kubectl"), "#!/bin/sh\nexit 1\n");
-    chmodSync(join(dir, "kubectl"), 0o755);
-    return dir;
-}
-
 /** Runs `deploy.ts doctor [...flags]` against a cluster-free environment. */
 function runDoctor(flags: string[]) {
-    const fakeBin = makeFakeKubectlDir();
+    // A fake `kubectl` that always fails, fast and deterministically. Created
+    // inline so the temp-dir scanner sees the same name at mkdtemp and rmSync.
+    const fakeBin = mkdtempSync(join(tmpdir(), "knext-fake-kubectl-"));
+    writeFileSync(join(fakeBin, "kubectl"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(fakeBin, "kubectl"), 0o755);
     const kubeconfigDir = mkdtempSync(join(tmpdir(), "knext-no-kubeconfig-"));
     const kubeconfig = join(kubeconfigDir, "does-not-exist");
     try {
