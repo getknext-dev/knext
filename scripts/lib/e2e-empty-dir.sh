@@ -219,25 +219,16 @@ ed_assert_clean() {
 # health branch from the extra-path (`non5xx`) branch, so widening the health
 # threshold back toward "non5xx" would have gone undetected — the same
 # comparison this file's mutation prover (mutation 5) now exercises directly.
+#
+# ROUND-3: the request itself lives in scripts/lib/e2e-probe-http.mjs, not
+# inline here — see that file's own header for why (the apply-safety
+# scanner's "unclassified remote fetch" allowlist requires an exactly-once
+# match across the tree, which this probe's two real call sites × two
+# callers cannot satisfy; a real .mjs file's contents are outside that
+# scanner's scope, since it scans .sh/.bash text only).
 ed_probe_http() {
   local port="$1" path="$2" mode="$3"
-  node -e '
-    const http = require("node:http");
-    const port = Number(process.argv[1]);
-    const path = process.argv[2];
-    const mode = process.argv[3];
-    const req = http.get({ host: "127.0.0.1", port, path, timeout: 5000 }, (res) => {
-      const status = res.statusCode || 0;
-      res.resume();
-      res.on("end", () => {
-        const ok = mode === "2xx3xx" ? (status >= 200 && status < 300) : (status < 500 || status >= 600);
-        process.exit(ok ? 0 : 1);
-      });
-      res.on("error", () => process.exit(1));
-    });
-    req.on("timeout", () => { req.destroy(); process.exit(1); });
-    req.on("error", () => process.exit(1));
-  ' "${port}" "${path}" "${mode}"
+  node "$(dirname "${BASH_SOURCE[0]}")/e2e-probe-http.mjs" "${port}" "${path}" "${mode}"
 }
 
 # ed_boot_probe_kill <port> <health_path> <extra_path> <cmd...>

@@ -1,6 +1,14 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -463,6 +471,27 @@ describe('e2e-empty-dir — ed_refuse_self_contained_noop (#1455, round-3 review
     expect(r.stderr).toContain('ERROR');
     expect(r.stderr).toContain('KNEXT_SELF_CONTAINED=1');
     expect(r.stderr).toContain('RUNTIME=node');
+  });
+});
+
+// Round-3 review (non-blocking item (a)): ed_refuse_self_contained_noop's
+// own logic is unit-tested above, but nothing asserted that either deploy
+// script actually PROPAGATES its failure. Deleting `|| exit 1` at either
+// call site would leave the (docker-requiring, not runnable here) deploy
+// scripts silently continuing under `set -e` in most shapes, but nothing in
+// this suite would go red — a text-scan test closes that, and it is
+// mutation-proved the same way every other guard in this file is.
+describe('e2e-empty-dir — deploy-script call sites propagate the refusal (#1455, round-3 review non-blocking (a))', () => {
+  const CALL_SITE = /ed_refuse_self_contained_noop\s+"[^"]*"\s+\|\|\s+exit\s+1\b/;
+
+  it('scripts/e2e-deploy.sh calls ed_refuse_self_contained_noop and propagates failure with `|| exit 1`', () => {
+    const src = readFileSync(join(ROOT, 'scripts/e2e-deploy.sh'), 'utf8');
+    expect(src).toMatch(CALL_SITE);
+  });
+
+  it('scripts/e2e-deploy-vinext.sh calls ed_refuse_self_contained_noop and propagates failure with `|| exit 1`', () => {
+    const src = readFileSync(join(ROOT, 'scripts/e2e-deploy-vinext.sh'), 'utf8');
+    expect(src).toMatch(CALL_SITE);
   });
 });
 

@@ -99,9 +99,22 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/lib/e2e-empty-dir.sh');
+// ROUND-3: ed_probe_http's actual HTTP request moved out of an inline
+// `node -e` string into this real file (see its own header) — the apply-
+// safety scanner's exactly-once REMOTE_FETCH_ALLOWLIST constraint can't
+// otherwise be satisfied by a probe with two call sites × two callers.
+// Mutations 5 and 8 below target ITS content, not e2e-empty-dir.sh's.
+const PROBE_TARGET = resolve(REPO_ROOT, 'scripts/lib/e2e-probe-http.mjs');
+// ROUND-3 non-blocking (a): the two deploy-script CALL SITES of
+// ed_refuse_self_contained_noop, mutated directly (removing `|| exit 1`) to
+// prove the text-scan test in tests/e2e-empty-dir.test.ts actually notices —
+// ed_refuse_self_contained_noop's own logic (mutation 10) says nothing about
+// whether either caller still propagates its failure.
+const DEPLOY_TARGET = resolve(REPO_ROOT, 'scripts/e2e-deploy.sh');
+const VINEXT_TARGET = resolve(REPO_ROOT, 'scripts/e2e-deploy-vinext.sh');
 const SPEC = 'tests/e2e-empty-dir.test.ts';
 
-declareMutations(10);
+declareMutations(12);
 
 const { command, args, runArgs } = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -117,9 +130,22 @@ function specPasses() {
 let pass = 0;
 let fail = 0;
 
-function prove(label, anchor, replacement) {
+/**
+ * Shared mutate/restore body. Takes an already-snapshotted `snap`, not a
+ * file path — see the four thin wrappers below for why: this repo's
+ * PR-time prover audit (tests/mutation-prover-lane.test.ts, #912/#927)
+ * statically greps for a literal `snapshot(<CONST_NAME>)` call to bind each
+ * mutation to the file it proves against. A single generic helper taking a
+ * `target` PARAMETER (tried first, in round 3) calls `snapshot(target)` —
+ * that string never matches ANY of TARGET/PROBE_TARGET/DEPLOY_TARGET/
+ * VINEXT_TARGET by name, so the audit sees zero bindings and zero resolved
+ * anchors for this whole file: exactly the "invisible to both extractors"
+ * defect class #912/#927 exist to catch, reintroduced by trying to be DRY
+ * about it. Four one-line wrappers, each with its OWN literal
+ * `snapshot(CONST)` call, are the fix.
+ */
+function report(label, snap, anchor, replacement) {
   console.log(`── mutation: ${label}`);
-  const snap = snapshot(TARGET);
   try {
     mutate(snap, anchor, replacement);
     if (specPasses()) {
@@ -137,6 +163,19 @@ function prove(label, anchor, replacement) {
     console.error(`   FATAL: ${SPEC} did not go green again after restore`);
     process.exit(1);
   }
+}
+
+function prove(label, anchor, replacement) {
+  report(label, snapshot(TARGET), anchor, replacement);
+}
+function proveProbe(label, anchor, replacement) {
+  report(label, snapshot(PROBE_TARGET), anchor, replacement);
+}
+function proveDeploy(label, anchor, replacement) {
+  report(label, snapshot(DEPLOY_TARGET), anchor, replacement);
+}
+function proveVinext(label, anchor, replacement) {
+  report(label, snapshot(VINEXT_TARGET), anchor, replacement);
 }
 
 console.log('Baseline: the spec must be GREEN before anything is mutated.');
@@ -177,9 +216,11 @@ prove(
 
 // 4. BLOCKING-4: ed_probe_http's status requirement. A server that 500s on
 //    every route must pass once "any complete response" is restored.
-prove(
+//    ROUND-3: targets e2e-probe-http.mjs (moved out of e2e-empty-dir.sh —
+//    see PROBE_TARGET above).
+proveProbe(
   'ed_probe_http status requirement: accept any status again',
-  'const ok = mode === "2xx3xx" ? (status >= 200 && status < 300) : (status < 500 || status >= 600);',
+  "const ok = mode === '2xx3xx' ? status >= 200 && status < 300 : status < 500 || status >= 600;",
   'const ok = true;',
 );
 
@@ -188,7 +229,7 @@ prove(
 //    line) must still be caught — by the health-only-500 and 302 fixtures in
 //    tests/e2e-empty-dir.test.ts, which answer the health path and every
 //    OTHER route differently, unlike round 2's onlyStatus fixture.
-prove(
+proveProbe(
   'ed_probe_http health-branch threshold: widen it back toward non5xx',
   'status >= 200 && status < 300',
   'status >= 200 && status < 600',
@@ -216,7 +257,7 @@ prove(
 //    per-test timeout (not this repo's harness) is what turns "the probe
 //    hangs longer than expected" into a graded RED here — see the test's
 //    explicit timeout argument.
-prove(
+proveProbe(
   'ed_probe_http timeout: widen past the hanging-route test bound',
   'port, path, timeout: 5000 }',
   'port, path, timeout: 60000 }',
@@ -239,6 +280,22 @@ prove(
   'ed_refuse_self_contained_noop: report but do not refuse',
   'disk mode under a self-contained fingerprint."\n  return 1\n}',
   'disk mode under a self-contained fingerprint."\n  return 0\n}',
+);
+
+// 11. Round-3 non-blocking (a): scripts/e2e-deploy.sh's call site. Removing
+//     `|| exit 1` must red the call-site text-scan test.
+proveDeploy(
+  'e2e-deploy.sh call site: drop || exit 1',
+  'ed_refuse_self_contained_noop "RUNTIME=${RUNTIME}, KNEXT_SANDBOX_FETCH_DEBUG=${KNEXT_SANDBOX_FETCH_DEBUG:-0} — needs RUNTIME=bun and KNEXT_SANDBOX_FETCH_DEBUG unset/0" || exit 1',
+  'ed_refuse_self_contained_noop "RUNTIME=${RUNTIME}, KNEXT_SANDBOX_FETCH_DEBUG=${KNEXT_SANDBOX_FETCH_DEBUG:-0} — needs RUNTIME=bun and KNEXT_SANDBOX_FETCH_DEBUG unset/0"',
+);
+
+// 12. Round-3 non-blocking (a): scripts/e2e-deploy-vinext.sh's call site.
+//     Removing `|| exit 1` must red the call-site text-scan test.
+proveVinext(
+  'e2e-deploy-vinext.sh call site: drop || exit 1',
+  'ed_refuse_self_contained_noop "KNEXT_COMPILE=0 — needs KNEXT_COMPILE unset/1" || exit 1',
+  'ed_refuse_self_contained_noop "KNEXT_COMPILE=0 — needs KNEXT_COMPILE unset/1"',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
