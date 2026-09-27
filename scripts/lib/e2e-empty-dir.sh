@@ -302,13 +302,25 @@ ed_boot_probe_kill() {
 # hidden path — safe to call more than once, which is what makes it safe to
 # invoke from a subshell EXIT trap regardless of which branch that subshell
 # took.
+#
+# #1514: refuses (non-zero, loud) to restore over a <path> that ALSO exists —
+# `mv <p>.ed-hidden <p>` onto an existing directory nests the hidden tree
+# inside it instead of restoring it, the same shape ed_check_or_die's own
+# "already hidden" refusal exists to prevent on the hide side. Every other
+# path in the list is still restored.
 ed_restore_hidden_paths() {
-  local p
+  local p rc=0
   for p in "$@"; do
-    if [ -e "${p}.ed-hidden" ]; then
-      mv "${p}.ed-hidden" "${p}"
+    if [ -e "${p}.ed-hidden" ] || [ -L "${p}.ed-hidden" ]; then
+      if [ -e "${p}" ] || [ -L "${p}" ]; then
+        ed_log "ERROR: both ${p} and ${p}.ed-hidden exist — refusing to restore (mv would nest one inside the other). Check which copy is real, then restore by hand."
+        rc=1
+        continue
+      fi
+      mv "${p}.ed-hidden" "${p}" || rc=1
     fi
   done
+  return "${rc}"
 }
 
 # ed_check_or_die <label> <fresh_dir> <binary_src> <health_path> <extra_path> <port> [<src>:<dest_rel>]...
@@ -410,5 +422,186 @@ ed_check_or_die() {
     return 1
   fi
   ed_log "${label}: empty-dir lane check passed — ${staged} served ${health_path} and ${extra_path} with nothing beside it but static assets"
+  return 0
+}
+
+# ══ #1514: serve the SUITE from the empty dir, not just the 2-route probe ══════
+#
+# The discovered fact (#1514): with KNEXT_SELF_CONTAINED=1 the 2-route probe
+# above booted the binary from an empty dir, but the server that then served
+# the whole compat SUITE was booted from APP_DIR, with node_modules, .next and
+# .output all reachable — a self-contained window measured "compiled with
+# --self-contained, served with the disk tree present". The functions below
+# are the suite-serving half; both deploy scripts call them in their SC
+# branch, and the 2-route probe stays as the fail-fast pre-check.
+
+# The value both deploy scripts record as SERVED_FROM in their persisted
+# metadata when KNEXT_SELF_CONTAINED=1, and the value
+# scripts/compat-window-fingerprint.mjs reads out of the frozen harness (this
+# file is in its source closure) and folds into a self-contained digest. It
+# refuses to produce a self-contained fingerprint unless this reads exactly
+# `empty-dir` — so a harness that stops serving the suite from the empty dir
+# cannot keep the self-contained label by accident.
+ED_SUITE_SERVED_FROM_SC="empty-dir"
+
+# The APP_DIR entries hidden for the WHOLE suite run in SC mode.
+ED_SUITE_HIDE_NAMES=(node_modules .next .output)
+
+# ed_suite_stage <fresh_dir> <binary_src> [<src>:<dest_rel>]...
+#
+# Stage + ed_assert_clean, in one step, for the suite server's own directory.
+# A FRESH directory, never the pre-check's: the pre-check booted a server in
+# its directory, which may have written into it (a filesystem cache), and
+# that must not be what the cleanliness assertion judges. Prints the staged
+# binary's path.
+ed_suite_stage() {
+  local fresh_dir="$1" binary_src="$2"
+  shift 2
+  local staged
+  staged="$(ed_stage "${fresh_dir}" "${binary_src}" "$@")" || {
+    ed_log "ERROR: suite: staging into ${fresh_dir} failed"
+    return 1
+  }
+  ed_assert_clean "${fresh_dir}" "$(basename "${staged}")" || {
+    ed_log "ERROR: suite: the staged directory ${fresh_dir} is not clean — see above"
+    return 1
+  }
+  printf '%s\n' "${staged}"
+}
+
+# ed_suite_restore_app_dir <app_dir>
+#
+# Restores every ED_SUITE_HIDE_NAMES entry of <app_dir> that has a hidden
+# twin. Idempotent, and independent of any metadata file: it is what
+# scripts/e2e-cleanup.sh calls at teardown, AFTER the server is stopped, and
+# what the deploy script's own EXIT trap calls on a failed deploy.
+ed_suite_restore_app_dir() {
+  local app_dir="$1" n
+  local -a paths=()
+  for n in "${ED_SUITE_HIDE_NAMES[@]}"; do
+    paths+=("${app_dir}/${n}")
+  done
+  ed_restore_hidden_paths "${paths[@]}"
+}
+
+# ed_suite_hide_app_dir <app_dir>
+#
+# Renames each existing ED_SUITE_HIDE_NAMES entry of <app_dir> to
+# "<entry>.ed-hidden". Fails closed if a hidden twin already exists (a
+# previous run killed before it could restore — same refusal, same reason, as
+# ed_check_or_die's). The caller must have armed ed_suite_arm_restore_trap
+# FIRST, so a failure half-way through still restores what was hidden.
+ed_suite_hide_app_dir() {
+  local app_dir="$1" n p
+  for n in "${ED_SUITE_HIDE_NAMES[@]}"; do
+    p="${app_dir}/${n}"
+    if [ -e "${p}.ed-hidden" ] || [ -L "${p}.ed-hidden" ]; then
+      ed_log "ERROR: suite: ${p}.ed-hidden already exists — a previous run was killed before it restored ${p}. Refusing to hide again. Restore by hand after checking which copy is real: mv '${p}.ed-hidden' '${p}'"
+      return 1
+    fi
+    if [ -e "${p}" ] || [ -L "${p}" ]; then
+      mv "${p}" "${p}.ed-hidden" || {
+        ed_log "ERROR: suite: failed to hide ${p}"
+        return 1
+      }
+    fi
+  done
+}
+
+# ed_suite_arm_restore_trap <app_dir>
+#
+# Installs the deploy script's EXIT trap for SC mode: unless the script
+# reached ed_suite_hand_off (the URL is about to be printed and the harness
+# owns the deployment from here — scripts/e2e-cleanup.sh restores at
+# teardown), stop the suite server if one was recorded in ED_SUITE_SERVER_PID
+# / ED_SUITE_CONTAINER, THEN restore <app_dir>. Stop-before-restore: a server
+# still running when the tree comes back could serve from it.
+#
+# INT/TERM/HUP are converted into `exit`, so the EXIT trap runs on those too.
+# SIGKILL cannot be trapped; that case is what ed_suite_hide_app_dir's
+# "already hidden" refusal and e2e-cleanup.sh's unconditional restore cover.
+#
+# Called from the deploy script's MAIN shell (a trap set inside a function
+# still belongs to the whole shell); SC mode only, so disk-mode signal
+# handling is unchanged.
+ed_suite_arm_restore_trap() {
+  ED__SUITE_APP_DIR="$1"
+  ED_SUITE_HANDED_OFF=0
+  ED_SUITE_SERVER_PID=""
+  ED_SUITE_CONTAINER=""
+  trap 'ed__suite_on_exit' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+ed__suite_on_exit() {
+  if [ "${ED_SUITE_HANDED_OFF:-0}" = "1" ]; then
+    return 0
+  fi
+  if [ -n "${ED_SUITE_CONTAINER:-}" ] && command -v docker >/dev/null 2>&1; then
+    docker rm -f "${ED_SUITE_CONTAINER}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${ED_SUITE_SERVER_PID:-}" ] && kill -0 "${ED_SUITE_SERVER_PID}" 2>/dev/null; then
+    kill -TERM "${ED_SUITE_SERVER_PID}" 2>/dev/null || true
+    local j
+    for j in $(seq 1 25); do
+      kill -0 "${ED_SUITE_SERVER_PID}" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -KILL "${ED_SUITE_SERVER_PID}" 2>/dev/null || true
+  fi
+  ed_suite_restore_app_dir "${ED__SUITE_APP_DIR}" || true
+}
+
+# ed_suite_hand_off — the deployment is ready and isolated; from here the
+# harness owns it and scripts/e2e-cleanup.sh restores APP_DIR at teardown.
+ed_suite_hand_off() {
+  ED_SUITE_HANDED_OFF=1
+}
+
+# ed_assert_suite_isolated <server_cwd> <app_dir>
+#
+# The RUNTIME half of the #1514 guard, run while the suite server is UP (after
+# readiness, before the URL is handed to the harness). Fails if any of these
+# is reachable:
+#   * from the server's cwd: node_modules, .next/server, .output/server — as a
+#     directory, a file, or a symlink (dangling or not);
+#   * node_modules in ANY ancestor of the cwd — Node/Bun module resolution
+#     walks up, so a node_modules above an otherwise-clean cwd is reachable;
+#   * any symlink anywhere under the cwd (ed_assert_clean's rule, re-applied
+#     now that the server has been running in it);
+#   * via the hidden APP_DIR: node_modules, .next, .output present again under
+#     their real names — e.g. something re-created or symlinked them back.
+ed_assert_suite_isolated() {
+  local cwd="$1" app_dir="$2" rel p d leak
+  for rel in node_modules .next/server .output/server; do
+    p="${cwd}/${rel}"
+    if [ -e "${p}" ] || [ -L "${p}" ]; then
+      ed_log "ERROR: suite: ${p} is reachable from the suite server's cwd — the self-contained suite must be served with nothing but the binary, static assets and native/"
+      return 1
+    fi
+  done
+  d="$(dirname "${cwd}")"
+  while :; do
+    if [ -e "${d}/node_modules" ] || [ -L "${d}/node_modules" ]; then
+      ed_log "ERROR: suite: ${d}/node_modules is reachable by walking up from the suite server's cwd ${cwd}"
+      return 1
+    fi
+    [ "${d}" = "/" ] && break
+    d="$(dirname "${d}")"
+  done
+  leak="$(find "${cwd}" -type l -print -quit 2>/dev/null)"
+  if [ -n "${leak}" ]; then
+    ed_log "ERROR: suite: ${leak} is a symlink under the suite server's cwd — it can alias the disk-mode tree"
+    return 1
+  fi
+  for rel in "${ED_SUITE_HIDE_NAMES[@]}"; do
+    p="${app_dir}/${rel}"
+    if [ -e "${p}" ] || [ -L "${p}" ]; then
+      ed_log "ERROR: suite: ${p} is reachable while the suite server is up — APP_DIR must stay hidden for the whole self-contained run"
+      return 1
+    fi
+  done
   return 0
 }

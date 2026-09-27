@@ -983,7 +983,44 @@ elif [ -n "${KNEXT_NODE_SUPERVISOR}" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" !=
 else
   log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
 fi
+# ── #1514: in SC mode the SUITE is served from the empty dir ─────────────────
+# §3c-ii's 2-route probe is only the fail-fast pre-check. The container the
+# whole compat suite runs against boots from a FRESH empty dir holding only the
+# compiled exec + .next/static + public/: the container mounts ONLY that dir
+# (-v EMPTY_DIR:EMPTY_DIR, -w EMPTY_DIR — nothing of .next/standalone, nothing
+# of APP_DIR), and APP_DIR's node_modules / .next / .output are ALSO hidden on
+# the host for the whole run (restored by scripts/e2e-cleanup.sh at teardown,
+# after the container is stopped, or by the EXIT trap armed here if this
+# script fails before handing the URL to the harness). The container mount is
+# what isolates this lane; the host-side hide keeps the two lanes' guard
+# (ed_assert_suite_isolated) identical.
+SERVED_FROM="disk"
+if [ -n "${STANDALONE_EXEC}" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
+  EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir-suite.XXXXXX")"
+  EMPTY_DIR_STAGED="$(ed_suite_stage "${EMPTY_DIR}" "${STANDALONE_EXEC}" \
+    "${STANDALONE_APP_DIR}/.next/static:.next/static" "${STANDALONE_APP_DIR}/public:public")" || {
+    log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite's empty dir failed"
+    exit 1
+  }
+  ed_suite_arm_restore_trap "${APP_DIR}"
+  ED_SUITE_CONTAINER="${CONTAINER_NAME}"
+  ed_suite_hide_app_dir "${APP_DIR}" || exit 1
+  SERVED_FROM="${ED_SUITE_SERVED_FROM_SC}"
+  log "KNEXT_SELF_CONTAINED=1 — booting the SUITE container ${CONTAINER_NAME} from ${EMPTY_DIR} (mounts only that dir; APP_DIR node_modules/.next/.output hidden until teardown)"
+fi
 (
+  if [ "${SERVED_FROM}" != "disk" ]; then
+    cd "${EMPTY_DIR}"
+    exec docker run --rm --name "${ED_SUITE_CONTAINER}" \
+      --network host \
+      --user "$(id -u):$(id -g)" \
+      -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
+      -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      -v "${EMPTY_DIR}:${EMPTY_DIR}" \
+      -w "${EMPTY_DIR}" \
+      "${STANDALONE_BUN_IMAGE}" \
+      "./$(basename "${EMPTY_DIR_STAGED}")"
+  fi
   cd "${STANDALONE_APP_DIR}"
   if [ -n "${STANDALONE_EXEC}" ]; then
     exec docker run --rm --name "${CONTAINER_NAME}" \
@@ -1026,6 +1063,9 @@ fi
   fi
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
+if [ "${SERVED_FROM}" != "disk" ]; then
+  ED_SUITE_SERVER_PID="${SERVER_PID}"
+fi
 # The pid used for port-ownership attribution (#171 guard below). For the
 # docker-booted exec, SERVER_PID is the `docker run` CLIENT process — it
 # never itself holds the listening socket, `--network host` or not — so
@@ -1064,6 +1104,13 @@ OWNER_PID="${SERVER_PID}"
     fi
   fi
   echo "SERVER_JS=${SERVER_JS}"
+  # #1514: where the SUITE server was served from — `empty-dir`
+  # (KNEXT_SELF_CONTAINED=1: the container mounts only a staged empty dir,
+  # APP_DIR hidden) or `disk` (the standalone tree / APP_DIR).
+  echo "SERVED_FROM=${SERVED_FROM}"
+  if [ "${SERVED_FROM}" != "disk" ]; then
+    echo "SERVED_FROM_DIR=${EMPTY_DIR}"
+  fi
   echo "SERVER_LOG=${SERVER_LOG}"
   echo "BUILD_LOG=${BUILD_LOG}"
 } >"${LOG_FILE}"
@@ -1234,6 +1281,17 @@ elif [ "${OWNS}" = "2" ]; then
 fi
 
 log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"
+
+# #1514: the runtime isolation check, while the suite server is UP. A failure
+# exits here; the EXIT trap stops the container and restores APP_DIR.
+if [ "${SERVED_FROM}" != "disk" ]; then
+  if ! ed_assert_suite_isolated "${EMPTY_DIR}" "${APP_DIR}"; then
+    log "ERROR: KNEXT_SELF_CONTAINED=1 — the suite server is not isolated from the disk tree (see above); refusing to hand it to the harness"
+    exit 1
+  fi
+  ed_suite_hand_off
+  log "KNEXT_SELF_CONTAINED=1 — suite served from ${EMPTY_DIR} (served_from=${SERVED_FROM}); APP_DIR stays hidden until e2e-cleanup.sh"
+fi
 
 # ── 6b. node bytecode-liveness evidence (the node half of step 5b) ────────────
 # Count what V8 accepted from the shipped bake while the supervisor's Next

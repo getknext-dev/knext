@@ -10,8 +10,14 @@ set -uo pipefail
 
 APP_DIR="$(pwd)"
 LOG_FILE="${APP_DIR}/.adapter-build.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/e2e-empty-dir.sh
+. "${SCRIPT_DIR}/lib/e2e-empty-dir.sh"
 
 if [ ! -f "${LOG_FILE}" ]; then
+  # #1514: no metadata means no server to stop, but a self-contained deploy
+  # killed before writing it may still have left APP_DIR hidden.
+  ed_suite_restore_app_dir "${APP_DIR}" || true
   echo "[e2e-cleanup] no .adapter-build.log — nothing to clean up" >&2
   exit 0
 fi
@@ -56,6 +62,13 @@ CONTAINER_NAME="$(grep -E '^CONTAINER_NAME=' "${LOG_FILE}" | head -n1 | cut -d= 
 if [ -n "${CONTAINER_NAME:-}" ] && command -v docker >/dev/null 2>&1; then
   docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 fi
+
+# ── #1514: restore APP_DIR after a self-contained (served_from=empty-dir) run ─
+# The deploy script hid APP_DIR's node_modules/.next/.output for the WHOLE
+# suite run; restore them now that the server above is stopped. Unconditional
+# and metadata-independent (a no-op when nothing was hidden, i.e. every disk
+# run), so it also covers a deploy killed before it wrote SERVED_FROM.
+ed_suite_restore_app_dir "${APP_DIR}" || echo "[e2e-cleanup] WARNING: could not restore every hidden APP_DIR entry — see above" >&2
 
 # ── #188 (bun-lane fix round 1) — surface the server log at teardown ──────────
 # Triage's #1 finding (run 28607626868): every Bucket-1 "socket hang up"
