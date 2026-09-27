@@ -398,6 +398,50 @@ function count(shard, key) {
 }
 
 /**
+ * Whether a shard's redness is ENTIRELY attributable to `kind: 'deploy'`
+ * failures (#1520, raised from #1515) — a `createNext` deploy-script/harness
+ * failure (`Custom deploy script failed: …` / `…returned invalid URL: …`).
+ * Run 36312054519 is the motivating case: 419 files failed this way and the
+ * ledger read as "the binary serves wrong responses" until the shard logs
+ * were checked by hand.
+ *
+ * USED FOR LABELLING ONLY (round 2, #1550, lead-directed) — NOT for grading.
+ * A round-1 review found that a `createNext` failure is NOT reliably
+ * evidence-free: `scripts/e2e-deploy.sh` runs `next build` through the knext
+ * adapter under test and boots the knext server, so "Custom deploy script
+ * failed" is also what an adapter build crash or a server crash-on-boot
+ * reports. Grading such a night VOID (bridged over the streak, per the
+ * original #1520 design) let a real product regression go uncounted. The
+ * credential's integrity wins: this function only decides whether a red
+ * shard's disqualifier text is prefixed `deploy-classified:` for readability
+ * — the shard still counts as a real red either way (see `gradeNight`).
+ * Whether a proven-safe subset of deploy failures should someday be exempted
+ * from counting is tracked as #1553, undecided here.
+ *
+ * Fails CLOSED, deliberately stricter than it needs to be for the happy path:
+ *   - no `shard.failures` attribution at all → NOT deploy-only (an
+ *     unattributed red is a real red; older ledgers predate #545 attribution);
+ *   - `shard.failures.length` disagreeing with the shard's own `failed` count
+ *     → NOT deploy-only (the attribution does not cover every failure, so it
+ *     cannot vouch for all of them);
+ *   - `notRun > 0` → NEVER deploy-only. `notRun` is the PRE-EXISTING
+ *     jest-infra-abort category (A3-3, #147) — a different harness failure
+ *     mode #1520 is not scoped to, and conflating the two would mislabel an
+ *     ordinary "jest could not locate the file" abort.
+ *
+ * @param {any} shard
+ * @param {number} failedCount
+ * @param {number} notRunCount
+ * @returns {boolean}
+ */
+function isDeployOnlyRedShard(shard, failedCount, notRunCount) {
+  if (notRunCount > 0 || failedCount === 0) return false;
+  const failures = Array.isArray(shard?.failures) ? shard.failures : null;
+  if (!failures || failures.length !== failedCount) return false;
+  return failures.every((f) => f?.kind === 'deploy');
+}
+
+/**
  * The reasons a scheduled run can end up with no gradeable ledger. Every one of
  * them produces a DISQUALIFIED night (rule 5), never a gap in the record.
  */
@@ -493,7 +537,16 @@ export function gradeNight(ledger, opts = {}) {
     if (p.unknown || f.unknown || n.unknown || shard?.status === 'missing') {
       disqualifiers.push(`shard ${id} has no recorded result`);
     } else if (f.value > 0 || n.value > 0) {
-      disqualifiers.push(`shard ${id} red (failed=${f.value} notRun=${n.value})`);
+      // Round 2 (#1550): a deploy-classified red is labelled for readability
+      // but disqualifies the night exactly like any other red — see
+      // `isDeployOnlyRedShard`'s doc comment for why the original VOID grade
+      // was removed.
+      disqualifiers.push(
+        isDeployOnlyRedShard(shard, f.value, n.value)
+          ? `deploy-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — every ` +
+              'named failure is kind:deploy (a harness/deploy-script failure; #1520/#1553)'
+          : `shard ${id} red (failed=${f.value} notRun=${n.value})`,
+      );
     }
   }
 
@@ -908,6 +961,7 @@ export function formatReport(audit) {
       lines.push(`            ${u.runId}  ${u.reason}`);
     }
   }
+
   lines.push('');
   lines.push(`longest qualifying streak: ${audit.longest.nights} / ${audit.requiredNights}`);
   lines.push(`current  qualifying streak: ${audit.current.nights} / ${audit.requiredNights}`);
