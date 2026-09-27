@@ -115,7 +115,13 @@ mock.module("../cli/runtime-image", () => ({
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => ({
+        ok: true,
+        stdout: JSON.stringify({
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+        }),
+        stderr: "",
+    }),
 }));
 
 mock.module("../utils/logger", () => ({

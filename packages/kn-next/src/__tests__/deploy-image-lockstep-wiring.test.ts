@@ -132,7 +132,13 @@ mock.module("../cli/runtime-image", () => ({
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => ({
+        ok: true,
+        stdout: JSON.stringify({
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+        }),
+        stderr: "",
+    }),
 }));
 // `warn` is hoisted out (not a fresh `mock()` per call) so tests can assert on
 // it — the #1283 round 3 opt-out announcement.

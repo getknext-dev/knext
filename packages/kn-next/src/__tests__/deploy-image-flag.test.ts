@@ -95,7 +95,13 @@ mock.module("../cli/gc", () => ({
 }));
 
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => ({
+        ok: true,
+        stdout: JSON.stringify({
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+        }),
+        stderr: "",
+    }),
 }));
 
 const logWarn = mock<AnyFn>();

@@ -104,16 +104,20 @@ export {
  * cluster gate decides `skipAll`, then each check module is called in the
  * documented sequence and its results concatenated in order.
  */
-export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
+export async function runDoctor(
+    deps: DoctorDeps,
+    verbose = false,
+): Promise<DoctorReport> {
     const checks: CheckResult[] = [];
 
-    const cluster = clusterCheck(deps);
+    const cluster = clusterCheck(deps, verbose);
     checks.push(...cluster.checks);
 
     const ctx: CheckContext = {
         deps,
         kubectl: deps.kubectl,
         skipAll: !cluster.reachable,
+        verbose,
     };
 
     checks.push(...kubectlValidationCheck(ctx));
@@ -155,6 +159,7 @@ getting-started guide), never as a network flake.
 
 Options:
   --json      Emit the check results as JSON
+  --verbose   Show the raw kubectl/API diagnostic behind each short message
   -h, --help  Show this help
 `;
 
@@ -182,7 +187,7 @@ export async function doctorMain(
         writeSync(1, DOCTOR_HELP);
         return 0;
     }
-    const report = await runDoctor(deps);
+    const report = await runDoctor(deps, args.verbose);
     if (args.json) {
         writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
     } else {

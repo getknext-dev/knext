@@ -126,6 +126,22 @@ mock.module("../cli/schema/kubectl-capture", () => ({
         effects.push(
             `kubectl ${argv[1]}${argv.includes("--dry-run=server") ? " --dry-run=server" : ""}`,
         );
+        // #1535: the post-apply reconcile wait polls THIS SAME boundary
+        // (`kubectl get nextapp -o json`) via `waitForOperatorReconcile`. Every
+        // other call here goes through the per-test-driven `kubectl` mock
+        // (default `stdout: ""`), which would otherwise read as "never
+        // reconciled" and poll for the real 15s default — this suite is about
+        // preflight ORDERING, not the reconcile wait, so short-circuit that one
+        // call to "already reconciled".
+        if (argv[1] === "get" && argv[2] === "nextapp") {
+            return {
+                ok: true,
+                stdout: JSON.stringify({
+                    status: { conditions: [{ type: "Ready", status: "True" }] },
+                }),
+                stderr: "",
+            };
+        }
         return kubectl(argv);
     },
 }));

@@ -145,8 +145,17 @@ mock.module("../cli/build-artifact", () => ({
 // Stub the kubectl boundary it uses so this suite stays hermetic and keeps
 // asserting the real APPLY argv; the preflight itself is covered by
 // cr-prune-preflight.test.ts and deploy-preflight-ordering.test.ts.
+// #1535: this same boundary is polled post-apply by `waitForOperatorReconcile`
+// (`kubectl get nextapp -o json`) — an always-empty stdout reads as "never
+// reconciled" and blocks on the real 15s default wait.
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => ({
+        ok: true,
+        stdout: JSON.stringify({
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+        }),
+        stderr: "",
+    }),
 }));
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));

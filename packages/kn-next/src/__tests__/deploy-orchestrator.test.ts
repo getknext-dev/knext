@@ -188,8 +188,20 @@ const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 // #314: deploy runs a server-side dry-run prune preflight BEFORE any side
 // effect. Stub its kubectl boundary so this suite stays hermetic; the preflight
 // itself is covered by cr-prune-preflight.test.ts + deploy-preflight-ordering.test.ts.
+// #1535: the SAME boundary is also polled by the post-apply reconcile wait
+// (`kubectl get nextapp -o json`) — the preflight only inspects `ok` (never
+// `stdout`) when it is true, so a stdout carrying an already-reconciled
+// status is safe for both callers and keeps this suite's ordering assertions
+// off a real 15s poll (a `stdout: ""` here made every test that reaches the
+// apply step time out for real, since the poll never sees a condition).
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => ({
+        ok: true,
+        stdout: JSON.stringify({
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+        }),
+        stderr: "",
+    }),
 }));
 
 // T2d: the override warning is only observable through the logger, and pino
