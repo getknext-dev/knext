@@ -1582,7 +1582,7 @@ jobs:
   # contract, never that the test quietly ran nothing (#927/#932 declared-skips
   # discipline). Declared in tests/declared-test-skips.test.ts (LANE_BACKED).
   self-contained-exec-e2e:
-    name: file-manager self-contained exec e2e (#1460)
+    name: 'Self-contained (vinext): file-manager exec e2e (#1460)'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
