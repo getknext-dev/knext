@@ -1,0 +1,241 @@
+# Deploys the docs site (apps/docs) to the OKE cluster THROUGH the platform —
+# the same path a knext user takes: `kn-next deploy` builds + pushes the image
+# and writes ONE object, the `knext-docs` NextApp; the operator renders the
+# Knative Service from it (ADR-0001). Nothing in this file writes a Knative
+# object, and the credential cannot: it is the `kn-next init-ci` ServiceAccount
+# (apps/docs/deploy/oke/ci-rbac.yaml), which may get/list/create/patch/update
+# `nextapps` in `knext-docs` and nothing else.
+#
+# Two jobs, split by credential:
+#   dry-run  pull requests. NO secrets referenced, no cluster, no registry.
+#            Runs the same CLI build the deploy runs and prints the NextApp it
+#            would apply. It calls the CLI directly rather than the action,
+#            because the action's credential preflight (correctly) needs a
+#            kubeconfig even for a dry run.
+#   deploy   push to main + manual dispatch on main. The ONLY job that sees
+#            credentials, and it gets the kubeconfig through the `docs-oke`
+#            environment, whose deployment-branch policy admits `main` only —
+#            so a pull request that edits this file still cannot read it.
+#
+# Dogfooding: the action is used from the tree (`./packages/kn-next-action`),
+# not `getknext-dev/knext/packages/kn-next-action@v1` — that ref needs a
+# release tag, and dogfooding the tree is what catches a broken action before
+# users do. Inside this workspace the action's `npx @getknext/core` resolves
+# to the tree's own `kn-next` bin (apps/docs depends on `workspace:*`), so the
+# CLI under test is the one this commit built.
+name: Docs deploy (OKE)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/docs/**'
+      - 'packages/kn-next/**'
+      - 'packages/kn-next-action/**'
+      - '.github/workflows/docs-deploy-oke.yml'
+  pull_request:
+    paths:
+      - 'apps/docs/**'
+      - 'packages/kn-next/**'
+      - 'packages/kn-next-action/**'
+      - '.github/workflows/docs-deploy-oke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NAMESPACE: knext-docs
+  # OCIR namespace; the CLI appends the app name -> .../knext-docs (public repo).
+  REGISTRY: me-abudhabi-1.ocir.io/axfqznklsd2t
+  APP_DIR: apps/docs
+
+jobs:
+  dry-run:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Install the workspace
+        run: bun install --frozen-lockfile
+
+      # Order matters: docs imports the libraries' dist.
+      - name: Build the libraries and the CLI from this commit
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+
+      # Same audit the deploy job gates on, so a HIGH/CRITICAL in the docs
+      # closure reds the pull request instead of the first deploy after merge.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Install grype
+        id: grype
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+
+      - name: Put grype on PATH
+        run: dirname "${{ steps.grype.outputs.cmd }}" >> "$GITHUB_PATH"
+
+      - name: SBOM + HIGH/CRITICAL scan of the docs app's JS closure
+        run: node scripts/precompile-closure-audit.mjs --app apps/docs
+
+      - name: Dry run — print the NextApp, apply nothing
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node ../../packages/kn-next/dist/cli/kn-next.js deploy \
+            --dry-run --skip-upload \
+            --namespace "$NAMESPACE" --registry "$REGISTRY" --tag "$TAG" \
+            | tee "$RUNNER_TEMP/nextapp.yaml"
+          # The emitted resource is the NextApp and only the NextApp.
+          grep -q '^kind: NextApp$' "$RUNNER_TEMP/nextapp.yaml"
+          grep -q '^  name: knext-docs$' "$RUNNER_TEMP/nextapp.yaml"
+          if grep -qE '^kind: (Service|Route|Configuration|DomainMapping)$' "$RUNNER_TEMP/nextapp.yaml"; then
+            echo "::error::the dry run emitted a raw Knative object"; exit 1
+          fi
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: docs-oke
+    permissions:
+      contents: read
+    concurrency:
+      # One deploy at a time. Two concurrent applies of the same NextApp race,
+      # and the older commit can win.
+      group: docs-deploy-oke
+      cancel-in-progress: false
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Install the workspace
+        run: bun install --frozen-lockfile
+
+      - name: Build the libraries and the CLI from this commit
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+
+      # The image is a vinext build whose JS closure an image scanner cannot
+      # see, so audit the app's pre-build closure (SBOM + HIGH/CRITICAL, dated
+      # allowlist) BEFORE anything is built or pushed.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Install grype
+        id: grype
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+
+      - name: Put grype on PATH
+        run: dirname "${{ steps.grype.outputs.cmd }}" >> "$GITHUB_PATH"
+
+      - name: SBOM + HIGH/CRITICAL scan of the docs app's JS closure
+        run: node scripts/precompile-closure-audit.mjs --app apps/docs
+
+      - name: Upload the closure SBOM
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-closure-sbom
+          path: sbom/app-closure.cdx.json
+          if-no-files-found: error
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to OCIR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: me-abudhabi-1.ocir.io
+          username: ${{ secrets.OCIR_USER }}
+          password: ${{ secrets.OCIR_TOKEN }}
+
+      # Build + push + apply the NextApp. `doctor: false` is deliberate: doctor
+      # reads cluster-scoped state (CRDs, the operator's Deployment, Knative's
+      # ConfigMaps) that this namespace-scoped credential is, by design, not
+      # allowed to read — with it on, every run fails on RBAC probe errors.
+      # The deploy itself still runs its own CR-schema preflight (server-side
+      # dry run) before touching the cluster.
+      - name: Deploy through the platform
+        uses: ./packages/kn-next-action
+        with:
+          working-directory: apps/docs
+          kubeconfig: ${{ secrets.KNEXT_DOCS_KUBECONFIG_B64 }}
+          namespace: knext-docs
+          registry: me-abudhabi-1.ocir.io/axfqznklsd2t
+          registry-username: ${{ secrets.OCIR_USER }}
+          registry-token: ${{ secrets.OCIR_TOKEN }}
+          tag: ${{ github.sha }}
+          skip-upload: 'true'
+          doctor: 'false'
+
+      # `kn-next deploy` returns once the NextApp is submitted. Wait for the
+      # operator to report THIS generation Ready (get only — the credential
+      # has no `watch`, so no `kubectl wait`), then check the public host.
+      - name: Wait for the operator to roll out this commit
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            gen="$(kubectl -n "$NAMESPACE" get nextapp knext-docs -o jsonpath='{.metadata.generation}')"
+            ready="$(kubectl -n "$NAMESPACE" get nextapp knext-docs -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}/{.status.conditions[?(@.type=="Ready")].observedGeneration}')"
+            if [ "$ready" = "True/$gen" ]; then break; fi
+            sleep 10
+          done
+          [ "$ready" = "True/$gen" ] || { echo "::error::NextApp knext-docs not Ready at generation $gen (got $ready)"; exit 1; }
+          image="$(kubectl -n "$NAMESPACE" get nextapp knext-docs -o jsonpath='{.spec.image}')"
+          revision="$(kubectl -n "$NAMESPACE" get nextapp knext-docs -o jsonpath='{.status.observedRevision}')"
+          case "$image" in *":${SHA}@sha256:"*) ;; *) echo "::error::NextApp image $image is not this commit"; exit 1 ;; esac
+          {
+            echo "### Docs deployed"
+            echo "- image: \`$image\`"
+            echo "- revision: \`$revision\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke-test the public host
+        run: |
+          set -euo pipefail
+          for path in /api/health / /docs; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --retry 5 --retry-all-errors --max-time 30 "https://knext.dev${path}")"
+            echo "https://knext.dev${path} -> ${code}"
+            [ "$code" = 200 ] || { echo "::error::https://knext.dev${path} returned ${code}"; exit 1; }
+          done
