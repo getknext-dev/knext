@@ -50,7 +50,10 @@
  *             (`time -p`), M97 (`>&2` splits the command), M98 (helper body is
  *             one word), M99 (`>&2` splits a helper command), M100 (helper
  *             command not normalised), M101 (nameref target), M102 (`${!x:=}`),
- *             M103 (`eval` of a run-time string)
+ *             M103 (`eval` of a run-time string), M104–M109 (a helper that RUNS its
+ *             arguments: call site not a write, `shift` ignored, `local c=$1` not
+ *             followed, forwarding not followed, dispatch not unwrapped for
+ *             run-time names, the text after `$( … )` read as a command)
  *
  * Each subject is checked byte-identical to its green baseline after every
  * restore, instead of re-running the spec; the spec runs green once at the end.
@@ -76,7 +79,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(103);
+declareMutations(109);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -118,13 +121,18 @@ function assertSubjectsAtBaseline(when) {
     }
 }
 
-/** Applies one mutation to `file`, requires RED, restores byte-identically. */
-function prove(label, file, anchor, replacement) {
+/**
+ * Applies one mutation to `file`, requires RED, restores byte-identically.
+ * `extra` [anchor, replacement] pairs remove further rules in the same run,
+ * for a rule that a LATER, independent rule also covers (both must go).
+ */
+function prove(label, file, anchor, replacement, extra = []) {
   console.log(`── ${label}`);
   assertSubjectsAtBaseline('before this mutation');
   const snap = snapshot(file);
   try {
     mutate(snap, anchor, replacement);
+    for (const [a, r] of extra) mutate(snap, a, r);
     if (specPasses()) {
       console.log('   x DECORATION: the spec stayed GREEN with this rule removed');
       decorative += 1;
@@ -532,8 +540,8 @@ prove(
 prove(
   'M72 run-time names: a write through a computed variable name is not detected',
   SCANNER,
-  'export function dynamicNameWrites(text) {\n  const out = [];\n',
-  'export function dynamicNameWrites(text) {\n  const out = [];\n  if (text) return out;\n',
+  'export function dynamicNameWrites(text, dispatchers = new Map()) {\n  const out = [];\n',
+  'export function dynamicNameWrites(text, dispatchers = new Map()) {\n  const out = [];\n  if (text) return out;\n',
 );
 prove(
   'M73 implicit variables: REPLY / MAPFILE / … are ordinary unassigned variables',
@@ -585,10 +593,16 @@ prove(
 );
 
 prove(
-  'M81 write sites: a separator INSIDE quotes (`read -d ";" V`) splits the command',
+  'M81 write sites: a separator INSIDE quotes (`read -d ";" V`) splits the command (with the round-10 non-literal-command rule, which also catches the mis-split `b" ` head, removed too)',
   SCANNER,
   "    if (frames && frames[m.index] !== 'code' && frames[m.index] !== 'bq') continue;",
   '    if (false) continue;',
+  [
+    [
+      '  if (!RUNTIME.test(ws[0]) && !PLAIN_COMMAND.test(cmd)) return true;',
+      '  if (false) return true;',
+    ],
+  ],
 );
 prove(
   'M82 run-time names: an alias (`alias rd=read; rd V`) is not treated as a possible writer',
@@ -613,8 +627,8 @@ prove(
 prove(
   'M85 write sites: a name assembled from quoted pieces (`printf -v V"AR"`) is not compared dequoted',
   SCANNER,
-  '        if (dq !== w) out.push({ raw: w, dq, snippet: seg.trim().slice(0, 100) });',
-  '        void dq;',
+  '      if (dq !== w) out.push({ raw: w, dq, head: ws, snippet: seg.trim().slice(0, 100) });',
+  '      void dq;',
 );
 prove(
   'M86 positional parameters: a write from $1… is not followed to where $1 comes from',
@@ -706,8 +720,8 @@ prove(
 prove(
   'M100 run-time names: the command word is not normalised (`2>/dev/null read -r "$1"`)',
   SCANNER,
-  '    const raw = commandHead(words(seg));',
-  '    const raw = words(seg);',
+  '    const raw = dispatchedCommand(commandHead(words(seg)), dispatchers);',
+  '    const raw = dispatchedCommand(words(seg), dispatchers);',
 );
 prove(
   'M101 run-time names: a nameref whose target is run-time or bound later is not one',
@@ -726,6 +740,43 @@ prove(
   SCANNER,
   "    if (cmd === 'eval') {\n",
   '    if (false) {\n',
+);
+
+prove(
+  'M104 dispatchers: a call of a helper that runs its arguments (`quiet read V`) is not a write',
+  SCANNER,
+  '  if (dispatchers.has(cmd)) {\n    const idx = dispatchers.get(cmd);',
+  '  if (false) {\n    const idx = dispatchers.get(cmd);',
+);
+prove(
+  'M105 dispatchers: `shift` does not move the dispatch index (`retry 3 read V` runs `3`)',
+  SCANNER,
+  '          shifts += ws.length === 1 ? 1 : /^[0-9]+$/.test(ws[1]) ? Number(ws[1]) : Number.NaN;',
+  '          shifts += 0;',
+);
+prove(
+  'M106 dispatchers: a command word set from a positional (`local c=$1; $c`) is not followed',
+  SCANNER,
+  '            if (refs.length > 0) idx = refs.length === 1 ? assigned.get(refs[0]) : 0;',
+  '            void refs;',
+);
+prove(
+  'M107 dispatchers: a helper forwarding its positionals to a dispatcher is not one',
+  SCANNER,
+  '        } else if (out.has(cmd) && ws.slice(1).some((a) => POSITIONAL.test(a))) idx = 0;',
+  '        } else if (false) idx = 0;',
+);
+prove(
+  'M108 run-time names: a dispatcher call (`quiet read "$n"`) is not unwrapped to its command',
+  SCANNER,
+  '    const raw = dispatchedCommand(commandHead(words(seg)), dispatchers);',
+  '    const raw = commandHead(words(seg));',
+);
+prove(
+  'M109 command pieces: the text after a closing `$( … )` is read as a new command',
+  SCANNER,
+  "    continuation = c === '}' || (c === ')' && d > 0);",
+  '    continuation = false;',
 );
 
 // Every subject is byte-identical to its green baseline (checked after each

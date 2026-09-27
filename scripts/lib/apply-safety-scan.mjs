@@ -644,13 +644,31 @@ export function commandHead(ws) {
 }
 /** A command word that is not a plain literal (`$cmd`, `{read,x}`, `r*d`) may be ANY command. */
 const PLAIN_COMMAND = /^[\w./:@%+,-]+$|^\[\[?$/;
-function shellCanBind(stmt, after) {
+/** Whether the simple command whose normalised words are `ws` can bind a name among its arguments. */
+function headCanBind(ws, dispatchers) {
+  const cmd = unquote(ws[0]);
+  // `retry 3 read V` where `retry() { shift; "$@"; }`: the helper RUNS its
+  // arguments, so the command is the word at its dispatch index; at index 0
+  // (unknown) any word before the name that could bind makes this a write.
+  if (dispatchers.has(cmd)) {
+    const idx = dispatchers.get(cmd);
+    if (idx === 0) return ws.slice(1).some((w) => mayBeBindingCommand(w, dispatchers));
+    const rest = commandHead(ws.slice(idx));
+    return rest.length > 0 && headCanBind(rest, dispatchers);
+  }
+  if (!RUNTIME.test(ws[0]) && !PLAIN_COMMAND.test(cmd)) return true;
+  return SHELL_COMMANDS.has(cmd) || RUNTIME.test(ws[0]);
+}
+/** A word that, run as a command, may bind a name: a builtin, a run-time or non-literal word, or a dispatcher. */
+function mayBeBindingCommand(w, dispatchers) {
+  const u = unquote(w);
+  return SHELL_COMMANDS.has(u) || RUNTIME.test(w) || dispatchers.has(u) || /[{}*?[\]]/.test(u);
+}
+function shellCanBind(stmt, after, dispatchers) {
   const ws = commandHead(words(stmt.replace(LEADING_KEYWORDS, '')));
   // The occurrence IS the command position: `V[i]=…` / `V+=…` bind it.
   if (ws.length === 0) return /^(\[|\+?=)/.test(after);
-  const cmd = unquote(ws[0]);
-  if (!RUNTIME.test(ws[0]) && !PLAIN_COMMAND.test(cmd)) return true;
-  return SHELL_COMMANDS.has(cmd) || RUNTIME.test(ws[0]);
+  return headCanBind(ws, dispatchers);
 }
 
 /**
@@ -665,7 +683,7 @@ function shellCanBind(stmt, after) {
  * `wait -p name`, `{name}>f`, or a mention the scan cannot place — is
  * { kind: 'other', snippet }: the caller treats it as unfollowable.
  */
-export function writeSites(text, name) {
+export function writeSites(text, name, dispatchers = new Map()) {
   const out = [];
   const re = new RegExp(`(?<![\\w$])(?:-[A-Za-z]+)?${name}(?!\\w)`, 'g');
   let frames = null;
@@ -713,7 +731,7 @@ export function writeSites(text, name) {
       continue;
     }
     const stmt = commandPrefix(before, frames).replace(LEADING_KEYWORDS, '');
-    if (!shellCanBind(stmt, after)) continue;
+    if (!shellCanBind(stmt, after, dispatchers)) continue;
     if (!flagged && after.startsWith('=') && ASSIGN_PREFIX.test(stmt) && !NAMEREF_FLAG.test(stmt)) {
       out.push({ kind: 'assign', word: words(text.slice(at, at + 4000))[0] ?? '' });
       continue;
@@ -764,27 +782,42 @@ const RUNTIME = /[$`]/;
  * `;` `\n` `&` `|` `(` `)` `{` `}` — so a function body (`f() {\n read "$1"\n}`,
  * `function f { … }`), a group, a subshell, a `case` arm and a `$( … )` are
  * each seen as the commands they hold, not as one word headed by `f()`.
- * Over-splitting only yields extra pieces with junk heads, which are not
- * binders; every real command still starts a piece. `>&2`, `2>&1`, `&>f`
- * and `>|f` are redirections, not separators.
+ * Every real command starts a piece. The text after a CLOSING `)` (of a
+ * `$( … )` or subshell — one that ends a nesting level) or `}` continues the
+ * enclosing command (`"$(date) $1"`, `( … ) 2>/dev/null`), so it is not a
+ * command and is dropped; a `case` pattern's `)` ends no level, so its arm is
+ * kept. `>&2`, `2>&1`, `&>f` and `>|f` are redirections, not separators.
  */
 function commandPieces(text) {
   const pieces = [];
   let start = 0;
-  scanFrames(text, (i, _d, frame) => {
+  let continuation = false;
+  scanFrames(text, (i, d, frame) => {
     if (frame !== 'code') return undefined;
     const c = text[i];
     if (!/[;\n&|(){}]/.test(c) || isRedirectionChar(text, i)) return undefined;
-    pieces.push(text.slice(start, i));
+    if (!continuation) pieces.push(text.slice(start, i));
+    continuation = c === '}' || (c === ')' && d > 0);
     start = i + 1;
     return undefined;
   });
-  pieces.push(text.slice(start));
+  if (!continuation) pieces.push(text.slice(start));
   return pieces.filter((p) => p.trim() !== '');
 }
 
+/** `retry 3 read V` → `read V`: a dispatcher call is the command at its dispatch index. */
+function dispatchedCommand(ws, dispatchers) {
+  let out = ws;
+  for (let guard = 0; guard < 16 && out.length > 0; guard++) {
+    const idx = dispatchers.get(unquote(out[0]));
+    if (!idx) break;
+    out = commandHead(out.slice(idx));
+  }
+  return out;
+}
+
 /** Sites in `text` that write a variable whose NAME is computed at run time. */
-export function dynamicNameWrites(text) {
+export function dynamicNameWrites(text, dispatchers = new Map()) {
   const out = [];
   if (
     /\(\((?:[^()]|\([^()]*\))*\$\{?[A-Za-z_]\w*\}?(?:\[[^\]]*\])?\s*([-+*/%&|^]|<<|>>)?=(?!=)/.test(
@@ -800,12 +833,20 @@ export function dynamicNameWrites(text) {
   if (/(^|[\s;&|(])alias\s+[^\s=]+=|\bexpand_aliases\b/.test(text))
     out.push('an alias is defined, so any word may be a variable-writing builtin');
   for (const seg of commandPieces(text)) {
-    const raw = commandHead(words(seg));
+    const raw = dispatchedCommand(commandHead(words(seg)), dispatchers);
     const ws = raw.map(unquote);
     const cmd = ws[0];
     if (cmd === undefined) continue;
     const args = withoutRedirects(ws.slice(1));
     const hit = (w) => out.push(`\`${seg.trim().slice(0, 100)}\` (name \`${w}\`)`);
+    // A dispatcher whose dispatch index is unknown: from the first argument
+    // that may be a binding command on, a run-time word may be the name.
+    if (dispatchers.get(cmd) === 0) {
+      const k = raw.findIndex((a, j) => j > 0 && mayBeBindingCommand(a, dispatchers));
+      const n = k === -1 ? undefined : raw.slice(k + 1).find((a) => RUNTIME.test(a));
+      if (n !== undefined) hit(n);
+      continue;
+    }
     // `eval "$1=…"`: the evaluated text, and so the name it binds, is run-time.
     if (cmd === 'eval') {
       for (const a of raw.slice(1)) if (RUNTIME.test(a)) hit(a);
@@ -856,12 +897,92 @@ export function dynamicNameWrites(text) {
   return out;
 }
 
+/**
+ * The helpers that RUN their arguments as a command, each mapped to the
+ * argument index that becomes the command word (0: not determinable). A body
+ * command whose command word is a positional expansion — `"$@"`/`"$*"` (index
+ * 1 + the `shift`s before it: `retry() { shift; "$@"; }` → 2), `$k`, `"${@:k}"`
+ * — or a variable the body sets from one (`run() { local c=$1; shift; $c "$@"; }`
+ * → 1); and, to a fixpoint, a helper that calls one with its OWN positionals
+ * (index 0). A call site is then classified as the command at that index
+ * (`retry 3 read V` is `read V`); at index 0 every word may be the command.
+ * A run-time command word from a GLOBAL (`DRILL_PSQL() { $KD exec … "$1"; }`)
+ * passes its arguments as DATA, so it is not a dispatcher; a global assigned
+ * from a positional elsewhere is not followed.
+ */
+function dispatcherNames(st) {
+  const key = `\0disp\0${st.functions.size}`;
+  let out = st.writeSiteCache.get(key);
+  if (out) return out;
+  out = new Map();
+  const merge = (name, idx) => {
+    const prev = out.get(name);
+    if (prev === undefined) out.set(name, idx);
+    else if (prev !== idx) out.set(name, 0);
+    return prev !== out.get(name);
+  };
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [name, body] of st.functions) {
+      const pieces = commandPieces(body);
+      let shifts = 0; // positional shifts so far (NaN once not a literal count)
+      // The positional index a word expands to (after `shifts`), or null.
+      const posIndex = (w, sh) => {
+        const u = unquote(w);
+        const m = u.match(/^\$(?:([1-9])|\{([1-9])\}|([@*])|\{([@*])\}|\{@:([1-9])\})$/);
+        if (!m) return POSITIONAL.test(w) ? 0 : null;
+        const k = m[1] ?? m[2] ?? m[5];
+        const idx = (k === undefined ? 1 : Number(k)) + sh;
+        return Number.isFinite(idx) ? idx : 0;
+      };
+      const assigned = new Map(); // variable → index of the positional it was set from
+      for (const seg of pieces) {
+        const ws = commandHead(words(seg));
+        const w = ws[0];
+        const raw = words(seg);
+        if (w === undefined) {
+          // `c=$1` / `c="$1"`: a bare assignment.
+          for (const a of raw) {
+            const m = a.match(/^([A-Za-z_]\w*)=(.+)$/s);
+            if (m && POSITIONAL.test(m[2])) assigned.set(m[1], posIndex(m[2], shifts) ?? 0);
+          }
+          continue;
+        }
+        const cmd = unquote(w);
+        if (cmd === 'shift') {
+          shifts += ws.length === 1 ? 1 : /^[0-9]+$/.test(ws[1]) ? Number(ws[1]) : Number.NaN;
+          continue;
+        }
+        if (DECLARERS.has(cmd) || Object.hasOwn(NAME_BINDERS, cmd)) {
+          for (const a of ws.slice(1)) {
+            const m = a.match(/^([A-Za-z_]\w*)=(.+)$/s);
+            if (m && POSITIONAL.test(m[2])) assigned.set(m[1], posIndex(m[2], shifts) ?? 0);
+            else if (POSITIONAL.test(seg) && /^[A-Za-z_]\w*$/.test(a)) assigned.set(a, 0);
+          }
+        }
+        let idx = null;
+        if (RUNTIME.test(w)) {
+          idx = posIndex(w, shifts);
+          if (idx === null) {
+            const refs = varRefs(w).filter((r) => assigned.has(r));
+            if (refs.length > 0) idx = refs.length === 1 ? assigned.get(refs[0]) : 0;
+          }
+        } else if (out.has(cmd) && ws.slice(1).some((a) => POSITIONAL.test(a))) idx = 0;
+        if (idx !== null && merge(name, idx)) changed = true;
+      }
+    }
+  }
+  st.writeSiteCache.set(key, out);
+  return out;
+}
+
 /** dynamicNameWrites over this source's whole corpus (cached per corpus size). */
 function corpusDynamicWrites(st) {
   const key = `\0dyn\0${st.corpus.length}`;
   let d = st.writeSiteCache.get(key);
   if (!d) {
-    d = st.corpus.flatMap((t) => dynamicNameWrites(t));
+    const disp = dispatcherNames(st);
+    d = st.corpus.flatMap((t) => dynamicNameWrites(t, disp));
     st.writeSiteCache.set(key, d);
   }
   return d;
@@ -887,7 +1008,11 @@ function corpusWriteSites(name, st) {
   const key = `${name}\0${st.corpus.length}`;
   let sites = st.writeSiteCache.get(key);
   if (!sites) {
-    sites = st.corpus.flatMap((t) => [...writeSites(t, name), ...assembledWrites(t, name)]);
+    const disp = dispatcherNames(st);
+    sites = st.corpus.flatMap((t) => [
+      ...writeSites(t, name, disp),
+      ...assembledWrites(t, name, disp),
+    ]);
     st.writeSiteCache.set(key, sites);
   }
   return sites;
@@ -904,32 +1029,27 @@ function assembledWords(text) {
   let out = assembledCache.get(text);
   if (out) return out;
   out = [];
-  for (const cl of splitClauses(text)) {
-    for (const seg of splitPipeline(cl.text)) {
-      let ws = words(seg);
-      while (ws.length && /^(if|then|else|elif|do|while|until|!|\{|\(|time)$/.test(ws[0]))
-        ws = ws.slice(1);
-      while (ws.length && /^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/.test(ws[0])) ws = ws.slice(1);
-      if (ws.length === 0) continue;
-      if (!SHELL_COMMANDS.has(unquote(ws[0])) && !RUNTIME.test(ws[0])) continue;
-      for (const w of ws.slice(1)) {
-        if (!/["'\\]/.test(w)) continue;
-        const dq = w
-          .replace(/\$'((?:[^'\\]|\\.)*)'/g, '$1')
-          .replace(/\\(.)/g, '$1')
-          .replace(/["']/g, '');
-        if (dq !== w) out.push({ raw: w, dq, snippet: seg.trim().slice(0, 100) });
-      }
+  // Every simple command at any nesting (a helper body included), after its
+  // redirection / assignment / keyword / wrapper prefix.
+  for (const seg of commandPieces(text)) {
+    const ws = commandHead(words(seg));
+    for (const w of ws.slice(1)) {
+      if (!/["'\\]/.test(w)) continue;
+      const dq = w
+        .replace(/\$'((?:[^'\\]|\\.)*)'/g, '$1')
+        .replace(/\\(.)/g, '$1')
+        .replace(/["']/g, '');
+      if (dq !== w) out.push({ raw: w, dq, head: ws, snippet: seg.trim().slice(0, 100) });
     }
   }
   if (assembledCache.size > 500) assembledCache.clear();
   assembledCache.set(text, out);
   return out;
 }
-function assembledWrites(text, name) {
+function assembledWrites(text, name, dispatchers = new Map()) {
   const re = new RegExp(`(?<![\\w$])(?:-[A-Za-z]+)?${name}(?!\\w)`);
   return assembledWords(text)
-    .filter((a) => re.test(a.dq) && !re.test(a.raw))
+    .filter((a) => re.test(a.dq) && !re.test(a.raw) && headCanBind(a.head, dispatchers))
     .map((a) => ({ kind: 'other', snippet: a.snippet }));
 }
 
@@ -1055,8 +1175,8 @@ function bindUnmodeledWrites(text, loopTail, st, depth) {
     if (!clauseText.includes(name) && !loopTail.includes(name) && !/["'\\]/.test(clauseText))
       continue;
     if (
-      writeSites(clauseText, name).some((s) => s.kind === 'other') ||
-      assembledWrites(clauseText, name).length > 0
+      writeSites(clauseText, name, dispatcherNames(st)).some((s) => s.kind === 'other') ||
+      assembledWrites(clauseText, name, dispatcherNames(st)).length > 0
     )
       bind(name);
   }
@@ -1065,7 +1185,7 @@ function bindUnmodeledWrites(text, loopTail, st, depth) {
     produce();
     if (why) bind(name);
   }
-  if (RUNTIME.test(clauseText) && dynamicNameWrites(clauseText).length > 0) {
+  if (RUNTIME.test(clauseText) && dynamicNameWrites(clauseText, dispatcherNames(st)).length > 0) {
     produce();
     if (why) for (const name of refs) bind(name);
   }

