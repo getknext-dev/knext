@@ -83,11 +83,17 @@ function warmUrl(path) {
 }
 
 async function waitForServer(deadlineMs) {
-    const deadline = Date.now() + deadlineMs;
+    const start = Date.now();
+    const deadline = start + deadlineMs;
     for (;;) {
         try {
             const res = await fetch(warmUrl(WARM_PATHS[0] ?? "/"));
-            if (res.status) return;
+            if (res.status) {
+                console.log(
+                    `[knext bake] standalone server answered after ${Date.now() - start}ms`,
+                );
+                return;
+            }
         } catch {
             // not listening yet
         }
@@ -104,7 +110,7 @@ async function main() {
     // Importing this CJS entry executes its top-level side effects (binding
     // $PORT) exactly as running it directly would — the same code path the
     // supervisor spawns at runtime, just in THIS process instead of a child.
-    void serverPath; // KNEXT-MUTATION
+    await import(serverPath);
 
     // #1572: 30_000ms was measured too tight for a real, if less common, app
     // shape — a fixture whose route tree includes Proxy/middleware-driven

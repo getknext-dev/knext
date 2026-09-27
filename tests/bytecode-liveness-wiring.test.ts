@@ -230,6 +230,26 @@ describe('the shipped bake driver: startup deadline floor (#1572)', () => {
     expect(once(template, 'waitForServer(60_000)')).toBe(1);
     expect(template).not.toContain('waitForServer(30_000)');
   });
+
+  // Follow-up from the #1572 round-2 review: the driver never logged how
+  // long a real boot actually took, so raising the floor left no evidence to
+  // tell "normal, a little slower" from "silently approaching the ceiling".
+  // Pin the log line by exact anchor so a copy-paste or a reword can't drift
+  // it silently (mirrors the `once`-anchor pattern above).
+  it('logs the elapsed boot time once the server answers, so real durations are visible in CI logs', () => {
+    const template = readFileSync(SHIPPED_BAKE, 'utf8');
+    expect(
+      once(template, '`[knext bake] standalone server answered after ${Date.now() - start}ms`'),
+    ).toBe(1);
+  });
+
+  it('the SHIPPED bake driver actually emits that log line at runtime, not just in the template text', () => {
+    const { dir, driver, server } = fakeStandalone();
+    const cache = join(dir, '.next/compile-cache');
+    const r = runShippedBake(dir, driver, server, cache);
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.stdout).toMatch(/\[knext bake] standalone server answered after \d+ms/);
+  }, 90_000);
 });
 
 describe('e2e-bake-accept.mjs (#1299): the tolerance moved HERE, one process out, against the REAL driver', () => {
