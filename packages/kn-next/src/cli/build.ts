@@ -41,6 +41,7 @@ import { createLogger } from "../utils/logger";
 import {
     compileArtifactForDeploy,
     resolveBuildArtifact,
+    resolveSelfContained,
     standaloneStepsApply,
 } from "./build-artifact";
 import { isEntrypoint } from "./exec";
@@ -77,6 +78,12 @@ interface BuildOptions {
      * artifact this build produced can actually serve, scrape, and drain.
      */
     skipSmoke?: boolean;
+    /**
+     * `--self-contained`: opt in to the self-contained single-executable mode.
+     * Overrides the `selfContained` config key. No target honours it yet — it
+     * is routed to each compile path and recorded in the build log.
+     */
+    selfContained?: boolean;
 }
 
 /**
@@ -102,6 +109,7 @@ interface BuildOptions {
 async function smokeCompiledBinary(
     config: { healthCheckPath?: string },
     skipSmoke: boolean,
+    selfContained: boolean,
 ): Promise<void> {
     if (skipSmoke) {
         // LOUD, and it names what is now unverified rather than merely saying a
@@ -125,6 +133,9 @@ async function smokeCompiledBinary(
             arch: plan.arch,
             outFile: plan.outFile,
             skipViteBuild: true,
+            // The smoke must boot a binary built with the SAME mode as the
+            // shipped one, or it misses the one property the mode changes.
+            ...(selfContained ? { selfContained: true } : {}),
         });
     }
 
@@ -174,6 +185,7 @@ export async function build(options: BuildOptions = {}) {
                 : "none — assets served from the image",
             cache: config.cache?.provider ?? "none",
             runtime: config.runtime ?? DEFAULT_RUNTIME_ID,
+            selfContained: resolveSelfContained(config, options.selfContained),
         },
         "Configuration loaded",
     );
@@ -288,6 +300,7 @@ export async function build(options: BuildOptions = {}) {
     //     produced `.output`.
     const compileResult = compileArtifactForDeploy(config, process.cwd(), {
         arch: SHIP_ARCH,
+        selfContained: options.selfContained,
     });
 
     if (standaloneStepsApply(artifact)) {
@@ -336,7 +349,11 @@ export async function build(options: BuildOptions = {}) {
         //     broke that entry compiles, deploys, and never goes Ready. This
         //     boots the binary and checks all three HERE, before the assets are
         //     uploaded and long before a cluster sees it.
-        await smokeCompiledBinary(config, options.skipSmoke === true);
+        await smokeCompiledBinary(
+            config,
+            options.skipSmoke === true,
+            resolveSelfContained(config, options.selfContained),
+        );
     }
 
     // 2c'. vinext × node (#1260). Nothing to compile: node runs `.output`
@@ -398,7 +415,7 @@ export async function build(options: BuildOptions = {}) {
 export const BUILD_HELP = `knext build — run the build + asset-upload steps, without deploying
 
 Usage:
-  knext build [--skip-next] [--skip-smoke]
+  knext build [--skip-next] [--skip-smoke] [--self-contained]
 
 Runs the project's build script (\`next build\`, output:'standalone'), heals the
 standalone output, and uploads static assets to the configured bucket. It makes
@@ -410,6 +427,10 @@ Options:
                         route, metrics port, and SIGTERM drain. For CI that
                         cannot execute the binary (a foreign-arch runner). The
                         artifact ships UNVERIFIED and the build says so loudly.
+  --self-contained      Opt in to the self-contained single-executable mode
+                        (overrides \`selfContained\` in kn-next.config.ts).
+                        Experimental: no target honours it yet, so today it is
+                        only recorded in the build log.
   -h, --help            Show this help
 `;
 
@@ -424,6 +445,7 @@ Options:
 export const ACCEPTED_BUILD_FLAGS: ReadonlySet<string> = new Set([
     "--skip-next",
     "--skip-smoke",
+    "--self-contained",
 ]);
 
 /**
@@ -455,6 +477,8 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
     await build({
         skipNextBuild: argv.includes("--skip-next"),
         skipSmoke: argv.includes("--skip-smoke"),
+        // Only when passed: absent must defer to the config key, not force off.
+        ...(argv.includes("--self-contained") ? { selfContained: true } : {}),
     });
     return 0;
 }

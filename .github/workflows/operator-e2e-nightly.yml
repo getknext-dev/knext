@@ -309,9 +309,7 @@ jobs:
         run: |
           set -euo pipefail
           KNATIVE_VERSION="knative-v1.16.0"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
-          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          scripts/kind-manifests/apply-knative-kourier.sh "${KNATIVE_VERSION}"
           kubectl patch configmap/config-network \
             --namespace knative-serving \
             --type merge \
@@ -467,7 +465,7 @@ jobs:
       - name: Install cert-manager (operator webhook certs)
         run: |
           set -euo pipefail
-          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          scripts/kind-manifests/apply-cert-manager.sh
           kubectl wait --for=condition=Available --timeout=300s \
             -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
 
@@ -479,9 +477,7 @@ jobs:
         run: |
           set -euo pipefail
           KNATIVE_VERSION="knative-v1.16.0"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
-          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          scripts/kind-manifests/apply-knative-kourier.sh "${KNATIVE_VERSION}"
           kubectl patch configmap/config-network \
             --namespace knative-serving \
             --type merge \
@@ -555,7 +551,7 @@ jobs:
       - name: Install cert-manager (operator webhook certs)
         run: |
           set -euo pipefail
-          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          scripts/kind-manifests/apply-cert-manager.sh
           kubectl wait --for=condition=Available --timeout=300s \
             -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
 
@@ -567,9 +563,7 @@ jobs:
         run: |
           set -euo pipefail
           KNATIVE_VERSION="knative-v1.16.0"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
-          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          scripts/kind-manifests/apply-knative-kourier.sh "${KNATIVE_VERSION}"
           kubectl patch configmap/config-network \
             --namespace knative-serving \
             --type merge \
@@ -654,7 +648,7 @@ jobs:
       - name: Install cert-manager (operator webhook certs)
         run: |
           set -euo pipefail
-          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          scripts/kind-manifests/apply-cert-manager.sh
           kubectl wait --for=condition=Available --timeout=300s \
             -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
 
@@ -665,9 +659,7 @@ jobs:
         run: |
           set -euo pipefail
           KNATIVE_VERSION="knative-v1.16.0"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
-          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
-          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          scripts/kind-manifests/apply-knative-kourier.sh "${KNATIVE_VERSION}"
           kubectl patch configmap/config-network \
             --namespace knative-serving \
             --type merge \

@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 /**
  * #1225 shipped `turbopack × bun` as a `bun build --compile --bytecode`
@@ -38,6 +49,102 @@ const DOCKERFILE_PATH = resolve(
 );
 const NATIVE_REBUILD_SH_PATH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
 const src = readFileSync(DEPLOY_SH_PATH, 'utf8');
+
+const SECTION_START = '# ── 3b. compile the standalone-on-Bun bytecode executable';
+const SECTION_END = '# ── 3d. bake the V8 compile cache';
+
+/**
+ * BEHAVIOUR, not text. Rounds 1–10 tried to prove "the rebuild `docker run`
+ * mounts STANDALONE_ROOT before the image" by tokenising the script like bash,
+ * and every round lost to a shell semantic the tokenizer did not model (a
+ * `: \` line turning the whole command into arguments of `:`, a trailing `&`
+ * backgrounding it, `${X:+…}`, `$(…)`, `<(…)`, …). This runs the REAL section
+ * of `scripts/e2e-deploy.sh` (from the 3b marker to the 3d marker) under
+ * `bash -e` with stub `docker`/`bun` first on PATH, and asserts what the stub
+ * OBSERVED: however the text is spelled, bash either executed a docker with
+ * these argv, synchronously, or it did not.
+ */
+function runCompileSection(
+  script: string,
+  dockerStub: 'ok' | 'fail',
+): {
+  status: number | null;
+  out: string;
+  dockerCalls: string[][];
+  finishedBeforeExit: boolean;
+  reachedEnd: boolean;
+  root: string;
+  scriptDir: string;
+} {
+  const start = script.indexOf(SECTION_START);
+  const end = script.indexOf(SECTION_END);
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('the 3b/3d section markers are missing from scripts/e2e-deploy.sh');
+  }
+  const section = script.slice(start, end);
+  const tmp = mkdtempSync(join(tmpdir(), 'bun-lane-'));
+  try {
+    const bin = join(tmp, 'bin');
+    const rec = join(tmp, 'rec');
+    const adapter = join(tmp, 'adapter');
+    const app = join(tmp, 'app');
+    const scriptDir = join(tmp, 'scripts');
+    const standaloneApp = join(app, '.next', 'standalone', 'pkg');
+    for (const d of [bin, rec, adapter, standaloneApp, scriptDir]) {
+      mkdirSync(d, { recursive: true });
+    }
+    writeFileSync(join(adapter, 'standalone-compile.js'), '');
+    const stub = (name: string, body: string) => {
+      const p = join(bin, name);
+      writeFileSync(p, `#!/bin/sh\n${body}\n`);
+      chmodSync(p, 0o755);
+    };
+    stub('bun', 'exit 0');
+    stub(
+      'docker',
+      [
+        'echo x >> "$REC/calls"',
+        `printf '%s\\n' "$@" > "$REC/argv.$$"`,
+        'sleep 0.4', // a backgrounded docker would still be running when the script exits
+        dockerStub === 'ok' ? 'touch "$REC/finished"; exit 0' : 'exit 1',
+      ].join('\n'),
+    );
+    const root = join(app, '.next', 'standalone');
+    const wrapper = [
+      'set -euo pipefail',
+      'log() { echo "[t] $*" >&2; }',
+      'RUNTIME=bun',
+      `APP_DIR='${app}'`,
+      `SERVER_JS='${join(standaloneApp, 'server.js')}'`,
+      `STANDALONE_APP_DIR='${standaloneApp}'`,
+      `SCRIPT_DIR='${scriptDir}'`,
+      `NEXT_ADAPTER_PATH='${join(adapter, 'index.js')}'`,
+      'KNEXT_COMPAT_MODE=credential',
+      section,
+      'echo BLOCK_DONE',
+    ].join('\n');
+    const wrapperPath = join(tmp, 'wrapper.sh');
+    writeFileSync(wrapperPath, wrapper);
+    const r = spawnSync('bash', [wrapperPath], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REC: rec },
+      encoding: 'utf8',
+    });
+    const dockerCalls = readdirSync(rec)
+      .filter((n) => n.startsWith('argv.'))
+      .map((n) => readFileSync(join(rec, n), 'utf8').split('\n').slice(0, -1));
+    return {
+      status: r.status,
+      out: `${r.stdout}\n${r.stderr}`,
+      dockerCalls,
+      finishedBeforeExit: existsSync(join(rec, 'finished')),
+      reachedEnd: r.stdout.includes('BLOCK_DONE'),
+      root,
+      scriptDir,
+    };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec (#1166/#1225)', () => {
   it('compiles the standalone server via the shipped standalone-compile script', () => {
@@ -146,22 +253,48 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
     expect(/-a -p "\$\{OWNER_PID\}"/.test(src)).toBe(true);
   });
 
-  it('rebuilds native (*.node) addons for musl inside the pinned image before boot (review finding, hypothesis A — glibc-installed addons cannot dlopen under musl)', () => {
-    const compileBlock = src.slice(
-      src.indexOf('# ── 3b. compile the standalone-on-Bun bytecode executable'),
-      src.indexOf('# ── 4. boot the standalone server on a free port'),
-    );
-    expect(
-      /docker run --rm \\\s*\n\s*-v "\$\{STANDALONE_ROOT\}:\$\{STANDALONE_ROOT\}" \\\s*\n\s*-v "\$\{SCRIPT_DIR\}\/e2e-native-rebuild-musl\.sh/.test(
-        compileBlock,
-      ),
-      'must run e2e-native-rebuild-musl.sh inside STANDALONE_BUN_IMAGE against the STANDALONE_ROOT before boot',
-    ).toBe(true);
-    expect(
-      /"\$\{STANDALONE_BUN_IMAGE\}"\s*\\\s*\n\s*sh \/e2e-native-rebuild-musl\.sh "\$\{STANDALONE_ROOT\}"/.test(
-        compileBlock,
-      ),
-    ).toBe(true);
+  describe('the musl native-addon rebuild `docker run` — observed by running the real section (#1257)', () => {
+    const IMAGE_PIN = (src.match(/STANDALONE_BUN_IMAGE="([^"]+)"/) as RegExpMatchArray)[1];
+
+    it('invokes docker exactly once, synchronously, with STANDALONE_ROOT mounted BEFORE the pinned image and the rebuild script after it', () => {
+      const r = runCompileSection(src, 'ok');
+      expect(r.status, r.out).toBe(0);
+      expect(r.reachedEnd, r.out).toBe(true);
+      expect(r.dockerCalls.length, 'docker must be invoked exactly once').toBe(1);
+      expect(r.finishedBeforeExit, 'docker must have COMPLETED before the script exited').toBe(
+        true,
+      );
+      const argv = r.dockerCalls[0];
+      expect(argv.slice(0, 2)).toEqual(['run', '--rm']);
+      const imageIdx = argv.indexOf(IMAGE_PIN);
+      expect(imageIdx, 'the pinned image ref must be an argument').toBeGreaterThan(-1);
+      const before = argv.slice(0, imageIdx);
+      const mounts = before.flatMap((w, i) => (w === '-v' ? [before[i + 1]] : []));
+      expect(
+        mounts.filter((m) => m === `${r.root}:${r.root}`).length,
+        'STANDALONE_ROOT mounted once',
+      ).toBe(1);
+      expect(
+        mounts.filter((m) =>
+          m.startsWith(`${r.scriptDir}/e2e-native-rebuild-musl.sh:/e2e-native-rebuild-musl.sh`),
+        ).length,
+        'the rebuild script mounted once',
+      ).toBe(1);
+      expect(before).toContain('KNEXT_COMPAT_MODE=credential');
+      expect(argv.slice(imageIdx + 1)).toEqual([
+        'sh',
+        '/e2e-native-rebuild-musl.sh',
+        r.root,
+        '/musl-native-lockfiles',
+      ]);
+    });
+
+    it('a failing docker fails the section (set -e propagates; nothing after it runs)', () => {
+      const r = runCompileSection(src, 'fail');
+      expect(r.dockerCalls.length).toBe(1);
+      expect(r.status).not.toBe(0);
+      expect(r.reachedEnd).toBe(false);
+    });
   });
 
   it('e2e-native-rebuild-musl.sh is a fast no-op when the standalone tree has no native addons', () => {
@@ -178,8 +311,13 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
   it('e2e-native-rebuild-musl.sh is best-effort per package (a rebuild failure warns, never aborts the whole script)', () => {
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
     expect(/^set -eu$/m.test(rebuildSrc)).toBe(true);
+    // #1257 round 7 — the fresh-install branch now lives inside an `else`
+    // (the pinned-lockfile `npm ci` branch runs first when a committed
+    // lockfile matches), and the install itself runs via `run_as_builder`
+    // (su-exec'd to the unprivileged `builder` user) rather than directly
+    // as root.
     expect(
-      /if ! \(cd "\$\{PKG_SCRATCH\}" && npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
+      /if ! \(cd "\$\{PKG_SCRATCH\}" && run_as_builder env npm_config_build_from_source=true npm install --no-save --no-audit --no-fund "\$\{NAME\}@\$\{VERSION\}"/.test(
         rebuildSrc,
       ),
       'a per-package fresh-install failure must be caught (the `if !` guard), not let a failing `npm install` kill the whole script under set -e',
@@ -256,12 +394,19 @@ describe('scripts/e2e-deploy.sh — bun lane boots the compiled standalone exec 
 
   it('e2e-native-rebuild-musl.sh sends apk output to stderr, not /dev/null (round-6 review finding — set -eu gave an opaque abort on an apk failure)', () => {
     const rebuildSrc = readFileSync(NATIVE_REBUILD_SH_PATH, 'utf8');
+    // #1257 round 7 — `su-exec` joined the apk package list (needed to drop
+    // root before any install-time code runs); the stdout-only-silenced
+    // shape this test protects is otherwise unchanged.
     expect(
-      /apk add --no-cache python3 make g\+\+ npm >\/dev\/null$/m.test(rebuildSrc),
+      /apk add --no-cache python3~3\.12 make~4\.4 g\+\+~14\.2 npm~11\.6 nodejs~22\.23 su-exec~0\.2 >\/dev\/null$/m.test(
+        rebuildSrc,
+      ),
       'apk stdout may still be silenced, but stderr must flow (no trailing 2>&1 redirecting it into /dev/null too) so a failure under set -eu is diagnosable',
     ).toBe(true);
     expect(
-      rebuildSrc.includes('apk add --no-cache python3 make g++ npm >/dev/null 2>&1'),
+      rebuildSrc.includes(
+        'apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 nodejs~22.23 su-exec~0.2 >/dev/null 2>&1',
+      ),
       'the old shape swallowed BOTH streams — must be gone',
     ).toBe(false);
   });

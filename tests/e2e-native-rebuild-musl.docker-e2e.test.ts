@@ -24,6 +24,8 @@ import { join, resolve } from 'node:path';
  */
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const NATIVE_REBUILD_SH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
+const LOCKFILE_LOOKUP_SH = resolve(REPO_ROOT, 'scripts/lib/musl-lockfile-lookup.sh');
+const LOCKFILES_DIR = resolve(REPO_ROOT, 'scripts/musl-native-lockfiles');
 const STANDALONE_BUN_IMAGE =
   'oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f';
 
@@ -60,10 +62,20 @@ function runRebuild(
       `${mountDir}:/mnt`,
       '-v',
       `${NATIVE_REBUILD_SH}:/rebuild.sh:ro`,
+      // #1257 — the lookup helpers rebuild.sh sources (`. "$(dirname "$0")/lib/..."`,
+      // so `/rebuild.sh`'s dirname `/` is where it looks).
+      '-v',
+      `${LOCKFILE_LOOKUP_SH}:/lib/musl-lockfile-lookup.sh:ro`,
+      // #1257 — mounted so the script can `npm ci` against a committed,
+      // reproducible lockfile for a known name@version (real for THIS
+      // suite's sharp fixture) instead of a fresh, unpinned `npm install`.
+      '-v',
+      `${LOCKFILES_DIR}:/musl-native-lockfiles:ro`,
       STANDALONE_BUN_IMAGE,
       'sh',
       '/rebuild.sh',
       '/mnt',
+      '/musl-native-lockfiles',
     ],
     { encoding: 'utf8', timeout: timeoutMs },
   );
@@ -177,6 +189,16 @@ describe.skipIf(!dockerAvailable())(
       expect(status, `expected exit 0; stdout:\n${stdout}`).toBe(0);
       expect(stdout).toContain('added @img/sharp-linuxmusl-x64');
       expect(stdout).toContain('added @img/sharp-libvips-linuxmusl-x64');
+      // #1257 — this exact name@version (0.34.5 / 1.2.4) has a COMMITTED
+      // lockfile under scripts/musl-native-lockfiles/, so both installs must
+      // take the reproducible `npm ci` path, never the fresh/unpinned one.
+      expect(stdout).toContain(
+        '@img/sharp-linuxmusl-x64@0.34.5: using the committed, reproducible lockfile',
+      );
+      expect(stdout).toContain(
+        '@img/sharp-libvips-linuxmusl-x64@1.2.4: using the committed, reproducible lockfile',
+      );
+      expect(stdout).not.toContain('fresh (non-reproducible');
 
       // The behavioural claim: the produced musl .node file actually LOADS
       // under the pinned musl bun runtime (not just "a file exists at the
@@ -202,6 +224,148 @@ describe.skipIf(!dockerAvailable())(
         `sharp's musl native addon must load cleanly:\n${loadCheck.stdout}\n${loadCheck.stderr}`,
       ).toContain('LOADED OK:object');
     }, 360_000);
+
+    // #1426 — before this fixture, the sqlite3 build-from-source path (the
+    // script's OWN original motivating case, header ROUND 2/ROUND 7) had
+    // NEVER actually run in this suite: the only committed corpus fixture was
+    // sharp, which takes the entirely separate `musl_install_sibling()`
+    // branch (a glibc-only prebuilt with no source fallback). sqlite3 exits
+    // through the GENERIC `*.node`-owning-package loop instead — walk up to
+    // its package.json, look up `pinned_lockfile_dir_for`, `npm ci` against
+    // the committed lockfile with npm_config_build_from_source=true, replace
+    // the traced dir wholesale. Nothing here had ever proven that path
+    // against a real, compiled-from-source addon.
+    it('installs sqlite3 for musl via the committed lockfile pin (npm ci, build-from-source) and the resulting native addon LOADS under musl bun (#1426)', () => {
+      // Simulate what Next's output-file tracer keeps for a fixture that
+      // requires sqlite3: a node_modules-nested package.json (name/version
+      // is all the script's generic loop reads) plus a stray *.node file
+      // wherever node-pre-gyp's GLIBC prebuilt would have landed on the
+      // glibc ubuntu-latest install runner. The script never inspects the
+      // .node file's content, only its presence, before wholesale-replacing
+      // the owning package directory with a fresh musl-appropriate install —
+      // so a placeholder file is enough to drive the walk-up/lookup/rebuild
+      // machinery for real, exactly like the sharp fixture above does for
+      // its own corpus entry.
+      const sqliteDir = mkdtempSync(join(tmpDir, 'sqlite3-'));
+      temps.push(sqliteDir);
+      const pkgDir = join(sqliteDir, 'node_modules', 'sqlite3');
+      mkdirSync(join(pkgDir, 'lib', 'binding', 'napi-v6-linux-glibc-x64'), { recursive: true });
+      writeFileSync(
+        join(pkgDir, 'package.json'),
+        JSON.stringify({ name: 'sqlite3', version: '5.0.2' }),
+      );
+      writeFileSync(
+        join(pkgDir, 'lib', 'binding', 'napi-v6-linux-glibc-x64', 'node_sqlite3.node'),
+        'GLIBC PLACEHOLDER — must be replaced wholesale by the musl rebuild',
+      );
+
+      const { status, stdout } = runRebuild(sqliteDir, 340_000);
+      expect(status, `expected exit 0; stdout:\n${stdout}`).toBe(0);
+      // #1426 — this exact name@version has a COMMITTED lockfile under
+      // scripts/musl-native-lockfiles/sqlite3-5.0.2/, so the install must
+      // take the reproducible `npm ci` path, never the fresh/unpinned one
+      // (which is what every prior run of this corpus took, silently, since
+      // no committed lockfile existed for sqlite3 before this PR).
+      expect(stdout).toContain('sqlite3@5.0.2: using the committed, reproducible lockfile');
+      expect(stdout).not.toContain('NON-REPRODUCIBLE fresh-install fallback');
+      expect(stdout).not.toContain("reproducible 'npm ci' of sqlite3@5.0.2 failed");
+      expect(stdout).toContain('replacing the traced copy');
+
+      // The behavioural claim (CI run 35862123588's actual failure mode,
+      // cited in the script's own header/#1426 commit): the rebuilt sqlite3
+      // must not just exist on disk, it must actually LOAD under the pinned
+      // musl bun runtime — proving npm_config_build_from_source=true really
+      // forced a from-source compile (sqlite3 ships no musl prebuilt) rather
+      // than resolving to a GLIBC prebuilt that "succeeds" at install time
+      // and only fails later, unmasked, at dlopen.
+      const loadCheck = spawnSync(
+        'docker',
+        [
+          'run',
+          '--rm',
+          '--platform',
+          'linux/amd64',
+          '-v',
+          `${sqliteDir}:/mnt`,
+          STANDALONE_BUN_IMAGE,
+          'sh',
+          '-c',
+          "cd /mnt && bun -e \"try{const m=require('./node_modules/sqlite3');console.log('LOADED OK:'+typeof m)}catch(e){console.log('ERR:'+e.message)}\"",
+        ],
+        { encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(
+        loadCheck.stdout,
+        `sqlite3's musl native addon must load cleanly:\n${loadCheck.stdout}\n${loadCheck.stderr}`,
+      ).toContain('LOADED OK:');
+      expect(loadCheck.stdout).not.toContain('ERR:');
+    }, 360_000);
+
+    // #1257 round 7 — install scripts (and node-gyp/npm itself) must never
+    // run as root inside the container. Extracts the REAL `apk add` /
+    // `adduser` / `chown` lines this script uses to set up its unprivileged
+    // `builder` user (not a hand-retyped approximation of them — same
+    // philosophy as the `--user` extraction below), runs them for real
+    // inside the pinned image, then proves `su-exec builder ...` actually
+    // drops to a non-root uid: both what the exec'd process itself reports
+    // (`id -u`) and the numeric owner of a file it creates.
+    it("the builder user this script su-exec's into is genuinely non-root, using the script's OWN setup lines", () => {
+      const scriptSrc = require('node:fs').readFileSync(NATIVE_REBUILD_SH, 'utf8') as string;
+      const apkLine = scriptSrc
+        .split('\n')
+        .find((l) =>
+          l.includes(
+            'apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 nodejs~22.23 su-exec~0.2',
+          ),
+        );
+      const adduserLine = scriptSrc.split('\n').find((l) => l.trim().startsWith('adduser -D -H'));
+      const chownLine = scriptSrc
+        .split('\n')
+        .find((l) => l.includes('chown -R builder:builder "${BUILD_HOME}"'));
+      expect(
+        apkLine,
+        'the apk add line must still exist verbatim — this test proves it, not a copy',
+      ).toBeTruthy();
+      expect(
+        adduserLine,
+        'the adduser line must still exist verbatim — this test proves it, not a copy',
+      ).toBeTruthy();
+      expect(
+        chownLine,
+        'the chown line must still exist verbatim — this test proves it, not a copy',
+      ).toBeTruthy();
+
+      const setupScript = [
+        'set -eu',
+        apkLine,
+        'BUILD_HOME="$(mktemp -d)"',
+        adduserLine,
+        chownLine,
+        'su-exec builder:builder id -u',
+        "su-exec builder:builder sh -c 'touch /tmp/marker-file'",
+        'ls -ln /tmp/marker-file',
+      ].join('\n');
+
+      const r = spawnSync(
+        'docker',
+        ['run', '--rm', '--platform', 'linux/amd64', STANDALONE_BUN_IMAGE, 'sh', '-c', setupScript],
+        { encoding: 'utf8', timeout: 90_000 },
+      );
+      expect(r.status, `expected exit 0; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`).toBe(0);
+      const reportedUid = r.stdout.trim().split('\n')[0];
+      expect(reportedUid, `su-exec'd process must NOT report uid 0:\n${r.stdout}`).not.toBe('0');
+      expect(
+        Number(reportedUid),
+        'the reported uid must be a real positive integer',
+      ).toBeGreaterThan(0);
+      // `ls -ln` prints the numeric uid/gid as the 3rd/4th field — the file
+      // the su-exec'd process CREATED must be owned by that same non-root
+      // uid, not root (proves the drop applied to the actual filesystem
+      // operation, not just what `id` self-reports).
+      const lsLine = r.stdout.trim().split('\n').at(-1) ?? '';
+      const fileOwnerUid = lsLine.split(/\s+/)[2];
+      expect(fileOwnerUid, `file owner uid from: ${lsLine}`).toBe(reportedUid);
+    });
 
     it('--user "$(id -u):$(id -g)" on the boot docker run makes the containerized process run as the INVOKING user, not root (the pid-attribution fix)', () => {
       // Extracted from scripts/e2e-deploy.sh's own boot invocation rather

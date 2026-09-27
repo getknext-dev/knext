@@ -4,34 +4,30 @@
  * The sibling of `bun-keepalive-guard.cjs` (the NODE lane's `node:http` guard),
  * for the `Bun.serve` transport the vinext runtime serves through.
  *
- * WHY (root cause in `.claude/vinext-nitro-reset-rootcause.md`): the compiled
- * vinext single-exec and the uncompiled nitro-bun output both serve via nitro's
- * bun preset → `srvx/bun` → `Bun.serve`. Bun has the SAME class of keep-alive
- * socket-REUSE reset the node:http guard already isolated (#188), but on the
- * `Bun.serve` transport: when a client reuses a keep-alive socket for an
- * immediate back-to-back request, Bun resets it → `socket hang up`, no HTTP
- * response, clean server log, ~1 ms. It dominates the vinext-lane "silent socket
- * reset" failure cluster (~79 fixtures). The node guard patches
- * `node:http.createServer`, which `Bun.serve` never calls, so it is a structural
- * no-op here — this module reaches the `Bun.serve` seam instead.
+ * WHY: the compiled vinext single-exec and the uncompiled nitro-bun output both
+ * serve via nitro's bun preset → `srvx/bun` → `Bun.serve`. `Bun.serve` keeps
+ * HTTP/1.1 connections alive but never announces its idle deadline — responses
+ * carry no `Keep-Alive: timeout=…` header (oven-sh/bun#43848). A pooling client
+ * (node-fetch, undici, the Knative activator) therefore cannot know when the
+ * server will close an idle socket, and can reuse one the server is closing at
+ * that moment → `socket hang up`, no HTTP response, clean server log. That is
+ * the vinext-lane "silent socket reset" failure cluster. (An earlier theory — a
+ * deterministic reset on an immediate back-to-back request — was disproven and
+ * is not the mechanism; oven-sh/bun#42212 was closed not_planned.) The node
+ * guard patches `node:http.createServer`, which `Bun.serve` never calls, so it
+ * is a structural no-op here — this module reaches the `Bun.serve` seam instead.
  *
  * MITIGATION (identical to the node lane, different transport): wrap the `fetch`
  * handler `Bun.serve` is given so every returned `Response` carries
- * `Connection: close`. Spec-honoring clients (node-fetch, undici, browsers, the
- * Knative activator) then never reuse the socket, so the Bun reuse race is
- * unreachable. This trades keep-alive reuse for correctness on the `Bun.serve`
- * path only.
+ * `Connection: close`. Spec-honoring clients then never pool the socket, so the
+ * idle-close race is unreachable. This trades keep-alive reuse for correctness
+ * on the `Bun.serve` path only.
  *
- * VERSION CEILING — deliberately NONE. Unlike the node:http guard (which records
- * the reuse-reset as fixed at Bun 1.4.0 and self-disables at ≥1.4.0), the
- * `Bun.serve` path is MEASURED still-broken at Bun 1.4.2 on linux-x64 (compat run
- * 34485558152, reset fixtures still failing). The upstream fix and therefore the
- * safe ceiling are UNKNOWN as of Bun 1.4.2 on this transport, so this guard is
- * ALWAYS on when running under Bun. Re-verify on a future Bun release before
- * adding a ceiling; do not copy the node guard's `FIXED_MINOR` here.
- *
- * The bug is linux-x64-timing-specific and does NOT reproduce on darwin, so this
- * cannot be validated locally — validation is the compat lane re-run.
+ * VERSION CEILING — deliberately NONE. As of Bun 1.4.2 `Bun.serve` still sends
+ * no `Keep-Alive` header; the upstream-retirement probe `bun-serve-keepalive`
+ * (tests/upstream-retirement/registry.ts) asserts exactly that on the pinned
+ * Bun and goes red on the bump that fixes it — retire this guard in that PR
+ * rather than adding a version ceiling here.
  *
  * Escape hatch: `KNEXT_BUN_KEEPALIVE_GUARD=0` disables the guard outright (the
  * same env var the node guard reads, so one switch covers both transports).
@@ -49,6 +45,7 @@
  *     `bun --preload <this file>` installs the patch before the entry evaluates.
  */
 
+// @upstream-shim bun-serve-keepalive
 const INSTALLED = Symbol.for('knext.bunServeKeepaliveGuard.installed');
 
 /**

@@ -340,6 +340,11 @@ export interface VinextBuildOptions {
      * build for nothing. The `.output` existence check still runs either way.
      */
     readonly skipViteBuild?: boolean;
+    /**
+     * Opt-in self-contained mode. Accepted and recorded only — no embedding
+     * happens yet, so the compile argv is identical either way.
+     */
+    readonly selfContained?: boolean;
 }
 
 /**

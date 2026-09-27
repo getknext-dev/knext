@@ -1,33 +1,42 @@
 import type { KnativeNextConfig } from '@getknext/core';
 
 /**
- * kn-next deploy config for the knext docs site (dogfood target, issue #55).
+ * kn-next deploy config for the knext docs site — the dogfood target.
  *
- * Minimal-valid per packages/kn-next/src/cli/validate.ts:
- *   required: name, registry, storage.provider, storage.bucket
- *   storage.provider MUST be one of: "gcs" | "s3" | "minio" | "azure"
- *     (each shells out to that cloud's CLI: gsutil | aws | mc | az)
- *   scaling.minScale >= 0  → set to 0 here for true scale-to-zero.
+ * CI (`.github/workflows/docs-deploy-oke.yml`) deploys this app to the OKE
+ * cluster with `kn-next deploy` → NextApp CR → operator. Nothing else writes
+ * the cluster: the operator renders the Knative Service, named after `name`
+ * below, which is what `deploy/oke/domainmapping.yaml` points at. Renaming
+ * the app therefore orphans the custom domains — change both together.
+ *
+ * No `storage` block (ADR-0047 no-storage mode): the image serves its own
+ * static assets. The docs deploy also passes `--skip-upload`, so it needs no
+ * cloud-storage credential at all. Add a storage block once an object-storage
+ * bucket exists for OKE.
  *
  * No `cache` block: the docs site is static and needs neither Redis nor an ISR
- * data cache, so it does not enable the Redis cache handler or the bytecode-cache
- * PVC. (Bytecode caching can still be enabled later via the operator if desired.)
+ * data cache.
  */
 const config: KnativeNextConfig = {
   name: 'knext-docs',
-  // build: 'vinext' EXPLICIT — this site's build script runs `vite build` and
-  // ships the vinext single-exec Dockerfile, so it does not want knext's
-  // default builder (`turbopack`/`next build`, since #1183/ADR-0058).
+  // build: 'vinext' EXPLICIT — this site's build script runs `vite build`, so
+  // it does not want knext's default builder (`turbopack`/`next build`). The
+  // image is the app's own `Dockerfile` (vinext `.output` run under Bun).
   build: 'vinext',
-  registry: 'registry.example.com/knext-docs',
-  storage: {
-    provider: 'gcs',
-    bucket: 'knext-docs-assets',
-    publicUrl: 'https://storage.googleapis.com/knext-docs-assets',
-  },
+  // OCIR namespace. The CLI appends the app name, so the image lands in the
+  // PUBLIC `knext-docs` repository — the cluster pulls without a pull secret.
+  registry: 'me-abudhabi-1.ocir.io/axfqznklsd2t',
   scaling: {
-    minScale: 0, // scale to zero when idle
+    // Scale to zero when idle — the product's default. The hand-applied
+    // Knative Service this replaces pinned min-scale 1 ("keep warm"); a cold
+    // docs hit now pays one cold start instead of holding a pod forever.
+    minScale: 0,
     maxScale: 5,
+    // Matches the hand-applied Knative Service this replaces.
+    cpuRequest: '100m',
+    memoryRequest: '256Mi',
+    cpuLimit: '1',
+    memoryLimit: '768Mi',
   },
 };
 

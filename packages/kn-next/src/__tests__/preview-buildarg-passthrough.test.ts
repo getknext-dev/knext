@@ -206,3 +206,28 @@ describe("preview.ts defaultBuildAndPush compiles the exec via the shared build-
         expect(dockerArgv()).toBeUndefined();
     });
 });
+
+describe("preview.ts routes the resolved selfContained mode into the compile step", () => {
+    const resolved = (): boolean => {
+        const [cfg, , opts] = compileArtifactForDeploy.mock.calls[0] as [
+            { selfContained?: boolean },
+            string,
+            { selfContained?: boolean } | undefined,
+        ];
+        return opts?.selfContained ?? cfg.selfContained ?? false;
+    };
+    it("selfContained:true reaches compileArtifactForDeploy", async () => {
+        const { defaultBuildAndPush } = await import("../cli/preview");
+        await defaultBuildAndPush(
+            "acme-pr-1",
+            { ...baseConfig, selfContained: true },
+            "feature/x",
+        );
+        expect(resolved()).toBe(true);
+    });
+    it("default resolves to off", async () => {
+        const { defaultBuildAndPush } = await import("../cli/preview");
+        await defaultBuildAndPush("acme-pr-1", baseConfig, "feature/x");
+        expect(resolved()).toBe(false);
+    });
+});

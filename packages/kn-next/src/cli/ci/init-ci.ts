@@ -45,7 +45,7 @@ export const REQUIRED_SECRETS = [
     },
     {
         name: "KNEXT_REGISTRY",
-        what: "registry host + repository, e.g. ghcr.io/acme/app",
+        what: "registry host + namespace, e.g. ghcr.io/acme (the app name is appended)",
         why: "where the built image is pushed; you own it, knext never sees it",
     },
     {
