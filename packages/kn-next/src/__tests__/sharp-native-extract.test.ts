@@ -144,6 +144,17 @@ describe("extractEmbeddedNative", () => {
         expect(existsSync(join(tmpRoot, "..", "escape.node"))).toBe(false);
     });
 
+    it("refuses a BARE '..' relpath, not merely one PREFIXED by '../' (round-4, #1460 N3: proves `n.split(sep).includes(\'..\')` is load-bearing now that the redundant `n === \'..\'` disjunct was retired)", () => {
+        const tmpRoot = temp("knext-1460-tmp-");
+        const [file] = tree({ "a.node": "A" });
+        expect(() =>
+            extractEmbeddedNative({
+                files: [{ rel: "..", path: file.path }],
+                tmpRoot,
+            }),
+        ).toThrow(/escapes the native root/);
+    });
+
     it("an empty embedded tree is an error, not a silent no-op", () => {
         expect(() =>
             extractEmbeddedNative({
