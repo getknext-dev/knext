@@ -553,6 +553,8 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json:/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json:ro" \
       -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json:/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json:ro" \
       -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:ro" \
+      -v "${SCRIPT_DIR}/musl-native-lockfiles/sqlite3-5.0.2/package.json:/musl-native-lockfiles/sqlite3-5.0.2/package.json:ro" \
+      -v "${SCRIPT_DIR}/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json:/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json:ro" \
       "${STANDALONE_BUN_IMAGE}" \
       sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" /musl-native-lockfiles >&2
   else

@@ -184,6 +184,11 @@ const MUSL_NATIVE_LOCKFILE_FILES = Object.freeze([
   'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json',
   'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json',
   'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json',
+  // #1426: sqlite3 is the ORIGINAL motivating case for the musl rebuild
+  // script (see its own header's ROUND 2/ROUND 7 notes) but had no
+  // committed lockfile pin until now.
+  'scripts/musl-native-lockfiles/sqlite3-5.0.2/package.json',
+  'scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json',
 ]);
 
 export const CREDENTIAL_CELLS = Object.freeze([
