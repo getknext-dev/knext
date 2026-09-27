@@ -125,10 +125,11 @@ jobs:
       - name: Install cert-manager
         run: |
           set -euo pipefail
-          # The manifest is checksum-pinned: a moved/edited release asset fails here.
-          curl -fsSL -o /tmp/cert-manager.yaml https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
-          echo "1d51cdecd442f1f5f89783e9e0169b95d372724da203cc75dd7a5c4e50a10ce6  /tmp/cert-manager.yaml" | sha256sum -c -
-          kubectl apply -f /tmp/cert-manager.yaml
+          # Shared fetch+checksum-verify+image-digest-pin+apply helper (#1289) — do
+          # not re-inline the curl/sha256sum steps here; that drift (this lane's own
+          # copy skipped the image-digest pin the shared script does) is exactly
+          # what the helper exists to prevent.
+          scripts/kind-manifests/apply-cert-manager.sh
           kubectl wait --for=condition=Available --timeout=300s \
             -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
 
@@ -136,20 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           V="knative-v1.16.0"
-          # Checksum-pinned manifests (a moved/edited release asset fails here).
-          fetch() { # <url> <sha256> <file>
-            curl -fsSL -o "$3" "$1"
-            echo "$2  $3" | sha256sum -c -
-          }
-          fetch "https://github.com/knative/serving/releases/download/${V}/serving-crds.yaml" \
-            33cc24f96321cd19deea6b85397e53b24e1a7ae61aebc4a92c2bd867e93611ec /tmp/serving-crds.yaml
-          fetch "https://github.com/knative/serving/releases/download/${V}/serving-core.yaml" \
-            1f55c6b02bbea20ffe7c203811ae8dfd238ead7caca1f2e76275b239dfd06206 /tmp/serving-core.yaml
-          fetch "https://github.com/knative/net-kourier/releases/download/${V}/kourier.yaml" \
-            381efeb83e0f424d7ada19a581ecfa9a8267aae396d9100e836cc131cc7d210f /tmp/kourier.yaml
-          kubectl apply -f /tmp/serving-crds.yaml
-          kubectl apply -f /tmp/serving-core.yaml
-          kubectl apply -f /tmp/kourier.yaml
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
           kubectl patch configmap/config-network -n knative-serving --type merge \
             --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
           kubectl patch configmap/config-autoscaler -n knative-serving --type merge \

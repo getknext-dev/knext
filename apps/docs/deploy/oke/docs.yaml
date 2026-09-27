@@ -1,3 +1,5 @@
+# SUPERSEDED by #1481 (the docs site deploys through the NextApp; see
+# README.md). Retired once the docs-deploy-oke workflow's first run on main is green.
 # Plain-k8s deploy of knext-docs on OKE (no Knative / knext operator).
 # Image built from Dockerfile.oke (vinext/vite build with NITRO_PRESET=node,
 # served by `node .output/server/index.mjs`). It was a `next build` +

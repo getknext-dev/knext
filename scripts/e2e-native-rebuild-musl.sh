@@ -133,21 +133,14 @@
 #     `scripts/generate-musl-native-lockfile.sh` is the (real-network,
 #     contributor-run, not CI-run) tool that adds a new pin to that corpus.
 #
-# NOT done here, and stated rather than left implicit (#1257's other
-# acceptance leg): the `apk add` toolchain packages themselves are pinned by
-# NAME only, not by an exact NEVRA version or content digest — this script
-# cannot safely author those pins without a live container to resolve
-# against (no local docker in this environment; guessing a version risks
-# either being wrong, in which case CI reds outright, or being silently
-# stale). Alpine's package index IS signature-verified by `apk` itself
-# against Alpine's own trusted keys (not a bare unauthenticated mirror
-# fetch), and the base image `apk add` runs inside is already pinned by OCI
-# digest (`STANDALONE_BUN_IMAGE` in scripts/e2e-deploy.sh) — so this is a
-# real, if narrower, gap than a full digest pin: a mirror-side security
-# patch to python3/make/g++/npm/su-exec between two runs of this script can
-# still shift the exact toolchain build without either pin changing. Tracked
-# to close in a follow-up once a live CI run's `apk add` output supplies the
-# exact resolved versions to pin against (see the PR description).
+# apk toolchain pins (#1425): each `apk add` package carries a `~X.Y`
+# minor-lock (Alpine's fuzzy prefix match), resolved against the Alpine 3.22
+# index the digest-pinned base image ships (python3~3.12, make~4.4, g++~14.2,
+# npm~11.6, nodejs~22.23 [npm's own dep], su-exec~0.2). Deliberately NOT an exact `=X.Y.Z-rN` pin: Alpine
+# mirrors keep only the latest build per release branch, so an exact pin
+# reds CI the next time Alpine ships a routine security bump. The minor-lock
+# rejects a minor/major drift while accepting patch-level bumps. Guarded by
+# tests/musl-apk-pin.test.ts.
 set -eu
 
 ROOT="${1:?usage: e2e-native-rebuild-musl.sh <standalone-root> [lockfiles-dir]}"
@@ -187,8 +180,7 @@ trap restore_ownership EXIT
 # (#1257 round 7 — see the header note). stdout only is suppressed — an apk
 # failure under `set -eu` must not abort with zero diagnostic output (review
 # finding): stderr reaches the caller's log.
-apk add --no-cache python3 make g++ npm su-exec >/dev/null
-
+apk add --no-cache python3~3.12 make~4.4 g++~14.2 npm~11.6 nodejs~22.23 su-exec~0.2 >/dev/null
 # #1257 round 7 — an unprivileged user every npm install/ci below is
 # `su-exec`'d to, so install scripts (and anything node-gyp/npm itself runs)
 # never execute as root. `-D` (no password), `-H` (no default /home/<user>
@@ -260,7 +252,14 @@ musl_install_sibling() { # <spec> <dest-name>
     cp "${_pinned_dir}/package-lock.json" "${_pkg_scratch}/package-lock.json"
     chown builder:builder "${_pkg_scratch}/package.json" "${_pkg_scratch}/package-lock.json"
     echo "[native-rebuild] ${_spec}: using the committed, reproducible lockfile at ${_pinned_dir}"
-    if ! (cd "${_pkg_scratch}" && run_as_builder npm ci --no-audit --no-fund >"${_pkg_scratch}.log" 2>&1); then
+    # npm_config_build_from_source=true (#1426 — same reasoning as the fresh
+    # `npm install` fallback below, and as the pinned `npm ci` path in the
+    # main *.node loop below): without it, npm's node-pre-gyp/node-gyp-build
+    # tooling tries a PREBUILT download FIRST regardless of libc, so a
+    # network-connected runner "succeeds" with a GLIBC prebuilt and
+    # ERR_DLOPEN_FAILED resurfaces under musl at runtime, unmasked by a
+    # green `npm ci`.
+    if ! (cd "${_pkg_scratch}" && run_as_builder env npm_config_build_from_source=true npm ci --no-audit --no-fund >"${_pkg_scratch}.log" 2>&1); then
       echo "[native-rebuild] WARNING: reproducible 'npm ci' of ${_spec} failed (the committed lockfile may be stale)"
       tail -c 4096 "${_pkg_scratch}.log" 2>/dev/null || true
       return 1
@@ -431,7 +430,12 @@ echo "${HITS}" | while IFS= read -r f; do
     cp "${PINNED_DIR}/package-lock.json" "${PKG_SCRATCH}/package-lock.json"
     chown builder:builder "${PKG_SCRATCH}/package.json" "${PKG_SCRATCH}/package-lock.json"
     echo "[native-rebuild] ${NAME}@${VERSION}: using the committed, reproducible lockfile at ${PINNED_DIR}"
-    if ! (cd "${PKG_SCRATCH}" && run_as_builder npm ci --no-audit --no-fund >"${PKG_SCRATCH}.log" 2>&1); then
+    # npm_config_build_from_source=true (#1426 — CI run 35862123588, see the
+    # non-pinned fallback's comment below for the full explanation): without
+    # it, npm's node-pre-gyp tooling tries a PREBUILT download FIRST without
+    # checking libc, so this "reproducible" `npm ci` can still resolve to a
+    # GLIBC prebuilt and defer ERR_DLOPEN_FAILED to musl runtime, unmasked.
+    if ! (cd "${PKG_SCRATCH}" && run_as_builder env npm_config_build_from_source=true npm ci --no-audit --no-fund >"${PKG_SCRATCH}.log" 2>&1); then
       echo "[native-rebuild] WARNING: reproducible 'npm ci' of ${NAME}@${VERSION} failed (the committed lockfile may be stale) — this addon may still fail to dlopen under musl at runtime (original error will resurface, not masked)"
       tail -c 4096 "${PKG_SCRATCH}.log" 2>/dev/null || true
       continue
