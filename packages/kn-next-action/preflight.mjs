@@ -31,20 +31,36 @@ if (!namespace) {
 }
 
 /**
- * `kubectl auth can-i --list` performs a SelfSubjectRulesReview and prints the
- * subject's effective rules in the namespace. Asking the CLUSTER is the point:
- * a kubeconfig does not state its own permissions, so reading the file would
- * tell us nothing about what it can actually do.
+ * Ask the cluster for a `SelfSubjectRulesReview` — a virtual resource: the
+ * apiserver evaluates it against the caller's own identity and returns the
+ * answer, nothing is persisted. Asking the CLUSTER is the point: a kubeconfig
+ * does not state its own permissions, so reading the file would tell us
+ * nothing about what it can actually do.
+ *
+ * `kubectl auth can-i --list` performs this exact review but does NOT accept
+ * `-o`/`--output` on any kubectl release (checked 1.25 through 1.37; the
+ * flag has never existed for that subcommand) — #1493 was this preflight
+ * shipping `-o json` on that command and refusing on every runner. `kubectl
+ * create -o json -f -`, by contrast, supports `-o json` on every kubectl
+ * release, so submitting the review object directly is version-independent
+ * where scraping `can-i`'s table output never was. `kubectl get --raw` is not
+ * an option here: a review is created (POST), not read (GET).
  */
 function effectiveRules() {
-  const out = execFileSync('kubectl', ['auth', 'can-i', '--list', '-n', namespace, '-o', 'json'], {
+  const review = JSON.stringify({
+    apiVersion: 'authorization.k8s.io/v1',
+    kind: 'SelfSubjectRulesReview',
+    spec: { namespace },
+  });
+  const out = execFileSync('kubectl', ['create', '-o', 'json', '-f', '-'], {
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
+    input: review,
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const parsed = JSON.parse(out);
-  // `can-i --list -o json` returns a SelfSubjectRulesReview.
-  const rules = parsed?.status?.resourceRules;
-  if (!Array.isArray(rules)) {
+  const status = parsed?.status;
+  const rules = status?.resourceRules;
+  if (!status || !Array.isArray(rules)) {
     throw new Error('SelfSubjectRulesReview returned no resourceRules');
   }
   return rules;

@@ -45,6 +45,10 @@ If your cluster's authorizer cannot answer that question, the action fails rathe
 best. A check that goes green when it cannot see is not a check. `skip-credential-preflight: true`
 exists for that case and turns the check **off** — it does not satisfy it.
 
+This check does not depend on the `kubectl` version your runner happens to ship — it asks the
+cluster directly rather than parsing a command's table output, so it behaves the same on
+`ubuntu-latest` as it does on your laptop.
+
 ## Inputs
 
 | Input | Required | Default | Notes |
