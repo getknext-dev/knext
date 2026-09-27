@@ -116,7 +116,10 @@ with `runtime: 'bun'` — turning it on embeds the server side of the build — 
 own server modules and the build manifests — into the executable, so it starts from a directory that
 holds only the executable, `public/` and `.next/static/`. Other targets do not use it yet: there the
 choice is only recorded in the build log. The value must be a boolean — `knext validate` rejects
-anything else.
+anything else. If any dependency under `.next/server` ships a native addon (a compiled `.node`
+file), the build **fails immediately and names the file** rather than embedding it: a native addon
+loads from a real filesystem path, which the executable's embedded filesystem cannot provide, so an
+embedded copy would only crash the first request that touches it.
 
 ### vinext on Node
 

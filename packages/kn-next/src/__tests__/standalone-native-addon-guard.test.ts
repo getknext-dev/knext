@@ -14,7 +14,13 @@
 
 import { afterAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+    mkdirSync,
+    mkdtempSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -67,12 +73,21 @@ function syntheticStandalone(): { standalone: string; nodeFile: string } {
     write(join(standalone, "server.js"), SERVER_JS);
     // Any bytes stand in for a real native addon binary — the guard triggers
     // on the extension, not the content.
-    const nodeFile = join(standalone, ".next", "server", "vendor", "sharp-linux-x64.node");
+    const nodeFile = join(
+        standalone,
+        ".next",
+        "server",
+        "vendor",
+        "sharp-linux-x64.node",
+    );
     write(nodeFile, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
     return { standalone, nodeFile };
 }
 
-function runCompile(standalone: string, binary: string): { status: number | null; stderr: string } {
+function runCompile(
+    standalone: string,
+    binary: string,
+): { status: number | null; stderr: string } {
     try {
         execFileSync(
             "bun",
@@ -114,6 +129,13 @@ describe("self-contained compile fails closed on a .node native addon", () => {
         const binary = join(standalone, "knext-standalone-exec-2");
         const result = runCompile(standalone, binary);
         expect(result.status).not.toBe(0);
+        // Tie the "no outfile" claim to the GUARD's own failure, not just any
+        // failure: this fixture also fails downstream (no route chunk) once a
+        // route file is added, so without this assertion the test stays green
+        // even with the native-addon guard deleted — it would still see a
+        // non-zero exit and no outfile, just for an unrelated reason.
+        expect(result.stderr).toContain("native addon");
+        expect(result.stderr).toContain("dlopen");
         expect(() => statSync(binary)).toThrow();
     }, 30_000);
 });

@@ -591,11 +591,19 @@ export const REGISTRY: RetirementEntry[] = [
         // Control: the files ARE embedded and readable with readFileSync.
         if (read !== 'static-ok') inconclusive('bunfs-static-disk-alias', `readFileSync: ${raw}`);
         const streamBroken = stream !== 'static-ok';
-        const writeBroken = write !== 'wrote';
         const extensionlessBroken = ext !== 'id-ok';
+        // The write leg (`write`) is deliberately excluded from `stillBroken`:
+        // gap (2), a write under an embedded `$bunfs` path, is permanent by
+        // design (a
+        // baked-in virtual filesystem can never accept a write, upstream or
+        // not) — there is no upstream fix that could ever retire it. ORing it
+        // in would make this probe report `stillBroken: true` forever even
+        // after (1) and (3) are both fixed, permanently masking a real
+        // retirement of the read-side shim. It stays in `evidence` so a
+        // regression in the disk-write fallback is still visible.
         return {
-          stillBroken: streamBroken || writeBroken || extensionlessBroken,
-          evidence: `createReadStream → ${stream}; write under an embedded path → ${write}; extensionless read (no trailing-dot alias) → ${ext}`,
+          stillBroken: streamBroken || extensionlessBroken,
+          evidence: `createReadStream → ${stream}; write under an embedded path (permanent, not gating) → ${write}; extensionless read (no trailing-dot alias) → ${ext}`,
         };
       } finally {
         box.dispose();
