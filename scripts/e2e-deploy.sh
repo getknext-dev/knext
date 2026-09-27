@@ -621,6 +621,7 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       # fix). RUNNER_TEMP is the GitHub Actions runner's own temp root; /tmp
       # is the local fallback.
       EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir.XXXXXX")"
+      ed_own_dir "${EMPTY_DIR}"
       EMPTY_DIR_PORT="$(free_port)"
       EMPTY_DIR_UID_GID="$(id -u):$(id -g)"
       EMPTY_DIR_CONTAINER="knext-e2e-empty-dir-${DEPLOYMENT_ID}"
@@ -628,14 +629,37 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       log "KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check into ${EMPTY_DIR}"
       EMPTY_DIR_STAGED="$(ed_stage "${EMPTY_DIR}" "${STANDALONE_EXEC}" "${EMPTY_DIR_COPY_SPECS[@]}")" || {
         log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check failed"
+        rm -rf "${EMPTY_DIR}"
         exit 1
       }
       ed_assert_clean "${EMPTY_DIR}" "$(basename "${EMPTY_DIR_STAGED}")" || {
         log "ERROR: KNEXT_SELF_CONTAINED=1 — the staged empty dir is not clean — see above"
+        rm -rf "${EMPTY_DIR}"
         exit 1
       }
-      log "KNEXT_SELF_CONTAINED=1 — booting $(basename "${EMPTY_DIR_STAGED}") from ${EMPTY_DIR} inside ${STANDALONE_BUN_IMAGE} (nothing else present)"
-      if ! ed_boot_probe_kill "${EMPTY_DIR_PORT}" /api/health / \
+      # #1515: the 2xx check is a STAGED static file (ED_STATIC_PROBE) under
+      # the fixture's basePath — the compat fixtures have no /api/health —
+      # and `/` stays non-5xx. A lane whose app has the route sets
+      # KNEXT_EMPTY_DIR_HEALTH_PATH.
+      EMPTY_DIR_HEALTH="${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}"
+      if [ "${EMPTY_DIR_HEALTH}" = "${ED_STATIC_PROBE}" ]; then
+        # round-2 review, finding 2: the previous inline `try{}catch{}` turned
+        # an UNREADABLE/malformed manifest into a silent "" basePath — see
+        # scripts/lib/e2e-read-base-path.mjs's header for why that is a real
+        # defect, not a defensive fallback. Fail loud instead.
+        EMPTY_DIR_BASE_PATH="$(node "${ED__LIB_DIR}/e2e-read-base-path.mjs" "${APP_DIR}/.next/required-server-files.json")" || {
+          log "ERROR: KNEXT_SELF_CONTAINED=1 — could not resolve basePath from ${APP_DIR}/.next/required-server-files.json — refusing to probe with a silently-empty basePath (see above)"
+          rm -rf "${EMPTY_DIR}"
+          exit 1
+        }
+        EMPTY_DIR_HEALTH="$(ed_static_probe_path "${EMPTY_DIR}" "${EMPTY_DIR_BASE_PATH}")" || {
+          log "ERROR: KNEXT_SELF_CONTAINED=1 — no staged static file to probe"
+          rm -rf "${EMPTY_DIR}"
+          exit 1
+        }
+      fi
+      log "KNEXT_SELF_CONTAINED=1 — booting $(basename "${EMPTY_DIR_STAGED}") from ${EMPTY_DIR} inside ${STANDALONE_BUN_IMAGE} (nothing else present); probing ${EMPTY_DIR_HEALTH} (2xx) and / (non-5xx)"
+      if ! ed_boot_probe_kill "${EMPTY_DIR_PORT}" "${EMPTY_DIR_HEALTH}" / \
         docker run --rm --name "${EMPTY_DIR_CONTAINER}" \
         --network host \
         --user "${EMPTY_DIR_UID_GID}" \
@@ -647,10 +671,17 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
         "./$(basename "${EMPTY_DIR_STAGED}")"; then
         log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until N1 (#1456) embeds what this exec still loads from .next/server/** on disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
         docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true
+        # round-2 review, finding 3: this pre-check dir is a SECOND full copy
+        # of the binary + static assets, staged on top of the suite's own
+        # empty dir below — remove it right after the probe, on every exit
+        # path, rather than leaving it for e2e-cleanup.sh (which never knew
+        # about it) or the runner's own disk churn.
+        rm -rf "${EMPTY_DIR}"
         exit 1
       fi
       log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"
       docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true
+      rm -rf "${EMPTY_DIR}"
     fi
   else
     log "ERROR: KNEXT_E2E_SKIP_PACK=1 has no installed adapter to resolve the compile script from, but RUNTIME=bun was requested — refusing to silently fall back to server.js (contract-test mode is not expected to combine these)"
@@ -983,7 +1014,46 @@ elif [ -n "${KNEXT_NODE_SUPERVISOR}" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" !=
 else
   log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
 fi
+# ── #1514: in SC mode the SUITE is served from the empty dir ─────────────────
+# §3c-ii's 2-route probe is only the fail-fast pre-check. The container the
+# whole compat suite runs against boots from a FRESH empty dir holding only the
+# compiled exec + .next/static + public/: the container mounts ONLY that dir
+# (-v EMPTY_DIR:EMPTY_DIR, -w EMPTY_DIR — nothing of .next/standalone, nothing
+# of APP_DIR), and APP_DIR's node_modules / .next / .output are ALSO hidden on
+# the host for the whole run (restored by scripts/e2e-cleanup.sh at teardown,
+# after the container is stopped, or by the EXIT trap armed here if this
+# script fails before handing the URL to the harness). The container mount is
+# what isolates this lane; the host-side hide keeps the two lanes' guard
+# (ed_assert_suite_isolated) identical.
+SERVED_FROM="disk"
+if [ -n "${STANDALONE_EXEC}" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
+  EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir-suite.XXXXXX")"
+  ed_own_dir "${EMPTY_DIR}"
+  EMPTY_DIR_STAGED="$(ed_suite_stage "${EMPTY_DIR}" "${STANDALONE_EXEC}" \
+    "${STANDALONE_APP_DIR}/.next/static:.next/static" "${STANDALONE_APP_DIR}/public:public")" || {
+    log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite's empty dir failed"
+    rm -rf "${EMPTY_DIR}"
+    exit 1
+  }
+  ed_suite_arm_restore_trap "${APP_DIR}"
+  ED_SUITE_CONTAINER="${CONTAINER_NAME}"
+  ed_suite_hide_app_dir "${APP_DIR}" || exit 1
+  SERVED_FROM="${ED_SUITE_SERVED_FROM_SC}"
+  log "KNEXT_SELF_CONTAINED=1 — booting the SUITE container ${CONTAINER_NAME} from ${EMPTY_DIR} (mounts only that dir; APP_DIR node_modules/.next/.output hidden until teardown)"
+fi
 (
+  if [ "${SERVED_FROM}" != "disk" ]; then
+    cd "${EMPTY_DIR}"
+    exec docker run --rm --name "${ED_SUITE_CONTAINER}" \
+      --network host \
+      --user "$(id -u):$(id -g)" \
+      -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
+      -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      -v "${EMPTY_DIR}:${EMPTY_DIR}" \
+      -w "${EMPTY_DIR}" \
+      "${STANDALONE_BUN_IMAGE}" \
+      "./$(basename "${EMPTY_DIR_STAGED}")"
+  fi
   cd "${STANDALONE_APP_DIR}"
   if [ -n "${STANDALONE_EXEC}" ]; then
     exec docker run --rm --name "${CONTAINER_NAME}" \
@@ -1026,6 +1096,9 @@ fi
   fi
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
+if [ "${SERVED_FROM}" != "disk" ]; then
+  ED_SUITE_SERVER_PID="${SERVER_PID}"
+fi
 # The pid used for port-ownership attribution (#171 guard below). For the
 # docker-booted exec, SERVER_PID is the `docker run` CLIENT process — it
 # never itself holds the listening socket, `--network host` or not — so
@@ -1064,6 +1137,13 @@ OWNER_PID="${SERVER_PID}"
     fi
   fi
   echo "SERVER_JS=${SERVER_JS}"
+  # #1514: where the SUITE server was served from — `empty-dir`
+  # (KNEXT_SELF_CONTAINED=1: the container mounts only a staged empty dir,
+  # APP_DIR hidden) or `disk` (the standalone tree / APP_DIR).
+  echo "SERVED_FROM=${SERVED_FROM}"
+  if [ "${SERVED_FROM}" != "disk" ]; then
+    echo "SERVED_FROM_DIR=${EMPTY_DIR}"
+  fi
   echo "SERVER_LOG=${SERVER_LOG}"
   echo "BUILD_LOG=${BUILD_LOG}"
 } >"${LOG_FILE}"
@@ -1234,6 +1314,17 @@ elif [ "${OWNS}" = "2" ]; then
 fi
 
 log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"
+
+# #1514: the runtime isolation check, while the suite server is UP. A failure
+# exits here; the EXIT trap stops the container and restores APP_DIR.
+if [ "${SERVED_FROM}" != "disk" ]; then
+  if ! ed_assert_suite_isolated "${EMPTY_DIR}" "${APP_DIR}"; then
+    log "ERROR: KNEXT_SELF_CONTAINED=1 — the suite server is not isolated from the disk tree (see above); refusing to hand it to the harness"
+    exit 1
+  fi
+  ed_suite_hand_off "${EMPTY_DIR}"
+  log "KNEXT_SELF_CONTAINED=1 — suite served from ${EMPTY_DIR} (served_from=${SERVED_FROM}); APP_DIR stays hidden until e2e-cleanup.sh"
+fi
 
 # ── 6b. node bytecode-liveness evidence (the node half of step 5b) ────────────
 # Count what V8 accepted from the shipped bake while the supervisor's Next

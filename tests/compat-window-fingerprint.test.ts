@@ -458,11 +458,30 @@ describe('compat-window fingerprint — KNEXT_SELF_CONTAINED is folded into the 
     return JSON.parse(out);
   }
 
+  /**
+   * #1514: a self-contained fingerprint requires the frozen harness to declare
+   * `ED_SUITE_SERVED_FROM_SC="empty-dir"` in scripts/lib/e2e-empty-dir.sh,
+   * sourced by the deploy script (so it is in the closure). Applied to the
+   * fixture for BOTH modes of a comparison, so the harness halves still match.
+   */
+  function makeServedFromFixture(): { repoRoot: string; tarballsDir: string } {
+    const fixture = makeFixture();
+    writeFileSync(
+      join(fixture.repoRoot, 'scripts/e2e-deploy.sh'),
+      '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n. "${SCRIPT_DIR}/lib/e2e-empty-dir.sh"\necho deploy\n',
+    );
+    writeFileSync(
+      join(fixture.repoRoot, 'scripts/lib/e2e-empty-dir.sh'),
+      '#!/usr/bin/env bash\nED_SUITE_SERVED_FROM_SC="empty-dir"\n',
+    );
+    return fixture;
+  }
+
   // THE property this whole describe block exists to pin (#1455): a
   // self-contained window and a disk-mode window must NEVER share a
   // fingerprint, even when the harness and packed closure are byte-identical.
   it('self-contained ON produces a DIFFERENT fingerprint than the same tree with it OFF', () => {
-    const { repoRoot, tarballsDir } = makeFixture();
+    const { repoRoot, tarballsDir } = makeServedFromFixture();
     const off = fingerprintWithMode(repoRoot, tarballsDir, false);
     const on = fingerprintWithMode(repoRoot, tarballsDir, true);
     expect(on.fingerprint).not.toBe(off.fingerprint);
@@ -487,18 +506,22 @@ describe('compat-window fingerprint — KNEXT_SELF_CONTAINED is folded into the 
   });
 
   it('the mode is recorded verbatim, legible without re-deriving it from the hash', () => {
-    const { repoRoot, tarballsDir } = makeFixture();
+    const { repoRoot, tarballsDir } = makeServedFromFixture();
     const on = fingerprintWithMode(repoRoot, tarballsDir, true);
     const off = fingerprintWithMode(repoRoot, tarballsDir, false);
-    expect(on.recorded.selfContained).toEqual({ value: true, frozen: true });
-    expect(off.recorded.selfContained).toEqual({ value: false, frozen: false });
+    expect(on.recorded.selfContained).toEqual({
+      value: true,
+      frozen: true,
+      servedFrom: 'empty-dir',
+    });
+    expect(off.recorded.selfContained).toEqual({ value: false, frozen: false, servedFrom: null });
   });
 
   // Composes correctly with the OTHER strictly-additive fold (the bun-build
   // identity, #1147): turning self-contained on must not disturb a runtime
   // fold that is also present, and vice versa.
   it('composes with the runtime (bun-build) fold without disturbing it', () => {
-    const { repoRoot, tarballsDir } = makeFixture();
+    const { repoRoot, tarballsDir } = makeServedFromFixture();
     const args = [
       SCRIPT,
       '--repo-root',

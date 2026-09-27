@@ -10,8 +10,22 @@ set -uo pipefail
 
 APP_DIR="$(pwd)"
 LOG_FILE="${APP_DIR}/.adapter-build.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/e2e-empty-dir.sh
+. "${SCRIPT_DIR}/lib/e2e-empty-dir.sh"
+
+# PR #1521 round 3: this script never removes a staging directory by name
+# pattern or age. RUNNER_TEMP is shared by concurrently-running test files
+# (the harness runs `-c 2` on one runner), so a `knext-empty-dir*` glob
+# matches ANOTHER deploy's live suite/pre-check dir (the round-2 orphan sweep
+# deleted exactly that). Each deploy removes its own dirs (ed_own_dir in
+# scripts/lib/e2e-empty-dir.sh); the only one it hands over is the suite dir,
+# which this script removes below from THIS deployment's SERVED_FROM_DIR.
 
 if [ ! -f "${LOG_FILE}" ]; then
+  # #1514: no metadata means no server to stop, but a self-contained deploy
+  # killed before writing it may still have left APP_DIR hidden.
+  ed_suite_restore_app_dir "${APP_DIR}" || true
   echo "[e2e-cleanup] no .adapter-build.log — nothing to clean up" >&2
   exit 0
 fi
@@ -55,6 +69,28 @@ fi
 CONTAINER_NAME="$(grep -E '^CONTAINER_NAME=' "${LOG_FILE}" | head -n1 | cut -d= -f2- || true)"
 if [ -n "${CONTAINER_NAME:-}" ] && command -v docker >/dev/null 2>&1; then
   docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+fi
+
+# ── #1514: restore APP_DIR after a self-contained (served_from=empty-dir) run ─
+# The deploy script hid APP_DIR's node_modules/.next/.output for the WHOLE
+# suite run; restore them now that the server above is stopped. Unconditional
+# and metadata-independent (a no-op when nothing was hidden, i.e. every disk
+# run), so it also covers a deploy killed before it wrote SERVED_FROM.
+ed_suite_restore_app_dir "${APP_DIR}" || echo "[e2e-cleanup] WARNING: could not restore every hidden APP_DIR entry — see above" >&2
+
+# ── round-2 review, finding 3 (runner disk) — remove the suite's staged copy ──
+# SERVED_FROM_DIR (written at metadata time, §5 of e2e-deploy.sh/-vinext.sh)
+# is a mktemp path the deploy script itself owns — a full copy of the binary +
+# static assets, on top of APP_DIR, that the suite server ran from. Nothing
+# was ever removing it: about 33 deploys/shard × this one dir × 100+ MB each
+# would otherwise accumulate in RUNNER_TEMP over a self-contained dispatch
+# with no disk management. Read AFTER the server above is stopped (the same
+# ordering the restore above depends on) and removed unconditionally — a
+# no-op on every disk-mode run, where SERVED_FROM_DIR was never written.
+SERVED_FROM_DIR="$(grep -E '^SERVED_FROM_DIR=' "${LOG_FILE}" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+if [ -n "${SERVED_FROM_DIR:-}" ] && [ -d "${SERVED_FROM_DIR}" ]; then
+  rm -rf "${SERVED_FROM_DIR}"
+  echo "[e2e-cleanup] removed the suite's staged empty dir ${SERVED_FROM_DIR}" >&2
 fi
 
 # ── #188 (bun-lane fix round 1) — surface the server log at teardown ──────────

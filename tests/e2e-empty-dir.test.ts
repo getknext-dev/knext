@@ -1,16 +1,26 @@
 import { afterAll, describe, expect, it } from 'bun:test';
-import { spawnSync } from 'node:child_process';
+import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import {
+  collectHarness,
+  readHarnessServedFrom,
+  SC_SERVED_FROM,
+  SERVED_FROM_LIB,
+} from '../scripts/compat-window-fingerprint.mjs';
 
 /**
  * The KNEXT_SELF_CONTAINED=1 empty-dir lane step (#1455, ADR-0060 decision 5 /
@@ -50,13 +60,44 @@ afterAll(() => {
 });
 
 function sh(script: string) {
-  return spawnSync('bash', ['-c', `set -uo pipefail; . "${LIB}"; ${script}`], {
-    encoding: 'utf8',
-  });
+  return retryOnPortRace(script, () =>
+    spawnSync('bash', ['-c', `set -uo pipefail; . "${LIB}"; ${script}`], {
+      encoding: 'utf8',
+    }),
+  );
 }
 
+/**
+ * freePortExpr() is a TOCTOU by construction: it binds :0, closes, prints
+ * the port, and the fixture server binds it a moment later. On macOS the
+ * probes' own client sockets draw from the same ephemeral range, so about 1
+ * full-file run in 10 lost that race (`listen EADDRINUSE`, measured in PR
+ * #1521 round 3) — a red for a reason no test is about, which also FATALs
+ * the mutation prover's post-restore re-check. Re-run (at most twice more)
+ * ONLY when the script picked a free port AND the failure is that exact
+ * bind error; any other outcome, pass or fail, is returned as-is.
+ */
+function retryOnPortRace(
+  script: string,
+  run: () => SpawnSyncReturns<string>,
+): SpawnSyncReturns<string> {
+  let r = run();
+  if (!script.includes(freePortExpr())) return r;
+  for (let i = 0; i < 2 && r.status !== 0 && `${r.stderr}`.includes('EADDRINUSE'); i++) r = run();
+  return r;
+}
+
+/**
+ * A port that is free right now, drawn at random from 20000-31999 — BELOW
+ * both the macOS (49152+) and Linux (32768+) ephemeral ranges. listen(0)
+ * hands out an ephemeral port, which every outgoing client socket on the
+ * host (this file's own probes, and any other process on a busy machine)
+ * also draws from, so between "picked" and "the fixture binds it" another
+ * socket could take it: measured in PR #1521 round 3 as listen EADDRINUSE,
+ * and worse, as a probe answered by SOMEONE ELSE's server on that port.
+ */
 function freePortExpr(): string {
-  return `node -e 'const s=require("net").createServer();s.listen(0,()=>{const p=s.address().port;s.close(()=>console.log(p));});'`;
+  return `node -e 'const n=require("net");(function t(k){const p=20000+Math.floor(Math.random()*12000);const s=n.createServer();s.once("error",()=>{if(k>0)t(k-1);else process.exit(1);});s.listen(p,"127.0.0.1",()=>s.close(()=>console.log(p)));})(50);'`;
 }
 
 function makeServerFixture(
@@ -578,7 +619,10 @@ describe('e2e-empty-dir — ed_boot_probe_kill / ed_check_or_die (#1455)', () =>
       PORT="$(${freePortExpr()})"
       ed_check_or_die "unit-test" "${dest}" "${src}/server.js" /api/health /anything "\${PORT}" "${src}/public:public"
     `);
-    expect(r.status).toBe(0);
+    expect({ status: r.status, stderr: r.status === 0 ? '' : r.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
   });
 
   it('ed_check_or_die fails closed when the staged dir was contaminated after staging', () => {
@@ -635,7 +679,10 @@ describe('e2e-empty-dir — ed_boot_probe_kill / ed_check_or_die (#1455)', () =>
       ED_HIDE_DURING_BOOT=("${parent}/node_modules")
       ed_check_or_die "hide-test" "${dest}" "${binPath}" /api/health / "\${PORT}"
     `);
-    expect(r.status).toBe(0);
+    expect({ status: r.status, stderr: r.status === 0 ? '' : r.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
     // node_modules must be back in place afterwards — the hide is transient.
     const restored = sh(`test -d "${parent}/node_modules/leakpkg" && echo present`);
     expect(restored.stdout.trim()).toBe('present');
@@ -718,5 +765,1180 @@ describe('e2e-empty-dir — ed_boot_probe_kill / ed_check_or_die (#1455)', () =>
     expect(notNested.stdout.trim()).toBe('clean');
     const freshUntouched = sh(`test -d "${parent}/node_modules/freshpkg" && echo present`);
     expect(freshUntouched.stdout.trim()).toBe('present');
+  });
+});
+
+// ══ #1514 — the SUITE server is served from the empty dir, not APP_DIR ════════
+//
+// Three guards, one per half of the fix:
+//   (a) TEXT: in both deploy scripts, the self-contained branch of the suite
+//       boot cds into EMPTY_DIR and execs the STAGED binary (standalone: the
+//       container mounts only EMPTY_DIR), after arming the restore trap and
+//       hiding APP_DIR; the metadata records SERVED_FROM; the isolation check
+//       runs before the URL is handed over.
+//   (b) RUNTIME: while the suite server is up, node_modules / .output /
+//       .next/server are unreachable from its cwd and via the hidden APP_DIR,
+//       and APP_DIR is restored on every exit path.
+//   (c) FINGERPRINT: a self-contained fingerprint requires the frozen harness
+//       to declare served_from=empty-dir; missing or `disk` fails it.
+
+function readRepo(rel: string): string {
+  return readFileSync(join(ROOT, rel), 'utf8');
+}
+
+/** The text from `start` (which must occur exactly once) to the first `end` after it. */
+function block(src: string, start: string, end: string): string {
+  const i = src.indexOf(start);
+  expect(i).toBeGreaterThanOrEqual(0);
+  expect(src.indexOf(start, i + 1)).toBe(-1);
+  const j = src.indexOf(end, i + start.length);
+  expect(j).toBeGreaterThan(i);
+  return src.slice(i, j);
+}
+
+/** Every `cd "<target>"` target in a block, in order. */
+function cdTargets(text: string): string[] {
+  return [...text.matchAll(/^\s*cd\s+"([^"]+)"/gm)].map((m) => m[1]);
+}
+
+/** Asserts `needles` occur in `text` in the given order (each at least once). */
+function expectInOrder(text: string, needles: string[]) {
+  let at = -1;
+  for (const n of needles) {
+    const i = text.indexOf(n, at + 1);
+    expect({ needle: n, found: i > at }).toEqual({ needle: n, found: true });
+    at = i;
+  }
+}
+
+describe('#1514 (a) — the self-contained suite boot runs from EMPTY_DIR (text scan)', () => {
+  it('scripts/e2e-deploy-vinext.sh: the SC branch cds ONLY into EMPTY_DIR and execs the staged binary', () => {
+    const src = readRepo('scripts/e2e-deploy-vinext.sh');
+    const sc = block(
+      src,
+      'if [ "${KNEXT_COMPILE}" != "0" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then',
+      '\nelif [ "${KNEXT_COMPILE}" != "0" ]; then',
+    );
+    expect(cdTargets(sc)).toEqual(['${EMPTY_DIR}']);
+    expect(sc).toMatch(/^\s*exec "\$\{EMPTY_DIR_STAGED\}"$/m);
+    expect(sc).not.toMatch(/exec\s+"\$\{KNEXT_EXEC\}"/);
+    expect(sc).toContain('EMPTY_DIR_STAGED="$(ed_suite_stage "${EMPTY_DIR}" "${KNEXT_EXEC}"');
+    expectInOrder(sc, [
+      'ed_suite_arm_restore_trap "${APP_DIR}"',
+      'ed_suite_hide_app_dir "${APP_DIR}" || exit 1',
+      'SERVED_FROM="${ED_SUITE_SERVED_FROM_SC}"',
+      'cd "${EMPTY_DIR}"',
+      'ED_SUITE_SERVER_PID="${SERVER_PID}"',
+    ]);
+  });
+
+  it('scripts/e2e-deploy.sh: the SC container cds into EMPTY_DIR and mounts ONLY EMPTY_DIR', () => {
+    const src = readRepo('scripts/e2e-deploy.sh');
+    const boot = block(
+      src,
+      '(\n  if [ "${SERVED_FROM}" != "disk" ]; then',
+      '\n  fi\n  cd "${STANDALONE_APP_DIR}"',
+    );
+    expect(cdTargets(boot)).toEqual(['${EMPTY_DIR}']);
+    expect([...boot.matchAll(/-v\s+"([^"]+)"/g)].map((m) => m[1])).toEqual([
+      '${EMPTY_DIR}:${EMPTY_DIR}',
+    ]);
+    expect(boot).toContain('-w "${EMPTY_DIR}"');
+    expect(boot).toContain('"./$(basename "${EMPTY_DIR_STAGED}")"');
+    // ED_SUITE_CONTAINER is CONTAINER_NAME (asserted in the setup block
+    // below), so e2e-cleanup.sh's `docker rm -f` and the port-ownership
+    // `docker inspect` both still find it.
+    expect(boot).toContain('exec docker run --rm --name "${ED_SUITE_CONTAINER}"');
+    for (const disk of ['STANDALONE_ROOT', 'STANDALONE_APP_DIR', 'CONTAINER_ROOT', '{APP_DIR}']) {
+      expect({ disk, present: boot.includes(disk) }).toEqual({ disk, present: false });
+    }
+    const setup = block(
+      src,
+      'if [ -n "${STANDALONE_EXEC}" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then',
+      '\nfi\n(',
+    );
+    expect(setup).toContain(
+      'EMPTY_DIR_STAGED="$(ed_suite_stage "${EMPTY_DIR}" "${STANDALONE_EXEC}"',
+    );
+    expectInOrder(setup, [
+      'ed_suite_arm_restore_trap "${APP_DIR}"',
+      'ED_SUITE_CONTAINER="${CONTAINER_NAME}"',
+      'ed_suite_hide_app_dir "${APP_DIR}" || exit 1',
+      'SERVED_FROM="${ED_SUITE_SERVED_FROM_SC}"',
+    ]);
+  });
+
+  for (const script of ['scripts/e2e-deploy.sh', 'scripts/e2e-deploy-vinext.sh']) {
+    it(`${script}: records SERVED_FROM in the metadata and checks isolation BEFORE handing the URL over`, () => {
+      const src = readRepo(script);
+      expect(src.split('SERVED_FROM="disk"').length - 1).toBe(1);
+      const meta = block(src, '{\n  echo "BUILD_ID=${BUILD_ID}"', '} >"${LOG_FILE}"');
+      expect(meta).toContain('echo "SERVED_FROM=${SERVED_FROM}"');
+      const tail = src.slice(src.lastIndexOf('if [ "${SERVED_FROM}" != "disk" ]; then'));
+      expectInOrder(tail, [
+        'if ! ed_assert_suite_isolated "${EMPTY_DIR}" "${APP_DIR}"; then',
+        'exit 1',
+        'ed_suite_hand_off',
+        'echo "http://localhost:${PORT}"',
+      ]);
+    });
+  }
+});
+
+/** A synthetic "binary": answers /api/health, and /reach with 500 if ANY disk-tree path is reachable. */
+function makeReachFixture(dir: string, appDir: string): string {
+  const p = join(dir, 'knext-exec');
+  writeFileSync(
+    p,
+    [
+      '#!/usr/bin/env node',
+      "const http = require('node:http');",
+      "const fs = require('node:fs');",
+      'const port = Number(process.env.PORT);',
+      `const APP = ${JSON.stringify(appDir)};`,
+      'const probes = () => [',
+      "  'node_modules', '.next/server', '.output/server',",
+      "  APP + '/node_modules', APP + '/.next/server', APP + '/.output/server',",
+      '].filter((q) => fs.existsSync(q));',
+      'function leak() {',
+      "  try { require('leakpkg'); return ['require(leakpkg)']; } catch { return probes(); }",
+      '}',
+      'http.createServer((req, res) => {',
+      "  if (req.url === '/api/health') { res.writeHead(200); res.end('ok'); return; }",
+      '  const found = leak();',
+      '  res.writeHead(found.length ? 500 : 200); res.end(found.join(","));',
+      "}).listen(port, '127.0.0.1');",
+      '',
+    ].join('\n'),
+  );
+  chmodSync(p, 0o755);
+  return p;
+}
+
+/**
+ * A temp dir for the suite server's EMPTY_DIR parent, rooted at /tmp when it
+ * exists: ed_assert_suite_isolated rejects a node_modules in ANY ancestor of
+ * the cwd, and the test runner's tmpdir() can resolve inside a checkout.
+ */
+function outsideTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(existsSync('/tmp') ? '/tmp' : tmpdir(), prefix));
+  trackedTempDirs.push(dir);
+  return dir;
+}
+
+/** An APP_DIR shaped like a built fixture: the disk tree the suite server must NOT see. */
+function makeAppDir(): string {
+  const app = tempDir('ed-suite-app-');
+  mkdirSync(join(app, 'node_modules/leakpkg'), { recursive: true });
+  writeFileSync(join(app, 'node_modules/leakpkg/index.js'), "module.exports = 'leaked';\n");
+  writeFileSync(join(app, 'node_modules/leakpkg/package.json'), '{"main":"index.js"}');
+  mkdirSync(join(app, '.next/server'), { recursive: true });
+  writeFileSync(join(app, '.next/server/page.js'), 'x');
+  mkdirSync(join(app, '.output/server'), { recursive: true });
+  writeFileSync(join(app, '.output/server/index.mjs'), 'x');
+  mkdirSync(join(app, '.output/public'), { recursive: true });
+  writeFileSync(join(app, '.output/public/a.txt'), 'a');
+  makeReachFixture(app, app);
+  return app;
+}
+
+/**
+ * The SC suite-serving sequence both deploy scripts run (stage → arm → hide →
+ * boot from EMPTY_DIR → ready → <plant> → isolation check → reach probe →
+ * hand off), as a standalone bash script against the real lib. `plant` runs
+ * while the server is UP, before the isolation check.
+ */
+function suiteScript(app: string, emptyParent: string, plant = '', afterHandOff = ''): string {
+  return `
+    set -euo pipefail
+    . "${LIB}"
+    APP_DIR="${app}"
+    EMPTY_DIR="$(mktemp -d "${emptyParent}/knext-empty-dir-suite.XXXXXX")"
+    ed_own_dir "\${EMPTY_DIR}"
+    EMPTY_DIR_STAGED="$(ed_suite_stage "\${EMPTY_DIR}" "\${APP_DIR}/knext-exec" "\${APP_DIR}/.output/public:.output/public")"
+    ed_suite_arm_restore_trap "\${APP_DIR}"
+    ed_suite_hide_app_dir "\${APP_DIR}" || exit 1
+    PORT="$(${freePortExpr()})"
+    ( cd "\${EMPTY_DIR}"; PORT="\${PORT}" exec "\${EMPTY_DIR_STAGED}" ) >/dev/null 2>&1 &
+    SERVER_PID=$!
+    ED_SUITE_SERVER_PID="\${SERVER_PID}"
+    echo "PID=\${SERVER_PID}"
+    echo "EMPTY_DIR=\${EMPTY_DIR}"
+    for _ in $(seq 1 100); do
+      node -e "require('net').connect(\${PORT},'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null && break
+      sleep 0.1
+    done
+    ${plant}
+    ed_assert_suite_isolated "\${EMPTY_DIR}" "\${APP_DIR}" || exit 1
+    node "${join(ROOT, 'scripts/lib/e2e-probe-http.mjs')}" "\${PORT}" /reach 2xx3xx || { echo "REACHABLE" >&2; exit 1; }
+    ed_suite_hand_off "\${EMPTY_DIR}"
+    echo HANDED_OFF
+    ${afterHandOff}
+  `;
+}
+
+function runSuite(script: string) {
+  return spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 60_000 });
+}
+
+function field(stdout: string, key: string): string {
+  const m = new RegExp(`^${key}=(.*)$`, 'm').exec(stdout);
+  return m ? m[1] : '';
+}
+
+/** True iff the script printed an EMPTY_DIR= line AND that dir no longer exists. */
+function ownedDirGone(stdout: string): boolean {
+  const dir = field(stdout, 'EMPTY_DIR');
+  return dir !== '' && !existsSync(dir);
+}
+
+function alive(pid: string): boolean {
+  if (!pid) return false;
+  return spawnSync('kill', ['-0', pid]).status === 0;
+}
+
+function hiddenState(app: string) {
+  return {
+    node_modules: existsSync(join(app, 'node_modules')),
+    '.next': existsSync(join(app, '.next')),
+    '.output': existsSync(join(app, '.output')),
+    hidden: ['node_modules', '.next', '.output'].filter((n) =>
+      existsSync(join(app, `${n}.ed-hidden`)),
+    ),
+  };
+}
+
+const RESTORED = { node_modules: true, '.next': true, '.output': true, hidden: [] };
+const HIDDEN = {
+  node_modules: false,
+  '.next': false,
+  '.output': false,
+  hidden: ['node_modules', '.next', '.output'],
+};
+
+describe('#1514 (b) — the suite server runs with the disk tree unreachable (runtime)', () => {
+  it('serves from EMPTY_DIR with node_modules/.next/.output hidden, hands off, and e2e-cleanup.sh restores after stopping it', () => {
+    const app = makeAppDir();
+    const r = runSuite(suiteScript(app, outsideTempDir('ed-suite-parent-')));
+    const pid = field(r.stdout, 'PID');
+    try {
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('HANDED_OFF');
+      // Handed off: the tree STAYS hidden for the whole suite run, and the
+      // server keeps running — the deploy script's exit must not restore it.
+      expect(hiddenState(app)).toEqual(HIDDEN);
+      expect(alive(pid)).toBe(true);
+      // PR #1521 round 3: the served dir was disowned at hand-off, so the
+      // deploy's own EXIT trap (which ran on this exit 0) left it for the
+      // server still running from it — e2e-cleanup.sh removes it below.
+      const served = field(r.stdout, 'EMPTY_DIR');
+      expect(served).toBeTruthy();
+      expect(existsSync(served)).toBe(true);
+      // Teardown, exactly as the harness runs it: cwd = APP_DIR, metadata present.
+      writeFileSync(
+        join(app, '.adapter-build.log'),
+        `PID=${pid}\nSERVED_FROM=empty-dir\nSERVED_FROM_DIR=${served}\n`,
+      );
+      const c = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+        cwd: app,
+        encoding: 'utf8',
+      });
+      expect(c.status).toBe(0);
+      expect(alive(pid)).toBe(false);
+      expect(hiddenState(app)).toEqual(RESTORED);
+      expect(existsSync(served)).toBe(false);
+      expect(readFileSync(join(app, 'node_modules/leakpkg/index.js'), 'utf8')).toContain('leaked');
+    } finally {
+      if (alive(pid)) spawnSync('kill', ['-KILL', pid]);
+    }
+  }, 60_000);
+
+  // Each plant re-exposes the disk tree to the RUNNING server in a different
+  // way; each must red the isolation check — and the failed deploy must stop
+  // its server and restore APP_DIR on the way out.
+  const PLANTS: Record<string, string> = {
+    'symlinked node_modules in the cwd':
+      'ln -s "${APP_DIR}/node_modules.ed-hidden" "${EMPTY_DIR}/node_modules"',
+    'symlinked .output/server in the cwd':
+      'ln -s "${APP_DIR}/.output.ed-hidden/server" "${EMPTY_DIR}/.output/server"',
+    'symlinked .next/server in the cwd':
+      'mkdir -p "${EMPTY_DIR}/.next" && ln -s "${APP_DIR}/.next.ed-hidden/server" "${EMPTY_DIR}/.next/server"',
+    // Real directories, not symlinks — the symlink sweep cannot see these, so
+    // they isolate the cwd-path check itself (prover mutation 20).
+    'a REAL node_modules directory created in the cwd': 'mkdir "${EMPTY_DIR}/node_modules"',
+    'a REAL .output/server directory created in the cwd': 'mkdir "${EMPTY_DIR}/.output/server"',
+    'a REAL .next/server directory created in the cwd': 'mkdir -p "${EMPTY_DIR}/.next/server"',
+    'a symlink nested under the staged static assets':
+      'ln -s /nonexistent-knext-leak "${EMPTY_DIR}/.output/public/leak"',
+    'node_modules in an ANCESTOR of the cwd (module resolution walks up)':
+      'mkdir "$(dirname "${EMPTY_DIR}")/node_modules"',
+    'the hidden APP_DIR/node_modules symlinked back under its real name':
+      'ln -s "${APP_DIR}/node_modules.ed-hidden" "${APP_DIR}/node_modules"',
+    'the hidden APP_DIR/.next symlinked back under its real name':
+      'ln -s "${APP_DIR}/.next.ed-hidden" "${APP_DIR}/.next"',
+    'the hidden APP_DIR/.output symlinked back under its real name':
+      'ln -s "${APP_DIR}/.output.ed-hidden" "${APP_DIR}/.output"',
+  };
+  for (const [label, plant] of Object.entries(PLANTS)) {
+    it(`a planted leak reds the isolation check: ${label}`, () => {
+      const app = makeAppDir();
+      const parent = outsideTempDir('ed-suite-plant-');
+      // The plants that re-create an APP_DIR name as a symlink must be undone
+      // before the trap restores, or the restore (correctly) refuses to nest.
+      const r = runSuite(suiteScript(app, parent, plant));
+      const pid = field(r.stdout, 'PID');
+      try {
+        expect(r.status).not.toBe(0);
+        expect(r.stdout).not.toContain('HANDED_OFF');
+        expect(r.stderr).toContain('suite:');
+        expect(alive(pid)).toBe(false);
+      } finally {
+        if (alive(pid)) spawnSync('kill', ['-KILL', pid]);
+      }
+    }, 60_000);
+  }
+
+  it('without the hide, the running server DOES reach the disk tree (the probe is not decoration)', () => {
+    const app = makeAppDir();
+    // Both the hide AND the static isolation check removed: only the
+    // server's own view (the /reach probe) is left to notice.
+    const script = suiteScript(app, outsideTempDir('ed-suite-nohide-'))
+      .replace('ed_suite_hide_app_dir "${APP_DIR}" || exit 1', ':')
+      .replace('ed_assert_suite_isolated "${EMPTY_DIR}" "${APP_DIR}" || exit 1', ':');
+    expect(script).not.toContain('ed_suite_hide_app_dir');
+    expect(script).not.toContain('ed_assert_suite_isolated');
+    const r = runSuite(script);
+    const pid = field(r.stdout, 'PID');
+    try {
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('REACHABLE');
+      expect(r.stdout).not.toContain('HANDED_OFF');
+    } finally {
+      if (alive(pid)) spawnSync('kill', ['-KILL', pid]);
+    }
+  }, 60_000);
+});
+
+describe('#1514 (b) — APP_DIR is restored on EVERY exit path before hand-off', () => {
+  it('an explicit `exit 1` after hiding: server stopped, APP_DIR restored, exit code preserved', () => {
+    const app = makeAppDir();
+    const r = runSuite(suiteScript(app, outsideTempDir('ed-exit-'), 'exit 7'));
+    expect(r.status).toBe(7);
+    expect(alive(field(r.stdout, 'PID'))).toBe(false);
+    expect(hiddenState(app)).toEqual(RESTORED);
+    // PR #1521 round 3: the deploy's own suite dir goes with it.
+    expect(ownedDirGone(r.stdout)).toBe(true);
+  }, 60_000);
+
+  it('a `set -e` failure after hiding restores APP_DIR', () => {
+    const app = makeAppDir();
+    const r = runSuite(suiteScript(app, outsideTempDir('ed-sete-'), 'false'));
+    expect(r.status).not.toBe(0);
+    expect(alive(field(r.stdout, 'PID'))).toBe(false);
+    expect(hiddenState(app)).toEqual(RESTORED);
+    expect(ownedDirGone(r.stdout)).toBe(true);
+  }, 60_000);
+
+  it('SIGTERM to the deploy script after hiding restores APP_DIR (the trap converts it into an exit)', async () => {
+    const app = makeAppDir();
+    const parent = outsideTempDir('ed-term-');
+    const marker = join(parent, 'HIDDEN-NOW');
+    const script = suiteScript(app, parent, `touch "${marker}"; while :; do sleep 0.1; done`);
+    const child = spawn('bash', ['-c', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => {
+      out += d;
+    });
+    const exited = new Promise<number | null>((res) => child.on('exit', (code) => res(code)));
+    for (let i = 0; i < 300 && !existsSync(marker); i++) await Bun.sleep(50);
+    expect(existsSync(marker)).toBe(true);
+    expect(hiddenState(app)).toEqual(HIDDEN);
+    child.kill('SIGTERM');
+    const code = await exited;
+    expect(code).toBe(143);
+    expect(alive(field(out, 'PID'))).toBe(false);
+    expect(hiddenState(app)).toEqual(RESTORED);
+    expect(ownedDirGone(out)).toBe(true);
+  }, 60_000);
+
+  it('the hide refuses (and restores what it hid) when a stale <name>.ed-hidden exists from a killed run', () => {
+    const app = makeAppDir();
+    mkdirSync(join(app, '.output.ed-hidden'));
+    writeFileSync(join(app, '.output.ed-hidden/STALE'), 'x');
+    const r = runSuite(suiteScript(app, outsideTempDir('ed-stale-')));
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('already exists');
+    // node_modules/.next were hidden before the refusal; the trap put them back.
+    expect(existsSync(join(app, 'node_modules/leakpkg'))).toBe(true);
+    expect(existsSync(join(app, '.next/server'))).toBe(true);
+    // Neither copy of .output moved.
+    expect(existsSync(join(app, '.output/server'))).toBe(true);
+    expect(existsSync(join(app, '.output.ed-hidden/STALE'))).toBe(true);
+  }, 60_000);
+
+  it('restore refuses to nest when BOTH <name> and <name>.ed-hidden exist', () => {
+    const app = tempDir('ed-both-');
+    mkdirSync(join(app, 'node_modules'));
+    mkdirSync(join(app, 'node_modules.ed-hidden'));
+    writeFileSync(join(app, 'node_modules.ed-hidden/REAL'), 'x');
+    const r = sh(`ed_suite_restore_app_dir "${app}"`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('refusing to restore');
+    expect(existsSync(join(app, 'node_modules/node_modules.ed-hidden'))).toBe(false);
+    expect(existsSync(join(app, 'node_modules.ed-hidden/REAL'))).toBe(true);
+  });
+
+  it('e2e-cleanup.sh restores a hidden APP_DIR even when the deploy died before writing metadata', () => {
+    const app = makeAppDir();
+    for (const n of ['node_modules', '.next', '.output']) {
+      spawnSync('mv', [join(app, n), join(app, `${n}.ed-hidden`)]);
+    }
+    expect(hiddenState(app)).toEqual(HIDDEN);
+    const c = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+      cwd: app,
+      encoding: 'utf8',
+    });
+    expect(c.status).toBe(0);
+    expect(hiddenState(app)).toEqual(RESTORED);
+  });
+});
+
+/** A copy of the REAL frozen harness (every file collectHarness hashes), so the fingerprint runs against today's scripts. */
+function harnessCopy(): string {
+  const root = tempDir('ed-fp-repo-');
+  for (const e of collectHarness(ROOT, 'node', {}) as { path: string }[]) {
+    mkdirSync(dirname(join(root, e.path)), { recursive: true });
+    copyFileSync(join(ROOT, e.path), join(root, e.path));
+  }
+  return root;
+}
+
+function tarballsDir(): string {
+  const dir = tempDir('ed-fp-tgz-');
+  const stage = tempDir('ed-fp-pkg-');
+  mkdirSync(join(stage, 'package'));
+  writeFileSync(
+    join(stage, 'package/package.json'),
+    '{"name":"@getknext/core","version":"0.0.0-test"}\n',
+  );
+  const t = spawnSync('tar', ['czf', join(dir, 'core.tgz'), '-C', stage, 'package']);
+  expect(t.status).toBe(0);
+  return dir;
+}
+
+function fingerprintCli(repoRoot: string, tgz: string, selfContained: boolean) {
+  const args = [
+    join(ROOT, 'scripts/compat-window-fingerprint.mjs'),
+    '--repo-root',
+    repoRoot,
+    '--tarballs-dir',
+    tgz,
+    '--json',
+  ];
+  if (selfContained) args.push('--self-contained');
+  return spawnSync('node', args, { encoding: 'utf8' });
+}
+
+function setDeclaration(repoRoot: string, replacement: string) {
+  const lib = join(repoRoot, 'scripts/lib/e2e-empty-dir.sh');
+  const src = readFileSync(lib, 'utf8');
+  const decl = 'ED_SUITE_SERVED_FROM_SC="empty-dir"\n';
+  expect(src.split(decl).length - 1).toBe(1);
+  writeFileSync(lib, src.replace(decl, replacement));
+}
+
+describe('#1514 (c) — a self-contained fingerprint requires served_from=empty-dir', () => {
+  it('the real harness declares empty-dir: the self-contained fingerprint folds it and records it', () => {
+    const r = fingerprintCli(harnessCopy(), tarballsDir(), true);
+    expect(r.stderr).toBe('');
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.recorded.selfContained).toEqual({
+      value: true,
+      frozen: true,
+      servedFrom: 'empty-dir',
+    });
+    // Never the pre-#1514 marker: a window served from disk under the
+    // self-contained label cannot share this digest.
+    const pre1514 = `sha256:${createHash('sha256').update('selfContained\ttrue').digest('hex')}`;
+    expect(out.components.selfContained).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(out.components.selfContained).not.toBe(pre1514);
+  });
+
+  it('served_from=disk under --self-contained FAILS the fingerprint', () => {
+    const repo = harnessCopy();
+    setDeclaration(repo, 'ED_SUITE_SERVED_FROM_SC="disk"\n');
+    const r = fingerprintCli(repo, tarballsDir(), true);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('served_from=disk');
+  });
+
+  it('a MISSING served_from declaration under --self-contained FAILS the fingerprint', () => {
+    const repo = harnessCopy();
+    setDeclaration(repo, '');
+    const r = fingerprintCli(repo, tarballsDir(), true);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('served_from=MISSING');
+  });
+
+  it('disk mode (no --self-contained) needs no declaration and folds nothing', () => {
+    const repo = harnessCopy();
+    setDeclaration(repo, 'ED_SUITE_SERVED_FROM_SC="disk"\n');
+    const r = fingerprintCli(repo, tarballsDir(), false);
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.components).not.toHaveProperty('selfContained');
+    expect(out.recorded.selfContained).toEqual({ value: false, frozen: false, servedFrom: null });
+  });
+});
+
+// ══ #1515 — the pre-check probe measured nothing in run 36312054519 ═══════════
+//
+// (1) the probe server's `➜ Listening on: …` banner went to the deploy
+//     script's STDOUT, which the Next harness reads as the deployment URL;
+// (2) the probe demanded /api/health 2xx, a route ordinary compat fixtures do
+//     not have. The compat lanes now probe ONE staged static file for 2xx and
+//     `/` for non-5xx; /api/health stays available via KNEXT_EMPTY_DIR_HEALTH_PATH.
+
+/**
+ * A stand-in for a compiled compat fixture: prints nitro's banner to STDOUT,
+ * serves files from `.output/public` (cwd-relative) with 200, has NO
+ * /api/health (404), and answers `/` with `rootStatus`.
+ */
+function makeCompatFixture(dir: string, rootStatus: number): string {
+  const p = join(dir, 'knext-exec-e2e');
+  writeFileSync(
+    p,
+    [
+      '#!/usr/bin/env node',
+      "const http = require('node:http');",
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      'const port = Number(process.env.PORT);',
+      'http.createServer((req, res) => {',
+      "  if (req.url === '/') { res.writeHead(" +
+        String(rootStatus) +
+        "); res.end('root'); return; }",
+      "  const f = path.join(process.cwd(), '.output/public', decodeURIComponent(req.url));",
+      '  if (fs.existsSync(f) && fs.statSync(f).isFile()) { res.writeHead(200); res.end(fs.readFileSync(f)); return; }',
+      "  res.writeHead(404); res.end('not found');",
+      "}).listen(port, '127.0.0.1', () => { console.log('➜ Listening on: http://localhost:' + port + '/ (all interfaces)'); });",
+      '',
+    ].join('\n'),
+  );
+  chmodSync(p, 0o755);
+  mkdirSync(join(dir, '.output/public/assets'), { recursive: true });
+  writeFileSync(join(dir, '.output/public/assets/app-abc.js'), 'console.log(1)');
+  return p;
+}
+
+/**
+ * The deploy-script shape around the pre-check: the probe, then the ONE
+ * stdout line. Its stdout must be exactly that line whatever the probe
+ * server prints.
+ */
+function miniDeploy(src: string, dest: string, health: string) {
+  return sh(`
+    set -e
+    PORT="$(${freePortExpr()})"
+    ed_check_or_die "compat" "${dest}" "${src}/knext-exec-e2e" "${health}" / "\${PORT}" \\
+      "${src}/.output/public:.output/public"
+    echo "http://localhost:4242"
+  `);
+}
+
+describe('#1515 — the empty-dir pre-check probe (stdout contract + per-lane health path)', () => {
+  it("the probe server's stdout banner never reaches the deploy script's stdout: it stays exactly the one URL line", () => {
+    const src = tempDir('ed-1515-stdout-src-');
+    makeCompatFixture(src, 200);
+    const r = miniDeploy(src, join(tempDir('ed-1515-stdout-dest-'), 'd'), '@static');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('http://localhost:4242\n');
+    // The banner WAS printed — it went to stderr, not nowhere.
+    expect(r.stderr).toContain('➜ Listening on:');
+  });
+
+  it('a compat fixture with NO /api/health (404) and a 404 at / passes the static-file probe', () => {
+    const src = tempDir('ed-1515-compat-src-');
+    makeCompatFixture(src, 404);
+    const r = miniDeploy(src, join(tempDir('ed-1515-compat-dest-'), 'd'), '@static');
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('probing the staged static file /assets/app-abc.js');
+  });
+
+  it('the SAME fixture fails when the lane demands /api/health (the run-36312054519 defect, reproduced)', () => {
+    const src = tempDir('ed-1515-oldhealth-src-');
+    makeCompatFixture(src, 200);
+    const r = miniDeploy(src, join(tempDir('ed-1515-oldhealth-dest-'), 'd'), '/api/health');
+    expect(r.status).not.toBe(0);
+  });
+
+  it('a 5xx at / fails the probe even when the static file answers 200', () => {
+    const src = tempDir('ed-1515-root500-src-');
+    makeCompatFixture(src, 500);
+    const r = miniDeploy(src, join(tempDir('ed-1515-root500-dest-'), 'd'), '@static');
+    expect(r.status).not.toBe(0);
+  });
+
+  it('a missing static file fails the probe (2xx is required of the staged asset)', () => {
+    const src = tempDir('ed-1515-nostatic-src-');
+    makeCompatFixture(src, 200);
+    rmSync(join(src, '.output/public/assets/app-abc.js'));
+    writeFileSync(join(src, '.output/public/assets/.keep-dir'), '');
+    // The staged file exists but the server is told a path it does not serve.
+    const dest = join(tempDir('ed-1515-nostatic-dest-'), 'd');
+    const r = sh(`
+      PORT="$(${freePortExpr()})"
+      ed_check_or_die "compat" "${dest}" "${src}/knext-exec-e2e" /assets/not-staged.js / "\${PORT}" \\
+        "${src}/.output/public:.output/public"
+    `);
+    expect(r.status).not.toBe(0);
+  });
+
+  it('ed_static_probe_path: .output/public first, .next/static under /_next/static, public, basePath prefix; fails on none', () => {
+    const d = tempDir('ed-1515-pick-');
+    mkdirSync(join(d, '.next/static/chunks'), { recursive: true });
+    writeFileSync(join(d, '.next/static/chunks/b.js'), 'x');
+    writeFileSync(join(d, '.next/static/chunks/a.js'), 'x');
+    mkdirSync(join(d, 'public'), { recursive: true });
+    writeFileSync(join(d, 'public/robots.txt'), 'x');
+    expect(sh(`ed_static_probe_path "${d}"`).stdout).toBe('/_next/static/chunks/a.js\n');
+    expect(sh(`ed_static_probe_path "${d}" /docs`).stdout).toBe('/docs/_next/static/chunks/a.js\n');
+    mkdirSync(join(d, '.output/public'), { recursive: true });
+    writeFileSync(join(d, '.output/public/favicon.ico'), 'x');
+    expect(sh(`ed_static_probe_path "${d}"`).stdout).toBe('/favicon.ico\n');
+    const empty = tempDir('ed-1515-pick-empty-');
+    const r = sh(`ed_static_probe_path "${empty}"`);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('no static file was staged');
+  });
+
+  for (const script of ['scripts/e2e-deploy.sh', 'scripts/e2e-deploy-vinext.sh']) {
+    it(`${script}: the compat pre-check defaults to the staged static file, never a hardcoded /api/health`, () => {
+      const src = readRepo(script);
+      expect(src).toContain('"${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}"');
+      expect(src).not.toMatch(/(ed_check_or_die|ed_boot_probe_kill)\b[^\n]*\/api\/health/);
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR #1521 round 2 — reviewer findings 1-4 (review-1521.md)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** A tiny fixture that, on SIGTERM, records whether <checkPath> already exists
+ * (i.e. whether e2e-cleanup.sh had already restored it) BEFORE exiting. Used
+ * to make the "stop before restore" invariant order-sensitive rather than
+ * only end-state-sensitive (finding 1 / mutation R16). */
+function makeSigtermOrderFixture(dir: string): string {
+  const p = join(dir, 'sigterm-order-server.js');
+  const body = [
+    '#!/usr/bin/env node',
+    "const fs = require('fs');",
+    'const checkPath = process.argv[2];',
+    'const resultFile = process.argv[3];',
+    'const readyFile = process.argv[4];',
+    "process.on('SIGTERM', () => {",
+    '  const restoredBeforeStop = fs.existsSync(checkPath);',
+    '  fs.writeFileSync(resultFile, JSON.stringify({ restoredBeforeStop }));',
+    '  process.exit(0);',
+    '});',
+    // Written only AFTER the handler is installed: a SIGTERM that lands during
+    // node startup takes the default action and writes no result (the
+    // round-2 1-in-15 flake), so the test waits for this before cleanup.
+    "fs.writeFileSync(readyFile, 'ready');",
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n');
+  writeFileSync(p, body);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+describe('#1521 round-2, finding 1 — e2e-cleanup.sh stops the server BEFORE restoring APP_DIR', () => {
+  it('the server observes node_modules still hidden at the moment it receives SIGTERM', () => {
+    const app = makeAppDir();
+    const hide = sh(`ed_suite_hide_app_dir "${app}"`);
+    expect(hide.status).toBe(0);
+    expect(hiddenState(app)).toEqual(HIDDEN);
+
+    const workDir = tempDir('ed-r16-work-');
+    const resultFile = join(workDir, 'result.json');
+    const readyFile = join(workDir, 'ready');
+    const checkPath = join(app, 'node_modules'); // the RESTORED (real) name
+    const script = makeSigtermOrderFixture(workDir);
+    // Backgrounded via bash (mirrors suiteScript()/runSuite() elsewhere in
+    // this file), NOT via a direct node child_process.spawn() from this test
+    // process: the test runner stays busy inside the synchronous
+    // spawnSync(e2e-cleanup.sh) call below, so a child spawned directly by IT
+    // sits as a zombie (exited but unreaped) for that whole window, and
+    // `kill -0`/`kill -TERM` from e2e-cleanup.sh see a zombie as "alive" the
+    // entire time — a harness artifact, not a defect in the order under
+    // test. Backgrounding via bash instead: the bash process is this
+    // spawnSync's child, it exits once the fixture is backgrounded and
+    // handed off, and the fixture is reparented to init, which reaps it
+    // immediately on exit — the same reparenting the real deploy scripts and
+    // e2e-cleanup.sh depend on for the SAME reason.
+    const launch = spawnSync(
+      'bash',
+      [
+        '-c',
+        `node "${script}" "${checkPath}" "${resultFile}" "${readyFile}" >/dev/null 2>&1 & echo "PID=$!"`,
+      ],
+      { encoding: 'utf8' },
+    );
+    const pid = field(launch.stdout, 'PID');
+    expect(pid).toBeTruthy();
+    // Bounded wait (≤10 s) for the SIGTERM handler to be installed.
+    for (let i = 0; i < 400 && !existsSync(readyFile); i++) Bun.sleepSync(25);
+    expect(existsSync(readyFile)).toBe(true);
+    expect(alive(pid)).toBe(true);
+
+    try {
+      writeFileSync(join(app, '.adapter-build.log'), `PID=${pid}\nSERVED_FROM=empty-dir\n`);
+      const c = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+        cwd: app,
+        encoding: 'utf8',
+      });
+      expect(c.status).toBe(0);
+      expect(alive(pid)).toBe(false);
+      expect(hiddenState(app)).toEqual(RESTORED);
+
+      const result = JSON.parse(readFileSync(resultFile, 'utf8'));
+      // If the restore ran BEFORE the stop (R16), node_modules would already
+      // exist by the time the SIGTERM handler ran, and this would be `true`.
+      expect(result.restoredBeforeStop).toBe(false);
+    } finally {
+      if (alive(pid)) spawnSync('kill', ['-KILL', pid]);
+    }
+  }, 30_000);
+});
+
+describe('#1521 round-2, finding 2 — scripts/lib/e2e-read-base-path.mjs (standalone basePath probe, R13/R14)', () => {
+  const READ_BASE_PATH = join(ROOT, 'scripts/lib/e2e-read-base-path.mjs');
+  function readBasePath(manifestPath: string) {
+    return spawnSync('node', [READ_BASE_PATH, manifestPath], { encoding: 'utf8' });
+  }
+  function manifestFixture(contents: string): string {
+    const dir = tempDir('ed-basepath-');
+    const p = join(dir, 'required-server-files.json');
+    writeFileSync(p, contents);
+    return p;
+  }
+
+  it('reads a configured basePath ("/docs")', () => {
+    const r = readBasePath(manifestFixture(JSON.stringify({ config: { basePath: '/docs' } })));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('/docs');
+    expect(r.stderr).toBe('');
+  });
+
+  it('assetPrefix alone is not read as basePath', () => {
+    const r = readBasePath(
+      manifestFixture(JSON.stringify({ config: { assetPrefix: 'https://cdn.example.com/x' } })),
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('no basePath configured resolves to "" — a legitimate case, not an error', () => {
+    const r = readBasePath(manifestFixture(JSON.stringify({ config: {} })));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('a MISSING (unreadable) manifest fails loudly — exit 1 with a message, never a silent ""', () => {
+    const dir = tempDir('ed-basepath-missing-');
+    const r = readBasePath(join(dir, 'does-not-exist.json'));
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toContain('could not read/parse');
+  });
+
+  it('a MALFORMED (non-JSON) manifest fails loudly too', () => {
+    const r = readBasePath(manifestFixture('{ this is not valid json'));
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toContain('could not read/parse');
+  });
+
+  it('scripts/e2e-deploy.sh calls the extracted script and fails closed rather than hardcoding ""', () => {
+    const src = readRepo('scripts/e2e-deploy.sh');
+    expect(src).toContain('node "${ED__LIB_DIR}/e2e-read-base-path.mjs"');
+    expect(src).not.toContain(
+      'try{process.stdout.write(String(require(process.argv[1]).config?.basePath||""))}catch{}',
+    );
+    // Failure of the read must abort the pre-check, not fall through with an
+    // empty EMPTY_DIR_BASE_PATH.
+    expect(src).toMatch(
+      /node "\$\{ED__LIB_DIR\}\/e2e-read-base-path\.mjs"[^|]*\)"\s*\|\|\s*\{[\s\S]{0,500}?exit 1/,
+    );
+  });
+});
+
+describe('#1521 round-2, finding 2b — ED__LIB_DIR resolves absolutely regardless of sourcing style (R14)', () => {
+  it('ed_probe_http still finds its helper after the shell cds away from the sourcing-time cwd, even when the lib was sourced via a RELATIVE path', () => {
+    const workDir = tempDir('ed-r14-elsewhere-');
+    const script = `
+      set -euo pipefail
+      PORT="$(${freePortExpr()})"
+      PORT="\${PORT}" node -e "require('http').createServer((req,res)=>{res.writeHead(200);res.end('ok')}).listen(Number(process.env.PORT),'127.0.0.1')" >/dev/null 2>&1 &
+      SERVER_PID=$!
+      for _ in $(seq 1 50); do
+        node -e "require('net').connect(\${PORT},'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null && break
+        sleep 0.1
+      done
+      cd "${ROOT}"
+      . "scripts/lib/e2e-empty-dir.sh"
+      cd "${workDir}"
+      ed_probe_http "\${PORT}" / 2xx3xx
+      RC=$?
+      kill -KILL "\${SERVER_PID}" 2>/dev/null || true
+      exit "\${RC}"
+    `;
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 20_000 });
+    expect(r.status).toBe(0);
+  }, 25_000);
+});
+
+describe('#1521 round-2, finding 3 — the empty-dir lane cleans up its own staged copies (runner disk)', () => {
+  it("e2e-cleanup.sh removes SERVED_FROM_DIR (the suite's staged empty dir) after teardown", () => {
+    const app = makeAppDir();
+    const stagedDir = tempDir('knext-empty-dir-suite.');
+    writeFileSync(join(stagedDir, 'marker'), 'x');
+    for (const n of ['node_modules', '.next', '.output']) {
+      spawnSync('mv', [join(app, n), join(app, `${n}.ed-hidden`)]);
+    }
+    writeFileSync(
+      join(app, '.adapter-build.log'),
+      `PID=999999999\nSERVED_FROM=empty-dir\nSERVED_FROM_DIR=${stagedDir}\n`,
+    );
+    const c = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+      cwd: app,
+      encoding: 'utf8',
+    });
+    expect(c.status).toBe(0);
+    expect(existsSync(stagedDir)).toBe(false);
+    expect(hiddenState(app)).toEqual(RESTORED);
+  });
+
+  it('a disk-mode teardown (no SERVED_FROM_DIR in metadata) is a clean no-op for that step', () => {
+    const app = makeAppDir();
+    writeFileSync(join(app, '.adapter-build.log'), 'PID=999999999\nSERVED_FROM=disk\n');
+    const c = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+      cwd: app,
+      encoding: 'utf8',
+    });
+    expect(c.status).toBe(0);
+  });
+
+  it('e2e-cleanup.sh never removes a staged dir it does not own: a live concurrent deploy survives both teardown paths (PR #1521 round 3)', () => {
+    // The compat harness runs test files at `-c 2` on ONE runner sharing ONE
+    // RUNNER_TEMP. Deploy A is mid-suite: a live process running from its
+    // suite dir, plus an in-progress pre-check dir, both aged well past any
+    // start-of-run cutoff a sweep could use. Deploy B tears down twice — with
+    // no metadata (its deploy failed early: the path the round-2 orphan sweep
+    // ran on) and with metadata naming B's OWN SERVED_FROM_DIR. Neither
+    // teardown may touch A; the second must remove B's own dir.
+    const runnerTemp = tempDir('ed-r3-runner-temp-');
+    const aSuite = join(runnerTemp, 'knext-empty-dir-suite.AAAAAA');
+    const aPre = join(runnerTemp, 'knext-empty-dir.AAAAAA');
+    const aAsset = join(aSuite, '.next/static/chunks/a.js');
+    mkdirSync(dirname(aAsset), { recursive: true });
+    writeFileSync(aAsset, 'x');
+    mkdirSync(aPre);
+    const past = new Date(Date.now() - 600_000);
+    utimesSync(aSuite, past, past);
+    utimesSync(aPre, past, past);
+    const owner = spawnSync(
+      'bash',
+      ['-c', `( cd "${aSuite}" && exec sleep 60 ) >/dev/null 2>&1 & echo "PID=$!"`],
+      { encoding: 'utf8' },
+    );
+    const ownerPid = field(owner.stdout, 'PID');
+    expect(alive(ownerPid)).toBe(true);
+    try {
+      const env = { ...process.env, RUNNER_TEMP: runnerTemp };
+      const bNoMeta = tempDir('ed-r3-b-nometa-');
+      const c1 = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+        cwd: bNoMeta,
+        encoding: 'utf8',
+        env,
+      });
+      expect(c1.status).toBe(0);
+      const bMeta = tempDir('ed-r3-b-meta-');
+      const bSuite = join(runnerTemp, 'knext-empty-dir-suite.BBBBBB');
+      mkdirSync(bSuite);
+      utimesSync(bSuite, past, past);
+      writeFileSync(
+        join(bMeta, '.adapter-build.log'),
+        `PID=999999999\nSERVED_FROM=empty-dir\nSERVED_FROM_DIR=${bSuite}\n`,
+      );
+      const c2 = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+        cwd: bMeta,
+        encoding: 'utf8',
+        env,
+      });
+      expect(c2.status).toBe(0);
+      expect(existsSync(bSuite)).toBe(false);
+      expect(alive(ownerPid)).toBe(true);
+      expect(existsSync(aAsset)).toBe(true);
+      expect(existsSync(aPre)).toBe(true);
+    } finally {
+      if (alive(ownerPid)) spawnSync('kill', ['-KILL', ownerPid]);
+    }
+  });
+});
+
+/** The pre-check's shape in both deploy scripts: mktemp, own it on the next line, then <body>. */
+function precheckScript(parent: string, body: string): string {
+  return `
+    set -uo pipefail
+    . "${LIB}"
+    EMPTY_DIR="$(mktemp -d "${parent}/knext-empty-dir.XXXXXX")"
+    ed_own_dir "\${EMPTY_DIR}"
+    echo "EMPTY_DIR=\${EMPTY_DIR}"
+    ${body}
+  `;
+}
+
+describe('#1521 round-3 — each deploy removes its OWN staged dirs (ed_own_dir), on every exit', () => {
+  it('a normal exit 0 removes the owned pre-check dir even with no explicit rm', () => {
+    const r = runSuite(precheckScript(outsideTempDir('ed-own-ok-'), 'exit 0'));
+    expect(r.status).toBe(0);
+    expect(ownedDirGone(r.stdout)).toBe(true);
+  });
+
+  it('a staging failure (`ed_stage` of a missing binary → exit 1) removes the owned dir', () => {
+    const parent = outsideTempDir('ed-own-stage-');
+    const r = runSuite(
+      precheckScript(
+        parent,
+        `EMPTY_DIR_STAGED="$(ed_stage "\${EMPTY_DIR}" "${parent}/no-such-binary")" || exit 1; echo "STAGED=\${EMPTY_DIR_STAGED}"`,
+      ),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stdout).not.toContain('STAGED=');
+    expect(ownedDirGone(r.stdout)).toBe(true);
+  });
+
+  it('SIGTERM mid-pre-check removes the owned dir (exit 143)', async () => {
+    const parent = outsideTempDir('ed-own-term-');
+    const marker = join(parent, 'OWNED-NOW');
+    const child = spawn(
+      'bash',
+      ['-c', precheckScript(parent, `touch "${marker}"; while :; do sleep 0.1; done`)],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let out = '';
+    child.stdout.on('data', (d) => {
+      out += d;
+    });
+    const exited = new Promise<number | null>((res) => child.on('exit', (code) => res(code)));
+    for (let i = 0; i < 300 && !existsSync(marker); i++) await Bun.sleep(50);
+    expect(existsSync(marker)).toBe(true);
+    expect(existsSync(field(out, 'EMPTY_DIR'))).toBe(true);
+    child.kill('SIGTERM');
+    expect(await exited).toBe(143);
+    expect(ownedDirGone(out)).toBe(true);
+  }, 30_000);
+
+  it('removes ONLY what it owns: a sibling knext-empty-dir.* it did not create survives its exit', () => {
+    const parent = outsideTempDir('ed-own-sibling-');
+    const sibling = join(parent, 'knext-empty-dir.OTHER1');
+    mkdirSync(sibling);
+    const r = runSuite(precheckScript(parent, 'exit 1'));
+    expect(r.status).toBe(1);
+    expect(ownedDirGone(r.stdout)).toBe(true);
+    expect(existsSync(sibling)).toBe(true);
+  });
+
+  for (const script of ['scripts/e2e-deploy.sh', 'scripts/e2e-deploy-vinext.sh']) {
+    it(`${script}: every knext-empty-dir* mktemp is owned on the very next line, and the hand-off disowns the served dir`, () => {
+      const src = readRepo(script);
+      const lines = src.split('\n');
+      const mk = lines.flatMap((l, i) =>
+        /^\s*EMPTY_DIR="\$\(mktemp -d .*\/knext-empty-dir(-suite)?\.XXXXXX"\)"$/.test(l) ? [i] : [],
+      );
+      // The pre-check dir and the suite dir.
+      expect(mk.length).toBe(2);
+      for (const i of mk) expect(lines[i + 1].trim()).toBe('ed_own_dir "${EMPTY_DIR}"');
+      expect(src.match(/^\s*ed_suite_hand_off\b.*$/gm)).toEqual([
+        '  ed_suite_hand_off "${EMPTY_DIR}"',
+      ]);
+    });
+
+    it(`${script}: the pre-check dir and the suite staging dir are removed on EVERY exit from their blocks (structural)`, () => {
+      const lines = readRepo(script).split('\n');
+      const RM = 'rm -rf "${EMPTY_DIR}"';
+      // Pre-check block: from its mktemp to the `fi` closing the enclosing
+      // KNEXT_SELF_CONTAINED `if` (one indent level out). Every `exit 1`
+      // segment must remove the dir before exiting, AND so must the success
+      // path after the last `exit 1`.
+      const pre = lines.findIndex((l) => /mktemp -d .*\/knext-empty-dir\.XXXXXX/.test(l));
+      expect(pre).toBeGreaterThan(-1);
+      const indent = (lines[pre].match(/^ */) as RegExpMatchArray)[0].length;
+      const preEnd = lines.findIndex((l, i) => i > pre && l === `${' '.repeat(indent - 2)}fi`);
+      expect(preEnd).toBeGreaterThan(pre);
+      const preSegments = lines
+        .slice(pre, preEnd)
+        .join('\n')
+        .split(/\bexit 1\b/);
+      expect(preSegments.length).toBeGreaterThan(1);
+      preSegments.forEach((seg, i) => {
+        expect({ segment: i, removes: seg.includes(RM) }).toEqual({ segment: i, removes: true });
+      });
+      // Suite staging block: from its mktemp to the restore-trap arming. The
+      // staging-failure branch removes the dir before `exit 1`.
+      const suite = lines.findIndex((l) => /mktemp -d .*\/knext-empty-dir-suite\.XXXXXX/.test(l));
+      const suiteEnd = lines.findIndex(
+        (l, i) => i > suite && l.includes('ed_suite_arm_restore_trap'),
+      );
+      expect(suite).toBeGreaterThan(-1);
+      expect(suiteEnd).toBeGreaterThan(suite);
+      const suiteSegments = lines
+        .slice(suite, suiteEnd)
+        .join('\n')
+        .split(/\bexit 1\b/);
+      expect(suiteSegments.length).toBe(2);
+      expect(suiteSegments[0]).toContain(RM);
+    });
+  }
+});
+
+describe('#1521 round-2, finding 4 — self-contained native-addon limitation is documented', () => {
+  it('docs/compat-matrix.md states the limitation in plain language, naming both fixtures', () => {
+    const docs = readRepo('docs/compat-matrix.md');
+    expect(docs).toContain('turbopack-reports');
+    expect(docs).toContain('prerender-native-module');
+    expect(docs).toMatch(/native addon/i);
+  });
+});
+
+describe('#1521 round-2, finding 5 (R8) — ed_assert_suite_isolated also checks inherited env', () => {
+  function cleanCwdAppDir(): { cwd: string; app: string } {
+    // Both otherwise clean: no node_modules/.next/.output anywhere, no
+    // ancestor node_modules, no symlinks — every OTHER branch of
+    // ed_assert_suite_isolated must pass so only the env check is exercised.
+    return { cwd: tempDir('ed-r8-cwd-'), app: tempDir('ed-r8-app-') };
+  }
+
+  it('passes with a clean environment', () => {
+    const { cwd, app } = cleanCwdAppDir();
+    const r = sh(`ed_assert_suite_isolated "${cwd}" "${app}"`);
+    expect(r.status).toBe(0);
+  });
+
+  it('fails when NODE_PATH points into the hidden APP_DIR', () => {
+    const { cwd, app } = cleanCwdAppDir();
+    const r = sh(
+      `export NODE_PATH="${join(app, 'node_modules')}"; ed_assert_suite_isolated "${cwd}" "${app}"`,
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('NODE_PATH');
+  });
+
+  it('fails when BUN_INSTALL points into the hidden APP_DIR', () => {
+    const { cwd, app } = cleanCwdAppDir();
+    const r = sh(
+      `export BUN_INSTALL="${join(app, '.bun')}"; ed_assert_suite_isolated "${cwd}" "${app}"`,
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('BUN_INSTALL');
+  });
+
+  it('fails when NODE_OPTIONS (-r a shim inside the hidden APP_DIR) is set', () => {
+    const { cwd, app } = cleanCwdAppDir();
+    const r = sh(
+      `export NODE_OPTIONS="-r ${join(app, 'node_modules/shim.js')}"; ed_assert_suite_isolated "${cwd}" "${app}"`,
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('NODE_OPTIONS');
+  });
+
+  it('an env var referencing an UNRELATED path is not flagged', () => {
+    const { cwd, app } = cleanCwdAppDir();
+    const r = sh(
+      `export NODE_PATH="/some/totally/unrelated/node_modules"; ed_assert_suite_isolated "${cwd}" "${app}"`,
+    );
+    expect(r.status).toBe(0);
+  });
+
+  // Mutation R8 (review-1521.md) targets the REAL vinext boot line, not the
+  // synthetic suiteScript() harness above — nothing in this file actually
+  // execs scripts/e2e-deploy-vinext.sh's SC branch (it needs a compiled
+  // exec), so the env check above cannot observe that specific injection at
+  // runtime. Text-scan the boot line instead: it must set nothing but the
+  // known-safe env vars, so an explicit NODE_PATH/BUN_INSTALL/NODE_OPTIONS
+  // added there is caught even though it can never reach ed_assert_suite_isolated
+  // in this suite.
+  it('scripts/e2e-deploy-vinext.sh: the SC suite boot line sets no env var but the known-safe ones', () => {
+    const src = readRepo('scripts/e2e-deploy-vinext.sh');
+    const bootLine = src.match(
+      /PORT="\$\{PORT\}" HOSTNAME="" NODE_ENV="production"[^\n]*\n\s*NEXT_DEPLOYMENT_ID="\$\{DEPLOYMENT_ID\}"[^\n]*\n\s*exec "\$\{EMPTY_DIR_STAGED\}"/,
+    );
+    expect(bootLine).not.toBeNull();
+    expect(bootLine![0]).not.toMatch(/NODE_PATH|BUN_INSTALL|NODE_OPTIONS/);
+  });
+});
+
+describe('#1521 round-2, finding 6a (R6) — the EXIT trap removes the recorded SC container', () => {
+  it("ed__suite_on_exit still docker rm -f's ED_SUITE_CONTAINER when one is set", () => {
+    // Text-scan, not a runtime invocation: this repo's task instructions are
+    // explicit that this round must not run docker locally, and the guard's
+    // own runtime behaviour (a live `docker run`/`docker rm` cycle) is
+    // exercised by the OKE/CI integration round, not this unit suite.
+    const src = readRepo('scripts/lib/e2e-empty-dir.sh');
+    expect(src).toContain(
+      'if [ -n "${ED_SUITE_CONTAINER:-}" ] && command -v docker >/dev/null 2>&1; then\n    docker rm -f "${ED_SUITE_CONTAINER}"',
+    );
+  });
+});
+
+describe('#1521 round-2, finding 6b (R11) — the HUP trap is converted into an exit', () => {
+  it('SIGHUP to the deploy script after hiding restores APP_DIR (exit 129)', async () => {
+    const app = makeAppDir();
+    const parent = outsideTempDir('ed-hup-');
+    const marker = join(parent, 'HIDDEN-NOW');
+    const script = suiteScript(app, parent, `touch "${marker}"; while :; do sleep 0.1; done`);
+    const child = spawn('bash', ['-c', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => {
+      out += d;
+    });
+    const exited = new Promise<number | null>((res) => child.on('exit', (code) => res(code)));
+    for (let i = 0; i < 300 && !existsSync(marker); i++) await Bun.sleep(50);
+    expect(existsSync(marker)).toBe(true);
+    expect(hiddenState(app)).toEqual(HIDDEN);
+    child.kill('SIGHUP');
+    const code = await exited;
+    expect(code).toBe(129);
+    expect(alive(field(out, 'PID'))).toBe(false);
+    expect(hiddenState(app)).toEqual(RESTORED);
+    expect(ownedDirGone(out)).toBe(true);
+  }, 60_000);
+});
+
+describe('#1521 round-2, finding 6c (R18) — the fingerprint only reads served_from when the lib is IN the harness closure', () => {
+  it('returns null when SERVED_FROM_LIB is absent from the harness list, even though the real file on disk declares empty-dir', () => {
+    const harnessWithoutLib = (collectHarness(ROOT, 'node', {}) as { path: string }[]).filter(
+      (e) => e.path !== SERVED_FROM_LIB,
+    );
+    expect(harnessWithoutLib.some((e) => e.path === SERVED_FROM_LIB)).toBe(false);
+    expect(readHarnessServedFrom(ROOT, harnessWithoutLib)).toBeNull();
+  });
+
+  it('returns the declared value when the lib IS in the harness closure', () => {
+    const fullHarness = collectHarness(ROOT, 'node', {}) as { path: string }[];
+    expect(fullHarness.some((e) => e.path === SERVED_FROM_LIB)).toBe(true);
+    expect(readHarnessServedFrom(ROOT, fullHarness)).toBe(SC_SERVED_FROM);
+  });
+});
+
+describe('#1521 round-2, finding 2c (R13) — the standalone pre-check threads EMPTY_DIR_BASE_PATH through to the probe call', () => {
+  it('scripts/e2e-deploy.sh: ed_static_probe_path is called WITH the resolved basePath variable, never a hardcoded ""', () => {
+    const src = readRepo('scripts/e2e-deploy.sh');
+    expect(src).toContain('ed_static_probe_path "${EMPTY_DIR}" "${EMPTY_DIR_BASE_PATH}")"');
   });
 });

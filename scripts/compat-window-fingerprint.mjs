@@ -1612,7 +1612,55 @@ function collectRuntimeComponent({ runtimeVersion, runtimeRevision }) {
  */
 function collectSelfContainedComponent({ selfContained }) {
   if (!selfContained) return null;
-  return `sha256:${sha256('selfContained\ttrue')}`;
+  // #1514: the marker names WHERE the suite was served from. Only ever
+  // reached after assertSelfContainedServedFrom() proved the frozen harness
+  // declares SC_SERVED_FROM — so every pre-#1514 self-contained digest (a
+  // suite served from disk under the self-contained label) differs from
+  // every post-#1514 one.
+  return `sha256:${sha256(`selfContained\ttrue\nservedFrom\t${SC_SERVED_FROM}`)}`;
+}
+
+/**
+ * #1514: the harness file that declares where a self-contained SUITE is
+ * served from, and the only value a self-contained fingerprint accepts.
+ * Both deploy scripts source this file (so it is in the frozen harness's
+ * source closure) and write its `ED_SUITE_SERVED_FROM_SC` into their
+ * persisted metadata as `SERVED_FROM=` when KNEXT_SELF_CONTAINED=1.
+ */
+export const SERVED_FROM_LIB = 'scripts/lib/e2e-empty-dir.sh';
+export const SC_SERVED_FROM = 'empty-dir';
+
+/**
+ * Where the frozen harness declares a self-contained suite is served from:
+ * the single `ED_SUITE_SERVED_FROM_SC="…"` assignment in SERVED_FROM_LIB, read
+ * ONLY when that file is actually in the harness closure (a copy nothing
+ * sources is not what the night runs). `null` when absent, not in the
+ * closure, or declared more than once.
+ *
+ * @param {string} repoRoot
+ * @param {{ path: string }[]} harness
+ * @returns {string | null}
+ */
+export function readHarnessServedFrom(repoRoot, harness) {
+  if (!harness.some((e) => e.path === SERVED_FROM_LIB)) return null;
+  const src = readFileSync(resolve(repoRoot, SERVED_FROM_LIB), 'utf8');
+  const matches = [...src.matchAll(/^ED_SUITE_SERVED_FROM_SC="([^"\n]*)"[ \t]*$/gm)];
+  return matches.length === 1 ? matches[0][1] : null;
+}
+
+/**
+ * #1514: refuse to label a window self-contained unless the frozen harness
+ * serves the suite from the empty dir. A missing declaration, or `disk`, is a
+ * hard error — never a silently unfolded digest.
+ *
+ * @param {string | null} servedFrom
+ */
+function assertSelfContainedServedFrom(servedFrom) {
+  if (servedFrom !== SC_SERVED_FROM) {
+    throw new Error(
+      `compat-window fingerprint: --self-contained requires the frozen harness to serve the suite from the empty dir (${SERVED_FROM_LIB}: ED_SUITE_SERVED_FROM_SC="${SC_SERVED_FROM}"), but it declares served_from=${servedFrom ?? 'MISSING'}. A window served from disk must never carry the self-contained label (#1514).`,
+    );
+  }
 }
 
 /**
@@ -1659,6 +1707,10 @@ export function computeFingerprint({
   // #1455 (F6): folded AFTER runtime, same "append only when non-default"
   // discipline — a disk-mode caller's digest (selfContained: false/absent)
   // never moves because of this line.
+  // #1514: a self-contained label requires the harness to serve the suite
+  // from the empty dir — checked before anything is folded.
+  const servedFrom = selfContained ? readHarnessServedFrom(repoRoot, harness) : null;
+  if (selfContained) assertSelfContainedServedFrom(servedFrom);
   const selfContainedComponent = collectSelfContainedComponent({ selfContained });
   if (selfContainedComponent !== null) {
     components.selfContained = selfContainedComponent;
@@ -1684,7 +1736,13 @@ export function computeFingerprint({
       },
       // #1455: recorded verbatim too, so a reader sees the mode without
       // re-deriving it from the opaque component hash.
-      selfContained: { value: Boolean(selfContained), frozen: selfContainedComponent !== null },
+      // #1514: servedFrom is the harness-declared suite location, `null` in
+      // disk mode (nothing declared is needed or read there).
+      selfContained: {
+        value: Boolean(selfContained),
+        frozen: selfContainedComponent !== null,
+        servedFrom,
+      },
     },
     counts: { harness: harness.length, packed: packed.length },
     packages,
@@ -1768,7 +1826,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     }
     console.log(
       result.recorded.selfContained.frozen
-        ? '  KNEXT_SELF_CONTAINED=1 (FROZEN into the digest, #1455) — a disk-mode window cannot match this fingerprint'
+        ? `  KNEXT_SELF_CONTAINED=1 (FROZEN into the digest, #1455), served_from=${result.recorded.selfContained.servedFrom} (#1514) — a disk-mode window cannot match this fingerprint`
         : '  KNEXT_SELF_CONTAINED: off (disk mode — nothing folded)',
     );
     if (out) console.log(`  written to ${relative(process.cwd(), resolve(out))}`);

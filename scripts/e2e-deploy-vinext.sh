@@ -476,6 +476,7 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
     # closes the remaining gap: APP_DIR/node_modules and APP_DIR/.output
     # sitting on the SAME host, not nested under EMPTY_DIR at all.
     EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir.XXXXXX")"
+    ed_own_dir "${EMPTY_DIR}"
     EMPTY_DIR_PORT="$(free_port)"
     log "KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check into ${EMPTY_DIR}"
     # BLOCKING-3 (round-2 review): hide APP_DIR/node_modules and APP_DIR/.output
@@ -486,12 +487,21 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
     # one by walking up from EMPTY_DIR or via the absolute path baked into the
     # binary at compile time (ADR-0060 §Context), producing a false pass.
     ED_HIDE_DURING_BOOT=("${APP_DIR}/node_modules" "${APP_DIR}/.output")
-    if ! ed_check_or_die "vinext" "${EMPTY_DIR}" "${KNEXT_EXEC}" /api/health / "${EMPTY_DIR_PORT}" \
+    # #1515: the 2xx check is a STAGED static file (ED_STATIC_PROBE) — the
+    # compat fixtures have no /api/health — and `/` stays non-5xx. A lane
+    # whose app has the route (file-manager) sets KNEXT_EMPTY_DIR_HEALTH_PATH.
+    if ! ed_check_or_die "vinext" "${EMPTY_DIR}" "${KNEXT_EXEC}" "${KNEXT_EMPTY_DIR_HEALTH_PATH:-${ED_STATIC_PROBE}}" / "${EMPTY_DIR_PORT}" \
       "${APP_DIR}/.output/public:.output/public" "${APP_DIR}/native:native"; then
       log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until V1 (#1460) embeds what this exec still loads from disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
+      # round-2 review, finding 3: remove the pre-check's staged copy right
+      # after the probe, on every exit path — it is a second full copy of the
+      # binary + static assets + native/, on top of the suite's own empty dir
+      # below, and nothing else was ever removing it.
+      rm -rf "${EMPTY_DIR}"
       exit 1
     fi
     log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"
+    rm -rf "${EMPTY_DIR}"
   fi
 else
   KNEXT_EXEC=""
@@ -543,8 +553,39 @@ fi
 # entry under bun when KNEXT_COMPILE=0. Everything downstream (readiness, metadata,
 # the single stdout URL line) is identical either way.
 PORT="$(free_port)"
+SERVED_FROM="disk"
 
-if [ "${KNEXT_COMPILE}" != "0" ]; then
+if [ "${KNEXT_COMPILE}" != "0" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
+  # ── #1514: the SUITE is served from the empty dir, not from APP_DIR ─────────
+  # §6c's 2-route probe is only the fail-fast pre-check. The server the whole
+  # compat suite runs against boots HERE: from a FRESH empty dir holding only
+  # the binary + .output/public + native/ (cwd = that dir, exec the STAGED
+  # binary), with APP_DIR's node_modules / .next / .output hidden for the
+  # WHOLE run — hidden now, restored by scripts/e2e-cleanup.sh at teardown
+  # (after the server is stopped), or by the EXIT trap armed below if this
+  # script fails before handing the URL to the harness. Bare boot, no docker:
+  # same platform as this script (see §6c), so hiding is what isolates it.
+  EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir-suite.XXXXXX")"
+  ed_own_dir "${EMPTY_DIR}"
+  EMPTY_DIR_STAGED="$(ed_suite_stage "${EMPTY_DIR}" "${KNEXT_EXEC}" \
+    "${APP_DIR}/.output/public:.output/public" "${APP_DIR}/native:native")" || {
+    log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite's empty dir failed"
+    rm -rf "${EMPTY_DIR}"
+    exit 1
+  }
+  ed_suite_arm_restore_trap "${APP_DIR}"
+  ed_suite_hide_app_dir "${APP_DIR}" || exit 1
+  SERVED_FROM="${ED_SUITE_SERVED_FROM_SC}"
+  log "KNEXT_SELF_CONTAINED=1 — booting the SUITE server ${EMPTY_DIR_STAGED} with cwd=${EMPTY_DIR} on 0.0.0.0:${PORT}; APP_DIR node_modules/.next/.output hidden until teardown"
+  (
+    cd "${EMPTY_DIR}"
+    PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
+      NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      exec "${EMPTY_DIR_STAGED}"
+  ) >"${SERVER_LOG}" 2>&1 &
+  SERVER_PID=$!
+  ED_SUITE_SERVER_PID="${SERVER_PID}"
+elif [ "${KNEXT_COMPILE}" != "0" ]; then
   log "booting the compiled binary ${KNEXT_EXEC} on 0.0.0.0:${PORT} (keep-alive guard baked in by vinext-compile: ${GUARD_PRELOAD})"
   (
     cd "${APP_DIR}"
@@ -580,6 +621,12 @@ fi
   # axis: COMPILED=true (default, the shipped single executable) vs COMPILED=false
   # (KNEXT_COMPILE=0 diagnostic, the uncompiled nitro output under bun).
   echo "COMPILED=$([ "${KNEXT_COMPILE}" != "0" ] && echo true || echo false)"
+  # #1514: where the SUITE server was served from — `empty-dir` (KNEXT_SELF_CONTAINED=1:
+  # cwd = a staged empty dir, APP_DIR hidden) or `disk` (cwd = APP_DIR).
+  echo "SERVED_FROM=${SERVED_FROM}"
+  if [ "${SERVED_FROM}" != "disk" ]; then
+    echo "SERVED_FROM_DIR=${EMPTY_DIR}"
+  fi
   echo "SERVER_LOG=${SERVER_LOG}"
   echo "BUILD_LOG=${BUILD_LOG}"
 } >"${LOG_FILE}"
@@ -615,6 +662,17 @@ if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
 fi
 
 log "deployment ready (vinext $([ "${KNEXT_COMPILE}" != "0" ] && echo "single executable" || echo "UNCOMPILED nitro output under bun")): build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"
+
+# #1514: the runtime isolation check, while the suite server is UP. A failure
+# exits here; the EXIT trap stops the server and restores APP_DIR.
+if [ "${SERVED_FROM}" != "disk" ]; then
+  if ! ed_assert_suite_isolated "${EMPTY_DIR}" "${APP_DIR}"; then
+    log "ERROR: KNEXT_SELF_CONTAINED=1 — the suite server is not isolated from the disk tree (see above); refusing to hand it to the harness"
+    exit 1
+  fi
+  ed_suite_hand_off "${EMPTY_DIR}"
+  log "KNEXT_SELF_CONTAINED=1 — suite served from ${EMPTY_DIR} (served_from=${SERVED_FROM}); APP_DIR stays hidden until e2e-cleanup.sh"
+fi
 
 # ── 10. the ONLY stdout line: the deployment URL ──────────────────────────────
 echo "http://localhost:${PORT}"
