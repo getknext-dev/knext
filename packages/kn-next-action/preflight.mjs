@@ -63,6 +63,24 @@ function effectiveRules() {
   if (!status || !Array.isArray(rules)) {
     throw new Error('SelfSubjectRulesReview returned no resourceRules');
   }
+  // `status.incomplete` means the authorizer could not fully resolve the
+  // caller's rules — the normal answer from a webhook authorizer (OKE/GKE IAM
+  // backends say "webhook authorizer does not support user rule resolution").
+  // Warn, don't fail closed: refusing here would refuse every credential on a
+  // webhook-authorized cluster, including a correctly-scoped one — not just an
+  // over-broad one. A SelfSubjectAccessReview spot-check of the hazardous
+  // verbs would close this gap; that is tracked as separate security
+  // tech-debt (#1495), not fixed here.
+  if (status.incomplete) {
+    console.error(
+      '::warning::The cluster reports this SelfSubjectRulesReview as incomplete ' +
+        '(it could not fully resolve what this credential can do — common on ' +
+        'webhook-authorized clusters such as OKE or GKE with IAM). Evaluating the ' +
+        'rules it did return rather than failing closed, because failing closed ' +
+        'here would refuse the scoped credential this check exists to allow, not ' +
+        `just an over-broad one.${status.evaluationError ? ` Cluster said: ${status.evaluationError}` : ''}`,
+    );
+  }
   return rules;
 }
 

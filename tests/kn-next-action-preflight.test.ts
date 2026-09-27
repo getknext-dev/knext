@@ -166,6 +166,15 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
    * `create -o json -f -` form the fix actually uses. `createExit`/`createStdout`/
    * `createStderr` let each case control what that second form returns.
    */
+  /**
+   * The file this stub writes into `dir` carries the SelfSubjectRulesReview
+   * body the preflight piped on stdin to `kubectl create` — so a test can
+   * assert what was actually submitted, not just what the stub echoed back.
+   */
+  function capturedReviewPath(dir: string): string {
+    return join(dir, 'create-input.json');
+  }
+
   function stubKubectl(opts: {
     createExit?: number;
     createStdout?: string;
@@ -173,6 +182,7 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
   }): string {
     const dir = tempDir('knext-preflight-1493-bin-');
     const bin = join(dir, 'kubectl');
+    const captureFile = capturedReviewPath(dir);
     const createExit = opts.createExit ?? 0;
     const esc = (s: string) => s.replace(/'/g, `'\\''`);
     const script = [
@@ -183,9 +193,17 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
       '  echo "See \'kubectl auth can-i --help\' for usage." >&2',
       '  exit 1',
       'fi',
-      '# the form the fix actually invokes',
+      '# the form the fix actually invokes — enforce the exact flags so a',
+      "# mutation that drops or reorders '-o json' fails HERE, not on a live",
+      '# cluster (a bare `create -f -` defaults to human-readable output, which',
+      '# `JSON.parse` in preflight.mjs would then throw on, fail-closed but for',
+      '# the wrong reason and on every cluster, not just a misbehaving one).',
       'if [ "$1" = "create" ]; then',
-      '  cat >/dev/null', // drain the SelfSubjectRulesReview piped on stdin
+      '  if [ "$#" -ne 5 ] || [ "$2" != "-o" ] || [ "$3" != "json" ] || [ "$4" != "-f" ] || [ "$5" != "-" ]; then',
+      '    echo "kubectl-stub: create must be invoked as \\`create -o json -f -\\`, got: $*" >&2',
+      '    exit 1',
+      '  fi',
+      `  cat > '${captureFile}'`, // capture the piped review body instead of draining it
       opts.createStderr ? `  echo '${esc(opts.createStderr)}' >&2` : '  :',
       opts.createStdout ? `  echo '${esc(opts.createStdout)}'` : '  :',
       `  exit ${createExit}`,
@@ -257,6 +275,22 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
     expect(r.stderr).not.toContain('Could not determine what this credential can do');
     expect(r.stdout).toContain('correctly scoped');
     expect(r.status).toBe(0);
+  });
+
+  it('the SelfSubjectRulesReview it submits is scoped to the --namespace argument, not hardcoded', () => {
+    // `run()` always passes `--namespace knext-docs` — this asserts the review the stub
+    // actually received carries THAT namespace, not a literal like "default". Without
+    // this, hardcoding `spec: { namespace: 'default' }` in preflight.mjs stays green:
+    // every other test here happens to pass with the wrong namespace evaluated.
+    const kubectlDir = stubKubectl({ createStdout: SCOPED_REVIEW });
+    const r = run(appWithWildcardAwareCore(), kubectlDir);
+    expect(r.status).toBe(0);
+    const captured = JSON.parse(readFileSync(capturedReviewPath(kubectlDir), 'utf8'));
+    expect(captured).toEqual({
+      apiVersion: 'authorization.k8s.io/v1',
+      kind: 'SelfSubjectRulesReview',
+      spec: { namespace: 'knext-docs' },
+    });
   });
 
   it('(b) the review reports a wildcard rule → REFUSED, the same refusal message as before', () => {
@@ -331,5 +365,25 @@ describe('#1493 — SelfSubjectRulesReview via `kubectl create -o json -f -`, no
     chmodSync(bin, 0o755);
     const r = run(appWithWildcardAwareCore(), dir);
     expect(r.status).toBe(0);
+  });
+
+  it('warns but does not fail closed when the review reports status.incomplete, quoting evaluationError', () => {
+    // The real shape on a webhook-authorized cluster (OKE/GKE IAM): the review answers,
+    // but incompletely, and resourceRules comes back empty. Failing closed on `incomplete`
+    // alone would refuse every credential on such a cluster, including a correctly-scoped
+    // one — so this must still pass, and must say why in a warning, not silently.
+    const INCOMPLETE_REVIEW = JSON.stringify({
+      status: {
+        resourceRules: [],
+        incomplete: true,
+        evaluationError: 'webhook authorizer does not support user rule resolution',
+      },
+    });
+    const r = run(appWithWildcardAwareCore(), stubKubectl({ createStdout: INCOMPLETE_REVIEW }));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('correctly scoped');
+    expect(r.stderr).toContain('::warning::');
+    expect(r.stderr).toContain('incomplete');
+    expect(r.stderr).toContain('webhook authorizer does not support user rule resolution');
   });
 });
