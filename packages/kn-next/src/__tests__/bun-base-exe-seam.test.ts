@@ -73,7 +73,9 @@ function verifiedBase(): string {
 function compileBlocks(raw: string): string[] {
     // Comments are prose, not code: a doc comment that says `compile: { … }`
     // is not a compile object (block comments and whole-line `//` only).
-    const source = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const source = raw
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
     const blocks: string[] = [];
     for (const m of source.matchAll(/\bcompile:\s*\{/g)) {
         const open = (m.index ?? 0) + m[0].length - 1;
@@ -122,11 +124,17 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
             .filter((f) => f.endsWith(".mjs"))
             .filter((f) => {
                 const src = readFileSync(join(ADAPTERS, f), "utf8");
-                return /\bBun\.build\(/.test(src) && compileBlocks(src).length === 0;
+                return (
+                    /\bBun\.build\(/.test(src) &&
+                    compileBlocks(src).length === 0
+                );
             });
-        expect(unscanned.filter((f) => !NO_COMPILE_LITERAL_REVIEWED.has(f))).toEqual([]);
+        expect(
+            unscanned.filter((f) => !NO_COMPILE_LITERAL_REVIEWED.has(f)),
+        ).toEqual([]);
         // The exemption must stay load-bearing, not a stale entry.
-        for (const f of NO_COMPILE_LITERAL_REVIEWED) expect(unscanned).toContain(f);
+        for (const f of NO_COMPILE_LITERAL_REVIEWED)
+            expect(unscanned).toContain(f);
     });
 
     for (const { file, source } of scripts) {
