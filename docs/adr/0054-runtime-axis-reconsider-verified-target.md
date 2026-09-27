@@ -404,3 +404,26 @@ would give and is not yet measured on a cluster (#1226).
 7. Flip `DEFAULT_BUILDER_ID` to bun-standalone once that cell is credentialed. *(#1183)*
 8. **Maintainer:** reconcile `.claude/rules/architecture.md §4` and `CLAUDE.md §3` with this
    Amendment (see the PR body for the exact lines).
+
+## Amendment 8 — cross-reference to Amendment 7: self-contained compiled cells (ADR-0060, 2026-09-26)
+
+- **Status:** **Proposed (2026-09-26)**, with ADR-0060; decided at the same sprint-close design gate. Amends Amendment 7
+  by cross-reference only; ADR-0058's cell list is unchanged.
+
+1. **Compiled bun cells may ship self-contained, behind the flag.** With `--self-contained` /
+   `selfContained: true` (default off), a bun × turbopack or bun × webpack executable embeds what
+   Amendment 7 left on disk (`.next/server/**`, `*.runtime.prod.js`, manifests) and boots from a
+   directory with no `node_modules/` or `.next/`. Default builds are byte-identical to today.
+   **Amendment 7's single-instance rule is the open risk, not a solved one.** Amendment 7 keeps the
+   renderers and the modules literally required from `.next/server/**` on disk so each exists once
+   (the `NoFallbackError` fix); the self-contained embed moves exactly those files into the binary.
+   ADR-0060's path-fidelity invariant makes them *resolvable* but does not dedupe them against a
+   copy the entry bundle already inlines. The self-contained Next build does not ship, even behind
+   the flag, until a module-identity probe (#1456) shows the same React / renderer module object
+   from the entry bundle and from an included chunk.
+2. **Bytecode on included modules is measured (PR #1468).** A module embedded as an extra
+   entrypoint is compiled to bytecode on stock Bun 1.4.2 (marker-verified). Amendment 7's
+   fail-closed verifier checks the entry graph; #1456 extends it to Next's route chunks. Until that
+   lands, "self-contained" must not be read as "bytecode verified on every route".
+3. **A self-contained cell is a separate fingerprint.** Its compat window starts from zero (ADR-0056)
+   and does not inherit the disk-mode cell's nights.
