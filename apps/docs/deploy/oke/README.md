@@ -98,12 +98,10 @@ the operator's Deployment, Knative's ConfigMaps) that this credential is not all
 would fail every run on RBAC probe errors. `kn-next deploy` still server-side dry-runs the `NextApp`
 against the live CRD schema before it applies.
 
-## Superseded files (retire after the first green run on `main`)
+## Retired files (#1488)
 
-- `docs-ksvc.yaml`: the hand-applied Knative Service. **Do not apply it.** The operator owns
-  `knext-docs` now and would revert it.
-- `../../Dockerfile.oke` and `docs.yaml`: the `node:22-alpine` image and a plain-k8s variant.
-
-Both files are kept until the workflow's first run on `main` is green. Their removal also has to
-update `tests/base-image-cve-hygiene.test.ts`, `tests/bun-version-pins.test.ts`, and
-`scripts/check-base-images-pinned.sh`, which name `Dockerfile.oke`.
+`docs-ksvc.yaml` (the hand-applied Knative Service), `docs.yaml` (a plain-k8s variant), and
+`../../Dockerfile.oke` (the `node:22-alpine` image they built) were kept until the first green run
+of this workflow on `main` — that ran clean, and the operator has owned `knext-docs` since. All
+three are removed; do not re-add a hand-applied Knative Service or manifest here. The operator
+reverts anything applied out of band (ADR-0001).

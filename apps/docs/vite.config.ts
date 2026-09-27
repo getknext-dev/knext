@@ -22,11 +22,15 @@ import vinext from 'vinext';
 import { defineConfig } from 'vite';
 
 /**
- * This one app has three deployment targets, and only one of them can run bun.
+ * This one app deploys to two live targets, plus one retired preset kept
+ * building as a regression guard, and only one of them can run bun.
  *
  *   - knext/Knative (`Dockerfile`) — the dogfood target, `oven/bun` image
  *   - Vercel (`vercel.json`)       — a `nodejs24.x` function
- *   - plain k8s on OKE (`Dockerfile.oke`) — a `node:22-alpine` image
+ *   - `NITRO_PRESET=node` — no live deploy target since the plain-k8s OKE
+ *     deploy (`Dockerfile.oke`) retired (#1488); ci.yml still builds this
+ *     preset as a regression guard so it cannot silently ship the bun-only
+ *     entry below.
  *
  * `knext-bun-entry.mjs` serves through `Bun.serve`/`srvx/bun`, so carrying it
  * into a Node target produces something that COMPILES and then fails at
