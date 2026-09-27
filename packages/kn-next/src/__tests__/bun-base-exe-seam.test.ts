@@ -14,7 +14,14 @@
  *      `globalThis`, no computed key or write outside a reviewed set, and a
  *      compile literal spreads only the seam and reviewed expressions.
  *      The seam must never be readable from config or CLI flags (CI-only).
- *   2. The fail-closed table of `bunBaseExeCompileOptions()`.
+ *      Round 13 (review-1469-r12 MEDIUM-1): the round-12 literal-spread rule is
+ *      replaced by a structural one. The seam value is a private frozen const
+ *      in bun-base-exe.mjs, read only by `sealCompile()`; every `compile:` value
+ *      is a direct `sealCompile(…)` call, and no other adapter module spells
+ *      `executablePath` or a computed key outside a reviewed set.
+ *   2. The fail-closed table of `bunBaseExeCompileOptions()`, and `sealCompile()`
+ *      refusing a foreign `executablePath` by every runtime route (own,
+ *      inherited, non-enumerable, computed spelling, a lying Proxy).
  *   3. Both real scripts, in default AND `--self-contained` mode, run as
  *      processes with `Bun.build` stubbed by a preload that records EVERY
  *      call, so the assertion is on what the scripts actually hand to
@@ -43,8 +50,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import ts from "typescript";
 import {
+    assertBunBaseExe,
     BUN_BASE_EXE_ENV,
+    BunBaseExeError,
     bunBaseExeCompileOptions,
+    sealCompile,
 } from "../adapters/bun-base-exe.mjs";
 
 const ADAPTERS = resolve(import.meta.dir, "..", "adapters");
@@ -82,14 +92,10 @@ function verifiedBase(): string {
 /** One `compile` property as the PARSER sees it (TypeScript's, on the .mjs). */
 type CompileSite = {
     line: number;
-    /** Its value is an object literal (not an identifier, member, call, …). */
-    literal: boolean;
+    /** Round 13: its value is a direct `sealCompile(…)` call — the only way to build a compile value. */
+    sealed: boolean;
     /** The value's syntax kind, for the failure message. */
     valueKind: string;
-    /** `...BUN_BASE_EXE` spreads in the literal. */
-    seams: number;
-    /** `...BUN_BASE_EXE` is the literal's LAST element, so nothing after it can displace it. */
-    seamLast: boolean;
     /** An `executablePath` key anywhere in it (the seam must be its only source). */
     execPath: boolean;
 };
@@ -123,8 +129,15 @@ type ScriptScan = {
     computedKeys: number[];
     /** `o[k] = …` with a key that is not a string literal (a computed write of any key). */
     computedWrites: string[];
-    /** Per compile literal, its spreads other than the seam, as source text. */
-    compileSpreads: string[];
+    // ── round 13 (review-1469-r12 MEDIUM-1): the seam value is sealed in bun-base-exe.mjs ──
+    /** Every identifier `sealCompile` (the import, each compile value's callee, and any other use). */
+    sealRefs: number;
+    /** Every identifier `BUN_BASE_EXE` (the seam value — module-private to bun-base-exe.mjs). */
+    seamRefs: number;
+    /** Every identifier `bunBaseExeCompileOptions` (a compile script must not hold the raw value). */
+    rawSeamRefs: number;
+    /** A computed key that is not a string literal, as source text (for the adapters-wide rule). */
+    computedKeyTexts: string[];
 };
 
 /**
@@ -157,11 +170,10 @@ function scanScript(file: string, source: string): ScriptScan {
             return n.expression.text;
         return undefined;
     };
-    const isSeam = (e: ts.ObjectLiteralElementLike | undefined) =>
-        !!e &&
-        ts.isSpreadAssignment(e) &&
+    const isSealCall = (e: ts.Expression) =>
+        ts.isCallExpression(e) &&
         ts.isIdentifier(e.expression) &&
-        e.expression.text === "BUN_BASE_EXE";
+        e.expression.text === "sealCompile";
     const hasExecPath = (n: ts.Node): boolean => {
         let hit = false;
         const visit = (m: ts.Node) => {
@@ -198,7 +210,10 @@ function scanScript(file: string, source: string): ScriptScan {
         buildNames: [],
         computedKeys: [],
         computedWrites: [],
-        compileSpreads: [],
+        sealRefs: 0,
+        seamRefs: 0,
+        rawSeamRefs: 0,
+        computedKeyTexts: [],
     };
     const isLit = (e: ts.Expression) =>
         ts.isStringLiteralLike(e) || ts.isNumericLiteral(e);
@@ -252,8 +267,15 @@ function scanScript(file: string, source: string): ScriptScan {
                         n.name.text === "build")))
         )
             out.buildNames.push(lineOf(n));
-        if (ts.isComputedPropertyName(n) && !isLit(n.expression))
+        if (ts.isComputedPropertyName(n) && !isLit(n.expression)) {
             out.computedKeys.push(lineOf(n));
+            out.computedKeyTexts.push(n.getText(sf));
+        }
+        if (ts.isIdentifier(n)) {
+            if (n.text === "sealCompile") out.sealRefs++;
+            if (n.text === "BUN_BASE_EXE") out.seamRefs++;
+            if (n.text === "bunBaseExeCompileOptions") out.rawSeamRefs++;
+        }
         if (
             ts.isBinaryExpression(n) &&
             n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
@@ -265,19 +287,10 @@ function scanScript(file: string, source: string): ScriptScan {
 
         if (ts.isPropertyAssignment(n) && nameOf(n.name) === "compile") {
             const v = n.initializer;
-            const literal = ts.isObjectLiteralExpression(v);
-            const props = literal
-                ? v.properties
-                : ts.factory.createNodeArray<ts.ObjectLiteralElementLike>();
-            for (const p of props)
-                if (ts.isSpreadAssignment(p) && !isSeam(p))
-                    out.compileSpreads.push(p.getText(sf));
             out.compiles.push({
                 line: lineOf(n),
-                literal,
+                sealed: isSealCall(v),
                 valueKind: ts.SyntaxKind[v.kind],
-                seams: props.filter(isSeam).length,
-                seamLast: isSeam(props[props.length - 1]),
                 execPath: hasExecPath(v),
             });
         } else if (
@@ -341,14 +354,78 @@ const COMPILE_SITES: Record<string, number> = {
     "standalone-compile.mjs": 2, // base + self-contained
 };
 
-/** The spreads a compile literal may carry besides the seam, exactly (round 12): a spread of any
- *  other expression can carry an `executablePath` no key check sees — `...JSON.parse(env.X)`. */
-const REVIEWED_COMPILE_SPREADS = new Set([
-    "...(TARGET ? { target: TARGET } : {})",
-    "...shape.compile",
-    "...opts.compile",
-    "...base.compile",
+/**
+ * Round 13 (review-1469-r12 MEDIUM-1): the seam lives in ONE module. `bun-base-exe.mjs` owns the
+ * key and the value; every other adapter module (compile scripts, `compile-embed.mjs` — no
+ * exemption — and everything else) must not spell `executablePath` at all, and must not use a
+ * computed key outside this exact reviewed list (a computed key is how a key is spelled without
+ * being written). Spellings the text ban cannot see (`"executable" + "Path"` in an
+ * `Object.fromEntries`) are refused at RUNTIME by `sealCompile()`, which every compile value goes
+ * through — the scan's job is to make "every compile value is a `sealCompile(…)` call" true.
+ */
+const SEAM_MODULES = new Set(["bun-base-exe.mjs", "bun-base-exe.d.mts"]);
+const REVIEWED_COMPUTED_KEYS = new Set([
+    "correlation-response.ts [CORRELATION_RESPONSE_INSTALLED]",
+    "compile-embed.mjs [EMBED_PROBE_ENV]",
 ]);
+/** The one import a compile script may take from the seam module, exactly. */
+const SEAM_IMPORT =
+    'import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";';
+
+/**
+ * The structure of `bun-base-exe.mjs` that makes the seam value unreachable from outside
+ * `sealCompile`: `BUN_BASE_EXE` is declared exactly once, as a non-exported `const` initialised by
+ * `Object.freeze(…)`, and every other reference sits inside `function sealCompile`.
+ */
+function seamModuleShape(source: string) {
+    const sf = ts.createSourceFile(
+        "bun-base-exe.mjs",
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.JS,
+    );
+    const decls: string[] = [];
+    const outside: number[] = [];
+    let inside = 0;
+    const inSeal = (n: ts.Node): boolean => {
+        for (let p: ts.Node | undefined = n.parent; p; p = p.parent)
+            if (ts.isFunctionDeclaration(p) && p.name?.text === "sealCompile")
+                return true;
+        return false;
+    };
+    const visit = (n: ts.Node) => {
+        if (ts.isIdentifier(n) && n.text === "BUN_BASE_EXE") {
+            const d = n.parent;
+            if (ts.isVariableDeclaration(d) && d.name === n) {
+                const list = d.parent;
+                const stmt = list.parent;
+                const exported =
+                    ts.isVariableStatement(stmt) &&
+                    !!stmt.modifiers?.some(
+                        (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+                    );
+                const isConst =
+                    ts.isVariableDeclarationList(list) &&
+                    (list.flags & ts.NodeFlags.Const) !== 0;
+                const frozen =
+                    !!d.initializer &&
+                    ts.isCallExpression(d.initializer) &&
+                    d.initializer.expression.getText(sf) === "Object.freeze";
+                decls.push(
+                    `${isConst ? "const" : "mutable"} ${exported ? "exported" : "private"} ${frozen ? "frozen" : "unfrozen"}`,
+                );
+            } else if (inSeal(n)) inside++;
+            else
+                outside.push(
+                    sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
+                );
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return { decls, inside, outside };
+}
 
 /** Computed writes a compile script may make, exactly: its argv parser and a report tally. Neither
  *  object reaches Bun.build; any other `o[k] = …` (it can write `executablePath`) is red. */
@@ -458,14 +535,53 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
         ).toEqual(["a/b/deep.js", "top.ts"]);
     });
 
-    it("the reviewed spreads and computed writes are each used (no stale entry)", () => {
-        const spreads = new Set(scripts.flatMap((s) => s.scan.compileSpreads));
+    it("the reviewed computed writes and computed keys are each used (no stale entry)", () => {
         const writes = new Set(scripts.flatMap((s) => s.scan.computedWrites));
-        expect(
-            [...REVIEWED_COMPILE_SPREADS].filter((x) => !spreads.has(x)),
-        ).toEqual([]);
+        const keys = new Set(
+            all.flatMap((s) =>
+                s.scan.computedKeyTexts.map((k) => `${s.file} ${k}`),
+            ),
+        );
         expect(
             [...REVIEWED_COMPUTED_WRITES].filter((x) => !writes.has(x)),
+        ).toEqual([]);
+        expect([...REVIEWED_COMPUTED_KEYS].filter((x) => !keys.has(x))).toEqual(
+            [],
+        );
+    });
+
+    // ── round 13 (review-1469-r12 MEDIUM-1, rows C4/C5/C7) ──
+    it("C4/C5: BUN_BASE_EXE is one private frozen const, referenced only inside sealCompile", () => {
+        const seam = all.find((s) => s.file === "bun-base-exe.mjs");
+        expect(seam).toBeDefined();
+        const shape = seamModuleShape(seam?.source ?? "");
+        expect(shape.decls).toEqual(["const private frozen"]);
+        expect(shape.outside).toEqual([]);
+        expect(shape.inside).toBeGreaterThan(0);
+        expect(seam?.source).not.toMatch(/export\s*\{[^}]*\bBUN_BASE_EXE\b/);
+        // …and no other adapter module names it at all (a copy elsewhere is a second seam).
+        expect(
+            all
+                .filter(
+                    (s) => s.file !== "bun-base-exe.mjs" && s.scan.seamRefs > 0,
+                )
+                .map((s) => s.file),
+        ).toEqual([]);
+    });
+
+    it("C7: no adapter module but the seam module spells executablePath, or a computed key outside the reviewed set", () => {
+        const others = all.filter((s) => !SEAM_MODULES.has(s.file));
+        expect(
+            others
+                .filter((s) => s.source.includes("executablePath"))
+                .map((s) => s.file),
+        ).toEqual([]);
+        expect(
+            others.flatMap((s) =>
+                s.scan.computedKeyTexts
+                    .map((k) => `${s.file} ${k}`)
+                    .filter((k) => !REVIEWED_COMPUTED_KEYS.has(k)),
+            ),
         ).toEqual([]);
     });
 
@@ -487,13 +603,13 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
 
     for (const { file, source, scan } of scripts) {
         describe(file, () => {
-            it("resolves the seam through bunBaseExeCompileOptions()", () => {
-                expect(source).toContain(
-                    'import { bunBaseExeCompileOptions } from "./bun-base-exe.mjs";',
-                );
-                expect(source).toMatch(
-                    /BUN_BASE_EXE = bunBaseExeCompileOptions\(\);/,
-                );
+            it("reaches the seam only through assertBunBaseExe() and sealCompile() (never the raw value)", () => {
+                expect(source).toContain(SEAM_IMPORT);
+                expect(source).toMatch(/\bassertBunBaseExe\(\);/);
+                expect({
+                    seamRefs: scan.seamRefs,
+                    rawSeamRefs: scan.rawSeamRefs,
+                }).toEqual({ seamRefs: 0, rawSeamRefs: 0 });
             });
 
             it("calls Bun.build exactly once, directly (no second build, no alias)", () => {
@@ -526,17 +642,13 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
                 });
             });
 
-            it("every compile literal spreads only the seam and the reviewed spreads", () => {
-                expect(
-                    scan.compileSpreads.filter(
-                        (s) => !REVIEWED_COMPILE_SPREADS.has(s),
-                    ),
-                ).toEqual([]);
-            });
-
-            it("every compile value is an object literal, never an identifier/member/call", () => {
+            it("every compile value is a direct sealCompile(…) call, never a literal/identifier/member", () => {
                 expect(scan.compiles.length).toBeGreaterThan(0);
-                expect(scan.compiles.filter((c) => !c.literal)).toEqual([]);
+                expect(
+                    scan.compiles
+                        .filter((c) => !c.sealed || c.execPath)
+                        .map((c) => ({ line: c.line, valueKind: c.valueKind })),
+                ).toEqual([]);
                 expect({
                     shorthand: scan.shorthand,
                     writes: scan.writes,
@@ -544,19 +656,8 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
                 }).toEqual({ shorthand: [], writes: [], compileStrings: [] });
             });
 
-            it("every compile literal spreads ...BUN_BASE_EXE exactly once, LAST, and is the only executablePath", () => {
-                for (const c of scan.compiles)
-                    expect({
-                        line: c.line,
-                        seams: c.seams,
-                        seamLast: c.seamLast,
-                        execPath: c.execPath,
-                    }).toEqual({
-                        line: c.line,
-                        seams: 1,
-                        seamLast: true,
-                        execPath: false,
-                    });
+            it("sealCompile is used only as the import and each compile value's callee (no alias, no shadow)", () => {
+                expect(scan.sealRefs).toBe(scan.compiles.length + 1);
             });
         });
     }
@@ -566,67 +667,67 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
         [
             "T4: compile: opts.compile (member)",
             "Bun.build({ compile: opts.compile });",
-            (s) => s.compiles[0]?.literal,
+            (s) => s.compiles[0]?.sealed,
             false,
         ],
         [
             "compile: c (identifier)",
             "Bun.build({ compile: c });",
-            (s) => s.compiles[0]?.literal,
+            (s) => s.compiles[0]?.sealed,
             false,
         ],
         [
-            "compile: f() (call)",
+            "compile: f() (a call that is not sealCompile)",
             "Bun.build({ compile: f() });",
-            (s) => s.compiles[0]?.literal,
+            (s) => s.compiles[0]?.sealed,
             false,
         ],
         [
-            "compile: true",
-            "Bun.build({ compile: true });",
-            (s) => s.compiles[0]?.literal,
+            "compile: o.sealCompile() (a member call, not the imported function)",
+            "Bun.build({ compile: o.sealCompile({ outfile }) });",
+            (s) => s.compiles[0]?.sealed,
             false,
         ],
         [
-            "spread-only compile literal (no seam)",
-            "Bun.build({ compile: { ...opts.compile } });",
-            (s) => s.compiles[0]?.seams,
-            0,
+            "compile: a literal (round 12's shape, now unsealed)",
+            "Bun.build({ compile: { outfile, ...BUN_BASE_EXE } });",
+            (s) => ({ sealed: s.compiles[0]?.sealed, seamRefs: s.seamRefs }),
+            { sealed: false, seamRefs: 1 },
         ],
         [
-            "T1: seam spread first",
-            "Bun.build({ compile: { ...BUN_BASE_EXE, ...o } });",
-            (s) => s.compiles[0]?.seamLast,
-            false,
+            "compile: sealCompile(…) (the one accepted shape)",
+            "Bun.build({ compile: sealCompile({ outfile }) });",
+            (s) => ({ sealed: s.compiles[0]?.sealed, sealRefs: s.sealRefs }),
+            { sealed: true, sealRefs: 1 },
         ],
         [
-            "seam then a key",
-            "Bun.build({ compile: { ...BUN_BASE_EXE, outfile: x } });",
-            (s) => s.compiles[0]?.seamLast,
-            false,
+            "an alias of sealCompile",
+            "const seal = sealCompile; Bun.build({ compile: seal({ outfile }) });",
+            (s) => ({ sealed: s.compiles[0]?.sealed, sealRefs: s.sealRefs }),
+            { sealed: false, sealRefs: 1 },
         ],
         [
-            "seam spread twice",
-            "Bun.build({ compile: { ...BUN_BASE_EXE, ...BUN_BASE_EXE } });",
-            (s) => s.compiles[0]?.seams,
-            2,
-        ],
-        [
-            "executablePath key",
-            "Bun.build({ compile: { executablePath: p, ...BUN_BASE_EXE } });",
+            "executablePath key inside sealCompile's arguments",
+            "Bun.build({ compile: sealCompile({ executablePath: p }) });",
             (s) => s.compiles[0]?.execPath,
             true,
         ],
         [
+            "the raw seam value in a compile script",
+            "const x = bunBaseExeCompileOptions();",
+            (s) => s.rawSeamRefs,
+            1,
+        ],
+        [
             '"compile": quoted key',
             'Bun.build({ "compile": o.c });',
-            (s) => s.compiles[0]?.literal,
+            (s) => s.compiles[0]?.sealed,
             false,
         ],
         [
             '["compile"]: computed key',
             'Bun.build({ ["compile"]: o.c });',
-            (s) => s.compiles[0]?.literal,
+            (s) => s.compiles[0]?.sealed,
             false,
         ],
         [
@@ -737,10 +838,10 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
             1,
         ],
         [
-            "a compile spread outside the reviewed set",
-            "Bun.build({ compile: { outfile, ...JSON.parse(process.env.X), ...BUN_BASE_EXE } });",
-            (s) => s.compileSpreads,
-            ["...JSON.parse(process.env.X)"],
+            "a computed key's source text (for the adapters-wide reviewed set)",
+            "const o = { [k]: 1 };",
+            (s) => s.computedKeyTexts,
+            ["[k]"],
         ],
         [
             "typeof Bun is not an indirect use",
@@ -898,6 +999,205 @@ describe("bunBaseExeCompileOptions — fail closed", () => {
             );
         });
     }
+});
+
+// ── 2b. sealCompile — the one way to build a compile value (round 13) ────────
+
+describe("sealCompile — refuses a foreign executablePath by any route", () => {
+    const key = ["executable", "Path"].join("");
+    const refused: Array<[string, () => unknown]> = [
+        ["an own literal key", () => ({ executablePath: "x" })],
+        ["a computed spelling", () => Object.fromEntries([[key, "x"]])],
+        [
+            "an undefined value (the key itself is refused)",
+            () => ({ [key]: undefined }),
+        ],
+        ["an inherited key", () => Object.create({ [key]: "x" })],
+        [
+            "an own non-enumerable key",
+            () =>
+                Object.defineProperty({}, key, {
+                    value: "x",
+                    enumerable: false,
+                }),
+        ],
+        [
+            "a Proxy that hides the key from ownKeys but answers `in`",
+            () =>
+                new Proxy(
+                    {},
+                    {
+                        has: (_t, k) => k === key,
+                        get: (_t, k) => (k === key ? "x" : undefined),
+                    },
+                ),
+        ],
+    ];
+    for (const [name, part] of refused) {
+        it(`${name} → throws`, () => {
+            expect(() =>
+                sealCompile(
+                    { outfile: "o" },
+                    part() as Record<string, unknown>,
+                ),
+            ).toThrow(/sealCompile: a compile part carries executablePath/);
+        });
+    }
+
+    it('sealCompile({ executablePath: "x" }) throws (the round-13 acceptance row)', () => {
+        expect(() => sealCompile({ executablePath: "x" })).toThrow(
+            BunBaseExeError,
+        );
+    });
+
+    it("a non-object part throws", () => {
+        expect(() =>
+            sealCompile("x" as unknown as Record<string, unknown>),
+        ).toThrow(/must be an object/);
+    });
+
+    it("absent seam → a frozen, null-prototype merge of the parts, in order, with no executablePath", () => {
+        assertBunBaseExe();
+        const out = sealCompile({ outfile: "a", include: ["x"] }, undefined, {
+            outfile: "b",
+        });
+        expect({ ...out }).toEqual({ outfile: "b", include: ["x"] });
+        expect(Object.isFrozen(out)).toBe(true);
+        expect(Object.getPrototypeOf(out)).toBeNull();
+        expect(key in out).toBe(false);
+        // A sealed value re-sealed with more fields is accepted (standalone's self-contained shape).
+        expect({ ...sealCompile({ include: ["y"] }, out) }).toEqual({
+            outfile: "b",
+            include: ["x"],
+        });
+    });
+
+    it("a Proxy cannot answer the check one way and the merge another (the checked copy is what merges)", () => {
+        // Hides the key from the copy and the for…in (the first two ownKeys calls), then shows it to
+        // anything that enumerates the ORIGINAL again — which the merge must never do.
+        let n = 0;
+        const flip = new Proxy(
+            { outfile: "o" },
+            {
+                ownKeys: (t) =>
+                    n++ < 2 ? Reflect.ownKeys(t) : [...Reflect.ownKeys(t), key],
+                getOwnPropertyDescriptor: (t, k) =>
+                    k === key
+                        ? {
+                              value: "x",
+                              enumerable: true,
+                              configurable: true,
+                              writable: true,
+                          }
+                        : Reflect.getOwnPropertyDescriptor(t, k),
+                get: (t, k) => (k === key ? "x" : Reflect.get(t, k)),
+            },
+        );
+        const out = sealCompile(flip);
+        expect({ ...out }).toEqual({ outfile: "o" });
+        expect(key in out).toBe(false);
+    });
+
+    it("a verified seam is appended LAST, overriding nothing it did not own; a part carrying the SAME path still throws", () => {
+        const exe = verifiedBase();
+        const probe = join(tmp("knext-bun-base-seal-"), "probe.mjs");
+        writeFileSync(
+            probe,
+            `import { sealCompile } from ${JSON.stringify(join(ADAPTERS, "bun-base-exe.mjs"))};
+const a = sealCompile({ outfile: "a" }, { target: "t" });
+const b = sealCompile({ include: ["i"] }, a);
+let same = "no-throw";
+try { sealCompile({ ${key}: ${JSON.stringify(exe)} }); } catch (e) { same = String(e.message); }
+console.log(JSON.stringify({ a: Object.entries(a), b: Object.entries(b), same }));
+`,
+        );
+        const r = spawnSync(process.execPath, [probe], {
+            env: {
+                ...process.env,
+                GITHUB_ACTIONS: "true",
+                [BUN_BASE_EXE_ENV]: exe,
+            },
+            encoding: "utf8",
+        });
+        expect(r.status).toBe(0);
+        const got = JSON.parse(r.stdout.trim());
+        expect(got.a).toEqual([
+            ["outfile", "a"],
+            ["target", "t"],
+            [key, exe],
+        ]);
+        expect(got.b).toEqual([
+            ["include", ["i"]],
+            ["outfile", "a"],
+            ["target", "t"],
+            [key, exe],
+        ]);
+        expect(got.same).toMatch(/carries executablePath/);
+    });
+
+    it("a bad seam → assertBunBaseExe() and sealCompile() both throw it (no fall back to stock Bun)", () => {
+        const exe = verifiedBase();
+        writeFileSync(`${exe}.sha256`, `${"0".repeat(64)}  bun\n`);
+        const probe = join(tmp("knext-bun-base-seal-"), "probe.mjs");
+        writeFileSync(
+            probe,
+            `import { assertBunBaseExe, sealCompile } from ${JSON.stringify(join(ADAPTERS, "bun-base-exe.mjs"))};
+const out = [];
+for (const f of [() => assertBunBaseExe(), () => sealCompile({ outfile: "a" })]) {
+  try { f(); out.push("no-throw"); } catch (e) { out.push(String(e.message)); }
+}
+console.log(JSON.stringify(out));
+`,
+        );
+        const r = spawnSync(process.execPath, [probe], {
+            env: {
+                ...process.env,
+                GITHUB_ACTIONS: "true",
+                [BUN_BASE_EXE_ENV]: exe,
+            },
+            encoding: "utf8",
+        });
+        expect(r.status).toBe(0);
+        const got = JSON.parse(r.stdout.trim()) as string[];
+        expect(got).toHaveLength(2);
+        for (const m of got)
+            expect(m).toContain(`${BUN_BASE_EXE_ENV}: sha256 mismatch`);
+    });
+
+    it.each<[string, string, unknown]>([
+        [
+            "the shipped shape",
+            "const BUN_BASE_EXE = Object.freeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            ["const private frozen"],
+        ],
+        [
+            "C5: a mutable binding",
+            "let BUN_BASE_EXE = Object.freeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            ["mutable private frozen"],
+        ],
+        [
+            "an exported binding",
+            "export const BUN_BASE_EXE = Object.freeze({});\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            ["const exported frozen"],
+        ],
+        [
+            "an unfrozen value",
+            "const BUN_BASE_EXE = {};\nexport function sealCompile() { return BUN_BASE_EXE; }",
+            ["const private unfrozen"],
+        ],
+    ])("the seam-module shape sees: %s", (_n, src, want) => {
+        expect(seamModuleShape(src).decls).toEqual(want);
+    });
+
+    it("the seam-module shape sees C4: a reference outside sealCompile", () => {
+        const src =
+            "const BUN_BASE_EXE = Object.freeze({});\nObject.assign(BUN_BASE_EXE, {});\nexport function sealCompile() { return BUN_BASE_EXE; }";
+        expect(seamModuleShape(src)).toEqual({
+            decls: ["const private frozen"],
+            inside: 1,
+            outside: [2],
+        });
+    });
 });
 
 // ── 3. the real scripts, Bun.build stubbed ───────────────────────────────────

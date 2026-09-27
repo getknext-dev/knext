@@ -50,7 +50,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bunBaseExeCompileOptions } from "./bun-base-exe.mjs";
+import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -93,10 +93,10 @@ const SELF_CONTAINED = args["self-contained"] === "1";
 const NATIVE_DIR = args["native-dir"] ? resolve(args["native-dir"]) : null;
 const STRICT_REQUIRES =
     SELF_CONTAINED || process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1";
-// CI-only patched Bun base executable (infra/bun-base/); `{}` when unset.
-let BUN_BASE_EXE;
+// CI-only patched Bun base executable (infra/bun-base/): resolved and verified once, at import,
+// inside bun-base-exe.mjs, and appended by sealCompile() to every compile value. Fail before any work.
 try {
-    BUN_BASE_EXE = bunBaseExeCompileOptions();
+    assertBunBaseExe();
 } catch (err) {
     console.error(`[knext compile] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -744,11 +744,7 @@ function selfContainedBuildOptions() {
     return {
         ...shape,
         naming: { entry: shape.naming, chunk: shape.naming, asset: shape.naming },
-        compile: {
-            ...shape.compile,
-            ...(TARGET ? { target: TARGET } : {}),
-            ...BUN_BASE_EXE,
-        },
+        compile: sealCompile(shape.compile, TARGET ? { target: TARGET } : undefined),
     };
 }
 
@@ -761,15 +757,11 @@ const result = await Bun.build(
               plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
               minify: true,
               bytecode: true,
-              compile: {
-                  outfile: OUTFILE,
-                  // NEVER set `autoloadPackageJson` here: it widens runtime package
-                  // resolution beyond the sidecar. The sidecar is resolved by
-                  // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
-                  // server/node_modules (#1320).
-                  ...(TARGET ? { target: TARGET } : {}),
-                  ...BUN_BASE_EXE,
-              },
+              // NEVER set `autoloadPackageJson` here: it widens runtime package
+              // resolution beyond the sidecar. The sidecar is resolved by
+              // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
+              // server/node_modules (#1320).
+              compile: sealCompile({ outfile: OUTFILE }, TARGET ? { target: TARGET } : undefined),
           },
 );
 

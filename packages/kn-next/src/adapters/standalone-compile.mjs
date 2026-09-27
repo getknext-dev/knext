@@ -84,7 +84,7 @@ import {
 import { isBuiltin } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bunBaseExeCompileOptions } from "./bun-base-exe.mjs";
+import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";
 import { routeMarker, verifyBytecodeEmbedded, verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
 import {
     detectCompileInclude,
@@ -131,10 +131,10 @@ if (!args.outfile) fail("--outfile <path> is required");
 const SERVER = resolve(args.server);
 const OUTFILE = resolve(args.outfile);
 const TARGET = args.target?.trim();
-// CI-only patched Bun base executable (infra/bun-base/); `{}` when unset.
-let BUN_BASE_EXE;
+// CI-only patched Bun base executable (infra/bun-base/): resolved and verified once, at import,
+// inside bun-base-exe.mjs, and appended by sealCompile() to every compile value. Fail before any work.
 try {
-    BUN_BASE_EXE = bunBaseExeCompileOptions();
+    assertBunBaseExe();
 } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
 }
@@ -671,9 +671,9 @@ async function selfContainedBuildOptions(base) {
         // Marker only: the banner heads EVERY embedded module, and the root
         // globals are set by the entry prologue before anything is required.
         banner: `globalThis.__knextStandaloneExecMarker=${JSON.stringify(MARKER)};`,
-        // `base.compile` already carries the seam; spread it again LAST so no
+        // `base.compile` is already sealed; sealing again appends the seam LAST, so no
         // embed-plan field can displace the verified base executable.
-        compile: { ...opts.compile, ...base.compile, ...BUN_BASE_EXE },
+        compile: sealCompile(opts.compile, base.compile),
     };
 }
 
@@ -699,13 +699,11 @@ try {
             "process.env.NODE_ENV": '"production"',
             "process.env.NEXT_RUNTIME": '"nodejs"',
         },
-        compile: {
-            outfile: OUTFILE,
+        compile: sealCompile(
             // The load-bearing flag — see the header.
-            autoloadPackageJson: true,
-            ...(TARGET ? { target: TARGET } : {}),
-            ...BUN_BASE_EXE,
-        },
+            { outfile: OUTFILE, autoloadPackageJson: true },
+            TARGET ? { target: TARGET } : undefined,
+        ),
     };
     result = await Bun.build(SC ? await selfContainedBuildOptions(base) : base);
 } finally {

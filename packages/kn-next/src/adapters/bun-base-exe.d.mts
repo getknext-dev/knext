@@ -6,3 +6,7 @@ export class BunBaseExeError extends Error {
 export function bunBaseExeCompileOptions(env?: Record<string, string | undefined>): {
     executablePath?: string;
 };
+/** Throws the seam's resolution error (resolved once, at import, from `process.env`), if any. */
+export function assertBunBaseExe(): void;
+/** The only way to build a `compile` value: merges `parts`, refuses a foreign executable path, appends the seam last. */
+export function sealCompile(...parts: Array<Record<string, unknown> | undefined>): Readonly<Record<string, unknown>>;

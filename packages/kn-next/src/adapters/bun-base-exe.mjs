@@ -23,8 +23,12 @@
  * basename. Anything else throws — a compile that silently fell back to the
  * stock base would report a stock-Bun result as a patched-Bun verification.
  *
- * When the variable is absent, the result is `{}`, so spreading it into
- * `compile: { ... }` leaves the Bun.build options exactly as they were.
+ * When the variable is absent, the result is `{}`, so the compile options are
+ * exactly what the script built. The compile scripts never see the value:
+ * they build every `compile` through `sealCompile()`, which refuses a part
+ * that carries its own `executablePath` and appends the seam LAST (#1469
+ * round 13 — a mutable seam binding and an unchecked shared compile object
+ * each let an unverified base reach users' builds).
  *
  * Symlinks are NOT confined: the path is followed wherever it points, and the
  * sha256 check is what binds the bytes. Point it only at a downloaded,
@@ -90,4 +94,81 @@ export function bunBaseExeCompileOptions(env = process.env) {
         throw new BunBaseExeError(`sha256 mismatch for ${exe}: expected ${expected}, got ${actual}`);
     }
     return { executablePath: exe };
+}
+
+/** The key the seam owns. Spelled once, here, so the seam scan can ban it everywhere else. */
+const SEAM_KEY = "executablePath";
+
+/**
+ * Resolve the seam ONCE, at import, from `process.env`. A bad value is not thrown here: it is kept
+ * and thrown by `assertBunBaseExe()` (the scripts' early, prefixed exit) and by `sealCompile()`
+ * (so a script that skipped the assert still fails closed rather than compiling on stock Bun).
+ */
+function loadBunBaseExe() {
+    try {
+        return [bunBaseExeCompileOptions(), undefined];
+    } catch (err) {
+        return [{}, err];
+    }
+}
+const [RESOLVED_BUN_BASE_EXE, BUN_BASE_EXE_ERROR] = loadBunBaseExe();
+
+/**
+ * The seam's value, frozen and module-private: `{}` or `{ executablePath }`. Read ONLY by
+ * `sealCompile()` (the seam scan counts its references), so no compile script can rebind it,
+ * `Object.assign` into it, or spread it anywhere a check does not see (#1469 round 13).
+ */
+const BUN_BASE_EXE = Object.freeze({ ...RESOLVED_BUN_BASE_EXE });
+
+/** Throws the seam's resolution error, if any. The compile scripts call it first, before any work. */
+export function assertBunBaseExe() {
+    if (BUN_BASE_EXE_ERROR !== undefined) throw BUN_BASE_EXE_ERROR;
+}
+
+/** Compile objects this module produced — the only parts allowed to carry the seam's key. */
+const SEALED = new WeakSet();
+
+/**
+ * The ONLY way a compile script builds a `Bun.build` `compile` value (the seam scan asserts every
+ * `compile:` is a `sealCompile(...)` call). Merges `parts` in order and appends the seam LAST, into
+ * a fresh, frozen, null-prototype object — so nothing inherited, nothing written afterwards and
+ * nothing spread after the seam can supply a different base executable.
+ *
+ * Throws if any part carries `executablePath` by any route — own or inherited, enumerable or not,
+ * however the key was spelled in source (a computed `"executable" + "Path"` is the same string at
+ * runtime). Each part is copied once and the COPY is both checked and merged, so a Proxy cannot
+ * answer the check one way and the merge another. The one exemption is a value this function
+ * returned earlier (a sealed compile re-sealed with more fields): its key can only be the seam's.
+ *
+ * @param {...(Record<string, unknown> | undefined)} parts
+ * @returns {Readonly<Record<string, unknown>>}
+ */
+export function sealCompile(...parts) {
+    assertBunBaseExe();
+    const out = Object.create(null);
+    for (const part of parts) {
+        if (part === undefined) continue;
+        if (part === null || typeof part !== "object") {
+            throw new BunBaseExeError(`sealCompile: a compile part must be an object, got ${part === null ? "null" : typeof part}`);
+        }
+        const copy = { ...part };
+        if (!SEALED.has(part)) {
+            let foreign = Object.keys(copy).includes(SEAM_KEY) || SEAM_KEY in part;
+            for (const k in part) if (k === SEAM_KEY) foreign = true;
+            if (foreign) {
+                throw new BunBaseExeError(
+                    `sealCompile: a compile part carries ${SEAM_KEY} — only the seam, appended by sealCompile, may choose the base executable`,
+                );
+            }
+        }
+        Object.assign(out, copy);
+    }
+    Object.assign(out, BUN_BASE_EXE);
+    // A re-sealed part may carry the key only as the seam put it; the seam, last, overwrote it.
+    if (Object.hasOwn(out, SEAM_KEY) && out[SEAM_KEY] !== BUN_BASE_EXE[SEAM_KEY]) {
+        throw new BunBaseExeError(`sealCompile: ${SEAM_KEY} does not match the seam`);
+    }
+    const sealed = Object.freeze(out);
+    SEALED.add(sealed);
+    return sealed;
 }
