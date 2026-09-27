@@ -51,7 +51,7 @@ exists for that case and turns the check **off** — it does not satisfy it.
 |---|---|---|---|
 | `kubeconfig` | yes | — | base64-encoded, from the scoped ServiceAccount |
 | `namespace` | yes | — | no default: it bounds the credential's blast radius |
-| `registry` | yes | — | registry host and repository |
+| `registry` | yes | — | registry host and namespace; the app's `name` is appended (`ghcr.io/acme` → `ghcr.io/acme/<name>`) |
 | `registry-token` | no | — | on GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
 | `working-directory` | no | `.` | where `kn-next.config.ts` lives |
