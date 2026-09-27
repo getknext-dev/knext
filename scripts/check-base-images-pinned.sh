@@ -75,7 +75,6 @@ fi
 # A file NOT on this list and NOT pinned still FAILS — the scan fails closed.
 KNOWN_UNPINNED=(
     "apps/docs/Dockerfile"
-    "apps/docs/Dockerfile.oke"
     "packages/scale-zero-pg/gateway/Dockerfile"
     "packages/scale-zero-pg/demo/app/Dockerfile"
 )

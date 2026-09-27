@@ -11,9 +11,9 @@
 # the host filesystem at build time. Audited every `COPY` in every Dockerfile
 # a GitHub Actions workflow ACTUALLY builds with `context: .` — currently
 # `apps/file-manager/Dockerfile`, `apps/docs/Dockerfile.trivyscan`, and
-# `examples/bun-exec/Dockerfile.node.trivyscan` (NOT `apps/docs/Dockerfile.oke`,
-# which is built manually for the OKE deploy, outside CI, and so is outside
-# what this audit can claim to cover) — before widening: none of them `COPY`s
+# `examples/bun-exec/Dockerfile.node.trivyscan` (this list never included
+# `apps/docs/Dockerfile.oke`, the plain-k8s OKE deploy Dockerfile — built
+# manually, outside CI; #1488 retired it entirely) — before widening: none of them `COPY`s
 # a nested `node_modules`/`dist`/`.next`/`.open-next`/`.turbo`/`coverage`/`*.log`
 # from the HOST context (every `COPY --from=<stage>` reads from a PREVIOUS
 # BUILD STAGE's filesystem, which `.dockerignore` never touches; the two
