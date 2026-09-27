@@ -237,3 +237,120 @@ describe("verifyBytecodeExec — each half on its own", () => {
         expect(verifyBytecodeExec(Buffer.from("x"), "short").ok).toBe(false);
     });
 });
+
+describe("verifyBytecodeEmbedded — the self-contained proof (#1456)", () => {
+    const { routeMarker, verifyBytecodeEmbedded } =
+        require("../adapters/bytecode-exec-verify.mjs") as typeof import("../adapters/bytecode-exec-verify.mjs");
+    const head = (pragma: string, body: string) =>
+        `${pragma}\n(function(){globalThis.m="${MARKER}";${body}})\n`;
+    const BC = "// @bun @bytecode @bun-cjs";
+    const PLAIN = "// @bun @bun-cjs";
+    const route = (n: number, pragma = BC) =>
+        `${pragma}\n(function(){globalThis.m="${MARKER}";globalThis.r="${routeMarker(MARKER, n)}";})\n`;
+    const pool = (n: number) =>
+        `\0pool:${MARKER}\0${Array.from({ length: n }, (_, i) => routeMarker(MARKER, i)).join("\0")}\0`;
+    const bin = (...parts: string[]) =>
+        Buffer.from(`ELF\0${parts.join("\0".repeat(8192))}`, "latin1");
+
+    it("PASSES: every module head is @bytecode, pool copies exist, each route chunk verifies", () => {
+        expect(
+            verifyBytecodeEmbedded(
+                bin(pool(2), head(BC, "entry"), route(0), route(1)),
+                MARKER,
+                2,
+            ),
+        ).toEqual({ ok: true });
+    });
+
+    it("FAILS when any embedded module lost its bytecode, even with the entry intact", () => {
+        const r = verifyBytecodeEmbedded(
+            bin(pool(2), head(BC, "entry"), route(0), route(1, PLAIN)),
+            MARKER,
+            2,
+        );
+        expect(r.ok).toBe(false);
+    });
+
+    it("FAILS when a marked route chunk is missing from the executable", () => {
+        const r = verifyBytecodeEmbedded(
+            bin(pool(1), head(BC, "entry"), route(0)),
+            MARKER,
+            2,
+        );
+        expect(r).toEqual({
+            ok: false,
+            reason: expect.stringContaining("route chunk 1"),
+        });
+    });
+
+    it("FAILS with no route chunk to prove, and with no pool copy of the build marker", () => {
+        expect(
+            verifyBytecodeEmbedded(
+                bin(pool(1), head(BC, ""), route(0)),
+                MARKER,
+                0,
+            ).ok,
+        ).toBe(false);
+        expect(
+            verifyBytecodeEmbedded(bin(head(BC, ""), route(0)), MARKER, 1).ok,
+        ).toBe(false);
+    });
+
+    it("route markers are unambiguous: route 1 is not a prefix of route 10", () => {
+        expect(routeMarker(MARKER, 10).startsWith(routeMarker(MARKER, 1))).toBe(
+            false,
+        );
+    });
+
+    it("REAL compile: an embedded route chunk carries bytecode; the same build without --bytecode fails", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-bytecode-embedded-"));
+        tempDirs.push(dir);
+        const { mkdirSync } = require("node:fs") as typeof import("node:fs");
+        mkdirSync(join(dir, "server", "app"), { recursive: true });
+        writeFileSync(
+            join(dir, "entry.cjs"),
+            'require(require("node:path").join(require("node:path").dirname(process.argv[1]), "server/app/page.js"));\n',
+        );
+        writeFileSync(
+            join(dir, "server", "app", "page.js"),
+            'module.exports = { page: "ok" };\n',
+        );
+        const RM = routeMarker(MARKER, 0);
+        const build = async (bytecode: boolean) => {
+            const outfile = join(dir, bytecode ? "bc" : "plain");
+            const r = await Bun.build({
+                entrypoints: [
+                    join(dir, "entry.cjs"),
+                    join(dir, "server", "app", "page.js"),
+                ],
+                root: dir,
+                naming: "[dir]/[name].[ext]",
+                target: "bun",
+                format: "cjs",
+                bytecode,
+                minify: true,
+                banner: `globalThis.__knextStandaloneExecMarker=${JSON.stringify(MARKER)};`,
+                plugins: [
+                    {
+                        name: "route-marker",
+                        setup(b) {
+                            b.onLoad({ filter: /page\.js$/ }, (a) => ({
+                                contents: `globalThis.__knextRouteMarker=${JSON.stringify(RM)};\n${readFileSync(a.path, "utf8")}`,
+                                loader: "js",
+                            }));
+                        },
+                    },
+                ],
+                compile: { outfile },
+            } as Parameters<typeof Bun.build>[0]);
+            expect(r.success).toBe(true);
+            return readFileSync(outfile);
+        };
+        expect(verifyBytecodeEmbedded(await build(true), MARKER, 1)).toEqual({
+            ok: true,
+        });
+        expect(verifyBytecodeEmbedded(await build(false), MARKER, 1).ok).toBe(
+            false,
+        );
+    });
+});

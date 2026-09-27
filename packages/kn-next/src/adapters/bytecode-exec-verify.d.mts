@@ -10,3 +10,16 @@ export declare function verifyBytecodeExec(
     bytes: Uint8Array,
     marker: string,
 ): { ok: true } | { ok: false; reason: string };
+
+/** The unique literal a self-contained build heads route chunk `n` with. */
+export declare function routeMarker(marker: string, n: number): string;
+
+/**
+ * The self-contained proof: every module the build's banner heads carries
+ * bytecode, and route chunks `0 .. routeCount-1` each do by their own marker.
+ */
+export declare function verifyBytecodeEmbedded(
+    bytes: Uint8Array,
+    marker: string,
+    routeCount: number,
+): { ok: true } | { ok: false; reason: string };

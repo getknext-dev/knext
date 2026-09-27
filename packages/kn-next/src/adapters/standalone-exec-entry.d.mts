@@ -13,6 +13,14 @@ export declare const STANDALONE_DIR_BINDING: string;
 export declare function standaloneExecEntrySource(
     serverSrc: string,
     preloads: readonly string[],
+    opts?: {
+        /** Self-contained mode: point `distDir` into the executable. */
+        selfContained?: {
+            appRel: string;
+            distDir?: string;
+            extensionless?: readonly string[];
+        };
+    },
 ): string;
 
 /**

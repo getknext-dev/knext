@@ -111,9 +111,11 @@ const config: KnativeNextConfig = {
 };
 ```
 
-No build target uses this yet, so on this version setting it changes nothing about what
-`knext build` produces; the choice is only recorded in the build log. The value must be a boolean —
-`knext validate` rejects anything else.
+On the compiled standalone-on-Bun target (`build: 'turbopack'` with `runtime: 'bun'`), turning it
+on embeds the server side of the build — the route code, Next.js's own server modules and the build
+manifests — into the executable, so it starts from a directory that holds only the executable,
+`public/` and `.next/static/`. Other targets do not use it yet: there the choice is only recorded in the
+build log. The value must be a boolean — `knext validate` rejects anything else.
 
 ### vinext on Node
 

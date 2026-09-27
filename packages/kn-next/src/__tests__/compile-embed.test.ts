@@ -403,3 +403,29 @@ describe("unembeddedDynamicReport", () => {
         ]);
     });
 });
+
+describe("planEmbed — literal paths holding glob metacharacters (#1456)", () => {
+    it("embeds `[id]/page.js`, `[turbopack]_runtime.js` and `[root-of-the-server]__x.js` as the literal files they are", () => {
+        const root = tempDir("brackets");
+        writeTree(root, {
+            "app/[id]/page.js": "",
+            "chunks/[turbopack]_runtime.js": "",
+            "chunks/ssr/[root-of-the-server]__x._.js": "",
+            "chunks/t_runtime.js": "",
+        });
+        const plan = planEmbed({
+            root,
+            include: [
+                "app/[id]/page.js",
+                "chunks/[turbopack]_runtime.js",
+                "chunks/ssr/[root-of-the-server]__x._.js",
+            ],
+        });
+        expect(plan.relpaths).toEqual([
+            "app/[id]/page.js",
+            "chunks/[turbopack]_runtime.js",
+            "chunks/ssr/[root-of-the-server]__x._.js",
+        ]);
+        expect(plan.report.unmatched).toEqual([]);
+    });
+});

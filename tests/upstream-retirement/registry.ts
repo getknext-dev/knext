@@ -104,6 +104,50 @@ function sharpNativeDirs(): {
   };
 }
 
+/** oven-sh/bun#44068's oracle, shared by the constraint and the shim it retires. */
+async function dirnameInlinedRepro(id: string): Promise<Probe> {
+  const box = sandbox('44068');
+  try {
+    box.write(
+      {
+        'main.cjs':
+          'const { dirname, join } = require("node:path");\n' +
+          'const l = require(join(dirname(process.argv[1]), "chunks", "loader.js"));\n' +
+          'let rel, abs;\n' +
+          'try { rel = l.relative("n1"); } catch (e) { rel = "fail"; }\n' +
+          'try { abs = l.dirnameJoin("n1"); } catch (e) { abs = "fail " + String(e.message).split("\\n")[0]; }\n' +
+          'console.log("RESULT " + JSON.stringify({ rel, abs }));\n',
+        'chunks/loader.cjs':
+          'const { join } = require("node:path");\n' +
+          'exports.relative = (n) => require("./" + n + ".cjs");\n' +
+          'exports.dirnameJoin = (n) => require(join(__dirname, n + ".cjs"));\n',
+        'chunks/n1.cjs': 'module.exports = "n1-ok";\n',
+      },
+      'src',
+    );
+    const built = box.compile(
+      'src',
+      '{ entrypoints: ["./main.cjs", "./chunks/loader.cjs", "./chunks/n1.cjs"], root: ".", target: "bun", format: "cjs", naming: "[dir]/[name].[ext]", compile: { outfile: "../bin/app" } }',
+    );
+    if (built.status !== 'built') inconclusive(id, built.detail);
+    box.remove('src');
+    box.write({ '.keep': '' }, 'empty');
+    const raw = box.run([join(box.dir, 'bin/app')], join(box.dir, 'empty')).result;
+    const { rel, abs } = JSON.parse(raw) as { rel: string; abs: string };
+    // Control: the RELATIVE computed require resolves inside `$bunfs`, so
+    // the chunk IS embedded and a miss below is the `__dirname` anchor alone.
+    if (rel !== 'n1-ok') inconclusive(id, `relative computed require: ${raw}`);
+    if (abs !== 'n1-ok' && !/^fail Cannot find module/.test(abs))
+      inconclusive(id, `join(__dirname) failed oddly: ${raw}`);
+    return {
+      stillBroken: abs !== 'n1-ok',
+      evidence: `relative require → ${rel}; require(join(__dirname, …)) → ${abs} (fix: oven-sh/bun#29066)`,
+    };
+  } finally {
+    box.dispose();
+  }
+}
+
 export type CacheShape = 'A' | 'B' | 'C' | 'D';
 
 /**
@@ -378,44 +422,136 @@ export const REGISTRY: RetirementEntry[] = [
     // an empty directory; compile-embed.mjs documents the constraint (CJS
     // trees use a RELATIVE computed require). Fixed by oven-sh/bun#29066
     // (verified on a from-source build: this probe flips).
+    repro: () => dirnameInlinedRepro('bun-cjs-dirname-inlined'),
+  },
+  {
+    id: 'bun-cjs-dirname-rebind',
+    upstream: 'oven-sh/bun#44068',
+    upstreamTitle: '__dirname/__filename in an included CommonJS entrypoint are inlined',
+    fixedBy: {
+      ref: 'oven-sh/bun#29066',
+      title: 'Use the virtual $bunfs path for __dirname/__filename',
+    },
+    issue: '#1456',
+    kind: 'shim',
+    shape: 'next',
+    against: 'bun',
+    // The self-contained standalone build rebinds `__dirname`/`__filename` of
+    // every embedded CommonJS module that uses them to its embedded path
+    // (standalone-embed.mjs rebindDirnameSource) — the code form of the
+    // constraint above, needed because Next's own modules and the turbopack
+    // runtime anchor on `__dirname`. Same upstream bug, same oracle.
+    repro: () => dirnameInlinedRepro('bun-cjs-dirname-rebind'),
+  },
+  {
+    id: 'embedded-bare-specifier',
+    upstream: 'oven-sh/bun#44059',
+    upstreamTitle: '--include embeds extra files',
+    issue: '#1456',
+    kind: 'shim',
+    shape: 'next',
+    against: 'bun',
+    // A BARE specifier required from an embedded CommonJS chunk does not
+    // resolve inside `$bunfs` — not even with the package's `package.json`
+    // embedded and `autoloadPackageJson` on. The self-contained standalone
+    // build therefore rewrites every import between embedded modules to a
+    // relative path, and turbopack's hashed external aliases to absolute
+    // embedded paths (standalone-compile.mjs resolveFromEmbedded,
+    // standalone-embed.mjs rewriteExternalAliases). To be added to
+    // oven-sh/bun#44059's test matrix (the include PR is where embedded-package
+    // resolution lands).
     repro: async () => {
-      const box = sandbox('44068');
+      const box = sandbox('bare-in-bunfs');
       try {
         box.write(
           {
             'main.cjs':
               'const { dirname, join } = require("node:path");\n' +
-              'const l = require(join(dirname(process.argv[1]), "chunks", "loader.js"));\n' +
-              'let rel, abs;\n' +
-              'try { rel = l.relative("n1"); } catch (e) { rel = "fail"; }\n' +
-              'try { abs = l.dirnameJoin("n1"); } catch (e) { abs = "fail " + String(e.message).split("\\n")[0]; }\n' +
-              'console.log("RESULT " + JSON.stringify({ rel, abs }));\n',
-            'chunks/loader.cjs':
-              'const { join } = require("node:path");\n' +
-              'exports.relative = (n) => require("./" + n + ".cjs");\n' +
-              'exports.dirnameJoin = (n) => require(join(__dirname, n + ".cjs"));\n',
-            'chunks/n1.cjs': 'module.exports = "n1-ok";\n',
+              'const root = dirname(process.argv[1]);\n' +
+              'const c = require(join(root, "chunks", "c.js"));\n' +
+              'let rel, bare;\n' +
+              'try { rel = c.load("../node_modules/dep/index.js"); } catch (e) { rel = "fail " + String(e.message).split("\\n")[0]; }\n' +
+              'try { bare = c.load("dep"); } catch (e) { bare = "fail " + String(e.message).split("\\n")[0]; }\n' +
+              'console.log("RESULT " + JSON.stringify({ rel, bare }));\n',
+            'chunks/c.cjs': 'exports.load = (n) => require(n);\n',
+            'node_modules/dep/index.js': 'module.exports = "dep-ok";\n',
+            'node_modules/dep/package.json': '{ "name": "dep", "main": "index.js" }\n',
+            'assets.mjs':
+              'import p from "./node_modules/dep/package.json" with { type: "file" };\nexport default p;\n',
           },
           'src',
         );
         const built = box.compile(
           'src',
-          '{ entrypoints: ["./main.cjs", "./chunks/loader.cjs", "./chunks/n1.cjs"], root: ".", target: "bun", format: "cjs", naming: "[dir]/[name].[ext]", compile: { outfile: "../bin/app" } }',
+          '{ entrypoints: ["./main.cjs", "./chunks/c.cjs", "./node_modules/dep/index.js", "./assets.mjs"], root: ".", target: "bun", format: "cjs", naming: { entry: "[dir]/[name].[ext]", asset: "[dir]/[name].[ext]" }, compile: { outfile: "../bin/app", autoloadPackageJson: true } }',
         );
-        if (built.status !== 'built') inconclusive('bun-cjs-dirname-inlined', built.detail);
+        if (built.status !== 'built') inconclusive('embedded-bare-specifier', built.detail);
         box.remove('src');
         box.write({ '.keep': '' }, 'empty');
         const raw = box.run([join(box.dir, 'bin/app')], join(box.dir, 'empty')).result;
-        const { rel, abs } = JSON.parse(raw) as { rel: string; abs: string };
-        // Control: the RELATIVE computed require resolves inside `$bunfs`, so
-        // the chunk IS embedded and a miss below is the `__dirname` anchor alone.
-        if (rel !== 'n1-ok')
-          inconclusive('bun-cjs-dirname-inlined', `relative computed require: ${raw}`);
-        if (abs !== 'n1-ok' && !/^fail Cannot find module/.test(abs))
-          inconclusive('bun-cjs-dirname-inlined', `join(__dirname) failed oddly: ${raw}`);
+        const { rel, bare } = JSON.parse(raw) as { rel: string; bare: string };
+        // Control: the package IS embedded — a relative computed require from
+        // the same chunk reaches it — so a bare miss is resolution alone.
+        if (rel !== 'dep-ok') inconclusive('embedded-bare-specifier', `relative require: ${raw}`);
+        if (bare !== 'dep-ok' && !/^fail Cannot find (?:module|package)/.test(bare))
+          inconclusive('embedded-bare-specifier', `bare require failed oddly: ${raw}`);
         return {
-          stillBroken: abs !== 'n1-ok',
-          evidence: `relative require → ${rel}; require(join(__dirname, …)) → ${abs} (fix: oven-sh/bun#29066)`,
+          stillBroken: bare !== 'dep-ok',
+          evidence: `relative require of the embedded package → ${rel}; require("dep") from the embedded chunk → ${bare}`,
+        };
+      } finally {
+        box.dispose();
+      }
+    },
+  },
+  {
+    id: 'bunfs-static-disk-alias',
+    upstream: 'oven-sh/bun#22223',
+    upstreamTitle: '`readdir` and `createReadStream` support inside `$bunfs`',
+    issue: '#1456',
+    kind: 'shim',
+    shape: 'next',
+    against: 'bun',
+    // Next serves `.next/static` through `send` (fs.stat + createReadStream)
+    // and derives it from `distDir`, which the self-contained build points into
+    // the executable. createReadStream of an embedded file fails, so static
+    // files stay on disk and the entry aliases `<embedded distDir>/static` (and
+    // `/cache`, which Next writes) to the disk beside the binary
+    // (standalone-embed.mjs installDistDirAlias). The Next half — a supported
+    // way to put the static and cache roots somewhere other than `distDir` —
+    // is drafted in .claude/research/n1-nextjs-distdir-ask-DRAFT.md.
+    repro: async () => {
+      const box = sandbox('22223');
+      try {
+        box.write(
+          {
+            'main.cjs':
+              'const fs = require("node:fs"), { dirname, join } = require("node:path");\n' +
+              'const f = join(dirname(process.argv[1]), "static", "a.txt");\n' +
+              'let read; try { read = fs.readFileSync(f, "utf8").trim(); } catch (e) { read = "fail " + e.code; }\n' +
+              'let chunks = ""; fs.createReadStream(f).on("data", (c) => { chunks += c; })\n' +
+              '  .on("end", () => console.log("RESULT " + JSON.stringify({ read, stream: chunks.trim() })))\n' +
+              '  .on("error", (e) => console.log("RESULT " + JSON.stringify({ read, stream: "fail " + e.code })));\n',
+            'static/a.txt': 'static-ok\n',
+            'assets.mjs':
+              'import a from "./static/a.txt" with { type: "file" };\nexport default a;\n',
+          },
+          'src',
+        );
+        const built = box.compile(
+          'src',
+          '{ entrypoints: ["./main.cjs", "./assets.mjs"], root: ".", target: "bun", format: "cjs", naming: { entry: "[dir]/[name].[ext]", asset: "[dir]/[name].[ext]" }, compile: { outfile: "../bin/app" } }',
+        );
+        if (built.status !== 'built') inconclusive('bunfs-static-disk-alias', built.detail);
+        box.remove('src');
+        box.write({ '.keep': '' }, 'empty');
+        const raw = box.run([join(box.dir, 'bin/app')], join(box.dir, 'empty')).result;
+        const { read, stream } = JSON.parse(raw) as { read: string; stream: string };
+        // Control: the file IS embedded and readable with readFileSync.
+        if (read !== 'static-ok') inconclusive('bunfs-static-disk-alias', `readFileSync: ${raw}`);
+        return {
+          stillBroken: stream !== 'static-ok',
+          evidence: `readFileSync of the embedded file → ${read}; createReadStream → ${stream}`,
         };
       } finally {
         box.dispose();

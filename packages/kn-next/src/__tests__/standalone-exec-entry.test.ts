@@ -201,3 +201,117 @@ describe("splitBareSpecifier", () => {
         });
     });
 });
+
+describe("standaloneExecEntrySource — self-contained mode (#1456)", () => {
+    const SC = {
+        appRel: "apps/fm",
+        distDir: ".next",
+        extensionless: ["BUILD_ID"],
+    };
+
+    it("disk mode is byte-identical with the option absent or empty", () => {
+        const base = standaloneExecEntrySource(CJS_SERVER, PRELOADS);
+        expect(standaloneExecEntrySource(CJS_SERVER, PRELOADS, {})).toBe(base);
+        expect(base).not.toContain("__knextEmbed");
+        expect(base).not.toContain("nextConfig.distDir =");
+    });
+
+    it("rewrites distDir BEFORE Next serialises the config for its workers, and keeps dir + chdir on disk", () => {
+        const out = standaloneExecEntrySource(CJS_SERVER, PRELOADS, {
+            selfContained: SC,
+        });
+        const rewrite = out.indexOf("nextConfig.distDir = ");
+        const serialise = out.indexOf(
+            "process.env.__NEXT_PRIVATE_STANDALONE_CONFIG = JSON.stringify(nextConfig)",
+        );
+        expect(rewrite).toBeGreaterThan(out.indexOf("const nextConfig = "));
+        expect(rewrite).toBeLessThan(serialise);
+        expect(out).toContain(`const dir = ${STANDALONE_DIR_BINDING}`);
+        expect(out).toContain(`process.chdir(${STANDALONE_DIR_BINDING})`);
+    });
+
+    it("refuses a server.js with no config-serialisation anchor rather than guess", () => {
+        expect(() =>
+            standaloneExecEntrySource(ESM_SERVER, PRELOADS, {
+                selfContained: SC,
+            }),
+        ).toThrow(/__NEXT_PRIVATE_STANDALONE_CONFIG/);
+    });
+
+    /**
+     * Run the generated prologue + distDir rewrite in a child, with
+     * `process.argv[1]` set to what a compiled executable reports, a cwd that
+     * is NOT the executable's directory, and a real disk `.next/static` beside
+     * the "executable". Proves the anchor comes from argv[1]/execPath — never
+     * the cwd — and that static/ and BUILD_ID are aliased.
+     */
+    function runPrologue(argv1: string) {
+        const { mkdtempSync, mkdirSync, writeFileSync, rmSync } =
+            require("node:fs") as typeof import("node:fs");
+        const { join } = require("node:path") as typeof import("node:path");
+        const { tmpdir } = require("node:os") as typeof import("node:os");
+        const disk = mkdtempSync(join(tmpdir(), "knext-sc-prologue-"));
+        const elsewhere = mkdtempSync(join(tmpdir(), "knext-sc-cwd-"));
+        try {
+            mkdirSync(join(disk, ".next", "static"), { recursive: true });
+            writeFileSync(join(disk, ".next", "static", "a.js"), "static-ok");
+            const out = standaloneExecEntrySource(CJS_SERVER, [], {
+                selfContained: SC,
+            });
+            const head = out.slice(
+                0,
+                out.indexOf("process.env.__NEXT_PRIVATE_STANDALONE_CONFIG"),
+            );
+            const body = head
+                .replace("process.chdir(", ";(() => {})(")
+                .replace(
+                    /^const path = require\('path'\)$/m,
+                    "const path = require('node:path')",
+                );
+            const script =
+                `process.argv[1] = ${JSON.stringify(argv1)};\n` +
+                `${body}\n` +
+                "const fs = require('node:fs');\n" +
+                "const embedDist = require('node:path').join(dir, nextConfig.distDir);\n" +
+                "console.log(JSON.stringify({ root: globalThis.__knextEmbedRoot, embedDist, dir, " +
+                "static: fs.readFileSync(embedDist + '/static/a.js', 'utf8'), " +
+                "buildIdTarget: fs.existsSync(embedDist + '/BUILD_ID') }));";
+            const r = require("node:child_process").spawnSync(
+                process.execPath,
+                ["-e", script],
+                {
+                    cwd: elsewhere,
+                    encoding: "utf8",
+                    env: { ...process.env, KNEXT_STANDALONE_DIR: disk },
+                },
+            );
+            return {
+                status: r.status as number,
+                stdout: String(r.stdout).trim(),
+                stderr: String(r.stderr),
+                disk,
+            };
+        } finally {
+            rmSync(elsewhere, { recursive: true, force: true });
+            setTimeout(() => rmSync(disk, { recursive: true, force: true }), 0);
+        }
+    }
+
+    it("anchors distDir on the EMBEDDED root from argv[1] (not the cwd); static/ resolves on the disk beside the executable", () => {
+        const r = runPrologue("/$bunfs/root/knext-standalone-exec-linux-x64");
+        expect(r.stderr).toBe("");
+        const got = JSON.parse(r.stdout);
+        expect(got.root).toBe("/$bunfs/root");
+        expect(got.embedDist).toBe("/$bunfs/root/apps/fm/.next");
+        expect(got.dir).toBe(r.disk);
+        expect(got.static).toBe("static-ok");
+        // BUILD_ID is aliased to the dotted name Bun embeds; nothing is embedded here, so it does not exist
+        expect(got.buildIdTarget).toBe(false);
+    });
+
+    it("fails closed when the process is not running from an embedded filesystem", () => {
+        const r = runPrologue("/usr/local/bin/app");
+        expect(r.status).not.toBe(0);
+        expect(r.stderr).toContain("not running from its embedded filesystem");
+    });
+});
