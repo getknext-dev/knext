@@ -476,6 +476,7 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
     # closes the remaining gap: APP_DIR/node_modules and APP_DIR/.output
     # sitting on the SAME host, not nested under EMPTY_DIR at all.
     EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir.XXXXXX")"
+    ed_own_dir "${EMPTY_DIR}"
     EMPTY_DIR_PORT="$(free_port)"
     log "KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check into ${EMPTY_DIR}"
     # BLOCKING-3 (round-2 review): hide APP_DIR/node_modules and APP_DIR/.output
@@ -565,9 +566,11 @@ if [ "${KNEXT_COMPILE}" != "0" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
   # script fails before handing the URL to the harness. Bare boot, no docker:
   # same platform as this script (see §6c), so hiding is what isolates it.
   EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir-suite.XXXXXX")"
+  ed_own_dir "${EMPTY_DIR}"
   EMPTY_DIR_STAGED="$(ed_suite_stage "${EMPTY_DIR}" "${KNEXT_EXEC}" \
     "${APP_DIR}/.output/public:.output/public" "${APP_DIR}/native:native")" || {
     log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite's empty dir failed"
+    rm -rf "${EMPTY_DIR}"
     exit 1
   }
   ed_suite_arm_restore_trap "${APP_DIR}"
@@ -667,7 +670,7 @@ if [ "${SERVED_FROM}" != "disk" ]; then
     log "ERROR: KNEXT_SELF_CONTAINED=1 — the suite server is not isolated from the disk tree (see above); refusing to hand it to the harness"
     exit 1
   fi
-  ed_suite_hand_off
+  ed_suite_hand_off "${EMPTY_DIR}"
   log "KNEXT_SELF_CONTAINED=1 — suite served from ${EMPTY_DIR} (served_from=${SERVED_FROM}); APP_DIR stays hidden until e2e-cleanup.sh"
 fi
 

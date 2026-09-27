@@ -380,8 +380,10 @@ ed_static_probe_path() {
 # ED_STATIC_PROBE_BASE (a Next basePath; empty unless the caller sets it).
 #
 # A fixture that fails here because it needs a native addon (node_modules,
-# necessarily hidden) is likely one of ED_SC_NATIVE_ADDON_QUARANTINE below
-# (#1515(c)) — check that list before treating the failure as a regression.
+# necessarily hidden) cannot pass by construction (#1515(c)); the known ones
+# (turbopack-reports, prerender-native-module) are listed in
+# docs/compat-matrix.md's "Self-contained empty-dir mode" row — check there
+# before treating the failure as a regression.
 #
 # The one call site scripts/e2e-deploy.sh and scripts/e2e-deploy-vinext.sh
 # make: stage, assert clean, (optionally hide) boot, probe, restore —
@@ -594,16 +596,16 @@ ed_suite_arm_restore_trap() {
   ED_SUITE_HANDED_OFF=0
   ED_SUITE_SERVER_PID=""
   ED_SUITE_CONTAINER=""
-  trap 'ed__suite_on_exit' EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  ed__arm_exit_trap
 }
 
 ed__suite_on_exit() {
   if [ "${ED_SUITE_HANDED_OFF:-0}" = "1" ]; then
     return 0
   fi
+  # Not armed yet (only a pre-check dir is owned so far): nothing to stop or
+  # restore — the EXIT trap still removes the owned dirs next.
+  [ -n "${ED__SUITE_APP_DIR:-}" ] || return 0
   if [ -n "${ED_SUITE_CONTAINER:-}" ] && command -v docker >/dev/null 2>&1; then
     docker rm -f "${ED_SUITE_CONTAINER}" >/dev/null 2>&1 || true
   fi
@@ -619,10 +621,75 @@ ed__suite_on_exit() {
   ed_suite_restore_app_dir "${ED__SUITE_APP_DIR}" || true
 }
 
-# ed_suite_hand_off — the deployment is ready and isolated; from here the
-# harness owns it and scripts/e2e-cleanup.sh restores APP_DIR at teardown.
+# ed_suite_hand_off <served_dir> — the deployment is ready and isolated; from
+# here the harness owns it: scripts/e2e-cleanup.sh stops the server, restores
+# APP_DIR and removes <served_dir> (read back from SERVED_FROM_DIR) at
+# teardown. <served_dir> is disowned so this script's own EXIT trap — which
+# runs as soon as the script prints the URL and exits 0 — leaves it in place
+# for the server still running from it.
 ed_suite_hand_off() {
   ED_SUITE_HANDED_OFF=1
+  ed_disown_dir "${1:?ed_suite_hand_off needs the served dir}"
+}
+
+# ══ PR #1521 round 3: every staged dir is owned by the deploy that made it ══
+#
+# The pre-check dir (knext-empty-dir.*) and the suite dir
+# (knext-empty-dir-suite.*) are mktemp paths under RUNNER_TEMP, which the
+# compat harness SHARES across concurrently-running test files (`-c 2` on one
+# runner). So nothing may ever remove one of these dirs by name pattern or
+# age — a different deploy's live dir matches both (the round-2 orphan sweep
+# did exactly that). Instead the deploy that created a dir registers it here
+# right after its mktemp and removes it itself: explicitly on every failure
+# branch, and via the EXIT trap below (which INT/TERM/HUP are converted into)
+# on any other exit. The one dir that outlives the script — the suite dir,
+# once handed off — is disowned at hand-off and removed by
+# scripts/e2e-cleanup.sh from the deploy's own SERVED_FROM_DIR metadata.
+# SIGKILL cannot be trapped: a SIGKILLed deploy leaks its dir to the runner's
+# own teardown, by design, rather than any cleanup guessing which dirs are
+# dead.
+ED_OWNED_DIRS=()
+
+# ed_own_dir <dir> — register <dir> for removal on this script's exit and arm
+# the EXIT trap. Call it on the line right after the dir's mktemp.
+#
+ed_own_dir() {
+  ED_OWNED_DIRS+=("${1:?ed_own_dir needs a dir}")
+  ed__arm_exit_trap
+}
+
+# ed__arm_exit_trap — shared by ed_own_dir and ed_suite_arm_restore_trap.
+# The EXIT trap runs stop-before-remove: the suite server (if any) is stopped
+# and APP_DIR restored first, so nothing is still running from a dir when it
+# goes. Both calls are named directly in the trap string rather than through a
+# wrapper function: the apply-safety scanner in
+# tests/kind-manifest-checksum-pin.test.ts bounds how deep a trap's call chain
+# may nest. Installed from the deploy script's MAIN shell (a trap set inside a
+# function still belongs to the whole shell); idempotent. Only ever armed in
+# KNEXT_SELF_CONTAINED=1 mode, so disk-mode signal handling is unchanged.
+ed__arm_exit_trap() {
+  trap 'ed__suite_on_exit; ed__remove_owned_dirs' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+# ed_disown_dir <dir> — ownership of <dir> passes elsewhere (hand-off).
+ed_disown_dir() {
+  local d
+  local -a keep=()
+  for d in ${ED_OWNED_DIRS[@]+"${ED_OWNED_DIRS[@]}"}; do
+    [ "${d}" = "$1" ] || keep+=("${d}")
+  done
+  ED_OWNED_DIRS=(${keep[@]+"${keep[@]}"})
+}
+
+ed__remove_owned_dirs() {
+  local d
+  for d in ${ED_OWNED_DIRS[@]+"${ED_OWNED_DIRS[@]}"}; do
+    rm -rf "${d}" || true
+  done
+  ED_OWNED_DIRS=()
 }
 
 # ed_assert_suite_isolated <server_cwd> <app_dir>
@@ -685,37 +752,4 @@ ed_assert_suite_isolated() {
     esac
   done
   return 0
-}
-
-# ══ #1515(c): self-contained native-addon limitation (documented, not code-
-# enforced) ═══════════════════════════════════════════════════════════════
-#
-# A fixture whose build depends on a native addon (e.g. sqlite3) cannot pass
-# the empty-dir/isolated-suite check by construction: the addon's compiled
-# `.node` binding lives inside `node_modules`, and the whole point of this
-# mode is that `node_modules` is NOT reachable. Two fixtures in the official
-# corpus hit this today: `turbopack-reports` (sqlite3) and
-# `prerender-native-module`. Neither is a regression of this lane.
-#
-# Neither scripts/e2e-deploy.sh nor scripts/e2e-deploy-vinext.sh threads a
-# fixture identifier through to this file — APP_DIR is just a path the
-# harness picked — so there is no per-fixture value to key a skip on HERE.
-# This list is documentation that code actually reads and a test actually
-# asserts against (tests/e2e-empty-dir.test.ts), not an enforced exemption;
-# see docs/compat-matrix.md row 61 ("Self-contained empty-dir mode") for the
-# user-facing statement of the same limitation.
-ED_SC_NATIVE_ADDON_QUARANTINE=(
-  "turbopack-reports"
-  "prerender-native-module"
-)
-
-# ed_sc_is_known_native_addon_limitation <fixture_name>
-#
-# True (rc 0) iff <fixture_name> is one of the fixtures documented above.
-ed_sc_is_known_native_addon_limitation() {
-  local name="$1" n
-  for n in "${ED_SC_NATIVE_ADDON_QUARANTINE[@]}"; do
-    [ "${n}" = "${name}" ] && return 0
-  done
-  return 1
 }

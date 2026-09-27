@@ -917,6 +917,7 @@ function suiteScript(app: string, emptyParent: string, plant = '', afterHandOff 
     . "${LIB}"
     APP_DIR="${app}"
     EMPTY_DIR="$(mktemp -d "${emptyParent}/knext-empty-dir-suite.XXXXXX")"
+    ed_own_dir "\${EMPTY_DIR}"
     EMPTY_DIR_STAGED="$(ed_suite_stage "\${EMPTY_DIR}" "\${APP_DIR}/knext-exec" "\${APP_DIR}/.output/public:.output/public")"
     ed_suite_arm_restore_trap "\${APP_DIR}"
     ed_suite_hide_app_dir "\${APP_DIR}" || exit 1
@@ -933,7 +934,7 @@ function suiteScript(app: string, emptyParent: string, plant = '', afterHandOff 
     ${plant}
     ed_assert_suite_isolated "\${EMPTY_DIR}" "\${APP_DIR}" || exit 1
     node "${join(ROOT, 'scripts/lib/e2e-probe-http.mjs')}" "\${PORT}" /reach 2xx3xx || { echo "REACHABLE" >&2; exit 1; }
-    ed_suite_hand_off
+    ed_suite_hand_off "\${EMPTY_DIR}"
     echo HANDED_OFF
     ${afterHandOff}
   `;
@@ -946,6 +947,12 @@ function runSuite(script: string) {
 function field(stdout: string, key: string): string {
   const m = new RegExp(`^${key}=(.*)$`, 'm').exec(stdout);
   return m ? m[1] : '';
+}
+
+/** True iff the script printed an EMPTY_DIR= line AND that dir no longer exists. */
+function ownedDirGone(stdout: string): boolean {
+  const dir = field(stdout, 'EMPTY_DIR');
+  return dir !== '' && !existsSync(dir);
 }
 
 function alive(pid: string): boolean {
@@ -985,8 +992,17 @@ describe('#1514 (b) — the suite server runs with the disk tree unreachable (ru
       // server keeps running — the deploy script's exit must not restore it.
       expect(hiddenState(app)).toEqual(HIDDEN);
       expect(alive(pid)).toBe(true);
+      // PR #1521 round 3: the served dir was disowned at hand-off, so the
+      // deploy's own EXIT trap (which ran on this exit 0) left it for the
+      // server still running from it — e2e-cleanup.sh removes it below.
+      const served = field(r.stdout, 'EMPTY_DIR');
+      expect(served).toBeTruthy();
+      expect(existsSync(served)).toBe(true);
       // Teardown, exactly as the harness runs it: cwd = APP_DIR, metadata present.
-      writeFileSync(join(app, '.adapter-build.log'), `PID=${pid}\nSERVED_FROM=empty-dir\n`);
+      writeFileSync(
+        join(app, '.adapter-build.log'),
+        `PID=${pid}\nSERVED_FROM=empty-dir\nSERVED_FROM_DIR=${served}\n`,
+      );
       const c = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
         cwd: app,
         encoding: 'utf8',
@@ -994,6 +1010,7 @@ describe('#1514 (b) — the suite server runs with the disk tree unreachable (ru
       expect(c.status).toBe(0);
       expect(alive(pid)).toBe(false);
       expect(hiddenState(app)).toEqual(RESTORED);
+      expect(existsSync(served)).toBe(false);
       expect(readFileSync(join(app, 'node_modules/leakpkg/index.js'), 'utf8')).toContain('leaked');
     } finally {
       if (alive(pid)) spawnSync('kill', ['-KILL', pid]);
@@ -1073,6 +1090,8 @@ describe('#1514 (b) — APP_DIR is restored on EVERY exit path before hand-off',
     expect(r.status).toBe(7);
     expect(alive(field(r.stdout, 'PID'))).toBe(false);
     expect(hiddenState(app)).toEqual(RESTORED);
+    // PR #1521 round 3: the deploy's own suite dir goes with it.
+    expect(ownedDirGone(r.stdout)).toBe(true);
   }, 60_000);
 
   it('a `set -e` failure after hiding restores APP_DIR', () => {
@@ -1081,6 +1100,7 @@ describe('#1514 (b) — APP_DIR is restored on EVERY exit path before hand-off',
     expect(r.status).not.toBe(0);
     expect(alive(field(r.stdout, 'PID'))).toBe(false);
     expect(hiddenState(app)).toEqual(RESTORED);
+    expect(ownedDirGone(r.stdout)).toBe(true);
   }, 60_000);
 
   it('SIGTERM to the deploy script after hiding restores APP_DIR (the trap converts it into an exit)', async () => {
@@ -1102,6 +1122,7 @@ describe('#1514 (b) — APP_DIR is restored on EVERY exit path before hand-off',
     expect(code).toBe(143);
     expect(alive(field(out, 'PID'))).toBe(false);
     expect(hiddenState(app)).toEqual(RESTORED);
+    expect(ownedDirGone(out)).toBe(true);
   }, 60_000);
 
   it('the hide refuses (and restores what it hid) when a stale <name>.ed-hidden exists from a killed run', () => {
@@ -1380,11 +1401,16 @@ function makeSigtermOrderFixture(dir: string): string {
     "const fs = require('fs');",
     'const checkPath = process.argv[2];',
     'const resultFile = process.argv[3];',
+    'const readyFile = process.argv[4];',
     "process.on('SIGTERM', () => {",
     '  const restoredBeforeStop = fs.existsSync(checkPath);',
     '  fs.writeFileSync(resultFile, JSON.stringify({ restoredBeforeStop }));',
     '  process.exit(0);',
     '});',
+    // Written only AFTER the handler is installed: a SIGTERM that lands during
+    // node startup takes the default action and writes no result (the
+    // round-2 1-in-15 flake), so the test waits for this before cleanup.
+    "fs.writeFileSync(readyFile, 'ready');",
     'setInterval(() => {}, 1000);',
     '',
   ].join('\n');
@@ -1402,6 +1428,7 @@ describe('#1521 round-2, finding 1 — e2e-cleanup.sh stops the server BEFORE re
 
     const workDir = tempDir('ed-r16-work-');
     const resultFile = join(workDir, 'result.json');
+    const readyFile = join(workDir, 'ready');
     const checkPath = join(app, 'node_modules'); // the RESTORED (real) name
     const script = makeSigtermOrderFixture(workDir);
     // Backgrounded via bash (mirrors suiteScript()/runSuite() elsewhere in
@@ -1418,11 +1445,17 @@ describe('#1521 round-2, finding 1 — e2e-cleanup.sh stops the server BEFORE re
     // e2e-cleanup.sh depend on for the SAME reason.
     const launch = spawnSync(
       'bash',
-      ['-c', `node "${script}" "${checkPath}" "${resultFile}" >/dev/null 2>&1 & echo "PID=$!"`],
+      [
+        '-c',
+        `node "${script}" "${checkPath}" "${resultFile}" "${readyFile}" >/dev/null 2>&1 & echo "PID=$!"`,
+      ],
       { encoding: 'utf8' },
     );
     const pid = field(launch.stdout, 'PID');
     expect(pid).toBeTruthy();
+    // Bounded wait (≤10 s) for the SIGTERM handler to be installed.
+    for (let i = 0; i < 400 && !existsSync(readyFile); i++) Bun.sleepSync(25);
+    expect(existsSync(readyFile)).toBe(true);
     expect(alive(pid)).toBe(true);
 
     try {
@@ -1563,75 +1596,181 @@ describe('#1521 round-2, finding 3 — the empty-dir lane cleans up its own stag
     expect(c.status).toBe(0);
   });
 
-  it('a deploy killed before it wrote metadata: an orphaned pre-check/suite dir under RUNNER_TEMP is swept', () => {
-    // Rooted DIRECTLY at tmpdir() (never a nested custom dir): the sweep's own
-    // glob (`${RUNNER_TEMP}/knext-empty-dir.*`) only matches TOP-LEVEL
-    // entries, mirroring the real mktemp calls in scripts/e2e-deploy*.sh —
-    // and tests/temp-dirs-outside-the-repo.test.ts's location scan (#880)
-    // only recognizes `join(tmpdir(), …)`-shaped calls, not one rooted at an
-    // intermediate variable. No collision risk with this file's OTHER
-    // suiteScript()-based tests: those nest under their own outsideTempDir()
-    // parent, never directly at tmpdir() with this literal prefix.
-    const runnerTemp = tmpdir();
-    const orphanPrecheck = mkdtempSync(join(tmpdir(), 'knext-empty-dir.'));
-    // #880/D9 (tests/temp-dirs-outside-the-repo.test.ts): every mkdtemp needs
-    // a counted removal bound to its own name in THIS file — the bash-side
-    // rm -rf that e2e-cleanup.sh performs on two of these three is invisible
-    // to that static scan, so enroll all three in the shared registry the
-    // same way tempDir() itself does (its own top-level afterAll drains it).
-    trackedTempDirs.push(orphanPrecheck);
-    const orphanSuite = mkdtempSync(join(tmpdir(), 'knext-empty-dir-suite.'));
-    trackedTempDirs.push(orphanSuite);
-    writeFileSync(join(orphanPrecheck, 'marker'), 'x');
-    writeFileSync(join(orphanSuite, 'marker'), 'x');
-    // Backdate: ED_RUN_START_EPOCH has 1-SECOND resolution (`date +%s`), so a
-    // dir created in the same wall-clock second as the cleanup invocation
-    // would not be strictly older and would (correctly, in production —
-    // this is what stops a concurrently-running deploy's dir from being
-    // swept) survive. Push the mtime safely into the past instead of
-    // sleeping past a second boundary.
-    const past = new Date(Date.now() - 120_000);
-    utimesSync(orphanPrecheck, past, past);
-    utimesSync(orphanSuite, past, past);
-    const unrelated = mkdtempSync(join(tmpdir(), 'knext-not-related-to-empty-dir.'));
-    trackedTempDirs.push(unrelated);
-    const app = tempDir('ed-r3-nometa-app-');
-    const c = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
-      cwd: app,
-      encoding: 'utf8',
-      env: { ...process.env, RUNNER_TEMP: runnerTemp },
+  it('e2e-cleanup.sh never removes a staged dir it does not own: a live concurrent deploy survives both teardown paths (PR #1521 round 3)', () => {
+    // The compat harness runs test files at `-c 2` on ONE runner sharing ONE
+    // RUNNER_TEMP. Deploy A is mid-suite: a live process running from its
+    // suite dir, plus an in-progress pre-check dir, both aged well past any
+    // start-of-run cutoff a sweep could use. Deploy B tears down twice — with
+    // no metadata (its deploy failed early: the path the round-2 orphan sweep
+    // ran on) and with metadata naming B's OWN SERVED_FROM_DIR. Neither
+    // teardown may touch A; the second must remove B's own dir.
+    const runnerTemp = tempDir('ed-r3-runner-temp-');
+    const aSuite = join(runnerTemp, 'knext-empty-dir-suite.AAAAAA');
+    const aPre = join(runnerTemp, 'knext-empty-dir.AAAAAA');
+    const aAsset = join(aSuite, '.next/static/chunks/a.js');
+    mkdirSync(dirname(aAsset), { recursive: true });
+    writeFileSync(aAsset, 'x');
+    mkdirSync(aPre);
+    const past = new Date(Date.now() - 600_000);
+    utimesSync(aSuite, past, past);
+    utimesSync(aPre, past, past);
+    const owner = spawnSync(
+      'bash',
+      ['-c', `( cd "${aSuite}" && exec sleep 60 ) >/dev/null 2>&1 & echo "PID=$!"`],
+      { encoding: 'utf8' },
+    );
+    const ownerPid = field(owner.stdout, 'PID');
+    expect(alive(ownerPid)).toBe(true);
+    try {
+      const env = { ...process.env, RUNNER_TEMP: runnerTemp };
+      const bNoMeta = tempDir('ed-r3-b-nometa-');
+      const c1 = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+        cwd: bNoMeta,
+        encoding: 'utf8',
+        env,
+      });
+      expect(c1.status).toBe(0);
+      const bMeta = tempDir('ed-r3-b-meta-');
+      const bSuite = join(runnerTemp, 'knext-empty-dir-suite.BBBBBB');
+      mkdirSync(bSuite);
+      utimesSync(bSuite, past, past);
+      writeFileSync(
+        join(bMeta, '.adapter-build.log'),
+        `PID=999999999\nSERVED_FROM=empty-dir\nSERVED_FROM_DIR=${bSuite}\n`,
+      );
+      const c2 = spawnSync('bash', [join(ROOT, 'scripts/e2e-cleanup.sh')], {
+        cwd: bMeta,
+        encoding: 'utf8',
+        env,
+      });
+      expect(c2.status).toBe(0);
+      expect(existsSync(bSuite)).toBe(false);
+      expect(alive(ownerPid)).toBe(true);
+      expect(existsSync(aAsset)).toBe(true);
+      expect(existsSync(aPre)).toBe(true);
+    } finally {
+      if (alive(ownerPid)) spawnSync('kill', ['-KILL', ownerPid]);
+    }
+  });
+});
+
+/** The pre-check's shape in both deploy scripts: mktemp, own it on the next line, then <body>. */
+function precheckScript(parent: string, body: string): string {
+  return `
+    set -uo pipefail
+    . "${LIB}"
+    EMPTY_DIR="$(mktemp -d "${parent}/knext-empty-dir.XXXXXX")"
+    ed_own_dir "\${EMPTY_DIR}"
+    echo "EMPTY_DIR=\${EMPTY_DIR}"
+    ${body}
+  `;
+}
+
+describe('#1521 round-3 — each deploy removes its OWN staged dirs (ed_own_dir), on every exit', () => {
+  it('a normal exit 0 removes the owned pre-check dir even with no explicit rm', () => {
+    const r = runSuite(precheckScript(outsideTempDir('ed-own-ok-'), 'exit 0'));
+    expect(r.status).toBe(0);
+    expect(ownedDirGone(r.stdout)).toBe(true);
+  });
+
+  it('a staging failure (`ed_stage` of a missing binary → exit 1) removes the owned dir', () => {
+    const parent = outsideTempDir('ed-own-stage-');
+    const r = runSuite(
+      precheckScript(
+        parent,
+        `EMPTY_DIR_STAGED="$(ed_stage "\${EMPTY_DIR}" "${parent}/no-such-binary")" || exit 1; echo "STAGED=\${EMPTY_DIR_STAGED}"`,
+      ),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stdout).not.toContain('STAGED=');
+    expect(ownedDirGone(r.stdout)).toBe(true);
+  });
+
+  it('SIGTERM mid-pre-check removes the owned dir (exit 143)', async () => {
+    const parent = outsideTempDir('ed-own-term-');
+    const marker = join(parent, 'OWNED-NOW');
+    const child = spawn(
+      'bash',
+      ['-c', precheckScript(parent, `touch "${marker}"; while :; do sleep 0.1; done`)],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let out = '';
+    child.stdout.on('data', (d) => {
+      out += d;
     });
-    expect(c.status).toBe(0);
-    expect(existsSync(orphanPrecheck)).toBe(false);
-    expect(existsSync(orphanSuite)).toBe(false);
-    // Sweep is scoped to the knext-empty-dir* prefixes — nothing else under
-    // RUNNER_TEMP is touched.
-    expect(existsSync(unrelated)).toBe(true);
+    const exited = new Promise<number | null>((res) => child.on('exit', (code) => res(code)));
+    for (let i = 0; i < 300 && !existsSync(marker); i++) await Bun.sleep(50);
+    expect(existsSync(marker)).toBe(true);
+    expect(existsSync(field(out, 'EMPTY_DIR'))).toBe(true);
+    child.kill('SIGTERM');
+    expect(await exited).toBe(143);
+    expect(ownedDirGone(out)).toBe(true);
+  }, 30_000);
+
+  it('removes ONLY what it owns: a sibling knext-empty-dir.* it did not create survives its exit', () => {
+    const parent = outsideTempDir('ed-own-sibling-');
+    const sibling = join(parent, 'knext-empty-dir.OTHER1');
+    mkdirSync(sibling);
+    const r = runSuite(precheckScript(parent, 'exit 1'));
+    expect(r.status).toBe(1);
+    expect(ownedDirGone(r.stdout)).toBe(true);
+    expect(existsSync(sibling)).toBe(true);
   });
 
   for (const script of ['scripts/e2e-deploy.sh', 'scripts/e2e-deploy-vinext.sh']) {
-    it(`${script}: the pre-check's staged EMPTY_DIR is removed on every exit from that block`, () => {
+    it(`${script}: every knext-empty-dir* mktemp is owned on the very next line, and the hand-off disowns the served dir`, () => {
       const src = readRepo(script);
-      // Every `exit 1` inside the KNEXT_SELF_CONTAINED pre-check block, and
-      // its success path, must be preceded by an `rm -rf "${EMPTY_DIR}"` —
-      // checked loosely (scanning, not enumerating a specific line number)
-      // so a future edit that adds another exit path in this block cannot
-      // silently skip the cleanup.
-      expect(src).toContain('rm -rf "${EMPTY_DIR}"');
+      const lines = src.split('\n');
+      const mk = lines.flatMap((l, i) =>
+        /^\s*EMPTY_DIR="\$\(mktemp -d .*\/knext-empty-dir(-suite)?\.XXXXXX"\)"$/.test(l) ? [i] : [],
+      );
+      // The pre-check dir and the suite dir.
+      expect(mk.length).toBe(2);
+      for (const i of mk) expect(lines[i + 1].trim()).toBe('ed_own_dir "${EMPTY_DIR}"');
+      expect(src.match(/^\s*ed_suite_hand_off\b.*$/gm)).toEqual([
+        '  ed_suite_hand_off "${EMPTY_DIR}"',
+      ]);
+    });
+
+    it(`${script}: the pre-check dir and the suite staging dir are removed on EVERY exit from their blocks (structural)`, () => {
+      const lines = readRepo(script).split('\n');
+      const RM = 'rm -rf "${EMPTY_DIR}"';
+      // Pre-check block: from its mktemp to the `fi` closing the enclosing
+      // KNEXT_SELF_CONTAINED `if` (one indent level out). Every `exit 1`
+      // segment must remove the dir before exiting, AND so must the success
+      // path after the last `exit 1`.
+      const pre = lines.findIndex((l) => /mktemp -d .*\/knext-empty-dir\.XXXXXX/.test(l));
+      expect(pre).toBeGreaterThan(-1);
+      const indent = (lines[pre].match(/^ */) as RegExpMatchArray)[0].length;
+      const preEnd = lines.findIndex((l, i) => i > pre && l === `${' '.repeat(indent - 2)}fi`);
+      expect(preEnd).toBeGreaterThan(pre);
+      const preSegments = lines
+        .slice(pre, preEnd)
+        .join('\n')
+        .split(/\bexit 1\b/);
+      expect(preSegments.length).toBeGreaterThan(1);
+      preSegments.forEach((seg, i) => {
+        expect({ segment: i, removes: seg.includes(RM) }).toEqual({ segment: i, removes: true });
+      });
+      // Suite staging block: from its mktemp to the restore-trap arming. The
+      // staging-failure branch removes the dir before `exit 1`.
+      const suite = lines.findIndex((l) => /mktemp -d .*\/knext-empty-dir-suite\.XXXXXX/.test(l));
+      const suiteEnd = lines.findIndex(
+        (l, i) => i > suite && l.includes('ed_suite_arm_restore_trap'),
+      );
+      expect(suite).toBeGreaterThan(-1);
+      expect(suiteEnd).toBeGreaterThan(suite);
+      const suiteSegments = lines
+        .slice(suite, suiteEnd)
+        .join('\n')
+        .split(/\bexit 1\b/);
+      expect(suiteSegments.length).toBe(2);
+      expect(suiteSegments[0]).toContain(RM);
     });
   }
 });
 
-describe('#1521 round-2, finding 4 — self-contained native-addon limitation is documented AND read', () => {
-  it('the two known #1515(c) fixtures are recognized by the lane helper', () => {
-    expect(sh('ed_sc_is_known_native_addon_limitation "turbopack-reports"').status).toBe(0);
-    expect(sh('ed_sc_is_known_native_addon_limitation "prerender-native-module"').status).toBe(0);
-  });
-
-  it('an arbitrary fixture name is NOT in the quarantine list', () => {
-    expect(sh('ed_sc_is_known_native_addon_limitation "some-other-fixture"').status).not.toBe(0);
-  });
-
+describe('#1521 round-2, finding 4 — self-contained native-addon limitation is documented', () => {
   it('docs/compat-matrix.md states the limitation in plain language, naming both fixtures', () => {
     const docs = readRepo('docs/compat-matrix.md');
     expect(docs).toContain('turbopack-reports');
@@ -1740,6 +1879,7 @@ describe('#1521 round-2, finding 6b (R11) — the HUP trap is converted into an 
     expect(code).toBe(129);
     expect(alive(field(out, 'PID'))).toBe(false);
     expect(hiddenState(app)).toEqual(RESTORED);
+    expect(ownedDirGone(out)).toBe(true);
   }, 60_000);
 });
 

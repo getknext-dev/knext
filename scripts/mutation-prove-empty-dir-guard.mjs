@@ -132,7 +132,7 @@ const FINGERPRINT_TARGET = resolve(REPO_ROOT, 'scripts/compat-window-fingerprint
 const READ_BASE_PATH_TARGET = resolve(REPO_ROOT, 'scripts/lib/e2e-read-base-path.mjs');
 const SPEC = 'tests/e2e-empty-dir.test.ts';
 
-declareMutations(43);
+declareMutations(58);
 
 const { command, args, runArgs } = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -546,21 +546,116 @@ proveCleanup(
   'if false; then\n  rm -rf "${SERVED_FROM_DIR}"',
 );
 
-// 42. Finding 3 (runner disk): the orphan sweep (the no-metadata path, for a
-//     deploy killed before it wrote SERVED_FROM_DIR) must actually remove
-//     what it finds.
+// ── PR #1521 round 3 — self-owned staging dirs (the round-2 sweep is gone) ──
+
+// 42. The round-2 orphan sweep deleted a CONCURRENT deploy's live suite and
+//     pre-check dirs (reviewer attack A1). Re-introduce the worst form of it —
+//     every knext-empty-dir* under RUNNER_TEMP, on the no-metadata path — and
+//     the "live concurrent deploy survives both teardown paths" test must red.
 proveCleanup(
-  '#1521 round-2 finding 3: orphan sweep never removes anything',
-  'if [ "${mtime}" -lt "${now}" ]; then\n      rm -rf "${d}"',
-  'if false; then\n      rm -rf "${d}"',
+  '#1521 round-3: no-metadata teardown sweeps every knext-empty-dir* again',
+  '  ed_suite_restore_app_dir "${APP_DIR}" || true\n',
+  '  ed_suite_restore_app_dir "${APP_DIR}" || true\n  for d in "${RUNNER_TEMP:-/tmp}"/knext-empty-dir*; do rm -rf "${d}"; done\n',
 );
 
-// 43. Finding 4: the documented native-addon quarantine list must actually
-//     be readable by the helper function code claims reads it.
+// 43. Same, on the metadata-present path (after removing its OWN SERVED_FROM_DIR).
+proveCleanup(
+  '#1521 round-3: metadata teardown also sweeps every knext-empty-dir*',
+  '  echo "[e2e-cleanup] removed the suite\'s staged empty dir ${SERVED_FROM_DIR}" >&2\nfi\n',
+  '  echo "[e2e-cleanup] removed the suite\'s staged empty dir ${SERVED_FROM_DIR}" >&2\nfi\nfor d in "${RUNNER_TEMP:-/tmp}"/knext-empty-dir*; do rm -rf "${d}"; done\n',
+);
+
+// 44. ed_own_dir never registers the dir: nothing removes it on exit.
 prove(
-  '#1521 round-2 finding 4: quarantine helper never matches a known fixture',
-  '[ "${n}" = "${name}" ] && return 0',
-  '[ "${n}" = "${name}" ] && return 1',
+  '#1521 round-3: ed_own_dir never registers the dir',
+  '  ED_OWNED_DIRS+=("${1:?ed_own_dir needs a dir}")\n',
+  '  : "${1:?ed_own_dir needs a dir}"\n',
+);
+
+// 45. The owned-dir removal removes nothing.
+prove(
+  '#1521 round-3: ed__remove_owned_dirs never removes anything',
+  '    rm -rf "${d}" || true\n',
+  '    : "${d}"\n',
+);
+
+// 46. Hand-off no longer disowns the served dir: the deploy's own exit 0
+//     would delete the dir the handed-off server is running from.
+prove(
+  '#1521 round-3: ed_suite_hand_off keeps owning the served dir',
+  '  ed_disown_dir "${1:?ed_suite_hand_off needs the served dir}"\n',
+  '  : "${1:?ed_suite_hand_off needs the served dir}"\n',
+);
+
+// 47. ed_own_dir registers but never arms the EXIT trap (pre-check exits leak).
+prove(
+  '#1521 round-3: ed_own_dir never arms the EXIT trap',
+  '  ED_OWNED_DIRS+=("${1:?ed_own_dir needs a dir}")\n  ed__arm_exit_trap\n',
+  '  ED_OWNED_DIRS+=("${1:?ed_own_dir needs a dir}")\n',
+);
+
+// 48. The shared EXIT trap drops the owned-dir removal (suite exits leak).
+prove(
+  '#1521 round-3: the EXIT trap no longer removes owned dirs',
+  "  trap 'ed__suite_on_exit; ed__remove_owned_dirs' EXIT\n",
+  "  trap 'ed__suite_on_exit' EXIT\n",
+);
+
+// 49-52. Each deploy script owns each of its two staged dirs on the line after the mktemp.
+proveDeploy(
+  '#1521 round-3: e2e-deploy.sh no longer owns the suite dir',
+  'knext-empty-dir-suite.XXXXXX")"\n  ed_own_dir "${EMPTY_DIR}"\n',
+  'knext-empty-dir-suite.XXXXXX")"\n',
+);
+proveDeploy(
+  '#1521 round-3: e2e-deploy.sh no longer owns the pre-check dir',
+  'knext-empty-dir.XXXXXX")"\n      ed_own_dir "${EMPTY_DIR}"\n',
+  'knext-empty-dir.XXXXXX")"\n',
+);
+proveVinext(
+  '#1521 round-3: e2e-deploy-vinext.sh no longer owns the suite dir',
+  'knext-empty-dir-suite.XXXXXX")"\n  ed_own_dir "${EMPTY_DIR}"\n',
+  'knext-empty-dir-suite.XXXXXX")"\n',
+);
+proveVinext(
+  '#1521 round-3: e2e-deploy-vinext.sh no longer owns the pre-check dir',
+  'knext-empty-dir.XXXXXX")"\n    ed_own_dir "${EMPTY_DIR}"\n',
+  'knext-empty-dir.XXXXXX")"\n',
+);
+
+// 53-56. The structural "removed on every exit from the pre-check block" guard:
+//        the success path (reviewer attack A2) and a failure branch, both lanes.
+proveDeploy(
+  '#1521 round-3 (A2): standalone pre-check success path drops its removal',
+  '      log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"\n      docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true\n      rm -rf "${EMPTY_DIR}"\n',
+  '      log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"\n      docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true\n',
+);
+proveDeploy(
+  '#1521 round-3: standalone pre-check "not clean" branch drops its removal',
+  '        log "ERROR: KNEXT_SELF_CONTAINED=1 — the staged empty dir is not clean — see above"\n        rm -rf "${EMPTY_DIR}"\n',
+  '        log "ERROR: KNEXT_SELF_CONTAINED=1 — the staged empty dir is not clean — see above"\n',
+);
+proveVinext(
+  '#1521 round-3: vinext pre-check success path drops its removal',
+  '    log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"\n    rm -rf "${EMPTY_DIR}"\n',
+  '    log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"\n',
+);
+proveVinext(
+  '#1521 round-3: vinext pre-check failure branch drops its removal',
+  '      # below, and nothing else was ever removing it.\n      rm -rf "${EMPTY_DIR}"\n',
+  '      # below, and nothing else was ever removing it.\n',
+);
+
+// 57-58. The suite staging-failure branch removes its own dir before exit 1.
+proveDeploy(
+  '#1521 round-3: standalone suite staging failure drops its removal',
+  '    log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite\'s empty dir failed"\n    rm -rf "${EMPTY_DIR}"\n',
+  '    log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite\'s empty dir failed"\n',
+);
+proveVinext(
+  '#1521 round-3: vinext suite staging failure drops its removal',
+  '    log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite\'s empty dir failed"\n    rm -rf "${EMPTY_DIR}"\n',
+  '    log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite\'s empty dir failed"\n',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

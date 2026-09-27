@@ -14,44 +14,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/e2e-empty-dir.sh
 . "${SCRIPT_DIR}/lib/e2e-empty-dir.sh"
 
-# round-2 review, finding 3 (runner disk): captured BEFORE anything else runs,
-# so the orphan sweep below only ever removes a `knext-empty-dir*` directory
-# that already existed when THIS cleanup invocation started — never one a
-# concurrently-running deploy (a different shard) creates while this script
-# is executing.
-ED_RUN_START_EPOCH="$(date +%s)"
-
-# round-2 review, finding 3 (runner disk): sweeps orphaned `knext-empty-dir*`
-# staging directories under RUNNER_TEMP (the pre-check dir from
-# scripts/e2e-deploy.sh/-vinext.sh's §3c-ii/§6c, and a suite dir from a
-# self-contained deploy killed before it could write SERVED_FROM_DIR to
-# metadata — the normal, metadata-present path below removes its own
-# SERVED_FROM_DIR directly and never needs this). Only entries OLDER than
-# this script's own start are swept (see ED_RUN_START_EPOCH above) — never
-# assumed, one `stat` per candidate, best-effort on a platform whose `stat`
-# flags differ (GNU vs BSD/macOS, since this also runs under `bun test`
-# locally).
-ed_sweep_orphaned_empty_dirs() {
-  local now="$1" root="${RUNNER_TEMP:-/tmp}" d mtime
-  for d in "${root}"/knext-empty-dir.* "${root}"/knext-empty-dir-suite.*; do
-    [ -d "${d}" ] || continue
-    mtime="$(stat -c %Y "${d}" 2>/dev/null || stat -f %m "${d}" 2>/dev/null || echo "${now}")"
-    if [ "${mtime}" -lt "${now}" ]; then
-      rm -rf "${d}"
-      echo "[e2e-cleanup] swept orphaned empty-dir staging directory ${d}" >&2
-    fi
-  done
-}
+# PR #1521 round 3: this script never removes a staging directory by name
+# pattern or age. RUNNER_TEMP is shared by concurrently-running test files
+# (the harness runs `-c 2` on one runner), so a `knext-empty-dir*` glob
+# matches ANOTHER deploy's live suite/pre-check dir (the round-2 orphan sweep
+# deleted exactly that). Each deploy removes its own dirs (ed_own_dir in
+# scripts/lib/e2e-empty-dir.sh); the only one it hands over is the suite dir,
+# which this script removes below from THIS deployment's SERVED_FROM_DIR.
 
 if [ ! -f "${LOG_FILE}" ]; then
   # #1514: no metadata means no server to stop, but a self-contained deploy
   # killed before writing it may still have left APP_DIR hidden.
   ed_suite_restore_app_dir "${APP_DIR}" || true
-  # round-2 review, finding 3: no metadata also means no SERVED_FROM_DIR to
-  # read, so sweep by mtime instead — this is the one path where a leaked
-  # empty-dir staging directory from a killed deploy would otherwise never be
-  # found (the normal path below reads SERVED_FROM_DIR directly).
-  ed_sweep_orphaned_empty_dirs "${ED_RUN_START_EPOCH}"
   echo "[e2e-cleanup] no .adapter-build.log — nothing to clean up" >&2
   exit 0
 fi

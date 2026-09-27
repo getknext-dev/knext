@@ -621,6 +621,7 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       # fix). RUNNER_TEMP is the GitHub Actions runner's own temp root; /tmp
       # is the local fallback.
       EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir.XXXXXX")"
+      ed_own_dir "${EMPTY_DIR}"
       EMPTY_DIR_PORT="$(free_port)"
       EMPTY_DIR_UID_GID="$(id -u):$(id -g)"
       EMPTY_DIR_CONTAINER="knext-e2e-empty-dir-${DEPLOYMENT_ID}"
@@ -1027,9 +1028,11 @@ fi
 SERVED_FROM="disk"
 if [ -n "${STANDALONE_EXEC}" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
   EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir-suite.XXXXXX")"
+  ed_own_dir "${EMPTY_DIR}"
   EMPTY_DIR_STAGED="$(ed_suite_stage "${EMPTY_DIR}" "${STANDALONE_EXEC}" \
     "${STANDALONE_APP_DIR}/.next/static:.next/static" "${STANDALONE_APP_DIR}/public:public")" || {
     log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the suite's empty dir failed"
+    rm -rf "${EMPTY_DIR}"
     exit 1
   }
   ed_suite_arm_restore_trap "${APP_DIR}"
@@ -1319,7 +1322,7 @@ if [ "${SERVED_FROM}" != "disk" ]; then
     log "ERROR: KNEXT_SELF_CONTAINED=1 — the suite server is not isolated from the disk tree (see above); refusing to hand it to the harness"
     exit 1
   fi
-  ed_suite_hand_off
+  ed_suite_hand_off "${EMPTY_DIR}"
   log "KNEXT_SELF_CONTAINED=1 — suite served from ${EMPTY_DIR} (served_from=${SERVED_FROM}); APP_DIR stays hidden until e2e-cleanup.sh"
 fi
 
