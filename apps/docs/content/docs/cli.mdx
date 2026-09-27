@@ -127,10 +127,12 @@ cluster. If your own kubeconfig references its certificate authority as a file (
 verification), the commands warn you before writing a kubeconfig with an empty CA.
 
 **The minted token expires after one year** (`--duration=8760h`). When it expires, CI can no longer
-reach the cluster. Before then, re-run the printed `TOKEN=` line and the line after it (which
-patches the token into the file) and push the secret again (for example with `--push-secret`
-below). Change `--duration` to match your rotation policy; your cluster may cap it lower. To revoke
-the token early, delete and recreate the `knext-deployer` ServiceAccount.
+reach the cluster. Before then, **re-run the whole printed recipe from the top** and push the secret
+again (for example with `--push-secret` below) — it removes its own output file first, so the
+renewed token replaces the old one. Re-running only the last two lines over an existing file refuses
+instead of silently keeping the old token. Change `--duration` to match your rotation policy; your
+cluster may cap it lower. To revoke the token early, delete and recreate the `knext-deployer`
+ServiceAccount.
 
 Any kubeconfig that instead needs a cloud CLI on the runner (an `exec:` or
 `auth-provider:` entry — the `aws`/`gcloud`/`oci`/`az` shape) is refused wherever knext reads one —

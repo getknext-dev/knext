@@ -15,7 +15,9 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
+    chmodSync,
     existsSync,
+    mkdirSync,
     mkdtempSync,
     readFileSync,
     rmSync,
@@ -283,7 +285,11 @@ describe("mint recipe — round 2 of #1557", () => {
         const steps = nextSteps("acme");
         expect(steps).toContain("expires after one year");
         expect(steps).toContain("--duration=8760h");
-        expect(steps).toMatch(
+        // Round 4 of #1557 (R3-B1): renewal is "re-run the whole recipe",
+        // never just the TOKEN= and patch lines — that shape is what left
+        // the OLD token in place while exiting 0.
+        expect(steps).toMatch(/re-run the WHOLE recipe/);
+        expect(steps).not.toMatch(
             /re-run the TOKEN= and KNEXT_KUBECONFIG_TEXT= lines/,
         );
     });
@@ -382,6 +388,205 @@ describe("mint recipe — the token never reaches a child process's argv (round 
             // Untouched by the patch: it only replaces `users: null`.
             expect(parsed["current-context"]).toBe("knext-deployer");
             expect(parsed.clusters).toBeDefined();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+/**
+ * Round 4 of #1557 (R3-B1): round 3's patch line only wrote a token when the
+ * file still had `users: null` — true for a fresh mint, but NOT for renewal,
+ * which runs on a file that already has a `users:` entry. The substitution
+ * matched nothing, exited 0, and left the OLD token in place while the user
+ * believed they had rotated it. The fix is two halves: the patch line now
+ * fails CLOSED when the anchor is missing, and the recipe deletes its own
+ * output file first so re-running the WHOLE thing (the documented renewal
+ * path) always starts from a fresh anchor.
+ */
+describe("mint recipe — renewal fails closed instead of keeping the old token (round 4 of #1557, R3-B1)", () => {
+    it("the recipe's first command removes its own output file (so a full re-run cannot inherit a stale users: entry)", () => {
+        const cmds = mintKubeconfigCommands("acme");
+        expect(cmds[0]).toBe(`rm -f -- "${MINTED_KUBECONFIG_PATH}"`);
+    });
+
+    it("applying the patch line to a file that already has a users: entry fails non-zero, and leaves the old token untouched", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-mint-renewal-"));
+        try {
+            const out = join(dir, MINTED_KUBECONFIG_PATH);
+            const oldToken =
+                "eyJhbGciOiJSUzI1NiJ9.OLD_TOKEN_BEFORE_RENEWAL.sig";
+            const precursor = [
+                "apiVersion: v1",
+                "clusters:",
+                "- cluster:",
+                "    certificate-authority-data: ZmFrZQ==",
+                "    server: https://example.com",
+                "  name: knext-deployer",
+                "contexts:",
+                "- context:",
+                "    cluster: knext-deployer",
+                "    namespace: acme",
+                "    user: knext-deployer",
+                "  name: knext-deployer",
+                "current-context: knext-deployer",
+                "kind: Config",
+                "preferences: {}",
+                "users:",
+                "- name: knext-deployer",
+                "  user:",
+                `    token: ${oldToken}`,
+                "",
+            ].join("\n");
+            writeFileSync(out, precursor);
+            const patchLine = mintKubeconfigCommands("acme")
+                .at(-1)
+                ?.replaceAll(MINTED_KUBECONFIG_PATH, out);
+            expect(patchLine).toBeDefined();
+            const newToken = "eyJhbGciOiJSUzI1NiJ9.NEW_TOKEN_AFTER_RENEWAL.sig";
+            const r = spawnSync("bash", ["-c", `${patchLine}`], {
+                encoding: "utf8",
+                env: { ...process.env, TOKEN: newToken },
+            });
+            // Never exits 0 with the old token still in place — that is the
+            // exact defect: silently "succeeding" while renewing nothing.
+            expect(r.status).not.toBe(0);
+            expect(r.stderr).toContain("users: entry");
+            const after = readFileSync(out, "utf8");
+            expect(after).toContain(oldToken);
+            expect(after).not.toContain(newToken);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    /**
+     * A hermetic fake `kubectl` implementing only the four subcommands this
+     * recipe calls — no real cluster, no real binary. `set-cluster` is the
+     * one call that actually writes the (relative) `--kubeconfig=` path, the
+     * same way the real three `kubectl config` calls leave `users: null` on
+     * disk before the patch line ever runs; `set-context`/`use-context` are
+     * no-ops, and `create token` prints a token fixed per invocation so the
+     * "renewed" run can be told apart from the "first mint" run.
+     */
+    function writeFakeKubectl(binDir: string) {
+        const kubectl = join(binDir, "kubectl");
+        writeFileSync(
+            kubectl,
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'if [ "$1" = "config" ] && [ "$2" = "view" ]; then',
+                '  case "$*" in',
+                '    *server*) echo "https://example.invalid" ;;',
+                '    *) echo "ZmFrZS1jYQ==" ;;',
+                "  esac",
+                "  exit 0",
+                "fi",
+                'if [ "$1" = "config" ] && [ "$2" = "set-cluster" ]; then',
+                '  out=""',
+                '  for a in "$@"; do',
+                '    case "$a" in',
+                '      --kubeconfig=*) out="${a#--kubeconfig=}" ;;',
+                "    esac",
+                "  done",
+                "  cat > \"$out\" <<'YAML'",
+                "apiVersion: v1",
+                "clusters:",
+                "- cluster:",
+                "    certificate-authority-data: ZmFrZQ==",
+                "    server: https://example.invalid",
+                "  name: knext-deployer",
+                "contexts:",
+                "- context:",
+                "    cluster: knext-deployer",
+                "    namespace: acme",
+                "    user: knext-deployer",
+                "  name: knext-deployer",
+                "current-context: knext-deployer",
+                "kind: Config",
+                "preferences: {}",
+                "users: null",
+                "YAML",
+                "  exit 0",
+                "fi",
+                'if [ "$1" = "config" ] && { [ "$2" = "set-context" ] || [ "$2" = "use-context" ]; }; then',
+                "  exit 0",
+                "fi",
+                'if [ "$1" = "create" ] && [ "$2" = "token" ]; then',
+                '  echo "$FAKE_KUBECTL_NEW_TOKEN"',
+                "  exit 0",
+                "fi",
+                'echo "fake-kubectl: unhandled invocation: $*" >&2',
+                "exit 1",
+                "",
+            ].join("\n"),
+        );
+        chmodSync(kubectl, 0o755);
+    }
+
+    it("re-running the WHOLE recipe over an existing file ends with the new token and no trace of the old one", () => {
+        const dir = mkdtempSync(join(tmpdir(), "knext-mint-full-rerun-"));
+        try {
+            const binDir = join(dir, "bin");
+            const oldToken = "eyJhbGciOiJSUzI1NiJ9.TOKEN_BEFORE_RENEWAL.sig";
+            const newToken = "eyJhbGciOiJSUzI1NiJ9.TOKEN_AFTER_RENEWAL.sig";
+            writeFileSync(
+                join(dir, MINTED_KUBECONFIG_PATH),
+                [
+                    "apiVersion: v1",
+                    "clusters:",
+                    "- cluster:",
+                    "    certificate-authority-data: ZmFrZQ==",
+                    "    server: https://example.invalid",
+                    "  name: knext-deployer",
+                    "contexts:",
+                    "- context:",
+                    "    cluster: knext-deployer",
+                    "    namespace: acme",
+                    "    user: knext-deployer",
+                    "  name: knext-deployer",
+                    "current-context: knext-deployer",
+                    "kind: Config",
+                    "preferences: {}",
+                    "users:",
+                    "- name: knext-deployer",
+                    "  user:",
+                    `    token: ${oldToken}`,
+                    "",
+                ].join("\n"),
+            );
+            mkdirSync(binDir, { recursive: true });
+            writeFakeKubectl(binDir);
+            const recipe = mintKubeconfigCommands("acme").join("\n");
+            const r = spawnSync(
+                "bash",
+                ["-c", `set -euo pipefail\n${recipe}`],
+                {
+                    encoding: "utf8",
+                    cwd: dir,
+                    env: {
+                        ...process.env,
+                        PATH: `${binDir}:${process.env.PATH}`,
+                        FAKE_KUBECTL_NEW_TOKEN: newToken,
+                    },
+                },
+            );
+            expect(r.status, `stdout: ${r.stdout}\nstderr: ${r.stderr}`).toBe(
+                0,
+            );
+            const after = readFileSync(
+                join(dir, MINTED_KUBECONFIG_PATH),
+                "utf8",
+            );
+            expect(after).toContain(newToken);
+            expect(after).not.toContain(oldToken);
+            const parsed = parse(after) as {
+                users: Array<{ name: string; user: { token: string } }>;
+            };
+            expect(parsed.users).toEqual([
+                { name: "knext-deployer", user: { token: newToken } },
+            ]);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }

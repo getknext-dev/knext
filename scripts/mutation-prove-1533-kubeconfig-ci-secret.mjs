@@ -421,9 +421,17 @@ const MUTATIONS = [
     anchor: '        `[ -n "$CA_DATA" ] || echo "warning:',
     replacement: '        `[ -n "$CA_DATA" ] && echo "warning:',
   },
+  {
+    label:
+      'renewal keeps the old token: the patch line no longer fails closed when the users: null anchor is missing (round 4, R3-B1)',
+    subject: 'initCiTs',
+    spec: INIT_CI_SPEC,
+    anchor: 'case "$KNEXT_KUBECONFIG_TEXT" in *\'users: null\'*) ;;',
+    replacement: 'case "$KNEXT_KUBECONFIG_TEXT" in *) ;;',
+  },
 ];
 
-const DECLARED = 31;
+const DECLARED = 32;
 declareMutations(DECLARED);
 
 if (MUTATIONS.length !== DECLARED) {
