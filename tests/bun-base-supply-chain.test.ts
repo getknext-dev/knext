@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
 import {
@@ -1147,5 +1147,143 @@ describe('bun-base-build.yml: credentialed job triggers and permissions', () => 
   ])('goes RED on: %s', (_n, mutate) => {
     expect(mutate(wfText)).not.toBe(wfText);
     expect(problems(mutate(wfText)).length).toBeGreaterThan(0);
+  });
+});
+/**
+ * #1469 round 13 (review-1469-r12 LOW-1, rows W1/W2): the workflow chooses the Cloud Build config and
+ * signs whatever it downloaded, so its submit → wait → download → verify → sign chain is pinned here:
+ * the step order, and the exact run text of the steps that pick the config and handle the bytes. This
+ * is a reviewed copy in the test — a PR that edits the workflow AND this copy passes; see the README's
+ * "Known limits". It stops a one-sided edit, not a coordinated one.
+ */
+describe('bun-base-build.yml: the submit/download/verify/sign chain is pinned (W1/W2)', () => {
+  const wfPath = resolve(dir, '..', '..', '.github/workflows/bun-base-build.yml');
+  type Step = {
+    name?: string;
+    uses?: string;
+    run?: string;
+    env?: unknown;
+    'working-directory'?: string;
+  };
+  const stepsOf = (t: string): Step[] => {
+    const doc = parse(t) as { jobs?: Record<string, { steps?: Step[] }> };
+    const jobs = Object.values(doc.jobs ?? {});
+    const withSubmit = jobs.filter((j) =>
+      (j.steps ?? []).some((s) => /gcloud builds submit/.test(s.run ?? '')),
+    );
+    return withSubmit.length === 1 ? (withSubmit[0]?.steps ?? []) : [];
+  };
+  const label = (s: Step) => s.name ?? `uses ${String(s.uses).replace(/@.*/, '')}`;
+  const REVIEWED_ORDER = [
+    'Require the GCP federation variables (fail closed)',
+    'uses actions/checkout',
+    'uses google-github-actions/auth',
+    'uses google-github-actions/setup-gcloud',
+    'Submit the Cloud Build',
+    'Wait for the Cloud Build',
+    'Download the artifacts',
+    'Verify digests and the manifest (fail closed)',
+    'uses sigstore/cosign-installer',
+    'Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature',
+    'Store the signature beside the build',
+    'Smoke-test the x64 binary (musl, in Alpine)',
+    'uses actions/upload-artifact',
+  ];
+  const REVIEWED_RUN: Record<string, string> = {
+    'Submit the Cloud Build': `set -euo pipefail
+prefix="$(bash infra/bun-base/prefix.sh)"
+id="$(gcloud builds submit infra/bun-base --config infra/bun-base/cloudbuild.yaml \\
+  --project "$GCP_PROJECT" --gcs-source-staging-dir "gs://$BUCKET/_source" \\
+  --substitutions="_TARGETS=$TARGETS" --async --format='value(id)')"
+echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+echo "id=$id" >> "$GITHUB_OUTPUT"
+echo "Cloud Build $id → gs://$BUCKET/$prefix/$id/" >> "$GITHUB_STEP_SUMMARY"
+`,
+    'Download the artifacts': `set -euo pipefail
+mkdir -p out
+gcloud storage cp "gs://$BUCKET/$PREFIX/$BUILD_ID/*" out/
+ls -la out
+`,
+    'Verify digests and the manifest (fail closed)': `set -euo pipefail
+sha256sum -c SHA256SUMS
+# Every per-file .sha256 (the file the KNEXT_BUN_BASE_EXE seam reads) must agree too.
+for f in *.sha256; do sha256sum -c "$f"; grep -qxF "$(cat "$f")" SHA256SUMS; done
+for t in $TARGETS; do test -s "bun-linux-$t-musl"; test -s "bun-linux-$t-musl.sha256"; done
+jq -e --arg p "$PREFIX" --arg b "$BUILD_ID" --arg s "\${PREFIX%%-*}" \\
+  '.prefix == $p and .build_id == $b and .upstream_sha == $s' manifest.json
+`,
+    'Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature': `set -euo pipefail
+cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \\
+  --certificate-identity "https://github.com/$WORKFLOW_REF" \\
+  --certificate-oidc-issuer "$OIDC_ISSUER" \\
+  SHA256SUMS | tee -a "$GITHUB_STEP_SUMMARY"
+`,
+  };
+  const problems = (t: string): string[] => {
+    const steps = stepsOf(t);
+    const out: string[] = [];
+    const order = steps.map(label);
+    if (JSON.stringify(order) !== JSON.stringify(REVIEWED_ORDER))
+      out.push(`step order ${JSON.stringify(order)}`);
+    for (const [name, run] of Object.entries(REVIEWED_RUN)) {
+      const s = steps.find((x) => x.name === name);
+      if (s?.run !== run) out.push(`run of "${name}" differs from the reviewed copy`);
+    }
+    for (const name of [
+      'Verify digests and the manifest (fail closed)',
+      'Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature',
+    ])
+      if (steps.find((x) => x.name === name)?.['working-directory'] !== 'out')
+        out.push(`working-directory of "${name}"`);
+    return out;
+  };
+  const wf = readFileSync(wfPath, 'utf8');
+
+  it('has exactly the reviewed step order and run text for submit, download, verify and sign', () => {
+    expect(problems(wf)).toEqual([]);
+  });
+
+  it('infra/bun-base holds no second Cloud Build config or ignore file', () => {
+    const extra = readdirSync(dir).filter(
+      (f) => (/\.ya?ml$/.test(f) && f !== 'cloudbuild.yaml') || /^\.gcloudignore/.test(f),
+    );
+    expect(extra).toEqual([]);
+  });
+
+  it.each([
+    [
+      'W1: --config swapped',
+      (t: string) =>
+        t.replace(
+          '--config infra/bun-base/cloudbuild.yaml',
+          '--config infra/bun-base/cloudbuild.ci.yaml',
+        ),
+    ],
+    [
+      'W3: an --ignore-file added',
+      (t: string) =>
+        t.replace('--async --format', '--ignore-file=.gcloudignore.ci --async --format'),
+    ],
+    [
+      'W2: a binary swapped after download',
+      (t: string) =>
+        t.replace(
+          '          ls -la out\n',
+          '          cp /tmp/other out/bun-linux-x64-musl\n          ls -la out\n',
+        ),
+    ],
+    [
+      'sign moved before verify',
+      (t: string) => {
+        const a = t.indexOf('      - name: Verify digests');
+        const b = t.indexOf('      - uses: sigstore/cosign-installer');
+        const c = t.indexOf('      - name: Store the signature');
+        return t.slice(0, a) + t.slice(b, c) + t.slice(a, b) + t.slice(c);
+      },
+    ],
+  ])('goes RED on: %s', (_n, mutate) => {
+    expect(mutate(wf)).not.toBe(wf);
+    expect(problems(mutate(wf)).length).toBeGreaterThan(0);
   });
 });

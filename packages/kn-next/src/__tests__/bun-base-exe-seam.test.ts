@@ -138,6 +138,9 @@ type ScriptScan = {
     rawSeamRefs: number;
     /** A computed key that is not a string literal, as source text (for the adapters-wide rule). */
     computedKeyTexts: string[];
+    /** `o[k]` READ with a key that is not a literal (`m[["bu", "ild"].join("")]` reaches build
+     *  without spelling it — review-1469-r12 C1). Writes are in `computedWrites`. */
+    computedReads: string[];
 };
 
 /**
@@ -214,6 +217,7 @@ function scanScript(file: string, source: string): ScriptScan {
         seamRefs: 0,
         rawSeamRefs: 0,
         computedKeyTexts: [],
+        computedReads: [],
     };
     const isLit = (e: ts.Expression) =>
         ts.isStringLiteralLike(e) || ts.isNumericLiteral(e);
@@ -234,9 +238,16 @@ function scanScript(file: string, source: string): ScriptScan {
             )
                 out.bunModule.push(lineOf(n));
             const isImport = n.expression.kind === ts.SyntaxKind.ImportKeyword;
+            // Round 13 (review-1469-r12 C1): `import.meta.require(x)`, `module.require(x)` and
+            // `createRequire(…)(x)` load a module just like `require(x)`.
             const isRequire =
-                ts.isIdentifier(n.expression) &&
-                n.expression.text === "require";
+                (ts.isIdentifier(n.expression) &&
+                    n.expression.text === "require") ||
+                (ts.isPropertyAccessExpression(n.expression) &&
+                    n.expression.name.text === "require") ||
+                (ts.isCallExpression(n.expression) &&
+                    ts.isIdentifier(n.expression.expression) &&
+                    n.expression.expression.text === "createRequire");
             if (
                 (isImport || isRequire) &&
                 !(n.arguments[0] && ts.isStringLiteralLike(n.arguments[0]))
@@ -271,6 +282,17 @@ function scanScript(file: string, source: string): ScriptScan {
             out.computedKeys.push(lineOf(n));
             out.computedKeyTexts.push(n.getText(sf));
         }
+        if (
+            ts.isElementAccessExpression(n) &&
+            !isLit(n.argumentExpression) &&
+            !(
+                ts.isBinaryExpression(n.parent) &&
+                n.parent.left === n &&
+                n.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+                n.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+            )
+        )
+            out.computedReads.push(n.getText(sf));
         if (ts.isIdentifier(n)) {
             if (n.text === "sealCompile") out.sealRefs++;
             if (n.text === "BUN_BASE_EXE") out.seamRefs++;
@@ -367,6 +389,14 @@ const SEAM_MODULES = new Set(["bun-base-exe.mjs", "bun-base-exe.d.mts"]);
 const REVIEWED_COMPUTED_KEYS = new Set([
     "correlation-response.ts [CORRELATION_RESPONSE_INSTALLED]",
     "compile-embed.mjs [EMBED_PROBE_ENV]",
+]);
+/** Computed READS a compile script may make, exactly (round 13): argv parsing, the report tally and
+ *  the embed plan's index. Any other `o[expr]` can reach `build` or `Bun` without spelling either. */
+const REVIEWED_COMPUTED_READS = new Set([
+    "argv[i]",
+    "argv[i + 1]",
+    "kinds[ext]",
+    "plan.relpaths[i]",
 ]);
 /** The one import a compile script may take from the seam module, exactly. */
 const SEAM_IMPORT =
@@ -548,6 +578,10 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
         expect([...REVIEWED_COMPUTED_KEYS].filter((x) => !keys.has(x))).toEqual(
             [],
         );
+        const reads = new Set(scripts.flatMap((s) => s.scan.computedReads));
+        expect(
+            [...REVIEWED_COMPUTED_READS].filter((x) => !reads.has(x)),
+        ).toEqual([]);
     });
 
     // ── round 13 (review-1469-r12 MEDIUM-1, rows C4/C5/C7) ──
@@ -631,7 +665,11 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
                     computedWrites: scan.computedWrites.filter(
                         (w) => !REVIEWED_COMPUTED_WRITES.has(w),
                     ),
+                    computedReads: scan.computedReads.filter(
+                        (r) => !REVIEWED_COMPUTED_READS.has(r),
+                    ),
                 }).toEqual({
+                    computedReads: [],
                     bunModule: [],
                     dynamicSpecifier: [],
                     globalRefs: [],
@@ -842,6 +880,30 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
             "const o = { [k]: 1 };",
             (s) => s.computedKeyTexts,
             ["[k]"],
+        ],
+        [
+            "C1: import.meta.require with a computed specifier",
+            'const m = import.meta.require(["b", "un"].join(""));',
+            (s) => s.dynamicSpecifier.length,
+            1,
+        ],
+        [
+            "createRequire(u)(x) with a computed specifier",
+            "const m = createRequire(import.meta.url)(x);",
+            (s) => s.dynamicSpecifier.length,
+            1,
+        ],
+        [
+            "C1: a computed element read (reaches build without spelling it)",
+            'await m[["bu", "ild"].join("")](o);',
+            (s) => s.computedReads,
+            ['m[["bu", "ild"].join("")]'],
+        ],
+        [
+            "a computed write is not also a read",
+            "o[k] = 1;",
+            (s) => s.computedReads,
+            [],
         ],
         [
             "typeof Bun is not an indirect use",

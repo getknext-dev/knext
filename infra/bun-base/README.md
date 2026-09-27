@@ -87,6 +87,11 @@ binds the bytes, so point the variable only at the signature-verified download. 
 to stock Bun without saying so. The binaries are musl builds, so the compile itself must target
 `bun-linux-x64-musl` or `bun-linux-arm64-musl`.
 
+The variable is read once, in `bun-base-exe.mjs`, into a frozen value that the compile scripts cannot
+name. Every `compile` option they pass to `Bun.build` is built by `sealCompile()`. That function
+refuses any part that carries its own `executablePath` and appends the verified one last, so the
+variable is the only way to choose the base executable.
+
 ## Signing, and what it attests
 
 Cloud Build has no ambient OIDC identity that Fulcio accepts. This was measured, not assumed: its
@@ -205,10 +210,55 @@ which environment, and what happens to the binary afterwards. So the test parses
 it exactly — the step list, each step's image digest, entrypoint, args and env, the options and the
 substitutions — and every name `build.sh` reads must be bound in the script or be on a short
 allowlist of what the build step's `env` supplies (`BUILD_ID`, `BUN_BASE_TARGETS`, plus the image's
-`PATH`). What the pin cannot see is the rest of the executor: the `gcloud builds submit` flags in the
-workflow, the Cloud Build worker and project settings, and the build service account's grants. A
-change there can still alter what `build.sh` runs or verifies without turning this test red; those
-are reviewed with the workflow and the provisioning block below.
+`PATH`). What the pin cannot see is the rest of the executor: the Cloud Build worker and project
+settings, and the build service account's grants. A change there can still alter what `build.sh`
+runs or verifies without turning this test red. Those are reviewed with the provisioning block
+below. The workflow's own steps are covered next.
+
+### Known limits (what the tests do not prove)
+
+These are stated so nobody reads more into a green run than it says.
+
+- **The workflow is the root of trust, and it is not pinned the way `cloudbuild.yaml` is.**
+  `bun-base-build.yml` chooses the config (`gcloud builds submit --config …`), downloads the
+  binaries, checks them and signs `SHA256SUMS`. `tests/bun-base-supply-chain.test.ts` pins the text of
+  the submit, download, verify and sign steps and their order, and reds a second config or ignore file
+  under `infra/bun-base/`. But a PR that edits the workflow **and** that reviewed copy together passes
+  CI. Two edits show what that means: pointing `--config` at another file with a different env, or
+  swapping the downloaded binary before the checksums are recomputed and signed. Either one gets a
+  valid signature over bytes Cloud Build never produced. Only a human reading the workflow diff
+  catches it. The signature attests "this workflow, at this commit, signed these bytes". It does not
+  attest that the workflow was honest.
+- **Each pin is a reviewed copy that lives in the test.** `REVIEWED_CLOUDBUILD`, `CONSTS`, `PIN_BODY`,
+  `ENV_READS` and the workflow step pins are in `tests/helpers/bun-base-scan.ts` or the test itself. So
+  the guarantee is "a change needs an edit to the reviewed copy", not "a change is impossible". A PR
+  that edits both files in step passes CI, and the diff review is what stops it.
+- **"Bound before the read" is judged by position, not control flow.** The scanner takes a pinned
+  name's binding site to be its first binding in the text. A binding moved into a `case` arm that never
+  runs still counts as "before". At runtime this fails closed: `set -u` is pinned, so reading a name
+  that never got bound aborts the build. It does not reach a check with an empty value.
+- **The build image's environment is trusted from a comment.** The only thing the test knows about
+  the digest-pinned ubuntu image's config is a comment saying it sets only `PATH`. The digest is
+  immutable, so that cannot change without a digest bump, but no test reads the image config.
+- **The seam scan does not see every road to `Bun.build`.** In the two compile scripts it bans the
+  `"bun"` module, `globalThis`, a non-literal `import()`/`require()`/`import.meta.require()`/
+  `createRequire(…)()` specifier, `build` under any other name, and computed element reads outside
+  a reviewed set. That still leaves spellings the ban list does not name (`Reflect.get`,
+  `Object.values` over a module), and a **helper module** is only checked for the literal roads, so
+  `globalThis[["B", "un"].join("")]` there is not seen. Such a second build is caught only if it runs
+  during the stubbed compile legs, so an environment-gated one is missed. On its own it lowers CI
+  verification fidelity: it runs stock Bun. It becomes a shipping problem only if it also builds its
+  own `compile` with an `executablePath` spelled so that no text scan sees it. That is outside what
+  `sealCompile()` can refuse, because such a build never calls it. Only diff review stops that
+  combination.
+- **What the seam does guarantee.** Every `compile` value in the two compile scripts is a direct
+  `sealCompile(…)` call. `sealCompile()` refuses any part that carries `executablePath` by any route
+  (own or inherited, enumerable or not, however the key is spelled in the source, including a Proxy),
+  and appends the seam last into a frozen object. The seam value itself is a private frozen `const`
+  that only `sealCompile()` reads. So a foreign base executable has to get past a runtime throw, not
+  just a text scan.
+- **Out of the repo.** The Cloud Build worker pool and project settings, the environment Cloud Build
+  injects, and the build service account's grants. See the provisioning block below.
 
 ## Secret-scan hygiene
 
