@@ -213,3 +213,120 @@ describe('docs-deploy-oke.yml — every third-party action is SHA-pinned', () =>
     ).toHaveLength(1);
   });
 });
+
+const ACTION_PATH = 'packages/kn-next-action/action.yml';
+const actionRaw = (): string => readFileSync(resolve(REPO_ROOT, ACTION_PATH), 'utf8');
+
+const allSteps = (wf: Workflow): Step[] => Object.values(wf.jobs).flatMap((j) => j.steps ?? []);
+const stepByName = (wf: Workflow, re: RegExp): Step | undefined =>
+  allSteps(wf).find((s) => re.test(String(s.name ?? '')));
+
+/** A `skip-credential-preflight` value that is anything but an explicit false. */
+function preflightDisabled(text: string): string[] {
+  const hits: string[] = [];
+  for (const line of text.split('\n')) {
+    const m = /skip-credential-preflight['"]?\s*:\s*(.*)$/.exec(line);
+    if (!m) continue;
+    const v = (m[1] ?? '')
+      .replace(/#.*$/, '')
+      .replace(/['"\s]/g, '')
+      .toLowerCase();
+    if (v !== 'false') hits.push(line.trim());
+  }
+  return hits;
+}
+
+describe('docs-deploy-oke.yml — the credential preflight cannot be switched off', () => {
+  it('no step that receives the kubeconfig sets skip-credential-preflight to anything truthy', () => {
+    const wf = load();
+    const holders = allSteps(wf).filter((s) =>
+      JSON.stringify(s.with ?? {}).includes('KNEXT_DOCS_KUBECONFIG_B64'),
+    );
+    expect(holders.length).toBeGreaterThanOrEqual(1);
+    for (const step of holders) {
+      const w = (step.with ?? {}) as Record<string, unknown>;
+      const v = w['skip-credential-preflight'];
+      expect(v === undefined || String(v).toLowerCase() === 'false').toBe(true);
+    }
+  });
+
+  it('the workflow file as text never sets skip-credential-preflight but to false', () => {
+    expect(preflightDisabled(raw())).toEqual([]);
+  });
+
+  it('doctor is off, as the header comment says (namespace-scoped credential)', () => {
+    const step = stepByName(load(), /Deploy through the platform/);
+    const w = (step?.with ?? {}) as Record<string, unknown>;
+    expect(String(w.doctor)).toBe('false');
+  });
+
+  it('REDS when the preflight is disabled (mutation)', () => {
+    expect(preflightDisabled("          skip-credential-preflight: 'true'")).toHaveLength(1);
+    expect(preflightDisabled('          skip-credential-preflight: true')).toHaveLength(1);
+    expect(preflightDisabled("          skip-credential-preflight: 'false'")).toEqual([]);
+  });
+});
+
+describe('docs-deploy-oke.yml — the deploy is verified, not assumed', () => {
+  const waitScript = (): string => String(stepByName(load(), /Wait for the operator/)?.run ?? '');
+
+  it('compares the deployed spec.image to THIS commit and exits non-zero on mismatch', () => {
+    const s = waitScript();
+    expect(s).toContain('{.spec.image}');
+    expect(s).toMatch(/case "\$image" in \*":\$\{SHA\}@sha256:"\*\) ;; \*\)/);
+    expect(s).toMatch(/is not this commit"; exit 1/);
+  });
+
+  it('polls for Ready at the CURRENT generation and fails the step if it never is', () => {
+    const s = waitScript();
+    expect(s).toMatch(/for _ in \$\(seq 1 \d+\); do/);
+    expect(s).toContain('{.metadata.generation}');
+    expect(s).toMatch(/if \[ "\$ready" = "True\/\$gen" \]; then break; fi/);
+    expect(s).toMatch(/\[ "\$ready" = "True\/\$gen" \] \|\| \{[^\n]*exit 1/);
+    expect(s).toContain('sleep');
+  });
+
+  it('smoke-tests the origin through the Kourier LB with a Host header, and can fail', () => {
+    const step = stepByName(load(), /Smoke-test the origin/);
+    expect(step, 'origin smoke step').toBeDefined();
+    expect(step?.['continue-on-error']).toBeUndefined();
+    const s = String(step?.run ?? '');
+    expect(s).toMatch(/-H "Host: \$\{HOST\}"/);
+    expect(s).toContain('http://${LB}${path}');
+    expect(s).toMatch(/for path in \/api\/health \/ \/docs; do/);
+    expect(s).toMatch(/\[ "\$code" = 200 \] \|\| \{[^\n]*exit 1/);
+    const env = (step?.env ?? {}) as Record<string, string>;
+    expect(env.LB).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+    expect(env.HOST).toBe('knext.dev');
+  });
+
+  it('continue-on-error appears on exactly one step: the advisory public-host check', () => {
+    const soft = allSteps(load()).filter((s) => s['continue-on-error'] !== undefined);
+    expect(soft).toHaveLength(1);
+    expect(String(soft[0]?.name)).toMatch(/Public host check \(advisory/);
+    expect(soft[0]?.['continue-on-error']).toBe(true);
+  });
+});
+
+describe('docs-deploy-oke.yml — the kubeconfig does not outlive the job', () => {
+  it('an always() step removes $RUNNER_TEMP/kubeconfig, after the deploy step', () => {
+    const steps = load().jobs.deploy?.steps ?? [];
+    const idx = steps.findIndex((s) => /Remove the kubeconfig/.test(String(s.name ?? '')));
+    const deployIdx = steps.findIndex((s) => s.uses === './packages/kn-next-action');
+    expect(idx).toBeGreaterThan(deployIdx);
+    expect(steps[idx]?.if).toBe('always()');
+    expect(String(steps[idx]?.run)).toMatch(/rm -f "\$RUNNER_TEMP\/kubeconfig"/);
+  });
+
+  it('the action writes it under RUNNER_TEMP with umask 077, never into the workspace', () => {
+    const a = actionRaw();
+    const write = a.indexOf('base64 -d >');
+    expect(write).toBeGreaterThan(-1);
+    const umask = a.lastIndexOf('umask 077', write);
+    expect(umask, 'umask 077 must precede the kubeconfig write').toBeGreaterThan(-1);
+    expect(write - umask).toBeLessThan(200);
+    expect(a.slice(write, write + 120)).toContain('"$RUNNER_TEMP/kubeconfig"');
+    expect(a).toContain('KUBECONFIG=$RUNNER_TEMP/kubeconfig');
+    expect(a).not.toMatch(/GITHUB_WORKSPACE\/kubeconfig|\.\/kubeconfig|>\s*kubeconfig/);
+  });
+});

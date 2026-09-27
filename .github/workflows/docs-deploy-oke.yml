@@ -231,11 +231,34 @@ jobs:
             echo "- revision: \`$revision\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Smoke-test the public host
+      # Smoke test through the Kourier LoadBalancer with an explicit Host: header —
+      # the path Cloudflare itself takes to the origin. It does NOT go through
+      # https://knext.dev: that host 301s to www and Cloudflare's WAF answers 403
+      # to CI runners, so a check on it fails on every run whatever the deploy did.
+      # This step is the deploy's real gate; it must never be continue-on-error.
+      - name: Smoke-test the origin through the Kourier LB
+        env:
+          LB: '51.170.89.13'
+          HOST: knext.dev
         run: |
           set -euo pipefail
           for path in /api/health / /docs; do
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --retry 5 --retry-all-errors --max-time 30 "https://knext.dev${path}")"
-            echo "https://knext.dev${path} -> ${code}"
-            [ "$code" = 200 ] || { echo "::error::https://knext.dev${path} returned ${code}"; exit 1; }
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --retry 5 --retry-all-errors --retry-delay 5 --max-time 30 -H "Host: ${HOST}" "http://${LB}${path}")"
+            echo "http://${LB}${path} (Host: ${HOST}) -> ${code}"
+            [ "$code" = 200 ] || { echo "::error::origin ${path} returned ${code}"; exit 1; }
           done
+
+      # Advisory only, until the Cloudflare WAF stops blocking CI runners (#55).
+      # `continue-on-error` is allowed on THIS step and no other.
+      - name: Public host check (advisory - WAF blocks CI until #55)
+        continue-on-error: true
+        run: |
+          code="$(curl -sS -L -o /dev/null -w '%{http_code}' --max-time 30 https://knext.dev/api/health || true)"
+          echo "https://knext.dev/api/health -> ${code:-none}"
+          [ "$code" = 200 ] || echo "::warning::public https://knext.dev not reachable from CI (got ${code:-none}); expected while the WAF blocks runners"
+
+      # The kubeconfig is a credential on a runner's disk: remove it whatever
+      # happened above.
+      - name: Remove the kubeconfig
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kubeconfig"
