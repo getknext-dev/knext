@@ -129,6 +129,15 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       "action fixture, so it is not vacuous where actionlint is installed, and the gate's own " +
       'workflow already installs the same pinned binary fresh for the real check on every PR.',
   },
+  'apps/file-manager/self-contained-e2e.test.ts': {
+    skips: { 'describe.skipIf': 1 },
+    reason:
+      'Boots a self-contained compiled executable against file-manager’s own ' +
+      '`.next/standalone` tree. LANE-BACKED (#1456 round 2): the self-contained-exec-e2e job ' +
+      'builds that tree on BOTH builders (webpack and turbopack) and sets ' +
+      'KNEXT_REQUIRE_SC_EXEC=1, so a missing build FAILS the lane rather than vanishing; off ' +
+      'the flag (a local checkout) the case skips.',
+  },
   'packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts': {
     skips: { 'it.skipIf': 3 },
     reason:
@@ -165,6 +174,9 @@ const LANE_BACKED: Record<string, { flag: string }> = {
   },
   'apps/file-manager/sigterm-hardcap-e2e.test.ts': {
     flag: 'KNEXT_REQUIRE_STANDALONE',
+  },
+  'apps/file-manager/self-contained-e2e.test.ts': {
+    flag: 'KNEXT_REQUIRE_SC_EXEC',
   },
 };
 

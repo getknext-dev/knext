@@ -273,18 +273,32 @@ async function main() {
   const routes = routesFromManifests(nextDir);
   const staticAsset = firstStaticAsset(nextDir);
   const result = { label: val('--label') ?? '', routes, staticAsset, arms: {} };
-  const stages = [];
+  /** @type {{ dir: string, exec: string } | undefined} */
+  let a;
+  /** @type {{ dir: string, exec: string } | undefined} */
+  let b;
   try {
     if (diskBinary) {
-      const a = stageDisk({ nextDir, binary: diskBinary, publicDir });
-      stages.push(a);
+      a = stageDisk({ nextDir, binary: diskBinary, publicDir });
       result.arms.A = await measureArm(a, { routes, staticAsset, runs, env });
     }
-    const b = stageSelfContained({ nextDir, binary: scBinary, publicDir });
-    stages.push(b);
+    b = stageSelfContained({ nextDir, binary: scBinary, publicDir });
     result.arms.B = await measureArm(b, { routes, staticAsset, runs, env });
   } finally {
-    for (const s of stages) rmSync(s.dir, { recursive: true, force: true });
+    // Two explicit removals, not a loop over `[a, b]`: stageDisk and
+    // stageSelfContained each bind their created directory to `dir` in their
+    // OWN scope, and the #880 scan (tests/temp-dirs-outside-the-repo.test.ts)
+    // pairs a mkdtemp by counting textual removals of the name it was bound
+    // to — a loop removing `stage.dir` PROPERTY access can't be resolved back
+    // to either creation, so it would still report both as unremoved.
+    if (a) {
+      const { dir } = a;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    if (b) {
+      const { dir } = b;
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
   for (const arm of Object.values(result.arms)) {
     arm.servedCount = Object.values(arm.served).filter(isServed).length;

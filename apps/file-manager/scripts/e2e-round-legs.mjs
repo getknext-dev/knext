@@ -69,6 +69,12 @@ export const LEGS = Object.freeze([
     local: false, // containerised CI job — not part of the local round
     ciJob: 'bun-exec-alpine-image',
   }),
+  Object.freeze({
+    id: 'self-contained-exec',
+    title: 'self-contained executable e2e (embedded .next/server, webpack + turbopack, #1456)',
+    local: false, // needs a real `next build` standalone tree — not part of the local round
+    ciJob: 'self-contained-exec-e2e',
+  }),
 ]);
 
 /** Legs the local orchestrator runs, in order. */

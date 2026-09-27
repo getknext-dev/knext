@@ -80,8 +80,12 @@ interface BuildOptions {
     skipSmoke?: boolean;
     /**
      * `--self-contained`: opt in to the self-contained single-executable mode.
-     * Overrides the `selfContained` config key. No target honours it yet — it
-     * is routed to each compile path and recorded in the build log.
+     * Overrides the `selfContained` config key. Honoured by the standalone/node
+     * compile path since #1456 (embeds `.next/server`, $bunfs-anchored,
+     * proven by apps/file-manager/self-contained-e2e.test.ts on both webpack
+     * and turbopack builds); the vinext/bun-exec compile path does not honour
+     * it yet (tracked separately) — it is still routed there and recorded in
+     * the build log so the flag is never silently swallowed.
      */
     selfContained?: boolean;
 }

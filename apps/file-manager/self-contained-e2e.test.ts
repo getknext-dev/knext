@@ -37,6 +37,17 @@ const SERVER = join(NEXT_DIR, 'standalone', 'apps', 'file-manager', 'server.js')
 const COMPILE = resolve(APP, '../../packages/kn-next/src/adapters/standalone-compile.mjs');
 const HAVE_BUILD = existsSync(SERVER) && existsSync(join(NEXT_DIR, 'static'));
 
+// LANE-BACKED (#1456 round 2): the `self-contained-exec-e2e` ci.yml job builds
+// file-manager's `.next/standalone` tree on BOTH builders (webpack and
+// turbopack) and sets KNEXT_REQUIRE_SC_EXEC=1, so a missing build there FAILS
+// this lane rather than skipping silently (the #932 defect class). Off the
+// flag — a local checkout with no `next build` output — the case still skips.
+const REQUIRE_SC_EXEC = process.env.KNEXT_REQUIRE_SC_EXEC === '1';
+const skipReason = HAVE_BUILD ? null : `no standalone build found at ${SERVER}`;
+if (REQUIRE_SC_EXEC && skipReason !== null) {
+  throw new Error(`KNEXT_REQUIRE_SC_EXEC=1 but ${skipReason}`);
+}
+
 const statusOf = (r: RouteResult | undefined) => (r && 'status' in r ? r.status : undefined);
 
 const cleanup: string[] = [];
@@ -64,45 +75,48 @@ function compile(outfile: string, selfContained: boolean): string {
   return `${r.stdout}`;
 }
 
-describe.skipIf(!HAVE_BUILD)('file-manager self-contained executable from an empty dir', () => {
-  it('serves every manifest route with the same status as disk mode, and .next/static from disk', async () => {
-    const out = mkdtempSync(join(tmpdir(), 'knext-sc-e2e-'));
-    cleanup.push(out);
-    const log = compile(join(out, 'sc'), true);
-    expect(log).toMatch(
-      /self-contained: embedded \d+ module\(s\) .* route chunk\(s\) bytecode-verified/,
-    );
-    compile(join(out, 'disk'), false);
+describe.skipIf(skipReason !== null)(
+  'file-manager self-contained executable from an empty dir',
+  () => {
+    it('serves every manifest route with the same status as disk mode, and .next/static from disk', async () => {
+      const out = mkdtempSync(join(tmpdir(), 'knext-sc-e2e-'));
+      cleanup.push(out);
+      const log = compile(join(out, 'sc'), true);
+      expect(log).toMatch(
+        /self-contained: embedded \d+ module\(s\) .* route chunk\(s\) bytecode-verified/,
+      );
+      compile(join(out, 'disk'), false);
 
-    const routes = routesFromManifests(NEXT_DIR);
-    const staticAsset = firstStaticAsset(NEXT_DIR);
-    expect(routes.length).toBeGreaterThan(10);
-    expect(staticAsset).toBeDefined();
+      const routes = routesFromManifests(NEXT_DIR);
+      const staticAsset = firstStaticAsset(NEXT_DIR);
+      expect(routes.length).toBeGreaterThan(10);
+      expect(staticAsset).toBeDefined();
 
-    const env: Record<string, string> = process.env.DATABASE_URL
-      ? { DATABASE_URL: process.env.DATABASE_URL }
-      : {};
-    const publicDir = join(APP, 'public');
-    const a = stageDisk({ nextDir: NEXT_DIR, binary: join(out, 'disk'), publicDir });
-    const b = stageSelfContained({ nextDir: NEXT_DIR, binary: join(out, 'sc'), publicDir });
-    cleanup.push(a.dir, b.dir);
+      const env: Record<string, string> = process.env.DATABASE_URL
+        ? { DATABASE_URL: process.env.DATABASE_URL }
+        : {};
+      const publicDir = join(APP, 'public');
+      const a = stageDisk({ nextDir: NEXT_DIR, binary: join(out, 'disk'), publicDir });
+      const b = stageSelfContained({ nextDir: NEXT_DIR, binary: join(out, 'sc'), publicDir });
+      cleanup.push(a.dir, b.dir);
 
-    // The empty dir holds only what the self-contained image ships.
-    expect(
-      spawnSync('ls', ['-A', b.dir], { encoding: 'utf8' }).stdout.trim().split('\n').sort(),
-    ).toEqual(['.next', 'app', 'public']);
+      // The empty dir holds only what the self-contained image ships.
+      expect(
+        spawnSync('ls', ['-A', b.dir], { encoding: 'utf8' }).stdout.trim().split('\n').sort(),
+      ).toEqual(['.next', 'app', 'public']);
 
-    const A = await measureArm(a, { routes, staticAsset, runs: 1, env });
-    const B = await measureArm(b, { routes, staticAsset, runs: 1, env });
+      const A = await measureArm(a, { routes, staticAsset, runs: 1, env });
+      const B = await measureArm(b, { routes, staticAsset, runs: 1, env });
 
-    const mismatches = Object.keys(A.served).filter(
-      (k) => statusOf(A.served[k]) !== statusOf(B.served[k]),
-    );
-    expect(mismatches).toEqual([]);
-    expect(statusOf(B.served[staticAsset as string])).toBe(200);
-    // Every route disk mode serves, the self-contained binary serves.
-    const servedA = Object.keys(A.served).filter((k) => isServed(A.served[k]));
-    expect(servedA.filter((k) => !isServed(B.served[k]))).toEqual([]);
-    expect(servedA.length).toBeGreaterThan(routes.length / 2);
-  }, 900_000);
-});
+      const mismatches = Object.keys(A.served).filter(
+        (k) => statusOf(A.served[k]) !== statusOf(B.served[k]),
+      );
+      expect(mismatches).toEqual([]);
+      expect(statusOf(B.served[staticAsset as string])).toBe(200);
+      // Every route disk mode serves, the self-contained binary serves.
+      const servedA = Object.keys(A.served).filter((k) => isServed(A.served[k]));
+      expect(servedA.filter((k) => !isServed(B.served[k]))).toEqual([]);
+      expect(servedA.length).toBeGreaterThan(routes.length / 2);
+    }, 900_000);
+  },
+);
