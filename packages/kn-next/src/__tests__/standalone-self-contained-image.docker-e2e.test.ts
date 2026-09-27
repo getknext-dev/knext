@@ -68,6 +68,30 @@ const SHUTDOWN_GRACE_MS = 120_000;
 const DRAIN_BOUND_MS = 15_000;
 /** How long the fixture's after() callback keeps working after the response. */
 const AFTER_MS = 2_000;
+/** How long the in-flight request's handler sleeps before responding. */
+const REQUEST_MS = 4_000;
+/** How long after starting the request the container is sent SIGTERM. */
+const PRE_TERM_MS = 1_000;
+/**
+ * Round 4 (R3-B2): the fastest a CLEAN drain can possibly exit after SIGTERM.
+ * The response lands REQUEST_MS - PRE_TERM_MS (~3 s) after the signal, and the
+ * after() callback then keeps working for AFTER_MS more, so a process that
+ * really waited for it cannot exit sooner than their sum. 500 ms of slack
+ * absorbs clock and scheduling jitter (the request reaches the handler AFTER
+ * the fetch starts, which only makes the real exit later, never earlier).
+ * A fixture whose after() stopped waiting exits ~REQUEST_MS - PRE_TERM_MS
+ * after the signal, which is below this bound by AFTER_MS - 500 (>= 500 ms,
+ * because `standalone-drain-image-ci.test.ts` pins AFTER_MS >= 1000); the
+ * hardcap exits at SHUTDOWN_GRACE_MS, far above DRAIN_BOUND_MS. Neither passes.
+ */
+const MIN_CLEAN_DRAIN_MS = REQUEST_MS - PRE_TERM_MS + AFTER_MS - 500;
+/**
+ * Every container whose clean drain assertCleanDrain fully proved. The
+ * top-level afterAll below requires BOTH drain legs here, so a leg that is
+ * disabled, filtered out, or returns before draining fails the file instead of
+ * silently dropping out of it (round 4, R3-B1).
+ */
+const drainLegsCompleted: string[] = [];
 /** Logged by the supervisor only when the hardcap fires. */
 const HARDCAP_LOG = "shutdown hardcap reached";
 
@@ -142,9 +166,9 @@ async function waitForHealth(container: string, port: number) {
 async function assertCleanDrain(container: string, port: number) {
     const reqId = randomBytes(3).toString("hex");
     const inFlight = fetch(
-        `http://127.0.0.1:${port}/api/slow?ms=4000&afterMs=${AFTER_MS}&id=${reqId}`,
+        `http://127.0.0.1:${port}/api/slow?ms=${REQUEST_MS}&afterMs=${AFTER_MS}&id=${reqId}`,
     );
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, PRE_TERM_MS));
 
     const termAt = Date.now();
     const killed = run("docker", ["kill", "--signal=TERM", container], {
@@ -156,7 +180,11 @@ async function assertCleanDrain(container: string, port: number) {
     expect(res.status, "the in-flight request was dropped by the drain").toBe(
         200,
     );
-    expect(await res.json()).toEqual({ ok: true, sleptMs: 4000, id: reqId });
+    expect(await res.json()).toEqual({
+        ok: true,
+        sleptMs: REQUEST_MS,
+        id: reqId,
+    });
 
     // Well under SHUTDOWN_GRACE_MS: a hardcap exit times this out (non-zero).
     const waited = run("docker", ["wait", container], {
@@ -177,9 +205,13 @@ async function assertCleanDrain(container: string, port: number) {
         elapsedMs,
         `exit took ${elapsedMs} ms after SIGTERM; a clean drain finishes well inside ${DRAIN_BOUND_MS} ms`,
     ).toBeLessThan(DRAIN_BOUND_MS);
-    // The after() work (2 s after a response that lands ~3 s after TERM) has
-    // to have held the process up; an exit that skipped it would be faster.
-    expect(elapsedMs).toBeGreaterThanOrEqual(AFTER_MS);
+    // The after() work (AFTER_MS after a response that lands ~3 s after TERM)
+    // has to have held the process up; an exit that skipped it would be faster.
+    // See MIN_CLEAN_DRAIN_MS for why this bound, not AFTER_MS alone (round 4).
+    expect(
+        elapsedMs,
+        `exit took only ${elapsedMs} ms after SIGTERM; waiting for the after() work takes at least ${MIN_CLEAN_DRAIN_MS} ms:\n${out}`,
+    ).toBeGreaterThanOrEqual(MIN_CLEAN_DRAIN_MS);
 
     const start = out.indexOf(`AFTER_SENTINEL_START:${reqId}`);
     const done = out.indexOf(`AFTER_SENTINEL_RAN:${reqId}`);
@@ -195,6 +227,7 @@ async function assertCleanDrain(container: string, port: number) {
         out,
         "the hardcap fired: the drain did not finish on its own",
     ).not.toContain(HARDCAP_LOG);
+    drainLegsCompleted.push(container);
 }
 
 beforeAll(async () => {
@@ -344,6 +377,17 @@ beforeAll(async () => {
     await waitForHealth(CONTAINER, appPort);
 }, 1_200_000);
 
+// Round 4 (R3-B1): both drain legs must have run to the end. `bun test` exits
+// 0 when a leg is marked todo, skipped, or conditioned off, so without this a
+// disabled leg reads as a pass. (The CI step also runs this file with
+// `--no-skip`, and the fast lane scans it for skip-shaped constructs.)
+afterAll(() => {
+    expect(
+        [...drainLegsCompleted].sort(),
+        "a SIGTERM drain leg did not run to completion (disabled, filtered, or returned early)",
+    ).toEqual([CONTAINER, `${CONTAINER}-operator-cmd`].sort());
+});
+
 afterAll(() => {
     run("docker", ["rm", "--force", CONTAINER], { timeout: 60_000 });
     run("docker", ["rmi", "--force", IMAGE], { timeout: 60_000 });
@@ -489,6 +533,7 @@ describe("the image boots under the operator's exact forced command (B2, #1457 r
     // which must relay SIGTERM to the compiled executable that owns the
     // drain. This is the path `knext deploy` runs today, so it gets the same
     // clean-drain proof as the default ENTRYPOINT below.
+    // drain-leg: operator command (`bun run server.js`, PID 1 = the shim)
     it("under `bun run server.js`: SIGTERM drains the in-flight request, finishes after(), and exits 0 well before the hardcap", async () => {
         expect(operatorPort, "the boot leg above did not run").toBeGreaterThan(
             0,
@@ -522,6 +567,7 @@ describe("the folded supervisor's :9464 metrics endpoint (N2 fold decision)", ()
 // uses an after() that keeps working ~2 s past the response, a 120 s grace
 // window, and a 15 s bound, so only a clean drain passes.
 describe("SIGTERM drains in-flight work, runs after(), and exits 0, folded into the ONE process", () => {
+    // drain-leg: default ENTRYPOINT (the compiled executable is PID 1)
     it("default ENTRYPOINT: completes an in-flight request, finishes after(), and exits 0 well before the hardcap", async () => {
         await assertCleanDrain(CONTAINER, appPort);
     }, 120_000);

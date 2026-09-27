@@ -618,7 +618,7 @@ jobs:
       # Setting an env var the suite never reads is worse than harmless: it reads
       # as a real fail-closed guarantee this step does not actually have.
       - name: Self-contained image (standalone-bun-self-contained) — build + boot + no-node_modules e2e
-        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/standalone-self-contained-image.docker-e2e.test.ts
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/standalone-self-contained-image.docker-e2e.test.ts
 
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the

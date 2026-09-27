@@ -470,6 +470,12 @@ describe("install() arms the exit-code normaliser on the stop signal (R2-B1 guar
 describe("the hardcap is loud: it names the in-flight requests it drops (round 3)", () => {
     it("hardcapWarning names the grace window and the dropped count", () => {
         const msg = hardcapWarning(25_000, 3);
+        // Round 4 (H-sc5): security.mdx tells operators to look for a warning
+        // whose text starts with `[knext] shutdown` — pin that prefix.
+        expect(msg).toStartWith("[knext] shutdown hardcap reached: ");
+        expect(hardcapWarning(1000, undefined)).toStartWith(
+            "[knext] shutdown hardcap reached: ",
+        );
         expect(msg).toContain("SHUTDOWN_GRACE_MS=25000ms");
         expect(msg).toMatch(/DROPPING 3 in-flight request\(s\)/);
     });

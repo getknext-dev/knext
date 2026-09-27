@@ -221,6 +221,9 @@ describe("gracefulShutdown — the grace cap is loud, not silent", () => {
         t.fire();
         expect(warn).toHaveBeenCalledTimes(1);
         const msg = String(warn.mock.calls[0][0]);
+        // Round 4: security.mdx tells operators the warning text starts with
+        // `[knext] shutdown` — pin that prefix on the disk-mode path too.
+        expect(msg).toStartWith("[knext] shutdown grace cap reached: ");
         expect(msg).toContain("SHUTDOWN_GRACE_MS=25000ms");
         expect(msg).toContain("after SIGTERM");
         expect(msg).toMatch(

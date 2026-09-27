@@ -87,10 +87,17 @@ function selfContainedLayout(): { shimDest: string; execDest: string } {
 // A POSIX-sh stub standing in for the compiled executable. It installs its
 // traps BEFORE announcing readiness (no race), reports the signal it got, and
 // exits with a code the shim can only reproduce by propagating it.
+//
+// Round 4: it also reports whether NEXT_MANUAL_SIG_HANDLE reached it (the shim
+// must never set it — that flag turns off Next's own SIGTERM handler, which is
+// the one that waits for after() work), and STUB_KILL_SELF makes it die from a
+// signal the shim never relayed, standing in for an out-of-memory kill.
 const STUB = `#!/bin/sh
 trap 'echo STUB_GOT_TERM; exit 42' TERM
 trap 'echo STUB_GOT_INT; exit 43' INT
+echo "STUB_MANUAL_SIG_HANDLE=\${NEXT_MANUAL_SIG_HANDLE-unset}"
 if [ -n "$STUB_EXIT_NOW" ]; then echo "STUB_READY pid=$$ argv=$*"; exit "$STUB_EXIT_NOW"; fi
+if [ -n "$STUB_KILL_SELF" ]; then echo "STUB_READY pid=$$ argv=$*"; kill -"$STUB_KILL_SELF" $$; sleep 5; exit 99; fi
 echo "STUB_READY pid=$$ argv=$*"
 while :; do sleep 0.05; done
 `;
@@ -131,12 +138,16 @@ function startShim(env: Record<string, string> = {}) {
     chmodSync(stubPath, 0o755);
 
     let out = "";
+    // Start from an environment WITHOUT the flag, so the stub's report of it
+    // reflects only what the shim itself adds.
+    const baseEnv = { ...process.env };
+    delete baseEnv.NEXT_MANUAL_SIG_HANDLE;
     const child = spawn(
         process.execPath,
         ["run", basename(shimDest), "--from-operator"],
         {
             cwd: workDir,
-            env: { ...process.env, ...env },
+            env: { ...baseEnv, ...env },
             stdio: ["ignore", "pipe", "pipe"],
         },
     );
@@ -229,5 +240,74 @@ describe("the self-contained /app/server.js shim (what `bun run server.js` runs)
         );
         expect(output()).toContain("STUB_READY");
         expect(res).toEqual({ code: 5, signal: null });
+    });
+
+    // Round 4 (C3): a child that dies from a signal the shim never relayed
+    // (an OOM kill is SIGKILL) must surface as that same signal, not be
+    // laundered into `exit(1)` — the platform reads the cause from it.
+    it("re-raises a signal death it did not relay (SIGKILL) as the same signal, not exit 1", async () => {
+        const { exited, output } = startShim({ STUB_KILL_SELF: "KILL" });
+        const res = await withTimeout(
+            exited,
+            10_000,
+            `the shim to exit after its child was SIGKILLed\n${output()}`,
+        );
+        expect(output()).toContain("STUB_READY");
+        expect(res).toEqual({ code: null, signal: "SIGKILL" });
+    });
+
+    // Round 4 (A4), behaviour half: the shim must not hand the executable
+    // NEXT_MANUAL_SIG_HANDLE. With it set, Next skips its own SIGTERM handler
+    // — the one that awaits after() work — which is the round-1 defect.
+    it("does not set NEXT_MANUAL_SIG_HANDLE in the executable's environment", async () => {
+        const { output } = startShim();
+        await until(
+            () => /STUB_READY/.test(output()),
+            `the stub to start\n${output()}`,
+        );
+        expect(output()).toContain("STUB_MANUAL_SIG_HANDLE=unset");
+    });
+});
+
+describe("nothing in the self-contained image sets NEXT_MANUAL_SIG_HANDLE (round 4, A3/A4)", () => {
+    // Scan halves: the docker e2e would catch either only through its 30 s
+    // `docker wait` against the 120 s grace window, so the fast lane checks
+    // the two places it could be introduced.
+    it("the Dockerfile's self-contained stage never sets it (outside comments)", () => {
+        const text = readFileSync(DOCKERFILE, "utf8");
+        const start = text.search(new RegExp(`^FROM .* AS ${SC_STAGE}$`, "m"));
+        expect(start, `no ${SC_STAGE} stage`).toBeGreaterThan(-1);
+        const rest = text.slice(start + 1);
+        const next = rest.search(/^FROM /m);
+        const stage = next === -1 ? rest : rest.slice(0, next);
+        expect(stage, "the stage looks truncated").toMatch(/^ENTRYPOINT /m);
+        const offending = stage
+            .split("\n")
+            .filter((l) => !/^\s*#/.test(l))
+            .filter((l) => /NEXT_MANUAL/.test(l));
+        expect(
+            offending,
+            "the self-contained stage sets NEXT_MANUAL_SIG_HANDLE, which disables Next's own after()-draining SIGTERM handler",
+        ).toEqual([]);
+    });
+
+    it("the shim spawns the executable with the inherited environment only", () => {
+        const text = readFileSync(SHIM_TEMPLATE, "utf8");
+        const code = text
+            .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+            .replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
+        expect(
+            code,
+            "the shim mentions NEXT_MANUAL outside a comment",
+        ).not.toMatch(/NEXT_MANUAL/);
+        const spawns = [...code.matchAll(/\bspawn\s*\(/g)];
+        expect(spawns.length, "the shim must spawn exactly once").toBe(1);
+        // No `env:` override: the child gets process.env as-is.
+        expect(code).toMatch(
+            /\bspawn\(\s*bin\s*,\s*process\.argv\.slice\(2\)\s*,\s*\{\s*stdio:\s*'inherit'\s*\}\s*\)/,
+        );
+        expect(code, "the shim writes to process.env").not.toMatch(
+            /process\.env\s*(?:\[|\.\s*[A-Z_])[^\n]*=[^=]/,
+        );
     });
 });
