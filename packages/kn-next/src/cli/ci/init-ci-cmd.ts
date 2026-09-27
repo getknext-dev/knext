@@ -7,6 +7,8 @@
  * and a verb entry that owns argument parsing, output and exit codes is not
  * something you want to import.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createLogger } from "../../utils/logger";
 import { handleUsageError, UsageError } from "../shared";
@@ -17,6 +19,7 @@ import {
     skippedFileMessage,
     WORKFLOW_PATH,
 } from "./init-ci";
+import { pushKubeconfigSecret } from "./push-kubeconfig-secret";
 
 const log = createLogger({ module: "init-ci" });
 
@@ -31,10 +34,15 @@ const USAGE = `knext init-ci — set up push-to-deploy against YOUR cluster
   knext hosts nothing and never holds your credentials.
 
 Options
-  --namespace <name>   namespace to deploy into (required)
-  --app-dir <path>     app directory, relative to the repo root (default: .)
-  --force              overwrite files that already exist
-  --help               show this
+  --namespace <name>      namespace to deploy into (required)
+  --app-dir <path>        app directory, relative to the repo root (default: .)
+  --force                 overwrite files that already exist
+  --push-secret <path>    read a kubeconfig from <path> and push it as the
+                           KNEXT_KUBECONFIG repo secret via \`gh secret set\`.
+                           Refuses a kubeconfig that needs cloud-account
+                           credentials (exec/auth-provider). The token is
+                           never printed or logged — only piped to gh's stdin.
+  --help                  show this
 `;
 
 export async function initCiMain(argv: string[]): Promise<number> {
@@ -42,6 +50,7 @@ export async function initCiMain(argv: string[]): Promise<number> {
         namespace?: string;
         "app-dir"?: string;
         force?: boolean;
+        "push-secret"?: string;
         help?: boolean;
     };
     try {
@@ -51,6 +60,7 @@ export async function initCiMain(argv: string[]): Promise<number> {
                 namespace: { type: "string" },
                 "app-dir": { type: "string", default: "." },
                 force: { type: "boolean", default: false },
+                "push-secret": { type: "string" },
                 help: { type: "boolean", short: "h", default: false },
             },
             allowPositionals: false,
@@ -93,5 +103,36 @@ export async function initCiMain(argv: string[]): Promise<number> {
     }
 
     process.stdout.write(`\n${nextSteps(values.namespace)}\n`);
+
+    if (values["push-secret"]) {
+        const path = values["push-secret"];
+        let raw: string;
+        try {
+            raw = readFileSync(resolve(process.cwd(), path), "utf8");
+        } catch (err) {
+            // A file-not-found here is never logged with the path's contents
+            // — only the path itself and the OS error, neither of which can
+            // carry the kubeconfig's bytes.
+            process.stderr.write(
+                `\nerror: could not read ${path}: ` +
+                    `${err instanceof Error ? err.message : String(err)}\n`,
+            );
+            return 1;
+        }
+
+        // The classifier + push both run on the RAW file content, never on
+        // anything echoed back — pushKubeconfigSecret's own return value is
+        // typed to carry no secret bytes either (GhRunResult has no
+        // stdout/stderr field at all, by construction).
+        const pushed = pushKubeconfigSecret(raw);
+        if (!pushed.ok) {
+            process.stderr.write(`\nerror: ${pushed.error}\n`);
+            return 1;
+        }
+        log.info(
+            `pushed ${path} as the KNEXT_KUBECONFIG secret via \`gh secret set\``,
+        );
+    }
+
     return 0;
 }

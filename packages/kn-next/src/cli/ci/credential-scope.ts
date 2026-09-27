@@ -170,6 +170,266 @@ export function classifyCredentialScope(
     return { ok: findings.length === 0, findings, remedy: ROLE_REMEDY };
 }
 
+/**
+ * One SelfSubjectAccessReview point query. `namespace` undefined asks
+ * "across all namespaces / cluster-wide", which only a cluster-scoped grant
+ * satisfies.
+ */
+export interface HazardProbe {
+    group: string;
+    resource: string;
+    subresource?: string;
+    verb: string;
+    namespace?: string;
+    /** Printed when the probe is allowed — the reason for the refusal. */
+    label: string;
+}
+
+/** Every verb Kubernetes defines on an ordinary resource, plus the wildcard. */
+const RESOURCE_VERBS = [
+    "get",
+    "list",
+    "watch",
+    "create",
+    "update",
+    "patch",
+    "delete",
+    "deletecollection",
+    "*",
+] as const;
+
+/** A namespace that is not the target, for asking "is the grant namespaced?". */
+function foreignNamespace(namespace: string): string {
+    return namespace === "kube-system" ? "default" : "kube-system";
+}
+
+/**
+ * The hazardous-permission probe set for a credential meant to deploy into
+ * `namespace` (#1495). Any ONE allowed ⇒ refuse.
+ *
+ * Why probes at all: on a webhook-authorized cluster (OKE, GKE with IAM) the
+ * `SelfSubjectRulesReview` is `incomplete` and silent about IAM-granted
+ * permissions; `SelfSubjectAccessReview` still answers point queries there.
+ * It cannot enumerate the complement of the Role, so this set is DERIVED from
+ * `CI_ROLE_RULES` wherever it can be — a Role change re-derives it — and is a
+ * fixed escalation list where it cannot. It is a spot-check, not a proof: a
+ * permission outside every probe below still passes on such a cluster.
+ */
+export function hazardProbes(namespace: string): HazardProbe[] {
+    const probes: HazardProbe[] = [];
+    const foreign = foreignNamespace(namespace);
+
+    for (const rule of CI_ROLE_RULES) {
+        const roleVerbs = new Set<string>(rule.verbs);
+        for (const group of rule.apiGroups) {
+            for (const resource of rule.resources) {
+                // 1. The Role's own verbs, OUTSIDE the target namespace: the
+                //    Role is namespaced, so an allow here is a broader grant.
+                //    A cluster-wide grant (ClusterRoleBinding) answers "yes"
+                //    here too, so no separate all-namespaces probe is needed.
+                for (const verb of rule.verbs) {
+                    probes.push({
+                        group,
+                        resource,
+                        verb,
+                        namespace: foreign,
+                        label: `${verb} ${resource} outside ${namespace} (asked in ${foreign})`,
+                    });
+                }
+                // 2. Verbs the Role does NOT grant, in the target namespace.
+                for (const verb of RESOURCE_VERBS) {
+                    if (roleVerbs.has(verb)) continue;
+                    probes.push({
+                        group,
+                        resource,
+                        verb,
+                        namespace,
+                        label: `${verb} ${resource} (outside the published Role)`,
+                    });
+                }
+            }
+        }
+    }
+
+    // 3. Escalation primitives no Role derivation reaches.
+    const ns = (p: Omit<HazardProbe, "namespace">): HazardProbe => ({
+        ...p,
+        namespace,
+    });
+    const rbac = "rbac.authorization.k8s.io";
+    probes.push(
+        {
+            group: "*",
+            resource: "*",
+            verb: "*",
+            label: "wildcard on everything (*/*/*) — cluster-admin-shaped",
+        },
+        {
+            group: "*",
+            resource: "*",
+            verb: "get",
+            label: "read every resource (*/*/get)",
+        },
+        ns({
+            group: "",
+            resource: "pods",
+            subresource: "exec",
+            verb: "create",
+            label: "exec into pods (pods/exec)",
+        }),
+        ns({
+            group: "",
+            resource: "pods",
+            verb: "create",
+            label: "create pods",
+        }),
+        // The pods probe above is easily sidestepped: any controller that
+        // CREATES pods on the credential's behalf gets you the same shell,
+        // without ever asking for "create pods" directly (review of #1557,
+        // round 2/3, N1). Measured with the webhook fake: `create jobs`,
+        // namespaced `patch deployments` and `patch services.serving.knative.dev`
+        // all passed the preflight before these were added. Six probes, one
+        // per controller/resource this repo's own Knative-based operator
+        // makes relevant — not exhaustive (a residual this repo already
+        // discloses), but they stop the cheapest sidesteps of the pods probe.
+        ns({
+            group: "batch",
+            resource: "jobs",
+            verb: "create",
+            label: "create jobs (runs pods without asking for pods directly)",
+        }),
+        ns({
+            group: "batch",
+            resource: "cronjobs",
+            verb: "create",
+            label: "create cronjobs (runs pods on a schedule)",
+        }),
+        ns({
+            group: "apps",
+            resource: "deployments",
+            verb: "patch",
+            label: "patch deployments in the namespace (around the operator)",
+        }),
+        ns({
+            group: "apps",
+            resource: "statefulsets",
+            verb: "create",
+            label: "create statefulsets (runs pods without asking for pods directly)",
+        }),
+        ns({
+            group: "apps",
+            resource: "daemonsets",
+            verb: "create",
+            label: "create daemonsets (runs pods on every node)",
+        }),
+        ns({
+            group: "serving.knative.dev",
+            resource: "services",
+            verb: "patch",
+            label: "patch Knative Services directly (around the NextApp CR)",
+        }),
+        ns({
+            group: "",
+            resource: "serviceaccounts",
+            verb: "create",
+            label: "create serviceaccounts",
+        }),
+        ns({
+            group: "",
+            resource: "serviceaccounts",
+            subresource: "token",
+            verb: "create",
+            label: "mint serviceaccount tokens",
+        }),
+        ns({
+            group: "",
+            resource: "secrets",
+            verb: "get",
+            label: "get secrets",
+        }),
+        ns({
+            group: "",
+            resource: "secrets",
+            verb: "list",
+            label: "list secrets",
+        }),
+        ns({
+            group: "",
+            resource: "secrets",
+            verb: "watch",
+            label: "watch secrets",
+        }),
+        {
+            group: "apps",
+            resource: "deployments",
+            verb: "patch",
+            label: "patch deployments cluster-wide",
+        },
+        ns({
+            group: rbac,
+            resource: "roles",
+            verb: "escalate",
+            label: "escalate roles",
+        }),
+        ns({
+            group: rbac,
+            resource: "roles",
+            verb: "bind",
+            label: "bind roles",
+        }),
+        ns({
+            group: rbac,
+            resource: "rolebindings",
+            verb: "create",
+            label: "create rolebindings",
+        }),
+        {
+            group: rbac,
+            resource: "clusterroles",
+            verb: "escalate",
+            label: "escalate clusterroles",
+        },
+        {
+            group: rbac,
+            resource: "clusterroles",
+            verb: "bind",
+            label: "bind clusterroles",
+        },
+        {
+            group: rbac,
+            resource: "clusterrolebindings",
+            verb: "create",
+            label: "create clusterrolebindings",
+        },
+        {
+            group: "",
+            resource: "users",
+            verb: "impersonate",
+            label: "impersonate another user",
+        },
+        {
+            group: "",
+            resource: "groups",
+            verb: "impersonate",
+            label: "impersonate a group",
+        },
+        {
+            group: "",
+            resource: "serviceaccounts",
+            verb: "impersonate",
+            label: "impersonate serviceaccounts",
+        },
+        {
+            group: "",
+            resource: "nodes",
+            subresource: "proxy",
+            verb: "get",
+            label: "proxy to nodes (nodes/proxy)",
+        },
+    );
+    return probes;
+}
+
 /** The Role rendered as YAML, for a namespace. ONE definition, rendered. */
 export function renderRoleYaml(namespace: string): string {
     const rules = CI_ROLE_RULES.map(

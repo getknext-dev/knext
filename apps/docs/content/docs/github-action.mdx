@@ -187,9 +187,48 @@ cluster what the credential can do. If it can read Secrets, act on Deployments, 
 wildcard rule, the job fails and prints the Role above instead of deploying. Asking for less than
 you are offered is the point — a CI secret has a wider blast radius than a laptop.
 
-If your cluster's authorizer cannot answer that question, the action fails rather than guessing. A
-check that passes when it cannot see is not a check. `skip-credential-preflight: true` exists for
-that case, and turns the check off rather than satisfying it.
+**A kubeconfig that needs a cloud CLI on the runner is refused outright.** If it authenticates via
+an `exec:` or `auth-provider:` entry — the shape `aws eks get-token`, `gke-gcloud-auth-plugin`,
+`oci ce cluster generate-token` or `kubelogin` use — the job fails immediately, before any cluster
+call, with:
+
+> This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
+> ServiceAccount token.
+
+This runs as its own step, and `skip-credential-preflight` does **not** turn it off: it reads only
+the kubeconfig file, so there is no cluster limitation for the escape hatch to work around.
+
+knext holds no cloud-account credentials, ever. It accepts credentials that authenticate without
+running anything on the runner: a bearer token (the kind `knext init-ci` mints) or a client
+certificate and key. The same check backs `knext doctor --ci-kubeconfig <path>`, so you can check a
+kubeconfig FILE before it ever reaches CI. If the file is not valid YAML, the error gives at most
+the line number of the problem — never the file's contents, because those contents are a credential
+and the message lands in your CI log.
+
+**Some clusters cannot fully answer "what can this credential do?"** — common on webhook-authorized
+clusters such as OKE or GKE, where IAM answers authorization instead of Kubernetes RBAC. The action
+does not fail closed on that incompleteness alone (doing so would refuse the scoped credential this
+check exists to allow, not just an over-broad one). Instead it asks the cluster about specific
+permissions, one at a time, and refuses if ANY of them is allowed:
+
+- every permission the Role above grants, asked in a **different** namespace — an allow there means
+  the grant is not limited to your namespace;
+- every action on `nextapps` the Role does **not** grant (such as `delete`);
+- a fixed list of escalation paths: exec into or create Pods, create Jobs, CronJobs, StatefulSets
+  or DaemonSets (each of which runs Pods without asking for Pods directly), patch Deployments (in
+  your namespace or cluster-wide) or Knative Services directly, create ServiceAccounts or mint
+  their tokens, read, list or watch Secrets, escalate or bind Roles and ClusterRoles, create
+  RoleBindings or ClusterRoleBindings, impersonate users, groups or ServiceAccounts, proxy to
+  nodes, and any wildcard.
+
+It also refuses if any of those questions cannot be answered — an error, or a reply with no clear
+yes/no. A check that passes when it cannot see is not a check. On these clusters this is a
+spot-check, not a proof: a permission outside that list is not asked about. The Role above, applied
+as-is, passes every question.
+
+`skip-credential-preflight: true` exists for the case where your cluster implements neither review
+at all. It turns the permission checks off rather than satisfying them; the cloud-credential
+refusal above still runs.
 </Callout>
 
 ## Inputs

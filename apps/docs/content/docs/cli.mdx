@@ -120,11 +120,35 @@ holds your credentials. See [Deploy from GitHub Actions](/docs/github-action).
 knext init-ci --namespace my-app
 ```
 
+It also prints the exact commands to mint a kubeconfig for that ServiceAccount — a `kubectl create
+token`, bound and namespace-scoped, plus the `kubectl config set-*` calls that assemble a
+standalone kubeconfig file around it. **You run these yourself**; knext writes nothing to the
+cluster. If your own kubeconfig references its certificate authority as a file (or skips TLS
+verification), the commands warn you before writing a kubeconfig with an empty CA.
+
+**The minted token expires after one year** (`--duration=8760h`). When it expires, CI can no longer
+reach the cluster. Before then, **re-run the whole printed recipe from the top** and push the secret
+again (for example with `--push-secret` below) — it removes its own output file first, so the
+renewed token replaces the old one. Re-running only the last two lines over an existing file refuses
+instead of silently keeping the old token. Change `--duration` to match your rotation policy; your
+cluster may cap it lower. To revoke the token early, delete and recreate the `knext-deployer`
+ServiceAccount.
+
+Any kubeconfig that instead needs a cloud CLI on the runner (an `exec:` or
+`auth-provider:` entry — the `aws`/`gcloud`/`oci`/`az` shape) is refused wherever knext reads one —
+here, in the GitHub Action, and in `knext doctor --ci-kubeconfig` — with the same message:
+
+> This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
+> ServiceAccount token.
+
+Bearer tokens and client certificates are accepted — neither runs anything on the runner.
+
 | Flag | Notes |
 |---|---|
 | `--namespace <name>` | **Required.** The namespace to deploy into; it bounds what the credential can do. |
 | `--app-dir <path>` | App directory, relative to the repository root (default `.`). |
 | `--force` | Overwrite files that already exist. |
+| `--push-secret <path>` | Read a kubeconfig from `<path>` and push it as the `KNEXT_KUBECONFIG` repository secret via `gh secret set`. Refuses a kubeconfig that needs cloud-account credentials, same as above. The value is never printed or logged — it is only ever piped to `gh`'s stdin. |
 | `-h`, `--help` | Show the usage help. |
 
 Re-running it without `--force` never clobbers a file you've edited: it names the exact file and
@@ -271,6 +295,10 @@ never touch the cluster, so they still run even when nothing above is reachable:
   if you override `METRICS_PORT` (the default is `9464`).
 - **App image pullability** — whether each `NextApp`'s image can be pulled, and whether a pull
   credential is attached to the app's ServiceAccount.
+- **CI kubeconfig safety** (opt-in, `--ci-kubeconfig <path>`) — checks a kubeconfig FILE, not the
+  cluster: refuses one that needs cloud-account credentials on the runner (an `exec:` or
+  `auth-provider:` entry), with the same message `init-ci --push-secret` and the GitHub Action use.
+  Adds this one row only when the flag is passed.
 - **vinext-on-node entry freshness** — if your app uses `build: 'vinext'` with `runtime: 'node'`,
   its `knext-node-entry.mjs` was written once by `knext create` and is never re-rendered by later
   builds or deploys. When a newer `@getknext/core` release changes that entry's runtime behavior
@@ -283,9 +311,10 @@ never touch the cluster, so they still run even when nothing above is reachable:
   runtime combination, or that aren't run from their own directory, report `SKIP`.
 
 ```bash
-knext doctor            # human-readable checklist
-knext doctor --json     # structured results for CI
-knext doctor --verbose  # add the raw kubectl/API diagnostic behind each message
+knext doctor                                        # human-readable checklist
+knext doctor --json                                 # structured results for CI
+knext doctor --verbose                              # add the raw kubectl/API diagnostic behind each message
+knext doctor --ci-kubeconfig ./deployer.kubeconfig  # check a kubeconfig FILE before wiring it into CI
 ```
 
 Each check reports `PASS`, `WARN`, `FAIL`, `SKIP`, or `ERROR` — and the distinction is deliberate.

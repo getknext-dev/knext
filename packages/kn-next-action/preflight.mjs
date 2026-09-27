@@ -1,23 +1,37 @@
 #!/usr/bin/env node
 /**
  * ADR-0049 credential preflight (#874) — refuse a credential broader than the
- * one stage 1 asks for.
+ * one stage 1 asks for. Extended by the #1495 fix below.
  *
  * The classification logic is NOT here. It lives in `@getknext/core`
  * (`cli/ci/credential-scope.ts`), beside the Role definition that
- * `kn-next init-ci` generates from — so what the client is told to apply and
- * what this refuses cannot drift apart. This file is the thin part: ask the
- * cluster what the credential can do, hand the answer over, print the verdict.
+ * `kn-next init-ci` generates from — so what the client is told to apply,
+ * what this refuses, and which hazards it probes cannot drift. This file is
+ * the thin part: ask the cluster what the credential can do, hand the answer
+ * over, print the verdict.
  *
- * Fails CLOSED. If the review cannot be performed, that is a refusal, not a
- * pass: a check that goes green when it cannot see is worse than no check,
- * because it reports safety it never established.
+ * The cloud-credential (exec/auth-provider) refusal is NOT here either. It is
+ * `kubeconfig-check.mjs`, a separate action step, because this step can be
+ * switched off with `skip-credential-preflight` and that one must not be.
+ *
+ * Fails CLOSED, at every stage. If a check cannot be performed, that is a
+ * refusal, not a pass: a check that goes green when it cannot see is worse
+ * than no check, because it reports safety it never established.
+ *
+ * Two refusals, in order:
+ *
+ *   1. (#874) `SelfSubjectRulesReview` reports a grant outside the published
+ *      `CI_ROLE_RULES` Role.
+ *   2. (#1495) A `SelfSubjectAccessReview` spot-check — the probe set
+ *      `hazardProbes()` derives from the Role plus a fixed escalation list —
+ *      reports ANY probe allowed, or any review cannot be performed or comes
+ *      back without a boolean verdict. On a webhook authorizer (OKE/GKE IAM)
+ *      the rules review is `incomplete` and silent about IAM grants; these
+ *      point queries are what still answer there.
  */
 import { execFileSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { loadFromCore } from './load-core.mjs';
 
 const { values } = parseArgs({
   options: { namespace: { type: 'string' } },
@@ -30,65 +44,33 @@ if (!namespace) {
   process.exit(1);
 }
 
+const RULES_PATH = '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews';
+const ACCESS_PATH = '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews';
+
 /**
- * Ask the cluster for a `SelfSubjectRulesReview` — a virtual resource: the
- * apiserver evaluates it against the caller's own identity and returns the
- * answer, nothing is persisted. Asking the CLUSTER is the point: a kubeconfig
- * does not state its own permissions, so reading the file would tell us
- * nothing about what it can actually do.
+ * POST `body` to the apiserver at `rawPath` via `kubectl create --raw`, with
+ * NO client-side validation (see the long #1493/#1500 history this preserves
+ * verbatim): `kubectl auth can-i --list` never accepts `-o`/`--output` on any
+ * kubectl release, and `kubectl create` WITHOUT `--raw` does client-side
+ * schema validation that itself needs `list` on
+ * `customresourcedefinitions.apiextensions.k8s.io` — a cluster-scoped
+ * resource the scoped `knext-deployer` ServiceAccount is never granted.
+ * `--raw` talks to the apiserver directly: no CRD list, no schema check.
  *
- * `kubectl auth can-i --list` performs this exact review but does NOT accept
- * `-o`/`--output` on any kubectl release (checked 1.25 through 1.37; the
- * flag has never existed for that subcommand) — #1493 was this preflight
- * shipping `-o json` on that command and refusing on every runner. `kubectl
- * create -o json -f -` fixed that, but introduced a second, narrower problem
- * (#1500): `create` (without `--raw`) does CLIENT-SIDE schema validation
- * before it ever submits the object, and that validation itself calls
- * `list` on `customresourcedefinitions.apiextensions.k8s.io` — a
- * cluster-scoped resource the scoped `knext-deployer` ServiceAccount was
- * never granted (by design: its only grant is `apps.kn-next.dev/nextapps`).
- * The second real docs deploy on main (run 36303738838) failed with:
- *
- *   error validating "STDIN": error validating data: failed to check CRD:
- *   failed to list CRDs: customresourcedefinitions.apiextensions.k8s.io is
- *   forbidden: User "system:serviceaccount:knext-docs:knext-deployer" cannot
- *   list resource "customresourcedefinitions" in API group
- *   "apiextensions.k8s.io" at the cluster scope
- *
- * So the fix submits the review as a raw POST — `kubectl create --raw
- * <path> -f -` — which talks to the apiserver directly and performs NO
- * client-side validation at all (no CRD list, no schema check). `kubectl
- * get --raw` is not an option here: a review is created (POST), not read
- * (GET); `create --raw` accepts a URI and POSTs the piped body to it, which
- * is exactly this shape. Verified against the live OKE cluster with BOTH
- * credentials: the scoped `knext-deployer` SA gets a populated
- * `resourceRules` back (previously refused above); the cluster-admin
- * context also succeeds unchanged (`--raw` has no effect on what a broad
- * credential is allowed to do — this only removes a client-side check that
- * never needed cluster permissions of its own).
- *
- * If a kubectl release genuinely lacks `--raw` (none checked did; it has
- * shipped since well before 1.25), fall back to `create -o json
- * --validate=false -f -`: same effect — same POST, but no client-side
- * validation — reached only if invoking `--raw` itself fails to spawn
- * (e.g. an unrecognized flag), never on an authorization error from that
- * form, so a real permissions problem still fails closed below rather than
- * silently retrying into a different code path.
+ * Falls back to `create -o json --validate=false -f -` ONLY when `--raw`
+ * itself is unrecognized by this kubectl release (none checked lacked it;
+ * it has shipped since well before 1.25) — never on an authorization
+ * refusal, which must propagate as-is rather than being masked by a retry
+ * into a differently-shaped request.
  */
-const RAW_PATH = '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews';
-function submitReview(review) {
+function submitRaw(rawPath, body) {
   try {
-    return execFileSync('kubectl', ['create', '--raw', RAW_PATH, '-f', '-'], {
+    return execFileSync('kubectl', ['create', '--raw', rawPath, '-f', '-'], {
       encoding: 'utf8',
-      input: review,
+      input: body,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (err) {
-    // Only fall back on evidence `--raw` itself isn't understood by this
-    // kubectl — an ENOENT/spawn failure or kubectl's own "unknown flag"
-    // rejection. Anything else (including a server-side authorization
-    // refusal) is a real answer from the raw form and must propagate as-is,
-    // not be masked by a retry into a differently-shaped request.
     const message = err instanceof Error ? err.message : String(err);
     const looksLikeUnknownFlag =
       /unknown flag/i.test(message) || /unknown shorthand flag/i.test(message);
@@ -100,7 +82,7 @@ function submitReview(review) {
     );
     return execFileSync('kubectl', ['create', '-o', 'json', '--validate=false', '-f', '-'], {
       encoding: 'utf8',
-      input: review,
+      input: body,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   }
@@ -112,7 +94,7 @@ function effectiveRules() {
     kind: 'SelfSubjectRulesReview',
     spec: { namespace },
   });
-  const out = submitReview(review);
+  const out = submitRaw(RULES_PATH, review);
   const parsed = JSON.parse(out);
   const status = parsed?.status;
   const rules = status?.resourceRules;
@@ -120,21 +102,23 @@ function effectiveRules() {
     throw new Error('SelfSubjectRulesReview returned no resourceRules');
   }
   // `status.incomplete` means the authorizer could not fully resolve the
-  // caller's rules — the normal answer from a webhook authorizer (OKE/GKE IAM
-  // backends say "webhook authorizer does not support user rule resolution").
-  // Warn, don't fail closed: refusing here would refuse every credential on a
-  // webhook-authorized cluster, including a correctly-scoped one — not just an
-  // over-broad one. A SelfSubjectAccessReview spot-check of the hazardous
-  // verbs would close this gap; that is tracked as separate security
-  // tech-debt (#1495), not fixed here.
+  // caller's rules — the normal answer from a webhook authorizer (OKE/GKE
+  // IAM backends say "webhook authorizer does not support user rule
+  // resolution"). Warn, don't fail closed HERE: refusing on this alone would
+  // refuse every credential on a webhook-authorized cluster, including a
+  // correctly-scoped one. The hazardous-permission spot-check below is what
+  // actually verifies safety on exactly this cluster class (#1495) — this
+  // warning is informational, not a decision point by itself any more.
   if (status.incomplete) {
     console.error(
       '::warning::The cluster reports this SelfSubjectRulesReview as incomplete ' +
         '(it could not fully resolve what this credential can do — common on ' +
         'webhook-authorized clusters such as OKE or GKE with IAM). Evaluating the ' +
-        'rules it did return rather than failing closed, because failing closed ' +
-        'here would refuse the scoped credential this check exists to allow, not ' +
-        `just an over-broad one.${status.evaluationError ? ` Cluster said: ${status.evaluationError}` : ''}`,
+        'rules it did return, and relying on the hazardous-permission spot-check ' +
+        '(SelfSubjectAccessReview) below rather than failing closed here, because ' +
+        'failing closed on incompleteness ALONE would refuse the scoped credential ' +
+        'this check exists to allow, not just an over-broad one.' +
+        `${status.evaluationError ? ` Cluster said: ${status.evaluationError}` : ''}`,
     );
   }
   return rules;
@@ -160,35 +144,104 @@ try {
   process.exit(1);
 }
 
-// Resolved from the installed CLI so there is exactly one copy of the rules —
-// and resolved from the APP, not from this file. The action step runs in the
-// app's working directory, which is where `@getknext/core` is installed. A bare
-// `import('@getknext/core/…')` here would resolve relative to THIS file, i.e.
-// the action's own checkout, which has no node_modules — so it failed for every
-// consumer. Fails closed like everything above: no classifier, no pass.
-let classifyCredentialScope;
-try {
-  const fromApp = createRequire(join(process.cwd(), 'package.json'));
-  const entry = fromApp.resolve('@getknext/core/internal/credential-scope');
-  ({ classifyCredentialScope } = await import(pathToFileURL(entry).href));
-} catch (err) {
-  console.error('::error::Could not load the credential classifier from @getknext/core.');
+const { classifyCredentialScope, hazardProbes } = await loadFromCore(
+  'credential-scope',
+  'the credential classifier',
+);
+if (typeof classifyCredentialScope !== 'function' || typeof hazardProbes !== 'function') {
+  // An older @getknext/core without the derived probe set: refusing is the
+  // only answer that does not report a spot-check nobody ran.
   console.error(
-    `Looked from ${process.cwd()}. Install your app's dependencies (e.g. \`npm ci\`) ` +
-      'before this action, so `@getknext/core` is resolvable from `working-directory`.',
+    '::error::This @getknext/core does not provide the credential classifier and ' +
+      'hazard probe set this action needs. Upgrade @getknext/core. Refusing.',
+  );
+  process.exit(1);
+}
+
+const verdict = classifyCredentialScope(rules);
+if (!verdict.ok) {
+  console.error('::error::This kubeconfig grants more than knext needs. Refusing to use it.');
+  console.error('\nFound:');
+  for (const f of verdict.findings) console.error(`  - ${f}`);
+  console.error(`\n${verdict.remedy}`);
+  process.exit(1);
+}
+
+// ── #1495: hazardous-permission spot-check ──────────────────────────────────
+// A webhook authorizer answers a targeted SelfSubjectAccessReview even when
+// it cannot answer the broad SelfSubjectRulesReview above — this is what lets
+// the check be fail-CLOSED on exactly the cluster class the old code failed
+// open on. `hazardProbes` never asks for anything the published Role grants
+// in this namespace, so a correctly-scoped credential answers "no" to all.
+
+/**
+ * One review. Returns the verdict, or THROWS — and the caller refuses — when
+ * the reply is not a completed review: non-JSON, no `status`, a non-boolean
+ * `allowed` (the string "true" is not a verdict), or an `evaluationError`
+ * (the authorizer did not finish deciding, whatever `allowed` says).
+ */
+function checkHazard(probe) {
+  const review = JSON.stringify({
+    apiVersion: 'authorization.k8s.io/v1',
+    kind: 'SelfSubjectAccessReview',
+    spec: {
+      resourceAttributes: {
+        ...(probe.namespace !== undefined ? { namespace: probe.namespace } : {}),
+        group: probe.group,
+        resource: probe.resource,
+        ...(probe.subresource ? { subresource: probe.subresource } : {}),
+        verb: probe.verb,
+      },
+    },
+  });
+  const out = submitRaw(ACCESS_PATH, review);
+  let parsed;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    throw new Error(`the review of "${probe.label}" did not return JSON`);
+  }
+  const status = parsed?.status;
+  if (typeof status !== 'object' || status === null) {
+    throw new Error(`the review of "${probe.label}" returned no status`);
+  }
+  if (typeof status.evaluationError === 'string' && status.evaluationError !== '') {
+    throw new Error(`the review of "${probe.label}" did not complete: ${status.evaluationError}`);
+  }
+  if (typeof status.allowed !== 'boolean') {
+    throw new Error(`the review of "${probe.label}" returned no boolean verdict`);
+  }
+  return status.allowed;
+}
+
+let hazardsFound;
+try {
+  const probes = hazardProbes(namespace);
+  if (!Array.isArray(probes) || probes.length === 0) {
+    throw new Error('the hazard probe set is empty');
+  }
+  hazardsFound = probes.filter((probe) => checkHazard(probe));
+} catch (err) {
+  console.error(
+    '::error::Could not run the hazardous-permission spot-check (SelfSubjectAccessReview).',
+  );
+  console.error(
+    'Refusing rather than proceeding: a credential check that passes when it cannot see ' +
+      'is not a check. A review with no verdict is a review that did not run.',
   );
   console.error(`\nunderlying error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 }
 
-const verdict = classifyCredentialScope(rules);
-if (verdict.ok) {
-  console.log(`preflight: credential is correctly scoped for namespace "${namespace}".`);
-  process.exit(0);
+if (hazardsFound.length > 0) {
+  console.error(
+    '::error::This kubeconfig can do things far outside what knext needs. Refusing to use it.',
+  );
+  console.error('\nAllowed (any ONE of these is disqualifying):');
+  for (const h of hazardsFound) console.error(`  - ${h.label}`);
+  console.error(`\n${verdict.remedy}`);
+  process.exit(1);
 }
 
-console.error('::error::This kubeconfig grants more than knext needs. Refusing to use it.');
-console.error('\nFound:');
-for (const f of verdict.findings) console.error(`  - ${f}`);
-console.error(`\n${verdict.remedy}`);
-process.exit(1);
+console.log(`preflight: credential is correctly scoped for namespace "${namespace}".`);
+process.exit(0);

@@ -205,19 +205,108 @@ export function initCi(
     return { written, skipped };
 }
 
+/** Where the minted kubeconfig lands by default (#1533). */
+export const MINTED_KUBECONFIG_PATH = "knext-deployer.kubeconfig";
+
+/**
+ * The commands that mint a kubeconfig for the `knext-deployer`
+ * ServiceAccount (#1533, ADR-0061): a `kubectl create token` bound to the
+ * ServiceAccount `knext-ci-rbac.yaml` creates, plus the four `kubectl
+ * config set-*` calls that assemble a standalone kubeconfig file around it.
+ *
+ * knext MINTS NOTHING ITSELF — these are PRINTED for the user to run in
+ * their own shell, against their own kube-context. Every one of them is a
+ * read of the local kubeconfig or a `TokenRequest` for a ServiceAccount the
+ * user already owns; none of it is a knext-held credential or a knext
+ * process holding a cluster session (ADR-0061's "does not own" list:
+ * kubeconfig acquisition stays the user's).
+ *
+ * A bearer token, not an exec plugin — the ONE shape
+ * `classifyKubeconfigSafety` (kubeconfig-safety.ts) accepts, on every
+ * cloud, because it never shells out to a cloud CLI for cloud-account
+ * credentials.
+ */
+export function mintKubeconfigCommands(namespace: string): string[] {
+    const sa = "knext-deployer";
+    const out = MINTED_KUBECONFIG_PATH;
+    return [
+        // Removed first so re-running this WHOLE recipe (the documented
+        // renewal path, round 4 of #1557, R3-B1) always starts from a fresh
+        // `kubectl config set-*` output rather than patching an already-
+        // patched file. Without this, renewal has nothing to reset the
+        // `users: null` anchor the patch line below depends on.
+        `rm -f -- "${out}"`,
+        `SERVER=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}')`,
+        `CA_DATA=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')`,
+        // Empty when the source kubeconfig points at a CA FILE or skips TLS
+        // verification — the set-cluster line would then embed an empty CA
+        // and every CI connection would fail TLS. Say so before writing.
+        `[ -n "$CA_DATA" ] || echo "warning: your kubeconfig has no embedded CA (it points at a CA file, or skips TLS verification), so the minted kubeconfig would have an EMPTY certificate authority. Set CA_DATA=\\$(base64 < /path/to/ca.crt | tr -d '\\n') and continue." >&2`,
+        // A one-year bound token by default — adjust --duration to your
+        // rotation policy; the cluster may cap it lower (server flag
+        // --service-account-max-token-expiration).
+        `TOKEN=$(kubectl create token ${sa} -n ${namespace} --duration=8760h)`,
+        `kubectl config set-cluster ${sa} --server="$SERVER" --certificate-authority=/dev/stdin --embed-certs=true --kubeconfig=${out} <<< "$(echo "$CA_DATA" | base64 -d)"`,
+        `kubectl config set-context ${sa} --cluster=${sa} --user=${sa} --namespace=${namespace} --kubeconfig=${out}`,
+        `kubectl config use-context ${sa} --kubeconfig=${out}`,
+        // The token is written by patching the file, never by a `kubectl
+        // ... --token="$TOKEN"` call: `kubectl config set-credentials` has no
+        // stdin/file form for --token (verified against its own --help), so
+        // that flag would put the bearer token in THIS process's argv,
+        // readable via `ps` by any other local user for the life of the
+        // (brief) child process — the same class of exposure `--push-secret`
+        // avoids for the push step. `$(<file)`, `${VAR/…/…}` and `printf` are
+        // bash BUILTINS: none of them fork+exec, so the token never appears
+        // in any process's argument list. `users: null` is exactly what the
+        // three kubectl calls above leave in a freshly-written kubeconfig
+        // (their own marshalling of a nil slice) — patched here to a real
+        // entry instead of asking kubectl to write it.
+        //
+        // Fails CLOSED when that anchor is missing (round 4 of #1557,
+        // R3-B1): a file that already has a `users:` entry — which is what
+        // running only this line and the TOKEN= line above it, over an
+        // EXISTING kubeconfig, produces — matches nothing, so the
+        // substitution used to be a silent no-op that left the OLD token in
+        // place while exiting 0. Renewal is now "re-run the whole recipe" (it
+        // deletes its own output first), and this refuses rather than
+        // pretend it rotated anything if that is skipped.
+        `KNEXT_KUBECONFIG_TEXT=$(<${out}); case "$KNEXT_KUBECONFIG_TEXT" in *'users: null'*) ;; *) echo "knext: ${out} already has a users: entry, so patching it here would silently keep the OLD token. Delete ${out} and re-run the whole recipe from the top (it re-creates ${out} for you) to mint a fresh one." >&2; exit 1 ;; esac; NEW_USERS=$'users:\\n- name: '"${sa}"$'\\n  user:\\n    token: '"$TOKEN"; printf '%s\\n' "\${KNEXT_KUBECONFIG_TEXT/users: null/$NEW_USERS}" > ${out}`,
+    ];
+}
+
 /** The post-generation instructions, so the next step is never a guess. */
 export function nextSteps(namespace: string): string {
+    const mint = mintKubeconfigCommands(namespace)
+        .map((c) => `       ${c}`)
+        .join("\n");
     return [
         "Next, in this order:",
         "",
         `  1. Read ${RBAC_PATH}, then:  kubectl apply -f ${RBAC_PATH}`,
-        "  2. Create a kubeconfig for the knext-deployer ServiceAccount and",
-        `     add it, base64-encoded, as the KNEXT_KUBECONFIG secret.`,
-        "  3. Add the other three secrets listed at the top of",
+        "  2. Mint a kubeconfig for the knext-deployer ServiceAccount",
+        "     (knext writes nothing to the cluster — you run these):",
+        "",
+        mint,
+        "",
+        `  3. Add ${MINTED_KUBECONFIG_PATH}, base64-encoded, as the ` +
+            "KNEXT_KUBECONFIG secret — or run:",
+        `       kn-next init-ci --namespace ${namespace} --push-secret ` +
+            `${MINTED_KUBECONFIG_PATH}`,
+        "     which reads that file and pushes it with `gh secret set`" +
+            " itself (the token is never printed).",
+        "  4. Add the other three secrets listed at the top of",
         `     ${WORKFLOW_PATH}.`,
-        "  4. Push. The operator reconciles from the resource CI writes.",
+        "  5. Push. The operator reconciles from the resource CI writes.",
         "",
         `The credential grants ${CI_ROLE_RULES[0].verbs.join("/")} on ` +
             `${CI_ROLE_RULES[0].resources[0]} in ${namespace}, and nothing else.`,
+        "The token expires after one year (--duration=8760h) and CI then " +
+            "fails to authenticate. Before that, re-run the WHOLE recipe " +
+            "above from the top and push the secret again — it deletes its " +
+            `own ${MINTED_KUBECONFIG_PATH} first, so the renewed token ` +
+            "replaces the old one. Re-running only the last two lines over " +
+            "an existing file leaves the old token in place and refuses " +
+            "instead of pretending to rotate it. Deleting and recreating " +
+            "the knext-deployer ServiceAccount revokes it early.",
     ].join("\n");
 }

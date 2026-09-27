@@ -32,6 +32,15 @@ afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * `#1533`/`#1495`: preflight.mjs now also issues `SelfSubjectAccessReview`
+ * calls (one per hazard check) at a DIFFERENT raw path, distinguished by
+ * BODY content rather than argv — so this stub reads stdin once, routes an
+ * access-review request to a fixed "nothing hazardous is allowed" answer
+ * (the correctly-scoped-credential scenario every test in THIS describe
+ * block represents), and falls through to the original rules-review
+ * handling for everything else.
+ */
 function fakeKubectlDir(): string {
   const dir = tempDir('knext-preflight-bin-');
   const bin = join(dir, 'kubectl');
@@ -41,8 +50,14 @@ function fakeKubectlDir(): string {
     bin,
     [
       '#!/bin/sh',
+      'body="$(cat)"',
+      'case "$body" in',
+      '  *SelfSubjectAccessReview*)',
+      '    echo \'{"status":{"allowed":false}}\'',
+      '    exit 0',
+      '    ;;',
+      'esac',
       'if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then',
-      '  cat >/dev/null',
       '  echo \'{"status":{"resourceRules":[]}}\'',
       '  exit 0',
       'fi',
@@ -55,7 +70,17 @@ function fakeKubectlDir(): string {
   return dir;
 }
 
-/** An app dir whose node_modules carries a stub classifier that always passes. */
+// Minimal stand-in for the derived probe set (ci-hazard-probes.test.ts owns the real
+// one): ONE probe, so the access-review wiring still runs in every test here.
+const HAZARD_PROBES_STUB =
+  'export function hazardProbes() { return [{ group: "*", resource: "*", verb: "*", label: "wildcard on everything" }]; }\n';
+
+/**
+ * An app dir whose node_modules carries stub classifiers that always pass —
+ * both `credential-scope` (#874) and `kubeconfig-safety` (#1533), so a test
+ * that DOES set KUBECONFIG (none in this describe block do) would not hit
+ * "could not load" instead of the behaviour under test.
+ */
 function appWithStubCore(): string {
   const app = tempDir('knext-preflight-app-');
   writeFileSync(join(app, 'package.json'), '{"name":"app","private":true}\n');
@@ -66,12 +91,20 @@ function appWithStubCore(): string {
     JSON.stringify({
       name: '@getknext/core',
       type: 'module',
-      exports: { './internal/credential-scope': './scope.js' },
+      exports: {
+        './internal/credential-scope': './scope.js',
+        './internal/kubeconfig-safety': './kubeconfig-safety.js',
+      },
     }),
   );
   writeFileSync(
     join(core, 'scope.js'),
-    'export function classifyCredentialScope() { return { ok: true, findings: [], remedy: "" }; }\n',
+    'export function classifyCredentialScope() { return { ok: true, findings: [], remedy: "" }; }\n' +
+      HAZARD_PROBES_STUB,
+  );
+  writeFileSync(
+    join(core, 'kubeconfig-safety.js'),
+    'export function classifyKubeconfigSafety() { return { ok: true }; }\n',
   );
   return app;
 }
@@ -214,23 +247,53 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     /** What the FALLBACK form (`create -o json --validate=false -f -`) returns, when reached. */
     fallbackStdout?: string;
     fallbackExit?: number;
+    /**
+     * #1533/#1495: every `SelfSubjectAccessReview` hazard-check call is
+     * routed by BODY content (it shares the rules review's argv shapes) to
+     * this fixed answer — `false` (the default) represents a correctly
+     * scoped credential, matching what every test in THIS describe block
+     * that expects PASS already assumes. `true` simulates a credential that
+     * CAN do at least one hazardous thing. `"unreachable"` simulates the
+     * review itself failing to run.
+     */
+    accessReviewAllowed?: boolean | 'unreachable';
   }): string {
     const dir = tempDir('knext-preflight-1500-bin-');
     const bin = join(dir, 'kubectl');
     const captureFile = capturedReviewPath(dir);
     const rawExit = opts.rawExit ?? 0;
     const fallbackExit = opts.fallbackExit ?? 0;
+    const accessReviewAllowed = opts.accessReviewAllowed ?? false;
     const esc = (s: string) => s.replace(/'/g, `'\\''`);
     const script = [
       '#!/bin/sh',
+      // Read stdin ONCE, up front — several distinct request KINDS share the
+      // same argv shapes (SelfSubjectRulesReview vs SelfSubjectAccessReview,
+      // #1533/#1495), so this stub tells them apart by body content rather
+      // than by argv. Every branch below that used to `cat` stdin itself now
+      // reads `$body` instead.
+      'body="$(cat)"',
       '# The OLD, client-side-validated form — reproduces the real #1500 runner',
       '# failure verbatim. Any mutation that reverts to this shape, or drops',
       "# '--raw' so the argv no longer matches the raw form below, lands HERE.",
       `if [ "$1" = "create" ] && [ "$2" = "-o" ] && [ "$3" = "json" ] && [ "$4" = "-f" ] && [ "$5" = "-" ] && [ "$#" -eq 5 ]; then`,
-      '  cat >/dev/null',
       '  echo "error validating \\"STDIN\\": error validating data: failed to check CRD: failed to list CRDs: customresourcedefinitions.apiextensions.k8s.io is forbidden: User \\"system:serviceaccount:knext-docs:knext-deployer\\" cannot list resource \\"customresourcedefinitions\\" in API group \\"apiextensions.k8s.io\\" at the cluster scope" >&2',
       '  exit 1',
       'fi',
+      // #1495/#1533 hazard checks — routed by content, before the
+      // rules-review-only handling below, so a hazard-check call never falls
+      // through to "unrecognized invocation" and never touches captureFile
+      // (which stays exclusively the rules-review body, as every existing
+      // assertion here expects).
+      'case "$body" in',
+      '  *SelfSubjectAccessReview*)',
+      accessReviewAllowed === 'unreachable'
+        ? ['    echo "error: could not reach apiserver for access review" >&2', '    exit 1'].join(
+            '\n',
+          )
+        : `    echo '{"status":{"allowed":${accessReviewAllowed === true}}}'\n    exit 0`,
+      '    ;;',
+      'esac',
       opts.rawFlagUnknown
         ? [
             `if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then`,
@@ -243,7 +306,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
             `# that drops '--raw', reorders args, or points at the wrong path fails`,
             `# HERE, not on a live cluster.`,
             `if [ "$1" = "create" ] && [ "$2" = "--raw" ] && [ "$3" = "${RAW_PATH}" ] && [ "$4" = "-f" ] && [ "$5" = "-" ] && [ "$#" -eq 5 ]; then`,
-            `  cat > '${captureFile}'`,
+            `  printf '%s' "$body" > '${captureFile}'`,
             opts.rawStderr ? `  echo '${esc(opts.rawStderr)}' >&2` : '  :',
             opts.rawStdout ? `  echo '${esc(opts.rawStdout)}'` : '  :',
             `  exit ${rawExit}`,
@@ -251,7 +314,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
           ].join('\n'),
       '# the explicit-fallback form, reached only when --raw itself is unknown',
       `if [ "$1" = "create" ] && [ "$2" = "-o" ] && [ "$3" = "json" ] && [ "$4" = "--validate=false" ] && [ "$5" = "-f" ] && [ "$6" = "-" ] && [ "$#" -eq 6 ]; then`,
-      `  cat > '${captureFile}'`,
+      `  printf '%s' "$body" > '${captureFile}'`,
       opts.fallbackStdout ? `  echo '${esc(opts.fallbackStdout)}'` : '  :',
       `  exit ${fallbackExit}`,
       'fi',
@@ -289,7 +352,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
         '  return { ok: true, findings: [], remedy: "" };',
         '}',
         '',
-      ].join('\n'),
+      ].join('\n') + HAZARD_PROBES_STUB,
     );
     return app;
   }
@@ -449,7 +512,11 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
       [
         '#!/bin/sh',
         'if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then',
-        '  cat >/dev/null',
+        '  body="$(cat)"',
+        // An access review needs a real verdict — the rules-review body is
+        // not one, and since round 2 of #1557 a reply without a boolean
+        // `allowed` is refused rather than read as "not allowed".
+        '  case "$body" in *SelfSubjectAccessReview*) echo \'{"status":{"allowed":false}}\'; exit 0;; esac',
         `  echo '${SCOPED_REVIEW}'`,
         '  exit 0',
         'fi',

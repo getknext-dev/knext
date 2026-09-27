@@ -39,6 +39,7 @@ import { writeSync } from "node:fs";
 import { parseDoctorArgs } from "./doctor/args";
 import { appImageCheck } from "./doctor/checks/app-image";
 import { certManagerCheck } from "./doctor/checks/cert-manager";
+import { ciKubeconfigCheck } from "./doctor/checks/ci-kubeconfig";
 import { clusterCheck } from "./doctor/checks/cluster";
 import { crdCheck } from "./doctor/checks/crd";
 import { crdSchemaCheck } from "./doctor/checks/crd-schema";
@@ -107,6 +108,7 @@ export {
 export async function runDoctor(
     deps: DoctorDeps,
     verbose = false,
+    opts: { ciKubeconfigPath?: string } = {},
 ): Promise<DoctorReport> {
     const checks: CheckResult[] = [];
 
@@ -133,6 +135,11 @@ export async function runDoctor(
     checks.push(...knativeCheck(ctx));
     checks.push(...metricsCheck(ctx));
     checks.push(...networkPolicyCheck(ctx));
+    // Opt-in (#1533): a LOCAL file read, not a cluster call, so it does not
+    // participate in ctx.skipAll — and it contributes NO row at all when
+    // --ci-kubeconfig was not passed, which is what keeps every other
+    // invocation's row set byte-identical to before this check existed.
+    checks.push(...ciKubeconfigCheck(opts.ciKubeconfigPath));
 
     // ERRORs exit nonzero like FAILs (#230): an errored probe means the
     // preflight could NOT verify the cluster — reporting green would be a lie.
@@ -158,9 +165,15 @@ address, is reported plainly as "no cluster connected yet" (with the
 getting-started guide), never as a network flake.
 
 Options:
-  --json      Emit the check results as JSON
-  --verbose   Show the raw kubectl/API diagnostic behind each short message
-  -h, --help  Show this help
+  --json                     Emit the check results as JSON
+  --verbose                  Show the raw kubectl/API diagnostic behind each
+                             short message
+  --ci-kubeconfig <path>     Check a kubeconfig FILE (not the cluster) before
+                             wiring it into CI: an exec/auth-provider
+                             kubeconfig needs cloud-account credentials on the
+                             runner and is refused. Opt-in — adds one row only
+                             when passed.
+  -h, --help                 Show this help
 `;
 
 /**
@@ -187,7 +200,9 @@ export async function doctorMain(
         writeSync(1, DOCTOR_HELP);
         return 0;
     }
-    const report = await runDoctor(deps, args.verbose);
+    const report = await runDoctor(deps, args.verbose, {
+        ciKubeconfigPath: args.ciKubeconfig,
+    });
     if (args.json) {
         writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
     } else {

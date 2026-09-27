@@ -99,6 +99,11 @@
       "types": "./dist/cli/ci/credential-scope.d.ts",
       "import": "./dist/cli/ci/credential-scope.js",
       "default": "./dist/cli/ci/credential-scope.js"
+    },
+    "./internal/kubeconfig-safety": {
+      "types": "./dist/cli/ci/kubeconfig-safety.d.ts",
+      "import": "./dist/cli/ci/kubeconfig-safety.js",
+      "default": "./dist/cli/ci/kubeconfig-safety.js"
     }
   },
   "knext": {
