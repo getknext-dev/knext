@@ -89,6 +89,7 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec.secrets.envMap` | yes |
 | `spec.secrets.envMap.*.secretKey` | yes |
 | `spec.secrets.envMap.*.secretName` | yes |
+| `spec.selfContained` | yes |
 | `spec.storage` | yes |
 | `spec.storage.bucket` | yes |
 | `spec.storage.endpoint` | yes |

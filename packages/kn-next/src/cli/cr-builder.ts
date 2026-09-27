@@ -316,6 +316,34 @@ export function buildNextAppCRObject(
     // unknown value before the cluster is touched. Upgrade operator first.
     const build = resolvedBuild;
 
+    // selfContained (#1522, N2 follow-up #1457) — spec.selfContained tells the
+    // operator the standalone shape is a self-contained single executable (no
+    // `.next/standalone` tree, no `node_modules`), the SAME property
+    // `build: "vinext"` already has, reached by the other axis. The operator's
+    // containerCommand branch reads it to leave Command nil for this shape
+    // too, exactly like it already does for vinext.
+    //
+    // Emitted only when it is TRUE and would actually change the operator's
+    // decision — i.e. never for "vinext" (already always nil regardless; see
+    // `runtime-image.ts`'s own N2 gating comment) and never when the resolved
+    // runtime isn't "bun" (there is no compiled executable to be
+    // self-contained on "node" — the field would be a no-op the operator
+    // ignores either way, since its branch already requires Runtime=="bun").
+    // Omitted (not `false`) on every other config, matching the CRD default
+    // (`false`) and the opt-in-stays-opt-in discipline `selfContained`
+    // already follows in the LOCAL build (ADR-0060): a config that predates
+    // this field renders byte-identical output.
+    //
+    // #548 upgrade order: an OLD CRD that predates this field REJECTS a CR
+    // that sets it under --validate=strict (every CLI apply passes that
+    // flag), and `deploy`'s preflightCRSchema reports the unknown field
+    // before the cluster is touched — loud, not silent. Upgrade
+    // operator/CRD first, then CLI.
+    const selfContained =
+        resolvedBuild !== "vinext" && runtime === "bun" && config.selfContained
+            ? true
+            : undefined;
+
     // T2d — carry the deploy id into the POD's environment, not just into the
     // bundle. vinext resolves NEXT_DEPLOYMENT_ID at BUILD time (that is how the
     // `?dpl=` suffix and the `_next/static/<id>/` namespace get minted), so at
@@ -383,6 +411,7 @@ export function buildNextAppCRObject(
             : {}),
         ...(runtime ? { runtime } : {}),
         ...(build ? { build } : {}),
+        ...(selfContained ? { selfContained } : {}),
         // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
         // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
         ...(buildId ? { buildId } : {}),

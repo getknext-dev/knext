@@ -78,6 +78,7 @@ export const EMITTED_CR_FIELD_PATHS: readonly string[] = [
     "spec.secrets.envMap",
     "spec.secrets.envMap.*.secretKey",
     "spec.secrets.envMap.*.secretName",
+    "spec.selfContained",
     "spec.storage",
     "spec.storage.bucket",
     "spec.storage.endpoint",

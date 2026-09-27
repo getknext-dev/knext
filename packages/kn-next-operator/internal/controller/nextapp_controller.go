@@ -1132,18 +1132,29 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		timeoutSeconds = int64(nextApp.Spec.TimeoutSeconds)
 	}
 
-	// Container command, by artifact shape (spec.build):
+	// Container command, by artifact shape (spec.build, spec.selfContained):
 	//   - "vinext": the app is ONE compiled executable and the image's own CMD
 	//     runs it. Command stays nil — forcing `bun run server.js` here would
 	//     CrashLoop, because that file does not exist in a single-exec image.
 	//     Runtime is irrelevant to startup for this shape (bun is baked into
 	//     the binary).
-	//   - absent / "turbopack" / "webpack": the Next standalone tree (#1219:
-	//     "webpack" is a second spelling of the same shape, not a new branch —
-	//     the check below is `!= "vinext"`, not `== "turbopack"`). Runtime
-	//     "bun" execs `bun run server.js`; "node"/absent uses the image default.
+	//   - absent / "turbopack" / "webpack" with SelfContained: true (#1522,
+	//     N2 follow-up #1457): the SAME property as vinext — the image is one
+	//     compiled executable, no `.next/standalone` tree, no `node_modules`
+	//     — reached via the standalone bundler instead. Command stays nil for
+	//     the identical reason: there is no `server.js` in this image either.
+	//     (The image still ships a compat `/app/server.js` shim that execs
+	//     the binary — round-2 of #1519 — so an OLD operator that still forces
+	//     this command boots correctly too; this branch just stops adding an
+	//     unnecessary second process for an operator new enough to know
+	//     better.)
+	//   - absent / "turbopack" / "webpack", not self-contained: the Next
+	//     standalone tree (#1219: "webpack" is a second spelling of the same
+	//     shape, not a new branch — the check below is `!= "vinext"`, not
+	//     `== "turbopack"`). Runtime "bun" execs `bun run server.js`;
+	//     "node"/absent uses the image default.
 	var containerCommand []string
-	if nextApp.Spec.Build != "vinext" && nextApp.Spec.Runtime == "bun" {
+	if nextApp.Spec.Build != "vinext" && !nextApp.Spec.SelfContained && nextApp.Spec.Runtime == "bun" {
 		containerCommand = []string{"bun", "run", "server.js"}
 	}
 

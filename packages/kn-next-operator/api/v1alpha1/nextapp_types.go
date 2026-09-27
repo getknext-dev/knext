@@ -180,6 +180,36 @@ type NextAppSpec struct {
 	// +kubebuilder:validation:Enum=turbopack;vinext;webpack
 	Build string `json:"build,omitempty"`
 
+	// SelfContained marks the standalone shape (Build absent / "turbopack" /
+	// "webpack") as a self-contained single executable (#1522, follow-up to
+	// N2 #1457): the image ships no `.next/standalone` tree and no
+	// `node_modules` at all — just the compiled executable, `public/` and
+	// `.next/static`. This is the SAME property `Build == "vinext"` already
+	// has (the image is one binary the image's own CMD runs), just reached by
+	// a different axis: Build says WHICH bundler produced the artifact,
+	// SelfContained says WHETHER that artifact was then compiled into a
+	// self-sufficient binary. The controller's containerCommand branch reads
+	// this field so it can leave Command nil for this shape too — see that
+	// branch's comment for the CrashLoop this prevents.
+	//
+	// Only meaningful when Runtime == "bun" (the only cell that currently
+	// produces this artifact, `cr-builder.ts`/`runtime-image.ts`); ignored
+	// otherwise, same as the CLI's own build-target selection ignores it on
+	// "node" (there is no compiled executable on that runtime to be
+	// self-contained). Meaningless for Build == "vinext" (already always a
+	// single executable regardless of this field).
+	//
+	// Additive and optional (ADR-0017 discipline, same as Build/Runtime):
+	// absence means false, so every CR written before this field existed
+	// keeps its exact meaning. #548 upgrade-order hazard is accepted and
+	// LOUD, not silent: a CRD that predates this field rejects a CR that sets
+	// it under --validate=strict (which every CLI apply passes), and
+	// deploy's preflightCRSchema reports the unknown field before the
+	// cluster is touched. Upgrade operator/CRD first, then CLI.
+	// +optional
+	// +kubebuilder:default=false
+	SelfContained bool `json:"selfContained,omitempty"`
+
 	// TimeoutSeconds is the maximum number of seconds a request can take before
 	// the Knative Service times it out.  Defaults to 300 (5 min) when unset.
 	// Maps from the knative-manifest hardcoded timeoutSeconds=300.

@@ -1,0 +1,245 @@
+name: Standalone self-contained image — operator kind e2e
+
+# #1522 / #1517: no GitHub Actions kind lane booted the standalone
+# (`output: 'standalone'`) runtime image via a REAL operator-rendered pod —
+# every kind lane that exists uses a vinext-shaped image (file-manager,
+# rollback), and the only thing that ever booted the standalone image was the
+# plain-docker jobs in `ci.yml` (`docker run`, never through the operator's
+# NextApp reconciliation). #1522 wires `spec.selfContained` end to end (the CR
+# field, the CLI that emits it, the operator's `containerCommand` branch that
+# reads it) — this lane is the proof that wiring actually produces a Ready pod
+# serving traffic, not just a passing unit/envtest assertion.
+#
+# Deploys the SAME `standalone-drain-app` fixture
+# `standalone-self-contained-image.docker-e2e.test.ts` already proves builds
+# and boots (self-contained: no `.next/standalone` tree, no `node_modules`),
+# through the REAL CLI (`kn-next deploy`) -> NextApp CR -> the operator built
+# from HEAD -> Knative, on an ephemeral kind cluster with the same
+# local-registry recipe `file-manager-platform-e2e-nightly.yml` proves. Then
+# asserts the ksvc/pod goes Ready and /api/health answers 200 — closing the N2
+# half of #1517 (the vinext half is already covered by the existing
+# file-manager/rollback kind lanes).
+#
+# Ephemeral kind on the runner only. Runs on PRs that touch the pieces this
+# proves (the operator's command decision, the CR builder, the standalone
+# build/runtime-image pipeline, or this workflow itself) and on push to main.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
+      - 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml'
+      - 'packages/kn-next/src/cli/cr-builder.ts'
+      - 'packages/kn-next/src/cli/runtime-image.ts'
+      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/src/cli/build-artifact.ts'
+      - 'packages/kn-next/templates/runtime-standalone/**'
+      - 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/**'
+      - '.github/workflows/standalone-self-contained-operator-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
+      - 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml'
+      - 'packages/kn-next/src/cli/cr-builder.ts'
+      - 'packages/kn-next/src/cli/runtime-image.ts'
+      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/src/cli/build-artifact.ts'
+      - 'packages/kn-next/templates/runtime-standalone/**'
+      - 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/**'
+      - '.github/workflows/standalone-self-contained-operator-e2e.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLUSTER: standalone-sc-e2e
+  APP_NS: standalone-sc-e2e
+  APP_NAME: standalone-sc-e2e
+
+jobs:
+  standalone-self-contained-e2e:
+    name: standalone-drain-app (selfContained) through kn-next deploy on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      # `kn-next build --self-contained` compiles a Linux x64 bun executable
+      # (bytecode) regardless of the runner's own OS/arch, so no cross-arch
+      # concern here — same as the docker-e2e sibling.
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      - name: Install the fixture app's own dependencies
+        working-directory: packages/kn-next/src/__tests__/fixtures/standalone-drain-app
+        run: bun install
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      # The operator is built from HEAD, so this PR's own operator change (the
+      # nil-Command branch for selfContained) is what actually reconciles the
+      # ksvc below — not whatever is currently published.
+      - name: Build + deploy the operator from HEAD
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+
+      - name: Namespace
+        run: kubectl create namespace "$APP_NS"
+
+      # Through the product: the REAL CLI runs the fixture's own `next build`,
+      # compiles the self-contained executable, stages `Dockerfile.standalone.hbs`'s
+      # `standalone-bun-self-contained` stage, builds + pushes the image, resolves
+      # its digest, and applies the NextApp CR (spec.selfContained: true, #1522).
+      # The operator does the rest — including leaving Command nil, the change
+      # this whole lane exists to prove.
+      - name: kn-next deploy (self-contained standalone, config profile for kind)
+        working-directory: packages/kn-next/src/__tests__/fixtures/standalone-drain-app
+        run: |
+          set -euo pipefail
+          cp kn-next.config.e2e.ts kn-next.config.ts
+          node ../../../../../packages/kn-next/dist/cli/kn-next.js deploy \
+            --registry localhost:5001 --namespace "$APP_NS" --tag "${GITHUB_RUN_ID}"
+
+      - name: Wait for the NextApp to go Ready
+        run: |
+          set -euo pipefail
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$APP_NAME" \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
+
+      # #1522's own assertion: the rendered pod's container command is nil (the
+      # image's own ENTRYPOINT runs the compiled executable directly) — NOT the
+      # forced `bun run server.js` the pre-#1522 operator would have used for
+      # this exact build/runtime combination. A regression that reintroduces a
+      # forced Command for the self-contained shape reds here, not just in the
+      # Go unit test — this is the same claim proved against a REAL rendered
+      # Knative Revision spec, not just `buildDesiredKsvc`'s return value.
+      - name: Assert the rendered pod has NO forced container command
+        run: |
+          set -euo pipefail
+          rev="$(kubectl -n "$APP_NS" get ksvc "$APP_NAME" -o jsonpath='{.status.latestReadyRevisionName}')"
+          cmd="$(kubectl -n "$APP_NS" get revision "$rev" -o jsonpath='{.spec.containers[0].command}')"
+          echo "rendered command: '${cmd}'"
+          if [ -n "$cmd" ] && [ "$cmd" != "[]" ]; then
+            echo "::error::expected an EMPTY container command for the self-contained shape (spec.selfContained: true), got: $cmd"
+            exit 1
+          fi
+
+      - name: Reach the cluster (kourier-internal port-forward) and hit /api/health
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          host="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          if [ -z "$host" ]; then
+            echo "::error::nextapp status.url is empty"; kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o yaml; exit 1
+          fi
+          code="$(curl -s -o /tmp/health-body.json -w '%{http_code}' -H "Host: ${host}" http://127.0.0.1:8080/api/health)"
+          echo "GET /api/health -> $code"
+          cat /tmp/health-body.json
+          if [ "$code" != "200" ]; then
+            echo "::error::/api/health returned $code, want 200"; exit 1
+          fi
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods -o wide 2>&1 || true
+          kubectl -n "$APP_NS" get "nextapp/$APP_NAME" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+          for p in $(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o name 2>/dev/null); do
+            kubectl -n "$APP_NS" logs "$p" --all-containers --tail=80 2>&1 || true
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true

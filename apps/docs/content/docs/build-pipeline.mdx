@@ -127,10 +127,13 @@ supervisor dependencies — logging, metrics, tracing — are available at boot)
 image instead builds from a dedicated recipe that copies in only the compiled executable,
 `public/` and `.next/static/` — no `node_modules` anywhere in the image, and no separate
 supervisor process. When the image is started with its own default command, the one process that
-boots is the executable itself. Under `knext deploy` today there is a second process: the
-platform starts the app with `bun run server.js`, so a small `server.js` launcher starts first,
-starts the executable, and passes shutdown signals and the exit code between them. Either way the
-executable is what serves traffic: it drains in-flight
+boots is the executable itself. Under `knext deploy`, the CR records that this build is
+self-contained, and the operator leaves the container command to the image's own default — the
+same treatment the vinext target already gets — so only the one process boots there too. A cluster
+running an operator old enough to predate that field still boots correctly: the image also ships a
+small `server.js` compat shim that execs the real executable and relays its signals and exit code,
+so an old operator's forced `bun run server.js` still works, just with one extra relay process it
+no longer needs. Either way the executable is what serves traffic: it drains in-flight
 requests and runs any pending `after()` work before exiting on shutdown, and it serves Prometheus
 text on its usual metrics port — but not the same metrics the regular image serves. This mode is
 not yet at full parity, and the gap is real, not cosmetic:
