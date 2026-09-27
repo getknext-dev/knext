@@ -109,6 +109,7 @@ interface BuildOptions {
 async function smokeCompiledBinary(
     config: { healthCheckPath?: string },
     skipSmoke: boolean,
+    selfContained: boolean,
 ): Promise<void> {
     if (skipSmoke) {
         // LOUD, and it names what is now unverified rather than merely saying a
@@ -132,6 +133,9 @@ async function smokeCompiledBinary(
             arch: plan.arch,
             outFile: plan.outFile,
             skipViteBuild: true,
+            // The smoke must boot a binary built with the SAME mode as the
+            // shipped one, or it misses the one property the mode changes.
+            ...(selfContained ? { selfContained: true } : {}),
         });
     }
 
@@ -345,7 +349,11 @@ export async function build(options: BuildOptions = {}) {
         //     broke that entry compiles, deploys, and never goes Ready. This
         //     boots the binary and checks all three HERE, before the assets are
         //     uploaded and long before a cluster sees it.
-        await smokeCompiledBinary(config, options.skipSmoke === true);
+        await smokeCompiledBinary(
+            config,
+            options.skipSmoke === true,
+            resolveSelfContained(config, options.selfContained),
+        );
     }
 
     // 2c'. vinext × node (#1260). Nothing to compile: node runs `.output`

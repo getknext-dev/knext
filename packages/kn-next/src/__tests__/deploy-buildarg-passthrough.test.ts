@@ -95,8 +95,10 @@ mock.module("../cli/cr-builder", () => ({
 // #1339 review finding #1: deploy() now compiles the standalone-bun/vinext
 // executable via this shared step — stub it, same treatment as every other
 // side-effecting seam here.
+const compileArtifactForDeploy = mock<AnyFn>(() => ({ compiled: false }));
 mock.module("../cli/build-artifact", () => ({
-    compileArtifactForDeploy: () => ({ compiled: false }),
+    compileArtifactForDeploy: (...a: unknown[]) =>
+        compileArtifactForDeploy(...a),
     assertCompiledArtifactFresh: () => {},
 }));
 
@@ -276,5 +278,42 @@ describe("deploy() — the real dockerBuildxArgs call, both bake shapes (#1273)"
         const argv = dockerArgv();
         expect(argv, "no `docker` argv captured by runInherit").toBeDefined();
         expect(argv).not.toContain("--build-arg");
+    });
+});
+
+describe("deploy() routes the resolved selfContained mode into the compile step", () => {
+    const resolved = (): boolean => {
+        const [cfg, , opts] = compileArtifactForDeploy.mock.calls[0] as [
+            { selfContained?: boolean },
+            string,
+            { selfContained?: boolean } | undefined,
+        ];
+        // The value the compile step resolves: an explicit option wins, else config.
+        return opts?.selfContained ?? cfg.selfContained ?? false;
+    };
+    it("selfContained:true in config reaches compileArtifactForDeploy", async () => {
+        loadConfig.mockResolvedValue({
+            ...baseConfig,
+            build: "turbopack",
+            runtime: "bun",
+            selfContained: true,
+        });
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(compileArtifactForDeploy).toHaveBeenCalledTimes(1);
+        expect(resolved()).toBe(true);
+    });
+
+    it("default config resolves to off", async () => {
+        loadConfig.mockResolvedValue({
+            ...baseConfig,
+            build: "turbopack",
+            runtime: "bun",
+        });
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(resolved()).toBe(false);
     });
 });

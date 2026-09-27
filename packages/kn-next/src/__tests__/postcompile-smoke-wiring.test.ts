@@ -410,3 +410,44 @@ describe("#894 the smoke runs a HOST-arch binary", () => {
         }
     });
 });
+
+describe("selfContained reaches the smoke's host-arch compile and the config log", () => {
+    const smokeCompileOpts = () =>
+        buildVinextExecutable.mock.calls.find(
+            (c) => c[0]?.arch === hostArch,
+        )?.[0];
+    const configLogged = () => {
+        const call = info.mock.calls.find(
+            (c) => c[1] === "Configuration loaded",
+        );
+        if (!call) throw new Error("no 'Configuration loaded' log line");
+        return call[0] as { selfContained?: boolean };
+    };
+
+    it("cross-arch smoke compile carries selfContained when config is on", async () => {
+        loadConfig.mockResolvedValue(cfg({ selfContained: true }));
+        await build({ skipNextBuild: true });
+        expect(smokeCompileOpts()?.selfContained).toBe(true);
+    });
+    it("cross-arch smoke compile carries the CLI flag over config false", async () => {
+        loadConfig.mockResolvedValue(cfg({ selfContained: false }));
+        await build({ skipNextBuild: true, selfContained: true });
+        expect(smokeCompileOpts()?.selfContained).toBe(true);
+    });
+    it("OFF: the smoke compile options carry no selfContained key", async () => {
+        loadConfig.mockResolvedValue(cfg());
+        await build({ skipNextBuild: true });
+        expect(smokeCompileOpts()).toBeDefined();
+        expect(smokeCompileOpts()).not.toHaveProperty("selfContained");
+    });
+    it("the 'Configuration loaded' log records selfContained true", async () => {
+        loadConfig.mockResolvedValue(cfg({ selfContained: true }));
+        await build({ skipNextBuild: true });
+        expect(configLogged().selfContained).toBe(true);
+    });
+    it("the 'Configuration loaded' log records selfContained false by default", async () => {
+        loadConfig.mockResolvedValue(cfg());
+        await build({ skipNextBuild: true });
+        expect(configLogged().selfContained).toBe(false);
+    });
+});
