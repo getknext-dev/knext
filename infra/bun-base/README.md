@@ -289,6 +289,20 @@ These are stated so nobody reads more into a green run than it says.
   and with the realm's intrinsics patched after import. It appends the seam last into a frozen,
   null-prototype object. The seam value itself is a private frozen `const` that only `sealCompile()`
   reads. So a foreign base executable has to get past a runtime throw, not just a text scan.
+  **(Round 15, review-1469-r14.)** Sealing the `compile` *value* was not enough on its own: nothing
+  checked, at the `Bun.build` call, that the *options object* Bun actually reads still carried that
+  value — a helper in the compile scripts' import closure could overwrite `opts.compile` after
+  sealing (a member write, or the identical leak through `Object.assign`), or a spread placed
+  *after* the `compile:` key in the same object literal could displace it before the literal was
+  ever built. All three left the two scans above green (the `compile` value scanned was still a
+  direct `sealCompile(…)` call; only what reached `Bun.build` differed) while an attacker-chosen
+  `executablePath` reached a shipped compile. `sealBuild(opts)` closes this the same way
+  `sealCompile()` closes the value: it is the **only** thing the two compile scripts may pass to
+  `Bun.build` — the seam scan requires `Bun.build`'s single argument to be a direct `sealBuild(…)`
+  call — and it throws unless `opts.compile` is the exact object `sealCompile()` returned, checked
+  by `SEALED` WeakSet membership through the same captured primordial `sealCompile()` uses, never by
+  re-inspecting the object's shape. Replacing the reference is the only way any of the three leaks
+  worked, and replacing the reference is exactly what `sealBuild()` refuses.
 - **Out of the repo.** The Cloud Build worker pool and project settings, the environment Cloud Build
   injects, and the build service account's grants. See the provisioning block below.
 

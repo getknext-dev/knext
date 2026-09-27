@@ -10,3 +10,5 @@ export function bunBaseExeCompileOptions(env?: Record<string, string | undefined
 export function assertBunBaseExe(): void;
 /** The only way to build a `compile` value: merges `parts`, refuses a foreign executable path, appends the seam last. */
 export function sealCompile(...parts: Array<Record<string, unknown> | undefined>): Readonly<Record<string, unknown>>;
+/** The only way to build the options `Bun.build` receives: throws unless `opts.compile` is an object `sealCompile(...)` returned. */
+export function sealBuild(opts: Record<string, unknown>): Readonly<Record<string, unknown>>;

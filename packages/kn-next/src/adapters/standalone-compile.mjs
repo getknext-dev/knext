@@ -84,7 +84,7 @@ import {
 import { isBuiltin } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";
+import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
 import { routeMarker, verifyBytecodeEmbedded, verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
 import {
     detectCompileInclude,
@@ -705,7 +705,7 @@ try {
             TARGET ? { target: TARGET } : undefined,
         ),
     };
-    result = await Bun.build(SC ? await selfContainedBuildOptions(base) : base);
+    result = await Bun.build(sealBuild(SC ? await selfContainedBuildOptions(base) : base));
 } finally {
     rmSync(entry, { force: true });
     rmSync(EMPTY, { force: true });

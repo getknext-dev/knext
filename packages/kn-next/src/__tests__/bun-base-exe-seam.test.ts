@@ -60,6 +60,7 @@ import {
     BUN_BASE_EXE_ENV,
     BunBaseExeError,
     bunBaseExeCompileOptions,
+    sealBuild,
     sealCompile,
 } from "../adapters/bun-base-exe.mjs";
 
@@ -138,6 +139,12 @@ type ScriptScan = {
     // ── round 13 (review-1469-r12 MEDIUM-1): the seam value is sealed in bun-base-exe.mjs ──
     /** Every identifier `sealCompile` (the import, each compile value's callee, and any other use). */
     sealRefs: number;
+    /** Every identifier `sealBuild` (round 15: the import and each Bun.build call's callee). */
+    sealBuildRefs: number;
+    /** Per `Bun.build(...)` call, in order: is its single argument a direct `sealBuild(...)` call?
+     *  (round 15, review-1469-r14 BLOCKER — the compile VALUE was sealed but nothing checked, at
+     *  the `Bun.build` call, that the options still carried that exact value.) */
+    buildArgSealed: boolean[];
     /** Every identifier `BUN_BASE_EXE` (the seam value — module-private to bun-base-exe.mjs). */
     seamRefs: number;
     /** Every identifier `bunBaseExeCompileOptions` (a compile script must not hold the raw value). */
@@ -183,6 +190,10 @@ function scanScript(file: string, source: string): ScriptScan {
         ts.isCallExpression(e) &&
         ts.isIdentifier(e.expression) &&
         e.expression.text === "sealCompile";
+    const isSealBuildCall = (e: ts.Expression) =>
+        ts.isCallExpression(e) &&
+        ts.isIdentifier(e.expression) &&
+        e.expression.text === "sealBuild";
     const hasExecPath = (n: ts.Node): boolean => {
         let hit = false;
         const visit = (m: ts.Node) => {
@@ -220,6 +231,8 @@ function scanScript(file: string, source: string): ScriptScan {
         computedKeys: [],
         computedWrites: [],
         sealRefs: 0,
+        sealBuildRefs: 0,
+        buildArgSealed: [],
         seamRefs: 0,
         rawSeamRefs: 0,
         computedKeyTexts: [],
@@ -301,6 +314,7 @@ function scanScript(file: string, source: string): ScriptScan {
             out.computedReads.push(n.getText(sf));
         if (ts.isIdentifier(n)) {
             if (n.text === "sealCompile") out.sealRefs++;
+            if (n.text === "sealBuild") out.sealBuildRefs++;
             if (n.text === "BUN_BASE_EXE") out.seamRefs++;
             if (n.text === "bunBaseExeCompileOptions") out.rawSeamRefs++;
         }
@@ -350,8 +364,13 @@ function scanScript(file: string, source: string): ScriptScan {
             out.compileStrings.push(lineOf(n));
         if (isBunBuild(n)) {
             out.buildRefs++;
-            if (ts.isCallExpression(n.parent) && n.parent.expression === n)
+            if (ts.isCallExpression(n.parent) && n.parent.expression === n) {
                 out.buildCalls++;
+                out.buildArgSealed.push(
+                    n.parent.arguments.length === 1 &&
+                        isSealBuildCall(n.parent.arguments[0]),
+                );
+            }
         }
         if (
             ts.isIdentifier(n) &&
@@ -422,7 +441,7 @@ function seamKeyOffenders(
 }
 /** The one import a compile script may take from the seam module, exactly. */
 const SEAM_IMPORT =
-    'import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";';
+    'import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";';
 
 /**
  * The structure of `bun-base-exe.mjs` that makes the seam value unreachable from outside
@@ -1395,6 +1414,20 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
                 }).toEqual({ calls: 1, refs: 1, bunIndirect: [] });
             });
 
+            // Round 15 (review-1469-r14 BLOCKER): sealCompile sealed the compile VALUE, but nothing
+            // checked, at the Bun.build call, that the options still carried that value — a helper
+            // could overwrite opts.compile after sealing, or a spread placed after the compile: key
+            // could displace it within the same literal, and every scan on the compile value alone
+            // stayed green. sealBuild(...) is the backstop: it is the ONLY thing Bun.build may be
+            // called with.
+            it("Bun.build's single argument is a direct sealBuild(...) call (round 15)", () => {
+                expect(scan.buildArgSealed).toEqual([true]);
+            });
+
+            it("sealBuild is used only as the import and the Bun.build call site (no alias, no shadow)", () => {
+                expect(scan.sealBuildRefs).toBe(2);
+            });
+
             it("reaches Bun only as the literal `Bun.<name>`: no bun module, no globalThis, no computed key or write", () => {
                 expect({
                     bunModule: scan.bunModule,
@@ -1538,6 +1571,37 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
             "await Bun.build(a); await Bun.build(b);",
             (s) => s.buildCalls,
             2,
+        ],
+        // Round 15 (review-1469-r14 BLOCKER)
+        [
+            "Bun.build(sealBuild(o)) (the one accepted shape)",
+            "Bun.build(sealBuild(o));",
+            (s) => ({ arg: s.buildArgSealed, refs: s.sealBuildRefs }),
+            { arg: [true], refs: 1 },
+        ],
+        [
+            "Bun.build(o) — a bare argument, not sealBuild(...)",
+            "Bun.build(o);",
+            (s) => s.buildArgSealed,
+            [false],
+        ],
+        [
+            "Bun.build(o.sealBuild(o)) — a member call, not the imported function",
+            "Bun.build(o.sealBuild(o));",
+            (s) => s.buildArgSealed,
+            [false],
+        ],
+        [
+            "an alias of sealBuild",
+            "const seal = sealBuild; Bun.build(seal(o));",
+            (s) => ({ arg: s.buildArgSealed, refs: s.sealBuildRefs }),
+            { arg: [false], refs: 1 },
+        ],
+        [
+            "Bun.build(sealBuild(o), b) — a second argument alongside sealBuild(...)",
+            "Bun.build(sealBuild(o), b);",
+            (s) => s.buildArgSealed,
+            [false],
         ],
         [
             "an alias of Bun.build",
@@ -2078,6 +2142,131 @@ console.log(JSON.stringify(out));
             inside: 1,
             outside: [2],
         });
+    });
+});
+
+// ── 2c. sealBuild — the one way to build the OPTIONS Bun.build receives (round 15) ────────
+//
+// review-1469-r14 BLOCKER: sealCompile() sealed the `compile` VALUE, but nothing checked, at the
+// `Bun.build` call, that the options handed to it still carried that exact value. A helper in the
+// compile scripts' import closure could overwrite `opts.compile` after sealing (X1, a member write;
+// X1c, the same through `Object.assign`), or a spread placed AFTER the `compile:` key in the same
+// object literal could displace it before the literal was ever built (X2) — every scan on the
+// `compile` value alone (round 13/14) stayed green in all three cases, and CI was green while the
+// shipped `Bun.build` received an attacker-chosen `executablePath`.
+//
+// `sealBuild(opts)` is the backstop: it is the ONLY thing the two compile scripts may pass to
+// `Bun.build`, and it throws unless `opts.compile` is the exact object `sealCompile()` returned —
+// checked by `SEALED` WeakSet membership (the same primordial `sealCompile` itself uses), never by
+// re-inspecting the object's shape. All three round-14 leaks replace the reference outright, so
+// none of them can pass.
+describe("sealBuild — the compile-options gate (round 15, review-1469-r14 BLOCKER)", () => {
+    it("returns a frozen, null-prototype copy when opts.compile is exactly what sealCompile returned", () => {
+        const compile = sealCompile({ outfile: "x" });
+        const out = sealBuild({ entrypoints: ["a"], compile });
+        expect(out.compile).toBe(compile);
+        expect(Object.isFrozen(out)).toBe(true);
+        expect(Object.getPrototypeOf(out)).toBeNull();
+        expect(out).toEqual({ entrypoints: ["a"], compile });
+    });
+
+    it("re-sealing compile through sealCompile again (the self-contained re-seal) still passes", () => {
+        const inner = sealCompile({ outfile: "x" });
+        const resealed = sealCompile(inner);
+        const out = sealBuild({ entrypoints: ["a"], compile: resealed });
+        expect(out.compile).toBe(resealed);
+    });
+
+    it("throws (naming the constraint) when opts.compile carries its own executablePath, never sealed", () => {
+        expect(() => sealBuild({ compile: { executablePath: "x" } })).toThrow(
+            BunBaseExeError,
+        );
+        expect(() => sealBuild({ compile: { executablePath: "x" } })).toThrow(
+            /sealBuild: opts\.compile must be the exact object sealCompile\(\.\.\.\) returned/,
+        );
+    });
+
+    it("throws when opts.compile is a JSON.parse'd plain object shaped exactly like a sealed one", () => {
+        const compile = sealCompile({ outfile: "x" });
+        // A forged object with the identical own keys/values — but never passed through
+        // sealCompile, so it is not a member of the SEALED WeakSet.
+        const forged = JSON.parse(JSON.stringify(compile));
+        expect(() => sealBuild({ compile: forged })).toThrow(BunBaseExeError);
+    });
+
+    it("throws when opts.compile is missing, undefined, null, or a primitive", () => {
+        for (const bad of [
+            {},
+            { compile: undefined },
+            { compile: null },
+            { compile: "x" },
+            { compile: 1 },
+        ]) {
+            expect(() => sealBuild(bad as Record<string, unknown>)).toThrow(
+                BunBaseExeError,
+            );
+        }
+    });
+
+    it("does not mutate or re-freeze the original opts object (a shallow copy, not the same reference)", () => {
+        const compile = sealCompile({ outfile: "x" });
+        const opts = { entrypoints: ["a"], compile };
+        const out = sealBuild(opts);
+        expect(out).not.toBe(opts);
+        expect(Object.isFrozen(opts)).toBe(false);
+    });
+
+    // The three round-14 leak shapes, reproduced exactly (r14rev/x.json rows X1, X1c, X2): each
+    // builds the corrupted `opts` a mutated compile script would have handed to `Bun.build`, and
+    // `sealBuild` must reject every one of them — red by its own row name if it does not.
+    it.each<[string, () => Record<string, unknown>]>([
+        [
+            "X1: compile-embed's tuneOptions(o) does o.compile = JSON.parse(escaped executablePath) before Bun.build",
+            () => {
+                const compile = sealCompile({ outfile: "x" });
+                const o: Record<string, unknown> = {
+                    entrypoints: ["a"],
+                    compile,
+                };
+                // Exactly the round-14 mutation shape: a JSON.parse'd, unicode-escaped key.
+                o.compile = JSON.parse(
+                    `{"outfile":"x","executable\\u0050ath":"/evil/bun"}`,
+                );
+                return o;
+            },
+        ],
+        [
+            "X1c: the same leak through Object.assign(o, { compile: JSON.parse(...) }) — no member write",
+            () => {
+                const compile = sealCompile({ outfile: "x" });
+                const o: Record<string, unknown> = {
+                    entrypoints: ["a"],
+                    compile,
+                };
+                Object.assign(o, {
+                    compile: JSON.parse(
+                        `{"outfile":"x","executable\\u0050ath":"/evil/bun"}`,
+                    ),
+                });
+                return o;
+            },
+        ],
+        [
+            "X2: vinext spreads ...extraOpts() AFTER the compile: sealCompile(...) key in the same literal",
+            () => {
+                const extraOpts = () =>
+                    JSON.parse(
+                        `{"compile":{"outfile":"x","executable\\u0050ath":"/evil/bun"}}`,
+                    );
+                return {
+                    entrypoints: ["a"],
+                    compile: sealCompile({ outfile: "x" }),
+                    ...extraOpts(),
+                };
+            },
+        ],
+    ])("rejects the round-14 leak shape: %s", (_name, build) => {
+        expect(() => sealBuild(build())).toThrow(BunBaseExeError);
     });
 });
 

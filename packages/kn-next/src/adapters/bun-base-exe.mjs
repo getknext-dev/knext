@@ -193,3 +193,36 @@ export function sealCompile(...parts) {
     WeakSetAdd(SEALED, sealed);
     return sealed;
 }
+
+/**
+ * The ONLY way a compile script builds the options object `Bun.build` receives (#1469 round 15 —
+ * round 14 sealed the `compile` VALUE but nothing checked, at the `Bun.build` call, that the
+ * options still carried that exact value: a helper that overwrote `opts.compile` after sealing, or
+ * a spread placed after the `compile:` key, reached `Bun.build` with an unverified base executable
+ * while every scan on the `compile` value alone stayed green).
+ *
+ * Shallow-copies `opts` into a fresh, null-prototype object and throws unless `copy.compile` is an
+ * object `sealCompile()` itself returned — checked by `SEALED` WeakSet membership, through the same
+ * captured, bound `has` primordial `sealCompile` uses, so a later patch of `WeakSet.prototype.has`
+ * cannot change the answer. `sealCompile` freezes every value it returns, so nothing can rewrite a
+ * sealed compile object in place; the only way to make `copy.compile` diverge from what `sealCompile`
+ * produced is to replace the reference, which is exactly what this refuses.
+ *
+ * The seam scan requires the two compile scripts' single `Bun.build` argument to be a direct
+ * `sealBuild(...)` call, so whatever object a compile script builds — however a helper mutated it —
+ * is checked here, at the one call Bun reads.
+ *
+ * @param {Record<string, unknown>} opts
+ * @returns {Readonly<Record<string, unknown>>}
+ */
+export function sealBuild(opts) {
+    const copy = { ...opts };
+    const out = ObjectCreate(null);
+    ObjectAssign(out, copy);
+    if (!WeakSetHas(SEALED, out.compile)) {
+        throw new BunBaseExeError(
+            "sealBuild: opts.compile must be the exact object sealCompile(...) returned — Bun.build's argument must be built only through sealBuild(...)",
+        );
+    }
+    return ObjectFreeze(out);
+}

@@ -50,7 +50,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";
+import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -749,20 +749,22 @@ function selfContainedBuildOptions() {
 }
 
 const result = await Bun.build(
-    SELF_CONTAINED
-        ? selfContainedBuildOptions()
-        : {
-              entrypoints: [ENTRY],
-              target: "bun",
-              plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
-              minify: true,
-              bytecode: true,
-              // NEVER set `autoloadPackageJson` here: it widens runtime package
-              // resolution beyond the sidecar. The sidecar is resolved by
-              // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
-              // server/node_modules (#1320).
-              compile: sealCompile({ outfile: OUTFILE }, TARGET ? { target: TARGET } : undefined),
-          },
+    sealBuild(
+        SELF_CONTAINED
+            ? selfContainedBuildOptions()
+            : {
+                  entrypoints: [ENTRY],
+                  target: "bun",
+                  plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
+                  minify: true,
+                  bytecode: true,
+                  // NEVER set `autoloadPackageJson` here: it widens runtime package
+                  // resolution beyond the sidecar. The sidecar is resolved by
+                  // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
+                  // server/node_modules (#1320).
+                  compile: sealCompile({ outfile: OUTFILE }, TARGET ? { target: TARGET } : undefined),
+              },
+    ),
 );
 
 if (!result.success) {
