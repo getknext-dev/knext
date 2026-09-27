@@ -164,6 +164,16 @@ export interface InitCiResult {
 }
 
 /**
+ * #1535: the ONE actionable sentence for a file `init-ci` skipped because it
+ * already exists — names the file, points at the fix (`--force`). Pure and
+ * exported so it is testable without capturing pino's log stream, which
+ * writes through its own destination rather than `process.stdout.write`.
+ */
+export function skippedFileMessage(relativePath: string): string {
+    return `${relativePath} already exists — left alone (use --force to overwrite)`;
+}
+
+/**
  * Write both files under `repoRoot`.
  *
  * Refuses to overwrite by default. A workflow file is something the client will

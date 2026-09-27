@@ -37,6 +37,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // ---------------------------------------------------------------------------
 // Module mocks for every side-effecting seam. deploy.ts imports these by name;
@@ -188,17 +189,47 @@ const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 // #314: deploy runs a server-side dry-run prune preflight BEFORE any side
 // effect. Stub its kubectl boundary so this suite stays hermetic; the preflight
 // itself is covered by cr-prune-preflight.test.ts + deploy-preflight-ordering.test.ts.
+// #1535: the SAME boundary is also polled by the post-apply reconcile wait
+// (`kubectl get nextapp -o json`) — the preflight only inspects `ok` (never
+// `stdout`) when it is true, so a stdout carrying an already-reconciled
+// status is safe for both callers and keeps this suite's ordering assertions
+// off a real 15s poll (a `stdout: ""` here made every test that reaches the
+// apply step time out for real, since the poll never sees a condition).
+// #1535 round 2: superseded for THIS suite's reconcile-wait wiring tests by
+// the `../cli/deploy-reconcile-wait` module mock below, which controls
+// `waitForOperatorReconcile`'s result directly — this fixture stays
+// realistic (reconciled) for the OTHER callers of captureKubectl (the
+// dry-run preflight).
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => reconciledNextAppCapture(),
+}));
+
+// #1535 round 2 (B2): pin deploy.ts's WIRING to waitForOperatorReconcile's
+// result — `log.warn(noReconcileMessage(...))` on reconciled:false,
+// `log.info("...reconciling")` on reconciled:true, and nothing else. Module-
+// mocked (rather than driving the real poll through captureKubectl) so the
+// suite never depends on real wall-clock time: deploy.ts calls
+// `waitForOperatorReconcile` with NO injected `sleep`/`now`, so an
+// unreconciled real poll here would busy-wait the full 15s default per test.
+const __knextRealReconcileWait = await import("../cli/deploy-reconcile-wait");
+const waitForOperatorReconcileMock = mock<AnyFn>(async () => ({
+    reconciled: true,
+    url: "https://my-app.example.com",
+}));
+mock.module("../cli/deploy-reconcile-wait", () => ({
+    ...__knextRealReconcileWait,
+    waitForOperatorReconcile: (...a: unknown[]) =>
+        waitForOperatorReconcileMock(...a),
 }));
 
 // T2d: the override warning is only observable through the logger, and pino
 // writes through sonic-boom on a raw fd — patching `process.stderr.write`
 // captures nothing (measured). Same module mock `deploy-no-storage` uses.
 const logWarn = mock<AnyFn>();
+const logInfo = mock<AnyFn>();
 mock.module("../utils/logger", () => ({
     createLogger: () => ({
-        info: mock(),
+        info: (...a: unknown[]) => logInfo(...a),
         warn: (...a: unknown[]) => logWarn(...a),
         error: mock(),
         debug: mock(),
@@ -345,6 +376,12 @@ beforeEach(() => {
     renderNextAppCR.mockReturnValue("kind: NextApp\n");
     runAssetGC.mockReturnValue({ pruned: true });
     loadConfig.mockResolvedValue(baseConfig);
+    // #1535 round 2: default every test to "already reconciled" — only the
+    // dedicated wiring tests below override this to reconciled:false.
+    waitForOperatorReconcileMock.mockImplementation(async () => ({
+        reconciled: true,
+        url: "https://my-app.example.com",
+    }));
     // Skew guard reads .next/BUILD_ID — default: match the tag we pass.
     readFileSyncMock.mockImplementation(pkgOr("deploytag"));
     // ...and on the vinext leg, the built prefix — default: it is there.
@@ -389,6 +426,69 @@ describe("deploy() happy-path ordering", () => {
         await deploy();
         expect(resolveDigest).toHaveBeenCalledTimes(1);
         expect(validateCRImageRef).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
+ * #1535 round 2 (B2) — pin `deploy.ts`'s post-apply reconcile-wait WIRING
+ * (:1122-1129), not just the `waitForOperatorReconcile` helper it calls
+ * (that is `deploy-reconcile-wait.test.ts`'s job). Round 1 left this branch
+ * unpinned: every existing double answered "reconciled", so the warn branch
+ * was never taken and two mutations survived —
+ * `log.warn(noReconcileMessage(...))` → `log.info("ok")`, and
+ * `if (reconcileWait.reconciled)` → `if (true)`.
+ */
+describe("deploy() reconcile-wait wiring (#1535 round 2 — mutation-pinned)", () => {
+    it("reconciled:false — warns the EXACT no-reconcile sentence, never logs the reconciled line, and deploy still resolves (exit stays 0)", async () => {
+        waitForOperatorReconcileMock.mockImplementation(async () => ({
+            reconciled: false,
+            url: "",
+        }));
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+
+        await expect(deploy()).resolves.toBeUndefined();
+
+        expect(logWarn).toHaveBeenCalledWith(
+            {},
+            "NextApp applied; no operator reconciled it in 15s. Check the operator pod: kubectl get pods -n kn-next-operator-system.",
+        );
+        expect(
+            logInfo.mock.calls.some(
+                (c) =>
+                    c[1] === "Deployment submitted — operator is reconciling",
+            ),
+        ).toBe(false);
+    });
+
+    it("reconciled:true — logs the reconciled info line with the URL, and never warns", async () => {
+        waitForOperatorReconcileMock.mockImplementation(async () => ({
+            reconciled: true,
+            url: "https://my-app.example.com",
+        }));
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+
+        await deploy();
+
+        expect(
+            logInfo.mock.calls.some(
+                (c) =>
+                    (c[0] as { url?: string } | undefined)?.url ===
+                        "https://my-app.example.com" &&
+                    c[1] === "Deployment submitted — operator is reconciling",
+            ),
+        ).toBe(true);
+        // Scoped to the no-reconcile warning specifically — this environment
+        // can independently emit an unrelated `log.warn` (a real, unmocked
+        // Docker-build-context root-inference notice keyed off the actual
+        // filesystem, not this suite's seams), so asserting `logWarn` was
+        // never called at all is a false-positive risk unrelated to #1535.
+        expect(
+            logWarn.mock.calls.some((c) =>
+                String(c[1] ?? "").includes("no operator reconciled it"),
+            ),
+        ).toBe(false);
     });
 });
 

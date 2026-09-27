@@ -2,10 +2,19 @@
  * (a) NextApp CRD present + served version.
  */
 
+import { actionableDetail } from "../error-format";
 import { infraFailure, safeJson } from "../kubectl";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
 import { NEXTAPP_CRD, SKIP_UNREACHABLE } from "../types";
+
+/**
+ * #1535: the install step this check names when the CRD is missing. Points at
+ * the published install manifest — the same one `operator.ts`'s "no
+ * Deployment" branch names — so both dead-ends land the user on one command.
+ */
+const INSTALL_COMMAND =
+    "kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml";
 
 export function crdCheck(ctx: CheckContext): CheckResult[] {
     if (ctx.skipAll) {
@@ -31,8 +40,12 @@ export function crdCheck(ctx: CheckContext): CheckResult[] {
                 "crd",
                 "NextApp CRD",
                 "fail",
-                `${NEXTAPP_CRD} not found — install the operator bundle (kubectl apply --server-side -f install.yaml)`,
-                "Install the knext operator bundle (it ships the NextApp CRD): `kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml`, then re-run.",
+                actionableDetail(
+                    `NextApp CRD not found. Install the operator: ${INSTALL_COMMAND}`,
+                    `${NEXTAPP_CRD} not found`,
+                    ctx.verbose ?? false,
+                ),
+                "Install the knext operator bundle (it ships the NextApp CRD), then re-run.",
             ),
         ];
     }

@@ -43,6 +43,11 @@ import {
     validateCRImageRef,
 } from "./cr-builder";
 import {
+    noReconcileMessage,
+    RECONCILE_WAIT_MS_DEFAULT,
+    waitForOperatorReconcile,
+} from "./deploy-reconcile-wait";
+import {
     formatStrayPositional,
     formatUnknownCommand,
     resolveInvocation,
@@ -1091,26 +1096,37 @@ export async function deploy() {
         throw new Error(await describeFailedCRApply(), { cause: err });
     }
 
-    // Wait briefly for the operator to begin reconciling, then read the URL.
-    const result = runCapture(
-        withKubeContext(
-            [
-                "kubectl",
-                "get",
-                "nextapp",
-                config.name,
-                "-n",
-                options.namespace,
-                "-o",
-                "jsonpath={.status.url}",
-            ],
-            options.context,
+    // #1535: wait briefly for the operator to begin reconciling — polling
+    // status.conditions, not a single immediate read of status.url (which
+    // stays empty for a healthy app with no ingress yet, so it could never
+    // tell "the operator hasn't started" apart from "it's fine, just no URL
+    // yet"). Say so plainly, with the exact command to check, rather than
+    // silently logging an empty URL.
+    const reconcileWait = await waitForOperatorReconcile(() =>
+        captureKubectl(
+            withKubeContext(
+                [
+                    "kubectl",
+                    "get",
+                    "nextapp",
+                    config.name,
+                    "-n",
+                    options.namespace,
+                    "-o",
+                    "json",
+                ],
+                options.context,
+            ),
         ),
     );
-    log.info(
-        { url: result.replace(/'/g, "") },
-        "Deployment submitted — operator is reconciling",
-    );
+    if (reconcileWait.reconciled) {
+        log.info(
+            { url: reconcileWait.url },
+            "Deployment submitted — operator is reconciling",
+        );
+    } else {
+        log.warn({}, noReconcileMessage(RECONCILE_WAIT_MS_DEFAULT));
+    }
 
     // #93 skew-protection retention GC (ADR-0011). Reap old `_next/static/<id>/`
     // prefixes that are outside the retain window AND not currently serving
