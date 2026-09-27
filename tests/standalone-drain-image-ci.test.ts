@@ -678,85 +678,218 @@ describe('assertCleanDrain cannot record its leg and skip the assertions that ea
     ).toBe(true);
   });
 
-  it('nothing in the helper can return, throw, try/catch or if-guard its way past an assertion (parsed, not scanned by text)', () => {
+  // Round 6 (R5-B1). Round 5's guard was a DENY-list (return/throw/try/if)
+  // plus regexes over the helper's text. Every shape the round-5 review named
+  // hollows it out with the fast lane green: `switch`, any loop, a labelled
+  // break, an uncalled or swallowing arrow/function, `0 && expect(...)`, a
+  // ternary, or a copy of the exit-"0" pin left in a comment or a string —
+  // none of those trip a `return`/`throw`/`try`/`if` scan, and a comment or
+  // string satisfies a text regex without the assertion ever running. An
+  // ALLOW-list closes all of them at once: every top-level statement in the
+  // body must be a plain declaration, the one permitted sleep, a real
+  // `expect(...)` chain, or the final push — nothing else is even
+  // syntactically capable of skipping an assertion, so there is no shape left
+  // to enumerate.
+
+  /** The exact permitted async-sleep shape: `new Promise((p) => setTimeout(p, PRE_TERM_MS))`. */
+  function isPermittedPreTermPromise(expr: ts.Expression): boolean {
+    if (!ts.isNewExpression(expr)) return false;
+    if (!ts.isIdentifier(expr.expression) || expr.expression.text !== 'Promise') return false;
+    const args = expr.arguments ?? ([] as unknown as ts.NodeArray<ts.Expression>);
+    if (args.length !== 1) return false;
+    const executor = args[0];
+    if (!ts.isArrowFunction(executor)) return false;
+    if (executor.parameters.length !== 1 || !ts.isIdentifier(executor.parameters[0].name)) {
+      return false;
+    }
+    const param = executor.parameters[0].name.text;
+    const body = executor.body;
+    if (!ts.isCallExpression(body)) return false;
+    if (!ts.isIdentifier(body.expression) || body.expression.text !== 'setTimeout') return false;
+    if (body.arguments.length !== 2) return false;
+    const [a0, a1] = body.arguments;
+    return (
+      ts.isIdentifier(a0) && a0.text === param && ts.isIdentifier(a1) && a1.text === 'PRE_TERM_MS'
+    );
+  }
+
+  /** Unwraps a single leading `await`, if present. */
+  function stripAwait(expr: ts.Expression): ts.Expression {
+    return ts.isAwaitExpression(expr) ? expr.expression : expr;
+  }
+
+  interface ExpectChain {
+    rootArgs: readonly ts.Expression[];
+    matcherPath: string;
+    matcherArgs: readonly ts.Expression[];
+  }
+
+  /**
+   * Walks an `expect(...).a.b.c(...)` chain from the outside in. Returns null
+   * — not an expect chain, for this test's purposes — if it is not rooted at
+   * a bare `expect` identifier, if any link is optional (`?.`), or if `.soft`
+   * appears anywhere, since a swallowed/soft assertion does not fail the run.
+   */
+  function parseExpectChain(expr: ts.Expression): ExpectChain | null {
+    type Seg = { kind: 'call'; args: readonly ts.Expression[] } | { kind: 'prop'; name: string };
+    const segs: Seg[] = [];
+    let e: ts.Expression = expr;
+    for (;;) {
+      if (ts.isCallExpression(e)) {
+        if (e.questionDotToken) return null;
+        segs.push({ kind: 'call', args: e.arguments });
+        e = e.expression;
+        continue;
+      }
+      if (ts.isPropertyAccessExpression(e)) {
+        if (e.questionDotToken) return null;
+        if (e.name.text === 'soft') return null;
+        segs.push({ kind: 'prop', name: e.name.text });
+        e = e.expression;
+        continue;
+      }
+      break;
+    }
+    if (!ts.isIdentifier(e) || e.text !== 'expect') return null;
+    segs.reverse();
+    const first = segs[0];
+    if (!first || first.kind !== 'call') return null;
+    const rest = segs.slice(1);
+    const last = rest[rest.length - 1];
+    if (!last || last.kind !== 'call') return null; // `expect(...)` with no matcher call at all
+    const props = rest.slice(0, -1);
+    if (props.some((s) => s.kind !== 'prop')) return null;
+    return {
+      rootArgs: first.args,
+      matcherPath: props.map((s) => (s as { kind: 'prop'; name: string }).name).join('.'),
+      matcherArgs: last.args,
+    };
+  }
+
+  function isExpectStatement(expr: ts.Expression): boolean {
+    return parseExpectChain(stripAwait(expr)) !== null;
+  }
+
+  function isDrainPush(expr: ts.Expression): boolean {
+    if (!ts.isCallExpression(expr)) return false;
+    if (!ts.isPropertyAccessExpression(expr.expression)) return false;
+    if (!ts.isIdentifier(expr.expression.expression)) return false;
+    if (expr.expression.expression.text !== 'drainLegsCompleted') return false;
+    if (expr.expression.name.text !== 'push') return false;
+    if (expr.arguments.length !== 1) return false;
+    const arg = expr.arguments[0];
+    return ts.isIdentifier(arg) && arg.text === 'container';
+  }
+
+  it('every top-level statement in assertCleanDrain is on an allow-list — a plain declaration, the one permitted sleep, a real expect(...) chain, or the final push (nothing else is syntactically able to skip an assertion)', () => {
     const { sourceFile, fn } = parsedHelper();
     const body = fn.body as ts.Block;
     const stmts = body.statements;
-    const last = stmts[stmts.length - 1];
-    const hits: string[] = [];
-    const lineOfNode = (n: ts.Node) =>
+    const lineOf = (n: ts.Node) =>
       sourceFile.getLineAndCharacterOfPosition(n.getStart(sourceFile)).line + 1;
-    const walk = (n: ts.Node) => {
-      if (n === last) return; // the final push has nothing to check inside it
-      // Do not descend into a nested function's own control flow: a `return`
-      // inside a callback governs THAT callback, not assertCleanDrain. There
-      // is no such callback today, but the rule is the same one
-      // tests/helpers/fail-on-red-gate.ts uses for process.exit reachability.
+
+    // 1) No function/arrow/method/accessor anywhere in the body except the
+    // permitted sleep's own arrow. A switch/loop/labelled-break/if/try cannot
+    // smuggle a skipped assertion behind an unreachable, uncalled, or
+    // swallowing callback, because no callback is allowed to exist at all —
+    // this closes the uncalled-arrow and nested-function rows directly,
+    // without having to enumerate the wrapper shapes around them.
+    let permittedPromiseNode: ts.Node | undefined;
+    for (const stmt of stmts) {
+      if (
+        ts.isExpressionStatement(stmt) &&
+        isPermittedPreTermPromise(stripAwait(stmt.expression))
+      ) {
+        permittedPromiseNode = stmt.expression;
+      }
+    }
+    const badFns: string[] = [];
+    const walkForFns = (n: ts.Node) => {
+      if (n === permittedPromiseNode) return;
       if (
         ts.isFunctionDeclaration(n) ||
         ts.isFunctionExpression(n) ||
         ts.isArrowFunction(n) ||
-        ts.isMethodDeclaration(n)
+        ts.isMethodDeclaration(n) ||
+        ts.isGetAccessorDeclaration(n) ||
+        ts.isSetAccessorDeclaration(n)
       ) {
-        return;
+        badFns.push(`${ts.SyntaxKind[n.kind]} at line ${lineOf(n)}`);
+        return; // its own body is irrelevant — the node itself is already disallowed
       }
-      if (ts.isReturnStatement(n)) hits.push(`return at line ${lineOfNode(n)}`);
-      if (ts.isThrowStatement(n)) hits.push(`throw at line ${lineOfNode(n)}`);
-      if (ts.isTryStatement(n)) hits.push(`try at line ${lineOfNode(n)}`);
-      if (ts.isIfStatement(n)) hits.push(`if at line ${lineOfNode(n)}`);
-      ts.forEachChild(n, walk);
+      ts.forEachChild(n, walkForFns);
     };
-    walk(body);
+    walkForFns(body);
     expect(
-      hits,
-      `assertCleanDrain can exit early before its assertions run:\n${hits.join('\n')}`,
+      badFns,
+      `assertCleanDrain may not contain a function/arrow/method anywhere except the one permitted sleep:\n${badFns.join('\n')}`,
+    ).toEqual([]);
+
+    // 2) Every top-level statement's SHAPE is one of: a plain declaration,
+    // the permitted sleep, an `expect(...)` chain, or the final push. Not
+    // `switch`, not a loop of any kind, not a labelled statement, not `if`,
+    // not `try`, not a bare block — any of those could wrap an assertion in
+    // something that never actually runs it.
+    const bad: string[] = [];
+    stmts.forEach((stmt, i) => {
+      const isLast = i === stmts.length - 1;
+      if (ts.isVariableStatement(stmt)) return; // declarations only; function-freedom proven above
+      if (ts.isExpressionStatement(stmt)) {
+        const expr = stripAwait(stmt.expression);
+        if (isPermittedPreTermPromise(expr)) return;
+        if (isDrainPush(stmt.expression) && isLast) return;
+        if (isExpectStatement(stmt.expression)) return;
+      }
+      bad.push(`${ts.SyntaxKind[stmt.kind]} at line ${lineOf(stmt)}`);
+    });
+    expect(
+      bad,
+      `assertCleanDrain has a statement that is not on the allow-list (declaration / the permitted sleep / an expect(...) chain / the final push):\n${bad.join('\n')}`,
     ).toEqual([]);
   });
 
-  it('every assertion the helper is supposed to make is really IN it, pinned by use — not merely present somewhere in the file', () => {
-    const { fn, raw, code } = parsedHelper();
-    const start = fn.getStart(fn.getSourceFile());
-    const end = fn.getEnd();
-    const helperCode = code.slice(start, end);
-    // The exit-code pin checks a literal VALUE ("0"), which blankNonCode
-    // blanks along with every other string's contents (it cannot tell a
-    // value apart from a message) — so that one pin is matched against the
-    // unblanked helper text instead. It stays scoped to the helper (not the
-    // whole file), which is what keeps a stray comment elsewhere from
-    // satisfying it.
-    const helperRaw = raw.slice(start, end);
-    const pins: Array<[string, string, RegExp]> = [
-      [
-        'the in-flight response status (200)',
-        helperCode,
-        /expect\(\s*res\.status,[^;]*\)\.toBe\(\s*200,?\s*\);/,
-      ],
+  it('the six assertions the helper is supposed to make are pinned on the AST — argument text plus matcher name — not by a text scan a comment or a string literal can satisfy', () => {
+    const { sourceFile, fn } = parsedHelper();
+    const body = fn.body as ts.Block;
+    const facts: ExpectChain[] = [];
+    for (const stmt of body.statements) {
+      if (!ts.isExpressionStatement(stmt)) continue;
+      const chain = parseExpectChain(stripAwait(stmt.expression));
+      if (chain) facts.push(chain);
+    }
+    // Comments and string-literal contents are not statements, so a copy of
+    // any pin left in either place cannot satisfy `facts` — only a real,
+    // executing `expect(...)` chain can.
+    const argText = (n: ts.Expression) => n.getText(sourceFile).replace(/\s+/g, ' ').trim();
+    const has = (target: string, matcherPath: string, argIndex: number, argValue: string) =>
+      facts.some(
+        (f) =>
+          f.rootArgs.length > 0 &&
+          argText(f.rootArgs[0]) === target &&
+          f.matcherPath === matcherPath &&
+          f.matcherArgs.length > argIndex &&
+          argText(f.matcherArgs[argIndex]) === argValue,
+      );
+    const pins: Array<[string, boolean]> = [
+      ['the in-flight response status (200)', has('res.status', 'toBe', 0, '200')],
       [
         'the response body equality',
-        helperCode,
-        /expect\(\s*await\s+res\.json\(\)\s*\)\.toEqual\(/,
+        facts.some(
+          (f) =>
+            f.rootArgs.length > 0 &&
+            argText(f.rootArgs[0]) === 'await res.json()' &&
+            f.matcherPath === 'toEqual',
+        ),
       ],
-      [
-        'the exit-code parity check ("0")',
-        helperRaw,
-        /expect\(\s*waited\.stdout\.trim\(\),[\s\S]*?\)\.toBe\("0"\);/,
-      ],
-      ['the after() START marker', helperCode, /expect\(\s*start,[^;]*\)\.toBeGreaterThan\(-1\);/],
-      [
-        'the after() RAN-after-START marker',
-        helperCode,
-        /expect\(\s*done,[^;]*\)\.toBeGreaterThan\(start\);/,
-      ],
-      [
-        'the no-hardcap check',
-        helperCode,
-        /expect\(\s*out,[^;]*\)\.not\.toContain\(HARDCAP_LOG\);/,
-      ],
+      ['the exit-code parity check ("0")', has('waited.stdout.trim()', 'toBe', 0, '"0"')],
+      ['the after() START marker', has('start', 'toBeGreaterThan', 0, '-1')],
+      ['the after() RAN-after-START marker', has('done', 'toBeGreaterThan', 0, 'start')],
+      ['the no-hardcap check', has('out', 'not.toContain', 0, 'HARDCAP_LOG')],
     ];
-    const missing = pins.filter(([, text, re]) => !re.test(text)).map(([name]) => name);
+    const missing = pins.filter(([, found]) => !found).map(([name]) => name);
     expect(
       missing,
-      `assertCleanDrain is missing assertions, pinned by use: ${missing.join(', ')}`,
+      `assertCleanDrain is missing assertions, pinned on the AST: ${missing.join(', ')}`,
     ).toEqual([]);
   });
 });
