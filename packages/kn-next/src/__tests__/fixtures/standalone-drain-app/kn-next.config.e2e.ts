@@ -8,13 +8,24 @@
  * and then stage/compile from `.next/standalone` themselves, so it needs
  * nothing more to be deployed for real through the CLI.
  *
- * `selfContained: true` on `build: 'turbopack'` + `runtime: 'bun'` is the
- * exact shape #1522 wires end to end: the CR carries `spec.selfContained`,
- * and the operator's `containerCommand` branch leaves `Command` nil for it —
+ * `selfContained: true` on a next-standalone builder + `runtime: 'bun'` is
+ * the exact shape #1522 wires end to end: the CR carries `spec.selfContained`
+ * (cr-builder emits it for `build !== 'vinext' && runtime === 'bun'`), and
+ * the operator's `containerCommand` branch leaves `Command` nil for it —
  * this profile is what proves that on a REAL operator-rendered pod (a kind
  * lane, not just the plain-docker proof in
  * `standalone-self-contained-image.docker-e2e.test.ts`), closing the N2 half
  * of the "no kind lane boots the standalone image via the operator" gap.
+ *
+ * `build: 'webpack'`, not 'turbopack': the fixture pins next@16.3.3, which
+ * `knext deploy`'s #1372 pre-build guard (project-build.ts) refuses on the
+ * turbopack target — the adapter+standalone+turbopack regression fixed
+ * upstream in 16.3.5. The docker-e2e sibling never hits that guard (it runs
+ * a bare `next build`), so the fixture itself stays on the turbopack default;
+ * the kind workflow stages a throwaway copy and switches ITS build script
+ * to `next build --webpack` to match this profile. The builder is not the
+ * claim here — the CR shape, the nil Command and the self-contained image
+ * stage are all keyed on the bun runtime, not on the builder.
  *
  * No `storage` block — this fixture serves everything from the image
  * (ADR-0047 image-served static mode), same as the file-manager e2e profile
@@ -28,7 +39,7 @@
 const config = {
     name: "standalone-sc-e2e",
 
-    build: "turbopack",
+    build: "webpack",
     runtime: "bun",
     selfContained: true,
 

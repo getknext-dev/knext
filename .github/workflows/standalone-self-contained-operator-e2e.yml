@@ -103,9 +103,33 @@ jobs:
           bun run --filter "@getknext/core" build
           test -f packages/kn-next/dist/cli/kn-next.js
 
-      - name: Install the fixture app's own dependencies
-        working-directory: packages/kn-next/src/__tests__/fixtures/standalone-drain-app
-        run: bun install
+      # Stage the fixture OUTSIDE the repo, exactly as the docker-e2e sibling
+      # does (`cpSync(FIXTURE_SRC, <tmp>/app)`): the fixture is not a workspace
+      # member, and deploying it in place makes both `next`'s file-tracing root
+      # and the CLI's Docker build context collapse onto the monorepo root
+      # (root bun.lock + fixture bun.lock = "multiple root markers"), which
+      # would ship the whole checkout as build context. A real user's app is a
+      # standalone project dir — this is that.
+      #
+      # `--webpack`: the fixture pins next@16.3.3, which `knext deploy`'s
+      # #1372 pre-build guard refuses on the turbopack target (the
+      # adapter+standalone+turbopack regression, fixed upstream in 16.3.5).
+      # The profile is `build: "webpack"` to match; the switch is applied to
+      # this throwaway copy only, so the on-disk fixture keeps proving the
+      # turbopack build under the docker-e2e. The builder is not this lane's
+      # claim — the CR shape, nil Command and self-contained image stage are
+      # all keyed on the bun runtime.
+      - name: Stage the fixture app outside the repo + install its own dependencies
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/standalone-sc-app"
+          cp -R packages/kn-next/src/__tests__/fixtures/standalone-drain-app "$APP_DIR"
+          cd "$APP_DIR"
+          cp kn-next.config.e2e.ts kn-next.config.ts
+          npm pkg set scripts.build="next build --webpack"
+          grep -q '"build": "next build --webpack"' package.json
+          bun install
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
@@ -177,12 +201,10 @@ jobs:
       # The operator does the rest — including leaving Command nil, the change
       # this whole lane exists to prove.
       - name: kn-next deploy (self-contained standalone, config profile for kind)
-        working-directory: packages/kn-next/src/__tests__/fixtures/standalone-drain-app
         run: |
           set -euo pipefail
-          cp kn-next.config.e2e.ts kn-next.config.ts
-          # Four levels up from this fixture dir is packages/kn-next itself.
-          node ../../../../dist/cli/kn-next.js deploy \
+          cd "$APP_DIR"
+          node "${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" deploy \
             --registry localhost:5001 --namespace "$APP_NS" --tag "${GITHUB_RUN_ID}"
 
       - name: Wait for the NextApp to go Ready
