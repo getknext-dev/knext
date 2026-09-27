@@ -77,26 +77,27 @@ function specPasses(spec) {
 }
 
 /**
- * The parse-error leak, re-introduced: relay the parser's message AND let it
- * quote source (prettyErrors). Both halves, because the fix is two layers —
- * with prettyErrors off the message carries no excerpt, so relaying it alone
- * would not leak and the mutation would prove nothing.
+ * Every mutation normalises to a list of `{ subject, anchor, replacement }`
+ * edits — most are one file, but a few (the merge-key bypass, and the
+ * token-leak rows) need several edits landed TOGETHER in one mutation.
+ *
+ * Round 3 of #1557 (B1, mutation-prover-lane.test.ts's "no driver table
+ * entry vanishes"): those multi-edit rows used to declare `subject` ONCE, at
+ * the row's own top level, with the individual edits nested under `edits:`.
+ * The lane's static audit only resolves a `{ subject, anchor }` pair when
+ * BOTH sit in the SAME object literal (#927's driver-table shape) — a row
+ * whose `subject` sits one level up from its `anchor`s is invisible to it,
+ * neither resolved nor reported unresolved, which is exactly the silent
+ * shortfall the lane exists to catch. Four of those rows additionally
+ * referenced a SHARED `LEAK_EDITS` identifier rather than an inline array
+ * literal, which the extractor cannot resolve at all. Putting `subject` on
+ * EVERY edit (matching `mutation-prove-nextjs-credential-lockstep.mjs`,
+ * where this shape already works) makes each edit its own audited
+ * `{ subject, anchor }` pair.
  */
-const LEAK_EDITS = [
-  {
-    anchor: '                reason: invalidYamlReason(err, kubeconfigYaml),',
-    replacement:
-      '                reason: `${invalidYamlReason(err, kubeconfigYaml)} ${(err as Error).message}`,',
-  },
-  {
-    anchor: '    { merge: true, logLevel: "error", prettyErrors: false },',
-    replacement: '    { merge: true, logLevel: "error", prettyErrors: true },',
-  },
-  {
-    anchor: '    { merge: false, logLevel: "error", prettyErrors: false },',
-    replacement: '    { merge: false, logLevel: "error", prettyErrors: true },',
-  },
-];
+function editsOf(m) {
+  return m.edits ?? [{ subject: m.subject, anchor: m.anchor, replacement: m.replacement }];
+}
 
 const MUTATIONS = [
   // ── Guard 1: fail-OPEN reintroduced (#1495) ────────────────────────────
@@ -183,6 +184,22 @@ const MUTATIONS = [
     anchor: '            subresource: "exec",\n            verb: "create",',
     replacement: '            subresource: "exec",\n            verb: "get",',
   },
+  {
+    label: 'escalation list: the create-jobs probe is weakened to `get` (round 3, N1)',
+    subject: 'credentialScopeTs',
+    spec: HAZARD_PROBES_SPEC,
+    anchor: '            resource: "jobs",\n            verb: "create",',
+    replacement: '            resource: "jobs",\n            verb: "get",',
+  },
+  {
+    label: 'escalation list: the patch-Knative-Service probe is weakened to `get` (round 3, N1)',
+    subject: 'credentialScopeTs',
+    spec: HAZARD_PROBES_SPEC,
+    anchor:
+      '            group: "serving.knative.dev",\n            resource: "services",\n            verb: "patch",',
+    replacement:
+      '            group: "serving.knative.dev",\n            resource: "services",\n            verb: "get",',
+  },
 
   // ── Guard 2: exec/auth-provider classifier — BOTH halves, independently ──
   {
@@ -202,18 +219,27 @@ const MUTATIONS = [
   {
     label:
       'merge-key bypass: no merge resolution AND the walk skips `<<` values (the round-1 bypass)',
-    subject: 'kubeconfigSafetyTs',
     spec: KUBECONFIG_SAFETY_SPEC,
     edits: [
       {
+        subject: 'kubeconfigSafetyTs',
         anchor: '    { merge: true, logLevel: "error", prettyErrors: false },',
         replacement: '    { merge: false, logLevel: "error", prettyErrors: false },',
       },
       {
+        subject: 'kubeconfigSafetyTs',
         anchor: '        if (reachesCloudAuthKey(v, seen)) return true;',
         replacement: '        if (k !== "<<" && reachesCloudAuthKey(v, seen)) return true;',
       },
     ],
+  },
+  {
+    label:
+      'root-level merge bypass: `merge: true` alone is removed (round 3, B2) — a root-level `<<` never populates doc.users under `merge: false`',
+    subject: 'kubeconfigSafetyTs',
+    spec: KUBECONFIG_SAFETY_SPEC,
+    anchor: '    { merge: true, logLevel: "error", prettyErrors: false },',
+    replacement: '    { merge: false, logLevel: "error", prettyErrors: false },',
   },
   {
     label: 'depth: the walk stops at the first level of a user entry',
@@ -263,29 +289,104 @@ const MUTATIONS = [
   },
 
   // ── Guard 3: the token must never be printed or logged ──────────────────
+  //
+  // The parse-error leak, re-introduced: relay the parser's message AND let
+  // it quote source (prettyErrors). Both halves, because the fix is two
+  // layers — with prettyErrors off the message carries no excerpt, so
+  // relaying it alone would not leak and the mutation would prove nothing.
+  // Inlined per row (round 3 of #1557, B1) rather than shared through an
+  // identifier: `edits: LEAK_EDITS` is exactly the shape the lane's static
+  // audit cannot resolve (it reads `mutate()`/table-entry TEXT, not runtime
+  // values), so the four rows that referenced it were invisible to
+  // `mutation-prover-lane.test.ts`'s "no driver table entry vanishes" check
+  // — neither resolved nor reported unresolved, 4 of 28 silently uncovered.
   {
     label: 'token printed: the classifier reason relays the parser message (classifier spec)',
-    subject: 'kubeconfigSafetyTs',
     spec: KUBECONFIG_SAFETY_SPEC,
-    edits: LEAK_EDITS,
+    edits: [
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '                reason: invalidYamlReason(err, kubeconfigYaml),',
+        replacement:
+          '                reason: `${invalidYamlReason(err, kubeconfigYaml)} ${(err as Error).message}`,',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: true, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: true, logLevel: "error", prettyErrors: true },',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: false, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: false, logLevel: "error", prettyErrors: true },',
+      },
+    ],
   },
   {
     label: 'token printed: the parser message reaches init-ci --push-secret stderr (child process)',
-    subject: 'kubeconfigSafetyTs',
     spec: PUSH_SECRET_CLI_SPEC,
-    edits: LEAK_EDITS,
+    edits: [
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '                reason: invalidYamlReason(err, kubeconfigYaml),',
+        replacement:
+          '                reason: `${invalidYamlReason(err, kubeconfigYaml)} ${(err as Error).message}`,',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: true, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: true, logLevel: "error", prettyErrors: true },',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: false, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: false, logLevel: "error", prettyErrors: true },',
+      },
+    ],
   },
   {
     label: 'token printed: the parser message reaches the doctor table and --json (child process)',
-    subject: 'kubeconfigSafetyTs',
     spec: DOCTOR_CI_KUBECONFIG_SPEC,
-    edits: LEAK_EDITS,
+    edits: [
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '                reason: invalidYamlReason(err, kubeconfigYaml),',
+        replacement:
+          '                reason: `${invalidYamlReason(err, kubeconfigYaml)} ${(err as Error).message}`,',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: true, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: true, logLevel: "error", prettyErrors: true },',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: false, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: false, logLevel: "error", prettyErrors: true },',
+      },
+    ],
   },
   {
     label: "token printed: the parser message reaches the action's ::error:: line (child process)",
-    subject: 'kubeconfigSafetyTs',
     spec: HAZARD_SPEC,
-    edits: LEAK_EDITS,
+    edits: [
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '                reason: invalidYamlReason(err, kubeconfigYaml),',
+        replacement:
+          '                reason: `${invalidYamlReason(err, kubeconfigYaml)} ${(err as Error).message}`,',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: true, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: true, logLevel: "error", prettyErrors: true },',
+      },
+      {
+        subject: 'kubeconfigSafetyTs',
+        anchor: '    { merge: false, logLevel: "error", prettyErrors: false },',
+        replacement: '    { merge: false, logLevel: "error", prettyErrors: true },',
+      },
+    ],
   },
   {
     label: 'token printed: the CLI success message logs the raw kubeconfig instead of the path',
@@ -322,7 +423,7 @@ const MUTATIONS = [
   },
 ];
 
-const DECLARED = 28;
+const DECLARED = 31;
 declareMutations(DECLARED);
 
 if (MUTATIONS.length !== DECLARED) {
@@ -351,11 +452,15 @@ const decorative = [];
 for (const m of MUTATIONS) {
   console.log(`── mutation: ${m.label}`);
 
-  const snap = snapshot(resolve(REPO_ROOT, PROOF.subjects[m.subject]));
+  const edits = editsOf(m);
+  // Snapshot every file involved BEFORE mutating any of them, so a failure
+  // partway through never leaves an earlier edit un-restorable (matches
+  // mutation-prove-nextjs-credential-lockstep.mjs's multi-edit pattern).
+  const snaps = edits.map((e) => snapshot(resolve(REPO_ROOT, PROOF.subjects[e.subject])));
   try {
-    for (const e of m.edits ?? [{ anchor: m.anchor, replacement: m.replacement }]) {
-      mutate(snap, e.anchor, e.replacement);
-    }
+    edits.forEach((e, i) => {
+      mutate(snaps[i], e.anchor, e.replacement);
+    });
     if (specPasses(m.spec)) {
       console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       decorative.push(m.label);
@@ -364,7 +469,9 @@ for (const m of MUTATIONS) {
     }
     recordMutation();
   } finally {
-    restore(snap);
+    // Restore in REVERSE order — matches the mutate order's dependency
+    // direction and is the harness's own documented restore convention.
+    for (const snap of [...snaps].reverse()) restore(snap);
   }
   if (!specPasses(m.spec)) {
     console.error(`   FATAL: ${m.spec} did not go green again after restore`);

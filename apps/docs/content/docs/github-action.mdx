@@ -214,10 +214,12 @@ permissions, one at a time, and refuses if ANY of them is allowed:
 - every permission the Role above grants, asked in a **different** namespace — an allow there means
   the grant is not limited to your namespace;
 - every action on `nextapps` the Role does **not** grant (such as `delete`);
-- a fixed list of escalation paths: exec into or create Pods, create ServiceAccounts or mint their
-  tokens, read, list or watch Secrets, patch Deployments cluster-wide, escalate or bind Roles and
-  ClusterRoles, create RoleBindings or ClusterRoleBindings, impersonate users, groups or
-  ServiceAccounts, proxy to nodes, and any wildcard.
+- a fixed list of escalation paths: exec into or create Pods, create Jobs, CronJobs, StatefulSets
+  or DaemonSets (each of which runs Pods without asking for Pods directly), patch Deployments (in
+  your namespace or cluster-wide) or Knative Services directly, create ServiceAccounts or mint
+  their tokens, read, list or watch Secrets, escalate or bind Roles and ClusterRoles, create
+  RoleBindings or ClusterRoleBindings, impersonate users, groups or ServiceAccounts, proxy to
+  nodes, and any wildcard.
 
 It also refuses if any of those questions cannot be answered — an error, or a reply with no clear
 yes/no. A check that passes when it cannot see is not a check. On these clusters this is a

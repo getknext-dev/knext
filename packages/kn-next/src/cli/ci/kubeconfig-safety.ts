@@ -55,8 +55,19 @@ const CLOUD_AUTH_KEYS = new Set(["exec", "auth-provider", "authProvider"]);
  * Two parse modes, both walked. `merge: true` resolves `<<` the way kubectl's
  * go-yaml does, so a merged-in `exec:` appears as a real key. `merge: false`
  * keeps `<<` as a literal key whose VALUE the depth walk below still descends
- * into. Either one alone catches the merge-key bypass; requiring both to come
- * back clean means a quirk in one mode cannot pass what the other sees.
+ * into — which is sufficient WHEN the `<<` sits under `users[i].user` or
+ * deeper, because `doc.users` is unaffected by that merge and the walk still
+ * reaches the merged-in value through the literal `<<` key.
+ *
+ * It is NOT sufficient for a ROOT-level merge (`<<: {users: [...]}` at the
+ * top of the document, inline or via an alias): with `merge: false` that
+ * leaves `doc['<<']` holding the whole map and `doc.users` itself undefined,
+ * so `usersNeedCloudAuth` — which only reads `doc.users` — sees nothing.
+ * `merge: true` is what makes `doc.users` exist at all in that case (review
+ * of #1557, round 2, B2: measured against kubectl v1.33.3, which resolves
+ * the root-level form and runs `exec`). So `merge: true` is REQUIRED, not
+ * merely one of two equally-sufficient modes — do not "simplify" this to
+ * `merge: false` alone.
  *
  * `logLevel: "error"` keeps parse WARNINGS (unresolved tags and the like)
  * off the console: a warning's message can quote source text, and this

@@ -283,6 +283,51 @@ export function hazardProbes(namespace: string): HazardProbe[] {
             verb: "create",
             label: "create pods",
         }),
+        // The pods probe above is easily sidestepped: any controller that
+        // CREATES pods on the credential's behalf gets you the same shell,
+        // without ever asking for "create pods" directly (review of #1557,
+        // round 2/3, N1). Measured with the webhook fake: `create jobs`,
+        // namespaced `patch deployments` and `patch services.serving.knative.dev`
+        // all passed the preflight before these were added. Six probes, one
+        // per controller/resource this repo's own Knative-based operator
+        // makes relevant — not exhaustive (a residual this repo already
+        // discloses), but they stop the cheapest sidesteps of the pods probe.
+        ns({
+            group: "batch",
+            resource: "jobs",
+            verb: "create",
+            label: "create jobs (runs pods without asking for pods directly)",
+        }),
+        ns({
+            group: "batch",
+            resource: "cronjobs",
+            verb: "create",
+            label: "create cronjobs (runs pods on a schedule)",
+        }),
+        ns({
+            group: "apps",
+            resource: "deployments",
+            verb: "patch",
+            label: "patch deployments in the namespace (around the operator)",
+        }),
+        ns({
+            group: "apps",
+            resource: "statefulsets",
+            verb: "create",
+            label: "create statefulsets (runs pods without asking for pods directly)",
+        }),
+        ns({
+            group: "apps",
+            resource: "daemonsets",
+            verb: "create",
+            label: "create daemonsets (runs pods on every node)",
+        }),
+        ns({
+            group: "serving.knative.dev",
+            resource: "services",
+            verb: "patch",
+            label: "patch Knative Services directly (around the NextApp CR)",
+        }),
         ns({
             group: "",
             resource: "serviceaccounts",

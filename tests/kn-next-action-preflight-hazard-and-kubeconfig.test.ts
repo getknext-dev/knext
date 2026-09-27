@@ -297,7 +297,13 @@ describe('ADR-0061/#1533 — kubeconfig-check.mjs, before any cluster call', () 
  * no skip branch, so it refuses before the (skipped) preflight is reached.
  */
 describe('action.yml — the kubeconfig check is not reachable by skip-credential-preflight', () => {
-  type Step = { name?: string; if?: string; env?: Record<string, string>; run?: string };
+  type Step = {
+    name?: string;
+    if?: string;
+    env?: Record<string, string>;
+    run?: string;
+    'continue-on-error'?: boolean;
+  };
   const action = parse(readFileSync(join(ACTION_DIR, 'action.yml'), 'utf8')) as {
     runs: { steps: Step[] };
   };
@@ -329,6 +335,11 @@ describe('action.yml — the kubeconfig check is not reachable by skip-credentia
     expect(steps.indexOf(kubeStep as Step)).toBeLessThan(steps.indexOf(preflightStep as Step));
     expect(kubeStep?.if).toBeUndefined();
     expect(JSON.stringify(kubeStep)).not.toMatch(/skip/i);
+    // N3 (review of #1557, round 2): `continue-on-error: true` is a SECOND
+    // way to make this "non-skippable" step not actually block anything — it
+    // logs the refusal and the job carries on to deploy anyway. No `if:` is
+    // not the whole guarantee; this must hold too.
+    expect(kubeStep?.['continue-on-error']).toBeUndefined();
   });
 
   it('with skip-credential-preflight on, an exec kubeconfig is STILL refused by the step scripts', () => {

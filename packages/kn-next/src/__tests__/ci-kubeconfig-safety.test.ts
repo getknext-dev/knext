@@ -229,6 +229,38 @@ describe("classifyKubeconfigSafety — YAML merge keys and depth (round 2)", () 
 });
 
 /**
+ * Round 3 (review of #1557, B2). A ROOT-level `<<` merges `users` in at the
+ * document's top level, not under a `users[i].user` entry. `merge: false`
+ * leaves that as a literal `doc['<<']` key — `doc.users` itself is
+ * undefined, so `usersNeedCloudAuth` (which reads only `doc.users`) sees
+ * nothing. `merge: true` is the ONLY one of the two parse modes that makes
+ * `doc.users` exist at all here — measured against kubectl v1.33.3, which
+ * resolves this and runs `exec`.
+ */
+describe("classifyKubeconfigSafety — a ROOT-level merge key (round 3, B2)", () => {
+    it("refuses exec injected through an inline root-level `<<: {users: [...]}` merge key", () => {
+        const src = `${MERGE_HEAD}\n<<: {users: [{name: u, user: {exec: {command: aws, apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never}}}]}\n`;
+        const v = classifyKubeconfigSafety(src);
+        expect(v.ok).toBe(false);
+        expect(v.reason).toBe(CLOUD_CREDENTIAL_REFUSAL);
+    });
+
+    it("refuses exec injected through an aliased root-level `<<: *p` merge key", () => {
+        const src =
+            "p: &p {users: [{name: u, user: {exec: {command: aws, apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never}}}]}\n" +
+            `${MERGE_HEAD}\n<<: *p\n`;
+        const v = classifyKubeconfigSafety(src);
+        expect(v.ok).toBe(false);
+        expect(v.reason).toBe(CLOUD_CREDENTIAL_REFUSAL);
+    });
+
+    it("still accepts a root-level merge key that brings in only a plain token user", () => {
+        const src = `${MERGE_HEAD}\n<<: {users: [{name: u, user: {token: abc}}]}\n`;
+        expect(classifyKubeconfigSafety(src).ok).toBe(true);
+    });
+});
+
+/**
  * Round 2: the `yaml` library's error message quotes the failing source line.
  * When the typo sits on or next to `token:`, that quote IS the credential. The
  * refusal must be a fixed sentence plus at most a line NUMBER — never source

@@ -241,9 +241,21 @@ export function mintKubeconfigCommands(namespace: string): string[] {
         // --service-account-max-token-expiration).
         `TOKEN=$(kubectl create token ${sa} -n ${namespace} --duration=8760h)`,
         `kubectl config set-cluster ${sa} --server="$SERVER" --certificate-authority=/dev/stdin --embed-certs=true --kubeconfig=${out} <<< "$(echo "$CA_DATA" | base64 -d)"`,
-        `kubectl config set-credentials ${sa} --token="$TOKEN" --kubeconfig=${out}`,
         `kubectl config set-context ${sa} --cluster=${sa} --user=${sa} --namespace=${namespace} --kubeconfig=${out}`,
         `kubectl config use-context ${sa} --kubeconfig=${out}`,
+        // The token is written by patching the file, never by a `kubectl
+        // ... --token="$TOKEN"` call: `kubectl config set-credentials` has no
+        // stdin/file form for --token (verified against its own --help), so
+        // that flag would put the bearer token in THIS process's argv,
+        // readable via `ps` by any other local user for the life of the
+        // (brief) child process — the same class of exposure `--push-secret`
+        // avoids for the push step. `$(<file)`, `${VAR/…/…}` and `printf` are
+        // bash BUILTINS: none of them fork+exec, so the token never appears
+        // in any process's argument list. `users: null` is exactly what the
+        // three kubectl calls above leave in a freshly-written kubeconfig
+        // (their own marshalling of a nil slice) — patched here to a real
+        // entry instead of asking kubectl to write it.
+        `KNEXT_KUBECONFIG_TEXT=$(<${out}); NEW_USERS=$'users:\\n- name: '"${sa}"$'\\n  user:\\n    token: '"$TOKEN"; printf '%s\\n' "\${KNEXT_KUBECONFIG_TEXT/users: null/$NEW_USERS}" > ${out}`,
     ];
 }
 
@@ -275,7 +287,8 @@ export function nextSteps(namespace: string): string {
             `${CI_ROLE_RULES[0].resources[0]} in ${namespace}, and nothing else.`,
         "The token expires after one year (--duration=8760h) and CI then " +
             "fails to authenticate. Before that, re-run the TOKEN= and " +
-            "set-credentials lines above and push the secret again. Deleting " +
-            "and recreating the knext-deployer ServiceAccount revokes it early.",
+            "KNEXT_KUBECONFIG_TEXT= lines above and push the secret again. " +
+            "Deleting and recreating the knext-deployer ServiceAccount " +
+            "revokes it early.",
     ].join("\n");
 }

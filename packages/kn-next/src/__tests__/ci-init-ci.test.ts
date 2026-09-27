@@ -283,7 +283,108 @@ describe("mint recipe — round 2 of #1557", () => {
         const steps = nextSteps("acme");
         expect(steps).toContain("expires after one year");
         expect(steps).toContain("--duration=8760h");
-        expect(steps).toMatch(/re-run the TOKEN= and set-credentials lines/);
+        expect(steps).toMatch(
+            /re-run the TOKEN= and KNEXT_KUBECONFIG_TEXT= lines/,
+        );
+    });
+});
+
+/**
+ * Round 3 of #1557 (N4, round-1 N5): `kubectl config set-credentials
+ * --token="$TOKEN"` puts the bearer token in that process's OWN argv, which
+ * `ps`/`/proc/<pid>/cmdline` show to any other local user for the life of the
+ * process — kubectl has no stdin/file form for `--token` (verified against
+ * `kubectl config set-credentials --help`), unlike `--certificate-authority`
+ * (which this recipe already feeds via `/dev/stdin`). The fix patches the
+ * token into the file using only bash BUILTINS (`$(<file)`, `${VAR/…/…}`,
+ * `printf`) — none of which fork+exec, so the token never becomes any
+ * process's argument.
+ */
+describe("mint recipe — the token never reaches a child process's argv (round 3 of #1557, N4)", () => {
+    it("no command in the recipe passes $TOKEN as a kubectl (or any) CLI argument", () => {
+        for (const cmd of mintKubeconfigCommands("acme")) {
+            // The token is only ever consumed as "$TOKEN" inside a bash
+            // BUILTIN construct (a $'...' ANSI-C string, or a bare command
+            // substitution) — never as `--token=`, `--flag $TOKEN`, or any
+            // other shape that hands it to a forked/exec'd process's argv.
+            if (!cmd.includes("$TOKEN")) continue;
+            expect(cmd).not.toMatch(/--token[= ]/);
+            // Every command that touches $TOKEN must be the patch line,
+            // identified by its use of the bash-builtin parameter expansion.
+            expect(cmd).toContain("${KNEXT_KUBECONFIG_TEXT/users: null/");
+        }
+    });
+
+    it("no kubectl invocation in the recipe carries --token", () => {
+        for (const cmd of mintKubeconfigCommands("acme")) {
+            if (!cmd.startsWith("kubectl ")) continue;
+            expect(cmd).not.toContain("--token");
+        }
+    });
+
+    it("end to end: the patch line turns `users: null` into a real token entry", () => {
+        // Hermetic — no real `kubectl` binary required (this suite fakes
+        // kubectl everywhere else, `kubectl-seam.test.ts` even mocks the OS
+        // boundary for it). The precursor content below is EXACTLY what the
+        // three real `kubectl config set-cluster` / `set-context` /
+        // `use-context` calls leave on disk before `set-credentials` ever
+        // runs — verified once, out of band, against a real kubectl: it
+        // always marshals a nil user slice as the trailing `users: null`.
+        const dir = mkdtempSync(join(tmpdir(), "knext-mint-recipe-"));
+        try {
+            const out = join(dir, MINTED_KUBECONFIG_PATH);
+            const token = "eyJhbGciOiJSUzI1NiJ9.fake-e2e-token.sig";
+            writeFileSync(
+                out,
+                [
+                    "apiVersion: v1",
+                    "clusters:",
+                    "- cluster:",
+                    "    certificate-authority-data: ZmFrZQ==",
+                    "    server: https://example.com",
+                    "  name: knext-deployer",
+                    "contexts:",
+                    "- context:",
+                    "    cluster: knext-deployer",
+                    "    namespace: acme",
+                    "    user: knext-deployer",
+                    "  name: knext-deployer",
+                    "current-context: knext-deployer",
+                    "kind: Config",
+                    "preferences: {}",
+                    "users: null",
+                    "",
+                ].join("\n"),
+            );
+            const patchLine = mintKubeconfigCommands("acme")
+                .at(-1)
+                ?.replaceAll(MINTED_KUBECONFIG_PATH, out);
+            expect(patchLine).toBeDefined();
+            const r = spawnSync(
+                "bash",
+                ["-c", `set -euo pipefail\n${patchLine}`],
+                {
+                    encoding: "utf8",
+                    env: { ...process.env, TOKEN: token },
+                },
+            );
+            expect(r.status, `stdout: ${r.stdout}\nstderr: ${r.stderr}`).toBe(
+                0,
+            );
+            const parsed = parse(readFileSync(out, "utf8")) as {
+                users: Array<{ name: string; user: { token: string } }>;
+                clusters: unknown;
+                "current-context": string;
+            };
+            expect(parsed.users).toEqual([
+                { name: "knext-deployer", user: { token } },
+            ]);
+            // Untouched by the patch: it only replaces `users: null`.
+            expect(parsed["current-context"]).toBe("knext-deployer");
+            expect(parsed.clusters).toBeDefined();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 });
 

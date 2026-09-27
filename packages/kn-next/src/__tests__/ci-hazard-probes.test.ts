@@ -153,6 +153,35 @@ describe("hazardProbes — fixed escalation list", () => {
             { group: "", resource: "pods", verb: "create", ns: NS },
         ],
         [
+            "create jobs",
+            { group: "batch", resource: "jobs", verb: "create", ns: NS },
+        ],
+        [
+            "create cronjobs",
+            { group: "batch", resource: "cronjobs", verb: "create", ns: NS },
+        ],
+        [
+            "patch deployments (namespaced)",
+            { group: "apps", resource: "deployments", verb: "patch", ns: NS },
+        ],
+        [
+            "create statefulsets",
+            { group: "apps", resource: "statefulsets", verb: "create", ns: NS },
+        ],
+        [
+            "create daemonsets",
+            { group: "apps", resource: "daemonsets", verb: "create", ns: NS },
+        ],
+        [
+            "patch services.serving.knative.dev",
+            {
+                group: "serving.knative.dev",
+                resource: "services",
+                verb: "patch",
+                ns: NS,
+            },
+        ],
+        [
             "create serviceaccounts",
             { group: "", resource: "serviceaccounts", verb: "create", ns: NS },
         ],

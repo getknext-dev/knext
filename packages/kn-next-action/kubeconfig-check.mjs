@@ -10,7 +10,10 @@
  * hatch exists for authorizers that do not implement the access reviews
  * (`preflight.mjs`), and has no business switching off a check that needs no
  * authorizer at all. So it lives in its own step, which the skip input does
- * not reach (asserted by `tests/kn-next-action-kubeconfig-step.test.ts`).
+ * not reach (asserted by
+ * `tests/kn-next-action-preflight-hazard-and-kubeconfig.test.ts`'s
+ * "action.yml — the kubeconfig check is not reachable by
+ * skip-credential-preflight" describe block).
  *
  * Fails CLOSED: no KUBECONFIG, an unreadable file, or an unloadable classifier
  * all refuse. The printed reason is the classifier's, which never carries
