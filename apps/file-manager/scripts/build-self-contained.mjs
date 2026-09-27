@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { spawnSync } from 'node:child_process';
 /**
  * Build file-manager's SELF-CONTAINED vinext binary for the host (#1460): the
  * same compile `kn-next build --self-contained` runs, from this checkout's
@@ -22,7 +23,6 @@
  * Prints the binary's path on the last line.
  */
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,

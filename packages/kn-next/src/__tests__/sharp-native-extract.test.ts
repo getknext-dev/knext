@@ -165,15 +165,23 @@ describe("extractEmbeddedNative", () => {
         // foreign-owned, with no way for the legitimate uid to recover
         // without an operator clearing it).
         const tmpRoot = temp("knext-1460-uid-");
-        const { root } = extractEmbeddedNative({ files: tree(LAYOUT), tmpRoot });
+        const { root } = extractEmbeddedNative({
+            files: tree(LAYOUT),
+            tmpRoot,
+        });
         const uid =
-            typeof process.getuid === "function" ? String(process.getuid()) : "nouid";
+            typeof process.getuid === "function"
+                ? String(process.getuid())
+                : "nouid";
         expect(basename(root).startsWith(`knext-native-${uid}-`)).toBe(true);
     });
 
     it("extracted files carry no write bit (0500) — read+execute only", () => {
         const tmpRoot = temp("knext-1460-mode-");
-        const { root } = extractEmbeddedNative({ files: tree(LAYOUT), tmpRoot });
+        const { root } = extractEmbeddedNative({
+            files: tree(LAYOUT),
+            tmpRoot,
+        });
         const file = join(root, "sharp-linux-x64/lib/sharp-linux-x64.node");
         expect(statSync(file).mode & 0o777).toBe(0o500);
     });
@@ -199,12 +207,15 @@ describe("extractEmbeddedNative", () => {
 
     it("refuses a relative KNEXT_NATIVE_TMPDIR (would resolve against the cwd, unpredictably)", () => {
         const prev = process.env.KNEXT_NATIVE_TMPDIR;
-        process.env.KNEXT_NATIVE_TMPDIR = "relative/native-tmp-should-never-exist";
+        process.env.KNEXT_NATIVE_TMPDIR =
+            "relative/native-tmp-should-never-exist";
         try {
             expect(() =>
                 extractEmbeddedNative({ files: tree(LAYOUT) }),
             ).toThrow(/must be an absolute path/);
-            expect(existsSync("relative/native-tmp-should-never-exist")).toBe(false);
+            expect(existsSync("relative/native-tmp-should-never-exist")).toBe(
+                false,
+            );
         } finally {
             if (prev === undefined) delete process.env.KNEXT_NATIVE_TMPDIR;
             else process.env.KNEXT_NATIVE_TMPDIR = prev;
