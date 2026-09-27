@@ -398,6 +398,22 @@ const REVIEWED_COMPUTED_READS = new Set([
     "kinds[ext]",
     "plan.relpaths[i]",
 ]);
+/** Every adapter module but the seam module that spells `executablePath` (anywhere in its text) or
+ *  uses a computed key outside `REVIEWED_COMPUTED_KEYS`. */
+function seamKeyOffenders(
+    mods: ReadonlyArray<{ file: string; source: string; scan: ScriptScan }>,
+): string[] {
+    return mods
+        .filter((m) => !SEAM_MODULES.has(m.file))
+        .flatMap((m) => [
+            ...(m.source.includes("executablePath")
+                ? [`${m.file} spells executablePath`]
+                : []),
+            ...m.scan.computedKeyTexts
+                .map((k) => `${m.file} ${k}`)
+                .filter((k) => !REVIEWED_COMPUTED_KEYS.has(k)),
+        ]);
+}
 /** The one import a compile script may take from the seam module, exactly. */
 const SEAM_IMPORT =
     'import { assertBunBaseExe, sealCompile } from "./bun-base-exe.mjs";';
@@ -604,19 +620,40 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
     });
 
     it("C7: no adapter module but the seam module spells executablePath, or a computed key outside the reviewed set", () => {
-        const others = all.filter((s) => !SEAM_MODULES.has(s.file));
+        expect(seamKeyOffenders(all)).toEqual([]);
+    });
+
+    it.each<[string, string, string, string[]]>([
+        [
+            "a literal executablePath key",
+            "m.mjs",
+            "const c = { executablePath: p };",
+            ["m.mjs spells executablePath"],
+        ],
+        [
+            "executablePath in a comment or string",
+            "m.ts",
+            '// "executablePath"',
+            ["m.ts spells executablePath"],
+        ],
+        [
+            "an unreviewed computed key",
+            "m.js",
+            "const c = { [k]: p };",
+            ["m.js [k]"],
+        ],
+        [
+            "the seam module itself is exempt",
+            "bun-base-exe.mjs",
+            "const c = { executablePath: p, [k]: 1 };",
+            [],
+        ],
+    ])("the seam-key rule sees: %s", (_n, file, source, want) => {
         expect(
-            others
-                .filter((s) => s.source.includes("executablePath"))
-                .map((s) => s.file),
-        ).toEqual([]);
-        expect(
-            others.flatMap((s) =>
-                s.scan.computedKeyTexts
-                    .map((k) => `${s.file} ${k}`)
-                    .filter((k) => !REVIEWED_COMPUTED_KEYS.has(k)),
-            ),
-        ).toEqual([]);
+            seamKeyOffenders([
+                { file, source, scan: scanScript(file, source) },
+            ]),
+        ).toEqual(want);
     });
 
     it("the reviewed non-compile exemption stays load-bearing (not a stale entry)", () => {
