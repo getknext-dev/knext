@@ -99,7 +99,7 @@ identically) it decides how the server is packaged:
 
 ### Self-contained mode (experimental)
 
-`selfContained` is an opt-in switch for a future single executable that carries everything it needs
+`selfContained` is an opt-in switch for a single executable that carries everything it needs
 to boot, with nothing beside it on disk. It defaults to `false`, and `knext build --self-contained`
 turns it on for one build, overriding the config key:
 
@@ -112,9 +112,9 @@ const config: KnativeNextConfig = {
 ```
 
 On the vinext target, the binary embeds the server runtime and your `public` files, and unpacks
-its native image libraries into the temp directory the first time an image is optimized — so the
-image is the binary alone (`Dockerfile.self-contained`), and the temp directory must be writable
-(the knext operator mounts one at `/tmp`; with `docker run --read-only`, add `--tmpfs /tmp`). The
+its native image libraries into the temp directory the first time an image is optimized — so
+nothing needs to sit beside the binary, and the temp directory must be writable (the knext
+operator mounts one at `/tmp`; with `docker run --read-only`, add `--tmpfs /tmp`). The
 other targets do not use it yet: there, setting it changes nothing about what `knext build`
 produces, and the choice is only recorded in the build log. The value must be a boolean —
 `knext validate` rejects anything else.
