@@ -61,6 +61,21 @@ describe("parseDoctorArgs — --ci-kubeconfig (#1533)", () => {
         );
     });
 
+    it("refuses a FLAG as the path — `--ci-kubeconfig --json` keeps JSON mode, never reads a file named --json", () => {
+        expect(() => parseDoctorArgs(["--ci-kubeconfig", "--json"])).toThrow(
+            /--ci-kubeconfig requires a file path/,
+        );
+        expect(() =>
+            parseDoctorArgs(["--ci-kubeconfig", "--verbose", "x"]),
+        ).toThrow(/--ci-kubeconfig requires a file path/);
+    });
+
+    it("combines with --verbose", () => {
+        const args = parseDoctorArgs(["--verbose", "--ci-kubeconfig", "x"]);
+        expect(args.verbose).toBe(true);
+        expect(args.ciKubeconfig).toBe("x");
+    });
+
     it("still rejects an unknown flag", () => {
         expect(() => parseDoctorArgs(["--nope"])).toThrow(/unknown argument/);
     });
@@ -116,7 +131,7 @@ describe("runDoctor — --ci-kubeconfig wiring (#1533)", () => {
         // check still runs and still reports a real verdict — it is a LOCAL
         // file read, not a cluster call, so it must not be swallowed by the
         // skipAll cluster gate the way every other check is.
-        const report = await runDoctor(unreachableDeps, {
+        const report = await runDoctor(unreachableDeps, false, {
             ciKubeconfigPath: "irrelevant-because-injected",
         });
         // runDoctor's ciKubeconfigCheck call uses the REAL file reader (no

@@ -107,17 +107,19 @@ export {
  */
 export async function runDoctor(
     deps: DoctorDeps,
+    verbose = false,
     opts: { ciKubeconfigPath?: string } = {},
 ): Promise<DoctorReport> {
     const checks: CheckResult[] = [];
 
-    const cluster = clusterCheck(deps);
+    const cluster = clusterCheck(deps, verbose);
     checks.push(...cluster.checks);
 
     const ctx: CheckContext = {
         deps,
         kubectl: deps.kubectl,
         skipAll: !cluster.reachable,
+        verbose,
     };
 
     checks.push(...kubectlValidationCheck(ctx));
@@ -164,10 +166,13 @@ getting-started guide), never as a network flake.
 
 Options:
   --json                     Emit the check results as JSON
-  --ci-kubeconfig <path>     Check a kubeconfig FILE (not the cluster) for the
-                             #1533 refusal: an exec/auth-provider kubeconfig
-                             needs cloud-account credentials on the runner and
-                             is refused. Opt-in — adds one row only when passed.
+  --verbose                  Show the raw kubectl/API diagnostic behind each
+                             short message
+  --ci-kubeconfig <path>     Check a kubeconfig FILE (not the cluster) before
+                             wiring it into CI: an exec/auth-provider
+                             kubeconfig needs cloud-account credentials on the
+                             runner and is refused. Opt-in — adds one row only
+                             when passed.
   -h, --help                 Show this help
 `;
 
@@ -195,7 +200,7 @@ export async function doctorMain(
         writeSync(1, DOCTOR_HELP);
         return 0;
     }
-    const report = await runDoctor(deps, {
+    const report = await runDoctor(deps, args.verbose, {
         ciKubeconfigPath: args.ciKubeconfig,
     });
     if (args.json) {

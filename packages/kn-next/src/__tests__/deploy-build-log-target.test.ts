@@ -28,6 +28,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // biome-ignore lint/suspicious/noExplicitAny: mock return type must be `any` (bun:test typing gap)
 type AnyFn = (...args: unknown[]) => any;
@@ -93,7 +94,7 @@ mock.module("../cli/gc", () => ({
 }));
 
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 const logInfo = mock<AnyFn>();

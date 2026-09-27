@@ -33,6 +33,7 @@ import {
     REQUIRED_SECRETS,
     renderRbacManifest,
     renderWorkflow,
+    skippedFileMessage,
     WORKFLOW_PATH,
 } from "../cli/ci/init-ci";
 
@@ -163,6 +164,19 @@ describe("initCi writes both files (#874)", () => {
         );
     });
 
+    it("#1535: a second run's skipped files each get their own named, actionable message", () => {
+        const root = scratch();
+        initCi(root, { namespace: "acme", appDir: "." });
+        const second = initCi(root, { namespace: "acme", appDir: "." });
+        expect(second.skipped.sort()).toEqual(
+            [WORKFLOW_PATH, RBAC_PATH].sort(),
+        );
+        for (const f of second.skipped) {
+            expect(skippedFileMessage(f)).toContain(f);
+            expect(skippedFileMessage(f)).toContain("--force");
+        }
+    });
+
     it("overwrites only when explicitly forced", () => {
         const root = scratch();
         initCi(root, { namespace: "acme", appDir: "." });
@@ -225,5 +239,13 @@ describe("mintKubeconfigCommands — knext mints nothing itself (#1533, ADR-0061
         }
         // And documents the --push-secret shortcut.
         expect(steps).toContain("--push-secret");
+    });
+});
+
+describe("skippedFileMessage (#1535)", () => {
+    it("names the file and points at --force — one actionable sentence", () => {
+        expect(skippedFileMessage(WORKFLOW_PATH)).toBe(
+            `${WORKFLOW_PATH} already exists — left alone (use --force to overwrite)`,
+        );
     });
 });

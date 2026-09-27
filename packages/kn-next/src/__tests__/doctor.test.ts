@@ -1247,7 +1247,7 @@ function gateFailKubectl(stderr: string): KubectlFn {
 }
 
 describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () => {
-    it("state 1 — no kubeconfig at all: plain 'no cluster connected yet' + getting-started URL, never VPN", async () => {
+    it("state 1 — no kubeconfig at all: ONE actionable sentence (#1535), no raw dump by default", async () => {
         const report = await runDoctor({
             kubectl: gateFailKubectl(NO_CONFIG_STDERR),
             probeImage: okProbe,
@@ -1258,13 +1258,20 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         });
         const checks = byId(report.checks);
         expect(checks.cluster.status).toBe("warn");
-        expect(checks.cluster.detail).toMatch(/no kubeconfig/i);
-        expect(checks.cluster.detail).toMatch(
-            /don't have a Kubernetes cluster connected yet/,
+        // #1535: the exact, zero-K8s-jargon sentence — no stack trace, no
+        // searched-paths dump. That detail lives behind --verbose (below).
+        expect(checks.cluster.detail).toBe(
+            "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
         );
-        expect(checks.cluster.detail).toContain("/home/dev/.kube/config");
+        expect(checks.cluster.detail).not.toContain("/home/dev/.kube/config");
+        // #1535 round 2 (N1): the hint points at the SAME first-cluster
+        // walkthrough as `detail`, not the general getting-started guide —
+        // two different links on one no-cluster row was the bug.
         expect(checks.cluster.hint).toContain(
-            "https://knext.dev/docs/getting-started",
+            "https://knext.dev/docs/first-cluster",
+        );
+        expect(checks.cluster.hint).toMatch(
+            /don't have a Kubernetes cluster connected yet/,
         );
         expect(`${checks.cluster.detail} ${checks.cluster.hint}`).not.toMatch(
             /VPN|flaked/i,
@@ -1277,7 +1284,27 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         expect(report.exitCode).toBe(0);
     });
 
-    it("state 2 — kubeconfig exists but sets no current-context: same plain answer, names the file", async () => {
+    it("state 1, --verbose: the same sentence, PLUS the raw searched-paths diagnostic", async () => {
+        const report = await runDoctor(
+            {
+                kubectl: gateFailKubectl(NO_CONFIG_STDERR),
+                probeImage: okProbe,
+                inspectKubeconfig: () => ({
+                    kind: "absent",
+                    searched: ["/home/dev/.kube/config"],
+                }),
+            },
+            true,
+        );
+        const checks = byId(report.checks);
+        expect(checks.cluster.detail).toStartWith(
+            "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
+        );
+        expect(checks.cluster.detail).toContain("/home/dev/.kube/config");
+        expect(checks.cluster.detail).toMatch(/no kubeconfig/i);
+    });
+
+    it("state 2 — kubeconfig exists but sets no current-context: the SAME one-sentence answer by default", async () => {
         const report = await runDoctor({
             kubectl: gateFailKubectl(NO_CONFIG_STDERR),
             probeImage: okProbe,
@@ -1288,18 +1315,38 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         });
         const checks = byId(report.checks);
         expect(checks.cluster.status).toBe("warn");
-        expect(checks.cluster.detail).toContain("/home/dev/.kube/config");
-        expect(checks.cluster.detail).toMatch(/current-context/);
-        expect(checks.cluster.detail).toMatch(
-            /don't have a Kubernetes cluster connected yet/,
+        expect(checks.cluster.detail).toBe(
+            "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
         );
+        expect(checks.cluster.detail).not.toContain("/home/dev/.kube/config");
+        // #1535 round 2 (N1): same first-cluster link as `detail`.
         expect(checks.cluster.hint).toContain(
-            "https://knext.dev/docs/getting-started",
+            "https://knext.dev/docs/first-cluster",
+        );
+        expect(checks.cluster.hint).toMatch(
+            /don't have a Kubernetes cluster connected yet/,
         );
         expect(`${checks.cluster.detail} ${checks.cluster.hint}`).not.toMatch(
             /VPN|flaked/i,
         );
         expect(report.exitCode).toBe(0);
+    });
+
+    it("state 2, --verbose: names the file and mentions current-context", async () => {
+        const report = await runDoctor(
+            {
+                kubectl: gateFailKubectl(NO_CONFIG_STDERR),
+                probeImage: okProbe,
+                inspectKubeconfig: () => ({
+                    kind: "no-current-context",
+                    path: "/home/dev/.kube/config",
+                }),
+            },
+            true,
+        );
+        const checks = byId(report.checks);
+        expect(checks.cluster.detail).toContain("/home/dev/.kube/config");
+        expect(checks.cluster.detail).toMatch(/current-context/);
     });
 
     for (const addr of [
@@ -1380,11 +1427,15 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
             });
             const checks = byId(report.checks);
             expect(checks.cluster.status).toBe("warn");
-            expect(checks.cluster.detail).toMatch(
+            expect(checks.cluster.detail).toBe(
+                "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
+            );
+            expect(checks.cluster.hint).toMatch(
                 /don't have a Kubernetes cluster connected yet/,
             );
+            // #1535 round 2 (N1): same first-cluster link as `detail`.
             expect(checks.cluster.hint).toContain(
-                "https://knext.dev/docs/getting-started",
+                "https://knext.dev/docs/first-cluster",
             );
         } finally {
             unstubAllEnvs();
@@ -1392,13 +1443,44 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         }
     });
 
-    it("the three no-cluster states stay pairwise distinguishable in the detail line", async () => {
+    it("the 'no kube-context' states (absent / no-current-context) share ONE sentence by default (#1535) — the local-refused state stays distinct", async () => {
         const run = (inspect: KubeconfigInspectFn, stderr: string) =>
             runDoctor({
                 kubectl: gateFailKubectl(stderr),
                 probeImage: okProbe,
                 inspectKubeconfig: inspect,
             }).then((r) => byId(r.checks).cluster.detail);
+        const [absentDetail, noContextDetail, localRefusedDetail] =
+            await Promise.all([
+                run(
+                    () => ({ kind: "absent", searched: ["/x"] }),
+                    NO_CONFIG_STDERR,
+                ),
+                run(
+                    () => ({ kind: "no-current-context", path: "/x" }),
+                    NO_CONFIG_STDERR,
+                ),
+                run(hasCtx, LOCAL_REFUSED_STDERR),
+            ]);
+        // Deliberate collapse (#1535): a zero-K8s user does not need to know
+        // WHICH way their kubeconfig is unconfigured — both get the identical
+        // one-liner pointing at the first-cluster walkthrough.
+        expect(absentDetail).toBe(noContextDetail);
+        // The genuinely different "you have a context but nothing is
+        // listening" case must never collapse into the same sentence.
+        expect(localRefusedDetail).not.toBe(absentDetail);
+    });
+
+    it("--verbose still tells the absent/no-current-context states apart", async () => {
+        const run = (inspect: KubeconfigInspectFn, stderr: string) =>
+            runDoctor(
+                {
+                    kubectl: gateFailKubectl(stderr),
+                    probeImage: okProbe,
+                    inspectKubeconfig: inspect,
+                },
+                true,
+            ).then((r) => byId(r.checks).cluster.detail);
         const details = await Promise.all([
             run(() => ({ kind: "absent", searched: ["/x"] }), NO_CONFIG_STDERR),
             run(

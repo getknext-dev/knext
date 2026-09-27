@@ -273,7 +273,153 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
       expect(a.current.nights).toBe(0);
       expect(a.shortfall).toBe(WINDOW_REQUIRED_NIGHTS);
     });
+  });
 
+  // ───────────────────────────────────────────────────────────────────────
+  // #1520 (raised from #1515) — an infra/deploy-classified shard red gets a
+  // readable `deploy-classified:` label in the disqualifier text. Round 1 of
+  // #1550 also graded such a night VOID (bridged over: neither counted nor a
+  // reset). Round 2 (lead-directed, #1550) REMOVED that grade: a round-1
+  // review found `scripts/e2e-deploy.sh` reports the exact same "Custom
+  // deploy script failed" sentence for an adapter build crash or a
+  // crash-on-boot — genuine product regressions — so bridging it let a real
+  // regression go uncounted. The credential's integrity wins: a
+  // deploy-classified red now disqualifies a night, and resets the streak,
+  // exactly like any other red. Whether some proven-safe subset should someday
+  // be exempted is tracked as #1553, undecided here.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('#1520 — a deploy-classified shard red is labelled, but grades like any other red', () => {
+    /** A shard whose ENTIRE redness is one `kind: 'deploy'` failure. */
+    function deployOnlyShard(base: ShardRow, over: Record<string, unknown> = {}) {
+      return {
+        ...base,
+        passed: 48,
+        failed: 1,
+        failures: [{ file: 'test/e2e/app-dir/actions/actions.test.ts', kind: 'deploy', cases: [] }],
+        ...over,
+      };
+    }
+
+    it('gradeNight: a shard whose every named failure is kind:deploy is disqualified — same as any other red', () => {
+      const shards = night().shards;
+      shards[5] = deployOnlyShard(shards[5]);
+      const g = gradeNight(night({ shards }));
+      expect(g.eligible).toBe(false);
+      expect(hasReason(g, 'deploy-classified')).toBe(true);
+    });
+
+    it('gradeNight: a MIXED shard (one deploy failure, one assertion failure) is disqualified — no deploy label (partial attribution)', () => {
+      const shards = night().shards;
+      shards[5] = {
+        ...shards[5],
+        passed: 47,
+        failed: 2,
+        failures: [
+          { file: 'test/e2e/a.test.ts', kind: 'deploy', cases: [] },
+          { file: 'test/e2e/b.test.ts', kind: 'assertion', cases: ['c'] },
+        ],
+      };
+      const g = gradeNight(night({ shards }));
+      expect(g.eligible).toBe(false);
+      expect(hasReason(g, 'deploy-classified')).toBe(false);
+    });
+
+    it('gradeNight: a PARTIALLY-attributed shard (failed=2, only 1 failure named) never gets the deploy-classified label — the count-match guard fails closed', () => {
+      const shards = night().shards;
+      shards[5] = {
+        ...shards[5],
+        passed: 47,
+        failed: 2,
+        // Only ONE of the two counted failures is named, and it is kind:deploy.
+        failures: [{ file: 'test/e2e/a.test.ts', kind: 'deploy', cases: [] }],
+      };
+      const g = gradeNight(night({ shards }));
+      expect(g.eligible).toBe(false);
+      expect(hasReason(g, 'deploy-classified')).toBe(false);
+      expect(g.disqualifiers.some((d: string) => d.startsWith('shard 6/16 red'))).toBe(true);
+    });
+
+    it('gradeNight: a deploy-only red shard PLUS a real disqualifier (rerun) is still disqualified on both', () => {
+      const shards = night().shards;
+      shards[5] = deployOnlyShard(shards[5]);
+      const g = gradeNight(night({ shards, runAttempt: '2' }));
+      expect(g.eligible).toBe(false);
+      expect(g.disqualifiers).toContain('rerun');
+      expect(hasReason(g, 'deploy-classified')).toBe(true);
+    });
+
+    it('auditWindow: a deploy-only red night RESETS the streak — it is not bridged', () => {
+      const before = streakOf(6, 'sha256:aaaa', 40000000000);
+      const redShards = night().shards;
+      redShards[0] = deployOnlyShard(redShards[0]);
+      const redNight = night({
+        // Numerically BETWEEN the "before" and "after" streaks
+        // (`auditWindow` sorts nights by run id as a number, not by array
+        // position).
+        runId: '40000006000',
+        windowFingerprint: 'sha256:aaaa',
+        shards: redShards,
+      });
+      const after = streakOf(8, 'sha256:aaaa', 40007000000);
+      const a = auditWindow([...before, redNight, ...after]);
+      // The deploy-classified red is a REAL disqualifier now: it resets the
+      // streak, so the two halves never join — longest is the larger half (8),
+      // never the bridged 6+8=14.
+      expect(a.met).toBe(false);
+      expect(a.longest.nights).toBe(8);
+      expect(a.streaks).toHaveLength(2);
+      expect(a.streaks.at(-1)?.restartCause).toBe('night-disqualified');
+    });
+
+    it('auditWindow: an assertion-kind red STILL resets the streak (unchanged by #1520)', () => {
+      const shards = night().shards;
+      shards[7] = {
+        ...shards[7],
+        passed: 47,
+        failed: 2,
+        failures: [{ file: 'test/e2e/x.test.ts', kind: 'assertion', cases: ['a', 'b'] }],
+      };
+      const a = auditWindow([
+        ...streakOf(6, 'sha256:aaaa', 40000000000),
+        night({ runId: '40007000000', windowFingerprint: 'sha256:aaaa', shards }),
+        ...streakOf(3, 'sha256:aaaa', 40008000000),
+      ]);
+      expect(a.met).toBe(false);
+      expect(a.longest.nights).toBe(6);
+      expect(a.current.nights).toBe(3);
+      expect(a.streaks.at(-1)?.restartCause).toBe('night-disqualified');
+    });
+
+    it('auditWindow: a deploy-only red night at the END of the window ZEROES OUT the current streak', () => {
+      const trailingShards = night().shards;
+      trailingShards[0] = deployOnlyShard(trailingShards[0]);
+      const trailingRed = night({
+        // Numerically AFTER streakOf(14, …, 40000000000)'s last id (40000013000).
+        runId: '40000014000',
+        windowFingerprint: 'sha256:aaaa',
+        shards: trailingShards,
+      });
+      const a = auditWindow([...streakOf(14, 'sha256:aaaa', 40000000000), trailingRed]);
+      // The earned 14-night window still shows up as the LONGEST streak on
+      // record (history is not un-earned), but the CURRENT streak — the one
+      // still running from here — is reset to zero by the trailing red.
+      expect(a.met).toBe(true);
+      expect(a.longest.nights).toBe(14);
+      expect(a.current.nights).toBe(0);
+      expect(a.shortfall).toBe(WINDOW_REQUIRED_NIGHTS);
+    });
+
+    it('formatReport prints a deploy-classified red as an ordinary NO, never VOID', () => {
+      const shards = night().shards;
+      shards[0] = deployOnlyShard(shards[0]);
+      const a = auditWindow([night({ shards })]);
+      const report = formatReport(a);
+      expect(report).not.toMatch(/VOID/);
+      expect(report).toMatch(/NO —.*deploy-classified/);
+    });
+  });
+
+  describe('auditWindow — reporting and the arithmetic it emits', () => {
     it('every night is reported, disqualified ones included — a log of only successes is not evidence', () => {
       const a = auditWindow([
         ...streakOf(2, 'sha256:aaaa', 40000000000),

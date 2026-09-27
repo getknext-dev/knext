@@ -365,6 +365,309 @@ describe('scripts/e2e-summary.mjs — phantom infra-abort vs real failure (A3-3,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #1520 (raised from #1515) — run 36312054519: a `createNext` deploy-script
+// failure inside a test file's `beforeAll` must classify as kind 'deploy', never
+// 'assertion'/'unclassified'. 419 files failed before a single request was made,
+// and the ledger recorded them as ordinary per-case failures — read by hand as
+// "the self-contained binary serves wrong responses" until the shard logs were
+// checked (#1515 root-cause comment). A harness/deploy failure must never read
+// as a runtime regression.
+//
+// The official harness prints exactly two message shapes for this
+// (`test/lib/next-modes/next-deploy.ts`'s `createNext`), both thrown before
+// `beforeAll` returns:
+//   `Custom deploy script failed: …`
+//   `Custom deploy script returned invalid URL: …`
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Shape 1: the deploy script itself exits non-zero. No per-case ✕ lines at all —
+// jest never entered the file's tests ("Test suite failed to run"), so `cases`
+// is empty. Before #1520 this fell through to 'unclassified'.
+const SAMPLE_DEPLOY_SCRIPT_FAILED_OUTPUT = `
+total: 1
+Starting test/e2e/app-dir/actions/actions.test.ts retry 0/2
+##[group]❌ test/e2e/app-dir/actions/actions.test.ts output
+[e2e-deploy] running next build
+  ● Test suite failed to run
+
+    Custom deploy script failed: Error: Command failed with exit code 1: ./deploy.sh
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+end of test/e2e/app-dir/actions/actions.test.ts output
+test/e2e/app-dir/actions/actions.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+// Shape 2: the deploy script exits 0 but its stdout is not a bare URL (the
+// #1515 leaked-banner root cause). Same "no cases printed" shape.
+const SAMPLE_DEPLOY_SCRIPT_INVALID_URL_OUTPUT = `
+total: 1
+Starting test/e2e/app-dir/segment-cache/segment-cache.test.ts retry 0/2
+##[group]❌ test/e2e/app-dir/segment-cache/segment-cache.test.ts output
+[e2e-deploy] running next build
+  ● Test suite failed to run
+
+    Custom deploy script returned invalid URL: undefined
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:225:13)
+
+end of test/e2e/app-dir/segment-cache/segment-cache.test.ts output
+test/e2e/app-dir/segment-cache/segment-cache.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+// Shape 3: the `beforeAll`-cascade shape (#1520's "every case in the file
+// failed before a request was made") — jest DOES enumerate the describe
+// block's individual `it`s and marks each ✕ with the hook's own error, so
+// `cases` is non-empty. Before #1520 this classified as 'assertion' (the
+// literal bug the issue reports); 'deploy' must take PRIORITY over the
+// per-case markers, because the deploy script — not those cases — is why the
+// file never produced a real result.
+const SAMPLE_DEPLOY_SCRIPT_CASCADE_OUTPUT = `
+total: 1
+Starting test/e2e/app-dir/actions-alt/actions-alt.test.ts retry 0/2
+##[group]❌ test/e2e/app-dir/actions-alt/actions-alt.test.ts output
+[e2e-deploy] running next build
+  ✕ server action › one (2 ms)
+  ✕ server action › two (1 ms)
+
+  ● server action › one
+
+    Custom deploy script failed: Error: Command failed with exit code 1: ./deploy.sh
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● server action › two
+
+    Custom deploy script failed: Error: Command failed with exit code 1: ./deploy.sh
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+end of test/e2e/app-dir/actions-alt/actions-alt.test.ts output
+test/e2e/app-dir/actions-alt/actions-alt.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+describe('scripts/e2e-summary.mjs — deploy-script failures classify as kind "deploy" (#1520)', () => {
+  it('classifies "Custom deploy script failed: …" as kind "deploy"', () => {
+    const s = summarize(SAMPLE_DEPLOY_SCRIPT_FAILED_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+    });
+    expect(s.failed).toBe(1);
+    expect(s.failures).toEqual([
+      expect.objectContaining({
+        file: 'test/e2e/app-dir/actions/actions.test.ts',
+        kind: 'deploy',
+      }),
+    ]);
+  });
+
+  it('classifies "Custom deploy script returned invalid URL: …" as kind "deploy"', () => {
+    const s = summarize(SAMPLE_DEPLOY_SCRIPT_INVALID_URL_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '2/16',
+      excluded: 0,
+    });
+    expect(s.failed).toBe(1);
+    expect(s.failures).toEqual([
+      expect.objectContaining({
+        file: 'test/e2e/app-dir/segment-cache/segment-cache.test.ts',
+        kind: 'deploy',
+      }),
+    ]);
+  });
+
+  it('the beforeAll cascade (every case failed before a request was made) still classifies as "deploy", not "assertion"', () => {
+    const s = summarize(SAMPLE_DEPLOY_SCRIPT_CASCADE_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '3/16',
+      excluded: 0,
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure.kind).toBe('deploy');
+    // The per-case names are still carried (they are real evidence of the
+    // cascade), just not what decides the kind.
+    expect(failure.cases).toEqual(['server action › one', 'server action › two']);
+  });
+
+  it('a deploy-classified failure is never counted as notRun (it is a real, attributed failure)', () => {
+    const s = summarize(SAMPLE_DEPLOY_SCRIPT_FAILED_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+    });
+    expect(s.notRun).toBe(0);
+    expect(Object.keys(s)).not.toContain('notRunFiles');
+  });
+
+  it('does NOT misclassify an ordinary assertion failure as "deploy" (no false positive)', () => {
+    const s = summarize(SAMPLE_DEPLOY_RUNNER_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '1/4',
+      excluded: 0,
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure.kind).not.toBe('deploy');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1550 round 2 (lead-directed) — a round-1 review of #1520 found the classifier
+// matched the "Custom deploy script …" phrase ANYWHERE on any line, across every
+// retry, file-wide — so a genuine regression could read as harness noise. Fixed
+// two ways:
+//   1. the deploy marker is ANCHORED to the start of its own line (an assertion
+//      whose message merely CONTAINS the phrase, or a stray log echo, no longer
+//      matches);
+//   2. classification is scoped to the FINAL retry attempt only, and ranked PER
+//      CASE-BLOCK, with 'deploy' BELOW 'timeout' and 'assertion' — a case
+//      genuinely explained by something else is never demoted to harness noise.
+// Every fixture below is a genuine, real red that must NOT read as 'deploy'.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const F1550 = 'test/e2e/app-dir/x/x.test.ts';
+/** Wrap ONE retry's body in the real run-tests.js group markers. */
+function wrapOneRetry(body: string) {
+  return `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+${body}
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`;
+}
+
+describe('scripts/e2e-summary.mjs — deploy is ranked below assertion/timeout, per case (#1550 round 2)', () => {
+  it('an assertion whose OWN message merely contains the deploy phrase is NOT deploy (the anchor fix)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ error page › renders deploy error (5 ms)
+
+  ● error page › renders deploy error
+
+    expect(received).toContain(expected)
+    Expected substring: "Custom deploy script failed"
+    Received string:    "<html>ok</html>"
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('a mixed file (one createNext deploy failure, one genuine assertion failure) is NOT deploy', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ block A › one (2 ms)
+  ✕ block B › real (40 ms)
+
+  ● block A › one
+
+    Custom deploy script failed: Error: Command failed with exit code 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● block B › real
+
+    expect(received).toBe(expected)
+    Expected: 200
+    Received: 500
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('retry 0 hitting a deploy failure then retry 1 failing a genuine assertion (same file) is NOT deploy — final retry only', () => {
+    const s = summarize(
+      `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+  ● Test suite failed to run
+    Custom deploy script failed: Error: exit 1
+end of ${F1550} output
+Starting ${F1550} retry 1/2
+##[group]❌ ${F1550} output
+  ✕ real › case (30 ms)
+  ● real › case
+    expect(received).toBe(expected)
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`,
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('a real 60s timeout plus a deploy line in another case is "timeout", never "deploy" (precedence)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › slow (60001 ms)
+  ● a › slow
+    thrown: "Exceeded timeout of 60000 ms for a test.
+  ● b › other
+    Custom deploy script returned invalid URL: undefined
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('timeout');
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('retry 0 failing a genuine assertion then retry 1 hitting a deploy failure (same file) IS deploy — stale retry-0 evidence must not linger', () => {
+    // The inverse of the "final retry only" test above: this is what proves the
+    // per-retry RESET is load-bearing, not just harmless. If retry 0's real
+    // assertion evidence were never cleared, it would wrongly out-vote retry
+    // 1's clean deploy-only outcome (assertion ranks above deploy) even though
+    // the file's ACTUAL final state is a harness failure, not a code bug.
+    const s = summarize(
+      `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+  ✕ real › case (30 ms)
+  ● real › case
+    expect(received).toBe(expected)
+end of ${F1550} output
+Starting ${F1550} retry 1/2
+##[group]❌ ${F1550} output
+  ● Test suite failed to run
+    Custom deploy script failed: Error: exit 1
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`,
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+  });
+
+  it('a server log line that echoes the deploy phrase (not the harness marker itself) is NOT deploy', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › b (3 ms)
+  ● a › b
+    expect(received).toBe(expected)
+[server] Custom deploy script failed? no
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // #171 sys-design follow-up — the TRUNCATION marker. A shard KILLED mid-run
 // (job/step timeout, runner eviction) reports the partial results its tee'd
 // runner.log accumulated — indistinguishable from a complete run: {passed: 20,

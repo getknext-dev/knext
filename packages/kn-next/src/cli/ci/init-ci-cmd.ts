@@ -12,7 +12,13 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createLogger } from "../../utils/logger";
 import { handleUsageError, UsageError } from "../shared";
-import { initCi, nextSteps, RBAC_PATH, WORKFLOW_PATH } from "./init-ci";
+import {
+    initCi,
+    nextSteps,
+    RBAC_PATH,
+    skippedFileMessage,
+    WORKFLOW_PATH,
+} from "./init-ci";
 import { pushKubeconfigSecret } from "./push-kubeconfig-secret";
 
 const log = createLogger({ module: "init-ci" });
@@ -92,8 +98,8 @@ export async function initCiMain(argv: string[]): Promise<number> {
     for (const f of result.written) log.info(`wrote ${f}`);
     for (const f of result.skipped) {
         // Not an error, and not silent either: a generator that quietly did
-        // nothing is how someone concludes the tool is broken.
-        log.warn(`${f} already exists — left alone (use --force to overwrite)`);
+        // nothing is how someone concludes the tool is broken (#1535).
+        log.warn(skippedFileMessage(f));
     }
 
     process.stdout.write(`\n${nextSteps(values.namespace)}\n`);

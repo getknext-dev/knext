@@ -24,6 +24,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // biome-ignore lint/suspicious/noExplicitAny: thin mock factory plumbing
 type AnyFn = (...args: unknown[]) => any;
@@ -124,7 +125,7 @@ mock.module("../cli/runtime-image", () => ({
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 // `warn` is hoisted out (not a fresh `mock()` per call) so tests can assert on
 // it — the #1283 round 3 opt-out announcement.

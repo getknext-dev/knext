@@ -94,8 +94,8 @@ function stub(overrides: {
 
 const probeImage = mock(async () => "ok" as const);
 
-async function schemaCheck(kubectl: KubectlFn) {
-    const report = await runDoctor({ kubectl, probeImage });
+async function schemaCheck(kubectl: KubectlFn, verbose = false) {
+    const report = await runDoctor({ kubectl, probeImage }, verbose);
     const check = report.checks.find((c) => c.id === "crd-schema");
     if (!check) throw new Error("doctor has no `crd-schema` check");
     return { check, report };
@@ -132,8 +132,20 @@ describe("doctor — NextApp CRD schema coverage", () => {
             stub({ openapi: { ok: true, stdout: openApiDoc(schemaOf(crd)) } }),
         );
         expect(check.status).toBe("fail");
-        expect(check.detail).toMatch(/spec\.database\.roSecretRef/);
+        // #1535: the default detail is ONE actionable sentence — no field
+        // names, no raw diagnosis dump.
+        expect(check.detail).toBe(
+            "operator behind CLI: the installed CRD is missing 1 field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI).",
+        );
+        expect(check.detail).not.toMatch(/spec\.database\.roSecretRef/);
         expect(report.exitCode).toBe(1);
+
+        const { check: verboseCheck } = await schemaCheck(
+            stub({ openapi: { ok: true, stdout: openApiDoc(schemaOf(crd)) } }),
+            true,
+        );
+        expect(verboseCheck.detail).toMatch(/spec\.database\.roSecretRef/);
+        expect(verboseCheck.detail).toStartWith("operator behind CLI:");
     });
 
     it("is about COVERAGE, not existence — a served CRD is not enough to pass", async () => {
@@ -149,6 +161,7 @@ describe("doctor — NextApp CRD schema coverage", () => {
         delete spec.properties.buildId;
         const { check } = await schemaCheck(
             stub({ crd: { ok: true, stdout: JSON.stringify(crd) } }),
+            true,
         );
         expect(check.status).toBe("fail");
         expect(check.detail).toMatch(/spec\.buildId/);
