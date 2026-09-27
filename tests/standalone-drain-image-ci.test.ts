@@ -457,6 +457,20 @@ describe('the self-contained drain legs cannot be switched off or weakened (roun
     expect(code).toMatch(
       /await new Promise\(\(r\) => setTimeout\(r, PRE_TERM_MS\)\);\s*const termAt = Date\.now\(\);/,
     );
+    // The upper half and the ordering are pinned by USE, not only by value:
+    // a clean drain fits DRAIN_BOUND_MS (<= 15 s, far under the grace window),
+    // `docker wait` gives up before a hardcap could end the container, and RAN
+    // is required after START.
+    expect(bound, 'DRAIN_BOUND_MS must stay tight').toBeLessThanOrEqual(15_000);
+    expect(code, 'elapsedMs must be held under DRAIN_BOUND_MS').toMatch(
+      /expect\(\s*elapsedMs,[^;]*\)\.toBeLessThan\(DRAIN_BOUND_MS\);/,
+    );
+    expect(raw, '`docker wait` must time out well before the hardcap').toMatch(
+      /run\("docker", \["wait", container\], \{\s*timeout: DRAIN_BOUND_MS \* 2,\s*\}\);/,
+    );
+    expect(code, 'RAN must be required to come after START').toMatch(
+      /expect\(\s*done,[^;]*\)\.toBeGreaterThan\(start\);/,
+    );
     expect(code, 'elapsedMs must be held to MIN_CLEAN_DRAIN_MS').toMatch(
       /expect\(\s*elapsedMs,[^;]*\)\.toBeGreaterThanOrEqual\(MIN_CLEAN_DRAIN_MS\);/,
     );
