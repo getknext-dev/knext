@@ -8,7 +8,7 @@
  * `scripts/kind-manifests/pin-known-images.sh` against evasive manifests.
  * Each mutation below removes ONE rule the spec claims to enforce and
  * requires the spec to go RED; the file is then restored byte-identically
- * and the spec must be GREEN again. Verdicts come from the spec's exit code
+ * to its GREEN baseline (and the spec is re-run GREEN once at the end). Verdicts come from the spec's exit code
  * only — never from grepping its output.
  *
  * One mutation per bypass class the #1410 reviewer named (and per rule the
@@ -43,6 +43,17 @@
  *             quotes), M86 M87 M88 M89 (positional parameters: not followed, `set`
  *             rewrite, no static call site, value reference), M90 (general walk:
  *             `set --` carries no producer)
+ *   round 10 — the command word is found after any prefix, and a helper that
+ *             binds a name it is given is a run-time-name write:
+ *             M91 M92 M93 M94 (attached / bare redirection, assignment prefix,
+ *             wrapper hide the command), M95 (non-literal command word), M96
+ *             (`time -p`), M97 (`>&2` splits the command), M98 (helper body is
+ *             one word), M99 (`>&2` splits a helper command), M100 (helper
+ *             command not normalised), M101 (nameref target), M102 (`${!x:=}`),
+ *             M103 (`eval` of a run-time string)
+ *
+ * Each subject is checked byte-identical to its green baseline after every
+ * restore, instead of re-running the spec; the spec runs green once at the end.
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -65,7 +76,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(90);
+declareMutations(103);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -90,9 +101,27 @@ function specPasses() {
 let caught = 0;
 let decorative = 0;
 
-/** Applies one mutation to `file`, requires RED, restores, requires GREEN. */
+// The BASELINE bytes of every subject. The spec is deterministic over them, so
+// "every subject is byte-identical to its baseline" + "the baseline is GREEN"
+// implies GREEN: that replaces a full spec run after each restore (which was
+// half of the ~34 min wall time) without weakening the check. restore() already
+// refuses a non-byte-identical restore; this also catches residue in a subject
+// OTHER than the one just mutated. The spec is re-run GREEN once at the end, so
+// a non-deterministic spec cannot hide behind the byte check either.
+const SUBJECTS = [SCANNER, PIN_SCRIPT, DRILL_SCRIPT, KNATIVE_SCRIPT];
+const baselineBytes = new Map(SUBJECTS.map((f) => [f, readFileSync(f)]));
+function assertSubjectsAtBaseline(when) {
+  for (const f of SUBJECTS)
+    if (!readFileSync(f).equals(baselineBytes.get(f))) {
+      console.error(`   FATAL: ${f} is not byte-identical to its baseline ${when}`);
+      process.exit(1);
+    }
+}
+
+/** Applies one mutation to `file`, requires RED, restores byte-identically. */
 function prove(label, file, anchor, replacement) {
   console.log(`── ${label}`);
+  assertSubjectsAtBaseline('before this mutation');
   const snap = snapshot(file);
   try {
     mutate(snap, anchor, replacement);
@@ -107,10 +136,7 @@ function prove(label, file, anchor, replacement) {
   } finally {
     restore(snap);
   }
-  if (!specPasses()) {
-    console.error(`   FATAL: ${SPEC} did not go green again after restore`);
-    process.exit(1);
-  }
+  assertSubjectsAtBaseline('after restore');
 }
 
 console.log('Baseline: the spec must be GREEN before anything is mutated.');
@@ -620,6 +646,95 @@ prove(
   "      (!!st.vars.get('@')?.content && hasPositional(value));",
   '      false;',
 );
+
+// round 10 — the command word is found after any prefix (root cause 1), and a
+// helper that binds a name it is GIVEN is a run-time-name write (root cause 2).
+prove(
+  'M91 command word: an attached redirection prefix (`2>/dev/null read`) hides the command',
+  SCANNER,
+  String.raw`    else if (REDIR_ATTACHED.test(w) && !/^<\(/.test(w)) out.shift();`,
+  String.raw`    else if (REDIR_ATTACHED.test(w) && !/^<\(/.test(w)) return out;`,
+);
+prove(
+  'M92 command word: a bare redirection operator (`< f read`) hides the command',
+  SCANNER,
+  '    else if (REDIR_BARE.test(w)) out.splice(0, 2);',
+  '    else if (REDIR_BARE.test(w)) return out;',
+);
+prove(
+  'M93 command word: an assignment prefix (`IFS=, read`) hides the command',
+  SCANNER,
+  String.raw`    else if (/^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/.test(w)) out.shift();`,
+  String.raw`    else if (/^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/.test(w)) return out;`,
+);
+prove(
+  'M94 command word: a pass-through wrapper (`builtin printf -v`) hides the command',
+  SCANNER,
+  '    else if (WRAPPER_OPTS.has(u)) {',
+  '    else if (false) {',
+);
+prove(
+  'M95 command word: a non-literal command word (`{read,-r} V`) cannot bind a name',
+  SCANNER,
+  '  if (!RUNTIME.test(ws[0]) && !PLAIN_COMMAND.test(cmd)) return true;',
+  '  if (false) return true;',
+);
+prove(
+  'M96 command word: `time -p` leaves `-p` as the command',
+  SCANNER,
+  String.raw`time(?:\s+(?:-p|--))*)\s+)*/;`,
+  String.raw`time)\s+)*/;`,
+);
+prove(
+  'M97 write sites: the `&` of `>&2` splits the command (`>&2 read V`)',
+  SCANNER,
+  '    if (isRedirectionChar(before, m.index)) continue;',
+  '    if (false) continue;',
+);
+prove(
+  'M98 run-time names: a helper body (`f() { printf -v "$1" …; }`) is one word headed by `f()`',
+  SCANNER,
+  String.raw`    if (!/[;\n&|(){}]/.test(c) || isRedirectionChar(text, i)) return undefined;`,
+  String.raw`    if (!/[;\n&|]/.test(c) || isRedirectionChar(text, i)) return undefined;`,
+);
+prove(
+  'M99 run-time names: the `&` of `>&2` splits a helper command (`>&2 read "$1"`)',
+  SCANNER,
+  String.raw`    if (!/[;\n&|(){}]/.test(c) || isRedirectionChar(text, i)) return undefined;`,
+  String.raw`    if (!/[;\n&|(){}]/.test(c)) return undefined;`,
+);
+prove(
+  'M100 run-time names: the command word is not normalised (`2>/dev/null read -r "$1"`)',
+  SCANNER,
+  '    const raw = commandHead(words(seg));',
+  '    const raw = words(seg);',
+);
+prove(
+  'M101 run-time names: a nameref whose target is run-time or bound later is not one',
+  SCANNER,
+  '        else if (nameref && (',
+  '        else if (false && nameref && (',
+);
+prove(
+  'M102 run-time names: an indirect `:=` default (through `!x`) assigning a run-time name is not one',
+  SCANNER,
+  String.raw`  if (/\$\{![\w@*#?$-]+(?:\[[^\]]*\])?:?=/.test(text))`,
+  '  if (false)',
+);
+prove(
+  'M103 run-time names: `eval "read -r $1"` in a helper is not one',
+  SCANNER,
+  "    if (cmd === 'eval') {\n",
+  '    if (false) {\n',
+);
+
+// Every subject is byte-identical to its green baseline (checked after each
+// restore); one final run proves the spec itself did not drift.
+assertSubjectsAtBaseline('at the end');
+if (!specPasses()) {
+  console.error(`   FATAL: ${SPEC} is not green after the last restore`);
+  process.exit(1);
+}
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);
 if (decorative > 0) {

