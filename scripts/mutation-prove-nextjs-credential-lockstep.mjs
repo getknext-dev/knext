@@ -1,15 +1,7 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for `tests/nextjs-credential-lockstep.test.ts` (#1376,
- * rev-1379 rounds 2 and 3; re-credentialing round rev-1376-r2).
- *
- * Re-credentialing round (rev-1376-r2): the credential (`NEXTJS_REF`) and the
- * shipped scaffold pin are now EQUAL (`v16.3.5`), closing the divergence
- * rounds 2-3 below documented. Findings-2 mutations 4-7 were rewritten to
- * mutate the CURRENT docs text (the old "divergence paragraph" text they
- * mutated no longer exists) — they now probe the credential-target citation
- * and the "in lockstep" plain-language claim instead of the old
- * "newer Next.js release" / "16.3.x" divergence wording.
+ * rev-1379 rounds 2 and 3).
  *
  * Round 2: the original test read only `test-e2e-deploy.yml`'s `NEXTJS_REF`
  * env fallback, so a bump to `test-e2e-deploy.yml`'s workflow_dispatch
@@ -87,56 +79,57 @@ function editsOf(m) {
 const MUTATIONS = [
   // ── Finding 1: the scan must catch every dispatch-default and env-fallback ──
   {
-    label:
-      'test-e2e-deploy.yml: drift the workflow_dispatch nextjsRef DEFAULT from the shipped pin',
+    label: 'test-e2e-deploy.yml: bump the workflow_dispatch nextjsRef DEFAULT to the shipped pin',
     subject: 'testE2eDeploy',
     anchor:
-      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.5'",
+      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.2.0'",
     replacement:
       "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.3'",
   },
   {
-    label: 'compat-vinext.yml: drift the workflow_dispatch nextjsRef DEFAULT from the shipped pin',
+    label: 'compat-vinext.yml: bump the workflow_dispatch nextjsRef DEFAULT to the shipped pin',
     subject: 'compatVinext',
     anchor:
-      "        description: 'vercel/next.js git ref to test against (pinned tag >= v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.5'",
+      "        description: 'vercel/next.js git ref to test against (pinned tag >= v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.2.0'",
     replacement:
       "        description: 'vercel/next.js git ref to test against (pinned tag >= v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.3'",
   },
   {
-    label: 'compat-vinext.yml: drift the NEXTJS_REF env FALLBACK from the shipped pin',
+    label: 'compat-vinext.yml: bump the NEXTJS_REF env FALLBACK to the shipped pin',
     subject: 'compatVinext',
-    anchor: "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.3.5' }}",
+    anchor: "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}",
     replacement: "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.3.3' }}",
   },
 
-  // ── Finding 2: docs must track the manifest, and plainly explain lockstep ──
-  // (rev-1376-r2: the credential and the shipped pin are now EQUAL, v16.3.5;
-  // these mutations replace the old "drift/delete the divergence paragraph"
-  // probes, which mutated text that no longer exists post-re-credentialing.)
+  // ── Finding 2: docs must track the manifest, and explain the divergence ────
   {
-    label: 'docs/compat-matrix.md: drift the credential-target citation from the manifest',
+    label: 'docs/compat-matrix.md: drift the cited vercel/next.js version from the manifest',
     subject: 'docsMatrixMd',
-    anchor: 'The credential lanes run against `vercel/next.js` **v16.3.5**',
-    replacement: 'The credential lanes run against `vercel/next.js` **v16.9.9**',
+    anchor: 'against `vercel/next.js` **v16.2.0**, Node runtime.',
+    replacement: 'against `vercel/next.js` **v16.3.3**, Node runtime.',
   },
   {
-    label: 'compat-matrix.mdx: drift the credential-target citation from the manifest',
+    label: 'compat-matrix.mdx: drift the cited Next.js version from the manifest',
     subject: 'docsMatrixMdx',
-    anchor: 'are pinned against Next.js v16.3.5. No fresh scheduled run',
-    replacement: 'are pinned against Next.js v16.9.9. No fresh scheduled run',
+    anchor:
+      'nightly most recently observed **778 tests passed, 0 failed**, against Next.js v16.2.0.',
+    replacement:
+      'nightly most recently observed **778 tests passed, 0 failed**, against Next.js v16.3.3.',
   },
   {
-    label: 'compat-matrix.mdx: remove the "in lockstep" plain-language claim',
+    label: 'compat-matrix.mdx: delete the newer-Next-release divergence explanation',
     subject: 'docsMatrixMdx',
-    anchor: '**The compat credential is now in lockstep with the shipped Next.js pin (16.3.x).**',
-    replacement: '**The compat credential and the shipped Next.js pin (16.3.x) currently differ.**',
+    anchor:
+      '\n**New apps pin a newer Next.js release than the version measured above.** The scaffold ships\nNext.js 16.3.x, while the numbers on this page were measured against an older pinned release. The\nnewer release currently trips a build-tool bug that is being tracked upstream, so re-measuring\nagainst it would take every Turbopack-based row on this page to zero rather than show real\nprogress. The credentialed numbers will move forward once that is fixed.\n',
+    replacement: '\n',
   },
   {
-    label: "docs/compat-matrix.md: remove the 'in lockstep' plain-language claim",
-    subject: 'docsMatrixMd',
-    anchor: 'the credential lanes and the shipped\n> scaffold pin are now in lockstep.**',
-    replacement: 'the credential lanes and the shipped\n> scaffold pin currently differ.**',
+    label: "compat-matrix.mdx: drop the '16.3.x' version from the divergence explanation",
+    subject: 'docsMatrixMdx',
+    anchor:
+      '**New apps pin a newer Next.js release than the version measured above.** The scaffold ships\nNext.js 16.3.x, while',
+    replacement:
+      '**New apps pin a newer Next.js release than the version measured above.** The scaffold ships\na newer Next.js line, while',
   },
 
   // ── Round 3, finding 1: every NEXTJS_REF assignment form, not just the ──

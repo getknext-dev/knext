@@ -178,18 +178,23 @@ it is gate integrity, not polish.
 ### The Next.js version the credential measures
 
 The credential's `NEXTJS_REF` (`test-e2e-deploy.yml`, `compat-vinext.yml`) and the scaffold's
-shipped `next` pin (`packages/kn-next/templates/app/package.json.hbs`) are **required to stay in
-lockstep** — `.github/compat-credentialed-next-version.json` is the one citable source of "what
-Next.js version this is credentialed on", and `tests/nextjs-credential-lockstep.test.ts` fails CI
-the moment either value drifts from the other without a reviewed manifest update in the same PR
-(#1376). They briefly, deliberately diverged (credential pinned to v16.2.0, scaffold shipping
-16.3.3) because Next 16.3.0 introduced a confirmed upstream Turbopack + `adapterPath` +
-`output:'standalone'` regression (#1372) that would have zeroed out every Turbopack-credentialed
-cell; the divergence was documented, not hidden. It is resolved as of 2026-09-27: the regression is
-fixed upstream in Next 16.3.5 (#1386), so both the credential lanes and the scaffold now pin
-**v16.3.5**. No v1.0 release candidate has been cut yet, so no scheduled credential night has
-measured this pin — the 788/0 evidence on record (`docs/compat-matrix.md`) is still attributed to
-v16.2.0, the version it was actually measured against.
+shipped `next` pin (`packages/kn-next/templates/app/package.json.hbs`) are required to stay
+in documented lockstep — `.github/compat-credentialed-next-version.json` is the one citable
+source of "what Next.js version this is credentialed on", and
+`tests/nextjs-credential-lockstep.test.ts` fails CI the moment either value drifts from the
+other without a reviewed manifest update (#1376). They diverge today: credential `v16.2.0`,
+scaffold `16.3.5`. Next 16.3.0 introduced a confirmed upstream Turbopack + `adapterPath` +
+`output:'standalone'` regression (#1372); that half is now fixed (Next 16.3.5, #1386,
+live-repro-verified) and the scaffold bumped to it. **Bumping the credential to match is NOT
+just a pin edit, though — attempted and reverted 2026-09-27 (#1376):** it also trips a
+separate, mechanized, CI-blocking guard (`tests/deploy-manifest.test.ts`, ADR-0007's
+graduation addendum) requiring every one of the 14 stamped entries in
+`test/deploy-tests-manifest.knext.json`'s `$knextQuarantines` ledger to be individually
+re-audited against the new ref — each entry cites specific upstream evidence (e.g. a named
+upstream PR fixing the exact failure signature) that only a fresh compat-suite dispatch
+against v16.3.5 can re-verify. That real evidence-gathering is out of a single PR's scope and
+is the actual remaining blocker, tracked as a properly-scoped follow-up on #1376 — not the
+build regression, which is already fixed.
 
 ~~**Bun is out of the 1.0 verified surface.**~~ **Superseded (2026-09-23, ADR-0054 + ADR-0056).**
 This paragraph said a Bun lane red does not block 1.0. It no longer holds: bun-standalone is the

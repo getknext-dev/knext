@@ -52,7 +52,7 @@ on:
       nextjsRef:
         description: 'vercel/next.js git ref to test against (pinned tag >= v16.2.0; do NOT use canary)'
         required: false
-        default: 'v16.3.5'
+        default: 'v16.2.0'
       bun-version:
         description: 'Bun for the compiled binary (oven-sh/setup-bun spec). ADR-0048 floor is 1.4.0 — 1.3.x compiles a binary that boots ~2x slower.'
         required: false
@@ -88,7 +88,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 env:
-  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.3.5' }}
+  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}
   # DECLARED, not inferred from the artifacts that arrived — inference is the
   # defect run 30790778590 taught the node lane (fifteen arriving shards
   # "declare" fifteen and reconcile perfectly). Kept equal to the node lane's

@@ -12,18 +12,17 @@ description: Honest, evidence-gated status of what the knext adapter supports.
 Next.js app more than one way (standalone on Node or Bun, built with Turbopack or webpack, or the
 `vinext` build), and each combination is tracked separately rather than folded into a single "the suite is green" headline.
 The most-verified cell today is the **Turbopack build on the Node runtime**: the main-branch
-nightly most recently observed **778 tests passed, 0 failed**, on Next.js v16.2.0. The default
+nightly most recently observed **778 tests passed, 0 failed**, against Next.js v16.2.0. The default
 cell — Turbopack on the Bun runtime, the compiled bytecode executable — and the two webpack cells
 each have one 778/0 run behind them. That is current evidence, not a completed credential — see
 [Verified compatibility](/docs/compat-suite) for what credentialing requires and where every cell
 currently stands.
 
-**The compat credential is now in lockstep with the shipped Next.js pin (16.3.x).** A confirmed
-upstream Turbopack build-tool regression previously blocked re-measuring the credential on the
-newer release the scaffold ships; that regression is fixed upstream now, so the credential lanes
-are pinned against Next.js v16.3.5. No fresh scheduled run has recorded a result on the new pin
-yet — the 778/0 numbers above remain the most recent recorded evidence and were measured on the
-older release.
+**New apps pin a newer Next.js release than the version measured above.** The scaffold ships
+Next.js 16.3.x, while the numbers on this page were measured against an older pinned release. The
+newer release currently trips a build-tool bug that is being tracked upstream, so re-measuring
+against it would take every Turbopack-based row on this page to zero rather than show real
+progress. The credentialed numbers will move forward once that is fixed.
 </Callout>
 
 ## Legend
