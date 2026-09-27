@@ -50,11 +50,14 @@ const STUBS: Record<string, string> = {
     `printf '%s\\n' "$@" > "$f.argv"`,
     // The env twin of `--ignore-scripts`: either would stop sqlite3's install script (the build).
     `printf '%s|%s' "\${npm_config_ignore_scripts-<unset>}" "\${NPM_CONFIG_IGNORE_SCRIPTS-<unset>}" > "$f.ign"`,
+    // SCAN, not enumerate: npm treats EVERY npm_config_* env var (any case) as config —
+    // dry_run, omit, global, prefix, ignore_scripts, and any future one. Dump them all.
+    `env | grep -i '^npm_config_' | LC_ALL=C sort > "$f.env" || true`,
     'exit 0',
   ].join('\n'),
 };
 
-type Call = { flag: string; argv: string[]; ign?: string };
+type Call = { flag: string; argv: string[]; ign?: string; env?: string[] };
 
 function pkg(root: string, rel: string, manifest: object) {
   const dir = join(root, 'node_modules', rel);
@@ -62,6 +65,10 @@ function pkg(root: string, rel: string, manifest: object) {
   writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest));
   writeFileSync(join(dir, 'addon.node'), '');
 }
+
+/** The runner's env WITHOUT ambient npm config (`npm run`/.npmrc set npm_config_*): the test asserts what the SCRIPT adds. */
+const cleanAmbientEnv = (base: NodeJS.ProcessEnv = process.env) =>
+  Object.fromEntries(Object.entries(base).filter(([k]) => !/^npm_config_/i.test(k)));
 
 /** Runs the script (default: the real one) over a fixture tree; returns the npm calls it made. */
 function run(scriptPath = SCRIPT_PATH): { status: number | null; calls: Call[]; out: string } {
@@ -92,7 +99,7 @@ function run(scriptPath = SCRIPT_PATH): { status: number | null; calls: Call[]; 
     });
     pkg(root, 'nolock', { name: 'nolock', version: '1.0.0' });
     const r = spawnSync('sh', [scriptPath, root, LOCKFILES_DIR], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REC: rec },
+      env: { ...cleanAmbientEnv(), PATH: `${bin}:${process.env.PATH}`, REC: rec },
       encoding: 'utf8',
     });
     const calls: Call[] = [];
@@ -102,6 +109,7 @@ function run(scriptPath = SCRIPT_PATH): { status: number | null; calls: Call[]; 
         flag: readFileSync(`${base}.flag`, 'utf8'),
         argv: readFileSync(`${base}.argv`, 'utf8').split('\n').slice(0, -1),
         ign: readFileSync(`${base}.ign`, 'utf8'),
+        env: readFileSync(`${base}.env`, 'utf8').split('\n').filter(Boolean),
       });
     }
     return { status: r.status, calls, out: `${r.stdout}\n${r.stderr}` };
@@ -133,6 +141,10 @@ const argvViolations = (calls: Call[]) =>
       );
     return true;
   });
+/** The ONLY npm_config_* the script may add is the flag itself, exactly once (any other key/value = config override). */
+const ENV_ALLOWED = [`${FLAG}=true`];
+const envViolations = (calls: Call[]) =>
+  calls.filter((c) => JSON.stringify(c.env ?? ['<missing>']) !== JSON.stringify(ENV_ALLOWED));
 const scriptsDisabled = (calls: Call[]) => calls.filter((c) => c.ign !== '<unset>|<unset>');
 
 describe('the musl rebuild runs every npm install with npm_config_build_from_source=true (#1426)', () => {
@@ -154,6 +166,7 @@ describe('the musl rebuild runs every npm install with npm_config_build_from_sou
     // Exact argv: no extra word (--ignore-scripts, --dry-run, --foo) at ANY site.
     expect(argvViolations(calls)).toEqual([]);
     expect(scriptsDisabled(calls)).toEqual([]);
+    expect(envViolations(calls)).toEqual([]);
     expect(
       calls
         .filter((c) => c.argv[0] === 'install')
@@ -191,5 +204,33 @@ describe('the musl rebuild runs every npm install with npm_config_build_from_sou
       expect(argvViolations([{ ...ok, argv }]).length, argv.join(' ')).toBe(1);
     expect(scriptsDisabled([{ ...ok, argv: CI_ARGV, ign: 'true|<unset>' }]).length).toBe(1);
     expect(scriptsDisabled([{ ...ok, argv: CI_ARGV, ign: '<unset>|true' }]).length).toBe(1);
+  });
+
+  it('the env scan is real: any npm_config_* other than the flag (any case, any key) is a violation', () => {
+    const ok = { flag: 'true', argv: CI_ARGV };
+    expect(envViolations([{ ...ok, env: [`${FLAG}=true`] }])).toEqual([]);
+    for (const env of [
+      [],
+      [`${FLAG}=false`],
+      [`${FLAG}=true`, 'NPM_CONFIG_DRY_RUN=true'],
+      [`${FLAG}=true`, 'npm_config_dry_run=true'],
+      [`${FLAG}=true`, 'npm_config_omit=optional'],
+      [`${FLAG}=true`, 'NPM_CONFIG_PREFIX=/x'],
+      [`${FLAG}=true`, 'npm_config_global=true'],
+      [`${FLAG}=true`, 'npm_config_ignore_scripts=1'],
+      [`${FLAG}=true`, `NPM_CONFIG_BUILD_FROM_SOURCE=false`],
+    ])
+      expect(envViolations([{ ...ok, env }]).length, env.join(' ')).toBe(1);
+    expect(envViolations([{ ...ok }]).length).toBe(1);
+  });
+
+  it('ambient npm_config_* in the runner env is scrubbed, so the assertion is about what the script adds', () => {
+    const c = cleanAmbientEnv({
+      PATH: '/x',
+      npm_config_ignore_scripts: 'true',
+      NPM_CONFIG_PREFIX: '/p',
+      HOME: '/h',
+    });
+    expect(Object.keys(c).sort()).toEqual(['HOME', 'PATH']);
   });
 });
