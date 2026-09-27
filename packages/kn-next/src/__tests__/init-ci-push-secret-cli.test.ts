@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
     chmodSync,
+    existsSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
@@ -29,6 +30,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initCiMain } from "../cli/ci/init-ci-cmd";
 import { CLOUD_CREDENTIAL_REFUSAL } from "../cli/ci/kubeconfig-safety";
+import {
+    LEAK_SENTINEL_PREFIX,
+    MALFORMED_TOKEN_KUBECONFIGS,
+} from "./helpers/malformed-kubeconfigs";
 
 let dir: string;
 const savedCwd = process.cwd();
@@ -202,4 +207,27 @@ describe("init-ci --push-secret (#1533)", () => {
         expect(r.status).toBe(1);
         expect(r.combined).not.toContain("the-actual-token-bytes-xyz");
     });
+
+    // Round 2 of #1557: a parse error used to relay the YAML library's
+    // message, which quotes the failing source line — the token line.
+    for (const [name, text] of Object.entries(MALFORMED_TOKEN_KUBECONFIGS)) {
+        it(`${name}: a malformed kubeconfig is refused with no token bytes on stdout/stderr — real child-process capture`, () => {
+            const { binDir, sentinel } = installFakeGh("succeed");
+            const kubeconfigPath = join(dir, `${name}.kubeconfig`);
+            writeFileSync(kubeconfigPath, text);
+
+            const r = runInitCiSubprocess(
+                ["--namespace", "acme", "--push-secret", kubeconfigPath],
+                { PATH: `${binDir}:${savedPath ?? ""}` },
+            );
+
+            expect(r.status).toBe(1);
+            expect(r.combined).toContain(
+                "could not parse this file as a kubeconfig",
+            );
+            expect(r.combined).not.toContain(LEAK_SENTINEL_PREFIX);
+            // Refused before gh: nothing was pushed.
+            expect(existsSync(sentinel)).toBe(false);
+        });
+    }
 });

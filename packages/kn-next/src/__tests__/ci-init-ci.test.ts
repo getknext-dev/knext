@@ -13,6 +13,7 @@
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
     existsSync,
     mkdtempSync,
@@ -239,6 +240,50 @@ describe("mintKubeconfigCommands — knext mints nothing itself (#1533, ADR-0061
         }
         // And documents the --push-secret shortcut.
         expect(steps).toContain("--push-secret");
+    });
+});
+
+describe("mint recipe — round 2 of #1557", () => {
+    /** The guard line, executed under bash exactly as printed. */
+    function runCaGuard(caData: string) {
+        const guard = mintKubeconfigCommands("acme").find((c) =>
+            c.startsWith('[ -n "$CA_DATA" ]'),
+        );
+        expect(guard).toBeDefined();
+        return spawnSync("bash", ["-c", guard ?? "exit 99"], {
+            encoding: "utf8",
+            env: { ...process.env, CA_DATA: caData },
+        });
+    }
+
+    it("warns when the source kubeconfig has no embedded CA (a CA file, or TLS verification skipped)", () => {
+        const r = runCaGuard("");
+        expect(r.status).toBe(0);
+        expect(r.stderr).toContain("warning:");
+        expect(r.stderr).toContain("EMPTY certificate authority");
+    });
+
+    it("is silent when the CA is embedded", () => {
+        const r = runCaGuard("ZmFrZS1jYQ==");
+        expect(r.status).toBe(0);
+        expect(r.stderr).toBe("");
+    });
+
+    it("the guard runs right after CA_DATA is read, before anything is written", () => {
+        const cmds = mintKubeconfigCommands("acme");
+        const read = cmds.findIndex((c) => c.startsWith("CA_DATA="));
+        const guard = cmds.findIndex((c) => c.startsWith('[ -n "$CA_DATA" ]'));
+        const write = cmds.findIndex((c) => c.includes("set-cluster"));
+        expect(read).toBeGreaterThanOrEqual(0);
+        expect(guard).toBe(read + 1);
+        expect(guard).toBeLessThan(write);
+    });
+
+    it("nextSteps states the token's one-year lifetime and how to re-mint it", () => {
+        const steps = nextSteps("acme");
+        expect(steps).toContain("expires after one year");
+        expect(steps).toContain("--duration=8760h");
+        expect(steps).toMatch(/re-run the TOKEN= and set-credentials lines/);
     });
 });
 

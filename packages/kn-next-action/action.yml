@@ -84,7 +84,9 @@ inputs:
       Escape hatch for clusters whose authorizer does not implement
       SelfSubjectRulesReview. It disables a SECURITY check — an unreadable
       policy becomes "proceed" instead of "refuse" — so it is off by default
-      and logs loudly when on.
+      and logs loudly when on. It does NOT disable the refusal of a kubeconfig
+      that needs cloud-account credentials (exec or auth-provider), which
+      always runs.
     required: false
     default: 'false'
   cli:
@@ -137,7 +139,22 @@ runs:
             ;;
         esac
 
-    # ── 2. Credential preflight — refuse more than we asked for ──────────────
+    # ── 2a. Kubeconfig check — ALWAYS runs ───────────────────────────────────
+    # ADR-0061: an exec/auth-provider kubeconfig runs a cloud CLI on this
+    # runner with a cloud account's credentials in scope. Refused here, in its
+    # own step, because it is a local read of the file that needs no
+    # authorizer — `skip-credential-preflight` exists for authorizers that do
+    # not implement the access reviews below, and must not reach this. No
+    # `if:` and no skip branch, by design.
+    - name: Kubeconfig check
+      shell: bash
+      # The app's directory: kubeconfig-check.mjs resolves @getknext/core from here.
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        node "${{ github.action_path }}/kubeconfig-check.mjs"
+
+    # ── 2b. Credential preflight — refuse more than we asked for ─────────────
     # ADR-0049: "a cluster-admin kubeconfig must be refused, not merely
     # discouraged." Asking for less than you are offered is the entire trust
     # argument for handing this action a cluster credential at all.
@@ -151,7 +168,7 @@ runs:
       run: |
         set -euo pipefail
         if [ "$KNEXT_SKIP_PREFLIGHT" = "true" ]; then
-          echo "::warning::Credential preflight SKIPPED. An over-broad kubeconfig will be used as-is."
+          echo "::warning::Credential preflight SKIPPED. An over-broad kubeconfig will be used as-is. (The cloud-credential kubeconfig check above still ran.)"
           exit 0
         fi
         node "${{ github.action_path }}/preflight.mjs" --namespace "$KNEXT_NAMESPACE"

@@ -12,6 +12,14 @@ import {
     CLOUD_CREDENTIAL_REFUSAL,
     classifyKubeconfigSafety,
 } from "../cli/ci/kubeconfig-safety";
+import {
+    LEAK_SENTINEL_PREFIX,
+    MALFORMED_TOKEN_KUBECONFIGS,
+} from "./helpers/malformed-kubeconfigs";
+
+/** The ONLY shape a parse failure may take: fixed text + optional line number. */
+const INVALID_YAML_REASON =
+    /^could not parse this file as a kubeconfig \(invalid YAML(?: near line \d+)?\)\. Its contents are not shown\.$/;
 
 const TOKEN_KUBECONFIG = `
 apiVersion: v1
@@ -146,5 +154,100 @@ current-context: exec-context
         expect(
             classifyKubeconfigSafety("apiVersion: v1\nkind: Config\n").ok,
         ).toBe(true);
+    });
+});
+
+/**
+ * Round 2 (review of #1557). kubectl decodes kubeconfigs with go-yaml, which
+ * RESOLVES YAML merge keys (`<<`). A classifier that parses without merge
+ * support keeps `<<` as a literal key and never sees the `exec:` kubectl
+ * will run — measured: `kubectl config view --raw` prints the exec block for
+ * both forms below.
+ */
+const MERGE_HEAD = [
+    "apiVersion: v1",
+    "kind: Config",
+    "clusters:",
+    "- name: c",
+    "  cluster: {server: https://1.2.3.4}",
+    "contexts:",
+    "- name: x",
+    "  context: {cluster: c, user: u}",
+    "current-context: x",
+].join("\n");
+
+describe("classifyKubeconfigSafety — YAML merge keys and depth (round 2)", () => {
+    it("refuses exec injected through a `<<: *anchor` merge key", () => {
+        const src =
+            "x: &a\n  exec: {command: aws, apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never}\n" +
+            `${MERGE_HEAD}\nusers:\n- name: u\n  user:\n    <<: *a\n`;
+        const v = classifyKubeconfigSafety(src);
+        expect(v.ok).toBe(false);
+        expect(v.reason).toBe(CLOUD_CREDENTIAL_REFUSAL);
+    });
+
+    it("refuses exec injected through an inline `<<: {exec: …}` merge key", () => {
+        const src = `${MERGE_HEAD}\nusers:\n- name: u\n  user:\n    <<: {exec: {command: aws, apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never}}\n`;
+        const v = classifyKubeconfigSafety(src);
+        expect(v.ok).toBe(false);
+        expect(v.reason).toBe(CLOUD_CREDENTIAL_REFUSAL);
+    });
+
+    it("refuses auth-provider injected through a merge-key sequence `<<: [*a]`", () => {
+        const src =
+            "x: &a\n  auth-provider: {name: gcp}\n" +
+            `${MERGE_HEAD}\nusers:\n- name: u\n  user:\n    <<: [*a]\n`;
+        expect(classifyKubeconfigSafety(src).ok).toBe(false);
+    });
+
+    it("refuses the camelCase `authProvider` key too (client-go's Go field name)", () => {
+        const src = `${MERGE_HEAD}\nusers:\n- name: u\n  user:\n    authProvider: {name: gcp}\n`;
+        expect(classifyKubeconfigSafety(src).ok).toBe(false);
+    });
+
+    it("refuses an exec key nested at ANY depth under a user entry", () => {
+        const src = `${MERGE_HEAD}\nusers:\n- name: u\n  user:\n    token: abc\n    extra:\n      deeper:\n        exec: {command: aws}\n`;
+        expect(classifyKubeconfigSafety(src).ok).toBe(false);
+    });
+
+    it("terminates on a self-referencing alias cycle under a user entry", () => {
+        const src = `${MERGE_HEAD}\nusers:\n- name: u\n  user: &loop\n    token: abc\n    self: *loop\n`;
+        expect(classifyKubeconfigSafety(src).ok).toBe(true);
+    });
+
+    it("still accepts a merge key that brings in only a token", () => {
+        const src =
+            "x: &a\n  token: abc\n" +
+            `${MERGE_HEAD}\nusers:\n- name: u\n  user:\n    <<: *a\n`;
+        expect(classifyKubeconfigSafety(src).ok).toBe(true);
+    });
+
+    it("accepts a client-certificate kubeconfig — an x509 pair runs no cloud CLI", () => {
+        const src = `${MERGE_HEAD}\nusers:\n- name: u\n  user:\n    client-certificate-data: Zm9v\n    client-key-data: YmFy\n`;
+        expect(classifyKubeconfigSafety(src).ok).toBe(true);
+    });
+});
+
+/**
+ * Round 2: the `yaml` library's error message quotes the failing source line.
+ * When the typo sits on or next to `token:`, that quote IS the credential. The
+ * refusal must be a fixed sentence plus at most a line NUMBER — never source
+ * text and never the parser's own message.
+ */
+describe("classifyKubeconfigSafety — a malformed kubeconfig never echoes its contents (round 2)", () => {
+    for (const [name, src] of Object.entries(MALFORMED_TOKEN_KUBECONFIGS)) {
+        it(`${name}: refused with the fixed sentence, no token bytes`, () => {
+            const v = classifyKubeconfigSafety(src);
+            expect(v.ok).toBe(false);
+            expect(v.reason ?? "").not.toContain(LEAK_SENTINEL_PREFIX);
+            expect(v.reason).toMatch(INVALID_YAML_REASON);
+        });
+    }
+
+    it("gives the line NUMBER of the fault, so the user can still find it", () => {
+        const v = classifyKubeconfigSafety(
+            MALFORMED_TOKEN_KUBECONFIGS.tab ?? "",
+        );
+        expect(v.reason).toContain("near line 6");
     });
 });

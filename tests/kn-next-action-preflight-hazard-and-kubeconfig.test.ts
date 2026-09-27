@@ -1,29 +1,39 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { parse } from 'yaml';
+import {
+  LEAK_SENTINEL_PREFIX,
+  MALFORMED_TOKEN_KUBECONFIGS,
+} from '../packages/kn-next/src/__tests__/helpers/malformed-kubeconfigs';
 
 /**
- * Two refusals #1533 adds to `packages/kn-next-action/preflight.mjs`, tested
- * separately from `kn-next-action-preflight.test.ts` (which owns the
- * pre-existing #874/#1493/#1500 behaviour) to keep blast radius disjoint:
+ * The two refusals #1533 adds to the kn-next action, tested separately from
+ * `kn-next-action-preflight.test.ts` (which owns the #874/#1493/#1500
+ * rules-review behaviour):
  *
- *   1. (#1495 fix) the fail-OPEN replacement — a `SelfSubjectRulesReview`
- *      that reports `incomplete: true` with EMPTY `resourceRules` (the exact
- *      shape a webhook-authorized cluster returns) used to pass the rules
- *      classifier trivially, because `classifyCredentialScope([])` finds
- *      nothing to complain about. The `SelfSubjectAccessReview`
- *      hazard-check spot-check must now catch an over-broad credential in
- *      EXACTLY that scenario, and must also refuse if the spot-check itself
- *      cannot run.
- *   2. (ADR-0061) an exec-plugin / auth-provider kubeconfig is refused with
- *      the exact #1533 sentence, BEFORE any kubectl call — proved by never
- *      installing a `kubectl` on PATH at all for that case.
+ *   1. (#1495) the hazardous-permission SelfSubjectAccessReview spot-check in
+ *      `preflight.mjs`, against a fake kubectl that answers like a
+ *      webhook-authorized cluster (OKE/GKE IAM): the rules review comes back
+ *      `incomplete` and EMPTY, and access reviews answer per GRANTS. The probe
+ *      set is the REAL one — `hazardProbes()` from `credential-scope.ts` —
+ *      so these tests exercise what ships, not a stand-in list.
+ *   2. (ADR-0061) the cloud-credential kubeconfig refusal in
+ *      `kubeconfig-check.mjs`, with the REAL classifier — a separate action
+ *      step that `skip-credential-preflight` cannot reach (proved by running
+ *      the action's own step scripts with the skip input on).
+ *
+ * The scripts run under `process.execPath` (bun in this suite), which loads
+ * the TypeScript sources directly — no built dist needed.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
-const PREFLIGHT = join(REPO_ROOT, 'packages/kn-next-action/preflight.mjs');
+const ACTION_DIR = join(REPO_ROOT, 'packages/kn-next-action');
+const PREFLIGHT = join(ACTION_DIR, 'preflight.mjs');
+const KUBECONFIG_CHECK = join(ACTION_DIR, 'kubeconfig-check.mjs');
+const CORE_SRC = join(REPO_ROOT, 'packages/kn-next/src/cli/ci');
 const CLOUD_CREDENTIAL_REFUSAL =
   'This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer ServiceAccount token.';
 
@@ -37,8 +47,13 @@ afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** An app dir with stub `credential-scope` + `kubeconfig-safety` modules. */
-function appWithStubCore(): string {
+/**
+ * An app dir whose `@getknext/core` re-exports the REAL classifiers from
+ * source. The rules classifier is deliberately inert (always ok) — the rules
+ * half is `kn-next-action-preflight.test.ts`'s — but `hazardProbes` and
+ * `classifyKubeconfigSafety` are the shipped ones.
+ */
+function appWithRealCore(opts: { withHazardProbes?: boolean } = {}): string {
   const app = tempDir('knext-preflight-hz-app-');
   writeFileSync(join(app, 'package.json'), '{"name":"app","private":true}\n');
   const core = join(app, 'node_modules/@getknext/core');
@@ -54,182 +69,275 @@ function appWithStubCore(): string {
       },
     }),
   );
-  // Passes every rule set — this describe block is about the ACCESS review,
-  // not the rules classifier, so the rules half is deliberately inert.
   writeFileSync(
     join(core, 'scope.js'),
-    'export function classifyCredentialScope() { return { ok: true, findings: [], remedy: "apply the published Role" }; }\n',
-  );
-  // A minimal STAND-IN classifier — no `yaml` dependency in the fake app's
-  // node_modules, so it matches structurally on the two keys via a cheap
-  // per-line scan rather than a full YAML parse. `ci-kubeconfig-safety.test.ts`
-  // (packages/kn-next) exercises the REAL, published classifier; this file
-  // is only proving the WIRING (preflight.mjs calls it, refuses before any
-  // kubectl call, prints the exact sentence).
-  writeFileSync(
-    join(core, 'kubeconfig-safety.js'),
     [
-      `const REFUSAL = ${JSON.stringify(CLOUD_CREDENTIAL_REFUSAL)};`,
-      'export function classifyKubeconfigSafety(text) {',
-      '  if (/^\\s*exec:/m.test(text) || /^\\s*auth-provider:/m.test(text)) {',
-      '    return { ok: false, reason: REFUSAL };',
-      '  }',
-      '  return { ok: true };',
-      '}',
+      'export function classifyCredentialScope() { return { ok: true, findings: [], remedy: "apply the published Role" }; }',
+      opts.withHazardProbes === false
+        ? ''
+        : `export { hazardProbes } from ${JSON.stringify(join(CORE_SRC, 'credential-scope.ts'))};`,
       '',
     ].join('\n'),
+  );
+  writeFileSync(
+    join(core, 'kubeconfig-safety.js'),
+    `export { classifyKubeconfigSafety } from ${JSON.stringify(join(CORE_SRC, 'kubeconfig-safety.ts'))};\n`,
   );
   return app;
 }
 
 /**
- * kubectl stub: `SelfSubjectRulesReview` always answers `incomplete: true`
- * with EMPTY resourceRules (the exact #1495 webhook-authorizer shape).
- * `SelfSubjectAccessReview` calls are routed by `accessReviewAllowed`.
+ * A fake kubectl for a webhook-authorized cluster. Rules review: `incomplete`,
+ * EMPTY resourceRules. Access review: allowed iff a GRANTS entry
+ * `group|resource[/sub]|verb|ns` matches (any field `*`; ns `*` = every
+ * namespace AND cluster-wide; a concrete ns matches only a review naming it).
+ * SSAR_MODE simulates a review that does not complete.
  */
-function stubKubectlForHazardTest(opts: { accessReviewAllowed: boolean | 'unreachable' }): string {
+const FAKE_KUBECTL_JS = `
+import { readFileSync } from 'node:fs';
+const body = JSON.parse(readFileSync(0, 'utf8'));
+const mode = process.env.SSAR_MODE || 'normal';
+if (body.kind === 'SelfSubjectRulesReview') {
+  process.stdout.write(JSON.stringify({ status: { incomplete: true,
+    evaluationError: 'webhook authorizer does not support user rule resolution', resourceRules: [] } }));
+  process.exit(0);
+}
+if (mode === 'error') { process.stderr.write('Error from server (InternalError)\\n'); process.exit(1); }
+if (mode === 'nostatus') { process.stdout.write('{}'); process.exit(0); }
+if (mode === 'allowed_string') { process.stdout.write(JSON.stringify({ status: { allowed: 'true' } })); process.exit(0); }
+if (mode === 'evalerr') { process.stdout.write(JSON.stringify({ status: { allowed: false, evaluationError: 'webhook timeout' } })); process.exit(0); }
+if (mode === 'nonjson') { process.stdout.write('<html>502 bad gateway</html>'); process.exit(0); }
+const a = body.spec.resourceAttributes;
+const res = a.subresource ? a.resource + '/' + a.subresource : a.resource;
+const m = (g, v) => g === '*' || g === v;
+const allowed = (process.env.GRANTS || '').split(',').filter(Boolean).some((s) => {
+  const [g, r, v, ns] = s.split('|');
+  return m(g, a.group) && m(r, res) && m(v, a.verb) && (ns === '*' || (a.namespace !== undefined && a.namespace === ns));
+});
+process.stdout.write(JSON.stringify({ status: { allowed } }));
+`;
+
+function fakeKubectl(): string {
   const dir = tempDir('knext-preflight-hz-bin-');
+  writeFileSync(join(dir, 'fake-kubectl.mjs'), FAKE_KUBECTL_JS);
   const bin = join(dir, 'kubectl');
-  const INCOMPLETE_REVIEW = JSON.stringify({
-    status: {
-      resourceRules: [],
-      incomplete: true,
-      evaluationError: 'webhook authorizer does not support user rule resolution',
-    },
-  });
-  const accessResponse =
-    opts.accessReviewAllowed === 'unreachable'
-      ? 'echo "error: could not reach apiserver" >&2\n    exit 1'
-      : `echo '{"status":{"allowed":${opts.accessReviewAllowed === true}}}'\n    exit 0`;
   writeFileSync(
     bin,
-    [
-      '#!/bin/sh',
-      'body="$(cat)"',
-      'case "$body" in',
-      '  *SelfSubjectAccessReview*)',
-      `    ${accessResponse}`,
-      '    ;;',
-      '  *SelfSubjectRulesReview*)',
-      `    echo '${INCOMPLETE_REVIEW}'`,
-      '    exit 0',
-      '    ;;',
-      'esac',
-      'echo "kubectl-stub: unrecognized invocation: $*" >&2',
-      'exit 1',
-      '',
-    ].join('\n'),
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(dir, 'fake-kubectl.mjs'))} "$@"\n`,
   );
   chmodSync(bin, 0o755);
   return dir;
 }
 
-function runPreflight(cwd: string, kubectlDir: string, extraEnv: Record<string, string> = {}) {
-  return spawnSync(process.execPath, [PREFLIGHT, '--namespace', 'ns'], {
-    cwd,
+const NS = 'demo';
+/** Exactly the published Role, bound in `demo` — what `kn-next init-ci` sets up. */
+const ROLE = ['get', 'list', 'create', 'patch', 'update']
+  .map((v) => `apps.kn-next.dev|nextapps|${v}|${NS}`)
+  .join(',');
+
+function runPreflight(app: string, env: Record<string, string> = {}) {
+  const env0: Record<string, string | undefined> = { ...process.env };
+  delete env0.KUBECONFIG;
+  return spawnSync(process.execPath, [PREFLIGHT, '--namespace', NS], {
+    cwd: app,
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      PATH: `${kubectlDir}:${process.env.PATH ?? ''}`,
-      ...extraEnv,
-    },
+    env: { ...env0, PATH: `${fakeKubectl()}:${process.env.PATH ?? ''}`, ...env },
   });
 }
 
-describe('#1495 fix — hazardous-permission SelfSubjectAccessReview spot-check', () => {
-  it('an incomplete rules review with EMPTY resourceRules (the old fail-open shape) still PASSES when every hazard check is denied', () => {
-    const app = appWithStubCore();
-    const kubectlDir = stubKubectlForHazardTest({ accessReviewAllowed: false });
-    const r = runPreflight(app, kubectlDir);
+describe('#1495 — hazard spot-check on a webhook-authorized (OKE-style) cluster', () => {
+  it('passes a credential granted exactly the published Role in its namespace', () => {
+    const r = runPreflight(appWithRealCore(), { GRANTS: ROLE });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('correctly scoped');
-    expect(r.stderr).toContain('::warning::');
     expect(r.stderr).toContain('incomplete');
   });
 
-  it('the SAME incomplete/empty rules review is now REFUSED when a hazard check reports allowed:true — the exact #1495 fail-open scenario, fixed', () => {
-    const app = appWithStubCore();
-    const kubectlDir = stubKubectlForHazardTest({ accessReviewAllowed: true });
-    const r = runPreflight(app, kubectlDir);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain(
-      'This kubeconfig can do things far outside what knext needs. Refusing to use it.',
-    );
-  });
+  const broader: Array<[string, string]> = [
+    ['a Role verb granted in a FOREIGN namespace', 'apps.kn-next.dev|nextapps|patch|kube-system'],
+    ['nextapps granted cluster-wide', 'apps.kn-next.dev|nextapps|create|*'],
+    [
+      'deletecollection on nextapps (outside the Role)',
+      `apps.kn-next.dev|nextapps|deletecollection|${NS}`,
+    ],
+    ['create pods/exec', `|pods/exec|create|${NS}`],
+    ['create serviceaccounts', `|serviceaccounts|create|${NS}`],
+    ['patch deployments cluster-wide', 'apps|deployments|patch|*'],
+    ['list secrets', `|secrets|list|${NS}`],
+    ['watch secrets', `|secrets|watch|${NS}`],
+    ['escalate clusterroles', 'rbac.authorization.k8s.io|clusterroles|escalate|*'],
+    ['bind clusterroles', 'rbac.authorization.k8s.io|clusterroles|bind|*'],
+    ['create rolebindings', `rbac.authorization.k8s.io|rolebindings|create|${NS}`],
+    ['impersonate serviceaccounts', '|serviceaccounts|impersonate|*'],
+    ['*/*/*', '*|*|*|*'],
+  ];
+  for (const [label, grant] of broader) {
+    it(`refuses the Role plus ${label}`, () => {
+      const r = runPreflight(appWithRealCore(), { GRANTS: `${ROLE},${grant}` });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('This kubeconfig can do things far outside what knext needs.');
+    });
+  }
 
-  it('refuses, fail-CLOSED, when the hazard spot-check itself cannot run', () => {
-    const app = appWithStubCore();
-    const kubectlDir = stubKubectlForHazardTest({ accessReviewAllowed: 'unreachable' });
-    const r = runPreflight(app, kubectlDir);
+  const noVerdict: Array<[string, string]> = [
+    ['the review errors', 'error'],
+    ['the reply has no status', 'nostatus'],
+    ['allowed is the STRING "true"', 'allowed_string'],
+    ['the reply carries an evaluationError', 'evalerr'],
+    ['the reply is not JSON', 'nonjson'],
+  ];
+  for (const [label, mode] of noVerdict) {
+    it(`refuses, fail-CLOSED, when ${label}`, () => {
+      const r = runPreflight(appWithRealCore(), { GRANTS: ROLE, SSAR_MODE: mode });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(
+        'Could not run the hazardous-permission spot-check (SelfSubjectAccessReview)',
+      );
+    });
+  }
+
+  it('refuses when @getknext/core predates the derived probe set', () => {
+    const r = runPreflight(appWithRealCore({ withHazardProbes: false }), { GRANTS: ROLE });
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain(
-      'Could not run the hazardous-permission spot-check (SelfSubjectAccessReview)',
-    );
+    expect(r.stderr).toContain('does not provide the credential classifier and hazard probe set');
   });
 });
 
-describe('ADR-0061/#1533 — exec-plugin/auth-provider kubeconfig refused BEFORE any cluster call', () => {
-  const EXEC_KUBECONFIG = [
-    'apiVersion: v1',
-    'kind: Config',
-    'users:',
-    '  - name: admin',
-    '    user:',
-    '      exec:',
-    '        command: aws',
-    'contexts: []',
-    '',
-  ].join('\n');
+const EXEC_KUBECONFIG = [
+  'apiVersion: v1',
+  'kind: Config',
+  'users:',
+  '  - name: admin',
+  '    user:',
+  '      exec:',
+  '        command: aws',
+  'contexts: []',
+  '',
+].join('\n');
 
-  const TOKEN_KUBECONFIG = [
-    'apiVersion: v1',
-    'kind: Config',
-    'users:',
-    '  - name: knext-deployer',
-    '    user:',
-    '      token: abc',
-    'contexts: []',
-    '',
-  ].join('\n');
+const MERGE_KEY_KUBECONFIG = [
+  'x: &a',
+  '  exec: {command: aws, apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never}',
+  'apiVersion: v1',
+  'kind: Config',
+  'users:',
+  '- name: u',
+  '  user:',
+  '    <<: *a',
+  '',
+].join('\n');
 
-  it('refuses with the EXACT sentence and NEVER invokes kubectl at all', () => {
-    const app = appWithStubCore();
-    const kubeconfigDir = tempDir('knext-preflight-kubeconfig-');
-    const kubeconfigPath = join(kubeconfigDir, 'kubeconfig');
-    writeFileSync(kubeconfigPath, EXEC_KUBECONFIG);
+const TOKEN_KUBECONFIG = [
+  'apiVersion: v1',
+  'kind: Config',
+  'users:',
+  '  - name: knext-deployer',
+  '    user:',
+  '      token: abc',
+  'contexts: []',
+  '',
+].join('\n');
 
-    // No kubectl anywhere on PATH: if the code reached a kubectl call it
-    // would fail with "command not found" (or a shell error), not this
-    // refusal — so a passing assertion on the refusal text also proves
-    // kubectl was never invoked. `process.execPath` (an ABSOLUTE path) is
-    // used to launch the script itself so an EMPTY child PATH cannot also
-    // prevent the interpreter from being found.
-    const r = spawnSync(process.execPath, [PREFLIGHT, '--namespace', 'ns'], {
-      cwd: app,
-      encoding: 'utf8',
-      env: { ...process.env, PATH: '', KUBECONFIG: kubeconfigPath },
-    });
+function writeKubeconfig(text: string): string {
+  const path = join(tempDir('knext-kubeconfig-'), 'kubeconfig');
+  writeFileSync(path, text);
+  return path;
+}
 
+/** Runs kubeconfig-check.mjs with NO kubectl reachable (PATH is empty). */
+function runKubeconfigCheck(app: string, kubeconfig: string | undefined) {
+  const env: Record<string, string | undefined> = { ...process.env, PATH: '' };
+  if (kubeconfig === undefined) delete env.KUBECONFIG;
+  else env.KUBECONFIG = kubeconfig;
+  return spawnSync(process.execPath, [KUBECONFIG_CHECK], { cwd: app, encoding: 'utf8', env });
+}
+
+describe('ADR-0061/#1533 — kubeconfig-check.mjs, before any cluster call', () => {
+  it('refuses an exec kubeconfig with the EXACT sentence, with no kubectl on PATH', () => {
+    const r = runKubeconfigCheck(appWithRealCore(), writeKubeconfig(EXEC_KUBECONFIG));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`::error::${CLOUD_CREDENTIAL_REFUSAL}`);
+  });
+
+  it('refuses an exec block injected through a YAML merge key', () => {
+    const r = runKubeconfigCheck(appWithRealCore(), writeKubeconfig(MERGE_KEY_KUBECONFIG));
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(CLOUD_CREDENTIAL_REFUSAL);
   });
 
-  it('a plain bearer-token kubeconfig proceeds past this check to the cluster calls', () => {
-    const app = appWithStubCore();
-    const kubeconfigDir = tempDir('knext-preflight-kubeconfig-ok-');
-    const kubeconfigPath = join(kubeconfigDir, 'kubeconfig');
-    writeFileSync(kubeconfigPath, TOKEN_KUBECONFIG);
-    const kubectlDir = stubKubectlForHazardTest({ accessReviewAllowed: false });
-
-    const r = runPreflight(app, kubectlDir, { KUBECONFIG: kubeconfigPath });
+  it('passes a plain bearer-token kubeconfig', () => {
+    const r = runKubeconfigCheck(appWithRealCore(), writeKubeconfig(TOKEN_KUBECONFIG));
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('correctly scoped');
   });
 
-  it('is a no-op when KUBECONFIG is not set at all (existing callers unaffected)', () => {
-    const app = appWithStubCore();
-    const kubectlDir = stubKubectlForHazardTest({ accessReviewAllowed: false });
-    const r = runPreflight(app, kubectlDir);
-    expect(r.status).toBe(0);
+  it('refuses, fail-CLOSED, when KUBECONFIG is not set at all', () => {
+    const r = runKubeconfigCheck(appWithRealCore(), undefined);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('KUBECONFIG is unset');
+  });
+
+  for (const [name, text] of Object.entries(MALFORMED_TOKEN_KUBECONFIGS)) {
+    it(`${name}: a malformed kubeconfig is refused and the ::error:: line carries no token bytes`, () => {
+      const r = runKubeconfigCheck(appWithRealCore(), writeKubeconfig(text));
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('::error::could not parse this file as a kubeconfig');
+      expect(`${r.stdout}${r.stderr}`).not.toContain(LEAK_SENTINEL_PREFIX);
+    });
+  }
+});
+
+/**
+ * The action's own step scripts, executed. `skip-credential-preflight: true`
+ * must not let a cloud-credential kubeconfig through: the kubeconfig step has
+ * no skip branch, so it refuses before the (skipped) preflight is reached.
+ */
+describe('action.yml — the kubeconfig check is not reachable by skip-credential-preflight', () => {
+  type Step = { name?: string; if?: string; env?: Record<string, string>; run?: string };
+  const action = parse(readFileSync(join(ACTION_DIR, 'action.yml'), 'utf8')) as {
+    runs: { steps: Step[] };
+  };
+  const steps = action.runs.steps;
+  const kubeStep = steps.find((s) => s.name === 'Kubeconfig check');
+  const preflightStep = steps.find((s) => s.name === 'Credential preflight');
+
+  /** Execute one composite step's `run:` under bash, the way the runner would. */
+  function runStep(step: Step | undefined, app: string, env: Record<string, string>) {
+    // `node` -> this test's own runtime, so the re-exported TypeScript sources
+    // load whatever node version the CI image carries.
+    const script = String(step?.run ?? 'exit 99')
+      .replaceAll('${{ github.action_path }}', ACTION_DIR)
+      .replaceAll(/^(\s*)node /gm, `$1${JSON.stringify(process.execPath)} `);
+    return spawnSync('bash', ['-c', script], {
+      cwd: app,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...env,
+        PATH: `${join(process.execPath, '..')}:${process.env.PATH ?? ''}`,
+      },
+    });
+  }
+
+  it('the kubeconfig step runs before the credential preflight, unconditionally', () => {
+    expect(kubeStep).toBeDefined();
+    expect(preflightStep).toBeDefined();
+    expect(steps.indexOf(kubeStep as Step)).toBeLessThan(steps.indexOf(preflightStep as Step));
+    expect(kubeStep?.if).toBeUndefined();
+    expect(JSON.stringify(kubeStep)).not.toMatch(/skip/i);
+  });
+
+  it('with skip-credential-preflight on, an exec kubeconfig is STILL refused by the step scripts', () => {
+    const app = appWithRealCore();
+    const env = {
+      KUBECONFIG: writeKubeconfig(EXEC_KUBECONFIG),
+      KNEXT_SKIP_PREFLIGHT: 'true',
+      KNEXT_NAMESPACE: NS,
+    };
+    // The preflight step alone, skipped, exits 0 — the hatch works as documented…
+    expect(runStep(preflightStep, app, env).status).toBe(0);
+    // …and the kubeconfig step, which the hatch does not reach, refuses.
+    const r = runStep(kubeStep, app, env);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(CLOUD_CREDENTIAL_REFUSAL);
   });
 });

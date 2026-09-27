@@ -19,9 +19,13 @@
  * not three hand-maintained copies that can drift the way `credential-scope.ts`
  * already had to solve for the Role definition.
  *
- * Structural, not textual: the YAML is PARSED and `users[].user` is inspected
- * for the two keys, rather than grepping the raw text for `exec:` — a context
- * or cluster NAME containing the substring "exec" must never trip this.
+ * Structural, not textual: the YAML is PARSED (with and without merge-key
+ * resolution) and every `users[]` entry is walked, at any depth, for the
+ * cloud-auth keys — rather than grepping the raw text for `exec:`, so a
+ * context or cluster NAME containing the substring "exec" never trips this.
+ *
+ * A refusal NEVER carries source text. A kubeconfig holds a credential, and a
+ * YAML parser's error message quotes the line it failed on.
  */
 import { parse as parseYaml } from "yaml";
 
@@ -39,17 +43,89 @@ export interface KubeconfigSafetyVerdict {
     reason?: string;
 }
 
-interface ParsedKubeUser {
-    name?: unknown;
-    user?: Record<string, unknown> | null;
-}
+/**
+ * The keys that make kubectl run a binary (or a cloud auth plugin) on the
+ * runner. `authProvider` is client-go's Go field name; kubectl's decoder is
+ * case-sensitive and ignores it today, but refusing it costs a scoped
+ * credential nothing and does not bet on that decoder never changing.
+ */
+const CLOUD_AUTH_KEYS = new Set(["exec", "auth-provider", "authProvider"]);
 
-interface ParsedKubeconfig {
-    users?: unknown;
-}
+/**
+ * Two parse modes, both walked. `merge: true` resolves `<<` the way kubectl's
+ * go-yaml does, so a merged-in `exec:` appears as a real key. `merge: false`
+ * keeps `<<` as a literal key whose VALUE the depth walk below still descends
+ * into. Either one alone catches the merge-key bypass; requiring both to come
+ * back clean means a quirk in one mode cannot pass what the other sees.
+ *
+ * `logLevel: "error"` keeps parse WARNINGS (unresolved tags and the like)
+ * off the console: a warning's message can quote source text, and this
+ * source holds a credential. Errors still throw — and are never relayed.
+ */
+const PARSE_MODES = [
+    { merge: true, logLevel: "error", prettyErrors: false },
+    { merge: false, logLevel: "error", prettyErrors: false },
+] as const;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
     return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The refusal for a file that does not parse. A FIXED sentence plus, at
+ * most, the 1-based line NUMBER — never the parser's message, which quotes
+ * the failing source line, and on a kubeconfig that line is often `token:`.
+ */
+function invalidYamlReason(err: unknown, source: string): string {
+    // `YAMLError.pos` is a [start, end] character OFFSET pair; the line
+    // number is derived from it here rather than read from anything that
+    // carries text.
+    const offset = (err as { pos?: readonly unknown[] })?.pos?.[0];
+    const near =
+        typeof offset === "number" &&
+        Number.isInteger(offset) &&
+        offset >= 0 &&
+        offset <= source.length
+            ? ` near line ${source.slice(0, offset).split("\n").length}`
+            : "";
+    return `could not parse this file as a kubeconfig (invalid YAML${near}). Its contents are not shown.`;
+}
+
+/**
+ * True if `node` — or anything reachable from it, at any depth — carries a
+ * cloud-auth key. Structural, over the RESOLVED object graph: aliases and
+ * merged-in maps are real objects here. `seen` stops alias cycles.
+ */
+function reachesCloudAuthKey(node: unknown, seen: Set<object>): boolean {
+    if (typeof node !== "object" || node === null) return false;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) {
+        return node.some((item) => reachesCloudAuthKey(item, seen));
+    }
+    if (node instanceof Map) {
+        for (const [k, v] of node) {
+            if (typeof k === "string" && CLOUD_AUTH_KEYS.has(k)) return true;
+            if (reachesCloudAuthKey(k, seen) || reachesCloudAuthKey(v, seen)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    for (const [k, v] of Object.entries(node)) {
+        if (CLOUD_AUTH_KEYS.has(k)) return true;
+        if (reachesCloudAuthKey(v, seen)) return true;
+    }
+    return false;
+}
+
+/** Does any `users[]` entry of one parsed document reach a cloud-auth key? */
+function usersNeedCloudAuth(doc: unknown): boolean {
+    if (!isRecord(doc)) return false;
+    const users = doc.users;
+    // Walk `users` whatever its shape (list, or a map kubectl would reject):
+    // every entry, the whole entry, any depth.
+    return reachesCloudAuthKey(users, new Set());
 }
 
 /**
@@ -68,34 +144,21 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 export function classifyKubeconfigSafety(
     kubeconfigYaml: string,
 ): KubeconfigSafetyVerdict {
-    let doc: ParsedKubeconfig;
-    try {
-        doc = (parseYaml(kubeconfigYaml) ?? {}) as ParsedKubeconfig;
-    } catch (err) {
-        return {
-            ok: false,
-            reason: `could not parse this as a kubeconfig (invalid YAML): ${
-                err instanceof Error ? err.message : String(err)
-            }`,
-        };
-    }
-
-    if (!isRecord(doc) && doc !== null) {
-        // parseYaml on non-mapping input (e.g. a bare scalar) — not a
-        // kubeconfig at all, but not this function's job to say what it IS;
-        // only whether the two dangerous keys are present, and they are not.
-        return { ok: true };
-    }
-
-    const users = Array.isArray(doc.users) ? (doc.users as unknown[]) : [];
-    for (const entry of users) {
-        if (!isRecord(entry)) continue;
-        const user = (entry as ParsedKubeUser).user;
-        if (!isRecord(user)) continue;
-        if ("exec" in user || "auth-provider" in user) {
+    for (const mode of PARSE_MODES) {
+        let doc: unknown;
+        try {
+            doc = parseYaml(kubeconfigYaml, mode);
+        } catch (err) {
+            return {
+                ok: false,
+                reason: invalidYamlReason(err, kubeconfigYaml),
+            };
+        }
+        // A non-mapping document (a bare scalar, null) carries no `users`,
+        // so no dangerous key — not this function's job to say what it IS.
+        if (usersNeedCloudAuth(doc)) {
             return { ok: false, reason: CLOUD_CREDENTIAL_REFUSAL };
         }
     }
-
     return { ok: true };
 }

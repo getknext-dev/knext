@@ -41,11 +41,16 @@ the action refuses it immediately, with:
 > This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
 > ServiceAccount token.
 
-knext holds no cloud-account credentials, ever. The only shape it accepts is a plain bearer token —
-the kind `kn-next init-ci` prints the commands to mint, and `kn-next init-ci --push-secret` can push
-straight to your repository as the `KNEXT_KUBECONFIG` secret. This is the same classifier
+This is its own step (`kubeconfig-check.mjs`), and `skip-credential-preflight` does **not** turn it
+off: it reads only the kubeconfig file, so there is no cluster limitation to work around.
+
+knext holds no cloud-account credentials, ever. It accepts credentials that run nothing on the
+runner: a bearer token — the kind `kn-next init-ci` prints the commands to mint, and
+`kn-next init-ci --push-secret` can push straight to your repository as the `KNEXT_KUBECONFIG`
+secret — or a client certificate and key. This is the same classifier
 `knext doctor --ci-kubeconfig <path>` uses, so you can check a kubeconfig FILE before it ever
-reaches CI.
+reaches CI. A file that is not valid YAML is refused with at most a line number — never its
+contents, which are a credential.
 
 ## An over-broad kubeconfig is refused
 
@@ -64,12 +69,17 @@ Some clusters answer but mark the answer incomplete — their authorizer cannot 
 credential can do (common on webhook-authorized clusters such as OKE or GKE with IAM). The action
 does **not** fail closed on that incompleteness alone: refusing there would refuse the scoped
 credential this check exists to allow, not just an over-broad one. `status.incomplete` alone no
-longer decides anything by itself. Instead the action separately spot-checks a short, hazardous
-list — reading Secrets, deleting your app, creating a ClusterRoleBinding, impersonating another
-user, or a bare wildcard — directly against the cluster via `SelfSubjectAccessReview`, which a
-webhook authorizer answers even when it cannot answer the broader review. It refuses if ANY of
-those is allowed, or if that spot-check itself cannot run — the fail-closed backstop for exactly
-the cluster class the broader review is blind on.
+longer decides anything by itself. Instead the action asks point questions via
+`SelfSubjectAccessReview`, which a webhook authorizer answers even when it cannot answer the broader
+review. The question set is derived from the Role (`hazardProbes()` in `@getknext/core`, beside the
+Role definition): every Role verb asked in another namespace, every `nextapps` verb
+the Role does not grant, and a fixed escalation list (Pod exec/create, ServiceAccount create and
+token minting, Secret get/list/watch, cluster-wide Deployment patch, Role/ClusterRole
+escalate/bind, (Cluster)RoleBinding create, impersonation, node proxy, wildcards). It refuses if ANY
+is allowed, or if any review errors, is not JSON, carries an `evaluationError`, or has no boolean
+`allowed` — a review with no verdict is a review that did not run. On these clusters it is a
+spot-check, not a proof: a permission outside the set is not asked about. `skip-credential-preflight`
+turns these checks off; it never reaches the cloud-credential refusal above.
 
 This check does not depend on the `kubectl` version your runner happens to ship — it asks the
 cluster directly rather than parsing a command's table output, so it behaves the same on

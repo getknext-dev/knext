@@ -8,6 +8,8 @@
   "files": [
     "action.yml",
     "preflight.mjs",
+    "kubeconfig-check.mjs",
+    "load-core.mjs",
     "README.md"
   ]
 }

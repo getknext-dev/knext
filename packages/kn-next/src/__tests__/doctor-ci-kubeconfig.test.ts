@@ -9,12 +9,20 @@
  *   3. `runDoctor` end-to-end — passing NO path contributes NO row at all
  *      (the property `doctor-golden.test.ts` relies on to stay untouched).
  */
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CLOUD_CREDENTIAL_REFUSAL } from "../cli/ci/kubeconfig-safety";
 import { runDoctor } from "../cli/doctor";
 import { parseDoctorArgs } from "../cli/doctor/args";
 import { ciKubeconfigCheck } from "../cli/doctor/checks/ci-kubeconfig";
 import type { DoctorDeps } from "../cli/doctor/types";
+import {
+    LEAK_SENTINEL_PREFIX,
+    MALFORMED_TOKEN_KUBECONFIGS,
+} from "./helpers/malformed-kubeconfigs";
 
 const TOKEN_KUBECONFIG = `
 apiVersion: v1
@@ -142,4 +150,58 @@ describe("runDoctor — --ci-kubeconfig wiring (#1533)", () => {
         expect(row).toBeDefined();
         expect(row?.status).toBe("error");
     });
+});
+
+/**
+ * Round 2 of #1557: a malformed kubeconfig's refusal used to relay the YAML
+ * library's message, which quotes the failing line — the `token:` line. Run
+ * `doctorMain` in a REAL child process (an unreachable fake cluster, so no
+ * kubectl runs) and capture both the table and `--json` at the fd level.
+ */
+describe("doctor --ci-kubeconfig never prints a malformed kubeconfig's token (round 2)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "knext-doctor-leak-"));
+    afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
+    function runDoctorSubprocess(argv: string[]) {
+        const driver = join(tmp, "driver.mjs");
+        writeFileSync(
+            driver,
+            [
+                `import { doctorMain } from ${JSON.stringify(
+                    join(import.meta.dirname, "..", "cli", "doctor.ts"),
+                )};`,
+                "const deps = {",
+                '  kubectl: () => ({ ok: false, stdout: "", stderr: "connection refused" }),',
+                '  probeImage: async () => "unreachable",',
+                '  inspectKubeconfig: () => ({ kind: "absent", searched: ["~/.kube/config"] }),',
+                "};",
+                `const code = await doctorMain(${JSON.stringify(argv)}, deps);`,
+                "process.exit(code);",
+            ].join("\n"),
+        );
+        const r = spawnSync(process.execPath, [driver], {
+            cwd: tmp,
+            encoding: "utf8",
+        });
+        return { status: r.status, combined: `${r.stdout}${r.stderr}` };
+    }
+
+    for (const [name, text] of Object.entries(MALFORMED_TOKEN_KUBECONFIGS)) {
+        const path = join(tmp, `${name}.kubeconfig`);
+        writeFileSync(path, text);
+        for (const mode of [[], ["--json"]]) {
+            it(`${name} ${mode.join(" ") || "(table)"}: FAIL row, no token bytes`, () => {
+                const r = runDoctorSubprocess([
+                    ...mode,
+                    "--ci-kubeconfig",
+                    path,
+                ]);
+                expect(r.status).toBe(1);
+                expect(r.combined).toContain(
+                    "could not parse this file as a kubeconfig",
+                );
+                expect(r.combined).not.toContain(LEAK_SENTINEL_PREFIX);
+            });
+        }
+    }
 });

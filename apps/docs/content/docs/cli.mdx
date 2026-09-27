@@ -123,12 +123,23 @@ knext init-ci --namespace my-app
 It also prints the exact commands to mint a kubeconfig for that ServiceAccount — a `kubectl create
 token`, bound and namespace-scoped, plus the `kubectl config set-*` calls that assemble a
 standalone kubeconfig file around it. **You run these yourself**; knext writes nothing to the
-cluster. Any kubeconfig that instead needs a cloud CLI on the runner (an `exec:` or
+cluster. If your own kubeconfig references its certificate authority as a file (or skips TLS
+verification), the commands warn you before writing a kubeconfig with an empty CA.
+
+**The minted token expires after one year** (`--duration=8760h`). When it expires, CI can no longer
+reach the cluster. Before then, re-run the `TOKEN=` and `kubectl config set-credentials` lines and
+push the secret again (for example with `--push-secret` below). Change `--duration` to match your
+rotation policy; your cluster may cap it lower. To revoke the token early, delete and recreate the
+`knext-deployer` ServiceAccount.
+
+Any kubeconfig that instead needs a cloud CLI on the runner (an `exec:` or
 `auth-provider:` entry — the `aws`/`gcloud`/`oci`/`az` shape) is refused wherever knext reads one —
 here, in the GitHub Action, and in `knext doctor --ci-kubeconfig` — with the same message:
 
 > This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
 > ServiceAccount token.
+
+Bearer tokens and client certificates are accepted — neither runs anything on the runner.
 
 | Flag | Notes |
 |---|---|

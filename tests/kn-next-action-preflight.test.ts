@@ -70,6 +70,11 @@ function fakeKubectlDir(): string {
   return dir;
 }
 
+// Minimal stand-in for the derived probe set (ci-hazard-probes.test.ts owns the real
+// one): ONE probe, so the access-review wiring still runs in every test here.
+const HAZARD_PROBES_STUB =
+  'export function hazardProbes() { return [{ group: "*", resource: "*", verb: "*", label: "wildcard on everything" }]; }\n';
+
 /**
  * An app dir whose node_modules carries stub classifiers that always pass —
  * both `credential-scope` (#874) and `kubeconfig-safety` (#1533), so a test
@@ -94,7 +99,8 @@ function appWithStubCore(): string {
   );
   writeFileSync(
     join(core, 'scope.js'),
-    'export function classifyCredentialScope() { return { ok: true, findings: [], remedy: "" }; }\n',
+    'export function classifyCredentialScope() { return { ok: true, findings: [], remedy: "" }; }\n' +
+      HAZARD_PROBES_STUB,
   );
   writeFileSync(
     join(core, 'kubeconfig-safety.js'),
@@ -346,7 +352,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
         '  return { ok: true, findings: [], remedy: "" };',
         '}',
         '',
-      ].join('\n'),
+      ].join('\n') + HAZARD_PROBES_STUB,
     );
     return app;
   }
@@ -506,7 +512,11 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
       [
         '#!/bin/sh',
         'if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then',
-        '  cat >/dev/null',
+        '  body="$(cat)"',
+        // An access review needs a real verdict — the rules-review body is
+        // not one, and since round 2 of #1557 a reply without a boolean
+        // `allowed` is refused rather than read as "not allowed".
+        '  case "$body" in *SelfSubjectAccessReview*) echo \'{"status":{"allowed":false}}\'; exit 0;; esac',
         `  echo '${SCOPED_REVIEW}'`,
         '  exit 0',
         'fi',

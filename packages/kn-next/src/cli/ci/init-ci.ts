@@ -232,6 +232,10 @@ export function mintKubeconfigCommands(namespace: string): string[] {
     return [
         `SERVER=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}')`,
         `CA_DATA=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')`,
+        // Empty when the source kubeconfig points at a CA FILE or skips TLS
+        // verification — the set-cluster line would then embed an empty CA
+        // and every CI connection would fail TLS. Say so before writing.
+        `[ -n "$CA_DATA" ] || echo "warning: your kubeconfig has no embedded CA (it points at a CA file, or skips TLS verification), so the minted kubeconfig would have an EMPTY certificate authority. Set CA_DATA=\\$(base64 < /path/to/ca.crt | tr -d '\\n') and continue." >&2`,
         // A one-year bound token by default — adjust --duration to your
         // rotation policy; the cluster may cap it lower (server flag
         // --service-account-max-token-expiration).
@@ -269,5 +273,9 @@ export function nextSteps(namespace: string): string {
         "",
         `The credential grants ${CI_ROLE_RULES[0].verbs.join("/")} on ` +
             `${CI_ROLE_RULES[0].resources[0]} in ${namespace}, and nothing else.`,
+        "The token expires after one year (--duration=8760h) and CI then " +
+            "fails to authenticate. Before that, re-run the TOKEN= and " +
+            "set-credentials lines above and push the secret again. Deleting " +
+            "and recreating the knext-deployer ServiceAccount revokes it early.",
     ].join("\n");
 }
