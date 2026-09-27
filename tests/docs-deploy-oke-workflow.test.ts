@@ -330,3 +330,22 @@ describe('docs-deploy-oke.yml — the kubeconfig does not outlive the job', () =
     expect(a).not.toMatch(/GITHUB_WORKSPACE\/kubeconfig|\.\/kubeconfig|>\s*kubeconfig/);
   });
 });
+
+describe('docs-deploy-oke.yml — the closure audit gates the push', () => {
+  it('both jobs run the closure audit; in deploy it precedes the registry login and the deploy', () => {
+    const wf = load();
+    for (const [id, job] of Object.entries(wf.jobs)) {
+      const steps = job.steps ?? [];
+      const audit = steps.findIndex((s) =>
+        /precompile-closure-audit\.mjs --app apps\/docs/.test(String(s.run ?? '')),
+      );
+      expect(audit, `job ${id} must run the closure audit`).toBeGreaterThan(-1);
+      expect(steps[audit]?.['continue-on-error']).toBeUndefined();
+      if (id !== 'deploy') continue;
+      const login = steps.findIndex((s) => /docker\/login-action/.test(String(s.uses ?? '')));
+      const deploy = steps.findIndex((s) => s.uses === './packages/kn-next-action');
+      expect(audit).toBeLessThan(login);
+      expect(audit).toBeLessThan(deploy);
+    }
+  });
+});
