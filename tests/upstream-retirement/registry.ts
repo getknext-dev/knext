@@ -653,6 +653,11 @@ export const REGISTRY: RetirementEntry[] = [
     id: 'bun-json-asset-require',
     upstream: 'oven-sh/bun#44095',
     upstreamTitle: 'require() of an embedded JSON file asset evaluates it as JavaScript',
+    fixedBy: {
+      ref: 'oven-sh/bun#44145',
+      title:
+        "compile: load an embedded asset through its extension's loader on require() and import()",
+    },
     issue: '#1456',
     kind: 'shim',
     shape: 'next',
@@ -664,6 +669,23 @@ export const REGISTRY: RetirementEntry[] = [
     // `Module.prototype.require` hook that answers `.json` paths under the
     // embedded root from the file's bytes, parsed and cached like a real
     // `require` (standalone-embed.mjs installEmbeddedJsonRequire).
+    //
+    // 2026-09-27: oven-sh/bun#44145 (head 1567ef04) verified from source on Cloud
+    // Build against this probe's exact shape plus two extensions: a dynamic
+    // `import()` of the same embedded path (not just `require()`), and requiring
+    // the embedded JSON from inside a separate embedded CommonJS module (the
+    // knext route-chunk shape, one level removed from `main`) rather than
+    // directly from the entrypoint. All three fail identically on stock bun-v1.4.2
+    // (`SyntaxError: Unexpected token ':'`) and resolve correctly on the PR build.
+    // Regression control: a `.txt` asset embedded the same way still reads
+    // correctly via both `fs.readFileSync` and `Bun.file(...).text()` on both
+    // builds — the loader-routing change doesn't disturb byte-serving for a case
+    // this probe doesn't otherwise cover. The PR's own new tests
+    // (`compile/EmbeddedAssetRequireUsesLoader`, `compile/EmbeddedAssetImportFromPreload`
+    // in `test/bundler/bundler_compile.test.ts`) are red on stock (2 of 87) / green
+    // on the PR build (87/87), matching Bun's own contributor rule for a valid
+    // test. Still OPEN, not merged, no release yet — do NOT retire this shim on
+    // this alone; retire once a stable Bun release carries the fix.
     repro: async () => {
       const box = sandbox('bun-json-asset-require');
       try {
