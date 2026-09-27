@@ -40,7 +40,7 @@ import type {
     KubectlFn,
     ManifestProbeFn,
 } from "../cli/doctor/types";
-import { KOURIER_INGRESS_CLASS } from "../cli/doctor/types";
+import { KOURIER_INGRESS_CLASS, NEXTAPP_CRD } from "../cli/doctor/types";
 import type { KnativeNextConfig } from "../config";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -87,6 +87,7 @@ function makeCtx(
         operatorImage?: string;
         readNodeEntryFile?: () => string | undefined;
         readNodeEntryTemplate?: () => string | undefined;
+        verbose?: boolean;
     } = {},
 ): CheckContext {
     const kubectl = stubKubectl(table);
@@ -103,6 +104,7 @@ function makeCtx(
         kubectl,
         skipAll: opts.skipAll ?? false,
         operatorImage: opts.operatorImage,
+        verbose: opts.verbose ?? false,
     };
 }
 
@@ -495,6 +497,37 @@ describe("crdCheck (isolated)", () => {
         );
         expect(r?.status).toBe("fail");
         expect(r?.hint?.trim()).toBeTruthy(); // DX4: a FAIL must be actionable — carry a repair hint
+    });
+
+    it("#1535: missing-CRD detail is ONE sentence naming the install step, no raw kubectl dump by default", () => {
+        const [r] = crdCheck(
+            makeCtx({
+                [CRD_KEY]: {
+                    ok: false,
+                    stderr: 'Error from server (NotFound): crd "x" not found',
+                },
+            }),
+        );
+        expect(r?.detail).toBe(
+            "NextApp CRD not found. Install the operator: kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml",
+        );
+        expect(r?.detail).not.toContain("NotFound");
+    });
+
+    it("#1535: --verbose appends the raw NotFound diagnostic after the sentence", () => {
+        const [r] = crdCheck(
+            makeCtx(
+                {
+                    [CRD_KEY]: {
+                        ok: false,
+                        stderr: 'Error from server (NotFound): crd "x" not found',
+                    },
+                },
+                { verbose: true },
+            ),
+        );
+        expect(r?.detail).toStartWith("NextApp CRD not found.");
+        expect(r?.detail).toContain(NEXTAPP_CRD);
     });
 
     it("ERROR on an infrastructural (auth) failure", () => {

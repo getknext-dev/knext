@@ -29,6 +29,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // biome-ignore lint/suspicious/noExplicitAny: see deploy-orchestrator.test.ts's identical note
 type AnyFn = (...args: unknown[]) => any;
@@ -127,7 +128,7 @@ mock.module("../cli/runtime-image", () => ({
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 mock.module("../utils/logger", () => ({

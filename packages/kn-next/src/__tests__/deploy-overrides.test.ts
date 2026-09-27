@@ -17,6 +17,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // bun types `mockResolvedValue`/`mockReturnValue` off the declared return
 // type. A mock returning `unknown` is not Promise-shaped, so every
@@ -90,7 +91,7 @@ const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 // effect. Stub its kubectl boundary so this suite stays hermetic; the preflight
 // itself is covered by cr-prune-preflight.test.ts + deploy-preflight-ordering.test.ts.
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 mock.module("../cli/gc", () => ({
