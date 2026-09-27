@@ -370,6 +370,21 @@ function adapterModules(dir = ADAPTERS): string[] {
     return found;
 }
 
+/** Why a module that is NOT a compile script is an offender, or undefined: it references Bun.build
+ *  (except the reviewed probe module), imports the "bun" module, or names `build` any other way. */
+function nonCompileOffence(file: string, scan: ScriptScan) {
+    const reviewed = NOT_A_COMPILE_SCRIPT_REVIEWED.has(file);
+    const o = {
+        file,
+        buildRefs: reviewed ? 0 : scan.buildRefs,
+        bunModule: scan.bunModule,
+        buildNames: reviewed ? [] : scan.buildNames,
+    };
+    return o.buildRefs > 0 || o.bunModule.length > 0 || o.buildNames.length > 0
+        ? o
+        : undefined;
+}
+
 describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
     const all = adapterModules().map((p) => {
         const file = relative(ADAPTERS, p);
@@ -400,23 +415,51 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
     it("no other adapter module reaches Bun.build or the bun module (any extension, any depth)", () => {
         const offenders = all
             .filter(({ file }) => !(file in COMPILE_SITES))
-            .map(({ file, scan }) => ({
-                file,
-                buildRefs: NOT_A_COMPILE_SCRIPT_REVIEWED.has(file)
-                    ? 0
-                    : scan.buildRefs,
-                bunModule: scan.bunModule,
-                buildNames: NOT_A_COMPILE_SCRIPT_REVIEWED.has(file)
-                    ? []
-                    : scan.buildNames,
-            }))
-            .filter(
-                (o) =>
-                    o.buildRefs > 0 ||
-                    o.bunModule.length > 0 ||
-                    o.buildNames.length > 0,
-            );
+            .map(({ file, scan }) => nonCompileOffence(file, scan))
+            .filter((o) => o !== undefined);
         expect(offenders).toEqual([]);
+    });
+
+    it.each<[string, string, string]>([
+        ["a Bun.build call", "m.js", "await Bun.build(o);"],
+        [
+            'the "bun" module',
+            "m.ts",
+            'const { build: b } = await import("bun");',
+        ],
+        [
+            "a build reached through globalThis.Bun",
+            "m.cjs",
+            "const B = globalThis.Bun; B.build(o);",
+        ],
+        ["a destructured build", "m.mjs", "const { build } = globalThis.Bun;"],
+    ])("a non-compile module is an offender on: %s", (_n, file, src) => {
+        expect(nonCompileOffence(file, scanScript(file, src))).toBeDefined();
+    });
+
+    it("a non-compile module that only uses Bun.serve is not an offender", () => {
+        expect(
+            nonCompileOffence(
+                "m.mjs",
+                scanScript(
+                    "m.mjs",
+                    "const B = globalThis.Bun; B.serve({ fetch() {} });",
+                ),
+            ),
+        ).toBeUndefined();
+    });
+
+    it("the module walk descends into subdirectories and skips __tests__", () => {
+        const d = tmp("knext-bun-base-walk-");
+        write(join(d, "a/b/deep.js"), "");
+        write(join(d, "top.ts"), "");
+        write(join(d, "__tests__/t.test.ts"), "");
+        write(join(d, "notes.md"), "");
+        expect(
+            adapterModules(d)
+                .map((p) => relative(d, p))
+                .sort(),
+        ).toEqual(["a/b/deep.js", "top.ts"]);
     });
 
     it("the reviewed spreads and computed writes are each used (no stale entry)", () => {
