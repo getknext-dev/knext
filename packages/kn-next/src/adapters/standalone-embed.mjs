@@ -50,8 +50,17 @@ const KNOWN_DATA_KINDS = new Set([
   'map',
   'segment',
   'prefetch',
+  // Next reads a `.wasm` (edge-runtime WASM modules) with `fs`, the same as the
+  // other data kinds above — never `require`s it as a native addon. Embedding it
+  // byte-for-byte via the `assets` path is therefore correct, so it is a KNOWN
+  // kind rather than falling into `unknownKinds` (whose only guarantee is "some
+  // fs-read data path", not "this specific kind is safe to embed").
+  'wasm',
   '',
 ]);
+
+/** A native addon: dlopen's a real file on disk. `$bunfs` cannot provide one. */
+const NATIVE_ADDON = /\.node$/;
 
 /** A `*.js` under `.next` that Next reads with `fs` (evalManifest), never `require`s. */
 const FS_READ_JS = /(?:^|[-_/])[a-z-]*manifest\.js$/;
@@ -76,11 +85,17 @@ function extensionOf(rel) {
  *     prerendered outputs. Embedded byte for byte;
  *   - `disk` — `static/**` and `cache/**`, which stay beside the binary
  *     (served with `createReadStream`, and written at runtime);
+ *   - `nativeAddons` — a `.node` file. NEVER embedded: a native addon is
+ *     `dlopen`'d from a real filesystem path, which `$bunfs` cannot provide,
+ *     so embedding one as data would ship a file Next's `require` can only
+ *     crash on. The caller must fail the build rather than embed these
+ *     (`standalone-compile.mjs`'s self-contained planning step does);
  *   - `unknownKinds` — assets whose extension is not a kind this classifier
  *     knows. They ARE embedded (as data); the list makes a new Next output
  *     kind visible instead of silently guessing its read path.
  *
- * Nothing is dropped: `modules + assets + disk` is exactly the input.
+ * Nothing is dropped: `modules + assets + disk + nativeAddons` is exactly the
+ * input (a `.node` file is counted in `nativeAddons` only, never `assets`).
  *
  * @param {readonly string[]} relFiles
  * @param {{ edgeFiles?: Iterable<string> }} [opts] files listed by
@@ -92,6 +107,7 @@ export function classifyDistFiles(relFiles, { edgeFiles = [] } = {}) {
   const assets = [];
   const disk = [];
   const unknownKinds = [];
+  const nativeAddons = [];
   for (const rel of [...relFiles].sort()) {
     const top = rel.split('/')[0];
     if (top === 'static' || top === 'cache') {
@@ -103,13 +119,15 @@ export function classifyDistFiles(relFiles, { edgeFiles = [] } = {}) {
       !edge.has(rel)
     ) {
       modules.push(rel);
+    } else if (NATIVE_ADDON.test(rel)) {
+      nativeAddons.push(rel);
     } else {
       assets.push(rel);
       const ext = extensionOf(rel);
       if (!MODULE_JS.test(rel) && !KNOWN_DATA_KINDS.has(ext)) unknownKinds.push(rel);
     }
   }
-  return { modules, assets, disk, unknownKinds };
+  return { modules, assets, disk, unknownKinds, nativeAddons };
 }
 
 /** Every `files` entry of a middleware manifest (middleware + edge functions). */
@@ -247,16 +265,16 @@ export function installDistDirAlias(fs, fsp, aliases) {
  */
 // @upstream-shim bun-json-asset-require
 export function installEmbeddedJsonRequire(Module, fs, root) {
-    const prefix = `${root}/`;
-    const orig = Module.prototype.require;
-    const cache = new Map();
-    Module.prototype.require = function (id) {
-        if (typeof id === "string" && id.startsWith(prefix) && id.endsWith(".json")) {
-            if (!cache.has(id)) cache.set(id, JSON.parse(fs.readFileSync(id, "utf8")));
-            return cache.get(id);
-        }
-        return orig.apply(this, arguments);
-    };
+  const prefix = `${root}/`;
+  const orig = Module.prototype.require;
+  const cache = new Map();
+  Module.prototype.require = function (id) {
+    if (typeof id === 'string' && id.startsWith(prefix) && id.endsWith('.json')) {
+      if (!cache.has(id)) cache.set(id, JSON.parse(fs.readFileSync(id, 'utf8')));
+      return cache.get(id);
+    }
+    return orig.apply(this, arguments);
+  };
 }
 
 /**
@@ -277,19 +295,19 @@ export function installEmbeddedJsonRequire(Module, fs, root) {
  */
 // @upstream-shim embedded-bare-specifier
 export function rewriteExternalAliases(src, aliases) {
-    let source = src;
-    let rewritten = 0;
-    const unresolvedSubpaths = [];
-    for (const [alias, rel] of aliases) {
-        if (!source.includes(alias)) continue;
-        const esc = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        for (const m of source.matchAll(new RegExp(`(["'\`])${esc}/[^"'\`]*\\1`, "g"))) {
-            unresolvedSubpaths.push(m[0]);
-        }
-        source = source.replace(new RegExp(`(["'\`])${esc}\\1`, "g"), () => {
-            rewritten++;
-            return `(globalThis.${EMBED_ROOT_GLOBAL} + ${JSON.stringify(`/${rel}`)})`;
-        });
+  let source = src;
+  let rewritten = 0;
+  const unresolvedSubpaths = [];
+  for (const [alias, rel] of aliases) {
+    if (!source.includes(alias)) continue;
+    const esc = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const m of source.matchAll(new RegExp(`(["'\`])${esc}/[^"'\`]*\\1`, 'g'))) {
+      unresolvedSubpaths.push(m[0]);
     }
-    return { source, rewritten, unresolvedSubpaths };
+    source = source.replace(new RegExp(`(["'\`])${esc}\\1`, 'g'), () => {
+      rewritten++;
+      return `(globalThis.${EMBED_ROOT_GLOBAL} + ${JSON.stringify(`/${rel}`)})`;
+    });
+  }
+  return { source, rewritten, unresolvedSubpaths };
 }

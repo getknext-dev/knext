@@ -6,7 +6,13 @@ export declare const EMBED_ROOT_GLOBAL: string;
 export declare function classifyDistFiles(
     relFiles: readonly string[],
     opts?: { edgeFiles?: Iterable<string> },
-): { modules: string[]; assets: string[]; disk: string[]; unknownKinds: string[] };
+): {
+    modules: string[];
+    assets: string[];
+    disk: string[];
+    unknownKinds: string[];
+    nativeAddons: string[];
+};
 
 export declare function middlewareManifestFiles(manifest: unknown): string[];
 

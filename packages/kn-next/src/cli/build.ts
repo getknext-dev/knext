@@ -433,8 +433,11 @@ Options:
                         artifact ships UNVERIFIED and the build says so loudly.
   --self-contained      Opt in to the self-contained single-executable mode
                         (overrides \`selfContained\` in kn-next.config.ts).
-                        Experimental: no target honours it yet, so today it is
-                        only recorded in the build log.
+                        Honoured by the standalone/node build target (embeds
+                        the Next build output into the executable). Not yet
+                        honoured by the vinext/bun-exec target — the flag is
+                        still recorded in the build log there, not silently
+                        dropped.
   -h, --help            Show this help
 `;
 

@@ -403,6 +403,11 @@ function planSelfContained() {
     const mwPath = join(distAbs, "server", "middleware-manifest.json");
     const edgeFiles = existsSync(mwPath) ? middlewareManifestFiles(JSON.parse(readFileSync(mwPath, "utf8"))) : [];
     const cls = classifyDistFiles(listFilesRel(distAbs), { edgeFiles });
+    if (cls.nativeAddons.length > 0) {
+        fail(
+            `self-contained: ${cls.nativeAddons.length} native addon(.node) file(s) under ${distDir}/server cannot be embedded — a native addon is dlopen'd from a real filesystem path, which $bunfs cannot provide, so an embedded copy would only crash at runtime: ${cls.nativeAddons.join(", ")}`,
+        );
+    }
 
     // Turbopack's hashed external aliases (`.next/node_modules/<pkg>-<hash>`,
     // symlinks into the traced tree): each alias's entry and its closure are

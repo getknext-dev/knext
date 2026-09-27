@@ -59,6 +59,8 @@ const DIST = [
     "server/pages/_document.js",
     "server/webpack-runtime.js",
     "server/app/font.woff2",
+    "server/app/some.wasm",
+    "server/vendor/sharp-linux-x64.node",
 ];
 const EDGE = ["server/edge-runtime-webpack.js", "server/src/middleware.js"];
 
@@ -66,12 +68,13 @@ describe("classifyDistFiles", () => {
     const c = classifyDistFiles(DIST, { edgeFiles: EDGE });
 
     it("partitions EVERY input file — nothing is dropped", () => {
-        expect([...c.modules, ...c.assets, ...c.disk].sort()).toEqual(
-            [...DIST].sort(),
-        );
-        expect(new Set([...c.modules, ...c.assets, ...c.disk]).size).toBe(
-            DIST.length,
-        );
+        expect(
+            [...c.modules, ...c.assets, ...c.disk, ...c.nativeAddons].sort(),
+        ).toEqual([...DIST].sort());
+        expect(
+            new Set([...c.modules, ...c.assets, ...c.disk, ...c.nativeAddons])
+                .size,
+        ).toBe(DIST.length);
     });
 
     it("embeds the JavaScript Next requires as modules — route chunks, runtimes, instrumentation, bracketed names", () => {
@@ -120,6 +123,17 @@ describe("classifyDistFiles", () => {
     it("reports (and still embeds) a file kind it does not know, instead of guessing", () => {
         expect(c.unknownKinds).toEqual(["server/app/font.woff2"]);
         expect(c.assets).toContain("server/app/font.woff2");
+    });
+
+    it("embeds a .wasm as data (fs-read, byte for byte) — a KNOWN kind, not an unknown-kind guess", () => {
+        expect(c.assets).toContain("server/app/some.wasm");
+        expect(c.unknownKinds).not.toContain("server/app/some.wasm");
+    });
+
+    it("never embeds a .node native addon — it cannot dlopen from $bunfs", () => {
+        expect(c.nativeAddons).toEqual(["server/vendor/sharp-linux-x64.node"]);
+        expect(c.assets).not.toContain("server/vendor/sharp-linux-x64.node");
+        expect(c.modules).not.toContain("server/vendor/sharp-linux-x64.node");
     });
 
     it("without the middleware manifest's list, an edge file would be compiled as a module — the list is load-bearing", () => {

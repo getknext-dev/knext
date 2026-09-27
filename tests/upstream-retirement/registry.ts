@@ -445,8 +445,9 @@ export const REGISTRY: RetirementEntry[] = [
   },
   {
     id: 'embedded-bare-specifier',
-    upstream: 'oven-sh/bun#44059',
-    upstreamTitle: '--include embeds extra files',
+    upstream: 'oven-sh/bun#44101',
+    upstreamTitle:
+      'bun build --compile: a bare specifier required from an embedded module never resolves inside $bunfs',
     issue: '#1456',
     kind: 'shim',
     shape: 'next',
@@ -457,9 +458,22 @@ export const REGISTRY: RetirementEntry[] = [
     // build therefore rewrites every import between embedded modules to a
     // relative path, and turbopack's hashed external aliases to absolute
     // embedded paths (standalone-compile.mjs resolveFromEmbedded,
-    // standalone-embed.mjs rewriteExternalAliases). To be added to
-    // oven-sh/bun#44059's test matrix (the include PR is where embedded-package
-    // resolution lands).
+    // standalone-embed.mjs rewriteExternalAliases). Filed upstream as
+    // oven-sh/bun#44101 (not oven-sh/bun#44059 — that PR's own "explicitly
+    // out of scope" note says it "does not touch resolver lookup order",
+    // so it is not a candidate fix for this).
+    //
+    // NOT retirable on this probe alone even once #44101 lands: the rewrite
+    // does two independent jobs, and BOTH must hold for the shim to go away.
+    // (1) makes a bare specifier resolve (this probe's target) — but (2) it
+    // also DEDUPES Next's `*.external` singletons (two embedded chunks
+    // requiring the same module must share one instance, proven by the
+    // mutation in the round-1 review: rewriting `relativeSpecifier` to a
+    // non-shared path fails the self-contained compile closed). A bare
+    // specifier resolving upstream would still load each embedded chunk's
+    // own copy of a bare-required module rather than the ONE shared instance
+    // the relative rewrite guarantees, so the rewrite stays load-bearing for
+    // (2) independent of whether (1) is ever fixed.
     repro: async () => {
       const box = sandbox('bare-in-bunfs');
       try {
@@ -520,6 +534,19 @@ export const REGISTRY: RetirementEntry[] = [
     // (standalone-embed.mjs installDistDirAlias). The Next half — a supported
     // way to put the static and cache roots somewhere other than `distDir` —
     // is drafted in .claude/research/n1-nextjs-distdir-ask-DRAFT.md.
+    //
+    // The shim covers THREE distinct `$bunfs` gaps, not one, so the probe
+    // covers all three — a partial upstream fix (e.g. #22223 alone) must still
+    // report `stillBroken`, since the shim would still be load-bearing for the
+    // other two:
+    //   1. createReadStream of an embedded file (oven-sh/bun#22223 itself);
+    //   2. a WRITE under an embedded path (`.next/cache`, which Next writes at
+    //      runtime) — `$bunfs` is a baked-in virtual filesystem and can never
+    //      accept a write, upstream or not; this half of the shim is permanent;
+    //   3. an embedded EXTENSIONLESS file (`BUILD_ID`): Bun's own asset naming
+    //      appends a trailing dot to a name with no extension, so the runtime
+    //      must ask for `BUILD_ID.`, not `BUILD_ID` — a naming quirk, not a
+    //      missing capability, and independent of (1).
     repro: async () => {
       const box = sandbox('22223');
       try {
@@ -527,14 +554,23 @@ export const REGISTRY: RetirementEntry[] = [
           {
             'main.cjs':
               'const fs = require("node:fs"), { dirname, join } = require("node:path");\n' +
-              'const f = join(dirname(process.argv[1]), "static", "a.txt");\n' +
+              'const dir = dirname(process.argv[1]);\n' +
+              'const f = join(dir, "static", "a.txt");\n' +
               'let read; try { read = fs.readFileSync(f, "utf8").trim(); } catch (e) { read = "fail " + e.code; }\n' +
               'let chunks = ""; fs.createReadStream(f).on("data", (c) => { chunks += c; })\n' +
-              '  .on("end", () => console.log("RESULT " + JSON.stringify({ read, stream: chunks.trim() })))\n' +
-              '  .on("error", (e) => console.log("RESULT " + JSON.stringify({ read, stream: "fail " + e.code })));\n',
+              '  .on("end", () => afterStream(chunks.trim()))\n' +
+              '  .on("error", (e) => afterStream("fail " + e.code));\n' +
+              'function afterStream(stream) {\n' +
+              '  const cacheFile = join(dir, "cache", "x.bin");\n' +
+              '  let write; try { fs.writeFileSync(cacheFile, "w"); write = "wrote"; } catch (e) { write = "fail " + e.code; }\n' +
+              '  const idFile = join(dir, "BUILD_ID");\n' +
+              '  let ext; try { ext = fs.readFileSync(idFile, "utf8").trim(); } catch (e) { ext = "fail " + e.code; }\n' +
+              '  console.log("RESULT " + JSON.stringify({ read, stream, write, ext }));\n' +
+              '}\n',
             'static/a.txt': 'static-ok\n',
+            BUILD_ID: 'id-ok\n',
             'assets.mjs':
-              'import a from "./static/a.txt" with { type: "file" };\nexport default a;\n',
+              'import a from "./static/a.txt" with { type: "file" };\nimport b from "./BUILD_ID" with { type: "file" };\nexport default [a, b];\n',
           },
           'src',
         );
@@ -546,12 +582,20 @@ export const REGISTRY: RetirementEntry[] = [
         box.remove('src');
         box.write({ '.keep': '' }, 'empty');
         const raw = box.run([join(box.dir, 'bin/app')], join(box.dir, 'empty')).result;
-        const { read, stream } = JSON.parse(raw) as { read: string; stream: string };
-        // Control: the file IS embedded and readable with readFileSync.
+        const { read, stream, write, ext } = JSON.parse(raw) as {
+          read: string;
+          stream: string;
+          write: string;
+          ext: string;
+        };
+        // Control: the files ARE embedded and readable with readFileSync.
         if (read !== 'static-ok') inconclusive('bunfs-static-disk-alias', `readFileSync: ${raw}`);
+        const streamBroken = stream !== 'static-ok';
+        const writeBroken = write !== 'wrote';
+        const extensionlessBroken = ext !== 'id-ok';
         return {
-          stillBroken: stream !== 'static-ok',
-          evidence: `readFileSync of the embedded file → ${read}; createReadStream → ${stream}`,
+          stillBroken: streamBroken || writeBroken || extensionlessBroken,
+          evidence: `createReadStream → ${stream}; write under an embedded path → ${write}; extensionless read (no trailing-dot alias) → ${ext}`,
         };
       } finally {
         box.dispose();
