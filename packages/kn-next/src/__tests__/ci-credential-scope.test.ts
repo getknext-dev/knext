@@ -62,7 +62,10 @@ describe("ADR-0049 credential preflight (#874)", () => {
         const live = [
             {
                 apiGroups: ["authorization.k8s.io"],
-                resources: ["selfsubjectaccessreviews", "selfsubjectrulesreviews"],
+                resources: [
+                    "selfsubjectaccessreviews",
+                    "selfsubjectrulesreviews",
+                ],
                 verbs: ["create"],
             },
             {

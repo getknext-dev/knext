@@ -91,4 +91,33 @@ describe('kn-next-action preflight resolves @getknext/core from the app', () => 
     const step = action.runs.steps.find((s) => s.name === 'Credential preflight');
     expect(step?.['working-directory']).toBe('${{ inputs.working-directory }}');
   });
+  // The credentialed docs deploy uses this in-tree action, so the preflight's
+  // off-switch is the one input that can silently disable the ADR-0049 check.
+  describe('the preflight cannot be disabled by default or by a second exit', () => {
+    type Step = { name?: string; run?: string; env?: Record<string, string> };
+    const loadAction = () =>
+      parse(readFileSync(ACTION, 'utf8')) as {
+        inputs: Record<string, { default?: string }>;
+        runs: { steps: Step[] };
+      };
+
+    it('skip-credential-preflight defaults to exactly the string "false"', () => {
+      expect(loadAction().inputs['skip-credential-preflight']?.default).toBe('false');
+    });
+
+    it('the skip branch is the ONLY exit 0, gated on the input being literally "true"', () => {
+      const step = loadAction().runs.steps.find((s) => s.name === 'Credential preflight');
+      expect(step?.env?.KNEXT_SKIP_PREFLIGHT).toBe('${{ inputs.skip-credential-preflight }}');
+      const run = step?.run ?? '';
+      const exits = run.match(/\bexit\b/g) ?? [];
+      expect(exits).toHaveLength(1);
+      expect(run).toMatch(
+        /if \[ "\$KNEXT_SKIP_PREFLIGHT" = "true" \]; then\n[^\n]*\n\s*exit 0\n\s*fi\n/,
+      );
+      // the classifier's exit code must reach the step: nothing may swallow it.
+      const node = run.split('\n').find((l) => l.includes('preflight.mjs')) ?? '';
+      expect(node).not.toMatch(/\|\||;\s*true|\bexit 0\b/);
+      expect(run).not.toMatch(/\breturn\b|set \+e/);
+    });
+  });
 });
