@@ -87,6 +87,18 @@ inputs:
       and logs loudly when on.
     required: false
     default: 'false'
+  cli:
+    description: >-
+      The command used to run the knext CLI, split on whitespace (no shell
+      quoting or expansion — each word becomes one argv entry). Defaults to
+      the published package, which is what a consumer of this action from the
+      marketplace should use. A workflow that dogfoods this action FROM ITS
+      OWN CHECKOUT (as this repo's docs deploy does) should point it at that
+      checkout's own built CLI instead — e.g.
+      `node /path/to/packages/kn-next/dist/cli/kn-next.js` — so the deploy
+      runs the code under test rather than whatever npm currently serves.
+    required: false
+    default: 'npx --yes @getknext/core'
 
 runs:
   using: composite
@@ -172,10 +184,30 @@ runs:
       env:
         KNEXT_NAMESPACE: ${{ inputs.namespace }}
         KNEXT_REGISTRY: ${{ inputs.registry }}
+        KNEXT_CLI: ${{ inputs.cli }}
       run: |
         set -euo pipefail
+        # Split on whitespace into argv entries — no shell quoting/expansion of
+        # the input's contents, so a `cli` value cannot inject anything beyond
+        # separate words. `read -ra` does that safely, without re-interpreting
+        # the string as shell code.
+        read -r -a CLI <<< "$KNEXT_CLI"
+        if [ "${#CLI[@]}" -eq 0 ]; then
+          echo "::error::the 'cli' input is empty — nothing to run."
+          exit 1
+        fi
+        # A wrong 'cli' input must be a named error here, not exit 127 from a
+        # bare `sh: <word>: not found` deep inside the deploy call (#1502).
+        if ! command -v "${CLI[0]}" >/dev/null 2>&1; then
+          echo "::error::the 'cli' input's executable '${CLI[0]}' was not found on PATH. cli=\"$KNEXT_CLI\""
+          exit 1
+        fi
+        if [ "${CLI[0]}" = "node" ] && [ "${#CLI[@]}" -ge 2 ] && [ ! -f "${CLI[1]}" ]; then
+          echo "::error::the 'cli' input points node at '${CLI[1]}', which does not exist. Build the CLI before this step, or leave 'cli' at its default (npx)."
+          exit 1
+        fi
         if [ "${{ inputs.doctor }}" = "true" ]; then
-          npx --yes @getknext/core doctor --namespace "$KNEXT_NAMESPACE"
+          "${CLI[@]}" doctor --namespace "$KNEXT_NAMESPACE"
         fi
         DEPLOY_ARGS=(--namespace "$KNEXT_NAMESPACE" --registry "$KNEXT_REGISTRY")
         # `if`, not `[ … ] && …`. Under `set -e`, a `[ … ] && …` whose test is
@@ -189,4 +221,4 @@ runs:
         if [ "${{ inputs.skip-upload }}" = "true" ]; then DEPLOY_ARGS+=(--skip-upload); fi
         if [ "${{ inputs.skip-build }}" = "true" ]; then DEPLOY_ARGS+=(--skip-build); fi
         if [ "${{ inputs.dry-run }}" = "true" ]; then DEPLOY_ARGS+=(--dry-run); fi
-        npx --yes @getknext/core deploy "${DEPLOY_ARGS[@]}"
+        "${CLI[@]}" deploy "${DEPLOY_ARGS[@]}"

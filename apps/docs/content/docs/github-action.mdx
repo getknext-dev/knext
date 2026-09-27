@@ -210,6 +210,7 @@ that case, and turns the check off rather than satisfying it.
 | `working-directory` | no | `.` | Where `kn-next.config.ts` lives |
 | `doctor` | no | `true` | Read-only preflight; fails fast on an unready cluster |
 | `skip-credential-preflight` | no | `false` | Turns off the credential check. Read the callout above first |
+| `cli` | no | `npx --yes @getknext/core` | The command that runs the CLI, split on whitespace. Leave this at its default — it is only there so this action can be tested against a locally built CLI instead of the published package |
 
 The action sets no outputs. The deployed URL is reported by the cluster — read it with
 `kubectl get ksvc -n <namespace>`, or `knext status`. An output that was empty on every dry run
