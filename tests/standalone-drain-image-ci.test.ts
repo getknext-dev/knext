@@ -1287,6 +1287,187 @@ describe('assertCleanDrain cannot record its leg and skip the assertions that ea
       `assertCleanDrain can rewrite a value between its source and its assertion:\n${writes.join('\n')}`,
     ).toEqual([]);
   });
+  // Round 8 (R7-B1). Round 7 closed WHAT the six pins read from, but not the
+  // helper's own SIGNATURE: a 3rd parameter with a default value (a fake
+  // `fetch`, a shadowed `HARDCAP_LOG`, a zeroed `MIN_CLEAN_DRAIN_MS`) hollows
+  // the pins out with every other check green, because nothing pinned the
+  // parameter list itself. And nothing resolved the helper's FREE
+  // identifiers (as opposed to the ones it declares) — a module-level
+  // `const fetch = ...` shadowing the global is a legitimate top-level
+  // declaration of the file, so a check that only asked "is this top-level"
+  // would wave it through.
+  it("the helper's parameter list is exactly (container: string, port: number), and every free identifier it uses resolves to a helper local, one of the file's own named top-level bindings, or a lib/bun .d.ts global (round 8, R7-B1)", () => {
+    const { checker, sourceFile, fn } = checkedSuite();
+    const lineOf = (n: ts.Node) =>
+      sourceFile.getLineAndCharacterOfPosition(n.getStart(sourceFile)).line + 1;
+
+    // (1) Exactly two plain parameters, named and typed precisely, no
+    // default/rest/optional/destructure — this alone kills a 3rd smuggled
+    // parameter with an initializer (round 7's A1/A2/A3).
+    const WANT: Array<{ name: string; type: string }> = [
+      { name: 'container', type: 'string' },
+      { name: 'port', type: 'number' },
+    ];
+    const params = fn.parameters;
+    const shapeProblems: string[] = [];
+    if (params.length !== WANT.length) {
+      shapeProblems.push(
+        `assertCleanDrain must take exactly ${WANT.length} parameters, has ${params.length}`,
+      );
+    }
+    params.forEach((p, i) => {
+      if (p.dotDotDotToken) shapeProblems.push(`parameter ${i} is a rest parameter`);
+      if (p.initializer) shapeProblems.push(`parameter ${i} has a default initializer`);
+      if (p.questionToken) shapeProblems.push(`parameter ${i} is optional`);
+      if (!ts.isIdentifier(p.name)) {
+        shapeProblems.push(`parameter ${i} is not a plain identifier (destructured?)`);
+        return;
+      }
+      const want = WANT[i];
+      if (!want) return; // the count mismatch above already reports this
+      if (p.name.text !== want.name) {
+        shapeProblems.push(`parameter ${i} is named \`${p.name.text}\`, want \`${want.name}\``);
+      }
+      if (!p.type || p.type.getText(sourceFile) !== want.type) {
+        shapeProblems.push(`parameter ${i} (\`${p.name.text}\`) is not typed \`${want.type}\``);
+      }
+    });
+    expect(
+      shapeProblems,
+      `assertCleanDrain's parameter list is not exactly (container: string, port: number):\n${shapeProblems.join('\n')}`,
+    ).toEqual([]);
+
+    // (2) Every free identifier anywhere in the helper (parameters excluded
+    // — (1) above already pins their shape) must resolve to a helper local,
+    // one of the file's OWN named top-level bindings, or an ambient global
+    // declared in a .d.ts. "Named" is load-bearing: allowing ANY top-level
+    // declaration of the file would let a newly mutated-in module-level
+    // `const fetch = ...` (round 7's A5) pass, since that too is top-level.
+    const paramSyms = new Set<ts.Symbol>();
+    for (const n of allNodes(fn)) {
+      if (ts.isParameter(n) && ts.isIdentifier(n.name)) {
+        const sym = checker.getSymbolAtLocation(n.name);
+        if (sym) paramSyms.add(sym);
+      }
+    }
+    const localSyms = new Set<ts.Symbol>();
+    for (const stmt of (fn.body as ts.Block).statements) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      for (const d of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(d.name)) {
+          const sym = checker.getSymbolAtLocation(d.name);
+          if (sym) localSyms.add(sym);
+        }
+      }
+    }
+    const TOP_LEVEL_ALLOW = [
+      'REQUEST_MS',
+      'AFTER_MS',
+      'PRE_TERM_MS',
+      'DRAIN_BOUND_MS',
+      'SHUTDOWN_GRACE_MS',
+      'MIN_CLEAN_DRAIN_MS',
+      'HARDCAP_LOG',
+      'drainLegsCompleted',
+      'run',
+      'randomBytes',
+    ];
+    const allowSet = new Set(TOP_LEVEL_ALLOW);
+    const topLevelSyms = new Map<string, ts.Symbol>();
+    for (const stmt of sourceFile.statements) {
+      const names: ts.Identifier[] = [];
+      if (ts.isVariableStatement(stmt)) {
+        for (const d of stmt.declarationList.declarations) {
+          if (ts.isIdentifier(d.name)) names.push(d.name);
+        }
+      } else if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+        names.push(stmt.name);
+      } else if (
+        ts.isImportDeclaration(stmt) &&
+        stmt.importClause?.namedBindings &&
+        ts.isNamedImports(stmt.importClause.namedBindings)
+      ) {
+        for (const el of stmt.importClause.namedBindings.elements) names.push(el.name);
+      }
+      for (const n of names) {
+        if (allowSet.has(n.text)) {
+          const sym = checker.getSymbolAtLocation(n);
+          if (sym) topLevelSyms.set(n.text, sym);
+        }
+      }
+    }
+    for (const name of TOP_LEVEL_ALLOW) {
+      expect(
+        topLevelSyms.has(name),
+        `the file no longer declares a top-level \`${name}\` the helper depends on`,
+      ).toBe(true);
+    }
+    const topLevelSymSet = new Set(topLevelSyms.values());
+
+    const bad: string[] = [];
+    for (const n of allNodes(fn)) {
+      if (!ts.isIdentifier(n)) continue;
+      if (n === fn.name) continue; // the helper's own declaration name
+      const p = n.parent;
+      if (ts.isPropertyAccessExpression(p) && p.name === n) continue; // member name
+      if (ts.isPropertyAssignment(p) && p.name === n) continue; // object-literal key
+      const sym = checker.getSymbolAtLocation(n);
+      if (!sym) continue; // type-position keywords etc.
+      if (paramSyms.has(sym) || localSyms.has(sym) || topLevelSymSet.has(sym)) continue;
+      const aliasTarget = sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+      const decls = aliasTarget.declarations ?? [];
+      const isAmbientGlobal =
+        decls.length > 0 &&
+        decls.every((d) => d.getSourceFile().isDeclarationFile && d.getSourceFile() !== sourceFile);
+      if (isAmbientGlobal) continue;
+      bad.push(
+        `line ${lineOf(n)}: \`${n.text}\` does not resolve to a helper local, a named top-level binding, or a .d.ts global`,
+      );
+    }
+    expect(
+      bad,
+      `assertCleanDrain uses a free identifier the type checker cannot pin to a known source:\n${bad.join('\n')}`,
+    ).toEqual([]);
+  });
+
+  // Round 8 (R7-B2). The belt above forbids only DECLARING another `expect`.
+  // A member access on the real bun:test `expect` (`expect.extend`, and
+  // similar) is not a declaration, so it slipped past every prior check —
+  // `expect.extend({...})` at module scope repoints every matcher the six
+  // pins call, and every pin still reads a real `expect(...)` chain.
+  it('no property access on the bun:test `expect` symbol appears anywhere in the file — `expect.extend` and its siblings cannot silently repoint the matchers the pins depend on (round 8, R7-B2)', () => {
+    const { checker, sourceFile } = checkedSuite();
+    const lineOf = (n: ts.Node) =>
+      sourceFile.getLineAndCharacterOfPosition(n.getStart(sourceFile)).line + 1;
+
+    const bunImports = sourceFile.statements.filter(
+      (s): s is ts.ImportDeclaration =>
+        ts.isImportDeclaration(s) &&
+        ts.isStringLiteral(s.moduleSpecifier) &&
+        s.moduleSpecifier.text === 'bun:test',
+    );
+    expect(bunImports.length, 'exactly one import from bun:test').toBe(1);
+    const bindings = (bunImports[0] as ts.ImportDeclaration).importClause?.namedBindings;
+    const spec =
+      bindings && ts.isNamedImports(bindings)
+        ? bindings.elements.find((e) => e.name.text === 'expect' && !e.propertyName)
+        : undefined;
+    expect(spec, 'the bun:test import no longer binds `expect` (un-renamed)').not.toBeUndefined();
+    const importSym = checker.getSymbolAtLocation((spec as ts.ImportSpecifier).name);
+    expect(importSym, 'the `expect` import specifier has no symbol').not.toBeUndefined();
+
+    const violations: string[] = [];
+    for (const n of allNodes(sourceFile)) {
+      if (!ts.isPropertyAccessExpression(n)) continue;
+      if (!ts.isIdentifier(n.expression) || n.expression.text !== 'expect') continue;
+      if (checker.getSymbolAtLocation(n.expression) !== importSym) continue;
+      violations.push(`line ${lineOf(n)}: expect.${n.name.text}`);
+    }
+    expect(
+      violations,
+      `a property is accessed on the bun:test expect import — this can repoint a matcher (e.g. expect.extend) without any pinned assertion ever seeing it:\n${violations.join('\n')}`,
+    ).toEqual([]);
+  });
 });
 
 describe('the CI path actually reaches the suite (both halves)', () => {
