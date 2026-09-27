@@ -26,6 +26,9 @@ import { parse, parseAllDocuments } from "yaml";
 import { classifyCredentialScope } from "../cli/ci/credential-scope";
 import {
     initCi,
+    MINTED_KUBECONFIG_PATH,
+    mintKubeconfigCommands,
+    nextSteps,
     RBAC_PATH,
     REQUIRED_SECRETS,
     renderRbacManifest,
@@ -188,5 +191,39 @@ describe("initCi writes both files (#874)", () => {
             parse(readFileSync(join(root, WORKFLOW_PATH), "utf8")).jobs.deploy
                 .steps[1].with["working-directory"],
         ).toBe("apps/web");
+    });
+});
+
+describe("mintKubeconfigCommands — knext mints nothing itself (#1533, ADR-0061)", () => {
+    it("carries the namespace and the ServiceAccount name, never a placeholder", () => {
+        const cmds = mintKubeconfigCommands("prod-eu");
+        const text = cmds.join("\n");
+        expect(text).toContain("knext-deployer");
+        expect(text).toContain("prod-eu");
+        expect(text).toContain(MINTED_KUBECONFIG_PATH);
+    });
+
+    it("uses only kubectl — never a cloud CLI (ADR-0061 tripwire 2)", () => {
+        const text = mintKubeconfigCommands("acme").join("\n");
+        for (const cloudCli of ["aws ", "gcloud ", "az ", "oci ", "eksctl "]) {
+            expect(text).not.toContain(cloudCli);
+        }
+    });
+
+    it("mints a bound token via `kubectl create token`, not a stored Secret", () => {
+        // A ServiceAccount TOKEN SECRET is long-lived and never expires; a
+        // TokenRequest-minted token (`kubectl create token`) is bound and
+        // time-limited — the safer default this command set uses.
+        const text = mintKubeconfigCommands("acme").join("\n");
+        expect(text).toContain("kubectl create token knext-deployer");
+    });
+
+    it("nextSteps embeds the actual mint commands, not a vague instruction", () => {
+        const steps = nextSteps("acme");
+        for (const cmd of mintKubeconfigCommands("acme")) {
+            expect(steps).toContain(cmd);
+        }
+        // And documents the --push-secret shortcut.
+        expect(steps).toContain("--push-secret");
     });
 });

@@ -32,6 +32,21 @@ Deployments, Services or Pods.
 This is only possible because deploying *is* writing one object — the operator is the single source
 of truth for what runs, so CI never needs to touch Knative, autoscaling or networking directly.
 
+## A cloud-credential kubeconfig is refused, before any cluster call
+
+If the kubeconfig authenticates via an `exec:` or `auth-provider:` user entry — the shape
+`aws eks get-token`, `gke-gcloud-auth-plugin`, `oci ce cluster generate-token` or `kubelogin` use —
+the action refuses it immediately, with:
+
+> This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
+> ServiceAccount token.
+
+knext holds no cloud-account credentials, ever. The only shape it accepts is a plain bearer token —
+the kind `kn-next init-ci` prints the commands to mint, and `kn-next init-ci --push-secret` can push
+straight to your repository as the `KNEXT_KUBECONFIG` secret. This is the same classifier
+`knext doctor --ci-kubeconfig <path>` uses, so you can check a kubeconfig FILE before it ever
+reaches CI.
+
 ## An over-broad kubeconfig is refused
 
 On startup the action asks your cluster what the supplied credential can actually do, and fails if
@@ -47,14 +62,18 @@ for that case and turns the check **off** — it does not satisfy it.
 
 Some clusters answer but mark the answer incomplete — their authorizer cannot fully resolve what a
 credential can do (common on webhook-authorized clusters such as OKE or GKE with IAM). The action
-does not fail closed on that alone: refusing there would refuse the scoped credential this check
-exists to allow, not just an over-broad one. It prints a warning and evaluates whatever rules the
-cluster did return — an incomplete answer is a weaker guarantee than a complete one, so read the
-warning if you see it.
+does **not** fail closed on that incompleteness alone: refusing there would refuse the scoped
+credential this check exists to allow, not just an over-broad one. `status.incomplete` alone no
+longer decides anything by itself. Instead the action separately spot-checks a short, hazardous
+list — reading Secrets, deleting your app, creating a ClusterRoleBinding, impersonating another
+user, or a bare wildcard — directly against the cluster via `SelfSubjectAccessReview`, which a
+webhook authorizer answers even when it cannot answer the broader review. It refuses if ANY of
+those is allowed, or if that spot-check itself cannot run — the fail-closed backstop for exactly
+the cluster class the broader review is blind on.
 
 This check does not depend on the `kubectl` version your runner happens to ship — it asks the
 cluster directly rather than parsing a command's table output, so it behaves the same on
-`ubuntu-latest` as it does on your laptop. It submits that question as a raw POST to the apiserver,
+`ubuntu-latest` as it does on your laptop. It submits every review as a raw POST to the apiserver,
 with no client-side validation, so it works with the scoped credential this action expects and not
 only with a cluster-admin one.
 

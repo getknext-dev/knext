@@ -195,17 +195,67 @@ export function initCi(
     return { written, skipped };
 }
 
+/** Where the minted kubeconfig lands by default (#1533). */
+export const MINTED_KUBECONFIG_PATH = "knext-deployer.kubeconfig";
+
+/**
+ * The commands that mint a kubeconfig for the `knext-deployer`
+ * ServiceAccount (#1533, ADR-0061): a `kubectl create token` bound to the
+ * ServiceAccount `knext-ci-rbac.yaml` creates, plus the four `kubectl
+ * config set-*` calls that assemble a standalone kubeconfig file around it.
+ *
+ * knext MINTS NOTHING ITSELF — these are PRINTED for the user to run in
+ * their own shell, against their own kube-context. Every one of them is a
+ * read of the local kubeconfig or a `TokenRequest` for a ServiceAccount the
+ * user already owns; none of it is a knext-held credential or a knext
+ * process holding a cluster session (ADR-0061's "does not own" list:
+ * kubeconfig acquisition stays the user's).
+ *
+ * A bearer token, not an exec plugin — the ONE shape
+ * `classifyKubeconfigSafety` (kubeconfig-safety.ts) accepts, on every
+ * cloud, because it never shells out to a cloud CLI for cloud-account
+ * credentials.
+ */
+export function mintKubeconfigCommands(namespace: string): string[] {
+    const sa = "knext-deployer";
+    const out = MINTED_KUBECONFIG_PATH;
+    return [
+        `SERVER=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}')`,
+        `CA_DATA=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')`,
+        // A one-year bound token by default — adjust --duration to your
+        // rotation policy; the cluster may cap it lower (server flag
+        // --service-account-max-token-expiration).
+        `TOKEN=$(kubectl create token ${sa} -n ${namespace} --duration=8760h)`,
+        `kubectl config set-cluster ${sa} --server="$SERVER" --certificate-authority=/dev/stdin --embed-certs=true --kubeconfig=${out} <<< "$(echo "$CA_DATA" | base64 -d)"`,
+        `kubectl config set-credentials ${sa} --token="$TOKEN" --kubeconfig=${out}`,
+        `kubectl config set-context ${sa} --cluster=${sa} --user=${sa} --namespace=${namespace} --kubeconfig=${out}`,
+        `kubectl config use-context ${sa} --kubeconfig=${out}`,
+    ];
+}
+
 /** The post-generation instructions, so the next step is never a guess. */
 export function nextSteps(namespace: string): string {
+    const mint = mintKubeconfigCommands(namespace)
+        .map((c) => `       ${c}`)
+        .join("\n");
     return [
         "Next, in this order:",
         "",
         `  1. Read ${RBAC_PATH}, then:  kubectl apply -f ${RBAC_PATH}`,
-        "  2. Create a kubeconfig for the knext-deployer ServiceAccount and",
-        `     add it, base64-encoded, as the KNEXT_KUBECONFIG secret.`,
-        "  3. Add the other three secrets listed at the top of",
+        "  2. Mint a kubeconfig for the knext-deployer ServiceAccount",
+        "     (knext writes nothing to the cluster — you run these):",
+        "",
+        mint,
+        "",
+        `  3. Add ${MINTED_KUBECONFIG_PATH}, base64-encoded, as the ` +
+            "KNEXT_KUBECONFIG secret — or run:",
+        `       kn-next init-ci --namespace ${namespace} --push-secret ` +
+            `${MINTED_KUBECONFIG_PATH}`,
+        "     which reads that file and pushes it with `gh secret set`" +
+            " itself (the token is never printed).",
+        "  4. Add the other three secrets listed at the top of",
         `     ${WORKFLOW_PATH}.`,
-        "  4. Push. The operator reconciles from the resource CI writes.",
+        "  5. Push. The operator reconciles from the resource CI writes.",
         "",
         `The credential grants ${CI_ROLE_RULES[0].verbs.join("/")} on ` +
             `${CI_ROLE_RULES[0].resources[0]} in ${namespace}, and nothing else.`,

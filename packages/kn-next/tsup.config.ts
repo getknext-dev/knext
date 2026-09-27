@@ -82,6 +82,10 @@ export default defineConfig([
       // The ADR-0049 credential classifier. Published so the GitHub Action's
       // preflight reads the SAME Role definition `init-ci` generates from.
       'cli/ci/credential-scope': 'src/cli/ci/credential-scope.ts',
+      // The #1533/ADR-0061 exec-plugin/cloud-credential kubeconfig refusal.
+      // Published so the action preflight reads the SAME classifier
+      // `init-ci --push-secret` and `doctor --ci-kubeconfig` refuse with.
+      'cli/ci/kubeconfig-safety': 'src/cli/ci/kubeconfig-safety.ts',
       // #188 round 3 — own dist entry so e2e-deploy.sh can import the heal
       // POST-build (onBuildComplete fires before .next/standalone exists).
       'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
@@ -173,6 +177,8 @@ export default defineConfig([
       // The ADR-0049 credential classifier. Published so the GitHub Action's
       // preflight reads the SAME Role definition `init-ci` generates from.
       'cli/ci/credential-scope': 'src/cli/ci/credential-scope.ts',
+      // The #1533/ADR-0061 exec-plugin/cloud-credential kubeconfig refusal.
+      'cli/ci/kubeconfig-safety': 'src/cli/ci/kubeconfig-safety.ts',
         'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'adapters/tracing': 'src/adapters/tracing.ts',

@@ -187,9 +187,27 @@ cluster what the credential can do. If it can read Secrets, act on Deployments, 
 wildcard rule, the job fails and prints the Role above instead of deploying. Asking for less than
 you are offered is the point — a CI secret has a wider blast radius than a laptop.
 
-If your cluster's authorizer cannot answer that question, the action fails rather than guessing. A
-check that passes when it cannot see is not a check. `skip-credential-preflight: true` exists for
-that case, and turns the check off rather than satisfying it.
+**A kubeconfig that needs a cloud CLI on the runner is refused outright.** If it authenticates via
+an `exec:` or `auth-provider:` entry — the shape `aws eks get-token`, `gke-gcloud-auth-plugin`,
+`oci ce cluster generate-token` or `kubelogin` use — the job fails immediately, before any cluster
+call, with:
+
+> This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
+> ServiceAccount token.
+
+knext holds no cloud-account credentials, ever; the only shape it accepts is a plain bearer token,
+the kind `knext init-ci` mints. The same classifier backs `knext doctor --ci-kubeconfig <path>`, so
+you can check a kubeconfig FILE before it ever reaches CI.
+
+**Some clusters cannot fully answer "what can this credential do?"** — common on webhook-authorized
+clusters such as OKE or GKE, where IAM answers authorization instead of Kubernetes RBAC. The action
+does not fail closed on that incompleteness alone (doing so would refuse the scoped credential this
+check exists to allow, not just an over-broad one). Instead it separately spot-checks a short list
+of hazardous permissions — reading Secrets, deleting your app, creating a ClusterRoleBinding,
+impersonating another user, or a bare wildcard — directly against the cluster, and refuses if ANY of
+them is allowed, or if that spot-check itself cannot run. A check that passes when it cannot see is
+not a check. `skip-credential-preflight: true` exists for the case where your cluster implements
+neither review at all, and it turns the check off rather than satisfying it.
 </Callout>
 
 ## Inputs
