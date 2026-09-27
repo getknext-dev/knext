@@ -1033,6 +1033,32 @@ describe("sealCompile — refuses a foreign executablePath by any route", () => 
                 ),
         ],
     ];
+    // Shows the key only to the SECOND enumeration (the for…in), not to the copy or to `in`.
+    refused.push([
+        "a Proxy that shows the key only to a second enumeration (for…in)",
+        () => {
+            let n = 0;
+            return new Proxy(
+                {},
+                {
+                    ownKeys: (t) =>
+                        n++ < 1
+                            ? Reflect.ownKeys(t)
+                            : [...Reflect.ownKeys(t), key],
+                    getOwnPropertyDescriptor: (t, k) =>
+                        k === key
+                            ? {
+                                  value: "x",
+                                  enumerable: true,
+                                  configurable: true,
+                                  writable: true,
+                              }
+                            : Reflect.getOwnPropertyDescriptor(t, k),
+                    has: () => false,
+                },
+            );
+        },
+    ]);
     for (const [name, part] of refused) {
         it(`${name} → throws`, () => {
             expect(() =>
