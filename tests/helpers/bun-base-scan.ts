@@ -82,17 +82,50 @@ function probeOp(src: string): number {
   return op;
 }
 const PARAM_OPS_OK = new Set([probeOp('echo ${a:-b}'), probeOp('echo ${a%%b}')]);
-const ARITH_OK = new Set(['$(($(date +%s) - T0))']);
 
-/** ${…} index / slice-offset/length text that isn't a plain literal. mvdan-sh does NOT wrap these in
- *  an ArithmExp node the way it wraps `$(( ))`/`(( ))` (verified against the parser: a ParamExp.Index
- *  holds a raw BinaryArithm directly, and a ParamExp.Slice's Offset/Length are not visited by
- *  syntax.Walk AT ALL), so neither the ARITH_OK case above nor anything else in this file ever sees
- *  `${a[PATH=0]}` or `${x:PATH=0:1}` — the #1469-r6 arithmetic-bind bypass. Both are read and judged
- *  on text here instead of on node type; only `@`, `*`, a bare `$NAME`, or digits are index shapes
- *  build.sh actually uses, and only digits are slice shapes it uses. */
-const INDEX_OK = /^(@|\*|\$[A-Za-z_][A-Za-z0-9_]*|[0-9]+)$/;
-const SLICE_OK = /^[0-9]+$/;
+/** Literal index/slice shapes that need no arithmetic judgement at all: `@`/`*` (whole-array), a
+ *  digit literal, or (index only, and only on a `declare -A` array — see judgeIndex) a bare `$NAME`.
+ *  For an ASSOCIATIVE array, `[$NAME]` never runs through bash's arithmetic evaluator — the name is
+ *  word-expanded into a literal string key, nothing more (a CmdSubst nested in that expansion is
+ *  still caught, but structurally, by the outer expansions() walk, not here). For an INDEXED array
+ *  or a slice, bash evaluates the text arithmetically, so anything besides these literal shapes goes
+ *  through judgeArith below instead of being guessed at with a regex. */
+const INDEX_LITERAL_OK = /^(@|\*|[0-9]+)$/;
+const SLICE_LITERAL_OK = /^[0-9]+$/;
+const ASSOC_INDEX_NAME_OK = /^\$[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Op codes for the operators that make a `$(( ))`/`${…[…]}`/`${…:…:…}` context an assignment or an
+ *  increment/decrement, derived from the parser itself — like ARITH_TEST_OPS below — rather than
+ *  hardcoded enum numbers that could drift across mvdan-sh versions. `**=` is not a bash operator
+ *  mvdan-sh's parser accepts (a probe parse error), so it is silently dropped rather than injected
+ *  as a bogus code that could coincide with a real one. */
+function deriveArithOp(src: string, kind: 'BinaryArithm' | 'UnaryArithm'): number {
+  let code = -1;
+  try {
+    syntax.Walk(newParser().Parse(src, 'probe'), (n) => {
+      if (n && T(n) === kind && code === -1) code = n.Op ?? -1;
+      return true;
+    });
+  } catch {
+    // not a supported operator in this mvdan-sh build — never matches below, safe to omit
+  }
+  return code;
+}
+const ARITH_ASSIGN_OPS = new Set(
+  ['=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=']
+    .map((op) => deriveArithOp(`echo $((x ${op} 1))`, 'BinaryArithm'))
+    .filter((c) => c !== -1),
+);
+const ARITH_INCDEC_OPS = new Set(
+  ['++', '--']
+    .map((op) => deriveArithOp(`echo $((x${op}))`, 'UnaryArithm'))
+    .filter((c) => c !== -1),
+);
+/** Node kinds judgeArith's structural walk may pass through without a specific rule of its own —
+ *  pure containers/wrappers that carry no operator or identifier of their own. Anything else
+ *  unrecognized is fail-closed red, the same discipline walkStmt's final `else` uses for a statement
+ *  kind it does not model. */
+const ARITH_STRUCT_OK = new Set(['ArithmExp', 'Word', 'ParenArithm']);
 
 /** `[[ ]]`'s arithmetic comparison operators run their operands through the SAME evaluator as
  *  `$(( ))`/`(( ))` — including assignment (`[[ 1 -eq PATH=5 ]]` sets PATH; verified in real bash) and
@@ -132,18 +165,6 @@ function constMismatch(name: string, text: string): string | undefined {
   return `${name} may only be set as \`${want}\``;
 }
 
-/** Judge a raw Index or Slice-offset/length text: literal shapes pass; anything else is red, called
- *  out by name when it happens to rebind a CONST, generically otherwise (an arithmetic expression
- *  there can smuggle a command substitution regardless of whether the name is one we enumerate). */
-function arithContextBad(text: string, kind: 'index' | 'slice offset/length'): string | undefined {
-  if ((kind === 'index' ? INDEX_OK : SLICE_OK).test(text)) return undefined;
-  const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(text);
-  const mism = m && constMismatch(m[1]!, text);
-  return mism
-    ? `${kind} \`${text}\`: ${mism}`
-    : `${kind} \`${text}\` is not a literal ${kind === 'index' ? 'index (@, *, $NAME, or digits)' : 'offset/length digit'} — arithmetic here is not reviewed`;
-}
-
 /** Redirection targets / sources the scripts may use — every other path is red. */
 const OUT_TARGETS = new Set([
   '/dev/null',
@@ -173,6 +194,115 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
   let pipes = 0;
   const branch = (k: Kind): Kind => (k === 'top' ? 'branch' : k);
 
+  // ── arithmetic coverage bookkeeping (#1469 r8, LOW-4 + the coverage-assertion requirement) ──
+  // `seen` is filled independently at the very end, from a fresh walk of the whole file, exactly
+  // the way out.total (Stmt coverage) already is; `handled` is incremented at each actual call
+  // site below. A mismatch (a kind the AST has that no call site ever reached) is fail-closed red,
+  // never a silent skip — see the comparison right before `return out`.
+  const handled: Record<string, number> = {};
+  const bump = (rec: Record<string, number>, k: string) => {
+    rec[k] = (rec[k] ?? 0) + 1;
+  };
+
+  // Which array names are `declare -A` (associative), collected before the main walk so the check
+  // below never depends on declare-before-use order in a mutated test script.
+  const assocArrays = new Set<string>();
+  syntax.Walk(file, (n) => {
+    if (n && T(n) === 'DeclClause') {
+      const variant = String(n.Variant?.Value ?? '');
+      const flags: string[] = [];
+      const names: string[] = [];
+      for (const a of n.Args ?? []) {
+        if (a.Name) names.push(String(a.Name.Value));
+        else flags.push(a.Value ? sl(a.Value as ShNode) : '');
+      }
+      if ([variant, ...flags].join(' ') === 'declare -A')
+        for (const nm of names) assocArrays.add(nm);
+    }
+    return true;
+  });
+
+  /** THE arithmetic walker (#1469 r8): every arithmetic-evaluated context in the file — `$(( ))`, a
+   *  ParamExp Index, a Slice Offset/Length, an Assign's own Index, an array literal element's Index
+   *  — is judged by this one function instead of a per-context regex (see ARITH_STRUCT_OK's comment
+   *  above for why). It walks the real arithmetic AST mvdan-sh builds: */
+  const judgeArith = (node: ShNode): string[] => {
+    const problems: string[] = [];
+    syntax.Walk(node, (n) => {
+      if (!n) return true;
+      const t = T(n);
+      if (t === 'CmdSubst' || t === 'ProcSubst') return false; // the outer expansions() walk owns it
+      if (t === 'BinaryArithm') {
+        if (ARITH_ASSIGN_OPS.has(n.Op ?? -1)) {
+          const lhs = n.X ? sl(n.X) : '';
+          const want = /^[A-Za-z_][A-Za-z0-9_]*$/.test(lhs) ? CONSTS[lhs] : undefined;
+          problems.push(
+            want !== undefined
+              ? `${lhs} may only be set as \`${want}\``
+              : 'assignment operator inside arithmetic — not reviewed',
+          );
+          return false; // both operands are already summarized in the message above
+        }
+        return true;
+      }
+      if (t === 'UnaryArithm') {
+        if (ARITH_INCDEC_OPS.has(n.Op ?? -1)) {
+          const operand = n.X ? sl(n.X) : '';
+          const want = /^[A-Za-z_][A-Za-z0-9_]*$/.test(operand) ? CONSTS[operand] : undefined;
+          problems.push(
+            want !== undefined
+              ? `${operand} may only be set as \`${want}\` (++/-- rebinds it)`
+              : 'increment/decrement operator inside arithmetic — not reviewed',
+          );
+          return false;
+        }
+        return true;
+      }
+      if (t === 'ParamExp') {
+        const name = n.Param ? String(n.Param.Value ?? '') : '';
+        if (!name || CONSTS[name] === undefined)
+          problems.push(
+            `$${name || '?'} inside arithmetic is not a CONST (single-reviewed-assignment) name`,
+          );
+        return false; // its own Index/Slice, if any, is judged where THIS ParamExp is judged
+      }
+      if (t === 'Lit') {
+        const val = String(n.Value ?? '');
+        if (/^[0-9]+$/.test(val)) return true;
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(val)) {
+          if (CONSTS[val] === undefined)
+            problems.push(
+              `name \`${val}\` inside arithmetic is not a CONST (single-reviewed-assignment) name`,
+            );
+          return true;
+        }
+        if (val) problems.push(`arithmetic literal \`${val}\` is not a reviewed shape`);
+        return true;
+      }
+      if (!ARITH_STRUCT_OK.has(t))
+        problems.push(`arithmetic node kind ${t} is not modeled by the walker`);
+      return true;
+    });
+    return problems;
+  };
+
+  /** An Index (`${ARR[IDX]}`, `ARR[IDX]=`, or an array literal's `[IDX]=`): literal shapes (`@`,
+   *  `*`, digits) are always safe; a bare `$NAME` is also safe when ARR is a `declare -A` array
+   *  (word-expanded into a literal key, never evaluated arithmetically); anything else is evaluated
+   *  arithmetically by bash for an INDEXED array, so it goes through judgeArith. */
+  const judgeIndex = (node: ShNode, arrName: string | undefined): string[] => {
+    const text = sl(node);
+    if (INDEX_LITERAL_OK.test(text)) return [];
+    if (arrName && assocArrays.has(arrName) && ASSOC_INDEX_NAME_OK.test(text)) return [];
+    return judgeArith(node).map((m) => `index \`${text}\`: ${m}`);
+  };
+  /** A `${NAME:OFFSET:LENGTH}` slice's offset or length: always arithmetic, regardless of NAME. */
+  const judgeSlice = (node: ShNode): string[] => {
+    const text = sl(node);
+    if (SLICE_LITERAL_OK.test(text)) return [];
+    return judgeArith(node).map((m) => `slice offset/length \`${text}\`: ${m}`);
+  };
+
   const expansions = (node: ShNode, ctx: Ctx) =>
     syntax.Walk(node, (n) => {
       if (!n) return true;
@@ -197,21 +327,27 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
         if (n.Exp && !PARAM_OPS_OK.has(n.Exp.Op ?? -1))
           bad(n, 'parameter-expansion operator other than :- and %% (e.g. := assigns, @P runs)');
         if (n.Index) {
-          const msg = arithContextBad(sl(n.Index), 'index');
-          if (msg) bad(n, msg);
+          bump(handled, 'ParamExp.Index');
+          for (const msg of judgeIndex(n.Index, n.Param ? String(n.Param.Value ?? '') : undefined))
+            bad(n, msg);
         }
         // syntax.Walk does not descend into Slice.Offset/Length at all — unlike Index above, which it
-        // DOES traverse — so these two are read directly or they are never checked by anything.
+        // DOES traverse — so these two are read directly (judgeArith is invoked FRESH on each raw
+        // node, which does still recurse correctly — verified against the parser) or they are never
+        // checked by anything.
         if (n.Slice?.Offset) {
-          const msg = arithContextBad(sl(n.Slice.Offset), 'slice offset/length');
-          if (msg) bad(n, msg);
+          bump(handled, 'ParamExp.Slice.Offset');
+          for (const msg of judgeSlice(n.Slice.Offset)) bad(n, msg);
         }
         if (n.Slice?.Length) {
-          const msg = arithContextBad(sl(n.Slice.Length), 'slice offset/length');
-          if (msg) bad(n, msg);
+          bump(handled, 'ParamExp.Slice.Length');
+          for (const msg of judgeSlice(n.Slice.Length)) bad(n, msg);
         }
       }
-      if (t === 'ArithmExp' && !ARITH_OK.has(sl(n))) bad(n, `arithmetic expansion ${sl(n)}`);
+      if (t === 'ArithmExp') {
+        bump(handled, 'ArithmExp');
+        for (const msg of judgeArith(n)) bad(n, `arithmetic expansion ${sl(n)}: ${msg}`);
+      }
       return true;
     });
 
@@ -221,8 +357,17 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
     // `PATCHES[PATH=0]=z` assigns PATCHES (a VARS name, not a CONST) — the check above never notices
     // its subscript rebinds PATH, because that is `a.Index`, not `a.Name`/the assignment text.
     if (a.Index) {
-      const msg = arithContextBad(sl(a.Index), 'index');
-      if (msg) bad(a, msg);
+      bump(handled, 'Assign.Index');
+      for (const msg of judgeIndex(a.Index, nm)) bad(a, msg);
+    }
+    // An array LITERAL's own elements (`PATCHES=([PATH=1]=x)`, `PATCHES+=([PATH=1]=x)`) carry their
+    // own per-element Index, distinct from a.Index above — #1469 r7 MEDIUM-1: this was never judged
+    // at all, so `[PATH=1]` rebound PATH with nothing ever looking at it.
+    for (const el of a.Array?.Elems ?? []) {
+      if (el.Index) {
+        bump(handled, 'Assign.ArrayElem.Index');
+        for (const msg of judgeIndex(el.Index, nm)) bad(a, msg);
+      }
     }
     expansions(a, ctx);
   };
@@ -368,8 +513,13 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
       }
     } else if (t === 'ForClause') {
       const loop = c.Loop!;
-      if (T(loop) !== 'WordIter') bad(c, 'only `for NAME in WORDS` loops are allowed');
-      else if (!FOR_HEADERS.has(`for ${sl(loop)}`))
+      if (T(loop) !== 'WordIter') {
+        // `for (( ; ; ))` (CStyleLoop) is entirely rejected here, whatever its Init/Cond/Post hold —
+        // stricter than judging their arithmetic individually, so no separate judgeArith call is
+        // needed for it; the coverage assertion below still counts it as handled.
+        if (T(loop) === 'CStyleLoop') bump(handled, 'CStyleLoop');
+        bad(c, 'only `for NAME in WORDS` loops are allowed');
+      } else if (!FOR_HEADERS.has(`for ${sl(loop)}`))
         bad(c, `loop header not reviewed: for ${sl(loop)}`);
       expansions(loop, ctx);
       walkList(c.Do ?? [], { ...ctx, list: ++lists, tail: false });
@@ -416,6 +566,12 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
         cwd: { v: '?' },
       });
     } else {
+      // `(( ))` (ArithmCmd) and `let NAME=…` (LetClause) are both statement kinds this walker does
+      // not model at all — rejected outright here regardless of what they contain, which is
+      // stricter than judging their arithmetic individually. Counted as handled for the coverage
+      // assertion below the same way CStyleLoop is above.
+      if (t === 'ArithmCmd') bump(handled, 'ArithmCmd');
+      if (t === 'LetClause') bump(handled, 'LetClause');
       bad(c, `statement kind ${t} is not modeled by the scanner`);
     }
   }
@@ -430,12 +586,36 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
     tail: false,
     cwd: { v: '?' },
   });
+  // Independent AST-wide count of every arithmetic-capable node kind, the same way out.total counts
+  // Stmt nodes above: a mismatch against `handled` means some occurrence of that kind existed in the
+  // file but no call site above ever judged (or explicitly rejected) it — fail-closed, not a skip.
+  const seen: Record<string, number> = {};
   syntax.Walk(file, (n) => {
-    if (n && T(n) === 'Stmt') out.total++;
+    if (!n) return true;
+    const t = T(n);
+    if (t === 'Stmt') out.total++;
+    if (t === 'ArithmExp') bump(seen, 'ArithmExp');
+    if (t === 'ArithmCmd') bump(seen, 'ArithmCmd');
+    if (t === 'LetClause') bump(seen, 'LetClause');
+    if (t === 'ForClause' && n.Loop && T(n.Loop) === 'CStyleLoop') bump(seen, 'CStyleLoop');
+    if (t === 'ParamExp') {
+      if (n.Index) bump(seen, 'ParamExp.Index');
+      if (n.Slice?.Offset) bump(seen, 'ParamExp.Slice.Offset');
+      if (n.Slice?.Length) bump(seen, 'ParamExp.Slice.Length');
+    }
+    if (t === 'Assign') {
+      if (n.Index) bump(seen, 'Assign.Index');
+      for (const el of n.Array?.Elems ?? []) if (el.Index) bump(seen, 'Assign.ArrayElem.Index');
+    }
     return true;
   });
   if (out.visited !== out.total)
     out.problems.push(`walker visited ${out.visited} of ${out.total} statements`);
+  for (const k of Object.keys(seen)) {
+    const s = seen[k]!;
+    const h = handled[k] ?? 0;
+    if (h !== s) out.problems.push(`arithmetic coverage: ${k} seen ${s}, handled ${h}`);
+  }
   return out;
 }
 
@@ -523,6 +703,11 @@ const CONSTS: Record<string, string> = {
   // IFS controls how `read` splits its input; the one reviewed use (below) needs `:` and nothing
   // else may set it — an `IFS=` elsewhere could repurpose a later `read`/`for`/word-split silently.
   IFS: 'IFS=:',
+  // T0 is the one name judgeArith's structural walker (above) treats as safe to REFERENCE inside
+  // arithmetic (`$(($(date +%s) - T0))` in lap()) — that is only true because its own assignment is
+  // pinned to exactly this line, closing #1469 r7 MEDIUM-3 (`T0="PATH=0"` before a lap used to be
+  // GREEN and rebind PATH at runtime via T0's recursively-evaluated value).
+  T0: 'T0=$(date +%s)',
 };
 /** `read`'s only reviewed shape — the sysroot-pair unpacking loop. Any other `read` is red: this
  *  is the one binder in the script (besides the `=`/`export`/`local`/`declare` path already checked

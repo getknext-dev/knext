@@ -467,6 +467,67 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
       () => add('name=x\n[ "$name" -eq 0 ]'),
       /\[ -eq operand `"\$name"` is not a literal integer or length/,
     ],
+    // round 8 (review-1469-r7): the arithmetic checks above were per-context regexes rather than
+    // one structural walker, and that left gaps a regex author had not thought of — MEDIUM-1/2/3 and
+    // LOW-4 below. Fixed generically: judgeArith (tests/helpers/bun-base-scan.ts) walks the REAL
+    // arithmetic AST (BinaryArithm/UnaryArithm/Lit/ParamExp) for every arithmetic context, banning
+    // any assignment/increment op and any name that is not a CONST (the only names with a single,
+    // reviewed assignment site).
+    [
+      'MEDIUM-1: PATCHES=([PATH=1]=x) — an array LITERAL element key was never judged at all',
+      () => add('PATCHES=([PATH=1]=x)'),
+      /index `PATH=1`: PATH may only be set as/,
+    ],
+    [
+      'MEDIUM-1: PATCHES+=([PATH=1]=x) — same gap, append form',
+      () => add('PATCHES+=([PATH=1]=x)'),
+      /index `PATH=1`: PATH may only be set as/,
+    ],
+    [
+      'MEDIUM-1: a=([$(cmd)]=x) — an array literal key running a command substitution',
+      () => add('a=([$(id)]=y)'),
+      /assigns unknown variable a|not in the allowlist/,
+    ],
+    [
+      'MEDIUM-2: name="PATH=0"; ${PATCHES[$name]} — bash evaluates $name\'s VALUE recursively',
+      () => add('name="PATH=0"\necho "${PATCHES[$name]}"'),
+      /index `\$name`: \$name inside arithmetic is not a CONST/,
+    ],
+    [
+      'MEDIUM-2: PATCHES[$name]=z — same recursive-value bypass on the assignment side',
+      () => add('name="PATH=0"\nPATCHES[$name]=z'),
+      /index `\$name`: \$name inside arithmetic is not a CONST/,
+    ],
+    [
+      "MEDIUM-2: name='PATCHES[$(id)]'; ${PATCHES[$name]} — the recursive value runs a command",
+      () => add(`name='PATCHES[$(id)]'\necho "\${PATCHES[$name]}"`),
+      /index `\$name`: \$name inside arithmetic is not a CONST/,
+    ],
+    [
+      'MEDIUM-3: T0="PATH=0" before a lap — T0 was not itself a CONST, so its recursively-evaluated',
+      () => add('T0="PATH=0"'),
+      /T0 may only be set as `T0=\$\(date \+%s\)`/,
+    ],
+    [
+      'LOW-4: ${wk:0:PATH=1} — the Slice.Length half of the check, split out from Offset',
+      () => add('echo "${wk:0:PATH=1}"'),
+      /slice offset\/length `PATH=1`: PATH may only be set as/,
+    ],
+    [
+      'declare -i x; x=PATH=1 — still fully rejected by the declare-shape allowlist, not by the',
+      () => add('declare -i xdi\nxdi=PATH=1'),
+      /declare -i: only export, local and declare -A are allowed/,
+    ],
+    [
+      'r8 walker: ${PATCHES[PATH++]} — an increment/decrement operator inside an index',
+      () => add('echo "${PATCHES[PATH++]}"'),
+      /index `PATH\+\+`: PATH may only be set as .*\(\+\+\/-- rebinds it\)/,
+    ],
+    [
+      'r8 walker: ${PATCHES[bd]} — a bare (no $) name reference that is not a CONST',
+      () => add('echo "${PATCHES[bd]}"'),
+      /index `bd`: name `bd` inside arithmetic is not a CONST/,
+    ],
   ])('goes RED on: %s', (_n, mutate, why) => {
     const v = scan(mutate());
     expect(v.join('\n')).toMatch(why);
@@ -528,6 +589,21 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
 
   it('positive control: `cmd || { echo …; exit 1; }` stays green', () => {
     expect(scan(add('test -d /tmp || { echo "no /tmp" >&2; exit 1; }'))).toEqual([]);
+  });
+
+  // round 8 positive controls (review-1469-r7): the real, reviewed shapes the r8 arithmetic walker
+  // must NOT flag — each is exercised by the real build.sh already, restated standalone here so a
+  // future tightening of judgeArith/judgeIndex has a row that names exactly why it must stay green.
+  it('positive control: WK_KEY[$arch] — a bare $NAME index on a declare -A array stays green', () => {
+    expect(scan(add('echo "${WK_KEY[$arch]}"'))).toEqual([]);
+  });
+
+  it('positive control: ${#PATCHES[@]} — a length expression stays green', () => {
+    expect(scan(add('echo "${#PATCHES[@]}"'))).toEqual([]);
+  });
+
+  it('positive control: [ ${#PATCHES[@]} -gt 0 ] stays green', () => {
+    expect(scan(add('if [ ${#PATCHES[@]} -gt 0 ]; then echo ok; fi'))).toEqual([]);
   });
 });
 
