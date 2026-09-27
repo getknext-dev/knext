@@ -8,15 +8,18 @@
 # `.output/public`, no `native/`, no node_modules. Compare `Dockerfile`, which
 # copies `.output/public` and `native/` beside a disk-mode binary.
 #
-# Writable temp directory: the binary unpacks sharp's native libraries into
-# $TMPDIR (default /tmp) on the FIRST image-optimization request — not at boot —
-# because the OS loader can only open native libraries from a real filesystem.
+# Writable AND EXECUTABLE temp directory: the binary unpacks sharp's native
+# libraries into $TMPDIR (default /tmp) on the FIRST image-optimization request —
+# not at boot — then dlopen()s them, so the mount must allow both writes and
+# execution; the OS loader can only open native libraries from a real filesystem.
 # Everything else, including boot and health checks, needs no writable path.
 # The knext operator mounts an emptyDir at /tmp whenever the root filesystem is
-# read-only (its default), so nothing is needed there. With a plain
-# `docker run --read-only`, add `--tmpfs /tmp`; without a writable /tmp, image
-# optimization answers 500 with a message naming the fix, and every other route
-# keeps serving.
+# read-only (its default) — exec by default, so nothing extra is needed there.
+# With a plain `docker run --read-only`, add `--tmpfs /tmp:exec` — Docker's
+# `--tmpfs` defaults to `noexec`, and dlopen of the unpacked .node/libvips then
+# fails with "failed to map segment from shared object". Without a
+# writable+executable /tmp, image optimization answers 500 with a message naming
+# the fix, and every other route keeps serving.
 #
 # BINARY must be a musl target for this base (`bun-linux-x64-musl` /
 # `bun-linux-arm64-musl`), exactly as for `Dockerfile`:
