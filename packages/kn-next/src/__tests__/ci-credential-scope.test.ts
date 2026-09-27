@@ -53,8 +53,11 @@ describe("ADR-0049 credential preflight (#874)", () => {
     });
 
     it("accepts what a real cluster returns for the init-ci ServiceAccount", () => {
-        // Captured verbatim from `kubectl auth can-i --list -n knext-docs -o json`
-        // for the `knext-deployer` ServiceAccount on a live OKE cluster. Since
+        // Captured verbatim (as `.status.resourceRules`) from a live
+        // SelfSubjectRulesReview for the `knext-deployer` ServiceAccount on a
+        // real OKE cluster in namespace knext-docs — #1493's fix reads this
+        // review via `kubectl create -o json -f -`, because `auth can-i --list`
+        // never accepts `-o` on any kubectl release. Since
         // Kubernetes 1.28, `system:basic-user` also grants
         // authentication.k8s.io/selfsubjectreviews (`kubectl auth whoami`), so
         // every authenticated subject carries it — refusing it refused the
