@@ -94,19 +94,32 @@ describe('kn-next-action preflight resolves @getknext/core from the app', () => 
   // The credentialed docs deploy uses this in-tree action, so the preflight's
   // off-switch is the one input that can silently disable the ADR-0049 check.
   describe('the preflight cannot be disabled by default or by a second exit', () => {
-    type Step = { name?: string; run?: string; env?: Record<string, string> };
+    type Step = {
+      name?: string;
+      run?: string;
+      env?: Record<string, string>;
+      'continue-on-error'?: unknown;
+    };
     const loadAction = () =>
       parse(readFileSync(ACTION, 'utf8')) as {
         inputs: Record<string, { default?: string }>;
         runs: { steps: Step[] };
       };
 
+    // Located by what the step DOES (it runs preflight.mjs), not its display name,
+    // so renaming the step cannot un-guard it.
+    const preflightStep = () => {
+      const steps = loadAction().runs.steps.filter((s) => (s.run ?? '').includes('preflight.mjs'));
+      expect(steps).toHaveLength(1);
+      return steps[0] as Step;
+    };
+
     it('skip-credential-preflight defaults to exactly the string "false"', () => {
       expect(loadAction().inputs['skip-credential-preflight']?.default).toBe('false');
     });
 
     it('the skip branch is the ONLY exit 0, gated on the input being literally "true"', () => {
-      const step = loadAction().runs.steps.find((s) => s.name === 'Credential preflight');
+      const step = preflightStep();
       expect(step?.env?.KNEXT_SKIP_PREFLIGHT).toBe('${{ inputs.skip-credential-preflight }}');
       const run = step?.run ?? '';
       const exits = run.match(/\bexit\b/g) ?? [];
@@ -118,6 +131,10 @@ describe('kn-next-action preflight resolves @getknext/core from the app', () => 
       const node = run.split('\n').find((l) => l.includes('preflight.mjs')) ?? '';
       expect(node).not.toMatch(/\|\||;\s*true|\bexit 0\b/);
       expect(run).not.toMatch(/\breturn\b|set \+e/);
+    });
+
+    it('the preflight step has no continue-on-error in any form (a rejection must fail the job)', () => {
+      expect(preflightStep()['continue-on-error']).toBeUndefined();
     });
   });
 });
