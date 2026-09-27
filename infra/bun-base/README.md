@@ -200,6 +200,16 @@ bound once, by its reviewed derivation, so no check can be made to compare a val
 it trusts `pin()` only because its body is compared with the reviewed version — changing `pin()`, or
 adding a command shape, means changing the test in the same PR.
 
+The guarantee also depends on the **executor config**: `cloudbuild.yaml` decides which script runs, in
+which environment, and what happens to the binary afterwards. So the test parses it as YAML and pins
+it exactly — the step list, each step's image digest, entrypoint, args and env, the options and the
+substitutions — and every name `build.sh` reads must be bound in the script or be on a short
+allowlist of what the build step's `env` supplies (`BUILD_ID`, `BUN_BASE_TARGETS`, plus the image's
+`PATH`). What the pin cannot see is the rest of the executor: the `gcloud builds submit` flags in the
+workflow, the Cloud Build worker and project settings, and the build service account's grants. A
+change there can still alter what `build.sh` runs or verifies without turning this test red; those
+are reviewed with the workflow and the provisioning block below.
+
 ## Secret-scan hygiene
 
 CI runs gitleaks over the **full git history of every branch**, fail-closed, and history is never

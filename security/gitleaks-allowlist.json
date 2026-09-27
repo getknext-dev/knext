@@ -15,7 +15,7 @@
       "rule": "generic-api-key",
       "path": "infra/bun-base/build.sh",
       "class": "false-positive",
-      "justification": "LLVM_KEY_FPR is the PUBLIC apt.llvm.org archive signing key fingerprint pinned so the build verifies the key it downloads; a GPG fingerprint is a public identifier, not a credential. Commit 9e13947f exists only on the feat/1452-bun-base-exe-pipeline branch (PR #1469), and CI's secret scan checks out every branch (fetch-depth: 0), so the entry is needed while that branch exists. Retirement: squash-merge PR #1469 (main never contains 9e13947f), delete the branch, then retire this entry in a follow-up PR. No history is rewritten.",
+      "justification": "LLVM_KEY_FPR is the PUBLIC apt.llvm.org archive signing key fingerprint pinned so the build verifies the key it downloads; a GPG fingerprint is a public identifier, not a credential. Commit 9e13947f exists only on the feat/1452-bun-base-exe-pipeline branch (PR #1469), and CI's secret scan checks out every branch (fetch-depth: 0), so the entry is needed while that branch exists. Retirement condition: retire this entry (in a follow-up PR) when `git branch -r --contains 9e13947f` is empty — i.e. after PR #1469 is squash-merged (main never contains 9e13947f) and its branch, and any branch stacked on it, is deleted. No history is rewritten.",
       "added": "2026-09-27",
       "expires": "2026-12-27"
     }

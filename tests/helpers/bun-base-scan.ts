@@ -33,8 +33,19 @@
  *     targets, all found by scanning — except `line`, `have_patches`, `wkarch` at their exact
  *     reviewed sites; the verifiers' operands have one reviewed derivation each (CONSTS) and the
  *     committed pins must be static text, so no check input can be rebound around its check.
+ *     (L2) Bash also binds names with no site to count — `BASH_REMATCH` (`[[ =~ ]]`), `PWD`/`OLDPWD`
+ *     (`cd`), `_` — so "exactly once" holds for the names the SCRIPT binds; those four are
+ *     BASH_IMPLICIT below, none is a verifier operand, and none is read today.
+ * 14. (round 12) PRESENCE: every pinned name (CONSTS + STATIC_PINS) HAS its one site in build.sh.
+ *     Rules 4 and 13 judge the sites that exist; deleting a pinned line left no site to judge, and
+ *     the value then came from the executor's environment (review-1469-r11 E1–E7).
+ * 15. (round 12) every name READ (every ParamExp, found by the generic walk) is bound in the script
+ *     before the read, or is a bash special/implicit name, or is on ENV_READS — the reviewed list of
+ *     what build.sh takes from cloudbuild.yaml's build step `env` (which that test pins exactly).
  */
+import { isDeepStrictEqual } from 'node:util';
 import sh, { type ShNode } from 'mvdan-sh';
+import { parseDocument } from 'yaml';
 
 const { syntax } = sh;
 const T = (n: ShNode) => syntax.NodeType(n);
@@ -47,6 +58,8 @@ export type Cmd = {
   words: string[];
   redirs: string[];
   line: number;
+  /** Byte offset of the statement's end (a name it binds through an argument is bound there). */
+  end?: number;
   kind: Kind;
   /** Statement-list id; a subshell shares its parent's list (its status is the parent's check). */
   list: number;
@@ -130,9 +143,12 @@ export type Parsed = {
   fnDefs: { name: string; body: string[]; line: number }[];
   /** `=` assignments (plain, prefix, export/local/declare): its source text, and its value when
    *  fully static (null for an expansion or a bare `local x`). */
-  assigns: { name: string; text: string; line: number; value: string | null }[];
+  assigns: { name: string; text: string; line: number; value: string | null; end: number }[];
   /** `for NAME in …` loop variables (a binding site the `=` list does not see). */
-  loopVars: { name: string; line: number }[];
+  loopVars: { name: string; line: number; end: number }[];
+  /** Every parameter expansion (`$NAME`, `${NAME…}`, `$1`, `$?`), found by the GENERIC walk — a
+   *  read of NAME at byte offset `off` (round 12). */
+  reads: { name: string; line: number; off: number }[];
   visited: number;
   total: number;
   /** Per COVERED_KINDS kind: nodes the rule walk reached / nodes the generic walk found. */
@@ -312,6 +328,7 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
     fnDefs: [],
     assigns: [],
     loopVars: [],
+    reads: [],
     visited: 0,
     total: 0,
     reached: {},
@@ -373,6 +390,7 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
         text: sl(a),
         line: a.Pos().Line(),
         value: a.Value && !a.Array && !a.Index ? wordShape(a.Value as ShNode).value : null,
+        end: a.End().Offset(),
       });
     expansions(a, ctx);
   };
@@ -400,6 +418,7 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
       words,
       redirs,
       line: s.Pos().Line(),
+      end: s.End().Offset(),
       kind: ctx.kind,
       list: ctx.list,
       must: ctx.must,
@@ -512,7 +531,11 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
       } else {
         if (!FOR_HEADERS.has(`for ${sl(loop)}`))
           bad(c, `loop header not reviewed: for ${sl(loop)}`);
-        out.loopVars.push({ name: String(loop.Name?.Value ?? ''), line: c.Pos().Line() });
+        out.loopVars.push({
+          name: String(loop.Name?.Value ?? ''),
+          line: c.Pos().Line(),
+          end: loop.End().Offset(),
+        });
       }
       expansions(loop, ctx);
       walkList(c.Do ?? [], { ...ctx, list: ++lists, tail: false });
@@ -584,6 +607,12 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
     if ((COVERED_KINDS as readonly string[]).includes(k)) reachable[k] = (reachable[k] ?? 0) + 1;
     const why = banned(n, k, sl);
     if (why) bad(n, why);
+    if (k === 'ParamExp')
+      out.reads.push({
+        name: String(n.Param?.Value ?? ''),
+        line: n.Pos().Line(),
+        off: n.Pos().Offset(),
+      });
     return true;
   });
   out.total = reachable.Stmt ?? 0;
@@ -732,6 +761,23 @@ const MULTI_SITE_OK: Record<string, string[]> = {
   have_patches: ['have_patches=no', 'have_patches=yes'],
   wkarch: ['wkarch=amd64', 'wkarch=arm64'],
 };
+/** Rule 14: the names build.sh must bind itself — the verifiers' operands and the committed pins. */
+const PINNED_NAMES = [...Object.keys(CONSTS), ...STATIC_PINS];
+/** Rule 15: the ONLY names build.sh may read from its environment, each with why that is safe. The
+ *  two cloudbuild.yaml sets are pinned there too (its build step's `env` is asserted exactly), so the
+ *  executor supplies these and nothing else. */
+export const ENV_READS: Record<string, string> = {
+  BUN_BASE_TARGETS:
+    'cloudbuild.yaml build step env (from _TARGETS); only selects targets — the case rejects anything but x64/aarch64',
+  BUILD_ID:
+    "cloudbuild.yaml build step env (Cloud Build's own id); written into manifest.json only",
+  PATH: "the digest-pinned image's PATH, read once by the reviewed `export PATH=$HOME/.cargo/bin:$PATH` (CONSTS)",
+};
+/** Bash's special parameters (`$0`–`$9`, `${10}`, `$?`, `$#`, `$@`, `$*`, `$$`, `$!`, `$-`). */
+const BASH_SPECIAL = /^([0-9]+|[?#@*$!-])$/;
+/** (L2) Names bash binds itself, with no `=` rule 13 could count: `BASH_REMATCH` (`[[ =~ ]]`), `PWD`
+ *  and `OLDPWD` (`cd`), `_` (the last argument). None is a verifier operand; none is read today. */
+const BASH_IMPLICIT = new Set(['BASH_REMATCH', 'PWD', 'OLDPWD', '_']);
 /** Builtins that bind a variable NAMED BY AN ARGUMENT (not by `=`), with the options of each that
  *  take a value. `bind` is the option whose value is the bound name; `pos` says which positionals
  *  are names ('all' for read, the first for mapfile, the second for getopts, none otherwise). Any
@@ -1003,19 +1049,45 @@ export function scanBuildScript(
       v.push(`line ${a.line}: pin ${a.name} must be static text, got \`${a.text}\``);
   }
   // ── the single-assignment-site rule (see MULTI_SITE_OK) ──
-  const sites = new Map<string, { line: number; text: string }[]>();
-  const site = (name: string, line: number, text: string) =>
-    sites.set(name, [...(sites.get(name) ?? []), { line, text }]);
-  for (const a of p.assigns) site(a.name, a.line, a.text);
-  for (const l of p.loopVars) site(l.name, l.line, `for ${l.name}`);
+  const sites = new Map<string, { line: number; text: string; end: number }[]>();
+  const site = (name: string, line: number, text: string, end: number) =>
+    sites.set(name, [...(sites.get(name) ?? []), { line, text, end }]);
+  for (const a of p.assigns) site(a.name, a.line, a.text, a.end);
+  for (const l of p.loopVars) site(l.name, l.line, `for ${l.name}`, l.end);
   cmds.forEach((c) => {
     const w = normalize(c).words;
     for (const name of argBinds(w)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
         v.push(`line ${c.line}: ${w[0]} binds a name that is not a static identifier (${name})`);
-      site(name, c.line, `${w[0]} → ${name}`);
+      site(name, c.line, `${w[0]} → ${name}`, c.end ?? Number.POSITIVE_INFINITY);
     }
   });
+  // ── rule 14 (round 12): PRESENCE — every pinned name is bound in build.sh (the rules above judge
+  // the sites that exist; this one requires the site to exist). A pinned name with no site is read
+  // from the executor's environment: one `env:` line in cloudbuild.yaml would then choose the
+  // commit, the fingerprint, the workspace root, … while every verifier still ran as reviewed.
+  if (!opts.prefix)
+    for (const name of PINNED_NAMES)
+      if (!sites.has(name))
+        v.push(
+          `${name} is never bound — a pinned name must be bound exactly once in build.sh, never supplied by the environment`,
+        );
+  // ── rule 15 (round 12): PROVENANCE OF EVERY READ — a name the script reads is bound in the script
+  // BEFORE the read, or it is a bash special parameter / implicit binder, or it is on the reviewed
+  // environment allowlist (build.sh only; prefix.sh reads nothing from the environment).
+  const envOk = opts.prefix ? new Set<string>() : new Set(Object.keys(ENV_READS));
+  const firstBind = (name: string) => Math.min(...(sites.get(name) ?? []).map((x) => x.end));
+  for (const r of p.reads) {
+    if (BASH_SPECIAL.test(r.name) || BASH_IMPLICIT.has(r.name) || envOk.has(r.name)) continue;
+    if (!sites.has(r.name))
+      v.push(
+        `line ${r.line}: reads $${r.name}, which the script never binds and the reviewed environment allowlist does not name — its value would come from the executor's environment`,
+      );
+    else if (r.off < firstBind(r.name))
+      v.push(
+        `line ${r.line}: reads $${r.name} before its first binding site (line ${Math.min(...sites.get(r.name)!.map((x) => x.line))}) — that read sees the executor's environment`,
+      );
+  }
   for (const [name, at] of sites) {
     if (at.length === 1) continue;
     const ok = MULTI_SITE_OK[name];
@@ -1176,3 +1248,169 @@ export const PIN_BODY = [
   `printf '%s\\n' "$line" | sha256sum -c -`,
 ];
 export const LAP_BODY = ['echo "### LAP $1 at $(date -u +%T)"'];
+
+// ── cloudbuild.yaml: the executor config, pinned EXACTLY (round 12, review-1469-r11 HIGH-1) ──────
+//
+// build.sh's guarantees hold only for the build.sh the executor actually runs, in the environment it
+// actually gets. cloudbuild.yaml decides both: a build-step `env` entry can export a bash function
+// that replaces `sha256sum` (BASH_FUNC_sha256sum%%) or source a file first (BASH_ENV), `args` can run
+// another script, an extra step can swap the binary after build.sh verified it, and `options.env`
+// reaches every step. So the file is parsed as YAML and compared with the reviewed config field by
+// field — every reviewed key must EXIST with the reviewed value and no other key may exist — plus a
+// whole-document deep-equality backstop, so a shape no field rule models is still red. Changing the
+// executor config means changing REVIEWED_CLOUDBUILD in the same PR.
+
+const UPLOAD_SCRIPT = [
+  'cd /workspace/out',
+  'for f in bun-linux-*-musl bun-source.cdx.json bun-artifacts.cdx.json manifest.json; do sha256sum "$$f" > "$$f.sha256"; done',
+  'cat bun-linux-*-musl.sha256 bun-source.cdx.json.sha256 bun-artifacts.cdx.json.sha256 manifest.json.sha256 > SHA256SUMS',
+  'cat SHA256SUMS',
+  'dest="gs://gsw-mcp-bun-base/$(cat /workspace/.prefix)/$BUILD_ID/"',
+  'gcloud storage cp /workspace/out/* "$$dest"',
+  'echo "uploaded to $$dest"',
+  '',
+].join('\n');
+const SYFT =
+  'anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02';
+
+/** The reviewed Cloud Build config, as the YAML parser yields it. */
+export const REVIEWED_CLOUDBUILD = {
+  serviceAccount: 'projects/gsw-mcp/serviceAccounts/bun-base-build@gsw-mcp.iam.gserviceaccount.com',
+  options: { machineType: 'E2_HIGHCPU_32', diskSizeGb: 300, logging: 'CLOUD_LOGGING_ONLY' },
+  timeout: '7200s',
+  substitutions: { _TARGETS: 'x64 aarch64' },
+  steps: [
+    {
+      id: 'build',
+      name: 'ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3',
+      entrypoint: 'bash',
+      args: ['/workspace/build.sh'],
+      // Exactly the names build.sh may read from its environment (ENV_READS, minus the image's PATH).
+      env: ['BUILD_ID=$BUILD_ID', 'BUN_BASE_TARGETS=$_TARGETS'],
+    },
+    {
+      id: 'sbom',
+      name: SYFT,
+      args: [
+        'scan',
+        'dir:/workspace/bun',
+        '--exclude',
+        './build',
+        '-o',
+        'cyclonedx-json=/workspace/out/bun-source.cdx.json',
+      ],
+    },
+    {
+      id: 'sbom-artifacts',
+      name: SYFT,
+      env: ['SYFT_FILE_METADATA_SELECTION=all', 'SYFT_FILE_METADATA_DIGESTS=sha256'],
+      args: [
+        'scan',
+        'dir:/workspace/out',
+        '--exclude',
+        './*.json',
+        '--exclude',
+        './*.revision',
+        '-o',
+        'cyclonedx-json=/workspace/out/bun-artifacts.cdx.json',
+      ],
+    },
+    {
+      id: 'digests-and-upload',
+      name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim@sha256:cfca8415b7ce1abccf4c7a1a9c78b4da2c3718ac668806480a4471cb052e1ca9',
+      entrypoint: 'bash',
+      args: ['-euo', 'pipefail', '-c', UPLOAD_SCRIPT],
+    },
+  ],
+} as const;
+
+const show = (x: unknown) => JSON.stringify(x);
+const isObj = (x: unknown): x is Record<string, unknown> =>
+  !!x && typeof x === 'object' && !Array.isArray(x);
+
+/** One mapping, key by key: every reviewed key present and equal, and no other key. */
+function sameMap(where: string, got: unknown, want: Record<string, unknown>, out: string[]) {
+  if (!isObj(got)) {
+    out.push(`${where} is not a mapping (got ${show(got)})`);
+    return;
+  }
+  for (const k of Object.keys(got))
+    if (!(k in want))
+      out.push(
+        `${where}.${k} is not reviewed${/env/i.test(k) ? ' (an executor-wide environment reaches every step)' : ''}`,
+      );
+  for (const [k, w] of Object.entries(want)) {
+    if (!(k in got)) out.push(`${where}.${k} is missing (reviewed ${show(w)})`);
+    else if (!isDeepStrictEqual(got[k], w))
+      out.push(`${where}.${k} differs: got ${show(got[k])}, reviewed ${show(w)}`);
+  }
+}
+
+/** Every problem with a cloudbuild.yaml text against REVIEWED_CLOUDBUILD; [] means exactly reviewed. */
+export function scanCloudbuild(text: string): string[] {
+  const doc = parseDocument(text, { uniqueKeys: true, merge: false });
+  if (doc.errors.length || doc.warnings.length)
+    return [...doc.errors, ...doc.warnings].map((e) => `cloudbuild.yaml YAML error: ${e.message}`);
+  let y: unknown;
+  try {
+    // No aliases at all: every value the executor sees is spelled where it is used.
+    y = doc.toJS({ maxAliasCount: 0 });
+  } catch (e) {
+    return [`cloudbuild.yaml YAML error: ${(e as Error).message}`];
+  }
+  if (!isObj(y)) return [`cloudbuild.yaml is not a mapping (got ${show(y)})`];
+  const out: string[] = [];
+  const want = REVIEWED_CLOUDBUILD as unknown as Record<string, unknown>;
+  const top = Object.keys(y).sort();
+  const wantTop = Object.keys(want).sort();
+  if (show(top) !== show(wantTop))
+    out.push(
+      `top-level keys ${show(top)} differ from the reviewed ${show(wantTop)} (availableSecrets, secrets, artifacts, … are red)`,
+    );
+  for (const k of ['serviceAccount', 'timeout'])
+    if (!isDeepStrictEqual(y[k], want[k]))
+      out.push(`${k} differs: got ${show(y[k])}, reviewed ${show(want[k])}`);
+  sameMap('options', y.options, REVIEWED_CLOUDBUILD.options, out);
+  sameMap('substitutions', y.substitutions, REVIEWED_CLOUDBUILD.substitutions, out);
+
+  if (!Array.isArray(y.steps)) out.push(`steps is not a list (got ${show(y.steps)})`);
+  const steps = Array.isArray(y.steps) ? (y.steps as unknown[]) : [];
+  const ids = steps.map((s) => (isObj(s) ? s.id : undefined));
+  const wantIds = REVIEWED_CLOUDBUILD.steps.map((s) => s.id);
+  if (show(ids) !== show(wantIds))
+    out.push(
+      `step ids ${show(ids)} differ from the reviewed ${show(wantIds)} (count and order are pinned)`,
+    );
+  for (const w of REVIEWED_CLOUDBUILD.steps) {
+    const at = steps.filter((s) => isObj(s) && s.id === w.id);
+    if (at.length !== 1) continue; // the step-id rule reports it
+    const got = at[0] as Record<string, unknown>;
+    const wm = w as unknown as Record<string, unknown>;
+    for (const k of Object.keys(got))
+      if (!(k in wm))
+        out.push(`step ${w.id}: ${k} is not reviewed (secretEnv, volumes, dir, … are red)`);
+    for (const [k, v] of Object.entries(wm)) {
+      if (k === 'env') continue;
+      if (!isDeepStrictEqual(got[k], v))
+        out.push(`step ${w.id}: ${k} differs: got ${show(got[k])}, reviewed ${show(v)}`);
+    }
+    // env has its own rule, naming the entries: it reaches bash before build.sh runs a line
+    // (BASH_FUNC_<name>%% exports a function over a verifier, BASH_ENV sources a file first).
+    const wantEnv = (wm.env ?? []) as readonly string[];
+    const gotEnv = got.env === undefined ? [] : got.env;
+    if (!Array.isArray(gotEnv)) {
+      out.push(`step ${w.id}: env is not a list (got ${show(gotEnv)})`);
+      continue;
+    }
+    const extra = gotEnv.filter((e) => !wantEnv.includes(e as string));
+    const missing = wantEnv.filter((e) => !gotEnv.includes(e));
+    if (extra.length) out.push(`step ${w.id}: env entries not reviewed: ${show(extra)}`);
+    if (missing.length) out.push(`step ${w.id}: env entries missing: ${show(missing)}`);
+    if (!extra.length && !missing.length && !isDeepStrictEqual(gotEnv, wantEnv))
+      out.push(`step ${w.id}: env differs: got ${show(gotEnv)}, reviewed ${show(wantEnv)}`);
+  }
+  // Backstop: whatever no field rule above models is still a difference.
+  if (!isDeepStrictEqual(y, JSON.parse(show(REVIEWED_CLOUDBUILD))))
+    out.push('cloudbuild.yaml differs from REVIEWED_CLOUDBUILD (whole-document comparison)');
+  return out;
+}
