@@ -82,9 +82,15 @@ import {
     writeFileSync,
 } from "node:fs";
 import { isBuiltin } from "node:module";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
+import { routeMarker, verifyBytecodeEmbedded, verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
+import {
+    detectCompileInclude,
+    embedBuildOptions,
+    planEmbed,
+    unembeddedDynamicReport,
+} from "./compile-embed.mjs";
 import { computedRequireInventory, moduleDisposition } from "./computed-require-scan.mjs";
 import {
     DEV_ONLY_STUB_SOURCE,
@@ -93,6 +99,14 @@ import {
     standaloneCacheHandlerFiles,
     standaloneExecEntrySource,
 } from "./standalone-exec-entry.mjs";
+import {
+    classifyDistFiles,
+    EMBED_ROOT_GLOBAL,
+    middlewareManifestFiles,
+    rebindDirnameSource,
+    relativeSpecifier,
+    rewriteExternalAliases,
+} from "./standalone-embed.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
 function parseArgs(argv) {
@@ -116,6 +130,12 @@ if (!args.outfile) fail("--outfile <path> is required");
 const SERVER = resolve(args.server);
 const OUTFILE = resolve(args.outfile);
 const TARGET = args.target?.trim();
+// Self-contained mode (#1456): `.next` and every module the route chunks load
+// go INTO the executable (see "Self-contained mode" below). Off unless asked.
+const SELF_CONTAINED = args["self-contained"] === "1";
+if (args["self-contained"] !== undefined && args["self-contained"] !== "1") {
+    fail(`--self-contained takes 1, got ${JSON.stringify(args["self-contained"])}`);
+}
 
 if (!existsSync(SERVER)) {
     fail(`no standalone server at ${SERVER} — run \`next build\` with output: 'standalone' first`);
@@ -310,11 +330,12 @@ function cacheHandlerRoots() {
 }
 const CACHE_HANDLER_ROOTS = cacheHandlerRoots();
 
-function computeDiskClosure() {
+function computeDiskClosure(extraRoots = []) {
     const seen = new Set();
     const queue = [
         ...listJs(join(dirname(SERVER), ".next", "server")).map((f) => realpathSync(f)),
         ...CACHE_HANDLER_ROOTS,
+        ...extraRoots,
     ];
     while (queue.length > 0) {
         const file = queue.pop();
@@ -344,6 +365,126 @@ function computeDiskClosure() {
 }
 const DISK_CLOSURE = computeDiskClosure();
 
+// ── Self-contained mode (#1456) ─────────────────────────────────────────────
+// The executable carries the app's `.next` and every module the disk closure
+// holds, so it boots from a directory holding only itself, `public/`,
+// `.next/static/` (and `native/`). How each file goes in is decided by how Next
+// READS it (standalone-embed.mjs): JavaScript it `require`s is embedded as a
+// module (compiled, bytecode), everything it reads with `fs` byte for byte.
+function listFilesRel(dir, base = dir, out = []) {
+    let entries;
+    try {
+        entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return out;
+    }
+    for (const e of entries) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) listFilesRel(p, base, out);
+        else if (e.isFile()) out.push(relative(base, p).split(sep).join("/"));
+    }
+    return out;
+}
+
+/** `nextConfig.distDir` from server.js (`./.next` → `.next`). */
+function standaloneDistDirName(serverSrc) {
+    const m = serverSrc.match(/^const nextConfig = (.*)$/m);
+    const raw = m ? JSON.parse(m[1]).distDir : undefined;
+    return (typeof raw === "string" && raw ? raw : ".next").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+const ROUTE_CHUNK = /^server\/(?:app\/.*\/(?:page|route)|app\/(?:page|route)|pages\/.*)\.js$/;
+
+function planSelfContained() {
+    const serverDir = realpathSync(dirname(SERVER));
+    const appRel = relative(ROOT, serverDir).split(sep).join("/");
+    const distDir = standaloneDistDirName(readFileSync(SERVER, "utf8"));
+    const distAbs = join(serverDir, distDir);
+    const mwPath = join(distAbs, "server", "middleware-manifest.json");
+    const edgeFiles = existsSync(mwPath) ? middlewareManifestFiles(JSON.parse(readFileSync(mwPath, "utf8"))) : [];
+    const cls = classifyDistFiles(listFilesRel(distAbs), { edgeFiles });
+    if (cls.nativeAddons.length > 0) {
+        fail(
+            `self-contained: ${cls.nativeAddons.length} native addon(.node) file(s) under ${distDir}/server cannot be embedded — a native addon is dlopen'd from a real filesystem path, which $bunfs cannot provide, so an embedded copy would only crash at runtime: ${cls.nativeAddons.join(", ")}`,
+        );
+    }
+
+    // Turbopack's hashed external aliases (`.next/node_modules/<pkg>-<hash>`,
+    // symlinks into the traced tree): each alias's entry and its closure are
+    // embedded too, and the alias literal is rewritten (rewriteExternalAliases).
+    const aliasDir = join(distAbs, "node_modules");
+    const aliasEntries = new Map();
+    for (const name of existsSync(aliasDir) ? readdirSync(aliasDir) : []) {
+        let entryFile;
+        try {
+            entryFile = realpathSync(Bun.resolveSync(name, join(distAbs, "server")));
+        } catch (err) {
+            fail(`self-contained: turbopack external alias ${name} does not resolve: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (!isInside(entryFile, ROOT)) fail(`self-contained: turbopack external alias ${name} resolves outside the traced tree (${entryFile})`);
+        aliasEntries.set(name, entryFile);
+    }
+    const closure = aliasEntries.size > 0 ? computeDiskClosure([...aliasEntries.values()]) : DISK_CLOSURE;
+
+    const assetAbs = new Set(cls.assets.map((r) => join(distAbs, r)));
+    const moduleAbs = new Set();
+    for (const f of closure) {
+        if (/\.(c|m)?js$/.test(f) && !DEV_ONLY.some((p) => p.test(f)) && !assetAbs.has(f)) moduleAbs.add(f);
+    }
+    for (const r of cls.modules) moduleAbs.add(realpathSync(join(distAbs, r)));
+    const plan = planEmbed({ root: ROOT, include: [...moduleAbs].map((f) => relative(ROOT, f)) });
+    const dropped = [...plan.report.unmatched, ...plan.report.excluded, ...plan.report.nonModule];
+    if (dropped.length > 0) {
+        fail(`self-contained: ${dropped.length} module(s) of the embed set would not be embedded: ${dropped.slice(0, 10).join(", ")}`);
+    }
+
+    const embeddedRel = new Map();
+    plan.entrypoints.forEach((abs, i) => embeddedRel.set(realpathSync(abs), plan.relpaths[i]));
+    const aliases = new Map();
+    for (const [name, file] of aliasEntries) {
+        const rel = embeddedRel.get(file);
+        if (rel === undefined) fail(`self-contained: turbopack external alias ${name} → ${file} is not in the embed set`);
+        aliases.set(name, rel);
+    }
+    const routeMarkers = new Map();
+    for (const r of cls.modules.filter((m) => ROUTE_CHUNK.test(m)).sort()) {
+        routeMarkers.set(realpathSync(join(distAbs, r)), routeMarker(MARKER, routeMarkers.size));
+    }
+    if (routeMarkers.size === 0) {
+        fail(`self-contained: no route chunk under ${join(distAbs, "server")} — nothing to prove bytecode on`);
+    }
+
+    // The fs-read files, embedded as assets at their own paths.
+    const assetsEntry = join(serverDir, ".knext-embed-assets.mjs");
+    writeFileSync(
+        assetsEntry,
+        `${cls.assets.map((r, i) => `import a${i} from ${JSON.stringify(`./${distDir}/${r}`)} with { type: "file" };`).join("\n")}\nexport default [${cls.assets.map((_, i) => `a${i}`).join(", ")}];\n`,
+    );
+    const extensionless = cls.assets.filter((r) => !/\.[^/]*$/.test(r.split("/").pop()));
+    return {
+        appRel,
+        distDir,
+        cls,
+        plan,
+        embeddedRel,
+        routeMarkers,
+        assetsEntry,
+        extensionless,
+        aliases,
+        rewrites: 0,
+        aliasRewrites: 0,
+    };
+}
+const SC = SELF_CONTAINED ? planSelfContained() : null;
+if (SC) {
+    writeFileSync(
+        entry,
+        standaloneExecEntrySource(readFileSync(SERVER, "utf8"), PRELOADS, {
+            selfContained: { appRel: SC.appRel, distDir: SC.distDir, extensionless: SC.extensionless },
+        }),
+    );
+}
+
 // Where the standalone ROOT sits relative to the executable at runtime: the
 // executable lives beside server.js, which in a monorepo is below the root.
 const RUNTIME_ROOT_FROM_EXEC_DIR = relative(realpathSync(dirname(SERVER)), ROOT);
@@ -372,8 +513,52 @@ const bundledFiles = new Set();
 /** A module in the disk closure resolves to its on-disk twin, not the bundle. */
 function onDisk(real) {
     if (!DISK_CLOSURE.has(real)) return undefined;
+    if (SC) {
+        // Self-contained: its embedded twin. A closure member that is not an
+        // embedded module (JSON, a native addon) is data — bundled in place.
+        const rel = SC.embeddedRel.get(real);
+        if (rel === undefined) return undefined;
+        keptOnDisk.add(real);
+        return { path: rel, namespace: DISK_NAMESPACE };
+    }
     keptOnDisk.add(real);
     return { path: relative(ROOT, real), namespace: DISK_NAMESPACE };
+}
+
+function realpathSafe(p) {
+    try {
+        return realpathSync(p);
+    } catch {
+        return p;
+    }
+}
+
+/**
+ * An import FROM an embedded module. A target that is itself embedded is made
+ * external, rewritten to the relative path between the two embedded locations:
+ * bundling it would give each embedding chunk its own copy of a Next singleton,
+ * and a bare specifier would not resolve inside `$bunfs` at all. Anything else
+ * (JSON, a native addon, a builtin) is left to the bundler; a module outside the
+ * traced tree stays a runtime require, exactly as in disk mode.
+ */
+// @upstream-shim embedded-bare-specifier
+function resolveFromEmbedded(spec, importer, importerRel) {
+    let resolved;
+    try {
+        resolved = Bun.resolveSync(spec, dirname(importer));
+    } catch {
+        resolved = isBareSpecifier(spec) ? nodeConditionTarget(spec, dirname(importer)) : undefined;
+    }
+    if (resolved === undefined) return { path: spec, external: true };
+    if (!isAbsolute(resolved)) return undefined;
+    const real = realpathSafe(resolved);
+    const targetRel = SC.embeddedRel.get(real);
+    if (targetRel !== undefined) {
+        SC.rewrites++;
+        return { path: relativeSpecifier(importerRel, targetRel), external: true };
+    }
+    if (!isInside(real, ROOT)) return { path: spec, external: true };
+    return { path: real };
 }
 
 const standaloneResolver = {
@@ -382,14 +567,42 @@ const standaloneResolver = {
         build.onLoad({ filter: /.*/, namespace: DISK_NAMESPACE }, (a) => ({
             // Resolved at RUNTIME against the standalone root beside the
             // executable (banner below). realpath so the module-cache key is
-            // the one a disk chunk's own resolution produces.
-            contents: `module.exports = require(require("node:fs").realpathSync(require("node:path").join(globalThis.__knextStandaloneRoot, ${JSON.stringify(a.path)})));`,
+            // the one a disk chunk's own resolution produces. Self-contained:
+            // the module's embedded twin, by absolute path under the embedded
+            // root — the same module-cache key the chunks' relative requires
+            // produce.
+            contents: SC
+                ? `module.exports = require(globalThis.${EMBED_ROOT_GLOBAL} + ${JSON.stringify(`/${a.path}`)});`
+                : `module.exports = require(require("node:fs").realpathSync(require("node:path").join(globalThis.__knextStandaloneRoot, ${JSON.stringify(a.path)})));`,
             loader: "js",
         }));
+        if (SC) {
+            build.onLoad({ filter: /\.(c|m)?js$/ }, (a) => {
+                const real = realpathSync(a.path);
+                const rel = SC.embeddedRel.get(real);
+                if (rel === undefined) return undefined;
+                const marker = SC.routeMarkers.get(real);
+                const aliased = rewriteExternalAliases(readFileSync(real, "utf8"), SC.aliases);
+                if (aliased.unresolvedSubpaths.length > 0) {
+                    fail(`self-contained: ${rel} imports a subpath of a turbopack external alias, which cannot be embedded: ${aliased.unresolvedSubpaths.join(", ")}`);
+                }
+                SC.aliasRewrites += aliased.rewritten;
+                return {
+                    contents:
+                        (marker ? `globalThis.__knextRouteMarker=${JSON.stringify(marker)};\n` : "") +
+                        rebindDirnameSource(aliased.source, rel),
+                    loader: "js",
+                };
+            });
+        }
         build.onResolve({ filter: /.*/ }, (a) => {
             if (DEV_ONLY.some((p) => p.test(a.path))) return { path: EMPTY };
             if (!a.importer || PRELOAD_SET.has(a.path) || isBuiltin(a.path)) return undefined;
             if (a.path.startsWith("bun:") || a.path.startsWith("node:")) return undefined;
+            if (SC && a.namespace !== DISK_NAMESPACE) {
+                const importerRel = SC.embeddedRel.get(realpathSafe(a.importer));
+                if (importerRel !== undefined) return resolveFromEmbedded(a.path, a.importer, importerRel);
+            }
             let resolved;
             try {
                 resolved = Bun.resolveSync(a.path, dirname(a.importer));
@@ -430,9 +643,33 @@ const standaloneResolver = {
 };
 
 // ── Compile ──────────────────────────────────────────────────────────────────
+/** The self-contained build: the same options, plus the embed set (compile-embed.mjs). */
+async function selfContainedBuildOptions(base) {
+    const { supported } = await detectCompileInclude();
+    const opts = embedBuildOptions(SC.plan, {
+        entry,
+        outfile: OUTFILE,
+        includeSupported: supported,
+        format: "cjs",
+        bytecode: base.bytecode,
+        minify: base.minify,
+        target: "bun",
+        extra: { plugins: base.plugins, define: base.define },
+    });
+    return {
+        ...opts,
+        entrypoints: [...opts.entrypoints, SC.assetsEntry],
+        naming: { entry: "[dir]/[name].[ext]", asset: "[dir]/[name].[ext]" },
+        // Marker only: the banner heads EVERY embedded module, and the root
+        // globals are set by the entry prologue before anything is required.
+        banner: `globalThis.__knextStandaloneExecMarker=${JSON.stringify(MARKER)};`,
+        compile: { ...opts.compile, ...base.compile },
+    };
+}
+
 let result;
 try {
-    result = await Bun.build({
+    const base = {
         entrypoints: [entry],
         target: "bun",
         // --bytecode emits CommonJS; server.js and next/dist/server are CJS.
@@ -458,10 +695,12 @@ try {
             autoloadPackageJson: true,
             ...(TARGET ? { target: TARGET } : {}),
         },
-    });
+    };
+    result = await Bun.build(SC ? await selfContainedBuildOptions(base) : base);
 } finally {
     rmSync(entry, { force: true });
     rmSync(EMPTY, { force: true });
+    if (SC) rmSync(SC.assetsEntry, { force: true });
 }
 
 if (!result.success) {
@@ -470,7 +709,9 @@ if (!result.success) {
 }
 
 // ── The bytecode proof (fail closed) ────────────────────────────────────────
-const verdict = verifyBytecodeExec(readFileSync(OUTFILE), MARKER);
+const verdict = SC
+    ? verifyBytecodeEmbedded(readFileSync(OUTFILE), MARKER, SC.routeMarkers.size)
+    : verifyBytecodeExec(readFileSync(OUTFILE), MARKER);
 if (!verdict.ok) {
     rmSync(OUTFILE, { force: true });
     fail(`the compiled executable failed the bytecode check: ${verdict.reason}`);
@@ -495,6 +736,29 @@ console.log(
 if (process.env.KNEXT_STANDALONE_COMPILE_VERBOSE === "1") {
     for (const [f, n] of Object.entries(computedSites)) console.log(`  computed: ${f} (${n})`);
 }
+if (SC) {
+    const kinds = {};
+    for (const r of SC.cls.assets) {
+        const ext = r.includes(".") ? r.slice(r.lastIndexOf(".") + 1) : "(none)";
+        kinds[ext] = (kinds[ext] ?? 0) + 1;
+    }
+    console.log(
+        `[knext standalone-compile] self-contained: embedded ${SC.plan.relpaths.length} module(s) (${SC.cls.modules.length} from ${SC.distDir}/server, ${SC.routeMarkers.size} route chunk(s) bytecode-verified) and ${SC.cls.assets.length} file(s) read with fs (${Object.entries(kinds).map(([k, n]) => `${k}: ${n}`).join(", ")}); ${SC.rewrites} import(s) rewritten to embedded relative paths, ${SC.aliasRewrites} turbopack external alias literal(s) to embedded paths; ${SC.cls.disk.length} file(s) left on disk (static/, cache/)`,
+    );
+    if (SC.cls.unknownKinds.length > 0) {
+        console.log(
+            `[knext standalone-compile] self-contained: ${SC.cls.unknownKinds.length} file(s) of a kind this build does not know were embedded as data (read with fs): ${SC.cls.unknownKinds.join(", ")}`,
+        );
+    }
+    const dynamic = unembeddedDynamicReport(join(realpathSync(dirname(SERVER)), SC.distDir, "server"));
+    const sites = dynamic.reduce((n, r) => n + r.computedSites + r.dynamicRequireBindings.length, 0);
+    console.log(
+        `[knext standalone-compile] self-contained: ${sites} computed require/import site(s) in ${dynamic.length} embedded chunk(s) resolve at runtime and can only reach what is embedded (KNEXT_STANDALONE_COMPILE_VERBOSE=1 lists them)`,
+    );
+    if (process.env.KNEXT_STANDALONE_COMPILE_VERBOSE === "1") {
+        for (const r of dynamic) console.log(`  dynamic: ${r.file} (${r.computedSites}${r.dynamicRequireBindings.length ? `, ${r.dynamicRequireBindings.join(",")}` : ""})`);
+    }
+}
 console.log(
-    `[knext standalone-compile] wrote ${OUTFILE} (bytecode: verified${TARGET ? `, target: ${TARGET}` : ""})`,
+    `[knext standalone-compile] wrote ${OUTFILE} (bytecode: verified${SC ? ", self-contained" : ""}${TARGET ? `, target: ${TARGET}` : ""})`,
 );

@@ -110,10 +110,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // a decision too, per the rule above.
       // 12, was 11 (#1260): the vinext-node-image job installs the workspace
       // and runs its docker e2e via `bun:test` — its own pinned setup-bun.
-      // 13, was 12 (#1460 round 2): the self-contained-exec-e2e job builds
-      // file-manager's self-contained vinext binary natively and runs the
-      // e2e via `bun:test` — its own pinned setup-bun, same reasoning as the
-      // vinext-node-image entry above it.
+      // 13, was 12 (#1456 round 2, joined by #1460 round 2): the
+      // self-contained-exec-e2e job builds file-manager on both `next build`
+      // builders AND (as sibling steps in the SAME job, guarded to one matrix
+      // leg) file-manager's self-contained vinext binary, running both e2e
+      // suites via `bun:test` — ONE pinned setup-bun step for the whole job,
+      // same reasoning as the vinext-node-image entry above it.
       'ci.yml': 13,
       // NEW (#1302): the freeze guard's frozenFileSet() computation needs the
       // workspace's bun to run scripts/compat-credential-freeze-guard.mjs — a

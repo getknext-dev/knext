@@ -97,7 +97,10 @@ export function planEmbed({ root, include, exclude = [] }) {
   const unmatched = [];
   for (const pattern of include) {
     const before = found.size;
-    if (GLOB_META.test(pattern)) {
+    // A path that exists is a literal even when it holds glob metacharacters:
+    // Next names files `[id]/page.js`, `[root-of-the-server]__x.js`,
+    // `[turbopack]_runtime.js` — read as globs, they match nothing.
+    if (GLOB_META.test(pattern) && !existsSync(resolve(base, pattern))) {
       for (const rel of new Bun.Glob(pattern).scanSync({ cwd: base, onlyFiles: true })) {
         const posix = toPosix(rel);
         if (!posix.split('/').includes('node_modules')) found.add(posix);

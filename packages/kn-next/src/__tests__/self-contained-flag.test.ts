@@ -1,11 +1,17 @@
 /**
- * `--self-contained` / `selfContained` (opt-in; the vinext target honours it, #1460).
+ * `--self-contained` / `selfContained` (opt-in). Honoured by both compile
+ * paths: the standalone/node target since #1456 (embeds `.next/server` into
+ * the executable, proven by apps/file-manager/self-contained-e2e.test.ts on
+ * both webpack and turbopack builds), and the vinext target since #1460
+ * (embeds the server runtime and `public/`, proven below).
  *
  * Real modules only — the routing half (mocked compile steps) lives in
  * `self-contained-routing.test.ts`. This file pins: the config key's validator,
  * that the emitted NextApp CR does not change, that the flag is documented in
  * `--help`, and that the vinext compile argv is byte-identical whether the
- * option is absent or false, and gains only the self-contained switch when true.
+ * option is absent or false, and gains only the self-contained switch when
+ * true (the standalone/node target's own argv shape is covered where it plans
+ * self-contained embedding, not here).
  */
 
 import { describe, expect, it } from "bun:test";

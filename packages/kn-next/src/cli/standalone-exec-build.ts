@@ -21,7 +21,10 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { verifyBytecodeExec } from "../adapters/bytecode-exec-verify.mjs";
+import {
+    verifyBytecodeEmbedded,
+    verifyBytecodeExec,
+} from "../adapters/bytecode-exec-verify.mjs";
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
@@ -78,6 +81,8 @@ export interface StandaloneCompileArgs {
     readonly outFile: string;
     /** The bytecode-proof marker this build will scan the artifact for. */
     readonly marker: string;
+    /** Embed `.next` and the modules route chunks load (self-contained mode). */
+    readonly selfContained?: boolean;
 }
 
 export function standaloneCompileArgv(args: StandaloneCompileArgs): string[] {
@@ -95,6 +100,8 @@ export function standaloneCompileArgv(args: StandaloneCompileArgs): string[] {
         bunCompileTarget(args.arch),
         "--marker",
         args.marker,
+        // Appended only when on, so disk mode's argv is exactly what it was.
+        ...(args.selfContained ? ["--self-contained", "1"] : []),
     ];
 }
 
@@ -112,8 +119,9 @@ export interface StandaloneExecBuildOptions {
     /** Injectable for tests: read the produced executable. */
     readonly readArtifact?: (path: string) => Uint8Array;
     /**
-     * Opt-in self-contained mode. Accepted and recorded only — no embedding
-     * happens yet, so the compile argv is identical either way.
+     * Opt-in self-contained mode: the executable embeds the app's `.next` and
+     * every module its route chunks load, so it boots with only `public/` and
+     * `.next/static/` beside it. Off: the compile argv is exactly disk mode's.
      */
     readonly selfContained?: boolean;
 }
@@ -153,11 +161,16 @@ export function buildStandaloneExecutable(
             root,
             outFile,
             marker,
+            ...(opts.selfContained ? { selfContained: true } : {}),
         }),
     );
 
     const read = opts.readArtifact ?? ((p: string) => readFileSync(p));
-    const verdict = verifyBytecodeExec(read(outFile), marker);
+    // Self-contained: every embedded module, and route chunk 0 by its own
+    // marker, must carry bytecode (the compile script checks every route chunk).
+    const verdict = opts.selfContained
+        ? verifyBytecodeEmbedded(read(outFile), marker, 1)
+        : verifyBytecodeExec(read(outFile), marker);
     if (!verdict.ok) {
         rmSync(outFile, { force: true });
         throw new UsageError(

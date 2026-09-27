@@ -7,6 +7,7 @@
 
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EMBED_ROOT_GLOBAL, installDistDirAlias, installEmbeddedJsonRequire } from "./standalone-embed.mjs";
 
 /** The binding the re-anchored entry uses in place of `__dirname`. */
 export const STANDALONE_DIR_BINDING = "__knextStandaloneDir";
@@ -53,13 +54,19 @@ function replaceExactlyOnce(src, from, to) {
  *   - the ESM header is rewritten to CommonJS so `require('next')` is static;
  *   - the preloads the uncompiled cell passes as `--require` run first.
  *
+ * With `opts.selfContained` (the self-contained executable, which carries the
+ * app's `.next` inside it), `distDir` is additionally pointed INTO the
+ * executable — see `SELF_CONTAINED_DISTDIR`. Without it the output is
+ * byte-identical to what it was before self-contained mode existed.
+ *
  * Throws on any shape it does not recognise — never guesses.
  *
  * @param {string} serverSrc the generated server.js
  * @param {readonly string[]} preloads absolute paths, required first, in order
+ * @param {{ selfContained?: { appRel: string, distDir?: string, extensionless?: readonly string[] } }} [opts]
  * @returns {string}
  */
-export function standaloneExecEntrySource(serverSrc, preloads) {
+export function standaloneExecEntrySource(serverSrc, preloads, opts = {}) {
     let body = serverSrc;
     const isEsm = body.includes("import.meta.url");
     if (isEsm) {
@@ -78,12 +85,66 @@ export function standaloneExecEntrySource(serverSrc, preloads) {
         );
     }
 
-    return [
+    const prologue = [
         `const ${STANDALONE_DIR_BINDING} = process.env.KNEXT_STANDALONE_DIR || require("node:path").dirname(process.execPath);`,
-        ...preloads.map((p) => `require(${JSON.stringify(p)});`),
-        body,
-    ].join("\n");
+    ];
+    if (opts.selfContained) {
+        prologue.push(...selfContainedPrologue(opts.selfContained));
+        body = replaceExactlyOnce(body, NEXT_CONFIG_ANCHOR, `${SELF_CONTAINED_DISTDIR}\n${NEXT_CONFIG_ANCHOR}`);
+    }
+    return [...prologue, ...preloads.map((p) => `require(${JSON.stringify(p)});`), body].join("\n");
 }
+
+/** The line that serialises `nextConfig` for Next's workers; the distDir rewrite must precede it. */
+const NEXT_CONFIG_ANCHOR = "process.env.__NEXT_PRIVATE_STANDALONE_CONFIG = JSON.stringify(nextConfig)";
+
+/** The embedded app's `.next`, and the disk one beside the executable. */
+const EMBED_DIST = "__knextEmbedDistDir";
+const DISK_DIST = "__knextDiskDistDir";
+
+/**
+ * Point `distDir` INTO the executable. Next derives every build-output path
+ * from `path.join(dir, distDir)` while `public/` comes from `dir` alone, so
+ * `dir` stays the directory the executable sits in (and the process `chdir`s
+ * there, never into the virtual filesystem) and `distDir` becomes the relative
+ * path from it to the embedded `.next` — `path.join` then lands on
+ * `/$bunfs/root/<app>/.next`.
+ */
+const SELF_CONTAINED_DISTDIR = `nextConfig.distDir = require("node:path").relative(${STANDALONE_DIR_BINDING}, ${EMBED_DIST});`;
+
+/**
+ * The self-contained prologue: anchor on the EMBEDDED root — the executable's
+ * own virtual path, `process.argv[1]`, never the cwd — and fail closed if the
+ * process is not running from it; then alias the parts of `.next` that stay on
+ * disk (`static/`, `cache/`) and each extensionless embedded file (`BUILD_ID` →
+ * `BUILD_ID.`, the name Bun gives it).
+ *
+ * @param {{ appRel: string, distDir?: string, extensionless?: readonly string[] }} sc
+ *   `appRel`: the app directory relative to the embed root (posix, "" at the
+ *   root); `extensionless`: `.next`-relative paths of embedded extensionless files
+ */
+function selfContainedPrologue({ appRel, distDir = ".next", extensionless = [] }) {
+    const p = 'require("node:path")';
+    const aliases = [
+        `[${EMBED_DIST} + "/static"]: ${DISK_DIST} + "/static"`,
+        `[${EMBED_DIST} + "/cache"]: ${DISK_DIST} + "/cache"`,
+        // @upstream-shim bun-asset-extensionless-dot
+        ...extensionless.map(
+            (rel) =>
+                `[${EMBED_DIST} + ${JSON.stringify(`/${rel}`)}]: ${EMBED_DIST} + ${JSON.stringify(`/${rel}.`)}`,
+        ),
+    ];
+    return [
+        `globalThis.${EMBED_ROOT_GLOBAL} = (() => { const r = ${p}.dirname(process.argv[1] || ""); if (!${EMBEDDED_ROOT_RE}.test(r)) throw new Error("knext: this self-contained executable is not running from its embedded filesystem (argv[1] = " + process.argv[1] + ")"); return r; })();`,
+        `const ${EMBED_DIST} = ${p}.join(globalThis.${EMBED_ROOT_GLOBAL}, ${JSON.stringify(appRel)}, ${JSON.stringify(distDir)});`,
+        `const ${DISK_DIST} = ${p}.join(${STANDALONE_DIR_BINDING}, ${JSON.stringify(distDir)});`,
+        `(${installDistDirAlias.toString()})(require("node:fs"), require("node:fs/promises"), { ${aliases.join(", ")} });`,
+        `(${installEmbeddedJsonRequire.toString()})(require("node:module"), require("node:fs"), globalThis.${EMBED_ROOT_GLOBAL});`,
+    ];
+}
+
+/** Bun's embedded root: `/$bunfs/root` (posix) or `B:\~BUN\root` (Windows). */
+const EMBEDDED_ROOT_RE = String.raw`/^\/\$bunfs\/root$|^[A-Za-z]:[\\/]~BUN[\\/]root$/`;
 
 /**
  * The module Next's dev-only requires are compiled against. Production never
