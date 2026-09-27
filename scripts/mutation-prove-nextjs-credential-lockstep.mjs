@@ -82,7 +82,7 @@ const MUTATIONS = [
     label: 'test-e2e-deploy.yml: bump the workflow_dispatch nextjsRef DEFAULT to the shipped pin',
     subject: 'testE2eDeploy',
     anchor:
-      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.2.0'",
+      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.2.12'",
     replacement:
       "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.3'",
   },
@@ -105,31 +105,31 @@ const MUTATIONS = [
   {
     label: 'docs/compat-matrix.md: drift the cited vercel/next.js version from the manifest',
     subject: 'docsMatrixMd',
-    anchor: 'against `vercel/next.js` **v16.2.0**, Node runtime.',
-    replacement: 'against `vercel/next.js` **v16.3.3**, Node runtime.',
+    anchor: 'against `vercel/next.js` **v16.2.12**,',
+    replacement: 'against `vercel/next.js` **v16.3.3**,',
   },
   {
     label: 'compat-matrix.mdx: drift the cited Next.js version from the manifest',
     subject: 'docsMatrixMdx',
     anchor:
-      'nightly most recently observed **778 tests passed, 0 failed**, against Next.js v16.2.0.',
+      'nightly most recently observed **792 tests passed, 0 failed**, against Next.js v16.2.12.',
     replacement:
-      'nightly most recently observed **778 tests passed, 0 failed**, against Next.js v16.3.3.',
+      'nightly most recently observed **792 tests passed, 0 failed**, against Next.js v16.3.3.',
   },
   {
     label: 'compat-matrix.mdx: delete the newer-Next-release divergence explanation',
     subject: 'docsMatrixMdx',
     anchor:
-      '\n**New apps pin a newer Next.js release than the version measured above.** The scaffold ships\nNext.js 16.3.x, while the numbers on this page were measured against an older pinned release. The\nnewer release currently trips a build-tool bug that is being tracked upstream, so re-measuring\nagainst it would take every Turbopack-based row on this page to zero rather than show real\nprogress. The credentialed numbers will move forward once that is fixed.\n',
+      '\n**New apps pin a newer Next.js release (16.3.x) than the version measured above.** The scaffold\nships Next.js 16.3.x, while the numbers on this page were measured against the latest 16.2.x\nrelease. The 16.3.x line adds a handful of new upstream tests that knext has not yet passed, so\ncredentialing on it is a separate, later step rather than a side effect of this measurement. The\ncredentialed numbers will move forward onto the 16.3.x line once those tests are addressed.\n',
     replacement: '\n',
   },
   {
-    label: "compat-matrix.mdx: drop the '16.3.x' version from the divergence explanation",
+    label: "compat-matrix.mdx: drop every '16.3.x' mention from the divergence explanation",
     subject: 'docsMatrixMdx',
     anchor:
-      '**New apps pin a newer Next.js release than the version measured above.** The scaffold ships\nNext.js 16.3.x, while',
+      '**New apps pin a newer Next.js release (16.3.x) than the version measured above.** The scaffold\nships Next.js 16.3.x, while the numbers on this page were measured against the latest 16.2.x\nrelease. The 16.3.x line adds a handful of new upstream tests that knext has not yet passed, so\ncredentialing on it is a separate, later step rather than a side effect of this measurement. The\ncredentialed numbers will move forward onto the 16.3.x line once those tests are addressed.',
     replacement:
-      '**New apps pin a newer Next.js release than the version measured above.** The scaffold ships\na newer Next.js line, while',
+      '**New apps pin a newer Next.js release (a newer release) than the version measured above.** The scaffold\nships Next.js a newer release, while the numbers on this page were measured against the latest 16.2.x\nrelease. The a-newer-release line adds a handful of new upstream tests that knext has not yet passed, so\ncredentialing on it is a separate, later step rather than a side effect of this measurement. The\ncredentialed numbers will move forward onto the a-newer-release line once those tests are addressed.',
   },
 
   // ── Round 3, finding 1: every NEXTJS_REF assignment form, not just the ──
@@ -186,9 +186,10 @@ const MUTATIONS = [
     // gutting an existing one — same guard, still exercised.
     label: 'manifest: add a lockstepExceptions entry with an empty reason',
     subject: 'manifest',
-    anchor: '"lockstepExceptions": []',
+    anchor:
+      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570).",\n      "date": "2026-09-27"\n    }\n  ]',
     replacement:
-      '"lockstepExceptions": [{"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}]',
+      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570).",\n      "date": "2026-09-27"\n    },\n    {"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}\n  ]',
   },
 
   // ── Round 3, second pass, finding 1: the ledger's THIRD copy of the ref ──
@@ -196,7 +197,7 @@ const MUTATIONS = [
     label: 'compat-vinext-ledger.mjs: revert DEFAULT_NEXTJS_REF to a hardcoded (drifted) literal',
     subject: 'ledger',
     anchor:
-      "export const DEFAULT_NEXTJS_REF = JSON.parse(\n  readFileSync(CREDENTIAL_MANIFEST_PATH, 'utf8'),\n).credentialedNextRef;",
+      "export const DEFAULT_NEXTJS_REF =\n  credentialManifest.lockstepExceptions?.find(\n    (ex) => ex.file === LANE_WORKFLOW_PATH && ex.kind === 'dispatch-default',\n  )?.value ?? credentialManifest.credentialedNextRef;",
     replacement: "export const DEFAULT_NEXTJS_REF = 'v16.3.3';",
   },
 

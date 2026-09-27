@@ -5,7 +5,7 @@ description: How knext's default (standalone) build uses the official Next.js ad
 
 <Callout type="info">
 **Scope, stated plainly.** knext's **default build** (`build: 'turbopack'`) uses this adapter: the
-adapter hooks described below run on `next build`, producing the standalone output the **778/778
+adapter hooks described below run on `next build`, producing the standalone output the **792/792
 official-suite result** was earned on. The selectable **`build: 'vinext'`** target — which
 compiles your app with [vinext](https://vinext.dev), an open-source, Vite-based implementation of
 the Next.js framework, into a [single executable](/docs/bun-runtime) — does **not** use this
@@ -70,8 +70,8 @@ This is the same pattern that `knext create` scaffolds and the example apps in t
 
 knext validates the adapter against the official Next.js compatibility suite: the
 `vercel/next.js` deploy-mode e2e harness runs through knext's lifecycle scripts and passes
-**778 tests with zero failures** on the Node runtime, re-verified **nightly** (Next.js v16.2.0).
-The default Bun cell, which compiles the same standalone server, passed once at 778/0. A
+**792 tests with zero failures** on the Node runtime, re-verified **nightly** (Next.js v16.2.12).
+The default Bun cell, which compiles the same standalone server, passed once at 792/0. A
 fast smoke gate additionally runs a Node + Bun matrix on every change.
 
 <Callout type="info">

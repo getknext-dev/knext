@@ -45,7 +45,7 @@ compatibility cell, tracked with its own evidence:
 ## How knext runs the suite
 
 - **Pinned upstream ref.** The harness checks out `vercel/next.js` at a pinned release tag
-  (currently `v16.2.0`) — never `canary` — so an upstream break is not mistaken for a knext
+  (currently `v16.2.12`) — never `canary` — so an upstream break is not mistaken for a knext
   regression.
 - **Real lifecycle scripts.** The deploy tests run through knext's lifecycle scripts, which pack
   the `@getknext/core` adapter, set `NEXT_ADAPTER_PATH`, and boot each cell's own artifact — the
@@ -85,14 +85,14 @@ for more:
 
 The numbers below are the most recent runs for each cell. Treat them as current evidence of where
 each cell stands today, not as a completed v1.0 credential. Runs marked "one run" were a manually
-dispatched run against Next.js v16.2.0: verified once, not credentialed.
+dispatched run against Next.js v16.2.12: verified once, not credentialed.
 
 | Cell | Most recent evidence | Cadence |
 |---|---|---|
-| Turbopack build, **Node** runtime | 778 tests passed, 0 failed, against Next.js v16.2.0, on the nightly | Nightly (main), early warning |
-| Turbopack build, **Bun** runtime, compiled executable (default) | 778 passed, 0 failed, on the compiled executable (one run, Bun 1.4.2); its nightly credential lane is wired and waiting for a release candidate | One run; credential lane scheduled |
-| Webpack build, **Node** runtime | 778 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
-| Webpack build, **Bun** runtime | 778 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
+| Turbopack build, **Node** runtime | 792 tests passed, 0 failed, against Next.js v16.2.12, on the nightly | Nightly (main), early warning |
+| Turbopack build, **Bun** runtime, compiled executable (default) | 792 passed, 0 failed, on the compiled executable (one run, Bun 1.4.2); its nightly credential lane is wired and waiting for a release candidate | One run; credential lane scheduled |
+| Webpack build, **Node** runtime | 792 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
+| Webpack build, **Bun** runtime | 792 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
 | `vinext` build, **Bun** runtime | 728 passed, 38 failed, 12 quarantined of 778 — a measurement, not a credential. Tracked on its own bar, see [Bun & the compiled executable](/docs/bun-runtime) | Weekly |
 | `vinext` build, **Node** runtime | Buildable and booted on every PR (GET 200, compile cache baked and accepted); no suite lane yet | — |
 
