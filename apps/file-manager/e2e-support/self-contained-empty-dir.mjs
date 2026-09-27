@@ -265,8 +265,8 @@ async function main() {
   );
   const publicDir = val('--public') ?? join(dirname(nextDir ?? '.'), 'public');
   if (!nextDir || !scBinary) {
-    console.error(
-      'usage: --next-dir <app>/.next --sc-binary <path> [--disk-binary <path>] [--runs 5]',
+    process.stderr.write(
+      'usage: --next-dir <app>/.next --sc-binary <path> [--disk-binary <path>] [--runs 5]\n',
     );
     process.exit(2);
   }
@@ -290,7 +290,7 @@ async function main() {
     arm.servedCount = Object.values(arm.served).filter(isServed).length;
     arm.output = arm.output.slice(-1500);
   }
-  console.log(JSON.stringify(result, null, 2));
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 if (import.meta.main) await main();

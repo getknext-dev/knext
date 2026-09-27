@@ -277,7 +277,10 @@ describe("verifyBytecodeEmbedded — the self-contained proof (#1456)", () => {
             MARKER,
             1,
         );
-        expect(r).toEqual({ ok: false, reason: expect.stringContaining("no @bytecode") });
+        expect(r).toEqual({
+            ok: false,
+            reason: expect.stringContaining("no @bytecode"),
+        });
     });
 
     it("FAILS when a marked route chunk is missing from the executable", () => {
