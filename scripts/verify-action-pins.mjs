@@ -152,7 +152,7 @@ import { pathToFileURL } from 'node:url';
  * directory is resolved now. It remains the named subset that holds a live npm
  * publish credential, which is what the credentialed-coverage test asserts on.
  */
-export const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml'];
+export const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml', 'bun-base-build.yml'];
 
 /**
  * Every workflow in `dir`, DISCOVERED rather than enumerated (#528). A list is

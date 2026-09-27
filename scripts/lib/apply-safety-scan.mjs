@@ -1726,6 +1726,16 @@ export const REMOTE_FETCH_ALLOWLIST = [
     segment:
       /^node -e '\s*const r = await fetch\(process\.argv\[1\]\);\s*const b = await r\.text\(\);/,
   },
+  {
+    id: 'bun-base-upstream-source',
+    // infra/bun-base/build.sh (Cloud Build only): names the upstream Bun repository as `origin` in a
+    // fresh local clone. `git remote add` itself contacts nothing (no -f); the fetch that follows,
+    // `git fetch -q --depth 1 origin "$UPSTREAM_SHA"`, asks for one commit pinned in the repo and is
+    // checked by `test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"` (tests/bun-base-supply-chain.test.ts
+    // enforces that pairing). The tree is only compiled into CI-verification binaries; the script
+    // applies nothing to any cluster.
+    segment: /^git remote add origin https:\/\/github\.com\/oven-sh\/bun\.git$/,
+  },
 ];
 
 /**

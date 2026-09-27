@@ -116,6 +116,25 @@ kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | h
 `knext doctor` (the `metrics-port` check) flags any app still pinned onto a queue-proxy-owned
 port and tells you which serving ConfigMap key governs `:9091` on your cluster.
 
+## Version-specific step: the build id now comes from `KNEXT_BUILD_ID`
+
+`knext deploy` used to hand the deploy tag to `next build` as `NEXT_DEPLOYMENT_ID`. From Next.js
+16.2.11, a deployment id makes `next build` ignore `generateBuildId` and write the same fixed build
+id on every deploy, so standalone (`turbopack` or `webpack`) deploys stopped at the build-id check.
+The CLI now sets `KNEXT_BUILD_ID` instead, and leaves `NEXT_DEPLOYMENT_ID` unset for standalone
+builds.
+
+Update `generateBuildId` in your `next.config` to read the new variable first, and remove any
+`deploymentId` line from a standalone app's config:
+
+```ts title="next.config.ts"
+generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
+```
+
+Until you do, a standalone deploy stops before anything is uploaded or applied, with
+`Update generateBuildId in next.config to read KNEXT_BUILD_ID`. `vinext` apps keep working without
+the change, but the same line is correct for them too. See [Skew protection](/docs/skew-protection).
+
 ## The scale-to-zero database: roll the failover controller before its new config
 
 The scale-to-zero database ships its own **failover controller** — a small component that watches

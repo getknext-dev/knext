@@ -215,6 +215,43 @@ describe('the shipped bake driver: UNCONDITIONALLY strict 2xx — no knob anywhe
   });
 });
 
+describe('the shipped bake driver: startup deadline floor (#1572)', () => {
+  // #1572: the node-lane compat shards carrying the upstream
+  // redirect-rewrite-dynamic(.test.ts)/redirect-rewrite-dynamic-basepath
+  // fixtures measurably exceeded the original 30_000ms `waitForServer`
+  // deadline on a loaded runner (reproduced independent of NEXTJS_REF, and
+  // intermittent — the same shards also passed cleanly on other nights), so a
+  // deadline this tight is a false-negative risk for a real, if less common,
+  // app shape, not a broken cache. Pin the raised floor so it cannot silently
+  // drift back down; exact anchor text (`once`) so a stray second occurrence
+  // (e.g. a copy-pasted second call) is caught rather than averaged away.
+  it('waits at least 60s for the standalone server to answer before failing the bake', () => {
+    const template = readFileSync(SHIPPED_BAKE, 'utf8');
+    expect(once(template, 'waitForServer(60_000)')).toBe(1);
+    expect(template).not.toContain('waitForServer(30_000)');
+  });
+
+  // Follow-up from the #1572 round-2 review: the driver never logged how
+  // long a real boot actually took, so raising the floor left no evidence to
+  // tell "normal, a little slower" from "silently approaching the ceiling".
+  // Pin the log line by exact anchor so a copy-paste or a reword can't drift
+  // it silently (mirrors the `once`-anchor pattern above).
+  it('logs the elapsed boot time once the server answers, so real durations are visible in CI logs', () => {
+    const template = readFileSync(SHIPPED_BAKE, 'utf8');
+    expect(
+      once(template, '`[knext bake] standalone server answered after ${Date.now() - start}ms`'),
+    ).toBe(1);
+  });
+
+  it('the SHIPPED bake driver actually emits that log line at runtime, not just in the template text', () => {
+    const { dir, driver, server } = fakeStandalone();
+    const cache = join(dir, '.next/compile-cache');
+    const r = runShippedBake(dir, driver, server, cache);
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.stdout).toMatch(/\[knext bake] standalone server answered after \d+ms/);
+  }, 90_000);
+});
+
 describe('e2e-bake-accept.mjs (#1299): the tolerance moved HERE, one process out, against the REAL driver', () => {
   it('with the wrapper + KNEXT_WARM_ACCEPT_ANY_STATUS=1, a 404 or 500 render is tolerated', () => {
     expect(bakeThroughWrapper('/not-there', '1').status).toBe(0);

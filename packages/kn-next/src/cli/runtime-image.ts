@@ -314,8 +314,8 @@ export function dockerBuildxArgs(opts: {
     /** See `RuntimeImageSelection.bakesCompileCache`. Gates the build-arg above. */
     bakesCompileCache?: boolean;
     /**
-     * This deploy's build id (`NEXT_DEPLOYMENT_ID`), threaded as
-     * `--build-arg NEXT_DEPLOYMENT_ID` (#1283). ONLY for an `app-dockerfile`
+     * This deploy's build id, threaded as `--build-arg KNEXT_BUILD_ID` and
+     * `--build-arg NEXT_DEPLOYMENT_ID` (#1283, #1417). ONLY for an `app-dockerfile`
      * selection (`opts.target` absent) — a `standalone` build's Dockerfile
      * `COPY`s the HOST-built `.next/standalone`, which already had the env
      * var when `next build` ran, so passing it again would be a no-op at
@@ -363,6 +363,10 @@ export function dockerBuildxArgs(opts: {
     // on `buildId`/`assetPrefix` above); scope to `app-dockerfile` (no target).
     if (!opts.target) {
         if (opts.buildId) {
+            // #1417: KNEXT_BUILD_ID is the variable next.config's
+            // generateBuildId reads first; NEXT_DEPLOYMENT_ID stays for the
+            // vinext in-image builds that read it for `?dpl=`.
+            argv.push("--build-arg", `KNEXT_BUILD_ID=${opts.buildId}`);
             argv.push("--build-arg", `NEXT_DEPLOYMENT_ID=${opts.buildId}`);
         }
         if (opts.assetPrefix) {
