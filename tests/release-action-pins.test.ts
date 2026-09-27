@@ -27,7 +27,7 @@ import { jobBlocks, jobNeeds } from './helpers/release-workflow';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
-const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml'] as const;
+const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml', 'bun-base-build.yml'] as const;
 
 /**
  * The actions ALLOWED to run on the publish path — the credentialed surface, so
@@ -47,6 +47,10 @@ const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml'] as const;
  * the tests below, which hold regardless of which version is current.
  */
 const EXPECTED_ACTIONS: ReadonlySet<string> = new Set([
+  // bun-base-build.yml (id-token: write — GCP federation + cosign keyless):
+  'google-github-actions/auth',
+  'google-github-actions/setup-gcloud',
+  'sigstore/cosign-installer',
   'actions/checkout',
   'actions/setup-node',
   'actions/upload-artifact',
@@ -79,6 +83,14 @@ const EXPECTED_ACTIONS_BY_FILE: Record<(typeof PINNED_WORKFLOWS)[number], Readon
     'actions/setup-node',
     'actions/upload-artifact',
     'oven-sh/setup-bun',
+  ]),
+  // Holds `id-token: write` (GCP federation + cosign keyless), so it is credential-bearing.
+  'bun-base-build.yml': new Set([
+    'actions/checkout',
+    'actions/upload-artifact',
+    'google-github-actions/auth',
+    'google-github-actions/setup-gcloud',
+    'sigstore/cosign-installer',
   ]),
 };
 
