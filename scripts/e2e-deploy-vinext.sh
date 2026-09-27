@@ -54,10 +54,10 @@ BUILDER="vinext"
 # dispatch-only — see §6c below for what it does and why it is EXPECTED to
 # fail against a real fixture until V1 (#1460) lands.
 KNEXT_SELF_CONTAINED="${KNEXT_SELF_CONTAINED:-0}"
-case "${KNEXT_SELF_CONTAINED}" in
+case "${KNEXT_SELF_CONTAINED:-0}" in
   0|1) ;;
   *)
-    echo "[e2e-deploy-vinext] ERROR: KNEXT_SELF_CONTAINED must be 0 or 1, got '${KNEXT_SELF_CONTAINED}'" >&2
+    echo "[e2e-deploy-vinext] ERROR: KNEXT_SELF_CONTAINED must be 0 or 1, got '${KNEXT_SELF_CONTAINED:-0}'" >&2
     exit 1
     ;;
 esac
@@ -425,7 +425,7 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
   # else"), forward wiring for V1 (#1460), which is what actually embeds
   # anything.
   VINEXT_COMPILE_ARGS=()
-  if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+  if [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
     VINEXT_COMPILE_ARGS+=(--self-contained true)
   fi
   if ! bun run "${COMPILE_SCRIPT}" --entry "${NITRO_ENTRY}" --outfile "${KNEXT_EXEC}" \
@@ -467,10 +467,25 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
   # (tests/e2e-empty-dir.test.ts, scripts/mutation-prove-empty-dir-guard.mjs)
   # against a synthetic fixture, not against this real one. Fail-closed, no
   # silent fallback to the normal boot below.
-  if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
-    EMPTY_DIR="$(mktemp -d "${APP_DIR}/.knext-empty-dir.XXXXXX")"
+  if [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
+    # BLOCKING-3 (round-2 review): rooted OUTSIDE APP_DIR (RUNNER_TEMP, or
+    # /tmp locally) — this lane boots the exec BARE, no docker, so an
+    # EMPTY_DIR nested inside APP_DIR would still let module resolution walk
+    # up and find APP_DIR/node_modules (measured with a synthetic
+    # `require('leakpkg')` binary before this fix). ED_HIDE_DURING_BOOT below
+    # closes the remaining gap: APP_DIR/node_modules and APP_DIR/.output
+    # sitting on the SAME host, not nested under EMPTY_DIR at all.
+    EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir.XXXXXX")"
     EMPTY_DIR_PORT="$(free_port)"
     log "KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check into ${EMPTY_DIR}"
+    # BLOCKING-3 (round-2 review): hide APP_DIR/node_modules and APP_DIR/.output
+    # for the duration of the boot only (ed_check_or_die stages from the REAL
+    # paths first, then hides, then boots, then restores on every exit path —
+    # see its own header comment). Without this, the bare vinext exec — which
+    # runs on this SAME host, not inside a container — can still read either
+    # one by walking up from EMPTY_DIR or via the absolute path baked into the
+    # binary at compile time (ADR-0060 §Context), producing a false pass.
+    ED_HIDE_DURING_BOOT=("${APP_DIR}/node_modules" "${APP_DIR}/.output")
     if ! ed_check_or_die "vinext" "${EMPTY_DIR}" "${KNEXT_EXEC}" /api/health / "${EMPTY_DIR_PORT}" \
       "${APP_DIR}/.output/public:.output/public" "${APP_DIR}/native:native"; then
       log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until V1 (#1460) embeds what this exec still loads from disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
@@ -481,7 +496,7 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
 else
   KNEXT_EXEC=""
   log "KNEXT_COMPILE=0 — DIAGNOSTIC uncompiled boot: skipping the single-executable compile (§5) and sharp staging (§6); the UNCOMPILED nitro output will be booted under bun (partitions compile-step bugs from vite-pipeline/runtime bugs)"
-  if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+  if [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
     # #1455: self-containment is only meaningful for the COMPILED binary —
     # this diagnostic boot always needs the uncompiled nitro output +
     # node_modules on disk. No binary here for the empty-dir check to test.

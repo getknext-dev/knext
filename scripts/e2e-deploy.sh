@@ -33,10 +33,10 @@ RUNTIME="${KNEXT_RUNTIME:-node}"   # node (default) | bun  (bun = fast-follow ta
 # dispatch-only — see step 3b-ii below for what it does and why it is EXPECTED
 # to fail against a real fixture until N1 (#1456) lands.
 KNEXT_SELF_CONTAINED="${KNEXT_SELF_CONTAINED:-0}"
-case "${KNEXT_SELF_CONTAINED}" in
+case "${KNEXT_SELF_CONTAINED:-0}" in
   0|1) ;;
   *)
-    echo "[e2e-deploy] ERROR: KNEXT_SELF_CONTAINED must be 0 or 1, got '${KNEXT_SELF_CONTAINED}'" >&2
+    echo "[e2e-deploy] ERROR: KNEXT_SELF_CONTAINED must be 0 or 1, got '${KNEXT_SELF_CONTAINED:-0}'" >&2
     exit 1
     ;;
 esac
@@ -538,7 +538,7 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     # buildStandaloneExecutable "accepts it and does nothing else"), forward
     # wiring for N1 (#1456), which is what actually embeds anything.
     STANDALONE_COMPILE_ARGS=()
-    if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+    if [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
       STANDALONE_COMPILE_ARGS+=(--self-contained true)
     fi
     bun run "${STANDALONE_COMPILE_JS}" \
@@ -599,8 +599,15 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     # silent fallback to the disk-mode boot below: a requested check that
     # cannot pass is a hard `exit 1`, exactly like every other fail-closed gate
     # in this script (the compile step above, the docker requirement).
-    if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
-      EMPTY_DIR="$(mktemp -d "${APP_DIR}/.knext-empty-dir.XXXXXX")"
+    if [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
+      # BLOCKING-3 (round-2 review): rooted OUTSIDE APP_DIR so module
+      # resolution walking up from the staged binary's cwd can never reach
+      # APP_DIR/node_modules — a mktemp under APP_DIR itself made that
+      # reachable even though the docker run below only mounts EMPTY_DIR
+      # (measured with a synthetic `require('leakpkg')` binary before this
+      # fix). RUNNER_TEMP is the GitHub Actions runner's own temp root; /tmp
+      # is the local fallback.
+      EMPTY_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/knext-empty-dir.XXXXXX")"
       EMPTY_DIR_PORT="$(free_port)"
       EMPTY_DIR_UID_GID="$(id -u):$(id -g)"
       EMPTY_DIR_CONTAINER="knext-e2e-empty-dir-${DEPLOYMENT_ID}"
@@ -610,7 +617,7 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
         log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check failed"
         exit 1
       }
-      ed_assert_clean "${EMPTY_DIR}" || {
+      ed_assert_clean "${EMPTY_DIR}" "$(basename "${EMPTY_DIR_STAGED}")" || {
         log "ERROR: KNEXT_SELF_CONTAINED=1 — the staged empty dir is not clean — see above"
         exit 1
       }
@@ -636,7 +643,7 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     log "ERROR: KNEXT_E2E_SKIP_PACK=1 has no installed adapter to resolve the compile script from, but RUNTIME=bun was requested — refusing to silently fall back to server.js (contract-test mode is not expected to combine these)"
     exit 1
   fi
-elif [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+elif [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
   # #1455: on this axis, self-containment is only meaningful for the compiled
   # exec (the branch above) — RUNTIME=node boots the standalone server.js
   # interpreted, which always needs the traced node_modules on disk beside
