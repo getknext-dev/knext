@@ -142,12 +142,10 @@ const CLI_ONLY: Record<string, string> = {
     "Dockerfile.self-contained.hbs":
         "the zone app is built and imaged by this repo's own pipeline and never runs " +
         "`kn-next build --self-contained`, so it needs no copy of this reference recipe " +
-        "(#1460). Verified empirically (loadTemplates()/selectBuilderTemplates()): this " +
-        "file is NOT gated by VINEXT_ONLY_TEMPLATES/DEFAULT_ONLY_TEMPLATES, so it ships " +
-        "into every created app unconditionally today regardless of --builder — self- " +
-        "contained mode has no create-time flag yet (only `kn-next build " +
-        "--self-contained`). That gap is real but is a create.ts template-selection " +
-        "question, not something this zone-vs-CLI parity guard is scoped to fix.",
+        "(#1460). RESOLVED (#1460 round 3): this file is now in VINEXT_ONLY_TEMPLATES " +
+        "in create.ts — it ships only for `--builder vinext` (the only target " +
+        "`--self-contained` applies to), never for the default standalone target. See " +
+        "`create-scaffold-builder.test.ts`'s pair of tests proving each side.",
 };
 
 // `Dockerfile.standalone.hbs` and `knext-standalone-entry.mjs.hbs` (the
@@ -266,7 +264,9 @@ describe("knext create — the CLI ships its own template tree", () => {
     it("the published package includes the templates (else `knext create` 404s post-install)", () => {
         const manifest = JSON.parse(
             readFileSync(join(PKG_ROOT, "package.json"), "utf8"),
-        ) as { files?: string[] };
+        ) as {
+            files?: string[];
+        };
         expect(manifest.files ?? []).toContain("templates");
     });
 });

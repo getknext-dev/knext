@@ -82,7 +82,10 @@ By default, `create` scaffolds the **standalone target**: plain `next build` (Tu
 `adapterPath` — `knext build`/`deploy` stage the matching runtime image automatically, so the
 scaffold ships no Dockerfile for it. Pass `--builder vinext` instead to scaffold
 the compiled single-executable target — its own `Dockerfile`, `vite.config.ts`, and
-`build: 'vinext'` pinned in `kn-next.config.ts`. See
+`build: 'vinext'` pinned in `kn-next.config.ts`, plus a `Dockerfile.self-contained` reference
+recipe for the optional `--self-contained` single-executable build (see
+[Self-contained mode](/docs/build-pipeline#self-contained-mode-experimental)) — the standalone
+target never scaffolds that file, since `--self-contained` only applies to the vinext build. See
 [the adapter and the compiled build](/docs/official-adapter) for the trade-off between the two.
 
 ```bash title="shell"
