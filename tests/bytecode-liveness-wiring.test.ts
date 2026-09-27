@@ -215,6 +215,23 @@ describe('the shipped bake driver: UNCONDITIONALLY strict 2xx — no knob anywhe
   });
 });
 
+describe('the shipped bake driver: startup deadline floor (#1572)', () => {
+  // #1572: the node-lane compat shards carrying the upstream
+  // redirect-rewrite-dynamic(.test.ts)/redirect-rewrite-dynamic-basepath
+  // fixtures measurably exceeded the original 30_000ms `waitForServer`
+  // deadline on a loaded runner (reproduced independent of NEXTJS_REF, and
+  // intermittent — the same shards also passed cleanly on other nights), so a
+  // deadline this tight is a false-negative risk for a real, if less common,
+  // app shape, not a broken cache. Pin the raised floor so it cannot silently
+  // drift back down; exact anchor text (`once`) so a stray second occurrence
+  // (e.g. a copy-pasted second call) is caught rather than averaged away.
+  it('waits at least 60s for the standalone server to answer before failing the bake', () => {
+    const template = readFileSync(SHIPPED_BAKE, 'utf8');
+    expect(once(template, 'waitForServer(60_000)')).toBe(1);
+    expect(template).not.toContain('waitForServer(30_000)');
+  });
+});
+
 describe('e2e-bake-accept.mjs (#1299): the tolerance moved HERE, one process out, against the REAL driver', () => {
   it('with the wrapper + KNEXT_WARM_ACCEPT_ANY_STATUS=1, a 404 or 500 render is tolerated', () => {
     expect(bakeThroughWrapper('/not-there', '1').status).toBe(0);

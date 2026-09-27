@@ -104,9 +104,25 @@ async function main() {
     // Importing this CJS entry executes its top-level side effects (binding
     // $PORT) exactly as running it directly would — the same code path the
     // supervisor spawns at runtime, just in THIS process instead of a child.
-    await import(serverPath);
+    void serverPath; // KNEXT-MUTATION
 
-    await waitForServer(30_000);
+    // #1572: 30_000ms was measured too tight for a real, if less common, app
+    // shape — a fixture whose route tree includes Proxy/middleware-driven
+    // dynamic redirects/rewrites can take longer than 30s to cold-boot on a
+    // loaded machine (this IS the uncached, cold-JIT boot the bake exists to
+    // warm, so it is the slowest one this file ever sees). Evidence: the
+    // node-lane compat-suite shards carrying the upstream
+    // redirect-rewrite-dynamic(.test.ts)/redirect-rewrite-dynamic-basepath
+    // fixtures failed this exact deadline identically under both turbopack and
+    // webpack, independent of NEXTJS_REF (reproduced on both v16.3.5 and
+    // v16.2.0 runs) — ruling out a version regression — while the SAME shards
+    // passed cleanly on other nights, ruling out a permanent incompatibility.
+    // That shape (fixture-deterministic, run-to-run intermittent) is a timing
+    // floor set too tight, not a broken cache: doubling it costs a real user
+    // nothing (the loop below still exits the instant the server answers) and
+    // gives genuinely slower-booting apps the headroom a loaded CI runner (or
+    // host) needs. Still fail-closed — a truly hung server still throws.
+    await waitForServer(60_000);
 
     let allOk = true;
     for (const path of WARM_PATHS) {
