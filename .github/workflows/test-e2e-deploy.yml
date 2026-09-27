@@ -168,6 +168,20 @@ on:
         required: false
         type: string
         default: ''
+      # #1455 (F6, ADR-0060 decision 5) — the empty-dir lane mode: boots the
+      # compiled Bun exec from a FRESH directory holding only the binary +
+      # static assets + native/, and fails if node_modules/.next(-server)/
+      # .output is present beside it. DISPATCH-ONLY and DEFAULT OFF, same
+      # contract as sandboxFetchDebug above: github.event.inputs is empty on
+      # every `schedule` event, so no credential or early-warning night ever
+      # sees this on by accident. Meaningful only with runtime=bun — see
+      # scripts/e2e-deploy.sh §3c-ii for the RUNTIME=node no-op. EXPECTED TO
+      # FAIL until N1 (#1456) ships; not wired into any credential lane yet.
+      selfContained:
+        description: '#1455 — dispatch-only: boot the compiled exec from an empty dir (KNEXT_SELF_CONTAINED=1), folded into the compat-window fingerprint. Meaningful only with runtime=bun. EXPECTED TO FAIL until N1 (#1456) lands. Never runs on schedule.'
+        required: false
+        type: boolean
+        default: false
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
@@ -295,6 +309,10 @@ env:
   # AND the weekly bun lane. '1' is the exact value scripts/e2e-deploy.sh
   # gates on. Guard-tested in tests/compat-suite-workflow.test.ts.
   KNEXT_SANDBOX_FETCH_DEBUG: ${{ github.event.inputs.sandboxFetchDebug == 'true' && '1' || '' }}
+  # #1455 (F6) — dispatch input ONLY, same contract as KNEXT_SANDBOX_FETCH_DEBUG
+  # above: '' (off) on every schedule event, '1' only on an explicit dispatch
+  # with selfContained=true. '1' is the exact value scripts/e2e-deploy.sh gates on.
+  KNEXT_SELF_CONTAINED: ${{ github.event.inputs.selfContained == 'true' && '1' || '' }}
   # #1301 — the ONE manifest-filename decision, made once at the workflow
   # level so both the test-selection step and the "Compute excluded count"
   # step (which must agree with it, or the reported excluded count would lie)
@@ -625,6 +643,13 @@ jobs:
             RUNTIME_ARGS+=(--runtime-version "${BUN_VERSION}")
             RUNTIME_ARGS+=(--runtime-revision "${BUN_REVISION}")
           fi
+          # #1455 (F6): fold the empty-dir mode in, so a self-contained window
+          # can never share a fingerprint with a disk-mode one. '' (unset) on
+          # every schedule and every dispatch that didn't ask for it.
+          SELF_CONTAINED_ARGS=()
+          if [ "${KNEXT_SELF_CONTAINED:-}" = "1" ]; then
+            SELF_CONTAINED_ARGS+=(--self-contained)
+          fi
           node knext/scripts/compat-window-fingerprint.mjs \
             --repo-root knext \
             --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs" \
@@ -635,6 +660,7 @@ jobs:
             --workflow-file "${GITHUB_WORKSPACE}/knext-executing/.github/workflows/test-e2e-deploy.yml" \
             --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
             ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
+            ${SELF_CONTAINED_ARGS[@]+"${SELF_CONTAINED_ARGS[@]}"} \
             | tee "${RUNNER_TEMP}/fingerprint.txt"
           {
             echo '### Compat-window fingerprint'
@@ -1671,6 +1697,10 @@ jobs:
           # next-deploy.ts spawn children with {...process.env}, so this
           # reaches scripts/e2e-deploy.sh AND scripts/e2e-cleanup.sh.
           KNEXT_SANDBOX_FETCH_DEBUG: ${{ env.KNEXT_SANDBOX_FETCH_DEBUG }}
+          # #1455 (F6) — the empty-dir lane mode (dispatch-only; '' on every
+          # schedule). Reaches scripts/e2e-deploy.sh the same way
+          # KNEXT_SANDBOX_FETCH_DEBUG does, above.
+          KNEXT_SELF_CONTAINED: ${{ env.KNEXT_SELF_CONTAINED }}
           # #147 A3-3 — FULL-SHARD EXECUTION. run-tests.js@v16.0.3 ABORTED the
           # whole shard on the first post-retry failure (cleanUpAndExit(1))
           # unless this env was 'true' — run 28552585087 therefore reported
