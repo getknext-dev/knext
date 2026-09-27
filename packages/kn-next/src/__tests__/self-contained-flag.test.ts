@@ -77,7 +77,7 @@ describe("knext build --self-contained is a documented flag", () => {
         expect(ACCEPTED_BUILD_FLAGS.has("--self-contained")).toBe(true);
     });
     it("is described in --help", () => {
-        expect(BUILD_HELP).toContain("--self-contained");
+        expect(BUILD_HELP).toMatch(/^ {2}--self-contained {2,}\S/m);
     });
 });
 
@@ -131,6 +131,6 @@ describe("the docs site documents the flag and the key", () => {
         expect(docs("cli.mdx")).toContain("--self-contained");
     });
     it("build-pipeline documents selfContained", () => {
-        expect(docs("build-pipeline.mdx")).toContain("selfContained");
+        expect(docs("build-pipeline.mdx")).toContain("selfContained: true,");
     });
 });
