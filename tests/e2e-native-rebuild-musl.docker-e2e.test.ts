@@ -24,6 +24,8 @@ import { join, resolve } from 'node:path';
  */
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const NATIVE_REBUILD_SH = resolve(REPO_ROOT, 'scripts/e2e-native-rebuild-musl.sh');
+const LOCKFILE_LOOKUP_SH = resolve(REPO_ROOT, 'scripts/lib/musl-lockfile-lookup.sh');
+const LOCKFILES_DIR = resolve(REPO_ROOT, 'scripts/musl-native-lockfiles');
 const STANDALONE_BUN_IMAGE =
   'oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f';
 
@@ -60,10 +62,20 @@ function runRebuild(
       `${mountDir}:/mnt`,
       '-v',
       `${NATIVE_REBUILD_SH}:/rebuild.sh:ro`,
+      // #1257 — the lookup helpers rebuild.sh sources (`. "$(dirname "$0")/lib/..."`,
+      // so `/rebuild.sh`'s dirname `/` is where it looks).
+      '-v',
+      `${LOCKFILE_LOOKUP_SH}:/lib/musl-lockfile-lookup.sh:ro`,
+      // #1257 — mounted so the script can `npm ci` against a committed,
+      // reproducible lockfile for a known name@version (real for THIS
+      // suite's sharp fixture) instead of a fresh, unpinned `npm install`.
+      '-v',
+      `${LOCKFILES_DIR}:/musl-native-lockfiles:ro`,
       STANDALONE_BUN_IMAGE,
       'sh',
       '/rebuild.sh',
       '/mnt',
+      '/musl-native-lockfiles',
     ],
     { encoding: 'utf8', timeout: timeoutMs },
   );
@@ -177,6 +189,16 @@ describe.skipIf(!dockerAvailable())(
       expect(status, `expected exit 0; stdout:\n${stdout}`).toBe(0);
       expect(stdout).toContain('added @img/sharp-linuxmusl-x64');
       expect(stdout).toContain('added @img/sharp-libvips-linuxmusl-x64');
+      // #1257 — this exact name@version (0.34.5 / 1.2.4) has a COMMITTED
+      // lockfile under scripts/musl-native-lockfiles/, so both installs must
+      // take the reproducible `npm ci` path, never the fresh/unpinned one.
+      expect(stdout).toContain(
+        '@img/sharp-linuxmusl-x64@0.34.5: using the committed, reproducible lockfile',
+      );
+      expect(stdout).toContain(
+        '@img/sharp-libvips-linuxmusl-x64@1.2.4: using the committed, reproducible lockfile',
+      );
+      expect(stdout).not.toContain('fresh (non-reproducible');
 
       // The behavioural claim: the produced musl .node file actually LOADS
       // under the pinned musl bun runtime (not just "a file exists at the
@@ -202,6 +224,68 @@ describe.skipIf(!dockerAvailable())(
         `sharp's musl native addon must load cleanly:\n${loadCheck.stdout}\n${loadCheck.stderr}`,
       ).toContain('LOADED OK:object');
     }, 360_000);
+
+    // #1257 round 7 — install scripts (and node-gyp/npm itself) must never
+    // run as root inside the container. Extracts the REAL `apk add` /
+    // `adduser` / `chown` lines this script uses to set up its unprivileged
+    // `builder` user (not a hand-retyped approximation of them — same
+    // philosophy as the `--user` extraction below), runs them for real
+    // inside the pinned image, then proves `su-exec builder ...` actually
+    // drops to a non-root uid: both what the exec'd process itself reports
+    // (`id -u`) and the numeric owner of a file it creates.
+    it("the builder user this script su-exec's into is genuinely non-root, using the script's OWN setup lines", () => {
+      const scriptSrc = require('node:fs').readFileSync(NATIVE_REBUILD_SH, 'utf8') as string;
+      const apkLine = scriptSrc
+        .split('\n')
+        .find((l) => l.includes('apk add --no-cache python3 make g++ npm su-exec'));
+      const adduserLine = scriptSrc.split('\n').find((l) => l.trim().startsWith('adduser -D -H'));
+      const chownLine = scriptSrc
+        .split('\n')
+        .find((l) => l.includes('chown -R builder:builder "${BUILD_HOME}"'));
+      expect(
+        apkLine,
+        'the apk add line must still exist verbatim — this test proves it, not a copy',
+      ).toBeTruthy();
+      expect(
+        adduserLine,
+        'the adduser line must still exist verbatim — this test proves it, not a copy',
+      ).toBeTruthy();
+      expect(
+        chownLine,
+        'the chown line must still exist verbatim — this test proves it, not a copy',
+      ).toBeTruthy();
+
+      const setupScript = [
+        'set -eu',
+        apkLine,
+        'BUILD_HOME="$(mktemp -d)"',
+        adduserLine,
+        chownLine,
+        'su-exec builder:builder id -u',
+        "su-exec builder:builder sh -c 'touch /tmp/marker-file'",
+        'ls -ln /tmp/marker-file',
+      ].join('\n');
+
+      const r = spawnSync(
+        'docker',
+        ['run', '--rm', '--platform', 'linux/amd64', STANDALONE_BUN_IMAGE, 'sh', '-c', setupScript],
+        { encoding: 'utf8', timeout: 90_000 },
+      );
+      expect(r.status, `expected exit 0; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`).toBe(0);
+      const reportedUid = r.stdout.trim().split('\n')[0];
+      expect(reportedUid, `su-exec'd process must NOT report uid 0:\n${r.stdout}`).not.toBe('0');
+      expect(
+        Number(reportedUid),
+        'the reported uid must be a real positive integer',
+      ).toBeGreaterThan(0);
+      // `ls -ln` prints the numeric uid/gid as the 3rd/4th field — the file
+      // the su-exec'd process CREATED must be owned by that same non-root
+      // uid, not root (proves the drop applied to the actual filesystem
+      // operation, not just what `id` self-reports).
+      const lsLine = r.stdout.trim().split('\n').at(-1) ?? '';
+      const fileOwnerUid = lsLine.split(/\s+/)[2];
+      expect(fileOwnerUid, `file owner uid from: ${lsLine}`).toBe(reportedUid);
+    });
 
     it('--user "$(id -u):$(id -g)" on the boot docker run makes the containerized process run as the INVOKING user, not root (the pid-attribution fix)', () => {
       // Extracted from scripts/e2e-deploy.sh's own boot invocation rather

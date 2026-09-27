@@ -599,6 +599,23 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
     writeFileSync(join(root, 'scripts/compat-credential-ref.mjs'), 'export const noop = 1;\n');
     writeFileSync(join(root, 'scripts/compat-run-ledger.mjs'), 'export const noop = 1;\n');
     writeFileSync(join(root, '.github/compat-credential-ref.json'), '{"rcTag":null}\n');
+    // #1257: the 'node' lane's extraFiles ALSO declares the musl-lockfile
+    // lookup helper and each committed musl-native lockfile FILE
+    // individually (scripts/compat-window-audit.mjs's MUSL_NATIVE_LOCKFILE_FILES) —
+    // every declared extraFiles entry must exist under repoRoot or
+    // compat-window-fingerprint.mjs's collectHarness throws before this
+    // fixture's two tests ever reach their real assertions.
+    mkdirSync(join(root, 'scripts/lib'), { recursive: true });
+    writeFileSync(join(root, 'scripts/lib/musl-lockfile-lookup.sh'), '#!/bin/sh\n');
+    for (const rel of [
+      'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package.json',
+      'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json',
+      'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json',
+      'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json',
+    ]) {
+      mkdirSync(join(root, dirname(rel)), { recursive: true });
+      writeFileSync(join(root, rel), '{}\n');
+    }
     const tarballs = join(root, 'tarballs');
     mkdirSync(tarballs);
     const pkg = join(root, 'pkgsrc/package');

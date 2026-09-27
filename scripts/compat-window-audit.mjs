@@ -173,6 +173,19 @@ export const CREDENTIAL_LANE = 'node';
  * its own small, reasoned exceptions list) — so a future one of these left
  * undeclared goes red instead of silently unfrozen.
  */
+// #1257 — the committed musl-native-addon lockfiles e2e-deploy.sh mounts
+// (each file individually, not the directory — extraFiles freezes FILE
+// content, and this repo's convention is that adding a new pinned lockfile
+// is itself a reviewed, credential-window-affecting change). Shared across
+// every cell below since e2e-deploy.sh (and the lookup mechanism it wires
+// in) is common harness code, not lane-specific.
+const MUSL_NATIVE_LOCKFILE_FILES = Object.freeze([
+  'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package.json',
+  'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json',
+  'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json',
+  'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json',
+]);
+
 export const CREDENTIAL_CELLS = Object.freeze([
   Object.freeze({
     runtime: 'node',
@@ -183,10 +196,15 @@ export const CREDENTIAL_CELLS = Object.freeze([
     // test-e2e-deploy.yml's credential-ref job runs compat-credential-ref.mjs
     // (reads the RC pin) on EVERY night of this lane; compat-run-ledger.mjs
     // runs at the end of every night, credential or early-warning.
+    // scripts/lib/musl-lockfile-lookup.sh (#1257): e2e-deploy.sh bind-mounts
+    // it into the musl-rebuild container — a shell `.` source, not something
+    // the JS import-closure scanner can discover on its own.
     extraFiles: Object.freeze([
       'scripts/compat-credential-ref.mjs',
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
+      'scripts/lib/musl-lockfile-lookup.sh',
+      ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
   Object.freeze({
@@ -199,6 +217,8 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-credential-ref.mjs',
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
+      'scripts/lib/musl-lockfile-lookup.sh',
+      ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
   // #1245: the webpack cells run on the SAME shared credential workflow as the
@@ -214,6 +234,8 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-credential-ref.mjs',
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
+      'scripts/lib/musl-lockfile-lookup.sh',
+      ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
   Object.freeze({
@@ -226,6 +248,8 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-credential-ref.mjs',
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
+      'scripts/lib/musl-lockfile-lookup.sh',
+      ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
   Object.freeze({
@@ -257,6 +281,8 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-run-ledger.mjs',
       'scripts/compat-vinext-ledger.mjs',
       'test/compat-vinext-ledger.json',
+      'scripts/lib/musl-lockfile-lookup.sh',
+      ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
 ]);
