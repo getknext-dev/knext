@@ -14,7 +14,14 @@ export function entries() {
 }
 
 export function render() {
-  const lines = entries().map((e) => `- **${e.what}** (\`${e.scope}\`) — ${e.why}`);
+  // `match` and `calls` are rendered too: a widened regex (or a changed call count) is then a
+  // visible README drift, not a silent edit to a JSON field nobody reads.
+  const lines = entries().map((e) => {
+    const m = e.match
+      ? ` Matches \`${e.match}\` (${e.calls} call${e.calls === 1 ? '' : 's'}).`
+      : '';
+    return `- **${e.what}** (\`${e.scope}\`) — ${e.why}${m}`;
+  });
   return `${BEGIN}\n${lines.join('\n')}\n${END}`;
 }
 
