@@ -181,7 +181,8 @@ jobs:
         run: |
           set -euo pipefail
           cp kn-next.config.e2e.ts kn-next.config.ts
-          node ../../../../../packages/kn-next/dist/cli/kn-next.js deploy \
+          # Four levels up from this fixture dir is packages/kn-next itself.
+          node ../../../../dist/cli/kn-next.js deploy \
             --registry localhost:5001 --namespace "$APP_NS" --tag "${GITHUB_RUN_ID}"
 
       - name: Wait for the NextApp to go Ready
