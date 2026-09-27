@@ -789,10 +789,121 @@ function corpusWriteSites(name, st) {
   const key = `${name}\0${st.corpus.length}`;
   let sites = st.writeSiteCache.get(key);
   if (!sites) {
-    sites = st.corpus.flatMap((t) => writeSites(t, name));
+    sites = st.corpus.flatMap((t) => [...writeSites(t, name), ...assembledWrites(t, name)]);
     st.writeSiteCache.set(key, sites);
   }
   return sites;
+}
+
+/**
+ * A builtin receives its arguments AFTER quote removal, so `printf -v V"AR"`,
+ * `read 'V'AR`, `read V\AR`, `read V$'AR'` all bind VAR while no occurrence of
+ * the text `VAR` exists. Every argument of a shell builtin / keyword / run-time
+ * command whose spelling contains quoting is compared in its DEQUOTED form.
+ */
+const assembledCache = new Map();
+function assembledWords(text) {
+  let out = assembledCache.get(text);
+  if (out) return out;
+  out = [];
+  for (const cl of splitClauses(text)) {
+    for (const seg of splitPipeline(cl.text)) {
+      let ws = words(seg);
+      while (ws.length && /^(if|then|else|elif|do|while|until|!|\{|\(|time)$/.test(ws[0]))
+        ws = ws.slice(1);
+      while (ws.length && /^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/.test(ws[0])) ws = ws.slice(1);
+      if (ws.length === 0) continue;
+      if (!SHELL_COMMANDS.has(unquote(ws[0])) && !RUNTIME.test(ws[0])) continue;
+      for (const w of ws.slice(1)) {
+        if (!/["'\\]/.test(w)) continue;
+        const dq = w
+          .replace(/\$'((?:[^'\\]|\\.)*)'/g, '$1')
+          .replace(/\\(.)/g, '$1')
+          .replace(/["']/g, '');
+        if (dq !== w) out.push({ raw: w, dq, snippet: seg.trim().slice(0, 100) });
+      }
+    }
+  }
+  if (assembledCache.size > 500) assembledCache.clear();
+  assembledCache.set(text, out);
+  return out;
+}
+function assembledWrites(text, name) {
+  const re = new RegExp(`(?<![\\w$])(?:-[A-Za-z]+)?${name}(?!\\w)`);
+  return assembledWords(text)
+    .filter((a) => re.test(a.dq) && !re.test(a.raw))
+    .map((a) => ({ kind: 'other', snippet: a.snippet }));
+}
+
+// `set -- …` / `set x …` rewrites the positional parameters.
+const SETS_POSITIONALS = /(?:^|[\n;&|(])[ \t]*set[ \t]+(?:-[A-Za-z]*[ \t]+)*(?:--|[^-+\s])/;
+
+/** Whether `text` runs a positional-rewriting `set` as CODE (not inside a string). */
+function setsPositionals(text) {
+  const re = new RegExp(SETS_POSITIONALS.source, 'g');
+  let frames = null;
+  for (const m of text.matchAll(re)) {
+    frames ??= frameMap(text);
+    const at = m.index + m[0].indexOf('set');
+    if (frames[at] === 'code' || frames[at] === 'bq') return true;
+  }
+  return false;
+}
+
+/** A positional-parameter expansion outside single quotes (`'{print $1}'` is awk's). */
+function hasPositional(text) {
+  const frames = frameMap(text);
+  for (const m of text.matchAll(/\$\{?[1-9@*]/g))
+    if (frames[m.index] !== 'sq' && frames[m.index] !== 'sqa') return true;
+  return false;
+}
+
+/**
+ * Where the positional parameters in `word` (a `NAME=…$1…` write site) come
+ * from: every static call site of each helper whose body holds the write (the
+ * whole call line is traced, so every argument is), or — outside any helper —
+ * the script's own arguments, which are the caller's like the environment,
+ * unless `set` rewrites them. A helper with no static call site, or one that is
+ * also referenced as a VALUE (`cmd=F`, `for s in F`), is called with arguments
+ * nothing static reveals: opaque.
+ */
+function positionalSources(word, r, st, depth, ctx) {
+  // `set -- …` rewrites the positionals of whatever scope runs it, top level or helper.
+  if (st.corpus.some(setsPositionals))
+    ctx.out.add(`opaque:$${r} is assigned from positional parameters that \`set\` rewrites`);
+  const owners = [...st.functions].filter(([, body]) => body.includes(word)).map(([n]) => n);
+  if (owners.length === 0) return; // the script's own arguments: the caller's, like its environment
+  for (const fn of owners) {
+    const key = `\0callers\0${fn}`;
+    if (ctx.fns.has(key)) continue;
+    ctx.fns.add(key);
+    const re = new RegExp(
+      `(?<![\\w$./-])${fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`,
+      'g',
+    );
+    let calls = 0;
+    for (const t of st.corpus) {
+      for (const m of t.matchAll(re)) {
+        const from = t.lastIndexOf('\n', m.index) + 1;
+        const to = t.indexOf('\n', m.index);
+        const line = t.slice(from, to === -1 ? t.length : to);
+        const rest = t.slice(m.index + fn.length);
+        if (/^\s*\(\s*\)/.test(rest) || /function\s+$/.test(t.slice(from, m.index))) continue;
+        if (/=["']?$/.test(t.slice(from, m.index)) || /^\s*(for|select)\s/.test(line)) {
+          ctx.out.add(
+            `opaque:$${r} is assigned from the arguments of ${fn}(), which is referenced as a value in \`${line.trim().slice(0, 80)}\``,
+          );
+          continue;
+        }
+        calls++;
+        taintSources(line, st, depth + 1, ctx);
+      }
+    }
+    if (calls === 0)
+      ctx.out.add(
+        `opaque:$${r} is assigned from the arguments of ${fn}(), which has no static call site`,
+      );
+  }
 }
 
 /** Every name the corpus READS as a variable (`$N`, `${N…}`), cached per corpus size. */
@@ -843,8 +954,13 @@ function bindUnmodeledWrites(text, loopTail, st, depth) {
     });
   };
   for (const name of refs) {
-    if (!clauseText.includes(name) && !loopTail.includes(name)) continue;
-    if (writeSites(clauseText, name).some((s) => s.kind === 'other')) bind(name);
+    if (!clauseText.includes(name) && !loopTail.includes(name) && !/["'\\]/.test(clauseText))
+      continue;
+    if (
+      writeSites(clauseText, name).some((s) => s.kind === 'other') ||
+      assembledWrites(clauseText, name).length > 0
+    )
+      bind(name);
   }
   for (const name of IMPLICIT_VARS) {
     if (!refs.has(name)) continue;
@@ -1360,7 +1476,8 @@ function recordAssignments(ws, st, depth) {
       .filter(Boolean);
     const content =
       innerSubstitutions(value).some((inner) => textIsNetwork(inner, st, depth + 1)) ||
-      refs.some((r) => r.content);
+      refs.some((r) => r.content) ||
+      (!!st.vars.get('@')?.content && hasPositional(value));
     if (nameref) {
       // `declare -n R=V`: `$R` reads V at RUN time; nothing static says what
       // V will hold then, so R is network content (fail closed).
@@ -1507,7 +1624,6 @@ function taintSources(text, st, depth, ctx) {
     // The walk-time value (last `NAME=` write reached so far) …
     const v = st.vars.get(r);
     if (v?.value !== undefined) taintSources(v.value, st, depth + 1, ctx);
-    if (v?.producer !== undefined) taintSources(v.producer, st, depth + 1, ctx);
     // … AND every write site anywhere in the corpus, in any order, in any
     // helper or sourced file: a modeled `NAME=value` is traced, anything else
     // that can bind the name is opaque. Found by scanning every occurrence of
@@ -1524,6 +1640,7 @@ function taintSources(text, st, depth, ctx) {
         continue;
       }
       const m = site.word.match(/^[A-Za-z_]\w*=(.*)$/s);
+      if (m && hasPositional(m[1])) positionalSources(site.word, r, st, depth, ctx);
       if (m) taintSources(m[1], st, depth + 1, ctx);
       else out.add(`opaque:$${r} assignment \`${site.word.slice(0, 80)}\``);
     }
@@ -1715,7 +1832,15 @@ function walk(code, st, ctx) {
       }
       if (/(^|\s)-o\s+errexit/.test(setM[1])) st.errexit = true;
       if (/(^|\s)\+o\s+errexit/.test(setM[1])) st.errexit = false;
-      continue;
+      // `set -- …` / `set x …` rewrites $1…: they carry that producer, and the
+      // clause is judged like any other (a fetch in it is still a fetch).
+      if (!SETS_POSITIONALS.test(text)) continue;
+      const prevPos = st.vars.get('@');
+      st.vars.set('@', {
+        value: undefined,
+        url: !!prevPos?.url,
+        content: !!prevPos?.content || !!producerIsNetwork(text, st, ctx.depth + 1),
+      });
     }
 
     const segs = splitPipeline(text);

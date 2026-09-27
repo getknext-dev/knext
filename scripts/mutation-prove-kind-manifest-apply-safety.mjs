@@ -39,7 +39,10 @@
  *             M77 (trap handler), M78 M79 M80 (general walk: producer, loop
  *             redirect, nameref), M81 (quoted separator splits the command),
  *             M82 (aliases ignored), M83 (heredoc `${V:=}` not scanned),
- *             M84 (unresolved sourced file not opaque)
+ *             M84 (unresolved sourced file not opaque), M85 (names assembled from
+ *             quotes), M86 M87 M88 M89 (positional parameters: not followed, `set`
+ *             rewrite, no static call site, value reference), M90 (general walk:
+ *             `set --` carries no producer)
  *
  * Usage:  node scripts/mutation-prove-kind-manifest-apply-safety.mjs
  */
@@ -62,7 +65,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(84);
+declareMutations(90);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -579,6 +582,43 @@ prove(
   SCANNER,
   '    if (st.unresolvedSource !== null)\n      out.add(',
   '    if (false)\n      out.add(',
+);
+
+prove(
+  'M85 write sites: a name assembled from quoted pieces (`printf -v V"AR"`) is not compared dequoted',
+  SCANNER,
+  '        if (dq !== w) out.push({ raw: w, dq, snippet: seg.trim().slice(0, 100) });',
+  '        void dq;',
+);
+prove(
+  'M86 positional parameters: a write from $1… is not followed to where $1 comes from',
+  SCANNER,
+  '      if (m && hasPositional(m[1])) positionalSources(site.word, r, st, depth, ctx);',
+  '      void hasPositional;',
+);
+prove(
+  'M87 positional parameters: a `set --` rewrite is not opaque',
+  SCANNER,
+  '  if (st.corpus.some(setsPositionals))',
+  '  if (false)',
+);
+prove(
+  'M88 positional parameters: a helper with no static call site is assumed to write nothing',
+  SCANNER,
+  '    if (calls === 0)',
+  '    if (false)',
+);
+prove(
+  'M89 positional parameters: a helper referenced as a value (`h=F; "$h" …`) is traced as if called statically',
+  SCANNER,
+  '        if (/=["\']?$/.test(t.slice(from, m.index)) || /^\\s*(for|select)\\s/.test(line)) {',
+  '        if (false) {',
+);
+prove(
+  'M90 general walk: `set -- "$(fetch)"` leaves $1… untainted',
+  SCANNER,
+  "      (!!st.vars.get('@')?.content && hasPositional(value));",
+  '      false;',
 );
 
 console.log(`\n${caught} caught, ${decorative} undetected.`);

