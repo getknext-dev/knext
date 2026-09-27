@@ -474,6 +474,13 @@ class State {
     this.sourced = new Set();
     /** the first `source`d path that could not be resolved, if any. */
     this.unresolvedSource = null;
+    /**
+     * Every piece of code this source can run in ITS OWN shell: the whole
+     * lexed file (helpers included) and every `source`d file. Shared (by
+     * reference) with the helper sub-walks. Scanned for variable write sites.
+     */
+    this.corpus = [];
+    this.writeSiteCache = new Map();
   }
 }
 
@@ -505,6 +512,333 @@ function varRefs(text) {
   const refs = [];
   for (const m of text.matchAll(/\$\{([A-Za-z_]\w*)|\$([A-Za-z_]\w*)/g)) refs.push(m[1] ?? m[2]);
   return refs;
+}
+
+/**
+ * Variables the shell assigns WITHOUT the name appearing at the write site
+ * (`read` with no name → REPLY, `mapfile` → MAPFILE, `coproc` → COPROC,
+ * `[[ =~ ]]` → BASH_REMATCH, `getopts` → OPTARG, `$_`). A statement that
+ * interpolates one cannot have its producer located by any scan, so it is
+ * opaque; the general walk binds them from every network clause.
+ */
+const IMPLICIT_VARS = new Set([
+  'REPLY',
+  'MAPFILE',
+  'COPROC',
+  'COPROC_PID',
+  'OPTARG',
+  'OPTIND',
+  'BASH_REMATCH',
+  'READLINE_LINE',
+  '_',
+]);
+
+// The start of the simple command an occurrence sits in: after the last
+// unquoted-looking separator. Imprecise on purpose — a prefix it mis-splits
+// fails the shapes below and is therefore classed a write (fail closed).
+const COMMAND_START = /[;\n&|()`]|\{\s/g;
+function commandPrefix(before) {
+  let at = 0;
+  for (const m of before.matchAll(COMMAND_START)) at = m.index + m[0].length;
+  return before.slice(at);
+}
+// `NAME=v` is a write the recognizer MODELS only as recordAssignments reads
+// it: leading assignment words, optionally after export/local/declare/
+// readonly/typeset and their flags. `let V=`, `env V=`, `cmd V=` and a
+// nameref (`-n`) are not modeled.
+const ASSIGN_PREFIX =
+  /^\s*(?:(?:export|local|declare|readonly|typeset)(?:\s+-[A-Za-z]+)*\s+)?(?:[A-Za-z_]\w*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"'])*\s+)*$/;
+// A declaration that binds no value: `local V`, `export V`, `unset V`.
+const DECLARE_ONLY =
+  /^\s*(?:local|export|readonly|declare|typeset|unset)(?:\s+-[A-Za-z]+)*(?:\s+[A-Za-z_]\w*(?:=(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"'])*)?)*\s+$/;
+const NAMEREF_FLAG = /^\s*(?:local|declare|typeset)\s(?:[^=]*\s)?-[A-Za-z]*n/;
+const LEADING_KEYWORDS = /^\s*(?:(?:if|then|else|elif|do|while|until|!|\{|time)\s+)*/;
+
+/**
+ * Only the SHELL can bind one of its variables: a child process (jq, psql,
+ * kubectl, curl, sudo …) cannot write the parent's. So a mention in an
+ * argument can be a write only when the command running it is a bash builtin
+ * or keyword, or is computed at run time (`$cmd V` may be `read V`). This is
+ * bash's COMPLETE builtin + keyword set (`compgen -b`, `compgen -k`), not a
+ * list of writers: a builtin that never binds a name is still classed a
+ * writer here (fail closed). A user function is not: whatever it binds, it
+ * binds in its own body, which is in the corpus and scanned there.
+ */
+const SHELL_COMMANDS = new Set(
+  (
+    '. : [ alias bg bind break builtin caller cd command compgen complete compopt continue ' +
+    'declare dirs disown echo enable eval exec exit export false fc fg getopts hash help ' +
+    'history jobs kill let local logout mapfile popd printf pushd pwd read readarray ' +
+    'readonly return set shift shopt source suspend test times trap true type typeset ' +
+    'ulimit umask unalias unset wait ' +
+    'case coproc for select function [['
+  ).split(' '),
+);
+function shellCanBind(stmt, after) {
+  const ws = words(stmt.replace(LEADING_KEYWORDS, ''));
+  while (ws.length && /^[A-Za-z_]\w*(\[[^\]]*\])?\+?=/.test(ws[0])) ws.shift();
+  // The occurrence IS the command position: `V[i]=…` / `V+=…` bind it.
+  if (ws.length === 0) return /^(\[|\+?=)/.test(after);
+  const cmd = unquote(ws[0]);
+  return SHELL_COMMANDS.has(cmd) || RUNTIME.test(ws[0]);
+}
+
+/**
+ * Every site in `text` that can WRITE shell variable `name`, found by
+ * SCANNING every occurrence of the name, never by listing the builtins that
+ * write. An occurrence is a READ only as `$name` / `${name…}` (without
+ * `:=` / `=`), and a MODELED write only as a leading `name=value` word (see
+ * ASSIGN_PREFIX) — returned as { kind: 'assign', word }. A bare declaration
+ * (`local name`) writes nothing foreign. Every OTHER occurrence — `read
+ * name`, `for name in`, `printf -v name`, `mapfile name`, `getopts o name`,
+ * `coproc name`, `${name:=…}`, `name[i]=`, `name+=`, `declare -n r=name`,
+ * `wait -p name`, `{name}>f`, or a mention the scan cannot place — is
+ * { kind: 'other', snippet }: the caller treats it as unfollowable.
+ */
+export function writeSites(text, name) {
+  const out = [];
+  const re = new RegExp(`(?<![\\w$])(?:-[A-Za-z]+)?${name}(?!\\w)`, 'g');
+  let frames = null;
+  for (const m of text.matchAll(re)) {
+    frames ??= frameMap(text);
+    const at = m.index + m[0].length - name.length;
+    const before = text.slice(0, at);
+    const after = text.slice(at + name.length);
+    const snippet = text
+      .slice(Math.max(0, at - 40), at + name.length + 40)
+      .replace(/\s+/g, ' ')
+      .trim();
+    const flagged = m[0] !== name; // `-vNAME`: an attached option value
+    // `-U` / `-n`: an option LETTER. A name can follow a dash only attached to
+    // at least one option letter (`-vNAME`), which is `flagged`.
+    if (!flagged && before.endsWith('-')) continue;
+    if (!flagged && /\$\{[#!]?$/.test(before)) {
+      if (/^(\[[^\]]*\])?:?=/.test(after)) out.push({ kind: 'other', snippet });
+      continue;
+    }
+    // Inside a quoted string (or a `${…}` operand) the name is TEXT — unless it
+    // is the very first thing the quotes hold, the one spelling in which a
+    // quoted word can still name a variable (`read "V"`, `declare "V=…"`).
+    const fr = frames[at];
+    if (fr === 'dq' || fr === 'sq' || fr === 'sqa' || fr === 'brace') {
+      const q = text[at - 1];
+      const opensHere =
+        frames[at - 1] !== fr && ((fr === 'dq' && q === '"') || (fr !== 'dq' && q === "'"));
+      if (!opensHere) continue;
+    }
+    // Arithmetic (`$(( … ))`, `(( … ))`): a bare name is a READ unless an
+    // assignment operator or ++/-- binds it.
+    if (!flagged && ARITH_OPEN.test(before)) {
+      if (
+        /^\s*(\[[^\]]*\])?\s*([-+*/%&|^]|<<|>>)?=(?!=)/.test(after) ||
+        /^\s*(\+\+|--)/.test(after) ||
+        /(\+\+|--)\s*$/.test(before)
+      )
+        out.push({ kind: 'other', snippet });
+      continue;
+    }
+    // `{V}>file`: the shell binds V to a file descriptor, whatever the command.
+    if (!flagged && /\{$/.test(before) && /^\}\s*[<>]/.test(after)) {
+      out.push({ kind: 'other', snippet });
+      continue;
+    }
+    const stmt = commandPrefix(before).replace(LEADING_KEYWORDS, '');
+    if (!shellCanBind(stmt, after)) continue;
+    if (!flagged && after.startsWith('=') && ASSIGN_PREFIX.test(stmt) && !NAMEREF_FLAG.test(stmt)) {
+      out.push({ kind: 'assign', word: words(text.slice(at, at + 4000))[0] ?? '' });
+      continue;
+    }
+    if (!flagged && /^(\s|;|$)/.test(after) && DECLARE_ONLY.test(stmt) && !NAMEREF_FLAG.test(stmt))
+      continue;
+    out.push({ kind: 'other', snippet });
+  }
+  return out;
+}
+
+// An unclosed `((` before the occurrence (one level of inner parens allowed).
+const ARITH_OPEN = /\(\((?:[^()]|\([^()]*\))*$/;
+
+/** The quoting frame (code / dq / sq / sqa / brace / bq) of every index of `text`. */
+function frameMap(text) {
+  const f = new Array(text.length);
+  scanFrames(text, (i, _d, t) => {
+    f[i] = t;
+    return undefined;
+  });
+  for (let i = 1; i < f.length; i++) if (f[i] === undefined) f[i] = f[i - 1];
+  return f;
+}
+
+/**
+ * The builtins that bind a variable whose NAME is an argument, and which of
+ * their option letters take a value (for read/mapfile the `-a` value, for
+ * printf `-v`, for wait `-p`, for compgen `-V` IS the name). A name
+ * computed at run time (`read "$n"`, `printf -v "$n"`, `declare "$n=…"`,
+ * `(( $n = 1 ))`) can write ANY variable, so no occurrence scan can see it;
+ * this is the one list in the rule, and it lists writers that RED.
+ */
+const NAME_BINDERS = {
+  read: { valued: 'adeinNptu', nameOpts: 'a', positional: 'all' },
+  mapfile: { valued: 'dnOsuCc', nameOpts: '', positional: 'first' },
+  readarray: { valued: 'dnOsuCc', nameOpts: '', positional: 'first' },
+  getopts: { valued: '', nameOpts: '', positional: 'second' },
+  printf: { valued: 'v', nameOpts: 'v', positional: 'none' },
+  wait: { valued: 'p', nameOpts: 'p', positional: 'none' },
+  compgen: { valued: 'AaCFGPSWXV', nameOpts: 'V', positional: 'none' },
+};
+const DECLARERS = new Set(['declare', 'typeset', 'local', 'export', 'readonly', 'let']);
+const RUNTIME = /[$`]/;
+
+/** Sites in `text` that write a variable whose NAME is computed at run time. */
+export function dynamicNameWrites(text) {
+  const out = [];
+  if (
+    /\(\((?:[^()]|\([^()]*\))*\$\{?[A-Za-z_]\w*\}?(?:\[[^\]]*\])?\s*([-+*/%&|^]|<<|>>)?=(?!=)/.test(
+      text,
+    )
+  )
+    out.push('an arithmetic assignment to a $-expanded name');
+  for (const cl of splitClauses(text)) {
+    for (const seg of splitPipeline(cl.text)) {
+      let ws = words(seg).map(unquote);
+      while (
+        ws.length &&
+        /^(if|then|else|elif|do|while|until|!|\{|\(|builtin|command|time)$/.test(ws[0])
+      )
+        ws = ws.slice(1);
+      while (ws.length && /^[A-Za-z_]\w*=/.test(ws[0])) ws = ws.slice(1);
+      const cmd = ws[0];
+      if (cmd === undefined) continue;
+      const args = withoutRedirects(ws.slice(1));
+      const hit = (w) => out.push(`\`${seg.trim().slice(0, 100)}\` (name \`${w}\`)`);
+      if (DECLARERS.has(cmd)) {
+        for (const a of args) if (!a.startsWith('-') && RUNTIME.test(a.split('=')[0])) hit(a);
+        continue;
+      }
+      const spec = NAME_BINDERS[cmd];
+      if (!spec) continue;
+      const positional = [];
+      for (let k = 0; k < args.length; k++) {
+        const a = args[k];
+        if (a === '--') {
+          positional.push(...args.slice(k + 1));
+          break;
+        }
+        const o = a.match(/^-([A-Za-z]+)(.*)$/);
+        if (!o) {
+          positional.push(a);
+          continue;
+        }
+        const letters = o[1];
+        const vi = letters.split('').findIndex((c) => spec.valued.includes(c));
+        if (vi === -1) continue;
+        const attached = letters.slice(vi + 1) + o[2];
+        const val = attached !== '' ? attached : (args[++k] ?? '');
+        if (spec.nameOpts.includes(letters[vi]) && RUNTIME.test(val)) hit(val);
+      }
+      const names =
+        spec.positional === 'all'
+          ? positional
+          : spec.positional === 'first'
+            ? positional.slice(0, 1)
+            : spec.positional === 'second'
+              ? positional.slice(1, 2)
+              : [];
+      for (const n of names) if (RUNTIME.test(n)) hit(n);
+    }
+  }
+  return out;
+}
+
+/** dynamicNameWrites over this source's whole corpus (cached per corpus size). */
+function corpusDynamicWrites(st) {
+  const key = `\0dyn\0${st.corpus.length}`;
+  let d = st.writeSiteCache.get(key);
+  if (!d) {
+    d = st.corpus.flatMap((t) => dynamicNameWrites(t));
+    st.writeSiteCache.set(key, d);
+  }
+  return d;
+}
+
+/** writeSites over this source's whole corpus (cached per corpus size). */
+function corpusWriteSites(name, st) {
+  const key = `${name}\0${st.corpus.length}`;
+  let sites = st.writeSiteCache.get(key);
+  if (!sites) {
+    sites = st.corpus.flatMap((t) => writeSites(t, name));
+    st.writeSiteCache.set(key, sites);
+  }
+  return sites;
+}
+
+/** Every name the corpus READS as a variable (`$N`, `${N…}`), cached per corpus size. */
+function referencedVars(st) {
+  const key = `\0refs\0${st.corpus.length}`;
+  let refs = st.writeSiteCache.get(key);
+  if (!refs) {
+    refs = new Set(st.corpus.flatMap((t) => varRefs(t)));
+    st.writeSiteCache.set(key, refs);
+  }
+  return refs;
+}
+
+/**
+ * The general walk's half of the same rule: a clause that writes a variable
+ * by any construct other than a leading `NAME=` binds it FROM THE WHOLE
+ * CLAUSE (every pipeline stage, process substitution, redirection and, for a
+ * `while`/`until` loop, the `done < …` that feeds it). Its value becomes
+ * unknown (paths stay `$NAME`), and it holds network content / a URL if
+ * that producer does. Implicitly-assigned names are bound from any network clause.
+ */
+function bindUnmodeledWrites(clauseText, loopTail, st, depth) {
+  const refs = referencedVars(st);
+  let producer = null;
+  let why;
+  const produce = () => {
+    if (producer === null) {
+      const stdin = splitPipeline(`${clauseText} ${loopTail}`)
+        .flatMap((seg) => stdinSources(words(seg)))
+        .filter((x) => !/^<<__HD/.test(x));
+      producer = [clauseText, loopTail, ...stdin].filter(Boolean).join('\n');
+      why = textIsNetwork(producer, st, depth + 1);
+    }
+  };
+  const bind = (name) => {
+    produce();
+    const prev = st.vars.get(name);
+    st.vars.set(name, {
+      value: undefined,
+      producer: [prev?.producer, prev?.value, producer].filter((x) => x !== undefined).join('\n'),
+      url: !!prev?.url || URL_RE.test(canonical(producer, st.vars)),
+      content: !!prev?.content || !!why,
+    });
+  };
+  for (const name of refs) {
+    if (!clauseText.includes(name) && !loopTail.includes(name)) continue;
+    if (writeSites(clauseText, name).some((s) => s.kind === 'other')) bind(name);
+  }
+  for (const name of IMPLICIT_VARS) {
+    if (!refs.has(name)) continue;
+    produce();
+    if (why) bind(name);
+  }
+  if (RUNTIME.test(clauseText) && dynamicNameWrites(clauseText).length > 0) {
+    produce();
+    if (why) for (const name of refs) bind(name);
+  }
+}
+
+/** For a clause opening a `while`/`until` loop, the text of its matching `done` clause. */
+function loopTailOf(clauses, ci) {
+  if (!/^\s*(while|until)\b/.test(clauses[ci].text)) return '';
+  let d = 0;
+  for (let j = ci; j < clauses.length; j++) {
+    const t = clauses[j].text.trim();
+    for (const m of t.matchAll(/(^|\s)(while|until|for|select)(\s|$)/g)) if (m) d++;
+    if (/^done\b/.test(t) && --d === 0) return t;
+  }
+  return '';
 }
 
 /**
@@ -737,7 +1071,9 @@ function loadSource(word, st) {
     offend(st, 'unparseable', `${error} in sourced ${path}`);
     return;
   }
-  const { functions: sourcedFns } = extractFunctions(adoptHeredocs(code, heredocs, st));
+  const adopted = adoptHeredocs(code, heredocs, st);
+  st.corpus.push(adopted);
+  const { functions: sourcedFns } = extractFunctions(adopted);
   for (const [n, fn] of sourcedFns) if (!st.functions.has(n)) st.functions.set(n, fn);
 }
 
@@ -819,11 +1155,13 @@ function innerSubstitutions(w) {
         else if (w[j] === ')') {
           d--;
           if (d === 0) {
+            const inner = w
+              .slice(i + 2, j)
+              .replace(/^\(/, '')
+              .replace(/\)$/, '');
+            // `$(<file)` reads file exactly as `$(cat file)` does.
             out.push(
-              w
-                .slice(i + 2, j)
-                .replace(/^\(/, '')
-                .replace(/\)$/, ''),
+              w[i] === '$' && /^\s*<(?![<(])/.test(inner) ? inner.replace(/^\s*</, 'cat ') : inner,
             );
             i = j;
             break;
@@ -974,9 +1312,13 @@ export function applyTargets(ws) {
 
 function recordAssignments(ws, st, depth) {
   let k = 0;
+  let nameref = false;
   if (['export', 'local', 'declare', 'readonly', 'typeset'].includes(ws[0])) {
     k = 1;
-    while (ws[k]?.startsWith('-')) k++;
+    while (ws[k]?.startsWith('-')) {
+      if (/^-[A-Za-z]*n/.test(ws[k])) nameref = true;
+      k++;
+    }
   }
   let any = false;
   for (; k < ws.length; k++) {
@@ -991,6 +1333,12 @@ function recordAssignments(ws, st, depth) {
     const content =
       innerSubstitutions(value).some((inner) => textIsNetwork(inner, st, depth + 1)) ||
       refs.some((r) => r.content);
+    if (nameref) {
+      // `declare -n R=V`: `$R` reads V at RUN time; nothing static says what
+      // V will hold then, so R is network content (fail closed).
+      st.vars.set(m[1], { value: undefined, producer: value, url: true, content: true });
+      continue;
+    }
     st.vars.set(m[1], { value, url: URL_RE.test(expanded) || refs.some((r) => r.url), content });
   }
   return any && k >= ws.length;
@@ -1128,9 +1476,26 @@ function taintSources(text, st, depth, ctx) {
   const followVar = (r) => {
     if (vars.has(r)) return;
     vars.add(r);
+    // The walk-time value (last `NAME=` write reached so far) …
     const v = st.vars.get(r);
-    if (v) taintSources(v.value, st, depth + 1, ctx);
-    else if (v === undefined) return; // unset here: an env value, not a scanned source
+    if (v?.value !== undefined) taintSources(v.value, st, depth + 1, ctx);
+    if (v?.producer !== undefined) taintSources(v.producer, st, depth + 1, ctx);
+    // … AND every write site anywhere in the corpus, in any order, in any
+    // helper or sourced file: a modeled `NAME=value` is traced, anything else
+    // that can bind the name is opaque. Found by scanning every occurrence of
+    // the name, so a write construct nobody listed is still opaque.
+    if (IMPLICIT_VARS.has(r)) out.add(`opaque:$${r} is assigned implicitly by the shell`);
+    for (const d of corpusDynamicWrites(st))
+      out.add(`opaque:$${r} may be written through a run-time variable name: ${d}`);
+    for (const site of corpusWriteSites(r, st)) {
+      if (site.kind === 'other') {
+        out.add(`opaque:$${r} is written by \`${site.snippet}\``);
+        continue;
+      }
+      const m = site.word.match(/^[A-Za-z_]\w*=(.*)$/s);
+      if (m) taintSources(m[1], st, depth + 1, ctx);
+      else out.add(`opaque:$${r} assignment \`${site.word.slice(0, 80)}\``);
+    }
   };
   for (const r of varRefs(text)) followVar(r);
   const { code } = lex(text);
@@ -1235,6 +1600,7 @@ function walk(code, st, ctx) {
     const cl = clauses[ci];
     if (!['&&', '||'].includes(cl.sepBefore)) chainStart = ci;
     let text = cl.text;
+    bindUnmodeledWrites(text, loopTailOf(clauses, ci), st, ctx.depth);
 
     // Control-flow keywords: track blocks so a verification inside one only
     // covers applies inside the same branch.
@@ -1733,6 +2099,10 @@ export function unsafeApplies(
     st.verified = carry.verified;
   }
   st.heredocs = heredocs;
+  st.corpus.push(code);
+  // A `trap` handler is a string the CURRENT shell runs later: its writes count.
+  for (const m of code.matchAll(/(?:^|[\s;&|(])trap\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")/g))
+    st.corpus.push(m[1] ?? m[2]);
   if (error) offend(st, 'unparseable', error);
   const { code: top, functions } = extractFunctions(code);
   st.functions = functions;
@@ -1752,6 +2122,8 @@ export function unsafeApplies(
     sub.file = st.file;
     sub.sourced = new Set(st.sourced);
     sub.unresolvedSource = st.unresolvedSource;
+    sub.corpus = st.corpus;
+    sub.writeSiteCache = st.writeSiteCache;
     walk(body, sub, {
       depth: 1,
       defeated: false,
