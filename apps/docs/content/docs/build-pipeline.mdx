@@ -97,6 +97,24 @@ identically) it decides how the server is packaged:
 - **`runtime: 'node'`** — the supervisor spawns `server.js` under Node, and bytecode caching comes
   from the V8 compile cache in the image (see [bytecode caching](/docs/bytecode)).
 
+### Self-contained mode (experimental)
+
+`selfContained` is an opt-in switch for a future single executable that carries everything it needs
+to boot, with nothing beside it on disk. It defaults to `false`, and `knext build --self-contained`
+turns it on for one build, overriding the config key:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  selfContained: true,   // optional — leave it out and nothing changes
+};
+```
+
+No build target uses this yet, so on this version setting it changes nothing about what
+`knext build` produces; the choice is only recorded in the build log. The value must be a boolean —
+`knext validate` rejects anything else.
+
 ### vinext on Node
 
 The vinext target also runs on **Node**. Set `build: 'vinext'` explicitly and `runtime: 'node'`:

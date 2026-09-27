@@ -340,6 +340,16 @@ export function validateConfig(
         }
     }
 
+    // selfContained (opt-in): a boolean or absent. A string like "false" is
+    // truthy in JS, so silently accepting one would turn the mode ON.
+    if (
+        (config as { selfContained?: unknown }).selfContained !== undefined &&
+        typeof (config as { selfContained?: unknown }).selfContained !==
+            "boolean"
+    ) {
+        errors.push("'selfContained' must be a boolean (true or false)");
+    }
+
     // Runtime validation
     if (
         config.runtime &&
