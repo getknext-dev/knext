@@ -349,3 +349,139 @@ describe('docs-deploy-oke.yml — the closure audit gates the push', () => {
     }
   });
 });
+
+/**
+ * #1502 — the third real docs deploy (run 36306107152, job 108582984798) got
+ * past the credential preflight and the OCIR login, then died in the
+ * action's Deploy sub-step: `npx --yes @getknext/core deploy …` exited 127
+ * with `sh: 1: knext: not found`.
+ *
+ * Reproduced locally from `apps/docs` after a real `bun install` + build:
+ * unversioned `npx @getknext/core`, run inside a workspace member that
+ * depends on it via `workspace:*`, resolves the LOCAL tree rather than
+ * fetching the published package — but `packages/kn-next/package.json` now
+ * declares two bins (`knext`, the new canonical name, and `kn-next`, kept as
+ * a deprecated alias — see `deprecated-alias-invocation.test.ts`), and `bun
+ * install` only creates a `node_modules/.bin` entry for a bin whose target
+ * file exists AT INSTALL TIME. The workflow's "Install the workspace" step
+ * runs before the CLI is built, so neither bin gets linked, and npx's local
+ * resolution falls through to a bare, unlinked `knext` — exactly the
+ * `sh: knext: command not found` this reproduces. The fix does not depend on
+ * guessing that mechanism correctly in perpetuity: it stops going through
+ * npx's bin resolution for this dogfooded workflow at all.
+ */
+describe("docs-deploy-oke.yml — the deploy step dogfoods THIS commit's built CLI, not npx (#1502)", () => {
+  /** The knext-action step's `cli` input must be `node <path ending in packages/kn-next/dist/cli/kn-next.js>`. */
+  function deployCliIsTreeBuild(wf: Workflow): boolean {
+    const step = allSteps(wf).find((s) => s.uses === './packages/kn-next-action');
+    const cli = String((step?.with as Record<string, unknown> | undefined)?.cli ?? '');
+    return /^node\s+\$\{\{\s*github\.workspace\s*\}\}\/packages\/kn-next\/dist\/cli\/kn-next\.js$/.test(
+      cli,
+    );
+  }
+
+  it("the cli input points node at the tree's built kn-next.js, not npx", () => {
+    expect(deployCliIsTreeBuild(load())).toBe(true);
+    const step = allSteps(load()).find((s) => s.uses === './packages/kn-next-action');
+    const cli = String((step?.with as Record<string, unknown>).cli ?? '');
+    expect(cli).not.toMatch(/npx/);
+  });
+
+  it('REDS when the cli input is dropped from the deploy step (mutation)', () => {
+    const mutated = raw().replace(
+      /\n\s*cli: node \$\{\{ github\.workspace \}\}\/packages\/kn-next\/dist\/cli\/kn-next\.js\n/,
+      '\n',
+    );
+    expect(mutated).not.toEqual(raw());
+    expect(deployCliIsTreeBuild(load(mutated))).toBe(false);
+  });
+
+  it('REDS when the cli input is pointed back at npx (mutation)', () => {
+    const mutated = raw().replace(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression syntax, not a JS template placeholder
+      'cli: node ${{ github.workspace }}/packages/kn-next/dist/cli/kn-next.js',
+      'cli: npx --yes @getknext/core',
+    );
+    expect(mutated).not.toEqual(raw());
+    expect(deployCliIsTreeBuild(load(mutated))).toBe(false);
+  });
+
+  it('the deploy job builds @getknext/lib, @getknext/db and @getknext/core before the action step', () => {
+    const steps = load().jobs.deploy?.steps ?? [];
+    const buildIdx = steps.findIndex((s) =>
+      /Build the libraries and the CLI/.test(String(s.name ?? '')),
+    );
+    const deployIdx = steps.findIndex((s) => s.uses === './packages/kn-next-action');
+    expect(buildIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeLessThan(deployIdx);
+    const run = String(steps[buildIdx]?.run ?? '');
+    for (const pkg of ['@getknext/lib', '@getknext/db', '@getknext/core']) {
+      expect(run).toContain(pkg);
+    }
+  });
+});
+
+describe('packages/kn-next-action — the cli input actually drives the Deploy step (#1502)', () => {
+  const deployRun = (text: string = actionRaw()): string => {
+    const a = parse(text) as { runs: { steps: { name?: string; run?: string }[] } };
+    return String(a.runs.steps.find((s) => s.name === 'Deploy')?.run ?? '');
+  };
+
+  it('the cli input defaults to npx, for a consumer who never sets it', () => {
+    const a = parse(actionRaw()) as { inputs: Record<string, { default?: string }> };
+    expect(a.inputs.cli?.default).toBe('npx --yes @getknext/core');
+  });
+
+  it('the Deploy step invokes the resolved cli array, not a hardcoded npx call', () => {
+    const run = deployRun();
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash array syntax, not a JS template placeholder
+    expect(run).toContain('"${CLI[@]}" doctor');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash array syntax, not a JS template placeholder
+    expect(run).toContain('"${CLI[@]}" deploy');
+    expect(run).not.toMatch(/npx --yes @getknext\/core (doctor|deploy)/);
+  });
+
+  it('splits the cli input into argv words via `read`, never `eval`', () => {
+    const run = deployRun();
+    expect(run).toMatch(/read -r -a CLI <<< "\$KNEXT_CLI"/);
+    expect(run).not.toMatch(/\beval\b/);
+  });
+
+  it('fails loudly, before doing anything, if the resolved executable is not on PATH', () => {
+    const run = deployRun();
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash array syntax being searched for, not a JS template placeholder
+    const checkIdx = run.indexOf('command -v "${CLI[0]}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash array syntax being searched for, not a JS template placeholder
+    const doctorIdx = run.indexOf('"${CLI[@]}" doctor');
+    expect(checkIdx).toBeGreaterThan(-1);
+    expect(doctorIdx).toBeGreaterThan(-1);
+    expect(checkIdx).toBeLessThan(doctorIdx);
+    expect(run).toMatch(/::error::the 'cli' input's executable[^\n]*not found on PATH/);
+  });
+
+  it('REDS when the executable check is removed (mutation)', () => {
+    const mutated = actionRaw().replace(
+      /\s*# A wrong 'cli' input[\s\S]*?not found on PATH\. cli=\\"\$KNEXT_CLI\\""\n\s*exit 1\n\s*fi\n/,
+      '\n',
+    );
+    expect(mutated).not.toEqual(actionRaw());
+    expect(deployRun(mutated)).not.toMatch(/command -v "\$\{CLI\[0\]\}"/);
+  });
+
+  it('REDS when the action ignores cli and hardcodes npx again (mutation)', () => {
+    const mutated = actionRaw()
+      .replace(
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash array syntax, not a JS template placeholder
+        '"${CLI[@]}" doctor --namespace "$KNEXT_NAMESPACE"',
+        'npx --yes @getknext/core doctor --namespace "$KNEXT_NAMESPACE"',
+      )
+      .replace(
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash array syntax, not a JS template placeholder
+        '"${CLI[@]}" deploy "${DEPLOY_ARGS[@]}"',
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: literal bash array syntax, not a JS template placeholder
+        'npx --yes @getknext/core deploy "${DEPLOY_ARGS[@]}"',
+      );
+    expect(mutated).not.toEqual(actionRaw());
+    expect(deployRun(mutated)).toMatch(/npx --yes @getknext\/core (doctor|deploy)/);
+  });
+});
