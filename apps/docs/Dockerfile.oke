@@ -1,3 +1,5 @@
+# SUPERSEDED by #1481 once the docs-deploy-oke workflow's first run on main is
+# green: `kn-next deploy` builds apps/docs/Dockerfile. See deploy/oke/README.md.
 # Plain-k8s image for the OKE deploy: no knext adapter, no @getknext/core —
 # fully self-contained.
 #

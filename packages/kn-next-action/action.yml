@@ -50,7 +50,9 @@ inputs:
     required: false
     default: 'true'
   registry:
-    description: Registry host and repository, e.g. ghcr.io/acme/app.
+    description: >-
+      Registry host and namespace, e.g. ghcr.io/acme. The app's `name` from
+      kn-next.config.ts is appended, so the image is pushed to ghcr.io/acme/<name>.
     required: true
   registry-token:
     description: Push token for that registry. On GHCR, github.token suffices.
@@ -129,6 +131,8 @@ runs:
     # argument for handing this action a cluster credential at all.
     - name: Credential preflight
       shell: bash
+      # The app's directory: preflight.mjs resolves @getknext/core from here.
+      working-directory: ${{ inputs.working-directory }}
       env:
         KNEXT_NAMESPACE: ${{ inputs.namespace }}
         KNEXT_SKIP_PREFLIGHT: ${{ inputs.skip-credential-preflight }}

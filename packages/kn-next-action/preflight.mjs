@@ -14,6 +14,9 @@
  * because it reports safety it never established.
  */
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({
@@ -67,8 +70,26 @@ try {
   process.exit(1);
 }
 
-// Resolved from the installed CLI so there is exactly one copy of the rules.
-const { classifyCredentialScope } = await import('@getknext/core/internal/credential-scope');
+// Resolved from the installed CLI so there is exactly one copy of the rules —
+// and resolved from the APP, not from this file. The action step runs in the
+// app's working directory, which is where `@getknext/core` is installed. A bare
+// `import('@getknext/core/…')` here would resolve relative to THIS file, i.e.
+// the action's own checkout, which has no node_modules — so it failed for every
+// consumer. Fails closed like everything above: no classifier, no pass.
+let classifyCredentialScope;
+try {
+  const fromApp = createRequire(join(process.cwd(), 'package.json'));
+  const entry = fromApp.resolve('@getknext/core/internal/credential-scope');
+  ({ classifyCredentialScope } = await import(pathToFileURL(entry).href));
+} catch (err) {
+  console.error('::error::Could not load the credential classifier from @getknext/core.');
+  console.error(
+    `Looked from ${process.cwd()}. Install your app's dependencies (e.g. \`npm ci\`) ` +
+      'before this action, so `@getknext/core` is resolvable from `working-directory`.',
+  );
+  console.error(`\nunderlying error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
 
 const verdict = classifyCredentialScope(rules);
 if (verdict.ok) {
