@@ -160,7 +160,7 @@ that case, and turns the check off rather than satisfying it.
 |---|---|---|---|
 | `kubeconfig` | **yes** | — | Base64-encoded, from the scoped ServiceAccount |
 | `namespace` | **yes** | — | No default: it is what bounds the credential's blast radius |
-| `registry` | **yes** | — | Registry host and repository, e.g. `ghcr.io/acme/app` |
+| `registry` | **yes** | — | Registry host and namespace, e.g. `ghcr.io/acme`. Your app's `name` is appended, so the image is pushed to `ghcr.io/acme/<name>` |
 | `registry-token` | no | — | On GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
 | `tag` | no | `github.sha` | Image tag. The commit SHA traces an image to its commit |
