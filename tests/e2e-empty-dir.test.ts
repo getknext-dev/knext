@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test';
-import { spawn, spawnSync } from 'node:child_process';
+import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -60,13 +60,44 @@ afterAll(() => {
 });
 
 function sh(script: string) {
-  return spawnSync('bash', ['-c', `set -uo pipefail; . "${LIB}"; ${script}`], {
-    encoding: 'utf8',
-  });
+  return retryOnPortRace(script, () =>
+    spawnSync('bash', ['-c', `set -uo pipefail; . "${LIB}"; ${script}`], {
+      encoding: 'utf8',
+    }),
+  );
 }
 
+/**
+ * freePortExpr() is a TOCTOU by construction: it binds :0, closes, prints
+ * the port, and the fixture server binds it a moment later. On macOS the
+ * probes' own client sockets draw from the same ephemeral range, so about 1
+ * full-file run in 10 lost that race (`listen EADDRINUSE`, measured in PR
+ * #1521 round 3) — a red for a reason no test is about, which also FATALs
+ * the mutation prover's post-restore re-check. Re-run (at most twice more)
+ * ONLY when the script picked a free port AND the failure is that exact
+ * bind error; any other outcome, pass or fail, is returned as-is.
+ */
+function retryOnPortRace(
+  script: string,
+  run: () => SpawnSyncReturns<string>,
+): SpawnSyncReturns<string> {
+  let r = run();
+  if (!script.includes(freePortExpr())) return r;
+  for (let i = 0; i < 2 && r.status !== 0 && `${r.stderr}`.includes('EADDRINUSE'); i++) r = run();
+  return r;
+}
+
+/**
+ * A port that is free right now, drawn at random from 20000-31999 — BELOW
+ * both the macOS (49152+) and Linux (32768+) ephemeral ranges. listen(0)
+ * hands out an ephemeral port, which every outgoing client socket on the
+ * host (this file's own probes, and any other process on a busy machine)
+ * also draws from, so between "picked" and "the fixture binds it" another
+ * socket could take it: measured in PR #1521 round 3 as listen EADDRINUSE,
+ * and worse, as a probe answered by SOMEONE ELSE's server on that port.
+ */
 function freePortExpr(): string {
-  return `node -e 'const s=require("net").createServer();s.listen(0,()=>{const p=s.address().port;s.close(()=>console.log(p));});'`;
+  return `node -e 'const n=require("net");(function t(k){const p=20000+Math.floor(Math.random()*12000);const s=n.createServer();s.once("error",()=>{if(k>0)t(k-1);else process.exit(1);});s.listen(p,"127.0.0.1",()=>s.close(()=>console.log(p)));})(50);'`;
 }
 
 function makeServerFixture(
@@ -588,7 +619,10 @@ describe('e2e-empty-dir — ed_boot_probe_kill / ed_check_or_die (#1455)', () =>
       PORT="$(${freePortExpr()})"
       ed_check_or_die "unit-test" "${dest}" "${src}/server.js" /api/health /anything "\${PORT}" "${src}/public:public"
     `);
-    expect(r.status).toBe(0);
+    expect({ status: r.status, stderr: r.status === 0 ? '' : r.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
   });
 
   it('ed_check_or_die fails closed when the staged dir was contaminated after staging', () => {
@@ -645,7 +679,10 @@ describe('e2e-empty-dir — ed_boot_probe_kill / ed_check_or_die (#1455)', () =>
       ED_HIDE_DURING_BOOT=("${parent}/node_modules")
       ed_check_or_die "hide-test" "${dest}" "${binPath}" /api/health / "\${PORT}"
     `);
-    expect(r.status).toBe(0);
+    expect({ status: r.status, stderr: r.status === 0 ? '' : r.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
     // node_modules must be back in place afterwards — the hide is transient.
     const restored = sh(`test -d "${parent}/node_modules/leakpkg" && echo present`);
     expect(restored.stdout.trim()).toBe('present');
