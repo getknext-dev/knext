@@ -20,7 +20,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
     extractEmbeddedNative,
     lazySharp,
@@ -85,6 +85,10 @@ describe("extractEmbeddedNative", () => {
         const files = tree(LAYOUT);
         const { root } = extractEmbeddedNative({ files, tmpRoot });
         const lib = join(root, "sharp-libvips-linux-x64/lib/libvips-cpp.so.42");
+        // Extracted files ship 0500 (no write bit, #1460 round 2 hardening) —
+        // a REALISTIC same-uid tamper has to reclaim write access first, same
+        // as this simulates.
+        chmodSync(lib, 0o600);
         writeFileSync(lib, "LIBVIPZ"); // same length, different bytes
         const again = extractEmbeddedNative({ files, tmpRoot });
         expect(again).toMatchObject({ extracted: 1, reused: 2 });
@@ -146,6 +150,65 @@ describe("extractEmbeddedNative", () => {
                 tmpRoot: temp("knext-1460-tmp-"),
             }),
         ).toThrow(/embeds no native tree/);
+    });
+
+    // #1460 round 2 hardening (i)-(iv): the extraction directory name is not a
+    // pure function of content alone, the TMPDIR base itself is checked before
+    // anything is created under it, a relative KNEXT_NATIVE_TMPDIR is refused,
+    // and extracted files carry no write bit.
+
+    it("the extraction directory name includes the uid, not just the content hash", () => {
+        // A name that were ONLY a content hash would be identical on every
+        // host running the same binary, regardless of who runs it — so any
+        // local user could pre-create it and permanently deny extraction to
+        // every OTHER uid (assertPrivateDir would then always refuse it as
+        // foreign-owned, with no way for the legitimate uid to recover
+        // without an operator clearing it).
+        const tmpRoot = temp("knext-1460-uid-");
+        const { root } = extractEmbeddedNative({ files: tree(LAYOUT), tmpRoot });
+        const uid =
+            typeof process.getuid === "function" ? String(process.getuid()) : "nouid";
+        expect(basename(root).startsWith(`knext-native-${uid}-`)).toBe(true);
+    });
+
+    it("extracted files carry no write bit (0500) — read+execute only", () => {
+        const tmpRoot = temp("knext-1460-mode-");
+        const { root } = extractEmbeddedNative({ files: tree(LAYOUT), tmpRoot });
+        const file = join(root, "sharp-linux-x64/lib/sharp-linux-x64.node");
+        expect(statSync(file).mode & 0o777).toBe(0o500);
+    });
+
+    it("refuses a world-writable TMPDIR base that lacks the sticky bit", () => {
+        // Distinct from assertPrivateDir, which checks the directory THIS
+        // process creates — this checks the BASE it creates that directory
+        // under. A shared, non-sticky, world-writable base lets another local
+        // user rename or replace entries here between checks.
+        const tmpRoot = temp("knext-1460-unsticky-");
+        chmodSync(tmpRoot, 0o777);
+        expect(() =>
+            extractEmbeddedNative({ files: tree(LAYOUT), tmpRoot }),
+        ).toThrow(/world-writable.*without the sticky bit/s);
+    });
+
+    it("accepts a world-writable TMPDIR base that HAS the sticky bit, like a real /tmp", () => {
+        const tmpRoot = temp("knext-1460-sticky-");
+        chmodSync(tmpRoot, 0o1777);
+        const out = extractEmbeddedNative({ files: tree(LAYOUT), tmpRoot });
+        expect(out.extracted).toBe(3);
+    });
+
+    it("refuses a relative KNEXT_NATIVE_TMPDIR (would resolve against the cwd, unpredictably)", () => {
+        const prev = process.env.KNEXT_NATIVE_TMPDIR;
+        process.env.KNEXT_NATIVE_TMPDIR = "relative/native-tmp-should-never-exist";
+        try {
+            expect(() =>
+                extractEmbeddedNative({ files: tree(LAYOUT) }),
+            ).toThrow(/must be an absolute path/);
+            expect(existsSync("relative/native-tmp-should-never-exist")).toBe(false);
+        } finally {
+            if (prev === undefined) delete process.env.KNEXT_NATIVE_TMPDIR;
+            else process.env.KNEXT_NATIVE_TMPDIR = prev;
+        }
     });
 });
 

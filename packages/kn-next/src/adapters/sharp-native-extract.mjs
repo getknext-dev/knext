@@ -84,19 +84,66 @@ function assertPrivateDir(dir) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   if (uid !== null && st.uid !== uid) {
     throw new Error(
-      `knext: refusing to extract into ${dir} — it belongs to uid ${st.uid}, not to this process (${uid})`,
+      `knext: refusing to extract into ${dir} — it belongs to uid ${st.uid}, not to this process (${uid}). ` +
+        'Set KNEXT_NATIVE_TMPDIR to a private directory this process owns.',
     );
   }
   if ((st.mode & 0o022) !== 0) {
     throw new Error(
-      `knext: refusing to extract into ${dir} — it is writable by other users (mode ${(st.mode & 0o777).toString(8)})`,
+      `knext: refusing to extract into ${dir} — it is writable by other users (mode ${(st.mode & 0o777).toString(8)}). ` +
+        'Set KNEXT_NATIVE_TMPDIR to a private directory this process owns.',
+    );
+  }
+}
+
+/**
+ * The TMPDIR base itself (before this process creates anything under it) must
+ * be safe to share: a shared temp directory that is world-writable but lacks
+ * the sticky bit lets another local user rename or replace entries out from
+ * under this process between checks. `/tmp` is normally 1777 (world-writable,
+ * sticky) and passes; a private directory this process owns outright also
+ * passes without needing the sticky bit. Anything else is refused rather than
+ * trusted.
+ */
+function assertSafeBase(dir) {
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (error) {
+    throw new Error(
+      `knext: refusing to extract under ${dir} — it does not exist or is not accessible\n` +
+        `  underlying error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`knext: refusing to extract under ${dir} — it is not a plain directory`);
+  }
+  const worldWritable = (st.mode & 0o002) !== 0;
+  const sticky = (st.mode & 0o1000) !== 0;
+  if (worldWritable && !sticky) {
+    throw new Error(
+      `knext: refusing to extract under ${dir} — it is world-writable (mode ${(st.mode & 0o777).toString(8)}) ` +
+        'without the sticky bit set, so another local user could rename or replace entries here ' +
+        'between checks. Set KNEXT_NATIVE_TMPDIR to a directory with the sticky bit set (like a ' +
+        'normal /tmp) or one this process owns privately.',
+    );
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (uid !== null && !worldWritable && st.uid !== uid && st.uid !== 0) {
+    throw new Error(
+      `knext: refusing to extract under ${dir} — it is owned by uid ${st.uid}, not this process ` +
+        `(${uid}) or root. Set KNEXT_NATIVE_TMPDIR to a directory this process owns.`,
     );
   }
 }
 
 function writeAtomic(target, bytes) {
   const tmp = `${target}.${process.pid}.tmp`;
-  const fd = openSync(tmp, 'w', 0o600);
+  // 0500 (r-x, no write bit): a dlopened native library needs no write access
+  // after extraction, and denying it narrows the window a compromised
+  // same-uid process (or the app itself) could tamper with a verified file
+  // between the integrity check and the OS loader reading it.
+  const fd = openSync(tmp, 'w', 0o500);
   try {
     writeSync(fd, bytes);
   } finally {
@@ -120,7 +167,20 @@ export function extractEmbeddedNative({ files, tmpRoot }) {
       'knext: this self-contained binary embeds no native tree for sharp — rebuild it with a current `kn-next build --self-contained`',
     );
   }
-  const base = tmpRoot || process.env.KNEXT_NATIVE_TMPDIR || tmpdir();
+  const envTmp = process.env.KNEXT_NATIVE_TMPDIR;
+  const base = tmpRoot || envTmp || tmpdir();
+  // A relative base would resolve against the process's current working
+  // directory at call time — unpredictable in a server process, and a config
+  // mistake this process can catch instead of silently extracting somewhere
+  // nobody expected.
+  if (!isAbsolute(base)) {
+    throw new Error(
+      `knext: the native extraction directory must be an absolute path, got ${JSON.stringify(base)}` +
+        (base === envTmp ? ' (from KNEXT_NATIVE_TMPDIR)' : '') +
+        ' — a relative path would resolve against the current working directory, which is unpredictable.',
+    );
+  }
+  assertSafeBase(base);
   const entries = [...files]
     .map((f) => ({ rel: safeRel(f.rel), path: f.path }))
     .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
@@ -129,7 +189,15 @@ export function extractEmbeddedNative({ files, tmpRoot }) {
     const bytes = entries.map((e) => readFileSync(e.path));
     const key = createHash('sha256');
     entries.forEach((e, i) => key.update(e.rel).update('\0').update(sha256(bytes[i])).update('\0'));
-    root = join(base, `${DIR_PREFIX}${key.digest('hex').slice(0, 16)}`);
+    // The uid is part of the directory name (not just enforced by
+    // assertPrivateDir afterwards): the name is otherwise a pure function of
+    // the embedded tree's content, so it is the SAME on every host running
+    // the same binary. Without the uid, any local user could pre-create it
+    // and permanently deny extraction to every other uid (assertPrivateDir
+    // would then always refuse it as foreign-owned) — a denial-of-service
+    // this process cannot recover from without an operator's intervention.
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 'nouid';
+    root = join(base, `${DIR_PREFIX}${uid}-${key.digest('hex').slice(0, 16)}`);
     mkdirSync(root, { recursive: true, mode: 0o700 });
     assertPrivateDir(root);
     let extracted = 0;

@@ -223,7 +223,10 @@ describe("#1460 self-contained compile: nothing beside the binary", () => {
         expect(out).toMatch(/SHARP2 ok \d+/);
         const after = readdirSync(nt);
         expect(after).toHaveLength(1);
-        expect(after[0]).toMatch(/^knext-native-[0-9a-f]{16}$/);
+        // #1460 round 2: the directory name now carries the uid too (a
+        // pure content hash would let another local user pre-create it and
+        // deny extraction to every other uid).
+        expect(after[0]).toMatch(/^knext-native-(?:\d+|nouid)-[0-9a-f]{16}$/);
     });
 
     it("an unwritable temp dir fails the sharp call with the named cause — twice, no hang, no crash", () => {
