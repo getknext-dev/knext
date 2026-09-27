@@ -570,13 +570,24 @@ describe("#857 — a pnpm-lock.yaml below the root does not make the install fro
  * `requireBuildContext` (deploy/preview) calls `warnDuplicatedLockFiles`; `resolveLayout`
  * (create) called `findTracingRoot` directly and threw the `lockFiles` list away. So an
  * ambiguous marker chain surfaced at `docker build` rather than at scaffold time, when it
- * is cheap to fix by pinning `outputFileTracingRoot`.
+ * is cheap to fix.
  *
- * The stakes are not merely ergonomic, and `warnDuplicatedLockFiles`' own docstring says
- * why: knext hands the inferred directory to `docker buildx build` and the scaffolded
- * Dockerfile does `COPY . .`, so a stray `~/package-lock.json` does not just mis-trace a
- * build — it bakes `~/.ssh` and `~/.aws` into a PUSHED image. `create` is the command that
- * writes that Dockerfile, and it was the one command saying nothing.
+ * The two paths get DIFFERENT remedies, and that asymmetry is the point:
+ * `requireBuildContext` consults `configuredTracingRoot`, so "pin `outputFileTracingRoot`"
+ * genuinely silences it and moves the build. `resolveLayout` does NOT consult it, so the
+ * same advice would leave `create` still warning while baking COPY paths against the
+ * INFERRED root that deploy no longer uses — following the warning would break the build.
+ * `create` therefore gets the remedy it can honour: remove the redundant lockfile.
+ *
+ * The stakes are not merely ergonomic: knext hands the inferred directory to
+ * `docker buildx build` and the scaffolded Dockerfile does `COPY . .`, so a stray
+ * `~/package-lock.json` uploads `$HOME` to the daemon and copies it into the BUILD stage,
+ * where it sits in the build cache and becomes publishable under `--target builder`,
+ * `--cache-to type=registry`, or a single-stage Dockerfile. `create` writes that
+ * Dockerfile and was the one command saying nothing about it.
+ *
+ * (Not "bakes it into the PUSHED image" — that was the inherited claim, and a design gate
+ * measured it false for the two-stage scaffold. The builder is discarded.)
  */
 describe("#860 — create warns when the marker chain is ambiguous", () => {
     it("warns, naming the chosen root, when more than one marker is found", () => {
@@ -588,7 +599,12 @@ describe("#860 — create warns when the marker chain is ambiguous", () => {
         const warnings: string[] = [];
         resolveLayout(join(root, "apps", "web"), (m) => warnings.push(m));
         expect(warnings).toHaveLength(1);
-        expect(warnings[0]).toContain("outputFileTracingRoot");
+        // Both halves. `create` must NOT prescribe the pin: `resolveLayout` ignores
+        // `configuredTracingRoot`, so following that advice leaves the warning in place AND
+        // desynchronises the baked COPY paths from the root deploy will use. Asserting only
+        // the presence of the new remedy would stay green if the old one came back alongside.
+        expect(warnings[0]).toContain("Remove the lockfile you do not need");
+        expect(warnings[0]).not.toContain("outputFileTracingRoot");
     });
 
     it("stays silent for an unambiguous single-marker tree", () => {

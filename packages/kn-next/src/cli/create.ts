@@ -34,6 +34,7 @@ import { handleUsageError, UsageError } from "./shared";
 import {
     findTracingRoot,
     NO_LOCKFILE_INSTALL,
+    REMOVE_REMEDY,
     shadowingConfigFor,
     warnDuplicatedLockFiles,
 } from "./tracing-root";
@@ -132,15 +133,22 @@ export function resolveLayout(
     // `docker build` rather than at scaffold time, when pinning `outputFileTracingRoot`
     // is cheap (#860).
     //
-    // Not merely ergonomic: `warnDuplicatedLockFiles`' own docstring records that knext
-    // hands the inferred directory to `docker buildx build` and the scaffolded Dockerfile
-    // does `COPY . .`, so a stray `~/package-lock.json` bakes `~/.ssh` and `~/.aws` into a
-    // PUSHED image. The command that writes that Dockerfile was the one saying nothing.
+    // Not merely ergonomic: knext hands the inferred directory to `docker buildx build`
+    // and the scaffolded Dockerfile does `COPY . .`, so a stray `~/package-lock.json`
+    // uploads `$HOME` to the daemon and copies it into the BUILD stage — where it sits in
+    // the build cache, and becomes a published artifact the moment anyone uses
+    // `--target builder`, `--cache-to type=registry`, or a single-stage Dockerfile. The
+    // command that WRITES that Dockerfile was the one saying nothing about it.
+    //
+    // Stated at that width deliberately: the first draft of this comment inherited a
+    // claim that it lands in the PUSHED image, which a design gate measured as false for
+    // the two-stage scaffold. An overstated consequence sends the reader to the wrong
+    // remediation.
     // No `found !== null` guard: mutation-proving showed it cannot fail. With no marker
     // anywhere, `findTracingRoot` returns an EMPTY `lockFiles`, and the warning already
     // returns early at `length <= 1`. A condition that cannot change the outcome reads as
     // though the call were unsafe without it, which is worse than no condition.
-    warnDuplicatedLockFiles(lockFiles, root, warn);
+    warnDuplicatedLockFiles(lockFiles, root, warn, REMOVE_REMEDY);
     const rel = relative(root, app);
     const standalonePrefix =
         !rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}/`;

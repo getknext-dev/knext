@@ -372,15 +372,43 @@ export function configuredTracingRoot(appDir: string): ConfiguredRoot | null {
  * Warn — Next's `warnDuplicatedLockFiles`, which knext had copied the inference
  * from without copying the mitigation.
  *
- * It matters more here than it does in Next: knext hands the inferred directory
- * to `docker buildx build`, and the scaffolded Dockerfile does `COPY . .`. A
- * stray `~/package-lock.json` therefore does not merely mis-trace a build, it
- * bakes `~/.ssh` and `~/.aws` into a PUSHED image.
+ * It matters more here than it does in Next: knext hands the inferred directory to
+ * `docker buildx build`, and the scaffolded Dockerfile does `COPY . .`. A stray
+ * `~/package-lock.json` therefore uploads `$HOME` to the daemon and copies it into
+ * the BUILD stage.
+ *
+ * An earlier version of this said it bakes `~/.ssh` and `~/.aws` into a PUSHED image.
+ * A design gate measured that and it is false for the scaffolded Dockerfile, which is
+ * two-stage: the builder is discarded, and nothing traced into `.next/standalone`
+ * reaches for `~/.ssh`. The real exposure is still worth the warning — the build cache
+ * on the host, any exported cache, and a genuine publish the moment someone uses
+ * `--target builder`, `--cache-to type=registry`, or flattens to a single stage — but
+ * the overstatement sends the reader to rotate keys and audit pulls instead of the
+ * remediation that helps. (The mitigation actually missing is a scaffolded
+ * `.dockerignore`; filed separately.)
  */
+/**
+ * The remedy differs by caller, and getting that wrong is worse than silence.
+ *
+ * `deploy`/`preview` resolve through `requireBuildContext`, which consults
+ * `configuredTracingRoot` FIRST — so telling those users to pin the root works, and the
+ * warning goes quiet once they do. `create` resolves through `resolveLayout`, which does
+ * NOT consult it, so the same sentence would send a `create` user to an action that
+ * changes nothing they can see and bakes a Dockerfile whose COPY paths the deploy context
+ * no longer contains. A design gate measured exactly that: following the advice broke the
+ * build. A warning whose prescribed remedy is inert for the command emitting it is worse
+ * than the silence it replaces.
+ */
+export const PIN_OR_REMOVE_REMEDY =
+    "To pin it, set `outputFileTracingRoot` in next.config, or remove the lockfile you do not need.";
+export const REMOVE_REMEDY =
+    "Remove the lockfile you do not need, or scaffold from the directory you mean to be the root.";
+
 export function warnDuplicatedLockFiles(
     lockFiles: string[],
     root: string,
     warn: (message: string) => void,
+    remedy: string = PIN_OR_REMOVE_REMEDY,
 ): void {
     if (lockFiles.length <= 1) return;
     const extras = lockFiles
@@ -392,11 +420,12 @@ export function warnDuplicatedLockFiles(
             "inferred your project root, but it " +
             `may not be correct. Using ${root} as the Docker build context, from ` +
             `${lockFiles[lockFiles.length - 1]}.\n` +
-            "Everything under that directory is sent to `docker build` and, with " +
-            "the default Dockerfile's `COPY . .`, can end up INSIDE the pushed " +
-            "image. Check that is what you intend.\n" +
-            "To pin it, set `outputFileTracingRoot` in next.config, or remove the " +
-            `lockfile you do not need. Also detected:${extras}`,
+            "Everything under that directory is uploaded to the Docker daemon and " +
+            "copied into the BUILD stage by the default Dockerfile's `COPY . .`. The " +
+            "two-stage build means it is not in the final image, but it IS in your " +
+            "build cache — and a single-stage build, `--target builder`, or " +
+            "`--cache-to type=registry` would publish it.\n" +
+            `${remedy} Also detected:${extras}`,
     );
 }
 
