@@ -323,3 +323,32 @@ branch, with the baked-id rationale in-line).
   and no runtime 404 risk from a mismatched prefix.
 - The skew-protection half of this ADR still applies via the image's own baked build-id + the
   `?dpl=` marker; only the CLI-side UPLOAD is skipped, not the versioning contract.
+
+## Amendment (2026-09-27, #1417): the build id travels as `KNEXT_BUILD_ID`, not `NEXT_DEPLOYMENT_ID`
+
+Decision point 2's mechanism stopped holding on Next >= 16.2.11. Next fills `config.deploymentId`
+from `NEXT_DEPLOYMENT_ID` (`dist/server/config.js`, "only leverage deploymentId"), and `getBuildId`
+(`dist/build/index.js`) then returns the literal constant `build-TfctsWXpff2fKS` and never calls
+`generateBuildId` — Next's own skew protection keys on the deployment id instead. The guard in
+decision point 2 ("fails the deploy if `.next/BUILD_ID` is not the tag") therefore fired on every
+standalone deploy: it did exactly its job, against a Next change it was written to catch.
+
+Founder decision (2026-09-27): **own the variable.** `kn-next deploy`/`preview` export
+`KNEXT_BUILD_ID = <deploy tag>` (a name Next never reads) and, for the standalone targets
+(turbopack/webpack), **unset** `NEXT_DEPLOYMENT_ID` for the build — including one inherited from the
+shell or CI, with a warning. `generateBuildId` reads
+`process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null` in every template and in-repo
+app; the standalone template no longer sets `deploymentId`. The vinext leg is unchanged: vinext has
+no constant-id path and still receives `NEXT_DEPLOYMENT_ID` for `?dpl=`. The lock-step invariant
+(`.next/BUILD_ID` == tag == image tag == `_next/static/<tag>/` == CR `spec.buildId`) is unchanged;
+the guard now names the one-line next.config fix when it sees the constant or a config that never
+reads `KNEXT_BUILD_ID` (`packages/kn-next/src/cli/build-id-env.ts`).
+
+Consequence, stated: on the standalone targets the `?dpl=` half of client→build pinning is gone.
+Skew **detection** is kept — the App Router compares the per-deploy build id and hard-navigates on
+a mismatch — and asset retention never depended on `?dpl=`. The runtime `NEXT_DEPLOYMENT_ID` the CR
+still carries is inert on a standalone server built without a deployment id (Next's base server
+overwrites it with the build-time value, `''`). The compat lanes (`scripts/e2e-deploy.sh`) are out
+of scope: they deliberately export `NEXT_DEPLOYMENT_ID` for Next's own deployment-skew tests and do
+not assert `BUILD_ID == id`. Upstream vercel/next.js#99147 ("Always use generateBuildId if set
+explicitly") would make an explicit `generateBuildId` win again; this design does not depend on it.

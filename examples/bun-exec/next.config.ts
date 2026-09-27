@@ -5,13 +5,13 @@ import type { NextConfig } from 'next';
 // `--compile`: one shippable artifact, no `next start` wrapper.
 const config: NextConfig = {
   // Pin BUILD_ID to the deploy tag (ADR-0011 skew protection). `kn-next deploy`
-  // exports NEXT_DEPLOYMENT_ID before the build; without this the build id is a
+  // exports KNEXT_BUILD_ID before the build; without this the build id is a
   // random one, so the uploaded `_next/static/<id>/` prefix does not match the
   // tag the retention GC prunes by. `deploy` now refuses rather than shipping
   // that mismatch, so this line is what keeps the example deployable. `|| null`
-  // (not `??`) so an empty NEXT_DEPLOYMENT_ID falls back to Next's own id
+  // (not `??`) so an empty value falls back to Next's own id
   // instead of becoming the build id `''`.
-  generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+  generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
   output: 'standalone',
 };
 export default config;

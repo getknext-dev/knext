@@ -175,11 +175,11 @@ const nextConfig: NextConfig = {
   // kn-next sets ASSET_PREFIX so browsers load static assets from your bucket.
   // Unset in `next dev`, so local development is unaffected.
   assetPrefix: process.env.ASSET_PREFIX || "",
-  // kn-next sets NEXT_DEPLOYMENT_ID (the deploy tag). Pinning the build ID to it
-  // keeps the uploaded asset paths and the deployed build in lock-step, and
-  // deploymentId pins each browser session to the build it loaded.
-  generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
-  deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
+  // kn-next sets KNEXT_BUILD_ID (the deploy tag). Pinning the build ID to it
+  // keeps the uploaded asset paths and the deployed build in lock-step. Do not
+  // set deploymentId here: from Next 16.2.11 it makes next build ignore
+  // generateBuildId and write a fixed build id.
+  generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
 };
 
 export default nextConfig;

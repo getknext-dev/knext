@@ -42,9 +42,17 @@ const NEXT_CONFIG_TEMPLATES = execFileSync(
     .map((rel) => join(REPO_ROOT, rel));
 
 /**
- * True when the source mints the build id from `NEXT_DEPLOYMENT_ID` via
- * `generateBuildId`, with an explicit `|| null` fallback (null ⇒ vinext's own
- * UUID, so a plain `vite build` outside `knext deploy` is unchanged).
+ * True when the source mints the build id from the deploy id via
+ * `generateBuildId` — `KNEXT_BUILD_ID` FIRST, then `NEXT_DEPLOYMENT_ID`, with
+ * an explicit `|| null` fallback (null ⇒ the builder's own id, so a plain
+ * build outside `knext deploy` is unchanged).
+ *
+ * **`KNEXT_BUILD_ID` first, and required.** On Next >= 16.2.11 a set
+ * `NEXT_DEPLOYMENT_ID` makes `next build` ignore `generateBuildId` and write a
+ * constant build id, so `knext deploy` no longer exports it to the standalone
+ * build — a config that reads only `NEXT_DEPLOYMENT_ID` gets a random id there
+ * and the deploy aborts. `NEXT_DEPLOYMENT_ID` stays as the fallback because
+ * the vinext leg still receives it.
  *
  * **`||`, not `??`, and the difference is behavioural.** With `??` an
  * `NEXT_DEPLOYMENT_ID` exported as the EMPTY STRING yields `""` — which is not
@@ -61,7 +69,7 @@ function mintsBuildIdFromDeploymentId(source: string): boolean {
     const code = source
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "");
-    return /generateBuildId\s*:\s*\(\s*\)\s*=>\s*process\.env\.NEXT_DEPLOYMENT_ID\s*\|\|\s*null/.test(
+    return /generateBuildId\s*:\s*\(\s*\)\s*=>\s*process\.env\.KNEXT_BUILD_ID\s*\|\|\s*process\.env\.NEXT_DEPLOYMENT_ID\s*\|\|\s*null/.test(
         code,
     );
 }
@@ -95,10 +103,31 @@ describe("T2a — scaffold templates mint the static namespace from the deploy i
                 `/* generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID ?? null */\nconst c = {};`,
             ),
         ).toBe(false);
-        // (d) The shape T2a lands — the predicate must accept it.
+        // (d) The pre-KNEXT_BUILD_ID shape: on Next >= 16.2.11 the standalone
+        // build never sees NEXT_DEPLOYMENT_ID any more, so this mints a random
+        // id and the deploy aborts.
         expect(
             mintsBuildIdFromDeploymentId(
                 `const nextConfig = { generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null };`,
+            ),
+        ).toBe(false);
+        // (e) Reversed precedence — NEXT_DEPLOYMENT_ID would win on vinext,
+        // which is harmless, but the scan pins one canonical line.
+        expect(
+            mintsBuildIdFromDeploymentId(
+                `const nextConfig = { generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || process.env.KNEXT_BUILD_ID || null };`,
+            ),
+        ).toBe(false);
+        // (f) The shape that lands — the predicate must accept it, on one
+        // line or wrapped by a formatter.
+        expect(
+            mintsBuildIdFromDeploymentId(
+                `const nextConfig = { generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null };`,
+            ),
+        ).toBe(true);
+        expect(
+            mintsBuildIdFromDeploymentId(
+                `const nextConfig = {\n  generateBuildId: () =>\n    process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,\n};`,
             ),
         ).toBe(true);
     });
@@ -139,7 +168,7 @@ describe("T2a — scaffold templates mint the static namespace from the deploy i
 
     it.each(
         NEXT_CONFIG_TEMPLATES,
-    )("%s sets generateBuildId from NEXT_DEPLOYMENT_ID", (template) => {
+    )("%s sets generateBuildId from KNEXT_BUILD_ID", (template) => {
         const source = readFileSync(template, "utf8");
         // Non-vacuity on the file itself: an empty/missing read would pass
         // nothing, so pin that we are scanning a real Next config.

@@ -1,0 +1,291 @@
+name: Standalone deploy — kind e2e (build-id lock-step)
+
+# #1417: every `kn-next deploy` of the DEFAULT standalone target (turbopack)
+# on Next >= 16.2.11 died on the `.next/BUILD_ID == tag` guard, because knext
+# exported NEXT_DEPLOYMENT_ID before `next build` and Next then writes the
+# constant `build-TfctsWXpff2fKS` and ignores `generateBuildId`. No lane caught
+# it: the nightlies deploy vinext apps, and the compat lanes use their own
+# deploy script rather than `kn-next deploy`.
+#
+# This lane runs the REAL CLI end to end on the default builder (turbopack) at
+# the Next version the scaffold pins (16.3.5): `kn-next deploy` -> NextApp CR ->
+# the operator built from HEAD -> Knative on an ephemeral kind cluster. It
+# asserts the built `.next/BUILD_ID` IS the deploy tag, the CR carries that
+# `spec.buildId`, the NextApp goes Ready, and `/api/health` answers 200.
+#
+# Job shape reused from `standalone-self-contained-operator-e2e.yml` (#1554,
+# the self-contained variant, which needs its own operator change): same
+# fixture staged outside the repo, same local-registry + certs.d recipe as
+# `file-manager-platform-e2e-nightly.yml`. Both runtimes of the default
+# builder run, since both are v1.0 cells.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next/src/cli/deploy.ts'
+      - 'packages/kn-next/src/cli/build-id-env.ts'
+      - 'packages/kn-next/src/cli/cr-builder.ts'
+      - 'packages/kn-next/src/cli/runtime-image.ts'
+      - 'packages/kn-next/src/cli/project-build.ts'
+      - 'packages/kn-next/src/cli/build-artifact.ts'
+      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/templates/app/next.config.ts.hbs'
+      - 'packages/kn-next/templates/runtime-standalone/**'
+      - 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/**'
+      - '.github/workflows/standalone-deploy-kind-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/kn-next/src/cli/deploy.ts'
+      - 'packages/kn-next/src/cli/build-id-env.ts'
+      - 'packages/kn-next/src/cli/cr-builder.ts'
+      - 'packages/kn-next/src/cli/runtime-image.ts'
+      - 'packages/kn-next/src/cli/project-build.ts'
+      - 'packages/kn-next/src/cli/build-artifact.ts'
+      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/templates/app/next.config.ts.hbs'
+      - 'packages/kn-next/templates/runtime-standalone/**'
+      - 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/**'
+      - '.github/workflows/standalone-deploy-kind-e2e.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  standalone-deploy-e2e:
+    name: standalone (turbopack, ${{ matrix.runtime }}) through kn-next deploy on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [bun, node]
+    env:
+      CLUSTER: standalone-e2e
+      APP_NS: standalone-e2e
+      APP_NAME: standalone-e2e
+      NEXT_VERSION: 16.3.5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      # Same closure/rewrite the compat harness lane packs (test-e2e-deploy.yml
+      # "Pack knext adapter tarballs"): `bun pm pack` rewrites the `workspace:^`
+      # deps @getknext/core carries on @getknext/lib + @getknext/db to a real
+      # semver, which is what makes the tarballs npm-installable standalone —
+      # `npm pack` ships the raw protocol and 404s on install.
+      - name: Pack knext adapter tarballs (bun pm pack — rewrites workspace:^, npm-installable)
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          mkdir -p "${DEST}"
+          (cd packages/lib && bun pm pack --destination "${DEST}")
+          (cd packages/db && bun pm pack --destination "${DEST}")
+          (cd packages/kn-next && bun pm pack --destination "${DEST}")
+          ls -la "${DEST}"
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      # Staged OUTSIDE the repo (a real app is its own project dir; in place,
+      # Next's tracing root and the docker context collapse onto the monorepo
+      # root). Next is moved to the version the scaffold pins; the build
+      # script stays the fixture's plain `next build` — turbopack, the default.
+      # No `build` key in the config: this lane proves the DEFAULT builder.
+      #
+      # The Docker build context IS this directory (`kn-next deploy` builds
+      # from `process.cwd()`), and `Dockerfile.standalone` COPYs `public` and
+      # `node_modules/@getknext/core` from it unconditionally — the drain
+      # fixture has neither (it is a minimal SIGTERM-drain fixture, not a
+      # real scaffolded app), so both are staged here, matching how
+      # `scripts/e2e-deploy.sh` installs the packed adapter tarballs into a
+      # fixture (`npm install --no-save` all three tarballs in one reify so
+      # npm resolves @getknext/core's lib/db deps from the local tarballs
+      # rather than the registry) rather than a hand-rolled copy.
+      - name: Stage the fixture app outside the repo + install its own dependencies
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/standalone-app"
+          cp -R packages/kn-next/src/__tests__/fixtures/standalone-drain-app "$APP_DIR"
+          cd "$APP_DIR"
+          npm pkg set "dependencies.next=${NEXT_VERSION}"
+          grep -q '"build": "next build"' package.json
+          grep -q 'KNEXT_BUILD_ID' next.config.js
+          cat > kn-next.config.ts <<EOF
+          const config = {
+            name: "${APP_NAME}",
+            runtime: "${{ matrix.runtime }}",
+            registry: "localhost:5001",
+            healthCheckPath: "/api/health",
+            scaling: { minScale: 0, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+          };
+          export default config;
+          EOF
+          bun install
+          node -e "const v=require('./node_modules/next/package.json').version; if (v !== process.env.NEXT_VERSION) { console.error('next is ' + v); process.exit(1) }"
+          mkdir -p public
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+          test -d node_modules/@getknext/core
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          echo "DEPLOY_TAG=r${GITHUB_RUN_ID}-${{ matrix.runtime }}" >> "$GITHUB_ENV"
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      - name: Build + deploy the operator from HEAD
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+
+      - name: Namespace
+        run: kubectl create namespace "$APP_NS"
+
+      # Through the product. A runner-level NEXT_DEPLOYMENT_ID is exported on
+      # purpose: a CI environment that sets it must not put Next back on the
+      # constant-build-id path — knext unsets it for the standalone build.
+      - name: kn-next deploy (default builder, ${{ matrix.runtime }})
+        env:
+          NEXT_DEPLOYMENT_ID: inherited-from-the-runner
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          node "${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" deploy \
+            --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"
+
+      - name: Assert the build id IS the deploy tag (build + CR)
+        run: |
+          set -euo pipefail
+          built="$(cat "$APP_DIR/.next/BUILD_ID")"
+          echo ".next/BUILD_ID=${built} tag=${DEPLOY_TAG}"
+          if [ "$built" != "$DEPLOY_TAG" ]; then
+            echo "::error::.next/BUILD_ID is '${built}', want the deploy tag '${DEPLOY_TAG}'"; exit 1
+          fi
+          cr="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.buildId}')"
+          echo "spec.buildId=${cr}"
+          if [ "$cr" != "$DEPLOY_TAG" ]; then
+            echo "::error::NextApp spec.buildId is '${cr}', want '${DEPLOY_TAG}'"; exit 1
+          fi
+
+      - name: Wait for the NextApp to go Ready
+        run: |
+          set -euo pipefail
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$APP_NAME" \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
+
+      - name: Reach the cluster (kourier-internal port-forward) and hit /api/health
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          host="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          if [ -z "$host" ]; then
+            echo "::error::nextapp status.url is empty"; kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o yaml; exit 1
+          fi
+          code="$(curl -s -o /tmp/health-body.json -w '%{http_code}' -H "Host: ${host}" http://127.0.0.1:8080/api/health)"
+          echo "GET /api/health -> $code"
+          cat /tmp/health-body.json
+          if [ "$code" != "200" ]; then
+            echo "::error::/api/health returned $code, want 200"; exit 1
+          fi
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods -o wide 2>&1 || true
+          kubectl -n "$APP_NS" get "nextapp/$APP_NAME" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+          for p in $(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o name 2>/dev/null); do
+            kubectl -n "$APP_NS" logs "$p" --all-containers --tail=80 2>&1 || true
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true

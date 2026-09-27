@@ -38,6 +38,7 @@ import {
 } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import { compileArtifactForDeploy } from "./build-artifact";
+import { exportBuildIdEnv } from "./build-id-env";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -364,7 +365,10 @@ export async function defaultBuildAndPush(
     // Lock-step the preview tag with the PR/branch so the static prefix and the
     // image tag share an id (see deploy.ts #93 note). The tag is the build-id.
     const tag = `${previewName}-${Date.now()}`;
-    process.env.NEXT_DEPLOYMENT_ID = tag;
+    // #1417: same env shaping as `deploy` — KNEXT_BUILD_ID for every target,
+    // NEXT_DEPLOYMENT_ID only for vinext (on Next >= 16.2.11 it would make the
+    // standalone `next build` ignore generateBuildId).
+    exportBuildIdEnv(process.env, tag, config.build ?? DEFAULT_BUILDER_ID);
 
     // #644: same rule as `deploy`, and resolved at the same point — BEFORE the
     // build. The docker context is Next's file-tracing root (an explicit

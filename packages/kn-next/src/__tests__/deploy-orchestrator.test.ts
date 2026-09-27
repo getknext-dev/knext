@@ -553,6 +553,45 @@ describe("deploy() skew guard — standalone leg (ADR-0011 / #93)", () => {
         expect(applied()).toBe(false);
     });
 
+    it("Next's constant BUILD_ID (a deployment id reached next build) aborts with the one-sentence fix", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        readFileSyncMock.mockImplementation(pkgOr("build-TfctsWXpff2fKS"));
+
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow(
+            /^Update generateBuildId in next\.config to read KNEXT_BUILD_ID/,
+        );
+        expect(applied()).toBe(false);
+    });
+
+    it("the standalone `next build` sees KNEXT_BUILD_ID = tag and NO NEXT_DEPLOYMENT_ID, even one inherited from the shell", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        process.env.NEXT_DEPLOYMENT_ID = "inherited-from-ci";
+        let atBuild: { knext?: string; next?: string } | undefined;
+        runQuiet.mockImplementation((...a: unknown[]) => {
+            const argv = a[0] as string[];
+            if (argv?.includes("build")) {
+                order.push("build");
+                atBuild = {
+                    knext: process.env.KNEXT_BUILD_ID,
+                    next: process.env.NEXT_DEPLOYMENT_ID,
+                };
+            }
+        });
+
+        const deploy = await importDeploy();
+        await deploy();
+
+        expect(atBuild).toEqual({ knext: "deploytag", next: undefined });
+        // Removing a variable the user exported is said out loud.
+        expect(
+            logWarn.mock.calls.some((c) =>
+                JSON.stringify(c).includes("inherited-from-ci"),
+            ),
+        ).toBe(true);
+    });
+
     it("WARNS and PROCEEDS to apply when .next/BUILD_ID is MISSING (ENOENT)", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);
         // Simulate a missing file: readFileSync throws ENOENT.
@@ -603,6 +642,23 @@ describe("deploy() skew guard — vinext leg (T2a)", () => {
             expect.any(String),
             "deploytag",
         );
+    });
+
+    it("the vinext build still receives NEXT_DEPLOYMENT_ID (its ?dpl= source) alongside KNEXT_BUILD_ID", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        let atBuild: { knext?: string; next?: string } | undefined;
+        runQuiet.mockImplementation((...a: unknown[]) => {
+            const argv = a[0] as string[];
+            if (argv?.includes("build")) {
+                atBuild = {
+                    knext: process.env.KNEXT_BUILD_ID,
+                    next: process.env.NEXT_DEPLOYMENT_ID,
+                };
+            }
+        });
+        const deploy = await importDeploy();
+        await deploy();
+        expect(atBuild).toEqual({ knext: "deploytag", next: "deploytag" });
     });
 
     it("THROWS and aborts BEFORE apply when the tag's prefix is absent", async () => {
