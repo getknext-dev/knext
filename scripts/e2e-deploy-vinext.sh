@@ -44,12 +44,27 @@
 set -euo pipefail
 
 APP_DIR="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${APP_DIR}/.adapter-build.log"
 SERVER_LOG="${APP_DIR}/.adapter-server.log"
 BUILD_LOG="${APP_DIR}/.adapter-vite-build.log"
 BUILDER="vinext"
 
+# #1455 (F6, ADR-0060 decision 5): the empty-dir lane mode. Off by default and
+# dispatch-only — see §6c below for what it does and why it is EXPECTED to
+# fail against a real fixture until V1 (#1460) lands.
+KNEXT_SELF_CONTAINED="${KNEXT_SELF_CONTAINED:-0}"
+case "${KNEXT_SELF_CONTAINED}" in
+  0|1) ;;
+  *)
+    echo "[e2e-deploy-vinext] ERROR: KNEXT_SELF_CONTAINED must be 0 or 1, got '${KNEXT_SELF_CONTAINED}'" >&2
+    exit 1
+    ;;
+esac
+
 log() { echo "[e2e-deploy-vinext] $*" >&2; }
+# shellcheck source=lib/e2e-empty-dir.sh
+. "${SCRIPT_DIR}/lib/e2e-empty-dir.sh"
 
 free_port() {
   node -e 'const s=require("net").createServer();s.listen(0,()=>{const p=s.address().port;s.close(()=>console.log(p));});'
@@ -401,7 +416,20 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
 
   KNEXT_EXEC="${APP_DIR}/knext-exec-e2e"
   log "compiling the single executable (bun, bytecode, minified) → ${KNEXT_EXEC}"
-  if ! bun run "${COMPILE_SCRIPT}" --entry "${NITRO_ENTRY}" --outfile "${KNEXT_EXEC}" >&2; then
+  # #1455 (F6): forward the mode, mirroring F5's `--self-contained` CLI flag
+  # (packages/kn-next/src/cli/vinext-build.ts). This script does not go
+  # through `kn-next build` — it replicates its internals directly against
+  # the freshly-built fixture — so there is no other place to thread the
+  # flag. Neither this script nor vinext-compile.mjs reads it yet: it is a
+  # no-op today (F5's buildVinextExecutable "accepts it and does nothing
+  # else"), forward wiring for V1 (#1460), which is what actually embeds
+  # anything.
+  VINEXT_COMPILE_ARGS=()
+  if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+    VINEXT_COMPILE_ARGS+=(--self-contained true)
+  fi
+  if ! bun run "${COMPILE_SCRIPT}" --entry "${NITRO_ENTRY}" --outfile "${KNEXT_EXEC}" \
+    "${VINEXT_COMPILE_ARGS[@]+"${VINEXT_COMPILE_ARGS[@]}"}" >&2; then
     log "ERROR: the single-executable compile failed for this fixture"
     exit 1
   fi
@@ -424,9 +452,41 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
       break
     fi
   done
+
+  # ── 6c. the empty-dir lane check (#1455, ADR-0060 F6) ───────────────────────
+  # Off by default; KNEXT_SELF_CONTAINED=1 is dispatch-only. Stages a FRESH
+  # directory holding only the compiled exec + .output/public + native/ (if
+  # sharp was staged above), asserts nothing else is present, then boots it —
+  # bare, no docker: the vinext exec runs on the SAME platform as this script
+  # (unlike the standalone-on-Bun-musl lane), so a direct exec is correct here.
+  #
+  # EXPECTED TO FAIL against a real fixture until V1 (#1460) embeds what this
+  # exec still loads from disk (ADR-0060 §Context — the asset root is still
+  # baked as the BUILD machine's absolute path). The guard and its own
+  # staging/cleanliness half are unit- and mutation-tested
+  # (tests/e2e-empty-dir.test.ts, scripts/mutation-prove-empty-dir-guard.mjs)
+  # against a synthetic fixture, not against this real one. Fail-closed, no
+  # silent fallback to the normal boot below.
+  if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+    EMPTY_DIR="$(mktemp -d "${APP_DIR}/.knext-empty-dir.XXXXXX")"
+    EMPTY_DIR_PORT="$(free_port)"
+    log "KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check into ${EMPTY_DIR}"
+    if ! ed_check_or_die "vinext" "${EMPTY_DIR}" "${KNEXT_EXEC}" /api/health / "${EMPTY_DIR_PORT}" \
+      "${APP_DIR}/.output/public:.output/public" "${APP_DIR}/native:native"; then
+      log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until V1 (#1460) embeds what this exec still loads from disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
+      exit 1
+    fi
+    log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"
+  fi
 else
   KNEXT_EXEC=""
   log "KNEXT_COMPILE=0 — DIAGNOSTIC uncompiled boot: skipping the single-executable compile (§5) and sharp staging (§6); the UNCOMPILED nitro output will be booted under bun (partitions compile-step bugs from vite-pipeline/runtime bugs)"
+  if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+    # #1455: self-containment is only meaningful for the COMPILED binary —
+    # this diagnostic boot always needs the uncompiled nitro output +
+    # node_modules on disk. No binary here for the empty-dir check to test.
+    log "WARNING: KNEXT_SELF_CONTAINED=1 has no effect on this deploy (KNEXT_COMPILE=0) — the empty-dir lane check only applies to the compiled single executable"
+  fi
 fi
 
 # ── 6b. resolve the Bun.serve keep-alive guard (BOTH boot paths load it) ───────

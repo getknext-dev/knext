@@ -59,6 +59,11 @@
  *      equality operand, or the right side of `in`. Disarming it (short-
  *      circuiting to `return false` at the top) must silently let both
  *      shapes back through as clean.
+ *  11. THE MODE MUST MOVE THE DIGEST (#1455, ADR-0060 F6) — `--self-contained`
+ *      is folded into the digest so a self-contained window can never be
+ *      mistaken for a disk-mode one. Disarming the fold collapses both modes
+ *      onto the SAME fingerprint, silently defeating #1455's whole point (a
+ *      mode change with no file change must still restart the streak).
  *  (#1422's named-exception scoping guards live in their own prover,
  *  `mutation-prove-execution-scan-spec.mjs`.)
  *
@@ -71,8 +76,8 @@
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
- *   * `declareMutations`/`recordMutation` — the lane can tell 9-of-10 from
- *     10-of-10;
+ *   * `declareMutations`/`recordMutation` — the lane can tell 10-of-11 from
+ *     11-of-11;
  *   * judged on EXIT CODES, never on grepped output — vitest/bun:test write
  *     ANSI, and a pass/fail grep over it once certified fourteen decorative
  *     mutations green.
@@ -97,7 +102,7 @@ const SPECS = [
   'tests/compat-window-fingerprint-execution-scan.test.ts',
 ];
 
-declareMutations(10);
+declareMutations(11);
 
 const RUNNERS = SPECS.map((spec) => ({ spec, runner: resolveSpecRunner(REPO_ROOT, spec) }));
 
@@ -261,6 +266,16 @@ prove(
   'a global object escaping as a value stops being a hard error: isAmbientRootEscape always returns false',
   'const isAmbientRootEscape = (node) => {\n    if (',
   'const isAmbientRootEscape = (node) => {\n    return false;\n    if (',
+);
+
+// 11. THE #1455 (F6) exit criterion: the self-contained mode must move the
+//     digest. Disarming the fold means a self-contained fingerprint and its
+//     disk-mode twin (same harness, same packed closure) become identical —
+//     exactly the collapse #1455 exists to prevent.
+prove(
+  'KNEXT_SELF_CONTAINED stops moving the digest: disarm the selfContained fold',
+  'const selfContainedComponent = collectSelfContainedComponent({ selfContained });\n  if (selfContainedComponent !== null) {\n    components.selfContained = selfContainedComponent;\n    digestInput += `selfContained\\t${selfContainedComponent}\\n`;\n  }',
+  'const selfContainedComponent = collectSelfContainedComponent({ selfContained });',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

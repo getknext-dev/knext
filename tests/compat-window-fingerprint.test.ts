@@ -440,6 +440,88 @@ describe('compat-window fingerprint — the observed Bun build is folded ONLY on
   });
 });
 
+describe('compat-window fingerprint — KNEXT_SELF_CONTAINED is folded into the digest (#1455, ADR-0060 F6)', () => {
+  /** Run the fingerprint with the self-contained flag on/off. */
+  function fingerprintWithMode(
+    repoRoot: string,
+    tarballsDir: string,
+    selfContained: boolean,
+  ): {
+    fingerprint: string;
+    components: Record<string, string>;
+    recorded: Record<string, unknown>;
+  } {
+    const args = [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json'];
+    if (selfContained) args.push('--self-contained');
+    const out = execFileSync(process.execPath, args, { encoding: 'utf8' });
+    return JSON.parse(out);
+  }
+
+  // THE property this whole describe block exists to pin (#1455): a
+  // self-contained window and a disk-mode window must NEVER share a
+  // fingerprint, even when the harness and packed closure are byte-identical.
+  it('self-contained ON produces a DIFFERENT fingerprint than the same tree with it OFF', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const off = fingerprintWithMode(repoRoot, tarballsDir, false);
+    const on = fingerprintWithMode(repoRoot, tarballsDir, true);
+    expect(on.fingerprint).not.toBe(off.fingerprint);
+    // The move is attributable to the mode alone — harness/packed untouched.
+    expect(on.components.harness).toBe(off.components.harness);
+    expect(on.components.packed).toBe(off.components.packed);
+    expect(on.components.selfContained).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(off.components).not.toHaveProperty('selfContained');
+  });
+
+  // The STRICTLY-ADDITIVE guarantee, same shape as the #1147 runtime-fold
+  // test above: every caller before #1455, and every disk-mode caller after
+  // it, must see the byte-identical pre-#1455 digest. Not folding this would
+  // silently mean "self-contained mode is not distinguishable from disk mode"
+  // — exactly the mutation #1455's own mutation-prover targets.
+  it('OFF (the default) is byte-identical to the pre-#1455 digest', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const plain = fingerprint(repoRoot, tarballsDir);
+    const explicitlyOff = fingerprintWithMode(repoRoot, tarballsDir, false);
+    expect(explicitlyOff.fingerprint).toBe(plain.fingerprint);
+    expect(Object.keys(explicitlyOff.components).sort()).toEqual(['harness', 'packed']);
+  });
+
+  it('the mode is recorded verbatim, legible without re-deriving it from the hash', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const on = fingerprintWithMode(repoRoot, tarballsDir, true);
+    const off = fingerprintWithMode(repoRoot, tarballsDir, false);
+    expect(on.recorded.selfContained).toEqual({ value: true, frozen: true });
+    expect(off.recorded.selfContained).toEqual({ value: false, frozen: false });
+  });
+
+  // Composes correctly with the OTHER strictly-additive fold (the bun-build
+  // identity, #1147): turning self-contained on must not disturb a runtime
+  // fold that is also present, and vice versa.
+  it('composes with the runtime (bun-build) fold without disturbing it', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const args = [
+      SCRIPT,
+      '--repo-root',
+      repoRoot,
+      '--tarballs-dir',
+      tarballsDir,
+      '--runtime-version',
+      '1.4.2',
+      '--runtime-revision',
+      'cccccccccccc',
+      '--json',
+    ];
+    const withoutSelfContained = JSON.parse(
+      execFileSync(process.execPath, args, { encoding: 'utf8' }),
+    );
+    const withSelfContained = JSON.parse(
+      execFileSync(process.execPath, [...args, '--self-contained'], { encoding: 'utf8' }),
+    );
+    expect(withSelfContained.fingerprint).not.toBe(withoutSelfContained.fingerprint);
+    expect(withSelfContained.components.runtime).toBe(withoutSelfContained.components.runtime);
+    expect(withSelfContained.components.selfContained).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+});
+
 describe('compat-window fingerprint — suite provenance is RECORDED, not frozen', () => {
   /** A throwaway git repo standing in for the nightly `next.js` checkout. */
   function fakeNextJsCheckout(): { dir: string; head: string } {

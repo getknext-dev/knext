@@ -51,6 +51,18 @@
  * gate, PR-time and app-side. Confusing the two is the likeliest way to widen
  * this scope by accident.
  *
+ * THE MODE (#1455, ADR-0060 decision 5 / action item F6). `KNEXT_SELF_CONTAINED=1`
+ * changes what a night's DEPLOYS actually boot from (an empty dir, nothing else)
+ * without changing a single byte of the harness or the packed closure — so it
+ * MUST be folded into the digest itself, not left to the file-content halves
+ * above to notice. `--self-contained` is a bare flag (present ⇒ true); its
+ * absence (every caller before #1455, and every disk-mode caller after it) must
+ * yield the byte-identical pre-#1455 digest — the same "STRICTLY ADDITIVE"
+ * contract #1147's `--runtime-version`/`--runtime-revision` already keep for the
+ * bun-build fold below, so a self-contained window and a disk-mode window can
+ * never be mistaken for the same streak, and disk-mode nights are never reset by
+ * this code path.
+ *
  * PER-CELL WORKFLOW ENTRY (#1294). The harness has exactly one `harness` file
  * entry — the workflow that EXECUTED — but which *file* that is depends on the
  * lane: the node and bun (turbopack) cells run from `test-e2e-deploy.yml`, the
@@ -70,6 +82,7 @@
  *     [--next-js-dir next.js] [--next-tarball next-prebuilt/next.tgz] \
  *     [--next-ref v16.2.0] \
  *     [--workflow-file knext-executing/.github/workflows/test-e2e-deploy.yml] \
+ *     [--self-contained] \
  *     [--out compat-window-fingerprint.json] [--json] [--files]
  */
 
@@ -1586,7 +1599,24 @@ function collectRuntimeComponent({ runtimeVersion, runtimeRevision }) {
 }
 
 /**
- * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null, workflowFile?: string | null, lane?: string }} options
+ * The self-contained-mode component (#1455, ADR-0060 decision 5).
+ *
+ * `false` (the default, every caller before #1455) folds NOTHING — the digest
+ * stays byte-identical to the pre-#1455 formula, exactly like the absent-runtime
+ * case above. `true` folds a fixed marker, so the ONLY thing a self-contained
+ * fingerprint can ever share with a disk-mode one is the harness+packed halves;
+ * the two can never collapse into the same streak.
+ *
+ * @param {{ selfContained?: boolean }} options
+ * @returns {string | null}
+ */
+function collectSelfContainedComponent({ selfContained }) {
+  if (!selfContained) return null;
+  return `sha256:${sha256('selfContained\ttrue')}`;
+}
+
+/**
+ * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null, runtimeVersion?: string | null, runtimeRevision?: string | null, workflowFile?: string | null, lane?: string, selfContained?: boolean }} options
  */
 export function computeFingerprint({
   repoRoot,
@@ -1602,13 +1632,16 @@ export function computeFingerprint({
   // the same `test-e2e-deploy.yml` entry the un-lane-aware formula always used,
   // so an un-migrated caller's digest is byte-identical.
   lane = CREDENTIAL_LANE,
+  // #1455 (F6): KNEXT_SELF_CONTAINED=1. Defaults false — every pre-#1455 caller
+  // and every disk-mode caller after it gets the byte-identical formula.
+  selfContained = false,
 }) {
   const harness = collectHarness(repoRoot, lane, { workflowFile });
   const { entries: packed, packages } = collectPacked(tarballsDir);
 
   const harnessLines = harness.map((e) => e.line).sort();
   const packedLines = packed.map((e) => e.line).sort();
-  /** @type {{ harness: string, packed: string, runtime?: string }} */
+  /** @type {{ harness: string, packed: string, runtime?: string, selfContained?: string }} */
   const components = {
     harness: `sha256:${sha256(harnessLines.join('\n'))}`,
     packed: `sha256:${sha256(packedLines.join('\n'))}`,
@@ -1622,6 +1655,14 @@ export function computeFingerprint({
   if (runtimeComponent !== null) {
     components.runtime = runtimeComponent;
     digestInput += `runtime\t${runtimeComponent}\n`;
+  }
+  // #1455 (F6): folded AFTER runtime, same "append only when non-default"
+  // discipline — a disk-mode caller's digest (selfContained: false/absent)
+  // never moves because of this line.
+  const selfContainedComponent = collectSelfContainedComponent({ selfContained });
+  if (selfContainedComponent !== null) {
+    components.selfContained = selfContainedComponent;
+    digestInput += `selfContained\t${selfContainedComponent}\n`;
   }
   const fingerprint = `sha256:${sha256(digestInput)}`;
 
@@ -1641,6 +1682,9 @@ export function computeFingerprint({
         revision: runtimeRevision == null || runtimeRevision === '' ? null : runtimeRevision,
         frozen: runtimeComponent !== null,
       },
+      // #1455: recorded verbatim too, so a reader sees the mode without
+      // re-deriving it from the opaque component hash.
+      selfContained: { value: Boolean(selfContained), frozen: selfContainedComponent !== null },
     },
     counts: { harness: harness.length, packed: packed.length },
     packages,
@@ -1683,6 +1727,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       workflowFile: arg('workflow-file', null),
       // #1294: which cell's workflow entry to hash — defaults to CREDENTIAL_LANE.
       lane: arg('lane', CREDENTIAL_LANE),
+      // #1455 (F6): KNEXT_SELF_CONTAINED=1 — a bare flag, absent ⇒ false, so a
+      // caller that has never heard of it (every one before #1455) gets the
+      // unfolded, byte-identical digest.
+      selfContained: flag('self-contained'),
     });
   } catch (error) {
     console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
@@ -1718,6 +1766,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     } else {
       console.log('  runtime identity: none (node lane — nothing folded)');
     }
+    console.log(
+      result.recorded.selfContained.frozen
+        ? '  KNEXT_SELF_CONTAINED=1 (FROZEN into the digest, #1455) — a disk-mode window cannot match this fingerprint'
+        : '  KNEXT_SELF_CONTAINED: off (disk mode — nothing folded)',
+    );
     if (out) console.log(`  written to ${relative(process.cwd(), resolve(out))}`);
   }
 }

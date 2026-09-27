@@ -29,9 +29,23 @@ LOG_FILE="${APP_DIR}/.adapter-build.log"
 SERVER_LOG="${APP_DIR}/.adapter-server.log"
 RUNTIME="${KNEXT_RUNTIME:-node}"   # node (default) | bun  (bun = fast-follow target)
 
+# #1455 (F6, ADR-0060 decision 5): the empty-dir lane mode. Off by default and
+# dispatch-only — see step 3b-ii below for what it does and why it is EXPECTED
+# to fail against a real fixture until N1 (#1456) lands.
+KNEXT_SELF_CONTAINED="${KNEXT_SELF_CONTAINED:-0}"
+case "${KNEXT_SELF_CONTAINED}" in
+  0|1) ;;
+  *)
+    echo "[e2e-deploy] ERROR: KNEXT_SELF_CONTAINED must be 0 or 1, got '${KNEXT_SELF_CONTAINED}'" >&2
+    exit 1
+    ;;
+esac
+
 log() { echo "[e2e-deploy] $*" >&2; }
 # shellcheck source=lib/e2e-state-snapshot.sh
 . "${SCRIPT_DIR}/lib/e2e-state-snapshot.sh"
+# shellcheck source=lib/e2e-empty-dir.sh
+. "${SCRIPT_DIR}/lib/e2e-empty-dir.sh"
 
 # ── pick a free TCP port ──────────────────────────────────────────────────────
 free_port() {
@@ -515,12 +529,25 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     # compile script's own bytecode-pragma proof.
     MARKER="knext-standalone-exec:$(node -e 'process.stdout.write(require("node:crypto").randomBytes(12).toString("hex"))')"
     log "compiling the standalone-on-Bun bytecode executable (${STANDALONE_COMPILE_JS})"
+    # #1455 (F6): forward the mode to the compile step, mirroring F5's
+    # `--self-contained` CLI flag (packages/kn-next/src/cli/build.ts). This
+    # script does not go through `kn-next build` — it replicates its
+    # internals directly against the freshly-built fixture — so there is no
+    # other place to thread the flag. Neither this script nor
+    # standalone-compile.mjs reads it yet: it is a no-op today (F5's
+    # buildStandaloneExecutable "accepts it and does nothing else"), forward
+    # wiring for N1 (#1456), which is what actually embeds anything.
+    STANDALONE_COMPILE_ARGS=()
+    if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+      STANDALONE_COMPILE_ARGS+=(--self-contained true)
+    fi
     bun run "${STANDALONE_COMPILE_JS}" \
       --server "${SERVER_JS}" \
       --root "${STANDALONE_ROOT}" \
       --outfile "${STANDALONE_EXEC}" \
       --target bun-linux-x64-musl \
-      --marker "${MARKER}" >&2
+      --marker "${MARKER}" \
+      "${STANDALONE_COMPILE_ARGS[@]+"${STANDALONE_COMPILE_ARGS[@]}"}" >&2
     log "compiled + bytecode-verified: ${STANDALONE_EXEC}"
 
     # ── 3c. rebuild native (*.node) addons for musl, inside the same pinned
@@ -555,10 +582,68 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
       -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:ro" \
       "${STANDALONE_BUN_IMAGE}" \
       sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" /musl-native-lockfiles >&2
+
+    # ── 3c-ii. the empty-dir lane check (#1455, ADR-0060 F6) ─────────────────
+    # Off by default; KNEXT_SELF_CONTAINED=1 is dispatch-only. Stages a FRESH
+    # directory holding only the compiled exec + .next/static + public/ (+
+    # native/, if the fixture staged any), asserts nothing else is present,
+    # then boots it — inside the SAME pinned musl image the main boot uses
+    # below (a musl exec cannot run bare on this glibc runner, so this is not
+    # optional plumbing).
+    #
+    # EXPECTED TO FAIL against a real fixture until N1 (#1456) embeds what
+    # this exec still loads from disk (ADR-0060 §Context) — the guard and its
+    # own staging/cleanliness half are unit- and mutation-tested
+    # (tests/e2e-empty-dir.test.ts, scripts/mutation-prove-empty-dir-guard.mjs)
+    # against a synthetic fixture, not against this real one. Fail-closed, no
+    # silent fallback to the disk-mode boot below: a requested check that
+    # cannot pass is a hard `exit 1`, exactly like every other fail-closed gate
+    # in this script (the compile step above, the docker requirement).
+    if [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+      EMPTY_DIR="$(mktemp -d "${APP_DIR}/.knext-empty-dir.XXXXXX")"
+      EMPTY_DIR_PORT="$(free_port)"
+      EMPTY_DIR_UID_GID="$(id -u):$(id -g)"
+      EMPTY_DIR_CONTAINER="knext-e2e-empty-dir-${DEPLOYMENT_ID}"
+      EMPTY_DIR_COPY_SPECS=("${STANDALONE_APP_DIR}/.next/static:.next/static" "${STANDALONE_APP_DIR}/public:public")
+      log "KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check into ${EMPTY_DIR}"
+      EMPTY_DIR_STAGED="$(ed_stage "${EMPTY_DIR}" "${STANDALONE_EXEC}" "${EMPTY_DIR_COPY_SPECS[@]}")" || {
+        log "ERROR: KNEXT_SELF_CONTAINED=1 — staging the empty-dir lane check failed"
+        exit 1
+      }
+      ed_assert_clean "${EMPTY_DIR}" || {
+        log "ERROR: KNEXT_SELF_CONTAINED=1 — the staged empty dir is not clean — see above"
+        exit 1
+      }
+      log "KNEXT_SELF_CONTAINED=1 — booting $(basename "${EMPTY_DIR_STAGED}") from ${EMPTY_DIR} inside ${STANDALONE_BUN_IMAGE} (nothing else present)"
+      if ! ed_boot_probe_kill "${EMPTY_DIR_PORT}" /api/health / \
+        docker run --rm --name "${EMPTY_DIR_CONTAINER}" \
+        --network host \
+        --user "${EMPTY_DIR_UID_GID}" \
+        -e PORT="${EMPTY_DIR_PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
+        -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+        -v "${EMPTY_DIR}:${EMPTY_DIR}" \
+        -w "${EMPTY_DIR}" \
+        "${STANDALONE_BUN_IMAGE}" \
+        "./$(basename "${EMPTY_DIR_STAGED}")"; then
+        log "ERROR: KNEXT_SELF_CONTAINED=1 — the empty-dir lane check failed. Until N1 (#1456) embeds what this exec still loads from .next/server/** on disk, this is EXPECTED for any real fixture — that is exactly why the mode defaults off and is dispatch-only (ADR-0060)."
+        docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true
+        exit 1
+      fi
+      log "KNEXT_SELF_CONTAINED=1 — empty-dir lane check passed"
+      docker rm -f "${EMPTY_DIR_CONTAINER}" >/dev/null 2>&1 || true
+    fi
   else
     log "ERROR: KNEXT_E2E_SKIP_PACK=1 has no installed adapter to resolve the compile script from, but RUNTIME=bun was requested — refusing to silently fall back to server.js (contract-test mode is not expected to combine these)"
     exit 1
   fi
+elif [ "${KNEXT_SELF_CONTAINED}" = "1" ]; then
+  # #1455: on this axis, self-containment is only meaningful for the compiled
+  # exec (the branch above) — RUNTIME=node boots the standalone server.js
+  # interpreted, which always needs the traced node_modules on disk beside
+  # it, and the sandbox-fetch-debug lane needs the SAME. There is no binary
+  # here for the empty-dir check to test, so this is a documented no-op, never
+  # a silent one.
+  log "WARNING: KNEXT_SELF_CONTAINED=1 has no effect on this deploy (RUNTIME=${RUNTIME}, KNEXT_SANDBOX_FETCH_DEBUG=${KNEXT_SANDBOX_FETCH_DEBUG:-0}) — the empty-dir lane check only applies to the compiled Bun executable"
 fi
 
 # ── 3d. bake the V8 compile cache with KNEXT'S OWN driver (node runtime) ──────
