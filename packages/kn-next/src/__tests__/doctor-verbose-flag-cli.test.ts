@@ -74,40 +74,48 @@ function runDoctor(flags: string[]) {
 describe("end-to-end: `knext doctor --verbose` threads to the raw diagnostic (#1535 round 2)", () => {
     const probe = spawnSync(bun, ["--version"], { encoding: "utf8" });
 
-    it.skipIf(!!probe.error)(
-        "without --verbose: the short actionable sentence only, no raw diagnostic",
-        () => {
-            const r = runDoctor([]);
-            const combined = `${r.stdout}${r.stderr}`;
-            expect(r.status).toBe(0);
-            expect(combined).toContain("No Kubernetes cluster configured.");
-            expect(combined).not.toContain("[--verbose]");
-            expect(combined).not.toContain("no kubeconfig found (searched:");
-        },
-    );
+    // #1535 round 3: this suite is the ONLY end-to-end pin for `--verbose` —
+    // it must never silently skip. A `skipIf(!!probe.error)` here reports
+    // the same green whether bun spawned or not, which is exactly the
+    // "control that reports success while inert" class this repo keeps
+    // finding (round 2 review, R2-B3). Asserting `probe.error` is unset as
+    // each test's first statement makes a spawn failure a LOUD failure,
+    // carrying the real probe error in the assertion message, instead of a
+    // vanished test.
+    const bunSpawned = () =>
+        expect(
+            probe.error,
+            `bun failed to spawn (${bun}) — this end-to-end pin cannot skip, it must fail`,
+        ).toBeUndefined();
 
-    it.skipIf(!!probe.error)(
-        "with --verbose: the raw diagnostic (including the searched path) is appended",
-        () => {
-            const r = runDoctor(["--verbose"]);
-            const combined = `${r.stdout}${r.stderr}`;
-            expect(r.status).toBe(0);
-            expect(combined).toContain("No Kubernetes cluster configured.");
-            expect(combined).toContain("[--verbose]");
-            expect(combined).toContain("no kubeconfig found (searched:");
-            expect(combined).toContain(r.kubeconfig);
-        },
-    );
+    it("without --verbose: the short actionable sentence only, no raw diagnostic", () => {
+        bunSpawned();
+        const r = runDoctor([]);
+        const combined = `${r.stdout}${r.stderr}`;
+        expect(r.status).toBe(0);
+        expect(combined).toContain("No Kubernetes cluster configured.");
+        expect(combined).not.toContain("[--verbose]");
+        expect(combined).not.toContain("no kubeconfig found (searched:");
+    });
 
-    it.skipIf(!!probe.error)(
-        "an unrelated unknown flag is still rejected (parser strictness unchanged by --verbose)",
-        () => {
-            const r = spawnSync(bun, [entry, "doctor", "--not-a-real-flag"], {
-                encoding: "utf8",
-                env: { ...process.env, NO_COLOR: "1" },
-            });
-            expect(r.status).not.toBe(0);
-            expect(`${r.stdout}${r.stderr}`).toContain("unknown argument");
-        },
-    );
+    it("with --verbose: the raw diagnostic (including the searched path) is appended", () => {
+        bunSpawned();
+        const r = runDoctor(["--verbose"]);
+        const combined = `${r.stdout}${r.stderr}`;
+        expect(r.status).toBe(0);
+        expect(combined).toContain("No Kubernetes cluster configured.");
+        expect(combined).toContain("[--verbose]");
+        expect(combined).toContain("no kubeconfig found (searched:");
+        expect(combined).toContain(r.kubeconfig);
+    });
+
+    it("an unrelated unknown flag is still rejected (parser strictness unchanged by --verbose)", () => {
+        bunSpawned();
+        const r = spawnSync(bun, [entry, "doctor", "--not-a-real-flag"], {
+            encoding: "utf8",
+            env: { ...process.env, NO_COLOR: "1" },
+        });
+        expect(r.status).not.toBe(0);
+        expect(`${r.stdout}${r.stderr}`).toContain("unknown argument");
+    });
 });

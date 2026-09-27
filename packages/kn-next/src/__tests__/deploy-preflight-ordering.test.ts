@@ -32,6 +32,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // bun types `mockResolvedValue`/`mockReturnValue` off the declared return
 // type. A mock returning `unknown` is not Promise-shaped, so every
@@ -134,25 +135,7 @@ mock.module("../cli/schema/kubectl-capture", () => ({
         // preflight ORDERING, not the reconcile wait, so short-circuit that one
         // call to "already reconciled".
         if (argv[1] === "get" && argv[2] === "nextapp") {
-            return {
-                ok: true,
-                stdout: JSON.stringify({
-                    // #1535 round 2: reconciled now requires a condition at
-                    // (or after) metadata.generation, not just a non-empty
-                    // conditions array.
-                    metadata: { generation: 1 },
-                    status: {
-                        conditions: [
-                            {
-                                type: "Ready",
-                                status: "True",
-                                observedGeneration: 1,
-                            },
-                        ],
-                    },
-                }),
-                stderr: "",
-            };
+            return reconciledNextAppCapture();
         }
         return kubectl(argv);
     },

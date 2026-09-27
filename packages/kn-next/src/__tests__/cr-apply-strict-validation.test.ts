@@ -57,6 +57,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // bun types `mockResolvedValue`/`mockReturnValue` off the declared return
 // type. A mock returning `unknown` is not Promise-shaped, so every
@@ -149,21 +150,7 @@ mock.module("../cli/build-artifact", () => ({
 // (`kubectl get nextapp -o json`) — an always-empty stdout reads as "never
 // reconciled" and blocks on the real 15s default wait.
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({
-        ok: true,
-        stdout: JSON.stringify({
-            // #1535 round 2: reconciled now requires a condition whose
-            // observedGeneration is at least metadata.generation — both
-            // must be present, not just a non-empty conditions array.
-            metadata: { generation: 1 },
-            status: {
-                conditions: [
-                    { type: "Ready", status: "True", observedGeneration: 1 },
-                ],
-            },
-        }),
-        stderr: "",
-    }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));

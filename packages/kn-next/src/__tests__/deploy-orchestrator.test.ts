@@ -37,6 +37,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // ---------------------------------------------------------------------------
 // Module mocks for every side-effecting seam. deploy.ts imports these by name;
@@ -194,26 +195,13 @@ const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 // status is safe for both callers and keeps this suite's ordering assertions
 // off a real 15s poll (a `stdout: ""` here made every test that reaches the
 // apply step time out for real, since the poll never sees a condition).
+// #1535 round 2: superseded for THIS suite's reconcile-wait wiring tests by
+// the `../cli/deploy-reconcile-wait` module mock below, which controls
+// `waitForOperatorReconcile`'s result directly — this fixture stays
+// realistic (reconciled) for the OTHER callers of captureKubectl (the
+// dry-run preflight).
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({
-        ok: true,
-        stdout: JSON.stringify({
-            // #1535 round 2: reconciled now requires a condition at (or
-            // after) metadata.generation, not just a non-empty conditions
-            // array. Superseded for THIS suite's reconcile-wait wiring tests
-            // by the `../cli/deploy-reconcile-wait` module mock below, which
-            // controls `waitForOperatorReconcile`'s result directly — this
-            // fixture stays realistic for the OTHER callers of captureKubectl
-            // (the dry-run preflight).
-            metadata: { generation: 1 },
-            status: {
-                conditions: [
-                    { type: "Ready", status: "True", observedGeneration: 1 },
-                ],
-            },
-        }),
-        stderr: "",
-    }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 // #1535 round 2 (B2): pin deploy.ts's WIRING to waitForOperatorReconcile's
@@ -486,7 +474,8 @@ describe("deploy() reconcile-wait wiring (#1535 round 2 — mutation-pinned)", (
         expect(
             logInfo.mock.calls.some(
                 (c) =>
-                    c[0]?.url === "https://my-app.example.com" &&
+                    (c[0] as { url?: string } | undefined)?.url ===
+                        "https://my-app.example.com" &&
                     c[1] === "Deployment submitted — operator is reconciling",
             ),
         ).toBe(true);

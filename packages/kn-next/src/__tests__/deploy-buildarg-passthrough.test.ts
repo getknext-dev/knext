@@ -40,6 +40,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // biome-ignore lint/suspicious/noExplicitAny: thin mock factory plumbing
 type AnyFn = (...args: unknown[]) => any;
@@ -115,13 +116,7 @@ mock.module("../cli/runtime-image", () => ({
 const runAssetGC = mock<AnyFn>(() => ({ pruned: true }));
 
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({
-        ok: true,
-        stdout: JSON.stringify({
-            status: { conditions: [{ type: "Ready", status: "True" }] },
-        }),
-        stderr: "",
-    }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 mock.module("../utils/logger", () => ({

@@ -25,6 +25,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // bun types `mockResolvedValue`/`mockReturnValue` off the declared return
 // type. A mock returning `unknown` is not Promise-shaped, so every
@@ -116,13 +117,7 @@ mock.module("../cli/gc", () => ({
 }));
 
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({
-        ok: true,
-        stdout: JSON.stringify({
-            status: { conditions: [{ type: "Ready", status: "True" }] },
-        }),
-        stderr: "",
-    }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 // Capture the announcement: deploy logs through createLogger().

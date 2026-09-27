@@ -33,6 +33,7 @@ import {
     mock,
 } from "bun:test";
 import type { KnativeNextConfig } from "../config";
+import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
 // biome-ignore lint/suspicious/noExplicitAny: the return must be `any` so bun's mockResolvedValue/mockReturnValue type off the declared return (see the orchestrator suite)
 type AnyFn = (...args: unknown[]) => any;
@@ -95,13 +96,7 @@ mock.module("../cli/gc", () => ({
 }));
 
 mock.module("../cli/schema/kubectl-capture", () => ({
-    captureKubectl: () => ({
-        ok: true,
-        stdout: JSON.stringify({
-            status: { conditions: [{ type: "Ready", status: "True" }] },
-        }),
-        stderr: "",
-    }),
+    captureKubectl: () => reconciledNextAppCapture(),
 }));
 
 const logWarn = mock<AnyFn>();
