@@ -48,11 +48,13 @@ const STUBS: Record<string, string> = {
     'f="$REC/npm.$$"',
     `printf '%s' "\${${FLAG}-<unset>}" > "$f.flag"`,
     `printf '%s\\n' "$@" > "$f.argv"`,
+    // The env twin of `--ignore-scripts`: either would stop sqlite3's install script (the build).
+    `printf '%s|%s' "\${npm_config_ignore_scripts-<unset>}" "\${NPM_CONFIG_IGNORE_SCRIPTS-<unset>}" > "$f.ign"`,
     'exit 0',
   ].join('\n'),
 };
 
-type Call = { flag: string; argv: string[] };
+type Call = { flag: string; argv: string[]; ign?: string };
 
 function pkg(root: string, rel: string, manifest: object) {
   const dir = join(root, 'node_modules', rel);
@@ -99,6 +101,7 @@ function run(scriptPath = SCRIPT_PATH): { status: number | null; calls: Call[]; 
       calls.push({
         flag: readFileSync(`${base}.flag`, 'utf8'),
         argv: readFileSync(`${base}.argv`, 'utf8').split('\n').slice(0, -1),
+        ign: readFileSync(`${base}.ign`, 'utf8'),
       });
     }
     return { status: r.status, calls, out: `${r.stdout}\n${r.stderr}` };
@@ -110,6 +113,27 @@ function run(scriptPath = SCRIPT_PATH): { status: number | null; calls: Call[]; 
 /** The npm invocations that would NOT have built from source. */
 const offenders = (calls: Call[]) =>
   calls.filter((c) => c.flag !== 'true' || c.argv.some((a) => /build.from.source/i.test(a)));
+
+/**
+ * EXACT argv per call. A "no argv word mentions the flag" check lets any EXTRA word through —
+ * `--ignore-scripts` (the flag is set but sqlite3's install script never runs, so nothing is built
+ * for musl) or `--dry-run` — so pin the whole vector. `install` sites differ only in the trailing
+ * spec, which must be a `name@version` and (set-compared below) exactly the three unpinned ones.
+ */
+const CI_ARGV = ['ci', '--no-audit', '--no-fund'];
+const INSTALL_HEAD = ['install', '--no-save', '--no-audit', '--no-fund'];
+const argvViolations = (calls: Call[]) =>
+  calls.filter((c) => {
+    if (c.argv[0] === 'ci') return JSON.stringify(c.argv) !== JSON.stringify(CI_ARGV);
+    if (c.argv[0] === 'install')
+      return (
+        c.argv.length !== INSTALL_HEAD.length + 1 ||
+        JSON.stringify(c.argv.slice(0, INSTALL_HEAD.length)) !== JSON.stringify(INSTALL_HEAD) ||
+        !/^@?[^@\s]+@[^@\s]+$/.test(c.argv[INSTALL_HEAD.length])
+      );
+    return true;
+  });
+const scriptsDisabled = (calls: Call[]) => calls.filter((c) => c.ign !== '<unset>|<unset>');
 
 describe('the musl rebuild runs every npm install with npm_config_build_from_source=true (#1426)', () => {
   it('static anchor: exactly four run_as_builder npm ci/install invocations exist (the behaviour run below must reach all four)', () => {
@@ -127,6 +151,19 @@ describe('the musl rebuild runs every npm install with npm_config_build_from_sou
     expect(calls.filter((c) => c.argv.includes('ci')).length, out).toBe(3);
     expect(calls.filter((c) => c.argv.includes('install')).length, out).toBe(3);
     expect(offenders(calls)).toEqual([]);
+    // Exact argv: no extra word (--ignore-scripts, --dry-run, --foo) at ANY site.
+    expect(argvViolations(calls)).toEqual([]);
+    expect(scriptsDisabled(calls)).toEqual([]);
+    expect(
+      calls
+        .filter((c) => c.argv[0] === 'install')
+        .map((c) => c.argv[INSTALL_HEAD.length])
+        .sort(),
+    ).toEqual([
+      '@img/sharp-libvips-linuxmusl-arm64@0.0.1',
+      '@img/sharp-linuxmusl-arm64@0.0.1',
+      'nolock@1.0.0',
+    ]);
   });
 
   it('the recorder is real: an npm stub that cannot see the flag is reported as an offender', () => {
@@ -135,5 +172,24 @@ describe('the musl rebuild runs every npm install with npm_config_build_from_sou
     expect(offenders([{ flag: '\n\ntrue', argv: ['ci'] }]).length).toBe(1);
     expect(offenders([{ flag: 'true', argv: ['ci', '--build_from_source=false'] }]).length).toBe(1);
     expect(offenders([{ flag: 'true', argv: ['ci', '--no-audit'] }])).toEqual([]);
+  });
+
+  it('the argv guard is real: any extra/missing word on ci or install is a violation, the exact vectors are not', () => {
+    const ok = { flag: 'true', ign: '<unset>|<unset>' };
+    expect(argvViolations([{ ...ok, argv: CI_ARGV }])).toEqual([]);
+    expect(argvViolations([{ ...ok, argv: [...INSTALL_HEAD, 'a@1.0.0'] }])).toEqual([]);
+    for (const argv of [
+      [...CI_ARGV, '--ignore-scripts'],
+      [...CI_ARGV, '--dry-run'],
+      ['ci', '--no-fund'],
+      [...INSTALL_HEAD, 'a@1.0.0', '--foo'],
+      [...INSTALL_HEAD, '--ignore-scripts', 'a@1.0.0'],
+      ['install', '--no-save', '--no-fund', 'a@1.0.0'],
+      [...INSTALL_HEAD],
+      ['rebuild'],
+    ])
+      expect(argvViolations([{ ...ok, argv }]).length, argv.join(' ')).toBe(1);
+    expect(scriptsDisabled([{ ...ok, argv: CI_ARGV, ign: 'true|<unset>' }]).length).toBe(1);
+    expect(scriptsDisabled([{ ...ok, argv: CI_ARGV, ign: '<unset>|true' }]).length).toBe(1);
   });
 });
