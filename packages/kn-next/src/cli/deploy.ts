@@ -548,17 +548,32 @@ export async function deploy() {
     }
 
     if (!options.skipBuild) {
+        // #1506: these two log lines used to be hardcoded to the standalone
+        // (turbopack/webpack) shape regardless of `resolvedBuild`, so a vinext
+        // deploy (like the docs app's) logged "Running next build
+        // (output:standalone)..." / "standalone output in .next/standalone/"
+        // while `npm run build` actually ran the app's own `vite build`
+        // script and produced `.output/`. The DISPATCH was always correct —
+        // `runProjectBuild` just runs `npm run build`, whatever that app's
+        // package.json says — only the operator-facing message was wrong,
+        // which is exactly what made this read as a routing bug from the log
+        // alone.
+        const isVinextBuild = resolvedBuild === "vinext";
         if (hasStorage(config)) {
             const assetPrefix = getAssetPrefix(config);
             process.env.ASSET_PREFIX = assetPrefix;
             log.info(
-                { assetPrefix, buildId },
-                "Running next build (output:standalone)...",
+                { assetPrefix, buildId, builder: resolvedBuild },
+                isVinextBuild
+                    ? "Running vinext build (npm run build -> vite build, emitting .output)..."
+                    : "Running next build (output:standalone)...",
             );
         } else {
             log.info(
-                { buildId },
-                "Running next build (output:standalone; assets served from the image — no assetPrefix)...",
+                { buildId, builder: resolvedBuild },
+                isVinextBuild
+                    ? "Running vinext build (npm run build -> vite build, emitting .output; assets served from the image — no assetPrefix)..."
+                    : "Running next build (output:standalone; assets served from the image — no assetPrefix)...",
             );
         }
         // UX ledger row 4 (4c): the seam translates a deps-not-installed failure
@@ -567,11 +582,13 @@ export async function deploy() {
         // Reads `resolvedBuild`, not a hardcoded fallback — an absent `build`
         // no longer means vinext (#1183, DEFAULT_BUILDER_ID is "turbopack").
         runProjectBuild({
-            requireEsm: resolvedBuild === "vinext",
+            requireEsm: isVinextBuild,
             builderId: resolvedBuild,
         });
         log.info(
-            "Next.js build complete — standalone output in .next/standalone/",
+            isVinextBuild
+                ? "vinext build complete — .output produced"
+                : "Next.js build complete — standalone output in .next/standalone/",
         );
 
         // Defect-A guard, STANDALONE leg: fail LOUDLY if `.next/BUILD_ID` is not

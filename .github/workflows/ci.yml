@@ -1571,20 +1571,31 @@ jobs:
         # `bun:test`, so vitest collected nothing and exited 1.
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts
 
-  # ── self-contained exec e2e (#1460) ──────────────────────────────────────────
-  # Builds file-manager's SELF-CONTAINED vinext binary NATIVELY on the runner
-  # (apps/file-manager/scripts/build-self-contained.mjs — vite build, stage
-  # sharp's traced native/ tree, compile with --self-contained 1) and boots it
-  # ALONE in an empty directory: no .output/public, no native/, no node_modules
-  # beside it. KNEXT_REQUIRE_SC_EXEC=1 is load-bearing — it converts "no binary"
-  # from a silent skip into a hard failure, so a green check here proves the
-  # binary actually served all 13 measurement routes + the lazy sharp unpack
-  # contract, never that the test quietly ran nothing (#927/#932 declared-skips
-  # discipline). Declared in tests/declared-test-skips.test.ts (LANE_BACKED).
   self-contained-exec-e2e:
-    name: 'Self-contained (vinext): file-manager exec e2e (#1460)'
+    # #1456 round 2 — BLOCKING 2. The self-contained executable (file-manager
+    # compiled with `--self-contained`, booted from a directory holding ONLY the
+    # binary, `public/` and `.next/static/`) is proven here for BOTH builders
+    # `next build` ships: webpack and turbopack. No other job builds
+    # file-manager's Next `.next/standalone` tree — file-manager's own default
+    # build is vinext, which emits no such tree — so
+    # apps/file-manager/self-contained-e2e.test.ts skips everywhere else.
+    # KNEXT_REQUIRE_SC_EXEC=1 converts that skip into a hard FAILURE when the
+    # build is missing, so a green run here means the embed+compile+boot path
+    # actually ran (the #932 defect class this repo keeps guarding against:
+    # a check that reports the same green whether or not it exercised anything).
+    #
+    # COORDINATION (#1496), DONE: the vinext self-contained BINARY (#1460) gets
+    # its own sibling steps below ("Build the self-contained binary" / "Self-
+    # contained exec e2e"), guarded to `matrix.builder == 'webpack'` so it runs
+    # once per CI run rather than once per matrix leg — it has no builder axis
+    # of its own. The matrix and the Next-standalone steps above are unchanged.
+    name: Self-contained executable e2e (file-manager, #1456 + #1460)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        builder: [webpack, turbopack]
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1594,7 +1605,7 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup Bun
+      - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.4.2'
@@ -1603,8 +1614,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # @getknext/lib and @getknext/core ship only dist/ and must be built before the
-      # app (same order as compat-smoke: lib -> db -> core).
+      # file-manager depends on the built dist/ of all three; lib -> db -> core,
+      # same order as every other job that builds the app from source.
       - name: Build @getknext/lib
         run: bun run --filter @getknext/lib build
 
@@ -1614,15 +1625,38 @@ jobs:
       - name: Build @getknext/core
         run: bun run --filter @getknext/core build
 
-      # Runs `vite build`, stages sharp's native/ tree from nitro's traced
-      # .output/server/node_modules/@img, then compiles with --self-contained 1.
-      # Fails loud (non-zero) on any of those steps rather than leaving no
-      # binary for the next step to silently skip past.
-      - name: Build the self-contained binary (host target, native compile)
+      - name: Self-contained (standalone) — next build --webpack
+        if: matrix.builder == 'webpack'
+        working-directory: apps/file-manager
+        run: bunx next build --webpack
+
+      - name: Self-contained (standalone) — next build (turbopack)
+        if: matrix.builder == 'turbopack'
+        working-directory: apps/file-manager
+        run: bunx next build
+
+      # No skip path here: KNEXT_REQUIRE_SC_EXEC=1 turns a missing
+      # `.next/standalone` build into a thrown error before any test runs. bun,
+      # not vitest — the file imports `bun:test`; scripts/bun-test.mjs exits
+      # non-zero on an empty selection, so a renamed path fails loudly too.
+      - name: Self-contained (standalone) — embed + compile + boot e2e (${{ matrix.builder }})
+        env:
+          KNEXT_REQUIRE_SC_EXEC: '1'
+        run: node scripts/bun-test.mjs apps/file-manager/self-contained-e2e.test.ts
+
+      # #1460 — the vinext self-contained binary has no builder axis, so it
+      # only needs to run once: guarded to a single matrix leg rather than
+      # duplicated across both. Runs `vite build`, stages sharp's native/ tree
+      # from nitro's traced .output/server/node_modules/@img, then compiles
+      # with --self-contained 1. Fails loud (non-zero) on any of those steps
+      # rather than leaving no binary for the next step to silently skip past.
+      - name: Self-contained (vinext) — build the self-contained binary (host target, native compile)
+        if: matrix.builder == 'webpack'
         working-directory: apps/file-manager
         run: bun scripts/build-self-contained.mjs --out knext-exec-self-contained
 
-      - name: Self-contained exec e2e (must NOT skip)
+      - name: Self-contained (vinext) — exec e2e (must NOT skip)
+        if: matrix.builder == 'webpack'
         env:
           KNEXT_SC_EXEC: ${{ github.workspace }}/apps/file-manager/knext-exec-self-contained
           KNEXT_REQUIRE_SC_EXEC: '1'
@@ -1646,7 +1680,14 @@ jobs:
   # apps/file-manager/e2e-round.test.ts.
   file-manager-e2e-round:
     name: file-manager e2e round
-    needs: [compat-smoke, prod-image-optimization, standalone-drain-bun-image, bun-exec-alpine-image, self-contained-exec-e2e]
+    needs:
+      [
+        compat-smoke,
+        prod-image-optimization,
+        standalone-drain-bun-image,
+        bun-exec-alpine-image,
+        self-contained-exec-e2e,
+      ]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

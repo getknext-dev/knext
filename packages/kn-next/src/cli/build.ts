@@ -80,8 +80,13 @@ interface BuildOptions {
     skipSmoke?: boolean;
     /**
      * `--self-contained`: opt in to the self-contained single-executable mode.
-     * Overrides the `selfContained` config key. Routed to each compile path and
-     * recorded in the build log; the vinext target honours it (#1460).
+     * Overrides the `selfContained` config key. Honoured by both compile paths:
+     * the standalone/node target since #1456 (embeds `.next/server`,
+     * $bunfs-anchored, proven by apps/file-manager/self-contained-e2e.test.ts
+     * on both webpack and turbopack builds), and the vinext/bun-exec target
+     * since #1460 (embeds the server runtime and `public/`). Routed to each
+     * compile path and recorded in the build log either way, so the flag is
+     * never silently swallowed.
      */
     selfContained?: boolean;
 }
@@ -429,8 +434,10 @@ Options:
                         artifact ships UNVERIFIED and the build says so loudly.
   --self-contained      Opt in to the self-contained single-executable mode
                         (overrides \`selfContained\` in kn-next.config.ts).
-                        Experimental: the vinext target embeds everything it
-                        serves; other targets only record it in the build log.
+                        Experimental. Honoured by the standalone/node build
+                        target (embeds the Next build output into the
+                        executable) and the vinext target (embeds everything
+                        it serves).
   -h, --help            Show this help
 `;
 

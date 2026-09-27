@@ -99,6 +99,30 @@ jobs:
       - name: SBOM + HIGH/CRITICAL scan of the docs app's JS closure
         run: node scripts/precompile-closure-audit.mjs --app apps/docs
 
+      # #1506: the deploy job's own image build (`docker buildx build ... --push`,
+      # inside the action) was the FIRST thing to actually exercise
+      # `apps/docs/Dockerfile` end to end — nothing before it does, and Actions
+      # has docker while a contributor's local checkout is told not to run it
+      # here (no kind/docker locally). So a broken Dockerfile (the missing
+      # `/repo/node_modules/@img` this issue fixes) only ever reds AFTER merge,
+      # on the real deploy. This step runs the SAME build, same platform and
+      # build-arg the CLI passes (see `dockerBuildxArgs` /
+      # `packages/kn-next/src/cli/deploy.ts`), with no `-t`/`--push`/registry
+      # login at all — a pure build-and-discard, so a PR reds here instead.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the docs image (dry run, no push)
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            -f apps/docs/Dockerfile \
+            --build-arg NEXT_DEPLOYMENT_ID="$SHA" \
+            .
+
       - name: Dry run — print the NextApp, apply nothing
         working-directory: ${{ env.APP_DIR }}
         env:

@@ -221,3 +221,58 @@ describe("buildStandaloneExecutable", () => {
         expect(markers[0]).not.toBe(markers[1]);
     });
 });
+
+describe("self-contained mode (#1456)", () => {
+    const args = {
+        arch: "linux-x64",
+        server: "/a/server.js",
+        root: "/a",
+        outFile: "/a/x",
+        marker: "m",
+    };
+
+    it("the compile argv gains --self-contained 1 only when on; disk mode's argv is unchanged", () => {
+        const disk = standaloneCompileArgv(args);
+        expect(disk).not.toContain("--self-contained");
+        expect(
+            standaloneCompileArgv({ ...args, selfContained: false }),
+        ).toEqual(disk);
+        expect(standaloneCompileArgv({ ...args, selfContained: true })).toEqual(
+            [...disk, "--self-contained", "1"],
+        );
+    });
+
+    it("verifies a self-contained artifact with the embedded proof (route chunk 0 must carry bytecode)", () => {
+        const cwd = appWithStandalone();
+        let marker = "";
+        const run = (argv: readonly string[]) => {
+            marker = argv[argv.indexOf("--marker") + 1] as string;
+        };
+        const withRoute = (m: string) =>
+            Buffer.from(
+                `ELF\0pool:${m}\0${m}:route:0:\0// @bun @bytecode @bun-cjs\n(function(){globalThis.m="${m}";globalThis.r="${m}:route:0:";})`,
+                "latin1",
+            );
+        expect(
+            buildStandaloneExecutable({
+                cwd,
+                arch: "linux-x64",
+                bunVersion: "1.4.2",
+                run,
+                selfContained: true,
+                readArtifact: () => withRoute(marker),
+            }),
+        ).toBe(join(cwd, standaloneExecFileName("linux-x64")));
+        // the disk-mode artifact shape carries no route chunk: refused in self-contained mode
+        expect(() =>
+            buildStandaloneExecutable({
+                cwd,
+                arch: "linux-x64",
+                bunVersion: "1.4.2",
+                run,
+                selfContained: true,
+                readArtifact: () => bytecodeArtifact(marker),
+            }),
+        ).toThrow(/route chunk 0/);
+    });
+});
