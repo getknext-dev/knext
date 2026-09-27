@@ -47,7 +47,7 @@ describe("noReconcileMessage (#1535)", () => {
 });
 
 describe("waitForOperatorReconcile (#1535)", () => {
-    it("returns reconciled=true as soon as status.conditions is non-empty", async () => {
+    it("returns reconciled=true as soon as status.conditions carries a condition at the CR's own generation", async () => {
         let calls = 0;
         const result = await waitForOperatorReconcile(
             () => {
@@ -55,8 +55,15 @@ describe("waitForOperatorReconcile (#1535)", () => {
                 return {
                     ok: true,
                     stdout: JSON.stringify({
+                        metadata: { generation: 1 },
                         status: {
-                            conditions: [{ type: "Ready", status: "True" }],
+                            conditions: [
+                                {
+                                    type: "Ready",
+                                    status: "True",
+                                    observedGeneration: 1,
+                                },
+                            ],
                             url: "https://shop.example.com",
                         },
                     }),
@@ -72,7 +79,7 @@ describe("waitForOperatorReconcile (#1535)", () => {
         expect(calls).toBe(1);
     });
 
-    it("polls until conditions appear, then stops", async () => {
+    it("polls until a condition at the current generation appears, then stops", async () => {
         let calls = 0;
         const clock = fakeClock();
         const result = await waitForOperatorReconcile(
@@ -82,9 +89,16 @@ describe("waitForOperatorReconcile (#1535)", () => {
                 return {
                     ok: true,
                     stdout: JSON.stringify({
+                        metadata: { generation: 1 },
                         status: {
                             conditions: reconciled
-                                ? [{ type: "Ready", status: "True" }]
+                                ? [
+                                      {
+                                          type: "Ready",
+                                          status: "True",
+                                          observedGeneration: 1,
+                                      },
+                                  ]
                                 : [],
                             url: reconciled ? "https://shop.example.com" : "",
                         },
@@ -101,6 +115,78 @@ describe("waitForOperatorReconcile (#1535)", () => {
         );
         expect(calls).toBe(3);
         expect(result.reconciled).toBe(true);
+    });
+
+    it("round 2 (#1535 B1) — REDEPLOY: conditions from the PREVIOUS generation are never treated as reconciled, even though they are non-empty", async () => {
+        const clock = fakeClock();
+        // metadata.generation: 7 (this is at least the CLI's 2nd apply of
+        // this CR), but every condition the operator ever wrote still
+        // carries observedGeneration: 6 — i.e. a dead/CrashLooping operator
+        // that stopped reconciling one generation ago. The pre-fix code
+        // read `conditions.length > 0` alone and returned reconciled=true on
+        // the very first poll here.
+        const result = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: JSON.stringify({
+                    metadata: { generation: 7 },
+                    status: {
+                        conditions: [
+                            {
+                                type: "Ready",
+                                status: "True",
+                                observedGeneration: 6,
+                            },
+                        ],
+                        url: "https://stale.example.com",
+                    },
+                }),
+                stderr: "",
+            }),
+            {
+                waitMs: 3_000,
+                pollIntervalMs: 1_000,
+                sleep: clock.sleep,
+                now: clock.now,
+            },
+        );
+        expect(result.reconciled).toBe(false);
+        // lastUrl is still tracked from the stale read — waitForOperatorReconcile
+        // never claims it has none, only that it isn't reconciled YET.
+        expect(result.url).toBe("https://stale.example.com");
+        expect(clock.now()).toBeGreaterThanOrEqual(3_000);
+    });
+
+    it("round 2 (#1535 B1) — REDEPLOY: a condition at (or after) the current generation IS reconciled", async () => {
+        let calls = 0;
+        const result = await waitForOperatorReconcile(
+            () => {
+                calls += 1;
+                return {
+                    ok: true,
+                    stdout: JSON.stringify({
+                        metadata: { generation: 7 },
+                        status: {
+                            conditions: [
+                                {
+                                    type: "Ready",
+                                    status: "True",
+                                    observedGeneration: 7,
+                                },
+                            ],
+                            url: "https://fresh.example.com",
+                        },
+                    }),
+                    stderr: "",
+                };
+            },
+            { waitMs: 15_000, pollIntervalMs: 1_000, sleep: async () => {} },
+        );
+        expect(result).toEqual({
+            reconciled: true,
+            url: "https://fresh.example.com",
+        });
+        expect(calls).toBe(1);
     });
 
     it("gives up at the deadline: reconciled=false, never throws", async () => {
@@ -133,7 +219,12 @@ describe("waitForOperatorReconcile (#1535)", () => {
                 return {
                     ok: true,
                     stdout: JSON.stringify({
-                        status: { conditions: [{ type: "Ready" }] },
+                        metadata: { generation: 1 },
+                        status: {
+                            conditions: [
+                                { type: "Ready", observedGeneration: 1 },
+                            ],
+                        },
                     }),
                     stderr: "",
                 };

@@ -8,12 +8,49 @@
  * streams captured.
  */
 
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    mock,
+    spyOn,
+} from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RBAC_PATH, WORKFLOW_PATH } from "../cli/ci/init-ci";
-import { initCiMain } from "../cli/ci/init-ci-cmd";
+
+// #1535 round 2 (B2): pin `initCiMain`'s WIRING to `skippedFileMessage` —
+// round 1 covered the generator's pure output (`ci-init-ci.test.ts`) but
+// nothing asserted the verb entry actually LOGS it (`log.warn(f)` — the raw
+// path, dropping the message entirely — survived as a mutation). Module-
+// mocked for the same reason `deploy-orchestrator.test.ts` mocks the logger:
+// pino writes through sonic-boom on a raw fd, so patching
+// `process.stdout/stderr.write` captures nothing.
+//
+// `initCiMain` is imported via a top-level `await import(...)` BELOW,
+// AFTER this mock is registered — a static `import { initCiMain } from
+// "../cli/ci/init-ci-cmd"` at the top of the file would resolve (and cache)
+// the real, unmocked `../utils/logger` first, since ES imports are hoisted
+// ahead of ordinary statements (the same reason `deploy-orchestrator.test.ts`
+// / `db-bind-b2-gaps.test.ts` dynamic-import their module under test).
+const logWarn = mock<(...args: unknown[]) => void>();
+mock.module("../utils/logger", () => ({
+    createLogger: () => ({
+        info: mock(),
+        warn: (...a: unknown[]) => logWarn(...a),
+        error: mock(),
+        debug: mock(),
+        fatal: mock(),
+        trace: mock(),
+    }),
+}));
+
+const { RBAC_PATH, WORKFLOW_PATH, skippedFileMessage } = await import(
+    "../cli/ci/init-ci"
+);
+const { initCiMain } = await import("../cli/ci/init-ci-cmd");
 
 let dir: string;
 const savedCwd = process.cwd();
@@ -21,6 +58,7 @@ const savedCwd = process.cwd();
 beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "knext-init-ci-cmd-"));
     process.chdir(dir);
+    logWarn.mockClear();
 });
 
 afterEach(() => {
@@ -104,5 +142,20 @@ describe("initCiMain — success path", () => {
         expect(r.code).toBe(0);
         expect(existsSync(join(dir, WORKFLOW_PATH))).toBe(true);
         expect(existsSync(join(dir, RBAC_PATH))).toBe(true);
+    });
+
+    it("#1535 round 2 — a second run without --force WARNS with the exact skippedFileMessage for each pre-existing file", async () => {
+        await runInitCi(["--namespace", "acme"]);
+        logWarn.mockClear();
+
+        const r = await runInitCi(["--namespace", "acme"]);
+
+        expect(r.code).toBe(0);
+        expect(logWarn).toHaveBeenCalledWith(skippedFileMessage(WORKFLOW_PATH));
+        expect(logWarn).toHaveBeenCalledWith(skippedFileMessage(RBAC_PATH));
+        // Not the bare path — the mutation this pins turns
+        // `log.warn(skippedFileMessage(f))` into `log.warn(f)`.
+        expect(logWarn).not.toHaveBeenCalledWith(WORKFLOW_PATH);
+        expect(logWarn).not.toHaveBeenCalledWith(RBAC_PATH);
     });
 });

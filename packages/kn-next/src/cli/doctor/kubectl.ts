@@ -176,13 +176,20 @@ const GETTING_STARTED_URL = `${DOCS_URL}/docs/getting-started`;
 /** #1535: the zero-cluster walkthrough — kind on your laptop, end to end. */
 const FIRST_CLUSTER_URL = `${DOCS_URL}/docs/first-cluster`;
 
-/** The persona-plain hint for every no-cluster-configured state (finding 1c). */
-const NO_CLUSTER_HINT = `you don't have a Kubernetes cluster connected yet — knext deploys into one; follow ${GETTING_STARTED_URL} to get set up, then re-run doctor`;
+/**
+ * The persona-plain hint for every no-cluster-configured state (finding 1c).
+ * #1535 round 2 (N1): this used to point at the general getting-started
+ * guide while `detail` (above it, same row) already pointed at the
+ * zero-cluster walkthrough — two different links on one line, and the
+ * getting-started guide carries the Kubernetes jargon this sentence was
+ * written to drop. Point both at the same place.
+ */
+const NO_CLUSTER_HINT = `you don't have a Kubernetes cluster connected yet — knext deploys into one; follow ${FIRST_CLUSTER_URL} to get set up, then re-run doctor`;
 
 /**
  * #1535: the ONE actionable sentence for "no kube-context configured" — no
  * kubeconfig, or one that sets no current-context. Exactly this string
- * (mutation-proved, `doctor-actionable-messages.test.ts`); the raw diagnostic
+ * (mutation-proved, `doctor.test.ts`); the raw diagnostic
  * (which paths were searched / which file had no current-context) is appended
  * only under `--verbose` by the caller via `actionableDetail`.
  */

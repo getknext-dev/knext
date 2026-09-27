@@ -137,7 +137,19 @@ mock.module("../cli/schema/kubectl-capture", () => ({
             return {
                 ok: true,
                 stdout: JSON.stringify({
-                    status: { conditions: [{ type: "Ready", status: "True" }] },
+                    // #1535 round 2: reconciled now requires a condition at
+                    // (or after) metadata.generation, not just a non-empty
+                    // conditions array.
+                    metadata: { generation: 1 },
+                    status: {
+                        conditions: [
+                            {
+                                type: "Ready",
+                                status: "True",
+                                observedGeneration: 1,
+                            },
+                        ],
+                    },
                 }),
                 stderr: "",
             };

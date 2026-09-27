@@ -147,10 +147,11 @@ notice that static assets are served from the image instead — see [Starting wi
 storage](/docs/multi-cloud#starting-without-object-storage).
 
 **After the `NextApp` CR is applied**, deploy waits briefly (up to 15s) for the operator to begin
-reconciling it before reporting the URL. If nothing reconciles it in that time — the operator isn't
-running, is `CrashLoopBackOff`, or is watching the wrong namespace — deploy says so plainly instead
-of silently printing an empty URL: `NextApp applied; no operator reconciled it in 15s. Check the
-operator pod: kubectl get pods -n kn-next-operator-system.`
+reconciling THIS apply specifically — not a stale status left over from an earlier one — before
+reporting the URL. That holds on a redeploy too: if the operator isn't running, is
+`CrashLoopBackOff`, or is watching the wrong namespace, deploy says so plainly instead of quoting the
+URL from the last time it actually reconciled: `NextApp applied; no operator reconciled it in 15s.
+Check the operator pod: kubectl get pods -n kn-next-operator-system.`
 
 **Placeholders fail fast.** Before any build step, deploy refuses config values still carrying a
 `<...>` placeholder from the scaffold (like `ghcr.io/<your-user>`), with a per-field explanation of

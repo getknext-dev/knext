@@ -11,11 +11,22 @@
  *
  * READ-ONLY (ADR-0001): the only cluster call is a polled `kubectl get
  * nextapp -o json`. "Reconciled" = the operator has written at least one
- * status condition — the same signal `knext status` renders
+ * status condition whose `observedGeneration` is at least the CR's OWN
+ * `metadata.generation` — the same signal `knext status` renders
  * (`status.conditions`) and the cheapest one that is unambiguously the
- * OPERATOR's own writing. `status.url` cannot be the signal: it stays empty
- * for a healthy app that has no ingress yet, so an empty url alone would
- * false-warn a working deploy.
+ * OPERATOR's own writing, AT the generation `deploy` just applied.
+ * `status.url` cannot be the signal: it stays empty for a healthy app that
+ * has no ingress yet, so an empty url alone would false-warn a working
+ * deploy.
+ *
+ * #1535 round 2: `conditions.length > 0` alone is NOT enough. On a REDEPLOY
+ * (the common case, not the first deploy) the CR already carries conditions
+ * from the PREVIOUS generation the last-good reconcile wrote — those are
+ * still non-empty even against a dead or CrashLooping operator, so the very
+ * first poll would read "reconciled" off stale data. The operator stamps
+ * `ObservedGeneration: app.Generation` on every condition it sets
+ * (`status_verdict.go`), which is exactly the field this module now checks
+ * against the CR's own `metadata.generation` from the same `-o json` read.
  */
 
 import { OPERATOR_NAMESPACE } from "./doctor/types";
@@ -53,15 +64,49 @@ export function noReconcileMessage(waitMs: number): string {
     return `NextApp applied; no operator reconciled it in ${seconds}s. Check the operator pod: ${operatorPodCheckCommand()}.`;
 }
 
-function parseStatus(
-    raw: string,
-): { conditions?: unknown[]; url?: string } | undefined {
+interface ParsedNextApp {
+    generation?: number;
+    conditions?: unknown[];
+    url?: string;
+}
+
+function parseNextApp(raw: string): ParsedNextApp | undefined {
     try {
-        const parsed = JSON.parse(raw) as { status?: unknown };
-        return parsed.status as { conditions?: unknown[]; url?: string };
+        const parsed = JSON.parse(raw) as {
+            metadata?: { generation?: unknown };
+            status?: { conditions?: unknown[]; url?: string };
+        };
+        const generation = parsed.metadata?.generation;
+        return {
+            generation: typeof generation === "number" ? generation : undefined,
+            conditions: parsed.status?.conditions,
+            url: parsed.status?.url,
+        };
     } catch {
         return undefined;
     }
+}
+
+/**
+ * A condition is evidence of reconciliation only when the operator wrote it
+ * AT OR AFTER the generation this poll is watching for — see the module
+ * doc comment (#1535 round 2). `generation` missing (a malformed/partial
+ * read) is treated as "cannot tell", i.e. not reconciled, rather than
+ * guessing.
+ */
+function isReconciled(
+    generation: number | undefined,
+    conditions: unknown[] | undefined,
+): boolean {
+    if (typeof generation !== "number" || !Array.isArray(conditions)) {
+        return false;
+    }
+    return conditions.some((c) => {
+        if (typeof c !== "object" || c === null) return false;
+        const observed = (c as { observedGeneration?: unknown })
+            .observedGeneration;
+        return typeof observed === "number" && observed >= generation;
+    });
 }
 
 /**
@@ -96,12 +141,11 @@ export async function waitForOperatorReconcile(
     let lastUrl = "";
     for (;;) {
         const result = getNextApp();
-        const status = result.ok ? parseStatus(result.stdout) : undefined;
-        if (typeof status?.url === "string") {
-            lastUrl = status.url;
+        const parsed = result.ok ? parseNextApp(result.stdout) : undefined;
+        if (typeof parsed?.url === "string") {
+            lastUrl = parsed.url;
         }
-        const conditions = status?.conditions;
-        if (Array.isArray(conditions) && conditions.length > 0) {
+        if (isReconciled(parsed?.generation, parsed?.conditions)) {
             return { reconciled: true, url: lastUrl };
         }
         if (now() >= deadline) {
