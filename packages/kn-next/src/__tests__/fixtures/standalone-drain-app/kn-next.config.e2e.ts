@@ -1,5 +1,3 @@
-import type { KnativeNextConfig } from "@getknext/core";
-
 /**
  * #1522 / #1517 — the config profile for the self-contained-standalone kind
  * e2e (`.github/workflows/standalone-self-contained-operator-e2e.yml`).
@@ -21,8 +19,13 @@ import type { KnativeNextConfig } from "@getknext/core";
  * No `storage` block — this fixture serves everything from the image
  * (ADR-0047 image-served static mode), same as the file-manager e2e profile
  * when it drops `storage`.
+ *
+ * Untyped on purpose: this fixture lives inside @getknext/core's own source
+ * tree, where `import type { KnativeNextConfig } from "@getknext/core"` does
+ * not resolve for the package typecheck (same reason `vinext-node-app/kn-next.config.ts`
+ * is untyped). The shape is what a real app writes.
  */
-const config: KnativeNextConfig = {
+const config = {
     name: "standalone-sc-e2e",
 
     build: "turbopack",
