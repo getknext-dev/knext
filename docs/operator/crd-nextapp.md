@@ -35,7 +35,9 @@ The value drives the operator's only shape-aware decision, the container
 command: for `vinext` the app is one compiled executable and the operator
 leaves the command to the image's own `CMD` (forcing the standalone command
 would CrashLoop — there is no `server.js` in that image); for `turbopack` or
-absence, `runtime: bun` execs `bun run server.js`.
+absence, `runtime: bun` execs `bun run server.js` — **unless `selfContained`
+is also set** (see below), which puts that shape in the same "leave it to the
+image's own `CMD`" bucket as `vinext`.
 
 > **Upgrade order (#548):** a cluster whose CRD predates `"vinext"` rejects
 > such a CR under `--validate=strict` (which every CLI apply passes) — a loud
@@ -56,6 +58,37 @@ spec:
 > under Node; flipping such an image back to `node` requires rebuilding it.
 > New builds never hit this — bytecode now exists only inside the vinext
 > single executable.
+
+### `selfContained` (Optional, default `false`)
+Marks the standalone shape as a self-contained single executable — the image
+ships no `.next/standalone` tree and no `node_modules` at all, just the
+compiled executable, `public/` and `.next/static`. This is produced by
+`knext build --self-contained` (or the `selfContained` config key) on the
+`turbopack`/`webpack` builders with `runtime: "bun"`; see the
+[build pipeline docs](/docs/build-pipeline#self-contained-mode-experimental)
+for what the local build actually does.
+```yaml
+spec:
+  build: "turbopack"
+  runtime: "bun"
+  selfContained: true
+```
+
+Only meaningful when `runtime` resolves to `"bun"` on the standalone shape
+(`build` absent, `"turbopack"`, or `"webpack"`) — it is a no-op on `"node"`
+(there is no compiled executable to be self-contained) and on `build:
+"vinext"` (already always a single executable regardless of this field). When
+it applies, it has the SAME effect on the container command that `build:
+"vinext"` already has: the operator leaves `Command` nil rather than forcing
+`bun run server.js`, because that image has no `server.js` either. The image
+still ships a small `server.js` compat shim that execs the real binary, so a
+cluster running an operator that predates this field keeps booting correctly
+— it just runs one extra relay process it no longer needs to.
+
+> **Upgrade order (#548):** identical to `build`, above — a cluster whose CRD
+> predates `selfContained` rejects a CR that sets it under
+> `--validate=strict`, a loud stop rather than a silent mis-run. Roll the
+> operator/CRD before the CLI.
 
 ### `scaling` (Optional)
 Controls the autoscaling behavior of the underlying Knative Service.

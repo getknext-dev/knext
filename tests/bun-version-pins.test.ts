@@ -130,6 +130,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       'operator-e2e-nightly.yml': 3,
       'preview.yml': 2,
       'scale-zero-pg.yml': 1,
+      // NEW (#1522/#1517): the self-contained standalone image kind e2e —
+      // one "Setup bun" step (installs the workspace + builds the fixture's
+      // own `next build` before `kn-next deploy` compiles it).
+      'standalone-self-contained-operator-e2e.yml': 1,
       // NEW (#1417): the default-builder standalone deploy kind e2e — one
       // "Setup bun" step (workspace install + the fixture's own `next build`).
       'standalone-deploy-kind-e2e.yml': 1,

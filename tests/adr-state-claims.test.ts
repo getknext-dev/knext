@@ -94,9 +94,14 @@ describe('ADR-0036 / ADR-0042 state corrections stay true (#869)', () => {
     expect(read(CRD_YAML)).toMatch(/enum:\n\s+- turbopack\n\s+- vinext/);
 
     // The other half of the "same change" contract: the controller must gate
-    // the standalone command away from the vinext shape.
+    // the standalone command away from the vinext shape. Since #1522 the same
+    // branch also leaves Command nil for the self-contained standalone shape
+    // (`spec.selfContained: true`), so the gate carries that clause too — the
+    // vinext gate this test exists to prove is unchanged.
     const controller = read('packages/kn-next-operator/internal/controller/nextapp_controller.go');
-    expect(controller).toMatch(/Spec\.Build != "vinext" && nextApp\.Spec\.Runtime == "bun"/);
+    expect(controller).toMatch(
+      /Spec\.Build != "vinext" && !nextApp\.Spec\.SelfContained && nextApp\.Spec\.Runtime == "bun"/,
+    );
   });
 
   it('both ADRs carry a dated state-correction block', () => {

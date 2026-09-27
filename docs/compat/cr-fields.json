@@ -70,6 +70,7 @@
     "spec.secrets.envMap",
     "spec.secrets.envMap.*.secretKey",
     "spec.secrets.envMap.*.secretName",
+    "spec.selfContained",
     "spec.storage",
     "spec.storage.bucket",
     "spec.storage.endpoint",
@@ -77,5 +78,5 @@
     "spec.storage.region"
   ],
   "notInBundledCRD": [],
-  "fieldCount": 71
+  "fieldCount": 72
 }

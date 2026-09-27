@@ -7,7 +7,8 @@
  *
  * Real modules only — the routing half (mocked compile steps) lives in
  * `self-contained-routing.test.ts`. This file pins: the config key's validator,
- * that the emitted NextApp CR does not change, that the flag is documented in
+ * that the emitted NextApp CR gains exactly `spec.selfContained` when the key
+ * is true (#1522) and is otherwise unchanged, that the flag is documented in
  * `--help`, and that the vinext compile argv is byte-identical whether the
  * option is absent or false, and gains only the self-contained switch when
  * true (the standalone/node target's own argv shape is covered where it plans
@@ -60,21 +61,36 @@ describe("selfContained config key", () => {
         );
     });
 
-    it("does not change the emitted NextApp CR (no CR field yet)", () => {
+    // #1522: the CR now carries `spec.selfContained` for the standalone-on-bun
+    // shape (the default cell here). `false`/absent stays byte-identical to
+    // before the field existed; `true` adds exactly that one field. The
+    // vinext / node negatives live in cr-builder-self-contained.test.ts.
+    it("emits spec.selfContained only when true on the standalone-on-bun shape (#1522)", () => {
         const base = buildNextAppCRObject(
             cfg(),
             "reg.io/team/app@sha256:abc",
             "ns",
         );
-        for (const v of [true, false]) {
-            expect(
-                buildNextAppCRObject(
-                    cfg({ selfContained: v }),
-                    "reg.io/team/app@sha256:abc",
-                    "ns",
-                ),
-            ).toEqual(base);
-        }
+        expect(
+            buildNextAppCRObject(
+                cfg({ selfContained: false }),
+                "reg.io/team/app@sha256:abc",
+                "ns",
+            ),
+        ).toEqual(base);
+        expect(
+            buildNextAppCRObject(
+                cfg({ selfContained: true }),
+                "reg.io/team/app@sha256:abc",
+                "ns",
+            ),
+        ).toEqual({
+            ...base,
+            spec: {
+                ...(base.spec as Record<string, unknown>),
+                selfContained: true,
+            },
+        });
     });
 });
 
