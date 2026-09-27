@@ -111,8 +111,12 @@ const config: KnativeNextConfig = {
 };
 ```
 
-No build target uses this yet, so on this version setting it changes nothing about what
-`knext build` produces; the choice is only recorded in the build log. The value must be a boolean —
+On the vinext target, the binary embeds the server runtime and your `public` files, and unpacks
+its native image libraries into the temp directory the first time an image is optimized — so the
+image is the binary alone (`Dockerfile.self-contained`), and the temp directory must be writable
+(the knext operator mounts one at `/tmp`; with `docker run --read-only`, add `--tmpfs /tmp`). The
+other targets do not use it yet: there, setting it changes nothing about what `knext build`
+produces, and the choice is only recorded in the build log. The value must be a boolean —
 `knext validate` rejects anything else.
 
 ### vinext on Node

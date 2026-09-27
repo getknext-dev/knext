@@ -134,8 +134,12 @@ export const DIVERGENT = {
       'same hunk by one script. The recorded divergence is still ONLY the item-4 comment block.\n\n' +
       'HASH UPDATED for #1313 (rejectMalformedPath, requestErrorResponse, metricsRequestListener) ' +
       'and #1269 (drainWarmBody): applied to the template and this copy from the same hunks. The ' +
-      'recorded divergence is still ONLY the item-4 comment block.',
-    sha256: '4915049eb281f516461b1d041d891004350e3638b76779b7ed0cb4dd5fae17ff',
+      'recorded divergence is still ONLY the item-4 comment block.' +
+      '\n\nHASH UPDATED for #1460 (resolveAssetAnchor gains the `embedded` branch + isEmbeddedPath, so a ' +
+      'self-contained binary serving its own embedded `.output/public` is not warned about): applied to ' +
+      'the template and every copy from the same hunks by one script. The recorded divergence is still ' +
+      'ONLY the item-4 comment block.',
+    sha256: 'cf2994747553af507978356d3bb2eac02069ba454b58cc2c644a0a723856abe1',
   },
 };
 

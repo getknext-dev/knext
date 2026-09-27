@@ -86,16 +86,22 @@ function addonPath() {
 
   const beside = dirname(process.execPath);
 
+  // A self-contained binary (#1460) carries the native tree inside itself and
+  // unpacks it on first use (sharp-native-extract.mjs), then names the unpacked
+  // root here — before this module is evaluated. Nothing beside the binary is
+  // consulted then: the embedded tree is the one the build pinned.
+  const extracted = globalThis[Symbol.for('knext.sharp.nativeRoot')];
+
   // The simple shape: the addon dropped straight next to the executable.
   const flat = join(beside, 'sharp.node');
-  if (existsSync(flat)) return flat;
+  if (!extracted && existsSync(flat)) return flat;
 
   // The shape an image actually ships, because the addon links libvips by a
   // RELATIVE rpath and therefore cannot be flattened: `native/@img`-style trees
   // kept intact beside the binary. Discovered rather than configured — one less
   // value to set correctly, and a wrong env var is the failure mode this
   // function already had to defend against.
-  const nativeRoot = join(beside, 'native');
+  const nativeRoot = extracted || join(beside, 'native');
   const sharpDirs = safeReadDir(nativeRoot).filter(
     (pkg) => pkg.startsWith('sharp-') && !pkg.startsWith('sharp-libvips-'),
   );

@@ -80,8 +80,8 @@ interface BuildOptions {
     skipSmoke?: boolean;
     /**
      * `--self-contained`: opt in to the self-contained single-executable mode.
-     * Overrides the `selfContained` config key. No target honours it yet — it
-     * is routed to each compile path and recorded in the build log.
+     * Overrides the `selfContained` config key. Routed to each compile path and
+     * recorded in the build log; the vinext target honours it (#1460).
      */
     selfContained?: boolean;
 }
@@ -429,8 +429,8 @@ Options:
                         artifact ships UNVERIFIED and the build says so loudly.
   --self-contained      Opt in to the self-contained single-executable mode
                         (overrides \`selfContained\` in kn-next.config.ts).
-                        Experimental: no target honours it yet, so today it is
-                        only recorded in the build log.
+                        Experimental: the vinext target embeds everything it
+                        serves; other targets only record it in the build log.
   -h, --help            Show this help
 `;
 

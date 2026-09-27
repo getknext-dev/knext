@@ -242,6 +242,14 @@ const RUNTIME_BASENAMES = new Set(['bun', 'bun-debug', 'bunx', 'node', 'deno']);
  * @param {string} execPath `process.execPath`.
  * @returns {boolean} true when execPath is the app itself, not a language runtime.
  */
+/** True when `path` is inside a compiled Bun binary's embedded filesystem (`/$bunfs/`, or `B:/~BUN/` on Windows). */
+export function isEmbeddedPath(path) {
+  return (
+    typeof path === 'string' &&
+    (path.startsWith('/$bunfs/') || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(path))
+  );
+}
+
 export function isCompiledExecutable(execPath) {
   const base = basename(execPath).replace(/\.exe$/i, '');
   return !RUNTIME_BASENAMES.has(base);
@@ -254,7 +262,7 @@ export function isCompiledExecutable(execPath) {
  * @param {(path: string) => boolean} opts.exists
  * @param {boolean} [opts.isCompiled]         Defaults to `isCompiledExecutable(execPath)`.
  * @param {string} [opts.cwd]                 Reported in the warning only — never a candidate.
- * @returns { { mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null } }
+ * @returns { { mainUrl: string | null, source: 'baked' | 'embedded' | 'execdir' | 'unresolved', warning: string | null } }
  *   `mainUrl` is null when `__nitro_main__` must be left alone (candidate 1 or 3).
  */
 export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cwd }) {
@@ -279,6 +287,13 @@ export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cw
   // a different artifact that merely happens to be reachable on the builder.
   if (bakedOk && !compiled) {
     return { mainUrl: null, source: 'baked', warning: null };
+  }
+
+  // Self-contained (`kn-next build --self-contained`): the baked root is INSIDE
+  // the binary's own embedded filesystem, so it is exactly what shipped — not
+  // the build machine's tree — and it wins over anything beside the binary.
+  if (bakedOk && isEmbeddedPath(bakedDir)) {
+    return { mainUrl: null, source: 'embedded', warning: null };
   }
 
   // Compiled, and BOTH roots are present: the co-located one is what shipped,

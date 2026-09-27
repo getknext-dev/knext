@@ -45,3 +45,6 @@ runner.js
 cache-handler.js
 manifests/
 .output
+
+# `bun scripts/build-self-contained.mjs` stages the host sharp tree here (#1460)
+/native/

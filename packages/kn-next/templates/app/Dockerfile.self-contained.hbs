@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+#
+# knext — vinext single-executable image, SELF-CONTAINED variant
+# (`kn-next build --self-contained`, or `selfContained: true` in kn-next.config.ts).
+#
+# The binary carries everything it serves: the server, `.output/public`, and
+# sharp's native libraries. So the image is the binary and nothing else — no
+# `.output/public`, no `native/`, no node_modules. Compare `Dockerfile`, which
+# copies `.output/public` and `native/` beside a disk-mode binary.
+#
+# Writable temp directory: the binary unpacks sharp's native libraries into
+# $TMPDIR (default /tmp) on the FIRST image-optimization request — not at boot —
+# because the OS loader can only open native libraries from a real filesystem.
+# Everything else, including boot and health checks, needs no writable path.
+# The knext operator mounts an emptyDir at /tmp whenever the root filesystem is
+# read-only (its default), so nothing is needed there. With a plain
+# `docker run --read-only`, add `--tmpfs /tmp`; without a writable /tmp, image
+# optimization answers 500 with a message naming the fix, and every other route
+# keeps serving.
+#
+# BINARY must be a musl target for this base (`bun-linux-x64-musl` /
+# `bun-linux-arm64-musl`), exactly as for `Dockerfile`:
+#   docker build -f Dockerfile.self-contained --build-arg BINARY=knext-exec-linux-arm64 .
+ARG BINARY=knext-exec-linux-x64
+
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+
+# The two libraries a Bun-compiled binary links against; the whole-base upgrade
+# first, for the same reason as `Dockerfile` (it clears base-layer CVEs between
+# the pinned digest and the branch's current patch).
+RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc
+
+WORKDIR /app
+
+ARG BINARY
+COPY ${BINARY} /app/server
+
+# Non-root, matching `Dockerfile`. /tmp in the base image is world-writable with
+# the sticky bit; the binary unpacks into a private (0700) directory under it.
+USER 65532:65532
+
+ENV PORT=3000 \
+    HOSTNAME=0.0.0.0 \
+    NODE_ENV=production
+
+EXPOSE 3000
+
+CMD ["/app/server"]
