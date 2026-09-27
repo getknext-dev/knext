@@ -60,6 +60,9 @@ const MUTATIONS = [
     // The residue marker goes on its OWN line: a trailing `// …` would comment out the rest of
     // the one-line config the spec writes and red it for the wrong reason.
     replacement: `    // ${MUTATION_MARKER}\n    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,`,
+    // `.hbs` has no COMMENT_PREFIX entry because its comment syntax depends on
+    // what it templates; this one templates TypeScript.
+    options: { commentPrefix: '//' },
   },
   {
     id: 'M4',
