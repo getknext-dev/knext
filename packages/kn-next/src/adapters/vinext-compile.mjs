@@ -46,7 +46,8 @@
  * because nitro externalizes sharp: `import sharp from "sharp"` survives into
  * `.output/server/index.mjs`, so sharp only enters a module graph now.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bunBaseExeCompileOptions } from "./bun-base-exe.mjs";
@@ -62,6 +63,8 @@ import {
     analyzeServerModule,
     wrapRequireBindings,
 } from "./entry-require-staticize.mjs";
+import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
+import { embedBuildOptions, planEmbed } from "./compile-embed.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
 function parseArgs(argv) {
@@ -81,7 +84,15 @@ const TARGET = args.target?.trim();
 // Opt-in (#1314): fail the build when a server module runtime-requires a
 // package that cannot be bundled. The default only warns, because an optional
 // dependency that is absent throws only if its code path actually runs.
-const STRICT_REQUIRES = process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1";
+// Opt-in (#1460, `kn-next build --self-contained`): the binary carries the nitro
+// runtime, `.output/public` and sharp's native tree INSIDE itself and needs
+// nothing beside it. Strict requires are FORCED on in this mode — a runtime
+// require the analysis cannot bundle has nowhere on disk to fall back to, so it
+// must fail the build rather than the first request that reaches it.
+const SELF_CONTAINED = args["self-contained"] === "1";
+const NATIVE_DIR = args["native-dir"] ? resolve(args["native-dir"]) : null;
+const STRICT_REQUIRES =
+    SELF_CONTAINED || process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1";
 // CI-only patched Bun base executable (infra/bun-base/); `{}` when unset.
 let BUN_BASE_EXE;
 try {
@@ -310,6 +321,28 @@ function planRuntimeRequires() {
 }
 
 /**
+ * Self-contained (#1460): `import.meta.*` of the entry, reconstructed INSIDE the
+ * binary. `.output/public` is embedded at its relative path under `$bunfs/root`,
+ * so "this file" is the entry's own relative path under the embedded root, and
+ * nitro's `../public` lands on the embedded tree. The compiled entry itself sits
+ * at `$bunfs/root/<outfile name>` (Bun names it after the binary, not by the
+ * naming template), so the root is `dirname(process.argv[1])` and the entry's
+ * directory is re-added. Nothing reads the disk or the cwd.
+ *
+ * @param {string} entryRelDir the entry's directory relative to the app root, posix
+ */
+function selfContainedEntryExprs(entryRelDir) {
+    const path = 'require("node:path")';
+    const dir = `${path}.join(${path}.dirname(process.argv[1]),${JSON.stringify(entryRelDir)})`;
+    const entryFileExpr = `(${path}.join(${dir},"index.mjs"))`;
+    return {
+        entryFileExpr,
+        entryDirExpr: `(${dir})`,
+        entryUrlExpr: `(require("node:url").pathToFileURL(${entryFileExpr}).href)`,
+    };
+}
+
+/**
  * Injects the keep-alive guard import into the nitro entry AND rewrites
  * `import.meta.*` so `--bytecode`'s CommonJS output can hold it. Both act on the
  * SAME entry file, so they share one onLoad (Bun calls only the first plugin
@@ -345,10 +378,18 @@ const importMetaToCjs = {
                 PLAN.modules.get(path)?.aliases ?? [],
                 [...PLAN.embed.keys()],
             );
+            // Self-contained: no sidecar resolver (there is no sidecar to
+            // resolve from, and a `node_modules` planted beside the binary must
+            // not be able to answer a require), and `.output/public` embedded
+            // through a generated module of file imports.
             const src =
                 `import ${JSON.stringify(GUARD_FILE)};\n` +
-                `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n` +
+                (SELF_CONTAINED ? "" : `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n`) +
                 `import ${JSON.stringify(CACHE_CONTROL_FILE)};\n` +
+                (SELF_CONTAINED
+                    ? `import __knextEmbeddedPublic from "${EMBEDDED_PREFIX}public";\n` +
+                      "globalThis[Symbol.for(\"knext.embedded.public\")] = __knextEmbeddedPublic;\n"
+                    : "") +
                 wrapped.contents;
             console.log(
                 "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",
@@ -374,10 +415,13 @@ const importMetaToCjs = {
             const entryFileExpr = `(${P}.join(${P}.dirname(process.execPath),".output","server","index.mjs"))`;
             const entryDirExpr = `(${P}.join(${P}.dirname(process.execPath),".output","server"))`;
             const entryUrlExpr = `(require("node:url").pathToFileURL(${entryFileExpr}).href)`;
+            const exprs = SELF_CONTAINED
+                ? selfContainedEntryExprs(relative(APP_ROOT, ENTRY_DIR).split(sep).join("/"))
+                : { entryFileExpr, entryDirExpr, entryUrlExpr };
             const out = src
-                .replaceAll("import.meta.filename", entryFileExpr)
-                .replaceAll("import.meta.dirname", entryDirExpr)
-                .replaceAll("import.meta.url", entryUrlExpr);
+                .replaceAll("import.meta.filename", exprs.entryFileExpr)
+                .replaceAll("import.meta.dirname", exprs.entryDirExpr)
+                .replaceAll("import.meta.url", exprs.entryUrlExpr);
             const after = (out.match(/import\.meta/g) ?? []).length;
             if (after > 0) {
                 // Bytecode would fail anyway; failing here says WHY, and names
@@ -492,6 +536,163 @@ const externalSidecar = {
     },
 };
 
+/**
+ * Self-contained mode (#1460). Everything the nitro bun preset reads from disk
+ * at runtime is embedded at the SAME relative path it has under the app root
+ * (path fidelity), so `$bunfs/root/.output/public/…` is where nitro's asset
+ * reader (`fsp.readFile(resolve(<entry dir>, "../public/…"))`) looks, and
+ * `$bunfs/root/native/…` keeps the addon's relative rpath to libvips.
+ *
+ *  - `.output/public/**` and the staged `native/**` tree are embedded as FILE
+ *    assets (`import x from "<abs>" with { type: "file" }`), byte-for-byte —
+ *    client chunks must not be re-bundled.
+ *  - `sharp` resolves to a lazy facade: sharp's whole module (its JavaScript
+ *    calls into the addon at load) is evaluated on the FIRST image request,
+ *    after sharp-native-extract.mjs unpacks the tree to a temp directory. Boot
+ *    and `/api/health` never pay the unpack.
+ */
+const EMBEDDED_PREFIX = "knext-embedded:";
+// Unique per build, so a stale binary cannot pass the bytecode proof.
+const BYTECODE_MARKER = `knext-vinext-exec:${randomBytes(12).toString("hex")}`;
+const APP_ROOT = dirname(dirname(ENTRY_DIR));
+const PUBLIC_DIR = join(APP_ROOT, ".output", "public");
+const EXTRACT_FILE = [
+    join(compileHere, "sharp-native-extract.js"),
+    join(compileHere, "sharp-native-extract.mjs"),
+].find((c) => existsSync(c));
+
+/** Every regular file under `dir`, as absolute paths, sorted. */
+function listFiles(dir) {
+    const out = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...listFiles(path));
+        else if (entry.isFile()) out.push(path);
+    }
+    return out.sort();
+}
+
+/** A generated module exporting `[{ rel, path }]` for `files`, each embedded as a file asset. */
+function fileAssetModule(files, relTo) {
+    const lines = files.map(
+        (f, i) => `import f${i} from ${JSON.stringify(f)} with { type: "file" };`,
+    );
+    const rows = files.map(
+        (f, i) => `{ rel: ${JSON.stringify(relative(relTo, f).split(sep).join("/"))}, path: f${i} }`,
+    );
+    return `${lines.join("\n")}\nexport default [${rows.join(", ")}];\n`;
+}
+
+let sharpFacaded = false;
+const selfContainedEmbed = {
+    name: "knext-self-contained-embed",
+    setup(build) {
+        build.onResolve({ filter: /^knext-embedded:/ }, (args) => ({
+            path: args.path.slice(EMBEDDED_PREFIX.length),
+            namespace: "knext-embedded",
+        }));
+        build.onLoad({ filter: /.*/, namespace: "knext-embedded" }, (args) => {
+            if (args.path === "public") {
+                const files = existsSync(PUBLIC_DIR) ? listFiles(PUBLIC_DIR) : [];
+                console.log(
+                    `[knext compile] self-contained: embedding ${files.length} file(s) of .output/public`,
+                );
+                return { contents: fileAssetModule(files, PUBLIC_DIR), loader: "js" };
+            }
+            if (args.path === "native") {
+                const files = NATIVE_DIR && existsSync(NATIVE_DIR) ? listFiles(NATIVE_DIR) : [];
+                if (files.length === 0) {
+                    throw new Error(
+                        "[knext compile] self-contained: the server output uses sharp, but no staged " +
+                            `native tree was passed (--native-dir${NATIVE_DIR ? ` ${NATIVE_DIR} is empty` : " is missing"}) ` +
+                            "— the binary would have no image backend. `kn-next build --self-contained` stages it first.",
+                    );
+                }
+                console.log(
+                    `[knext compile] self-contained: embedding sharp's native tree (${files.length} file(s)); ` +
+                        "unpacked to TMPDIR on the first image request",
+                );
+                return { contents: fileAssetModule(files, NATIVE_DIR), loader: "js" };
+            }
+            throw new Error(`[knext compile] unknown embedded module ${args.path}`);
+        });
+        // The server output's `import sharp from "sharp"` → the lazy facade.
+        build.onResolve({ filter: /^sharp$/ }, (args) => {
+            if (!args.importer || !isServerOutputModule(resolve(args.importer))) return undefined;
+            return { path: "sharp", namespace: "knext-sharp-lazy" };
+        });
+        build.onLoad({ filter: /.*/, namespace: "knext-sharp-lazy" }, () => {
+            if (!EXTRACT_FILE) {
+                throw new Error(
+                    "[knext compile] the sharp native extractor is missing beside vinext-compile " +
+                        `(looked for sharp-native-extract.{js,mjs} in ${compileHere}) — the installed @getknext/core is incomplete`,
+                );
+            }
+            // sharp's ESM entry, explicitly: `require` would otherwise pick its
+            // CommonJS build, whose `require('./sharp.cjs')` would receive the
+            // ESM dlopen shim's namespace instead of the addon.
+            const resolved = Bun.resolveSync("sharp", ENTRY_DIR);
+            const esm = join(dirname(resolved), "index.mjs");
+            const sharpEntry = existsSync(esm) ? esm : resolved;
+            sharpFacaded = true;
+            return {
+                contents:
+                    `import { extractEmbeddedNative, lazySharp, NATIVE_ROOT_KEY } from ${JSON.stringify(EXTRACT_FILE)};\n` +
+                    `import files from "${EMBEDDED_PREFIX}native";\n` +
+                    "export default lazySharp(() => {\n" +
+                    '    if (!(process.env.KNEXT_SHARP_ADDON ?? "").trim()) {\n' +
+                    "        globalThis[NATIVE_ROOT_KEY] = extractEmbeddedNative({ files }).root;\n" +
+                    "    }\n" +
+                    `    return require(${JSON.stringify(sharpEntry)}).default;\n` +
+                    "});\n",
+                loader: "js",
+            };
+        });
+    },
+};
+
+/**
+ * Self-contained: the set of things that must sit beside the binary has to be
+ * EMPTY. Scanned, not enumerated: every package nitro traced into the server
+ * output that ships a native addon is one the binary cannot load from inside
+ * itself — except sharp's, which is embedded and unpacked on first use.
+ */
+function selfContainedSidecarViolations() {
+    if (!existsSync(SIDECAR_NODE_MODULES)) return [];
+    const names = [];
+    for (const entry of readdirSync(SIDECAR_NODE_MODULES)) {
+        if (entry.startsWith(".")) continue;
+        if (entry.startsWith("@")) {
+            for (const sub of readdirSync(join(SIDECAR_NODE_MODULES, entry))) names.push(`${entry}/${sub}`);
+        } else names.push(entry);
+    }
+    return names
+        .filter((name) => name !== "sharp" && !name.startsWith("@img/"))
+        .filter((name) => hasNativeAddon(join(SIDECAR_NODE_MODULES, name)))
+        .sort();
+}
+
+if (SELF_CONTAINED) {
+    const violations = selfContainedSidecarViolations();
+    if (violations.length > 0) {
+        console.error(
+            `[knext compile] self-contained: ${violations.join(", ")} ship(s) a native addon, which cannot ` +
+                "load from inside the binary and has no sidecar to load from — self-contained mode embeds " +
+                "only sharp's native tree. Build without --self-contained, or drop the dependency.",
+        );
+        process.exit(1);
+    }
+    if (NATIVE_DIR) {
+        const rel = relative(APP_ROOT, NATIVE_DIR);
+        if (rel.startsWith("..") || isAbsolute(rel)) {
+            console.error(
+                `[knext compile] self-contained: --native-dir ${NATIVE_DIR} must sit under the app root ${APP_ROOT}`,
+            );
+            process.exit(1);
+        }
+    }
+}
+
 const PLAN = planRuntimeRequires();
 const DYNAMIC_MESSAGE =
     "a runtime require called with a non-literal package name (e.g. `__require(name)`) in " +
@@ -519,26 +720,76 @@ if (
     process.exit(1);
 }
 
-const result = await Bun.build({
-    entrypoints: [ENTRY],
-    target: "bun",
-    plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
-    minify: true,
-    bytecode: true,
-    compile: {
+/**
+ * Self-contained: F2's build shape (compile-embed.mjs) — `root` = the app root
+ * and hash-free `[dir]/[name].[ext]` naming, so the entry and every embedded
+ * asset keep their on-disk relative path under `$bunfs/root`. The runtime-require
+ * plan adds no module FILES here: its `embed` set is packages, bundled through
+ * the wrapped require bindings above.
+ */
+function selfContainedBuildOptions() {
+    const shape = embedBuildOptions(planEmbed({ root: APP_ROOT, include: [] }), {
+        entry: ENTRY,
         outfile: OUTFILE,
-        // NEVER set `autoloadPackageJson` here: it widens runtime package
-        // resolution beyond the sidecar. The sidecar is resolved by
-        // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
-        // server/node_modules (#1320).
-        ...(TARGET ? { target: TARGET } : {}),
-        ...BUN_BASE_EXE,
-    },
-});
+        includeSupported: false,
+        bytecode: true,
+        minify: true,
+        extra: {
+            plugins: [importMetaToCjs, sharpAddonDlopen, selfContainedEmbed],
+            // The bytecode-proof marker, as a BANNER so it sits directly under
+            // the module's `// @bun …` pragma (see bytecode-exec-verify.mjs).
+            banner: `globalThis.__knextVinextExecMarker=${JSON.stringify(BYTECODE_MARKER)};`,
+        },
+    });
+    return {
+        ...shape,
+        naming: { entry: shape.naming, chunk: shape.naming, asset: shape.naming },
+        compile: {
+            ...shape.compile,
+            ...(TARGET ? { target: TARGET } : {}),
+            ...BUN_BASE_EXE,
+        },
+    };
+}
+
+const result = await Bun.build(
+    SELF_CONTAINED
+        ? selfContainedBuildOptions()
+        : {
+              entrypoints: [ENTRY],
+              target: "bun",
+              plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
+              minify: true,
+              bytecode: true,
+              compile: {
+                  outfile: OUTFILE,
+                  // NEVER set `autoloadPackageJson` here: it widens runtime package
+                  // resolution beyond the sidecar. The sidecar is resolved by
+                  // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
+                  // server/node_modules (#1320).
+                  ...(TARGET ? { target: TARGET } : {}),
+                  ...BUN_BASE_EXE,
+              },
+          },
+);
 
 if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
+}
+if (SELF_CONTAINED) {
+    // Fail closed: a self-contained binary without bytecode boots and serves,
+    // just slower — the regression nobody notices.
+    const verdict = verifyBytecodeExec(readFileSync(OUTFILE), BYTECODE_MARKER);
+    if (!verdict.ok) {
+        rmSync(OUTFILE, { force: true });
+        console.error(`[knext compile] the self-contained executable failed the bytecode check: ${verdict.reason}`);
+        process.exit(1);
+    }
+    console.log(
+        "[knext compile] self-contained: nothing needs to sit beside the binary " +
+            `(sharp: ${sharpFacaded ? "embedded, unpacked on first use" : "not used"}); bytecode verified`,
+    );
 }
 if (PLAN.embed.size > 0) {
     console.log(

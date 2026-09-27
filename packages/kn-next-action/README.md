@@ -76,6 +76,7 @@ only with a cluster-admin one.
 | `doctor` | no | `true` | read-only cluster preflight |
 | `auth` | no | `kubeconfig` | reserved for short-lived cloud credentials |
 | `skip-credential-preflight` | no | `false` | read the section above first |
+| `cli` | no | `npx --yes @getknext/core` | the command that runs the CLI, split on whitespace. Leave it at the default unless you are dogfooding this action from its own checkout — point it at a locally built CLI (e.g. `node ./packages/kn-next/dist/cli/kn-next.js`) to deploy with that build instead of the published package |
 
 No outputs. The deployed URL comes from the cluster — `kn-next status`, or
 `kubectl get ksvc -n <namespace>`.

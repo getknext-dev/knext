@@ -1571,6 +1571,64 @@ jobs:
         # `bun:test`, so vitest collected nothing and exited 1.
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/compile-cache-health-bun.test.ts
 
+  # ── self-contained exec e2e (#1460) ──────────────────────────────────────────
+  # Builds file-manager's SELF-CONTAINED vinext binary NATIVELY on the runner
+  # (apps/file-manager/scripts/build-self-contained.mjs — vite build, stage
+  # sharp's traced native/ tree, compile with --self-contained 1) and boots it
+  # ALONE in an empty directory: no .output/public, no native/, no node_modules
+  # beside it. KNEXT_REQUIRE_SC_EXEC=1 is load-bearing — it converts "no binary"
+  # from a silent skip into a hard failure, so a green check here proves the
+  # binary actually served all 13 measurement routes + the lazy sharp unpack
+  # contract, never that the test quietly ran nothing (#927/#932 declared-skips
+  # discipline). Declared in tests/declared-test-skips.test.ts (LANE_BACKED).
+  self-contained-exec-e2e:
+    name: 'Self-contained (vinext): file-manager exec e2e (#1460)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+          # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # @getknext/lib and @getknext/core ship only dist/ and must be built before the
+      # app (same order as compat-smoke: lib -> db -> core).
+      - name: Build @getknext/lib
+        run: bun run --filter @getknext/lib build
+
+      - name: Build @getknext/db
+        run: bun run --filter @getknext/db build
+
+      - name: Build @getknext/core
+        run: bun run --filter @getknext/core build
+
+      # Runs `vite build`, stages sharp's native/ tree from nitro's traced
+      # .output/server/node_modules/@img, then compiles with --self-contained 1.
+      # Fails loud (non-zero) on any of those steps rather than leaving no
+      # binary for the next step to silently skip past.
+      - name: Build the self-contained binary (host target, native compile)
+        working-directory: apps/file-manager
+        run: bun scripts/build-self-contained.mjs --out knext-exec-self-contained
+
+      - name: Self-contained exec e2e (must NOT skip)
+        env:
+          KNEXT_SC_EXEC: ${{ github.workspace }}/apps/file-manager/knext-exec-self-contained
+          KNEXT_REQUIRE_SC_EXEC: '1'
+        # bun, not vitest: the file imports bun:test directly.
+        run: node scripts/bun-test.mjs apps/file-manager/self-contained-exec-e2e.test.ts
+
   # ── file-manager e2e round (#1197 / T1) ──────────────────────────────────────
   # A NAME + a scoping rule over the app-level e2e legs that ALREADY gate every PR
   # fail-closed — NOT new fidelity. It asserts that the underlying jobs all went
@@ -1588,7 +1646,7 @@ jobs:
   # apps/file-manager/e2e-round.test.ts.
   file-manager-e2e-round:
     name: file-manager e2e round
-    needs: [compat-smoke, prod-image-optimization, standalone-drain-bun-image, bun-exec-alpine-image]
+    needs: [compat-smoke, prod-image-optimization, standalone-drain-bun-image, bun-exec-alpine-image, self-contained-exec-e2e]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1623,6 +1681,7 @@ jobs:
           E2E_RESULT_PROD_IMAGE_OPTIMIZATION: ${{ needs.prod-image-optimization.result }}
           E2E_RESULT_STANDALONE_DRAIN_BUN_IMAGE: ${{ needs.standalone-drain-bun-image.result }}
           E2E_RESULT_BUN_EXEC_ALPINE_IMAGE: ${{ needs.bun-exec-alpine-image.result }}
+          E2E_RESULT_SELF_CONTAINED_EXEC_E2E: ${{ needs.self-contained-exec-e2e.result }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node apps/file-manager/scripts/e2e-round-aggregate.mjs

@@ -341,8 +341,10 @@ export interface VinextBuildOptions {
      */
     readonly skipViteBuild?: boolean;
     /**
-     * Opt-in self-contained mode. Accepted and recorded only — no embedding
-     * happens yet, so the compile argv is identical either way.
+     * Opt-in self-contained mode (#1460): the binary embeds `.output/public`
+     * and sharp's native tree and needs nothing beside it. The native tree is
+     * staged BEFORE the compile so it can be embedded. Off (the default), the
+     * compile argv and the step order are exactly what they were.
      */
     readonly selfContained?: boolean;
 }
@@ -395,6 +397,22 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
                 "That entry is what gets compiled into the executable, so the image would have nothing to run.\n" +
                 "Check that this app's vite config uses the nitro bun preset.",
         );
+    }
+
+    if (opts.selfContained) {
+        // Self-contained: stage sharp's native tree for the target arch FIRST
+        // (the compile embeds it, and it is unpacked on the first image
+        // request), then compile with it. Nothing is left for the image to
+        // copy beside the binary.
+        stageSharpNative(opts.cwd, { arch });
+        run([
+            ...compileArgv(arch, entry, outFile),
+            "--self-contained",
+            "1",
+            "--native-dir",
+            "native",
+        ]);
+        return outFile;
     }
 
     // 2. compile + bytecode

@@ -1,11 +1,11 @@
 /**
- * `--self-contained` / `selfContained` (opt-in; no target honours it yet).
+ * `--self-contained` / `selfContained` (opt-in; the vinext target honours it, #1460).
  *
  * Real modules only — the routing half (mocked compile steps) lives in
  * `self-contained-routing.test.ts`. This file pins: the config key's validator,
  * that the emitted NextApp CR does not change, that the flag is documented in
- * `--help`, and that the compile argv the two targets build is byte-identical
- * whether the option is absent, false or true (today it only gets recorded).
+ * `--help`, and that the vinext compile argv is byte-identical whether the
+ * option is absent or false, and gains only the self-contained switch when true.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -81,7 +81,7 @@ describe("knext build --self-contained is a documented flag", () => {
     });
 });
 
-describe("compile argv is byte-identical with the option absent, false or true", () => {
+describe("compile argv: byte-identical absent or false; true adds only the self-contained switch", () => {
     function argvFor(selfContained: boolean | undefined): string[][] {
         const cwd = mkdtempSync(join(tmpdir(), "knext-f5-"));
         try {
@@ -106,7 +106,11 @@ describe("compile argv is byte-identical with the option absent, false or true",
         const absent = argvFor(undefined);
         expect(absent.length).toBe(1);
         expect(argvFor(false)).toEqual(absent);
-        expect(argvFor(true)).toEqual(absent);
+        // #1460: the vinext target honours it — the same argv, plus the switch
+        // and the native tree staged for embedding. Nothing else moves.
+        expect(argvFor(true)).toEqual([
+            [...absent[0], "--self-contained", "1", "--native-dir", "native"],
+        ]);
     });
 });
 

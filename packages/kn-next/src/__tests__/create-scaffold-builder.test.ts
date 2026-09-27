@@ -83,7 +83,9 @@ describe("knext create — default target is standalone (#1342/ADR-0058)", () =>
         const { appDir } = scaffold("std-pkg");
         const pkg = JSON.parse(
             readFileSync(join(appDir, "package.json"), "utf8"),
-        ) as { scripts?: Record<string, string> };
+        ) as {
+            scripts?: Record<string, string>;
+        };
         expect(pkg.scripts?.build).toBe("next build");
         expect(pkg.scripts?.build).not.toContain("vite");
         expect(pkg.scripts?.dev).toBe("next dev");
@@ -131,6 +133,14 @@ describe("knext create — default target is standalone (#1342/ADR-0058)", () =>
             ).toBe(false);
         }
     });
+
+    it("emits NO Dockerfile.self-contained — that reference recipe only applies to `kn-next build --self-contained`, a vinext-only build mode (#1460 round 3, was BLOCKING)", () => {
+        const { appDir, files } = scaffold("std-no-self-contained");
+        expect(existsSync(join(appDir, "Dockerfile.self-contained"))).toBe(
+            false,
+        );
+        expect([...files.keys()]).not.toContain("Dockerfile.self-contained");
+    });
 });
 
 describe("knext create --builder vinext — unchanged shape (#1342)", () => {
@@ -152,7 +162,9 @@ describe("knext create --builder vinext — unchanged shape (#1342)", () => {
         const { appDir } = scaffold("vinext-pkg", "vinext");
         const pkg = JSON.parse(
             readFileSync(join(appDir, "package.json"), "utf8"),
-        ) as { scripts?: Record<string, string> };
+        ) as {
+            scripts?: Record<string, string>;
+        };
         expect(pkg.scripts?.build).toBe("vite build");
     });
 
@@ -169,6 +181,14 @@ describe("knext create --builder vinext — unchanged shape (#1342)", () => {
     it("emits no next-adapter.ts — inert under vinext, which never calls adapter hooks", () => {
         const { appDir } = scaffold("vinext-no-adapter", "vinext");
         expect(existsSync(join(appDir, "next-adapter.ts"))).toBe(false);
+    });
+
+    it("emits Dockerfile.self-contained — the reference recipe for `kn-next build --self-contained` (#1460 round 3)", () => {
+        const { appDir, files } = scaffold("vinext-self-contained", "vinext");
+        expect(existsSync(join(appDir, "Dockerfile.self-contained"))).toBe(
+            true,
+        );
+        expect([...files.keys()]).toContain("Dockerfile.self-contained");
     });
 });
 

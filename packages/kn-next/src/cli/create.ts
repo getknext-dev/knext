@@ -237,6 +237,15 @@ const VINEXT_ONLY_TEMPLATES: ReadonlySet<string> = new Set([
     "knext-node-entry.mjs",
     "knext-bun-entry.mjs",
     "runtime-contract.mjs",
+    // #1460 round 3 (was BLOCKING): a self-contained single-executable
+    // build only exists for the vinext target (`kn-next build
+    // --self-contained` compiles the vite/rolldown output). It shipped
+    // into EVERY scaffold, default included, until this line — useless
+    // dead reference material in a standalone-target app, which never
+    // runs `--self-contained` and has no `vite.config.ts` for it to sit
+    // beside. See `create-scaffold-parity.test.ts`'s `CLI_ONLY` entry for
+    // this file, which documented the gap before this fixed it.
+    "Dockerfile.self-contained",
 ]);
 
 /**

@@ -206,6 +206,21 @@ jobs:
           tag: ${{ github.sha }}
           skip-upload: 'true'
           doctor: 'false'
+          # Dogfood THIS commit's build, not whatever @getknext/core npm
+          # currently serves (#1502: unversioned `npx @getknext/core`, run
+          # from a workspace member that depends on it via `workspace:*`,
+          # resolves locally rather than fetching the published package — and
+          # the tree's package.json now declares two bins, `knext` (canonical)
+          # and `kn-next` (deprecated alias). `bun install` only creates
+          # `node_modules/.bin` entries for a workspace bin whose target file
+          # already exists, and that install ran BEFORE the CLI was built, so
+          # neither `.bin/knext` nor `.bin/kn-next` existed yet. npx's local
+          # resolution then fell through to a bare shell lookup of the
+          # (unlinked) canonical bin name and died with `sh: 1: knext: not
+          # found` (exit 127) — reproduced verbatim from `apps/docs`, see the
+          # PR description. Pointing at the just-built file sidesteps npx's
+          # bin resolution entirely.
+          cli: node ${{ github.workspace }}/packages/kn-next/dist/cli/kn-next.js
 
       # `kn-next deploy` returns once the NextApp is submitted. Wait for the
       # operator to report THIS generation Ready (get only — the credential

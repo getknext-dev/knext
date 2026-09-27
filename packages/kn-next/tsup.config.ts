@@ -113,6 +113,10 @@ export default defineConfig([
       // `import` of this right after the guard, so it too must ship in dist
       // beside vinext-compile (it fails closed when absent).
       'adapters/sidecar-install': 'src/adapters/sidecar-install.mjs',
+      // The self-contained sharp extractor + lazy loader (#1460). vinext-compile
+      // imports it into the lazy sharp facade by absolute path (and fails closed
+      // when absent), so it must ship in dist beside vinext-compile.
+      'adapters/sharp-native-extract': 'src/adapters/sharp-native-extract.mjs',
       // The Bun.serve deployed Cache-Control normalization (#1322). vinext-compile
       // injects an `import` of this after the sidecar resolver (and fails closed
       // when it is absent), so it must ship in dist beside vinext-compile.

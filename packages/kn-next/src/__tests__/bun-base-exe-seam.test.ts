@@ -64,13 +64,19 @@ function verifiedBase(): string {
 
 // ── 1. scan ──────────────────────────────────────────────────────────────────
 
-/** The body of the `compile: { … }` object inside a `Bun.build({ … })` call. */
-function compileBlocks(source: string): string[] {
+/**
+ * The body of EVERY `compile: { … }` object literal in a script — independent
+ * of how the `Bun.build(…)` call is shaped. Anchoring on `Bun.build({` missed
+ * `Bun.build(SELF_CONTAINED ? selfContainedBuildOptions() : { … })` (#1460 on
+ * main), and a scan that silently finds fewer blocks proves less than it says.
+ */
+function compileBlocks(raw: string): string[] {
+    // Comments are prose, not code: a doc comment that says `compile: { … }`
+    // is not a compile object (block comments and whole-line `//` only).
+    const source = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     const blocks: string[] = [];
-    for (const build of source.matchAll(/Bun\.build\(\s*\{/g)) {
-        const at = source.indexOf("compile:", build.index);
-        if (at < 0) continue;
-        const open = source.indexOf("{", at);
+    for (const m of source.matchAll(/\bcompile:\s*\{/g)) {
+        const open = (m.index ?? 0) + m[0].length - 1;
         let depth = 0;
         for (let i = open; i < source.length; i++) {
             if (source[i] === "{") depth++;
@@ -82,6 +88,13 @@ function compileBlocks(source: string): string[] {
     }
     return blocks;
 }
+
+/**
+ * Scripts that call `Bun.build(` WITHOUT a `compile: { … }` literal. Each is
+ * reviewed: `compile-embed.mjs` builds throwaway probe binaries in a child
+ * process to DETECT what stock Bun embeds — never a shipped executable.
+ */
+const NO_COMPILE_LITERAL_REVIEWED = new Set(["compile-embed.mjs"]);
 
 describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
     const scripts = readdirSync(ADAPTERS)
@@ -96,6 +109,24 @@ describe("KNEXT_BUN_BASE_EXE seam — scan", () => {
         const names = scripts.map((s) => s.file);
         expect(names).toContain("vinext-compile.mjs");
         expect(names).toContain("standalone-compile.mjs");
+    });
+
+    it("counts every compile object in vinext-compile.mjs (both build shapes)", () => {
+        const v = scripts.find((x) => x.file === "vinext-compile.mjs");
+        // self-contained + sidecar: two compile literals, both must carry the seam.
+        expect(v && compileBlocks(v.source).length).toBe(2);
+    });
+
+    it("no script calls Bun.build without a scanned compile literal, unless reviewed", () => {
+        const unscanned = readdirSync(ADAPTERS)
+            .filter((f) => f.endsWith(".mjs"))
+            .filter((f) => {
+                const src = readFileSync(join(ADAPTERS, f), "utf8");
+                return /\bBun\.build\(/.test(src) && compileBlocks(src).length === 0;
+            });
+        expect(unscanned.filter((f) => !NO_COMPILE_LITERAL_REVIEWED.has(f))).toEqual([]);
+        // The exemption must stay load-bearing, not a stale entry.
+        for (const f of NO_COMPILE_LITERAL_REVIEWED) expect(unscanned).toContain(f);
     });
 
     for (const { file, source } of scripts) {
