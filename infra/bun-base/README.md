@@ -144,16 +144,22 @@ real bash parser (`mvdan-sh`, the parser behind `shfmt`) and walks the syntax tr
 
 - every command name must be a literal word on the allowlist; network-capable commands (`curl`, `wget`,
   `git fetch`, `apt-get`, `rustup`, `apk.static`, `bun`) are accepted only in the exact argument shapes
-  this script uses. Wrappers such as `timeout`, `env` or `xargs` are stripped before the check;
+  this script uses. Wrappers such as `timeout`, `env` or `xargs` are stripped before the check; a `curl`
+  with a second output option (any spelling of `-o`/`-O`/`-fsSLo`/`-fsSLO`) is red outright — curl
+  writes to the *first* one, so a scanner that read the *last* one disagreed with the interpreter
+  about which file was actually verified (#1469 F1);
 - each network command must run in the script's top-level flow (not in a branch, function, condition
   or `$( )`) and be followed, in the same statement list and before the next fetch, by its verifier —
   for a download, `pin` of the same file in the directory it was written to; for the build, the
   consumption `grep` plus the `tee` inside the build's own pipeline — or be listed below;
 - only `pin()` and `lap()` may be defined, once, with the reviewed bodies; `prefix.sh` may define no
   function and fetch nothing;
-- variables are assigned only from a fixed list, and `PATH`, `HOME`, `WS`, `SRC`, `OUT`, `LD` and
-  `BUN_BUILD_PREFETCH_DIR` only as their one reviewed line; every redirection reads or writes a reviewed
-  path, so no spelling of `/dev/tcp` gets through;
+- variables are assigned only from a fixed list, and `PATH`, `HOME`, `WS`, `SRC`, `OUT`, `LD`, `IFS`
+  and `BUN_BUILD_PREFETCH_DIR` only as their one reviewed line — **including via `read`, not only
+  `=`/`export`/`local`/`declare`**: `read` itself is checked against a fixed allowed shape (the one
+  reviewed `IFS=: read -r _ apkarch root <<<"$pair"`), because `read -r PATH <<<…` or
+  `read -r HOME <<<…` binds those names without ever writing an `=` assignment (#1469 F2); every
+  redirection reads or writes a reviewed path, so no spelling of `/dev/tcp` gets through;
 - each entry below matches exactly its stated number of calls, and its `match` regex is rendered here,
   so widening one is a visible change.
 

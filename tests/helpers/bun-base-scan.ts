@@ -429,7 +429,15 @@ const CONSTS: Record<string, string> = {
   OUT: 'OUT=$WS/out',
   BUN_BUILD_PREFETCH_DIR: 'BUN_BUILD_PREFETCH_DIR=/tmp/bun-prefetch',
   LD: 'LD=/opt/linux-sysroot-musl/lib/ld-musl-x86_64.so.1',
+  // IFS controls how `read` splits its input; the one reviewed use (below) needs `:` and nothing
+  // else may set it — an `IFS=` elsewhere could repurpose a later `read`/`for`/word-split silently.
+  IFS: 'IFS=:',
 };
+/** `read`'s only reviewed shape — the sysroot-pair unpacking loop. Any other `read` is red: this
+ *  is the one binder in the script (besides the `=`/`export`/`local`/`declare` path already checked
+ *  above) that can name a variable, so it gets its own fixed allowlist rather than a VARS lookup —
+ *  VARS also contains PATH/HOME/WS/… (legal on the LEFT of `=`), which `read` must never touch. */
+const READ_EXACT = new Set(['read -r _ apkarch root']);
 /** Loop headers, exactly (the loop variable and the word list). */
 const FOR_HEADERS = new Set([
   'for p in "${PATCHES[@]}"',
@@ -516,15 +524,27 @@ function curlShape(
   let url: string | undefined;
   let out: string | undefined;
   let O = false;
+  // curl pairs each output option with the URL that precedes it in argv order and writes to the
+  // FIRST one it sees; a naive last-one-wins scan (the #1469 F1 bug) disagrees with that and can be
+  // satisfied by a build.sh that writes unverified bytes to the first path while `pin` re-checks an
+  // already-verified file named by a second, decoy output option. So a second output option of ANY
+  // spelling (-o, -fsSLo, -fsSLO, …) is red here — the rule decides, not a downstream count.
+  let outputOptions = 0;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '-fsSL' || a === '--tlsv1.2') continue;
-    if (a === '-fsSLO') O = true;
-    else if (a === '--proto' && args[i + 1] === "'=https'") i++;
-    else if (a === '-o' || a === '-fsSLo') out = args[++i];
-    else if (a.startsWith('-')) return { bad: `curl option ${a} not allowed` };
+    if (a === '-fsSLO') {
+      outputOptions++;
+      O = true;
+    } else if (a === '--proto' && args[i + 1] === "'=https'") i++;
+    else if (a === '-o' || a === '-fsSLo') {
+      outputOptions++;
+      out = args[++i];
+    } else if (a.startsWith('-')) return { bad: `curl option ${a} not allowed` };
     else if (url) return { bad: 'curl with more than one URL' };
     else url = a;
+    if (outputOptions > 1)
+      return { bad: 'curl with more than one output option (-o/-O/-fsSLo/-fsSLO)' };
   }
   if (!url) return { bad: 'curl without a URL' };
   const u = unq(url);
@@ -619,9 +639,12 @@ export function scanBuildScript(
       v.push(`${at}: a check or fetch before && (its failure does not stop the script)`);
     if (head === 'printf' && n.words.some((w) => /^-[a-zA-Z]*v/.test(w)))
       v.push(`${at}: printf -v assigns a variable`);
-    if (head === 'read')
-      for (const x of n.words.slice(1).filter((x) => !x.startsWith('-')))
-        if (!VARS.has(x)) v.push(`${at}: read into unknown variable`);
+    // `read` is checked against its own fixed shape, not VARS: VARS also allows PATH/HOME/WS/… on
+    // the left of `=` (the CONSTS one-line check covers that), and a `read` into one of those names
+    // — `read -r PATH <<<…`, `read -r HOME <<<…`, `read -r WS <<<…` — bypassed that check entirely
+    // (#1469 F2) because it was never an `=` assignment. Only the one reviewed `read` may run.
+    if (head === 'read' && !READ_EXACT.has(n.text))
+      v.push(`${at}: read is only allowed in the reviewed shape (${[...READ_EXACT].join(', ')})`);
 
     const conf = [...c.words, ...c.redirs].join(' ');
     if (/\/etc\/apt|sources\.list|apt\.conf|preferences\.d/.test(conf) && !APT_CONF_OK.has(conf))
