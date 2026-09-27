@@ -86,7 +86,10 @@ describe("selfContained config key", () => {
             ),
         ).toEqual({
             ...base,
-            spec: { ...base.spec, selfContained: true },
+            spec: {
+                ...(base.spec as Record<string, unknown>),
+                selfContained: true,
+            },
         });
     });
 });

@@ -272,7 +272,11 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		// "node" precisely so the fixture exercises a pairing the old
 		// `bun => vinext` invariant would have forbidden, and which the shipped
 		// code has always allowed.
-		Build:          "turbopack",
+		Build: "turbopack",
+		// SelfContained (#1522) is a plain opt-in bool with no CRD pairing
+		// against Runtime; it must be non-zero in at least one fixture so any
+		// annotation ever stamped from it stays inside the disposition guard.
+		SelfContained:  true,
 		TimeoutSeconds: 111,
 		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS},
 		BuildID:        "build-1",
