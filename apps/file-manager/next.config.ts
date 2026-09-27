@@ -20,10 +20,10 @@ const nextConfig: NextConfig = {
   // which is otherwise a RANDOM nanoid. The retention GC keys deletes by the
   // deploy tag, so the static dir MUST equal that tag or GC matches nothing and
   // the "just-deployed build is protected" guarantee silently fails. Force
-  // BUILD_ID == NEXT_DEPLOYMENT_ID so `.next/BUILD_ID`, the uploaded
+  // BUILD_ID == the deploy tag (KNEXT_BUILD_ID) so `.next/BUILD_ID`, the uploaded
   // `_next/static/<tag>/` prefix, and `pruneOldBuilds(..., buildId=tag)` all
   // line up. Returning null in dev falls back to Next's default nanoid.
-  generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+  generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
   output: 'standalone',
   // Ensure native node modules are traced into standalone output (not bundled).
   // pino-elasticsearch and thread-stream are excluded here to avoid Turbopack

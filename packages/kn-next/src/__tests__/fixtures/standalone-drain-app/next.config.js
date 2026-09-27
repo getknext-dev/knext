@@ -11,4 +11,8 @@
 module.exports = {
   output: 'standalone',
   typescript: { ignoreBuildErrors: true },
+  // The build id is the deploy tag, exactly as the scaffold template wires it:
+  // `kn-next deploy` refuses a standalone build whose .next/BUILD_ID is not
+  // the tag. Outside a deploy both vars are unset → Next's own id.
+  generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
 };
