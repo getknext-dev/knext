@@ -41,22 +41,78 @@ if (!namespace) {
  * `-o`/`--output` on any kubectl release (checked 1.25 through 1.37; the
  * flag has never existed for that subcommand) — #1493 was this preflight
  * shipping `-o json` on that command and refusing on every runner. `kubectl
- * create -o json -f -`, by contrast, supports `-o json` on every kubectl
- * release, so submitting the review object directly is version-independent
- * where scraping `can-i`'s table output never was. `kubectl get --raw` is not
- * an option here: a review is created (POST), not read (GET).
+ * create -o json -f -` fixed that, but introduced a second, narrower problem
+ * (#1500): `create` (without `--raw`) does CLIENT-SIDE schema validation
+ * before it ever submits the object, and that validation itself calls
+ * `list` on `customresourcedefinitions.apiextensions.k8s.io` — a
+ * cluster-scoped resource the scoped `knext-deployer` ServiceAccount was
+ * never granted (by design: its only grant is `apps.kn-next.dev/nextapps`).
+ * The second real docs deploy on main (run 36303738838) failed with:
+ *
+ *   error validating "STDIN": error validating data: failed to check CRD:
+ *   failed to list CRDs: customresourcedefinitions.apiextensions.k8s.io is
+ *   forbidden: User "system:serviceaccount:knext-docs:knext-deployer" cannot
+ *   list resource "customresourcedefinitions" in API group
+ *   "apiextensions.k8s.io" at the cluster scope
+ *
+ * So the fix submits the review as a raw POST — `kubectl create --raw
+ * <path> -f -` — which talks to the apiserver directly and performs NO
+ * client-side validation at all (no CRD list, no schema check). `kubectl
+ * get --raw` is not an option here: a review is created (POST), not read
+ * (GET); `create --raw` accepts a URI and POSTs the piped body to it, which
+ * is exactly this shape. Verified against the live OKE cluster with BOTH
+ * credentials: the scoped `knext-deployer` SA gets a populated
+ * `resourceRules` back (previously refused above); the cluster-admin
+ * context also succeeds unchanged (`--raw` has no effect on what a broad
+ * credential is allowed to do — this only removes a client-side check that
+ * never needed cluster permissions of its own).
+ *
+ * If a kubectl release genuinely lacks `--raw` (none checked did; it has
+ * shipped since well before 1.25), fall back to `create -o json
+ * --validate=false -f -`: same effect — same POST, but no client-side
+ * validation — reached only if invoking `--raw` itself fails to spawn
+ * (e.g. an unrecognized flag), never on an authorization error from that
+ * form, so a real permissions problem still fails closed below rather than
+ * silently retrying into a different code path.
  */
+const RAW_PATH = '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews';
+function submitReview(review) {
+  try {
+    return execFileSync('kubectl', ['create', '--raw', RAW_PATH, '-f', '-'], {
+      encoding: 'utf8',
+      input: review,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    // Only fall back on evidence `--raw` itself isn't understood by this
+    // kubectl — an ENOENT/spawn failure or kubectl's own "unknown flag"
+    // rejection. Anything else (including a server-side authorization
+    // refusal) is a real answer from the raw form and must propagate as-is,
+    // not be masked by a retry into a differently-shaped request.
+    const message = err instanceof Error ? err.message : String(err);
+    const looksLikeUnknownFlag =
+      /unknown flag/i.test(message) || /unknown shorthand flag/i.test(message);
+    if (!looksLikeUnknownFlag) throw err;
+    console.error(
+      "::warning::This kubectl does not recognize 'create --raw' — falling back to " +
+        "'create -o json --validate=false -f -' (same request, client-side validation " +
+        'disabled explicitly rather than bypassed via --raw).',
+    );
+    return execFileSync('kubectl', ['create', '-o', 'json', '--validate=false', '-f', '-'], {
+      encoding: 'utf8',
+      input: review,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  }
+}
+
 function effectiveRules() {
   const review = JSON.stringify({
     apiVersion: 'authorization.k8s.io/v1',
     kind: 'SelfSubjectRulesReview',
     spec: { namespace },
   });
-  const out = execFileSync('kubectl', ['create', '-o', 'json', '-f', '-'], {
-    encoding: 'utf8',
-    input: review,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  const out = submitReview(review);
   const parsed = JSON.parse(out);
   const status = parsed?.status;
   const rules = status?.resourceRules;
