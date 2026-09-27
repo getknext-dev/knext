@@ -97,7 +97,12 @@ const SPEC_NO_STORAGE = 'packages/kn-next/src/__tests__/deploy-no-storage.test.t
 /** SGR colour codes in runner output — matched without a raw escape byte. */
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
 
-const GENERATE_BUILD_ID = '    generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,\n';
+// #1417: both templates now read KNEXT_BUILD_ID first (knext's own env var,
+// exported for the standalone build) and fall back to NEXT_DEPLOYMENT_ID
+// (still exported for vinext) — re-anchored here so both rows track the
+// actual scaffold line rather than the pre-#1417 one.
+const GENERATE_BUILD_ID =
+  '    generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,\n';
 
 /**
  * Every disarm, as `[file, label, anchor, replacement, spec, opts?]`.
@@ -157,8 +162,12 @@ const MUTATIONS = [
   [
     DEPLOY,
     'T2d: the config-override warning goes silent (green-if-deleted in round 1)',
-    '        config.env?.NEXT_DEPLOYMENT_ID !== undefined &&\n',
-    '        false &&\n',
+    // #1417 round 2: T2d was rewritten from a single NEXT_DEPLOYMENT_ID check
+    // into a loop over [NEXT_DEPLOYMENT_ID_ENV, KNEXT_BUILD_ID_ENV] (the same
+    // silent-override risk now applies to both vars) — re-anchored on the
+    // loop body's `if`, which is unique in the file.
+    '        if (configured !== undefined && configured !== buildId) {\n',
+    '        if (false) {\n',
     SPEC_DEPLOY,
   ],
   [

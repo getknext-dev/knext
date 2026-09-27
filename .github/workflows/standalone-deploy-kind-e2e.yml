@@ -101,11 +101,37 @@ jobs:
           bun run --filter "@getknext/core" build
           test -f packages/kn-next/dist/cli/kn-next.js
 
+      # Same closure/rewrite the compat harness lane packs (test-e2e-deploy.yml
+      # "Pack knext adapter tarballs"): `bun pm pack` rewrites the `workspace:^`
+      # deps @getknext/core carries on @getknext/lib + @getknext/db to a real
+      # semver, which is what makes the tarballs npm-installable standalone —
+      # `npm pack` ships the raw protocol and 404s on install.
+      - name: Pack knext adapter tarballs (bun pm pack — rewrites workspace:^, npm-installable)
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          mkdir -p "${DEST}"
+          (cd packages/lib && bun pm pack --destination "${DEST}")
+          (cd packages/db && bun pm pack --destination "${DEST}")
+          (cd packages/kn-next && bun pm pack --destination "${DEST}")
+          ls -la "${DEST}"
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
       # Staged OUTSIDE the repo (a real app is its own project dir; in place,
       # Next's tracing root and the docker context collapse onto the monorepo
       # root). Next is moved to the version the scaffold pins; the build
       # script stays the fixture's plain `next build` — turbopack, the default.
       # No `build` key in the config: this lane proves the DEFAULT builder.
+      #
+      # The Docker build context IS this directory (`kn-next deploy` builds
+      # from `process.cwd()`), and `Dockerfile.standalone` COPYs `public` and
+      # `node_modules/@getknext/core` from it unconditionally — the drain
+      # fixture has neither (it is a minimal SIGTERM-drain fixture, not a
+      # real scaffolded app), so both are staged here, matching how
+      # `scripts/e2e-deploy.sh` installs the packed adapter tarballs into a
+      # fixture (`npm install --no-save` all three tarballs in one reify so
+      # npm resolves @getknext/core's lib/db deps from the local tarballs
+      # rather than the registry) rather than a hand-rolled copy.
       - name: Stage the fixture app outside the repo + install its own dependencies
         run: |
           set -euo pipefail
@@ -127,6 +153,12 @@ jobs:
           EOF
           bun install
           node -e "const v=require('./node_modules/next/package.json').version; if (v !== process.env.NEXT_VERSION) { console.error('next is ' + v); process.exit(1) }"
+          mkdir -p public
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+          test -d node_modules/@getknext/core
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
           echo "DEPLOY_TAG=r${GITHUB_RUN_ID}-${{ matrix.runtime }}" >> "$GITHUB_ENV"
 
