@@ -41,9 +41,20 @@ That is deliberate, and it is the reason the credential is worth granting at all
 than you are offered is what makes the request reasonable. Advice would not do it, because the
 kubeconfig most people have to hand is the admin one.
 
-If your cluster's authorizer cannot answer that question, the action fails rather than assuming the
-best. A check that goes green when it cannot see is not a check. `skip-credential-preflight: true`
-exists for that case and turns the check **off** — it does not satisfy it.
+If your cluster cannot answer that question at all, the action fails rather than assuming the best.
+A check that goes green when it cannot see is not a check. `skip-credential-preflight: true` exists
+for that case and turns the check **off** — it does not satisfy it.
+
+Some clusters answer but mark the answer incomplete — their authorizer cannot fully resolve what a
+credential can do (common on webhook-authorized clusters such as OKE or GKE with IAM). The action
+does not fail closed on that alone: refusing there would refuse the scoped credential this check
+exists to allow, not just an over-broad one. It prints a warning and evaluates whatever rules the
+cluster did return — an incomplete answer is a weaker guarantee than a complete one, so read the
+warning if you see it.
+
+This check does not depend on the `kubectl` version your runner happens to ship — it asks the
+cluster directly rather than parsing a command's table output, so it behaves the same on
+`ubuntu-latest` as it does on your laptop.
 
 ## Inputs
 
