@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, setDefaultTimeout } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,6 +28,11 @@ import {
  * The scripts run under `process.execPath` (bun in this suite), which loads
  * the TypeScript sources directly — no built dist needed.
  */
+
+// Each preflight run submits ~40 access reviews, one fake-kubectl process
+// each; under a loaded runner (or the mutation prover) that exceeds bun's
+// 5 s default. Measured: 1 of 3 back-to-back runs timed out at 5 s.
+setDefaultTimeout(30_000);
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const ACTION_DIR = join(REPO_ROOT, 'packages/kn-next-action');

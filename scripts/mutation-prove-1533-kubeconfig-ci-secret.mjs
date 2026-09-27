@@ -322,7 +322,7 @@ const MUTATIONS = [
   },
 ];
 
-const DECLARED = 27;
+const DECLARED = 28;
 declareMutations(DECLARED);
 
 if (MUTATIONS.length !== DECLARED) {
