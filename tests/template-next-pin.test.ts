@@ -31,10 +31,12 @@ import {
  *     `next-version-floor.test.ts`'s `FLOOR`. That constant is a *lower bound*
  *     (a CVE floor, asserted with `>=`); a template pinned at the floor while
  *     the workspace has moved to a later minor is exactly the drift this guard
- *     exists to catch, and deriving from the floor would call it green. Nor is
+ *     exists to catch, and deriving from the floor would call it green. `NEXTJS_REF`
+ *     (`v16.2.0`) sits below the CVE floor (16.2.11) and stays there — this guard
+ *     protects against a newer scaffold pin dropping below its old lock point. Nor is
  *     the compat workflow's `NEXTJS_REF` the source either: it is a
  *     deliberately-frozen git tag inside the compat window (ADR-0039),
- *     required to stay in lockstep with the shipped pin by a SEPARATE guard
+ *     required to stay in lockstep with the shipped pin by a separate guard
  *     (`tests/nextjs-credential-lockstep.test.ts`, #1376) rather than by this
  *     one deriving from it — collapsing the two would make a legitimate,
  *     reviewed divergence between them (which has already happened once, see
