@@ -111,12 +111,50 @@ Read the manifest, then apply it yourself:
 kubectl apply -f knext-ci-rbac.yaml
 ```
 
-Build a kubeconfig from the `knext-deployer` ServiceAccount's token, base64-encode it, and store it
-as an encrypted repository secret under **Settings → Secrets and variables → Actions**.
+Build a kubeconfig from the `knext-deployer` ServiceAccount's token. A token Secret gives CI a
+credential that does not expire the way `kubectl create token` output does. The manifest holds no
+token; Kubernetes fills it in:
+
+```bash title="shell"
+kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: knext-deployer-token
+  namespace: my-app
+  annotations:
+    kubernetes.io/service-account.name: knext-deployer
+type: kubernetes.io/service-account-token
+YAML
+
+umask 077
+SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+CA=$(kubectl -n my-app get secret knext-deployer-token -o jsonpath='{.data.ca\.crt}')
+TOKEN=$(kubectl -n my-app get secret knext-deployer-token -o jsonpath='{.data.token}' | base64 -d)
+cat > ci-kubeconfig.yaml <<YAML
+apiVersion: v1
+kind: Config
+clusters: [{name: cluster, cluster: {server: $SERVER, certificate-authority-data: $CA}}]
+users: [{name: knext-deployer, user: {token: $TOKEN}}]
+contexts: [{name: ci, context: {cluster: cluster, user: knext-deployer, namespace: my-app}}]
+current-context: ci
+YAML
+```
+
+Check that it is the scoped one: `KUBECONFIG=ci-kubeconfig.yaml kubectl auth can-i get secrets -n my-app`
+must answer `no`. Then base64-encode it, store it as an encrypted secret under
+**Settings → Secrets and variables → Actions**, and delete the file:
 
 ```bash title="shell"
 base64 -w0 < ci-kubeconfig.yaml    # macOS: base64 -i ci-kubeconfig.yaml
+rm ci-kubeconfig.yaml
 ```
+
+Store it on an **environment** limited to your default branch, not as a repository secret. Then a
+pull request that edits the workflow still cannot read it.
+
+The action loads its credential check from your app's installed `@getknext/core`, so install your
+dependencies (`npm ci`) in a step before it.
 
 ### What the credential can actually do
 

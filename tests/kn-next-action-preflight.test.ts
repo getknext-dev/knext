@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
@@ -22,8 +22,18 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const PREFLIGHT = join(REPO_ROOT, 'packages/kn-next-action/preflight.mjs');
 const ACTION = join(REPO_ROOT, 'packages/kn-next-action/action.yml');
 
+const made: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  made.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 function fakeKubectlDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'knext-preflight-bin-'));
+  const dir = tempDir('knext-preflight-bin-');
   const bin = join(dir, 'kubectl');
   writeFileSync(bin, '#!/bin/sh\necho \'{"status":{"resourceRules":[]}}\'\n');
   chmodSync(bin, 0o755);
@@ -32,7 +42,7 @@ function fakeKubectlDir(): string {
 
 /** An app dir whose node_modules carries a stub classifier that always passes. */
 function appWithStubCore(): string {
-  const app = mkdtempSync(join(tmpdir(), 'knext-preflight-app-'));
+  const app = tempDir('knext-preflight-app-');
   writeFileSync(join(app, 'package.json'), '{"name":"app","private":true}\n');
   const core = join(app, 'node_modules/@getknext/core');
   mkdirSync(core, { recursive: true });
@@ -68,7 +78,7 @@ describe('kn-next-action preflight resolves @getknext/core from the app', () => 
   });
 
   it('fails CLOSED, naming the fix, when the app has no @getknext/core', () => {
-    const r = runPreflight(mkdtempSync(join(tmpdir(), 'knext-preflight-empty-')));
+    const r = runPreflight(tempDir('knext-preflight-empty-'));
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('Could not load the credential classifier');
     expect(r.stderr).toContain('working-directory');

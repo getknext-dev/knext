@@ -33,7 +33,7 @@ cat > "$tmp/kubeconfig" <<EOF
 apiVersion: v1
 kind: Config
 clusters:
-  - name: knext-oke
+  - name: oke-cluster
     cluster:
       server: ${server}
       certificate-authority-data: ${ca}
@@ -42,12 +42,12 @@ users:
     user:
       token: ${token}
 contexts:
-  - name: ${sa}@knext-oke
+  - name: ${sa}@oke-cluster
     context:
-      cluster: knext-oke
+      cluster: oke-cluster
       user: ${sa}
       namespace: ${ns}
-current-context: ${sa}@knext-oke
+current-context: ${sa}@oke-cluster
 EOF
 
 # Prove the credential is the scoped one before storing it: it must be able to
