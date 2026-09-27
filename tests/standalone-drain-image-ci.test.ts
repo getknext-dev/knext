@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import ts from 'typescript';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import { skipViolation } from '../scripts/lib/bun-test-no-skip.mjs';
 import { auditBlockingGate } from './helpers/blocking-gate';
@@ -425,9 +426,20 @@ describe('the self-contained drain legs cannot be switched off or weakened (roun
       .map((m) => m[1])
       .filter((l) => l.includes(SELF_CONTAINED_IMAGE_E2E_PATH));
     expect(runLine.length, 'exactly one run: line invokes the self-contained e2e').toBe(1);
-    expect(runLine[0], 'the self-contained e2e step must pass --no-skip to bun-test.mjs').toMatch(
-      /bun-test\.mjs\s+(?:\S+\s+)*--no-skip\b/,
-    );
+    // Round 5 (R4 minor, X20/X21): a bare `.toMatch(/--no-skip\b/)` is satisfied
+    // by `--no-skip` sitting inside a YAML comment (` # --no-skip`, never part
+    // of the command bun-test.mjs receives) and by `--no-skip=false` (`\b`
+    // matches the boundary before `=`, but `argv.includes('--no-skip')` in
+    // bun-test.mjs sees no such token). Parse the run string as a command line
+    // instead: drop anything from an unquoted ` #` on (YAML's own comment
+    // rule — everything after requires no quoting here, since the command has
+    // none), then require the EXACT token, not a substring or prefix.
+    const commandOnly = runLine[0].replace(/\s#.*$/, '');
+    const tokens = commandOnly.trim().split(/\s+/);
+    expect(
+      tokens,
+      `the self-contained e2e step must pass the literal --no-skip token to bun-test.mjs (not inside a YAML comment, not --no-skip=false): ${JSON.stringify(runLine[0])}`,
+    ).toContain('--no-skip');
   });
 
   it('the drain lower bound cannot be met by an exit that skipped the after() work', () => {
@@ -580,6 +592,172 @@ describe('the self-contained drain legs cannot be switched off or weakened (roun
     expect(runner, 'a failed file must be recorded as a failure').toMatch(
       /if \(!ok\) failures\.push\(\{ file, output \}\);/,
     );
+  });
+});
+
+// Round 5 (R4-B1). The round-4 guard above ("assertCleanDrain must record the
+// container as its final statement") is a TEXT match ending in
+// `.not.toContain(HARDCAP_LOG);\s*drainLegsCompleted\.push\(container\);\s*\}`.
+// A leg mutated to `drainLegsCompleted.push(container); if (container) return;`
+// as the helper's FIRST statement still matches that trailing text — the
+// original push is still there, unmoved, right before the closing brace — so
+// every leg still gets "recorded" and every assertion after the early return
+// silently never runs. Same story for weakening or deleting one assertion
+// out of the helper's body: nothing here requires the SET of assertions to
+// stay intact, only that the trailing shape survives.
+//
+// These checks parse `assertCleanDrain` with the TypeScript compiler — the
+// same parser this repo's other structural guards already use for exactly
+// this kind of question (see `tests/helpers/fail-on-red-gate.ts`, which walks
+// a real AST rather than sub-string-matching an embedded script) — so the
+// answer comes from the function's STRUCTURE, not from a spelling a mutation
+// can dodge underneath an unchanged tail.
+describe('assertCleanDrain cannot record its leg and skip the assertions that earned it (round 5, R4-B1)', () => {
+  function parsedHelper(): {
+    sourceFile: ts.SourceFile;
+    fn: ts.FunctionDeclaration;
+    raw: string;
+    code: string;
+  } {
+    const { raw, code } = scSuite();
+    const sourceFile = ts.createSourceFile(
+      SELF_CONTAINED_IMAGE_E2E_PATH,
+      raw,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    let fn: ts.FunctionDeclaration | undefined;
+    const walk = (n: ts.Node) => {
+      if (ts.isFunctionDeclaration(n) && n.name?.text === 'assertCleanDrain') fn = n;
+      ts.forEachChild(n, walk);
+    };
+    walk(sourceFile);
+    expect(
+      fn,
+      'assertCleanDrain is no longer a top-level function declaration',
+    ).not.toBeUndefined();
+    const found = fn as ts.FunctionDeclaration;
+    expect(found.body, 'assertCleanDrain has no function body').not.toBeUndefined();
+    return { sourceFile, fn: found, raw, code };
+  }
+
+  it('drainLegsCompleted.push( occurs exactly once in the whole file', () => {
+    const { raw } = scSuite();
+    const count = raw.split('drainLegsCompleted.push(').length - 1;
+    expect(
+      count,
+      'drainLegsCompleted.push( must occur exactly once — one call, so it cannot be duplicated ahead of an early exit while the original stays at the tail',
+    ).toBe(1);
+  });
+
+  it("the helper's FINAL statement is drainLegsCompleted.push(container) — structurally, not by trailing text", () => {
+    const { fn } = parsedHelper();
+    const body = fn.body as ts.Block;
+    const stmts = body.statements;
+    expect(stmts.length, 'assertCleanDrain has an empty body').toBeGreaterThan(0);
+    const last = stmts[stmts.length - 1] as ts.Statement;
+    let isPush = false;
+    if (ts.isExpressionStatement(last) && ts.isCallExpression(last.expression)) {
+      const callee = last.expression.expression;
+      const args = last.expression.arguments;
+      if (args.length === 1) {
+        const arg = args[0] as ts.Expression;
+        isPush =
+          ts.isPropertyAccessExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          callee.expression.text === 'drainLegsCompleted' &&
+          callee.name.text === 'push' &&
+          ts.isIdentifier(arg) &&
+          arg.text === 'container';
+      }
+    }
+    expect(
+      isPush,
+      `assertCleanDrain's last statement must be exactly drainLegsCompleted.push(container); found: ${last.getText()}`,
+    ).toBe(true);
+  });
+
+  it('nothing in the helper can return, throw, try/catch or if-guard its way past an assertion (parsed, not scanned by text)', () => {
+    const { sourceFile, fn } = parsedHelper();
+    const body = fn.body as ts.Block;
+    const stmts = body.statements;
+    const last = stmts[stmts.length - 1];
+    const hits: string[] = [];
+    const lineOfNode = (n: ts.Node) =>
+      sourceFile.getLineAndCharacterOfPosition(n.getStart(sourceFile)).line + 1;
+    const walk = (n: ts.Node) => {
+      if (n === last) return; // the final push has nothing to check inside it
+      // Do not descend into a nested function's own control flow: a `return`
+      // inside a callback governs THAT callback, not assertCleanDrain. There
+      // is no such callback today, but the rule is the same one
+      // tests/helpers/fail-on-red-gate.ts uses for process.exit reachability.
+      if (
+        ts.isFunctionDeclaration(n) ||
+        ts.isFunctionExpression(n) ||
+        ts.isArrowFunction(n) ||
+        ts.isMethodDeclaration(n)
+      ) {
+        return;
+      }
+      if (ts.isReturnStatement(n)) hits.push(`return at line ${lineOfNode(n)}`);
+      if (ts.isThrowStatement(n)) hits.push(`throw at line ${lineOfNode(n)}`);
+      if (ts.isTryStatement(n)) hits.push(`try at line ${lineOfNode(n)}`);
+      if (ts.isIfStatement(n)) hits.push(`if at line ${lineOfNode(n)}`);
+      ts.forEachChild(n, walk);
+    };
+    walk(body);
+    expect(
+      hits,
+      `assertCleanDrain can exit early before its assertions run:\n${hits.join('\n')}`,
+    ).toEqual([]);
+  });
+
+  it('every assertion the helper is supposed to make is really IN it, pinned by use — not merely present somewhere in the file', () => {
+    const { fn, raw, code } = parsedHelper();
+    const start = fn.getStart(fn.getSourceFile());
+    const end = fn.getEnd();
+    const helperCode = code.slice(start, end);
+    // The exit-code pin checks a literal VALUE ("0"), which blankNonCode
+    // blanks along with every other string's contents (it cannot tell a
+    // value apart from a message) — so that one pin is matched against the
+    // unblanked helper text instead. It stays scoped to the helper (not the
+    // whole file), which is what keeps a stray comment elsewhere from
+    // satisfying it.
+    const helperRaw = raw.slice(start, end);
+    const pins: Array<[string, string, RegExp]> = [
+      [
+        'the in-flight response status (200)',
+        helperCode,
+        /expect\(\s*res\.status,[^;]*\)\.toBe\(\s*200,?\s*\);/,
+      ],
+      [
+        'the response body equality',
+        helperCode,
+        /expect\(\s*await\s+res\.json\(\)\s*\)\.toEqual\(/,
+      ],
+      [
+        'the exit-code parity check ("0")',
+        helperRaw,
+        /expect\(\s*waited\.stdout\.trim\(\),[\s\S]*?\)\.toBe\("0"\);/,
+      ],
+      ['the after() START marker', helperCode, /expect\(\s*start,[^;]*\)\.toBeGreaterThan\(-1\);/],
+      [
+        'the after() RAN-after-START marker',
+        helperCode,
+        /expect\(\s*done,[^;]*\)\.toBeGreaterThan\(start\);/,
+      ],
+      [
+        'the no-hardcap check',
+        helperCode,
+        /expect\(\s*out,[^;]*\)\.not\.toContain\(HARDCAP_LOG\);/,
+      ],
+    ];
+    const missing = pins.filter(([, text, re]) => !re.test(text)).map(([name]) => name);
+    expect(
+      missing,
+      `assertCleanDrain is missing assertions, pinned by use: ${missing.join(', ')}`,
+    ).toEqual([]);
   });
 });
 
