@@ -71,8 +71,10 @@ export const LEGS = Object.freeze([
   }),
   Object.freeze({
     id: 'self-contained-exec',
-    title: 'self-contained executable e2e (embedded .next/server, webpack + turbopack, #1456)',
-    local: false, // needs a real `next build` standalone tree — not part of the local round
+    title:
+      'self-contained executable e2e (embedded .next/server, webpack + turbopack, #1456; ' +
+      'vinext binary served from an empty directory, #1460)',
+    local: false, // needs a real `next build` standalone tree / native `vite build` + compile — CI-only
     ciJob: 'self-contained-exec-e2e',
   }),
 ]);

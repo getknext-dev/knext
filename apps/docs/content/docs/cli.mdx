@@ -82,7 +82,10 @@ By default, `create` scaffolds the **standalone target**: plain `next build` (Tu
 `adapterPath` — `knext build`/`deploy` stage the matching runtime image automatically, so the
 scaffold ships no Dockerfile for it. Pass `--builder vinext` instead to scaffold
 the compiled single-executable target — its own `Dockerfile`, `vite.config.ts`, and
-`build: 'vinext'` pinned in `kn-next.config.ts`. See
+`build: 'vinext'` pinned in `kn-next.config.ts`, plus a `Dockerfile.self-contained` reference
+recipe for the optional `--self-contained` single-executable build (see
+[Self-contained mode](/docs/build-pipeline#self-contained-mode-experimental)) — the standalone
+target never scaffolds that file, since `--self-contained` only applies to the vinext build. See
 [the adapter and the compiled build](/docs/official-adapter) for the trade-off between the two.
 
 ```bash title="shell"
@@ -198,7 +201,7 @@ underlying error — the two are never conflated. See [the Bun runtime](/docs/bu
 |---|---|
 | `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
 | `--skip-smoke` | Do not boot the compiled executable. For CI that cannot execute it (a foreign-architecture runner). The build prints a loud warning and the artifact ships unverified. |
-| `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `kn-next.config.ts`. Experimental: no build target uses it yet, so on this version it only shows up in the build log and the build output is unchanged. |
+| `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `kn-next.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. |
 | `-h`, `--help` | Show the usage help. |
 
 ## `knext cleanup`

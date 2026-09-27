@@ -164,6 +164,54 @@ export function cacheControlVerdict(shapes: Record<CacheShape, string | null>): 
   return { stillBroken: leaking.length > 0, leaking };
 }
 
+/**
+ * oven-sh/bun#44063, shared by the two shims it forces: an embedded addon whose
+ * relative-rpath sibling library is embedded beside it (layout intact) must load
+ * from inside the binary. CONTROL: the same two files dlopen from disk. PROBE:
+ * the compiled binary, run from an empty directory. Red (= retire) once the
+ * pinned Bun extracts co-embedded siblings with their layout.
+ */
+async function embeddedAddonSiblingRepro(id: string): Promise<Probe> {
+  const { addon, libvipsLib, libvipsFile, platform } = sharpNativeDirs();
+  const box = sandbox('44063');
+  try {
+    const addonRel = `@img/sharp-${platform}/lib/addon.node`;
+    const libRel = `@img/sharp-libvips-${platform}/lib/${libvipsFile}`;
+    box.copy(addon, `fx/${addonRel}`);
+    box.copy(join(libvipsLib, libvipsFile), `fx/${libRel}`);
+    box.write(
+      {
+        'main.mjs': `import lib from "./${libRel}" with { type: "file" };\nawait import("./load.cjs");\n`,
+        'load.cjs':
+          `try { const m = require("./${addonRel}"); console.log("RESULT loaded " + Object.keys(m).length); }\n` +
+          'catch (e) { console.log("RESULT fail " + String(e.message).split("\\n")[0]); }\n',
+        'control.cjs':
+          `try { const m = { exports: {} }; process.dlopen(m, require("node:path").join(__dirname, "${addonRel}")); console.log("RESULT loaded " + Object.keys(m.exports).length); }\n` +
+          'catch (e) { console.log("RESULT fail " + String(e.message).split("\\n")[0]); }\n',
+        'empty/.keep': '',
+      },
+      'fx',
+    );
+    const control = box.run([bunOnPath(), 'control.cjs'], join(box.dir, 'fx')).result;
+    if (!control.startsWith('loaded')) inconclusive(id, `on-disk dlopen: ${control}`);
+    const built = box.compile(
+      'fx',
+      '{ entrypoints: ["./main.mjs"], root: ".", target: "bun", naming: { entry: "[dir]/[name].[ext]", asset: "[dir]/[name].[ext]" }, compile: { outfile: "../bin/app" } }',
+    );
+    if (built.status !== 'built') inconclusive(id, built.detail);
+    const probe = box.run([join(box.dir, 'bin/app')], join(box.dir, 'fx/empty')).result;
+    if (probe.startsWith('fail') && !/libvips/.test(probe)) {
+      inconclusive(id, `embedded load failed for a reason other than libvips: ${probe}`);
+    }
+    return {
+      stillBroken: probe.startsWith('fail'),
+      evidence: `on-disk dlopen → ${control}; embedded addon + embedded libvips → ${probe}`,
+    };
+  } finally {
+    box.dispose();
+  }
+}
+
 export const REGISTRY: RetirementEntry[] = [
   {
     id: 'sidecar-cjs-resolve',
@@ -216,50 +264,25 @@ export const REGISTRY: RetirementEntry[] = [
     // An embedded `.node` is extracted ALONE to a temp file before dlopen, so
     // its relative rpath to libvips (embedded beside it, layout intact) does not
     // resolve. sharp-addon-dlopen.mjs dlopens a real on-disk @img tree instead.
-    repro: async () => {
-      const { addon, libvipsLib, libvipsFile, platform } = sharpNativeDirs();
-      const box = sandbox('44063');
-      try {
-        const addonRel = `@img/sharp-${platform}/lib/addon.node`;
-        const libRel = `@img/sharp-libvips-${platform}/lib/${libvipsFile}`;
-        box.copy(addon, `fx/${addonRel}`);
-        box.copy(join(libvipsLib, libvipsFile), `fx/${libRel}`);
-        box.write(
-          {
-            'main.mjs': `import lib from "./${libRel}" with { type: "file" };\nawait import("./load.cjs");\n`,
-            'load.cjs':
-              `try { const m = require("./${addonRel}"); console.log("RESULT loaded " + Object.keys(m).length); }\n` +
-              'catch (e) { console.log("RESULT fail " + String(e.message).split("\\n")[0]); }\n',
-            'control.cjs':
-              `try { const m = { exports: {} }; process.dlopen(m, require("node:path").join(__dirname, "${addonRel}")); console.log("RESULT loaded " + Object.keys(m.exports).length); }\n` +
-              'catch (e) { console.log("RESULT fail " + String(e.message).split("\\n")[0]); }\n',
-            'empty/.keep': '',
-          },
-          'fx',
-        );
-        const control = box.run([bunOnPath(), 'control.cjs'], join(box.dir, 'fx')).result;
-        if (!control.startsWith('loaded'))
-          inconclusive('sharp-addon-dlopen', `on-disk dlopen: ${control}`);
-        const built = box.compile(
-          'fx',
-          '{ entrypoints: ["./main.mjs"], root: ".", target: "bun", naming: { entry: "[dir]/[name].[ext]", asset: "[dir]/[name].[ext]" }, compile: { outfile: "../bin/app" } }',
-        );
-        if (built.status !== 'built') inconclusive('sharp-addon-dlopen', built.detail);
-        const probe = box.run([join(box.dir, 'bin/app')], join(box.dir, 'fx/empty')).result;
-        if (probe.startsWith('fail') && !/libvips/.test(probe)) {
-          inconclusive(
-            'sharp-addon-dlopen',
-            `embedded load failed for a reason other than libvips: ${probe}`,
-          );
-        }
-        return {
-          stillBroken: probe.startsWith('fail'),
-          evidence: `on-disk dlopen → ${control}; embedded addon + embedded libvips → ${probe}`,
-        };
-      } finally {
-        box.dispose();
-      }
+    repro: () => embeddedAddonSiblingRepro('sharp-addon-dlopen'),
+  },
+  {
+    id: 'sharp-native-extract',
+    upstream: 'oven-sh/bun#44063',
+    upstreamTitle: 'an embedded native addon is extracted alone',
+    fixedBy: {
+      ref: 'oven-sh/bun#44083',
+      title: 'mirror embedded shared libraries into one temp directory before dlopen',
     },
+    issue: '#1463',
+    kind: 'shim',
+    shape: 'vinext',
+    against: 'bun',
+    // Self-contained vinext binaries (#1460) embed sharp's native tree and
+    // unpack the WHOLE tree (layout intact) to TMPDIR on the first image request,
+    // because Bun extracts an embedded addon alone. Retired by the first stable
+    // Bun release that ships oven-sh/bun#44083: dlopen the embedded addon directly.
+    repro: () => embeddedAddonSiblingRepro('sharp-native-extract'),
   },
   {
     id: 'bun-serve-keepalive',

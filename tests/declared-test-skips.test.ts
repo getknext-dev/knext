@@ -110,6 +110,16 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'Needs the tsup-built dist/ bundle to exercise node/bun parity on the shipped artifact. ' +
       'CI builds before running; a source-only checkout has nothing to run.',
   },
+  'apps/file-manager/self-contained-exec-e2e.test.ts': {
+    skips: { 'describe.skipIf': 1 },
+    reason:
+      'Needs a compiled self-contained vinext binary (KNEXT_SC_EXEC), built natively by ' +
+      'apps/file-manager/scripts/build-self-contained.mjs (#1460). LANE-BACKED: the ' +
+      'self-contained-exec-e2e ci.yml job builds that binary and sets KNEXT_REQUIRE_SC_EXEC=1, ' +
+      'so a missing binary FAILS the lane rather than vanishing; off the flag (a local checkout ' +
+      'with no binary built) the two cases skip. Wired into the file-manager e2e round via ' +
+      'apps/file-manager/scripts/e2e-round-legs.mjs.',
+  },
   'tests/e2e-native-rebuild-musl.docker-e2e.test.ts': {
     skips: { 'describe.skipIf': 1 },
     reason:
@@ -176,6 +186,9 @@ const LANE_BACKED: Record<string, { flag: string }> = {
     flag: 'KNEXT_REQUIRE_STANDALONE',
   },
   'apps/file-manager/self-contained-e2e.test.ts': {
+    flag: 'KNEXT_REQUIRE_SC_EXEC',
+  },
+  'apps/file-manager/self-contained-exec-e2e.test.ts': {
     flag: 'KNEXT_REQUIRE_SC_EXEC',
   },
 };

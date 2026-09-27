@@ -1584,10 +1584,12 @@ jobs:
     # actually ran (the #932 defect class this repo keeps guarding against:
     # a check that reports the same green whether or not it exercised anything).
     #
-    # COORDINATION (#1496): the vinext self-contained BINARY gets its own
-    # sibling step in THIS job, named "Self-contained (vinext binary) …" — append
-    # a step, do not restructure the matrix or the job.
-    name: Self-contained executable e2e (file-manager, #1456)
+    # COORDINATION (#1496), DONE: the vinext self-contained BINARY (#1460) gets
+    # its own sibling steps below ("Build the self-contained binary" / "Self-
+    # contained exec e2e"), guarded to `matrix.builder == 'webpack'` so it runs
+    # once per CI run rather than once per matrix leg — it has no builder axis
+    # of its own. The matrix and the Next-standalone steps above are unchanged.
+    name: Self-contained executable e2e (file-manager, #1456 + #1460)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -1606,7 +1608,7 @@ jobs:
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.2
+          bun-version: '1.4.2'
           # PINNED — see the first setup-bun step's rationale (#754/#807/#882).
 
       - name: Install dependencies
@@ -1641,6 +1643,25 @@ jobs:
         env:
           KNEXT_REQUIRE_SC_EXEC: '1'
         run: node scripts/bun-test.mjs apps/file-manager/self-contained-e2e.test.ts
+
+      # #1460 — the vinext self-contained binary has no builder axis, so it
+      # only needs to run once: guarded to a single matrix leg rather than
+      # duplicated across both. Runs `vite build`, stages sharp's native/ tree
+      # from nitro's traced .output/server/node_modules/@img, then compiles
+      # with --self-contained 1. Fails loud (non-zero) on any of those steps
+      # rather than leaving no binary for the next step to silently skip past.
+      - name: Self-contained (vinext) — build the self-contained binary (host target, native compile)
+        if: matrix.builder == 'webpack'
+        working-directory: apps/file-manager
+        run: bun scripts/build-self-contained.mjs --out knext-exec-self-contained
+
+      - name: Self-contained (vinext) — exec e2e (must NOT skip)
+        if: matrix.builder == 'webpack'
+        env:
+          KNEXT_SC_EXEC: ${{ github.workspace }}/apps/file-manager/knext-exec-self-contained
+          KNEXT_REQUIRE_SC_EXEC: '1'
+        # bun, not vitest: the file imports bun:test directly.
+        run: node scripts/bun-test.mjs apps/file-manager/self-contained-exec-e2e.test.ts
 
   # ── file-manager e2e round (#1197 / T1) ──────────────────────────────────────
   # A NAME + a scoping rule over the app-level e2e legs that ALREADY gate every PR

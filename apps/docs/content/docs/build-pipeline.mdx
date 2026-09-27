@@ -99,7 +99,7 @@ identically) it decides how the server is packaged:
 
 ### Self-contained mode (experimental)
 
-`selfContained` is an opt-in switch for a future single executable that carries everything it needs
+`selfContained` is an opt-in switch for a single executable that carries everything it needs
 to boot, with nothing beside it on disk. It defaults to `false`, and `knext build --self-contained`
 turns it on for one build, overriding the config key:
 
@@ -114,12 +114,23 @@ const config: KnativeNextConfig = {
 On the compiled standalone-on-Bun target — `build: 'turbopack'` or `build: 'webpack'`, either one,
 with `runtime: 'bun'` — turning it on embeds the server side of the build — the route code, Next.js's
 own server modules and the build manifests — into the executable, so it starts from a directory that
-holds only the executable, `public/` and `.next/static/`. Other targets do not use it yet: there the
-choice is only recorded in the build log. The value must be a boolean — `knext validate` rejects
-anything else. If any dependency under `.next/server` ships a native addon (a compiled `.node`
-file), the build **fails immediately and names the file** rather than embedding it: a native addon
-loads from a real filesystem path, which the executable's embedded filesystem cannot provide, so an
-embedded copy would only crash the first request that touches it.
+holds only the executable, `public/` and `.next/static/`. If any dependency under `.next/server`
+ships a native addon (a compiled `.node` file), the build **fails immediately and names the file**
+rather than embedding it: a native addon loads from a real filesystem path, which the executable's
+embedded filesystem cannot provide, so an embedded copy would only crash the first request that
+touches it.
+
+On the vinext target, the binary embeds the server runtime and your `public` files, and unpacks
+its native image libraries into the temp directory the first time an image is optimized — so
+nothing needs to sit beside the binary, and the temp directory must be writable **and
+executable** (the knext operator mounts a writable `emptyDir` at `/tmp`, which is exec by
+default; with `docker run --read-only`, add `--tmpfs /tmp:exec` — Docker's `--tmpfs` defaults
+to `noexec`, and dlopen-ing the unpacked native library from a noexec mount fails with
+"failed to map segment from shared object").
+
+Both targets support it; nothing else does — there, setting it changes nothing about what
+`knext build` produces, and the choice is only recorded in the build log. The value must be a
+boolean — `knext validate` rejects anything else.
 
 ### vinext on Node
 
