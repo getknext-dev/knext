@@ -104,6 +104,22 @@ function sharpNativeDirs(): {
   };
 }
 
+export type CacheShape = 'A' | 'B' | 'C' | 'D';
+
+/**
+ * "Fixed" needs EVERY probed shape normalised: a partial upstream fix leaves
+ * the shim needed, so it must stay "still broken", never order a delete.
+ */
+export function cacheControlVerdict(shapes: Record<CacheShape, string | null>): {
+  stillBroken: boolean;
+  leaking: CacheShape[];
+} {
+  const leaking = (Object.keys(shapes) as CacheShape[]).filter((k) =>
+    /s-maxage/.test(shapes[k] ?? ''),
+  );
+  return { stillBroken: leaking.length > 0, leaking };
+}
+
 export const REGISTRY: RetirementEntry[] = [
   {
     id: 'sidecar-cjs-resolve',
@@ -262,11 +278,15 @@ export const REGISTRY: RetirementEntry[] = [
     // With VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1, vinext normalises the shared-cache
     // Cache-Control it COMPUTES, but passes an app-set `s-maxage` through
     // untouched — and so does a `headers()` s-maxage from next.config, applied
-    // later. bun-serve-cache-control.mjs normalises every response. KNOWN BLIND
-    // SPOT: the Pages-router handler needs a full page-render harness and is not
-    // probed, so a fix landing App-side only would turn this red while Pages
-    // still leaks — whoever acts on the red must confirm the upstream fix
-    // covers the Pages path before deleting the shim.
+    // later, and a response already MARKED config-headers-applied (metadata
+    // routes, the response-stage path), which returns early through
+    // normalizeExplicitNonCacheablePolicy only. bun-serve-cache-control.mjs
+    // normalises every response. Red only when A+B+C+D ALL normalise. KNOWN
+    // BLIND SPOT: the Pages-router handler needs a full page-render harness and
+    // is not probed, so a fix landing on every probed App path but not Pages
+    // would turn this red while Pages still leaks — whoever acts on the red
+    // must confirm the upstream fix covers the Pages path before deleting the
+    // shim.
     repro: async () => {
       const { dir } = pinnedVinext();
       const box = sandbox('3487');
@@ -292,10 +312,11 @@ export const REGISTRY: RetirementEntry[] = [
             // when every one is normalised.
             'const CH = [{ source: "/api/:path*", headers: [{ key: "Cache-Control", value: SHARED }] }];\n' +
             'const req = () => new Request("http://localhost/api/probe");\n' +
+            'const D = await fin.finalizeAppRscResponse(fin.markAppRscResponseConfigHeadersApplied(new Response("ok", { headers: { "cache-control": SHARED } })), req(), { configHeaders: CH });\n' +
             'const A = await fin.finalizeAppRscResponse(new Response("ok", { headers: { "cache-control": SHARED } }), req(), { configHeaders: [] });\n' +
             'const B = await fin.finalizeAppRscResponse(new Response("ok"), req(), { configHeaders: CH });\n' +
             'const C = await fin.finalizeAppRscResponse(new Response("ok", { headers: { "cache-control": "public, max-age=5" } }), req(), { configHeaders: CH });\n' +
-            'console.log("RESULT " + JSON.stringify({ A: A.headers.get("cache-control"), B: B.headers.get("cache-control"), C: C.headers.get("cache-control") }));\n',
+            'console.log("RESULT " + JSON.stringify({ A: A.headers.get("cache-control"), B: B.headers.get("cache-control"), C: C.headers.get("cache-control"), D: D.headers.get("cache-control") }));\n',
         });
         const { result, output } = box.run([bunOnPath(), 'probe.mjs'], box.dir, {
           VINEXT_NEXT_DEPLOY_CACHE_CONTROL: '1',
@@ -307,15 +328,12 @@ export const REGISTRY: RetirementEntry[] = [
             `the deploy switch did not normalise a COMPUTED shared policy: ${control}`,
           );
         }
-        const shapes = JSON.parse(result) as Record<'A' | 'B' | 'C', string | null>;
-        const leaking = (Object.keys(shapes) as ('A' | 'B' | 'C')[]).filter((k) =>
-          /s-maxage/.test(shapes[k] ?? ''),
+        const { stillBroken, leaking } = cacheControlVerdict(
+          JSON.parse(result) as Record<CacheShape, string | null>,
         );
-        // "Fixed" needs EVERY shape normalised: a partial upstream fix leaves the
-        // shim needed, so it must stay "still broken", never order a delete.
         return {
-          stillBroken: leaking.length > 0,
-          evidence: `computed policy → ${control}; still leaking s-maxage in [${leaking.join(',')}] of A(app-set)/B(config headers())/C(config over app-set): ${result}`,
+          stillBroken,
+          evidence: `computed policy → ${control}; still leaking s-maxage in [${leaking.join(',')}] of A(app-set)/B(config headers())/C(config over app-set)/D(marked, config already applied): ${result}`,
         };
       } finally {
         box.dispose();

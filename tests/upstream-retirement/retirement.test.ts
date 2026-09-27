@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crossCheck, scanMarkers } from './marker-scan';
 import { bunOnPath, bunVersionOf, pinnedBunVersion, pinnedVinext, REPO_ROOT } from './probe-kit';
-import { REGISTRY } from './registry';
+import { type CacheShape, cacheControlVerdict, REGISTRY } from './registry';
 
 const ADAPTERS = join(REPO_ROOT, 'packages/kn-next/src/adapters');
 const PROBE_TIMEOUT = 120_000;
@@ -178,6 +178,38 @@ describe('upstream-retirement: every cited upstream ref is the issue/PR it claim
     expect(await checkRefs(refs, { fetch: limited, ci: true, warn: () => {} })).toHaveLength(2);
   });
 
+  it('the token is sent as a Bearer authorization header; absent when there is no token', async () => {
+    const seen: (string | null)[] = [];
+    const spy = ((_u: string, init: RequestInit) => {
+      seen.push(new Headers(init.headers).get('authorization'));
+      return Promise.resolve(ok('expected-fragment'));
+    }) as unknown as typeof fetch;
+    await checkRefs(refs, { fetch: spy, ci: true, token: 'tok123', warn: () => {} });
+    expect(seen).toEqual(['Bearer tok123', 'Bearer tok123']);
+    seen.length = 0;
+    await checkRefs(refs, { fetch: spy, ci: true, warn: () => {} });
+    expect(seen).toEqual([null, null]);
+  });
+
+  it('a rate limit is named as such — a warned skip locally, never a "HTTP 429" hard failure', async () => {
+    const limited = (() =>
+      Promise.resolve(new Response('', { status: 429 }))) as unknown as typeof fetch;
+    const warned: string[] = [];
+    expect(
+      await checkRefs(refs, { fetch: limited, ci: false, warn: (m) => warned.push(m) }),
+    ).toEqual([]);
+    expect(warned.join('\n')).toContain('rate limit');
+    const ci = await checkRefs(refs, { fetch: limited, ci: true, warn: () => {} });
+    expect(ci[0]).toContain('rate limit');
+    const exhausted = (() =>
+      Promise.resolve(
+        new Response('', { status: 403, headers: { 'x-ratelimit-remaining': '0' } }),
+      )) as unknown as typeof fetch;
+    expect((await checkRefs(refs, { fetch: exhausted, ci: true, warn: () => {} }))[0]).toContain(
+      'rate limit',
+    );
+  });
+
   it('local: unreachable is a warned skip, one warning per ref', async () => {
     const down = (() => Promise.reject(new Error('offline'))) as unknown as typeof fetch;
     const warned: string[] = [];
@@ -247,5 +279,30 @@ describe('upstream-retirement: @upstream-shim markers ↔ registry', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('upstream-retirement: the vinext cache-control verdict needs EVERY shape normalised', () => {
+  const NORMAL = 'public, max-age=0, must-revalidate';
+  const LEAK = 's-maxage=2, stale-while-revalidate=31535998';
+  const all: CacheShape[] = ['A', 'B', 'C', 'D'];
+  const shapes = (leaky: CacheShape[]) =>
+    Object.fromEntries(all.map((k) => [k, leaky.includes(k) ? LEAK : NORMAL])) as Record<
+      CacheShape,
+      string
+    >;
+
+  it('all four normalised → fixed (the only red)', () => {
+    expect(cacheControlVerdict(shapes([])).stillBroken).toBe(false);
+  });
+  it('every single leaking shape, and every all-but-one fix, stays still-broken', () => {
+    for (const k of all) {
+      expect(cacheControlVerdict(shapes([k])).stillBroken).toBe(true);
+      expect(cacheControlVerdict(shapes(all.filter((x) => x !== k))).stillBroken).toBe(true);
+    }
+    expect(cacheControlVerdict(shapes(all)).leaking).toEqual(all);
+  });
+  it('a null Cache-Control is not a leak', () => {
+    expect(cacheControlVerdict({ A: null, B: null, C: null, D: null }).stillBroken).toBe(false);
   });
 });
