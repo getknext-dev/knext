@@ -6,44 +6,48 @@ import { DEFAULT_NEXTJS_REF as LEDGER_DEFAULT_NEXTJS_REF } from '../scripts/comp
 /**
  * NEXTJS credential lockstep (#1376).
  *
- * `test-e2e-deploy.yml`'s `NEXTJS_REF` (the Next.js ref every compat cell in
- * that workflow tests) and `packages/kn-next/templates/app/package.json.hbs`'s
- * `next` pin (the Next.js version the scaffold actually ships) currently
- * DIFFER on purpose: `NEXTJS_REF` defaults to `v16.2.0`, the scaffold pins
- * `16.3.3`. That gap is real and, for now, unavoidable — Next 16.3.0
- * introduced a CONFIRMED upstream regression (Turbopack + `adapterPath` +
- * `output:'standalone'` -> `ENOENT next-server.js.nft.json`, see #1372) that
- * breaks every harness deploy under Turbopack, so bumping the credential to
- * the shipped pin today would zero out both turbopack-credentialed lanes
- * with no fix available (#1376's options comment on the issue has the full
- * analysis).
+ * `test-e2e-deploy.yml` and `compat-vinext.yml`'s `NEXTJS_REF` (the Next.js
+ * ref every compat cell tests) and `packages/kn-next/templates/app/package.json.hbs`'s
+ * `next` pin (the Next.js version the scaffold actually ships) are now
+ * IN LOCKSTEP (as of 2026-09-27, #1376): both are `v16.3.5`. That was not
+ * always true — see "HISTORY" below — and this guard does not assume it
+ * stays true by construction; it CHECKS both real values against what
+ * `.github/compat-credentialed-next-version.json` DOCUMENTS every run, so a
+ * future bump to either `NEXTJS_REF` or the scaffold's `next` pin, without
+ * updating that manifest in the SAME PR, reds this test. A bump is then a
+ * deliberate, reviewed decision — never silent drift — and the manifest
+ * becomes the one citable source of "what Next version was this credentialed
+ * on". This is deliberately NOT a hardcoded equality assertion like
+ * `tests/vinext-pin-lockstep.test.ts` — it reads both fields from the
+ * manifest and compares the REAL values to THOSE, so it stays meaningful the
+ * next time the two are deliberately allowed to differ again (e.g. a future
+ * upstream regression), not just while they happen to match.
  *
- * This is NOT an equality lockstep like `tests/vinext-pin-lockstep.test.ts`
- * (which requires the vinext pin to match everywhere byte-for-byte) —
- * equality is exactly what is infeasible here today. Instead, this guard
- * requires both real values to match what `.github/compat-credentialed-next-version.json`
- * DOCUMENTS: any future bump to either `NEXTJS_REF` or the scaffold's `next`
- * pin, without updating that manifest in the SAME PR, reds this test. A
- * bump is then a deliberate, reviewed decision — never silent drift — and
- * the manifest becomes the one citable source of "what Next version was
- * this credentialed on".
+ * HISTORY, kept for context: `NEXTJS_REF` used to default to `v16.2.0` while
+ * the scaffold pinned `16.3.3`, on purpose — Next 16.3.0 introduced a
+ * CONFIRMED upstream regression (Turbopack + `adapterPath` +
+ * `output:'standalone'` -> `ENOENT next-server.js.nft.json`, see #1372) that
+ * broke every harness deploy under Turbopack for 16.3.0 through 16.3.4, so
+ * bumping the credential to the shipped pin at the time would have zeroed
+ * out both turbopack-credentialed lanes with no fix available. #1386 fixed
+ * #1372 upstream-side (Next 16.3.5) and bumped the scaffold; this PR bumps
+ * the credential to match, closing the gap #1379 documented rather than
+ * hiding it.
  *
  * REVIEW ROUND 2 (rev-1379) widened this from "check the one place the
  * original PR happened to touch" to a SCAN of every workflow that carries a
  * `nextjsRef` dispatch-input default or a `NEXTJS_REF` env fallback. The
  * original test only read `test-e2e-deploy.yml`'s env fallback, so changing
- * `test-e2e-deploy.yml`'s dispatch-input default (line 58) or ANYTHING in
- * `compat-vinext.yml` (lines 55, 78) stayed green. Every occurrence found by
- * the scan must either equal `credentialedNextRef` or be explicitly listed
- * in the manifest's `lockstepExceptions` — an unparseable occurrence (zero
- * or more than one match where exactly one is expected) is a hard failure,
- * never a silent skip.
+ * `test-e2e-deploy.yml`'s dispatch-input default or ANYTHING in
+ * `compat-vinext.yml` stayed green. Every occurrence found by the scan must
+ * either equal `credentialedNextRef` or be explicitly listed in the
+ * manifest's `lockstepExceptions` — an unparseable occurrence (zero or more
+ * than one match where exactly one is expected) is a hard failure, never a
+ * silent skip.
  *
  * REVIEW ROUND 2 also ties the two public-facing docs pages that cite the
  * credentialed version (`docs/compat-matrix.md`, `apps/docs/content/docs/compat-matrix.mdx`)
- * to the same manifest value, and requires the docs site to plainly explain
- * (no issue/PR/ADR numbers — `apps/docs/content-hygiene.test.ts` enforces
- * that) that the scaffold ships a newer Next than the credentialed version.
+ * to the same manifest value.
  *
  * REVIEW ROUND 3 (rev-1379 round 2) widened the scan again: the round-2 scan
  * only recognised `NEXTJS_REF` written as a workflow-level env key using the
@@ -61,10 +65,16 @@ import { DEFAULT_NEXTJS_REF as LEDGER_DEFAULT_NEXTJS_REF } from '../scripts/comp
  * file+kind+value — matching the value is never enough on its own to excuse
  * an unrecognised form.
  *
- * Round 3 also stopped hardcoding "16.3.x" in the docs check: the pattern is
- * now derived from `manifest.shippedNextPin` (`major.minor.x`), checked
- * against BOTH docs pages, and every `lockstepExceptions` entry must carry a
- * non-empty `reason`.
+ * REVIEW ROUND 4 (rev-1376-r2, the re-credentialing PR): now that
+ * `credentialedNextRef` equals `shippedNextPin`, the round-3 "the scaffold
+ * ships a newer Next than the credentialed version" docs requirement (which
+ * hardcoded a divergence that no longer exists) is replaced by
+ * `versionsInLockstep`, derived from the manifest, plus a plain-language
+ * "in lockstep" / "matches the shipped" citation requirement — so the docs
+ * check keeps testing something true rather than asserting a fact this PR
+ * makes false. `shippedMinorPattern` is kept (and still self-tested) as a
+ * general derivation helper; it is no longer required to appear in the docs
+ * now that the exact versions match.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -339,6 +349,22 @@ export function shippedMinorPattern(shippedNextPin: string): string | undefined 
   return m ? `${m[1]}.${m[2]}.x` : undefined;
 }
 
+/**
+ * Are the two manifest fields EXACTLY equal today? `credentialedNextRef` is
+ * `v`-prefixed (`v16.3.5`), `shippedNextPin` is bare (`16.3.5`) — this
+ * normalises the prefix rather than string-comparing two differently-shaped
+ * fields. DERIVED, not asserted: this reads the real manifest values, so it
+ * flips back to `false` the moment a future PR deliberately re-introduces a
+ * divergence (e.g. another upstream regression) — the docs-language test
+ * below follows this, never a hardcoded "they always match" assumption.
+ */
+export function versionsInLockstep(manifest: {
+  credentialedNextRef: string;
+  shippedNextPin: string;
+}): boolean {
+  return manifest.credentialedNextRef === `v${manifest.shippedNextPin}`;
+}
+
 describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
   it('the manifest exists and is well-formed', () => {
     const manifest = loadManifest();
@@ -597,29 +623,61 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
       expect(shippedMinorPattern('not-a-version')).toBeUndefined();
     });
 
-    it('the public docs plainly explain the scaffold ships a newer Next than the credentialed version, citing the DERIVED minor line', () => {
+    it('derives whether the two manifest fields are in lockstep (self-test)', () => {
+      expect(versionsInLockstep({ credentialedNextRef: 'v16.3.5', shippedNextPin: '16.3.5' })).toBe(
+        true,
+      );
+      expect(versionsInLockstep({ credentialedNextRef: 'v16.2.0', shippedNextPin: '16.3.5' })).toBe(
+        false,
+      );
+    });
+
+    // Round 4 (rev-1376-r2): the manifest's two fields are now EQUAL
+    // (`credentialedNextRef` === `v${shippedNextPin}`) — re-credentialing #1376
+    // closed the divergence #1379/#1386 documented. The round-3 assertion here
+    // required the docs to say "the scaffold ships a newer Next than the
+    // credentialed version", which is now FALSE and would have reintroduced
+    // exactly the kind of stale/dishonest doc claim this repo's own docs-guard
+    // culture exists to prevent. This test is DERIVED from the manifest
+    // (`versionsInLockstep`), not hardcoded to today's "they match" state, so
+    // it keeps testing something true if a future PR deliberately reintroduces
+    // a divergence (it would then need to restore language like the old
+    // "newer Next.js release" wording, and this test would start requiring
+    // that instead).
+    it('the public docs plainly explain whether the credential and the shipped pin are in lockstep', () => {
       const manifest = loadManifest();
-      const pattern = shippedMinorPattern(manifest.shippedNextPin);
-      expect(
-        pattern,
-        `could not derive a major.minor.x pattern from ${manifest.shippedNextPin}`,
-      ).toBeDefined();
+      const inLockstep = versionsInLockstep(manifest);
 
       const mdxText = readFileSync(COMPAT_MATRIX_MDX_PATH, 'utf8');
-      // Plain-language, no issue/PR/ADR numbers (apps/docs/content-hygiene.test.ts
-      // enforces that repo-wide) — just requires the explanation to exist and to
-      // mention both the "newer" framing and the DERIVED shipped-minor line.
-      expect(mdxText).toMatch(/newer Next\.js release/i);
-      expect(
-        mdxText.includes(pattern as string),
-        `compat-matrix.mdx does not cite ${pattern}`,
-      ).toBe(true);
-
       const mdText = readFileSync(COMPAT_MATRIX_MD_PATH, 'utf8');
-      expect(
-        mdText.includes(pattern as string),
-        `docs/compat-matrix.md does not cite ${pattern}`,
-      ).toBe(true);
+
+      if (inLockstep) {
+        // Plain-language, no issue/PR/ADR numbers required in the mdx
+        // (apps/docs/content-hygiene.test.ts enforces that repo-wide) — just
+        // requires an honest "in lockstep" / "matches the shipped" claim.
+        const lockstepClaim = /in lockstep|matches? the shipped|aligned with the shipped/i;
+        expect(mdxText, 'compat-matrix.mdx does not state the versions are in lockstep').toMatch(
+          lockstepClaim,
+        );
+        expect(mdText, 'docs/compat-matrix.md does not state the versions are in lockstep').toMatch(
+          lockstepClaim,
+        );
+      } else {
+        const pattern = shippedMinorPattern(manifest.shippedNextPin);
+        expect(
+          pattern,
+          `could not derive a major.minor.x pattern from ${manifest.shippedNextPin}`,
+        ).toBeDefined();
+        expect(mdxText).toMatch(/newer Next\.js release/i);
+        expect(
+          mdxText.includes(pattern as string),
+          `compat-matrix.mdx does not cite ${pattern}`,
+        ).toBe(true);
+        expect(
+          mdText.includes(pattern as string),
+          `docs/compat-matrix.md does not cite ${pattern}`,
+        ).toBe(true);
+      }
     });
   });
 

@@ -175,6 +175,22 @@ failures into the ledger. Measuring ledger *growth* is what makes green mean "th
 correct" rather than "its known failures are catalogued." This is why **#512** is on the 1.0 path —
 it is gate integrity, not polish.
 
+### The Next.js version the credential measures
+
+The credential's `NEXTJS_REF` (`test-e2e-deploy.yml`, `compat-vinext.yml`) and the scaffold's
+shipped `next` pin (`packages/kn-next/templates/app/package.json.hbs`) are **required to stay in
+lockstep** — `.github/compat-credentialed-next-version.json` is the one citable source of "what
+Next.js version this is credentialed on", and `tests/nextjs-credential-lockstep.test.ts` fails CI
+the moment either value drifts from the other without a reviewed manifest update in the same PR
+(#1376). They briefly, deliberately diverged (credential pinned to v16.2.0, scaffold shipping
+16.3.3) because Next 16.3.0 introduced a confirmed upstream Turbopack + `adapterPath` +
+`output:'standalone'` regression (#1372) that would have zeroed out every Turbopack-credentialed
+cell; the divergence was documented, not hidden. It is resolved as of 2026-09-27: the regression is
+fixed upstream in Next 16.3.5 (#1386), so both the credential lanes and the scaffold now pin
+**v16.3.5**. No v1.0 release candidate has been cut yet, so no scheduled credential night has
+measured this pin — the 788/0 evidence on record (`docs/compat-matrix.md`) is still attributed to
+v16.2.0, the version it was actually measured against.
+
 ~~**Bun is out of the 1.0 verified surface.**~~ **Superseded (2026-09-23, ADR-0054 + ADR-0056).**
 This paragraph said a Bun lane red does not block 1.0. It no longer holds: bun-standalone is the
 v1.0 default (ADR-0054), and every supported cell, the Bun cells included, is part of the

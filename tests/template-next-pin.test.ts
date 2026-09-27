@@ -32,9 +32,14 @@ import {
  *     (a CVE floor, asserted with `>=`); a template pinned at the floor while
  *     the workspace has moved to a later minor is exactly the drift this guard
  *     exists to catch, and deriving from the floor would call it green. Nor is
- *     the compat workflow's `NEXTJS_REF` (`v16.2.0`) the source: it is a
- *     deliberately-frozen git tag inside the compat window (ADR-0039) and sits
- *     *below* the CVE floor, so templates must not follow it either.
+ *     the compat workflow's `NEXTJS_REF` the source either: it is a
+ *     deliberately-frozen git tag inside the compat window (ADR-0039),
+ *     required to stay in lockstep with the shipped pin by a SEPARATE guard
+ *     (`tests/nextjs-credential-lockstep.test.ts`, #1376) rather than by this
+ *     one deriving from it — collapsing the two would make a legitimate,
+ *     reviewed divergence between them (which has already happened once, see
+ *     that test's history) impossible to express without breaking this guard
+ *     too.
  *
  * And it SCANS for template manifests instead of listing the two we know about
  * — "we added a scaffolder and forgot the pin" IS this bug, so a third template

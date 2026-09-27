@@ -6,18 +6,25 @@
 >
 > **knext passes the official Next.js deploy-test suite on `main`** (the `vercel/next.js`
 > deploy-test harness, ADR-0007 option B): run 28602886003 (2026-07-02) — **788 passed / 0 failed**
-> across 16 shards against `vercel/next.js` **v16.2.0**, Node runtime. The exact scope of that claim
+> across 16 shards, pinned to `vercel/next.js` v16.2.0, Node runtime. The exact scope of that claim
 > (architectural exclusions, the per-case flaky-quarantine ledger, Node-only) lives in the
 > official-suite row below — read it before repeating the claim. The guard test now **requires**
 > that row to cite its run ID + pinned ref + "N passed / 0 failed" result; an evidence-less ✅
 > fails CI. See **Maintenance & honesty** below.
 >
-> **New apps scaffolded by knext pin a newer Next.js release (16.3.x) than the `v16.2.0` measured
-> above.** Next 16.3.0 introduced a confirmed upstream Turbopack + `adapterPath` +
-> `output:'standalone'` regression (#1372) that breaks every harness deploy under Turbopack, so
-> re-measuring against the shipped pin today would zero out both Turbopack-credentialed rows
-> rather than show real progress. See `.github/compat-credentialed-next-version.json` (#1376) for
-> the tracked divergence; the credentialed numbers move forward once that regression has a fix.
+> **Compat credential target (#1376, resolved 2026-09-27): the credential lanes and the shipped
+> scaffold pin are now in lockstep.** The credential lanes run against `vercel/next.js` **v16.3.5**
+> — the same version knext's scaffold ships (`packages/kn-next/templates/app/package.json.hbs`).
+> Next 16.3.0 introduced a confirmed upstream Turbopack + `adapterPath` + `output:'standalone'`
+> regression (#1372) that broke every harness deploy under Turbopack between 16.3.0 and 16.3.4; it
+> is fixed upstream in 16.3.5 (verified with a live local repro in #1386), so the divergence this
+> section used to document is resolved. `.github/compat-credentialed-next-version.json` is the one
+> citable source of "what Next version this is credentialed on";
+> `tests/nextjs-credential-lockstep.test.ts` fails CI if either value drifts from the other again.
+> No v1.0 release-candidate tag has been cut yet (`.github/compat-credential-ref.json`'s `rcTag` is
+> `null`), so no scheduled credential night has measured this pin — the 788/0 evidence above is
+> still the most recent recorded credential result and remains attributed to v16.2.0, the version it
+> was actually measured against.
 
 ## Legend
 
