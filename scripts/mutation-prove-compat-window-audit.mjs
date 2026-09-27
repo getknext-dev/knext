@@ -23,6 +23,16 @@
  *      longer streak.
  *   5. UNREADABLE LEDGER — a ledger file that will not parse is a hard failure,
  *      not a `return null` that a `.filter(Boolean)` then erases.
+ *   6. VOID AS GREEN (#1520) — a night whose ONLY redness is a `kind: 'deploy'`
+ *      shard failure (a `createNext` deploy-script/harness failure, never a
+ *      code result — run 36312054519, 419 files) must never report `eligible`
+ *      as if that harness failure were a real green result.
+ *   7. VOID AS RESET (#1520) — that same VOID night must be BRIDGED over in
+ *      `auditWindow`, not treated as an ordinary disqualification: it may
+ *      neither extend the streak (it never actually verified anything) nor
+ *      reset it (the redness carries no evidence about the code, so
+ *      restarting the v1.0 credential window over a harness bug would be
+ *      exactly the dishonest-the-other-direction failure #1520 exists to stop).
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one guard's behaviour and requires
@@ -58,7 +68,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 const SPEC = 'tests/compat-window-audit.test.ts';
 
-declareMutations(5);
+declareMutations(7);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -147,6 +157,25 @@ prove(
   'unreadable ledger: swallow the parse error and return a ledger-shaped blank',
   '      } catch (err) {\n        throw new Error(',
   '      } catch (err) {\n        return { shards: [] };\n        throw new Error(',
+);
+
+// 6. VOID AS GREEN (#1520): stop excluding deploy-only reds from `eligible`, so
+//    a night whose only redness is a harness/deploy-script failure reports as
+//    green.
+prove(
+  'void as green: a deploy-only-red night reports eligible',
+  'eligible: disqualifiers.length === 0 && deployOnlyReasons.length === 0,',
+  'eligible: disqualifiers.length === 0,',
+);
+
+// 7. VOID AS RESET (#1520): stop bridging a VOID night in `auditWindow`, so it
+//    falls through to the ordinary disqualification path and restarts the
+//    streak — the exact dishonest-the-other-direction failure #1520 exists to
+//    stop (a harness bug, not a code regression, killing a real streak).
+prove(
+  'void as reset: stop bridging a VOID night over, so it restarts the streak',
+  'if (night.void) {\n      continue;\n    }',
+  'if (false) {\n      continue;\n    }',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

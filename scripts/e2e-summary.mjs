@@ -71,9 +71,10 @@ import { summarizeBootLedger } from './e2e-bytecode-liveness.mjs';
 const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
 
 /**
- * How a failing test FILE failed (#545). Coarse on purpose — see the shape
- * comment inside summarize() for what each value does and does not claim.
- * @typedef {'timeout' | 'assertion' | 'unclassified'} FailureKind
+ * How a failing test FILE failed (#545; 'deploy' added by #1520). Coarse on
+ * purpose — see the shape comment inside summarize() for what each value does
+ * and does not claim.
+ * @typedef {'timeout' | 'assertion' | 'deploy' | 'unclassified'} FailureKind
  */
 
 /**
@@ -273,9 +274,21 @@ export function summarize(runnerOutput, meta) {
     //                signature upstream root-caused as vercel/next.js#95301.
     //                It means "at least one case in this file timed out", never
     //                "all did" — `cases` carries the rest.
-    //   'assertion' — failing cases, no timeout throw.
-    //   'unclassified' — the file failed with neither marker (e.g. a build
-    //                abort). Named rather than swallowed.
+    //   'deploy'   — #1520 (run 36312054519, 419 files). The group contains the
+    //                official harness's own `createNext` deploy-mode failure —
+    //                `Custom deploy script failed: …` or `Custom deploy script
+    //                returned invalid URL: …` — thrown inside the file's
+    //                `beforeAll`, before a single request was made. Every test
+    //                in the file then reports as a hook-cascade "failure" with
+    //                the SAME cause, which is a harness/deploy defect, never a
+    //                runtime regression: it must never be read as "the suite
+    //                served wrong responses". Takes priority over 'timeout' and
+    //                'assertion' — whatever per-case markers the cascade also
+    //                produced, the deploy script is why the file never got a
+    //                real result.
+    //   'assertion' — failing cases, no timeout throw, no deploy-script marker.
+    //   'unclassified' — the file failed with none of the above markers (e.g. a
+    //                build abort). Named rather than swallowed.
     //
     // Both keys are OMITTED when empty so a GREEN shard's artifact stays
     // byte-stable for existing consumers (the #41 matrix publisher).
@@ -289,14 +302,26 @@ export function summarize(runnerOutput, meta) {
 /**
  * Build the per-file failure record from its scanned output group.
  * @param {string} file
- * @param {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined}>} groups
+ * @param {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined, deployScript:boolean}>} groups
  * @returns {ShardFailure}
  */
 function attributeFailure(file, groups) {
   const g = groups.get(file);
   const cases = g ? [...g.cases].sort() : [];
-  const kind =
-    g?.timeoutMs !== undefined ? 'timeout' : cases.length > 0 ? 'assertion' : 'unclassified';
+  // #1520 — a `createNext` deploy-script failure takes PRIORITY over the other
+  // markers. It fires inside `beforeAll`, before any request is made, so the
+  // file's cases (if any got printed by the jest hook-failure cascade) and any
+  // incidental timeout text are downstream noise from the same harness defect —
+  // never a real per-case result. Reporting it as 'deploy' rather than
+  // 'assertion'/'unclassified' is the whole point of #1520: a harness/deploy
+  // failure must never read as a runtime regression.
+  const kind = g?.deployScript
+    ? 'deploy'
+    : g?.timeoutMs !== undefined
+      ? 'timeout'
+      : cases.length > 0
+        ? 'assertion'
+        : 'unclassified';
   return {
     file,
     kind,
@@ -321,7 +346,7 @@ function attributeFailure(file, groups) {
  * file. Everything below is credited ONLY while a group is open.
  *
  * @param {string} text
- * @returns {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined}>}
+ * @returns {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined, deployScript:boolean}>}
  */
 function scanOutputGroups(text) {
   const groups = new Map();
@@ -335,6 +360,13 @@ function scanOutputGroups(text) {
   const failedCaseRe = /✕\s+(.+?)\s+\(\d+(?:\.\d+)?\s*ms\)\s*$/;
   // jest's bare per-case timeout throw (the hardcoded 60s individualTestTimeout).
   const timeoutRe = /Exceeded timeout of (\d+) ms for a test/;
+  // #1520 (run 36312054519) — the official harness's own `createNext`
+  // deploy-mode failure, thrown inside the file's `beforeAll` before a single
+  // request is made. ONE pattern scans the SHARED shape both known messages
+  // carry ("Custom deploy script " + failed|returned invalid URL) rather than
+  // enumerating either sentence verbatim, so a harness wording tweak on either
+  // branch (e.g. an appended detail after "failed:") still matches.
+  const deployScriptRe = /Custom deploy script (?:failed|returned invalid URL)\b/;
   let current = null;
   for (const line of lines) {
     const close = line.match(groupCloseRe);
@@ -346,13 +378,19 @@ function scanOutputGroups(text) {
     if (open) {
       current = open[1];
       if (!groups.has(current)) {
-        groups.set(current, { noTestsFound: false, cases: new Set(), timeoutMs: undefined });
+        groups.set(current, {
+          noTestsFound: false,
+          cases: new Set(),
+          timeoutMs: undefined,
+          deployScript: false,
+        });
       }
       continue;
     }
     if (!current) continue;
     const g = groups.get(current);
     if (noTestsRe.test(line)) g.noTestsFound = true;
+    if (deployScriptRe.test(line)) g.deployScript = true;
     const failedCase = line.match(failedCaseRe);
     // De-dup is inherent: run-tests.js reprints the ✕ line once per retry and
     // `cases` is a Set, so a 3-retry failure is ONE case, not three.
