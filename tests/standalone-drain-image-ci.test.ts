@@ -892,6 +892,401 @@ describe('assertCleanDrain cannot record its leg and skip the assertions that ea
       `assertCleanDrain is missing assertions, pinned on the AST: ${missing.join(', ')}`,
     ).toEqual([]);
   });
+  // Round 7 (R6-B1). The allow-list above checks the SHAPE of the helper and
+  // the TEXT of what the six pins read. It never asked what those names are
+  // BOUND to, so four mutations hollowed the helper out with every fast-lane
+  // check, biome and tsc green:
+  //   - `const expect = _pass;` as the first statement, or `expect = _pass` as
+  //     a default parameter, where `_pass` is a pass-through Proxy. Every
+  //     `expect(...)` still parses as an expect chain; none of them asserts.
+  //   - a local `const assertCleanDrain = async (c) => { ...push(c) }` in a
+  //     describe, which shadows the helper at the drain-leg call site.
+  //   - `const waited = { ..._w, stdout: "0" }` and a hard-coded `const out`,
+  //     which keep the pinned argument TEXT (`waited.stdout.trim()`, `out`)
+  //     while faking the data under it.
+  // So these checks ask the TypeScript type checker, not the spelling: every
+  // name the helper asserts with, and every name the drain legs call, must
+  // resolve to the one declaration it is supposed to be, and the values the
+  // pins read must come straight from the real `docker wait` / `docker logs`
+  // calls.
+  function checkedSuite(): {
+    checker: ts.TypeChecker;
+    sourceFile: ts.SourceFile;
+    fn: ts.FunctionDeclaration;
+  } {
+    // The repo's own root typecheck config: it is the one that resolves
+    // `bun:test` (the `node` + `bun` type roots). Without them, `expect` would
+    // resolve to `unknown` and every binding check below would be vacuous, so
+    // that is asserted, not assumed.
+    const configPath = resolve(REPO_ROOT, 'tsconfig.typecheck.json');
+    const config = ts.readConfigFile(configPath, ts.sys.readFile);
+    expect(config.error, 'tsconfig.typecheck.json could not be read').toBeUndefined();
+    const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, REPO_ROOT);
+    const file = resolve(REPO_ROOT, SELF_CONTAINED_IMAGE_E2E_PATH);
+    const program = ts.createProgram({ rootNames: [file], options: parsed.options });
+    const sourceFile = program.getSourceFile(file);
+    expect(sourceFile, 'the type checker did not load the self-contained e2e').not.toBeUndefined();
+    const sf = sourceFile as ts.SourceFile;
+    const fns = sf.statements.filter(
+      (s): s is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(s) && s.name?.text === 'assertCleanDrain',
+    );
+    expect(fns.length, 'there must be exactly one top-level `function assertCleanDrain`').toBe(1);
+    const fn = fns[0] as ts.FunctionDeclaration;
+    expect(fn.body, 'assertCleanDrain has no function body').not.toBeUndefined();
+    return { checker: program.getTypeChecker(), sourceFile: sf, fn };
+  }
+
+  /** Every node under `root`, depth-first. */
+  function allNodes(root: ts.Node): ts.Node[] {
+    const out: ts.Node[] = [];
+    const walk = (n: ts.Node) => {
+      out.push(n);
+      ts.forEachChild(n, walk);
+    };
+    walk(root);
+    return out;
+  }
+
+  /** Is `node` inside `declare module "<name>" { ... }`? */
+  function insideAmbientModule(node: ts.Node, name: string): boolean {
+    for (let p: ts.Node | undefined = node.parent; p; p = p.parent) {
+      if (ts.isModuleDeclaration(p) && ts.isStringLiteral(p.name) && p.name.text === name) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  it('the names the helper asserts with and the drain legs call resolve (type checker) to the bun:test import and the top-level helper — nothing else is declared under either name', () => {
+    const { checker, sourceFile, fn } = checkedSuite();
+    const lineOf = (n: ts.Node) =>
+      sourceFile.getLineAndCharacterOfPosition(n.getStart(sourceFile)).line + 1;
+
+    // The one legitimate `expect` binding: the specifier in the bun:test import,
+    // not renamed, and resolving through the alias into bun's own declarations.
+    const bunImports = sourceFile.statements.filter(
+      (s): s is ts.ImportDeclaration =>
+        ts.isImportDeclaration(s) &&
+        ts.isStringLiteral(s.moduleSpecifier) &&
+        s.moduleSpecifier.text === 'bun:test',
+    );
+    expect(bunImports.length, 'exactly one import from bun:test').toBe(1);
+    const bindings = (bunImports[0] as ts.ImportDeclaration).importClause?.namedBindings;
+    const spec =
+      bindings && ts.isNamedImports(bindings)
+        ? bindings.elements.find((e) => e.name.text === 'expect' && !e.propertyName)
+        : undefined;
+    expect(spec, 'the bun:test import no longer binds `expect` (un-renamed)').not.toBeUndefined();
+    const importSym = checker.getSymbolAtLocation((spec as ts.ImportSpecifier).name);
+    expect(importSym, 'the `expect` import specifier has no symbol').not.toBeUndefined();
+    const target = checker.getAliasedSymbol(importSym as ts.Symbol);
+    const targetDecls = target.declarations ?? [];
+    expect(
+      targetDecls.length > 0 &&
+        targetDecls.every(
+          (d) => d.getSourceFile().isDeclarationFile && insideAmbientModule(d, 'bun:test'),
+        ),
+      `the \`expect\` import does not resolve into bun's \`declare module "bun:test"\` (got ${target.name}): the binding checks below would be vacuous`,
+    ).toBe(true);
+
+    // (1) Every `expect` identifier the helper uses resolves to THAT symbol —
+    // not a local const, a default parameter, a module-level stand-in.
+    const wrongExpect: string[] = [];
+    for (const n of allNodes(fn)) {
+      if (!ts.isIdentifier(n) || n.text !== 'expect') continue;
+      const sym = checker.getSymbolAtLocation(n);
+      if (sym !== importSym) wrongExpect.push(`line ${lineOf(n)}: ${n.parent.getText(sourceFile)}`);
+    }
+    expect(
+      wrongExpect,
+      `an \`expect\` inside assertCleanDrain is not the bun:test import:\n${wrongExpect.join('\n')}`,
+    ).toEqual([]);
+
+    // (2) Both drain-leg calls resolve to the top-level declaration — a local
+    // `const assertCleanDrain = ...` nearer the call site shadows it.
+    const fnSym = checker.getSymbolAtLocation(fn.name as ts.Identifier);
+    const calls = allNodes(sourceFile).filter(
+      (n): n is ts.CallExpression =>
+        ts.isCallExpression(n) &&
+        ts.isIdentifier(n.expression) &&
+        n.expression.text === 'assertCleanDrain',
+    );
+    expect(
+      calls.length,
+      'assertCleanDrain( must be called exactly twice (the two drain legs)',
+    ).toBe(2);
+    for (const call of calls) {
+      expect(
+        checker.getSymbolAtLocation(call.expression) === fnSym,
+        `line ${lineOf(call)}: this assertCleanDrain( does not resolve to the top-level helper`,
+      ).toBe(true);
+      expect(
+        ts.isAwaitExpression(call.parent) && ts.isExpressionStatement(call.parent.parent),
+        `line ${lineOf(call)}: the drain-leg call must be a plain \`await assertCleanDrain(...);\` statement`,
+      ).toBe(true);
+    }
+
+    // (3) Belt and braces, independent of the checker: nothing else in the
+    // file declares, imports or takes a parameter named `expect` or
+    // `assertCleanDrain`.
+    const declared: string[] = [];
+    for (const n of allNodes(sourceFile)) {
+      if (!ts.isIdentifier(n) || (n.text !== 'expect' && n.text !== 'assertCleanDrain')) continue;
+      const p = n.parent;
+      const isBindingName =
+        ((ts.isVariableDeclaration(p) ||
+          ts.isParameter(p) ||
+          ts.isBindingElement(p) ||
+          ts.isFunctionDeclaration(p) ||
+          ts.isFunctionExpression(p) ||
+          ts.isClassDeclaration(p) ||
+          ts.isClassExpression(p) ||
+          ts.isEnumDeclaration(p) ||
+          ts.isModuleDeclaration(p) ||
+          ts.isImportEqualsDeclaration(p) ||
+          ts.isImportClause(p) ||
+          ts.isNamespaceImport(p) ||
+          ts.isImportSpecifier(p)) &&
+          p.name === n) ||
+        (ts.isImportSpecifier(p) && p.propertyName === n);
+      if (!isBindingName) continue;
+      const theImport = p === spec;
+      const theHelper = p === fn;
+      if (!theImport && !theHelper) {
+        declared.push(`line ${lineOf(n)}: ${ts.SyntaxKind[p.kind]} \`${n.text}\``);
+      }
+    }
+    expect(
+      declared,
+      `the file declares another \`expect\` / \`assertCleanDrain\`:\n${declared.join('\n')}`,
+    ).toEqual([]);
+  });
+
+  it('the values the six pins read come straight from the real docker/fetch calls — every helper binding is a pinned const, and nothing rewrites one before it is asserted', () => {
+    const { checker, sourceFile, fn } = checkedSuite();
+    const body = fn.body as ts.Block;
+    const lineOf = (n: ts.Node) =>
+      sourceFile.getLineAndCharacterOfPosition(n.getStart(sourceFile)).line + 1;
+    // Whitespace and trailing commas are formatter territory, not meaning;
+    // none of these initializers holds a string with a space in it.
+    const squash = (n: ts.Node) =>
+      n
+        .getText(sourceFile)
+        .replace(/\s+/g, '')
+        .replace(/,([)\]}])/g, '$1');
+
+    // (1) Every declaration in the helper is a single `const` from this list,
+    // with exactly this initializer. A new binding (an alias, a fake, a
+    // side-effecting initializer) is not on it.
+    const PINNED: Record<string, string> = {
+      reqId: 'randomBytes(3).toString("hex")',
+      inFlight:
+        'fetch(`http://127.0.0.1:${port}/api/slow?ms=${REQUEST_MS}&afterMs=${AFTER_MS}&id=${reqId}`)',
+      termAt: 'Date.now()',
+      killed: 'run("docker",["kill","--signal=TERM",container],{timeout:60_000})',
+      res: 'awaitinFlight',
+      waited: 'run("docker",["wait",container],{timeout:DRAIN_BOUND_MS*2})',
+      elapsedMs: 'Date.now()-termAt',
+      logs: 'run("docker",["logs",container],{timeout:60_000})',
+      out: '`${logs.stdout}\\n${logs.stderr}`',
+      start: 'out.indexOf(`AFTER_SENTINEL_START:${reqId}`)',
+      done: 'out.indexOf(`AFTER_SENTINEL_RAN:${reqId}`)',
+    };
+    const decls = new Map<string, ts.VariableDeclaration>();
+    const badDecls: string[] = [];
+    for (const n of allNodes(body)) {
+      if (!ts.isVariableDeclarationList(n)) continue;
+      if (!(n.flags & ts.NodeFlags.Const) || n.declarations.length !== 1) {
+        badDecls.push(`line ${lineOf(n)}: not a single \`const\` (${n.getText(sourceFile)})`);
+        continue;
+      }
+      const d = n.declarations[0] as ts.VariableDeclaration;
+      const name = ts.isIdentifier(d.name) ? d.name.text : d.name.getText(sourceFile);
+      if (!ts.isVariableStatement(n.parent) || n.parent.parent !== body) {
+        badDecls.push(`line ${lineOf(d)}: \`${name}\` is not a top-level statement of the helper`);
+      } else if (!Object.hasOwn(PINNED, name) || decls.has(name)) {
+        badDecls.push(`line ${lineOf(d)}: \`${name}\` is not one of the helper's pinned bindings`);
+      } else if (!d.initializer || squash(d.initializer) !== PINNED[name]) {
+        badDecls.push(
+          `line ${lineOf(d)}: \`${name}\` = ${d.initializer?.getText(sourceFile)} (want ${PINNED[name]})`,
+        );
+      } else {
+        decls.set(name, d);
+      }
+    }
+    for (const name of Object.keys(PINNED)) {
+      if (!decls.has(name) && !badDecls.some((b) => b.includes(`\`${name}\``))) {
+        badDecls.push(`\`${name}\` is not declared`);
+      }
+    }
+    expect(
+      badDecls,
+      `assertCleanDrain's bindings are not the pinned ones:\n${badDecls.join('\n')}`,
+    ).toEqual([]);
+
+    // (2) The data sources, structurally and by binding: `waited` / `logs` are
+    // `run("docker", ["wait"|"logs", container, ...])` where `run` is the
+    // file's own top-level `run` and `container` is the helper's parameter,
+    // and `out` is built from THAT `logs`.
+    const runDecl = sourceFile.statements.find(
+      (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === 'run',
+    );
+    expect(runDecl, 'the suite no longer declares a top-level `function run`').not.toBeUndefined();
+    const runSym = checker.getSymbolAtLocation(
+      (runDecl as ts.FunctionDeclaration).name as ts.Identifier,
+    );
+    const containerParam = fn.parameters[0];
+    const containerSym =
+      containerParam && ts.isIdentifier(containerParam.name)
+        ? checker.getSymbolAtLocation(containerParam.name)
+        : undefined;
+    expect(
+      containerSym,
+      "assertCleanDrain's first parameter is not a plain `container`",
+    ).not.toBeUndefined();
+    const symOf = (name: string) =>
+      checker.getSymbolAtLocation((decls.get(name) as ts.VariableDeclaration).name);
+    const dockerCall = (name: string, verb: string): boolean => {
+      const init = decls.get(name)?.initializer;
+      if (!init || !ts.isCallExpression(init)) return false;
+      if (
+        !ts.isIdentifier(init.expression) ||
+        checker.getSymbolAtLocation(init.expression) !== runSym
+      ) {
+        return false;
+      }
+      const [a0, a1] = init.arguments;
+      if (!a0 || !ts.isStringLiteral(a0) || a0.text !== 'docker') return false;
+      if (!a1 || !ts.isArrayLiteralExpression(a1)) return false;
+      if (a1.elements.some((e) => ts.isSpreadElement(e))) return false;
+      const [v, c] = a1.elements;
+      return (
+        !!v &&
+        ts.isStringLiteral(v) &&
+        v.text === verb &&
+        !!c &&
+        ts.isIdentifier(c) &&
+        checker.getSymbolAtLocation(c) === containerSym
+      );
+    };
+    expect(
+      dockerCall('waited', 'wait'),
+      '`waited` is not the real `docker wait <container>` call',
+    ).toBe(true);
+    expect(
+      dockerCall('logs', 'logs'),
+      '`logs` is not the real `docker logs <container>` call',
+    ).toBe(true);
+    const outInit = decls.get('out')?.initializer;
+    const logsSym = symOf('logs');
+    const outFromLogs =
+      !!outInit &&
+      ts.isTemplateExpression(outInit) &&
+      outInit.templateSpans.length === 2 &&
+      outInit.templateSpans.every(
+        (s, i) =>
+          ts.isPropertyAccessExpression(s.expression) &&
+          ts.isIdentifier(s.expression.expression) &&
+          checker.getSymbolAtLocation(s.expression.expression) === logsSym &&
+          s.expression.name.text === (i === 0 ? 'stdout' : 'stderr'),
+      );
+    expect(
+      outFromLogs,
+      '`out` is not the template of the real `logs.stdout` then `logs.stderr`',
+    ).toBe(true);
+
+    // (3) The pins read THOSE bindings: the root of each pinned expect's first
+    // argument resolves to the pinned declaration of that name.
+    const pinRoots: Array<[string, string]> = [
+      ['res.status', 'res'],
+      ['await res.json()', 'res'],
+      ['waited.stdout.trim()', 'waited'],
+      ['start', 'start'],
+      ['done', 'done'],
+      ['out', 'out'],
+    ];
+    const rootIdent = (e: ts.Expression): ts.Identifier | undefined => {
+      let x: ts.Expression = e;
+      for (;;) {
+        if (ts.isAwaitExpression(x) || ts.isParenthesizedExpression(x)) x = x.expression;
+        else if (ts.isCallExpression(x) || ts.isPropertyAccessExpression(x)) x = x.expression;
+        else break;
+      }
+      return ts.isIdentifier(x) ? x : undefined;
+    };
+    const misbound: string[] = [];
+    for (const [text, name] of pinRoots) {
+      const want = symOf(name);
+      const hits = allNodes(body).filter(
+        (n): n is ts.CallExpression =>
+          ts.isCallExpression(n) &&
+          ts.isIdentifier(n.expression) &&
+          n.expression.text === 'expect' &&
+          n.arguments.length > 0 &&
+          (n.arguments[0] as ts.Expression).getText(sourceFile).replace(/\s+/g, ' ').trim() ===
+            text,
+      );
+      const ok =
+        hits.length > 0 &&
+        hits.every((h) => {
+          const id = rootIdent(h.arguments[0] as ts.Expression);
+          return !!id && checker.getSymbolAtLocation(id) === want;
+        });
+      if (!ok) misbound.push(`expect(${text}) does not read the pinned \`${name}\``);
+    }
+    expect(misbound, misbound.join('\n')).toEqual([]);
+
+    // (4) Nothing rewrites a binding between its source and its assertion: no
+    // assignment, ++/--, or delete anywhere in the helper, and every reference
+    // to an OBJECT-valued binding (the spawn results, the fetch promise and its
+    // response — the string/number ones are immutable and cannot be rebound
+    // past `const` + no-assignment) sits in a read-only position: a property
+    // read on it (`.stdout`/`.stderr`/`.status`/`.json`), an expect root or
+    // matcher argument, a template interpolation, or `await`. That excludes
+    // `Object.assign(waited, …)` / `Reflect.set(waited, …)` smuggled into an
+    // assertion message, which the statement allow-list cannot see.
+    const pinnedSyms = new Set(['killed', 'waited', 'logs', 'res', 'inFlight'].map(symOf));
+    const READ_PROPS = new Set(['stdout', 'stderr', 'status', 'json']);
+    const writes: string[] = [];
+    for (const n of allNodes(body)) {
+      if (
+        (ts.isBinaryExpression(n) &&
+          n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+        ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+          (n.operator === ts.SyntaxKind.PlusPlusToken ||
+            n.operator === ts.SyntaxKind.MinusMinusToken)) ||
+        ts.isDeleteExpression(n)
+      ) {
+        writes.push(`line ${lineOf(n)}: ${n.getText(sourceFile)}`);
+        continue;
+      }
+      if (!ts.isIdentifier(n) || !pinnedSyms.has(checker.getSymbolAtLocation(n))) continue;
+      const p = n.parent;
+      if (ts.isVariableDeclaration(p) && p.name === n) continue;
+      if (ts.isPropertyAccessExpression(p) && p.expression === n && READ_PROPS.has(p.name.text)) {
+        continue;
+      }
+      if (ts.isTemplateSpan(p) || ts.isAwaitExpression(p)) continue;
+      if (ts.isCallExpression(p) && p.arguments.includes(n)) {
+        const isExpectRoot = ts.isIdentifier(p.expression) && p.expression.text === 'expect';
+        const outer = p.parent;
+        const isMatcherArg =
+          ts.isPropertyAccessExpression(p.expression) &&
+          parseExpectChain(p) !== null &&
+          !(outer && ts.isPropertyAccessExpression(outer));
+        if ((isExpectRoot && p.arguments[0] === n) || isMatcherArg) continue;
+      }
+      writes.push(
+        `line ${lineOf(n)}: \`${n.text}\` used as ${ts.SyntaxKind[p.kind]} (${p.getText(sourceFile)})`,
+      );
+    }
+    expect(
+      writes,
+      `assertCleanDrain can rewrite a value between its source and its assertion:\n${writes.join('\n')}`,
+    ).toEqual([]);
+  });
 });
 
 describe('the CI path actually reaches the suite (both halves)', () => {
