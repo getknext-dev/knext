@@ -40,6 +40,8 @@ TARGETS="${BUN_BASE_TARGETS:-x64 aarch64}"
 
 # No arithmetic, array, subscript or slice anywhere in this file (the guard bans all of them): step
 # timing is a wall-clock stamp per phase, and Cloud Build's own step timing is the duration of record.
+# Every variable is bound exactly once (the guard counts binding sites; see README "Toolchain
+# pins"), so nothing a check compares can be rebound around it — give a new loop its own name.
 lap() { echo "### LAP $1 at $(date -u +%T)"; }
 
 PREFIX="$(bash "$WS/prefix.sh")"
@@ -187,7 +189,7 @@ cat >"$OUT/manifest.json" <<JSON
   "upstream_sha": "$UPSTREAM_SHA",
   "patched_head": "$HEAD_SHA",
   "prefix": "$PREFIX",
-  "patches": [$(for p in "$WS"/patches/*.patch; do printf '"%s",' "$(basename "$p")"; done | sed 's/,$//')],
+  "patches": [$(for pf in "$WS"/patches/*.patch; do printf '"%s",' "$(basename "$pf")"; done | sed 's/,$//')],
   "targets": [$(for a in $TARGETS; do printf '"bun-linux-%s-musl",' "$a"; done | sed 's/,$//')],
   "profile": "release (ThinLTO), canary=off",
   "build_id": "${BUILD_ID:-local}"

@@ -160,6 +160,16 @@ real bash parser (`mvdan-sh`, the parser behind `shfmt`) and walks the syntax tr
   reviewed `IFS=: read -r _ apkarch root <<<"$pair"`), because `read -r PATH <<<…` or
   `read -r HOME <<<…` binds those names without ever writing an `=` assignment (#1469 F2); every
   redirection reads or writes a reviewed path, so no spelling of `/dev/tcp` gets through;
+- **every variable has exactly one binding site.** The test finds binding sites by scanning: `=`
+  (plain, prefix, `export`, `local`), `for NAME in`, and the names that `read`, `mapfile`/`readarray`,
+  `printf -v`, `getopts` and `wait -p` bind. It reds any name bound twice, except `line` (pin()'s
+  `local` plus its assignment), `have_patches` (a `no`/`yes` flag) and `wkarch` (one per `case` arm),
+  each only at its exact reviewed sites. Because the verifiers are matched by their text, their
+  operands are pinned too: `UPSTREAM_SHA`, `PREFIX`, `fpr`, `HEAD_SHA`, `headshort`, `wk`, `wkshort`,
+  `wkurl`, `wkfile` and `wkkey` each have one reviewed derivation, and the committed pins
+  (`LLVM_SIGNER_FPR` and the versions) must be static text. Without this, `LLVM_SIGNER_FPR="$fpr"`
+  after the key download, or `UPSTREAM_SHA` rebound around its `rev-parse` check, left every check
+  textually intact while making it compare a value with itself (#1469 round 11);
 - **no arithmetic, array, subscript or slice, anywhere.** Bash evaluates `$(( ))`, `(( ))`, `let`,
   `for (( ))`, array subscripts, `${x:offset:length}`, `declare -i`, `[[ -eq ]]`/`[ -eq ]` and `-v`
   arithmetically, and that evaluator can assign variables and run command substitutions. Earlier
@@ -185,7 +195,8 @@ real bash parser (`mvdan-sh`, the parser behind `shfmt`) and walks the syntax tr
 
 **Known limits of that test.** It reasons about the script's text, not about runtime values: a verifier
 counts because it sits where it must run, and the scan does not evaluate what a variable such as
-`$TARGETS` holds. It trusts the tools of the digest-pinned build image (`sha256sum`, `grep`, `curl`), and
+`$TARGETS` holds. What it does guarantee about values is their provenance: each verifier operand is
+bound once, by its reviewed derivation, so no check can be made to compare a value with itself. It trusts the tools of the digest-pinned build image (`sha256sum`, `grep`, `curl`), and
 it trusts `pin()` only because its body is compared with the reviewed version — changing `pin()`, or
 adding a command shape, means changing the test in the same PR.
 
