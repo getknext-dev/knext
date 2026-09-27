@@ -35,6 +35,7 @@ declare module 'mvdan-sh' {
     Value?: ShNode | string | null;
     Naked?: boolean;
     Index?: ShNode | null;
+    Slice?: { Offset?: ShNode | null; Length?: ShNode | null } | null;
     Array?: ShNode | null;
     N?: ShNode | null;
     Hdoc?: ShNode | null;

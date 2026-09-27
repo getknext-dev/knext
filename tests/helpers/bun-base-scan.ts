@@ -84,6 +84,66 @@ function probeOp(src: string): number {
 const PARAM_OPS_OK = new Set([probeOp('echo ${a:-b}'), probeOp('echo ${a%%b}')]);
 const ARITH_OK = new Set(['$(($(date +%s) - T0))']);
 
+/** ${…} index / slice-offset/length text that isn't a plain literal. mvdan-sh does NOT wrap these in
+ *  an ArithmExp node the way it wraps `$(( ))`/`(( ))` (verified against the parser: a ParamExp.Index
+ *  holds a raw BinaryArithm directly, and a ParamExp.Slice's Offset/Length are not visited by
+ *  syntax.Walk AT ALL), so neither the ARITH_OK case above nor anything else in this file ever sees
+ *  `${a[PATH=0]}` or `${x:PATH=0:1}` — the #1469-r6 arithmetic-bind bypass. Both are read and judged
+ *  on text here instead of on node type; only `@`, `*`, a bare `$NAME`, or digits are index shapes
+ *  build.sh actually uses, and only digits are slice shapes it uses. */
+const INDEX_OK = /^(@|\*|\$[A-Za-z_][A-Za-z0-9_]*|[0-9]+)$/;
+const SLICE_OK = /^[0-9]+$/;
+
+/** `[[ ]]`'s arithmetic comparison operators run their operands through the SAME evaluator as
+ *  `$(( ))`/`(( ))` — including assignment (`[[ 1 -eq PATH=5 ]]` sets PATH; verified in real bash) and
+ *  recursive evaluation of a variable's OWN value (`name="PATH=0"; [[ $name -eq 0 ]]` also sets PATH)
+ *  — but mvdan-sh parses a BinaryTest's operands as plain Words, never as arithmetic, so no
+ *  ArithmExp/BinaryArithm case ever runs over them either. build.sh never uses these inside `[[ ]]`
+ *  (only `=~` and classic `[ ]`), so they are banned outright. Derived from the parser itself, the
+ *  same way PARAM_OPS_OK is above, instead of a hardcoded enum number that could drift across
+ *  mvdan-sh versions. */
+const ARITH_TEST_OPS = new Set(
+  ['-eq', '-ne', '-lt', '-le', '-gt', '-ge'].map((op) => {
+    let code = -1;
+    syntax.Walk(newParser().Parse(`[[ 1 ${op} 1 ]]`, 'probe'), (n) => {
+      if (n && T(n) === 'BinaryTest') code = n.Op ?? -1;
+      return true;
+    });
+    return code;
+  }),
+);
+/** The operand allowed next to -eq/-ne/-lt/-le/-gt/-ge in a classic `[ ]`/`test` comparison (`[[ ]]`
+ *  itself is banned outright above): a digit literal, or a length expression (`${#NAME}`/
+ *  `${#NAME[@]}`, always a non-negative integer, never attacker-shaped text) — build.sh's one such
+ *  use is `[ ${#PATCHES[@]} -gt 0 ]`. A bare `$NAME`/`"$NAME"` is refused even though real bash does
+ *  NOT turn `[ "$x" -eq 0 ]` into an assignment (verified) — its value still runs through the same
+ *  arithmetic evaluator, so an unreviewed `$(...)` inside that value would still execute. */
+const NUMERIC_TEST_OPERAND = /^"?\$\{#[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\}"?$|^[0-9]+$/;
+/** The same six operators, matched as a whole word inside a classic `[ ]`/`test` command's argv
+ *  (plain strings there, never a BinaryTest node — that node type only exists for `[[ ]]`). */
+const ARITH_COMPARE_WORD = /^-(eq|ne|lt|le|gt|ge)$/;
+
+/** ONE place that knows CONSTS' one-reviewed-line rule — consulted by the `=` assignment loop in
+ *  scanBuildScript AND by the Index/Slice arithmetic checks below, so a name protected by CONSTS is
+ *  protected the same way regardless of which binding site names it. */
+function constMismatch(name: string, text: string): string | undefined {
+  const want = CONSTS[name];
+  if (want === undefined || text === want) return undefined;
+  return `${name} may only be set as \`${want}\``;
+}
+
+/** Judge a raw Index or Slice-offset/length text: literal shapes pass; anything else is red, called
+ *  out by name when it happens to rebind a CONST, generically otherwise (an arithmetic expression
+ *  there can smuggle a command substitution regardless of whether the name is one we enumerate). */
+function arithContextBad(text: string, kind: 'index' | 'slice offset/length'): string | undefined {
+  if ((kind === 'index' ? INDEX_OK : SLICE_OK).test(text)) return undefined;
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(text);
+  const mism = m && constMismatch(m[1]!, text);
+  return mism
+    ? `${kind} \`${text}\`: ${mism}`
+    : `${kind} \`${text}\` is not a literal ${kind === 'index' ? 'index (@, *, $NAME, or digits)' : 'offset/length digit'} — arithmetic here is not reviewed`;
+}
+
 /** Redirection targets / sources the scripts may use — every other path is red. */
 const OUT_TARGETS = new Set([
   '/dev/null',
@@ -136,6 +196,20 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
         if (n.Excl) bad(n, 'indirect expansion ${!…} is not allowed');
         if (n.Exp && !PARAM_OPS_OK.has(n.Exp.Op ?? -1))
           bad(n, 'parameter-expansion operator other than :- and %% (e.g. := assigns, @P runs)');
+        if (n.Index) {
+          const msg = arithContextBad(sl(n.Index), 'index');
+          if (msg) bad(n, msg);
+        }
+        // syntax.Walk does not descend into Slice.Offset/Length at all — unlike Index above, which it
+        // DOES traverse — so these two are read directly or they are never checked by anything.
+        if (n.Slice?.Offset) {
+          const msg = arithContextBad(sl(n.Slice.Offset), 'slice offset/length');
+          if (msg) bad(n, msg);
+        }
+        if (n.Slice?.Length) {
+          const msg = arithContextBad(sl(n.Slice.Length), 'slice offset/length');
+          if (msg) bad(n, msg);
+        }
       }
       if (t === 'ArithmExp' && !ARITH_OK.has(sl(n))) bad(n, `arithmetic expansion ${sl(n)}`);
       return true;
@@ -144,6 +218,12 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
   const assign = (a: ShNode, ctx: Ctx) => {
     const nm = a.Name ? String(a.Name.Value) : '';
     if (nm) out.assigns.push({ name: nm, text: sl(a), line: a.Pos().Line() });
+    // `PATCHES[PATH=0]=z` assigns PATCHES (a VARS name, not a CONST) — the check above never notices
+    // its subscript rebinds PATH, because that is `a.Index`, not `a.Name`/the assignment text.
+    if (a.Index) {
+      const msg = arithContextBad(sl(a.Index), 'index');
+      if (msg) bad(a, msg);
+    }
     expansions(a, ctx);
   };
 
@@ -227,6 +307,17 @@ export function parseScript(src: string, name = 'build.sh'): Parsed {
       expansions(c, ctx);
     } else if (t === 'TestClause') {
       expansions(c, ctx);
+      // BinaryTest operands are plain Words to the parser (never ArithmExp/BinaryArithm), so
+      // expansions() above cannot see the arithmetic-with-assignment semantics [[ ]] gives -eq et al.
+      // at runtime; walked and banned outright here instead.
+      syntax.Walk(c, (n) => {
+        if (n && T(n) === 'BinaryTest' && ARITH_TEST_OPS.has(n.Op ?? -1))
+          bad(
+            n,
+            '[[ ]] arithmetic comparison (-eq/-ne/-lt/-le/-gt/-ge) is not allowed — it evaluates both operands arithmetically (assignment and command substitution included); build.sh uses [ ] for numeric comparisons',
+          );
+        return true;
+      });
       emit(s, ['[[', sl(c)], redirs, ctx);
     } else if (t === 'BinaryCmd') {
       const op = /^(&&|\|\||\|&|\|)/.exec(
@@ -586,10 +677,10 @@ export function scanBuildScript(
   const seen: Record<string, number> = {};
   for (const a of p.assigns) {
     if (!VARS.has(a.name)) v.push(`line ${a.line}: assigns unknown variable ${a.name}`);
-    const want = CONSTS[a.name];
-    if (want !== undefined) {
+    if (CONSTS[a.name] !== undefined) {
       seen[a.name] = (seen[a.name] ?? 0) + 1;
-      if (a.text !== want) v.push(`line ${a.line}: ${a.name} may only be set as \`${want}\``);
+      const mism = constMismatch(a.name, a.text);
+      if (mism) v.push(`line ${a.line}: ${mism}`);
       if (seen[a.name]! > 1) v.push(`line ${a.line}: ${a.name} assigned more than once`);
     }
   }
@@ -639,6 +730,19 @@ export function scanBuildScript(
       v.push(`${at}: a check or fetch before && (its failure does not stop the script)`);
     if (head === 'printf' && n.words.some((w) => /^-[a-zA-Z]*v/.test(w)))
       v.push(`${at}: printf -v assigns a variable`);
+    // Classic `[ ]`/`test` (not `[[ ]]`, banned outright above): -eq/-ne/-lt/-le/-gt/-ge run their
+    // operands through the same arithmetic evaluator [[ ]] does. Real bash does not turn `[ "$x" -eq
+    // 0 ]` into an assignment (verified) — the evaluator still runs, so an unreviewed `$(...)` inside
+    // an operand's value would still execute. build.sh's one use, `[ ${#PATCHES[@]} -gt 0 ]`, is a
+    // length expression on one side and a digit on the other; anything else next to these operators
+    // is red rather than trusted to be a plain number at runtime.
+    if (/^(\[|test)$/.test(head))
+      n.words.forEach((w, k) => {
+        if (!ARITH_COMPARE_WORD.test(w)) return;
+        for (const operand of [n.words[k - 1], n.words[k + 1]])
+          if (operand !== undefined && !NUMERIC_TEST_OPERAND.test(operand))
+            v.push(`${at}: ${head} ${w} operand \`${operand}\` is not a literal integer or length`);
+      });
     // `read` is checked against its own fixed shape, not VARS: VARS also allows PATH/HOME/WS/… on
     // the left of `=` (the CONSTS one-line check covers that), and a `read` into one of those names
     // — `read -r PATH <<<…`, `read -r HOME <<<…`, `read -r WS <<<…` — bypassed that check entirely

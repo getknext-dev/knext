@@ -412,6 +412,61 @@ describe('build.sh scan: allowlisted commands; every fetch pinned or explicitly 
       () => add('IFS=,'),
       /IFS may only be set as/,
     ],
+    // round 7 (review-1469-r6): arithmetic-context binders — a `NAME=value` sitting inside a
+    // ParamExp slice/index, an assignment subscript, or a `[[ ]]` -eq-family comparison rebinds a
+    // CONST via the shell's arithmetic evaluator without ever going through an `=` assignment, so
+    // none of the round-5/6 checks (which key on `=` Assign nodes or the reviewed READ_EXACT/
+    // FOR_HEADERS shapes) ever saw it. Verified in real bash: the export survives the statement.
+    [
+      'slice offset arithmetic: ${wk:PATH=0:16} rebinds PATH',
+      () => add('echo "${wk:PATH=0:16}"'),
+      /slice offset\/length .*PATH may only be set as/,
+    ],
+    [
+      'slice offset arithmetic: ${x:BUN_BUILD_PREFETCH_DIR=0:1} rebinds the prefetch dir',
+      () => add('echo "${wk:BUN_BUILD_PREFETCH_DIR=0:1}"'),
+      /slice offset\/length .*BUN_BUILD_PREFETCH_DIR may only be set as/,
+    ],
+    [
+      'index arithmetic: ${PATCHES[PATH=0]} rebinds PATH',
+      () => add('echo "${PATCHES[PATH=0]}"'),
+      /index .*PATH may only be set as/,
+    ],
+    [
+      'assignment subscript: PATCHES[PATH=0]=z rebinds PATH via a.Index, not a.Name',
+      () => add('PATCHES[PATH=0]=z'),
+      /index .*PATH may only be set as/,
+    ],
+    [
+      '[[ ]] arithmetic comparison assigns: [[ 1 -eq PATH=5 ]]',
+      () => add('[[ 1 -eq PATH=5 ]]'),
+      /\[\[ \]\] arithmetic comparison/,
+    ],
+    [
+      '[[ ]] arithmetic comparison via a variable’s own value: name="HOME=0"; [[ $name -eq 0 ]]',
+      () => add('name="HOME=0"\n[[ $name -eq 0 ]]'),
+      /\[\[ \]\] arithmetic comparison/,
+    ],
+    [
+      'arithmetic command (( PATH = 1 )) still not modeled by the walker',
+      () => add('(( PATH = 1 ))'),
+      /ArithmCmd is not modeled/,
+    ],
+    [
+      'let PATH=1 is a statement kind the walker does not model',
+      () => add('let PATH=1'),
+      /statement kind LetClause is not modeled/,
+    ],
+    [
+      'a $(( )) form nested inside a slice offset: ${x:$((PATH=1)):1}',
+      () => add('echo "${wk:$((PATH=1)):1}"'),
+      /slice offset\/length/,
+    ],
+    [
+      'classic test: [ "$name" -eq 0 ] refuses a non-literal, non-length operand',
+      () => add('name=x\n[ "$name" -eq 0 ]'),
+      /\[ -eq operand `"\$name"` is not a literal integer or length/,
+    ],
   ])('goes RED on: %s', (_n, mutate, why) => {
     const v = scan(mutate());
     expect(v.join('\n')).toMatch(why);
