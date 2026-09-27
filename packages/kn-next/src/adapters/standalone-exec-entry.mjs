@@ -128,6 +128,7 @@ function selfContainedPrologue({ appRel, distDir = ".next", extensionless = [] }
     const aliases = [
         `[${EMBED_DIST} + "/static"]: ${DISK_DIST} + "/static"`,
         `[${EMBED_DIST} + "/cache"]: ${DISK_DIST} + "/cache"`,
+        // @upstream-shim bun-asset-extensionless-dot
         ...extensionless.map(
             (rel) =>
                 `[${EMBED_DIST} + ${JSON.stringify(`/${rel}`)}]: ${EMBED_DIST} + ${JSON.stringify(`/${rel}.`)}`,

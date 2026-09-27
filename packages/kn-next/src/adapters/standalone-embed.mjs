@@ -245,8 +245,7 @@ export function installDistDirAlias(fs, fsp, aliases) {
  * @param {any} fs `node:fs`
  * @param {string} root the embedded root (`/$bunfs/root`)
  */
-// Upstream-shim WITHOUT a registry entry yet: no Bun issue exists for this behaviour
-// (drafted, awaiting a go-ahead to post — tracked on #1456). Register it the moment one does.
+// @upstream-shim bun-json-asset-require
 export function installEmbeddedJsonRequire(Module, fs, root) {
     const prefix = `${root}/`;
     const orig = Module.prototype.require;

@@ -558,4 +558,116 @@ export const REGISTRY: RetirementEntry[] = [
       }
     },
   },
+  {
+    id: 'bun-json-asset-require',
+    upstream: 'oven-sh/bun#44095',
+    upstreamTitle: 'require() of an embedded JSON file asset evaluates it as JavaScript',
+    issue: '#1456',
+    kind: 'shim',
+    shape: 'next',
+    against: 'bun',
+    // `require()` of an embedded JSON `type: "file"` asset evaluates its bytes as a
+    // JavaScript module body (a SyntaxError on the first `:`) instead of going
+    // through the `.json` loader a disk `require()` uses. Next `require`s some
+    // manifests by absolute path, so the self-contained entry installs a
+    // `Module.prototype.require` hook that answers `.json` paths under the
+    // embedded root from the file's bytes, parsed and cached like a real
+    // `require` (standalone-embed.mjs installEmbeddedJsonRequire).
+    repro: async () => {
+      const box = sandbox('bun-json-asset-require');
+      try {
+        box.write(
+          {
+            'main.cjs':
+              'const { dirname, join } = require("node:path");\n' +
+              'const p = join(dirname(process.argv[1]), "data", "m.json");\n' +
+              'const disk = require("node:fs").readFileSync(p, "utf8").trim();\n' +
+              'let req; try { req = JSON.stringify(require(p)); } catch (e) { req = "fail " + String(e.message).split("\\n")[0]; }\n' +
+              'console.log("RESULT " + JSON.stringify({ disk, req }));\n',
+            'assets.mjs':
+              'import m from "./data/m.json" with { type: "file" };\nexport default m;\n',
+            'data/m.json': '{"a":1}',
+          },
+          'src',
+        );
+        const built = box.compile(
+          'src',
+          '{ entrypoints: ["./main.cjs", "./assets.mjs"], root: ".", target: "bun", format: "cjs", naming: { entry: "[dir]/[name].[ext]", asset: "[dir]/[name].[ext]" }, compile: { outfile: "../bin/app" } }',
+        );
+        if (built.status !== 'built') inconclusive('bun-json-asset-require', built.detail);
+        box.remove('src');
+        box.write({ '.keep': '' }, 'empty');
+        const raw = box.run([join(box.dir, 'bin/app')], join(box.dir, 'empty')).result;
+        const { disk, req } = JSON.parse(raw) as { disk: string; req: string };
+        // Control: the file IS embedded and readable byte-for-byte with fs.
+        if (disk !== '{"a":1}') inconclusive('bun-json-asset-require', `readFileSync: ${raw}`);
+        return {
+          stillBroken: req !== '{"a":1}',
+          evidence: `readFileSync of the embedded JSON asset → ${disk}; require() of the same path → ${req}`,
+        };
+      } finally {
+        box.dispose();
+      }
+    },
+  },
+  {
+    id: 'bun-asset-extensionless-dot',
+    upstream: 'oven-sh/bun#44096',
+    upstreamTitle: 'embeds an extensionless file with a trailing dot',
+    issue: '#1456',
+    kind: 'shim',
+    shape: 'next',
+    against: 'bun',
+    // With `naming.asset: "[dir]/[name].[ext]"`, an embedded file with no
+    // extension is emitted with a trailing dot (`BUILD_ID` → `BUILD_ID.`) instead
+    // of its own name — `[ext]` always expands with its leading `.` even when
+    // empty. Next reads `.next/BUILD_ID` with `fs`, so the self-contained entry
+    // aliases the app's extensionless embedded paths to the dotted name Bun
+    // actually gives them (standalone-exec-entry.mjs selfContainedPrologue,
+    // installed by standalone-embed.mjs installDistDirAlias).
+    repro: async () => {
+      const box = sandbox('bun-asset-extensionless-dot');
+      try {
+        box.write(
+          {
+            'main.cjs':
+              'const fs = require("node:fs");\n' +
+              'const { dirname } = require("node:path");\n' +
+              // `root` is joined with a literal "./" (not `path.join`, which would
+              // normalize the "." away): with `naming.asset: "[dir]/[name].[ext]"`
+              // and `root: "."`, Bun embeds these assets one level down, under an
+              // actual directory named ".", so the check must reach past it.
+              'const root = dirname(process.argv[1]) + "/./";\n' +
+              'const e1 = fs.existsSync(root + "BUILD_ID");\n' +
+              'const e2 = fs.existsSync(root + "BUILD_ID.");\n' +
+              'const j1 = fs.existsSync(root + "x.json");\n' +
+              'console.log("RESULT " + JSON.stringify({ e1, e2, j1 }));\n',
+            'assets.mjs':
+              'import a from "./BUILD_ID" with { type: "file" };\nimport b from "./x.json" with { type: "file" };\nexport default [a, b];\n',
+            BUILD_ID: 'buildid-content',
+            'x.json': '{"a":1}',
+          },
+          'src',
+        );
+        const built = box.compile(
+          'src',
+          '{ entrypoints: ["./main.cjs", "./assets.mjs"], root: ".", target: "bun", naming: { entry: "[dir]/[name].[ext]", asset: "[dir]/[name].[ext]" }, compile: { outfile: "../bin/app" } }',
+        );
+        if (built.status !== 'built') inconclusive('bun-asset-extensionless-dot', built.detail);
+        box.remove('src');
+        box.write({ '.keep': '' }, 'empty');
+        const raw = box.run([join(box.dir, 'bin/app')], join(box.dir, 'empty')).result;
+        const { e1, e2, j1 } = JSON.parse(raw) as { e1: boolean; e2: boolean; j1: boolean };
+        // Control: the extensioned asset embeds under its own correct name.
+        if (!j1)
+          inconclusive('bun-asset-extensionless-dot', `x.json missing at its own name: ${raw}`);
+        return {
+          stillBroken: !e1 && e2,
+          evidence: `BUILD_ID present under its own name → ${e1}; BUILD_ID. (trailing dot) present → ${e2}; x.json present under its own name → ${j1}`,
+        };
+      } finally {
+        box.dispose();
+      }
+    },
+  },
 ];
