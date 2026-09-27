@@ -88,13 +88,18 @@ describe("every mutation prover's STATICALLY-resolvable anchors still match the 
     ).toBeGreaterThanOrEqual(MIN_RESOLVED_PROVERS);
   });
 
-  it('#1223: compat-window-audit.mjs resolves ALL FIVE of its anchors, all clean', () => {
+  it('#1223: compat-window-audit.mjs resolves ALL SIX of its anchors, all clean', () => {
     // The concrete regression tripwire for the bug this file exists to catch:
     // mutation #4's anchor is now `l?.lane === lane || (isUnresolved(l) &&
     // l?.lane == null)`, matching the current `selectLaneNights` shape.
+    //
+    // Count history: 5 original guards; #1550 round 1 added 2 VOID-grade
+    // mutations (7 total); #1550 round 2 removed the VOID grade entirely (the
+    // credential's integrity wins over bridging a deploy-classified red) and
+    // added 1 new count-match-guard mutation in its place — 6 total.
     const scanned = scanProverFile(REPO_ROOT, 'scripts/mutation-prove-compat-window-audit.mjs');
     expect(scanned.subjectFiles).toEqual(['scripts/compat-window-audit.mjs']);
-    expect(scanned.pairs.length).toBe(5);
+    expect(scanned.pairs.length).toBe(6);
     expect(auditProverAnchors(REPO_ROOT, scanned)).toEqual([]);
   });
 

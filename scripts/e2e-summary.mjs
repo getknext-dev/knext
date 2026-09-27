@@ -274,19 +274,27 @@ export function summarize(runnerOutput, meta) {
     //                signature upstream root-caused as vercel/next.js#95301.
     //                It means "at least one case in this file timed out", never
     //                "all did" — `cases` carries the rest.
-    //   'deploy'   — #1520 (run 36312054519, 419 files). The group contains the
-    //                official harness's own `createNext` deploy-mode failure —
+    //   'deploy'   — #1520 (run 36312054519, 419 files). At least one FAILING
+    //                CASE's own jest error-detail block (bounded by its own
+    //                `  ● …` header, on the FINAL retry attempt only — #1550
+    //                round 2, see `scanOutputGroups`) contains the official
+    //                harness's own `createNext` deploy-mode failure —
     //                `Custom deploy script failed: …` or `Custom deploy script
-    //                returned invalid URL: …` — thrown inside the file's
-    //                `beforeAll`, before a single request was made. Every test
-    //                in the file then reports as a hook-cascade "failure" with
-    //                the SAME cause, which is a harness/deploy defect, never a
-    //                runtime regression: it must never be read as "the suite
-    //                served wrong responses". Takes priority over 'timeout' and
-    //                'assertion' — whatever per-case markers the cascade also
-    //                produced, the deploy script is why the file never got a
-    //                real result.
-    //   'assertion' — failing cases, no timeout throw, no deploy-script marker.
+    //                returned invalid URL: …`. A `beforeAll`-thrown deploy
+    //                failure produces a jest hook-cascade where every case
+    //                shares that one cause, so a file whose EVERY case (or
+    //                whose sole suite-level failure) is explained this way is
+    //                'deploy'. RANKED BELOW 'timeout' and 'assertion' (#1550
+    //                round 2, lead-directed): a round-1 review found that
+    //                ranking it FIRST let a case that carries BOTH a deploy
+    //                line and its own genuine timeout/assertion evidence read
+    //                as harness noise instead of the real regression it is.
+    //                Any case whose block is NOT explained by the deploy
+    //                marker — or any failing case with no error-detail block
+    //                at all — downgrades the whole file to 'assertion' (fail
+    //                closed toward "real regression", never toward "deploy").
+    //   'assertion' — failing cases, no timeout throw, and NOT every case is
+    //                explained by a deploy-script marker.
     //   'unclassified' — the file failed with none of the above markers (e.g. a
     //                build abort). Named rather than swallowed.
     //
@@ -302,26 +310,34 @@ export function summarize(runnerOutput, meta) {
 /**
  * Build the per-file failure record from its scanned output group.
  * @param {string} file
- * @param {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined, deployScript:boolean}>} groups
+ * @param {Map<string, ScannedGroup>} groups
  * @returns {ShardFailure}
  */
 function attributeFailure(file, groups) {
   const g = groups.get(file);
   const cases = g ? [...g.cases].sort() : [];
-  // #1520 — a `createNext` deploy-script failure takes PRIORITY over the other
-  // markers. It fires inside `beforeAll`, before any request is made, so the
-  // file's cases (if any got printed by the jest hook-failure cascade) and any
-  // incidental timeout text are downstream noise from the same harness defect —
-  // never a real per-case result. Reporting it as 'deploy' rather than
-  // 'assertion'/'unclassified' is the whole point of #1520: a harness/deploy
-  // failure must never read as a runtime regression.
-  const kind = g?.deployScript
-    ? 'deploy'
-    : g?.timeoutMs !== undefined
+  const blocks = g?.blocks ?? [];
+  // #1550 round 2 — deploy is a PER-CASE-BLOCK label now, ranked BELOW
+  // 'timeout' and 'assertion' (see the shape comment in `summarize()`). A
+  // block counts as 'deploy' only when it CONTAINS the anchored deploy
+  // marker; every other block — and every failing case with no error-detail
+  // block at all (`unexplainedCase`) — is presumed a genuine, unexplained
+  // failure. That is deliberately fail-closed the OTHER way from the
+  // pre-round-2 code: a case NOT proven to be deploy-only downgrades the
+  // whole file, rather than one deploy line upgrading it.
+  const hasDeployBlock = blocks.some((b) => b.deploy);
+  const hasNonDeployBlock = blocks.some((b) => !b.deploy);
+  const unexplainedCase = cases.length > blocks.length;
+  const kind =
+    g?.timeoutMs !== undefined
       ? 'timeout'
-      : cases.length > 0
+      : hasNonDeployBlock || unexplainedCase
         ? 'assertion'
-        : 'unclassified';
+        : hasDeployBlock || g?.deployScript
+          ? 'deploy'
+          : cases.length > 0
+            ? 'assertion'
+            : 'unclassified';
   return {
     file,
     kind,
@@ -329,6 +345,15 @@ function attributeFailure(file, groups) {
     cases,
   };
 }
+
+/**
+ * @typedef {object} ScannedGroup
+ * @property {boolean} noTestsFound
+ * @property {Set<string>} cases
+ * @property {number|undefined} timeoutMs
+ * @property {boolean} deployScript
+ * @property {Array<{deploy: boolean}>} blocks
+ */
 
 /**
  * Scan run-tests.js's per-file output groups ONCE, collecting everything the
@@ -345,8 +370,19 @@ function attributeFailure(file, groups) {
  * that once counted the underscore JEST_JUNIT_OUTPUT_NAME echo as a distinct
  * file. Everything below is credited ONLY while a group is open.
  *
+ * RETRY SCOPING (#1550 round 2). run-tests.js reopens the SAME group (same
+ * file key) once per retry attempt. A round-1 review found that accumulating
+ * `cases`/`timeoutMs`/`deployScript`/case-block evidence ACROSS every retry
+ * let an EARLIER retry's deploy-script failure leak into a LATER retry that
+ * failed for a real, unrelated reason (and vice versa) — the file's
+ * classification must reflect only the FINAL retry's own evidence. So this
+ * scan RESETS that per-retry evidence every time a file's group re-opens,
+ * keeping only `noTestsFound`, which is an infra-abort signature that does
+ * not vary meaningfully by retry (jest either can locate the file or it
+ * cannot, on every attempt alike).
+ *
  * @param {string} text
- * @returns {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined, deployScript:boolean}>}
+ * @returns {Map<string, ScannedGroup>}
  */
 function scanOutputGroups(text) {
   const groups = new Map();
@@ -366,31 +402,74 @@ function scanOutputGroups(text) {
   // carry ("Custom deploy script " + failed|returned invalid URL) rather than
   // enumerating either sentence verbatim, so a harness wording tweak on either
   // branch (e.g. an appended detail after "failed:") still matches.
-  const deployScriptRe = /Custom deploy script (?:failed|returned invalid URL)\b/;
+  //
+  // ANCHORED to the start of the line (#1550 round 2, B3 from the round-1
+  // review): an UNANCHORED match hits any line whose text merely CONTAINS the
+  // sentence — an assertion's own `Expected substring: "Custom deploy script
+  // failed"` reads it right back, and a stray log line
+  // (`[server] Custom deploy script failed? no`) does too. The real harness
+  // message is always the first thing jest prints on its own line (optionally
+  // indented); nothing legitimate prefixes it.
+  const deployScriptRe = /^\s*Custom deploy script (?:failed|returned invalid URL)\b/;
+  // jest's per-case error-detail header — `  ● <describe> › <test>` (or, for a
+  // `beforeAll`/suite-level throw, `  ● Test suite failed to run`). Bounds ONE
+  // case's evidence block: everything from the line AFTER this header up to
+  // the next such header (or the group's close) belongs to it. `●` is a
+  // distinct glyph from the group-open `❌`, so the two never collide.
+  const caseHeaderRe = /^\s*●\s+\S.*$/;
+
+  /** @returns {ScannedGroup} */
+  const freshGroup = () => ({
+    noTestsFound: false,
+    cases: new Set(),
+    timeoutMs: undefined,
+    deployScript: false,
+    blocks: [],
+  });
+
   let current = null;
+  let inBlock = false;
+  let blockHasDeploy = false;
+  /** Close the currently-open case block (if any), recording its verdict. */
+  const closeBlock = (g) => {
+    if (inBlock && g) g.blocks.push({ deploy: blockHasDeploy });
+    inBlock = false;
+    blockHasDeploy = false;
+  };
+
   for (const line of lines) {
     const close = line.match(groupCloseRe);
     if (close) {
+      closeBlock(current ? groups.get(current) : null);
       current = null;
       continue;
     }
     const open = line.match(groupOpenRe);
     if (open) {
+      closeBlock(current ? groups.get(current) : null);
       current = open[1];
-      if (!groups.has(current)) {
-        groups.set(current, {
-          noTestsFound: false,
-          cases: new Set(),
-          timeoutMs: undefined,
-          deployScript: false,
-        });
+      if (groups.has(current)) {
+        // A NEW retry attempt for an already-seen file: reset the per-retry
+        // evidence (see the RETRY SCOPING doc above), keeping noTestsFound.
+        const g = groups.get(current);
+        const noTestsFound = g.noTestsFound;
+        Object.assign(g, freshGroup(), { noTestsFound });
+      } else {
+        groups.set(current, freshGroup());
       }
       continue;
     }
     if (!current) continue;
     const g = groups.get(current);
     if (noTestsRe.test(line)) g.noTestsFound = true;
-    if (deployScriptRe.test(line)) g.deployScript = true;
+    const isDeployLine = deployScriptRe.test(line);
+    if (isDeployLine) g.deployScript = true;
+    if (caseHeaderRe.test(line)) {
+      closeBlock(g);
+      inBlock = true;
+      continue; // the header line names the case; it carries no evidence itself
+    }
+    if (inBlock && isDeployLine) blockHasDeploy = true;
     const failedCase = line.match(failedCaseRe);
     // De-dup is inherent: run-tests.js reprints the ✕ line once per retry and
     // `cases` is a Set, so a 3-retry failure is ONE case, not three.
@@ -398,6 +477,7 @@ function scanOutputGroups(text) {
     const timeout = line.match(timeoutRe);
     if (timeout && g.timeoutMs === undefined) g.timeoutMs = Number(timeout[1]);
   }
+  closeBlock(current ? groups.get(current) : null);
   return groups;
 }
 

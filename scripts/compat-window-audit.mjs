@@ -400,11 +400,23 @@ function count(shard, key) {
 /**
  * Whether a shard's redness is ENTIRELY attributable to `kind: 'deploy'`
  * failures (#1520, raised from #1515) — a `createNext` deploy-script/harness
- * failure (`Custom deploy script failed: …` / `…returned invalid URL: …`),
- * thrown before a single request was made, never a code result. Run
- * 36312054519 is the motivating case: 419 files failed this way and the
+ * failure (`Custom deploy script failed: …` / `…returned invalid URL: …`).
+ * Run 36312054519 is the motivating case: 419 files failed this way and the
  * ledger read as "the binary serves wrong responses" until the shard logs
  * were checked by hand.
+ *
+ * USED FOR LABELLING ONLY (round 2, #1550, lead-directed) — NOT for grading.
+ * A round-1 review found that a `createNext` failure is NOT reliably
+ * evidence-free: `scripts/e2e-deploy.sh` runs `next build` through the knext
+ * adapter under test and boots the knext server, so "Custom deploy script
+ * failed" is also what an adapter build crash or a server crash-on-boot
+ * reports. Grading such a night VOID (bridged over the streak, per the
+ * original #1520 design) let a real product regression go uncounted. The
+ * credential's integrity wins: this function only decides whether a red
+ * shard's disqualifier text is prefixed `deploy-classified:` for readability
+ * — the shard still counts as a real red either way (see `gradeNight`).
+ * Whether a proven-safe subset of deploy failures should someday be exempted
+ * from counting is tracked as #1553, undecided here.
  *
  * Fails CLOSED, deliberately stricter than it needs to be for the happy path:
  *   - no `shard.failures` attribution at all → NOT deploy-only (an
@@ -414,9 +426,8 @@ function count(shard, key) {
  *     cannot vouch for all of them);
  *   - `notRun > 0` → NEVER deploy-only. `notRun` is the PRE-EXISTING
  *     jest-infra-abort category (A3-3, #147) — a different harness failure
- *     mode #1520 is not scoped to, and conflating the two would let an
- *     ordinary "jest could not locate the file" abort quietly stop resetting
- *     the streak too.
+ *     mode #1520 is not scoped to, and conflating the two would mislabel an
+ *     ordinary "jest could not locate the file" abort.
  *
  * @param {any} shard
  * @param {number} failedCount
@@ -506,15 +517,10 @@ export function gradeNight(ledger, opts = {}) {
       notRun: 0,
       disqualifiers: [ledger.unresolved],
       eligible: false,
-      void: false,
       unresolved: ledger.unresolved,
     };
   }
   const disqualifiers = [];
-  // #1520 — shard reds whose EVERY named failure is `kind: 'deploy'`, tracked
-  // SEPARATELY from real disqualifiers. See `isDeployOnlyRedShard` and the
-  // `void` computation below.
-  const deployOnlyReasons = [];
   const shards = Array.isArray(ledger?.shards) ? ledger.shards : [];
 
   let passed = 0;
@@ -531,14 +537,16 @@ export function gradeNight(ledger, opts = {}) {
     if (p.unknown || f.unknown || n.unknown || shard?.status === 'missing') {
       disqualifiers.push(`shard ${id} has no recorded result`);
     } else if (f.value > 0 || n.value > 0) {
-      if (isDeployOnlyRedShard(shard, f.value, n.value)) {
-        deployOnlyReasons.push(
-          `deploy-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — every ` +
-            'named failure is kind:deploy (a harness/deploy-script failure, not a code result; #1520)',
-        );
-      } else {
-        disqualifiers.push(`shard ${id} red (failed=${f.value} notRun=${n.value})`);
-      }
+      // Round 2 (#1550): a deploy-classified red is labelled for readability
+      // but disqualifies the night exactly like any other red — see
+      // `isDeployOnlyRedShard`'s doc comment for why the original VOID grade
+      // was removed.
+      disqualifiers.push(
+        isDeployOnlyRedShard(shard, f.value, n.value)
+          ? `deploy-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — every ` +
+              'named failure is kind:deploy (a harness/deploy-script failure; #1520/#1553)'
+          : `shard ${id} red (failed=${f.value} notRun=${n.value})`,
+      );
     }
   }
 
@@ -641,18 +649,8 @@ export function gradeNight(ledger, opts = {}) {
     passed,
     failed,
     notRun,
-    // #1520 — the deploy-only reasons are reported alongside the real ones (a
-    // reader should always be able to see WHY a night didn't count), but they
-    // are what makes the night VOID rather than a normal disqualification —
-    // see the `void` field.
-    disqualifiers: [...new Set([...disqualifiers, ...deployOnlyReasons])],
-    eligible: disqualifiers.length === 0 && deployOnlyReasons.length === 0,
-    // VOID: the ONLY reason this night doesn't count is one or more deploy-only
-    // shard reds — no other disqualifier fired. A night with even one REAL
-    // disqualifier (a non-deploy red, a rerun, a short ledger, …) is graded as
-    // an ordinary disqualification instead: void is narrower than "not
-    // eligible", not a replacement for it.
-    void: disqualifiers.length === 0 && deployOnlyReasons.length > 0,
+    disqualifiers: [...new Set(disqualifiers)],
+    eligible: disqualifiers.length === 0,
     unresolved: null,
   };
 }
@@ -731,20 +729,6 @@ export function auditWindow(ledgers, opts = {}) {
   // "fingerprint-changed", blaming the wrong rule for the reset.
   let pendingCause = null;
   for (const night of nights) {
-    // #1520 — a VOID night (every red shard is `kind: 'deploy'`-classified, no
-    // other disqualifier) is bridged over: it neither extends the current
-    // streak nor resets it. This is the OPPOSITE bridging direction from an
-    // UNRESOLVED night (rule 5), and deliberately so — rule 5 disqualifies an
-    // unresolved night because the EVIDENCE ITSELF is missing, and assuming
-    // innocence there is exactly the inference the ledger forbids. Here the
-    // evidence is POSITIVE: every failure names a deploy-script/harness cause,
-    // not a code result, so counting it as a real red (and restarting the
-    // streak over a harness bug unrelated to the code) would be dishonest in
-    // the other direction. `assertion`/`unclassified`/`timeout` reds, and any
-    // other disqualifier, still reset the streak exactly as before.
-    if (night.void) {
-      continue;
-    }
     if (!night.eligible) {
       // A disqualified night restarts the count. It does not pause it — and an
       // UNRESOLVED night (rule 5) is disqualified, not absent, which is what
@@ -826,18 +810,9 @@ export function auditWindow(ledgers, opts = {}) {
   const empty = { fingerprint: null, nights: 0, runIds: [], startRunId: null, endRunId: null };
   const longest = streaks.reduce((best, s) => (s.nights > best.nights ? s : best), empty);
   // "Current" is the streak that is still open — i.e. one that runs to the last
-  // night that could have extended or reset it. A streak broken by a later red
-  // is history, not the count.
-  //
-  // #1520 — that "last night" is the last NON-VOID one, not simply `nights.at(-1)`.
-  // A void night is bridged over (see the loop above): it never becomes a
-  // streak's `endRunId`. Comparing against the raw last night would therefore
-  // read a trailing void night as "the streak broke" even though nothing
-  // disqualified it — exactly the false reset #1520 exists to prevent, just
-  // relocated from the loop into this arithmetic.
-  const lastStreakable = [...nights].reverse().find((n) => !n.void);
+  // graded night. A streak broken by a later red is history, not the count.
   const last = streaks.at(-1);
-  const current = last && lastStreakable && last.endRunId === lastStreakable.runId ? last : empty;
+  const current = last && last.endRunId === nights.at(-1)?.runId ? last : empty;
 
   // The two fields below deliberately read DIFFERENT streaks, and which one
   // each reads is the answer to a different question:
@@ -874,15 +849,6 @@ export function auditWindow(ledgers, opts = {}) {
       .map((n) => ({
         runId: n.runId,
         reason: n.unresolved,
-      })),
-    // #1520: surfaced separately for the same reason — a caller must be able
-    // to see that a night was bridged over (neither counted nor a reset) and
-    // WHY, rather than inferring it from an absence in the streak table.
-    voidNights: nights
-      .filter((n) => n.void)
-      .map((n) => ({
-        runId: n.runId,
-        reasons: n.disqualifiers,
       })),
     // Only a CREDENTIAL window can meet the gate. An early-warning streak on
     // `main` is a forecast, however long it runs.
@@ -932,11 +898,7 @@ export function formatReport(audit) {
   for (const n of audit.nights) {
     const fp = (n.fingerprint ?? '(none)').replace(/^sha256:/, '').slice(0, 8);
     const shards = `${n.shardsSeen}/${n.shardsExpected ?? '?'}`;
-    const verdict = n.eligible
-      ? 'counts'
-      : n.void
-        ? `VOID — ${n.disqualifiers.join('; ')} (infra/deploy failure — does not count, does not reset the streak)`
-        : `NO — ${n.disqualifiers.join('; ')}`;
+    const verdict = n.eligible ? 'counts' : `NO — ${n.disqualifiers.join('; ')}`;
     lines.push(
       `${n.runId.padEnd(12)} ${fp.padEnd(12)} ${shards.padEnd(7)} ${String(n.passed).padStart(4)}/${n.failed}/${n.notRun}${' '.repeat(12)}${verdict}`,
     );
@@ -1000,23 +962,6 @@ export function formatReport(audit) {
     }
   }
 
-  if (audit.voidNights.length > 0) {
-    lines.push('');
-    lines.push(
-      `VOID: ${audit.voidNights.length} scheduled run(s) failed ONLY on deploy/harness-classified`,
-    );
-    lines.push(
-      '      shard reds (#1520) — bridged over, never skipped: they neither extend the streak',
-    );
-    lines.push(
-      '      nor reset it. Contrast with UNRESOLVED above, which fails closed the OTHER way',
-    );
-    lines.push('      because there the evidence itself is missing; here every failure names a');
-    lines.push('      deploy-script/harness cause, not a code result.');
-    for (const v of audit.voidNights) {
-      lines.push(`            ${v.runId}  ${v.reasons.join('; ')}`);
-    }
-  }
   lines.push('');
   lines.push(`longest qualifying streak: ${audit.longest.nights} / ${audit.requiredNights}`);
   lines.push(`current  qualifying streak: ${audit.current.nights} / ${audit.requiredNights}`);

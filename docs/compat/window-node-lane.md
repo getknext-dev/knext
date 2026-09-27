@@ -34,12 +34,16 @@ them.** Since ADR-0056 (2026-09-23) this is one cell of the per-cell v1.0 matrix
     it.
   - a night that claims credential on any other ref is **disqualified**, and that restarts the
     count.
-  - a night whose ONLY shard reds are `kind: 'deploy'`-classified (a `createNext`
-    deploy-script/harness failure — `scripts/e2e-summary.mjs`, #1520) is **VOID**: it is bridged
-    over, neither extending the streak nor restarting it. A harness/deploy failure carries no
-    evidence about the code, so it may not count as a green night, and restarting the window over
-    it would be exactly as dishonest as counting it green. An `assertion`/`timeout`/`unclassified`
-    shard red, or any other disqualifier, still restarts the count as before.
+  - a night with a `kind: 'deploy'`-classified shard red (a `createNext` deploy-script/harness
+    failure — `scripts/e2e-summary.mjs`, #1520) is labelled `deploy-classified` in the disqualifier
+    text for readability, but it **restarts the count exactly like any other red**. A round-1 review
+    of #1520 found that classifying it as evidence-free and bridging it over the streak (a VOID
+    grade) let a real code regression — an adapter build crash or a boot-crash in the standalone/
+    compiled server, both of which `scripts/e2e-deploy.sh` reports with the same "Custom deploy
+    script failed" sentence — go uncounted. The credential's integrity wins: a deploy-classified red
+    is graded the same as an `assertion`/`timeout`/`unclassified` one. Whether some proven-safe
+    subset of deploy failures should someday be exempted is a genuine, undecided design question —
+    #1553 tracks it for the sprint-close gate, not settled here.
   - `--scope early-warning` reports the `main` streak and never prints "GATE MET".
   - `--matrix` prints every supported cell.
 - **Restarts.** A window restarts when **this cell's** fingerprint changes, not when the ref does.

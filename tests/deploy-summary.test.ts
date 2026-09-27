@@ -513,6 +513,161 @@ describe('scripts/e2e-summary.mjs — deploy-script failures classify as kind "d
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #1550 round 2 (lead-directed) — a round-1 review of #1520 found the classifier
+// matched the "Custom deploy script …" phrase ANYWHERE on any line, across every
+// retry, file-wide — so a genuine regression could read as harness noise. Fixed
+// two ways:
+//   1. the deploy marker is ANCHORED to the start of its own line (an assertion
+//      whose message merely CONTAINS the phrase, or a stray log echo, no longer
+//      matches);
+//   2. classification is scoped to the FINAL retry attempt only, and ranked PER
+//      CASE-BLOCK, with 'deploy' BELOW 'timeout' and 'assertion' — a case
+//      genuinely explained by something else is never demoted to harness noise.
+// Every fixture below is a genuine, real red that must NOT read as 'deploy'.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const F1550 = 'test/e2e/app-dir/x/x.test.ts';
+/** Wrap ONE retry's body in the real run-tests.js group markers. */
+function wrapOneRetry(body: string) {
+  return `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+${body}
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`;
+}
+
+describe('scripts/e2e-summary.mjs — deploy is ranked below assertion/timeout, per case (#1550 round 2)', () => {
+  it('an assertion whose OWN message merely contains the deploy phrase is NOT deploy (the anchor fix)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ error page › renders deploy error (5 ms)
+
+  ● error page › renders deploy error
+
+    expect(received).toContain(expected)
+    Expected substring: "Custom deploy script failed"
+    Received string:    "<html>ok</html>"
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('a mixed file (one createNext deploy failure, one genuine assertion failure) is NOT deploy', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ block A › one (2 ms)
+  ✕ block B › real (40 ms)
+
+  ● block A › one
+
+    Custom deploy script failed: Error: Command failed with exit code 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● block B › real
+
+    expect(received).toBe(expected)
+    Expected: 200
+    Received: 500
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('retry 0 hitting a deploy failure then retry 1 failing a genuine assertion (same file) is NOT deploy — final retry only', () => {
+    const s = summarize(
+      `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+  ● Test suite failed to run
+    Custom deploy script failed: Error: exit 1
+end of ${F1550} output
+Starting ${F1550} retry 1/2
+##[group]❌ ${F1550} output
+  ✕ real › case (30 ms)
+  ● real › case
+    expect(received).toBe(expected)
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`,
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('a real 60s timeout plus a deploy line in another case is "timeout", never "deploy" (precedence)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › slow (60001 ms)
+  ● a › slow
+    thrown: "Exceeded timeout of 60000 ms for a test.
+  ● b › other
+    Custom deploy script returned invalid URL: undefined
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('timeout');
+    expect(failure?.kind).not.toBe('deploy');
+  });
+
+  it('retry 0 failing a genuine assertion then retry 1 hitting a deploy failure (same file) IS deploy — stale retry-0 evidence must not linger', () => {
+    // The inverse of the "final retry only" test above: this is what proves the
+    // per-retry RESET is load-bearing, not just harmless. If retry 0's real
+    // assertion evidence were never cleared, it would wrongly out-vote retry
+    // 1's clean deploy-only outcome (assertion ranks above deploy) even though
+    // the file's ACTUAL final state is a harness failure, not a code bug.
+    const s = summarize(
+      `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+  ✕ real › case (30 ms)
+  ● real › case
+    expect(received).toBe(expected)
+end of ${F1550} output
+Starting ${F1550} retry 1/2
+##[group]❌ ${F1550} output
+  ● Test suite failed to run
+    Custom deploy script failed: Error: exit 1
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`,
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+  });
+
+  it('a server log line that echoes the deploy phrase (not the harness marker itself) is NOT deploy', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › b (3 ms)
+  ● a › b
+    expect(received).toBe(expected)
+[server] Custom deploy script failed? no
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // #171 sys-design follow-up — the TRUNCATION marker. A shard KILLED mid-run
 // (job/step timeout, runner eviction) reports the partial results its tee'd
 // runner.log accumulated — indistinguishable from a complete run: {passed: 20,
