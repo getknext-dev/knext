@@ -187,9 +187,9 @@ const MUTATIONS = [
     label: 'manifest: add a lockstepExceptions entry with an empty reason',
     subject: 'manifest',
     anchor:
-      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570)."\n    }\n  ]',
+      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570).",\n      "date": "2026-09-27"\n    }\n  ]',
     replacement:
-      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570)."\n    },\n    {"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}\n  ]',
+      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570).",\n      "date": "2026-09-27"\n    },\n    {"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}\n  ]',
   },
 
   // ── Round 3, second pass, finding 1: the ledger's THIRD copy of the ref ──
