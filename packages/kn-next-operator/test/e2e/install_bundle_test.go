@@ -179,6 +179,19 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 		Expect(applyOrDeleteBundle("apply", renderedBundle)).
 			To(Succeed(), "failed to kubectl apply the install bundle")
 
+		By("asserting the NextApp CRD is Established (the bundle registers a usable API)")
+		// Distinct from "a sample NextApp apply later succeeds": that would only
+		// prove the API server accepted one object, which is compatible with a
+		// CRD that never finished establishing (a later apply could simply be
+		// racing the same condition this checks explicitly). Checked here,
+		// immediately after the bundle apply and before anything assumes it.
+		Eventually(func(g Gomega) {
+			out, err := utils.Kubectl("get", "crd", "nextapps.apps.kn-next.dev",
+				"-o", "jsonpath={.status.conditions[?(@.type=='Established')].status}")
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			g.Expect(out).To(Equal("True"), "NextApp CRD not Established")
+		}).Should(Succeed())
+
 		By("waiting for the operator Deployment to become Available")
 		Eventually(func(g Gomega) {
 			out, err := utils.Kubectl("get", "deployment", bundleOperatorDeploy,

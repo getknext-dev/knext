@@ -14,6 +14,23 @@ operator         →  reconciles desired state
 Knative Service  →  scaled-to-zero, reachable
 ```
 
+## Installing the operator
+
+The operator ships as one digest-pinned `install.yaml` bundle (CRDs + RBAC + manager
+Deployment + webhook), regenerated for every release. Install the control plane with one
+command, after cert-manager:
+
+```sh title="shell"
+kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
+```
+
+See [Install → 4 · Install the operator](/docs/install#4--install-the-operator) for the
+cert-manager prerequisite, local-bundle fallback, and signature verification.
+
+**Upgrade order is load-bearing: upgrade the operator/CRD first, then the CLI.** The CLI can
+emit fields an older operator's CRD does not know about; upgrading the cluster before the CLI
+keeps every apply compatible. See [Upgrading](/docs/upgrading) for the full sequence.
+
 ## The NextApp resource
 
 - **apiVersion:** `apps.kn-next.dev/v1alpha1`
