@@ -138,6 +138,30 @@ describe('cloudbuild.yaml is pinned exactly (parsed as YAML, not matched as text
       /^top-level keys .*"availableSecrets"/m,
     ],
     [
+      'the build step env loses an entry',
+      () => edit(BUILD_ENV, '    env: [BUILD_ID=$BUILD_ID]'),
+      /^step build: env entries missing: \["BUN_BASE_TARGETS=\$_TARGETS"\]/m,
+    ],
+    [
+      'an option removed (logging mode)',
+      () => edit('  logging: CLOUD_LOGGING_ONLY\n', ''),
+      /^options\.logging is missing/m,
+    ],
+    [
+      'an option changed',
+      () => edit('  diskSizeGb: 300\n', '  diskSizeGb: 30\n'),
+      /^options\.diskSizeGb differs/m,
+    ],
+    [
+      'the default compute service account',
+      () =>
+        edit(
+          'serviceAccount: projects/gsw-mcp/serviceAccounts/bun-base-build@gsw-mcp.iam.gserviceaccount.com',
+          'serviceAccount: projects/gsw-mcp/serviceAccounts/1-compute@developer.gserviceaccount.com',
+        ),
+      /^serviceAccount differs/m,
+    ],
+    [
       'an extra substitution',
       () => edit('  _TARGETS: x64 aarch64\n', '  _TARGETS: x64 aarch64\n  _EXTRA: x\n'),
       /^substitutions\._EXTRA is not reviewed/m,
