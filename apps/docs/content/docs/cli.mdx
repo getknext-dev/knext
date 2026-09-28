@@ -112,13 +112,23 @@ a source checkout), `create` checks the registry and prints a warning telling yo
 ## `knext init-ci`
 
 Sets up push-to-deploy against **your** cluster. It writes two files and touches no cluster: a
-deploy workflow (`.github/workflows/`) and a manifest with a ServiceAccount, Role, and RoleBinding
-that grant permission to write one kind of object in one namespace. knext hosts nothing and never
-holds your credentials. See [Deploy from GitHub Actions](/docs/github-action).
+deploy pipeline (`.github/workflows/` or `.gitlab-ci.yml`, chosen with `--provider`) and a manifest
+with a ServiceAccount, Role, and RoleBinding that grant permission to write one kind of object in
+one namespace. knext hosts nothing and never holds your credentials. See
+[Deploy from GitHub Actions](/docs/github-action) and [Deploy from GitLab CI/CD](/docs/gitlab-ci).
 
 ```bash
 knext init-ci --namespace my-app
+# or, for GitLab:
+knext init-ci --namespace my-app --provider gitlab
 ```
+
+Both providers run the SAME two refusals, in the SAME order, before any cluster-mutating call:
+the exec/auth-provider kubeconfig refusal, then the credential-scope + hazard spot-check. On
+GitHub that is the composite action's two steps; on GitLab it is two dedicated
+pipeline jobs (`kubeconfig-check`, `credential-preflight`) that call `knext doctor --ci-kubeconfig`
+and `knext ci-preflight` — the same classifiers, exposed as CLI verbs so the pipeline never
+re-derives the rules in shell.
 
 It also prints the exact commands to mint a kubeconfig for that ServiceAccount — a `kubectl create
 token`, bound and namespace-scoped, plus the `kubectl config set-*` calls that assemble a
@@ -146,9 +156,10 @@ Bearer tokens and client certificates are accepted — neither runs anything on 
 | Flag | Notes |
 |---|---|
 | `--namespace <name>` | **Required.** The namespace to deploy into; it bounds what the credential can do. |
+| `--provider <name>` | `github` (default) or `gitlab`. Chooses which pipeline file is generated; the RBAC manifest and the mint recipe are identical either way. |
 | `--app-dir <path>` | App directory, relative to the repository root (default `.`). |
 | `--force` | Overwrite files that already exist. |
-| `--push-secret <path>` | Read a kubeconfig from `<path>` and push it as the `KNEXT_KUBECONFIG` repository secret via `gh secret set`. Refuses a kubeconfig that needs cloud-account credentials, same as above. The value is never printed or logged — it is only ever piped to `gh`'s stdin. |
+| `--push-secret <path>` | Read a kubeconfig from `<path>` and push it as `KNEXT_KUBECONFIG` — via `gh secret set` (github) or `glab variable set --masked --protected` (gitlab). Refuses a kubeconfig that needs cloud-account credentials, same as above. The value is never printed or logged — it is only ever piped to the provider CLI's stdin. With `--provider gitlab` and no `glab` on `PATH`, it prints the manual steps to add the variable in GitLab's UI instead of failing. |
 | `-h`, `--help` | Show the usage help. |
 
 Re-running it without `--force` never clobbers a file you've edited: it names the exact file and

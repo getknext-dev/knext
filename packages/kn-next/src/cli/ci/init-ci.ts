@@ -20,40 +20,28 @@
  */
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { REQUIRED_SECRETS } from "./ci-secrets";
 import { CI_ROLE_RULES, renderRoleYaml } from "./credential-scope";
+import { GITLAB_CI_PATH, renderGitlabPipeline } from "./init-ci-gitlab";
 
 /** Where each generated file lands, relative to the repo root. */
 export const WORKFLOW_PATH = ".github/workflows/knext-deploy.yml";
 export const RBAC_PATH = "knext-ci-rbac.yaml";
 
 /**
- * The four repository secrets ADR-0049 asks the client for, with the reason
- * each is needed. A user who cannot see why a permission is wanted cannot
- * consent to it, so the reasons ship in the generated file rather than only in
- * a docs page.
+ * The CI provider `init-ci` generates for (#1534). GitHub stays the default —
+ * every existing call site that does not pass `provider` must keep writing
+ * byte-identical output to before this flag existed.
  */
-export const REQUIRED_SECRETS = [
-    {
-        name: "KNEXT_KUBECONFIG",
-        what: "base64 kubeconfig for the ServiceAccount created by knext-ci-rbac.yaml",
-        why: "so the workflow can write the NextApp resource — nothing else",
-    },
-    {
-        name: "KNEXT_NAMESPACE",
-        what: "the namespace to deploy into",
-        why: "keeps the credential's blast radius to one namespace",
-    },
-    {
-        name: "KNEXT_REGISTRY",
-        what: "registry host + namespace, e.g. ghcr.io/acme (the app name is appended)",
-        why: "where the built image is pushed; you own it, knext never sees it",
-    },
-    {
-        name: "KNEXT_REGISTRY_TOKEN",
-        what: "a push token for that registry",
-        why: "as above — omit on GHCR, where the built-in GITHUB_TOKEN suffices",
-    },
-] as const;
+export type CiProvider = "github" | "gitlab";
+
+/**
+ * The four repository secrets ADR-0049 asks the client for, with the reason
+ * each is needed. Re-exported from `ci-secrets.ts` — the single list every
+ * provider template (including `init-ci-gitlab.ts`) reads — so existing
+ * imports of `REQUIRED_SECRETS` from this module keep working.
+ */
+export { REQUIRED_SECRETS };
 
 /**
  * The RBAC manifest: ServiceAccount, Role, RoleBinding.
@@ -182,13 +170,25 @@ export function skippedFileMessage(relativePath: string): string {
  */
 export function initCi(
     repoRoot: string,
-    opts: { namespace: string; appDir: string; force?: boolean },
+    opts: {
+        namespace: string;
+        appDir: string;
+        force?: boolean;
+        provider?: CiProvider;
+    },
 ): InitCiResult {
     const root = resolve(repoRoot);
-    const files: [string, string][] = [
-        [WORKFLOW_PATH, renderWorkflow(opts.appDir)],
-        [RBAC_PATH, renderRbacManifest(opts.namespace)],
-    ];
+    const provider = opts.provider ?? "github";
+    const files: [string, string][] =
+        provider === "gitlab"
+            ? [
+                  [GITLAB_CI_PATH, renderGitlabPipeline(opts.appDir)],
+                  [RBAC_PATH, renderRbacManifest(opts.namespace)],
+              ]
+            : [
+                  [WORKFLOW_PATH, renderWorkflow(opts.appDir)],
+                  [RBAC_PATH, renderRbacManifest(opts.namespace)],
+              ];
 
     const written: string[] = [];
     const skipped: string[] = [];
@@ -274,11 +274,47 @@ export function mintKubeconfigCommands(namespace: string): string[] {
     ];
 }
 
+/**
+ * The provider-specific "next, push the secret" step (#1534). GitHub's shape
+ * (`gh secret set`) is preserved byte-for-byte from before `--provider`
+ * existed; GitLab's uses `glab variable set` and names the CI/CD variable
+ * flags (Masked + Protected) that matter there.
+ */
+function pushSecretStep(namespace: string, provider: CiProvider): string {
+    if (provider === "gitlab") {
+        return [
+            `  3. Add ${MINTED_KUBECONFIG_PATH}, base64-encoded, as the ` +
+                "KNEXT_KUBECONFIG CI/CD variable (Settings -> CI/CD -> " +
+                "Variables), marked BOTH Masked and Protected — or run:",
+            `       kn-next init-ci --provider gitlab --namespace ${namespace} ` +
+                `--push-secret ${MINTED_KUBECONFIG_PATH}`,
+            "     which reads that file and pushes it with `glab variable " +
+                "set` itself (the token is never printed).",
+        ].join("\n");
+    }
+    return [
+        `  3. Add ${MINTED_KUBECONFIG_PATH}, base64-encoded, as the ` +
+            "KNEXT_KUBECONFIG secret — or run:",
+        `       kn-next init-ci --namespace ${namespace} --push-secret ` +
+            `${MINTED_KUBECONFIG_PATH}`,
+        "     which reads that file and pushes it with `gh secret set`" +
+            " itself (the token is never printed).",
+    ].join("\n");
+}
+
 /** The post-generation instructions, so the next step is never a guess. */
-export function nextSteps(namespace: string): string {
+export function nextSteps(
+    namespace: string,
+    provider: CiProvider = "github",
+): string {
     const mint = mintKubeconfigCommands(namespace)
         .map((c) => `       ${c}`)
         .join("\n");
+    const workflowPath = provider === "gitlab" ? GITLAB_CI_PATH : WORKFLOW_PATH;
+    const secretsStepLabel =
+        provider === "gitlab"
+            ? `  4. Add the other three variables listed at the top of\n     ${workflowPath}, each Masked and Protected.`
+            : `  4. Add the other three secrets listed at the top of\n     ${workflowPath}.`;
     return [
         "Next, in this order:",
         "",
@@ -288,14 +324,8 @@ export function nextSteps(namespace: string): string {
         "",
         mint,
         "",
-        `  3. Add ${MINTED_KUBECONFIG_PATH}, base64-encoded, as the ` +
-            "KNEXT_KUBECONFIG secret — or run:",
-        `       kn-next init-ci --namespace ${namespace} --push-secret ` +
-            `${MINTED_KUBECONFIG_PATH}`,
-        "     which reads that file and pushes it with `gh secret set`" +
-            " itself (the token is never printed).",
-        "  4. Add the other three secrets listed at the top of",
-        `     ${WORKFLOW_PATH}.`,
+        pushSecretStep(namespace, provider),
+        secretsStepLabel,
         "  5. Push. The operator reconciles from the resource CI writes.",
         "",
         `The credential grants ${CI_ROLE_RULES[0].verbs.join("/")} on ` +

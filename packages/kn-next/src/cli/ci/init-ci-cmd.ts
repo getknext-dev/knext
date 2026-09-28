@@ -13,13 +13,22 @@ import { parseArgs } from "node:util";
 import { createLogger } from "../../utils/logger";
 import { handleUsageError, UsageError } from "../shared";
 import {
+    type CiProvider,
     initCi,
     nextSteps,
     RBAC_PATH,
     skippedFileMessage,
     WORKFLOW_PATH,
 } from "./init-ci";
+import { GITLAB_CI_PATH } from "./init-ci-gitlab";
 import { pushKubeconfigSecret } from "./push-kubeconfig-secret";
+import { pushKubeconfigSecretGitlab } from "./push-kubeconfig-secret-gitlab";
+
+const PROVIDERS: readonly CiProvider[] = ["github", "gitlab"];
+
+function isCiProvider(value: string): value is CiProvider {
+    return (PROVIDERS as readonly string[]).includes(value);
+}
 
 const log = createLogger({ module: "init-ci" });
 
@@ -27,7 +36,8 @@ const USAGE = `knext init-ci — set up push-to-deploy against YOUR cluster
 
   Writes two files and touches no cluster:
 
-    ${WORKFLOW_PATH}   the deploy workflow
+    ${WORKFLOW_PATH}   the deploy workflow (--provider github, the default)
+    ${GITLAB_CI_PATH}                  the deploy pipeline (--provider gitlab)
     ${RBAC_PATH}                 a ServiceAccount, Role and RoleBinding
 
   The Role grants permission to write ONE kind of object in ONE namespace.
@@ -35,19 +45,23 @@ const USAGE = `knext init-ci — set up push-to-deploy against YOUR cluster
 
 Options
   --namespace <name>      namespace to deploy into (required)
+  --provider <name>       github (default) or gitlab
   --app-dir <path>        app directory, relative to the repo root (default: .)
   --force                 overwrite files that already exist
   --push-secret <path>    read a kubeconfig from <path> and push it as the
-                           KNEXT_KUBECONFIG repo secret via \`gh secret set\`.
-                           Refuses a kubeconfig that needs cloud-account
-                           credentials (exec/auth-provider). The token is
-                           never printed or logged — only piped to gh's stdin.
+                           KNEXT_KUBECONFIG secret/CI-CD variable — via
+                           \`gh secret set\` (github) or \`glab variable set\`
+                           (gitlab). Refuses a kubeconfig that needs
+                           cloud-account credentials (exec/auth-provider). The
+                           token is never printed or logged — only piped to
+                           the provider CLI's stdin.
   --help                  show this
 `;
 
 export async function initCiMain(argv: string[]): Promise<number> {
     let values: {
         namespace?: string;
+        provider?: string;
         "app-dir"?: string;
         force?: boolean;
         "push-secret"?: string;
@@ -58,6 +72,7 @@ export async function initCiMain(argv: string[]): Promise<number> {
             args: argv,
             options: {
                 namespace: { type: "string" },
+                provider: { type: "string", default: "github" },
                 "app-dir": { type: "string", default: "." },
                 force: { type: "boolean", default: false },
                 "push-secret": { type: "string" },
@@ -89,10 +104,23 @@ export async function initCiMain(argv: string[]): Promise<number> {
         return 1;
     }
 
+    const providerInput = values.provider ?? "github";
+    if (!isCiProvider(providerInput)) {
+        handleUsageError(
+            new UsageError(
+                `--provider must be one of ${PROVIDERS.join(", ")} (got ${JSON.stringify(providerInput)})`,
+            ),
+        );
+        process.stderr.write(USAGE);
+        return 1;
+    }
+    const provider = providerInput;
+
     const result = initCi(process.cwd(), {
         namespace: values.namespace,
         appDir: values["app-dir"] ?? ".",
         force: values.force,
+        provider,
     });
 
     for (const f of result.written) log.info(`wrote ${f}`);
@@ -102,7 +130,7 @@ export async function initCiMain(argv: string[]): Promise<number> {
         log.warn(skippedFileMessage(f));
     }
 
-    process.stdout.write(`\n${nextSteps(values.namespace)}\n`);
+    process.stdout.write(`\n${nextSteps(values.namespace, provider)}\n`);
 
     if (values["push-secret"]) {
         const path = values["push-secret"];
@@ -121,17 +149,32 @@ export async function initCiMain(argv: string[]): Promise<number> {
         }
 
         // The classifier + push both run on the RAW file content, never on
-        // anything echoed back — pushKubeconfigSecret's own return value is
-        // typed to carry no secret bytes either (GhRunResult has no
-        // stdout/stderr field at all, by construction).
-        const pushed = pushKubeconfigSecret(raw);
-        if (!pushed.ok) {
-            process.stderr.write(`\nerror: ${pushed.error}\n`);
-            return 1;
+        // anything echoed back — the return value of both pushers is typed
+        // to carry no secret bytes either (no stdout/stderr field at all, by
+        // construction).
+        if (provider === "gitlab") {
+            const pushed = pushKubeconfigSecretGitlab(raw);
+            if (!pushed.ok) {
+                process.stderr.write(`\nerror: ${pushed.error}\n`);
+                return 1;
+            }
+            if (pushed.manualSteps) {
+                process.stdout.write(`\n${pushed.manualSteps}\n`);
+            } else {
+                log.info(
+                    `pushed ${path} as the KNEXT_KUBECONFIG CI/CD variable via \`glab variable set\``,
+                );
+            }
+        } else {
+            const pushed = pushKubeconfigSecret(raw);
+            if (!pushed.ok) {
+                process.stderr.write(`\nerror: ${pushed.error}\n`);
+                return 1;
+            }
+            log.info(
+                `pushed ${path} as the KNEXT_KUBECONFIG secret via \`gh secret set\``,
+            );
         }
-        log.info(
-            `pushed ${path} as the KNEXT_KUBECONFIG secret via \`gh secret set\``,
-        );
     }
 
     return 0;

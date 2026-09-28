@@ -1,0 +1,97 @@
+---
+title: GitLab CI/CD
+description: Deploy from GitLab CI/CD with a kubeconfig — no cloud credentials, no provisioning.
+---
+
+Deploy on every push to `main`, from your own GitLab Runner, to your own cluster. Same trust model
+as [the GitHub Action](/docs/github-action): knext hosts nothing, holds no credentials, and the
+generated pipeline writes exactly one object to your cluster — a `NextApp` resource the knext
+operator reconciles from.
+
+## Generate the pipeline
+
+```bash title="shell"
+knext init-ci --namespace my-app --provider gitlab
+```
+
+That writes two files and touches nothing in your cluster:
+
+- `.gitlab-ci.yml` — the pipeline, with every CI/CD variable it needs documented at the top
+- `knext-ci-rbac.yaml` — a ServiceAccount, a Role and a RoleBinding (identical to the GitHub path)
+
+Read the manifest, then apply it yourself:
+
+```bash title="shell"
+kubectl apply -f knext-ci-rbac.yaml
+```
+
+`knext init-ci` also prints the exact `kubectl create token` + `kubectl config set-*` commands that
+mint a kubeconfig for the `knext-deployer` ServiceAccount — **you run these yourself**; knext writes
+nothing to the cluster. Then push it as a variable:
+
+```bash title="shell"
+knext init-ci --namespace my-app --provider gitlab --push-secret knext-deployer.kubeconfig
+```
+
+This reads that file, refuses it if it needs cloud-account credentials (the same check
+described below), and pushes it via `glab variable set --masked --protected` — the value is never
+printed or logged, only piped to `glab`'s stdin. Without `glab` installed, it prints the manual
+steps for GitLab's UI instead of failing.
+
+## CI/CD variables
+
+Set these under **Settings → CI/CD → Variables**. Mark **every one** both **Masked** (never shown in
+a job log) and **Protected** (only available to jobs running on protected branches/tags — the
+generated pipeline only runs on `main`, which you should protect):
+
+| Variable | Notes |
+|---|---|
+| `KNEXT_KUBECONFIG` | Base64 text (type **Variable**, not File) — decoded the same way the GitHub Action decodes its `kubeconfig` input. From the scoped `knext-deployer` ServiceAccount. |
+| `KNEXT_NAMESPACE` | The namespace to deploy into. |
+| `KNEXT_REGISTRY` | Registry host and namespace, e.g. `ghcr.io/acme`. Your app's `name` is appended. |
+| `KNEXT_REGISTRY_TOKEN` | Push token for that registry. |
+
+## The two preflight jobs
+
+The pipeline has three jobs: `kubeconfig-check` and `credential-preflight` (stage `preflight`), then
+`deploy` (stage `deploy`). `deploy` depends on both preflight jobs (`needs:`), and
+`credential-preflight` depends on `kubeconfig-check` — so the exec-plugin refusal always completes
+before the hazard preflight's first `kubectl` call, the same order the GitHub Action's two composite
+steps run in. Neither preflight job sets `allow_failure`, so GitLab's default — a failing job fails
+the pipeline — is exactly "not skippable".
+
+<Callout type="warn">
+**`kubeconfig-check` refuses a kubeconfig that needs a cloud CLI on the runner** — an `exec:` or
+`auth-provider:` entry, the shape `aws eks get-token`, `gke-gcloud-auth-plugin`,
+`oci ce cluster generate-token` or `kubelogin` use. It runs `knext doctor --ci-kubeconfig`, a LOCAL
+file read with no cluster call, and fails with:
+
+> This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
+> ServiceAccount token.
+
+**`credential-preflight` refuses a credential broader than the published Role.** It runs
+`knext ci-preflight --namespace <ns>` — the same rules-review + hazard-spot-check
+`kn-next-action`'s composite action runs, exposed as a CLI verb so this pipeline invokes the
+classifier through the published CLI instead of re-deriving the rules in shell. It asks your
+cluster what the credential can do (`SelfSubjectRulesReview`) and, because some clusters (OKE, GKE
+with IAM) cannot fully answer that, also spot-checks specific hazardous permissions
+(`SelfSubjectAccessReview`) — reading Secrets, acting on Deployments/Pods/Services directly,
+escalating RBAC, and more. See [the GitHub Action's callout](/docs/github-action#what-the-credential-can-actually-do)
+for the exact list; both providers read it from the same source.
+</Callout>
+
+Both jobs need `kubectl` on the runner; the generated pipeline installs it in the job if it is not
+already on the image.
+
+## Renewing the token
+
+The minted token expires after one year (`--duration=8760h`). Before then, re-run the **whole**
+printed recipe from the top and push the secret again — it deletes its own output file first, so the
+renewed token replaces the old one everywhere it was minted, regardless of which provider you pushed
+it to.
+
+## Related
+
+- [GitHub Action](/docs/github-action) — the same trust model, generated for `.github/workflows/`
+- [CLI reference](/docs/cli#knext-init-ci) — every `init-ci` flag, including `--provider`
+- [Upgrading](/docs/upgrading) — why the operator is upgraded before the CLI

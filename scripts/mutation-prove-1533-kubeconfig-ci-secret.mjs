@@ -393,8 +393,8 @@ const MUTATIONS = [
     subject: 'initCiCmdTs',
     spec: PUSH_SECRET_CLI_SPEC,
     anchor:
-      '        log.info(\n            `pushed ${path} as the KNEXT_KUBECONFIG secret via \\`gh secret set\\``,\n        );',
-    replacement: '        log.info(raw);',
+      '            log.info(\n                `pushed ${path} as the KNEXT_KUBECONFIG secret via \\`gh secret set\\``,\n            );',
+    replacement: '            log.info(raw);',
   },
   {
     label: "token printed: the push failure message includes the kubeconfig's raw bytes",

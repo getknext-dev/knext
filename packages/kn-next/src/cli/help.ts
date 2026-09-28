@@ -147,6 +147,17 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
             },
         ],
     },
+    {
+        heading: "CI internals",
+        commands: [
+            {
+                verb: "ci-preflight",
+                display: "ci-preflight",
+                summary:
+                    "the credential preflight generated CI pipelines run before any cluster call (not usually run by hand)",
+            },
+        ],
+    },
 ];
 
 /** Column width of the command column, so summaries line up. */
