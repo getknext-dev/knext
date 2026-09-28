@@ -1,27 +1,30 @@
 #!/usr/bin/env node
 /**
- * ga-tarball-diff.mjs — GA check (#1306): the published v1.0 `@getknext/*`
- * tarballs must differ from the rc.N tarballs the compat credential measured
- * ONLY in version fields.
+ * ga-tarball-diff.mjs — GA/rc-bump check (#1306, wired into `release.yml`'s
+ * publish-blocking gate by #1562): the published `@getknext/*` tarballs must
+ * differ from the rc.N tarballs the compat credential measured ONLY in
+ * version fields.
  *
  * WHY: the v1.0 compatibility credential is a property of the `rc.N` tarballs
  * that were actually installed and exercised by the compat suite. Nothing
  * connects that measurement to what `npm publish` later ships under the GA
  * tag — if the GA tarball for `@getknext/core` (or `lib`/`db`) differs from
  * its rc counterpart in anything beyond the version bump, the credential does
- * not cover the artifact users install. This script is that proof, not yet
- * wired into any release workflow (a release-workflow change is trigger-class
- * per `.claude/rules/workflow.md` — see the PR for the deferral note).
+ * not cover the artifact users install. `scripts/ga-tarball-diff-gate.mjs` is
+ * the `release.yml` wiring that decides WHEN to invoke this script; see that
+ * file and `scripts/lib/ga-tarball-diff.mjs`'s `shouldRunGaTarballDiffGate`
+ * for why a mid-window rc bump is deliberately NOT gated by it even though
+ * this script itself will happily compare one (see `validateVersionBump`).
  *
- * WHAT'S ALLOWED between an rc tree and its GA counterpart
+ * WHAT'S ALLOWED between an rc tree and its GA-or-later-rc counterpart
  * (`scripts/lib/ga-tarball-diff.mjs` has the precise rules): the top-level
  * `version` field in each package's `package.json`; a `@getknext/*` sibling
  * dependency RANGE that equals the rc range with the version substituted
  * (nothing looser); and the exact rc version string substituted for the
- * exact GA version string, boundary-aware, at EVERY site it is embedded in a
- * built file's bytes. Anything else — an extra/missing/reordered manifest
- * key, a type/mode/symlink-target change on ANY tar entry, an entry outside
- * `package/`, a partial substitution, unexplained binary drift — is a
+ * exact target version string, boundary-aware, at EVERY site it is embedded
+ * in a built file's bytes. Anything else — an extra/missing/reordered
+ * manifest key, a type/mode/symlink-target change on ANY tar entry, an entry
+ * outside `package/`, a partial substitution, unexplained binary drift — is a
  * failure, printed with a precise diff.
  *
  * This reads every entry with `node-tar` (`scripts/lib/tar-entries.mjs`) —
@@ -58,7 +61,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compareTarEntries, validateVersionPair } from './lib/ga-tarball-diff.mjs';
+import { compareTarEntries, validateVersionBump } from './lib/ga-tarball-diff.mjs';
 import { readTarEntries } from './lib/tar-entries.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
@@ -240,15 +243,17 @@ function runInner(argv, log) {
 
   const siblingNames = new Set(expected);
 
-  // Lockstep (#1306 review item 6): every package's rc/GA version must itself
-  // be well-formed ("X.Y.Z-rc.N" -> "X.Y.Z"), and every package in the set
-  // must carry the SAME pair — otherwise "compared as one release" is false,
-  // and the sibling-range substitution rule above has no fixed point.
+  // Lockstep (#1306 review item 6; shape widened to GA-or-rc-bump by #1562):
+  // every package's rc/target version pair must itself be well-formed
+  // ("X.Y.Z-rc.N" -> "X.Y.Z", "X.Y.Z-rc.N" -> "X.Y.Z-rc.M" with M > N, or an
+  // identical pair), and every package in the set must carry the SAME pair —
+  // otherwise "compared as one release" is false, and the sibling-range
+  // substitution rule above has no fixed point.
   const versionPairs = new Map();
   for (const name of expected) {
     const rcVersion = rcByName.get(name).version;
     const gaVersion = gaByName.get(name).version;
-    const err = validateVersionPair(rcVersion, gaVersion);
+    const err = validateVersionBump(rcVersion, gaVersion);
     if (err) {
       allViolations.push(`${name}: ${err}`);
       continue;
@@ -286,12 +291,12 @@ function runInner(argv, log) {
     }
 
     if (!result.ok) {
-      log(`[ga-tarball-diff] FAIL: ${name} (rc ${rcVersion} -> GA ${gaVersion})`);
+      log(`[ga-tarball-diff] FAIL: ${name} (rc ${rcVersion} -> target ${gaVersion})`);
       for (const v of result.violations) log(`  - ${v}`);
       allViolations.push(...result.violations.map((v) => `${name}: ${v}`));
     } else {
       log(
-        `[ga-tarball-diff] OK: ${name} (rc ${rcVersion} -> GA ${gaVersion}), ` +
+        `[ga-tarball-diff] OK: ${name} (rc ${rcVersion} -> target ${gaVersion}), ` +
           `${result.embeddedVersionSites.length} embedded-version site(s): ` +
           `${result.embeddedVersionSites.join(', ') || 'none'}`,
       );

@@ -1,0 +1,149 @@
+#!/usr/bin/env node
+/**
+ * Mutation proof for #1562's version-shape logic in
+ * `scripts/lib/ga-tarball-diff.mjs`: `parseRcVersion`, `validateVersionBump`,
+ * and `shouldRunGaTarballDiffGate`.
+ *
+ * WHY THIS NEEDS PROVING SEPARATELY FROM THE #1306 CONTENT-DIFF TESTS
+ * --------------------------------------------------------------------
+ * `tests/ga-tarball-diff.test.ts` already has extensive behavioural coverage
+ * for the CONTENT diff (`compareTarEntries` et al., mutation-reviewed across
+ * #1306's own rounds). What #1562 adds on top is a SHAPE decision two levels
+ * removed from that: which version pairs the release gate even attempts to
+ * compare, and — narrower still — which of those the gate should actually
+ * RUN rather than skip. Both are a handful of `if`s whose removal is
+ * invisible in a diff and would show up in production as either (a) the gate
+ * silently accepting a backwards/mismatched-base rc pair, or (b) the gate
+ * either never running (false negative — a real GA-vs-rc drift ships
+ * unnoticed) or running on every mid-window rc bump (false positive — it
+ * reds on every ordinary feature landing during the credential window,
+ * which is precisely the failure mode `shouldRunGaTarballDiffGate`'s own
+ * header explains it exists to avoid).
+ *
+ * DISCIPLINE (`.claude/rules/workflow.md`): exit codes only; green baseline; a
+ * canary red first; anchors exactly once or abort; clean tree between
+ * mutations.
+ */
+
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createGuardProver } from './lib/guard-prover.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SPEC = 'tests/ga-tarball-diff.test.ts';
+
+const MUTATIONS = [
+  {
+    id: 'M1',
+    expect: 'red',
+    claim:
+      "the IDENTICAL-pair shortcut in validateVersionBump is removed — the credentialed rc's own " +
+      "re-publish (rcTag's commit diffed against itself) would then be judged by the GA/rc-bump " +
+      'rules instead of trivially accepted, which is wrong for a pair with nothing to substitute',
+    subject: 'lib',
+    anchor: 'if (toVersion === fromVersion) return null; // case 1',
+    replacement: 'if (false) return null; // case 1',
+  },
+  {
+    id: 'M2',
+    expect: 'red',
+    claim:
+      'the rc-base-mismatch check is removed — validateVersionBump would accept an rc target ' +
+      "whose base does not match the credentialed rc's own base (e.g. 1.0.0-rc.1 -> 1.0.1-rc.2), " +
+      'which is not the same release line at all',
+    subject: 'lib',
+    anchor: 'if (to.base !== from.base) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'M3',
+    expect: 'red',
+    claim:
+      'the forward-progress check is removed — validateVersionBump would accept a BACKWARDS rc ' +
+      'bump (target rc counter <= source), which cannot be a legitimate "later rc" transition',
+    subject: 'lib',
+    anchor: 'if (to.n <= from.n) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'M4',
+    expect: 'red',
+    claim:
+      "shouldRunGaTarballDiffGate's identical-target shortcut is removed — the credentialed rc's " +
+      "own first publish (target === rcTag's version) would fall through to the GA-cut check and " +
+      'report SKIP, so the gate never proves the one publish it is guaranteed to see',
+    subject: 'lib',
+    anchor: 'if (targetVersion === rcVersion) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'M5',
+    expect: 'red',
+    claim:
+      "shouldRunGaTarballDiffGate's GA-cut detection is removed — a real GA cut (empty prerelease " +
+      'id) would fall through to the default SKIP branch, silently letting the #1306 transition ' +
+      'this whole check exists for go ungated',
+    subject: 'lib',
+    anchor: 'if (GA_VERSION_RE.test(targetVersion)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'M6',
+    expect: 'red',
+    claim:
+      "shouldRunGaTarballDiffGate's default is flipped from SKIP to RUN — every ordinary mid-window " +
+      'rc bump (rc.2, rc.3, ... while rcTag still names rc.1) would then be content-diffed, which ' +
+      'reds the release lane on every routine feature landing during the credential window',
+    subject: 'lib',
+    anchor: 'run: false,',
+    replacement: 'run: true,',
+  },
+];
+
+/**
+ * NEGATIVE CONTROL. The trailing clause of the SKIP reason is prose, asserted
+ * nowhere byte-for-byte (the spec only checks `.toContain('mid-window rc
+ * bump')`). Rewording it must leave the guard GREEN, or the six reds above
+ * are equally explained by a text assertion rather than by behaviour.
+ */
+const NEGATIVE = {
+  id: 'M7',
+  expect: 'green',
+  claim: "the SKIP reason's trailing clause is reworded — the spec asserts behaviour, not prose",
+  subject: 'lib',
+  anchor: "'is not gated by this check',",
+  replacement: "'is not gated by this particular check (reworded by the negative control).',",
+};
+
+const ALL = [...MUTATIONS, NEGATIVE];
+
+const prover = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: SPEC,
+  subjects: {
+    lib: 'scripts/lib/ga-tarball-diff.mjs',
+  },
+});
+
+console.log(`=== mutation proof: ${SPEC} (#1562 version-shape gate) ===`);
+prover.preflight(ALL);
+declareMutations(ALL.length);
+prover.baseline();
+
+// Removing the whole rc-shape parse makes EVERY well-formed rc version read as
+// malformed — proves the runner is pointed at this spec and can see red.
+prover.proveCanSeeRed({
+  subject: 'lib',
+  anchor: 'export function parseRcVersion(version) {\n  const m = RC_VERSION_RE.exec(version);',
+  replacement:
+    'export function parseRcVersion(version) {\n  return null;\n  const m = RC_VERSION_RE.exec(version);',
+});
+
+console.log('\n=== mutations ===');
+for (const m of ALL) {
+  prover.run(m);
+  recordMutation();
+}
+
+prover.finish(ALL.length);

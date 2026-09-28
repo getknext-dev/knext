@@ -46,7 +46,11 @@ const SAFE_ROOT = 'package';
 
 // --- version well-formedness (#1306 review item 6) --------------------------
 
-const RC_VERSION_RE = /^(\d+\.\d+\.\d+)-rc\.\d+$/;
+// Captures both the base (`X.Y.Z`) and the rc counter (`N`) — the counter is
+// unused by `validateVersionPair` (kept byte-for-byte for its existing
+// callers/tests) but is what `parseRcVersion`/`validateVersionBump` (#1562)
+// need to tell an rc BUMP from a stale or backwards re-cut.
+const RC_VERSION_RE = /^(\d+\.\d+\.\d+)-rc\.(\d+)$/;
 const GA_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /**
@@ -70,6 +74,134 @@ export function validateVersionPair(rcVersion, gaVersion) {
     );
   }
   return null;
+}
+
+/**
+ * Parse `X.Y.Z-rc.N` into `{ base: "X.Y.Z", n: N }`, or `null` when the
+ * string is not that shape (#1562).
+ *
+ * @param {string} version
+ * @returns {{ base: string, n: number } | null}
+ */
+export function parseRcVersion(version) {
+  const m = RC_VERSION_RE.exec(version);
+  if (!m) return null;
+  return { base: m[1], n: Number(m[2]) };
+}
+
+/**
+ * The SHAPE check `release.yml`'s publish-blocking gate (#1562) runs before
+ * attempting a content diff: is `toVersion` a version the credentialed rc
+ * `fromVersion` may legitimately be diffed against at all?
+ *
+ * Deliberately a SUPERSET of `validateVersionPair` — every pair that function
+ * accepts, this accepts too (case 2 below reproduces it exactly) — plus two
+ * more shapes `validateVersionPair` was never asked to allow:
+ *
+ *   1. IDENTICAL — `toVersion === fromVersion`. This is not a hypothetical:
+ *      the founder checklist for cutting an rc (#1591) pushes the git tag
+ *      naming it at the SAME commit the version bump publishes from, so the
+ *      credentialed rc's own first publish diffs a commit against itself.
+ *      Trivially valid — there is nothing to substitute.
+ *   2. GA CUT — `toVersion` is `fromVersion`'s rc base with the prerelease
+ *      stripped. The #1306 transition this whole check exists for.
+ *   3. RC RE-CUT — `toVersion` is a LATER rc of the exact same base
+ *      (`fromVersion` is `rc.N`, `toVersion` is `rc.M`, `M > N`). This
+ *      function only judges the SHAPE; whether that later rc's CONTENT
+ *      actually differs only in version fields is a separate question a mid-
+ *      window rc bump is expected to fail (see `shouldRunGaTarballDiffGate`,
+ *      which is deliberately narrower — it does not treat every shape this
+ *      function accepts as something the release gate should attempt).
+ *
+ * `fromVersion` must itself be a well-formed `X.Y.Z-rc.N` — there is no
+ * "identical" escape hatch for a malformed source, because an identical
+ * malformed pair would otherwise validate two strings that are not a version
+ * at all.
+ *
+ * @param {string} fromVersion the credentialed rc's own version
+ * @param {string} toVersion the version being compared against it
+ * @returns {string | null} an error string, or `null` when the shape is valid
+ */
+export function validateVersionBump(fromVersion, toVersion) {
+  const from = parseRcVersion(fromVersion);
+  if (!from) {
+    return `credentialed rc version is not well-formed "X.Y.Z-rc.N": ${JSON.stringify(fromVersion)}`;
+  }
+
+  if (toVersion === fromVersion) return null; // case 1
+
+  if (GA_VERSION_RE.test(toVersion)) {
+    if (toVersion !== from.base) {
+      return (
+        `GA version ${JSON.stringify(toVersion)} does not match the rc version's base ` +
+        `${JSON.stringify(from.base)} (from rc ${JSON.stringify(fromVersion)})`
+      );
+    }
+    return null; // case 2
+  }
+
+  const to = parseRcVersion(toVersion);
+  if (!to) {
+    return (
+      'target version is neither identical to the credentialed rc, nor a well-formed GA ' +
+      `"X.Y.Z", nor a well-formed rc "X.Y.Z-rc.M": ${JSON.stringify(toVersion)}`
+    );
+  }
+  if (to.base !== from.base) {
+    return (
+      `target rc version ${JSON.stringify(toVersion)} does not share the credentialed rc's base ` +
+      `${JSON.stringify(from.base)} (from ${JSON.stringify(fromVersion)})`
+    );
+  }
+  if (to.n <= from.n) {
+    return (
+      `target rc.${to.n} does not bump forward past the credentialed rc.${from.n} ` +
+      `(from ${JSON.stringify(fromVersion)} to ${JSON.stringify(toVersion)})`
+    );
+  }
+  return null; // case 3
+}
+
+/**
+ * Should `release.yml`'s publish-blocking gate (#1562) attempt a full
+ * content diff for THIS publish, given the credentialed rc's bare version and
+ * the version about to ship?
+ *
+ * Deliberately NARROWER than `validateVersionBump`'s shape check: a
+ * mid-window rc bump (`rc.N -> rc.M`, `M > N`, not identical) is a VALID
+ * shape but is EXPECTED to carry real code changes relative to the
+ * credentialed rc — that is the entire point of cutting further rcs during
+ * the credential window (#1591's changesets pre-mode auto-bumps `rc.N` on
+ * every merge with a pending changeset). Running the "differs only in
+ * version fields" content diff against an ordinary mid-window bump would red
+ * on every routine feature landing during the sprint, which is not the
+ * defect #1306 exists to catch. The content diff applies to exactly two
+ * transitions:
+ *
+ *   - a GA cut (`targetVersion` has no prerelease id) — the #1306 transition
+ *     itself.
+ *   - re-publishing/confirming the EXACT version `rcVersion` already names
+ *     (the credentialed rc's own publish) — trivially must be clean, and
+ *     worth proving rather than silently skipping.
+ *
+ * @param {string} rcVersion the credentialed rc's bare version (rcTag, no leading "v")
+ * @param {string} targetVersion the version about to be published
+ * @returns {{ run: boolean, reason: string }}
+ */
+export function shouldRunGaTarballDiffGate(rcVersion, targetVersion) {
+  if (targetVersion === rcVersion) {
+    return { run: true, reason: 'target version is identical to the credentialed rc' };
+  }
+  if (GA_VERSION_RE.test(targetVersion)) {
+    return { run: true, reason: 'target version has no prerelease id (a GA cut)' };
+  }
+  return {
+    run: false,
+    reason:
+      `target ${JSON.stringify(targetVersion)} is a prerelease other than the credentialed rc ` +
+      `${JSON.stringify(rcVersion)} — a mid-window rc bump is expected to carry real changes and ` +
+      'is not gated by this check',
+  };
 }
 
 // --- boundary-aware version substitution (#1306 review item 4) -------------

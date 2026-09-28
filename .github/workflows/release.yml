@@ -360,6 +360,55 @@ jobs:
         id: preflight
         run: node scripts/publish-preflight.mjs
 
+  # GA-vs-rc tarball diff (#1306, wired here by #1562) — PUBLISH-BLOCKING.
+  #
+  # The v1.0 compat credential is a property of the rc.N tarballs the compat
+  # suite actually installed and exercised. Nothing else connects that
+  # measurement to what `changeset publish` ships next — if a GA cut (or a
+  # re-publish of the exact credentialed rc) differs from that rc in anything
+  # beyond version fields, the credential does not cover the artifact users
+  # install. `scripts/ga-tarball-diff-gate.mjs` decides whether THIS publish
+  # is one of those two transitions (an ordinary mid-window rc bump is
+  # deliberately NOT gated here — see that script's header for why) and, when
+  # it is, invokes `scripts/ga-tarball-diff.mjs --rc-ref <rcTag> --ga-ref HEAD`.
+  #
+  # `fetch-depth: 0` + `fetch-tags: true`: the diff script resolves `rcTag` as
+  # a real git ref via `git worktree add --detach <dir> <rcTag>`, which needs
+  # the tag's history present — the default shallow, no-tags checkout the
+  # other jobs use is not enough here.
+  #
+  # A no-op (rcTag still null, or an ordinary rc bump) exits 0 quickly, so
+  # this job is cheap on every push that has nothing to gate; only a GA cut or
+  # the credentialed rc's own re-publish pays for the double `bun install` +
+  # build + pack this actually does.
+  ga-tarball-diff:
+    name: GA-vs-rc tarball diff (credential still covers what ships) — blocks publish
+    runs-on: ubuntu-latest
+    needs: [version-pr, publish-preflight]
+    if: >-
+      github.repository == 'getknext-dev/knext'
+      && needs.version-pr.outputs.has_changesets == 'false'
+      && needs.publish-preflight.outputs.should_publish == 'true'
+    steps:
+      - name: Checkout code (full history + tags — resolves the credentialed rc's git ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Run the GA-vs-rc tarball diff gate
+        run: node scripts/ga-tarball-diff-gate.mjs
+
   release:
     name: Publish to npm (gated on NPM_TOKEN + environment approval)
     runs-on: ubuntu-latest
@@ -374,8 +423,9 @@ jobs:
     # Publish-BLOCKING supply-chain gate: never publish tarballs the audit did
     # not clear (HIGH/CRITICAL fail-closed). `audit` is named directly as well as
     # reached transitively, so deleting an intermediate job cannot silently drop
-    # it.
-    needs: [audit, version-pr, publish-preflight]
+    # it. `ga-tarball-diff` (#1562) is the same shape: it must complete (skip or
+    # pass) before a GA cut / credentialed-rc re-publish is allowed through.
+    needs: [audit, version-pr, publish-preflight, ga-tarball-diff]
     # Belt-and-suspenders: only ever run on the canonical repo (never forks).
     # BOTH halves of the "there is something to publish" question are asserted —
     # no pending changesets AND a version the registry does not have. Either one

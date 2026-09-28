@@ -19,7 +19,10 @@ import {
   countVersionOccurrences,
   diffFileBytes,
   diffPackageJson,
+  parseRcVersion,
+  shouldRunGaTarballDiffGate,
   substituteVersion,
+  validateVersionBump,
   validateVersionPair,
 } from '../scripts/lib/ga-tarball-diff.mjs';
 import { readTarEntries } from '../scripts/lib/tar-entries.mjs';
@@ -160,6 +163,78 @@ describe('validateVersionPair', () => {
 
   it('rejects a GA version that does not match the rc version base', () => {
     expect(validateVersionPair('1.0.0-rc.3', '1.0.1')).toContain('does not match');
+  });
+});
+
+// --- parseRcVersion / validateVersionBump (#1562) ---------------------------
+
+describe('parseRcVersion', () => {
+  it('parses a well-formed rc version into base + counter', () => {
+    expect(parseRcVersion('1.0.0-rc.3')).toEqual({ base: '1.0.0', n: 3 });
+  });
+
+  it('returns null for a non-rc version', () => {
+    expect(parseRcVersion('1.0.0')).toBeNull();
+  });
+
+  it('returns null for a malformed rc suffix', () => {
+    expect(parseRcVersion('1.0.0-beta')).toBeNull();
+  });
+});
+
+describe('validateVersionBump', () => {
+  it('rejects a malformed source (credentialed rc) version', () => {
+    expect(validateVersionBump('1.0.0', '1.0.0')).toContain('not well-formed');
+  });
+
+  it('accepts an identical pair (the credentialed rc republishing itself)', () => {
+    expect(validateVersionBump('1.0.0-rc.1', '1.0.0-rc.1')).toBeNull();
+  });
+
+  it('still accepts a well-formed rc->GA pair (superset of validateVersionPair)', () => {
+    expect(validateVersionBump('1.0.0-rc.3', '1.0.0')).toBeNull();
+  });
+
+  it('rejects a GA target that does not match the rc base', () => {
+    expect(validateVersionBump('1.0.0-rc.3', '1.0.1')).toContain('does not match');
+  });
+
+  it('accepts a later rc of the same base (a valid rc bump)', () => {
+    expect(validateVersionBump('1.0.0-rc.1', '1.0.0-rc.2')).toBeNull();
+  });
+
+  it('rejects a BACKWARDS rc bump (lower rc counter)', () => {
+    expect(validateVersionBump('1.0.0-rc.3', '1.0.0-rc.2')).toContain('does not bump forward');
+  });
+
+  it('rejects an rc target with a different base', () => {
+    expect(validateVersionBump('1.0.0-rc.1', '1.0.1-rc.2')).toContain('does not share');
+  });
+
+  it('rejects a target that is neither identical, GA, nor a well-formed rc', () => {
+    expect(validateVersionBump('1.0.0-rc.1', '1.0.0-beta')).toContain('neither identical');
+  });
+});
+
+// --- shouldRunGaTarballDiffGate (#1562) -------------------------------------
+
+describe('shouldRunGaTarballDiffGate', () => {
+  it('runs for a target identical to the credentialed rc', () => {
+    const d = shouldRunGaTarballDiffGate('1.0.0-rc.1', '1.0.0-rc.1');
+    expect(d.run).toBe(true);
+    expect(d.reason).toContain('identical');
+  });
+
+  it('runs for a GA cut', () => {
+    const d = shouldRunGaTarballDiffGate('1.0.0-rc.3', '1.0.0');
+    expect(d.run).toBe(true);
+    expect(d.reason).toContain('GA cut');
+  });
+
+  it('skips an ordinary mid-window rc bump', () => {
+    const d = shouldRunGaTarballDiffGate('1.0.0-rc.1', '1.0.0-rc.2');
+    expect(d.run).toBe(false);
+    expect(d.reason).toContain('mid-window rc bump');
   });
 });
 
