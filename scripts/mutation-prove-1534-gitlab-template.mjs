@@ -201,7 +201,7 @@ const MUTATIONS = [
   // ── Guard 11 (#1588 round 4 review, blocker): the bun sha256 VALUE is unpinned ──
   {
     label:
-      'the embedded BUN_SHA256_LINUX_X64_MUSL is replaced with a wrong-but-well-formed sha256 — the shape check alone cannot tell a wrong hash from the real one, so a Bun version bump without its matching hash would ship a template whose sha256sum -c fails on every user\'s deploy',
+      "the embedded BUN_SHA256_LINUX_X64_MUSL is replaced with a wrong-but-well-formed sha256 — the shape check alone cannot tell a wrong hash from the real one, so a Bun version bump without its matching hash would ship a template whose sha256sum -c fails on every user's deploy",
     subject: 'initCiGitlabTs',
     spec: GITLAB_TEMPLATE_SPEC,
     anchor:
