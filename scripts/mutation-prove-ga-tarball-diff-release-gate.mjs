@@ -10,7 +10,11 @@
  * on top: the SKIP/FAIL/RUN exit codes, the notice + step-summary announcements, and that
  * the diff is invoked against the exact args `release.yml` needs
  * (`--ga-ref HEAD`, never a branch name or anything else that could drift
- * out from under the commit actually being published).
+ * out from under the commit actually being published) — plus, since the fix
+ * for the run-36418444586 defect (the `ga-tarball-diff` job had no install
+ * step, so even a SKIP decision crashed on the `tar`-importing diff module),
+ * that a static top-level import of the tar-dependent diff module never
+ * comes back (M9).
  *
  * DISCIPLINE (`.claude/rules/workflow.md`): exit codes only; green baseline; a
  * canary red first; anchors exactly once or abort; clean tree between
@@ -64,8 +68,10 @@ const MUTATIONS = [
       'BEFORE changeset publish creates the tag, so the artifact under diff must be the exact ' +
       'commit about to publish (HEAD), never a moving branch tip',
     subject: 'gate',
-    anchor: "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'HEAD'], { log });",
-    replacement: "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'main'], { log });",
+    anchor:
+      "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'HEAD'], { log, repoRoot });",
+    replacement:
+      "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'main'], { log, repoRoot });",
   },
   {
     id: 'M5',
@@ -91,6 +97,56 @@ const MUTATIONS = [
     anchor: '  return code;\n}',
     replacement: '  return 0;\n}',
   },
+  {
+    id: 'M9',
+    expect: 'red',
+    claim:
+      'a static top-level import of the tar-dependent diff module comes back (the run-36418444586 ' +
+      'defect: `ga-tarball-diff.mjs` -> `lib/tar-entries.mjs` -> the `tar` npm package) — a SKIP/FAIL ' +
+      'decision would then crash before it could even be reached in a checkout with no `node_modules`',
+    subject: 'gate',
+    anchor:
+      "import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';",
+    replacement:
+      "import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';\n" +
+      "import { run as _reintroducedStaticImport } from './ga-tarball-diff.mjs';\n" +
+      'void _reintroducedStaticImport;',
+  },
+  {
+    id: 'M10',
+    expect: 'red',
+    claim:
+      "release.yml's `ga-tarball-diff` job loses its install step (the live run-36418444586 defect, " +
+      'verbatim) — the gate script has nothing to `bun install`, so a credentialed RUN decision ' +
+      'cannot shell out to the diff at all',
+    subject: 'workflow',
+    anchor:
+      '      - name: Install dependencies\n' +
+      '        run: bun install --frozen-lockfile\n' +
+      '\n' +
+      '      - name: Run the GA-vs-rc tarball diff gate\n',
+    replacement: '      - name: Run the GA-vs-rc tarball diff gate\n',
+  },
+  {
+    id: 'M11',
+    expect: 'red',
+    claim:
+      'the install step is REORDERED to after the gate step — installing too late is the same as ' +
+      'not installing for the step that actually needs it',
+    subject: 'workflow',
+    anchor:
+      '      - name: Install dependencies\n' +
+      '        run: bun install --frozen-lockfile\n' +
+      '\n' +
+      '      - name: Run the GA-vs-rc tarball diff gate\n' +
+      '        run: node scripts/ga-tarball-diff-gate.mjs\n',
+    replacement:
+      '      - name: Run the GA-vs-rc tarball diff gate\n' +
+      '        run: node scripts/ga-tarball-diff-gate.mjs\n' +
+      '\n' +
+      '      - name: Install dependencies\n' +
+      '        run: bun install --frozen-lockfile\n',
+  },
 ];
 
 /**
@@ -115,6 +171,7 @@ const prover = createGuardProver({
   spec: SPEC,
   subjects: {
     gate: 'scripts/ga-tarball-diff-gate.mjs',
+    workflow: '.github/workflows/release.yml',
   },
 });
 
