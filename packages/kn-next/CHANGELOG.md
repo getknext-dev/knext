@@ -59,6 +59,17 @@
   run bare `npx knext` on its own — the unscoped `knext` name on the public npm
   registry belongs to an unrelated package. Always use `npx @getknext/core ...`
   or a locally installed `knext`.
+- 1363eb3: Add `knext init-ci --provider gitlab`, generating a `.gitlab-ci.yml` pipeline with the
+  same credential preflight the GitHub Action already runs — a `preflight` stage
+  (`kubeconfig-check`, `credential-preflight`) that must pass before `deploy` runs. Omitting
+  `--provider` still defaults to `github` and writes byte-identical output to before this flag
+  existed. `--push-secret` gains a GitLab path too: it classifies the kubeconfig first (refusing
+  an exec-plugin credential before `glab` is ever invoked), then sets the masked/protected CI
+  variable via `glab variable set` with the value passed on stdin only — never on the command
+  line, in the environment, or in output. With no `glab` installed, it prints the manual steps for
+  GitLab's UI instead of failing. A new `knext ci-preflight --namespace <ns>` verb runs the same
+  checks the GitHub Action's preflight step runs, so any CI provider can invoke the identical
+  hazard check without re-implementing it in shell.
 - d0a1d2b: Self-contained mode (experimental) now does something on the compiled
   standalone-on-Bun target: with `selfContained: true` / `--self-contained`, the
   executable embeds the app's server build output, Next.js's server modules and
@@ -187,6 +198,32 @@
   same execution context as live requests. Work a warm route schedules with
   `after()` is therefore awaited by the image's compile-cache bake and by the
   SIGTERM drain, instead of being cut off when the process exits.
+- 3650f50: `knext build`/`deploy` now set their own `KNEXT_BUILD_ID` environment variable (the
+  deploy tag) instead of relying on `NEXT_DEPLOYMENT_ID`. On Next.js 16.2.11 and later, Next
+  ignores a configured `generateBuildId` whenever it sees a deployment id and writes its own fixed
+  build id instead, which silently breaks skew protection's build-id contract. The scaffolded
+  `next.config.ts` now reads the new variable first and falls back to the old one:
+
+  ```ts
+  generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
+  ```
+
+  **Migration for apps scaffolded before this release:** update `generateBuildId` in your
+  `next.config` to the line above. On an affected Next version, `knext build`/`deploy` now print a
+  clear error naming this exact fix when they detect an app still on the old `generateBuildId` (or
+  none at all).
+- e18d16e: The GitHub Action (`getknext-dev/knext-action`) now installs Bun before deploying.
+  Previously it never installed Bun at all, so every deploy using the default runtime (which
+  compiles the standalone server with a bare `bun` binary) failed with a "command not found" error
+  on stock GitHub-hosted runners, which ship no Bun by default. No workflow changes are needed on
+  your side — the fix is entirely inside the action.
+- 8340de9: Raised the shipped compile-cache bake driver's cold-boot deadline from 30s to 60s
+  before it gives up and fails the build. A real, if less common, app shape (routes with
+  Proxy/middleware-driven dynamic redirects or rewrites) can take longer than 30s to answer its
+  very first, fully-cold request — which is exactly the request the bake driver waits on. A normal
+  boot pays nothing extra; a genuinely hung server still fails the build, just up to 30s later than
+  before. The driver also now logs how long the boot actually took, so a build that is getting
+  close to the ceiling is visible in your build logs instead of only showing up as a failure.
 - @getknext/db@1.0.0-rc.1
   - @getknext/lib@1.0.0-rc.1
 
