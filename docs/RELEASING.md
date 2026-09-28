@@ -200,6 +200,32 @@ Step 4 is the only human step in the loop, and it is the correct one: it is the 
 something irreversible happens. If a run is sitting in `waiting`, **check its head SHA before
 approving** — approving a stale parked run publishes the tree as it stood when that run started.
 
+### The "Changeset required" PR check
+
+A PR that changes a published package's shipped surface — `packages/kn-next/src/**`,
+`packages/kn-next/templates/**`, `packages/lib/src/**`, `packages/db/src/**`, the
+`packages/kn-next-alias/bin/**` forwarding shim, or any of those packages' `package.json`
+`bin`/`exports`/`files` — must carry a `.changeset/*.md` naming the affected package. The
+`Changeset required` check (`scripts/check-changeset-required.mjs`,
+`.github/workflows/changeset-required.yml`) flags a PR that touches that surface with neither a
+changeset nor an explicit opt-out.
+
+- **Tests-only, `__tests__`, and docs-only changes never trigger it** — only the shipped surface
+  itself.
+- **Opt-out:** label the PR `no-changeset` and say why in the PR description in one line. The
+  label is mechanically checked; the reason is a review convention (the spec reviewer's job), the
+  same way the docs-delta claim in `.claude/rules/workflow.md` step 5 is verified by a human, not
+  parsed.
+- **This is a PR-time nudge, not a release-lane gate** — the release lane above already has its
+  own coherent-group checks (`version-pr`, `publish-preflight`). This closes the earlier, cheaper
+  catch point: three PRs (#1569, #1588, #1575) changed published-package behaviour and merged with
+  no changeset, so none showed up in `packages/kn-next/CHANGELOG.md` or the rc.1 release notes
+  until a later PR hand-backfilled them.
+- **Pre-release caution:** once `.changeset/pre.json` exists (changesets **"pre" mode**, entered
+  ahead of an `rc.N`), adding a new changeset here versions the **next prerelease** (e.g. `rc.2`),
+  not a stable release. That is still the correct outcome — an `rc` that ships a behaviour change
+  with no changelog entry is exactly the gap this check exists to close.
+
 ## Upgrade order
 
 **Upgrade the operator (and therefore the CRD) BEFORE upgrading `@getknext/core`: operator/CRD
