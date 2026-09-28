@@ -231,6 +231,10 @@ jobs:
             -n kn-next-operator-system certificate/kn-next-operator-serving-cert
           kubectl wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
             -n kn-next-operator-system endpoints/kn-next-operator-webhook-service
+          # #1594 round 2: a Ready Certificate + a routable Endpoint still
+          # raced with cainjector's caBundle patch and the apiserver's own
+          # webhook client -- see the script for the run that proved it.
+          "${GITHUB_WORKSPACE}/scripts/kind-manifests/wait-for-webhook-ready.sh"
 
       - name: Namespace
         run: kubectl create namespace "$APP_NS"
