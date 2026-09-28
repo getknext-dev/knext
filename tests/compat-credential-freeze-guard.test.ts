@@ -553,9 +553,12 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
 });
 
 describe('the pin file itself documents rcBumpMarker (#1302)', () => {
-  it('.github/compat-credential-ref.json parses and rcTag is currently null (no live window today)', () => {
+  it('.github/compat-credential-ref.json parses, and once v1.0.0-rc.1 is live the window is frozen (#1529)', () => {
     const pin = JSON.parse(readFileSync(resolve(REPO_ROOT, PIN_FILE), 'utf8'));
-    expect(isFrozen(pin)).toBe(false);
+    // rc.1 (#1529) set rcTag to a real RC tag, so the window is now live on
+    // `main` — this documents the post-cut state, not the pre-cut one.
+    expect(pin.rcTag).toBe('v1.0.0-rc.1');
+    expect(isFrozen(pin)).toBe(true);
   });
 });
 
