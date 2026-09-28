@@ -372,8 +372,8 @@ describe('decideGaTarballDiffGate — transition table', () => {
       });
       expect(d.action).toBe(t.action);
       expect(d.reason).toMatch(t.reason);
-      if (t.action === 'run') expect(d.rcTag).toBe(t.rcTag);
-      else expect(d.rcTag).toBeUndefined();
+      if (d.action === 'run') expect(d.rcTag as string | undefined).toBe(t.rcTag);
+      else expect('rcTag' in d ? d.rcTag : undefined).toBeUndefined();
     });
   }
 
