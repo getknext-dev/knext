@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for the `kind: 'deploy'` classification in
- * `scripts/e2e-summary.mjs` (#1520, raised from #1515; reworked #1550 round 2).
+ * `scripts/e2e-summary.mjs` (#1520, raised from #1515; reworked #1550 round 2;
+ * extended #1555 with the round-2 review's follow-ups).
  *
  * WHAT THIS PROTECTS. Run 36312054519: a `createNext` deploy-script failure
  * (`Custom deploy script failed: …` / `Custom deploy script returned invalid
@@ -14,7 +15,7 @@
  * #1550 ROUND 2 (lead-directed) reworked the guard after a review found the
  * round-1 version matched the phrase ANYWHERE on any line, file-wide, across
  * every retry — so a genuine regression could read as harness noise. Four
- * properties are now load-bearing, each proven below:
+ * properties are load-bearing, proven below (mutations 1-4):
  *   1. ANCHORED — the marker must START its own line (ignoring leading
  *      whitespace), not merely appear as a substring inside an assertion's own
  *      message or a stray log echo.
@@ -27,6 +28,24 @@
  *   4. RANKED BELOW assertion/timeout — a file with both deploy and
  *      non-deploy evidence downgrades to the non-deploy kind, never the
  *      reverse.
+ *
+ * #1555 (the round-2 closing review's own follow-ups) adds three more
+ * (mutations 5-9, two of them each proving BOTH halves of one property):
+ *   5/6. AFTERALL-TEARDOWN EXCUSED (N1) — a `Test suite failed to run` block
+ *      that is the harness's own `next.destroy()` TypeError, a SIDE EFFECT of
+ *      an earlier deploy failure in the SAME group, does not by itself
+ *      downgrade the file away from 'deploy'. Both the DETECTION (mutation 5)
+ *      and the EXCEPTION that reads it (mutation 6) are proven separately —
+ *      a detector nothing reads, or an exception nothing sets, are equally
+ *      decorative.
+ *   7. UNEXPLAINED-CASE GUARD (N2) — a failing case with NO error-detail
+ *      block at all downgrades the file, independent of `hasNonDeployBlock`
+ *      (mutation 4 removes both at once; this isolates this half alone).
+ *   8/9. RETRY EVIDENCE PRESERVED (N3) — an earlier retry's own cases/timeout
+ *      are archived (mutation 8) and actually reported via `attempts`
+ *      (mutation 9), rather than silently discarded by the mutation-2 reset —
+ *      `compat-vinext-ledger.mjs` matches known failures on `cases`, so this
+ *      evidence loss is a real regression, not cosmetic.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one property and requires
@@ -56,7 +75,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/e2e-summary.mjs');
 const SPEC = 'tests/deploy-summary.test.ts';
 
-declareMutations(4);
+declareMutations(9);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -117,7 +136,7 @@ prove(
 //    deploy failure leaks into a later retry that failed for a real reason.
 prove(
   "retry reset removed: an earlier retry's evidence leaks into the final retry",
-  'Object.assign(g, freshGroup(), { noTestsFound });',
+  'Object.assign(g, freshGroup(), { noTestsFound, priorAttempts });',
   'void 0;',
 );
 
@@ -139,6 +158,59 @@ prove(
   'rank removed: deploy no longer downgrades below a genuine assertion/timeout',
   'hasNonDeployBlock || unexplainedCase',
   'false',
+);
+
+// 5. #1555 N1 DETECTION removed: the afterAll-teardown TypeError is never
+//    recognized on its own block, so the exception in mutation 6 never fires
+//    and a real deploy failure followed by the teardown cascade downgrades to
+//    'assertion' again (the exact ~11% measured regression this fix closes).
+prove(
+  "afterAll-teardown detection removed: a deploy failure followed by the harness's own next.destroy() TypeError downgrades to assertion",
+  'if (inBlock && teardownCascadeRe.test(line)) blockIsTeardownCascade = true;',
+  'if (false) blockIsTeardownCascade = true;',
+);
+
+// 6. #1555 N1 EXCEPTION removed: even with the teardown correctly detected
+//    (mutation 5's flag still sets), the exception that excuses it from
+//    `hasNonDeployBlock` is gone — the OTHER half of the same property, since
+//    a detector nothing reads is exactly as decorative as an exception
+//    nothing sets.
+prove(
+  'afterAll-teardown exception removed: the detected teardown block counts as a genuine non-deploy block again',
+  '!(hasDeployBlock && b.teardownCascade)',
+  'true',
+);
+
+// 7. #1555 N2 unexplainedCase removed IN ISOLATION from hasNonDeployBlock
+//    (mutation 4 removes both at once and would not by itself prove this
+//    guard matters on its own): a failing case with no error-detail block at
+//    all no longer downgrades a file whose PRINTED blocks are all
+//    deploy-explained.
+prove(
+  'unexplainedCase guard removed: an unexplained failing case with no block at all no longer downgrades away from deploy',
+  'const unexplainedCase = cases.length > blocks.length;',
+  'const unexplainedCase = false;',
+);
+
+// 8. #1555 N3 ARCHIVAL removed: the about-to-be-discarded retry's own
+//    cases/timeoutMs is never snapshotted before the mutation-2 reset
+//    overwrites it — an earlier retry's evidence is silently lost again
+//    (rather than surviving via `attempts`), the exact regression a
+//    round-2-era review found in `compat-vinext-ledger.mjs`'s known-failure
+//    matching on `cases`.
+prove(
+  "retry-evidence archival removed: an earlier retry's cases/timeoutMs are silently dropped instead of preserved in `attempts`",
+  'const priorAttempts = [...g.priorAttempts, snapshotAttempt(g)];',
+  'const priorAttempts = g.priorAttempts;',
+);
+
+// 9. #1555 N3 REPORTING removed: even with the archival intact (mutation 8),
+//    `attributeFailure()` never surfaces it on the returned `ShardFailure` —
+//    the OTHER half of the same property, an archive nothing reads.
+prove(
+  'retry-evidence reporting removed: archived prior-attempt evidence is never surfaced on the returned failure record',
+  '...(priorAttempts.length > 0 ? { attempts: [...priorAttempts, snapshotAttempt(g)] } : {}),',
+  '...{},',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

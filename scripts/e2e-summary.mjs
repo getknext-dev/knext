@@ -81,9 +81,32 @@ const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
  * One failing test FILE's attribution record.
  * @typedef {object} ShardFailure
  * @property {string} file repo-root-relative test file (run-tests.js's own key)
- * @property {FailureKind} kind
- * @property {number} [timeoutMs] present only when kind === 'timeout'
- * @property {string[]} cases failing case names, de-duplicated across retries
+ * @property {FailureKind} kind decided from the FINAL retry attempt's own
+ *   evidence ONLY (#1550 round 2) — never restore the earlier round-1
+ *   behaviour of accumulating this across retries; see RETRY SCOPING in
+ *   scanOutputGroups().
+ * @property {number} [timeoutMs] present only when kind === 'timeout', from
+ *   the FINAL retry only
+ * @property {string[]} cases the FINAL retry's own failing case names
+ *   (de-duplicated WITHIN that retry — run-tests.js reprints a ✕ line once
+ *   per retry attempt of the SAME group). An EARLIER retry's cases are NOT
+ *   folded in here — see `attempts` (#1555 N3).
+ * @property {AttemptEvidence[]} [attempts] #1555 N3 — every retry attempt's
+ *   OWN cases/timeoutMs evidence, in retry order (the final entry duplicates
+ *   `cases`/`timeoutMs` above). Present ONLY when the file was retried at
+ *   least once, so a single-attempt file's artifact stays byte-stable.
+ *   `kind` above is still decided from the final retry alone (#1550 round 2
+ *   closes a real cross-retry misclassification hazard — do not derive
+ *   `kind` from this array); `attempts` exists purely so an earlier retry's
+ *   evidence is never silently discarded for a consumer that matches on it
+ *   (`compat-vinext-ledger.mjs` matches known failures on `cases`).
+ */
+
+/**
+ * One retry attempt's own case/timeout evidence (#1555 N3).
+ * @typedef {object} AttemptEvidence
+ * @property {string[]} cases that attempt's own failing case names
+ * @property {number} [timeoutMs] present only when that attempt hit a timeout
  */
 
 /**
@@ -326,7 +349,18 @@ function attributeFailure(file, groups) {
   // pre-round-2 code: a case NOT proven to be deploy-only downgrades the
   // whole file, rather than one deploy line upgrading it.
   const hasDeployBlock = blocks.some((b) => b.deploy);
-  const hasNonDeployBlock = blocks.some((b) => !b.deploy);
+  // #1555 N1 — a `Test suite failed to run` block whose OWN content is the
+  // harness's generic "cannot read properties of undefined/null (reading
+  // 'destroy'/…)" TypeError is the `afterAll` teardown crashing BECAUSE the
+  // earlier deploy failure never assigned the instance it tears down — a
+  // SIDE EFFECT of the deploy failure the same group already proves, not
+  // independent evidence of a real regression. (Measured: ~11% of real
+  // deploy failures were downgraded to 'assertion' by this exact shape.)
+  // Excused from `hasNonDeployBlock` ONLY when the group ALSO carries a
+  // genuine deploy block elsewhere — an unrelated teardown crash with NO
+  // accompanying deploy evidence in the same group stays a real, unexplained
+  // failure (fail closed the same direction as `unexplainedCase`).
+  const hasNonDeployBlock = blocks.some((b) => !b.deploy && !(hasDeployBlock && b.teardownCascade));
   const unexplainedCase = cases.length > blocks.length;
   const kind =
     g?.timeoutMs !== undefined
@@ -338,21 +372,44 @@ function attributeFailure(file, groups) {
           : cases.length > 0
             ? 'assertion'
             : 'unclassified';
+  // #1555 N3 — the earlier retries' own cases/timeoutMs evidence, archived by
+  // scanOutputGroups() every time a retry attempt's group re-opens (see
+  // RETRY SCOPING). `kind`/`cases`/`timeoutMs` above are decided from the
+  // FINAL retry alone, unchanged from #1550 round 2 — `attempts` is
+  // additive, never read for classification.
+  const priorAttempts = g?.priorAttempts ?? [];
   return {
     file,
     kind,
     ...(g?.timeoutMs !== undefined ? { timeoutMs: g.timeoutMs } : {}),
     cases,
+    ...(priorAttempts.length > 0 ? { attempts: [...priorAttempts, snapshotAttempt(g)] } : {}),
+  };
+}
+
+/**
+ * Snapshot ONE retry attempt's own case/timeout evidence (#1555 N3), for
+ * archival in `priorAttempts`/`attempts` — never for classification.
+ * @param {ScannedGroup} g
+ * @returns {AttemptEvidence}
+ */
+function snapshotAttempt(g) {
+  return {
+    cases: [...g.cases].sort(),
+    ...(g.timeoutMs !== undefined ? { timeoutMs: g.timeoutMs } : {}),
   };
 }
 
 /**
  * @typedef {object} ScannedGroup
  * @property {boolean} noTestsFound
- * @property {Set<string>} cases
- * @property {number|undefined} timeoutMs
+ * @property {Set<string>} cases the CURRENT (final-so-far) retry's own cases
+ * @property {number|undefined} timeoutMs the CURRENT retry's own timeout
  * @property {boolean} deployScript
- * @property {Array<{deploy: boolean}>} blocks
+ * @property {Array<{deploy: boolean, teardownCascade: boolean}>} blocks
+ * @property {AttemptEvidence[]} priorAttempts #1555 N3 — every EARLIER retry
+ *   attempt's own cases/timeoutMs, archived (never reset) at the moment its
+ *   group re-opens for the next attempt. Does NOT include the current retry.
  */
 
 /**
@@ -370,16 +427,25 @@ function attributeFailure(file, groups) {
  * that once counted the underscore JEST_JUNIT_OUTPUT_NAME echo as a distinct
  * file. Everything below is credited ONLY while a group is open.
  *
- * RETRY SCOPING (#1550 round 2). run-tests.js reopens the SAME group (same
- * file key) once per retry attempt. A round-1 review found that accumulating
- * `cases`/`timeoutMs`/`deployScript`/case-block evidence ACROSS every retry
- * let an EARLIER retry's deploy-script failure leak into a LATER retry that
- * failed for a real, unrelated reason (and vice versa) — the file's
- * classification must reflect only the FINAL retry's own evidence. So this
- * scan RESETS that per-retry evidence every time a file's group re-opens,
- * keeping only `noTestsFound`, which is an infra-abort signature that does
- * not vary meaningfully by retry (jest either can locate the file or it
+ * RETRY SCOPING (#1550 round 2, amended #1555 N3). run-tests.js reopens the
+ * SAME group (same file key) once per retry attempt. A round-1 review found
+ * that accumulating `cases`/`timeoutMs`/`deployScript`/case-block evidence
+ * ACROSS every retry let an EARLIER retry's deploy-script failure leak into a
+ * LATER retry that failed for a real, unrelated reason (and vice versa) — the
+ * file's CLASSIFICATION must reflect only the FINAL retry's own evidence. So
+ * this scan still RESETS `cases`/`timeoutMs`/`deployScript`/`blocks` every
+ * time a file's group re-opens (that half is unchanged and must stay that
+ * way — `kind` is never derived from more than the final retry). `noTestsFound`
+ * is kept across the reset, as before — it is an infra-abort signature that
+ * does not vary meaningfully by retry (jest either can locate the file or it
  * cannot, on every attempt alike).
+ *
+ * #1555 N3 — a round-2-era review found that this reset also silently
+ * DISCARDED an earlier retry's own cases/timeoutMs entirely, which
+ * `compat-vinext-ledger.mjs` matches known failures on. The evidence about to
+ * be overwritten is now snapshotted into `priorAttempts` immediately before
+ * the reset, so it survives (additively, via `attempts` in the returned
+ * `ShardFailure` — never folded back into the classification fields above).
  *
  * @param {string} text
  * @returns {Map<string, ScannedGroup>}
@@ -417,6 +483,15 @@ function scanOutputGroups(text) {
   // the next such header (or the group's close) belongs to it. `●` is a
   // distinct glyph from the group-open `❌`, so the two never collide.
   const caseHeaderRe = /^\s*●\s+\S.*$/;
+  // #1555 N1 — the harness's `afterAll` teardown (`next.destroy()`) crashing
+  // because a `createNext` deploy failure never assigned the instance it
+  // tears down. Jest reports it under the SAME generic "Test suite failed to
+  // run" header a `beforeAll` throw uses, so it cannot be told apart by
+  // header text — only by this specific TypeError shape. ANCHORED to the
+  // start of the line for the same reason as `deployScriptRe`: an assertion's
+  // own diff text merely containing this sentence must not match.
+  const teardownCascadeRe =
+    /^\s*TypeError: Cannot read propert(?:y|ies) of (?:undefined|null) \(reading '(?:destroy|close|stop)'\)/;
 
   /** @returns {ScannedGroup} */
   const freshGroup = () => ({
@@ -425,16 +500,21 @@ function scanOutputGroups(text) {
     timeoutMs: undefined,
     deployScript: false,
     blocks: [],
+    priorAttempts: [],
   });
 
   let current = null;
   let inBlock = false;
   let blockHasDeploy = false;
+  let blockIsTeardownCascade = false;
   /** Close the currently-open case block (if any), recording its verdict. */
   const closeBlock = (g) => {
-    if (inBlock && g) g.blocks.push({ deploy: blockHasDeploy });
+    if (inBlock && g) {
+      g.blocks.push({ deploy: blockHasDeploy, teardownCascade: blockIsTeardownCascade });
+    }
     inBlock = false;
     blockHasDeploy = false;
+    blockIsTeardownCascade = false;
   };
 
   for (const line of lines) {
@@ -450,10 +530,14 @@ function scanOutputGroups(text) {
       current = open[1];
       if (groups.has(current)) {
         // A NEW retry attempt for an already-seen file: reset the per-retry
-        // evidence (see the RETRY SCOPING doc above), keeping noTestsFound.
+        // CLASSIFICATION evidence (see the RETRY SCOPING doc above), keeping
+        // noTestsFound. #1555 N3 — archive the about-to-be-discarded retry's
+        // own cases/timeoutMs into `priorAttempts` FIRST, so that evidence is
+        // preserved (additively, via `attempts`) rather than silently lost.
         const g = groups.get(current);
         const noTestsFound = g.noTestsFound;
-        Object.assign(g, freshGroup(), { noTestsFound });
+        const priorAttempts = [...g.priorAttempts, snapshotAttempt(g)];
+        Object.assign(g, freshGroup(), { noTestsFound, priorAttempts });
       } else {
         groups.set(current, freshGroup());
       }
@@ -470,9 +554,14 @@ function scanOutputGroups(text) {
       continue; // the header line names the case; it carries no evidence itself
     }
     if (inBlock && isDeployLine) blockHasDeploy = true;
+    if (inBlock && teardownCascadeRe.test(line)) blockIsTeardownCascade = true;
     const failedCase = line.match(failedCaseRe);
-    // De-dup is inherent: run-tests.js reprints the ✕ line once per retry and
-    // `cases` is a Set, so a 3-retry failure is ONE case, not three.
+    // De-dup is inherent WITHIN one retry attempt: run-tests.js reprints the
+    // ✕ line once per group-open, and `cases` is a Set, so a single retry
+    // naming the same case twice is ONE case, not two. This does NOT
+    // accumulate ACROSS retries (#1550 round 2) — a new retry attempt resets
+    // `cases` to empty (see RETRY SCOPING above); an earlier retry's own
+    // cases survive separately via `priorAttempts`/`attempts` (#1555 N3).
     if (failedCase) g.cases.add(failedCase[1].trim());
     const timeout = line.match(timeoutRe);
     if (timeout && g.timeoutMs === undefined) g.timeoutMs = Number(timeout[1]);

@@ -1261,3 +1261,163 @@ test/e2e/a/a.test.ts finished on retry 0/2 in 1.0s
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 — three concrete follow-ups from the #1550 round-2 closing review,
+// plus one nit, all "label only, no grading effect" (a deploy-classified red
+// resets the credential like any other red either way):
+//   N1: an `afterAll` `next.destroy()` TypeError — a SIDE EFFECT of the
+//       earlier `createNext` deploy failure, since the instance it tears down
+//       was never assigned — was measured to downgrade ~11% of real deploy
+//       failures to 'assertion'. It must not.
+//   N2: `unexplainedCase` (a failing case with NO error-detail block at all)
+//       was untested in isolation from `hasNonDeployBlock`.
+//   N3: the #1550 round-2 per-retry reset (load-bearing for `kind`) also
+//       silently DISCARDS an earlier retry's own cases/timeoutMs evidence —
+//       `compat-vinext-ledger.mjs` matches known failures on `cases`, so that
+//       evidence must be preserved, not overwritten.
+//   Nit: timeout ranks above deploy WITHIN one case's own block (previously
+//        only proven across two different blocks).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('scripts/e2e-summary.mjs — afterAll teardown cascade stays "deploy" (#1555 N1)', () => {
+  it('a beforeAll deploy-script cascade followed by an afterAll next.destroy() TypeError is still "deploy"', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ foo describe › renders (2 ms)
+
+  ● Test suite failed to run
+
+    Custom deploy script failed: Error: Command failed with exit code 1: ./deploy.sh
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● foo describe › renders
+
+    Custom deploy script failed: Error: Command failed with exit code 1: ./deploy.sh
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+    expect(failure?.cases).toEqual(['foo describe › renders']);
+  });
+
+  it('the SAME teardown TypeError with NO accompanying deploy evidence anywhere is NOT swallowed as deploy (fail closed)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ foo describe › renders (2 ms)
+
+  ● foo describe › renders
+
+    expect(received).toBe(expected)
+    Expected: 200
+    Received: 500
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+});
+
+describe('scripts/e2e-summary.mjs — unexplainedCase guard, in isolation (#1555 N2)', () => {
+  it('a failing case with NO error-detail block at all downgrades away from "deploy" even when every PRINTED block is deploy-explained', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+  ✕ a › two (3 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Two failing cases, only ONE error-detail block ("a › two" has none) —
+    // unexplainedCase must fail closed to 'assertion', never 'deploy', even
+    // though the one block that DOES exist is fully deploy-explained.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one', 'a › two']);
+  });
+});
+
+describe('scripts/e2e-summary.mjs — retry attempts preserve prior cases/timeout evidence (#1555 N3)', () => {
+  it("retry0 timeout, retry1 real assertion (same file): kind reflects the FINAL retry, but retry0's evidence survives via `attempts`", () => {
+    const s = summarize(
+      `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+  ✕ a › slow (60001 ms)
+  ● a › slow
+    thrown: "Exceeded timeout of 60000 ms for a test.
+end of ${F1550} output
+Starting ${F1550} retry 1/2
+##[group]❌ ${F1550} output
+  ✕ real › case (30 ms)
+  ● real › case
+    expect(received).toBe(expected)
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`,
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Final-retry classification is UNCHANGED (#1550 round 2's fix — final
+    // retry only decides `kind`/top-level `cases`/`timeoutMs`):
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['real › case']);
+    expect(failure?.timeoutMs).toBeUndefined();
+    // But the earlier retry's own evidence is not silently dropped — it
+    // survives in `attempts`, in retry order, for a consumer like
+    // compat-vinext-ledger.mjs that matches known failures on `cases`.
+    expect(failure?.attempts).toEqual([
+      { cases: ['a › slow'], timeoutMs: 60000 },
+      { cases: ['real › case'] },
+    ]);
+  });
+
+  it('a single-attempt (never retried) file carries no `attempts` key — the artifact stays byte-stable', () => {
+    const s = summarize(SAMPLE_DEPLOY_SCRIPT_FAILED_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(Object.keys(failure ?? {})).not.toContain('attempts');
+  });
+});
+
+describe('scripts/e2e-summary.mjs — timeout ranks above deploy WITHIN one case block (#1555 nit)', () => {
+  it('a single case block carrying BOTH the timeout throw and a deploy-script line classifies "timeout", not "deploy"', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › slow (60001 ms)
+
+  ● a › slow
+
+    thrown: "Exceeded timeout of 60000 ms for a test.
+    Custom deploy script failed: Error: exit 1
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('timeout');
+  });
+});
