@@ -365,23 +365,30 @@ lost ledger, left open for a night that never happened.
 `auditWindow` derives each lane's expected UTC night calendar from its own credential cron and
 checks it before computing streaks:
 
-- The cron is **read from the workflow**, not hardcoded — `parseCredentialCronsFromWorkflow` parses
-  the `KNEXT_COMPAT_MODE`/`KNEXT_LANE` expression lines the same way this ADR's D1 and #1245 already
-  require them kept in sync, so a moved cron or a newly-wired lane is picked up automatically and a
-  workflow that stops naming a lane's cron fails loudly rather than trusting a stale mapping.
-- For every UTC date from the earliest graded night through a bounded cutoff, a date with **no
-  graded night at all** becomes a synthetic `missing-night` stand-in — graded exactly like a rule-5
+- The cron is **read from the workflow**, not hardcoded — `parseCredentialCronsFromWorkflow` reads
+  the `on.schedule` list and the `KNEXT_COMPAT_MODE`/`KNEXT_LANE` expressions and cross-checks them,
+  so a moved cron or a newly-wired lane is picked up automatically. It tolerates formatting (quote
+  style, operand order, block scalars) but **throws** on meaning it cannot read: a schedule clause
+  in an unknown shape, a credential cron missing from `on.schedule`, a non-daily cron, or a wired
+  cell left with no cron.
+- **Nights are dated by cron slot.** Each run belongs to the latest cron fire time at or before its
+  `createdAt` (`gh run list`'s enqueue time, threaded through as `scheduledAt`) — never the
+  wall-clock UTC date, which scheduler delay can push past midnight. One slot is one night: two
+  runs in the same slot are both disqualified (`duplicate-slot`, the first-attempt-only rule's
+  territory), never counted twice.
+- For every slot from the earliest graded night through a bounded cutoff, a slot with **no graded
+  night at all** becomes a synthetic `missing-night` stand-in — graded exactly like a rule-5
   unresolved night: disqualified, restarting the streak, counted, never silently skipped.
-- **Grace, not zero tolerance.** "Today" only counts as required once its cron time plus a grace
+- **Grace, not zero tolerance.** A slot only counts as required once its own fire time plus a grace
   window (`MISSING_NIGHT_GRACE_HOURS`, 6h — headroom over the run's own "better part of an hour"
   documented duration, plus queueing delay) has passed, so a night still plausibly in flight is
   never mistaken for one that never happened.
-- **Requires a scheduling timestamp.** This check needs to place every graded night on the
-  calendar. `--fetch` supplies one (`gh run list`'s `createdAt`, threaded through as `scheduledAt`);
-  `--dir` ledgers and pre-#1607 fixtures do not. Mixed dated/undated input, or none at all, **skips
-  the check** (`calendarChecked: false`, with a stated reason) rather than applying it partially —
-  the same fail-closed shape as every other rule here, applied to the check's own precondition
-  instead of to a night.
+- **Fail closed when the calendar cannot be verified.** The check needs a scheduling timestamp on
+  every graded night and a resolvable cron. When either is missing, or the parser throws, the
+  window reports `calendarChecked: false`, `verdict: CALENDAR UNVERIFIED` and **`met: false`**
+  however long the streak reads; the report, the `--matrix` view and the tracker say CALENDAR
+  UNVERIFIED, never GATE MET. (`--dir` ledgers carry no timestamp, so they can inform but never
+  bank a credential.)
 - **Scoped to `scope: 'credential'` only.** The four v1.0 cells' own crons are what a "fourteen
   consecutive nights" claim is ever made against (this ADR's own subject); an early-warning `main`
   streak is a forecast with no such claim to protect (`docs/compat/window-node-lane.md`'s own
@@ -393,9 +400,8 @@ checks it before computing streaks:
 - A v1.0 credential claim can no longer be inflated by a night GitHub silently failed to run at
   all, closing the gap D1's own ledger-loss handling left open.
 - `--dir`-based historical review (the pre-`--fetch` workflow this ADR's own window-node-lane.md
-  history was reconstructed with) is now honestly **unverified** on this axis unless the input
-  carries `scheduledAt` — `calendarChecked: false` says so explicitly rather than reading as "checked
-  and clean".
+  history was reconstructed with) is now **unverified** on this axis unless the input carries
+  `scheduledAt` — and an unverified window can never meet the gate.
 - One credential cron per lane is assumed (`parseCredentialCronsFromWorkflow` throws otherwise) —
   correct for every wired v1.0 cell today; a future design that runs a lane's credential night on
   more than one cron would need this amended again.
