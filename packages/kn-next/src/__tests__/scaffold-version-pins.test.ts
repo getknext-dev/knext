@@ -291,6 +291,43 @@ describe("scaffoldGetknextPins — scans the rendered package.json (#950)", () =
     it("returns [] when the map has no package.json", () => {
         expect(scaffoldGetknextPins(new Map())).toEqual([]);
     });
+
+    // #1591 round 3: the pin parser used to be release-only (`^\d+\.\d+\.\d+$`),
+    // so once the CLI's manifest version is `1.0.0-rc.1` the rendered pin
+    // `^1.0.0-rc.1` parsed to `version: null` — silently skipping the
+    // unpublished-pin warning for every rc build (round 2's review finding 1).
+    it.each([
+        ["^1.0.0-rc.1", "1.0.0-rc.1"],
+        ["^1.0.0-rc.2", "1.0.0-rc.2"],
+        ["^1.0.0-rc.10", "1.0.0-rc.10"],
+        ["^1.0.0", "1.0.0"],
+    ])("parses the prerelease-aware pin %s -> %s", (range, expected) => {
+        const files = new Map([
+            [
+                "package.json",
+                JSON.stringify({ dependencies: { "@getknext/core": range } }),
+            ],
+        ]);
+        const [pin] = scaffoldGetknextPins(files);
+        expect(pin.version).toBe(expected);
+    });
+
+    it.each([
+        "^1.0.0-", // empty prerelease identifier
+        "^1.0.0-rc.1.", // trailing dot
+        "^1.0.0-rc.1 || *", // not a bare caret
+        "1.0.0-rc.1", // no caret at all
+        "*",
+    ])("a malformed pin %s fails closed to null, never guesses", (range) => {
+        const files = new Map([
+            [
+                "package.json",
+                JSON.stringify({ dependencies: { "@getknext/core": range } }),
+            ],
+        ]);
+        const [pin] = scaffoldGetknextPins(files);
+        expect(pin.version).toBeNull();
+    });
 });
 
 describe("unpublishedPinsWarning — the honest message (#950)", () => {

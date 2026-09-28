@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   ensureGroupPublished,
   extractConflictVersion,
@@ -9,6 +12,13 @@ import {
   prereleaseDistTag,
   RegistryUnreachableError,
 } from '../scripts/ensure-published-group.mjs';
+
+const SCRIPT_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'scripts',
+  'ensure-published-group.mjs',
+);
 
 /**
  * `scripts/ensure-published-group.mjs` is the SELF-HEAL step wired into
@@ -524,5 +534,39 @@ describe('prereleaseDistTag — derives the npm dist-tag from the version, never
 
   it('is null for an unparseable version rather than guessing', () => {
     expect(prereleaseDistTag('not-a-version')).toBeNull();
+  });
+});
+
+// #1591 round 3 finding 3 — nothing tested that main()'s OWN publish closure
+// forwards the derived distTag through to npmPublish. `prereleaseDistTag`
+// (above) and `npmPublish`'s real --tag forwarding
+// (`tests/ensure-published-group-fake-npm.test.ts`) were both covered in
+// round 2, but the WIRING between them lives only inside `main()`, which is
+// not exported (it reads the real .changeset/config.json + real workspace
+// and shells out to a real `npm view`/`npm publish`, so it cannot be spawned
+// here the way the fake-npm suite spawns individual functions). Mutating
+// `npmPublish(dirByName.get(name), registry, distTag)` to
+// `…, registry, null)` in `main()` left every existing test green — a
+// prerelease re-publish would silently ship without `--tag` and npm >= 11
+// would refuse it, exactly the M1 defect round 2 already fixed once,
+// regressed at the one call site nothing here read.
+describe("main()'s publish closure — the derived distTag actually reaches npmPublish (#1591 round 3)", () => {
+  const source = readFileSync(SCRIPT_PATH, 'utf8');
+
+  it('the publish closure inside main() passes the npmPublish call the distTag variable, not a hardcoded value', () => {
+    // Anchored on the exact call site main() builds for ensureGroupPublished's
+    // `publish` callback — scan, don't enumerate: any edit to this call site
+    // that stops passing the `distTag` binding through (a literal `null`, a
+    // different identifier, a dropped third argument) fails this assertion.
+    const anchor = 'return npmPublish(dirByName.get(name), registry, distTag);';
+    expect(
+      source,
+      "main()'s publish closure must call npmPublish(dir, registry, distTag) verbatim — a " +
+        'prerelease republish that drops distTag ships without --tag and npm >= 11 refuses it',
+    ).toContain(anchor);
+  });
+
+  it('distTag itself is derived from prereleaseDistTag(targetVersion), never hard-coded', () => {
+    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion);');
   });
 });
