@@ -123,8 +123,8 @@ declareMutations(MUTATIONS.length);
 prover.baseline();
 prover.proveCanSeeRed({
   subject: 'guard',
-  anchor: "export const NO_CHANGESET_LABEL = 'no-changeset';",
-  replacement: "export const NO_CHANGESET_LABEL = 'no-changeset-canary';",
+  anchor: '      if (root.watchDir && path.startsWith(root.watchDir)) hit.add(root.name);',
+  replacement: '      if (false) hit.add(root.name);',
 });
 
 console.log('\n=== mutations ===');
