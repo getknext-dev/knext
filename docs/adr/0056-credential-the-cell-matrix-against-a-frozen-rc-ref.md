@@ -64,6 +64,13 @@ Three facts, each already measured or decided, collide in the v1.0 gate.
   `compat-mode-<mode>` marker artifacts before anything that can fail. An unresolved night whose
   mode marker says early-warning cannot restart a credential window. One with an unreadable mode
   is admitted to it (fail closed, same as rule 5 for lanes).
+- **Amendment (2026-09-28, #1605).** "A `main` night is *excluded*" above means an EXPLICIT
+  `compatMode: 'early-warning'` night, never an absence of mode. A **resolved, scheduled,
+  lane-matched night with no recorded `compatMode`** is not a `main` night by inference and is not
+  excluded — it stays in the graded sequence and is *disqualified* (restarting the count) the same
+  way any other non-credential ledger is, rather than being silently dropped before grading. The
+  earlier implementation dropped it instead, which let a mode-less run bridge two streaks into one
+  on `origin/main`.
 
 ### D2 — One window per cell, and a cell resets only on its own fingerprint
 
