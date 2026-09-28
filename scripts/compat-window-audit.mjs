@@ -105,6 +105,14 @@
  *      cannot restart a credential window, while a lost night of UNKNOWN mode
  *      is admitted (fail closed).
  *
+ *      Amendment (#1605): the same "disqualify, never skip" shape applies to a
+ *      RESOLVED night, not just an unresolved one. A resolved, scheduled,
+ *      lane-matched night with no recorded `compatMode` is never dropped from
+ *      the sequence before grading — it is graded and DISQUALIFIED (restarting
+ *      the streak) exactly like any other non-credential ledger. Only an
+ *      EXPLICIT `compatMode: 'early-warning'` night is excluded from the
+ *      credential scope; a missing mode is not itself an early-warning claim.
+ *
  *      `--scope early-warning` reports the `main` streak instead. It is a
  *      report about `main`, never a credential: its `met` is always false.
  *
@@ -830,6 +838,12 @@ export function selectLaneNights(ledgers, lane = CREDENTIAL_LANE, scope = 'crede
  *
  * An unresolved night is placed by its MODE marker; with no readable mode it is
  * admitted to BOTH scopes, because its mode is exactly what we failed to read.
+ *
+ * A RESOLVED, scheduled, lane-matched night with no recorded mode is a
+ * different case and must not be confused with the unresolved one above: it
+ * is never admitted-by-default and never dropped from the sequence — it stays
+ * in `nights` and is GRADED, which disqualifies it (#1605). Only an EXPLICIT
+ * `compatMode: 'early-warning'` night is excluded here.
  */
 function inScope(ledger, scope) {
   if (isUnresolved(ledger)) {

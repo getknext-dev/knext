@@ -31,7 +31,9 @@ them.** Since ADR-0056 (2026-09-23) this is one cell of the per-cell v1.0 matrix
   `workflowSha`. The ledger job fails a credential-mode night whose ref is not an RC tag.
 - **Counting.** `scripts/compat-window-audit.mjs` grades the **credential** window by default:
   - early-warning nights are **excluded**. A `main` night neither extends the RC streak nor breaks
-    it.
+    it. This exclusion applies only to an EXPLICIT `compatMode: 'early-warning'` night — a
+    resolved, scheduled, lane-matched night with **no recorded mode** is never skipped or excluded
+    this way; it is graded and disqualified like any other non-credential night (#1605).
   - a night that claims credential on any other ref is **disqualified**, and that restarts the
     count.
   - a night with a `kind: 'deploy'`-classified shard red (a `createNext` deploy-script/harness

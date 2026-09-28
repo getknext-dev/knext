@@ -96,9 +96,13 @@ describe("every mutation prover's STATICALLY-resolvable anchors still match the 
     // Count history: 5 original guards; #1550 round 1 added 2 VOID-grade
     // mutations (7 total); #1550 round 2 removed the VOID grade entirely (the
     // credential's integrity wins over bridging a deploy-classified red) and
-    // added 1 new count-match-guard mutation in its place — 6 total; #1606
-    // re-anchored guard 1 to the new modeless-bridging exclusion line — 7 total;
-    // #1612 round 2 added 10 rule-8 (missing-night calendar) mutations — 17 total.
+    // added 1 new count-match-guard mutation in its place — 6 total; #1605
+    // added a NEW 7th mutation (mode-less bridging: disqualify a mode-less
+    // night rather than dropping it before grading) — 7 total. (#1606
+    // separately re-anchored an unrelated guard in
+    // mutation-prove-compat-credential-ref.mjs; it did not touch this file's
+    // count.) #1612 round 2 added 10 rule-8 (missing-night calendar)
+    // mutations — 17 total.
     const scanned = scanProverFile(REPO_ROOT, 'scripts/mutation-prove-compat-window-audit.mjs');
     expect(scanned.subjectFiles).toEqual(['scripts/compat-window-audit.mjs']);
     expect(scanned.pairs.length).toBe(17);
