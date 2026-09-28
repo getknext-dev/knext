@@ -1551,3 +1551,261 @@ describe('scripts/e2e-summary.mjs — the afterAll-teardown excuse is scoped to 
     expect(failure?.cases).toEqual(['a › one']);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 round 3 (this review) — the round-2 N1 excuse (scoped to its own
+// header + content) never actually fired on REAL CI output: run 36312054519
+// replayed through summarize() classified 0 of 46 real teardown-cascade files
+// as deploy (main and the PR were byte-identical, 418 deploy / 50 assertion),
+// because a real block also carries a jest CODE FRAME around the throwing
+// line and the JEST SUMMARY TRAILER, both of which tripped the "no other
+// content" condition. Fixture below is the VERBATIM group for
+// test/e2e/404-page-router/index.test.ts from that run (job "Deploy tests —
+// vinext binary (shard 1/16)", 2026-09-27T10:22:23Z), scrubbed of nothing but
+// the per-line CI timestamp/job-name columns.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const F1520_REAL_FILE = 'test/e2e/404-page-router/index.test.ts';
+
+/** Wrap a real-shape body in the actual run-tests.js total/Starting/group-open
+ *  markers for the file the fixture below was captured from. The body itself
+ *  already carries the group's own close + failed-to-pass lines. */
+function wrapRealFile(body: string) {
+  return `
+total: 49
+Starting ${F1520_REAL_FILE} retry 0/0
+❌ ${F1520_REAL_FILE} output:
+${body}
+`;
+}
+
+const REAL_TEARDOWN_CASCADE_BODY = `FAIL Turbopack test/e2e/404-page-router/index.test.ts (44.128 s)
+  ● 404-page-router › 404-page-router with basePath of false and i18n of true and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of true and i18n of false and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of true and i18n of true and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of false and i18n of false and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of false and i18n of false and middleware true › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+
+      45 |     next = await createNext({ files, skipStart: true, patchFileDelay: 500 })
+      46 |   })
+    > 47 |   afterAll(() => next.destroy())
+         |                       ^
+      48 |
+      49 |   describe.each(table)(
+      50 |     '404-page-router with basePath of $basePath and i18n of $i18n and middleware $middleware',
+
+      at Object.destroy (e2e/404-page-router/index.test.ts:47:23)
+
+Test Suites: 1 failed, 1 total
+Tests:       5 failed, 5 total
+Snapshots:   0 total
+Time:        44.163 s
+Ran all test suites matching /test\\/e2e\\/404-page-router\\/index.test.ts/i.
+Force exiting Jest: Have you considered using \`--detectOpenHandles\` to detect async operations that kept running after all tests finished?
+end of test/e2e/404-page-router/index.test.ts output
+test/e2e/404-page-router/index.test.ts failed due to Error: failed with code: 1
+test/e2e/404-page-router/index.test.ts failed to pass within 0 retries`;
+
+describe("scripts/e2e-summary.mjs — the afterAll-teardown excuse also covers jest's own code frame + summary trailer (#1555 round 3, real-log replay of run 36312054519)", () => {
+  it('classifies the VERBATIM real teardown-cascade block (code frame + jest trailer both present) as deploy', () => {
+    const s = summarize(wrapRealFile(REAL_TEARDOWN_CASCADE_BODY), {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      builder: 'vinext',
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+  });
+
+  it('the SAME real block with one genuine expect(...) line inserted into the teardown block is NOT excused (fails closed to assertion)', () => {
+    const withAssertion = REAL_TEARDOWN_CASCADE_BODY.replace(
+      "    TypeError: Cannot read properties of undefined (reading 'destroy')",
+      "    TypeError: Cannot read properties of undefined (reading 'destroy')\n\n    expect(received).toBe(expected)",
+    );
+    expect(withAssertion).not.toBe(REAL_TEARDOWN_CASCADE_BODY);
+    const s = summarize(wrapRealFile(withAssertion), {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      builder: 'vinext',
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('assertion');
+  });
+
+  it("a code frame that merely ECHOES a nearby, not-yet-run expect(...) call is not itself assertion evidence (measured false positive, run 36312054519's edge-can-use-wasm-files fixture)", () => {
+    // Real shape: the teardown code frame's context window happens to
+    // include the NEXT `it()`'s own `expect(extractJSON(response))` call,
+    // several lines after the `> NN |` throw pointer — that source echo is
+    // not itself proof of a genuine assertion failure (no `Expected:`/
+    // `Received:` diff, no bare `expect(received)...` MESSAGE line). Before
+    // this was scoped to non-code-frame lines, this exact shape wrongly
+    // downgraded 1 of the 4 files the round-3 fix's own replay measured as
+    // still 'assertion' (464/4 → verified 465/3 after this refinement).
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+
+      65 |     })
+      66 |   })
+    > 67 |   afterAll(() => next.destroy())
+         |                       ^
+      68 |   it('uses the wasm file', async () => {
+      69 |     const response = await fetchViaHTTP(next.url, '/api/add', { input: 10 })
+      70 |     expect(extractJSON(response)).toEqual({
+
+      at Object.destroy (e2e/edge-can-use-wasm-files/index.test.ts:67:23)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 round 3 finding 2 — `suiteFailedHeaderRe` (condition 1: the block's
+// OWN header must be the exact suite-level header) had no test and no prover
+// row. Relaxing it to '/./' (any header) kept deploy-summary 74/74 green.
+// Unlike A4b (whose `unexplainedCase` count guard downgrades the file on its
+// own either way), B9 isolates the header condition: exactly ONE failing case
+// (so the count guard cannot fire) whose OWN block is the teardown-shaped
+// TypeError, sitting next to a SUITE-LEVEL deploy block (not a second failing
+// case) so `hasDeployBlock` is satisfied without adding a second case.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('scripts/e2e-summary.mjs — suiteFailedHeaderRe condition 1 is load-bearing (#1555 round 3 finding 2, fixture B9)', () => {
+  it('B9: a real per-case TypeError-shaped failure next to a suite-level deploy block stays assertion', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › closes server (2 ms)
+
+  ● Test suite failed to run
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● a › closes server
+
+    TypeError: Cannot read properties of undefined (reading 'close')
+        at Object.<anonymous> (/next.js/test/app.test.ts:40:10)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // The case's OWN header is "a › closes server", not the suite-level
+    // header a beforeAll/afterAll throw uses — the shape match on the
+    // TypeError alone must never excuse it. A mutant that relaxes
+    // suiteFailedHeaderRe to match ANY header (e.g. /./) would wrongly
+    // excuse this block (hasDeployBlock is satisfied by the suite-level
+    // deploy block above) and flip this to 'deploy'.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › closes server']);
+  });
+});

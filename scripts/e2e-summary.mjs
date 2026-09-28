@@ -513,7 +513,33 @@ function scanOutputGroups(text) {
   const suiteFailedHeaderRe = /^\s*●\s+Test suite failed to run\s*$/;
   // A jest stack-trace frame (`    at Object.afterAll (...)`) is expected
   // alongside the TypeError line and is not "other content" on its own.
-  const stackFrameRe = /^\s*at\s+\S/;
+  // Tightened to a real frame shape (#1555 round 3 nit) — `at <fn> (<file>:
+  // <line>:<col>)` or the bare `at <file>:<line>:<col>` form. The looser
+  // `/^\s*at\s+\S/` also excused a line like `    at expect(received)…`,
+  // which is contrived (a real matcher failure always carries a non-`at`
+  // `expect(`/`Expected:`/`Received:` line too) but free to close.
+  const stackFrameRe = /^\s*at\s+.*\(.*:\d+:\d+\)\s*$/;
+  const stackFrameNoParenRe = /^\s*at\s+\S+:\d+:\d+\s*$/;
+  // #1555 round 3 (this review) — real teardown-cascade blocks (run
+  // 36312054519, verified verbatim) carry TWO more shapes the round-2 fixtures
+  // never exercised, so the excuse never actually fired on production output:
+  //  * jest's CODE FRAME around the throwing line — a `  NN |  <source>`
+  //    gutter, a `> NN |  <source>` pointer line, and a `   |      ^` caret
+  //    continuation with no line number;
+  //  * the JEST SUMMARY TRAILER printed once the whole file finishes
+  //    (`Test Suites: …`, `Tests:`, `Snapshots:`, `Time:`, `Ran all test
+  //    suites…`, `Force exiting Jest: …`) — printed AFTER the last case
+  //    block's content but still BEFORE the group's `end of … output` close,
+  //    so it lands inside the still-open block.
+  // Both are non-substantive PROVIDED the code-frame gutter's own echoed
+  // source line is not itself a real assertion — `assertionLineRe` is
+  // checked FIRST so a code frame around a genuine `expect(...)` call still
+  // disqualifies the block.
+  const assertionLineRe = /\bexpect\(|^\s*Expected:|^\s*Received:/;
+  const codeFrameGutterRe = /^\s*>?\s*\d+\s*\|/;
+  const codeFrameCaretRe = /^\s*\|\s*\^?\s*$/;
+  const jestTrailerRe =
+    /^\s*(Test Suites:|Tests:|Snapshots:|Time:|Ran all test suites|Force exiting Jest:)/;
 
   /** @returns {ScannedGroup} */
   const freshGroup = () => ({
@@ -593,7 +619,34 @@ function scanOutputGroups(text) {
     // NEITHER the teardown marker itself NOR a stack frame NOR blank means
     // the block is not "only" the teardown crash (a real `expect(...)`
     // assertion sitting right next to it, most concretely).
-    if (inBlock && !isTeardownLine && line.trim() !== '' && !stackFrameRe.test(line)) {
+    // #1555 round 3 (this review, real-log replay of run 36312054519) — a
+    // jest code-frame gutter/caret line or the jest summary trailer is ALSO
+    // not "other content" — UNLESS it is itself a real assertion MESSAGE/diff
+    // line (`expect(`/`Expected:`/`Received:`), which stays disqualifying no
+    // matter what shape it also resembles.
+    //
+    // The `expect(` check is scoped to NON-code-frame-shaped lines (measured
+    // false positive, same run: the wasm-file fixture's teardown code frame
+    // shows the NEXT `it()`'s `expect(extractJSON(response))` call as
+    // surrounding source context, several lines after the actual `> NN |`
+    // throw pointer — that source echo is not itself proof of a failure). A
+    // GENUINE assertion failure always ALSO prints its own bare
+    // `expect(received).toBe(expected)` MESSAGE line (and/or `Expected:`/
+    // `Received:`), which is never code-frame-shaped, so nothing is lost by
+    // excluding gutter/caret lines from the `expect(` half of this check.
+    const isCodeFrameShape = codeFrameGutterRe.test(line) || codeFrameCaretRe.test(line);
+    const isAssertionLine = !isCodeFrameShape && assertionLineRe.test(line);
+    const isCodeFrame = !isAssertionLine && isCodeFrameShape;
+    const isJestTrailer = !isAssertionLine && jestTrailerRe.test(line);
+    if (
+      inBlock &&
+      !isTeardownLine &&
+      line.trim() !== '' &&
+      !stackFrameRe.test(line) &&
+      !stackFrameNoParenRe.test(line) &&
+      !isCodeFrame &&
+      !isJestTrailer
+    ) {
       blockHasOtherContent = true;
     }
     const failedCase = line.match(failedCaseRe);

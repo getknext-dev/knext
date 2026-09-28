@@ -58,6 +58,34 @@
  *      the harness's own marker (the same false-positive class the anchor on
  *      `deployScriptRe`, mutation 1, exists to prevent).
  *
+ * #1555 ROUND 3 (this review — the round-2 excuse never fired on REAL CI
+ * output) adds three more:
+ *   12. CODE-FRAME / JEST-TRAILER ALLOWANCE removed — real-log replay of run
+ *      36312054519 found the round-2 excuse's own `!blockHasOtherContent`
+ *      condition never actually held on production output: every real
+ *      teardown-cascade block also carries jest's own CODE FRAME around the
+ *      throwing line and the JEST SUMMARY TRAILER (`Test Suites:`, `Tests:`,
+ *      `Snapshots:`, `Time:`, `Ran all test suites…`, `Force exiting Jest:`),
+ *      and both tripped the guard — 0 of 46 real teardown-cascade files in
+ *      that run were reclassified. Without this allowance, the VERBATIM
+ *      real-block fixture (`tests/deploy-summary.test.ts`) downgrades from
+ *      'deploy' to 'assertion' again.
+ *   13. suiteFailedHeaderRe's EXACT-HEADER CONDITION removed — the block's
+ *      own header must be the LITERAL suite-level "Test suite failed to run"
+ *      header, not just any header. Relaxing it to match any header (e.g.
+ *      `/./`) wrongly excuses a REAL per-case failure (`● b › closes
+ *      server`) whose own message merely matches the same TypeError shape.
+ *      Fixture B9 isolates this from the `unexplainedCase` count guard
+ *      (which A4b cannot avoid triggering either way) by keeping exactly one
+ *      failing case and putting the deploy evidence in a separate,
+ *      SUITE-LEVEL block.
+ *   14. isCodeFrameShape SCOPING removed (measured false positive, the same
+ *      run's edge-can-use-wasm-files fixture) — the `expect(` half of the
+ *      assertion check is no longer scoped away from code-frame-shaped
+ *      lines, so a teardown code frame that merely ECHOES a nearby,
+ *      not-yet-run `expect(...)` call (surrounding source context, not
+ *      failure evidence) wrongly counts as real assertion evidence again.
+ *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one property and requires
  * `tests/deploy-summary.test.ts` to go RED, then GREEN again after restore —
@@ -86,7 +114,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/e2e-summary.mjs');
 const SPEC = 'tests/deploy-summary.test.ts';
 
-declareMutations(11);
+declareMutations(14);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -244,6 +272,40 @@ prove(
   "teardownCascadeRe anchor removed: an assertion's own diff text containing the marker is excused as the harness's teardown crash",
   "const teardownCascadeRe =\n    /^\\s*TypeError: Cannot read propert(?:y|ies) of (?:undefined|null) \\(reading '(?:destroy|close|stop)'\\)/;",
   "const teardownCascadeRe =\n    /TypeError: Cannot read propert(?:y|ies) of (?:undefined|null) \\(reading '(?:destroy|close|stop)'\\)/;",
+);
+
+// 12. #1555 round 3 — the code-frame/jest-trailer allowance is removed, so
+//    the round-2 excuse's `!blockHasOtherContent` condition never actually
+//    holds on real production output again (verified against run
+//    36312054519): the code-frame gutter/caret lines and the jest summary
+//    trailer both count as "other content" once more.
+prove(
+  'code-frame/jest-trailer allowance removed: a REAL teardown-cascade block (code frame + jest trailer) never actually gets excused',
+  'const isCodeFrame = !isAssertionLine && isCodeFrameShape;\n    const isJestTrailer = !isAssertionLine && jestTrailerRe.test(line);',
+  'const isCodeFrame = false;\n    const isJestTrailer = false;',
+);
+
+// 13. #1555 round 3 (finding 2) — suiteFailedHeaderRe's exact-header
+//    condition is relaxed to match ANY header, so a REAL per-case failure
+//    shaped like the teardown TypeError (fixture B9: `● b › closes server`)
+//    is wrongly excused just because a SUITE-LEVEL deploy block exists
+//    elsewhere in the same group.
+prove(
+  'suiteFailedHeaderRe relaxed to match any header: a real per-case TypeError-shaped failure is wrongly excused as the harness teardown crash',
+  'const suiteFailedHeaderRe = /^\\s*●\\s+Test suite failed to run\\s*$/;',
+  'const suiteFailedHeaderRe = /./;',
+);
+
+// 14. #1555 round 3 (measured false positive, run 36312054519's
+//    edge-can-use-wasm-files fixture) — the `expect(` half of the assertion
+//    check is no longer scoped away from code-frame-shaped lines, so a
+//    teardown code frame that merely ECHOES a nearby, not-yet-run
+//    `expect(...)` call (surrounding source context, not failure evidence)
+//    wrongly counts as "other content" again.
+prove(
+  'isCodeFrameShape scoping removed: a code frame that merely echoes a nearby expect(...) call is wrongly treated as real assertion evidence',
+  'const isAssertionLine = !isCodeFrameShape && assertionLineRe.test(line);',
+  'const isAssertionLine = assertionLineRe.test(line);',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
