@@ -46,7 +46,11 @@ const SAFE_ROOT = 'package';
 
 // --- version well-formedness (#1306 review item 6) --------------------------
 
-const RC_VERSION_RE = /^(\d+\.\d+\.\d+)-rc\.\d+$/;
+// Captures both the base (`X.Y.Z`) and the rc counter (`N`) — the counter is
+// unused by `validateVersionPair` (kept byte-for-byte for its existing
+// callers/tests) but is what `parseRcVersion`/`validateVersionBump` (#1562)
+// need to tell an rc BUMP from a stale or backwards re-cut.
+const RC_VERSION_RE = /^(\d+\.\d+\.\d+)-rc\.(\d+)$/;
 const GA_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /**
@@ -70,6 +74,179 @@ export function validateVersionPair(rcVersion, gaVersion) {
     );
   }
   return null;
+}
+
+/**
+ * Parse `X.Y.Z-rc.N` into `{ base: "X.Y.Z", n: N }`, or `null` when the
+ * string is not that shape (#1562).
+ *
+ * @param {string} version
+ * @returns {{ base: string, n: number } | null}
+ */
+export function parseRcVersion(version) {
+  const m = RC_VERSION_RE.exec(version);
+  if (!m) return null;
+  return { base: m[1], n: Number(m[2]) };
+}
+
+/**
+ * The SHAPE check `release.yml`'s publish-blocking gate (#1562) runs before
+ * attempting a content diff: is `toVersion` a version the credentialed rc
+ * `fromVersion` may legitimately be diffed against at all?
+ *
+ * Deliberately a SUPERSET of `validateVersionPair` — every pair that function
+ * accepts, this accepts too (case 2 below reproduces it exactly) — plus two
+ * more shapes `validateVersionPair` was never asked to allow:
+ *
+ *   1. IDENTICAL — `toVersion === fromVersion`. This is not a hypothetical:
+ *      the founder checklist for cutting an rc (#1591) pushes the git tag
+ *      naming it at the SAME commit the version bump publishes from, so the
+ *      credentialed rc's own first publish diffs a commit against itself.
+ *      Trivially valid — there is nothing to substitute.
+ *   2. GA CUT — `toVersion` is `fromVersion`'s rc base with the prerelease
+ *      stripped. The #1306 transition this whole check exists for.
+ *   3. RC RE-CUT — `toVersion` is a LATER rc of the exact same base
+ *      (`fromVersion` is `rc.N`, `toVersion` is `rc.M`, `M > N`). This
+ *      function only judges the SHAPE; whether that later rc's CONTENT
+ *      actually differs only in version fields is a separate question a mid-
+ *      window rc bump is expected to fail (see `decideGaTarballDiffGate`,
+ *      which is deliberately narrower — it does not treat every shape this
+ *      function accepts as something the release gate should attempt).
+ *
+ * `fromVersion` must itself be a well-formed `X.Y.Z-rc.N` — there is no
+ * "identical" escape hatch for a malformed source, because an identical
+ * malformed pair would otherwise validate two strings that are not a version
+ * at all.
+ *
+ * @param {string} fromVersion the credentialed rc's own version
+ * @param {string} toVersion the version being compared against it
+ * @returns {string | null} an error string, or `null` when the shape is valid
+ */
+export function validateVersionBump(fromVersion, toVersion) {
+  const from = parseRcVersion(fromVersion);
+  if (!from) {
+    return `credentialed rc version is not well-formed "X.Y.Z-rc.N": ${JSON.stringify(fromVersion)}`;
+  }
+
+  if (toVersion === fromVersion) return null; // case 1
+
+  if (GA_VERSION_RE.test(toVersion)) {
+    if (toVersion !== from.base) {
+      return (
+        `GA version ${JSON.stringify(toVersion)} does not match the rc version's base ` +
+        `${JSON.stringify(from.base)} (from rc ${JSON.stringify(fromVersion)})`
+      );
+    }
+    return null; // case 2
+  }
+
+  const to = parseRcVersion(toVersion);
+  if (!to) {
+    return (
+      'target version is neither identical to the credentialed rc, nor a well-formed GA ' +
+      `"X.Y.Z", nor a well-formed rc "X.Y.Z-rc.M": ${JSON.stringify(toVersion)}`
+    );
+  }
+  if (to.base !== from.base) {
+    return (
+      `target rc version ${JSON.stringify(toVersion)} does not share the credentialed rc's base ` +
+      `${JSON.stringify(from.base)} (from ${JSON.stringify(fromVersion)})`
+    );
+  }
+  if (to.n <= from.n) {
+    return (
+      `target rc.${to.n} does not bump forward past the credentialed rc.${from.n} ` +
+      `(from ${JSON.stringify(fromVersion)} to ${JSON.stringify(toVersion)})`
+    );
+  }
+  return null; // case 3
+}
+
+/**
+ * Should `release.yml`'s publish-blocking gate (#1562) diff THIS publish, and
+ * if so against which rc tag?
+ *
+ * KEYED ON GIT TAGS, NOT ON `rcTag` (#1562 round 2). `rcTag` in
+ * `.github/compat-credential-ref.json` is the credential window's LIVE pin
+ * (ADR-0056) and is legitimately cleared when a window closes — which is
+ * exactly when the GA cut happens. Keying on it made the gate a green no-op
+ * for the one publish it exists for (1.0.0 after the window closed), and,
+ * while still set, blocked every later release (1.0.1, 1.1.0, ...) with a
+ * version-shape failure. So:
+ *
+ *   - PRERELEASE target (any prerelease id) — SKIP by design. A later rc is
+ *     expected to carry real changes relative to an earlier one; that is the
+ *     point of cutting it.
+ *   - GA target `X.Y.Z` with NO `vX.Y.Z-rc.N` git tag — SKIP: no release
+ *     candidate was cut for X.Y.Z, so this release is not claimed as
+ *     credentialed. Never blocks it (1.0.1, 1.1.0, 2.0.0, 0.4.4 ...).
+ *   - GA target `X.Y.Z` WITH `vX.Y.Z-rc.N` tags — RUN against the HIGHEST N
+ *     (numeric, so rc.10 > rc.9): the last rc is the candidate the credential
+ *     window ends on.
+ *   - ...unless `pinnedRcTag` names a DIFFERENT `vX.Y.Z-rc.*` than that
+ *     highest tag — FAIL: the credential is ambiguous (was rc.1 credentialed
+ *     and rc.2 cut afterwards?). A pin on another tuple (the next window
+ *     already open) is irrelevant to this GA.
+ *   - An EMPTY tag list — FAIL closed. The repo has always had tags; zero
+ *     means a tagless/shallow checkout, and "no rc tag found" from a
+ *     checkout that cannot see tags must never read as "not credentialed".
+ *
+ * @param {{ targetVersion: string, pinnedRcTag: string | null, gitTags: string[] }} input
+ * @returns {{ action: 'run', rcTag: string, reason: string } | { action: 'skip' | 'fail', reason: string }}
+ */
+export function decideGaTarballDiffGate({ targetVersion, pinnedRcTag, gitTags }) {
+  if (!GA_VERSION_RE.test(targetVersion)) {
+    return {
+      action: 'skip',
+      reason:
+        `target ${JSON.stringify(targetVersion)} is a prerelease — only a GA cut is diffed ` +
+        'against its release candidate; a later rc is expected to carry real changes',
+    };
+  }
+  if (gitTags.length === 0) {
+    return {
+      action: 'fail',
+      reason:
+        'no git tags are visible in this checkout — it is tagless or shallow, so "was a release ' +
+        `candidate cut for ${targetVersion}?" cannot be answered (fail closed, never a skip)`,
+    };
+  }
+
+  const tagPrefix = `v${targetVersion}-rc.`;
+  const rcTagRe = new RegExp(`^${escapeRegExp(tagPrefix)}(0|[1-9]\\d*)$`);
+  let highest = null;
+  for (const tag of gitTags) {
+    const m = rcTagRe.exec(tag);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (highest === null || n > highest.n) highest = { tag, n };
+  }
+
+  if (highest === null) {
+    return {
+      action: 'skip',
+      reason:
+        `no release candidate was cut for ${targetVersion} — this release is not claimed as ` +
+        `credentialed (no ${tagPrefix}N git tag exists)`,
+    };
+  }
+
+  const pinnedSameTuple = pinnedRcTag?.startsWith(tagPrefix) === true;
+  if (pinnedSameTuple && pinnedRcTag !== highest.tag) {
+    return {
+      action: 'fail',
+      reason:
+        `ambiguous credential: .github/compat-credential-ref.json pins rcTag=${JSON.stringify(pinnedRcTag)} ` +
+        `but the highest release candidate cut for ${targetVersion} is ${JSON.stringify(highest.tag)} — ` +
+        'either credential the highest rc (and pin it) or explain the later tag before cutting GA',
+    };
+  }
+
+  return {
+    action: 'run',
+    rcTag: highest.tag,
+    reason: `GA cut of ${targetVersion}; diffing against its highest release candidate ${highest.tag}`,
+  };
 }
 
 // --- boundary-aware version substitution (#1306 review item 4) -------------
