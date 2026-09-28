@@ -190,6 +190,23 @@ runs:
         printf '%s' "$KNEXT_REGISTRY_TOKEN" \
           | docker login "${KNEXT_REGISTRY%%/*}" -u "$KNEXT_REGISTRY_USERNAME" --password-stdin
 
+    # ── 2c. Bun toolchain — the compiled default runtime needs it (#1596) ────
+    # `DEFAULT_RUNTIME_ID` (packages/kn-next/src/adapters/artifact-contract.ts)
+    # is "bun" — a bare `kn-next.config.ts` compiles the standalone server into
+    # a Bun single executable, and `standaloneCompileArgv()` shells out to a
+    # bare `bun` to do it. Stock `ubuntu-24.04` runners ship no Bun at all
+    # (github/actions/runner-images has never bundled it), so every
+    # default-runtime deploy through this action failed with ENOENT before
+    # this step existed. Runs AFTER the credential steps — installing a
+    # toolchain needs no credential, so it does not belong ahead of them, and
+    # their own relative order is unchanged — and BEFORE the deploy step that
+    # needs it. Harmless if a future runner image ships Bun already:
+    # `setup-bun` is a no-op re-link in that case.
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version: '1.4.2'
+
     # ── 3. Build, push, emit the CR, apply, wait ─────────────────────────────
     # All of it is `kn-next deploy`. The action adds no deployment logic of its
     # own — if it did, the CLI and the action would drift, and the cluster would
