@@ -209,6 +209,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
       'scripts/lib/musl-lockfile-lookup.sh',
+      // #1530 — the free-disk-floor pre-check the workflow invokes via a
+      // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own.
+      'scripts/compat-disk-floor-check.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -223,6 +227,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
       'scripts/lib/musl-lockfile-lookup.sh',
+      // #1530 — the free-disk-floor pre-check the workflow invokes via a
+      // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own.
+      'scripts/compat-disk-floor-check.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -240,6 +248,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
       'scripts/lib/musl-lockfile-lookup.sh',
+      // #1530 — the free-disk-floor pre-check the workflow invokes via a
+      // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own.
+      'scripts/compat-disk-floor-check.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -254,6 +266,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-run-ledger.mjs',
       '.github/compat-credential-ref.json',
       'scripts/lib/musl-lockfile-lookup.sh',
+      // #1530 — the free-disk-floor pre-check the workflow invokes via a
+      // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own.
+      'scripts/compat-disk-floor-check.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -442,6 +458,37 @@ function isDeployOnlyRedShard(shard, failedCount, notRunCount) {
 }
 
 /**
+ * Whether a shard's redness is an INFRA fault (#1530) — the runner's
+ * free-disk floor breached before the shard ran a single test
+ * (`scripts/compat-disk-floor-check.mjs`), never a real test regression.
+ *
+ * USED FOR LABELLING ONLY, exactly like `isDeployOnlyRedShard` above: the
+ * shard still counts as a real red either way (a disk-exhausted shard proved
+ * nothing about the knext ref under test, so it must never be a green night
+ * either — see the doc comment there for why "never a pass" and "still
+ * disqualifies" are the correct combination). This only decides whether the
+ * disqualifier text is prefixed `infra-classified:` for readability, so
+ * triage is not misdirected at a phantom assertion regression.
+ *
+ * Deliberately requires `failedCount === 0` (unlike the deploy check, which
+ * requires `notRunCount === 0`): a disk-floor abort reports its outage as
+ * `notRun`, never `failed` — there is no genuine test failure to attribute,
+ * only a runner precondition that was never met. Any REAL `failed` count
+ * alongside an infra marker disqualifies the label, same fail-closed
+ * direction as the deploy check.
+ *
+ * @param {any} shard
+ * @param {number} failedCount
+ * @returns {boolean}
+ */
+function isInfraOnlyRedShard(shard, failedCount) {
+  if (failedCount > 0) return false;
+  const failures = Array.isArray(shard?.failures) ? shard.failures : null;
+  if (!failures || failures.length === 0) return false;
+  return failures.every((f) => f?.kind === 'infra');
+}
+
+/**
  * The reasons a scheduled run can end up with no gradeable ledger. Every one of
  * them produces a DISQUALIFIED night (rule 5), never a gap in the record.
  */
@@ -545,7 +592,12 @@ export function gradeNight(ledger, opts = {}) {
         isDeployOnlyRedShard(shard, f.value, n.value)
           ? `deploy-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — every ` +
               'named failure is kind:deploy (a harness/deploy-script failure; #1520/#1553)'
-          : `shard ${id} red (failed=${f.value} notRun=${n.value})`,
+          : isInfraOnlyRedShard(shard, f.value)
+            ? `infra-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — the ` +
+              'free-disk floor aborted this shard before it ran a single test (#1530); it ' +
+              'still disqualifies the night (a runner fault proves nothing either way about ' +
+              'the ref under test) but is never mistaken for kind:assertion'
+            : `shard ${id} red (failed=${f.value} notRun=${n.value})`,
       );
     }
   }
