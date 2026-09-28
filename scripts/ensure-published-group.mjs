@@ -106,6 +106,33 @@ export function defaultBackoffMs(attempt) {
 export class GroupStillIncoherentError extends Error {}
 
 /**
+ * The npm dist-tag a prerelease publish MUST carry (#1591 round 2, M1). npm
+ * >= 11 refuses `npm publish` for a prerelease version with no `--tag`:
+ * "You must specify a tag using --tag when publishing a prerelease version."
+ * — reproduced live against the real npm registry with `--dry-run`. Without
+ * this, the heal path in `ensureGroupPublished` cannot re-publish a member of
+ * an rc release: the very re-publish this step exists to perform would itself
+ * fail, leaving the group broken.
+ *
+ * Derived from the VERSION STRING ITSELF — the first dot-separated
+ * prerelease identifier, e.g. `1.0.0-rc.1` -> `rc` — never hard-coded.
+ * `.changeset/pre.json`'s `tag` field is a changesets PUBLISH-PLAN concept
+ * and can drift from what a version string actually carries; the version is
+ * the one fact `npm publish` itself checks. Returns `null` for a plain
+ * (non-prerelease) version, so a stable release keeps publishing to `latest`
+ * exactly as before — this function must never be the reason a stable
+ * release ships under a non-latest tag, and never the reason a prerelease
+ * silently ships AS latest.
+ *
+ * @param {string} version
+ * @returns {string | null}
+ */
+export function prereleaseDistTag(version) {
+  const m = /^v?\d+\.\d+\.\d+-([0-9A-Za-z-]+)(?:\.[0-9A-Za-z-]+)*$/.exec(String(version).trim());
+  return m ? m[1] : null;
+}
+
+/**
  * A bare `x.y.z` with optional semver prerelease/build metadata.
  *
  * #1364 round 2: each identifier is `[0-9A-Za-z-]+`, and `.` ONLY appears
@@ -446,17 +473,26 @@ export function npmProbe(registry) {
  * publishConfig (`access: public`, `provenance: true`) rides along — the same
  * artifact `changeset publish` shipped, so a re-publish is byte-faithful.
  * Exported for the same fake-`npm` process-level testing as `npmResolvesAt`.
+ *
+ * @param {string} dir
+ * @param {string} registry
+ * @param {string | null} [tag] the dist-tag (`prereleaseDistTag(targetVersion)`)
+ *   — passed as `--tag <tag>` when set (M1: npm >= 11 refuses a prerelease
+ *   publish with no tag); omitted entirely for a stable release, so npm's own
+ *   default (`latest`) is unchanged.
  */
-export function npmPublish(dir, registry) {
+export function npmPublish(dir, registry, tag) {
+  const args = ['publish', '--registry', registry];
+  if (tag) args.push('--tag', tag);
   // stderr is PIPED (not inherited) so we can read npm's rejection message and
   // tell a benign already-published 403 from a real failure — then re-emitted to
   // our own stderr so the log still shows it. npm never echoes NODE_AUTH_TOKEN,
   // and we add nothing that would, so this capture leaks no secret.
-  const run = spawnSync(
-    process.platform === 'win32' ? 'npm.cmd' : 'npm',
-    ['publish', '--registry', registry],
-    { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'inherit', 'pipe'] },
-  );
+  const run = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, {
+    cwd: dir,
+    encoding: 'utf8',
+    stdio: ['ignore', 'inherit', 'pipe'],
+  });
   const stderr = run.stderr || '';
   if (stderr) process.stderr.write(stderr);
   return { ok: !run.error && run.status === 0, stderr };
@@ -508,6 +544,18 @@ async function main() {
     );
   }
 
+  // M1 (#1591 round 2): derive the dist-tag from targetVersion ITSELF, not
+  // hard-coded — npm >= 11 refuses `npm publish` for a prerelease with no
+  // `--tag`. `null` for a stable release, so the heal path keeps publishing
+  // to `latest` exactly as before.
+  const distTag = prereleaseDistTag(targetVersion);
+  if (distTag) {
+    console.log(
+      `[ensure-published-group] target ${targetVersion} is a prerelease — any re-publish will ` +
+        `pass --tag ${distTag} (never latest).`,
+    );
+  }
+
   let result;
   try {
     result = await ensureGroupPublished({
@@ -520,7 +568,7 @@ async function main() {
           `[ensure-published-group] ${name} is missing at ${targetVersion} — re-publishing ` +
             `from ${dirByName.get(name)}…`,
         );
-        return npmPublish(dirByName.get(name), registry);
+        return npmPublish(dirByName.get(name), registry, distTag);
       },
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     });

@@ -35,10 +35,11 @@ export interface ScaffoldPin {
     /** The range as pinned in the generated package.json, e.g. `^0.3.1`. */
     range: string;
     /**
-     * The exact version the range anchors on (`^X.Y.Z` → `X.Y.Z`), or null
-     * when the range is not that shape (hand-edited apps). Null pins are not
-     * probed: guessing what an arbitrary range resolves to is the registry's
-     * job, not ours.
+     * The exact version the range anchors on (`^X.Y.Z` → `X.Y.Z`, or
+     * `^X.Y.Z-<prerelease>` → `X.Y.Z-<prerelease>`), or null when the range
+     * is not that shape (hand-edited apps). Null pins are not probed:
+     * guessing what an arbitrary range resolves to is the registry's job,
+     * not ours.
      */
     version: string | null;
 }
@@ -47,6 +48,30 @@ export type RegistryVerdict =
     | { kind: "ok" }
     | { kind: "missing"; missing: ScaffoldPin[] }
     | { kind: "unreachable" };
+
+/**
+ * A bare `^X.Y.Z` or `^X.Y.Z-<prerelease>` caret pin — the ONLY shape the
+ * scaffold template ever renders (`^{{ version }}`, see the module doc).
+ * Prerelease-aware for the same reason round 2 made `verify-published-group`
+ * and `audit-published`'s caret matching prerelease-aware (#1591): once the
+ * CLI's own manifest version is `1.0.0-rc.1`, the rendered pin is
+ * `^1.0.0-rc.1`, and the pre-#1591 release-only shape parsed that to `null`
+ * — silently skipping the unpublished-pin warning this module exists to give
+ * (#950) for every rc build. The prerelease identifier grammar (dot-split
+ * `[0-9A-Za-z-]+`) matches semver 2.0.0 §9 and is the same character class
+ * used by `parseSemver`/`caretSatisfies` in `scripts/audit-published.mjs` /
+ * `scripts/verify-published-group.mjs` — this is a deliberate, independent
+ * copy rather than a shared import: those two live in root `scripts/` (CI
+ * tooling, never published), this lives in `packages/kn-next/src` (the
+ * published CLI bundle), and the existing precedent in this repo is that
+ * each consumer of this exact grammar keeps its own copy so it is provable
+ * on its own closure (see the doc comment on `caretSatisfies`). Anything
+ * that does not match this exact shape yields `null` and is silently
+ * skipped, never guessed at — a malformed pin (e.g. a trailing dot, an empty
+ * prerelease identifier, an `||` range) is a hand-edited app whose range is
+ * the user's call, not ours.
+ */
+const CARET_PIN = /^\^(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/;
 
 /** Extract every `@getknext/*` pin from a rendered scaffold's package.json. */
 export function scaffoldGetknextPins(
@@ -68,7 +93,7 @@ export function scaffoldGetknextPins(
         .map(([name, range]) => ({
             name,
             range,
-            version: /^\^(\d+\.\d+\.\d+)$/.exec(range)?.[1] ?? null,
+            version: CARET_PIN.exec(range)?.[1] ?? null,
         }));
 }
 

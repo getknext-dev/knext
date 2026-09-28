@@ -80,6 +80,46 @@ describe('#942 F1 — packed sibling ranges must be satisfied by the co-packed s
     expect(siblingRangeProblems([lib('0.4.0'), core('0.4.0', '^0.3.1')]).length).toBeGreaterThan(0);
   });
 
+  // #1591 round 2 (B2) — the release lane's first prerelease (v1.0.0-rc.1).
+  // caretSatisfies used to reject any range carrying a `-rc.N` suffix
+  // outright ("expected ^x.y.z"), so a co-packed rc sibling always read as
+  // incoherent even when it was exactly the tarball beside it.
+  describe('prerelease caret semantics (rc.1/rc.2/1.0.0)', () => {
+    it('a floor of exactly its own rc is satisfied (rc.1 satisfies ^1.0.0-rc.1)', () => {
+      expect(siblingRangeProblems([lib('1.0.0-rc.1'), core('1.0.0-rc.1', '^1.0.0-rc.1')])).toEqual(
+        [],
+      );
+    });
+
+    it('a LATER rc of the same tuple satisfies (rc.2 satisfies ^1.0.0-rc.1)', () => {
+      expect(siblingRangeProblems([lib('1.0.0-rc.2'), core('1.0.0-rc.2', '^1.0.0-rc.1')])).toEqual(
+        [],
+      );
+    });
+
+    it('the final release satisfies an rc floor (1.0.0 satisfies ^1.0.0-rc.1)', () => {
+      expect(siblingRangeProblems([lib('1.0.0'), core('1.0.0', '^1.0.0-rc.1')])).toEqual([]);
+    });
+
+    it('an EARLIER rc does NOT satisfy a later rc floor (rc.1 does not satisfy ^1.0.0-rc.2)', () => {
+      expect(
+        siblingRangeProblems([lib('1.0.0-rc.1'), core('1.0.0-rc.1', '^1.0.0-rc.2')]).length,
+      ).toBeGreaterThan(0);
+    });
+
+    it('a prerelease of a DIFFERENT tuple never satisfies, even same major (fail-closed)', () => {
+      expect(
+        siblingRangeProblems([lib('1.0.1-rc.1'), core('1.0.1-rc.1', '^1.0.0-rc.1')]).length,
+      ).toBeGreaterThan(0);
+    });
+
+    it('a bare (non-prerelease) floor never silently accepts a prerelease sibling', () => {
+      expect(
+        siblingRangeProblems([lib('1.0.0-rc.1'), core('1.0.0-rc.1', '^1.0.0')]).length,
+      ).toBeGreaterThan(0);
+    });
+  });
+
   it('main() actually CALLS the tripwire between pack and install', () => {
     // The helper being correct is worth nothing if main() never consults it —
     // the guards-must-assert-both-halves rule this repo keeps relearning.
