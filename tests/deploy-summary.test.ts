@@ -1421,3 +1421,133 @@ describe('scripts/e2e-summary.mjs — timeout ranks above deploy WITHIN one case
     expect(failure?.kind).toBe('timeout');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 round 2 — a closing review of the N1 excuse itself found it applied
+// too broadly: to ANY case block (not only a `Test suite failed to run`
+// block), and it stayed set for the whole block even when a genuine
+// assertion sat right next to the teardown marker. Fixtures below are named
+// to match the review's own fixture IDs (A4b/A6/A7), plus one each isolating
+// the `hasDeployBlock` gate and the anchor on `teardownCascadeRe`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('scripts/e2e-summary.mjs — the afterAll-teardown excuse is scoped to its own header and content (#1555 round 2 review)', () => {
+  it("A4b: a REAL per-case failure shaped like the teardown TypeError, in a DIFFERENT case's own block, is never excused", () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+  ✕ b › closes server (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● b › closes server
+
+    TypeError: Cannot read properties of undefined (reading 'close')
+        at Object.<anonymous> (/next.js/test/app.test.ts:40:10)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // "b › closes server" is a genuine, unrelated case-level failure — its
+    // own header is NOT "Test suite failed to run", so the shape match alone
+    // must not excuse it, no matter that "a › one" proves real deploy
+    // evidence elsewhere in the same group.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one', 'b › closes server']);
+  });
+
+  it('A6: an excused teardown block does not count as explaining a DIFFERENT, block-less failing case', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+  ✕ a › two (3 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Two failing cases, two blocks — but one block is the excused teardown
+    // cascade, which explains nothing about "a › two". Counting it toward
+    // the count-match guard would let "a › two" hide with no explanation.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one', 'a › two']);
+  });
+
+  it('A7: a "Test suite failed to run" block that ALSO carries a genuine assertion is not "only" the teardown crash', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+    expect(received).toBe(expected)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('assertion');
+  });
+
+  it('a LONE teardown-cascade block with NO deploy evidence anywhere in the group fails closed to "assertion" (the hasDeployBlock gate)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Without ANY deploy evidence in the group, the teardown-shaped block
+    // must stay a real, unexplained failure — never 'deploy' and never
+    // 'unclassified' (which is what dropping the `hasDeployBlock` gate on
+    // the excuse would produce, since it would also stop counting as a
+    // non-deploy block at all).
+    expect(failure?.kind).toBe('assertion');
+  });
+
+  it("an assertion's OWN diff text merely containing the teardown marker (no line-start match) is never excused (the anchor)", () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    Received: "TypeError: Cannot read properties of undefined (reading 'destroy')"
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // The "Received: ..." line only CONTAINS the marker text; it does not
+    // START with it. Excusing this block would flip the file to 'deploy'
+    // even though "a › one" is its only real case and it is not itself the
+    // harness's own teardown crash.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one']);
+  });
+});

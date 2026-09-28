@@ -323,6 +323,25 @@ describe('applyLedger: case-level reclassification, never narrowing', () => {
     expect(out.quarantined[0].cases).toEqual(['a', 'b']);
   });
 
+  it('a PARTIAL quarantine drops the stale `attempts` snapshot rather than carrying it out of sync with the filtered `cases`', () => {
+    const s = summary();
+    s.failures[0] = {
+      file: SHELLS,
+      kind: 'assertion',
+      cases: ['a', 'b', 'new-regression'],
+      attempts: [{ cases: ['a', 'b', 'new-regression'] }],
+    };
+    const out = applyLedger(s, [entry()]);
+    const shells = out.failures.find((f: Any) => f.file === SHELLS);
+    // The snapshot ('a', 'b') is quarantined away; only the new case remains
+    // a real failure. `attempts` documents its last entry as duplicating
+    // `cases` (e2e-summary.mjs) — carrying the PRE-quarantine snapshot
+    // forward here would violate that on the very next read, and nothing
+    // downstream reads `attempts` past this point.
+    expect(shells.cases).toEqual(['new-regression']);
+    expect(shells).not.toHaveProperty('attempts');
+  });
+
   it('only snapshot cases are quarantined; the file stays failed while other cases fail', () => {
     const out = applyLedger(summary(), [navEntry(['hash'])]);
     expect(out.failed).toBe(3);

@@ -385,8 +385,16 @@ export function applyLedger(summary, entries) {
       if (e.upstream) rec.upstream = e.upstream;
       quarantined.push(rec);
     }
-    if (rest.length > 0) failures.push({ ...f, cases: rest });
-    else removed += 1;
+    if (rest.length > 0) {
+      // #1555 round-2 review nit — `f.attempts` (#1555 N3, e2e-summary.mjs)
+      // duplicates the LAST entry's `cases` from the full, pre-quarantine
+      // set. Spreading `f` as-is would leave that duplicate stale against
+      // the now-filtered `cases: rest` on a partial quarantine. No consumer
+      // reads `attempts` past this point, so drop it rather than carry a
+      // value that no longer matches its own documented invariant.
+      const { attempts: _staleAttempts, ...fSansAttempts } = f;
+      failures.push({ ...fSansAttempts, cases: rest });
+    } else removed += 1;
   }
   return { ...summary, failures, failed: failed - removed, quarantined };
 }

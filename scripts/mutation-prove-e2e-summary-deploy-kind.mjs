@@ -47,6 +47,17 @@
  *      `compat-vinext-ledger.mjs` matches known failures on `cases`, so this
  *      evidence loss is a real regression, not cosmetic.
  *
+ * #1555 ROUND 2 (closing-review follow-ups on N1 itself) adds two more:
+ *   10. hasDeployBlock GATE ON THE EXCUSE — the teardown excuse must only
+ *      read as evidence when the SAME group also proves a real deploy
+ *      failure; dropping that gate lets a lone teardown-cascade block (no
+ *      deploy evidence anywhere) silently stop counting as a non-deploy
+ *      block at all, changing an unrelated-crash file's kind.
+ *   11. teardownCascadeRe's LINE-START ANCHOR — without it, an assertion's
+ *      own `Received: "TypeError: … (reading 'destroy')"` diff line reads as
+ *      the harness's own marker (the same false-positive class the anchor on
+ *      `deployScriptRe`, mutation 1, exists to prevent).
+ *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one property and requires
  * `tests/deploy-summary.test.ts` to go RED, then GREEN again after restore —
@@ -75,7 +86,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/e2e-summary.mjs');
 const SPEC = 'tests/deploy-summary.test.ts';
 
-declareMutations(9);
+declareMutations(11);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -166,8 +177,8 @@ prove(
 //    'assertion' again (the exact ~11% measured regression this fix closes).
 prove(
   "afterAll-teardown detection removed: a deploy failure followed by the harness's own next.destroy() TypeError downgrades to assertion",
-  'if (inBlock && teardownCascadeRe.test(line)) blockIsTeardownCascade = true;',
-  'if (false) blockIsTeardownCascade = true;',
+  'if (inBlock && isTeardownLine) blockHasTeardownLine = true;',
+  'if (false) blockHasTeardownLine = true;',
 );
 
 // 6. #1555 N1 EXCEPTION removed: even with the teardown correctly detected
@@ -177,8 +188,8 @@ prove(
 //    nothing sets.
 prove(
   'afterAll-teardown exception removed: the detected teardown block counts as a genuine non-deploy block again',
-  '!(hasDeployBlock && b.teardownCascade)',
-  'true',
+  'const hasNonDeployBlock = blocks.some((b) => !b.deploy && !isExcusedTeardownBlock(b));',
+  'const hasNonDeployBlock = blocks.some((b) => !b.deploy);',
 );
 
 // 7. #1555 N2 unexplainedCase removed IN ISOLATION from hasNonDeployBlock
@@ -188,7 +199,7 @@ prove(
 //    deploy-explained.
 prove(
   'unexplainedCase guard removed: an unexplained failing case with no block at all no longer downgrades away from deploy',
-  'const unexplainedCase = cases.length > blocks.length;',
+  'const unexplainedCase = cases.length > explainedBlockCount;',
   'const unexplainedCase = false;',
 );
 
@@ -211,6 +222,28 @@ prove(
   'retry-evidence reporting removed: archived prior-attempt evidence is never surfaced on the returned failure record',
   '...(priorAttempts.length > 0 ? { attempts: [...priorAttempts, snapshotAttempt(g)] } : {}),',
   '...{},',
+);
+
+// 10. #1555 round-2 review (M1) — the `hasDeployBlock &&` gate on the excuse
+//    is dropped, so a LONE teardown-cascade block (no deploy evidence
+//    anywhere in the group) is wrongly excused from `hasNonDeployBlock` too,
+//    changing an otherwise-unrelated-crash file's kind (fixture A2: assertion
+//    → unclassified).
+prove(
+  'hasDeployBlock gate on the excuse removed: a lone teardown-cascade block with NO deploy evidence anywhere is wrongly excused too',
+  'const isExcusedTeardownBlock = (b) => hasDeployBlock && b.teardownCascade;',
+  'const isExcusedTeardownBlock = (b) => b.teardownCascade;',
+);
+
+// 11. #1555 round-2 review (M2) — `teardownCascadeRe`'s line-start anchor is
+//    removed, so an assertion's own diff line that merely CONTAINS the
+//    marker text (e.g. `Received: "TypeError: … (reading 'destroy')"`) is
+//    read as the harness's own teardown crash and excused (fixture A4-shape:
+//    assertion → deploy).
+prove(
+  "teardownCascadeRe anchor removed: an assertion's own diff text containing the marker is excused as the harness's teardown crash",
+  "const teardownCascadeRe =\n    /^\\s*TypeError: Cannot read propert(?:y|ies) of (?:undefined|null) \\(reading '(?:destroy|close|stop)'\\)/;",
+  "const teardownCascadeRe =\n    /TypeError: Cannot read propert(?:y|ies) of (?:undefined|null) \\(reading '(?:destroy|close|stop)'\\)/;",
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

@@ -356,12 +356,18 @@ function attributeFailure(file, groups) {
   // SIDE EFFECT of the deploy failure the same group already proves, not
   // independent evidence of a real regression. (Measured: ~11% of real
   // deploy failures were downgraded to 'assertion' by this exact shape.)
-  // Excused from `hasNonDeployBlock` ONLY when the group ALSO carries a
-  // genuine deploy block elsewhere — an unrelated teardown crash with NO
-  // accompanying deploy evidence in the same group stays a real, unexplained
-  // failure (fail closed the same direction as `unexplainedCase`).
-  const hasNonDeployBlock = blocks.some((b) => !b.deploy && !(hasDeployBlock && b.teardownCascade));
-  const unexplainedCase = cases.length > blocks.length;
+  // Excused ONLY when the group ALSO carries a genuine deploy block
+  // elsewhere — an unrelated teardown crash with NO accompanying deploy
+  // evidence in the same group stays a real, unexplained failure (fail
+  // closed the same direction as `unexplainedCase`).
+  const isExcusedTeardownBlock = (b) => hasDeployBlock && b.teardownCascade;
+  const hasNonDeployBlock = blocks.some((b) => !b.deploy && !isExcusedTeardownBlock(b));
+  // #1555 round-2 review (fixture A6) — an excused teardown-cascade block is
+  // not evidence explaining a DIFFERENT failing case; it must not count
+  // toward this count-match guard, or a real case with no error-detail
+  // block of its own hides behind the excused block's mere presence.
+  const explainedBlockCount = blocks.filter((b) => !isExcusedTeardownBlock(b)).length;
+  const unexplainedCase = cases.length > explainedBlockCount;
   const kind =
     g?.timeoutMs !== undefined
       ? 'timeout'
@@ -487,11 +493,27 @@ function scanOutputGroups(text) {
   // because a `createNext` deploy failure never assigned the instance it
   // tears down. Jest reports it under the SAME generic "Test suite failed to
   // run" header a `beforeAll` throw uses, so it cannot be told apart by
-  // header text — only by this specific TypeError shape. ANCHORED to the
-  // start of the line for the same reason as `deployScriptRe`: an assertion's
-  // own diff text merely containing this sentence must not match.
+  // header text alone — only by this specific TypeError shape. ANCHORED to
+  // the start of the line for the same reason as `deployScriptRe`: an
+  // assertion's own diff text merely containing this sentence must not
+  // match.
   const teardownCascadeRe =
     /^\s*TypeError: Cannot read propert(?:y|ies) of (?:undefined|null) \(reading '(?:destroy|close|stop)'\)/;
+  // #1555 round-2 review (fixture A4b/A7) — TWO more conditions the cascade
+  // must satisfy before it is excused, because the marker above alone is
+  // matched by more than the harness's own teardown crash:
+  //  * the block's OWN header must be the exact suite-level "Test suite
+  //    failed to run" header a `beforeAll`/`afterAll` throw uses — a REAL
+  //    per-case failure (`● b › closes server`) whose own message merely
+  //    matches the same TypeError shape (e.g. `reading 'close'`) must never
+  //    be excused just because the shape matches.
+  //  * the block must carry NO OTHER substantive content — a block that also
+  //    holds a genuine `expect(...)` assertion line is not "only" the
+  //    teardown crash, even under the right header.
+  const suiteFailedHeaderRe = /^\s*●\s+Test suite failed to run\s*$/;
+  // A jest stack-trace frame (`    at Object.afterAll (...)`) is expected
+  // alongside the TypeError line and is not "other content" on its own.
+  const stackFrameRe = /^\s*at\s+\S/;
 
   /** @returns {ScannedGroup} */
   const freshGroup = () => ({
@@ -506,15 +528,25 @@ function scanOutputGroups(text) {
   let current = null;
   let inBlock = false;
   let blockHasDeploy = false;
-  let blockIsTeardownCascade = false;
+  let blockHasTeardownLine = false;
+  let blockHasOtherContent = false;
+  let blockIsSuiteFailedHeader = false;
   /** Close the currently-open case block (if any), recording its verdict. */
   const closeBlock = (g) => {
     if (inBlock && g) {
-      g.blocks.push({ deploy: blockHasDeploy, teardownCascade: blockIsTeardownCascade });
+      // #1555 round-2 review — excused ONLY when the header matched, the
+      // marker line was seen, and nothing else of substance was in the
+      // block (see the `teardownCascadeRe` comment above for why both extra
+      // conditions are load-bearing, not redundant with the anchor).
+      const teardownCascade =
+        blockIsSuiteFailedHeader && blockHasTeardownLine && !blockHasOtherContent;
+      g.blocks.push({ deploy: blockHasDeploy, teardownCascade });
     }
     inBlock = false;
     blockHasDeploy = false;
-    blockIsTeardownCascade = false;
+    blockHasTeardownLine = false;
+    blockHasOtherContent = false;
+    blockIsSuiteFailedHeader = false;
   };
 
   for (const line of lines) {
@@ -551,10 +583,19 @@ function scanOutputGroups(text) {
     if (caseHeaderRe.test(line)) {
       closeBlock(g);
       inBlock = true;
+      blockIsSuiteFailedHeader = suiteFailedHeaderRe.test(line);
       continue; // the header line names the case; it carries no evidence itself
     }
     if (inBlock && isDeployLine) blockHasDeploy = true;
-    if (inBlock && teardownCascadeRe.test(line)) blockIsTeardownCascade = true;
+    const isTeardownLine = teardownCascadeRe.test(line);
+    if (inBlock && isTeardownLine) blockHasTeardownLine = true;
+    // #1555 round-2 review (fixture A7) — any line in the block that is
+    // NEITHER the teardown marker itself NOR a stack frame NOR blank means
+    // the block is not "only" the teardown crash (a real `expect(...)`
+    // assertion sitting right next to it, most concretely).
+    if (inBlock && !isTeardownLine && line.trim() !== '' && !stackFrameRe.test(line)) {
+      blockHasOtherContent = true;
+    }
     const failedCase = line.match(failedCaseRe);
     // De-dup is inherent WITHIN one retry attempt: run-tests.js reprints the
     // ✕ line once per group-open, and `cases` is a Set, so a single retry
