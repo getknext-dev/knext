@@ -702,7 +702,31 @@ function inScope(ledger, scope) {
     if (mode === null) return true;
     return scope === 'credential' ? mode === 'credential' : mode === 'early-warning';
   }
-  return scope === 'credential' ? claimsCredential(ledger) : !claimsCredential(ledger);
+  if (scope !== 'credential') return !claimsCredential(ledger);
+  if (claimsCredential(ledger)) return true;
+  // #1605: a resolved ledger reaching this point has ALREADY matched this
+  // window's `lane` and `event: 'schedule'` — selectLaneNights's own first
+  // filter runs before `inScope` is ever called. So this is never "some
+  // other lane's night" the way a bun weekly or a workflow_dispatch run is.
+  //
+  // An EXPLICIT `compatMode: 'early-warning'` night IS a real, different
+  // night (a main run) and stays excluded here — never graded, never a
+  // disqualifier — exactly as rule 6 requires: it must neither advance nor
+  // break the credential streak.
+  if (ledger?.compatMode === 'early-warning') return false;
+  // Everything else that reaches here claims nothing: `compatMode` is absent
+  // or `null` — a workflow run that never wrote `KNEXT_COMPAT_MODE`, or a
+  // ledger produced before ADR-0056 existed (nothing in a ledger's shape
+  // tells the two apart, and treating them differently would reopen this
+  // same hole for old runs still inside the fetch horizon). The OLD
+  // behaviour excluded it here too, which removed it from `nights` entirely
+  // and let `auditWindow` bridge the streaks either side of it as if it had
+  // never run (13 green + 30 mode-less + 1 green read as one 14-night
+  // streak). It must instead stay IN the sequence and be GRADED — which
+  // disqualifies it via `gradeNight`'s existing `not-a-credential-run`/
+  // `non-credential-ref` checks — the same "disqualify, never skip" shape
+  // rule 5 already uses for a night whose ledger could not be read at all.
+  return true;
 }
 
 /**

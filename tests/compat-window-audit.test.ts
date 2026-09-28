@@ -276,6 +276,129 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
   });
 
   // ───────────────────────────────────────────────────────────────────────
+  // #1605 (found in the #1604 round-2 review, fixture A "unscoped" variant):
+  // `auditWindow` used to DROP a resolved ledger that carries no credential
+  // mode BEFORE grading — `inScope` returned `claimsCredential(ledger)` for a
+  // scheduled, lane-matched entry, which is `false` for a mode-less one, so
+  // `selectLaneNights` filtered it out of `nights` entirely. On origin/main
+  // this let 13 green + 30 mode-less + 1 green nights on the SAME lane read
+  // as current=14, met=true — the exact unbounded-bridging shape the #1550
+  // and #1604 reviews rejected for a different outcome kind, reachable here
+  // with no new field at all.
+  //
+  // DECISION (this PR): a resolved ledger that has ALREADY matched this
+  // window's `lane` and `event: 'schedule'` (selectLaneNights's own first
+  // filter, which runs before `inScope`) is a scheduled run of THIS credential
+  // lane by definition — it is never "some other lane's night" the way a bun
+  // weekly or a workflow_dispatch run is. So:
+  //   * an EXPLICIT `compatMode: 'early-warning'` night stays excluded, not
+  //     disqualifying — that is a real main night and rule 6 says it must
+  //     neither advance nor break the credential streak.
+  //   * anything else that does not claim credential (`compatMode` absent or
+  //     `null`, whether from a workflow that never wrote `KNEXT_COMPAT_MODE`
+  //     or from a ledger produced before ADR-0056 existed) now stays IN the
+  //     sequence and is GRADED — which disqualifies it via `gradeNight`'s
+  //     existing `not-a-credential-run`/`non-credential-ref` checks — instead
+  //     of vanishing. This applies uniformly to legacy pre-ADR-0056 history:
+  //     nothing in a ledger's shape distinguishes "predates the mode field"
+  //     from "forgot to set it", and carving out an exception for the former
+  //     would reopen this exact bridging hole for old runs still inside the
+  //     fetch horizon.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('#1605 — a mode-less scheduled night on the credential lane disqualifies, never skips', () => {
+    /** A resolved ledger that never claimed credential — no mode at all. */
+    function modeLessNight(over: Record<string, unknown> = {}) {
+      return night({
+        compatMode: null,
+        credential: false,
+        knextRef: null,
+        knextSha: null,
+        ...over,
+      });
+    }
+
+    it('does NOT merge the streaks either side of it (rule-5 shape, one level up)', () => {
+      const before = streakOf(2, 'sha256:aaaa', 40000000000);
+      const after = streakOf(2, 'sha256:aaaa', 41000000000);
+
+      // The bug, stated as the contrast that makes it visible: with the
+      // mode-less night simply dropped before grading, four nights on one
+      // fingerprint look like one streak.
+      const silentlyDropped = auditWindow(
+        [...before, ...after].filter((l) => (l as { runId: string }).runId !== '40500000000'),
+      );
+      expect(silentlyDropped.longest.nights).toBe(4);
+
+      // With the mode-less night RECORDED and graded, the streak is honestly 2.
+      const honest = auditWindow([
+        ...before,
+        modeLessNight({ runId: '40500000000', windowFingerprint: 'sha256:aaaa' }),
+        ...after,
+      ]);
+      expect(honest.longest.nights).toBe(2);
+      expect(honest.streaks).toHaveLength(2);
+      expect(honest.streaks[1].restartCause).toBe('night-disqualified');
+      expect(honest.current.nights).toBe(2);
+    });
+
+    it('13 green + 30 mode-less + 1 green is met=false, not the 14-night bridge on origin/main', () => {
+      let id = 40000000000;
+      const ledgers = [
+        ...Array.from({ length: 13 }, () =>
+          night({ runId: String(id++), windowFingerprint: 'sha256:aaaa' }),
+        ),
+        ...Array.from({ length: 30 }, () =>
+          modeLessNight({ runId: String(id++), windowFingerprint: 'sha256:aaaa' }),
+        ),
+        night({ runId: String(id++), windowFingerprint: 'sha256:aaaa' }),
+      ];
+      const a = auditWindow(ledgers, { lane: 'node' });
+      expect(a.nights).toHaveLength(13 + 30 + 1);
+      const modeLessGraded = a.nights.slice(13, 43);
+      expect(modeLessGraded.every((n: { eligible: boolean }) => n.eligible === false)).toBe(true);
+      expect(
+        modeLessGraded.every((n: { disqualifiers: string[] }) =>
+          hasReason(n, 'not-a-credential-run'),
+        ),
+      ).toBe(true);
+      expect(a.longest.nights).toBe(13);
+      expect(a.current.nights).toBe(1);
+      expect(a.met).toBe(false);
+    });
+
+    it('an EXPLICIT early-warning night, by contrast, stays excluded — not a disqualifier', () => {
+      const nights14 = streakOf(14, 'sha256:aaaa');
+      const withEarlyWarning = [
+        ...nights14.slice(0, 7),
+        night({
+          runId: '40006500000',
+          windowFingerprint: 'sha256:aaaa',
+          compatMode: 'early-warning',
+          credential: false,
+          knextRef: 'refs/heads/main',
+        }),
+        ...nights14.slice(7),
+      ];
+      const a = auditWindow(withEarlyWarning, { lane: 'node' });
+      // Unlike the mode-less case above, the early-warning night never enters
+      // `nights` at all — it is filtered out before grading, exactly like a
+      // bun weekly is, so it neither breaks nor advances the credential streak.
+      expect(a.nights).toHaveLength(14);
+      expect(a.met).toBe(true);
+    });
+
+    it('a pre-ADR-0056 ledger (no `compatMode` KEY at all, not merely null) is graded the same way', () => {
+      const full = night();
+      const { compatMode: _cm, credential: _cr, knextRef: _kr, knextSha: _ks, ...legacy } = full;
+      const selected = selectLaneNights([legacy], 'node', 'credential');
+      expect(selected).toHaveLength(1);
+      const graded = gradeNight(selected[0], { lane: 'node', scope: 'credential' });
+      expect(graded.eligible).toBe(false);
+      expect(hasReason(graded, 'not-a-credential-run')).toBe(true);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
   // #1520 (raised from #1515) — an infra/deploy-classified shard red gets a
   // readable `deploy-classified:` label in the disqualifier text. Round 1 of
   // #1550 also graded such a night VOID (bridged over: neither counted nor a

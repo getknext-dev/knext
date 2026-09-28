@@ -342,14 +342,23 @@ describe('guard 1 — a main-ref night never advances a credential count', () =>
     ).toBe(true);
   });
 
-  it('a pre-#850 ledger (no mode, no ref) is not a credential night', () => {
+  it('a pre-#850 ledger (no mode, no ref) is not a credential night — and #1605: it disqualifies rather than vanishing', () => {
+    // Before #1605 this ledger was dropped by `selectLaneNights` before
+    // grading (`toHaveLength(0)`), which let it bridge over silently: a
+    // scheduled, lane-matched night with no mode is never "some other lane's
+    // night" the way a bun weekly or a dispatch run is — it stays IN this
+    // window's sequence and is graded ineligible, so it still disqualifies
+    // (and restarts) the streak instead of being invisible to it.
     const legacy = night({
       compatMode: undefined,
       credential: undefined,
       knextRef: undefined,
       knextSha: undefined,
     });
-    expect(selectLaneNights([legacy], 'node')).toHaveLength(0);
+    expect(selectLaneNights([legacy], 'node')).toHaveLength(1);
+    const g = gradeNight(legacy, { lane: 'node' });
+    expect(g.eligible).toBe(false);
+    expect(hasReason(g, 'not-a-credential-run')).toBe(true);
   });
 
   it('the early-warning scope reports main, and its report never says GATE MET', () => {
