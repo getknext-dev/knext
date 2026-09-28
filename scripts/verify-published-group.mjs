@@ -83,29 +83,95 @@ export const REACHABILITY_PROBE = 'npm';
 /** Thrown when the registry cannot be reached, so a 404 cannot be trusted. */
 export class RegistryUnreachableError extends Error {}
 
-/** Parse `x.y.z` (an optional leading v tolerated); null when not that shape. */
+/**
+ * Parse `x.y.z` or `x.y.z-<prerelease>` (an optional leading v tolerated);
+ * null when not that shape. `prerelease` is the dot-split identifier array
+ * (`[]` for a plain release), per the semver 2.0.0 grammar.
+ */
 export function parseSemver(version) {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(String(version).trim());
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(
+    String(version).trim(),
+  );
   if (!m) return null;
-  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+  return {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+    prerelease: m[4] ? m[4].split('.') : [],
+  };
 }
 
 /**
- * Caret satisfaction for plain `^x.y.z` ranges — npm's rule: same major (same
- * minor when major is 0, same patch when both are 0), and >= the floor.
- * Deliberately NOT a general semver engine: a workspace sibling range is always
- * a caret over a release, and any other shape must fail closed.
+ * Compare two semver prerelease-identifier arrays per semver 2.0.0 §11: a
+ * numeric identifier compares numerically and always has LOWER precedence
+ * than an alphanumeric one at the same position; a shorter list with all
+ * equal leading identifiers has lower precedence; NO prerelease (a release)
+ * has HIGHER precedence than any prerelease of the same major.minor.patch —
+ * `1.0.0` outranks `1.0.0-rc.1`.
+ * @returns {-1|0|1}
+ */
+function comparePrerelease(a, b) {
+  if (a.length === 0 && b.length === 0) return 0;
+  if (a.length === 0) return 1;
+  if (b.length === 0) return -1;
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] === undefined) return -1;
+    if (b[i] === undefined) return 1;
+    const aNum = /^\d+$/.test(a[i]);
+    const bNum = /^\d+$/.test(b[i]);
+    if (aNum && bNum) {
+      const cmp = Number(a[i]) - Number(b[i]);
+      if (cmp !== 0) return cmp < 0 ? -1 : 1;
+      continue;
+    }
+    if (aNum !== bNum) return aNum ? -1 : 1;
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+/** Full precedence compare of two parsed semvers (major.minor.patch, then prerelease). @returns {-1|0|1} */
+function compareSemver(a, b) {
+  if (a.major !== b.major) return a.major < b.major ? -1 : 1;
+  if (a.minor !== b.minor) return a.minor < b.minor ? -1 : 1;
+  if (a.patch !== b.patch) return a.patch < b.patch ? -1 : 1;
+  return comparePrerelease(a.prerelease, b.prerelease);
+}
+
+/**
+ * Caret satisfaction for `^x.y.z` and `^x.y.z-<prerelease>` ranges — npm's
+ * rule: same major (same minor when major is 0, same patch when both are 0),
+ * and >= the floor. Prerelease-aware (rc.1/rc.2/1.0.0-rc.N shapes, added for
+ * the v1.0.0-rc.1 release lane, #1591 round 2): per semver 2.0.0 §9, a
+ * PRERELEASE version only satisfies a range when the range's floor is ITSELF
+ * a prerelease of the SAME major.minor.patch — a bare `^1.0.0` must never
+ * silently accept `1.0.0-rc.1`. A plain release version is unaffected and
+ * follows ordinary caret bounds exactly as before. Deliberately NOT a general
+ * semver engine: a workspace sibling range is always a caret over a release
+ * (or, now, an rc) version, and any other shape must fail closed.
  */
 export function caretSatisfies(range, version) {
-  const m = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(String(range).trim());
+  const m = /^\^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(
+    String(range).trim(),
+  );
   const v = parseSemver(version);
   if (!m || !v) return false;
-  const floor = { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+  const floor = {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+    prerelease: m[4] ? m[4].split('.') : [],
+  };
+  if (v.prerelease.length > 0) {
+    const sameTuple =
+      v.major === floor.major && v.minor === floor.minor && v.patch === floor.patch;
+    if (!sameTuple || floor.prerelease.length === 0) return false;
+  }
   if (v.major !== floor.major) return false;
   if (floor.major === 0 && v.minor !== floor.minor) return false;
   if (floor.major === 0 && floor.minor === 0 && v.patch !== floor.patch) return false;
-  const cmp = v.major - floor.major || v.minor - floor.minor || v.patch - floor.patch;
-  return cmp >= 0;
+  return compareSemver(v, floor) >= 0;
 }
 
 /**
@@ -176,10 +242,11 @@ export function fixedGroupProblems(manifests, fixedGroup) {
         if (!dep.startsWith(SIBLING_SCOPE) && !fixedGroup.includes(dep)) continue;
         const sibling = byName.get(dep);
         if (!sibling) continue; // presence already reported in (1)
-        if (!/^\^\d+\.\d+\.\d+$/.test(String(range).trim())) {
+        if (!/^\^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(String(range).trim())) {
           problems.push(
             `${manifest.name}@${manifest.version} ${group} on ${dep} has range '${range}', which this ` +
-              'gate cannot vouch for (expected ^x.y.z) — a surviving workspace: spec or unexpected shape',
+              'gate cannot vouch for (expected ^x.y.z or ^x.y.z-<prerelease>) — a surviving ' +
+              'workspace: spec or unexpected shape',
           );
           continue;
         }

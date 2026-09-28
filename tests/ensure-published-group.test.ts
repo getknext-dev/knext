@@ -6,6 +6,7 @@ import {
   GroupStillIncoherentError,
   isAlreadyPublishedConflict,
   pollResolves,
+  prereleaseDistTag,
   RegistryUnreachableError,
 } from '../scripts/ensure-published-group.mjs';
 
@@ -498,5 +499,30 @@ describe('fixedGroupVersionMismatches — #1364 finding 2: a fixed group must ac
     versionByName.set('@getknext/db', '0.5.1');
     const mismatches = fixedGroupVersionMismatches(MEMBERS, versionByName, TARGET);
     expect(mismatches.map((m) => m.name).sort()).toEqual(['@getknext/db', '@getknext/lib']);
+  });
+});
+
+// #1591 round 2 (M1) — npm >= 11 refuses `npm publish` for a prerelease with
+// no `--tag`. The heal path must derive that tag from the version itself.
+describe('prereleaseDistTag — derives the npm dist-tag from the version, never hard-codes it', () => {
+  it('extracts the first prerelease identifier as the tag (rc.1 -> rc)', () => {
+    expect(prereleaseDistTag('1.0.0-rc.1')).toBe('rc');
+  });
+
+  it('a later rc of the same tuple still derives the same tag', () => {
+    expect(prereleaseDistTag('1.0.0-rc.2')).toBe('rc');
+  });
+
+  it('is null for a plain (non-prerelease) release — publish keeps defaulting to latest', () => {
+    expect(prereleaseDistTag('1.0.0')).toBeNull();
+    expect(prereleaseDistTag('0.4.3')).toBeNull();
+  });
+
+  it('handles a different prerelease identifier, not just "rc"', () => {
+    expect(prereleaseDistTag('2.1.0-beta.3')).toBe('beta');
+  });
+
+  it('is null for an unparseable version rather than guessing', () => {
+    expect(prereleaseDistTag('not-a-version')).toBeNull();
   });
 });

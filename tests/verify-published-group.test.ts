@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  caretSatisfies,
   fixedGroupProblems,
+  parseSemver,
   POST_POLL_MAX_MS,
   pollViewVersion,
   RegistryUnreachableError,
@@ -21,6 +23,14 @@ import {
  * The pure decision logic is unit-tested here without a network or a real
  * publish; the script wires it to `npm pack` (pre) and `npm view` (post).
  */
+
+type Manifest = {
+  name: string;
+  version: string;
+  dependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+};
 
 describe('workspaceProtocolProblems — the leak that shipped 0.4.0', () => {
   it('flags any dep group still carrying a workspace: spec', () => {
@@ -106,6 +116,94 @@ describe('fixedGroupProblems — the packed set must be internally coherent', ()
       m.name === '@getknext/db' ? { ...m, dependencies: { '@getknext/lib': 'workspace:^' } } : m,
     );
     expect(fixedGroupProblems(leak, fixed).length).toBeGreaterThan(0);
+  });
+
+  // #1591 round 2 (B2) — verify-published-group's own `--pre` gate rejected
+  // every prerelease edge, including kn-next -> @getknext/core, with "expected
+  // ^x.y.z". Same fixed-group shape, all four members on an rc, every sibling
+  // dep pinned to the RELEASED floor `^1.0.0-rc.1`.
+  const rcGroup = (version: string): Manifest[] => [
+    { name: '@getknext/lib', version, dependencies: {} },
+    { name: '@getknext/db', version, dependencies: { '@getknext/lib': '^1.0.0-rc.1' } },
+    {
+      name: '@getknext/core',
+      version,
+      dependencies: { '@getknext/lib': '^1.0.0-rc.1', '@getknext/db': '^1.0.0-rc.1' },
+    },
+    { name: 'kn-next', version, dependencies: { '@getknext/core': '^1.0.0-rc.1' } },
+  ];
+
+  describe('prerelease caret semantics (rc.1/rc.2/1.0.0)', () => {
+    it('passes a coherent rc.1 fixed group pinned to ^1.0.0-rc.1', () => {
+      expect(fixedGroupProblems(rcGroup('1.0.0-rc.1'), fixed)).toEqual([]);
+    });
+
+    it('passes a coherent rc.2 fixed group against the same rc.1 floor (a later rc)', () => {
+      expect(fixedGroupProblems(rcGroup('1.0.0-rc.2'), fixed)).toEqual([]);
+    });
+
+    it('passes the final 1.0.0 fixed group against the rc.1 floor (the GA cutover)', () => {
+      expect(fixedGroupProblems(rcGroup('1.0.0'), fixed)).toEqual([]);
+    });
+
+    it('still flags an EARLIER rc than the pinned floor', () => {
+      expect(fixedGroupProblems(rcGroup('1.0.0-rc.0'), fixed).length).toBeGreaterThan(0);
+    });
+  });
+});
+
+describe('caretSatisfies / parseSemver — prerelease-aware caret matching (#1591 round 2, B2)', () => {
+  it('parses a plain release with an empty prerelease array', () => {
+    expect(parseSemver('1.0.0')).toEqual({ major: 1, minor: 0, patch: 0, prerelease: [] });
+  });
+
+  it('parses a dotted prerelease into identifiers', () => {
+    expect(parseSemver('1.0.0-rc.1')).toEqual({
+      major: 1,
+      minor: 0,
+      patch: 0,
+      prerelease: ['rc', '1'],
+    });
+  });
+
+  it('rejects a malformed version', () => {
+    expect(parseSemver('not-a-version')).toBeNull();
+    expect(parseSemver('1.0')).toBeNull();
+  });
+
+  it('^1.0.0-rc.1 is satisfied by its own floor', () => {
+    expect(caretSatisfies('^1.0.0-rc.1', '1.0.0-rc.1')).toBe(true);
+  });
+
+  it('^1.0.0-rc.1 is satisfied by a LATER rc of the same tuple', () => {
+    expect(caretSatisfies('^1.0.0-rc.1', '1.0.0-rc.2')).toBe(true);
+  });
+
+  it('^1.0.0-rc.1 is satisfied by the final release (rc precedes its own release)', () => {
+    expect(caretSatisfies('^1.0.0-rc.1', '1.0.0')).toBe(true);
+  });
+
+  it('^1.0.0-rc.2 is NOT satisfied by the earlier rc.1', () => {
+    expect(caretSatisfies('^1.0.0-rc.2', '1.0.0-rc.1')).toBe(false);
+  });
+
+  it('^1.0.0-rc.1 is NOT satisfied by a prerelease of a different tuple', () => {
+    expect(caretSatisfies('^1.0.0-rc.1', '1.0.1-rc.1')).toBe(false);
+  });
+
+  it('a bare ^1.0.0 floor (no prerelease) never accepts a prerelease version', () => {
+    expect(caretSatisfies('^1.0.0', '1.0.0-rc.1')).toBe(false);
+  });
+
+  it('^1.0.0-rc.1 still respects the ordinary major upper bound', () => {
+    expect(caretSatisfies('^1.0.0-rc.1', '2.0.0')).toBe(false);
+    expect(caretSatisfies('^1.0.0-rc.1', '1.5.0')).toBe(true);
+  });
+
+  it('unaffected release-only behaviour is unchanged (regression guard)', () => {
+    expect(caretSatisfies('^0.4.0', '0.4.3')).toBe(true);
+    expect(caretSatisfies('^0.4.0', '0.5.0')).toBe(false);
+    expect(caretSatisfies('^1.2.0', '1.3.0')).toBe(true);
   });
 });
 

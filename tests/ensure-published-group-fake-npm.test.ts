@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -68,6 +68,8 @@ if (argv[0] === 'view') {
 }
 
 if (argv[0] === 'publish') {
+  const argvStatePath = process.env.FAKE_NPM_PUBLISH_ARGV_STATE;
+  if (argvStatePath) writeFileSync(argvStatePath, JSON.stringify(argv));
   const mode = process.env.FAKE_NPM_PUBLISH_MODE ?? 'success';
   if (mode === 'success') {
     process.stdout.write('+ fake-package@0.0.0\\n');
@@ -216,6 +218,44 @@ describe('npmPublish — real spawnSync stderr capture feeds isAlreadyPublishedC
       expect(result.ok).toBe(true);
     } finally {
       delete process.env.FAKE_NPM_PUBLISH_MODE;
+    }
+  });
+
+  // #1591 round 2 (M1) — npm >= 11 refuses a prerelease publish with no
+  // `--tag`. Prove the REAL argv `npmPublish` spawns actually carries it (a
+  // pure-logic test cannot see this — it never spawns a process).
+  it('forwards --tag <tag> to the real npm invocation when a tag is given', () => {
+    process.env.FAKE_NPM_PUBLISH_MODE = 'success';
+    const state = mkdtempSync(join(tmpdir(), 'knext-fake-npm-argv-'));
+    const argvPath = join(state, 'argv.json');
+    process.env.FAKE_NPM_PUBLISH_ARGV_STATE = argvPath;
+    try {
+      const result = npmPublish(pkgDir, 'http://127.0.0.1:1/', 'rc');
+      expect(result.ok).toBe(true);
+      const argv = JSON.parse(readFileSync(argvPath, 'utf8'));
+      expect(argv).toContain('--tag');
+      expect(argv[argv.indexOf('--tag') + 1]).toBe('rc');
+    } finally {
+      delete process.env.FAKE_NPM_PUBLISH_MODE;
+      delete process.env.FAKE_NPM_PUBLISH_ARGV_STATE;
+      rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  it('omits --tag entirely for a stable release (no tag given) — npm keeps defaulting to latest', () => {
+    process.env.FAKE_NPM_PUBLISH_MODE = 'success';
+    const state = mkdtempSync(join(tmpdir(), 'knext-fake-npm-argv-'));
+    const argvPath = join(state, 'argv.json');
+    process.env.FAKE_NPM_PUBLISH_ARGV_STATE = argvPath;
+    try {
+      const result = npmPublish(pkgDir, 'http://127.0.0.1:1/');
+      expect(result.ok).toBe(true);
+      const argv = JSON.parse(readFileSync(argvPath, 'utf8'));
+      expect(argv).not.toContain('--tag');
+    } finally {
+      delete process.env.FAKE_NPM_PUBLISH_MODE;
+      delete process.env.FAKE_NPM_PUBLISH_ARGV_STATE;
+      rmSync(state, { recursive: true, force: true });
     }
   });
 });
