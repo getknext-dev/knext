@@ -2,7 +2,7 @@
 /**
  * Mutation proof for #1562's version-shape logic in
  * `scripts/lib/ga-tarball-diff.mjs`: `parseRcVersion`, `validateVersionBump`,
- * and `shouldRunGaTarballDiffGate`.
+ * and `decideGaTarballDiffGate`.
  *
  * WHY THIS NEEDS PROVING SEPARATELY FROM THE #1306 CONTENT-DIFF TESTS
  * --------------------------------------------------------------------
@@ -17,7 +17,7 @@
  * either never running (false negative — a real GA-vs-rc drift ships
  * unnoticed) or running on every mid-window rc bump (false positive — it
  * reds on every ordinary feature landing during the credential window,
- * which is precisely the failure mode `shouldRunGaTarballDiffGate`'s own
+ * which is precisely the failure mode `decideGaTarballDiffGate`'s own
  * header explains it exists to avoid).
  *
  * DISCIPLINE (`.claude/rules/workflow.md`): exit codes only; green baseline; a
@@ -70,50 +70,89 @@ const MUTATIONS = [
     id: 'M4',
     expect: 'red',
     claim:
-      "shouldRunGaTarballDiffGate's identical-target shortcut is removed — the credentialed rc's " +
-      "own first publish (target === rcTag's version) would fall through to the GA-cut check and " +
-      'report SKIP, so the gate never proves the one publish it is guaranteed to see',
+      "decideGaTarballDiffGate's prerelease SKIP is removed — an rc target would fall through to " +
+      'the tag lookup and be judged as if it were a GA cut',
     subject: 'lib',
-    anchor: 'if (targetVersion === rcVersion) {',
+    anchor: 'if (!GA_VERSION_RE.test(targetVersion)) {',
     replacement: 'if (false) {',
   },
   {
     id: 'M5',
     expect: 'red',
     claim:
-      "shouldRunGaTarballDiffGate's GA-cut detection is removed — a real GA cut (empty prerelease " +
-      'id) would fall through to the default SKIP branch, silently letting the #1306 transition ' +
-      'this whole check exists for go ungated',
+      'the empty-tag-list FAIL is removed — a tagless/shallow checkout would read "no rc tag found" ' +
+      'as "not credentialed" and SKIP the 1.0.0 cut instead of failing closed',
     subject: 'lib',
-    anchor: 'if (GA_VERSION_RE.test(targetVersion)) {',
+    anchor: 'if (gitTags.length === 0) {',
     replacement: 'if (false) {',
   },
   {
     id: 'M6',
     expect: 'red',
     claim:
-      "shouldRunGaTarballDiffGate's default is flipped from SKIP to RUN — every ordinary mid-window " +
-      'rc bump (rc.2, rc.3, ... while rcTag still names rc.1) would then be content-diffed, which ' +
-      'reds the release lane on every routine feature landing during the credential window',
+      'the highest rc is chosen LEXICALLY instead of numerically — rc.9 would outrank rc.10 and the ' +
+      'GA would be diffed against a superseded candidate',
     subject: 'lib',
-    anchor: 'run: false,',
-    replacement: 'run: true,',
+    anchor: 'if (highest === null || n > highest.n) highest = { tag, n };',
+    replacement: 'if (highest === null || tag > highest.tag) highest = { tag, n };',
+  },
+  {
+    id: 'M7',
+    expect: 'red',
+    claim:
+      'the ambiguous-credential FAIL is removed — rcTag pinned at rc.1 while rc.2 exists would ' +
+      'silently diff against rc.2, a candidate the credential may never have measured',
+    subject: 'lib',
+    anchor: 'if (pinnedSameTuple && pinnedRcTag !== highest.tag) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'M8',
+    expect: 'red',
+    claim:
+      'the ambiguity check loses its same-tuple scoping — a pin on the NEXT window (v1.1.0-rc.1) ' +
+      'would wrongly block the 1.0.0 GA',
+    subject: 'lib',
+    anchor: 'const pinnedSameTuple = pinnedRcTag?.startsWith(tagPrefix) === true;',
+    replacement: 'const pinnedSameTuple = pinnedRcTag !== null;',
+  },
+  {
+    id: 'M9',
+    expect: 'red',
+    claim:
+      'a GA with no rc tag for its own tuple FAILS instead of skipping — every post-GA release ' +
+      '(1.0.1, 1.1.0, 2.0.0, 0.4.4) would be blocked, the round-1 defect this replaces',
+    subject: 'lib',
+    anchor: "if (highest === null) {\n    return {\n      action: 'skip',",
+    replacement: "if (highest === null) {\n    return {\n      action: 'fail',",
+  },
+  {
+    id: 'M10',
+    expect: 'red',
+    claim:
+      'the rc-tag pattern loses its end anchor — a look-alike tag (v11.0.0-rc.1-foo) would count as ' +
+      'a release candidate for 11.0.0',
+    subject: 'lib',
+    anchor: '(0|[1-9]\\\\d*)$`);',
+    replacement: '(0|[1-9]\\\\d*)`);',
   },
 ];
 
 /**
- * NEGATIVE CONTROL. The trailing clause of the SKIP reason is prose, asserted
- * nowhere byte-for-byte (the spec only checks `.toContain('mid-window rc
- * bump')`). Rewording it must leave the guard GREEN, or the six reds above
- * are equally explained by a text assertion rather than by behaviour.
+ * NEGATIVE CONTROL. The ambiguous-credential reason's trailing clause is
+ * prose, asserted nowhere byte-for-byte (the spec only matches /ambiguous/
+ * and the two tag names). Rewording it must leave the guard GREEN, or the
+ * reds above are equally explained by a text assertion rather than behaviour.
  */
 const NEGATIVE = {
-  id: 'M7',
+  id: 'M11',
   expect: 'green',
-  claim: "the SKIP reason's trailing clause is reworded — the spec asserts behaviour, not prose",
+  claim:
+    "the ambiguity reason's trailing clause is reworded — the spec asserts behaviour, not prose",
   subject: 'lib',
-  anchor: "'is not gated by this check',",
-  replacement: "'is not gated by this particular check (reworded by the negative control).',",
+  anchor:
+    "'either credential the highest rc (and pin it) or explain the later tag before cutting GA',",
+  replacement: "'pin the highest rc or explain the later tag (reworded by the negative control)',",
 };
 
 const ALL = [...MUTATIONS, NEGATIVE];

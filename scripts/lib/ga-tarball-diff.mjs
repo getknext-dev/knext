@@ -109,7 +109,7 @@ export function parseRcVersion(version) {
  *      (`fromVersion` is `rc.N`, `toVersion` is `rc.M`, `M > N`). This
  *      function only judges the SHAPE; whether that later rc's CONTENT
  *      actually differs only in version fields is a separate question a mid-
- *      window rc bump is expected to fail (see `shouldRunGaTarballDiffGate`,
+ *      window rc bump is expected to fail (see `decideGaTarballDiffGate`,
  *      which is deliberately narrower — it does not treat every shape this
  *      function accepts as something the release gate should attempt).
  *
@@ -163,44 +163,89 @@ export function validateVersionBump(fromVersion, toVersion) {
 }
 
 /**
- * Should `release.yml`'s publish-blocking gate (#1562) attempt a full
- * content diff for THIS publish, given the credentialed rc's bare version and
- * the version about to ship?
+ * Should `release.yml`'s publish-blocking gate (#1562) diff THIS publish, and
+ * if so against which rc tag?
  *
- * Deliberately NARROWER than `validateVersionBump`'s shape check: a
- * mid-window rc bump (`rc.N -> rc.M`, `M > N`, not identical) is a VALID
- * shape but is EXPECTED to carry real code changes relative to the
- * credentialed rc — that is the entire point of cutting further rcs during
- * the credential window (#1591's changesets pre-mode auto-bumps `rc.N` on
- * every merge with a pending changeset). Running the "differs only in
- * version fields" content diff against an ordinary mid-window bump would red
- * on every routine feature landing during the sprint, which is not the
- * defect #1306 exists to catch. The content diff applies to exactly two
- * transitions:
+ * KEYED ON GIT TAGS, NOT ON `rcTag` (#1562 round 2). `rcTag` in
+ * `.github/compat-credential-ref.json` is the credential window's LIVE pin
+ * (ADR-0056) and is legitimately cleared when a window closes — which is
+ * exactly when the GA cut happens. Keying on it made the gate a green no-op
+ * for the one publish it exists for (1.0.0 after the window closed), and,
+ * while still set, blocked every later release (1.0.1, 1.1.0, ...) with a
+ * version-shape failure. So:
  *
- *   - a GA cut (`targetVersion` has no prerelease id) — the #1306 transition
- *     itself.
- *   - re-publishing/confirming the EXACT version `rcVersion` already names
- *     (the credentialed rc's own publish) — trivially must be clean, and
- *     worth proving rather than silently skipping.
+ *   - PRERELEASE target (any prerelease id) — SKIP by design. A later rc is
+ *     expected to carry real changes relative to an earlier one; that is the
+ *     point of cutting it.
+ *   - GA target `X.Y.Z` with NO `vX.Y.Z-rc.N` git tag — SKIP: no release
+ *     candidate was cut for X.Y.Z, so this release is not claimed as
+ *     credentialed. Never blocks it (1.0.1, 1.1.0, 2.0.0, 0.4.4 ...).
+ *   - GA target `X.Y.Z` WITH `vX.Y.Z-rc.N` tags — RUN against the HIGHEST N
+ *     (numeric, so rc.10 > rc.9): the last rc is the candidate the credential
+ *     window ends on.
+ *   - ...unless `pinnedRcTag` names a DIFFERENT `vX.Y.Z-rc.*` than that
+ *     highest tag — FAIL: the credential is ambiguous (was rc.1 credentialed
+ *     and rc.2 cut afterwards?). A pin on another tuple (the next window
+ *     already open) is irrelevant to this GA.
+ *   - An EMPTY tag list — FAIL closed. The repo has always had tags; zero
+ *     means a tagless/shallow checkout, and "no rc tag found" from a
+ *     checkout that cannot see tags must never read as "not credentialed".
  *
- * @param {string} rcVersion the credentialed rc's bare version (rcTag, no leading "v")
- * @param {string} targetVersion the version about to be published
- * @returns {{ run: boolean, reason: string }}
+ * @param {{ targetVersion: string, pinnedRcTag: string | null, gitTags: string[] }} input
+ * @returns {{ action: 'run', rcTag: string, reason: string } | { action: 'skip' | 'fail', reason: string }}
  */
-export function shouldRunGaTarballDiffGate(rcVersion, targetVersion) {
-  if (targetVersion === rcVersion) {
-    return { run: true, reason: 'target version is identical to the credentialed rc' };
+export function decideGaTarballDiffGate({ targetVersion, pinnedRcTag, gitTags }) {
+  if (!GA_VERSION_RE.test(targetVersion)) {
+    return {
+      action: 'skip',
+      reason:
+        `target ${JSON.stringify(targetVersion)} is a prerelease — only a GA cut is diffed ` +
+        'against its release candidate; a later rc is expected to carry real changes',
+    };
   }
-  if (GA_VERSION_RE.test(targetVersion)) {
-    return { run: true, reason: 'target version has no prerelease id (a GA cut)' };
+  if (gitTags.length === 0) {
+    return {
+      action: 'fail',
+      reason:
+        'no git tags are visible in this checkout — it is tagless or shallow, so "was a release ' +
+        `candidate cut for ${targetVersion}?" cannot be answered (fail closed, never a skip)`,
+    };
   }
+
+  const tagPrefix = `v${targetVersion}-rc.`;
+  const rcTagRe = new RegExp(`^${escapeRegExp(tagPrefix)}(0|[1-9]\\d*)$`);
+  let highest = null;
+  for (const tag of gitTags) {
+    const m = rcTagRe.exec(tag);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (highest === null || n > highest.n) highest = { tag, n };
+  }
+
+  if (highest === null) {
+    return {
+      action: 'skip',
+      reason:
+        `no release candidate was cut for ${targetVersion} — this release is not claimed as ` +
+        `credentialed (no ${tagPrefix}N git tag exists)`,
+    };
+  }
+
+  const pinnedSameTuple = pinnedRcTag?.startsWith(tagPrefix) === true;
+  if (pinnedSameTuple && pinnedRcTag !== highest.tag) {
+    return {
+      action: 'fail',
+      reason:
+        `ambiguous credential: .github/compat-credential-ref.json pins rcTag=${JSON.stringify(pinnedRcTag)} ` +
+        `but the highest release candidate cut for ${targetVersion} is ${JSON.stringify(highest.tag)} — ` +
+        'either credential the highest rc (and pin it) or explain the later tag before cutting GA',
+    };
+  }
+
   return {
-    run: false,
-    reason:
-      `target ${JSON.stringify(targetVersion)} is a prerelease other than the credentialed rc ` +
-      `${JSON.stringify(rcVersion)} — a mid-window rc bump is expected to carry real changes and ` +
-      'is not gated by this check',
+    action: 'run',
+    rcTag: highest.tag,
+    reason: `GA cut of ${targetVersion}; diffing against its highest release candidate ${highest.tag}`,
   };
 }
 

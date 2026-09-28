@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main, readCredentialRcTag, readTargetVersion } from '../scripts/ga-tarball-diff-gate.mjs';
@@ -95,72 +95,98 @@ describe('readTargetVersion', () => {
   });
 });
 
-describe('main', () => {
-  it('is a NO-OP (exit 0) and never invokes the diff when rcTag is null', () => {
-    const root = buildFixtureRoot({ rcTag: null, packages: trio('1.0.0-rc.1') });
+describe('main — every outcome is announced, never a silent green', () => {
+  const tagsRc12 = ['v0.1.0', 'v1.0.0-rc.1', 'v1.0.0-rc.2'];
+
+  function runMain(opts: {
+    rcTag: string | null;
+    version: string;
+    tags: string[];
+    diffExit?: number;
+  }) {
+    const root = buildFixtureRoot({ rcTag: opts.rcTag, packages: trio(opts.version) });
+    const summaryPath = join(root, 'step-summary.md');
     const logs: string[] = [];
-    let diffCalled = false;
+    let capturedArgv: string[] | undefined;
     const code = main({
       repoRoot: root,
       log: (...args: unknown[]) => {
         logs.push(String(args[0]));
       },
-      runDiff: () => {
-        diffCalled = true;
-        return 0;
+      runDiff: (argv: string[]) => {
+        capturedArgv = argv;
+        return opts.diffExit ?? 0;
       },
+      listGitTags: () => opts.tags,
+      summaryPath,
     });
-    expect(code).toBe(0);
-    expect(diffCalled).toBe(false);
-    expect(logs.join('\n')).toContain('NO-OP');
+    const summary = existsSync(summaryPath) ? readFileSync(summaryPath, 'utf8') : '';
+    return { code, out: logs.join('\n'), capturedArgv, summary };
+  }
+
+  it('GA 1.0.0 with rc tags -> RUNS against the HIGHEST rc tag vs HEAD, propagating the diff exit', () => {
+    const r = runMain({ rcTag: 'v1.0.0-rc.2', version: '1.0.0', tags: tagsRc12, diffExit: 1 });
+    expect(r.code).toBe(1);
+    expect(r.capturedArgv).toEqual(['--rc-ref', 'v1.0.0-rc.2', '--ga-ref', 'HEAD']);
+    expect(r.out).toContain('::notice');
+    expect(r.summary).toContain('RUN');
+    expect(r.summary).toContain('FAIL');
   });
 
-  it('SKIPS (exit 0, no diff invoked) an ordinary mid-window rc bump', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.1', packages: trio('1.0.0-rc.2') });
+  it('GA 1.0.0 with rcTag CLEARED (window closed) -> still RUNS, and a clean diff is recorded as PASS', () => {
+    const r = runMain({ rcTag: null, version: '1.0.0', tags: tagsRc12, diffExit: 0 });
+    expect(r.code).toBe(0);
+    expect(r.capturedArgv).toEqual(['--rc-ref', 'v1.0.0-rc.2', '--ga-ref', 'HEAD']);
+    expect(r.summary).toContain('RUN');
+    expect(r.summary).toContain('PASS');
+  });
+
+  it('rcTag pinned at rc.1 while rc.2 exists -> FAILS (exit 1) with ::error and never diffs', () => {
+    const r = runMain({ rcTag: 'v1.0.0-rc.1', version: '1.0.0', tags: tagsRc12 });
+    expect(r.code).toBe(1);
+    expect(r.capturedArgv).toBeUndefined();
+    expect(r.out).toContain('::error');
+    expect(r.summary).toContain('FAIL');
+  });
+
+  for (const version of ['1.0.1', '1.1.0', '2.0.0', '0.4.4']) {
+    it(`GA ${version} after 1.0.0 (rcTag still pinned) -> SKIPS with a notice + summary, never blocks`, () => {
+      const r = runMain({ rcTag: 'v1.0.0-rc.2', version, tags: tagsRc12 });
+      expect(r.code).toBe(0);
+      expect(r.capturedArgv).toBeUndefined();
+      expect(r.out).toContain('::notice');
+      expect(r.out).toContain(`no release candidate was cut for ${version}`);
+      expect(r.summary).toContain('SKIP');
+      expect(r.summary).toContain('not claimed as credentialed');
+    });
+  }
+
+  it('a prerelease -> SKIPS with a notice + summary', () => {
+    const r = runMain({ rcTag: 'v1.0.0-rc.1', version: '1.0.0-rc.2', tags: tagsRc12 });
+    expect(r.code).toBe(0);
+    expect(r.capturedArgv).toBeUndefined();
+    expect(r.out).toContain('::notice');
+    expect(r.summary).toContain('SKIP');
+  });
+
+  it('an unset GITHUB_STEP_SUMMARY (local run) still announces on stdout and does not crash', () => {
+    const root = buildFixtureRoot({ rcTag: null, packages: trio('1.0.1') });
     const logs: string[] = [];
-    let diffCalled = false;
     const code = main({
       repoRoot: root,
       log: (...args: unknown[]) => {
         logs.push(String(args[0]));
       },
-      runDiff: () => {
-        diffCalled = true;
-        return 0;
-      },
+      runDiff: () => 0,
+      listGitTags: () => tagsRc12,
+      summaryPath: undefined,
     });
     expect(code).toBe(0);
-    expect(diffCalled).toBe(false);
-    expect(logs.join('\n')).toContain('SKIP');
+    expect(logs.join('\n')).toContain('::notice');
   });
 
-  it('RUNS the diff for a GA cut, forwarding --rc-ref/--ga-ref HEAD, and propagates its exit code', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.3', packages: trio('1.0.0') });
-    let capturedArgv: string[] | undefined;
-    const code = main({
-      repoRoot: root,
-      log: () => {},
-      runDiff: (argv: string[]) => {
-        capturedArgv = argv;
-        return 1; // propagate a failing diff verbatim
-      },
-    });
-    expect(code).toBe(1);
-    expect(capturedArgv).toEqual(['--rc-ref', 'v1.0.0-rc.3', '--ga-ref', 'HEAD']);
-  });
-
-  it('RUNS the diff when the target is identical to the credentialed rc (first publish)', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.1', packages: trio('1.0.0-rc.1') });
-    let capturedArgv: string[] | undefined;
-    const code = main({
-      repoRoot: root,
-      log: () => {},
-      runDiff: (argv: string[]) => {
-        capturedArgv = argv;
-        return 0;
-      },
-    });
-    expect(code).toBe(0);
-    expect(capturedArgv).toEqual(['--rc-ref', 'v1.0.0-rc.1', '--ga-ref', 'HEAD']);
+  it('the default tag lister fails CLOSED outside a git repo (an unanswerable question is never a skip)', () => {
+    const root = buildFixtureRoot({ rcTag: null, packages: trio('1.0.0') });
+    expect(() => main({ repoRoot: root, log: () => {}, runDiff: () => 0 })).toThrow();
   });
 });

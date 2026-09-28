@@ -8,11 +8,12 @@
  * WHY: the v1.0 compatibility credential is a property of the `rc.N` tarballs
  * that were actually installed and exercised by the compat suite. Nothing
  * connects that measurement to what `npm publish` later ships under the GA
- * tag — if the GA tarball for `@getknext/core` (or `lib`/`db`) differs from
+ * tag — if the GA tarball for `@getknext/core` (or `lib`/`db`, or the unscoped
+ * `kn-next` npx alias, which is in the same changesets `fixed` group) differs from
  * its rc counterpart in anything beyond the version bump, the credential does
  * not cover the artifact users install. `scripts/ga-tarball-diff-gate.mjs` is
  * the `release.yml` wiring that decides WHEN to invoke this script; see that
- * file and `scripts/lib/ga-tarball-diff.mjs`'s `shouldRunGaTarballDiffGate`
+ * file and `scripts/lib/ga-tarball-diff.mjs`'s `decideGaTarballDiffGate`
  * for why a mid-window rc bump is deliberately NOT gated by it even though
  * this script itself will happily compare one (see `validateVersionBump`).
  *
@@ -68,7 +69,10 @@ import { publishablePackages, readWorkspaceManifests } from './publish-preflight
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
-// The scope is the PUBLISHED set (ADR-0020): @getknext/{lib,db,core}. Derived
+// The scope is the PUBLISHED set (ADR-0020): @getknext/{lib,db,core} AND the
+// unscoped `kn-next` npx alias (#1562 round 2 — it is in the changesets
+// `fixed` group and ships at GA; its `bin/` forwarder is exactly what
+// `npx kn-next` runs, so it must not drift from the rc undetected). Derived
 // from the workspace manifests, same helper `install-smoke.mjs` and
 // `audit-published.mjs` use, so a new publishable package is covered by
 // construction rather than needing to be added to a list here.
@@ -78,12 +82,7 @@ function publishedPackageNames() {
     readFileSync(join(repoRoot, '.changeset', 'config.json'), 'utf8'),
   );
   const ignore = Array.isArray(changesetConfig.ignore) ? changesetConfig.ignore : [];
-  // The npx alias (`kn-next`) is out of scope here — it ships no built code of
-  // its own (one forwarding shim), so it carries no embedded-version surface
-  // beyond its manifest, which the package.json rules already cover uniformly.
-  return publishablePackages(manifests, ignore)
-    .map((p) => p.name)
-    .filter((name) => name.startsWith('@getknext/'));
+  return publishablePackages(manifests, ignore).map((p) => p.name);
 }
 
 const registry = [];
@@ -185,6 +184,9 @@ function packRef(ref, label) {
       ['@getknext/db', join(worktreeDir, 'packages', 'db')],
       ['@getknext/core', join(worktreeDir, 'packages', 'kn-next')],
     ];
+    // The `kn-next` npx alias has no build step (it ships its source `bin/`
+    // forwarder verbatim) — packed, never built.
+    const packOnly = [['kn-next', join(worktreeDir, 'packages', 'kn-next-alias')]];
     const byName = new Map();
     let built = false;
     for (const [, pkgDir] of order) {
@@ -211,7 +213,7 @@ function packRef(ref, label) {
       });
     }
 
-    for (const [name, pkgDir] of order) {
+    for (const [name, pkgDir] of [...order, ...packOnly]) {
       if (!existsSync(pkgDir)) continue; // ref predates this package
       const packDest = mkdtempSync(join(tmpdir(), `knext-ga-diff-pack-${label}-`));
       registry.push(packDest);

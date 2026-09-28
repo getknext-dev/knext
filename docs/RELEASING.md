@@ -56,7 +56,7 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 | `audit` | — | — | npm supply-chain audit + SBOM. Publish-blocking. |
 | `version-pr` | **none** | **none** | opens/updates the "Version Packages" PR. Passes no `publish-script`, so it *cannot* publish. |
 | `publish-preflight` | none | none | runs `scripts/publish-preflight.mjs` — is any version in the tree absent from the registry? |
-| `ga-tarball-diff` | none | none | runs `scripts/ga-tarball-diff-gate.mjs` — see below. Publish-blocking. |
+| `ga-tarball-diff` | none | none | runs `scripts/ga-tarball-diff-gate.mjs` — a credentialed GA cut must differ from its last rc only in version fields; see below. Publish-blocking. |
 | `release` | `npm-publish` | `NODE_AUTH_TOKEN` | the only job that publishes. **Skipped** unless there are no pending changesets *and* something is genuinely unpublished. |
 
 `NPM_TOKEN` is an **environment secret on `npm-publish`** — not a repo secret, which is why a plain
@@ -94,29 +94,40 @@ Three layers now assert the tarball can scaffold, form-at-PR-time / value-at-run
 - **Stranger, against the live registry:** the `verify-scaffold-install.mjs` nightly runs the
   documented `npm exec --package=@getknext/core@latest -- kn-next create` quickstart.
 
-### The GA/rc tarball must differ from the credentialed rc ONLY in version fields
+### A credentialed GA must differ from its last rc ONLY in version fields
 
 The v1.0 compatibility credential is measured against a specific `rc.N` git tag's tarballs — the
 ones the compat suite actually installed and exercised for 14 nights. Nothing else connects that
-measurement to what `changeset publish` ships next. If the tarball published under a GA cut (or a
-re-publish of the exact credentialed rc) differs from that rc in anything beyond version fields,
-the credential does not cover the artifact users install.
+measurement to what `changeset publish` ships next. If the tarball published under the GA cut
+differs from that rc in anything beyond version fields, the credential does not cover the artifact
+users install.
 
 `scripts/ga-tarball-diff.mjs` (`scripts/lib/ga-tarball-diff.mjs` has the precise comparison rules)
-proves this: it packs both sides and fails on any delta that isn't a version field, a co-versioned
-`@getknext/*` sibling range, or the exact version string substituted wherever it is embedded in a
-built file's bytes. `scripts/ga-tarball-diff-gate.mjs` is the `release.yml` wiring that decides
-*when* to run it, reading `rcTag` from `.github/compat-credential-ref.json` (ADR-0056):
+proves this: it packs both sides — `@getknext/core`, `@getknext/lib`, `@getknext/db` **and the
+unscoped `kn-next` npx alias** (same `fixed` group, ships at GA) — and fails on any delta that
+isn't a version field, a co-versioned `@getknext/*` sibling range, or the exact version string
+substituted wherever it is embedded in a built file's bytes. `scripts/ga-tarball-diff-gate.mjs` is
+the `release.yml` wiring that decides *when* to run it, from the **git tags**, not from `rcTag` in
+`.github/compat-credential-ref.json` (which is the credential window's live pin and is cleared when
+the window closes — exactly when GA is cut):
 
-- **`rcTag` is `null`** (no rc credentialed yet) — the gate is a loudly-logged no-op. Never a
-  silent pass that could be mistaken for "the tarballs were compared and are clean."
-- **An ordinary mid-window rc bump** (e.g. `rc.2` while `rcTag` still names `rc.1`) — a deliberate
-  **skip**, also logged. A later rc is *expected* to carry real code changes relative to the
-  credentialed rc (that is the entire point of cutting further candidates before GA); gating that
-  transition would red the release lane on every routine feature landing during the credential
-  window.
-- **A GA cut, or a re-publish of the exact version `rcTag` already names** — the gate **runs** the
-  diff (`--rc-ref <rcTag> --ga-ref HEAD`) and blocks `release` on a non-zero exit.
+| target version | `vX.Y.Z-rc.N` tags for that `X.Y.Z` | outcome |
+| --- | --- | --- |
+| any prerelease (`1.0.0-rc.3`, `2.0.0-beta.0`) | — | **skip** by design — a later rc is *expected* to carry real changes |
+| GA `X.Y.Z` | none (e.g. `1.0.1`, `1.1.0`, `2.0.0`) | **skip** — "no release candidate was cut for X.Y.Z — this release is not claimed as credentialed". Never blocks the release. |
+| GA `X.Y.Z` | one or more | **run** — diff the **highest** `vX.Y.Z-rc.N` (numeric) against `HEAD`; a non-zero exit blocks `release` |
+| GA `X.Y.Z` | one or more, but `rcTag` pins a *different* `vX.Y.Z-rc.*` | **fail** — ambiguous credential |
+| GA, and the checkout sees no tags at all | — | **fail** closed (a tagless checkout cannot answer the question) |
+
+Every outcome is written to the job's step summary and annotated (`::notice::`/`::error::`), so a
+green `ga-tarball-diff` check that compared nothing is never mistaken for "compared and clean".
+
+**Ordering for a credentialed GA.** Closing the credential window (clearing `rcTag`) before or after
+merging the GA Version PR makes no difference to this gate — it keys on the tags. What matters: the
+last rc you cut for `X.Y.Z` is the one that was credentialed. If you cut a later `vX.Y.Z-rc.N` tag
+after the credential, either credential it or remove it before the GA cut; otherwise the diff runs
+against the later, uncredentialed candidate (and, if `rcTag` still pins the earlier one, the gate
+fails as ambiguous).
 
 The comparison packs with **`npm pack`**, matching the real publish tool (`changeset publish`
 shells to `npm publish` for a bun workspace) — never `bun pm pack`, which was measured (rehearsal,

@@ -7,7 +7,7 @@
  * which proves the pure decision logic
  * (`validateVersionBump`/`shouldRunGaTarballDiffGate`) in
  * `scripts/lib/ga-tarball-diff.mjs`. This file proves the THIN wiring layer
- * on top: the `rcTag === null` no-op branch, the skip/run branch, and that
+ * on top: the SKIP/FAIL/RUN exit codes, the notice + step-summary announcements, and that
  * the diff is invoked against the exact args `release.yml` needs
  * (`--ga-ref HEAD`, never a branch name or anything else that could drift
  * out from under the commit actually being published).
@@ -30,54 +30,76 @@ const MUTATIONS = [
     id: 'M1',
     expect: 'red',
     claim:
-      'the rcTag===null no-op branch is removed — main() would then call `.replace` on `null` (or ' +
-      'otherwise mis-handle the uncredentialed state) instead of a clean, loudly-logged no-op',
+      'a SKIP exits non-zero — every GA with no rc for its own tuple (1.0.1, 1.1.0, ...) would ' +
+      'block the release lane',
     subject: 'gate',
-    anchor: 'if (rcTag === null) {',
-    replacement: 'if (false) {',
+    anchor: "announce('notice', 'SKIP (nothing compared)', decision.reason);\n    return 0;",
+    replacement: "announce('notice', 'SKIP (nothing compared)', decision.reason);\n    return 1;",
   },
   {
     id: 'M2',
     expect: 'red',
     claim:
-      'the skip branch is removed — every mid-window rc bump would fall through to invoking the ' +
-      'diff, exactly the false-positive shouldRunGaTarballDiffGate exists to prevent',
+      'the SKIP announcement is dropped — a green check that compared nothing would be ' +
+      'indistinguishable from "compared and clean" in the checks UI',
     subject: 'gate',
-    anchor: 'if (!decision.run) {',
-    replacement: 'if (false) {',
+    anchor: "announce('notice', 'SKIP (nothing compared)', decision.reason);",
+    replacement: '',
   },
   {
     id: 'M3',
     expect: 'red',
     claim:
-      'the GA-side ref is changed from the literal "HEAD" to a branch name — release.yml runs this ' +
-      'BEFORE changeset publish creates the GA/rc tag, so the artifact under diff must be the exact ' +
-      'commit about to publish (HEAD), never a moving branch tip that could drift mid-run',
+      'an ambiguous-credential FAIL exits 0 — rcTag pinned at rc.1 while rc.2 exists would let ' +
+      'the GA publish anyway',
     subject: 'gate',
-    anchor: "return runDiff(['--rc-ref', rcTag, '--ga-ref', 'HEAD'], { log });",
-    replacement: "return runDiff(['--rc-ref', rcTag, '--ga-ref', 'main'], { log });",
+    anchor: "announce('error', 'FAIL', decision.reason);\n    return 1;",
+    replacement: "announce('error', 'FAIL', decision.reason);\n    return 0;",
   },
   {
     id: 'M4',
     expect: 'red',
     claim:
-      'the "v" prefix strip on rcTag is removed — a credentialed rc tag ("v1.0.0-rc.1") would then ' +
-      'never compare as IDENTICAL to the bare tree version ("1.0.0-rc.1") shouldRunGaTarballDiffGate ' +
-      "reads, so the credentialed rc's own first publish would wrongly read as a mid-window bump " +
-      'and SKIP instead of RUN',
+      'the GA-side ref is changed from the literal "HEAD" to a branch name — release.yml runs this ' +
+      'BEFORE changeset publish creates the tag, so the artifact under diff must be the exact ' +
+      'commit about to publish (HEAD), never a moving branch tip',
     subject: 'gate',
-    anchor: "const rcVersion = rcTag.replace(/^v/, '');",
-    replacement: 'const rcVersion = rcTag;',
+    anchor: "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'HEAD'], { log });",
+    replacement: "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'main'], { log });",
+  },
+  {
+    id: 'M5',
+    expect: 'red',
+    claim: 'the $GITHUB_STEP_SUMMARY write is removed — no outcome reaches the run summary',
+    subject: 'gate',
+    anchor: 'if (summaryPath) appendFileSync(',
+    replacement: 'if (false) appendFileSync(',
+  },
+  {
+    id: 'M6',
+    expect: 'red',
+    claim: 'the pinned rcTag is no longer read — the ambiguous-credential check can never fire',
+    subject: 'gate',
+    anchor: 'const pinnedRcTag = readCredentialRcTag(repoRoot);',
+    replacement: 'const pinnedRcTag = null;',
+  },
+  {
+    id: 'M7',
+    expect: 'red',
+    claim: "the diff's exit code is swallowed — a GA that differs from its rc would publish",
+    subject: 'gate',
+    anchor: '  return code;\n}',
+    replacement: '  return 0;\n}',
   },
 ];
 
 /**
  * NEGATIVE CONTROL. A doc-comment sentence, asserted nowhere. Rewording it
- * must leave the guard GREEN, or the four reds above are equally explained by
+ * must leave the guard GREEN, or the seven reds above are equally explained by
  * a text assertion rather than by behaviour.
  */
 const NEGATIVE = {
-  id: 'M5',
+  id: 'M8',
   expect: 'green',
   claim: 'a header doc-comment sentence is reworded — the spec asserts behaviour, not prose',
   subject: 'gate',
