@@ -143,9 +143,33 @@ function loadTarballDir(dir, label) {
 
 /**
  * Pack the three publishable packages from a git ref into fresh tarballs,
- * mirroring `scripts/install-smoke.mjs`'s build (lib -> db -> core) + `bun pm
- * pack` sequence, but against a detached worktree checkout of `ref` so the
- * currently-checked-out tree is never touched.
+ * mirroring the REAL publish lane's tool choice (`release.yml`'s `release`
+ * job) rather than `install-smoke.mjs`'s: build with `bun` (lib -> db ->
+ * core), then run `scripts/rewrite-workspace-ranges.mjs` to resolve
+ * `workspace:` sibling ranges to concrete versions, then pack with **`npm
+ * pack`** — never `bun pm pack` — against a detached worktree checkout of
+ * `ref` so the currently-checked-out tree is never touched.
+ *
+ * TWO REASONS `npm pack` IS DELIBERATE HERE, not a style choice
+ * (rehearsal-discovered, #1562):
+ *
+ *   1. `changeset publish` shells to `npm publish` for a bun workspace
+ *      (`getPublishTool` only knows npm/pnpm/yarn) — see
+ *      `rewrite-workspace-ranges.mjs`'s own header for the measured
+ *      `workspace:` leak this already fixes. Packing the SAME way the real
+ *      publish does is the entire point of this script: it exists to prove
+ *      what SHIPS, not what a different tool would have shipped.
+ *   2. `bun pm pack` was measured (rehearsal, #1562) to emit
+ *      `@getknext/core`'s `dist/cli/kn-next.js` as a DUPLICATE tar entry —
+ *      `bin` maps both the `knext` and `kn-next` command names to that one
+ *      file, and bun's packer adds the target once per bin key without
+ *      de-duplicating. `assertEntrySafe`'s `readTarEntries` correctly
+ *      REJECTS a duplicate path (by design, review round 2) — so packing
+ *      with `bun pm pack` here made this gate permanently, incorrectly RED
+ *      on every real GA cut, for a duplicate that plain `npm pack` never
+ *      produces (measured: `npm pack` emits the file exactly once). The real
+ *      published artifact was always fine; only this tool's packing choice
+ *      was not faithful to it.
  */
 function packRef(ref, label) {
   const worktreeDir = mkdtempSync(join(tmpdir(), `knext-ga-diff-wt-${label}-`));
@@ -162,13 +186,36 @@ function packRef(ref, label) {
       ['@getknext/core', join(worktreeDir, 'packages', 'kn-next')],
     ];
     const byName = new Map();
+    let built = false;
+    for (const [, pkgDir] of order) {
+      if (!existsSync(pkgDir)) continue; // ref predates this package
+      if (!built) {
+        execFileSync('bun', ['install', '--frozen-lockfile'], {
+          cwd: worktreeDir,
+          stdio: 'inherit',
+        });
+      }
+      execFileSync('bun', ['run', 'build'], { cwd: pkgDir, stdio: 'inherit' });
+      built = true;
+    }
+
+    // Rewrite `workspace:` ranges to concrete versions BEFORE packing — same
+    // fix, same reason, as the real publish job (`release.yml`). Skipped
+    // when nothing built at all (an empty-tree ref, see the CLI test for
+    // that path) — the script would otherwise find nothing publishable and
+    // no-op harmlessly either way, but there is nothing to rewrite for.
+    if (built) {
+      execFileSync('node', ['scripts/rewrite-workspace-ranges.mjs'], {
+        cwd: worktreeDir,
+        stdio: 'inherit',
+      });
+    }
+
     for (const [name, pkgDir] of order) {
       if (!existsSync(pkgDir)) continue; // ref predates this package
-      execFileSync('bun', ['install', '--frozen-lockfile'], { cwd: worktreeDir, stdio: 'inherit' });
-      execFileSync('bun', ['run', 'build'], { cwd: pkgDir, stdio: 'inherit' });
       const packDest = mkdtempSync(join(tmpdir(), `knext-ga-diff-pack-${label}-`));
       registry.push(packDest);
-      execFileSync('bun', ['pm', 'pack', '--destination', packDest], {
+      execFileSync('npm', ['pack', '--pack-destination', packDest], {
         cwd: pkgDir,
         stdio: 'inherit',
       });
@@ -177,7 +224,7 @@ function packRef(ref, label) {
         .map((f) => join(packDest, f))
         .sort()
         .at(-1);
-      if (!tgz) throw new Error(`bun pm pack produced no .tgz for ${name} (${label})`);
+      if (!tgz) throw new Error(`npm pack produced no .tgz for ${name} (${label})`);
       byName.set(name, loadTarball(tgz));
     }
     return byName;

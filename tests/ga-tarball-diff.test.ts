@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1075,5 +1076,39 @@ describe('ga-tarball-diff CLI (--rc-ref/--ga-ref)', () => {
     const { code, output } = runCli(['--rc-ref', 'HEAD']);
     expect(code).toBe(1);
     expect(output).toContain('ERROR');
+  });
+});
+
+// --- packRef packs with the REAL publish tool (rehearsal-discovered, #1562) -
+
+describe('packRef packs with npm (the real publish tool), never bun pm pack', () => {
+  const source = readFileSync(
+    join(import.meta.dir, '..', 'scripts', 'ga-tarball-diff.mjs'),
+    'utf8',
+  );
+
+  /**
+   * Rehearsal (#1562: pack the current tree twice, once as the "credentialed
+   * rc" and once as a version-only GA cut) measured that `bun pm pack` emits
+   * `@getknext/core`'s `dist/cli/kn-next.js` as a DUPLICATE tar entry — its
+   * `bin` field maps both `knext` and `kn-next` to that one file, and bun's
+   * packer adds the target once per bin key without de-duplicating.
+   * `readTarEntries` correctly REJECTS a duplicate path (review round 2), so
+   * packing with `bun pm pack` made this gate permanently, incorrectly RED on
+   * every real GA cut. Plain `npm pack` — the tool `changeset publish`
+   * actually shells to for a bun workspace — was measured to emit the file
+   * exactly once. BOTH halves asserted: the fix must be present, and the
+   * defect must not be reintroduced.
+   */
+  it('packs with `npm pack --pack-destination`', () => {
+    expect(source).toContain("execFileSync('npm', ['pack', '--pack-destination'");
+  });
+
+  it('never packs with `bun pm pack`', () => {
+    expect(source).not.toContain("'pm', 'pack'");
+  });
+
+  it('rewrites workspace: ranges to concrete versions before packing (matches release.yml)', () => {
+    expect(source).toContain('rewrite-workspace-ranges.mjs');
   });
 });
