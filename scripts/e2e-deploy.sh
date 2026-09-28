@@ -533,13 +533,16 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     # `--self-contained` CLI flag (packages/kn-next/src/cli/build.ts). This
     # script does not go through `kn-next build` — it replicates its
     # internals directly against the freshly-built fixture — so there is no
-    # other place to thread the flag. Neither this script nor
-    # standalone-compile.mjs reads it yet: it is a no-op today (F5's
-    # buildStandaloneExecutable "accepts it and does nothing else"), forward
-    # wiring for N1 (#1456), which is what actually embeds anything.
+    # other place to thread the flag. N1 (#1456) landed: standalone-compile.mjs
+    # now READS this flag and enforces its value — `args["self-contained"]`
+    # must be the literal string "1" or the compile step fails closed
+    # (`--self-contained takes 1, got ...`). This is no longer forward wiring
+    # for a future landing; it is live, so the value passed here MUST match
+    # the literal standalone-compile.mjs accepts (guarded by
+    # tests/e2e-self-contained-flag-lockstep.test.ts).
     STANDALONE_COMPILE_ARGS=()
     if [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
-      STANDALONE_COMPILE_ARGS+=(--self-contained true)
+      STANDALONE_COMPILE_ARGS+=(--self-contained 1)
     fi
     bun run "${STANDALONE_COMPILE_JS}" \
       --server "${SERVER_JS}" \
