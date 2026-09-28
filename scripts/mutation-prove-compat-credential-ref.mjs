@@ -51,11 +51,10 @@ const PROOF = {
 const MUTATIONS = [
   // ── Guard 1: a main-ref night never advances a credential count ───────────
   {
-    label: 'guard 1: stop excluding main nights from the credential window',
+    label: 'guard 1: stop excluding explicit early-warning nights from audit',
     subject: 'audit',
-    anchor:
-      "  return scope === 'credential' ? claimsCredential(ledger) : !claimsCredential(ledger);",
-    replacement: '  return true;',
+    anchor: "  if (ledger?.compatMode === 'early-warning') return false;",
+    replacement: '  if (false) return false;',
   },
   {
     label: 'guard 1: stop disqualifying a credential claim on a non-RC ref',
