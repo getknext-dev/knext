@@ -78,8 +78,8 @@ const snap = snapshot(TARGET);
 try {
   mutate(
     snap,
-    "l?.event === 'schedule' && (l?.lane === lane || (isUnresolved(l) && l?.lane == null))",
-    "l?.event === 'schedule' && l?.lane === lane",
+    "        l?.event === 'schedule' &&\n        (l?.lane === lane || ((isUnresolved(l) || isInvalid(l)) && l?.lane == null)),",
+    "        l?.event === 'schedule' && l?.lane === lane,",
   );
   if (specPasses()) {
     console.log('   x DECORATION: the drift guard stayed GREEN with the anchor deleted');

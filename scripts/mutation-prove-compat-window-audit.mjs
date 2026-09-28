@@ -142,8 +142,8 @@ prove(
 //    dropped one into a single longer streak.
 prove(
   'merged streak: filter unresolved nights out of the lane, so the streak joins across them',
-  "l?.event === 'schedule' && (l?.lane === lane || (isUnresolved(l) && l?.lane == null))",
-  "l?.event === 'schedule' && l?.lane === lane",
+  "        l?.event === 'schedule' &&\n        (l?.lane === lane || ((isUnresolved(l) || isInvalid(l)) && l?.lane == null)),",
+  "        l?.event === 'schedule' && l?.lane === lane,",
 );
 
 // 5. Restore the pre-fix `readDir`: an unparseable ledger becomes a null that a

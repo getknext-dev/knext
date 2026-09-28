@@ -1607,6 +1607,72 @@ jobs:
           fi
           echo "jest discovery alive: ${COUNT} match(es) for ${PROBE} (jest exit ${JEST_EXIT})"
 
+      # #1530 (sprint B4) — the free-disk-floor risk guard. A shard's own steps
+      # (this checkout, a musl-native rebuild per fixture, a `next build` +
+      # server boot per deploy-test file) are disk-heavy; a runner that fills
+      # its disk mid-shard fails with whatever partial-write error the OS
+      # happens to surface, indistinguishable in the ledger from a REAL
+      # assertion regression (`kind: 'assertion'`) once it lands. This runs
+      # BEFORE the real test-run step, as a precondition check, not a test —
+      # see `scripts/compat-disk-floor-check.mjs`'s header for the full
+      # reasoning and `scripts/compat-window-audit.mjs`'s `isInfraOnlyRedShard`
+      # for how the ledger tells this apart from a real regression.
+      #
+      # `|| true` mirrors the test-run step below: the STEP's own exit is
+      # swallowed, and every downstream step branches on `outputs.ok` instead —
+      # `if: always()` steps must still run to emit SOME ledger artifact.
+      # On a floor breach this step writes the shard's summary JSON itself
+      # (the shape `scripts/e2e-summary.mjs` produces), synthesizing a
+      # `kind: 'infra'` failure — never a bare `notRun` with no attribution,
+      # which would read as an unexplained regression instead of a runner
+      # fault. `working-directory: knext` matches "Summarize shard result"
+      # below, which is guarded off when this step reports a breach so it
+      # never overwrites this file with a false-green 0/0/0 parse of an empty
+      # runner.log.
+      - name: Free disk floor (#1530)
+        id: disk-floor
+        working-directory: knext
+        run: |
+          set -uo pipefail
+          node scripts/compat-disk-floor-check.mjs --path . --floor-gb 5
+          STATUS=$?
+          if [ "${STATUS}" -ne 0 ]; then
+            SAFE_SHARD="${{ matrix.shard }}"
+            SAFE_SHARD="${SAFE_SHARD/\//-}"
+            FREE_BYTES="$(df -k . | tail -n1 | awk '{print $4 * 1024}')"
+            # Deliberately single-quoted, same rationale as "Fail shard on red
+            # results" below: this is an embedded `node -e` script whose OWN
+            # JS uses `${...}` template literals, which the shell linter's
+            # heuristic misreads as shell interpolation.
+            # shellcheck disable=SC2016
+            node -e '
+              const fs = require("fs");
+              const safeShard = process.argv[1];
+              const shard = process.argv[2];
+              const freeBytes = process.argv[3];
+              const summary = {
+                passed: 0,
+                failed: 0,
+                notRun: 1,
+                excluded: 0,
+                ref: process.env.NEXTJS_REF || "",
+                shard,
+                runtime: process.env.KNEXT_RUNTIME === "bun" ? "bun" : "node",
+                failures: [
+                  {
+                    file: "(infra: free-disk-floor)",
+                    kind: "infra",
+                    cases: [],
+                    reason: `free disk below the 5GB floor (${freeBytes} bytes available)`,
+                  },
+                ],
+              };
+              fs.writeFileSync(`compat-suite-summary-${safeShard}.json`, `${JSON.stringify(summary, null, 2)}\n`);
+              console.log(`wrote an infra-classified summary for shard ${shard}`);
+            ' "${SAFE_SHARD}" "${{ matrix.shard }}" "${FREE_BYTES:-0}"
+          fi
+          echo "ok=$([ "${STATUS}" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
@@ -1737,13 +1803,25 @@ jobs:
         # cancellation, which is not guaranteed to leave room for the tail).
         timeout-minutes: 105
         run: |
-          # -c 2: EXPLICIT upstream test-deploy-adapter concurrency (was the
-          # run-tests.js default, 2 — the flag declares the fidelity and pins it
-          # against a silent default change on a ref bump). Deliberately NOT -c 1:
-          # upstream runs this suite at -c 2 on the same ubuntu-latest runners and
-          # ledgers the residual 60s-timeout wobble; diverging would trade
-          # env-parity for an unproven stability hypothesis at ~2x wall time.
-          node run-tests.js --type e2e -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
+          # #1530 — deliberately branched INSIDE the script rather than on the
+          # step's own `if:`. This step sits immediately before the job's
+          # unconditional reporting tail (#703/`tests/helpers/workflow-conditioning.ts`);
+          # giving it its own `if:` would pull it INTO that tail, where only a
+          # bare `always()` is admissible. Skipping here, instead, when the
+          # disk-floor precondition (the step above) already failed means the
+          # actual test binary never runs against a starved disk — the shard's
+          # summary is written by "Summarize shard result" below either way.
+          if [ "${{ steps.disk-floor.outputs.ok }}" = 'false' ]; then
+            echo "::warning::skipping deploy tests — free-disk floor breached (#1530); see the disk-floor step above"
+          else
+            # -c 2: EXPLICIT upstream test-deploy-adapter concurrency (was the
+            # run-tests.js default, 2 — the flag declares the fidelity and pins it
+            # against a silent default change on a ref bump). Deliberately NOT -c 1:
+            # upstream runs this suite at -c 2 on the same ubuntu-latest runners and
+            # ledgers the residual 60s-timeout wobble; diverging would trade
+            # env-parity for an unproven stability hypothesis at ~2x wall time.
+            node run-tests.js --type e2e -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
+          fi
 
       # Fix round 1: `if: always()` on the WHOLE summarize+upload tail — a
       # timed-out or failed shard must still report its partial results, never
@@ -1768,6 +1846,20 @@ jobs:
         run: |
           SAFE_SHARD="${{ matrix.shard }}"
           SAFE_SHARD="${SAFE_SHARD/\//-}"
+          # #1530 — the step's own `if:` stays a bare `always()` (this is
+          # inside the job's unconditional reporting tail; see the doc comment
+          # on the "Run official deploy tests" step above for why the branch
+          # lives HERE, in the script, and not on the `if:` key). When the
+          # disk-floor step already reported a breach, it also already wrote
+          # this exact file directly (an infra-classified summary) — running
+          # e2e-summary.mjs here would parse an EMPTY runner.log (the real
+          # test-run step skipped itself) into a false-green 0/0/0 result and
+          # clobber that file with exactly the silent-pass this guard exists
+          # to prevent.
+          if [ "${{ steps.disk-floor.outputs.ok }}" = 'false' ]; then
+            echo "disk-floor breach recorded upstream — leaving its infra-classified summary in place, not re-summarizing"
+            exit 0
+          fi
           # #188 — VERSION-attribute the bun lane: with the bun-version dispatch
           # knob, "runtime": "bun" alone can't distinguish a 1.4.0 run from a
           # 1.4.0-canary run, and a canary run's whole purpose is attributing

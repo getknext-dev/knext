@@ -599,6 +599,9 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
     writeFileSync(join(root, 'scripts/compat-credential-ref.mjs'), 'export const noop = 1;\n');
     writeFileSync(join(root, 'scripts/compat-run-ledger.mjs'), 'export const noop = 1;\n');
     writeFileSync(join(root, '.github/compat-credential-ref.json'), '{"rcTag":null}\n');
+    // #1530: the 'node' lane's extraFiles ALSO declares the free-disk-floor
+    // pre-check script the workflow invokes as a subprocess.
+    writeFileSync(join(root, 'scripts/compat-disk-floor-check.mjs'), 'export const noop = 1;\n');
     // #1257: the 'node' lane's extraFiles ALSO declares the musl-lockfile
     // lookup helper and each committed musl-native lockfile FILE
     // individually (scripts/compat-window-audit.mjs's MUSL_NATIVE_LOCKFILE_FILES) —
