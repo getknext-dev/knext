@@ -1261,3 +1261,551 @@ test/e2e/a/a.test.ts finished on retry 0/2 in 1.0s
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 — three concrete follow-ups from the #1550 round-2 closing review,
+// plus one nit, all "label only, no grading effect" (a deploy-classified red
+// resets the credential like any other red either way):
+//   N1: an `afterAll` `next.destroy()` TypeError — a SIDE EFFECT of the
+//       earlier `createNext` deploy failure, since the instance it tears down
+//       was never assigned — was measured to downgrade ~11% of real deploy
+//       failures to 'assertion'. It must not.
+//   N2: `unexplainedCase` (a failing case with NO error-detail block at all)
+//       was untested in isolation from `hasNonDeployBlock`.
+//   N3: the #1550 round-2 per-retry reset (load-bearing for `kind`) also
+//       silently DISCARDS an earlier retry's own cases/timeoutMs evidence —
+//       `compat-vinext-ledger.mjs` matches known failures on `cases`, so that
+//       evidence must be preserved, not overwritten.
+//   Nit: timeout ranks above deploy WITHIN one case's own block (previously
+//        only proven across two different blocks).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('scripts/e2e-summary.mjs — afterAll teardown cascade stays "deploy" (#1555 N1)', () => {
+  it('a beforeAll deploy-script cascade followed by an afterAll next.destroy() TypeError is still "deploy"', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ foo describe › renders (2 ms)
+
+  ● Test suite failed to run
+
+    Custom deploy script failed: Error: Command failed with exit code 1: ./deploy.sh
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● foo describe › renders
+
+    Custom deploy script failed: Error: Command failed with exit code 1: ./deploy.sh
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+    expect(failure?.cases).toEqual(['foo describe › renders']);
+  });
+
+  it('the SAME teardown TypeError with NO accompanying deploy evidence anywhere is NOT swallowed as deploy (fail closed)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ foo describe › renders (2 ms)
+
+  ● foo describe › renders
+
+    expect(received).toBe(expected)
+    Expected: 200
+    Received: 500
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).not.toBe('deploy');
+  });
+});
+
+describe('scripts/e2e-summary.mjs — unexplainedCase guard, in isolation (#1555 N2)', () => {
+  it('a failing case with NO error-detail block at all downgrades away from "deploy" even when every PRINTED block is deploy-explained', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+  ✕ a › two (3 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Two failing cases, only ONE error-detail block ("a › two" has none) —
+    // unexplainedCase must fail closed to 'assertion', never 'deploy', even
+    // though the one block that DOES exist is fully deploy-explained.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one', 'a › two']);
+  });
+});
+
+describe('scripts/e2e-summary.mjs — retry attempts preserve prior cases/timeout evidence (#1555 N3)', () => {
+  it("retry0 timeout, retry1 real assertion (same file): kind reflects the FINAL retry, but retry0's evidence survives via `attempts`", () => {
+    const s = summarize(
+      `
+total: 1
+Starting ${F1550} retry 0/2
+##[group]❌ ${F1550} output
+  ✕ a › slow (60001 ms)
+  ● a › slow
+    thrown: "Exceeded timeout of 60000 ms for a test.
+end of ${F1550} output
+Starting ${F1550} retry 1/2
+##[group]❌ ${F1550} output
+  ✕ real › case (30 ms)
+  ● real › case
+    expect(received).toBe(expected)
+end of ${F1550} output
+${F1550} failed to pass within 2 retries
+exiting with code 1
+`,
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Final-retry classification is UNCHANGED (#1550 round 2's fix — final
+    // retry only decides `kind`/top-level `cases`/`timeoutMs`):
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['real › case']);
+    expect(failure?.timeoutMs).toBeUndefined();
+    // But the earlier retry's own evidence is not silently dropped — it
+    // survives in `attempts`, in retry order, for a consumer like
+    // compat-vinext-ledger.mjs that matches known failures on `cases`.
+    expect(failure?.attempts).toEqual([
+      { cases: ['a › slow'], timeoutMs: 60000 },
+      { cases: ['real › case'] },
+    ]);
+  });
+
+  it('a single-attempt (never retried) file carries no `attempts` key — the artifact stays byte-stable', () => {
+    const s = summarize(SAMPLE_DEPLOY_SCRIPT_FAILED_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(Object.keys(failure ?? {})).not.toContain('attempts');
+  });
+});
+
+describe('scripts/e2e-summary.mjs — timeout ranks above deploy WITHIN one case block (#1555 nit)', () => {
+  it('a single case block carrying BOTH the timeout throw and a deploy-script line classifies "timeout", not "deploy"', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › slow (60001 ms)
+
+  ● a › slow
+
+    thrown: "Exceeded timeout of 60000 ms for a test.
+    Custom deploy script failed: Error: exit 1
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('timeout');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 round 2 — a closing review of the N1 excuse itself found it applied
+// too broadly: to ANY case block (not only a `Test suite failed to run`
+// block), and it stayed set for the whole block even when a genuine
+// assertion sat right next to the teardown marker. Fixtures below are named
+// to match the review's own fixture IDs (A4b/A6/A7), plus one each isolating
+// the `hasDeployBlock` gate and the anchor on `teardownCascadeRe`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('scripts/e2e-summary.mjs — the afterAll-teardown excuse is scoped to its own header and content (#1555 round 2 review)', () => {
+  it("A4b: a REAL per-case failure shaped like the teardown TypeError, in a DIFFERENT case's own block, is never excused", () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+  ✕ b › closes server (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● b › closes server
+
+    TypeError: Cannot read properties of undefined (reading 'close')
+        at Object.<anonymous> (/next.js/test/app.test.ts:40:10)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // "b › closes server" is a genuine, unrelated case-level failure — its
+    // own header is NOT "Test suite failed to run", so the shape match alone
+    // must not excuse it, no matter that "a › one" proves real deploy
+    // evidence elsewhere in the same group.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one', 'b › closes server']);
+  });
+
+  it('A6: an excused teardown block does not count as explaining a DIFFERENT, block-less failing case', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+  ✕ a › two (3 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Two failing cases, two blocks — but one block is the excused teardown
+    // cascade, which explains nothing about "a › two". Counting it toward
+    // the count-match guard would let "a › two" hide with no explanation.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one', 'a › two']);
+  });
+
+  it('A7: a "Test suite failed to run" block that ALSO carries a genuine assertion is not "only" the teardown crash', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+    expect(received).toBe(expected)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('assertion');
+  });
+
+  it('a LONE teardown-cascade block with NO deploy evidence anywhere in the group fails closed to "assertion" (the hasDeployBlock gate)', () => {
+    const s = summarize(
+      wrapOneRetry(`  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+        at Object.afterAll (/next.js/test/lib/next-modes/base.ts:145:16)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // Without ANY deploy evidence in the group, the teardown-shaped block
+    // must stay a real, unexplained failure — never 'deploy' and never
+    // 'unclassified' (which is what dropping the `hasDeployBlock` gate on
+    // the excuse would produce, since it would also stop counting as a
+    // non-deploy block at all).
+    expect(failure?.kind).toBe('assertion');
+  });
+
+  it("an assertion's OWN diff text merely containing the teardown marker (no line-start match) is never excused (the anchor)", () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    Received: "TypeError: Cannot read properties of undefined (reading 'destroy')"
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // The "Received: ..." line only CONTAINS the marker text; it does not
+    // START with it. Excusing this block would flip the file to 'deploy'
+    // even though "a › one" is its only real case and it is not itself the
+    // harness's own teardown crash.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › one']);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 round 3 (this review) — the round-2 N1 excuse (scoped to its own
+// header + content) never actually fired on REAL CI output: run 36312054519
+// replayed through summarize() classified 0 of 46 real teardown-cascade files
+// as deploy (main and the PR were byte-identical, 418 deploy / 50 assertion),
+// because a real block also carries a jest CODE FRAME around the throwing
+// line and the JEST SUMMARY TRAILER, both of which tripped the "no other
+// content" condition. Fixture below is the VERBATIM group for
+// test/e2e/404-page-router/index.test.ts from that run (job "Deploy tests —
+// vinext binary (shard 1/16)", 2026-09-27T10:22:23Z), scrubbed of nothing but
+// the per-line CI timestamp/job-name columns.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const F1520_REAL_FILE = 'test/e2e/404-page-router/index.test.ts';
+
+/** Wrap a real-shape body in the actual run-tests.js total/Starting/group-open
+ *  markers for the file the fixture below was captured from. The body itself
+ *  already carries the group's own close + failed-to-pass lines. */
+function wrapRealFile(body: string) {
+  return `
+total: 49
+Starting ${F1520_REAL_FILE} retry 0/0
+❌ ${F1520_REAL_FILE} output:
+${body}
+`;
+}
+
+const REAL_TEARDOWN_CASCADE_BODY = `FAIL Turbopack test/e2e/404-page-router/index.test.ts (44.128 s)
+  ● 404-page-router › 404-page-router with basePath of false and i18n of true and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of true and i18n of false and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of true and i18n of true and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of false and i18n of false and middleware false › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+  ● 404-page-router › 404-page-router with basePath of false and i18n of false and middleware true › should skip for deploy
+
+    Custom deploy script failed: ➜ Listening on: http://localhost:45537/ (all interfaces) undefined (1)
+
+      68 |
+      69 |     if (deployRes.exitCode !== 0) {
+    > 70 |       throw new Error(
+         |             ^
+      71 |         \`Custom deploy script failed: \${deployRes.stdout} \${deployRes.stderr} (\${deployRes.exitCode})\`
+      72 |       )
+      73 |     }
+
+      at NextDeployInstance.deployUsingCustomScript (lib/next-modes/next-deploy.ts:70:13)
+      at NextDeployInstance.setup (lib/next-modes/next-deploy.ts:248:23)
+      at lib/e2e-utils/index.ts:276:7
+      at Span.traceAsyncFn (../packages/next/src/trace/trace.ts:146:14)
+      at createNext (lib/e2e-utils/index.ts:241:12)
+      at Object.<anonymous> (e2e/404-page-router/index.test.ts:45:12)
+
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+
+      45 |     next = await createNext({ files, skipStart: true, patchFileDelay: 500 })
+      46 |   })
+    > 47 |   afterAll(() => next.destroy())
+         |                       ^
+      48 |
+      49 |   describe.each(table)(
+      50 |     '404-page-router with basePath of $basePath and i18n of $i18n and middleware $middleware',
+
+      at Object.destroy (e2e/404-page-router/index.test.ts:47:23)
+
+Test Suites: 1 failed, 1 total
+Tests:       5 failed, 5 total
+Snapshots:   0 total
+Time:        44.163 s
+Ran all test suites matching /test\\/e2e\\/404-page-router\\/index.test.ts/i.
+Force exiting Jest: Have you considered using \`--detectOpenHandles\` to detect async operations that kept running after all tests finished?
+end of test/e2e/404-page-router/index.test.ts output
+test/e2e/404-page-router/index.test.ts failed due to Error: failed with code: 1
+test/e2e/404-page-router/index.test.ts failed to pass within 0 retries`;
+
+describe("scripts/e2e-summary.mjs — the afterAll-teardown excuse also covers jest's own code frame + summary trailer (#1555 round 3, real-log replay of run 36312054519)", () => {
+  it('classifies the VERBATIM real teardown-cascade block (code frame + jest trailer both present) as deploy', () => {
+    const s = summarize(wrapRealFile(REAL_TEARDOWN_CASCADE_BODY), {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      builder: 'vinext',
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+  });
+
+  it('the SAME real block with one genuine expect(...) line inserted into the teardown block is NOT excused (fails closed to assertion)', () => {
+    const withAssertion = REAL_TEARDOWN_CASCADE_BODY.replace(
+      "    TypeError: Cannot read properties of undefined (reading 'destroy')",
+      "    TypeError: Cannot read properties of undefined (reading 'destroy')\n\n    expect(received).toBe(expected)",
+    );
+    expect(withAssertion).not.toBe(REAL_TEARDOWN_CASCADE_BODY);
+    const s = summarize(wrapRealFile(withAssertion), {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      builder: 'vinext',
+    });
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('assertion');
+  });
+
+  it("a code frame that merely ECHOES a nearby, not-yet-run expect(...) call is not itself assertion evidence (measured false positive, run 36312054519's edge-can-use-wasm-files fixture)", () => {
+    // Real shape: the teardown code frame's context window happens to
+    // include the NEXT `it()`'s own `expect(extractJSON(response))` call,
+    // several lines after the `> NN |` throw pointer — that source echo is
+    // not itself proof of a genuine assertion failure (no `Expected:`/
+    // `Received:` diff, no bare `expect(received)...` MESSAGE line). Before
+    // this was scoped to non-code-frame lines, this exact shape wrongly
+    // downgraded 1 of the 4 files the round-3 fix's own replay measured as
+    // still 'assertion' (464/4 → verified 465/3 after this refinement).
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › one (2 ms)
+
+  ● a › one
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● Test suite failed to run
+
+    TypeError: Cannot read properties of undefined (reading 'destroy')
+
+      65 |     })
+      66 |   })
+    > 67 |   afterAll(() => next.destroy())
+         |                       ^
+      68 |   it('uses the wasm file', async () => {
+      69 |     const response = await fetchViaHTTP(next.url, '/api/add', { input: 10 })
+      70 |     expect(extractJSON(response)).toEqual({
+
+      at Object.destroy (e2e/edge-can-use-wasm-files/index.test.ts:67:23)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    expect(failure?.kind).toBe('deploy');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1555 round 3 finding 2 — `suiteFailedHeaderRe` (condition 1: the block's
+// OWN header must be the exact suite-level header) had no test and no prover
+// row. Relaxing it to '/./' (any header) kept deploy-summary 74/74 green.
+// Unlike A4b (whose `unexplainedCase` count guard downgrades the file on its
+// own either way), B9 isolates the header condition: exactly ONE failing case
+// (so the count guard cannot fire) whose OWN block is the teardown-shaped
+// TypeError, sitting next to a SUITE-LEVEL deploy block (not a second failing
+// case) so `hasDeployBlock` is satisfied without adding a second case.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('scripts/e2e-summary.mjs — suiteFailedHeaderRe condition 1 is load-bearing (#1555 round 3 finding 2, fixture B9)', () => {
+  it('B9: a real per-case TypeError-shaped failure next to a suite-level deploy block stays assertion', () => {
+    const s = summarize(
+      wrapOneRetry(`  ✕ a › closes server (2 ms)
+
+  ● Test suite failed to run
+
+    Custom deploy script failed: Error: exit 1
+        at createNext (/next.js/test/lib/next-modes/next-deploy.ts:210:13)
+
+  ● a › closes server
+
+    TypeError: Cannot read properties of undefined (reading 'close')
+        at Object.<anonymous> (/next.js/test/app.test.ts:40:10)
+`),
+      { ref: 'v16.2.0', shard: '1/16', excluded: 0 },
+    );
+    const [failure] = s.failures ?? [];
+    expect(failure).toBeDefined();
+    // The case's OWN header is "a › closes server", not the suite-level
+    // header a beforeAll/afterAll throw uses — the shape match on the
+    // TypeError alone must never excuse it. A mutant that relaxes
+    // suiteFailedHeaderRe to match ANY header (e.g. /./) would wrongly
+    // excuse this block (hasDeployBlock is satisfied by the suite-level
+    // deploy block above) and flip this to 'deploy'.
+    expect(failure?.kind).toBe('assertion');
+    expect(failure?.cases).toEqual(['a › closes server']);
+  });
+});
