@@ -67,12 +67,12 @@ const MUTATIONS = [
     id: 'M5',
     expect: 'red',
     claim:
-      "the .changeset/README.md exclusion is dropped from hasChangesetEntry — the tool's own " +
+      "the .changeset/README.md exclusion is dropped from isChangesetEntryPath — the tool's own " +
       'README would be mistaken for a real changeset entry, letting a PR satisfy the check by ' +
       'accident',
     subject: 'guard',
-    anchor: '/^\\.changeset\\/(?!README\\.md$)[^/]+\\.md$/',
-    replacement: '/^\\.changeset\\/[^/]+\\.md$/',
+    anchor: 'const CHANGESET_ENTRY_PATH_RE = /^\\.changeset\\/(?!README\\.md$)[^/]+\\.md$/;',
+    replacement: 'const CHANGESET_ENTRY_PATH_RE = /^\\.changeset\\/[^/]+\\.md$/;',
   },
   {
     id: 'M6',
@@ -102,10 +102,37 @@ const MUTATIONS = [
     expect: 'red',
     claim:
       'the changeset-present branch of decide() is removed — a PR that DOES carry a ' +
-      '.changeset/*.md would still be reported as failing',
+      '.changeset/*.md naming the touched package would still be reported as failing',
     subject: 'guard',
-    anchor: "  if (hasChangeset) return { required: true, ok: true, via: 'changeset', packages };",
+    anchor:
+      '  if (hasChangesetEntry(changesetCandidates ?? [], packages)) {\n' +
+      "    return { required: true, ok: true, via: 'changeset', packages };\n" +
+      '  }',
     replacement: '  // changeset branch intentionally dropped',
+  },
+  {
+    id: 'M9',
+    expect: 'red',
+    claim:
+      'hasChangesetEntry stops checking that the changeset NAMES a touched package — any ' +
+      'parseable changeset would satisfy the check regardless of which package(s) it declares, ' +
+      'reopening the exact gap #1615 exists to close (review round 2, finding #1)',
+    subject: 'guard',
+    anchor: '    return names != null && names.some((n) => touched.has(n));',
+    replacement: '    return names != null;',
+  },
+  {
+    id: 'M10',
+    expect: 'red',
+    claim:
+      'consumerVisibleManifestChanged stops checking dependencies/peerDependencies/' +
+      'optionalDependencies — a dependency bump in a shipped package would no longer require a ' +
+      'changeset (review round 2, finding #2)',
+    subject: 'guard',
+    anchor:
+      'export function consumerVisibleManifestChanged(before, after) {\n  if (publicSurfaceChanged(before, after)) return true;',
+    replacement:
+      'export function consumerVisibleManifestChanged(before, after) {\n  return publicSurfaceChanged(before, after);',
   },
 ];
 

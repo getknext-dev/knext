@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  consumerVisibleManifestChanged,
   decide,
   derivePackageRoots,
   fixedGroupNames,
   hasChangesetEntry,
   hasNoChangesetLabel,
+  isChangesetEntryPath,
   isTestOrDocsOnly,
   NO_CHANGESET_LABEL,
+  parseChangesetFrontmatter,
   touchedPackages,
 } from '../scripts/check-changeset-required.mjs';
 
@@ -179,21 +182,177 @@ describe('touchedPackages', () => {
   });
 });
 
-describe('hasChangesetEntry', () => {
+describe('isChangesetEntryPath', () => {
   it('recognizes a real changeset file', () => {
-    expect(hasChangesetEntry(['.changeset/fix-1615-changeset-check.md'])).toBe(true);
+    expect(isChangesetEntryPath('.changeset/fix-1615-changeset-check.md')).toBe(true);
   });
   it('does not count .changeset/README.md', () => {
-    expect(hasChangesetEntry(['.changeset/README.md'])).toBe(false);
+    expect(isChangesetEntryPath('.changeset/README.md')).toBe(false);
   });
   it('does not count .changeset/config.json', () => {
-    expect(hasChangesetEntry(['.changeset/config.json'])).toBe(false);
+    expect(isChangesetEntryPath('.changeset/config.json')).toBe(false);
   });
   it('does not count a nested path under .changeset/', () => {
-    expect(hasChangesetEntry(['.changeset/sub/dir.md'])).toBe(false);
+    expect(isChangesetEntryPath('.changeset/sub/dir.md')).toBe(false);
   });
-  it('false when no .changeset path is in the diff at all', () => {
-    expect(hasChangesetEntry(['packages/kn-next/src/cli/deploy.ts'])).toBe(false);
+  it('false for an ordinary source path', () => {
+    expect(isChangesetEntryPath('packages/kn-next/src/cli/deploy.ts')).toBe(false);
+  });
+});
+
+describe('parseChangesetFrontmatter', () => {
+  it('extracts a single package name and bump', () => {
+    expect(parseChangesetFrontmatter('---\n"@getknext/core": patch\n---\n\nfix a bug\n')).toEqual([
+      '@getknext/core',
+    ]);
+  });
+
+  it('extracts multiple package names', () => {
+    expect(
+      parseChangesetFrontmatter('---\n"@getknext/core": patch\n"kn-next": minor\n---\n\ndesc\n'),
+    ).toEqual(['@getknext/core', 'kn-next']);
+  });
+
+  it('tolerates single-quoted or unquoted names and trailing newline variations', () => {
+    expect(parseChangesetFrontmatter("---\n'@getknext/lib': major\n---")).toEqual([
+      '@getknext/lib',
+    ]);
+  });
+
+  it('returns null when there is no frontmatter fence at all', () => {
+    expect(parseChangesetFrontmatter('just some prose, no frontmatter')).toBeNull();
+  });
+
+  it('returns null when the frontmatter is unterminated', () => {
+    expect(
+      parseChangesetFrontmatter('---\n"@getknext/core": patch\n\nno closing fence'),
+    ).toBeNull();
+  });
+
+  it('returns null when the frontmatter block is empty', () => {
+    expect(parseChangesetFrontmatter('---\n---\n\ndesc\n')).toBeNull();
+  });
+
+  it('returns null for a malformed line (missing bump keyword)', () => {
+    expect(parseChangesetFrontmatter('---\n"@getknext/core"\n---\n')).toBeNull();
+  });
+
+  it('returns null for a malformed line (invalid bump keyword)', () => {
+    expect(parseChangesetFrontmatter('---\n"@getknext/core": banana\n---\n')).toBeNull();
+  });
+
+  it('fails closed on non-string content (deleted file, read error)', () => {
+    expect(parseChangesetFrontmatter(null)).toBeNull();
+    expect(parseChangesetFrontmatter(undefined)).toBeNull();
+  });
+});
+
+describe('hasChangesetEntry', () => {
+  const candidate = (path: string, status: string, content: string | null) => ({
+    path,
+    status,
+    content,
+  });
+
+  it('a changeset naming the touched package satisfies it', () => {
+    const candidates = [candidate('.changeset/x.md', 'A', '---\n"@getknext/core": patch\n---\n')];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(true);
+  });
+
+  it('a changeset naming only an unrelated/ignored package does NOT satisfy it', () => {
+    const candidates = [candidate('.changeset/x.md', 'A', '---\n"@getknext/ui": patch\n---\n')];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(false);
+  });
+
+  it('a DELETED changeset never satisfies it, even if its content still names the touched package', () => {
+    const candidates = [candidate('.changeset/x.md', 'D', '---\n"@getknext/core": patch\n---\n')];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(false);
+  });
+
+  it('a changeset with no content (deleted, unreadable) never satisfies it', () => {
+    const candidates = [candidate('.changeset/x.md', 'A', null)];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(false);
+  });
+
+  it('a changeset naming TWO packages including the touched one satisfies it', () => {
+    const candidates = [
+      candidate(
+        '.changeset/x.md',
+        'A',
+        '---\n"@getknext/ui": patch\n"@getknext/core": minor\n---\n',
+      ),
+    ];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(true);
+  });
+
+  it('malformed frontmatter fails closed — does not satisfy it', () => {
+    const candidates = [candidate('.changeset/x.md', 'A', 'no frontmatter here at all')];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(false);
+  });
+
+  it('no candidates at all does not satisfy it', () => {
+    expect(hasChangesetEntry([], ['@getknext/core'])).toBe(false);
+  });
+
+  it('a MODIFIED changeset is honored the same as an added one', () => {
+    const candidates = [candidate('.changeset/x.md', 'M', '---\n"@getknext/core": patch\n---\n')];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(true);
+  });
+
+  it('a RENAMED changeset (status starting with R) is honored the same as an added one', () => {
+    const candidates = [
+      candidate('.changeset/x.md', 'R100', '---\n"@getknext/core": patch\n---\n'),
+    ];
+    expect(hasChangesetEntry(candidates, ['@getknext/core'])).toBe(true);
+  });
+});
+
+describe('consumerVisibleManifestChanged', () => {
+  it('true when the public surface changed (delegates to publicSurfaceChanged)', () => {
+    expect(consumerVisibleManifestChanged({ exports: './a.js' }, { exports: './b.js' })).toBe(true);
+  });
+
+  it('true when dependencies changed', () => {
+    expect(
+      consumerVisibleManifestChanged(
+        { dependencies: { foo: '1.0.0' } },
+        { dependencies: { foo: '2.0.0' } },
+      ),
+    ).toBe(true);
+  });
+
+  it('true when peerDependencies changed', () => {
+    expect(
+      consumerVisibleManifestChanged(
+        { peerDependencies: {} },
+        { peerDependencies: { react: '^18' } },
+      ),
+    ).toBe(true);
+  });
+
+  it('true when optionalDependencies changed', () => {
+    expect(consumerVisibleManifestChanged({}, { optionalDependencies: { bufferutil: '^4' } })).toBe(
+      true,
+    );
+  });
+
+  it('false when only devDependencies changed', () => {
+    expect(
+      consumerVisibleManifestChanged(
+        { devDependencies: { vitest: '1.0.0' } },
+        { devDependencies: { vitest: '2.0.0' } },
+      ),
+    ).toBe(false);
+  });
+
+  it('false when only scripts changed', () => {
+    expect(
+      consumerVisibleManifestChanged({ scripts: { build: 'a' } }, { scripts: { build: 'b' } }),
+    ).toBe(false);
+  });
+
+  it('false when only the version bumped (nothing consumer-visible)', () => {
+    expect(consumerVisibleManifestChanged({ version: '1.0.0' }, { version: '1.0.1' })).toBe(false);
   });
 });
 
@@ -209,6 +368,14 @@ describe('hasNoChangesetLabel', () => {
   });
 });
 
+const changesetNaming = (...names: string[]) => [
+  {
+    path: '.changeset/fix-1615.md',
+    status: 'A',
+    content: `---\n${names.map((n) => `"${n}": patch`).join('\n')}\n---\n\ndesc\n`,
+  },
+];
+
 describe('decide — the whole check', () => {
   it('required=false when no fixed-group package is touched', () => {
     const v = decide({
@@ -216,7 +383,7 @@ describe('decide — the whole check', () => {
       roots: ROOTS,
       manifestChanged: {},
       labels: [],
-      hasChangeset: false,
+      changesetCandidates: [],
     });
     expect(v).toMatchObject({ required: false, ok: true, packages: [] });
   });
@@ -227,18 +394,57 @@ describe('decide — the whole check', () => {
       roots: ROOTS,
       manifestChanged: {},
       labels: [],
-      hasChangeset: false,
+      changesetCandidates: [],
     });
     expect(v).toMatchObject({ required: true, ok: false, packages: ['@getknext/core'] });
   });
 
-  it('required=true, ok=true, via=changeset when a .changeset/*.md is present', () => {
+  it('required=true, ok=true, via=changeset when a .changeset/*.md naming the touched package is present', () => {
     const v = decide({
       changedPaths: ['packages/kn-next/src/cli/deploy.ts', '.changeset/fix-1615.md'],
       roots: ROOTS,
       manifestChanged: {},
       labels: [],
-      hasChangeset: true,
+      changesetCandidates: changesetNaming('@getknext/core'),
+    });
+    expect(v).toMatchObject({ required: true, ok: true, via: 'changeset' });
+  });
+
+  it('required=true, ok=false when the only changeset names an unrelated/ignored package', () => {
+    const v = decide({
+      changedPaths: ['packages/kn-next/src/cli/deploy.ts', '.changeset/fix-1615.md'],
+      roots: ROOTS,
+      manifestChanged: {},
+      labels: [],
+      changesetCandidates: changesetNaming('@getknext/ui'),
+    });
+    expect(v).toMatchObject({ required: true, ok: false, packages: ['@getknext/core'] });
+  });
+
+  it('required=true, ok=false when the diff only DELETES a stale changeset', () => {
+    const v = decide({
+      changedPaths: ['packages/kn-next/src/cli/deploy.ts', '.changeset/stale.md'],
+      roots: ROOTS,
+      manifestChanged: {},
+      labels: [],
+      changesetCandidates: [
+        {
+          path: '.changeset/stale.md',
+          status: 'D',
+          content: '---\n"@getknext/core": patch\n---\n',
+        },
+      ],
+    });
+    expect(v).toMatchObject({ required: true, ok: false, packages: ['@getknext/core'] });
+  });
+
+  it('required=true, ok=true when a changeset names two packages including the touched one', () => {
+    const v = decide({
+      changedPaths: ['packages/kn-next/src/cli/deploy.ts', '.changeset/fix-1615.md'],
+      roots: ROOTS,
+      manifestChanged: {},
+      labels: [],
+      changesetCandidates: changesetNaming('@getknext/ui', '@getknext/core'),
     });
     expect(v).toMatchObject({ required: true, ok: true, via: 'changeset' });
   });
@@ -249,7 +455,7 @@ describe('decide — the whole check', () => {
       roots: ROOTS,
       manifestChanged: {},
       labels: [NO_CHANGESET_LABEL],
-      hasChangeset: false,
+      changesetCandidates: [],
     });
     expect(v).toMatchObject({ required: true, ok: true, via: 'label' });
   });
@@ -260,7 +466,7 @@ describe('decide — the whole check', () => {
       roots: ROOTS,
       manifestChanged: {},
       labels: [],
-      hasChangeset: false,
+      changesetCandidates: [],
     });
     expect(v.packages).toEqual(['@getknext/core', '@getknext/lib']);
   });
@@ -271,7 +477,7 @@ describe('decide — the whole check', () => {
       roots: ROOTS,
       manifestChanged: {},
       labels: [],
-      hasChangeset: false,
+      changesetCandidates: [],
     });
     expect(v).toMatchObject({ required: false, ok: true, packages: [] });
   });

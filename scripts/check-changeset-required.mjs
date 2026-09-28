@@ -24,10 +24,29 @@
  *     root is `<pkg>/src/`.
  *   - any other `files` entry (`templates`, `bin`, ...) ships as-is, so the
  *     watched root is that directory verbatim.
- *   - a package's own `package.json` is always watched, but only fires when
- *     its PUBLIC surface changes (`bin`/`exports`/`files`/`main`/`types`/
- *     `typesVersions` — shared with `check-escalation-triggers.mjs`, which
- *     already carries the "a version bump alone must not fire" rationale).
+ *   - a package's own `package.json` is always watched, and fires on any
+ *     CONSUMER-VISIBLE manifest change: its PUBLIC surface (`bin`/`exports`/
+ *     `files`/`main`/`types`/`typesVersions` — shared with
+ *     `check-escalation-triggers.mjs`, which already carries the "a version
+ *     bump alone must not fire" rationale) OR its `dependencies`/
+ *     `peerDependencies`/`optionalDependencies` (a dependency bump changes what
+ *     every consumer installs, even with no source edit). This check's
+ *     manifest predicate is deliberately BROADER than
+ *     `publicSurfaceChanged` alone — that function answers "does this need a
+ *     design gate", this one answers "does this need a changelog entry", and
+ *     the two questions are not the same. `devDependencies`/`scripts` stay
+ *     quiet on purpose (build/test tooling, invisible to a consumer).
+ *
+ * WHAT "CARRIES A CHANGESET" MEANS. Not merely "a `.changeset/*.md` path
+ * appears in the diff" — that would pass on a changeset naming an unrelated
+ * or `ignore`d package (e.g. `@getknext/ui`), or on a PR that only DELETES a
+ * stale changeset while touching real source. An added or modified
+ * `.changeset/*.md`'s YAML frontmatter (the `"pkg-name": patch|minor|major`
+ * block between the two `---` lines) is parsed and must name at least one of
+ * the packages this diff actually touches. A deleted changeset never counts
+ * (nothing at HEAD to name anything), and malformed frontmatter fails CLOSED
+ * — it does not satisfy the check, the same discipline as everything else
+ * here (`.claude/rules/workflow.md`).
  *
  * WHAT DOES NOT FIRE, deliberately (a guard that cries wolf gets worked
  * around): `__tests__/`, `*.test.*`/`*.spec.*`, and markdown files under a
@@ -146,13 +165,101 @@ export function touchedPackages(changedPaths, roots, manifestChanged) {
   return hit;
 }
 
-/** A real changeset entry — `.changeset/*.md`, excluding the tool's own README. */
-export function hasChangesetEntry(changedPaths) {
-  return changedPaths.some((p) => /^\.changeset\/(?!README\.md$)[^/]+\.md$/.test(p));
+const CHANGESET_ENTRY_PATH_RE = /^\.changeset\/(?!README\.md$)[^/]+\.md$/;
+
+/** Is this path a real changeset entry (`.changeset/*.md`), excluding the tool's own README? */
+export function isChangesetEntryPath(path) {
+  return CHANGESET_ENTRY_PATH_RE.test(path);
+}
+
+/**
+ * Parse a changeset's YAML frontmatter — the `"pkg-name": patch|minor|major`
+ * block between the two `---` lines — into the package names it declares a
+ * bump for. Returns `null` (fail CLOSED) when the content isn't a string, the
+ * frontmatter fence is missing or unterminated, the block is empty, or ANY
+ * line inside it isn't a `"name": bump` pair. One hand-rolled parser, no new
+ * dependency; a hand parser earns fail-closed-on-anything-unexpected rather
+ * than a best-effort guess at what the author meant.
+ *
+ * @param {string | null | undefined} content
+ * @returns {string[] | null}
+ */
+export function parseChangesetFrontmatter(content) {
+  if (typeof content !== 'string') return null;
+  const fence = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!fence) return null;
+  const lines = fence[1]
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  const names = [];
+  for (const line of lines) {
+    const kv = line.match(/^["']?([^"':]+?)["']?\s*:\s*(patch|minor|major)\s*$/);
+    if (!kv) return null; // one malformed line invalidates the whole block
+    names.push(kv[1]);
+  }
+  return names;
+}
+
+/**
+ * An `.changeset/*.md` change from the diff, together with its content at
+ * HEAD (`null` for a deleted file — nothing to parse).
+ * @typedef {{ path: string, status: string, content: string | null }} ChangesetCandidate
+ */
+
+/**
+ * Does at least one ADDED or MODIFIED changeset in this diff name a package
+ * this diff actually touches? A deleted changeset never satisfies it (there
+ * is nothing at HEAD to name anything), and a changeset whose frontmatter
+ * names only untouched/unrelated packages does not satisfy it either — this
+ * is the check that closes the "any `.changeset/*.md` path in the diff
+ * passes" gap (#1615 review round 2).
+ *
+ * @param {ChangesetCandidate[]} candidates
+ * @param {Iterable<string>} touchedPackageNames
+ */
+export function hasChangesetEntry(candidates, touchedPackageNames) {
+  const touched = new Set(touchedPackageNames);
+  return (candidates ?? []).some((c) => {
+    if (c.status === 'D') return false;
+    const names = parseChangesetFrontmatter(c.content);
+    return names != null && names.some((n) => touched.has(n));
+  });
 }
 
 export function hasNoChangesetLabel(labels) {
   return (labels ?? []).some((l) => l.trim().toLowerCase() === NO_CHANGESET_LABEL);
+}
+
+/**
+ * The dependency fields whose change alters what a consumer installs, even
+ * with no source edit — distinct from `PUBLIC_MANIFEST_KEYS`
+ * (`check-escalation-triggers.mjs`), which answers "does this need a design
+ * gate", not "does this need a changelog entry". `devDependencies`/`scripts`
+ * are deliberately excluded (build/test tooling, invisible to a consumer).
+ */
+export const CONSUMER_VISIBLE_DEPENDENCY_KEYS = [
+  'dependencies',
+  'peerDependencies',
+  'optionalDependencies',
+];
+
+/**
+ * Did this package.json change in a way a CONSUMER can observe — its public
+ * surface (`publicSurfaceChanged`) or one of its dependency maps? Broader on
+ * purpose than `publicSurfaceChanged` alone; see the module doc comment.
+ *
+ * @param {Record<string, unknown> | null} before
+ * @param {Record<string, unknown> | null} after
+ */
+export function consumerVisibleManifestChanged(before, after) {
+  if (publicSurfaceChanged(before, after)) return true;
+  const pick = (o) =>
+    JSON.stringify(
+      Object.fromEntries(CONSUMER_VISIBLE_DEPENDENCY_KEYS.map((k) => [k, o?.[k] ?? null])),
+    );
+  return pick(before) !== pick(after);
 }
 
 /**
@@ -164,15 +271,17 @@ export function hasNoChangesetLabel(labels) {
  *   roots: Array<{ name: string, watchDir?: string }>,
  *   manifestChanged: Record<string, boolean>,
  *   labels: string[],
- *   hasChangeset: boolean,
+ *   changesetCandidates: ChangesetCandidate[],
  * }} input
  */
-export function decide({ changedPaths, roots, manifestChanged, labels, hasChangeset }) {
+export function decide({ changedPaths, roots, manifestChanged, labels, changesetCandidates }) {
   const packages = [...touchedPackages(changedPaths, roots, manifestChanged)].sort();
   if (packages.length === 0) {
     return { required: false, ok: true, packages };
   }
-  if (hasChangeset) return { required: true, ok: true, via: 'changeset', packages };
+  if (hasChangesetEntry(changesetCandidates ?? [], packages)) {
+    return { required: true, ok: true, via: 'changeset', packages };
+  }
   if (hasNoChangesetLabel(labels)) return { required: true, ok: true, via: 'label', packages };
   return { required: true, ok: false, packages };
 }
@@ -192,6 +301,14 @@ function showJson(ref, path, cwd) {
     return JSON.parse(git(['show', `${ref}:${path}`], cwd));
   } catch {
     return null; // absent on that side is a legitimate answer
+  }
+}
+
+function showText(ref, path, cwd) {
+  try {
+    return git(['show', `${ref}:${path}`], cwd);
+  } catch {
+    return null; // deleted, or unreadable — hasChangesetEntry treats null as no-match
   }
 }
 
@@ -241,9 +358,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(2);
   }
 
-  const changedPaths = parseNameStatus(
-    git(['diff', '--name-status', `${base}...${head}`], repoRoot),
-  ).map((c) => c.path);
+  const changes = parseNameStatus(git(['diff', '--name-status', `${base}...${head}`], repoRoot));
+  const changedPaths = changes.map((c) => c.path);
 
   const changesetConfig = readJsonSafe(resolve(repoRoot, '.changeset/config.json')) ?? {};
   const dirs = discoverPackageDirs(repoRoot);
@@ -262,12 +378,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const name = headManifests[dir]?.name;
     if (!name || !fixedNames.has(name)) continue;
     const before = showJson(base, manifestPath, repoRoot);
-    manifestChanged[name] = publicSurfaceChanged(before, headManifests[dir]);
+    manifestChanged[name] = consumerVisibleManifestChanged(before, headManifests[dir]);
   }
 
+  // Only an ADDED or MODIFIED `.changeset/*.md` can satisfy the check — a
+  // deleted one has nothing at HEAD to read, so its content is `null` and
+  // `hasChangesetEntry` skips it by status regardless.
+  const changesetCandidates = changes
+    .filter((c) => isChangesetEntryPath(c.path))
+    .map((c) => ({
+      path: c.path,
+      status: c.status,
+      content: c.status === 'D' ? null : showText(head, c.path, repoRoot),
+    }));
+
   const labels = readLabels();
-  const hasChangeset = hasChangesetEntry(changedPaths);
-  const verdict = decide({ changedPaths, roots, manifestChanged, labels, hasChangeset });
+  const verdict = decide({ changedPaths, roots, manifestChanged, labels, changesetCandidates });
   const preReleaseActive = existsSync(resolve(repoRoot, '.changeset/pre.json'));
 
   if (process.argv.includes('--json')) {
