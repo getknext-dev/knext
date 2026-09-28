@@ -49,6 +49,29 @@
  *     documents. That is TOFU against `dl.k8s.io`, the same trust root as the
  *     binary itself, not an independently-sourced hash — recorded here rather
  *     than left implicit.
+ *
+ * ## Round 3 (#1588) fixes
+ *
+ *   - **`docker-cli` alone was not enough.** On Alpine, `docker-cli` ships only
+ *     `/usr/bin/docker` — the `buildx` plugin is a SEPARATE package,
+ *     `docker-cli-buildx` (no `install_if`, `docker-cli` does not depend on
+ *     it). `kn-next deploy` runs `docker buildx build` (`runtime-image.ts`'s
+ *     `dockerBuildxArgs`, argv[0..1] = `["docker", "buildx"]`), so the `deploy`
+ *     job now installs BOTH packages.
+ *   - **`kubectl`'s sha256 is now embedded, not fetched.** The old two-`curl`
+ *     shape downloaded the binary AND its checksum from the same host
+ *     (`dl.k8s.io`) — that catches a corrupted download but not a substituted
+ *     one, since there is nothing independent to compare against. The literal
+ *     below closes that: it was read directly from
+ *     `https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256`
+ *     and must move in lockstep with `KUBECTL_VERSION` — bump both together,
+ *     never one without the other.
+ *   - **The `docker:27.3.1-dind` service is now digest-pinned**, matching the
+ *     three job images (`security.md`: pin images by digest, reject mutable
+ *     tags). Resolved with `crane digest docker:27.3.1-dind` — the manifest
+ *     LIST digest (same convention as the `node:22-alpine` pin above: an OCI
+ *     index, not one platform's manifest), so Docker still selects the
+ *     runner's actual architecture.
  */
 import { cliVersion } from "../create";
 import { REQUIRED_SECRETS } from "./ci-secrets";
@@ -60,6 +83,33 @@ export const GITLAB_CI_PATH = ".gitlab-ci.yml";
  * none — pinned, not `stable.txt`, and verified against the sha256 the
  * release publishes alongside the binary. Bump deliberately, not silently. */
 const KUBECTL_VERSION = "v1.33.3";
+
+/**
+ * sha256 of the `linux/amd64` kubectl binary for {@link KUBECTL_VERSION},
+ * read directly from
+ * `https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256`
+ * (2026-09-28) and embedded here rather than fetched at pipeline run time —
+ * the old two-`curl` shape downloaded the checksum from the same host as the
+ * binary, which catches corruption but not substitution, since there was
+ * nothing independent to compare against. MUST move in lockstep with
+ * {@link KUBECTL_VERSION}: bumping one without the other pins a binary
+ * against the wrong release's checksum.
+ */
+const KUBECTL_SHA256_LINUX_AMD64 =
+    "2fcf65c64f352742dc253a25a7c95617c2aba79843d1b74e585c69fe4884afb0";
+
+/**
+ * `docker:27.3.1-dind`'s manifest-LIST digest (an OCI image index, same
+ * convention as the `node:22-alpine` pin below — not one platform's manifest
+ * digest, so Docker still resolves the runner's actual architecture),
+ * resolved with `crane digest docker:27.3.1-dind` (2026-09-28). Digest-pinned
+ * per `security.md` ("pin images by digest; reject `:latest`" — the same
+ * rule applies to any mutable tag, and this is a privileged dind service
+ * holding the registry token and the decoded kubeconfig for its job's
+ * lifetime).
+ */
+const DIND_DIGEST =
+    "sha256:6ca9a6811085e2cf769cbac04bc47daf66629102990391caab7cf37426e939da";
 
 /**
  * The pipeline. `appDir` is baked in at generation time (like `renderWorkflow`'s
@@ -131,8 +181,7 @@ variables:
   - |
     if ! command -v kubectl >/dev/null 2>&1; then
       curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-      curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
-      echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
+      echo "${KUBECTL_SHA256_LINUX_AMD64}  kubectl" | sha256sum -c -
       chmod +x kubectl
       mv kubectl /usr/local/bin/kubectl
     fi
@@ -178,9 +227,11 @@ credential-preflight:
 
 # ── Deploy — build, push, apply ──────────────────────────────────────────────
 # \`kn-next deploy\` runs \`docker buildx build … --push\` (deploy.ts), so this
-# job needs an actual docker daemon — a plain \`image: node:22\` has none. This
-# pairs a docker-in-docker service with a docker-CLI-capable job image, GitLab's
-# own recipe for exactly this:
+# job needs an actual docker daemon AND the buildx plugin — a plain
+# \`image: node:22\` has neither, and Alpine's \`docker-cli\` package alone ships
+# only \`/usr/bin/docker\`, not buildx (a separate package, \`docker-cli-buildx\`).
+# This pairs a docker-in-docker service with a docker-CLI-and-buildx-capable
+# job image, GitLab's own recipe for exactly this:
 # https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker
 # \`resource_group\` serialises deploys per namespace — two concurrent pipelines
 # on \`main\` must not race two applies of the same NextApp.
@@ -188,7 +239,7 @@ deploy:
   stage: deploy
   image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
   services:
-    - docker:27.3.1-dind
+    - docker:27.3.1-dind@${DIND_DIGEST}
   variables:
     DOCKER_HOST: tcp://docker:2376
     DOCKER_TLS_CERTDIR: "/certs"
@@ -203,7 +254,7 @@ deploy:
   script:
     - |
       if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache docker-cli curl bash
+        apk add --no-cache docker-cli docker-cli-buildx curl bash
       fi
     - *knext_kubeconfig
     - *knext_kubectl_install

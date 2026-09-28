@@ -156,9 +156,40 @@ const MUTATIONS = [
     anchor: '    if (hazardsFound.length > 0) {',
     replacement: '    if (false) {',
   },
+
+  // ── Guard 7 (#1588 round 3, finding 1): docker-cli-buildx removed ───────
+  {
+    label:
+      'the deploy job drops docker-cli-buildx — `docker buildx build` has no plugin to run, even though `docker-cli` alone still installs',
+    subject: 'initCiGitlabTs',
+    spec: GITLAB_TEMPLATE_SPEC,
+    anchor: 'apk add --no-cache docker-cli docker-cli-buildx curl bash',
+    replacement: 'apk add --no-cache docker-cli curl bash',
+  },
+
+  // ── Guard 8 (#1588 round 3, finding 2): kubectl sha256 fetched again ────
+  {
+    label:
+      'the embedded kubectl sha256 check reverts to a second curl download from dl.k8s.io — TOFU against a substituted binary is reopened',
+    subject: 'initCiGitlabTs',
+    spec: GITLAB_TEMPLATE_SPEC,
+    anchor: 'echo "${KUBECTL_SHA256_LINUX_AMD64}  kubectl" | sha256sum -c -',
+    replacement:
+      'curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"\n      echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -',
+  },
+
+  // ── Guard 9 (#1588 round 3, finding 3): dind service loses its digest pin ─
+  {
+    label:
+      'the dind service reverts to a bare mutable tag — the privileged docker-in-docker service holding the registry token and kubeconfig is no longer digest-pinned',
+    subject: 'initCiGitlabTs',
+    spec: GITLAB_TEMPLATE_SPEC,
+    anchor: '- docker:27.3.1-dind@${DIND_DIGEST}',
+    replacement: '- docker:27.3.1-dind',
+  },
 ];
 
-const DECLARED = 10;
+const DECLARED = 13;
 declareMutations(DECLARED);
 
 if (MUTATIONS.length !== DECLARED) {

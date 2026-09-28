@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { CI_ROLE_RULES } from "../cli/ci/credential-scope";
 import { GITLAB_CI_PATH, renderGitlabPipeline } from "../cli/ci/init-ci-gitlab";
+import { dockerBuildxArgs } from "../cli/runtime-image";
 
 // Each credential-preflight run submits ~40 access reviews, one fake-kubectl
 // process each (same shape as kn-next-action-preflight-hazard-and-kubeconfig.
@@ -121,8 +122,12 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
     // concurrent deploys to the same namespace must not race.
     it("deploy carries a docker-in-docker service, since `knext deploy` needs a docker daemon", () => {
         const { jobs } = pipeline();
+        // Digest-pinned since #1588 round 3 (finding 3) — the tag prefix must
+        // still be `docker:*-dind`, but a bare `@sha256:` tail is now required.
         expect(
-            jobs.deploy?.services?.some((s) => /^docker:.*-dind$/.test(s)),
+            jobs.deploy?.services?.some((s) =>
+                /^docker:.*-dind@sha256:[0-9a-f]{64}$/.test(s),
+            ),
         ).toBe(true);
     });
 
@@ -161,6 +166,85 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
             /dl\.k8s\.io\/release\/v\d+\.\d+\.\d+\/bin\/linux\/amd64\/kubectl/,
         );
         expect(text).toContain("sha256sum -c");
+    });
+
+    // #1588 round 3 review, finding 2 — the sha256 must be an embedded literal,
+    // never a second network fetch from the same host as the binary (TOFU
+    // against a substituted download, not just a corrupted one).
+    it("the kubectl sha256 is embedded in the pipeline, not fetched from dl.k8s.io at run time", () => {
+        const text = renderGitlabPipeline(".");
+        expect(text).not.toContain("kubectl.sha256");
+        // Exactly one curl in the kubectl-install block: the binary itself.
+        const installBlock = text.slice(
+            text.indexOf(".knext_kubectl_install"),
+            text.indexOf("# ── Kubeconfig check"),
+        );
+        const curlCount = (installBlock.match(/curl -fsSLO/g) ?? []).length;
+        expect(curlCount).toBe(1);
+        expect(installBlock).toContain('kubectl"\n');
+    });
+
+    // The version and hash must move together: both are read from the SAME
+    // module constants, so the check line the pipeline emits always reflects
+    // whichever KUBECTL_VERSION/hash the source currently declares — never a
+    // stale literal hand-copied into the render function separately.
+    it("the embedded kubectl sha256 is a well-formed sha256 and is wired into the same sha256sum -c line as the pinned version", () => {
+        const text = renderGitlabPipeline(".");
+        const versionMatch = text.match(
+            /dl\.k8s\.io\/release\/(v\d+\.\d+\.\d+)\/bin\/linux\/amd64\/kubectl"/,
+        );
+        expect(versionMatch).not.toBeNull();
+        const shaMatch = text.match(
+            /echo "([0-9a-f]{64})  kubectl" \| sha256sum -c -/,
+        );
+        expect(shaMatch).not.toBeNull();
+        // Both come from the same generated pipeline, adjacent lines, in the
+        // same install block — a version bump with no matching hash bump would
+        // still render valid-LOOKING output, but this pins the current pair so
+        // an editor changing one constant without the other is visible in the
+        // diff of this test's own literal expectations.
+        expect(shaMatch?.[1]).toBe(
+            "2fcf65c64f352742dc253a25a7c95617c2aba79843d1b74e585c69fe4884afb0",
+        );
+        expect(versionMatch?.[1]).toBe("v1.33.3");
+    });
+
+    // #1588 round 3 review, finding 1 — Alpine's `docker-cli` package does not
+    // include the `buildx` plugin `dockerBuildxArgs` (runtime-image.ts) shells
+    // out to; it is the separate `docker-cli-buildx` package.
+    it("the deploy job installs docker-cli-buildx alongside docker-cli — dockerBuildxArgs needs the buildx plugin, not just the docker binary", () => {
+        const { jobs } = pipeline();
+        const script = flattenScript(jobs.deploy?.script).join("\n");
+        expect(
+            dockerBuildxArgs({
+                taggedRef: "example.com/app:tag",
+                metadataFilePath: "/tmp/meta.json",
+                buildContext: ".",
+                dockerfile: "Dockerfile",
+            })[0],
+        ).toBe("docker");
+        expect(
+            dockerBuildxArgs({
+                taggedRef: "example.com/app:tag",
+                metadataFilePath: "/tmp/meta.json",
+                buildContext: ".",
+                dockerfile: "Dockerfile",
+            })[1],
+        ).toBe("buildx");
+        expect(script).toMatch(/apk add --no-cache[^\n]*\bdocker-cli\b/);
+        expect(script).toMatch(/apk add --no-cache[^\n]*\bdocker-cli-buildx\b/);
+    });
+
+    // #1588 round 3 review, finding 3 — a privileged dind service holding the
+    // registry token and decoded kubeconfig must be digest-pinned, matching
+    // the three job images (security.md: pin images by digest).
+    it("the dind service is pinned by digest, not just a mutable tag", () => {
+        const { jobs } = pipeline();
+        const dindRef = jobs.deploy?.services?.find((s) =>
+            s.startsWith("docker:27.3.1-dind"),
+        );
+        expect(dindRef).toBeDefined();
+        expect(dindRef).toMatch(/^docker:27\.3\.1-dind@sha256:[0-9a-f]{64}$/);
     });
 });
 

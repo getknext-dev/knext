@@ -94,22 +94,36 @@ for the exact list; both providers read it from the same source.
 </Callout>
 
 Both preflight jobs need `kubectl` on the runner; the generated pipeline installs a pinned release
-if it is not already on the image, verifying the download against the sha256 Kubernetes' own
-release infrastructure publishes alongside the binary.
+if it is not already on the image, verifying the download against a checksum embedded directly in
+the pipeline — read once from Kubernetes' own release infrastructure and bumped together with the
+version, rather than fetched again at every run.
 
 ## The deploy job needs a docker daemon
 
 `knext deploy` builds and pushes your image with `docker buildx build … --push`. A plain job
 image has no docker daemon at all, so the generated `deploy` job pairs a docker-in-docker service
-(`docker:27.3.1-dind`) with a docker-CLI-capable job image — [GitLab's own recipe for
-this](https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker). It logs into
-`KNEXT_REGISTRY` with `KNEXT_REGISTRY_TOKEN` via `docker login --password-stdin` — the token never
-appears in a job's command line. The job also carries a `resource_group` scoped to your namespace,
-so two pipelines racing on `main` cannot apply the same `NextApp` concurrently.
+(`docker:27.3.1-dind`, pinned by digest) with a docker-CLI-and-buildx-capable job image —
+[GitLab's own recipe for this](https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker).
+On Alpine, the `docker-cli` package alone ships only `/usr/bin/docker` — the `buildx` plugin is a
+separate package, `docker-cli-buildx` — so the job installs both. It logs into `KNEXT_REGISTRY`
+with `KNEXT_REGISTRY_TOKEN` via `docker login --password-stdin` — the token never appears in a
+job's command line. The job also carries a `resource_group` scoped to your namespace, so two
+pipelines racing on `main` cannot apply the same `NextApp` concurrently.
+
+<Callout type="warn">
+Docker-in-docker over TLS (the generated job's `DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` setup) needs a
+**privileged runner** — GitLab's Docker executor cannot start the `dind` service without
+`privileged = true` in the runner's `config.toml`. With the Docker executor you also need the
+`/certs/client` directory shared as a runner volume (`--docker-volumes "/certs/client"`, or the
+equivalent `config.toml` entry) — without it, `DOCKER_CERT_PATH` is empty and the job's `docker`
+client cannot complete the TLS handshake to `docker:2376`. See GitLab's [Docker-in-Docker with
+TLS](https://docs.gitlab.com/ci/docker/docker_in_docker/) page for the full runner configuration.
+</Callout>
 
 If your runner cannot run docker-in-docker (some shared/Kubernetes-executor runners restrict it),
 point the job at a runner that can, or replace the `services:`/`docker login` block with your own
-kaniko/buildah equivalent — `knext deploy` only needs a working `docker` on `PATH` when it runs.
+kaniko/buildah equivalent — `knext deploy` only needs a working `docker` (with the `buildx` plugin)
+on `PATH` when it runs.
 
 ## Kubeconfig handling
 
