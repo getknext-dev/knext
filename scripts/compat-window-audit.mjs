@@ -533,68 +533,6 @@ export function isUnresolved(ledger) {
 }
 
 /**
- * The reasons a scheduled run can be marked INVALID (#1530) rather than
- * UNRESOLVED. The distinction matters and is not cosmetic:
- *
- *   * UNRESOLVED (rule 5, above) means "we could not obtain evidence" — the
- *     run may have been perfectly good, we simply lost the ledger. It
- *     DISQUALIFIES the night and RESTARTS the streak, because admitting it
- *     would risk joining two streaks across a night that might really have
- *     been red.
- *   * INVALID means the opposite kind of certainty: we DO have evidence, and
- *     the evidence says the run's precondition was untrustworthy BEFORE a
- *     single shard executed (today: the OKE operator's live digest did not
- *     match the release digest the credential ref resolved — an operator
- *     bug could pass or fail shards for reasons that have nothing to do with
- *     the knext ref under test). That is not "no evidence either way" in the
- *     sense of a lost artifact; it is "evidence this specific night proves
- *     nothing", which is why it must count as neither a red night (it never
- *     ran the suite) nor a green one (nothing was proven), and — unlike
- *     UNRESOLVED — must not cost the streak either, since skipping a night
- *     whose own tooling never got to test anything is not the silent-drop
- *     rule 5 exists to prevent (there is nothing here that COULD have been
- *     silently dropped). See `auditWindow`'s loop, which PAUSES on an
- *     invalid night — leaves `open`/`pendingCause` untouched — in contrast
- *     to the RESET an unresolved or disqualified night causes.
- */
-export const INVALID_REASONS = Object.freeze([
-  // the OKE operator's live Deployment image digest did not match the digest
-  // recorded for the release the credential ref resolved (#1530).
-  'operator-digest-mismatch',
-]);
-
-/**
- * A stand-in for a scheduled run marked invalid before it produced evidence.
- * Shaped like `unresolvedNight` on purpose — same stand-in contract, same
- * `readLedgerDir`/`fetchLedgers` consumption path — but carries `invalid`
- * instead of `unresolved` so `gradeNight`/`auditWindow` can tell the two
- * apart and treat them differently (see `INVALID_REASONS` above).
- *
- * @param {string|number} runId
- * @param {typeof INVALID_REASONS[number]} reason
- * @param {string|null} [lane]
- * @param {string|null} [mode]
- */
-export function invalidNight(runId, reason, lane = null, mode = null) {
-  if (!INVALID_REASONS.includes(reason)) {
-    throw new Error(`compat-window-audit: unknown invalid reason ${reason}`);
-  }
-  return {
-    runId: String(runId),
-    event: 'schedule',
-    lane: typeof lane === 'string' && lane.length > 0 ? lane : null,
-    compatMode: COMPAT_MODES.includes(mode) ? mode : null,
-    invalid: reason,
-    shards: [],
-  };
-}
-
-/** Is this entry a stand-in for a run marked invalid before it ran? */
-export function isInvalid(ledger) {
-  return typeof ledger?.invalid === 'string' && ledger.invalid.length > 0;
-}
-
-/**
  * Grade ONE run ledger against every rule a single night can be judged on
  * alone (rule 1 is cross-night and lives in `auditWindow`).
  *
@@ -604,33 +542,6 @@ export function isInvalid(ledger) {
 export function gradeNight(ledger, opts = {}) {
   const lane = opts.lane ?? CREDENTIAL_LANE;
   const scope = opts.scope ?? 'credential';
-  // A night marked invalid before it ran (#1530) is graded on that fact alone,
-  // same shape as unresolved but tagged `invalid` instead — see
-  // INVALID_REASONS' doc comment for why `auditWindow` treats the two
-  // differently even though both grade `eligible: false` here.
-  if (isInvalid(ledger)) {
-    return {
-      runId: String(ledger.runId ?? ''),
-      lane: null,
-      event: ledger.event ?? null,
-      runAttempt: null,
-      ref: null,
-      knextRef: null,
-      knextSha: null,
-      compatMode: ledger.compatMode ?? null,
-      fingerprint: null,
-      fingerprintComponents: null,
-      shardsExpected: null,
-      shardsSeen: 0,
-      passed: 0,
-      failed: 0,
-      notRun: 0,
-      disqualifiers: [`invalid: ${ledger.invalid}`],
-      eligible: false,
-      unresolved: null,
-      invalid: ledger.invalid,
-    };
-  }
   // A night we could not read is disqualified on that fact alone. Grading it
   // against the other rules would be theatre — every field it would be judged
   // on is missing precisely because the ledger is.
@@ -654,7 +565,6 @@ export function gradeNight(ledger, opts = {}) {
       disqualifiers: [ledger.unresolved],
       eligible: false,
       unresolved: ledger.unresolved,
-      invalid: null,
     };
   }
   const disqualifiers = [];
@@ -794,7 +704,6 @@ export function gradeNight(ledger, opts = {}) {
     disqualifiers: [...new Set(disqualifiers)],
     eligible: disqualifiers.length === 0,
     unresolved: null,
-    invalid: null,
   };
 }
 
@@ -823,9 +732,7 @@ export function selectLaneNights(ledgers, lane = CREDENTIAL_LANE, scope = 'crede
   }
   return ledgers
     .filter(
-      (l) =>
-        l?.event === 'schedule' &&
-        (l?.lane === lane || ((isUnresolved(l) || isInvalid(l)) && l?.lane == null)),
+      (l) => l?.event === 'schedule' && (l?.lane === lane || (isUnresolved(l) && l?.lane == null)),
     )
     .filter((l) => inScope(l, scope))
     .sort((a, b) => Number(a.runId) - Number(b.runId));
@@ -842,7 +749,7 @@ export function selectLaneNights(ledgers, lane = CREDENTIAL_LANE, scope = 'crede
  * admitted to BOTH scopes, because its mode is exactly what we failed to read.
  */
 function inScope(ledger, scope) {
-  if (isUnresolved(ledger) || isInvalid(ledger)) {
+  if (isUnresolved(ledger)) {
     const mode = ledger?.compatMode ?? null;
     if (mode === null) return true;
     return scope === 'credential' ? mode === 'credential' : mode === 'early-warning';
@@ -874,17 +781,6 @@ export function auditWindow(ledgers, opts = {}) {
   // "fingerprint-changed", blaming the wrong rule for the reset.
   let pendingCause = null;
   for (const night of nights) {
-    if (night.invalid) {
-      // #1530: an INVALID night PAUSES the count rather than resetting it —
-      // the opposite of the unresolved/disqualified branch below. It is not a
-      // silently-dropped night (rule 5's concern): we have direct evidence the
-      // run's precondition was bad before it produced a single shard, so
-      // there is nothing here that could have been a real red or green night
-      // erased by skipping it. `open`/`pendingCause` are deliberately left
-      // untouched so the qualifying nights either side of it still join into
-      // one streak.
-      continue;
-    }
     if (!night.eligible) {
       // A disqualified night restarts the count. It does not pause it — and an
       // UNRESOLVED night (rule 5) is disqualified, not absent, which is what
@@ -967,16 +863,8 @@ export function auditWindow(ledgers, opts = {}) {
   const longest = streaks.reduce((best, s) => (s.nights > best.nights ? s : best), empty);
   // "Current" is the streak that is still open — i.e. one that runs to the last
   // graded night. A streak broken by a later red is history, not the count.
-  //
-  // #1530: the comparison is against the last NON-INVALID night, not the last
-  // night full stop. An invalid night is transparent to the streak (it is
-  // PAUSED over, never joined or broken on) — without this, a still-open
-  // streak whose most recent scheduled run happened to be invalid would
-  // report `current: 0` for no reason connected to the streak itself, which
-  // is exactly the false reset INVALID_REASONS exists to prevent.
-  const lastGradedRunId = [...nights].reverse().find((n) => !n.invalid)?.runId ?? null;
   const last = streaks.at(-1);
-  const current = last && last.endRunId === lastGradedRunId ? last : empty;
+  const current = last && last.endRunId === nights.at(-1)?.runId ? last : empty;
 
   // The two fields below deliberately read DIFFERENT streaks, and which one
   // each reads is the answer to a different question:
@@ -1013,15 +901,6 @@ export function auditWindow(ledgers, opts = {}) {
       .map((n) => ({
         runId: n.runId,
         reason: n.unresolved,
-      })),
-    // #1530: surfaced separately from unresolvedNights on purpose — an invalid
-    // night is neither a gap in the record (rule 5) nor a disqualified/red
-    // night; see INVALID_REASONS' doc comment and the auditWindow loop above.
-    invalidNights: nights
-      .filter((n) => n.invalid)
-      .map((n) => ({
-        runId: n.runId,
-        reason: n.invalid,
       })),
     // Only a CREDENTIAL window can meet the gate. An early-warning streak on
     // `main` is a forecast, however long it runs.
@@ -1132,20 +1011,6 @@ export function formatReport(audit) {
     );
     for (const u of audit.unresolvedNights) {
       lines.push(`            ${u.runId}  ${u.reason}`);
-    }
-  }
-
-  if (audit.invalidNights.length > 0) {
-    lines.push('');
-    lines.push(
-      `INVALID: ${audit.invalidNights.length} scheduled run(s) were marked invalid before they`,
-    );
-    lines.push(
-      '         produced a single shard result (#1530) — neither red nor green, and PAUSED',
-    );
-    lines.push('         rather than reset: the streak either side of them still joins.');
-    for (const v of audit.invalidNights) {
-      lines.push(`         ${v.runId}  ${v.reason}`);
     }
   }
 

@@ -3,68 +3,39 @@
 Sprint B4 (milestone "v1.0 Credential Windows") asked for one guard per risk
 named against the v1.0 credential harness (ADR-0056,
 `docs/ci/credential-freeze-guard.md`). This doc covers what shipped, what a
-"night" outcome means for each guard, and — honestly — what did not ship and
-why.
+"night" outcome means for the guard that shipped, and — honestly — what did
+not ship and why, including one dropped in review.
 
-## The three outcome kinds a scheduled run can now carry
+## Guard 1 — the OKE operator-digest pre-check: dropped in review, not shipped
 
-Before this work, `scripts/compat-window-audit.mjs` recognized exactly two
-outcomes for a scheduled night: **eligible** (a real green) and
-**disqualified** (a red, or an `UNRESOLVED` night whose ledger could not be
-obtained — both RESET the streak). This adds two more, and neither is a
-synonym for either of those:
+An earlier round of this PR added `scripts/compat-operator-digest-check.mjs`
+and a new `INVALID` outcome kind in `scripts/compat-window-audit.mjs`
+(`INVALID_REASONS`, `invalidNight`, `isInvalid`) that would have **paused** a
+streak — the qualifying nights either side of an invalid night still joining
+— rather than resetting it like every other disqualifier. Round-2 review
+found the pause semantics unbounded: nothing capped consecutive invalid
+nights or tied them to a calendar bound, so a fixture of 13 green nights, 30
+consecutive invalid nights, and 1 more green night graded as one continuous
+14-night streak (`met: true`). That is exactly the VOID-bridging question
+already parked, undecided, at #1553 — this PR is not the place to resolve a
+counting-rule change with a live safety hole and no real producer to justify
+it (guard 1's own script was never wired into a workflow step; the credential
+lanes never touch a live cluster — see below).
 
-| Outcome | What it means | Effect on the streak | Effect on `met`/CI |
-|---|---|---|---|
-| green (`eligible: true`) | every rule satisfied | extends | — |
-| red / disqualified | a rule failed, or the ledger was lost (`UNRESOLVED`) | **resets** | fails the shard/night |
-| **INVALID** (new) | the run's precondition was proven untrustworthy *before it produced a single shard result* | **pauses** — the streak either side of it still joins | never a pass, but never charged either |
-| **infra-classified red** (new) | the run's precondition failed *and the shard still failed*, for a reason that is a runner/environment fault, not a claim about the knext ref under test | resets, same as any red | fails the shard, but is labelled distinctly from `kind: 'assertion'` so triage is not misdirected |
-
-The distinction between "pauses" and "resets, but labelled" is deliberate and
-maps to two different failure shapes:
-
-- an **INVALID** night never ran a single test — grading it as a normal red
-  would silently accuse the knext ref under test of something the operator
-  digest mismatch actually caused, and grading it as absent (skipping it)
-  would let two unrelated streaks quietly merge, which is exactly the
-  silently-dropped-night failure rule 5 already exists to prevent. Pausing is
-  the only choice that is honest in both directions.
-- an **infra-classified** shard DID attempt to run, failed for an
-  environmental reason (the runner's own disk), and must still cost the
-  streak (a runner fault proves nothing green either) — but a reviewer
-  triaging a red night must not go looking for a product regression that
-  does not exist.
-
-## Guard 1 — the OKE operator-digest pre-check
-
-`scripts/compat-operator-digest-check.mjs` compares the OKE operator
-Deployment's *live* running image digest against the digest recorded in the
-digest-pinned `install.yaml` release asset for the RC tag
-`scripts/compat-credential-ref.mjs` resolved. A mismatch marks the night
-**INVALID** (`scripts/compat-window-audit.mjs`'s `INVALID_REASONS`,
-`operator-digest-mismatch`) — see the table above for what that means for the
-streak.
-
-**Honesty note on wiring.** The four wired v1.0 credential cells
-(`CREDENTIAL_CELLS` in `scripts/compat-window-audit.mjs`) all run from
-`.github/workflows/test-e2e-deploy.yml`, and that workflow's `deploy-tests`
-job runs the official Next.js compat suite's *own* `deploy-tests` category —
-every fixture is built and served as a **local process on the GitHub-hosted
-runner** (`scripts/e2e-deploy.sh`). Nothing in that job holds a kubeconfig, a
-kube-context, or any reference to a live cluster; it never touches OKE. So
-this guard's pre-check function and its ledger semantics are built, tested,
-and mutation-proved here, but **not yet wired into a workflow step**, because
-there is currently no credential-cell job that reaches a live cluster to
-check a digest against. It is ready to be called the day a credential cell
-(or a different workflow this ADR's scope grows to cover) actually deploys
-through OKE; until then it is a proven, unused primitive, not decoration —
-the alternative (fabricating a `kubectl` step into a workflow that runs
-nothing on a cluster) would exercise nothing real.
+**Decision (lead-directed): drop the pause semantics entirely.**
+`scripts/compat-window-audit.mjs` is restored to `main`'s counting rules
+byte-for-byte except for the guard-3 labelling described below.
+`scripts/compat-operator-digest-check.mjs`, its test, and its mutation prover
+are removed from this PR rather than left as unwired dead library code. The
+right home for an operator-digest pre-check is the tag-time platform e2e that
+builds the operator from the release tag (#1305 / G2), where a real digest
+comparison has a real producer. Until that lands, no digest check exists, and
+this doc records why rather than leaving a decision-shaped hole for someone
+to rediscover.
 
 ## Guard 3 — the free-disk floor
 
-`.github/workflows/test-e2e-deploy.yml`'s `deploy-tests` job now runs a
+`.github/workflows/test-e2e-deploy.yml`'s `deploy-tests` job runs a
 "Free disk floor" step before the real test-run step. It shells out to
 `scripts/compat-disk-floor-check.mjs`, which fails closed on an unreadable
 reading and compares free space against a floor (5GB — a first estimate, not
@@ -79,7 +50,21 @@ inside the job's unconditional reporting tail; narrowing an `if:` there is
 exactly what `tests/helpers/workflow-conditioning.ts`'s tail audit exists to
 catch). `scripts/compat-window-audit.mjs`'s `isInfraOnlyRedShard` gives the
 disqualifier a distinct `infra-classified:` label, mirroring how `#1520`
-already separated `kind: 'deploy'` from a real assertion regression.
+already separated `kind: 'deploy'` from a real assertion regression. An
+infra-classified night still **disqualifies** the streak exactly like any
+other red — it is never a pass and never charged as anything gentler — the
+label only steers triage away from a phantom product regression.
+
+**Wiring is load-bearing, and now tested as such.** Round-2 review mutated
+the live workflow with an anchor-exact mutator (asserting exactly one match,
+then restoring byte-exact) and found the wiring itself unguarded: removing
+the whole "Free disk floor" step, removing the skip branch in "Run official
+deploy tests" (so the suite runs after a breach), or removing the early
+`exit 0` in "Summarize shard result" (so an empty-log 0/0/0 overwrites the
+infra summary) all left the existing pure-function unit tests green. A
+workflow-scan test now reds on each of those three mutations independently
+(anchor-exact, byte-exact restore, exit-code proof) — the guard's *wiring*,
+not just its labelling function, is covered.
 
 ## Guard 2 — per-cluster concurrency + namespace per lane: not shipped, and why
 
@@ -87,11 +72,19 @@ This is the one guard in the issue that did **not** ship, and it is worth
 saying precisely why rather than shipping something decorative to match the
 issue's wording. "Per-cluster concurrency" and "a distinct namespace per
 cell" both presume the credential cells deploy into a shared Kubernetes
-cluster. They do not: as guard 1's honesty note above establishes, every
-wired credential cell runs entirely on GitHub-hosted runners with no cluster
-in the loop at all. There is no k8s namespace to scope and no cluster deploy
-slot to serialize — adding YAML that pretends otherwise would pass a workflow
-scan while proving nothing.
+cluster. They do not: every wired credential cell (`CREDENTIAL_CELLS` in
+`scripts/compat-window-audit.mjs`) runs entirely on GitHub-hosted runners,
+via `.github/workflows/test-e2e-deploy.yml`'s `deploy-tests` job running the
+official Next.js compat suite's own `deploy-tests` category
+(`scripts/e2e-deploy.sh`) — every fixture is built and served as a local
+process on the runner. This is a **discovered fact, not an assumption**:
+there is no `kubectl`/kubeconfig/kube-context reference anywhere in that job
+or the scripts it transitively calls. So there is no k8s namespace to scope
+and no cluster deploy slot to serialize — adding YAML that pretends
+otherwise would pass a workflow scan while proving nothing. It also means
+guard 1's dropped digest check (above) would have compared against nothing
+these lanes actually observed, which is the same discovered fact playing out
+twice.
 
 The workflow's own existing design comment (`.github/workflows/test-e2e-deploy.yml`,
 `concurrency:` block) documents a *related* but different concurrency
@@ -104,5 +97,6 @@ of it.
 
 If a future credential cell (or a different workflow this scope grows to
 cover) does deploy through a shared cluster, this guard's concurrency +
-namespace requirement should be re-scoped against that workflow's real
-job/step shape rather than assumed from this doc.
+namespace requirement — and guard 1's operator-digest pre-check — should be
+re-scoped against that workflow's real job/step shape rather than assumed
+from this doc.
