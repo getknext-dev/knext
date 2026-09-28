@@ -239,6 +239,100 @@ describe("runCiPreflight — fails closed when a review cannot be run at all", (
             "Could not run the hazardous-permission spot-check",
         );
     });
+
+    // #1588 review, finding 4: this exact branch — the reply has no `.status`
+    // AT ALL (as opposed to the row above, where `.status` is present but
+    // empty) — was untested. A mutant that deletes the `typeof status !==
+    // "object" || status === null` guard stayed green across every spec in
+    // this file until this row was added: every SelfSubjectAccessReview
+    // answering `{}` (no status key) must still refuse, not read as "not
+    // hazardous".
+    it("refuses when a hazard probe's access review has no `status` key at all", () => {
+        let calls = 0;
+        const result = runCiPreflight({
+            namespace: NS,
+            kubeconfigPath: "/fake/kubeconfig",
+            readFile: () => TOKEN_KUBECONFIG,
+            kubectlRaw: (rawPath, body) => {
+                const parsed = JSON.parse(body) as { kind: string };
+                if (parsed.kind === "SelfSubjectRulesReview") {
+                    return fakeKubectlRaw(ROLE_GRANTS)(rawPath, body);
+                }
+                calls += 1;
+                // No `status` field at all — every probe answers this way, so
+                // a "treat missing status as not allowed" mutant would let
+                // this pass as correctly scoped.
+                return JSON.stringify({});
+            },
+        });
+        expect(result.ok).toBe(false);
+        expect(calls).toBeGreaterThan(0);
+        expect(result.lines.join("\n")).toContain(
+            "Could not run the hazardous-permission spot-check",
+        );
+    });
+
+    it("refuses when a hazard probe's access review carries a non-empty evaluationError", () => {
+        const result = runCiPreflight({
+            namespace: NS,
+            kubeconfigPath: "/fake/kubeconfig",
+            readFile: () => TOKEN_KUBECONFIG,
+            kubectlRaw: (rawPath, body) => {
+                const parsed = JSON.parse(body) as { kind: string };
+                if (parsed.kind === "SelfSubjectRulesReview") {
+                    return fakeKubectlRaw(ROLE_GRANTS)(rawPath, body);
+                }
+                // `allowed: false` must NOT be trusted while the authorizer
+                // reports it did not finish deciding.
+                return JSON.stringify({
+                    status: {
+                        allowed: false,
+                        evaluationError: "webhook timeout",
+                    },
+                });
+            },
+        });
+        expect(result.ok).toBe(false);
+        expect(result.lines.join("\n")).toContain(
+            "Could not run the hazardous-permission spot-check",
+        );
+    });
+
+    it("refuses when a hazard probe's access review call itself throws (e.g. a 403 from the apiserver)", () => {
+        const result = runCiPreflight({
+            namespace: NS,
+            kubeconfigPath: "/fake/kubeconfig",
+            readFile: () => TOKEN_KUBECONFIG,
+            kubectlRaw: (rawPath, body) => {
+                const parsed = JSON.parse(body) as { kind: string };
+                if (parsed.kind === "SelfSubjectRulesReview") {
+                    return fakeKubectlRaw(ROLE_GRANTS)(rawPath, body);
+                }
+                throw new Error(
+                    'Error from server (Forbidden): selfsubjectaccessreviews.authorization.k8s.io is forbidden: User "knext-deployer" cannot create resource',
+                );
+            },
+        });
+        expect(result.ok).toBe(false);
+        expect(result.lines.join("\n")).toContain(
+            "Could not run the hazardous-permission spot-check",
+        );
+        expect(result.lines.join("\n")).toContain("Forbidden");
+    });
+
+    it("refuses, fail-closed, when the hazard probe set is unexpectedly empty", () => {
+        const result = runCiPreflight({
+            namespace: NS,
+            kubeconfigPath: "/fake/kubeconfig",
+            readFile: () => TOKEN_KUBECONFIG,
+            kubectlRaw: fakeKubectlRaw(ROLE_GRANTS),
+            hazardProbesOverride: () => [],
+        });
+        expect(result.ok).toBe(false);
+        expect(result.lines.join("\n")).toContain(
+            "Could not run the hazardous-permission spot-check",
+        );
+    });
 });
 
 describe("runCiPreflight — the incomplete rules review is a warning, not a refusal by itself", () => {

@@ -6,13 +6,15 @@
  * the bytes afterward: base64-encoded, piped ONLY to `glab`'s stdin, never an
  * argv entry a co-resident process could read via `ps`.
  *
- * `glab variable set <key> --value-file -` reads the value from stdin when
- * the file path is `-` — the same "`-` means stdin" convention this repo
- * already relies on for `kubectl create --raw <path> -f -`
- * (`preflight.mjs`/`ci-preflight.ts`) and for `docker login --password-stdin`
- * (`kn-next-action/action.yml`). If `glab` is not on PATH, this prints the
- * manual steps instead of failing silently — there is no cluster call to
- * skip by failing here, only a secret push the user can do by hand.
+ * `glab variable set <key>` reads the value from stdin whenever `-v`/`--value`
+ * is omitted (glab's own examples: `glab variable set FROM_FILE < secret.txt`).
+ * glab has **no `--value-file` flag** — `internal/commands/variable/set/set.go`
+ * (gitlab.com/gitlab-org/cli, current release) defines only `-v/--value`, `-t`,
+ * `-s`, `-g`, `-m`/`--masked`, `--hidden`, `-r`/`--protected`, `-p`, `-d`; an
+ * earlier revision of this file passed `--value-file -`, which is `Unknown
+ * flag: --value-file` on every real `glab`. If `glab` is not on PATH, this
+ * prints the manual steps instead of failing silently — there is no cluster
+ * call to skip by failing here, only a secret push the user can do by hand.
  */
 import { spawnSync } from "node:child_process";
 import { classifyKubeconfigSafety } from "./kubeconfig-safety";
@@ -107,15 +109,7 @@ export function pushKubeconfigSecretGitlab(
     const encoded = Buffer.from(kubeconfigYaml, "utf8").toString("base64");
 
     const result = run(
-        [
-            "variable",
-            "set",
-            secretName,
-            "--masked",
-            "--protected",
-            "--value-file",
-            "-",
-        ],
+        ["variable", "set", secretName, "--masked", "--protected"],
         encoded,
     );
     if (!result.ok) {

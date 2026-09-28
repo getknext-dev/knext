@@ -166,6 +166,33 @@ Re-running it without `--force` never clobbers a file you've edited: it names th
 points you at the flag, e.g. `.github/workflows/knext-deploy.yml already exists — left alone (use
 --force to overwrite)`.
 
+## `knext ci-preflight`
+
+The credential-scope + hazard spot-check that `init-ci --provider gitlab`'s generated pipeline runs
+before `deploy` — the same check `kn-next-action`'s composite action runs on GitHub, exposed as a
+CLI verb so a pipeline with no composite-action equivalent can invoke it through the published CLI
+instead of re-deriving the rules in shell. Not typically run by hand.
+
+It asks your cluster what the credential can do (`SelfSubjectRulesReview`) and, because some
+clusters (OKE, GKE with IAM) cannot fully answer that, also spot-checks specific hazardous
+permissions (`SelfSubjectAccessReview`). Every failure mode — the review cannot be reached, returns
+no verdict, or reports the credential can do more than the published Role — refuses rather than
+proceeding: a check that passes when it cannot see is not a check.
+
+```bash
+knext ci-preflight --namespace my-app
+```
+
+| Flag | Notes |
+|---|---|
+| `--namespace <name>` | **Required.** The namespace the credential is scoped to. |
+| `--kubeconfig <path>` | Kubeconfig file to check. Defaults to `$KUBECONFIG`. |
+| `-h`, `--help` | Show the usage help. |
+
+Exits `0` and prints `preflight: credential is correctly scoped for namespace "<ns>".` when the
+credential passes. Exits `1` on any refusal, printing the reason — never the kubeconfig's bytes —
+to stderr.
+
 ## `knext deploy` (default)
 
 Loads and validates `kn-next.config.ts`, runs your build (`next build` with standalone output on the

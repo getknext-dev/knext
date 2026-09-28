@@ -25,12 +25,41 @@
  * `kn-next-action/action.yml`'s step order. `deploy` needs both. Neither
  * preflight job sets `allow_failure` — GitLab's default (a job failure fails
  * the pipeline) is exactly "not skippable", so nothing here may set it `true`.
+ *
+ * ## Round 2 (#1588) fixes
+ *
+ *   - `deploy` now actually CAN build and push: `kn-next deploy` shells out to
+ *     `docker buildx build … --push` (`deploy.ts`), and a plain `image: node:22`
+ *     job has no docker daemon at all. This template pairs a docker-in-docker
+ *     service with a docker-CLI-capable job image (`node:22-alpine` + `apk add
+ *     docker-cli` — the same digest this repo's own Dockerfiles already pin),
+ *     following GitLab's own docker-in-docker recipe
+ *     (https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker),
+ *     and logs into the registry with `KNEXT_REGISTRY_TOKEN` via
+ *     `--password-stdin` — never an argv password (`ps` on the runner can read
+ *     another process's argv).
+ *   - The kubeconfig is written under `umask 077` to a job-scoped path in
+ *     `/tmp` (never `$CI_PROJECT_DIR`, which can outlive the job on a
+ *     shell/persistent-volume executor) and removed by `after_script`, which
+ *     GitLab runs even when the job fails.
+ *   - `kubectl` is pinned to an exact release (not whatever `stable.txt`
+ *     resolves to today) and its download is checked against the sha256
+ *     Kubernetes' own release infra publishes alongside the binary — the same
+ *     verification method https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/
+ *     documents. That is TOFU against `dl.k8s.io`, the same trust root as the
+ *     binary itself, not an independently-sourced hash — recorded here rather
+ *     than left implicit.
  */
 import { cliVersion } from "../create";
 import { REQUIRED_SECRETS } from "./ci-secrets";
 
 /** Where the generated pipeline lands, relative to the repo root. */
 export const GITLAB_CI_PATH = ".gitlab-ci.yml";
+
+/** Exact kubectl release the generated pipeline installs when the runner has
+ * none — pinned, not `stable.txt`, and verified against the sha256 the
+ * release publishes alongside the binary. Bump deliberately, not silently. */
+const KUBECTL_VERSION = "v1.33.3";
 
 /**
  * The pipeline. `appDir` is baked in at generation time (like `renderWorkflow`'s
@@ -53,10 +82,16 @@ export function renderGitlabPipeline(appDir: string): string {
 # against a cluster you control.
 #
 # CI/CD variables this needs (Settings -> CI/CD -> Variables). Mark EVERY one
-# BOTH Masked (never shown in a job log) AND Protected (only available to
-# jobs running on protected branches/tags — this pipeline only runs on
-# \`main\`, which you should protect):
+# Protected (only available to jobs running on protected branches/tags — this
+# pipeline only runs on \`main\`, which you should protect). Mark it Masked too
+# EXCEPT where the value is under 8 characters — GitLab refuses to save a
+# Masked variable shorter than that (a namespace like \`prod\` or \`default\`
+# cannot be Masked; it can still be Protected):
 ${varDocs}
+#
+# KNEXT_REGISTRY_USERNAME (optional) — the registry login username. Defaults
+# to \`gitlab-ci-token\`, correct for GitLab's own Container Registry; set it
+# explicitly for GHCR, Docker Hub, or any other external registry.
 #
 # KNEXT_KUBECONFIG is a base64-encoded TEXT variable (type "Variable", not
 # "File") — the exact same value \`kn-next init-ci --push-secret\` and the
@@ -75,16 +110,29 @@ variables:
   # built dist, a pinned alternate version, …) without editing every job.
   KNEXT_CLI: "${pinnedCli}"
 
+# The kubeconfig lives under /tmp for the lifetime of ONE job — never under
+# $CI_PROJECT_DIR, which a shell or persistent-volume executor can leave on
+# disk after the job ends. \`\${CI_JOB_ID:-$$}\` falls back to the shell's own
+# PID only when CI_JOB_ID is unset (i.e. outside a real GitLab job, such as a
+# hermetic test harness) — on a real runner CI_JOB_ID is always set, so the
+# fallback never fires there, and \`after_script\` (a separate shell context)
+# resolves the exact same path because CI_JOB_ID is a predefined variable
+# available in every phase of the job.
 .knext_kubeconfig: &knext_kubeconfig
-  - mkdir -p "$CI_PROJECT_DIR/.knext"
-  - printf '%s' "$KNEXT_KUBECONFIG" | base64 -d > "$CI_PROJECT_DIR/.knext/kubeconfig"
-  - export KUBECONFIG="$CI_PROJECT_DIR/.knext/kubeconfig"
+  - umask 077
+  - export KUBECONFIG="/tmp/knext-kubeconfig-\${CI_JOB_ID:-$$}"
+  - printf '%s' "$KNEXT_KUBECONFIG" | base64 -d > "$KUBECONFIG"
   - chmod 600 "$KUBECONFIG"
+
+.knext_kubeconfig_cleanup: &knext_kubeconfig_cleanup
+  - rm -f "/tmp/knext-kubeconfig-\${CI_JOB_ID:-$$}"
 
 .knext_kubectl_install: &knext_kubectl_install
   - |
     if ! command -v kubectl >/dev/null 2>&1; then
-      curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+      curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
+      echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
       chmod +x kubectl
       mv kubectl /usr/local/bin/kubectl
     fi
@@ -96,12 +144,14 @@ variables:
 # \`allow_failure\`/\`when: manual\` on a shared job could.
 kubeconfig-check:
   stage: preflight
-  image: node:22
+  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
   script:
     - *knext_kubeconfig
     - $KNEXT_CLI doctor --ci-kubeconfig "$KUBECONFIG"
+  after_script:
+    - *knext_kubeconfig_cleanup
 
 # ── Credential preflight — refuse more than we asked for ────────────────────
 # ADR-0049/#1495: a cluster-admin kubeconfig, or one with any grant outside
@@ -110,29 +160,58 @@ kubeconfig-check:
 # first kubectl call.
 credential-preflight:
   stage: preflight
-  image: node:22
+  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
   needs:
     - kubeconfig-check
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
   script:
+    - |
+      if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache curl bash
+      fi
     - *knext_kubeconfig
     - *knext_kubectl_install
     - $KNEXT_CLI ci-preflight --namespace "$KNEXT_NAMESPACE" --kubeconfig "$KUBECONFIG"
+  after_script:
+    - *knext_kubeconfig_cleanup
 
+# ── Deploy — build, push, apply ──────────────────────────────────────────────
+# \`kn-next deploy\` runs \`docker buildx build … --push\` (deploy.ts), so this
+# job needs an actual docker daemon — a plain \`image: node:22\` has none. This
+# pairs a docker-in-docker service with a docker-CLI-capable job image, GitLab's
+# own recipe for exactly this:
+# https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker
+# \`resource_group\` serialises deploys per namespace — two concurrent pipelines
+# on \`main\` must not race two applies of the same NextApp.
 deploy:
   stage: deploy
-  image: node:22
+  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+  services:
+    - docker:27.3.1-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
   needs:
     - kubeconfig-check
     - credential-preflight
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
+  resource_group: knext-deploy-$KNEXT_NAMESPACE
   script:
+    - |
+      if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache docker-cli curl bash
+      fi
     - *knext_kubeconfig
     - *knext_kubectl_install
+    - printf '%s' "$KNEXT_REGISTRY_TOKEN" | docker login "\${KNEXT_REGISTRY%%/*}" -u "\${KNEXT_REGISTRY_USERNAME:-gitlab-ci-token}" --password-stdin
     - cd ${appDir}
     - npm ci
     - $KNEXT_CLI deploy --namespace "$KNEXT_NAMESPACE" --registry "$KNEXT_REGISTRY"
+  after_script:
+    - *knext_kubeconfig_cleanup
 `;
 }

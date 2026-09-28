@@ -168,6 +168,14 @@ export interface RunCiPreflightOptions {
     kubeconfigPath: string;
     readFile?: (p: string) => string;
     kubectlRaw?: KubectlRawFn;
+    /**
+     * Test-only override for the derived hazard-probe set. Defaults to the
+     * real, shipped `hazardProbes()` — production code never sets this. It
+     * exists so a test can exercise the "probe set unexpectedly empty"
+     * fail-closed branch below, which the real `hazardProbes()` (derived from
+     * the fixed `CI_ROLE_RULES` Role) can never actually produce.
+     */
+    hazardProbesOverride?: (namespace: string) => HazardProbe[];
 }
 
 /**
@@ -232,7 +240,9 @@ export function runCiPreflight(opts: RunCiPreflightOptions): CiPreflightResult {
 
     let hazardsFound: HazardProbe[];
     try {
-        const probes = hazardProbes(opts.namespace);
+        const probes = (opts.hazardProbesOverride ?? hazardProbes)(
+            opts.namespace,
+        );
         if (probes.length === 0)
             throw new Error("the hazard probe set is empty");
         hazardsFound = probes.filter((probe) => checkHazard(probe, raw));

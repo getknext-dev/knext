@@ -89,8 +89,6 @@ describe("pushKubeconfigSecretGitlab — DI (#1534)", () => {
             DEFAULT_SECRET_NAME,
             "--masked",
             "--protected",
-            "--value-file",
-            "-",
         ]);
         // The token never appears verbatim in argv — only base64 via stdin.
         expect(receivedArgs.join(" ")).not.toContain(
@@ -152,12 +150,33 @@ describe("pushKubeconfigSecretGitlab — real subprocess, fake glab on PATH (#15
         );
         const sentinel = join(dir, "received-stdin.txt");
         const fakeGlab = join(dir, "glab");
+        // Mirrors glab's real `variable set` flag set
+        // (`internal/commands/variable/set/set.go`, gitlab.com/gitlab-org/cli):
+        // only -v/--value, -t/--type, -s/--scope, -g/--group, -m/--masked,
+        // --hidden, -r/--protected, -p/--project, -d/--description are known.
+        // Any other flag (e.g. the old `--value-file`) is rejected, exactly
+        // like the real binary, so this class of drift cannot recur silently.
         writeFileSync(
             fakeGlab,
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 'if [ "$1" = "--version" ]; then echo "fake-glab 1.0.0"; exit 0; fi',
+                'if [ "$1" != "variable" ] || [ "$2" != "set" ]; then',
+                '  echo "fake-glab: unsupported invocation: $*" >&2',
+                "  exit 1",
+                "fi",
+                "shift 2",
+                'for arg in "$@"; do',
+                '  case "$arg" in',
+                "    -v|--value|-t|--type|-s|--scope|-g|--group|-m|--masked|--hidden|-r|--protected|-p|--project|-d|--description)",
+                "      ;;",
+                "    -*)",
+                '      echo "ERROR Unknown flag: $arg" >&2',
+                "      exit 1",
+                "      ;;",
+                "  esac",
+                "done",
                 'echo "fake-glab: argv=$*"',
                 "cat > " + JSON.stringify(sentinel),
                 'echo "fake-glab: variable set (ok)"',

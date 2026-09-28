@@ -40,9 +40,15 @@ steps for GitLab's UI instead of failing.
 
 ## CI/CD variables
 
-Set these under **Settings → CI/CD → Variables**. Mark **every one** both **Masked** (never shown in
-a job log) and **Protected** (only available to jobs running on protected branches/tags — the
-generated pipeline only runs on `main`, which you should protect):
+Set these under **Settings → CI/CD → Variables**. Mark **every one Protected** (only available to
+jobs running on protected branches/tags — the generated pipeline only runs on `main`, which you
+should protect).
+
+<Callout type="warn">
+Mark `KNEXT_KUBECONFIG` and `KNEXT_REGISTRY_TOKEN` **Masked** too. GitLab refuses to save a Masked
+variable shorter than **8 characters**, so a short value like `KNEXT_NAMESPACE=prod` or
+`KNEXT_REGISTRY=ghcr.io` cannot be Masked — leave those Protected-only.
+</Callout>
 
 | Variable | Notes |
 |---|---|
@@ -50,6 +56,7 @@ generated pipeline only runs on `main`, which you should protect):
 | `KNEXT_NAMESPACE` | The namespace to deploy into. |
 | `KNEXT_REGISTRY` | Registry host and namespace, e.g. `ghcr.io/acme`. Your app's `name` is appended. |
 | `KNEXT_REGISTRY_TOKEN` | Push token for that registry. |
+| `KNEXT_REGISTRY_USERNAME` (optional) | Registry login username. Defaults to `gitlab-ci-token`, correct for GitLab's own Container Registry — set it explicitly for GHCR, Docker Hub, or any other external registry. |
 
 ## The two preflight jobs
 
@@ -59,6 +66,12 @@ The pipeline has three jobs: `kubeconfig-check` and `credential-preflight` (stag
 before the hazard preflight's first `kubectl` call, the same order the GitHub Action's two composite
 steps run in. Neither preflight job sets `allow_failure`, so GitLab's default — a failing job fails
 the pipeline — is exactly "not skippable".
+
+<Callout type="warn">
+Don't add `when: manual` or `when: always` to either preflight job. `when: manual` defaults
+`allow_failure: true`, and `when: always` runs the job even after an upstream failure — both defeat
+the "not skippable" guarantee above just as directly as setting `allow_failure: true` would.
+</Callout>
 
 <Callout type="warn">
 **`kubeconfig-check` refuses a kubeconfig that needs a cloud CLI on the runner** — an `exec:` or
@@ -80,8 +93,29 @@ escalating RBAC, and more. See [the GitHub Action's callout](/docs/github-action
 for the exact list; both providers read it from the same source.
 </Callout>
 
-Both jobs need `kubectl` on the runner; the generated pipeline installs it in the job if it is not
-already on the image.
+Both preflight jobs need `kubectl` on the runner; the generated pipeline installs a pinned release
+if it is not already on the image, verifying the download against the sha256 Kubernetes' own
+release infrastructure publishes alongside the binary.
+
+## The deploy job needs a docker daemon
+
+`knext deploy` builds and pushes your image with `docker buildx build … --push`. A plain job
+image has no docker daemon at all, so the generated `deploy` job pairs a docker-in-docker service
+(`docker:27.3.1-dind`) with a docker-CLI-capable job image — [GitLab's own recipe for
+this](https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker). It logs into
+`KNEXT_REGISTRY` with `KNEXT_REGISTRY_TOKEN` via `docker login --password-stdin` — the token never
+appears in a job's command line. The job also carries a `resource_group` scoped to your namespace,
+so two pipelines racing on `main` cannot apply the same `NextApp` concurrently.
+
+If your runner cannot run docker-in-docker (some shared/Kubernetes-executor runners restrict it),
+point the job at a runner that can, or replace the `services:`/`docker login` block with your own
+kaniko/buildah equivalent — `knext deploy` only needs a working `docker` on `PATH` when it runs.
+
+## Kubeconfig handling
+
+The kubeconfig is decoded under `umask 077` to a job-scoped path in `/tmp` — never under
+`$CI_PROJECT_DIR`, which a shell or persistent-volume executor can leave on disk after the job ends
+— and every job's `after_script` removes it, which GitLab runs even when the job fails.
 
 ## Renewing the token
 

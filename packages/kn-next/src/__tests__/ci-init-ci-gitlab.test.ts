@@ -39,6 +39,9 @@ interface GitlabJob {
     allow_failure?: boolean;
     rules?: unknown;
     script?: unknown;
+    services?: string[];
+    resource_group?: string;
+    after_script?: unknown;
 }
 
 function pipeline(): {
@@ -111,6 +114,53 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
             deploy: { script: string[] };
         };
         expect(doc.deploy.script.join("\n")).toContain("cd apps/web");
+    });
+
+    // #1588 review, findings 2/5/6/7 — the deploy job must actually be able to
+    // build and push, the kubeconfig must not live under $CI_PROJECT_DIR, and
+    // concurrent deploys to the same namespace must not race.
+    it("deploy carries a docker-in-docker service, since `knext deploy` needs a docker daemon", () => {
+        const { jobs } = pipeline();
+        expect(
+            jobs.deploy?.services?.some((s) => /^docker:.*-dind$/.test(s)),
+        ).toBe(true);
+    });
+
+    it("deploy has a resource_group scoped to the namespace, so concurrent pipelines cannot race", () => {
+        const { jobs } = pipeline();
+        expect(jobs.deploy?.resource_group).toContain("$KNEXT_NAMESPACE");
+    });
+
+    it("every job removes the kubeconfig in after_script (cleanup even on failure)", () => {
+        const { jobs } = pipeline();
+        for (const name of [
+            "kubeconfig-check",
+            "credential-preflight",
+            "deploy",
+        ]) {
+            expect(jobs[name]?.after_script).toBeDefined();
+        }
+    });
+
+    it("the kubeconfig never lives under $CI_PROJECT_DIR", () => {
+        const text = renderGitlabPipeline(".");
+        expect(text).not.toContain("$CI_PROJECT_DIR/.knext");
+    });
+
+    it("the deploy job logs into the registry with the documented token, never as an argv password", () => {
+        const text = renderGitlabPipeline(".");
+        expect(text).toContain("docker login");
+        expect(text).toContain("--password-stdin");
+        expect(text).toContain("KNEXT_REGISTRY_TOKEN");
+    });
+
+    it("kubectl is installed at a pinned version, not whatever stable.txt resolves to today, and its download is checked", () => {
+        const text = renderGitlabPipeline(".");
+        expect(text).not.toContain("dl.k8s.io/release/stable.txt");
+        expect(text).toMatch(
+            /dl\.k8s\.io\/release\/v\d+\.\d+\.\d+\/bin\/linux\/amd64\/kubectl/,
+        );
+        expect(text).toContain("sha256sum -c");
     });
 });
 

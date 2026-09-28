@@ -69,9 +69,9 @@ const MUTATIONS = [
     subject: 'initCiGitlabTs',
     spec: GITLAB_TEMPLATE_SPEC,
     anchor:
-      'credential-preflight:\n  stage: preflight\n  image: node:22\n  needs:\n    - kubeconfig-check\n',
+      'credential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  needs:\n    - kubeconfig-check\n',
     replacement:
-      'xcredential-preflight:\n  stage: preflight\n  image: node:22\n  needs:\n    - kubeconfig-check\n',
+      'xcredential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  needs:\n    - kubeconfig-check\n',
   },
 
   // ── Guard 2: allow_failure added to a preflight job (made skippable) ────
@@ -81,9 +81,9 @@ const MUTATIONS = [
     subject: 'initCiGitlabTs',
     spec: GITLAB_TEMPLATE_SPEC,
     anchor:
-      'credential-preflight:\n  stage: preflight\n  image: node:22\n  needs:\n    - kubeconfig-check\n',
+      'credential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  needs:\n    - kubeconfig-check\n',
     replacement:
-      'credential-preflight:\n  stage: preflight\n  image: node:22\n  allow_failure: true\n  needs:\n    - kubeconfig-check\n',
+      'credential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  allow_failure: true\n  needs:\n    - kubeconfig-check\n',
   },
 
   // ── Guard 3: the ordering guarantee is removed (order swapped/dropped) ──
@@ -109,9 +109,10 @@ const MUTATIONS = [
     label: "the kubeconfig moves from glab's stdin to its argv (ps-visible on a shared runner)",
     subject: 'pushSecretGitlabTs',
     spec: PUSH_SECRET_GITLAB_CLI_SPEC,
-    anchor: '            "--value-file",\n            "-",\n        ],\n        encoded,\n    );',
+    anchor:
+      '        ["variable", "set", secretName, "--masked", "--protected"],\n        encoded,\n    );',
     replacement:
-      '            "--value-file",\n            encoded,\n        ],\n        "",\n    );',
+      '        ["variable", "set", secretName, "--masked", "--protected", encoded],\n        "",\n    );',
   },
 
   // ── Guard 5: the two refusals in push-kubeconfig-secret-gitlab.ts ───────
