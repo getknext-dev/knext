@@ -1,27 +1,31 @@
 #!/usr/bin/env node
 /**
- * ga-tarball-diff.mjs — GA check (#1306): the published v1.0 `@getknext/*`
- * tarballs must differ from the rc.N tarballs the compat credential measured
- * ONLY in version fields.
+ * ga-tarball-diff.mjs — GA/rc-bump check (#1306, wired into `release.yml`'s
+ * publish-blocking gate by #1562): the published `@getknext/*` tarballs must
+ * differ from the rc.N tarballs the compat credential measured ONLY in
+ * version fields.
  *
  * WHY: the v1.0 compatibility credential is a property of the `rc.N` tarballs
  * that were actually installed and exercised by the compat suite. Nothing
  * connects that measurement to what `npm publish` later ships under the GA
- * tag — if the GA tarball for `@getknext/core` (or `lib`/`db`) differs from
+ * tag — if the GA tarball for `@getknext/core` (or `lib`/`db`, or the unscoped
+ * `kn-next` npx alias, which is in the same changesets `fixed` group) differs from
  * its rc counterpart in anything beyond the version bump, the credential does
- * not cover the artifact users install. This script is that proof, not yet
- * wired into any release workflow (a release-workflow change is trigger-class
- * per `.claude/rules/workflow.md` — see the PR for the deferral note).
+ * not cover the artifact users install. `scripts/ga-tarball-diff-gate.mjs` is
+ * the `release.yml` wiring that decides WHEN to invoke this script; see that
+ * file and `scripts/lib/ga-tarball-diff.mjs`'s `decideGaTarballDiffGate`
+ * for why a mid-window rc bump is deliberately NOT gated by it even though
+ * this script itself will happily compare one (see `validateVersionBump`).
  *
- * WHAT'S ALLOWED between an rc tree and its GA counterpart
+ * WHAT'S ALLOWED between an rc tree and its GA-or-later-rc counterpart
  * (`scripts/lib/ga-tarball-diff.mjs` has the precise rules): the top-level
  * `version` field in each package's `package.json`; a `@getknext/*` sibling
  * dependency RANGE that equals the rc range with the version substituted
  * (nothing looser); and the exact rc version string substituted for the
- * exact GA version string, boundary-aware, at EVERY site it is embedded in a
- * built file's bytes. Anything else — an extra/missing/reordered manifest
- * key, a type/mode/symlink-target change on ANY tar entry, an entry outside
- * `package/`, a partial substitution, unexplained binary drift — is a
+ * exact target version string, boundary-aware, at EVERY site it is embedded
+ * in a built file's bytes. Anything else — an extra/missing/reordered
+ * manifest key, a type/mode/symlink-target change on ANY tar entry, an entry
+ * outside `package/`, a partial substitution, unexplained binary drift — is a
  * failure, printed with a precise diff.
  *
  * This reads every entry with `node-tar` (`scripts/lib/tar-entries.mjs`) —
@@ -58,14 +62,17 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compareTarEntries, validateVersionPair } from './lib/ga-tarball-diff.mjs';
+import { compareTarEntries, validateVersionBump } from './lib/ga-tarball-diff.mjs';
 import { readTarEntries } from './lib/tar-entries.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
-// The scope is the PUBLISHED set (ADR-0020): @getknext/{lib,db,core}. Derived
+// The scope is the PUBLISHED set (ADR-0020): @getknext/{lib,db,core} AND the
+// unscoped `kn-next` npx alias (#1562 round 2 — it is in the changesets
+// `fixed` group and ships at GA; its `bin/` forwarder is exactly what
+// `npx kn-next` runs, so it must not drift from the rc undetected). Derived
 // from the workspace manifests, same helper `install-smoke.mjs` and
 // `audit-published.mjs` use, so a new publishable package is covered by
 // construction rather than needing to be added to a list here.
@@ -75,12 +82,7 @@ function publishedPackageNames() {
     readFileSync(join(repoRoot, '.changeset', 'config.json'), 'utf8'),
   );
   const ignore = Array.isArray(changesetConfig.ignore) ? changesetConfig.ignore : [];
-  // The npx alias (`kn-next`) is out of scope here — it ships no built code of
-  // its own (one forwarding shim), so it carries no embedded-version surface
-  // beyond its manifest, which the package.json rules already cover uniformly.
-  return publishablePackages(manifests, ignore)
-    .map((p) => p.name)
-    .filter((name) => name.startsWith('@getknext/'));
+  return publishablePackages(manifests, ignore).map((p) => p.name);
 }
 
 const registry = [];
@@ -140,9 +142,33 @@ function loadTarballDir(dir, label) {
 
 /**
  * Pack the three publishable packages from a git ref into fresh tarballs,
- * mirroring `scripts/install-smoke.mjs`'s build (lib -> db -> core) + `bun pm
- * pack` sequence, but against a detached worktree checkout of `ref` so the
- * currently-checked-out tree is never touched.
+ * mirroring the REAL publish lane's tool choice (`release.yml`'s `release`
+ * job) rather than `install-smoke.mjs`'s: build with `bun` (lib -> db ->
+ * core), then run `scripts/rewrite-workspace-ranges.mjs` to resolve
+ * `workspace:` sibling ranges to concrete versions, then pack with **`npm
+ * pack`** — never `bun pm pack` — against a detached worktree checkout of
+ * `ref` so the currently-checked-out tree is never touched.
+ *
+ * TWO REASONS `npm pack` IS DELIBERATE HERE, not a style choice
+ * (rehearsal-discovered, #1562):
+ *
+ *   1. `changeset publish` shells to `npm publish` for a bun workspace
+ *      (`getPublishTool` only knows npm/pnpm/yarn) — see
+ *      `rewrite-workspace-ranges.mjs`'s own header for the measured
+ *      `workspace:` leak this already fixes. Packing the SAME way the real
+ *      publish does is the entire point of this script: it exists to prove
+ *      what SHIPS, not what a different tool would have shipped.
+ *   2. `bun pm pack` was measured (rehearsal, #1562) to emit
+ *      `@getknext/core`'s `dist/cli/kn-next.js` as a DUPLICATE tar entry —
+ *      `bin` maps both the `knext` and `kn-next` command names to that one
+ *      file, and bun's packer adds the target once per bin key without
+ *      de-duplicating. `assertEntrySafe`'s `readTarEntries` correctly
+ *      REJECTS a duplicate path (by design, review round 2) — so packing
+ *      with `bun pm pack` here made this gate permanently, incorrectly RED
+ *      on every real GA cut, for a duplicate that plain `npm pack` never
+ *      produces (measured: `npm pack` emits the file exactly once). The real
+ *      published artifact was always fine; only this tool's packing choice
+ *      was not faithful to it.
  */
 function packRef(ref, label) {
   const worktreeDir = mkdtempSync(join(tmpdir(), `knext-ga-diff-wt-${label}-`));
@@ -158,14 +184,40 @@ function packRef(ref, label) {
       ['@getknext/db', join(worktreeDir, 'packages', 'db')],
       ['@getknext/core', join(worktreeDir, 'packages', 'kn-next')],
     ];
+    // The `kn-next` npx alias has no build step (it ships its source `bin/`
+    // forwarder verbatim) — packed, never built.
+    const packOnly = [['kn-next', join(worktreeDir, 'packages', 'kn-next-alias')]];
     const byName = new Map();
-    for (const [name, pkgDir] of order) {
+    let built = false;
+    for (const [, pkgDir] of order) {
       if (!existsSync(pkgDir)) continue; // ref predates this package
-      execFileSync('bun', ['install', '--frozen-lockfile'], { cwd: worktreeDir, stdio: 'inherit' });
+      if (!built) {
+        execFileSync('bun', ['install', '--frozen-lockfile'], {
+          cwd: worktreeDir,
+          stdio: 'inherit',
+        });
+      }
       execFileSync('bun', ['run', 'build'], { cwd: pkgDir, stdio: 'inherit' });
+      built = true;
+    }
+
+    // Rewrite `workspace:` ranges to concrete versions BEFORE packing — same
+    // fix, same reason, as the real publish job (`release.yml`). Skipped
+    // when nothing built at all (an empty-tree ref, see the CLI test for
+    // that path) — the script would otherwise find nothing publishable and
+    // no-op harmlessly either way, but there is nothing to rewrite for.
+    if (built) {
+      execFileSync('node', ['scripts/rewrite-workspace-ranges.mjs'], {
+        cwd: worktreeDir,
+        stdio: 'inherit',
+      });
+    }
+
+    for (const [name, pkgDir] of [...order, ...packOnly]) {
+      if (!existsSync(pkgDir)) continue; // ref predates this package
       const packDest = mkdtempSync(join(tmpdir(), `knext-ga-diff-pack-${label}-`));
       registry.push(packDest);
-      execFileSync('bun', ['pm', 'pack', '--destination', packDest], {
+      execFileSync('npm', ['pack', '--pack-destination', packDest], {
         cwd: pkgDir,
         stdio: 'inherit',
       });
@@ -174,7 +226,7 @@ function packRef(ref, label) {
         .map((f) => join(packDest, f))
         .sort()
         .at(-1);
-      if (!tgz) throw new Error(`bun pm pack produced no .tgz for ${name} (${label})`);
+      if (!tgz) throw new Error(`npm pack produced no .tgz for ${name} (${label})`);
       byName.set(name, loadTarball(tgz));
     }
     return byName;
@@ -240,15 +292,17 @@ function runInner(argv, log) {
 
   const siblingNames = new Set(expected);
 
-  // Lockstep (#1306 review item 6): every package's rc/GA version must itself
-  // be well-formed ("X.Y.Z-rc.N" -> "X.Y.Z"), and every package in the set
-  // must carry the SAME pair — otherwise "compared as one release" is false,
-  // and the sibling-range substitution rule above has no fixed point.
+  // Lockstep (#1306 review item 6; shape widened to GA-or-rc-bump by #1562):
+  // every package's rc/target version pair must itself be well-formed
+  // ("X.Y.Z-rc.N" -> "X.Y.Z", "X.Y.Z-rc.N" -> "X.Y.Z-rc.M" with M > N, or an
+  // identical pair), and every package in the set must carry the SAME pair —
+  // otherwise "compared as one release" is false, and the sibling-range
+  // substitution rule above has no fixed point.
   const versionPairs = new Map();
   for (const name of expected) {
     const rcVersion = rcByName.get(name).version;
     const gaVersion = gaByName.get(name).version;
-    const err = validateVersionPair(rcVersion, gaVersion);
+    const err = validateVersionBump(rcVersion, gaVersion);
     if (err) {
       allViolations.push(`${name}: ${err}`);
       continue;
@@ -286,12 +340,12 @@ function runInner(argv, log) {
     }
 
     if (!result.ok) {
-      log(`[ga-tarball-diff] FAIL: ${name} (rc ${rcVersion} -> GA ${gaVersion})`);
+      log(`[ga-tarball-diff] FAIL: ${name} (rc ${rcVersion} -> target ${gaVersion})`);
       for (const v of result.violations) log(`  - ${v}`);
       allViolations.push(...result.violations.map((v) => `${name}: ${v}`));
     } else {
       log(
-        `[ga-tarball-diff] OK: ${name} (rc ${rcVersion} -> GA ${gaVersion}), ` +
+        `[ga-tarball-diff] OK: ${name} (rc ${rcVersion} -> target ${gaVersion}), ` +
           `${result.embeddedVersionSites.length} embedded-version site(s): ` +
           `${result.embeddedVersionSites.join(', ') || 'none'}`,
       );
