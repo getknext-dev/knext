@@ -420,13 +420,15 @@ if [ "${KNEXT_COMPILE}" != "0" ]; then
   # (packages/kn-next/src/cli/vinext-build.ts). This script does not go
   # through `kn-next build` — it replicates its internals directly against
   # the freshly-built fixture — so there is no other place to thread the
-  # flag. Neither this script nor vinext-compile.mjs reads it yet: it is a
-  # no-op today (F5's buildVinextExecutable "accepts it and does nothing
-  # else"), forward wiring for V1 (#1460), which is what actually embeds
-  # anything.
+  # flag. V1 (#1460) landed: vinext-compile.mjs now READS this flag
+  # (`args["self-contained"] === "1"`) and embeds the nitro runtime,
+  # `.output/public`, and sharp's native tree when it is set. This is no
+  # longer forward wiring for a future landing; it is live, so the value
+  # passed here MUST match the literal vinext-compile.mjs checks for
+  # (guarded by tests/e2e-self-contained-flag-lockstep.test.ts).
   VINEXT_COMPILE_ARGS=()
   if [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
-    VINEXT_COMPILE_ARGS+=(--self-contained true)
+    VINEXT_COMPILE_ARGS+=(--self-contained 1)
   fi
   if ! bun run "${COMPILE_SCRIPT}" --entry "${NITRO_ENTRY}" --outfile "${KNEXT_EXEC}" \
     "${VINEXT_COMPILE_ARGS[@]+"${VINEXT_COMPILE_ARGS[@]}"}" >&2; then
