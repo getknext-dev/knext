@@ -82,10 +82,20 @@ export const CREDENTIAL_RESET_LABEL = 'credential-reset';
  * checker (`tests/compat-matrix-tracker.test.ts`'s `entry()` helper).
  *
  * @param {{runtime: string, builder: string, lane: string, wired: boolean}} cell
- * @param {{met: boolean, requiredNights: number, current: {nights: number, restartCause: string|null}}} entry
+ * @param {{met: boolean, calendarChecked?: boolean, requiredNights: number, current: {nights: number, restartCause: string|null}}} entry
  */
 export function formatCellRow(cell, entry) {
-  const status = cell.wired ? (entry.met ? 'MET' : 'not met') : 'UNWIRED';
+  // #1612 round 2 — fail closed: a cell is MET only on an explicitly VERIFIED
+  // calendar (rule 8). `met` already requires it; this refuses to trust a
+  // `met: true` that arrives without `calendarChecked: true`.
+  const verified = entry.calendarChecked === true;
+  const status = !cell.wired
+    ? 'UNWIRED'
+    : entry.met && verified
+      ? 'MET'
+      : !verified
+        ? 'CALENDAR UNVERIFIED'
+        : 'not met';
   const cause = entry.current?.restartCause ? ` (last restart: ${entry.current.restartCause})` : '';
   return (
     `| ${cell.runtime}×${cell.builder} | \`${cell.lane}\` | ${cell.wired ? 'wired' : 'unwired'} ` +
@@ -110,9 +120,17 @@ export function buildTrackerBody(matrix, opts = {}) {
     }
     return formatCellRow(cell, entry);
   });
-  const verdict = matrix.allMet
-    ? 'v1.0 CREDENTIAL MET — every supported cell banked its window on an RC tag.'
-    : 'v1.0 credential NOT YET met — every supported cell needs its own 14 RC-tag nights.';
+  // Fail closed (#1612 round 2): allMet is only honoured when every cell's
+  // calendar was verified; an unverified calendar is named, never MET.
+  const unverified = CREDENTIAL_CELLS.filter(
+    (cell) => cell.wired && matrix.cells[cell.lane].calendarChecked !== true,
+  ).map((cell) => cell.lane);
+  const verdict =
+    matrix.allMet && unverified.length === 0
+      ? 'v1.0 CREDENTIAL MET — every supported cell banked its window on an RC tag.'
+      : unverified.length > 0
+        ? `v1.0 credential NOT YET met — CALENDAR UNVERIFIED for ${unverified.join(', ')}: no night on an unverifiable calendar can be banked.`
+        : 'v1.0 credential NOT YET met — every supported cell needs its own 14 RC-tag nights.';
   return `Daily matrix audit — generated ${generatedAt}${opts.runUrl ? ` by ${opts.runUrl}` : ''}.
 
 This is the **one pinned aggregate view** of every credentialing cell (ADR-0056

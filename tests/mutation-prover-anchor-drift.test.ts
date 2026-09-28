@@ -88,7 +88,7 @@ describe("every mutation prover's STATICALLY-resolvable anchors still match the 
     ).toBeGreaterThanOrEqual(MIN_RESOLVED_PROVERS);
   });
 
-  it('#1223: compat-window-audit.mjs resolves ALL SEVEN of its anchors, all clean', () => {
+  it('#1223: compat-window-audit.mjs resolves ALL SEVENTEEN of its anchors, all clean', () => {
     // The concrete regression tripwire for the bug this file exists to catch:
     // mutation #4's anchor is now `l?.lane === lane || (isUnresolved(l) &&
     // l?.lane == null)`, matching the current `selectLaneNights` shape.
@@ -101,10 +101,11 @@ describe("every mutation prover's STATICALLY-resolvable anchors still match the 
     // night rather than dropping it before grading) — 7 total. (#1606
     // separately re-anchored an unrelated guard in
     // mutation-prove-compat-credential-ref.mjs; it did not touch this file's
-    // count.)
+    // count.) #1612 round 2 added 10 rule-8 (missing-night calendar)
+    // mutations — 17 total.
     const scanned = scanProverFile(REPO_ROOT, 'scripts/mutation-prove-compat-window-audit.mjs');
     expect(scanned.subjectFiles).toEqual(['scripts/compat-window-audit.mjs']);
-    expect(scanned.pairs.length).toBe(7);
+    expect(scanned.pairs.length).toBe(17);
     expect(auditProverAnchors(REPO_ROOT, scanned)).toEqual([]);
   });
 

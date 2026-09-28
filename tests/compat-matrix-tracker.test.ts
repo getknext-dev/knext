@@ -53,6 +53,9 @@ function entry(over: Record<string, unknown> = {}) {
     requiredNights: 14,
     current: { nights: 5, restartCause: null },
     met: false,
+    // #1612 round 2 — the tracker fails closed on anything but an explicitly
+    // verified calendar, so the default fixture carries one.
+    calendarChecked: true,
     ...over,
   };
 }
@@ -95,6 +98,25 @@ describe('compat-matrix-tracker: buildTrackerBody', () => {
       entry({ current: { nights: 3, restartCause: null } }),
     );
     expect(row).not.toContain('last restart');
+  });
+
+  it('#1612: a cell whose calendar is UNVERIFIED renders CALENDAR UNVERIFIED, never MET — even if met were true', () => {
+    const node = CREDENTIAL_CELLS.find((c) => c.lane === 'node');
+    if (!node) throw new Error('node cell missing');
+    const row = formatCellRow(node, entry({ met: true, calendarChecked: false }));
+    expect(row).toContain('CALENDAR UNVERIFIED');
+    expect(row).not.toMatch(/\| MET/);
+    const missing = formatCellRow(node, entry({ met: true, calendarChecked: undefined }));
+    expect(missing).toContain('CALENDAR UNVERIFIED');
+  });
+
+  it('#1612: allMet with ANY unverified cell calendar is never v1.0 CREDENTIAL MET', () => {
+    const body = buildTrackerBody({
+      ...fullMatrix({ node: { met: true, calendarChecked: false } }),
+      allMet: true,
+    });
+    expect(body).not.toContain('v1.0 CREDENTIAL MET');
+    expect(body).toContain('CALENDAR UNVERIFIED');
   });
 
   it('reports the MET verdict honestly both ways', () => {

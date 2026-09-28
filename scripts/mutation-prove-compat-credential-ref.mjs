@@ -65,7 +65,11 @@ const MUTATIONS = [
   {
     label: 'guard 1: let an early-warning (main) streak report the gate met',
     subject: 'audit',
-    anchor: "    met: scope === 'credential' && longest.nights >= requiredNights,",
+    // #1612 round 2: `met` also requires a verified calendar, and the calendar
+    // check is itself credential-scoped — so dropping ONLY the scope term is
+    // now an equivalent mutant. The mutation drops the whole guard instead.
+    anchor:
+      "    met: scope === 'credential' && calendar.checked && longest.nights >= requiredNights,",
     replacement: '    met: longest.nights >= requiredNights,',
   },
   {

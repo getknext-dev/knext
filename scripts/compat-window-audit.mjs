@@ -128,6 +128,54 @@
  *      report stays comparable across the rule's introduction; its shard jobs
  *      still go red through the workflow's own liveness check.
  *
+ *   8. NO SILENTLY-DROPPED NIGHT, CALENDAR EDITION (#1607). Rule 5 disqualifies a
+ *      scheduled run whose LEDGER could not be obtained — but a run GitHub never
+ *      fires at all (a scheduled-workflow drop under load, a workflow disabled
+ *      after 60 days of repo inactivity, an outage) produces no run, no
+ *      artifacts, no marker — nothing rule 5 has anything to disqualify. Before
+ *      this rule, `auditWindow` only checked SEQUENCE adjacency between the
+ *      nights it was handed (did night N+1 share night N's fingerprint?), never
+ *      CALENDAR adjacency (was night N+1 the very next scheduled UTC date?), so
+ *      a dropped night on an unchanged fingerprint would silently bridge two
+ *      streaks into one that never actually ran on the day in between.
+ *
+ *      The fix derives the expected calendar from the lane's own credential
+ *      cron, READ from its workflow file (`parseCredentialCronsFromWorkflow`:
+ *      the `on.schedule` list plus the `KNEXT_COMPAT_MODE`/`KNEXT_LANE`
+ *      expressions, cross-checked against each other) rather than hardcoded
+ *      here. The parser tolerates formatting (quote style, operand order,
+ *      block scalars) but THROWS on meaning it cannot read: a schedule clause
+ *      in an unknown shape, a credential cron absent from `on.schedule`, a
+ *      non-daily cron, or a wired cell left with no cron.
+ *
+ *      Each run is dated by its CRON SLOT — the latest fire time ≤ its
+ *      `createdAt` — never by the wall-clock date of `createdAt`, which is the
+ *      fire time plus GitHub's scheduler delay (a 23:47 run enqueued at 00:05
+ *      belongs to the previous date). One slot is one night: two runs in the
+ *      same slot are rule-3 territory, so both are disqualified
+ *      (`duplicate-slot`) rather than counted as two nights. For every slot
+ *      from the earliest graded night through the cutoff — the latest slot
+ *      whose fire time plus `MISSING_NIGHT_GRACE_HOURS` has passed, measured
+ *      from that slot's own fire time — a slot with no graded night becomes a
+ *      synthetic `missing-night` stand-in, graded like any other unresolved
+ *      night: disqualified, restarting the streak (`night-missing`, distinct
+ *      from `night-unresolved` so the report does not conflate "we lost the
+ *      ledger" with "nothing ever ran"), never silently skipped.
+ *
+ *      FAIL CLOSED (#1612 round 2). When the check cannot run — a graded night
+ *      with no `scheduledAt` (`--dir` input, legacy fixtures), a lane with no
+ *      resolvable cron, a parser or cron error — `calendarChecked` is false,
+ *      `calendarSkippedReason` says why, `verdict` is `CALENDAR UNVERIFIED`,
+ *      and `met` is FALSE however long the streak reads. `formatReport`, the
+ *      `--matrix` report and the tracker all print CALENDAR UNVERIFIED, never
+ *      GATE MET / MET. An unchecked calendar is exactly where a dropped night
+ *      hides, so it can never bank one. (An empty lane is vacuously
+ *      on-calendar — there is nothing to bridge, and 0 nights never meets.)
+ *      Restricted to `scope: 'credential'` — the four v1.0 cells' own crons
+ *      are what a "fourteen consecutive nights" claim is ever made against; an
+ *      early-warning `main` streak is a forecast with no such claim to protect
+ *      and can never meet the gate anyway.
+ *
  * USAGE
  *   node scripts/compat-window-audit.mjs --dir <dir-of-ledger-json>
  *   node scripts/compat-window-audit.mjs --fetch --limit 100  # needs `gh`
@@ -138,7 +186,8 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { COMPAT_MODES, isRcRef } from './compat-credential-ref.mjs';
 import { isShardBytecodeLive } from './e2e-bytecode-liveness.mjs';
 
@@ -506,10 +555,18 @@ export const UNRESOLVED_REASONS = Object.freeze([
   'artifact-api-unreachable', // the artifacts API call failed
   'artifact-download-failed', // listed as live, but the download failed
   'ledger-unreadable', // downloaded, but nothing in it parses as a ledger
+  // #1607 — distinct from every reason above: those all describe a run that
+  // EXISTED (gh run list named it) but left no gradeable ledger. This one is a
+  // scheduled UTC date with NO RUN AT ALL — GitHub never fired the cron, so
+  // there is nothing to list, download or fail to read. Synthesized by
+  // `auditWindow`'s calendar check (rule 8), never produced by `fetchLedgers`.
+  'missing-night',
 ]);
 
 /**
- * A stand-in for a scheduled run whose ledger could not be obtained.
+ * A stand-in for a scheduled run whose ledger could not be obtained — or, with
+ * reason `missing-night`, for a scheduled UTC date on which no run happened at
+ * all (rule 8, #1607).
  *
  * `lane` is what the run's MARKER artifact declared, or `null` when even that
  * could not be read. A `null` lane keeps the original fail-closed behaviour —
@@ -520,8 +577,13 @@ export const UNRESOLVED_REASONS = Object.freeze([
  * @param {typeof UNRESOLVED_REASONS[number]} reason
  * @param {string|null} [lane] the lane declared by the marker artifact
  * @param {string|null} [mode] the mode declared by the mode marker artifact
+ * @param {string|null} [scheduledAt] ISO datetime this night was scheduled/observed at (#1607) —
+ *   `fetchLedgers` supplies the run's `createdAt`; the calendar check supplies
+ *   the lane's cron time on the missing date. `null` when unknown, which keeps
+ *   the night invisible to the calendar check (it cannot place an undated
+ *   night, so it declines to check rather than guess — see rule 8).
  */
-export function unresolvedNight(runId, reason, lane = null, mode = null) {
+export function unresolvedNight(runId, reason, lane = null, mode = null, scheduledAt = null) {
   if (!UNRESOLVED_REASONS.includes(reason)) {
     throw new Error(`compat-window-audit: unknown unresolved reason ${reason}`);
   }
@@ -531,6 +593,7 @@ export function unresolvedNight(runId, reason, lane = null, mode = null) {
     lane: typeof lane === 'string' && lane.length > 0 ? lane : null,
     compatMode: COMPAT_MODES.includes(mode) ? mode : null,
     unresolved: reason,
+    scheduledAt: typeof scheduledAt === 'string' && scheduledAt.length > 0 ? scheduledAt : null,
     shards: [],
   };
 }
@@ -538,6 +601,24 @@ export function unresolvedNight(runId, reason, lane = null, mode = null) {
 /** Is this entry a stand-in for a run whose ledger we never got? */
 export function isUnresolved(ledger) {
   return typeof ledger?.unresolved === 'string' && ledger.unresolved.length > 0;
+}
+
+/**
+ * The UTC calendar date (`YYYY-MM-DD`) `ledger.scheduledAt` places this night
+ * on, or `null` when absent/unparseable (#1607). This is the ONLY place a night
+ * is dated — `fetchLedgers` stamps real nights with the run's `createdAt`, and
+ * the calendar check stamps a synthetic `missing-night` with the lane's own
+ * cron time on the missing date, so both flow through the same function here.
+ *
+ * @param {Record<string, any>} ledger
+ * @returns {string|null}
+ */
+function nightDateOf(ledger) {
+  const raw = ledger?.scheduledAt;
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  const t = Date.parse(raw);
+  if (Number.isNaN(t)) return null;
+  return new Date(t).toISOString().slice(0, 10);
 }
 
 /**
@@ -573,6 +654,7 @@ export function gradeNight(ledger, opts = {}) {
       disqualifiers: [ledger.unresolved],
       eligible: false,
       unresolved: ledger.unresolved,
+      date: ledger.calendarSlot ?? nightDateOf(ledger),
     };
   }
   const disqualifiers = [];
@@ -712,6 +794,7 @@ export function gradeNight(ledger, opts = {}) {
     disqualifiers: [...new Set(disqualifiers)],
     eligible: disqualifiers.length === 0,
     unresolved: null,
+    date: ledger.calendarSlot ?? nightDateOf(ledger),
   };
 }
 
@@ -795,21 +878,533 @@ function inScope(ledger, scope) {
   return true;
 }
 
+// ── Rule 8 — the missing-night calendar (#1607) ─────────────────────────────
+//
+// Deliberately a small hand parser, NOT a YAML parse: the one production
+// caller that matters (`.github/workflows/compat-matrix-tracker-nightly.yml`)
+// runs this script with only `actions/setup-node` — no `npm ci`/`bun install`
+// step — so `node_modules` does not exist there and an `import 'yaml'` would
+// throw on the exact path this rule protects. It reads three things from real
+// workflow text — the `on.schedule` cron list, and the `KNEXT_LANE` /
+// `KNEXT_COMPAT_MODE` env expressions — and it is TOLERANT of formatting
+// (single or double quotes, either operand order, `>-`/`|` block scalars) but
+// never of meaning: a schedule clause it cannot read, a credential cron that is
+// not in `on.schedule`, or a required lane with no credential cron THROWS. A
+// throw is never a pass — `auditWindow` turns it into `calendarChecked: false`,
+// which holds `met` false (rule 8's fail-closed half).
+
+/**
+ * The value of every `KEY:` line in `text` that carries a `${{ … }}`
+ * expression, with block scalars (`>-`, `|`, …) and plain-scalar continuation
+ * lines folded in. Returns the expression bodies (between `${{` and `}}`).
+ *
+ * @param {string} text
+ * @param {string} key
+ * @returns {string[]}
+ */
+function envExpressions(text, key) {
+  const lines = text.split('\n');
+  const keyRe = new RegExp(`^(\\s*)${key}:(.*)$`);
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(keyRe);
+    if (!m) continue;
+    const indent = m[1].length;
+    let value = m[2].trim();
+    if (/^[>|][-+]?\d*$/.test(value)) value = '';
+    // Fold every following line indented deeper than the key — a block
+    // scalar's body, or a plain scalar's continuation.
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const next = lines[j];
+      if (next.trim() === '') continue;
+      if (next.length - next.trimStart().length <= indent) break;
+      value += ` ${next.trim()}`;
+    }
+    const quoted = value.match(/^(['"])([\s\S]*)\1$/);
+    if (quoted) value = quoted[2];
+    const expr = value.match(/\$\{\{([\s\S]*)\}\}/);
+    if (expr) out.push(expr[1]);
+  }
+  return out;
+}
+
+/** Split `s` on a top-level `sep` (outside quotes and parentheses). */
+function splitTopLevel(s, sep) {
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let start = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === '(') depth += 1;
+    else if (c === ')') depth -= 1;
+    else if (depth === 0 && s.startsWith(sep, i)) {
+      parts.push(s.slice(start, i));
+      start = i + sep.length;
+      i += sep.length - 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts.map((p) => p.trim());
+}
+
+/** Strip parentheses that wrap the WHOLE of `s`. */
+function stripOuterParens(s) {
+  let out = s.trim();
+  for (;;) {
+    if (!out.startsWith('(') || !out.endsWith(')')) return out;
+    // Only strip if the opening paren closes at the very end.
+    let depth = 0;
+    let quote = null;
+    let closesAtEnd = true;
+    for (let i = 0; i < out.length; i += 1) {
+      const c = out[i];
+      if (quote) {
+        if (c === quote) quote = null;
+        continue;
+      }
+      if (c === "'" || c === '"') quote = c;
+      else if (c === '(') depth += 1;
+      else if (c === ')') {
+        depth -= 1;
+        if (depth === 0 && i !== out.length - 1) {
+          closesAtEnd = false;
+          break;
+        }
+      }
+    }
+    if (!closesAtEnd) return out;
+    out = out.slice(1, -1).trim();
+  }
+}
+
+const STRING_LITERAL_RE = /^(['"])([^'"]*)\1$/;
+const SCHEDULE_EQ_RE = /^github\.event\.schedule\s*==\s*(['"])([^'"]*)\1$/;
+const SCHEDULE_EQ_SWAPPED_RE = /^(['"])([^'"]*)\1\s*==\s*github\.event\.schedule$/;
+
+/**
+ * Parse a `${{ a || b || … }}` body into its `github.event.schedule == 'cron'`
+ * → value clauses plus the trailing default literal (if any). Alternatives that
+ * never mention `github.event.schedule` are dispatch-only and skipped; one that
+ * DOES mention it but is not exactly `schedule == 'cron' && 'value'` (either
+ * operand order, either quote style) throws.
+ *
+ * @param {string} expr
+ * @param {string} key for error messages
+ */
+function parseScheduleExpression(expr, key) {
+  const alternatives = splitTopLevel(expr, '||').map(stripOuterParens);
+  /** @type {Map<string, string>} */
+  const byCron = new Map();
+  let defaultLiteral = null;
+  alternatives.forEach((alt, idx) => {
+    if (!/github\.event\.schedule/.test(alt)) {
+      const lit = alt.match(STRING_LITERAL_RE);
+      if (lit && idx === alternatives.length - 1) defaultLiteral = lit[2];
+      return;
+    }
+    const conjuncts = splitTopLevel(alt, '&&').map(stripOuterParens);
+    let cron = null;
+    let value = null;
+    for (const c of conjuncts) {
+      const eq = c.match(SCHEDULE_EQ_RE) ?? c.match(SCHEDULE_EQ_SWAPPED_RE);
+      if (eq && cron === null) cron = eq[2];
+      else {
+        const lit = c.match(STRING_LITERAL_RE);
+        if (lit && value === null) value = lit[2];
+        else value = undefined;
+      }
+    }
+    if (conjuncts.length !== 2 || cron === null || typeof value !== 'string') {
+      throw new Error(
+        `compat-window-audit: cannot parse ${key} clause \`${alt}\` — expected ` +
+          "`github.event.schedule == '<cron>' && '<value>'`; refusing to drop it silently",
+      );
+    }
+    if (byCron.has(cron) && byCron.get(cron) !== value) {
+      throw new Error(
+        `compat-window-audit: ${key} maps cron '${cron}' to both '${byCron.get(cron)}' and '${value}'`,
+      );
+    }
+    if (!byCron.has(cron)) byCron.set(cron, value);
+  });
+  return { byCron, defaultLiteral };
+}
+
+/**
+ * The `on.schedule` cron list of a workflow. Throws when there is no
+ * `schedule:` block, more than one, or it lists nothing parseable.
+ *
+ * @param {string} text
+ * @returns {Set<string>}
+ */
+export function parseScheduleCrons(text) {
+  const lines = text.split('\n');
+  const starts = [];
+  lines.forEach((l, i) => {
+    if (/^\s*schedule:\s*(#.*)?$/.test(l)) starts.push(i);
+  });
+  if (starts.length !== 1) {
+    throw new Error(
+      `compat-window-audit: expected exactly one \`on.schedule\` block, found ${starts.length}`,
+    );
+  }
+  const start = starts[0];
+  const indent = lines[start].length - lines[start].trimStart().length;
+  const crons = new Set();
+  for (let j = start + 1; j < lines.length; j += 1) {
+    const l = lines[j];
+    const t = l.trim();
+    if (t === '' || t.startsWith('#')) continue;
+    if (l.length - l.trimStart().length <= indent) break;
+    const m = t.match(/^-\s*cron:\s*(.+?)\s*(#.*)?$/);
+    if (!m) continue;
+    const lit = m[1].match(STRING_LITERAL_RE);
+    crons.add((lit ? lit[2] : m[1]).trim());
+  }
+  if (crons.size === 0) {
+    throw new Error('compat-window-audit: the `on.schedule` block lists no `- cron:` entry');
+  }
+  return crons;
+}
+
+/**
+ * Read a workflow's raw text and return the ONE credential cron each lane runs
+ * on. Credential crons come from `KNEXT_COMPAT_MODE`; each is cross-checked
+ * against `on.schedule` and must be a daily `M H * * *`; its lane comes from
+ * `KNEXT_LANE` (an explicit clause, else the trailing default literal). Throws
+ * rather than guessing on anything it cannot read confidently — and on any
+ * lane in `opts.requiredLanes` left without a cron — because a wrong answer
+ * here silently points the calendar check at the wrong dates.
+ *
+ * @param {string} workflowText
+ * @param {{requiredLanes?: string[]}} [opts]
+ * @returns {Map<string, string>} lane → cron (`'m h * * *'`)
+ */
+export function parseCredentialCronsFromWorkflow(workflowText, opts = {}) {
+  const exprOf = (key) => {
+    // A step-level pass-through (`KEY: ${{ env.KEY }}`) re-exports the value;
+    // it is not a second definition.
+    const all = envExpressions(workflowText, key).filter(
+      (e) => !/^\s*env\.[A-Za-z_][A-Za-z0-9_]*\s*$/.test(e),
+    );
+    if (all.length === 0) {
+      throw new Error(
+        `compat-window-audit: no ${key} env line with a \${{ }} expression found — cannot derive credential crons`,
+      );
+    }
+    if (all.length > 1) {
+      throw new Error(
+        `compat-window-audit: ${all.length} ${key} expressions found — ambiguous, refusing to pick one`,
+      );
+    }
+    return all[0];
+  };
+  const mode = parseScheduleExpression(exprOf('KNEXT_COMPAT_MODE'), 'KNEXT_COMPAT_MODE');
+  const credentialCrons = [...mode.byCron].filter(([, v]) => v === 'credential').map(([c]) => c);
+
+  const lanes = parseScheduleExpression(exprOf('KNEXT_LANE'), 'KNEXT_LANE');
+  const scheduled = parseScheduleCrons(workflowText);
+
+  /** @type {Map<string, string>} */
+  const laneToCron = new Map();
+  for (const cron of credentialCrons) {
+    if (!scheduled.has(cron)) {
+      throw new Error(
+        `compat-window-audit: credential cron '${cron}' is not in the workflow's on.schedule list ` +
+          `(${[...scheduled].join(', ')}) — stale mapping`,
+      );
+    }
+    cronTimeUTC(cron); // throws unless a daily `M H * * *`
+    const lane = lanes.byCron.get(cron) ?? lanes.defaultLiteral;
+    if (!lane) {
+      throw new Error(
+        `compat-window-audit: KNEXT_LANE names no lane for credential cron '${cron}' and has no ` +
+          'trailing default lane literal',
+      );
+    }
+    if (laneToCron.has(lane)) {
+      throw new Error(
+        `compat-window-audit: both '${laneToCron.get(lane)}' and '${cron}' map to lane '${lane}' — ` +
+          'the calendar check assumes exactly one credential cron per lane',
+      );
+    }
+    laneToCron.set(lane, cron);
+  }
+  for (const lane of opts.requiredLanes ?? []) {
+    if (!laneToCron.has(lane)) {
+      throw new Error(
+        `compat-window-audit: wired credential lane '${lane}' has no credential cron in the workflow`,
+      );
+    }
+  }
+  return laneToCron;
+}
+
+const workflowCronCache = new Map();
+
+/**
+ * The credential cron for `lane`, read from its cell's `workflowFile`. `null`
+ * for an unknown or unwired lane (it has no credential calendar to check).
+ * For a WIRED lane it either returns the cron or THROWS — every wired cell
+ * sharing the workflow file is required to resolve to exactly one cron.
+ *
+ * @param {string} lane
+ * @param {{ readWorkflow?: (workflowFile: string) => string }} [deps] injectable for tests (bypasses the cache)
+ * @returns {string|null}
+ */
+export function credentialCronForLane(lane, deps = {}) {
+  const cell = CREDENTIAL_CELLS.find((c) => c.lane === lane);
+  if (!cell?.wired || !cell.workflowFile) return null;
+  const requiredLanes = CREDENTIAL_CELLS.filter(
+    (c) => c.wired && c.workflowFile === cell.workflowFile,
+  ).map((c) => c.lane);
+  const parse = (text) => parseCredentialCronsFromWorkflow(text, { requiredLanes });
+  if (deps.readWorkflow) return parse(deps.readWorkflow(cell.workflowFile)).get(lane) ?? null;
+  let laneToCron = workflowCronCache.get(cell.workflowFile);
+  if (!laneToCron) {
+    laneToCron = parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '..',
+          '.github',
+          'workflows',
+          cell.workflowFile,
+        ),
+        'utf8',
+      ),
+    );
+    workflowCronCache.set(cell.workflowFile, laneToCron);
+  }
+  return laneToCron.get(lane) ?? null;
+}
+
+/** `'m h * * *'` → `{hour, minute}` (UTC). Throws on anything but a daily cron. */
+function cronTimeUTC(cron) {
+  const parts = String(cron).trim().split(/\s+/);
+  if (parts.length !== 5) {
+    throw new Error(`compat-window-audit: '${cron}' is not a 5-field cron expression`);
+  }
+  const [minute, hour, dom, month, dow] = parts;
+  if (dom !== '*' || month !== '*' || dow !== '*') {
+    throw new Error(
+      `compat-window-audit: '${cron}' is not a daily '* * *' cron — the calendar check assumes ` +
+        'exactly one expected credential run per UTC day',
+    );
+  }
+  const h = /^\d{1,2}$/.test(hour) ? Number(hour) : Number.NaN;
+  const m = /^\d{1,2}$/.test(minute) ? Number(minute) : Number.NaN;
+  if (!Number.isInteger(h) || h < 0 || h > 23 || !Number.isInteger(m) || m < 0 || m > 59) {
+    throw new Error(`compat-window-audit: '${cron}' has a non-numeric or out-of-range hour/minute`);
+  }
+  return { hour: h, minute: m };
+}
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** `Date` → its UTC calendar date, `YYYY-MM-DD`. */
+function utcDateString(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+/** `YYYY-MM-DD` + a day offset (may be negative) → `YYYY-MM-DD`, in UTC. */
+function addUTCDays(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return utcDateString(d);
+}
+
+/** Every UTC date from `from` to `to`, inclusive, one per day. */
+function datesInclusive(from, to) {
+  const out = [];
+  let cur = from;
+  // A guard, not a real limit: at one row/day this is ~27 years before it
+  // fires, so it can only mean `to` < `from` was passed by mistake.
+  for (let i = 0; cur <= to && i < 10000; i += 1) {
+    out.push(cur);
+    cur = addUTCDays(cur, 1);
+  }
+  return out;
+}
+
+/**
+ * How long, after a slot's cron FIRE time, before its absence counts as
+ * "missing" rather than "still plausibly running". `test-e2e-deploy.yml`'s own
+ * comment says a credential run "takes the better part of an hour"; this adds
+ * generous headroom on top for queueing/runner-availability delay before
+ * declaring a silent night rather than a slow one — chosen deliberately larger
+ * than the measured run length so a night that is merely late is never
+ * mistaken for one that never happened.
+ */
+export const MISSING_NIGHT_GRACE_HOURS = 6;
+
+/**
+ * A lane's cron calendar: every run belongs to exactly one SLOT — the date of
+ * the latest cron fire time ≤ its timestamp (#1612 round 2). `createdAt` is
+ * the enqueue time, i.e. the fire time plus GitHub's scheduler delay, so a
+ * 23:47 run enqueued at 00:05 belongs to the PREVIOUS date's slot; dating it
+ * by wall clock would invent a gap behind it and a double ahead of it.
+ *
+ * @param {string} cron a daily `M H * * *`
+ */
+function cronCalendar(cron) {
+  const { hour, minute } = cronTimeUTC(cron);
+  const fireMs = (slot) => Date.parse(`${slot}T${pad2(hour)}:${pad2(minute)}:00.000Z`);
+  /** @param {number} ms */
+  const slotOfMs = (ms) => {
+    const d = utcDateString(new Date(ms));
+    return ms >= fireMs(d) ? d : addUTCDays(d, -1);
+  };
+  return {
+    fireMs,
+    /** @param {Record<string, any>} ledger @returns {string|null} */
+    slotOf(ledger) {
+      const raw = ledger?.scheduledAt;
+      if (typeof raw !== 'string' || raw.length === 0) return null;
+      const t = Date.parse(raw);
+      return Number.isNaN(t) ? null : slotOfMs(t);
+    },
+    /**
+     * The latest slot REQUIRED to exist by `now`: its fire time plus the
+     * grace window has passed. Measured from the slot's own fire time, so a
+     * 23:47 slot is not due until 05:47 the next UTC day.
+     */
+    cutoffSlot(now) {
+      const graceMs = MISSING_NIGHT_GRACE_HOURS * 60 * 60 * 1000;
+      let slot = slotOfMs(now.getTime());
+      while (fireMs(slot) + graceMs > now.getTime()) slot = addUTCDays(slot, -1);
+      return slot;
+    },
+  };
+}
+
+/**
+ * Rule 8: place every real night on its lane's cron slot, and synthesize a
+ * disqualified `missing-night` stand-in for every slot between the earliest
+ * real night and the lane's cutoff that no night landed on. When the check
+ * cannot run — non-credential scope, no cron, a cron that will not parse, an
+ * undated night — it returns `checked: false` with the reason and never
+ * partially applies; `auditWindow` then holds `met` false (fail closed).
+ *
+ * @param {Array<Record<string, any>>} selected real ledgers already filtered to this lane+scope
+ * @param {string} lane
+ * @param {string} scope
+ * @param {Date} now
+ * @param {(lane: string) => string|null} findCron
+ */
+function calendarCheck(selected, lane, scope, now, findCron) {
+  const skip = (reason) => ({ checked: false, reason, slotOf: null, extra: [] });
+  if (scope !== 'credential') {
+    return skip('the calendar check is scoped to credential nights only (rule 8)');
+  }
+  let calendar;
+  try {
+    const cron = findCron(lane);
+    if (!cron) {
+      return skip(
+        `lane '${lane}' has no discovered credential cron (unwired, or the workflow names no cron for it)`,
+      );
+    }
+    calendar = cronCalendar(cron);
+  } catch (err) {
+    return skip(`the lane's credential cron could not be resolved: ${err?.message ?? String(err)}`);
+  }
+  // Nothing to bridge: an empty lane is vacuously on-calendar (and 0 nights
+  // can never meet the gate anyway).
+  if (selected.length === 0)
+    return { checked: true, reason: null, slotOf: calendar.slotOf, extra: [] };
+  const slots = selected.map((l) => calendar.slotOf(l));
+  const undated = slots.filter((s) => s === null).length;
+  if (undated > 0) {
+    return skip(
+      `${undated} of ${selected.length} graded night(s) carry no scheduling date (offline --dir ` +
+        'input, or fixtures without scheduledAt) — the calendar cannot be verified, so no night ' +
+        'can be banked',
+    );
+  }
+  const known = new Set(slots);
+  const first = slots.reduce((min, d) => (d < min ? d : min), slots[0]);
+  const cutoff = calendar.cutoffSlot(now);
+  const expected = first <= cutoff ? datesInclusive(first, cutoff) : [];
+  const extra = expected
+    .filter((d) => !known.has(d))
+    .map((d) =>
+      unresolvedNight(
+        `missing:${lane}:${d}`,
+        'missing-night',
+        lane,
+        'credential',
+        new Date(calendar.fireMs(d)).toISOString(),
+      ),
+    );
+  return { checked: true, reason: null, slotOf: calendar.slotOf, extra };
+}
+
 /**
  * Compute the window: every night graded, grouped into fingerprint-stable
  * streaks of qualifying nights.
  *
  * @param {Array<Record<string, any>>} ledgers
- * @param {{lane?: string, requiredNights?: number, scope?: string}} [opts]
+ * @param {{lane?: string, requiredNights?: number, scope?: string, now?: Date, credentialCronForLane?: (lane: string) => string|null}} [opts]
  */
 export function auditWindow(ledgers, opts = {}) {
   const lane = opts.lane ?? CREDENTIAL_LANE;
   const requiredNights = opts.requiredNights ?? WINDOW_REQUIRED_NIGHTS;
   const scope = opts.scope ?? 'credential';
+  const now = opts.now ?? new Date();
 
-  const nights = selectLaneNights(ledgers ?? [], lane, scope).map((l) =>
-    gradeNight(l, { lane, scope }),
+  const selected = selectLaneNights(ledgers ?? [], lane, scope);
+  // Rule 8 (#1607): a date with no run at all leaves nothing for rule 5's
+  // fail-closed handling to catch, because there is no run for it to attach
+  // to. Synthesize the missing dates as their own disqualified stand-ins
+  // BEFORE grading, so they sort into the sequence exactly like a real
+  // unresolved night and break a streak that sequence-adjacency alone would
+  // have silently bridged.
+  //
+  // #1612 round 2: every night is dated by its lane's CRON SLOT (the latest
+  // fire time <= its createdAt), never the wall clock, and one slot is one
+  // night — two runs in a slot are rule-3 territory (a re-run by another
+  // name), so BOTH are disqualified `duplicate-slot` rather than counted twice.
+  const calendar = calendarCheck(
+    selected,
+    lane,
+    scope,
+    now,
+    opts.credentialCronForLane ?? credentialCronForLane,
   );
+  const withSlot = (l) => ({ ...l, calendarSlot: calendar.slotOf(l) });
+  const slotted = calendar.slotOf ? selected.map(withSlot) : selected;
+  const extra = calendar.extra.map(withSlot);
+  const merged = extra.length === 0 ? slotted : [...slotted, ...extra];
+  const dateKey = (l) => l.calendarSlot ?? nightDateOf(l) ?? '';
+  merged.sort((a, b) => {
+    const da = dateKey(a);
+    const db = dateKey(b);
+    if (da !== db) return da < db ? -1 : 1;
+    const na = Number(a.runId ?? 0);
+    const nb = Number(b.runId ?? 0);
+    if (!Number.isNaN(na) && !Number.isNaN(nb) && na !== nb) return na - nb;
+    const sa = String(a.runId);
+    const sb = String(b.runId);
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  });
+  const nights = merged.map((l) => gradeNight(l, { lane, scope }));
+  if (calendar.checked) {
+    const perSlot = new Map();
+    for (const n of nights) perSlot.set(n.date, (perSlot.get(n.date) ?? 0) + 1);
+    for (const n of nights) {
+      if (perSlot.get(n.date) > 1) {
+        n.disqualifiers = [...new Set([...n.disqualifiers, 'duplicate-slot'])];
+        n.eligible = false;
+      }
+    }
+  }
 
   /** @type {Array<{fingerprint: string, nights: number, runIds: string[], startRunId: string, endRunId: string, restartCause: string|null}>} */
   const streaks = [];
@@ -823,8 +1418,15 @@ export function auditWindow(ledgers, opts = {}) {
       // A disqualified night restarts the count. It does not pause it — and an
       // UNRESOLVED night (rule 5) is disqualified, not absent, which is what
       // stops the nights either side of it merging into one longer streak.
+      // A rule-8 MISSING night (no run at all) gets its own cause so the
+      // report never conflates "we lost the ledger" with "nothing ever ran".
       open = null;
-      pendingCause = night.unresolved ? 'night-unresolved' : 'night-disqualified';
+      pendingCause =
+        night.unresolved === 'missing-night'
+          ? 'night-missing'
+          : night.unresolved
+            ? 'night-unresolved'
+            : 'night-disqualified';
       continue;
     }
     if (open && open.fingerprint === night.fingerprint) {
@@ -939,10 +1541,29 @@ export function auditWindow(ledgers, opts = {}) {
       .map((n) => ({
         runId: n.runId,
         reason: n.unresolved,
+        ...(n.date ? { date: n.date } : {}),
       })),
+    // Rule 8 (#1607). `checked: false` means exactly what it says — no
+    // calendar claim was verified for this window, never "verified and clean".
+    // `formatReport`/every caller must read `calendarChecked` before trusting
+    // consecutiveness beyond what `restartsByCause` already reports.
+    calendarChecked: calendar.checked,
+    calendarSkippedReason: calendar.reason,
+    missingNights: extra.map((l) => ({ date: l.calendarSlot, lane, runId: l.runId })),
     // Only a CREDENTIAL window can meet the gate. An early-warning streak on
-    // `main` is a forecast, however long it runs.
-    met: scope === 'credential' && longest.nights >= requiredNights,
+    // `main` is a forecast, however long it runs. And a credential window
+    // whose calendar could not be verified can NEVER meet it (#1612 round 2,
+    // fail closed): an unchecked calendar is exactly where a dropped night
+    // hides.
+    met: scope === 'credential' && calendar.checked && longest.nights >= requiredNights,
+    verdict:
+      scope !== 'credential'
+        ? 'EARLY WARNING'
+        : !calendar.checked
+          ? 'CALENDAR UNVERIFIED'
+          : longest.nights >= requiredNights
+            ? 'MET'
+            : 'NOT MET',
     shortfall: Math.max(0, requiredNights - current.nights),
   };
 }
@@ -956,7 +1577,7 @@ export function auditWindow(ledgers, opts = {}) {
  * holds `allMet` false rather than being left out of the question.
  *
  * @param {Array<Record<string, any>>} ledgers
- * @param {{cells?: string[], requiredNights?: number}} [opts]
+ * @param {{cells?: string[], requiredNights?: number, now?: Date}} [opts]
  */
 export function auditCredentialMatrix(ledgers, opts = {}) {
   const cells = opts.cells ?? CREDENTIAL_CELLS.map((c) => c.lane);
@@ -967,12 +1588,52 @@ export function auditCredentialMatrix(ledgers, opts = {}) {
       lane,
       scope: 'credential',
       requiredNights: opts.requiredNights,
+      now: opts.now,
     });
   }
   return {
     cells: out,
+    // `met` already requires a verified calendar (rule 8, fail closed), so an
+    // unverified cell holds this false too.
     allMet: cells.length > 0 && cells.every((lane) => out[lane].met),
+    calendarUnverified: cells.filter((lane) => out[lane].calendarChecked !== true),
   };
+}
+
+/**
+ * The `--matrix` text report. A cell whose calendar could not be verified
+ * prints `CALENDAR UNVERIFIED` — never `MET` (#1612 round 2).
+ *
+ * @param {ReturnType<typeof auditCredentialMatrix>} matrix
+ * @returns {string}
+ */
+export function formatMatrix(matrix) {
+  const lines = [];
+  for (const cell of CREDENTIAL_CELLS) {
+    const a = matrix.cells[cell.lane];
+    if (!a) continue;
+    const status = a.met
+      ? 'MET'
+      : cell.wired && a.calendarChecked !== true
+        ? 'CALENDAR UNVERIFIED'
+        : 'not met';
+    lines.push(
+      `${cell.runtime}×${cell.builder}`.padEnd(18) +
+        ` lane=${cell.lane.padEnd(13)} ${cell.wired ? 'wired  ' : 'UNWIRED'} current ${a.current.nights}/${a.requiredNights}  ${status}`,
+    );
+  }
+  for (const cell of CREDENTIAL_CELLS) {
+    const a = matrix.cells[cell.lane];
+    if (a && cell.wired && a.calendarChecked !== true) {
+      lines.push(`  ${cell.lane}: calendar unverified — ${a.calendarSkippedReason}`);
+    }
+  }
+  lines.push(
+    matrix.allMet
+      ? 'v1.0 CREDENTIAL MET — every supported cell banked its window on an RC tag.'
+      : 'v1.0 credential NOT met — every supported cell needs its own 14 RC-tag nights on a verified calendar.',
+  );
+  return lines.join('\n');
 }
 
 /** Human-readable report. The CLI's default output. */
@@ -1048,9 +1709,17 @@ export function formatReport(audit) {
       '            the streaks either side of it and report a LONGER streak than reality.',
     );
     for (const u of audit.unresolvedNights) {
-      lines.push(`            ${u.runId}  ${u.reason}`);
+      lines.push(`            ${u.runId}  ${u.reason}${u.date ? `  (${u.date})` : ''}`);
     }
   }
+
+  lines.push('');
+  lines.push(
+    audit.calendarChecked
+      ? `calendar check (rule 8): verified — every cron slot has a graded night ` +
+          `(${audit.missingNights.length} missing night(s) found and disqualified)`
+      : `calendar check (rule 8): UNVERIFIED — ${audit.calendarSkippedReason}`,
+  );
 
   lines.push('');
   lines.push(`longest qualifying streak: ${audit.longest.nights} / ${audit.requiredNights}`);
@@ -1061,6 +1730,14 @@ export function formatReport(audit) {
   if (audit.scope === 'early-warning') {
     lines.push(
       `EARLY WARNING — non-credentialing. ${audit.current.nights} consecutive qualifying main night(s); main nights never advance the v1.0 credential (ADR-0056).`,
+    );
+    return lines.join('\n');
+  }
+  if (!audit.calendarChecked) {
+    // Fail closed (#1612 round 2): an unverifiable calendar is never GATE MET,
+    // however long the sequence streak reads.
+    lines.push(
+      `CALENDAR UNVERIFIED — the gate is NOT met: the longest streak reads ${audit.longest.nights} / ${audit.requiredNights}, but no night can be banked until every one is placed on its cron slot (${audit.calendarSkippedReason}).`,
     );
     return lines.join('\n');
   }
@@ -1159,7 +1836,10 @@ export function fetchLedgers(limit, deps = {}) {
       '--limit',
       String(limit),
       '--json',
-      'databaseId,status,event',
+      // #1607 — `createdAt` is the run's scheduling timestamp, threaded through
+      // as `scheduledAt` on every ledger and stand-in below so `auditWindow`'s
+      // rule-8 calendar check can place this night on a UTC date.
+      'databaseId,status,event,createdAt',
     ]),
   );
 
@@ -1179,8 +1859,9 @@ export function fetchLedgers(limit, deps = {}) {
     // what keeps rule 5's fail-closed behaviour for genuinely unknowable nights.
     let markerLane = null;
     let markerMode = null;
+    const scheduledAt = typeof run.createdAt === 'string' ? run.createdAt : null;
     const unresolved = (reason) =>
-      out.push(unresolvedNight(run.databaseId, reason, markerLane, markerMode));
+      out.push(unresolvedNight(run.databaseId, reason, markerLane, markerMode, scheduledAt));
 
     let artifactsResponse;
     try {
@@ -1254,7 +1935,7 @@ export function fetchLedgers(limit, deps = {}) {
       unresolved('ledger-unreadable');
       continue;
     }
-    for (const l of fetched) out.push(l);
+    for (const l of fetched) out.push({ ...l, scheduledAt });
   }
   return out;
 }
@@ -1292,18 +1973,7 @@ function main(argv) {
     if (argv.includes('--json')) {
       console.log(JSON.stringify(matrix, null, 2));
     } else {
-      for (const cell of CREDENTIAL_CELLS) {
-        const a = matrix.cells[cell.lane];
-        console.log(
-          `${cell.runtime}×${cell.builder}`.padEnd(18) +
-            ` lane=${cell.lane.padEnd(13)} ${cell.wired ? 'wired  ' : 'UNWIRED'} current ${a.current.nights}/${a.requiredNights}  ${a.met ? 'MET' : 'not met'}`,
-        );
-      }
-      console.log(
-        matrix.allMet
-          ? 'v1.0 CREDENTIAL MET — every supported cell banked its window on an RC tag.'
-          : 'v1.0 credential NOT met — every supported cell needs its own 14 RC-tag nights.',
-      );
+      console.log(formatMatrix(matrix));
     }
     return;
   }
