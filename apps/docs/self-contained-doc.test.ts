@@ -88,6 +88,10 @@ describe('docs — self-contained mode', () => {
     expect(scSection).toMatch(/ISR|PPR|Partial Prerendering|revalidat/i);
   });
 
+  it('describes the startup-check gap for middleware+sitemap and taint-API apps', () => {
+    expect(scSection).toMatch(/middleware|sitemap|taint|startup check|become ready/i);
+  });
+
   it('carries no ADR or issue/PR references in this section', () => {
     expect(scSection).not.toMatch(/\bADR-?\s?\d/i);
     expect(scSection).not.toMatch(/(?:\bPR |\bissue |\(|\s)#\d+\b/i);

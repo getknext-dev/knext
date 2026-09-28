@@ -204,6 +204,9 @@ default choice for a new one.
   or empty shell, or report a render as freshly built when it should report it as already
   revalidated. There is no build-time signal for this one — it only shows up by exercising the
   affected route after you deploy.
+- **Some app configurations fail the startup check before the executable serves traffic.** Apps that
+  combine middleware with a generated sitemap, or that use React's taint APIs, may not become ready —
+  check the startup logs after you deploy with this mode on. The default build is unaffected.
 
 If your app depends on any of the above, keep self-contained mode off for now. `knext build`
 surfaces the first two at build time either way; self-contained mode turns them from "runs, with a
