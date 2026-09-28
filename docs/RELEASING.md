@@ -242,6 +242,47 @@ Step 4 is the only human step in the loop, and it is the correct one: it is the 
 something irreversible happens. If a run is sitting in `waiting`, **check its head SHA before
 approving** — approving a stale parked run publishes the tree as it stood when that run started.
 
+### The "Changeset required" PR check
+
+A PR that changes a published package's shipped surface — `packages/kn-next/src/**`,
+`packages/kn-next/templates/**`, `packages/lib/src/**`, `packages/db/src/**`, the
+`packages/kn-next-alias/bin/**` forwarding shim, or any of those packages' `package.json`
+`bin`/`exports`/`files`/`dependencies`/`peerDependencies`/`optionalDependencies` — must carry a
+`.changeset/*.md` naming the affected package. The `Changeset required` check
+(`scripts/check-changeset-required.mjs`, `.github/workflows/changeset-required.yml`) flags a PR
+that touches that surface with neither a changeset nor an explicit opt-out.
+
+- **Tests-only, `__tests__`, and docs-only changes never trigger it** — only the shipped surface
+  itself.
+- **"Naming the affected package" is enforced, not just documented.** The check parses each
+  added or modified `.changeset/*.md`'s YAML frontmatter (the `"pkg-name": patch|minor|major`
+  block) and requires it to name at least one package this diff actually touches. A changeset
+  naming only an unrelated or `ignore`d package (e.g. `@getknext/ui`), a PR that only *deletes* a
+  stale changeset while touching real source, or a changeset with malformed frontmatter, does
+  **not** satisfy the check — it fails closed the same way the rest of this checker does. A
+  changeset naming two packages, one of them the touched one, does satisfy it.
+- **A dependency bump counts as touching the package, even with no source edit.** A
+  `dependencies`/`peerDependencies`/`optionalDependencies` change in a shipped package's
+  `package.json` changes what every consumer installs, so it requires a changeset the same as a
+  `bin`/`exports`/`files` change does. This is deliberately **broader** than
+  `publicSurfaceChanged` (the predicate `check-escalation-triggers.mjs` uses to decide whether a
+  *design gate* is needed) — the two checks answer different questions and are not required to
+  agree. `devDependencies` and `scripts` changes stay quiet (build/test tooling, invisible to a
+  consumer).
+- **Opt-out:** label the PR `no-changeset` and say why in the PR description in one line. The
+  label is mechanically checked; the reason is a review convention (the spec reviewer's job), the
+  same way the docs-delta claim in `.claude/rules/workflow.md` step 5 is verified by a human, not
+  parsed.
+- **This is a PR-time nudge, not a release-lane gate** — the release lane above already has its
+  own coherent-group checks (`version-pr`, `publish-preflight`). This closes the earlier, cheaper
+  catch point: three PRs (#1569, #1588, #1575) changed published-package behaviour and merged with
+  no changeset, so none showed up in `packages/kn-next/CHANGELOG.md` or the rc.1 release notes
+  until a later PR hand-backfilled them.
+- **Pre-release caution:** once `.changeset/pre.json` exists (changesets **"pre" mode**, entered
+  ahead of an `rc.N`), adding a new changeset here versions the **next prerelease** (e.g. `rc.2`),
+  not a stable release. That is still the correct outcome — an `rc` that ships a behaviour change
+  with no changelog entry is exactly the gap this check exists to close.
+
 ## Upgrade order
 
 **Upgrade the operator (and therefore the CRD) BEFORE upgrading `@getknext/core`: operator/CRD

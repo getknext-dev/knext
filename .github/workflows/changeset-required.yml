@@ -1,0 +1,72 @@
+name: Changeset required
+
+# Enforce a changeset (or an explicit opt-out) on a PR that changes a
+# PUBLISHED package's shipped surface (#1615).
+#
+# WHY. Three PRs changed published-package behaviour and merged with no
+# `.changeset/*.md` (#1569, #1588, #1575). None showed up in
+# `packages/kn-next/CHANGELOG.md` or the rc.1 release notes until a separate
+# PR hand-backfilled them during a pre-merge sweep. Nothing caught the gap at
+# review time.
+#
+# SCOPE, per the issue: a NUDGE/GATE ON THE PR, not a release-lane gate — the
+# release lane (`version-pr`/`publish-preflight`) already has its own
+# coherent-group checks; this closes the earlier, cheaper catch point. It is
+# deliberately NOT added to `main`'s required status checks here — that is a
+# branch-protection change outside this PR's scope. See
+# `scripts/check-changeset-required.mjs` for what counts as "shipped surface"
+# and `docs/RELEASING.md` for the pre-release ("pre" mode) caveat.
+#
+# ESCAPE HATCH, DELIBERATELY: the `no-changeset` label, mirroring
+# `design-gate:cleared` (escalation-triggers.yml). Auditable, cheap — the PR
+# should also carry a one-line reason in its description (a review
+# convention, not something this script parses).
+
+on:
+  pull_request:
+    branches: ['**']
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  # Defensive, mirroring escalation-triggers.yml: if this check is ever added
+  # to main's required status checks, a required context that never reports
+  # on the merge queue's `refs/heads/gh-readonly-queue/main/...` ref hangs
+  # every PR in AWAITING_CHECKS. The decision was already made at PR time, so
+  # this event runs a no-op rather than re-diffing a ref with no `pull_request`
+  # payload (base/head SHA, labels) to read.
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changeset-required:
+    name: Changeset required for shipped-surface changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Acknowledge on merge_group (no-op — checked at PR time)
+        if: github.event_name == 'merge_group'
+        run: echo "merge_group event - the changeset requirement was checked at PR time; nothing to re-check on the merged ref."
+
+      - name: Checkout (full history — the check diffs against the merge base)
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Check for a required changeset
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          node scripts/check-changeset-required.mjs \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA"
