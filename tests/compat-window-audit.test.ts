@@ -5,10 +5,13 @@ import { join, resolve } from 'node:path';
 import {
   auditWindow,
   CREDENTIAL_CELLS,
+  credentialCronForLane,
   DEFAULT_FETCH_LIMIT,
   fetchLedgers,
   formatReport,
   gradeNight,
+  MISSING_NIGHT_GRACE_HOURS,
+  parseCredentialCronsFromWorkflow,
   readLedgerDir,
   selectLaneNights,
   unresolvedNight,
@@ -1300,4 +1303,209 @@ describe('CREDENTIAL_CELLS.workflowFile names a workflow that runs the cell’s 
       expect(runtime).toBe(cell.runtime);
     });
   }
+});
+
+/**
+ * #1607 — rule 8: a scheduled credential cron GitHub never fires (dropped
+ * under load, a workflow disabled after 60 days of inactivity, an outage)
+ * leaves no run and no ledger. Before this rule `auditWindow` only checked
+ * SEQUENCE adjacency between the nights it was handed, so a dropped night on
+ * an otherwise-unchanged fingerprint would silently bridge two streaks into
+ * one that never ran on the day in between. These tests prove the fix from
+ * both directions: a real gap breaks the streak, and nothing that ISN'T a
+ * genuine gap (a same-day rerun, today's not-yet-due night, an unwired lane,
+ * offline/undated input) is ever mistaken for one.
+ */
+describe('the missing-night calendar (#1607, rule 8)', () => {
+  /** A credential night on `date` (UTC), at the node lane's own cron time (01:17 UTC). */
+  function nightAt(date: string, over: Record<string, unknown> = {}) {
+    return night({
+      runId: String(Date.parse(`${date}T00:00:00.000Z`)),
+      scheduledAt: `${date}T01:17:00.000Z`,
+      ...over,
+    });
+  }
+
+  it('a calendar gap between two same-fingerprint nights breaks the streak, even though sequence adjacency would bridge it', () => {
+    const n1 = nightAt('2026-01-01');
+    const n2 = nightAt('2026-01-03'); // 2026-01-02 never ran
+    // Past 2026-01-03's own due time (its grace bound), but not yet past
+    // 2026-01-04's, so the calendar's cutoff lands ON 2026-01-03 and the ONLY
+    // gap in range is the one under test.
+    const now = new Date('2026-01-03T20:00:00.000Z');
+    const a = auditWindow([n1, n2], { now });
+    expect(a.calendarChecked).toBe(true);
+    expect(a.missingNights.map((m: { date: string | null }) => m.date)).toEqual(['2026-01-02']);
+    expect(a.restartsByCause).toEqual({ 'night-missing': 1 });
+    // The whole point: sequence adjacency alone would read this as one
+    // 2-night streak. It must read as two separate 1-night streaks instead.
+    expect(a.streaks).toHaveLength(2);
+    expect(a.longest.nights).toBe(1);
+  });
+
+  it('the missing night is graded and reported like any other unresolved night, disqualified never skipped', () => {
+    const n1 = nightAt('2026-01-01');
+    const n2 = nightAt('2026-01-03');
+    const now = new Date('2026-01-03T20:00:00.000Z');
+    const a = auditWindow([n1, n2], { now });
+    const missing = a.nights.find(
+      (n: { unresolved: string | null }) => n.unresolved === 'missing-night',
+    );
+    expect(missing).toBeDefined();
+    expect(missing.eligible).toBe(false);
+    expect(missing.date).toBe('2026-01-02');
+    expect(a.unresolvedNights).toContainEqual({
+      runId: 'missing:node:2026-01-02',
+      reason: 'missing-night',
+      date: '2026-01-02',
+    });
+    const report = formatReport(a);
+    expect(report).toContain('missing-night');
+    expect(report).toContain('calendar check (rule 8): verified');
+  });
+
+  it('two ledgers on the same calendar date (e.g. a same-day rerun) still count as one known date, never a missing one', () => {
+    const firstAttempt = nightAt('2026-01-01', { runId: 'r1' });
+    const rerun = nightAt('2026-01-01', { runId: 'r2', runAttempt: '2' });
+    const n2 = nightAt('2026-01-02', { runId: 'r3' });
+    const now = new Date('2026-01-02T20:00:00.000Z'); // past 01-02's due, cutoff lands on 01-02
+    const a = auditWindow([firstAttempt, rerun, n2], { now });
+    expect(a.calendarChecked).toBe(true);
+    expect(a.missingNights).toEqual([]);
+    // The rerun itself still disqualifies — via the PRE-EXISTING rerun rule,
+    // never relabelled as a calendar gap.
+    const rerunNight = a.nights.find((n: { runId: string }) => n.runId === rerun.runId);
+    expect(rerunNight?.disqualifiers).toContain('rerun');
+  });
+
+  it('the current in-progress night is not counted missing before its cron time plus the grace bound', () => {
+    const n1 = nightAt('2026-01-01');
+    // 01:17 UTC on 2026-01-02 is the exact cron minute — the grace bound has
+    // not elapsed yet, so today's night is not yet overdue.
+    const now = new Date('2026-01-02T01:17:00.000Z');
+    const a = auditWindow([n1], { now });
+    expect(a.calendarChecked).toBe(true);
+    expect(a.missingNights).toEqual([]);
+  });
+
+  it('once the grace bound elapses with no run, the overdue night IS counted missing', () => {
+    const n1 = nightAt('2026-01-01');
+    const graceHour = 1 + MISSING_NIGHT_GRACE_HOURS + 1; // one hour past due
+    const now = new Date(`2026-01-02T${String(graceHour).padStart(2, '0')}:17:00.000Z`);
+    const a = auditWindow([n1], { now });
+    expect(a.calendarChecked).toBe(true);
+    expect(a.missingNights.map((m: { date: string | null }) => m.date)).toEqual(['2026-01-02']);
+  });
+
+  it('an unwired lane has no discovered credential cron, so the calendar check is SKIPPED, never guessed', () => {
+    const n1 = nightAt('2026-01-01', { lane: 'node-vinext' });
+    const a = auditWindow([n1], { lane: 'node-vinext', now: new Date('2026-01-05T00:00:00.000Z') });
+    expect(a.calendarChecked).toBe(false);
+    expect(a.calendarSkippedReason).toMatch(/no discovered credential cron/);
+    expect(a.missingNights).toEqual([]);
+  });
+
+  it('a mix of dated and undated graded nights skips the check rather than applying it partially', () => {
+    const dated = nightAt('2026-01-01');
+    const undated = night({ runId: '2', windowFingerprint: dated.windowFingerprint as string });
+    const a = auditWindow([dated, undated], { now: new Date('2026-01-05T00:00:00.000Z') });
+    expect(a.calendarChecked).toBe(false);
+    expect(a.calendarSkippedReason).toMatch(/no scheduling date/);
+  });
+
+  it('legacy ledgers with no scheduledAt at all (every pre-#1607 fixture) skip the check, never falsely pass it', () => {
+    const a = auditWindow(streakOf(3, 'sha256:aaaa'));
+    expect(a.calendarChecked).toBe(false);
+    expect(a.calendarSkippedReason).toMatch(/no scheduling date/);
+    // Unaffected otherwise — this is the backward-compatibility guarantee for
+    // every test above this describe block, and for `--dir` input generally.
+    expect(a.longest.nights).toBe(3);
+  });
+
+  it('an empty lane has nothing to anchor a calendar against', () => {
+    const a = auditWindow([], { now: new Date('2026-01-05T00:00:00.000Z') });
+    expect(a.calendarChecked).toBe(false);
+    expect(a.calendarSkippedReason).toMatch(/no graded night/);
+  });
+
+  it('the calendar check is scoped to credential nights only — early-warning stays sequence-only', () => {
+    const n1 = nightAt('2026-01-01', {
+      compatMode: 'early-warning',
+      credential: false,
+      knextRef: 'refs/heads/main',
+    });
+    const a = auditWindow([n1], {
+      scope: 'early-warning',
+      now: new Date('2026-01-05T00:00:00.000Z'),
+    });
+    expect(a.calendarChecked).toBe(false);
+    expect(a.calendarSkippedReason).toMatch(/scoped to credential nights only/);
+  });
+});
+
+describe('parseCredentialCronsFromWorkflow (#1607) — reads the cron↔lane mapping from real workflow text, never hardcoded', () => {
+  it('extracts one credential cron per lane from text shaped like the real KNEXT_LANE/KNEXT_COMPAT_MODE lines', () => {
+    const fixture = [
+      'env:',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression syntax being parsed, not a JS template placeholder
+      "  KNEXT_LANE: ${{ (github.event.schedule == '17 22 * * *' && 'node-webpack') || (github.event.schedule == '47 5 * * *' && 'bun') || 'node' }}",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression syntax being parsed, not a JS template placeholder
+      "  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || (github.event.schedule == '47 5 * * *' && 'credential') || (github.event.schedule == '17 22 * * *' && 'credential') || 'early-warning' }}",
+      '',
+    ].join('\n');
+    const map = parseCredentialCronsFromWorkflow(fixture);
+    expect(Object.fromEntries(map)).toEqual({
+      node: '17 1 * * *',
+      bun: '47 5 * * *',
+      'node-webpack': '17 22 * * *',
+    });
+  });
+
+  it('throws when two credential crons resolve to the same lane — one cron per lane is assumed', () => {
+    const fixture = [
+      'env:',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression syntax being parsed, not a JS template placeholder
+      "  KNEXT_LANE: ${{ github.event.inputs.runtime || 'node' }}",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression syntax being parsed, not a JS template placeholder
+      "  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || (github.event.schedule == '18 1 * * *' && 'credential') || 'early-warning' }}",
+      '',
+    ].join('\n');
+    expect(() => parseCredentialCronsFromWorkflow(fixture)).toThrow(/both.*map to lane/);
+  });
+
+  it('throws when KNEXT_COMPAT_MODE is absent — refuses to derive crons from nothing', () => {
+    expect(() => parseCredentialCronsFromWorkflow('env:\n  FOO: bar\n')).toThrow(
+      /KNEXT_COMPAT_MODE/,
+    );
+  });
+
+  it('throws when KNEXT_LANE has no trailing default lane literal', () => {
+    const fixture = [
+      'env:',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression syntax being parsed, not a JS template placeholder
+      '  KNEXT_LANE: ${{ github.event.inputs.runtime }}',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression syntax being parsed, not a JS template placeholder
+      "  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') || 'early-warning' }}",
+      '',
+    ].join('\n');
+    expect(() => parseCredentialCronsFromWorkflow(fixture)).toThrow(/trailing default/);
+  });
+});
+
+describe('credentialCronForLane + the real workflow (#1607) — drift guard', () => {
+  it('matches the real test-e2e-deploy.yml cron literals for every wired credential cell', () => {
+    expect(credentialCronForLane('node')).toBe('17 1 * * *');
+    expect(credentialCronForLane('bun')).toBe('47 5 * * *');
+    expect(credentialCronForLane('node-webpack')).toBe('17 22 * * *');
+    expect(credentialCronForLane('bun-webpack')).toBe('47 23 * * *');
+  });
+
+  it('an unwired lane (no workflow, or no credential mode wired yet) has no credential cron', () => {
+    expect(credentialCronForLane('node-vinext')).toBeNull();
+    expect(credentialCronForLane('bun-vinext')).toBeNull();
+  });
+
+  it('an unknown lane has no credential cron', () => {
+    expect(credentialCronForLane('not-a-real-lane')).toBeNull();
+  });
 });

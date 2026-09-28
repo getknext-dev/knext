@@ -4,6 +4,10 @@
   The **mechanism** lands with this ADR; **cutting a release candidate is a founder action** and
   none is cut here. **Amended** by Amendment 1 (2026-09-24, Proposed): bytecode-liveness grading
   (D4), per-cell fingerprint closure (D5), the freeze guard (D6) and the v1.0 cell set (D7).
+  **Amended** by Amendment 2 (2026-09-28, #1607): D1's "fourteen consecutive nights" is defined
+  against the lane's own cron-derived UTC calendar, not sequence adjacency between the nights the
+  audit happens to be handed — a scheduled cron GitHub never fires now breaks the streak instead of
+  silently bridging it.
 - **Amends** ADR-0039 (the frozen set is unchanged in scope — still tarball-inclusive, still not
   narrowed — but its *workflow* entry is now read from the commit that actually executed; see
   ADR-0039 Amendment 1). **Supersedes** the node-lane-only definition in `docs/V1_ROADMAP.md` §3.
@@ -337,3 +341,61 @@ recording as an open item.
 - [ ] v1.0-scope field on `CREDENTIAL_CELLS` / `auditCredentialMatrix`. *(ADR-0058 action item)*
 - [ ] Before vinext × bun gets a window: add the D4 liveness step to `compat-vinext.yml`, a
       credential cron and the `credential-ref` job, and amend ADR-0058.
+
+## Amendment 2 (2026-09-28): the missing-night calendar, #1607
+
+- **Implements:** #1607. **Amends:** D1's counting rule.
+
+### Context
+
+D1 says "the audit counts only credential nights" and describes disqualifying a night whose ledger
+could not be read (rule 5 in `scripts/compat-window-audit.mjs`). That rule protects a run that
+*existed* — `gh run list` named it — but left no gradeable artifact. It has nothing to attach to a
+scheduled cron GitHub never fired at all: a scheduled-workflow run dropped under load, a workflow
+GitHub auto-disables after 60 days with no commits, or a platform outage. None of those produce a
+`gh run list` row, so before this amendment `auditWindow` never even knew to look — it only checked
+whether consecutive **graded** nights shared a fingerprint (sequence adjacency), never whether they
+were also on consecutive **calendar** UTC dates for the lane's own cron. A dropped night on an
+otherwise-unchanged fingerprint would silently bridge the streaks either side of it into one that
+never actually ran on the day in between — exactly the failure mode rule 5 exists to prevent for a
+lost ledger, left open for a night that never happened.
+
+### Decision
+
+`auditWindow` derives each lane's expected UTC night calendar from its own credential cron and
+checks it before computing streaks:
+
+- The cron is **read from the workflow**, not hardcoded — `parseCredentialCronsFromWorkflow` parses
+  the `KNEXT_COMPAT_MODE`/`KNEXT_LANE` expression lines the same way this ADR's D1 and #1245 already
+  require them kept in sync, so a moved cron or a newly-wired lane is picked up automatically and a
+  workflow that stops naming a lane's cron fails loudly rather than trusting a stale mapping.
+- For every UTC date from the earliest graded night through a bounded cutoff, a date with **no
+  graded night at all** becomes a synthetic `missing-night` stand-in — graded exactly like a rule-5
+  unresolved night: disqualified, restarting the streak, counted, never silently skipped.
+- **Grace, not zero tolerance.** "Today" only counts as required once its cron time plus a grace
+  window (`MISSING_NIGHT_GRACE_HOURS`, 6h — headroom over the run's own "better part of an hour"
+  documented duration, plus queueing delay) has passed, so a night still plausibly in flight is
+  never mistaken for one that never happened.
+- **Requires a scheduling timestamp.** This check needs to place every graded night on the
+  calendar. `--fetch` supplies one (`gh run list`'s `createdAt`, threaded through as `scheduledAt`);
+  `--dir` ledgers and pre-#1607 fixtures do not. Mixed dated/undated input, or none at all, **skips
+  the check** (`calendarChecked: false`, with a stated reason) rather than applying it partially —
+  the same fail-closed shape as every other rule here, applied to the check's own precondition
+  instead of to a night.
+- **Scoped to `scope: 'credential'` only.** The four v1.0 cells' own crons are what a "fourteen
+  consecutive nights" claim is ever made against (this ADR's own subject); an early-warning `main`
+  streak is a forecast with no such claim to protect (`docs/compat/window-node-lane.md`'s own
+  words), so extending the same cron-derived calendar there was judged additional blast radius for
+  no bar currently gated on it.
+
+### Consequences
+
+- A v1.0 credential claim can no longer be inflated by a night GitHub silently failed to run at
+  all, closing the gap D1's own ledger-loss handling left open.
+- `--dir`-based historical review (the pre-`--fetch` workflow this ADR's own window-node-lane.md
+  history was reconstructed with) is now honestly **unverified** on this axis unless the input
+  carries `scheduledAt` — `calendarChecked: false` says so explicitly rather than reading as "checked
+  and clean".
+- One credential cron per lane is assumed (`parseCredentialCronsFromWorkflow` throws otherwise) —
+  correct for every wired v1.0 cell today; a future design that runs a lane's credential night on
+  more than one cron would need this amended again.

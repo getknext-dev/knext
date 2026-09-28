@@ -46,6 +46,19 @@ them.** Since ADR-0056 (2026-09-23) this is one cell of the per-cell v1.0 matrix
     #1553 tracks it for the sprint-close gate, not settled here.
   - `--scope early-warning` reports the `main` streak and never prints "GATE MET".
   - `--matrix` prints every supported cell.
+  - **A calendar night GitHub never fires still breaks the streak (#1607).** The rules above cover
+    a run that *existed* but left no gradeable ledger. A scheduled cron GitHub silently drops
+    (load, a workflow auto-disabled after 60 days of repo inactivity, an outage) leaves no run at
+    all — nothing for that fail-closed handling to attach to. The audit derives each lane's expected
+    UTC night calendar from its own credential cron (read out of `test-e2e-deploy.yml`'s
+    `KNEXT_COMPAT_MODE`/`KNEXT_LANE` expressions, never hardcoded), and any expected date with no
+    graded night becomes a disqualified `missing-night` stand-in — restarting the streak exactly
+    like an unresolved night, never silently bridging the gap. Today only counts once its cron time
+    plus a grace window has passed, so a night still plausibly in flight is never called missing.
+    This needs a scheduling timestamp on every graded night; `--fetch` supplies one, `--dir` input
+    does not, so offline/historical review reports `calendarChecked: false` rather than a false
+    "verified" claim — check that field (or the CLI report's "calendar check" line) before trusting
+    consecutiveness on anything read from `--dir`.
 - **Restarts.** A window restarts when **this cell's** fingerprint changes, not when the ref does.
   Cutting rc.N+1 with an unchanged node fingerprint does not restart the node window. The
   fingerprint is still tarball-inclusive (ADR-0039, not narrowed), so in practice a change to
