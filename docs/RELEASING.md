@@ -49,13 +49,14 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 
 ## The gate (two lanes, one approval)
 
-`release.yml` runs on every push to `main` and on manual `workflow_dispatch`, as **three jobs**:
+`release.yml` runs on every push to `main` and on manual `workflow_dispatch`, as **five jobs**:
 
 | job | environment | credential | what it does |
 | --- | --- | --- | --- |
 | `audit` | — | — | npm supply-chain audit + SBOM. Publish-blocking. |
 | `version-pr` | **none** | **none** | opens/updates the "Version Packages" PR. Passes no `publish-script`, so it *cannot* publish. |
 | `publish-preflight` | none | none | runs `scripts/publish-preflight.mjs` — is any version in the tree absent from the registry? |
+| `ga-tarball-diff` | none | none | runs `scripts/ga-tarball-diff-gate.mjs` — see below. Publish-blocking. |
 | `release` | `npm-publish` | `NODE_AUTH_TOKEN` | the only job that publishes. **Skipped** unless there are no pending changesets *and* something is genuinely unpublished. |
 
 `NPM_TOKEN` is an **environment secret on `npm-publish`** — not a repo secret, which is why a plain
@@ -92,6 +93,36 @@ Three layers now assert the tarball can scaffold, form-at-PR-time / value-at-run
   packed-and-installed package in a clean, Bun-free dir.
 - **Stranger, against the live registry:** the `verify-scaffold-install.mjs` nightly runs the
   documented `npm exec --package=@getknext/core@latest -- kn-next create` quickstart.
+
+### The GA/rc tarball must differ from the credentialed rc ONLY in version fields
+
+The v1.0 compatibility credential is measured against a specific `rc.N` git tag's tarballs — the
+ones the compat suite actually installed and exercised for 14 nights. Nothing else connects that
+measurement to what `changeset publish` ships next. If the tarball published under a GA cut (or a
+re-publish of the exact credentialed rc) differs from that rc in anything beyond version fields,
+the credential does not cover the artifact users install.
+
+`scripts/ga-tarball-diff.mjs` (`scripts/lib/ga-tarball-diff.mjs` has the precise comparison rules)
+proves this: it packs both sides and fails on any delta that isn't a version field, a co-versioned
+`@getknext/*` sibling range, or the exact version string substituted wherever it is embedded in a
+built file's bytes. `scripts/ga-tarball-diff-gate.mjs` is the `release.yml` wiring that decides
+*when* to run it, reading `rcTag` from `.github/compat-credential-ref.json` (ADR-0056):
+
+- **`rcTag` is `null`** (no rc credentialed yet) — the gate is a loudly-logged no-op. Never a
+  silent pass that could be mistaken for "the tarballs were compared and are clean."
+- **An ordinary mid-window rc bump** (e.g. `rc.2` while `rcTag` still names `rc.1`) — a deliberate
+  **skip**, also logged. A later rc is *expected* to carry real code changes relative to the
+  credentialed rc (that is the entire point of cutting further candidates before GA); gating that
+  transition would red the release lane on every routine feature landing during the credential
+  window.
+- **A GA cut, or a re-publish of the exact version `rcTag` already names** — the gate **runs** the
+  diff (`--rc-ref <rcTag> --ga-ref HEAD`) and blocks `release` on a non-zero exit.
+
+The comparison packs with **`npm pack`**, matching the real publish tool (`changeset publish`
+shells to `npm publish` for a bun workspace) — never `bun pm pack`, which was measured (rehearsal,
+#1562) to emit `@getknext/core`'s `dist/cli/kn-next.js` as a duplicate tar entry (its `bin` field
+maps two command names, `knext` and `kn-next`, to that one file) and would have made this gate
+permanently, incorrectly red on every real GA cut.
 
 ## First publish — DONE (2026-07-26)
 
