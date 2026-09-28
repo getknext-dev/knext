@@ -20,6 +20,9 @@
  *     `LEGACY_CONFIG_FILE` / `LegacyConfigFileError` / `formatLegacyConfigFile`
  *     / `LEGACY_CONFIG_FILE_CODE`. This IS the migration-error surface the
  *     issue asks to keep; excluding it is the point, not an oversight.
+ *   - This file itself (`scripts/check-config-filename-mentions.mjs`) —
+ *     `OLD_NAME` below MUST hold the literal old-name string as data for the
+ *     scan to work at all; that is not a stray mention, it is the sentinel.
  *   - Any `*.test.ts` / `*.spec.ts` file, or anything under a `__tests__/`
  *     directory — test code deliberately exercises BOTH names (the
  *     legacy-file-detection tests plant the old name in temp fixtures and
@@ -43,7 +46,12 @@ export const OLD_NAME = 'kn-next.config';
  * The ONE file allowed to carry the old name — the migration error itself.
  * An exact path, not a prefix: any OTHER file under `cli/` is fair game.
  */
-const ALLOWED_FILES = new Set(['packages/kn-next/src/cli/shared.ts', 'CLAUDE.md']);
+const ALLOWED_FILES = new Set([
+  'packages/kn-next/src/cli/shared.ts',
+  'CLAUDE.md',
+  // This scan script's own docblock/sentinel — see the module docblock.
+  'scripts/check-config-filename-mentions.mjs',
+]);
 
 /**
  * Directory prefixes excluded from the scan, each justified:

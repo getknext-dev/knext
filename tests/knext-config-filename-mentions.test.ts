@@ -91,6 +91,12 @@ describe('isExempt — the allowlist, asserted directly', () => {
     expect(isExempt('packages/kn-next/src/cli/deploy.ts')).toBe(false);
   });
 
+  it('exempts its own scan script — OLD_NAME is a sentinel, not a stray mention', () => {
+    expect(isExempt('scripts/check-config-filename-mentions.mjs')).toBe(true);
+    // A DIFFERENT script in the same directory is still caught.
+    expect(isExempt('scripts/check-escalation-triggers.mjs')).toBe(false);
+  });
+
   it('exempts test files by suffix and by __tests__ directory membership', () => {
     expect(isExempt('packages/kn-next/src/__tests__/loader.test.ts')).toBe(true);
     expect(isExempt('packages/kn-next/src/foo.spec.ts')).toBe(true);
