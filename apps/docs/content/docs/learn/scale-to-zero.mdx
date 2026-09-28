@@ -59,7 +59,7 @@ See [Scale to zero](/docs/scale-to-zero) for the numbers and how they were taken
 
 If cold starts matter more than idle cost for ACME:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 scaling: { minScale: 1, maxScale: 10 }
 ```
 
@@ -74,7 +74,7 @@ traffic. That is a scheduling question rather than a config flag — see
 
 There is a second middle setting, and a new app already has it:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 scaling: {
   minScale: 0,
   maxScale: 10,

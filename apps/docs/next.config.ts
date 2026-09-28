@@ -24,7 +24,7 @@ import type { NextConfig } from 'next';
  * this bundler comes from `fumadocs-mdx/vite` in `vite.config.ts`.
  */
 const nextConfig: NextConfig = {
-  // Asset prefix is injected by `kn-next deploy` from kn-next.config.ts. Without
+  // Asset prefix is injected by `kn-next deploy` from knext.config.ts. Without
   // it a no-storage deployment 404s every static chunk.
   assetPrefix: process.env.ASSET_PREFIX || '',
   // #93 skew protection (ADR-0011): pin every client to the build it loaded.

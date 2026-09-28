@@ -51,7 +51,7 @@ kubectl logs -n default -l app=k6-loadtest,target=<app-name> -f
 
 ## Prometheus remote-write (optional)
 
-When the app's `kn-next.config.ts` has `observability.enabled: true`, the CLI wires
+When the app's `knext.config.ts` has `observability.enabled: true`, the CLI wires
 `K6_PROMETHEUS_RW_SERVER_URL` so k6 streams metrics into the in-cluster Prometheus via its
 experimental remote-write output. Otherwise k6 writes summary stats to stdout only. No SaaS
 target is ever configured (CLAUDE.md §8: no lock-in).

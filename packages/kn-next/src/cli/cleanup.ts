@@ -63,7 +63,7 @@ export function runCleanup(
 }
 
 /**
- * Tear down the app described by the local kn-next.config.ts. Exported so the
+ * Tear down the app described by the local knext.config.ts. Exported so the
  * `knext cleanup` bin subcommand can dispatch to it (the module also remains
  * a documented directly-runnable entry — see the self-entry block below).
  */
@@ -93,7 +93,7 @@ Usage:
   knext cleanup
 
 Issues exactly ONE cluster write: \`kubectl delete nextapp <name>\` for the app
-named in kn-next.config.ts. Owned resources (Knative Service, ServiceAccount,
+named in knext.config.ts. Owned resources (Knative Service, ServiceAccount,
 PVC) go with it via owner-reference garbage collection, and the operator's
 finalizer clears this app's object-store prefix and Redis keyspace.
 
@@ -143,7 +143,7 @@ export async function cleanupMain(argv: readonly string[]): Promise<number> {
             );
         } else {
             throw new UsageError(
-                `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see knext cleanup --help)`,
+                `unexpected positional ${JSON.stringify(a)} — the app comes from knext.config.ts (see knext cleanup --help)`,
             );
         }
     }

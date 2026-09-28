@@ -73,7 +73,7 @@ export function resolveBuildArtifact(
         // `log.fatal({ err })` with a stack and a dist chunk path
         // (cli-dispatch-contract.test.ts enforces the distinction).
         throw new UsageError(
-            `Unknown build system '${id}' in kn-next.config.ts. Known: ${BUILDERS.map((b) => b.id).join(", ")}.`,
+            `Unknown build system '${id}' in knext.config.ts. Known: ${BUILDERS.map((b) => b.id).join(", ")}.`,
         );
     }
     // The runtime is threaded through because vinext's shape depends on it

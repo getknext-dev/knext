@@ -1,7 +1,7 @@
 /**
  * ADR-0047 — `storage` is OPTIONAL BY ABSENCE (ergonomics ledger row 3b).
  *
- * Omitting `storage` from kn-next.config.ts is a first-class, explicitly
+ * Omitting `storage` from knext.config.ts is a first-class, explicitly
  * announced deploy mode: static assets are served from the container image
  * (`next start` semantics) — no asset upload, no assetPrefix, no CDN offload,
  * no cross-deploy asset retention. Absence is the ONLY spelling of the state:
@@ -77,7 +77,7 @@ describe("both validation mirrors accept an absent storage (condition 2)", () =>
     it("loader.ts: a config module without storage loads clean", async () => {
         const dir = mkdtempSync(join(loaderTmpRoot, "nostorage-"));
         try {
-            const file = join(dir, "kn-next.config.mjs");
+            const file = join(dir, "knext.config.mjs");
             writeFileSync(
                 file,
                 "export default { name: 'starter', registry: 'ghcr.io/someone' };\n",
@@ -93,7 +93,7 @@ describe("both validation mirrors accept an absent storage (condition 2)", () =>
     it("loader.ts: name and registry are still required", async () => {
         const dir = mkdtempSync(join(loaderTmpRoot, "invalid-"));
         try {
-            const file = join(dir, "kn-next.config.mjs");
+            const file = join(dir, "knext.config.mjs");
             writeFileSync(file, "export default { name: 'starter' };\n");
             await expect(loaderLoadConfig(file)).rejects.toThrow(/registry/);
         } finally {
@@ -295,7 +295,7 @@ function scaffoldApp(
 describe("knext create scaffolds the no-storage default (condition 6)", () => {
     it("the generated config has storage COMMENTED OUT — every storage line is a comment", () => {
         const { appDir } = scaffoldApp("starter-app");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         const storageLines = config
             .split("\n")
             .filter((l) => /(storage:|provider:|bucket:|publicUrl:)/.test(l));
@@ -307,7 +307,7 @@ describe("knext create scaffolds the no-storage default (condition 6)", () => {
 
     it("the growth path is explained in plain language above the commented block", () => {
         const { appDir } = scaffoldApp("growth-app");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         // Plain words a zero-k8s Next.js dev can act on: what the default
         // does, and why/when to un-comment.
         expect(config).toMatch(/without/i);
@@ -320,7 +320,7 @@ describe("knext create scaffolds the no-storage default (condition 6)", () => {
         // placeholder. The scaffold must be valid before the user fills
         // anything storage-shaped in.
         const { appDir } = scaffoldApp("valid-as-is");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         // Reconstruct the object the TS module exports — comments stripped is
         // enough here because the storage block is entirely commented out.
         const uncommented = config

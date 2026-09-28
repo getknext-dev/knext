@@ -141,7 +141,7 @@ jobs:
           npm pkg set "dependencies.next=${NEXT_VERSION}"
           grep -q '"build": "next build"' package.json
           grep -q 'KNEXT_BUILD_ID' next.config.js
-          cat > kn-next.config.ts <<EOF
+          cat > knext.config.ts <<EOF
           const config = {
             name: "${APP_NAME}",
             runtime: "${{ matrix.runtime }}",

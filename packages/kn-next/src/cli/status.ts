@@ -27,10 +27,11 @@
  * render verbatim whenever a condition is in its BAD state.
  */
 
-import { existsSync, writeSync } from "node:fs";
+import { writeSync } from "node:fs";
 import type { KnativeNextConfig } from "../config";
 import { type KubectlFn, kubectlRunner } from "./doctor";
 import {
+    CONFIG_NOT_FOUND_CODE,
     excerpt,
     loadConfig,
     resolveKubeContext,
@@ -530,15 +531,28 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
     opts.context = resolveKubeContext(opts.context);
 
     // Resolve the app name: positional wins, else the local config's name —
-    // the same resolution `knext db bind` uses.
+    // the same resolution `knext db bind` uses. A missing config is fine
+    // here (an explicit positional covers it) — swallowed by code, not
+    // existsSync, so the pre-rename filename (#1559) still surfaces its
+    // actionable LegacyConfigFileError instead of silently falling through
+    // to "app name required".
     let localConfig: KnativeNextConfig | undefined;
-    if (opts.app === undefined && existsSync("kn-next.config.ts")) {
-        localConfig = await loadConfig();
+    if (opts.app === undefined) {
+        try {
+            localConfig = await loadConfig();
+        } catch (err) {
+            if (
+                (err as { code?: unknown } | null)?.code !==
+                CONFIG_NOT_FOUND_CODE
+            ) {
+                throw err;
+            }
+        }
     }
     const appName = opts.app ?? localConfig?.name;
     if (!appName) {
         throw new UsageError(
-            "app name required: pass it as a positional (knext status <app>) or run from a directory with kn-next.config.ts",
+            "app name required: pass it as a positional (knext status <app>) or run from a directory with knext.config.ts",
         );
     }
 

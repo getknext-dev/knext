@@ -49,7 +49,7 @@ one config field; the operator does the env plumbing (it is the single source of
 truth for pod env):
 
 ```ts
-// kn-next.config.ts
+// knext.config.ts
 export default defineConfig({
   observability: {
     tracing: {

@@ -10,7 +10,7 @@
  *
  * The `KnativeNextConfig` export of `@getknext/core` is TYPE-ONLY (erased at build), so we
  * cannot assert a runtime binding for it — instead we assert the `.` module LOADS, and
- * that the committed `kn-next.config.ts` fixture (which `import type`s it) loads on plain
+ * that the committed `knext.config.ts` fixture (which `import type`s it) loads on plain
  * Node via type-stripping, proving the type surface is consumable.
  *
  * Exit code is the contract: 0 = all public imports resolved; non-zero = at least one
@@ -83,14 +83,14 @@ for (const [spec, named] of PUBLIC_SURFACE) {
 // KnativeNextConfig type surface: the .ts fixture (which `import type`s it) must load on
 // plain Node via type-stripping, proving the type is consumable by an app's config.
 try {
-  const cfg = await import(`${process.cwd()}/kn-next.config.ts`);
+  const cfg = await import(`${process.cwd()}/knext.config.ts`);
   if (!cfg.default || cfg.default.name !== 'smoke-app') {
-    fail('kn-next.config.ts loaded but default export is missing/incorrect');
+    fail('knext.config.ts loaded but default export is missing/incorrect');
   } else {
-    ok('kn-next.config.ts (uses `import type { KnativeNextConfig }`) loads on plain Node');
+    ok('knext.config.ts (uses `import type { KnativeNextConfig }`) loads on plain Node');
   }
 } catch (e) {
-  fail(`kn-next.config.ts (KnativeNextConfig type fixture): ${e.message}`);
+  fail(`knext.config.ts (KnativeNextConfig type fixture): ${e.message}`);
 }
 
 function shorten(p) {

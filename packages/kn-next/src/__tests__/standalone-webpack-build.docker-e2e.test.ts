@@ -255,7 +255,7 @@ beforeAll(async () => {
     //     this suite bolts on outside the project's own command. This is the
     //     "project build" path `knext build`'s runProjectBuild seam runs
     //     (`npm run build` / `bun run build`), so it exercises the real thing
-    //     a user selecting `build: 'webpack'` in kn-next.config.ts relies on.
+    //     a user selecting `build: 'webpack'` in knext.config.ts relies on.
     const pkgJsonPath = join(appDir, "package.json");
     const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as {
         scripts: Record<string, string>;

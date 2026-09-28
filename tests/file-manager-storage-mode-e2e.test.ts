@@ -21,11 +21,8 @@ import {
 
 const ROOT = resolve(import.meta.dirname, '..');
 const WF = resolve(ROOT, '.github/workflows/file-manager-platform-e2e-nightly.yml');
-const STORAGE_PROFILE = resolve(
-  ROOT,
-  'apps/file-manager/platform-e2e/kn-next.config.storage-e2e.ts',
-);
-const REAL_CONFIG = resolve(ROOT, 'apps/file-manager/kn-next.config.ts');
+const STORAGE_PROFILE = resolve(ROOT, 'apps/file-manager/platform-e2e/knext.config.storage-e2e.ts');
+const REAL_CONFIG = resolve(ROOT, 'apps/file-manager/knext.config.ts');
 
 type Step = { name?: string; uses?: string; run?: string; if?: string; [k: string]: unknown };
 type Job = { steps: Step[]; needs?: string[]; if?: string; [k: string]: unknown };
@@ -42,7 +39,7 @@ describe('storage-mode leg - workflow wiring', () => {
   });
 
   it('the storage-mode deploy AND live-check steps carry no `if:` (fail-closed, not skippable)', () => {
-    const deploy = check.steps.find((s) => (s.run ?? '').includes('kn-next.config.storage-e2e.ts'));
+    const deploy = check.steps.find((s) => (s.run ?? '').includes('knext.config.storage-e2e.ts'));
     const liveCheck = check.steps.find((s) => (s.run ?? '').includes('storage-mode-e2e.mjs'));
     expect(deploy).toBeDefined();
     expect(liveCheck).toBeDefined();
@@ -51,13 +48,13 @@ describe('storage-mode leg - workflow wiring', () => {
   });
 
   it('the storage-mode deploy runs through the product CLI, not a hand-written Knative apply', () => {
-    const deploy = check.steps.find((s) => (s.run ?? '').includes('kn-next.config.storage-e2e.ts'));
+    const deploy = check.steps.find((s) => (s.run ?? '').includes('knext.config.storage-e2e.ts'));
     expect(deploy?.run).toContain('kn-next.js deploy');
     expect(deploy?.run).not.toMatch(/kind:\s*Service\b|serving\.knative\.dev\/v1/);
   });
 
   it('the storage-mode NextApp is waited on with a timeout before the live checks run', () => {
-    const deploy = check.steps.find((s) => (s.run ?? '').includes('kn-next.config.storage-e2e.ts'));
+    const deploy = check.steps.find((s) => (s.run ?? '').includes('knext.config.storage-e2e.ts'));
     expect(deploy?.run).toMatch(
       /wait --for=condition=Ready --timeout=\d+s nextapp\/file-manager-storage/,
     );

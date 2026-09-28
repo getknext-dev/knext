@@ -201,7 +201,7 @@ describe("in-repo apps carry the same generateBuildId", () => {
 
     /**
      * An app is in scope iff knext can BUILD or DEPLOY it — that is, it has a
-     * `kn-next.config.ts` (deployable) or a `vite.config.ts` (the vinext build
+     * `knext.config.ts` (deployable) or a `vite.config.ts` (the vinext build
      * entry, which is how `examples/bun-exec` qualifies without the former).
      *
      * Derived rather than a hand-written skip list, and the excluded set is
@@ -213,7 +213,7 @@ describe("in-repo apps carry the same generateBuildId", () => {
     const isKnextApp = (rel: string): boolean => {
         const dir = join(REPO_ROOT, rel, "..");
         return (
-            existsSync(join(dir, "kn-next.config.ts")) ||
+            existsSync(join(dir, "knext.config.ts")) ||
             existsSync(join(dir, "vite.config.ts"))
         );
     };

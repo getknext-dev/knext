@@ -446,7 +446,7 @@ export function parseGcArgs(argv: readonly string[]): GcArgs {
             throw new UsageError(`unknown flag "${a}" (see knext gc --help)`);
         } else {
             throw new UsageError(
-                `unexpected positional ${JSON.stringify(a)} — the app comes from kn-next.config.ts (see knext gc --help)`,
+                `unexpected positional ${JSON.stringify(a)} — the app comes from knext.config.ts (see knext gc --help)`,
             );
         }
     }
@@ -476,7 +476,7 @@ re-upload; such kept prefixes are named in the output, and reclaiming a
 retired app's pre-marker prefixes is a manual delete (or deleting the NextApp,
 whose teardown finalizer wipes the whole \`<app>/\` namespace).
 
-The app + storage come from kn-next.config.ts in the current directory.
+The app + storage come from knext.config.ts in the current directory.
 
 Usage:
   knext gc [--build-id <id>] [-n <namespace>] [--dry-run]

@@ -14,10 +14,10 @@
  * `@cloudflare/vite-plugin`, no KV/CDN adapters. knext targets Knative on
  * Kubernetes instead, so the server is a Bun binary rather than a Worker.
  *
- * Set `runtime: 'node'` in kn-next.config.ts and the same app builds for Node
+ * Set `runtime: 'node'` in knext.config.ts and the same app builds for Node
  * instead: nitro's `node` preset, served by `knext-node-entry.mjs`, run
  * uncompiled with a V8 compile cache baked into the image
- * (`Dockerfile.vinext-node`). The runtime is read from kn-next.config.ts —
+ * (`Dockerfile.vinext-node`). The runtime is read from knext.config.ts —
  * the same file `knext build` and `knext deploy` read — so the preset can
  * never disagree with the image the CLI builds.
  */
@@ -25,7 +25,7 @@
 import { nitro } from 'nitro/vite';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
-import knext from './kn-next.config';
+import knext from './knext.config';
 
 // 'node' only when asked for; anything else is the default Bun target.
 const onNode = knext.runtime === 'node';

@@ -38,7 +38,7 @@ export async function storageModeCheck(
                 "storage-mode",
                 "Static asset mode",
                 "skip",
-                "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+                "no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
             ),
         ];
     }

@@ -20,7 +20,7 @@ small supervisor that spawns Next's own `server.js` and drains it gracefully on 
 the target the official Next.js compatibility suite verifies knext against. You do not have to
 configure anything to get it:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
@@ -32,7 +32,7 @@ const config: KnativeNextConfig = {
 
 Pick which runtime executes it with `runtime`:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
@@ -45,7 +45,7 @@ The second target compiles your app with [**vinext**](https://vinext.dev), an op
 Vite-based implementation of the Next.js framework, into a single executable. Select it explicitly
 with `build: 'vinext'`:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
@@ -59,7 +59,7 @@ the `runtime` choice, the bytecode caching — is identical to the `turbopack` t
 are `next build` with a different bundler flag, and the standalone output they produce is the same
 shape:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
@@ -103,7 +103,7 @@ identically) it decides how the server is packaged:
 to boot, with nothing beside it on disk. It defaults to `false`, and `knext build --self-contained`
 turns it on for one build, overriding the config key:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
@@ -216,7 +216,7 @@ gap" into "the build refuses," so you find out before you deploy rather than aft
 
 The vinext target also runs on **Node**. Set `build: 'vinext'` explicitly and `runtime: 'node'`:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
@@ -230,12 +230,12 @@ Nothing is compiled into an executable on this target. Instead:
 - **The build emits a Node server.** `vite build` produces nitro's **Node** preset rather than the
   Bun one, with `knext-node-entry.mjs` as the server entry. That entry provides what the Bun entry
   does: the health route, the `:9464` metrics endpoint, and draining in-flight requests on
-  `SIGTERM`. `vite.config.ts` picks the preset from the `runtime` in `kn-next.config.ts`, so
+  `SIGTERM`. `vite.config.ts` picks the preset from the `runtime` in `knext.config.ts`, so
   `knext build`, `knext deploy` and a plain `npm run build` all agree.
 - **Bytecode caching is the V8 compile cache, baked into the image.** The image
   (`Dockerfile.vinext-node`, next to your `Dockerfile`) boots the server once during
   `docker build` and warms your configured **health check path** (`healthCheckPath` in
-  `kn-next.config.ts`, default `/api/health`) before shipping the compiled code as a layer.
+  `knext.config.ts`, default `/api/health`) before shipping the compiled code as a layer.
   `knext deploy` and `preview` — the two commands that actually run `docker build` —
   thread a custom `healthCheckPath` through automatically as a `--build-arg`, so a custom health
   route works with nothing extra to configure through either of them. `knext build` does **not**:
@@ -263,7 +263,7 @@ overwrites your own copies. It does **not** edit your `vite.config.ts`, which ma
 `preset: 'bun'`. Make the nitro plugin follow the runtime:
 
 ```ts title="vite.config.ts"
-import knext from './kn-next.config';
+import knext from './knext.config';
 
 const onNode = knext.runtime === 'node';
 

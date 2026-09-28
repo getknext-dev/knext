@@ -133,7 +133,7 @@ Both layouts work, and you do **not** need to restructure an existing app:
 my-app/                     # flat single-app repo (what `kn-next create` makes)
 ├── package-lock.json       # ← the lockfile: this directory is the context
 ├── Dockerfile
-├── kn-next.config.ts
+├── knext.config.ts
 └── ...                     # run kn-next from here
 
 my-repo/                    # monorepo
@@ -141,7 +141,7 @@ my-repo/                    # monorepo
 └── apps/
     └── hello-knext/        # run kn-next from here
         ├── Dockerfile
-        ├── kn-next.config.ts
+        ├── knext.config.ts
         ├── next.config.ts
         ├── package.json
         └── src/ or app/ ...
@@ -255,9 +255,9 @@ CMD ["node", "server.js"]
 > `.next/standalone/apps/hello-knext/server.js`) — adjust the `COPY` paths and
 > `CMD` accordingly.
 
-## Step 4 — Author `kn-next.config.ts`
+## Step 4 — Author `knext.config.ts`
 
-Create `kn-next.config.ts` next to your `package.json`. This is the smallest
+Create `knext.config.ts` next to your `package.json`. This is the smallest
 config that works — `name`, `registry`, and `storage` are required:
 
 ```ts

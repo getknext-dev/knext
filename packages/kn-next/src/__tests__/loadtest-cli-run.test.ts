@@ -94,7 +94,7 @@ describe("runLoadTestCli", () => {
     });
 
     it("returns 1 and writes a breadcrumb when config load fails (never silent exit)", async () => {
-        loadConfig.mockRejectedValue(new Error("no kn-next.config.ts"));
+        loadConfig.mockRejectedValue(new Error("no knext.config.ts"));
         const stderr = mock();
         const code = await runLoadTestCli(
             ["--url", "https://app.example.com", "--type", "smoke"],
@@ -102,9 +102,7 @@ describe("runLoadTestCli", () => {
         );
         expect(code).toBe(1);
         expect(stderr).toHaveBeenCalledWith(
-            expect.stringMatching(
-                /failed to start load test: .*kn-next\.config/,
-            ),
+            expect.stringMatching(/failed to start load test: .*knext\.config/),
         );
     });
 });

@@ -4,7 +4,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
 "PASS  Cluster reachable                           apiserver responded
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
-SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
 PASS  NextApp CRD schema coverage                 all 72 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
@@ -39,7 +39,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "title": "Static asset mode",
   },
   {
-    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
     "id": "node-entry-staleness",
     "status": "skip",
     "title": "vinext-on-node entry freshness",
@@ -112,8 +112,8 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
 exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachability gate WARNs, every cluster check SKIPs, exit 0: table 1`] = `
 "WARN  Cluster reachable                           apiserver unreachable (The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?) — all cluster checks skipped (hint: cluster connection flaked — check network/VPN and retry)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
-SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
-SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+SKIP  Static asset mode                           no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
@@ -144,13 +144,13 @@ exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachab
     "title": "kubectl strict validation",
   },
   {
-    "detail": "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+    "detail": "no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
     "id": "storage-mode",
     "status": "skip",
     "title": "Static asset mode",
   },
   {
-    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
     "id": "node-entry-staleness",
     "status": "skip",
     "title": "vinext-on-node entry freshness",
@@ -223,8 +223,8 @@ exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachab
 exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the reachability gate reports a credentials failure: table 1`] = `
 "WARN  Cluster reachable                           apiserver unreachable (error: You must be logged in to the server (Unauthorized)) — all cluster checks skipped (hint: credentials failed — re-authenticate (refresh your kubeconfig token) and retry)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
-SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
-SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+SKIP  Static asset mode                           no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
@@ -255,13 +255,13 @@ exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the re
     "title": "kubectl strict validation",
   },
   {
-    "detail": "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+    "detail": "no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
     "id": "storage-mode",
     "status": "skip",
     "title": "Static asset mode",
   },
   {
-    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
     "id": "node-entry-staleness",
     "status": "skip",
     "title": "vinext-on-node entry freshness",
@@ -334,8 +334,8 @@ exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the re
 exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reachability gate reports an RBAC denial: table 1`] = `
 "WARN  Cluster reachable                           apiserver unreachable (Error from server (Forbidden): nextapps.apps.kn-next.dev is forbidden: User "u" cannot get resource "nextapps") — all cluster checks skipped (hint: insufficient RBAC — ask a cluster admin for get/list on nextapps.apps.kn-next.dev)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
-SKIP  Static asset mode                           no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
-SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+SKIP  Static asset mode                           no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
@@ -366,13 +366,13 @@ exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reach
     "title": "kubectl strict validation",
   },
   {
-    "detail": "no kn-next.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
+    "detail": "no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served",
     "id": "storage-mode",
     "status": "skip",
     "title": "Static asset mode",
   },
   {
-    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
     "id": "node-entry-staleness",
     "status": "skip",
     "title": "vinext-on-node entry freshness",
@@ -446,7 +446,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
 "PASS  Cluster reachable                           apiserver responded
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
-SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
 PASS  NextApp CRD schema coverage                 all 72 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
@@ -481,7 +481,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "title": "Static asset mode",
   },
   {
-    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
     "id": "node-entry-staleness",
     "status": "skip",
     "title": "vinext-on-node entry freshness",
@@ -555,7 +555,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
 "PASS  Cluster reachable                           apiserver responded
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
-SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
 FAIL  NextApp CRD schema coverage                 operator behind CLI: the installed CRD is missing 1 field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI). (hint: upgrade the operator/CRD FIRST, then the CLI — see https://knext.dev/docs/upgrading)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
@@ -590,7 +590,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
     "title": "Static asset mode",
   },
   {
-    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no kn-next.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
     "id": "node-entry-staleness",
     "status": "skip",
     "title": "vinext-on-node entry freshness",

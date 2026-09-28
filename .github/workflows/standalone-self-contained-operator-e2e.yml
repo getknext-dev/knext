@@ -125,7 +125,7 @@ jobs:
           APP_DIR="${RUNNER_TEMP}/standalone-sc-app"
           cp -R packages/kn-next/src/__tests__/fixtures/standalone-drain-app "$APP_DIR"
           cd "$APP_DIR"
-          cp kn-next.config.e2e.ts kn-next.config.ts
+          cp knext.config.e2e.ts knext.config.ts
           npm pkg set scripts.build="next build --webpack"
           grep -q '"build": "next build --webpack"' package.json
           bun install

@@ -148,7 +148,7 @@ authenticated **on the build host / CI runner**:
 
 If the CLI is missing or unauthenticated, the asset upload step fails — this is a
 **build-host** prerequisite, independent of the cluster. Provide credentials via env / CI
-secrets only, never in `kn-next.config.ts` or images (see `.claude/rules/security.md`).
+secrets only, never in `knext.config.ts` or images (see `.claude/rules/security.md`).
 
 ---
 

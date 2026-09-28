@@ -23,7 +23,7 @@ name: File-manager platform e2e (nightly / dispatch)
 # NOT covered, by design (each is its own follow-up, never a skip):
 #   - browser-driven UI (the upload form is a client component; no Playwright dep)
 #   - the `mc`-based `minio` storage provider specifically (area D uses the
-#     `s3` provider against the same MinIO - see kn-next.config.storage-e2e.ts)
+#     `s3` provider against the same MinIO - see knext.config.storage-e2e.ts)
 #   - rename / delete / download flows: the app has none (upload + list only)
 #
 # BUDGET: one ubuntu-latest job, timeout 45 min, measured ~8-10 min wall (dispatch
@@ -201,7 +201,7 @@ jobs:
       - name: kn-next deploy (config profile for kind)
         run: |
           set -euo pipefail
-          cp apps/file-manager/platform-e2e/kn-next.config.e2e.ts apps/file-manager/kn-next.config.ts
+          cp apps/file-manager/platform-e2e/knext.config.e2e.ts apps/file-manager/knext.config.ts
           cd apps/file-manager
           node ../../packages/kn-next/dist/cli/kn-next.js deploy \
             --registry localhost:5001 --namespace "$APP_NS" --tag "${GITHUB_RUN_ID}"
@@ -271,7 +271,7 @@ jobs:
           KN_APP_NAMESPACE: ${{ env.APP_NS }}
         run: |
           set -euo pipefail
-          cp apps/file-manager/platform-e2e/kn-next.config.storage-e2e.ts apps/file-manager/kn-next.config.ts
+          cp apps/file-manager/platform-e2e/knext.config.storage-e2e.ts apps/file-manager/knext.config.ts
           cd apps/file-manager
           # `kn-next deploy` runs `aws s3` ON THE RUNNER (not in-cluster), so
           # AWS_ENDPOINT_URL must be the port-forward the runner can actually

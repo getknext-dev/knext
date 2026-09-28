@@ -66,13 +66,13 @@ The `@getknext/core` package provides pluggable adapters:
 ### 3. Configuration System
 
 ```text
-kn-next.config.ts           # User configuration
+knext.config.ts           # User configuration
         ↓
     kn-next build
         ↓
 ```
 
-**Example `kn-next.config.ts`:**
+**Example `knext.config.ts`:**
 
 ```typescript
 const config: KnativeNextConfig = {
@@ -317,7 +317,7 @@ The environment variables depend on your chosen storage and cache providers.
 knative-next-monorepo/
 ├── apps/
 │   └── file-manager/           # Example Next.js 16 application
-│       ├── kn-next.config.ts   # App configuration
+│       ├── knext.config.ts   # App configuration
 │       ├── deploy.sh           # Deployment automation
 │       ├── knative-service.yaml
 │       └── src/app/            # App Router pages
@@ -517,7 +517,7 @@ The V8 compile cache is **baked into the application image at build time**
 (ADR-0035). It is present in every pod from the first cold start and needs no
 config field, no PVC, and no cluster feature flag.
 
-The former opt-in — `bytecodeCache` in `kn-next.config.ts` and
+The former opt-in — `bytecodeCache` in `knext.config.ts` and
 `spec.cache.enableBytecodeCache` on the CR, backed by a PVC — has been **removed**.
 An operator-injected `NODE_COMPILE_CACHE` would bypass the baked layer, so the
 operator injects none.
@@ -685,7 +685,7 @@ npx @getknext/core build
 
 Runs the following steps:
 
-1. Loads `kn-next.config.ts`
+1. Loads `knext.config.ts`
 2. Runs `npm run build` (`next build` with `output:'standalone'`)
 3. Uploads static assets to GCS/S3/MinIO
 4. Generates `knative-service.yaml` in `.output/`

@@ -114,7 +114,7 @@ job's command line. The job also carries a `resource_group` scoped to your names
 pipelines racing on `main` cannot apply the same `NextApp` concurrently.
 
 <Callout type="warn">
-The default runtime (unset `runtime` in `kn-next.config.ts`) is `bun` — `knext deploy` compiles
+The default runtime (unset `runtime` in `knext.config.ts`) is `bun` — `knext deploy` compiles
 your app's standalone executable by shelling out to `bun`. The generated job installs a pinned Bun
 release (verified against an embedded checksum) alongside docker, so a fresh runner needs no manual
 Bun setup; if you set `runtime: 'node'`, the job never uses that install.

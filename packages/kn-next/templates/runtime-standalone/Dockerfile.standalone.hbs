@@ -315,7 +315,7 @@ ENV PORT=3000 \
 # and do nothing, so the build fails instead of shipping it.
 ARG KNEXT_COMPILE_CACHE_MIN_BYTES=262144
 
-# The path the bake warms — MUST match `kn-next.config.ts`'s `healthCheckPath`
+# The path the bake warms — MUST match `knext.config.ts`'s `healthCheckPath`
 # (default `/api/health`). `knext deploy`/`preview` pass this as a
 # `--build-arg` when the app configures a custom path (`knext build` does
 # NOT stage or build this recipe at all — see the file header); an app with

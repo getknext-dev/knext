@@ -22,7 +22,7 @@
  * packaged template is a false positive: the WARN names a runtime fix
  * (e.g. the Cache-Control normalization above) the app can never be
  * missing, because it never runs this file at all. So this check first
- * reads the app's OWN `kn-next.config.ts` (same pattern as
+ * reads the app's OWN `knext.config.ts` (same pattern as
  * `storage-mode.ts`) and SKIPs unless it resolves to vinext-on-node —
  * `runtime` defaults to `"bun"` (ADR-0058/#1183), so an absent `runtime` is
  * NOT node.
@@ -110,7 +110,7 @@ export async function nodeEntryStalenessCheck(
                 "vinext-on-node entry freshness",
                 "skip",
                 "this app does not build with build: 'vinext' + runtime: 'node' " +
-                    "(or no kn-next.config.ts was found) — knext-node-entry.mjs, " +
+                    "(or no knext.config.ts was found) — knext-node-entry.mjs, " +
                     "if scaffolded, is never run",
             ),
         ];
@@ -127,7 +127,7 @@ export async function nodeEntryStalenessCheck(
                 "node-entry-staleness",
                 "vinext-on-node entry freshness",
                 "skip",
-                "kn-next.config.ts selects build: 'vinext' + runtime: 'node', but no knext-node-entry.mjs was found in this directory — run doctor from the app directory",
+                "knext.config.ts selects build: 'vinext' + runtime: 'node', but no knext-node-entry.mjs was found in this directory — run doctor from the app directory",
             ),
         ];
     }

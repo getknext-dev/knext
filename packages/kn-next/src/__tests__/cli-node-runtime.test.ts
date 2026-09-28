@@ -437,7 +437,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(all).toContain(`knext ${swallowed}`);
         // It must refuse BEFORE the deploy flow starts — no config was even
         // read, so the config guidance must not appear either.
-        expect(all).not.toContain("No kn-next.config.ts found");
+        expect(all).not.toContain("No knext.config.ts found");
         expect(all).not.toContain("knext deploy\n");
         // Same presentation contract as every other expected failure.
         expect(all).not.toContain("FATAL");
@@ -450,9 +450,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         const dir = mkdtempSync(join(tmpdir(), "knext-explicit-deploy-"));
         const r = run(NODE_BIN, [distBin, "deploy"], dir);
         expect(r.status).toBe(1);
-        expect(`${r.stdout}${r.stderr}`).toContain(
-            "No kn-next.config.ts found",
-        );
+        expect(`${r.stdout}${r.stderr}`).toContain("No knext.config.ts found");
     });
 
     // --- Usage errors are messages, not FATAL dumps ---
@@ -535,7 +533,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         const r = run(NODE_BIN, [distBin, "--skip-build"], dir);
         expect(r.status).toBe(1);
         const all = `${r.stdout}${r.stderr}`;
-        expect(all).toContain("No kn-next.config.ts found");
+        expect(all).toContain("No knext.config.ts found");
         expect(all).not.toContain("unknown command");
     });
 

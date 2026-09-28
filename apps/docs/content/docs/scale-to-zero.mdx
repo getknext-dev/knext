@@ -40,10 +40,10 @@ spec:
 Every scaling knob on this page — `minScale`, `maxScale`, `containerConcurrency`, `poolMax`,
 `warmSchedule`, `scaleDownDelay`, `targetBurstCapacity`, `panicWindowPercentage`,
 `panicThresholdPercentage` — is
-also settable from your `kn-next.config.ts` `scaling:` block, so the app and its autoscaling are
+also settable from your `knext.config.ts` `scaling:` block, so the app and its autoscaling are
 configured from one file:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   scaling: {
@@ -78,7 +78,7 @@ connections that pod holds open**. If you have sized `maxScale × poolMax` again
 connection budget, this does not raise the peak — but it does keep idle connections occupied for
 longer, so count them.
 
-**New apps are scaffolded with `scaleDownDelay: "5m"`** in their `kn-next.config.ts`. Delete that
+**New apps are scaffolded with `scaleDownDelay: "5m"`** in their `knext.config.ts`. Delete that
 line for immediate scale-to-zero; shorten or lengthen it to move the trade. Existing apps are
 unaffected until you add the field yourself.
 

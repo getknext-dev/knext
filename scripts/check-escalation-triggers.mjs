@@ -63,7 +63,7 @@ export const TRIGGERS = [
   },
   {
     id: 'config-schema',
-    label: 'the kn-next.config.ts schema',
+    label: 'the knext.config.ts schema',
     match: (p) => p === 'packages/kn-next/src/config.ts',
     why: 'changes the public config schema every consuming app is written against',
   },

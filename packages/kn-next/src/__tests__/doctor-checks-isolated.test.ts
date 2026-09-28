@@ -280,7 +280,7 @@ const VINEXT_NODE_CONFIG = {
 } as unknown as KnativeNextConfig;
 
 describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
-    it("SKIP when kn-next.config.ts is not vinext + node (default-standalone: no build/runtime at all)", async () => {
+    it("SKIP when knext.config.ts is not vinext + node (default-standalone: no build/runtime at all)", async () => {
         const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
@@ -299,7 +299,7 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.detail).toContain("vinext");
     });
 
-    it("SKIP when kn-next.config.ts is build: 'vinext' but runtime is absent (defaults to bun, ADR-0058)", async () => {
+    it("SKIP when knext.config.ts is build: 'vinext' but runtime is absent (defaults to bun, ADR-0058)", async () => {
         const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
@@ -314,7 +314,7 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
         expect(r?.status).toBe("skip");
     });
 
-    it("SKIP when no kn-next.config.ts could be loaded at all", async () => {
+    it("SKIP when no knext.config.ts could be loaded at all", async () => {
         const [r] = await nodeEntryStalenessCheck(
             makeCtx(
                 {},
@@ -410,7 +410,7 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
 
     it("uses the REAL cwd/config/template readers by default when no deps are injected (does not throw)", async () => {
         // No overrides at all — exercises the real fs-backed defaults. The
-        // test cwd almost certainly has no kn-next.config.ts, so this should
+        // test cwd almost certainly has no knext.config.ts, so this should
         // SKIP, not throw or crash.
         const [r] = await nodeEntryStalenessCheck(makeCtx({}));
         expect(r?.id).toBe("node-entry-staleness");

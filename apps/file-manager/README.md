@@ -26,7 +26,7 @@ This command handles everything:
 
 ## Configuration
 
-### kn-next.config.ts
+### knext.config.ts
 
 ```typescript
 const config: KnativeNextConfig = {
@@ -181,7 +181,7 @@ through the ingress:
   and for `public/` files, and RSC streaming (fallback arrives before the resolved content).
 
 Every check fails closed: a missing prerequisite throws, there is no skip. The kind profile lives in
-`platform-e2e/kn-next.config.e2e.ts` (a guard test fails if it drifts from `kn-next.config.ts`
+`platform-e2e/knext.config.e2e.ts` (a guard test fails if it drifts from `knext.config.ts`
 beyond storage/registry/cache/database). `scripts/platform-e2e.selftest.mjs` runs the same checks
 against deliberately broken servers and needs no cluster, so you can run it locally:
 `node scripts/platform-e2e.selftest.mjs`. The job budget is 45 minutes (about 10 measured).
@@ -200,7 +200,7 @@ filesystem path into that URL, so it was quarantined rather than skipped - see #
 | `knative-service.yaml` | Knative service manifest |
 | `Dockerfile.opennext` | Production Docker image |
 | `open-next.config.ts` | Auto-generated OpenNext config |
-| `kn-next.config.ts` | User configuration |
+| `knext.config.ts` | User configuration |
 | `redis.yaml` | Redis deployment for tag cache |
 
 ## Cache Architecture

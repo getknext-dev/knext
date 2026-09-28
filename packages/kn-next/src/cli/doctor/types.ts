@@ -117,7 +117,7 @@ export interface DoctorDeps {
      */
     inspectKubeconfig?: KubeconfigInspectFn;
     /**
-     * Loads the kn-next.config.ts in the CURRENT directory, or undefined when
+     * Loads the knext.config.ts in the CURRENT directory, or undefined when
      * there is none (or it fails to load) — feeds the local static-asset-mode
      * check (ADR-0047). Defaults to the real cwd loader; tests inject.
      */

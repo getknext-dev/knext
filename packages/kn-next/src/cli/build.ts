@@ -7,7 +7,7 @@
  *   bun run packages/kn-next/src/cli/build.ts
  *
  * Steps:
- *   1. Load kn-next.config.ts (with validation)
+ *   1. Load knext.config.ts (with validation)
  *   2. Run `next build` (output:'standalone' set in the app's next.config.ts)
  *   3. Upload static assets to storage (GCS/S3/MinIO)
  *
@@ -433,7 +433,7 @@ Options:
                         cannot execute the binary (a foreign-arch runner). The
                         artifact ships UNVERIFIED and the build says so loudly.
   --self-contained      Opt in to the self-contained single-executable mode
-                        (overrides \`selfContained\` in kn-next.config.ts).
+                        (overrides \`selfContained\` in knext.config.ts).
                         Experimental. Honoured by the standalone/node build
                         target (embeds the Next build output into the
                         executable) and the vinext target (embeds everything

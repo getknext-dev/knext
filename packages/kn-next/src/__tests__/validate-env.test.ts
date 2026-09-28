@@ -8,7 +8,7 @@ import type { KnativeNextConfig } from "../config";
  * The operator's CRD CEL validation rejects reserved / malformed env var
  * names at `kubectl apply` time, but that is the LAST line of defense.
  * validateConfig must mirror those checks so a bad `env` in
- * kn-next.config.ts fails at validate/deploy time locally, with the same
+ * knext.config.ts fails at validate/deploy time locally, with the same
  * rules the cluster enforces:
  *   - names must be C_IDENTIFIERs ([A-Za-z_][A-Za-z0-9_]*)
  *   - reserved names: HOSTNAME, PORT, K_SERVICE, K_REVISION, K_CONFIGURATION

@@ -68,7 +68,7 @@ The three packages follow [semantic versioning](https://semver.org/) over the su
 - **major** is required to remove, rename, or change the signature of any public import;
 - **internal subpaths** (`@getknext/core/internal/*`, and any subpath not listed in
   `PUBLIC_API.md`) carry **no** guarantee and may change in a patch;
-- **the `kn-next` CLI** — its verbs, flags, and `kn-next.config.ts` schema — is covered by the same
+- **the `kn-next` CLI** — its verbs, flags, and `knext.config.ts` schema — is covered by the same
   rules: removing a flag or rejecting a previously-valid config key needs a major.
 
 Pre-1.0 caveat, stated rather than hidden: while the leading digit is `0`, semver itself allows
@@ -136,7 +136,7 @@ Removing something is a two-release process, never a single one:
    announcement — so there is always a version a consumer can run that carries both the warning and
    the old behaviour.
 
-Applies to: public imports, CLI verbs and flags, and `kn-next.config.ts` keys.
+Applies to: public imports, CLI verbs and flags, and `knext.config.ts` keys.
 
 > **UNRESOLVED — needs an architect call, do not read this as settled.** Combine step 2 ("no earlier
 > than the next major") with the pre-1.0 caveat above ("knext does not use semver's 0.x allowance")
