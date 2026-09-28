@@ -34,7 +34,7 @@
  *     service with a docker-CLI-capable job image (`node:22-alpine` + `apk add
  *     docker-cli` — the same digest this repo's own Dockerfiles already pin),
  *     following GitLab's own docker-in-docker recipe
- *     (https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker),
+ *     (https://docs.gitlab.com/ci/docker/using_docker_build/),
  *     and logs into the registry with `KNEXT_REGISTRY_TOKEN` via
  *     `--password-stdin` — never an argv password (`ps` on the runner can read
  *     another process's argv).
@@ -72,6 +72,28 @@
  *     LIST digest (same convention as the `node:22-alpine` pin above: an OCI
  *     index, not one platform's manifest), so Docker still selects the
  *     runner's actual architecture.
+ *
+ * ## Round 4 (#1588) fixes
+ *
+ *   - **The `deploy` job had no `bun`, so a default app's deploy failed.** The
+ *     scaffold leaves `runtime` unset, which resolves to `DEFAULT_RUNTIME_ID`
+ *     (`"bun"`, `adapters/artifact-contract.ts`), and `deploy.ts` always calls
+ *     `compileArtifactForDeploy` on the fresh-build leg — for the bun runtime
+ *     that shells out to `["bun", "run", …]` (`standaloneCompileArgv()[0]`,
+ *     `standalone-exec-build.ts`). The job image installed docker/kubectl/
+ *     curl/bash but never bun, so every default-runtime deploy died on
+ *     `ENOENT: bun`. The job now installs a pinned Bun release (musl, matching
+ *     Alpine's libc) the same way it installs kubectl: download, verify the
+ *     sha256 against an embedded literal, no second network fetch for the
+ *     checksum. `BUN_VERSION`/`BUN_SHA256_LINUX_X64_MUSL` MUST track this
+ *     repo's own Bun lockstep pin (`tests/bun-version-pins.test.ts`'s
+ *     `PINNED_BUN`, `package.json`'s `packageManager`) — that test imports
+ *     {@link BUN_VERSION} and reds if it drifts.
+ *   - The GitLab docs' claim that `knext deploy` "only needs a working
+ *     `docker`" was true for the node runtime only; the default (bun) runtime
+ *     also needs bun on `PATH`, which the docs now say explicitly.
+ *   - The GitHub Action (`kn-next-action/action.yml`) has the identical gap —
+ *     tracked separately, not fixed here.
  */
 import { cliVersion } from "../create";
 import { REQUIRED_SECRETS } from "./ci-secrets";
@@ -110,6 +132,32 @@ const KUBECTL_SHA256_LINUX_AMD64 =
  */
 const DIND_DIGEST =
     "sha256:6ca9a6811085e2cf769cbac04bc47daf66629102990391caab7cf37426e939da";
+
+/**
+ * Exact Bun release the `deploy` job installs when the runner has none —
+ * MUST equal this repo's own Bun lockstep pin (`tests/bun-version-
+ * pins.test.ts`'s `PINNED_BUN`, `package.json`'s `packageManager`). The
+ * default runtime (`DEFAULT_RUNTIME_ID`, `adapters/artifact-contract.ts`) is
+ * `bun`, and `deploy.ts` always compiles the standalone executable by
+ * shelling out to `["bun", "run", …]` (`standaloneCompileArgv()[0]`,
+ * `standalone-exec-build.ts`) — a Bun this pipeline's own version does not
+ * match would compile against a different Bun than the rest of the workspace
+ * builds and tests against. Exported so `bun-version-pins.test.ts` can assert
+ * the lockstep from its own scan.
+ */
+export const BUN_VERSION = "1.4.2";
+
+/**
+ * sha256 of the `linux-x64-musl` Bun release archive for {@link BUN_VERSION}
+ * (Alpine's libc — matches the `node:22-alpine` job image), read directly
+ * from
+ * `https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/SHASUMS256.txt`
+ * (2026-09-28) and embedded here rather than fetched at pipeline run time —
+ * same TOFU-against-substitution reasoning as {@link KUBECTL_SHA256_LINUX_AMD64}.
+ * MUST move in lockstep with {@link BUN_VERSION}.
+ */
+const BUN_SHA256_LINUX_X64_MUSL =
+    "4835eca59d6da70f4674f5642f6e459dcadab773695b2ed9922d131057989742";
 
 /**
  * The pipeline. `appDir` is baked in at generation time (like `renderWorkflow`'s
@@ -186,6 +234,25 @@ variables:
       mv kubectl /usr/local/bin/kubectl
     fi
 
+# The default runtime is bun (DEFAULT_RUNTIME_ID, adapters/artifact-contract.
+# ts), and \`kn-next deploy\` always compiles the standalone executable by
+# shelling out to \`bun run …\` (standaloneCompileArgv()[0],
+# standalone-exec-build.ts) — a plain node:22-alpine image has no bun at all.
+# Installed the same way as kubectl above: download the exact release,
+# verify its sha256 against an embedded literal (no second network fetch for
+# the checksum), no oven/bun docker image (this job's base image is already
+# node:22-alpine for npm/kubectl/docker-cli).
+.knext_bun_install: &knext_bun_install
+  - |
+    if ! command -v bun >/dev/null 2>&1; then
+      curl -fsSLO "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64-musl.zip"
+      echo "${BUN_SHA256_LINUX_X64_MUSL}  bun-linux-x64-musl.zip" | sha256sum -c -
+      unzip -q bun-linux-x64-musl.zip
+      mv bun-linux-x64-musl/bun /usr/local/bin/bun
+      chmod +x /usr/local/bin/bun
+      rm -rf bun-linux-x64-musl.zip bun-linux-x64-musl
+    fi
+
 # ── Kubeconfig check — ALWAYS runs, never conditional on the hazard check ──
 # ADR-0061: an exec/auth-provider kubeconfig runs a cloud CLI on this runner
 # with a cloud account's credentials in scope. Its own job — not a step inside
@@ -232,7 +299,10 @@ credential-preflight:
 # only \`/usr/bin/docker\`, not buildx (a separate package, \`docker-cli-buildx\`).
 # This pairs a docker-in-docker service with a docker-CLI-and-buildx-capable
 # job image, GitLab's own recipe for exactly this:
-# https://docs.gitlab.com/ci/docker/using_docker_build/#use-docker-in-docker
+# https://docs.gitlab.com/ci/docker/using_docker_build/
+# The default runtime also compiles a standalone executable via \`bun run …\`
+# (standaloneCompileArgv()[0]) — the job installs a pinned bun the same way
+# it installs kubectl, below.
 # \`resource_group\` serialises deploys per namespace — two concurrent pipelines
 # on \`main\` must not race two applies of the same NextApp.
 deploy:
@@ -254,10 +324,11 @@ deploy:
   script:
     - |
       if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache docker-cli docker-cli-buildx curl bash
+        apk add --no-cache docker-cli docker-cli-buildx curl bash unzip
       fi
     - *knext_kubeconfig
     - *knext_kubectl_install
+    - *knext_bun_install
     - printf '%s' "$KNEXT_REGISTRY_TOKEN" | docker login "\${KNEXT_REGISTRY%%/*}" -u "\${KNEXT_REGISTRY_USERNAME:-gitlab-ci-token}" --password-stdin
     - cd ${appDir}
     - npm ci

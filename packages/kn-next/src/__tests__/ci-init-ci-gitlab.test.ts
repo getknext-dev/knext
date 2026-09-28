@@ -22,8 +22,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { CI_ROLE_RULES } from "../cli/ci/credential-scope";
-import { GITLAB_CI_PATH, renderGitlabPipeline } from "../cli/ci/init-ci-gitlab";
+import {
+    BUN_VERSION,
+    GITLAB_CI_PATH,
+    renderGitlabPipeline,
+} from "../cli/ci/init-ci-gitlab";
 import { dockerBuildxArgs } from "../cli/runtime-image";
+import { standaloneCompileArgv } from "../cli/standalone-exec-build";
 
 // Each credential-preflight run submits ~40 access reviews, one fake-kubectl
 // process each (same shape as kn-next-action-preflight-hazard-and-kubeconfig.
@@ -175,9 +180,12 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
         const text = renderGitlabPipeline(".");
         expect(text).not.toContain("kubectl.sha256");
         // Exactly one curl in the kubectl-install block: the binary itself.
+        // (Sliced up to the separate `.knext_bun_install` block that now follows
+        // it — #1588 round 4 — not all the way to "# ── Kubeconfig check", or
+        // this would also count the bun install's own curl.)
         const installBlock = text.slice(
             text.indexOf(".knext_kubectl_install"),
-            text.indexOf("# ── Kubeconfig check"),
+            text.indexOf(".knext_bun_install"),
         );
         const curlCount = (installBlock.match(/curl -fsSLO/g) ?? []).length;
         expect(curlCount).toBe(1);
@@ -195,7 +203,7 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
         );
         expect(versionMatch).not.toBeNull();
         const shaMatch = text.match(
-            /echo "([0-9a-f]{64})  kubectl" \| sha256sum -c -/,
+            /echo "([0-9a-f]{64}) {2}kubectl" \| sha256sum -c -/,
         );
         expect(shaMatch).not.toBeNull();
         // Both come from the same generated pipeline, adjacent lines, in the
@@ -231,7 +239,13 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
                 dockerfile: "Dockerfile",
             })[1],
         ).toBe("buildx");
-        expect(script).toMatch(/apk add --no-cache[^\n]*\bdocker-cli\b/);
+        // (?!-) rejects a false match inside "docker-cli-buildx": a plain
+        // \bdocker-cli\b still matches there too, since "-" is a non-word
+        // character on both sides of the boundary it demands (#1588 round 4,
+        // finding 3) — deleting the standalone `docker-cli` package while
+        // keeping `docker-cli-buildx` would have stayed green under the old
+        // regex.
+        expect(script).toMatch(/apk add --no-cache[^\n]*\bdocker-cli(?!-)\b/);
         expect(script).toMatch(/apk add --no-cache[^\n]*\bdocker-cli-buildx\b/);
     });
 
@@ -245,6 +259,47 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
         );
         expect(dindRef).toBeDefined();
         expect(dindRef).toMatch(/^docker:27\.3\.1-dind@sha256:[0-9a-f]{64}$/);
+    });
+
+    // #1588 round 4 review, finding 1 — the default runtime is bun
+    // (DEFAULT_RUNTIME_ID), and `kn-next deploy` always compiles the standalone
+    // executable by shelling out to whatever standaloneCompileArgv()[0] names.
+    // node:22-alpine ships no bun at all, so a default-runtime app's first
+    // deploy failed with ENOENT before this fix. Tied to the REAL argv (like
+    // the buildx test above ties to dockerBuildxArgs), not a hardcoded string.
+    it("the deploy job installs the binary standaloneCompileArgv() actually invokes, before running $KNEXT_CLI deploy", () => {
+        const { jobs } = pipeline();
+        const script = flattenScript(jobs.deploy?.script);
+        const joined = script.join("\n");
+        const argv = standaloneCompileArgv({
+            arch: "linux-x64",
+            server: "server.js",
+            root: ".next/standalone",
+            outFile: "out",
+            marker: "m",
+        });
+        const binary = argv[0];
+        expect(binary).toBe("bun");
+        // The binary must actually be installed onto PATH (mv … /usr/local/bin/<binary>),
+        // and that install must run BEFORE the deploy invocation — installing it
+        // after the fact would leave the real deploy call still failing.
+        const installIdx = script.findIndex((l) =>
+            l.includes(`/usr/local/bin/${binary}`),
+        );
+        const deployIdx = script.findIndex((l) =>
+            l.includes("$KNEXT_CLI deploy"),
+        );
+        expect(installIdx).toBeGreaterThanOrEqual(0);
+        expect(deployIdx).toBeGreaterThan(installIdx);
+        // Verified against a checksum, the same shape as the kubectl install.
+        expect(joined).toMatch(
+            /echo "[0-9a-f]{64} {2}bun-linux-x64-musl\.zip" \| sha256sum -c -/,
+        );
+    });
+
+    it(`the pinned bun release matches this repo's own Bun lockstep pin (${BUN_VERSION})`, () => {
+        const text = renderGitlabPipeline(".");
+        expect(text).toContain(`bun-v${BUN_VERSION}/bun-linux-x64-musl.zip`);
     });
 });
 

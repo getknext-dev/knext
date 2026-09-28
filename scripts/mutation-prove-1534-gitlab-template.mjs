@@ -187,9 +187,19 @@ const MUTATIONS = [
     anchor: '- docker:27.3.1-dind@${DIND_DIGEST}',
     replacement: '- docker:27.3.1-dind',
   },
+
+  // ── Guard 10 (#1588 round 4, finding 1): the deploy job never installs bun ─
+  {
+    label:
+      "the deploy job drops the bun install step — the default (bun) runtime's `kn-next deploy` shells out to `bun run …` and node:22-alpine has no bun at all",
+    subject: 'initCiGitlabTs',
+    spec: GITLAB_TEMPLATE_SPEC,
+    anchor: '    - *knext_kubectl_install\n    - *knext_bun_install\n',
+    replacement: '    - *knext_kubectl_install\n',
+  },
 ];
 
-const DECLARED = 13;
+const DECLARED = 14;
 declareMutations(DECLARED);
 
 if (MUTATIONS.length !== DECLARED) {
