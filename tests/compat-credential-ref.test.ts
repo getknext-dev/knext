@@ -108,6 +108,20 @@ function mainNight(over: Record<string, unknown> = {}) {
   });
 }
 
+/**
+ * #1612 round 2 — rule 8 fails closed: an undated credential night can never
+ * bank. `slot(lane, i)` places night `i` on that lane's i-th daily cron slot
+ * from 2026-01-01 (node 01:17, bun 05:47 — the real credential crons), and
+ * `SLOT_NOW` is past both lanes' 14th slot + grace but before the 15th.
+ */
+function slot(lane: string, i: number) {
+  const hhmm = lane === 'bun' ? '05:47' : '01:17';
+  const d = new Date(`2026-01-01T${hhmm}:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + i);
+  return d.toISOString();
+}
+const SLOT_NOW = new Date('2026-01-14T12:00:00.000Z');
+
 function hasReason(graded: { disqualifiers: string[] }, token: string) {
   return graded.disqualifiers.some((d) => d === token || d.startsWith(`${token}:`));
 }
@@ -295,8 +309,8 @@ describe('guard 1 — a main-ref night never advances a credential count', () =>
 
   it('the other half: fourteen green RC nights DO meet the gate', () => {
     const a = auditWindow(
-      Array.from({ length: 14 }, () => night()),
-      { lane: 'node' },
+      Array.from({ length: 14 }, (_, i) => night({ scheduledAt: slot('node', i) })),
+      { lane: 'node', now: SLOT_NOW },
     );
     expect(a.current.nights).toBe(14);
     expect(a.met).toBe(true);
@@ -342,14 +356,23 @@ describe('guard 1 — a main-ref night never advances a credential count', () =>
     ).toBe(true);
   });
 
-  it('a pre-#850 ledger (no mode, no ref) is not a credential night', () => {
+  it('a pre-#850 ledger (no mode, no ref) is not a credential night — and #1605: it disqualifies rather than vanishing', () => {
+    // Before #1605 this ledger was dropped by `selectLaneNights` before
+    // grading (`toHaveLength(0)`), which let it bridge over silently: a
+    // scheduled, lane-matched night with no mode is never "some other lane's
+    // night" the way a bun weekly or a dispatch run is — it stays IN this
+    // window's sequence and is graded ineligible, so it still disqualifies
+    // (and restarts) the streak instead of being invisible to it.
     const legacy = night({
       compatMode: undefined,
       credential: undefined,
       knextRef: undefined,
       knextSha: undefined,
     });
-    expect(selectLaneNights([legacy], 'node')).toHaveLength(0);
+    expect(selectLaneNights([legacy], 'node')).toHaveLength(1);
+    const g = gradeNight(legacy, { lane: 'node' });
+    expect(g.eligible).toBe(false);
+    expect(hasReason(g, 'not-a-credential-run')).toBe(true);
   });
 
   it('the early-warning scope reports main, and its report never says GATE MET', () => {
@@ -396,8 +419,12 @@ describe('guard 2 — a fingerprint change for cell X restarts X and not Y', () 
   function interleaved(bunFingerprintAt: (i: number) => string) {
     const ledgers = [];
     for (let i = 0; i < 14; i += 1) {
-      ledgers.push(night({ lane: 'node', windowFingerprint: 'sha256:node-1' }));
-      ledgers.push(night({ lane: 'bun', windowFingerprint: bunFingerprintAt(i) }));
+      ledgers.push(
+        night({ lane: 'node', windowFingerprint: 'sha256:node-1', scheduledAt: slot('node', i) }),
+      );
+      ledgers.push(
+        night({ lane: 'bun', windowFingerprint: bunFingerprintAt(i), scheduledAt: slot('bun', i) }),
+      );
     }
     return ledgers;
   }
@@ -405,7 +432,7 @@ describe('guard 2 — a fingerprint change for cell X restarts X and not Y', () 
   it('bun moves at night 10: bun restarts, node banks 14', () => {
     const m = auditCredentialMatrix(
       interleaved((i) => (i < 10 ? 'sha256:bun-1' : 'sha256:bun-2')),
-      { cells: ['node', 'bun'] },
+      { cells: ['node', 'bun'], now: SLOT_NOW },
     );
     expect(m.cells.node.current.nights).toBe(14);
     expect(m.cells.node.met).toBe(true);
@@ -417,7 +444,7 @@ describe('guard 2 — a fingerprint change for cell X restarts X and not Y', () 
   it('the other half: both stable → both met, allMet', () => {
     const m = auditCredentialMatrix(
       interleaved(() => 'sha256:bun-1'),
-      { cells: ['node', 'bun'] },
+      { cells: ['node', 'bun'], now: SLOT_NOW },
     );
     expect(m.cells.bun.current.nights).toBe(14);
     expect(m.allMet).toBe(true);
@@ -599,6 +626,9 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
     writeFileSync(join(root, 'scripts/compat-credential-ref.mjs'), 'export const noop = 1;\n');
     writeFileSync(join(root, 'scripts/compat-run-ledger.mjs'), 'export const noop = 1;\n');
     writeFileSync(join(root, '.github/compat-credential-ref.json'), '{"rcTag":null}\n');
+    // #1530: the 'node' lane's extraFiles ALSO declares the free-disk-floor
+    // pre-check script the workflow invokes as a subprocess.
+    writeFileSync(join(root, 'scripts/compat-disk-floor-check.mjs'), 'export const noop = 1;\n');
     // #1257: the 'node' lane's extraFiles ALSO declares the musl-lockfile
     // lookup helper and each committed musl-native lockfile FILE
     // individually (scripts/compat-window-audit.mjs's MUSL_NATIVE_LOCKFILE_FILES) —

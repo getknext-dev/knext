@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { BUN_VERSION as GITLAB_CI_BUN_VERSION } from '../packages/kn-next/src/cli/ci/init-ci-gitlab';
 
 // Absolute, not CWD-relative — the repo convention (vitest.config.ts explains
 // why: a run from a sub-directory must not resolve a non-existent path).
@@ -26,30 +27,56 @@ const WF_DIR = join(REPO_ROOT, '.github/workflows');
 const PIN_RE = /^\d+\.\d+\.\d+$/;
 const FALLBACK_RE = /\$\{\{\s*github\.event\.inputs\.bun-version\s*\|\|\s*'(\d+\.\d+\.\d+)'\s*\}\}/;
 
+/**
+ * Non-workflow files this scan also covers — a `setup-bun` step is not
+ * exclusive to `.github/workflows/*.yml`. `packages/kn-next-action/action.yml`
+ * is a COMPOSITE ACTION: it ran through this repo's own CI (`ci.yml`) and
+ * shipped to every consumer's runner without ever installing Bun, which the
+ * default runtime (`DEFAULT_RUNTIME_ID`, artifact-contract.ts) needs to
+ * compile (#1596). That was the SEVENTH site the #754 docstring above warns about —
+ * scanning only `WF_DIR` would have let it land unpinned (or un-pinned later)
+ * with nothing here to catch it.
+ */
+const EXTRA_SCAN_FILES = [
+  {
+    label: 'packages/kn-next-action/action.yml',
+    path: join(REPO_ROOT, 'packages/kn-next-action/action.yml'),
+  },
+];
+
 type Step = { file: string; line: number; version: string | null; inputDefault: string | null };
+
+/** Scan one file's already-split lines for setup-bun steps, labelling hits with `label`. */
+function scanFileForSetupBunSteps(label: string, lines: string[]): Step[] {
+  const out: Step[] = [];
+  lines.forEach((l, i) => {
+    if (!/uses:\s*\S*setup-bun/.test(l)) return;
+    // find bun-version within the step's `with:` block — walk to the next
+    // step boundary, NOT a fixed window: a long comment block above the key
+    // (test-e2e-deploy.yml keeps 16 lines of pin rationale there) must not
+    // make the scanner misread a pinned step as unpinned. Cap generously.
+    let version: string | null = null;
+    for (let j = i + 1; j < Math.min(i + 60, lines.length); j++) {
+      if (/^\s*-\s+(name|uses):/.test(lines[j])) break;
+      const m = lines[j].match(/bun-version:\s*(.+?)\s*(#.*)?$/);
+      if (m) {
+        version = m[1].replace(/^['"]|['"]$/g, '');
+        break;
+      }
+    }
+    out.push({ file: label, line: i + 1, version, inputDefault: inputDefaultOf(lines) });
+  });
+  return out;
+}
 
 function setupBunSteps(): Step[] {
   const out: Step[] = [];
   for (const f of readdirSync(WF_DIR)) {
     if (!/\.ya?ml$/.test(f)) continue;
-    const lines = readFileSync(join(WF_DIR, f), 'utf8').split('\n');
-    lines.forEach((l, i) => {
-      if (!/uses:\s*\S*setup-bun/.test(l)) return;
-      // find bun-version within the step's `with:` block — walk to the next
-      // step boundary, NOT a fixed window: a long comment block above the key
-      // (test-e2e-deploy.yml keeps 16 lines of pin rationale there) must not
-      // make the scanner misread a pinned step as unpinned. Cap generously.
-      let version: string | null = null;
-      for (let j = i + 1; j < Math.min(i + 60, lines.length); j++) {
-        if (/^\s*-\s+(name|uses):/.test(lines[j])) break;
-        const m = lines[j].match(/bun-version:\s*(.+?)\s*(#.*)?$/);
-        if (m) {
-          version = m[1].replace(/^['"]|['"]$/g, '');
-          break;
-        }
-      }
-      out.push({ file: f, line: i + 1, version, inputDefault: inputDefaultOf(lines) });
-    });
+    out.push(...scanFileForSetupBunSteps(f, readFileSync(join(WF_DIR, f), 'utf8').split('\n')));
+  }
+  for (const { label, path } of EXTRA_SCAN_FILES) {
+    out.push(...scanFileForSetupBunSteps(label, readFileSync(path, 'utf8').split('\n')));
   }
   return out;
 }
@@ -169,6 +196,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // jobs now install with bun, pinned like every other lane.
       'release.yml': 3,
       'release-ghp.yml': 2,
+      // NEW (#1596, kn-next-action Bun toolchain fix): the composite action never
+      // installed Bun, so the default runtime's compiled-standalone build
+      // (`bun run …`) failed with ENOENT on every stock ubuntu-24.04 runner —
+      // scanned via EXTRA_SCAN_FILES, not WF_DIR, since this is not a
+      // `.github/workflows/*.yml` file.
+      'packages/kn-next-action/action.yml': 1,
     });
   });
 
@@ -898,5 +931,15 @@ describe(`bun lockstep (#1310) — one Bun (${PINNED_BUN}) everywhere it is sele
     // to exempt would be silent dead code.
     expect(exempted).toBeGreaterThan(0);
     expect(off).toEqual([]);
+  });
+
+  // #1588 round 4 — the generated GitLab CI template's `deploy` job installs
+  // a raw Bun release binary (musl, no `oven/bun` docker image; the job
+  // image is already node:22-alpine), so neither scan above ever looks at
+  // it. Registered here explicitly so a future Bun bump that misses this
+  // site is caught, the same way the setup-bun/oven-bun-image scans catch
+  // every other selection site.
+  it('the GitLab CI template installs the lockstep Bun in its deploy job', () => {
+    expect(GITLAB_CI_BUN_VERSION).toBe(PINNED_BUN);
   });
 });

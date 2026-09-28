@@ -51,11 +51,10 @@ const PROOF = {
 const MUTATIONS = [
   // ── Guard 1: a main-ref night never advances a credential count ───────────
   {
-    label: 'guard 1: stop excluding main nights from the credential window',
+    label: 'guard 1: stop excluding explicit early-warning nights from audit',
     subject: 'audit',
-    anchor:
-      "  return scope === 'credential' ? claimsCredential(ledger) : !claimsCredential(ledger);",
-    replacement: '  return true;',
+    anchor: "  if (ledger?.compatMode === 'early-warning') return false;",
+    replacement: '  if (false) return false;',
   },
   {
     label: 'guard 1: stop disqualifying a credential claim on a non-RC ref',
@@ -66,7 +65,11 @@ const MUTATIONS = [
   {
     label: 'guard 1: let an early-warning (main) streak report the gate met',
     subject: 'audit',
-    anchor: "    met: scope === 'credential' && longest.nights >= requiredNights,",
+    // #1612 round 2: `met` also requires a verified calendar, and the calendar
+    // check is itself credential-scoped — so dropping ONLY the scope term is
+    // now an equivalent mutant. The mutation drops the whole guard instead.
+    anchor:
+      "    met: scope === 'credential' && calendar.checked && longest.nights >= requiredNights,",
     replacement: '    met: longest.nights >= requiredNights,',
   },
   {

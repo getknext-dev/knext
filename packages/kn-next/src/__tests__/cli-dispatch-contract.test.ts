@@ -225,6 +225,19 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "buildNextAppCRObject not found",
             "buildNextAppCRObject has no return statement",
         ],
+        // #1534: cluster/API response failures from the SelfSubjectRulesReview
+        // + SelfSubjectAccessReview hazard spot-check `ci-preflight` runs — the
+        // same class `preflight.mjs` already throws these for. Nothing here is
+        // avoidable by typing a different command line; the fix is a cluster
+        // that answers the review, not a different --namespace/--kubeconfig.
+        "ci-preflight.ts": [
+            "SelfSubjectRulesReview returned no resourceRules",
+            "did not return JSON",
+            "returned no status",
+            "did not complete:",
+            "returned no boolean verdict",
+            "the hazard probe set is empty",
+        ],
         // Install/repo integrity — the standalone runtime image template is a
         // shipped package artifact, not something the user types (ADR-0055).
         "runtime-image.ts": [

@@ -23,6 +23,12 @@
  *      longer streak.
  *   5. UNREADABLE LEDGER — a ledger file that will not parse is a hard failure,
  *      not a `return null` that a `.filter(Boolean)` then erases.
+ *   6. MODE-LESS BRIDGING (#1605) — a resolved, scheduled, lane-matched ledger
+ *      that carries no credential mode must stay IN the graded sequence (and
+ *      therefore disqualify) rather than being dropped by `inScope` before
+ *      grading — the same shape as guard 4 above, one level: `claimsCredential`
+ *      alone is not enough to decide `inScope`, or the drop returns and the
+ *      streaks either side of such a night bridge into one.
  *
  * A #1520 round-1 VOID grade (a night whose only redness was a `kind:
  * 'deploy'` shard failure counted as bridged/evidence-free rather than a real
@@ -67,7 +73,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 const SPEC = 'tests/compat-window-audit.test.ts';
 
-declareMutations(6);
+declareMutations(17);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -168,6 +174,79 @@ prove(
   'count-match guard removed: a partially-attributed shard still gets the deploy-classified label',
   'if (!failures || failures.length !== failedCount) return false;',
   'if (!failures) return false;',
+);
+
+// 7. MODE-LESS BRIDGING (#1605): revert `inScope`'s credential branch to the
+//    pre-fix behaviour — a mode-less, lane-matched, scheduled night is
+//    dropped before grading rather than staying in the sequence to be
+//    disqualified. This is what let 13 green + 30 mode-less + 1 green read
+//    as a single 14-night streak on origin/main.
+prove(
+  'mode-less bridging: drop a mode-less night before grading instead of disqualifying it',
+  'rule 5 already uses for a night whose ledger could not be read at all.\n  return true;\n}',
+  'rule 5 already uses for a night whose ledger could not be read at all.\n  return false;\n}',
+);
+
+// ── #1612 round 2 — rule 8 (the missing-night calendar) ─────────────────────
+
+prove(
+  'missing-night insertion: never synthesize a stand-in for an empty cron slot',
+  '.filter((d) => !known.has(d))',
+  '.filter(() => false)',
+);
+
+prove(
+  'grace removed: call a slot missing the moment it fires, not slot + grace',
+  'while (fireMs(slot) + graceMs > now.getTime())',
+  'while (fireMs(slot) > now.getTime())',
+);
+
+prove(
+  'grace boundary: a night exactly at slot + grace is still treated as in flight',
+  '+ graceMs > now.getTime()',
+  '+ graceMs >= now.getTime()',
+);
+
+prove(
+  'fail-open: met stops requiring a verified calendar',
+  "met: scope === 'credential' && calendar.checked && longest.nights >= requiredNights,",
+  "met: scope === 'credential' && longest.nights >= requiredNights,",
+);
+
+prove(
+  'fail-open report: an unverified calendar falls through to the GATE MET/NOT MET line',
+  'if (!audit.calendarChecked) {',
+  'if (false) {',
+);
+
+prove(
+  'partial calendar: undated nights are ignored instead of making the calendar unverified',
+  'if (undated > 0) {',
+  'if (false) {',
+);
+
+prove(
+  'wall-clock dating: a run belongs to its createdAt date, not its cron slot',
+  'return ms >= fireMs(d) ? d : addUTCDays(d, -1);',
+  'return d;',
+);
+
+prove(
+  'slot dedupe removed: two runs in one cron slot count as two nights',
+  'if (perSlot.get(n.date) > 1) {',
+  'if (false) {',
+);
+
+prove(
+  'silent lane drop: a wired lane with no credential cron is tolerated',
+  'if (!laneToCron.has(lane)) {',
+  'if (false) {',
+);
+
+prove(
+  'stale cron: a credential cron absent from on.schedule is tolerated',
+  'if (!scheduled.has(cron)) {',
+  'if (false) {',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);

@@ -38,6 +38,10 @@ jobs:
 
 That is the whole thing. Push to `main`, and ACME redeploys.
 
+You don't need a Bun setup step of your own: this action installs the Bun toolchain it needs to
+compile your app before it deploys, even on a stock `ubuntu-latest` runner. Everything else — the
+Node.js and Docker steps above — is what your own build needs, not what the action needs.
+
 ## What this action deliberately does not do
 
 **It never asks for cloud-account credentials, and it does not create clusters.**
