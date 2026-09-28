@@ -98,6 +98,9 @@ if it is not already on the image, verifying the download against a checksum emb
 the pipeline — read once from Kubernetes' own release infrastructure and bumped together with the
 version, rather than fetched again at every run.
 
+Both the `kubectl` and Bun binaries the pipeline installs are x86_64 (amd64) releases only — arm64
+GitLab Runners are not supported by this template today; a job on one will fail on install.
+
 ## The deploy job needs a docker daemon
 
 `knext deploy` builds and pushes your image with `docker buildx build … --push`. A plain job

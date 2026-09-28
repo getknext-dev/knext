@@ -22,11 +22,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { CI_ROLE_RULES } from "../cli/ci/credential-scope";
-import {
-    BUN_VERSION,
-    GITLAB_CI_PATH,
-    renderGitlabPipeline,
-} from "../cli/ci/init-ci-gitlab";
+import { GITLAB_CI_PATH, renderGitlabPipeline } from "../cli/ci/init-ci-gitlab";
 import { dockerBuildxArgs } from "../cli/runtime-image";
 import { standaloneCompileArgv } from "../cli/standalone-exec-build";
 
@@ -297,9 +293,36 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
         );
     });
 
-    it(`the pinned bun release matches this repo's own Bun lockstep pin (${BUN_VERSION})`, () => {
+    // #1588 round 4 review (blocker) — the shape check in the previous test
+    // only proves the embedded hash LOOKS like a sha256; nothing pinned its
+    // VALUE. Replacing BUN_SHA256_LINUX_X64_MUSL with 64 zeros left every
+    // test in this file (and bun-version-pins.test.ts) green, so a Bun
+    // bump that updates BUN_VERSION without also updating the hash would
+    // ship a template whose `sha256sum -c` fails on every user's deploy —
+    // fails closed, but the deploy never runs. Pin the (version, hash) PAIR
+    // as literals, mirroring the kubectl pin test above, so an edit to
+    // either constant alone reds here.
+    //
+    // Deliberately NOT derived from the imported `BUN_VERSION` constant —
+    // that constant is also what `renderGitlabPipeline` itself uses to
+    // build this very string, so comparing against it is self-referential
+    // and proves nothing (the exact defect in the test this replaces: "the
+    // pinned bun release matches this repo's own Bun lockstep pin", which
+    // compared the constant to itself).
+    it("the embedded bun sha256 is a well-formed sha256 and is wired into the same sha256sum -c line as the pinned version", () => {
         const text = renderGitlabPipeline(".");
-        expect(text).toContain(`bun-v${BUN_VERSION}/bun-linux-x64-musl.zip`);
+        const versionMatch = text.match(
+            /bun-v(\d+\.\d+\.\d+)\/bun-linux-x64-musl\.zip"/,
+        );
+        expect(versionMatch).not.toBeNull();
+        const shaMatch = text.match(
+            /echo "([0-9a-f]{64}) {2}bun-linux-x64-musl\.zip" \| sha256sum -c -/,
+        );
+        expect(shaMatch).not.toBeNull();
+        expect(shaMatch?.[1]).toBe(
+            "4835eca59d6da70f4674f5642f6e459dcadab773695b2ed9922d131057989742",
+        );
+        expect(versionMatch?.[1]).toBe("1.4.2");
     });
 });
 

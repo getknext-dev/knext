@@ -197,9 +197,21 @@ const MUTATIONS = [
     anchor: '    - *knext_kubectl_install\n    - *knext_bun_install\n',
     replacement: '    - *knext_kubectl_install\n',
   },
+
+  // ── Guard 11 (#1588 round 4 review, blocker): the bun sha256 VALUE is unpinned ──
+  {
+    label:
+      'the embedded BUN_SHA256_LINUX_X64_MUSL is replaced with a wrong-but-well-formed sha256 — the shape check alone cannot tell a wrong hash from the real one, so a Bun version bump without its matching hash would ship a template whose sha256sum -c fails on every user\'s deploy',
+    subject: 'initCiGitlabTs',
+    spec: GITLAB_TEMPLATE_SPEC,
+    anchor:
+      'const BUN_SHA256_LINUX_X64_MUSL =\n    "4835eca59d6da70f4674f5642f6e459dcadab773695b2ed9922d131057989742";',
+    replacement:
+      'const BUN_SHA256_LINUX_X64_MUSL =\n    "0000000000000000000000000000000000000000000000000000000000000000";',
+  },
 ];
 
-const DECLARED = 14;
+const DECLARED = 15;
 declareMutations(DECLARED);
 
 if (MUTATIONS.length !== DECLARED) {
