@@ -2,8 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import {
   caretSatisfies,
   fixedGroupProblems,
-  parseSemver,
   POST_POLL_MAX_MS,
+  parseSemver,
   pollViewVersion,
   RegistryUnreachableError,
   registryGroupProblems,

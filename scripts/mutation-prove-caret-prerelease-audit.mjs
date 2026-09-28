@@ -54,7 +54,7 @@ const MUTATIONS = [
       "reverting parseSemver's regex to the pre-#1591 release-only shape (drops the " +
       '`-<prerelease>` capture group entirely) makes it return null for every rc.1/rc.2/1.0.0 ' +
       'version string, so the round-2 prerelease describe block reds across the board — the exact ' +
-      "regression that shipped round 1 (\"expected ^x.y.z after pack rewriting\") wasn't caught " +
+      'regression that shipped round 1 ("expected ^x.y.z after pack rewriting") wasn\'t caught ' +
       'because nothing exercised a prerelease before.',
     subject: 'script',
     anchor: PARSE_SEMVER_REGEX,
@@ -83,7 +83,7 @@ const MUTATIONS = [
       "/**\n * Caret satisfaction for `^x.y.z` and `^x.y.z-<prerelease>` ranges — npm's\n" +
       ' * rule: same major (same minor when major is 0, same patch when major and\n',
     replacement:
-      "/**\n * Caret satisfaction for `^x.y.z` and `^x.y.z-<prerelease>` ranges (reworded by the " +
+      '/**\n * Caret satisfaction for `^x.y.z` and `^x.y.z-<prerelease>` ranges (reworded by the ' +
       "negative control) — npm's\n" +
       ' * rule: same major (same minor when major is 0, same patch when major and\n',
   },

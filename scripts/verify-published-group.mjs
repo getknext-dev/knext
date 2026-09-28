@@ -164,8 +164,7 @@ export function caretSatisfies(range, version) {
     prerelease: m[4] ? m[4].split('.') : [],
   };
   if (v.prerelease.length > 0) {
-    const sameTuple =
-      v.major === floor.major && v.minor === floor.minor && v.patch === floor.patch;
+    const sameTuple = v.major === floor.major && v.minor === floor.minor && v.patch === floor.patch;
     if (!sameTuple || floor.prerelease.length === 0) return false;
   }
   if (v.major !== floor.major) return false;

@@ -86,15 +86,15 @@ describe('#942 F1 — packed sibling ranges must be satisfied by the co-packed s
   // incoherent even when it was exactly the tarball beside it.
   describe('prerelease caret semantics (rc.1/rc.2/1.0.0)', () => {
     it('a floor of exactly its own rc is satisfied (rc.1 satisfies ^1.0.0-rc.1)', () => {
-      expect(
-        siblingRangeProblems([lib('1.0.0-rc.1'), core('1.0.0-rc.1', '^1.0.0-rc.1')]),
-      ).toEqual([]);
+      expect(siblingRangeProblems([lib('1.0.0-rc.1'), core('1.0.0-rc.1', '^1.0.0-rc.1')])).toEqual(
+        [],
+      );
     });
 
     it('a LATER rc of the same tuple satisfies (rc.2 satisfies ^1.0.0-rc.1)', () => {
-      expect(
-        siblingRangeProblems([lib('1.0.0-rc.2'), core('1.0.0-rc.2', '^1.0.0-rc.1')]),
-      ).toEqual([]);
+      expect(siblingRangeProblems([lib('1.0.0-rc.2'), core('1.0.0-rc.2', '^1.0.0-rc.1')])).toEqual(
+        [],
+      );
     });
 
     it('the final release satisfies an rc floor (1.0.0 satisfies ^1.0.0-rc.1)', () => {
