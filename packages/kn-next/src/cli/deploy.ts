@@ -1227,6 +1227,12 @@ if (isEntrypoint(import.meta.url)) {
             // exactly what stage 1 exists to avoid.
             const { initCiMain } = await import("./ci/init-ci-cmd");
             process.exit(await initCiMain(process.argv.slice(3)));
+        } else if (sub === "ci-preflight") {
+            // #1534: the same credential preflight kn-next-action runs,
+            // exposed as a verb for CI providers with no composite-action
+            // equivalent (init-ci --provider gitlab's .gitlab-ci.yml).
+            const { ciPreflightMain } = await import("./ci/ci-preflight-cmd");
+            process.exit(await ciPreflightMain(process.argv.slice(3)));
         } else if (sub === "doctor") {
             const { doctorMain } = await import("./doctor");
             process.exit(await doctorMain(process.argv.slice(3)));

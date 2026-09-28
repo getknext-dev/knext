@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { BUN_VERSION as GITLAB_CI_BUN_VERSION } from '../packages/kn-next/src/cli/ci/init-ci-gitlab';
 
 // Absolute, not CWD-relative — the repo convention (vitest.config.ts explains
 // why: a run from a sub-directory must not resolve a non-existent path).
@@ -930,5 +931,15 @@ describe(`bun lockstep (#1310) — one Bun (${PINNED_BUN}) everywhere it is sele
     // to exempt would be silent dead code.
     expect(exempted).toBeGreaterThan(0);
     expect(off).toEqual([]);
+  });
+
+  // #1588 round 4 — the generated GitLab CI template's `deploy` job installs
+  // a raw Bun release binary (musl, no `oven/bun` docker image; the job
+  // image is already node:22-alpine), so neither scan above ever looks at
+  // it. Registered here explicitly so a future Bun bump that misses this
+  // site is caught, the same way the setup-bun/oven-bun-image scans catch
+  // every other selection site.
+  it('the GitLab CI template installs the lockstep Bun in its deploy job', () => {
+    expect(GITLAB_CI_BUN_VERSION).toBe(PINNED_BUN);
   });
 });

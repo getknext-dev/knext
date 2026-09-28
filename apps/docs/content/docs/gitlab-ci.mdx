@@ -1,0 +1,156 @@
+---
+title: GitLab CI/CD
+description: Deploy from GitLab CI/CD with a kubeconfig — no cloud credentials, no provisioning.
+---
+
+Deploy on every push to `main`, from your own GitLab Runner, to your own cluster. Same trust model
+as [the GitHub Action](/docs/github-action): knext hosts nothing, holds no credentials, and the
+generated pipeline writes exactly one object to your cluster — a `NextApp` resource the knext
+operator reconciles from.
+
+## Generate the pipeline
+
+```bash title="shell"
+knext init-ci --namespace my-app --provider gitlab
+```
+
+That writes two files and touches nothing in your cluster:
+
+- `.gitlab-ci.yml` — the pipeline, with every CI/CD variable it needs documented at the top
+- `knext-ci-rbac.yaml` — a ServiceAccount, a Role and a RoleBinding (identical to the GitHub path)
+
+Read the manifest, then apply it yourself:
+
+```bash title="shell"
+kubectl apply -f knext-ci-rbac.yaml
+```
+
+`knext init-ci` also prints the exact `kubectl create token` + `kubectl config set-*` commands that
+mint a kubeconfig for the `knext-deployer` ServiceAccount — **you run these yourself**; knext writes
+nothing to the cluster. Then push it as a variable:
+
+```bash title="shell"
+knext init-ci --namespace my-app --provider gitlab --push-secret knext-deployer.kubeconfig
+```
+
+This reads that file, refuses it if it needs cloud-account credentials (the same check
+described below), and pushes it via `glab variable set --masked --protected` — the value is never
+printed or logged, only piped to `glab`'s stdin. Without `glab` installed, it prints the manual
+steps for GitLab's UI instead of failing.
+
+## CI/CD variables
+
+Set these under **Settings → CI/CD → Variables**. Mark **every one Protected** (only available to
+jobs running on protected branches/tags — the generated pipeline only runs on `main`, which you
+should protect).
+
+<Callout type="warn">
+Mark `KNEXT_KUBECONFIG` and `KNEXT_REGISTRY_TOKEN` **Masked** too. GitLab refuses to save a Masked
+variable shorter than **8 characters**, so a short value like `KNEXT_NAMESPACE=prod` or
+`KNEXT_REGISTRY=ghcr.io` cannot be Masked — leave those Protected-only.
+</Callout>
+
+| Variable | Notes |
+|---|---|
+| `KNEXT_KUBECONFIG` | Base64 text (type **Variable**, not File) — decoded the same way the GitHub Action decodes its `kubeconfig` input. From the scoped `knext-deployer` ServiceAccount. |
+| `KNEXT_NAMESPACE` | The namespace to deploy into. |
+| `KNEXT_REGISTRY` | Registry host and namespace, e.g. `ghcr.io/acme`. Your app's `name` is appended. |
+| `KNEXT_REGISTRY_TOKEN` | Push token for that registry. |
+| `KNEXT_REGISTRY_USERNAME` (optional) | Registry login username. Defaults to `gitlab-ci-token`, correct for GitLab's own Container Registry — set it explicitly for GHCR, Docker Hub, or any other external registry. |
+
+## The two preflight jobs
+
+The pipeline has three jobs: `kubeconfig-check` and `credential-preflight` (stage `preflight`), then
+`deploy` (stage `deploy`). `deploy` depends on both preflight jobs (`needs:`), and
+`credential-preflight` depends on `kubeconfig-check` — so the exec-plugin refusal always completes
+before the hazard preflight's first `kubectl` call, the same order the GitHub Action's two composite
+steps run in. Neither preflight job sets `allow_failure`, so GitLab's default — a failing job fails
+the pipeline — is exactly "not skippable".
+
+<Callout type="warn">
+Don't add `when: manual` or `when: always` to either preflight job. `when: manual` defaults
+`allow_failure: true`, and `when: always` runs the job even after an upstream failure — both defeat
+the "not skippable" guarantee above just as directly as setting `allow_failure: true` would.
+</Callout>
+
+<Callout type="warn">
+**`kubeconfig-check` refuses a kubeconfig that needs a cloud CLI on the runner** — an `exec:` or
+`auth-provider:` entry, the shape `aws eks get-token`, `gke-gcloud-auth-plugin`,
+`oci ce cluster generate-token` or `kubelogin` use. It runs `knext doctor --ci-kubeconfig`, a LOCAL
+file read with no cluster call, and fails with:
+
+> This kubeconfig needs cloud-account credentials on the runner. Use the knext-deployer
+> ServiceAccount token.
+
+**`credential-preflight` refuses a credential broader than the published Role.** It runs
+`knext ci-preflight --namespace <ns>` — the same rules-review + hazard-spot-check
+`kn-next-action`'s composite action runs, exposed as a CLI verb so this pipeline invokes the
+classifier through the published CLI instead of re-deriving the rules in shell. It asks your
+cluster what the credential can do (`SelfSubjectRulesReview`) and, because some clusters (OKE, GKE
+with IAM) cannot fully answer that, also spot-checks specific hazardous permissions
+(`SelfSubjectAccessReview`) — reading Secrets, acting on Deployments/Pods/Services directly,
+escalating RBAC, and more. See [the GitHub Action's callout](/docs/github-action#what-the-credential-can-actually-do)
+for the exact list; both providers read it from the same source.
+</Callout>
+
+Both preflight jobs need `kubectl` on the runner; the generated pipeline installs a pinned release
+if it is not already on the image, verifying the download against a checksum embedded directly in
+the pipeline — read once from Kubernetes' own release infrastructure and bumped together with the
+version, rather than fetched again at every run.
+
+Both the `kubectl` and Bun binaries the pipeline installs are x86_64 (amd64) releases only — arm64
+GitLab Runners are not supported by this template today; a job on one will fail on install.
+
+## The deploy job needs a docker daemon
+
+`knext deploy` builds and pushes your image with `docker buildx build … --push`. A plain job
+image has no docker daemon at all, so the generated `deploy` job pairs a docker-in-docker service
+(`docker:27.3.1-dind`, pinned by digest) with a docker-CLI-and-buildx-capable job image —
+[GitLab's own recipe for this](https://docs.gitlab.com/ci/docker/using_docker_build/).
+On Alpine, the `docker-cli` package alone ships only `/usr/bin/docker` — the `buildx` plugin is a
+separate package, `docker-cli-buildx` — so the job installs both. It logs into `KNEXT_REGISTRY`
+with `KNEXT_REGISTRY_TOKEN` via `docker login --password-stdin` — the token never appears in a
+job's command line. The job also carries a `resource_group` scoped to your namespace, so two
+pipelines racing on `main` cannot apply the same `NextApp` concurrently.
+
+<Callout type="warn">
+The default runtime (unset `runtime` in `kn-next.config.ts`) is `bun` — `knext deploy` compiles
+your app's standalone executable by shelling out to `bun`. The generated job installs a pinned Bun
+release (verified against an embedded checksum) alongside docker, so a fresh runner needs no manual
+Bun setup; if you set `runtime: 'node'`, the job never uses that install.
+</Callout>
+
+<Callout type="warn">
+Docker-in-docker over TLS (the generated job's `DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` setup) needs a
+**privileged runner** — GitLab's Docker executor cannot start the `dind` service without
+`privileged = true` in the runner's `config.toml`. With the Docker executor you also need the
+`/certs/client` directory shared as a runner volume (`--docker-volumes "/certs/client"`, or the
+equivalent `config.toml` entry) — without it, `DOCKER_CERT_PATH` is empty and the job's `docker`
+client cannot complete the TLS handshake to `docker:2376`. See GitLab's [Docker-in-Docker with
+TLS](https://docs.gitlab.com/ci/docker/docker_in_docker/) page for the full runner configuration.
+</Callout>
+
+If your runner cannot run docker-in-docker (some shared/Kubernetes-executor runners restrict it),
+point the job at a runner that can, or replace the `services:`/`docker login` block with your own
+kaniko/buildah equivalent — `knext deploy` needs a working `docker` (with the `buildx` plugin) on
+`PATH` when it runs, and, for the default `bun` runtime, `bun` on `PATH` too (already installed by
+the generated job, above).
+
+## Kubeconfig handling
+
+The kubeconfig is decoded under `umask 077` to a job-scoped path in `/tmp` — never under
+`$CI_PROJECT_DIR`, which a shell or persistent-volume executor can leave on disk after the job ends
+— and every job's `after_script` removes it, which GitLab runs even when the job fails.
+
+## Renewing the token
+
+The minted token expires after one year (`--duration=8760h`). Before then, re-run the **whole**
+printed recipe from the top and push the secret again — it deletes its own output file first, so the
+renewed token replaces the old one everywhere it was minted, regardless of which provider you pushed
+it to.
+
+## Related
+
+- [GitHub Action](/docs/github-action) — the same trust model, generated for `.github/workflows/`
+- [CLI reference](/docs/cli#knext-init-ci) — every `init-ci` flag, including `--provider`
+- [Upgrading](/docs/upgrading) — why the operator is upgraded before the CLI

@@ -8,6 +8,7 @@
     "install",
     "cli",
     "github-action",
+    "gitlab-ci",
     "---Runtime---",
     "official-adapter",
     "build-pipeline",
