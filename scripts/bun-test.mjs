@@ -296,13 +296,71 @@ function acquireCoverageLock() {
 
 if (withCoverage) {
   acquireCoverageLock();
-  // Released on every exit path — including an uncaught throw or
-  // `process.exit()` elsewhere in this script — never a `finally` that a
-  // throw could skip.
+  // Released on every exit path THIS PROCESS controls — including an
+  // uncaught throw, and an explicit `process.exit()` from anywhere in this
+  // script, such as the SIGINT/SIGTERM handlers below — never a `finally`
+  // that a throw could skip.
+  //
+  // NOT released on an unhandled SIGINT/SIGTERM: `process.on('exit', ...)`
+  // does not fire when a signal's default action terminates the process —
+  // only when something in this process calls `process.exit()` (or falls off
+  // the end of the event loop). That gap is why the SIGINT/SIGTERM handlers
+  // below exist at all: they turn "unhandled signal kills the process" into
+  // "this process notices the signal and calls process.exit() itself",
+  // which DOES run this handler. The one case that still bypasses it
+  // entirely is an external SIGKILL of THIS runner (uncatchable by design) —
+  // `acquireCoverageLock`'s stale-PID reclaim above is what recovers from
+  // that, not this handler.
   process.on('exit', () => rmSync(COVERAGE_LOCK, { force: true }));
   if (existsSync(COVERAGE_OUT)) rmSync(COVERAGE_OUT, { recursive: true, force: true });
   mkdirSync(COVERAGE_RAW, { recursive: true });
 }
+
+/**
+ * SIGKILL the whole process GROUP a spawned file's child started, not just
+ * that one process (#1241 recurrence). A file that itself `spawnSync`s a
+ * real child (e.g. `tests/bytecode-liveness-wiring.test.ts`,
+ * `tests/kn-next-action-preflight.test.ts` do) leaves that grandchild
+ * orphaned — reparented to pid 1 — if only the bun-test child is killed,
+ * because the grandchild was never a member of the killed process alone.
+ * Every child below is spawned with `detached: true`, which on POSIX makes
+ * it the leader of its OWN new process group (pgid === its own pid), so
+ * `-pid` reaches it and everything it forked. No such grouping exists on
+ * Windows; fall back to a direct kill there.
+ */
+function killProcessTree(pid) {
+  if (pid === undefined) return;
+  try {
+    if (process.platform === 'win32') {
+      process.kill(pid, 'SIGKILL');
+    } else {
+      process.kill(-pid, 'SIGKILL');
+    }
+  } catch (err) {
+    if (err.code !== 'ESRCH') throw err; // already gone — not an error here
+  }
+}
+
+/** Every currently-running spawned file's pid, so a signal to THIS runner can reap them all. */
+const activeChildPids = new Set();
+
+/**
+ * Without this, `Ctrl-C` (or CI cancelling the job) on the runner itself
+ * leaves every in-flight spawned file's process group running — the same
+ * orphan class #1241 fixed for the per-file timeout, just triggered by the
+ * runner's own death instead of one file overrunning. `process.exit()` here
+ * (rather than letting the signal's default action terminate the process) is
+ * also what makes the coverage-lock `exit` handler above actually run.
+ */
+let interrupted = false;
+function handleTerminationSignal() {
+  if (interrupted) return;
+  interrupted = true;
+  for (const pid of activeChildPids) killProcessTree(pid);
+  process.exit(1);
+}
+process.on('SIGINT', handleTerminationSignal);
+process.on('SIGTERM', handleTerminationSignal);
 
 const failures = [];
 let done = 0;
@@ -367,7 +425,15 @@ function runFile(file) {
     if (withCoverage) {
       args.push('--coverage', '--coverage-reporter=lcov', `--coverage-dir=${covDir}`);
     }
-    const child = spawn(bunBin, args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    // `detached: true`: makes this child the leader of its own process
+    // GROUP (see `killProcessTree`), so a kill can reach a real grandchild
+    // the file itself spawns (#1241 recurrence) — not merely this one pid.
+    const child = spawn(bunBin, args, {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    });
+    activeChildPids.add(child.pid);
     let output = '';
     let timedOut = false;
     child.stdout.on('data', (d) => (output += d));
@@ -375,13 +441,15 @@ function runFile(file) {
     // #1241: an OUTER kill — bun's own per-test timeout lives INSIDE the
     // child and cannot help if the child's event loop is the thing stuck.
     // SIGKILL, not SIGTERM: a truly-hung process is exactly the case a
-    // handler-based graceful exit cannot be trusted to run.
+    // handler-based graceful exit cannot be trusted to run. The whole process
+    // GROUP, not just this pid — see `killProcessTree`.
     const killTimer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killProcessTree(child.pid);
     }, fileTimeoutMs);
     child.on('close', (code) => {
       clearTimeout(killTimer);
+      activeChildPids.delete(child.pid);
       done++;
       // Flatten each spawn's report to `coverage-bun/<slug>.info`, so the
       // directory is a readable pile of per-file lcov rather than a tree of
@@ -418,6 +486,7 @@ function runFile(file) {
     });
     child.on('error', (err) => {
       clearTimeout(killTimer);
+      activeChildPids.delete(child.pid);
       done++;
       failures.push({ file, output: String(err.message) });
       process.stdout.write(`  FAIL [${done}/${files.length}] ${file} (spawn error)\n`);

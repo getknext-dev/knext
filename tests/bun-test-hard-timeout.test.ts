@@ -27,8 +27,23 @@ const RUNNER = join(REPO_ROOT, 'scripts', 'bun-test.mjs');
 const HANG_REL = 'tests/__hard-timeout-canary-hangs.test.ts';
 const HANG_ABS = join(REPO_ROOT, HANG_REL);
 
+// Second canary: a file that itself spawns a REAL grandchild process (the
+// pattern `tests/bytecode-liveness-wiring.test.ts` and
+// `tests/kn-next-action-preflight.test.ts` use) and then hangs. This is the
+// #1241 recurrence: killing only the immediate bun-test child leaves that
+// grandchild running, reparented to pid 1, because it was never in the killed
+// process's group.
+const GRANDCHILD_HANG_REL = 'tests/__hard-timeout-canary-grandchild.test.ts';
+const GRANDCHILD_HANG_ABS = join(REPO_ROOT, GRANDCHILD_HANG_REL);
+// Unique per file (not per run): a marker embedded in the grandchild's own
+// argv, so it is identifiable in `ps` output independent of the test file's
+// path (which appears only in the bun-test CHILD's argv, never the
+// grandchild's — the grandchild is a bare `node -e ...`).
+const GRANDCHILD_MARKER = 'KNEXT_HARD_TIMEOUT_GRANDCHILD_CANARY_9f3a1c';
+
 afterEach(() => {
   rmSync(HANG_ABS, { force: true });
+  rmSync(GRANDCHILD_HANG_ABS, { force: true });
 });
 
 /**
@@ -44,6 +59,27 @@ function writeHangingCanary() {
       "import { test } from 'bun:test';",
       "test('hangs forever', async () => {",
       '  await new Promise(() => {});',
+      '}, 3_600_000);',
+      '',
+    ].join('\n'),
+  );
+}
+
+/**
+ * `spawnSync` blocks the test's own thread until the grandchild exits, so a
+ * grandchild that never exits IS the hang — no separate `await new
+ * Promise(() => {})` needed, and it matches how the real offending files
+ * (bytecode-liveness-wiring, kn-next-action-preflight) actually hang: inside
+ * a synchronous child-process call, not an unresolved promise.
+ */
+function writeGrandchildHangingCanary() {
+  writeFileSync(
+    GRANDCHILD_HANG_ABS,
+    [
+      "import { test } from 'bun:test';",
+      "import { spawnSync } from 'node:child_process';",
+      "test('hangs forever inside a spawnSync of a real, undying grandchild', () => {",
+      `  spawnSync('node', ['-e', '/* ${GRANDCHILD_MARKER} */ setInterval(() => {}, 1000);'], { stdio: 'ignore' });`,
       '}, 3_600_000);',
       '',
     ].join('\n'),
@@ -92,5 +128,35 @@ describe('scripts/bun-test.mjs — per-file hard timeout', () => {
       .filter((l) => l.includes(HANG_REL))
       .join('\n');
     expect(survivors, `orphaned process(es) still running:\n${survivors}`).toBe('');
+  }, 40_000);
+
+  test('a file whose spawnSync starts a real grandchild leaves no grandchild behind after the kill (#1241 recurrence)', () => {
+    writeGrandchildHangingCanary();
+    const start = Date.now();
+    const res = Bun.spawnSync(['node', RUNNER, GRANDCHILD_HANG_REL, '--file-timeout=1500'], {
+      cwd: REPO_ROOT,
+      timeout: 30_000,
+    });
+    const elapsedMs = Date.now() - start;
+    const stdout = res.stdout?.toString() ?? '';
+    const stderr = res.stderr?.toString() ?? '';
+    const combined = `${stdout}${stderr}`;
+
+    expect(elapsedMs, combined).toBeLessThan(20_000);
+    expect(res.exitCode, combined).toBe(1);
+    expect(combined).toContain(GRANDCHILD_HANG_REL);
+    expect(combined.toLowerCase()).toMatch(/timeout|killed/);
+
+    // The bug class: SIGKILLing only the immediate bun-test child (no process
+    // GROUP kill) leaves the real grandchild it spawnSync'd running, reparented
+    // to pid 1. Identified by a marker in the grandchild's OWN argv — the test
+    // file's path never appears there, only in the (now-dead) bun-test child's.
+    const psOut = execSync('ps -eo pid=,ppid=,command=', { encoding: 'utf8' });
+    const survivors = psOut
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.includes(GRANDCHILD_MARKER))
+      .join('\n');
+    expect(survivors, `orphaned grandchild process(es) still running:\n${survivors}`).toBe('');
   }, 40_000);
 });
