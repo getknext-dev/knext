@@ -3,17 +3,15 @@ title: Request hardening
 description: Rate limiting, payload-size caps, and malformed-request handling for a knext app — what the platform gives you, what it does not, and the recipe for the rest.
 ---
 
-knext bounds *how many* requests hit your app and *how long* each may run. On the **vinext build**
-it also bounds *how large* a single request body may be. It does not bound request **rate** per
-client, and on the default standalone build it does not cap request bodies in-process — use the
-recipes below. This page is precise about which is which, because the difference decides whether you need
-to do anything.
+knext bounds *how many* requests hit your app, *how long* each may run, and *how large* a single
+request body may be — on every build. It does not bound request **rate** per client; use the recipes
+below for that. This page is precise about which is which, because the difference decides whether
+you need to do anything.
 
 <Callout type="info">
-**On the vinext build, request bodies are capped at 8 MiB by default, for every route.** The
-default standalone build (Turbopack or webpack) has **no** in-process body cap, so put a proxy cap
-in front of it (see [the recipe](#the-recipe)). The vinext runtime refuses a larger
-body with `413` before your handler is entered, and it **counts bytes** rather than trusting
+**Request bodies are capped at 8 MiB by default, for every route, on every build** — the default
+standalone build (Turbopack or webpack, on Node or Bun, compiled or not) and the vinext build alike.
+A larger body is answered with `413`, and the cap **counts bytes** rather than trusting
 `Content-Length` — so a chunked request that sends no length is refused too. Change it with the
 `KNEXT_MAX_REQUEST_BYTES` environment variable; see
 [The request body cap](#the-request-body-cap).
@@ -28,9 +26,9 @@ set) is knext.
 
 ## What the platform already bounds
 
-- **Request body size (vinext build only)** — 8 MiB by default, on every route, enforced by the
-  scaffolded server entry before your code runs. See [The request body cap](#the-request-body-cap).
-  The standalone build does not enforce a cap; bound it at your proxy.
+- **Request body size** — 8 MiB by default, on every route and every build, enforced inside the
+  app's own process, so it applies to traffic from your proxy, from the Knative ingress, and from a
+  pod dialling your app directly. See [The request body cap](#the-request-body-cap).
 - **Concurrency per pod** — `spec.scaling.containerConcurrency` (default 20) is enforced by the
   Knative queue-proxy *inside* the pod, so it applies to every request that reaches your app.
 - **Request duration** — `spec.timeoutSeconds` (default 300s) caps how long one request may occupy
@@ -94,10 +92,11 @@ before you rely on one:
 
 ### 2. Set the request body cap [#the-request-body-cap]
 
-On the vinext build, knext caps request bodies in-process, so this control applies whether the
-traffic came through your proxy, through the Knative ingress, or from a pod inside the cluster
-dialling your app directly. The variable is read by the scaffolded `knext-bun-entry.mjs` and
-`knext-node-entry.mjs`; the standalone build does not read it.
+knext caps request bodies in-process, so this control applies whether the traffic came through
+your proxy, through the Knative ingress, or from a pod inside the cluster dialling your app
+directly. It is the same variable, default and rules on every build: on the standalone build the
+knext runtime loads the cap into the Next.js server process before it starts; on the vinext build
+the scaffolded `knext-bun-entry.mjs` and `knext-node-entry.mjs` read it.
 
 - **Default: `8388608` bytes (8 MiB).** Chosen against the memory limit and `containerConcurrency`
   (20 in-flight × 8 MiB stays far inside a 1Gi pod), and deliberately above Next's 1 MB Server
@@ -105,15 +104,40 @@ dialling your app directly. The variable is read by the scaffolded `knext-bun-en
 - **The runtime counts bytes.** A body sent with chunked transfer encoding and no `Content-Length`
   is refused at the same size as one that declares its length. `Content-Length` is never trusted on
   its own.
-- **The response is a bare `413`** with no body. It is produced by the runtime before any knext or
-  Next.js code runs, so there is nothing to attach a message to. To confirm which cap is in force,
-  read the line the app prints on start:
+- **An oversized body never reaches your handler.** A request that declares a `Content-Length`
+  above the cap is refused before your route runs. A chunked body is refused the moment the count
+  crosses the cap: the response is `413 Payload Too Large` with `Connection: close`, and if your
+  handler had already started reading, its read fails instead of returning a truncated body. The
+  rest of the body is discarded as it arrives — never held in memory — for at most two seconds, so
+  a client that is still uploading can read the `413` rather than a connection reset, and then the
+  connection is closed. (If a handler has *already begun
+  sending its response* before reading the body, a status can no longer be sent, so the connection
+  is dropped instead.)
+- **WebSocket upgrades and streamed responses are not affected** — the cap applies to request
+  bodies only.
+- **The response carries no knext-specific detail.** On the standalone build its body is the text
+  `Payload Too Large`; on the vinext build it is a bare `413` produced by the runtime. To confirm
+  which cap is in force, read the line the app prints on start:
 
   ```
-  REQUEST_BYTE_CAP:8388608 METRICS_BYTE_CAP:65536 (default)
+  REQUEST_BYTE_CAP:8388608 (default)                         # standalone build
+  REQUEST_BYTE_CAP:8388608 METRICS_BYTE_CAP:65536 (default)  # vinext build
   ```
 
-Change it per app with an environment variable:
+  With the cap removed it reads `REQUEST_BYTE_CAP:none (uncapped)`.
+
+Change it per app with an environment variable — in `knext.config.ts`:
+
+```ts title="knext.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  env: {
+    KNEXT_MAX_REQUEST_BYTES: '20971520', // 20 MiB
+  },
+};
+```
+
+or directly on the resource:
 
 ```yaml
 apiVersion: apps.kn-next.dev/v1alpha1
@@ -123,12 +147,19 @@ spec:
     KNEXT_MAX_REQUEST_BYTES: "20971520"   # 20 MiB
 ```
 
+If your app accepts uploads larger than 8 MiB through a route handler, raise the cap to your
+largest expected upload — and consider raising the pod's memory limit with it, since each
+in-flight upload can occupy up to that much memory while your handler buffers it. For very large
+files, uploading straight to object storage with a pre-signed URL keeps the bytes out of your app
+entirely.
+
 <Callout type="warn">
 **`KNEXT_MAX_REQUEST_BYTES=0` removes the cap entirely.** The app then buffers a body of any size
 the runtime accepts, and with `containerConcurrency` above 1 that is an out-of-memory kill rather
 than a `413`. It is deliberate, it is logged loudly on every start, and it should be temporary. Any
 value that is not a non-negative integer is ignored with a warning and the 8 MiB default stays in
-force — a typo cannot silently remove the cap. The metrics port stays capped either way.
+force — a typo cannot silently remove the cap. On the vinext build the metrics port stays capped
+either way.
 </Callout>
 
 If you need a **smaller, per-route** limit — say 100 KB on one JSON endpoint — the platform cap does
