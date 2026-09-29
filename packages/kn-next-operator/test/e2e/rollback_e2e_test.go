@@ -62,7 +62,7 @@ limitations under the License.
 // existing-cluster mode — still only inside the throwaway namespace.
 //
 // WHY A SEPARATE BUILD TAG (`e2e_rollback`): same reason as e2e_cli — needs
-// cert-manager + Knative Serving + Kourier + Node/pnpm, and its OWN suite
+// cert-manager + Knative Serving + Kourier + Node/Bun, and its OWN suite
 // runner so it never collides with the other suites' BeforeSuite hooks. It
 // runs in operator-e2e-nightly.yml as the INDEPENDENT `rollback-e2e` job
 // (no continue-on-error: every assertion is state-based; a failure is
@@ -257,10 +257,10 @@ var _ = Describe("kn-next rollback against a live cluster (#92)", Ordered, func(
 	var rev1Name, rev2Name string
 
 	BeforeAll(func() {
-		By("building the CLI from source with pnpm (plain-Node dist, no Bun)")
-		_, err := utils.RunAtRepoRoot("pnpm", "--filter", "@getknext/core...", "build")
+		By("building the CLI from source with bun (plain-Node dist)")
+		err := utils.BuildCLI()
 		Expect(err).NotTo(HaveOccurred(),
-			"failed to build the CLI — run `pnpm install --frozen-lockfile` at the repo root first")
+			"failed to build the CLI — run `bun install --frozen-lockfile` at the repo root first")
 		bin, err := utils.CLIBin()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(bin).To(BeAnExistingFile(), "CLI build produced no dist/cli/kn-next.js")
