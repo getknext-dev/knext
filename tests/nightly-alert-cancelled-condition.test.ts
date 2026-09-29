@@ -20,6 +20,15 @@ import { frozenFileSet } from '../scripts/compat-credential-freeze-guard.mjs';
  * A future alert job with this same bug, under any name, trips it
  * immediately; nothing here needs updating to catch it.
  *
+ * SECOND HALF OF THE SAME BUG (found in review of #1647): the disjunction
+ * above is dead code unless the job's `if:` also carries a status-check
+ * function that survives a failed/cancelled upstream — otherwise GitHub
+ * Actions prepends an implicit `success() &&` and the job never runs at all
+ * once its `needs:` job stops succeeding. This file also scans every
+ * alert-shaped job (any `if:` that inspects a `needs.*.result`) for the
+ * literal `always()` guard — see `hasAlwaysGuard`'s docstring for exactly
+ * what is and is not accepted as equivalent, and why.
+ *
  * ALLOWLIST — frozen credential-harness files only, deferred to #1643, not
  * this PR's scope. `test-e2e-deploy.yml`'s `nightly-red-alert` and
  * `compat-vinext.yml`'s `vinext-red-alert` both have this exact gap on
@@ -125,6 +134,85 @@ function summarize(findings: Finding[]): string {
       (f) =>
         `${f.file}: job "${f.job}" checks needs.${f.needsJob}.result == 'failure' but never 'cancelled'`,
     )
+    .join('\n');
+}
+
+/**
+ * The other half of the same bug (found in review of #1647): a job can carry
+ * the correct `(needs.X.result == 'failure' || needs.X.result == 'cancelled')`
+ * disjunction and STILL never fire on either outcome, because GitHub Actions
+ * prepends an implicit `success() &&` to any `if:` that contains none of the
+ * four status-check functions (`success()`, `always()`, `failure()`,
+ * `cancelled()`). Without one of those, the job simply never runs once its
+ * `needs:` job is anything but successful — the `needs.*.result` check is
+ * dead code.
+ *
+ * We accept ONLY the literal `always()` function as satisfying this, not
+ * bare `failure()`/`cancelled()`:
+ *   - `cancelled()` reports whether the WHOLE workflow RUN was cancelled
+ *     (e.g. someone hit the Cancel button), not whether a `needs:` job's own
+ *     conclusion is `'cancelled'` from hitting its `timeout-minutes` — the
+ *     exact #1645 case. A job timing out does not, by itself, cancel the run,
+ *     so gating on `cancelled()` would reproduce #1645 under a different
+ *     status-check function.
+ *   - `failure()` reports whether a `needs:` job FAILED; a `'cancelled'`
+ *     upstream is not a failure, so `failure() && (needs...)` still never
+ *     runs on a timeout.
+ *   - `always()` is unconditional — the only one of the four that is
+ *     guaranteed correct here — and it is the only one any alert job in this
+ *     repo actually uses. If a future job wants a narrower combination
+ *     (documented to genuinely run on a cancelled upstream), extend this
+ *     function deliberately rather than have it silently accept an untested
+ *     equivalence.
+ */
+const ALWAYS_RE = /\balways\(\)/;
+
+function hasAlwaysGuard(ifStr: string): boolean {
+  return ALWAYS_RE.test(ifStr);
+}
+
+/** True if `ifStr` inspects any `needs.<X>.result` at all — i.e. is alert-shaped. */
+const NEEDS_RESULT_RE = /needs\.[\w-]+\.result/;
+
+interface AlwaysFinding {
+  file: string;
+  job: string;
+}
+
+/** Every alert-shaped job (one that inspects a `needs.*.result`) with no `always()` guard on its `if:`. */
+function alwaysFindingsForDoc(file: string, doc: YamlDoc): AlwaysFinding[] {
+  if (!isScheduled(doc)) return [];
+  const jobs = doc.jobs ?? {};
+  const findings: AlwaysFinding[] = [];
+  for (const [jobName, job] of Object.entries(jobs)) {
+    const ifStr = typeof job?.if === 'string' ? job.if : undefined;
+    if (!ifStr || !NEEDS_RESULT_RE.test(ifStr)) continue;
+    if (!hasAlwaysGuard(ifStr)) {
+      findings.push({ file, job: jobName });
+    }
+  }
+  return findings;
+}
+
+function alwaysFindingsForFile(file: string): AlwaysFinding[] {
+  return alwaysFindingsForDoc(file, loadDoc(file));
+}
+
+/**
+ * Every scheduled workflow, unfiltered — no allowlist. Unlike the cancelled-
+ * check scan above, nothing in the repo is documented as exempt from having
+ * `always()` on an alert-shaped job's `if:`, and as of writing nothing is:
+ * every real alert job already carries it (round 1 of #1645 added it
+ * everywhere it was missing). Adding an allowlist here ahead of a genuine,
+ * documented exemption would just be a silent escape hatch.
+ */
+function scanAlways(): AlwaysFinding[] {
+  return listWorkflowFiles().flatMap(alwaysFindingsForFile);
+}
+
+function summarizeAlways(findings: AlwaysFinding[]): string {
+  return findings
+    .map((f) => `${f.file}: job "${f.job}" checks needs.*.result but its if: has no always() guard`)
     .join('\n');
 }
 
@@ -266,6 +354,89 @@ describe("#1645 — every scheduled workflow's alert job fires on a cancelled up
         checksCancelledFor(ifStr, needsJob),
         `${file}/${job}: does not check needs.${needsJob}.result == 'cancelled'`,
       ).toBe(true);
+    }
+  });
+});
+
+describe('#1647 review follow-up — the alert-shaped condition is dead code without an always() guard', () => {
+  it('non-vacuity: a synthetic alert-shaped job with no always() guard IS flagged', () => {
+    const doc: YamlDoc = {
+      on: { schedule: [{ cron: '0 0 * * *' }] },
+      jobs: {
+        'nightly-red-alert': {
+          if: "github.event_name == 'schedule' && (needs.check.result == 'failure' || needs.check.result == 'cancelled')",
+        },
+      },
+    };
+    expect(alwaysFindingsForDoc('synthetic.yml', doc)).toEqual([
+      { file: 'synthetic.yml', job: 'nightly-red-alert' },
+    ]);
+  });
+
+  it('non-vacuity: the SAME job, fixed with always() &&, is NOT flagged', () => {
+    const doc: YamlDoc = {
+      on: { schedule: [{ cron: '0 0 * * *' }] },
+      jobs: {
+        'nightly-red-alert': {
+          if: "always() && github.event_name == 'schedule' && (needs.check.result == 'failure' || needs.check.result == 'cancelled')",
+        },
+      },
+    };
+    expect(alwaysFindingsForDoc('synthetic.yml', doc)).toEqual([]);
+  });
+
+  it('a job whose if: never inspects needs.*.result is not flagged, always() or not', () => {
+    const doc: YamlDoc = {
+      on: { schedule: [{ cron: '0 0 * * *' }] },
+      jobs: {
+        build: {},
+        cleanup: { if: "github.event_name == 'schedule'" },
+      },
+    };
+    expect(alwaysFindingsForDoc('synthetic.yml', doc)).toEqual([]);
+  });
+
+  it('a workflow with no on.schedule trigger is out of scope, even with the same bug', () => {
+    const doc: YamlDoc = {
+      on: { workflow_dispatch: {} } as YamlDoc['on'],
+      jobs: { alert: { if: "needs.check.result == 'failure'" } },
+    };
+    expect(alwaysFindingsForDoc('dispatch-only.yml', doc)).toEqual([]);
+  });
+
+  it("bare failure()/cancelled() are NOT accepted as an always() equivalent — see hasAlwaysGuard's docstring", () => {
+    const doc: YamlDoc = {
+      on: { schedule: [{ cron: '0 0 * * *' }] },
+      jobs: {
+        // Looks plausible, but `cancelled()` is the RUN-level cancellation
+        // flag, not this needs job's per-job 'cancelled' conclusion — the
+        // exact non-equivalence this guard exists to reject.
+        'nightly-red-alert': {
+          if: "(failure() || cancelled()) && (needs.check.result == 'failure' || needs.check.result == 'cancelled')",
+        },
+      },
+    };
+    expect(alwaysFindingsForDoc('synthetic.yml', doc)).toEqual([
+      { file: 'synthetic.yml', job: 'nightly-red-alert' },
+    ]);
+  });
+
+  it('every scheduled workflow has always() on every alert-shaped job — no allowlist, nothing is exempt today', () => {
+    const findings = scanAlways();
+    expect(findings, `finding(s):\n${summarizeAlways(findings)}`).toEqual([]);
+  });
+
+  it('covers the two jobs the #1647 review verified live (mutation-prover-nightly + crane-pin-red-alert)', () => {
+    const targets: Array<{ file: string; job: string }> = [
+      { file: 'mutation-prover-nightly.yml', job: 'nightly-red-alert' },
+      { file: 'action-pin-resolution-nightly.yml', job: 'crane-pin-red-alert' },
+    ];
+    for (const { file, job } of targets) {
+      const doc = loadDoc(file);
+      const jobDef = doc.jobs?.[job];
+      expect(jobDef, `${file}: no longer has a job named "${job}"`).toBeTruthy();
+      const ifStr = typeof jobDef?.if === 'string' ? jobDef.if : '';
+      expect(hasAlwaysGuard(ifStr), `${file}/${job}: if: has no always() guard`).toBe(true);
     }
   });
 });
