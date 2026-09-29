@@ -435,10 +435,16 @@ that gap. (Amendment 4's text is left as written; this is the correction.)
 
 ### Honest residuals
 
-- The official compat credential lane boots `server.js` through `scripts/e2e-deploy.sh` with its
-  own explicit preload list, and that script is **frozen** for the live credential window. Until
-  the next window opens it, the credential measures the standalone server **without** this preload.
-  The production supervisor, the compiled executable and the shipped-bundle e2e all load it.
+- **The compat credential measures this control — no harness change needed.** `scripts/e2e-deploy.sh`
+  (frozen for the live window, and untouched here) boots the node cells **through the shipped
+  `node-server` supervisor** and the bun cells as the **compiled executable** built by the packed
+  `standalone-compile.js` — both from the packed tarball, so both load the preload. The official
+  deploy suite's only request bodies above 8 MiB are `client-max-body-size` (`skipDeployment: true`
+  — "deployed environment has its own configured limits") and `middleware-fetches-with-body`'s
+  10 MB case, which **expects** a `413`. Branch dispatches of all four cells are recorded on the PR.
+- **Server Actions are capped by Next first.** `serverActions.bodySizeLimit` (1 MB default) binds
+  before the 8 MiB platform cap, so an app that uploads through a Server Action — the reference
+  app does — must raise Next's limit to accept larger files, and the platform cap too above 8 MiB.
 - `Expect: 100-continue`: Node answers `100 Continue` before the `'request'` event, so a client
   that waits for it will send an oversized body before receiving the `413`; the connection is
   still closed and the body never reaches a handler.

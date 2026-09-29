@@ -17,7 +17,7 @@
 
 import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -137,6 +137,54 @@ describe.skipIf(skipReason !== null)(
         expect((await post(100)).status).not.toBe(413);
       } finally {
         await stop(capped.child);
+      }
+
+      // The reference app's REAL upload path under the DEFAULT cap (no env).
+      // file-manager uploads through the `uploadFile` Server Action (multipart,
+      // buffered in-app, then put to object storage), so Next's own 1 MB
+      // `serverActions.bodySizeLimit` binds long before knext's 8 MiB: a
+      // realistic 900 KB file must REACH the action with its file intact, a
+      // 2 MB one is refused by Next (not knext), and only a body over 8 MiB
+      // gets knext's 413.
+      const refs = JSON.parse(
+        readFileSync(join(NEXT_DIR, 'server', 'server-reference-manifest.json'), 'utf8'),
+      ) as { node: Record<string, { exportedName?: string; filename?: string }> };
+      const uploadAction = Object.entries(refs.node).find(
+        ([, v]) => v.exportedName === 'uploadFile' && v.filename === 'app/actions.ts',
+      )?.[0];
+      expect(uploadAction).toBeDefined();
+      const plain = await boot(b.exec, { env });
+      try {
+        expect(plain.output()).toContain('REQUEST_BYTE_CAP:8388608 (default)');
+        const upload = async (bytes: number) => {
+          // The React Server Actions reply encoding a browser sends for
+          // `uploadFile(formData)`: root `0` = ["$K1"], FormData fields `_1_<name>`.
+          const fd = new FormData();
+          fd.append(
+            '_1_file',
+            new File([new Uint8Array(bytes)], 'photo.jpg', { type: 'image/jpeg' }),
+          );
+          fd.append('0', '["$K1"]');
+          const r = await fetch(`http://127.0.0.1:${plain.port}/`, {
+            method: 'POST',
+            body: fd,
+            headers: { 'Next-Action': uploadAction as string, Accept: 'text/x-component' },
+            signal: AbortSignal.timeout(30_000),
+          });
+          return { status: r.status, text: await r.text() };
+        };
+        const ok = await upload(900 * 1024);
+        expect(ok.status).toBe(200);
+        // The action ran AND saw the file (without a database it then reports
+        // a storage/DB failure, which is the action's own answer, not a cap).
+        expect(ok.text).not.toContain('No file provided');
+        expect(ok.text).toContain('"error":"Failed to upload file"');
+        // Over Next's 1 MB action limit: Next refuses it, knext does not.
+        expect((await upload(2 * 1024 * 1024)).status).not.toBe(413);
+        // Over knext's default cap: 413 before Next sees it.
+        expect((await upload(9 * 1024 * 1024)).status).toBe(413);
+      } finally {
+        await stop(plain.child);
       }
     }, 900_000);
   },

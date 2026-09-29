@@ -193,6 +193,13 @@ export async function POST(req: Request) {
 The 1 MB default applies to Server Actions only. Set it explicitly so the value is a decision rather
 than an inheritance:
 
+<Callout type="info">
+**Uploading files through a Server Action?** Next's Server Action limit applies first, so a 2 MB
+file is refused by Next long before the 8 MiB request body cap is reached. To accept larger files,
+raise `bodySizeLimit` here — and if you raise it above 8 MiB, raise `KNEXT_MAX_REQUEST_BYTES` to
+match, or those uploads get a `413` from the platform cap instead.
+</Callout>
+
 ```ts
 // next.config.ts
 export default {
