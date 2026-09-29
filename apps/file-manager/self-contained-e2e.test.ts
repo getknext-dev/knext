@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  boot,
   firstStaticAsset,
   isServed,
   measureArm,
@@ -29,6 +30,7 @@ import {
   routesFromManifests,
   stageDisk,
   stageSelfContained,
+  stop,
 } from './e2e-support/self-contained-empty-dir.mjs';
 
 const APP = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +119,25 @@ describe.skipIf(skipReason !== null)(
       const servedA = Object.keys(A.served).filter((k) => isServed(A.served[k]));
       expect(servedA.filter((k) => !isServed(B.served[k]))).toEqual([]);
       expect(servedA.length).toBeGreaterThan(routes.length / 2);
+
+      // The request-body cap is COMPILED INTO the executable (standalone-compile
+      // embeds the preload — the binary takes no `--require`). Boot the
+      // self-contained binary with a small cap and prove the 413 behaviourally:
+      // a source scan of the preload list cannot tell whether the embed runs.
+      const capped = await boot(b.exec, { env: { ...env, KNEXT_MAX_REQUEST_BYTES: '4096' } });
+      try {
+        expect(capped.output()).toContain('REQUEST_BYTE_CAP:4096 (env)');
+        const post = (bytes: number) =>
+          fetch(`http://127.0.0.1:${capped.port}/api/health`, {
+            method: 'POST',
+            body: 'x'.repeat(bytes),
+            signal: AbortSignal.timeout(20_000),
+          });
+        expect((await post(4097)).status).toBe(413);
+        expect((await post(100)).status).not.toBe(413);
+      } finally {
+        await stop(capped.child);
+      }
     }, 900_000);
   },
 );

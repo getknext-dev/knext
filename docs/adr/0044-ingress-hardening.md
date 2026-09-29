@@ -449,5 +449,8 @@ that gap. (Amendment 4's text is left as written; this is the correction.)
 `packages/kn-next/src/__tests__/request-body-cap.test.ts` (behavioural under **both** Node and Bun
 over raw sockets, plus the resolver lockstep and wiring of all three launch paths) and the
 shipped-bundle case in `apps/file-manager/sigterm-drain-e2e.test.ts` (the published supervisor →
-child, `413` declared and chunked, exact cap passes). Mutation-proved by
-`scripts/mutation-prove-standalone-bytecap.mjs`.
+child, `413` declared and chunked, exact cap passes) and a boot of the **compiled** self-contained
+executable in `apps/file-manager/self-contained-e2e.test.ts` (`413` over a 4 KiB cap, pass under
+it — the embed proved behaviourally, not by a source scan). Mutation-proved by
+`scripts/mutation-prove-standalone-bytecap.mjs` (11/11); the compiled-exec check was
+mutation-proved once by hand (dropping the preload from the compile list reds it).
