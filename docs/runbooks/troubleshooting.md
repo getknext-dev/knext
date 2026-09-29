@@ -95,7 +95,7 @@ Only refs containing `@sha256:` are accepted.
 ```sh
 # resolve the digest of the tag you built
 docker buildx imagetools inspect ghcr.io/you/myapp:v1 --format '{{json .Manifest.Digest}}'
-# then set image: ghcr.io/you/myapp:v1@sha256:<hash>  in the NextApp / kn-next.config
+# then set image: ghcr.io/you/myapp:v1@sha256:<hash>  in the NextApp / knext.config
 ```
 
 `knext deploy` resolves the digest for you; if you author the CR by hand, the

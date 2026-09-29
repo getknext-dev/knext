@@ -1,6 +1,6 @@
 /**
  * #1183 follow-up (PR review finding #1, jev 0.93) — every in-repo
- * `kn-next.config*.ts` whose owning app's build script is `vite build` must
+ * `knext.config*.ts` whose owning app's build script is `vite build` must
  * pin `build: 'vinext'` EXPLICITLY.
  *
  * DEFAULT_BUILDER_ID flipped from "vinext" to "turbopack" in this PR
@@ -13,7 +13,7 @@
  *
  * SCANNED, not enumerated (workflow.md: "prefer scanning to enumerating; an
  * enumerated list of call sites is how the second one gets missed"). This
- * walks the whole repo for `kn-next.config*.ts` files (excluding
+ * walks the whole repo for `knext.config*.ts` files (excluding
  * node_modules/.claude/templates/__tests__/dist — none of those are a real,
  * deployed app config), resolves each one's nearest ancestor `package.json`,
  * and — only when that package's `build` script is `vite build` — asserts the
@@ -51,7 +51,7 @@ const EXCLUDED_DIR_NAMES = new Set([
     "coverage",
 ]);
 
-/** Depth-first walk for every `kn-next.config*.ts` under `root`, scanning not enumerating. */
+/** Depth-first walk for every `knext.config*.ts` under `root`, scanning not enumerating. */
 function findKnextConfigs(root: string): string[] {
     const found: string[] = [];
     const walk = (dir: string) => {
@@ -61,7 +61,7 @@ function findKnextConfigs(root: string): string[] {
             const st = statSync(full);
             if (st.isDirectory()) {
                 walk(full);
-            } else if (/^kn-next\.config.*\.ts$/.test(entry)) {
+            } else if (/^knext\.config.*\.ts$/.test(entry)) {
                 found.push(full);
             }
         }

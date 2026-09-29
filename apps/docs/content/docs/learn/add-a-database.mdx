@@ -32,7 +32,7 @@ environment file someone might commit.
 
 ## Reference it by name
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   // …registry, storage, scaling as before…
@@ -57,7 +57,7 @@ database provider it is using.
 
 Add `roSecretRef` and knext binds a second connection string as `DATABASE_URL_RO`:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
   database: {
     secretRef: { name: 'acme-db' },     // → DATABASE_URL   (writer)
     roSecretRef: { name: 'acme-db' },   // → DATABASE_URL_RO (reader)

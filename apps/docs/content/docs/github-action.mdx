@@ -245,12 +245,12 @@ refusal above still runs.
 | `registry-token` | no | — | On GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
 | `tag` | no | `github.sha` | Image tag. The commit SHA traces an image to its commit |
-| `bucket` | no | from `kn-next.config.ts` | Object-storage bucket for static assets |
+| `bucket` | no | from `knext.config.ts` | Object-storage bucket for static assets |
 | `skip-upload` | no | `false` | Skip the static-asset upload. Needs only a kubeconfig and registry auth |
 | `skip-build` | no | `false` | Skip `next build`, for when a previous job already produced the output |
 | `auth` | no | `kubeconfig` | Reserved for short-lived cloud credentials later |
 | `dry-run` | no | `false` | Prints the `NextApp` resource, applies nothing |
-| `working-directory` | no | `.` | Where `kn-next.config.ts` lives |
+| `working-directory` | no | `.` | Where `knext.config.ts` lives |
 | `doctor` | no | `true` | Read-only preflight; fails fast on an unready cluster |
 | `skip-credential-preflight` | no | `false` | Turns off the credential check. Read the callout above first |
 | `cli` | no | `npx --yes @getknext/core` | The command that runs the CLI, split on whitespace. Leave this at its default — it is only there so this action can be tested against a locally built CLI instead of the published package |

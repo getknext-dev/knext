@@ -10,7 +10,7 @@ OTLP backend like Grafana Tempo. No data leaves your cluster, and there is **no 
 Observability is configured per app under `observability` in your knext config. Metrics are always
 on; **RUM and tracing are opt-in and default OFF**.
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 observability: {
   enabled: true,
   prometheus: { scrapeInterval: '15s' },   // default 15s

@@ -125,7 +125,7 @@ describe("#1167 end-to-end reachability: loadConfig -> validateConfig -> selectR
      */
     async function loadFixture(source: string): Promise<KnativeNextConfig> {
         const dir = tmp();
-        const path = join(dir, "kn-next.config.ts");
+        const path = join(dir, "knext.config.ts");
         writeFileSync(path, source, "utf8");
         return loadConfig(path);
     }

@@ -32,7 +32,7 @@ knext rollback acme --to acme-00002 --canary 20
 
 | Flag | Notes |
 |---|---|
-| `<app>` | Positional, optional. Defaults to `name` from your `kn-next.config`. |
+| `<app>` | Positional, optional. Defaults to `name` from your `knext.config`. |
 | `--to <revision>` | Pin to a named Knative Revision (e.g. `acme-00002`). Omit to revert to latest-ready. |
 | `--canary <n>` | Integer **1–99** only. Percentage sent to **latest-ready**; the remainder goes to the pinned revision. `0` is not "no canary" (omit the flag) and `100` would not be a rollback at all — both are rejected. Requires `--to`. |
 | `-n`, `--namespace` | Target namespace (default `default`). |

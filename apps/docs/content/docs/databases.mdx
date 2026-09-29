@@ -36,11 +36,11 @@ The `NextApp` never names or reaches into another app's database — it only bin
 lives in its **own** namespace. Swapping providers is a Secret change: zero app or CR schema
 change.
 
-You can also declare the binding in your `kn-next.config.ts` — knext emits the same
+You can also declare the binding in your `knext.config.ts` — knext emits the same
 `spec.database` into the app's manifest, so the database and the app are configured from **one
 file**:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {

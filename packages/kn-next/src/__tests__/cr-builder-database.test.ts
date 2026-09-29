@@ -4,7 +4,7 @@ import type { KnativeNextConfig } from "../config";
 
 /**
  * #417 — Phase 2-B1: surface the NextApp CRD's `spec.database` binding
- * (DatabaseSpec/DatabaseSecretRef, ADR-0019) in `kn-next.config.ts` →
+ * (DatabaseSpec/DatabaseSecretRef, ADR-0019) in `knext.config.ts` →
  * `spec.database`.
  *
  * Round-trip contract (issue acceptance criteria):

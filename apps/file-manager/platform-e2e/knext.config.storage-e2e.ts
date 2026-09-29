@@ -4,8 +4,8 @@ import type { KnativeNextConfig } from '@getknext/core';
  * Object-storage-mode profile for the storage leg of the nightly platform e2e
  * (#1292, follow-up to #1283/#1291).
  *
- * The nightly copies this over `apps/file-manager/kn-next.config.ts` (same
- * mechanism `kn-next.config.e2e.ts` already uses) AFTER the image-served leg
+ * The nightly copies this over `apps/file-manager/knext.config.ts` (same
+ * mechanism `knext.config.e2e.ts` already uses) AFTER the image-served leg
  * has finished with it, then runs a SECOND real `kn-next deploy`. This
  * deploys a distinct NextApp (`file-manager-storage`) against the SAME
  * in-cluster MinIO the image-served leg's upload check already uses, with
@@ -23,7 +23,7 @@ import type { KnativeNextConfig } from '@getknext/core';
  * content) is provider-agnostic. Exercising the `mc`-based `minio` provider
  * itself is a deferred follow-up (needs a pinned `mc` artifact).
  *
- * Differs from `kn-next.config.e2e.ts` (the image-served profile) in EXACTLY:
+ * Differs from `knext.config.e2e.ts` (the image-served profile) in EXACTLY:
  *   - `name`    — a distinct NextApp so both legs' resources coexist.
  *   - `storage` — present here, dropped there (that profile documents why).
  *   - `cache.keyPrefix` — distinct, so the two apps' Redis entries never collide.

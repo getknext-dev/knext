@@ -5,7 +5,7 @@ import type { KnativeNextConfig } from "../config";
 /**
  * #794/#952 — private-registry pull secrets.
  *
- * `kn-next.config.ts` may declare `imagePullSecrets: ["ocir-secret"]` — a list
+ * `knext.config.ts` may declare `imagePullSecrets: ["ocir-secret"]` — a list
  * of Secret NAMES in the app's namespace. The CR builder maps them to the CRD's
  * `spec.imagePullSecrets`, which takes core `LocalObjectReference` objects
  * (`[{ name }]`), so the operator can write them onto `<app>-sa` and the app's

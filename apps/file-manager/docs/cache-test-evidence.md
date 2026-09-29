@@ -244,7 +244,7 @@ Bun uses the JavaScriptCore JIT which has its own internal warm-up. No external 
 
 ## Knative / Fluid Scaling Guidance
 
-These four Fluid pillars map directly to this adapter's design. Configure them via the operator's `ScalingSpec` in `kn-next.config.ts` (or equivalent Knative `Service` annotations).
+These four Fluid pillars map directly to this adapter's design. Configure them via the operator's `ScalingSpec` in `knext.config.ts` (or equivalent Knative `Service` annotations).
 
 ### 1. `NODE_COMPILE_CACHE` (V8 bytecode cache PVC)
 

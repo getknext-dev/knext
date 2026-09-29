@@ -2,7 +2,7 @@
 //
 // vinext-node-custom-health-path.docker-e2e — the vinext-node compile-cache
 // bake (#1260) warmed a HARDCODED `/api/health`, ignoring the app's
-// configured `healthCheckPath` (`kn-next.config.ts` / `config.healthCheckPath`,
+// configured `healthCheckPath` (`knext.config.ts` / `config.healthCheckPath`,
 // #326 in config.ts) — the same regression class #1264 fixed for the
 // standalone-node image (`standalone-node-custom-health-path.docker-e2e.test.ts`),
 // left open here in that PR and filed as #1273.

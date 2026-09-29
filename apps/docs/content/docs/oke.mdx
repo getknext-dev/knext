@@ -74,9 +74,9 @@ Push the app image to OCI Registry (OCIR), e.g.
 `<region-key>.ocir.io/<tenancy-namespace>/<repo>`. The operator **rejects any image that is not
 digest-pinned** (`@sha256:…`); `knext deploy` resolves the digest automatically.
 
-## 6 · Complete `kn-next.config.ts`
+## 6 · Complete `knext.config.ts`
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {

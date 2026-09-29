@@ -966,7 +966,7 @@ try {
   const probeDst = join(workDir, 'install-smoke-probe.mjs');
   copyFileSync(probeSrc, probeDst);
   writeFileSync(
-    join(workDir, 'kn-next.config.ts'),
+    join(workDir, 'knext.config.ts'),
     [
       "import type { KnativeNextConfig } from '@getknext/core';",
       '',

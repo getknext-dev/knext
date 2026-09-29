@@ -39,10 +39,10 @@ the build loudly rather than silently shipping an empty cache.
 ## 2. Validate the deploy config
 
 ```bash
-npm run config:validate   # runs the real knext validateConfig() against kn-next.config.ts
+npm run config:validate   # runs the real knext validateConfig() against knext.config.ts
 ```
 
-`kn-next.config.ts` is minimal-valid: `name`, `registry`, `storage{provider:gcs, bucket, publicUrl}`,
+`knext.config.ts` is minimal-valid: `name`, `registry`, `storage{provider:gcs, bucket, publicUrl}`,
 `scaling.minScale: 0`. No cache block (the docs site is static — no Redis, no ISR).
 
 ## 3. Build + push the image
@@ -55,7 +55,7 @@ docker push registry.example.com/knext-docs:$(git rev-parse --short HEAD)
 
 ## 4. Deploy via the knext CLI (operator path)
 
-From a knext checkout, with this repo's `kn-next.config.ts` on the path:
+From a knext checkout, with this repo's `knext.config.ts` on the path:
 
 ```bash
 knext deploy --registry registry.example.com/knext-docs

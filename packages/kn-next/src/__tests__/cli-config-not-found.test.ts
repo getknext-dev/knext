@@ -1,5 +1,8 @@
 /**
- * "No kn-next.config.ts here" is an EXPECTED state, not a crash (UX ledger 1b).
+ * "No knext.config.ts here" is an EXPECTED state, not a crash (UX ledger 1b).
+ * A directory that still has the pre-rename kn-next.config.ts (and no
+ * knext.config.ts) is a DIFFERENT expected state — #1559, no dual-read — and
+ * gets its own one-line "rename the file" guidance, covered below.
  *
  * The binding persona is a Next.js developer with zero Kubernetes knowledge who
  * runs `npx @getknext/core` in the wrong directory. Before this guard that user
@@ -38,6 +41,7 @@ import {
     readdirSync,
     readFileSync,
     rmSync,
+    writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -45,7 +49,9 @@ import { fileURLToPath } from "node:url";
 import {
     CONFIG_NOT_FOUND_CODE,
     formatConfigNotFound,
+    formatLegacyConfigFile,
     handleConfigNotFound,
+    LEGACY_CONFIG_FILE_CODE,
     loadConfig,
 } from "../cli/shared";
 
@@ -79,8 +85,8 @@ describe("loadConfig marks a missing config as an expected state", () => {
 describe("formatConfigNotFound renders guidance, not an exception dump", () => {
     const text = formatConfigNotFound("/somewhere/my-app");
 
-    it("says what kn-next.config.ts is, in plain English", () => {
-        expect(text).toContain("kn-next.config.ts");
+    it("says what knext.config.ts is, in plain English", () => {
+        expect(text).toContain("knext.config.ts");
         // No Kubernetes jargon in the explanation the newcomer reads.
         expect(text).not.toMatch(/Knative|CRD|NextApp CR|kubectl|namespace/i);
     });
@@ -97,6 +103,21 @@ describe("formatConfigNotFound renders guidance, not an exception dump", () => {
     it("carries no stack frame and no bundler chunk path", () => {
         expect(text).not.toMatch(STACK_FRAME_RE);
         expect(text).not.toMatch(CHUNK_PATH_RE);
+        expect(text).not.toContain("FATAL");
+    });
+});
+
+describe("formatLegacyConfigFile renders the rename instruction (#1559)", () => {
+    const text = formatLegacyConfigFile("/somewhere/my-app/kn-next.config.ts");
+
+    it("names both the old and new filename, and the rename command", () => {
+        expect(text).toContain("kn-next.config.ts");
+        expect(text).toContain("knext.config.ts");
+        expect(text).toContain("mv kn-next.config.ts knext.config.ts");
+    });
+
+    it("carries no stack frame and no bundler chunk path", () => {
+        expect(text).not.toMatch(STACK_FRAME_RE);
         expect(text).not.toContain("FATAL");
     });
 });
@@ -121,6 +142,18 @@ describe("handleConfigNotFound only claims the missing-config error", () => {
             false,
         );
         expect(out).toEqual([]);
+    });
+});
+
+describe("handleConfigNotFound also claims the legacy-config-file error (#1559)", () => {
+    it("handles LEGACY_CONFIG_FILE_CODE and writes the rename guidance", () => {
+        const out: string[] = [];
+        const err = Object.assign(new Error("Legacy config file found: /x"), {
+            code: LEGACY_CONFIG_FILE_CODE,
+            legacyPath: "/x/kn-next.config.ts",
+        });
+        expect(handleConfigNotFound(err, (t) => out.push(t))).toBe(true);
+        expect(out.join("")).toContain("mv kn-next.config.ts knext.config.ts");
     });
 });
 
@@ -216,9 +249,42 @@ describe("end-to-end: the real deploy entry in a directory with no config", () =
             });
             const combined = `${r.stdout}${r.stderr}`;
             expect(r.status).toBe(1);
-            expect(combined).toContain("kn-next.config.ts");
+            expect(combined).toContain("knext.config.ts");
             expect(combined).toContain("npx @getknext/core create");
             expect(combined).toContain("https://knext.dev");
+            expect(combined).not.toContain("FATAL");
+            expect(combined).not.toMatch(STACK_FRAME_RE);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("exits 1 with the rename guidance when only kn-next.config.ts is present (no dual-read, #1559)", () => {
+        const probe = spawnSync(bun, ["--version"], { encoding: "utf8" });
+        if (probe.error) {
+            expect(existsSync(entry)).toBe(true);
+            return;
+        }
+        const dir = mkdtempSync(join(tmpdir(), "knext-legacyconfig-e2e-"));
+        try {
+            writeFileSync(
+                join(dir, "kn-next.config.ts"),
+                [
+                    "export default {",
+                    "  name: 'legacy-app',",
+                    "  registry: 'reg.example.com',",
+                    "};",
+                ].join("\n"),
+                "utf-8",
+            );
+            const r = spawnSync(bun, [entry], {
+                cwd: dir,
+                encoding: "utf8",
+                env: { ...process.env, NO_COLOR: "1" },
+            });
+            const combined = `${r.stdout}${r.stderr}`;
+            expect(r.status).toBe(1);
+            expect(combined).toContain("mv kn-next.config.ts knext.config.ts");
             expect(combined).not.toContain("FATAL");
             expect(combined).not.toMatch(STACK_FRAME_RE);
         } finally {

@@ -1035,7 +1035,7 @@ describe('scripts/check-coverage.mjs — attribution decides the honest floor', 
     };
   }
   // `throw new UsageError(` whose lead line is a plain literal — attributable.
-  const OK = block(DEPLOY, '"--bucket overrides storage.bucket, but kn-next.config.ts has " +');
+  const OK = block(DEPLOY, '"--bucket overrides storage.bucket, but knext.config.ts has " +');
   // `throw new Error(` whose lead line converts `${image}` — NOT attributable.
   const SUBST = block(CR, 'is not digest-pinned. ');
 

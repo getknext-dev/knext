@@ -31,12 +31,13 @@
  *   (a cold DB wakes in ~2.5s), and warns on sslmode=disable.
  */
 
-import { existsSync, readFileSync, writeSync } from "node:fs";
+import { readFileSync, writeSync } from "node:fs";
 import YAML from "yaml";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
 import {
+    CONFIG_NOT_FOUND_CODE,
     loadConfig,
     resolveKubeContext,
     UsageError,
@@ -162,7 +163,7 @@ export function validateDbBindOptions(opts: DbBindOptions): void {
 }
 
 /**
- * Minimal shape of the parts of a NextApp spec (or its kn-next.config
+ * Minimal shape of the parts of a NextApp spec (or its knext.config
  * equivalent) that ADR-0019's matrix cross-checks against.
  */
 export interface BindTargetSpec {
@@ -173,7 +174,7 @@ export interface BindTargetSpec {
 /**
  * Cross-source validation — ADR-0019 rules 3/4 (envMap DATABASE_URL/_RO
  * collisions). `source` names where the conflicting spec came from
- * ("config" = local kn-next.config.ts, "cluster" = the live NextApp CR) so
+ * ("config" = local knext.config.ts, "cluster" = the live NextApp CR) so
  * the error points at the right file. (Rules 5/7 — managed-vs-BYO mutual
  * exclusion and managed-mode-only provisioning knobs — were removed with
  * managed database mode itself; ADR-0025 #303, #404.)
@@ -350,7 +351,7 @@ export async function runDbBind(
     const context = resolveKubeContext(opts.context);
 
     // Local config cross-check — envMap DATABASE_URL/_RO collisions (rules
-    // 3/4) may be visible in kn-next.config.ts before ever reaching a CR.
+    // 3/4) may be visible in knext.config.ts before ever reaching a CR.
     if (localConfig && typeof localConfig === "object") {
         const cfg = localConfig as {
             database?: Record<string, unknown>;
@@ -509,15 +510,24 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
 
     // Resolve the app name: positional wins, else the local config's name.
     // The config (when present) also feeds the envMap-collision cross-check
-    // (rules 3/4).
+    // (rules 3/4). A missing config is fine here (an explicit app positional
+    // covers it) — swallowed by code, not existsSync, so the pre-rename
+    // filename (#1559) still surfaces its actionable LegacyConfigFileError
+    // instead of silently falling through to "app name required".
     let localConfig: KnativeNextConfig | undefined;
-    if (existsSync("kn-next.config.ts")) {
+    try {
         localConfig = await loadConfig();
+    } catch (err) {
+        if (
+            (err as { code?: unknown } | null)?.code !== CONFIG_NOT_FOUND_CODE
+        ) {
+            throw err;
+        }
     }
     const appName = opts.app ?? localConfig?.name;
     if (!appName) {
         throw new UsageError(
-            "app name required: pass it as a positional (knext db bind <app> …) or run from a directory with kn-next.config.ts",
+            "app name required: pass it as a positional (knext db bind <app> …) or run from a directory with knext.config.ts",
         );
     }
 

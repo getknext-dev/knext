@@ -118,7 +118,7 @@ const (
 
 	// gcAppName doubles as the app-scoped object-store key prefix
 	// (`<app>/…`, ADR-0008) — MUST match the `name` in the rendered
-	// kn-next.config.ts below.
+	// knext.config.ts below.
 	gcAppName = "gc-e2e-app"
 	gcBucket  = "gc-e2e-assets"
 
@@ -549,7 +549,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 	}
 
 	// gcRunCLI invokes the REAL built CLI with plain node, cwd = the rendered
-	// app dir (kn-next.config.ts lives there).
+	// app dir (knext.config.ts lives there).
 	gcRunCLI := func(args ...string) utils.CLIResult {
 		res, err := utils.RunCLIInDir(appDir, args...)
 		Expect(err).NotTo(HaveOccurred(),
@@ -674,7 +674,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			Expect(err).NotTo(HaveOccurred(), out)
 		}
 
-		By("rendering the throwaway app dir with kn-next.config.ts (provider s3, assetRetention 1)")
+		By("rendering the throwaway app dir with knext.config.ts (provider s3, assetRetention 1)")
 		appDir, err = os.MkdirTemp("", "gc-e2e-app-*")
 		Expect(err).NotTo(HaveOccurred())
 		// assetRetention: 1 makes the scenario sharp: ONLY the live-set rule
@@ -690,7 +690,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
     },
 };
 `, gcAppName, gcBucket, endpointURL+"/"+gcBucket)
-		Expect(os.WriteFile(filepath.Join(appDir, "kn-next.config.ts"), []byte(config), 0o644)).
+		Expect(os.WriteFile(filepath.Join(appDir, "knext.config.ts"), []byte(config), 0o644)).
 			To(Succeed())
 
 		By("applying the NextApp WITHOUT spec.buildId (TARGET=rev1) — the fail-safe premise")
@@ -1030,7 +1030,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
     },
 };
 `, gcPinnedAppName, gcBucket, endpointURL+"/"+gcBucket)
-		Expect(os.WriteFile(filepath.Join(pinnedDir, "kn-next.config.ts"), []byte(pinnedConfig), 0o644)).
+		Expect(os.WriteFile(filepath.Join(pinnedDir, "knext.config.ts"), []byte(pinnedConfig), 0o644)).
 			To(Succeed())
 
 		By("seeding MARKED build prefixes a window-only prune WOULD reap (retain=1) — the skip assertion has teeth")

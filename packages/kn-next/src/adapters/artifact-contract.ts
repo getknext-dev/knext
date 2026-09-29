@@ -230,7 +230,7 @@ export const turbopackBuilder: BuilderAdapter = {
  * no new branch anywhere keyed on the builder id. Only `describeArtifact`
  * exists as its own object so `BUILDERS` can enumerate a real, distinct
  * `BuilderAdapter` per id — the object identity is what the CLI reports back
- * (`kn-next.config.ts`'s `build` value), not a difference in what gets built.
+ * (`knext.config.ts`'s `build` value), not a difference in what gets built.
  *
  * AVAILABLE from the start: nothing about running `next build --webpack`
  * needs new toolchain — it is the same `next` binary the turbopack target
@@ -409,7 +409,7 @@ export const RUNTIMES: readonly RuntimeAdapter[] = [nodeRuntime, bunRuntime];
  *
  * `"bun"`, matching ADR-0054's actual default cell: bun-standalone, packaged
  * as the compiled `--bytecode` single executable (#1225) — not the uncompiled
- * node-standalone fallback. A bare `kn-next.config.ts` (no `build`, no
+ * node-standalone fallback. A bare `knext.config.ts` (no `build`, no
  * `runtime`) now resolves to `build: "turbopack"` (`DEFAULT_BUILDER_ID`) ×
  * `runtime: "bun"` (this constant), the credentialed v1.0 default (ADR-0058
  * §Decision 2). This is ALSO vinext's own absent-runtime default (see

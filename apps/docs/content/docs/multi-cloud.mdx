@@ -30,7 +30,7 @@ itself — it invokes the already-authenticated CLI.
 
 ## Config shape
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 storage: {
   provider: 's3',                 // gcs | s3 | minio | azure
   bucket: 'acme-assets',    // bucket name — for azure, the blob container
@@ -44,7 +44,7 @@ browser fetches static chunks from object storage rather than the pod.
 
 ## Starting without object storage
 
-You can leave `storage` out of `kn-next.config.ts` entirely. Your app then serves its own static
+You can leave `storage` out of `knext.config.ts` entirely. Your app then serves its own static
 files from the container image — exactly how `next start` works — and every deploy prints a notice
 saying it is running in this mode. Nothing else changes: deploys, scale-to-zero, rollback, and
 `next/image` all keep working. It is the right starting point for a new app; `knext create`

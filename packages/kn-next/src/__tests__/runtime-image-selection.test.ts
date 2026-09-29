@@ -183,12 +183,12 @@ describe("selectRuntimeImage — target selection by (build, runtime)", () => {
     });
 
     it("an unrecognised build id THROWS rather than silently building the standalone recipe (cr-1181 #3, fail-closed)", () => {
-        // A caller reading `kn-next.config.ts` at runtime is not TS-checked
+        // A caller reading `knext.config.ts` at runtime is not TS-checked
         // against `BuilderId` — a config file can carry any string. A future
         // builder id (e.g. a compiled `+exec` shape) must not silently select
         // the `.next/standalone` recipe just because it isn't literally
         // "vinext"; it must be recognised by the artifact contract or refused.
-        // `config.build` is read from `kn-next.config.ts` at runtime, so it
+        // `config.build` is read from `knext.config.ts` at runtime, so it
         // is not TS-checked against `BuilderId` there — simulate that with
         // `unknown`, not `any`.
         const unrecognisedConfig = {

@@ -82,7 +82,7 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
                 verb: "validate",
                 display: "validate",
                 summary:
-                    "check kn-next.config.ts is filled in and valid (reads only your config file — no cluster needed)",
+                    "check knext.config.ts is filled in and valid (reads only your config file — no cluster needed)",
             },
             {
                 verb: "doctor",

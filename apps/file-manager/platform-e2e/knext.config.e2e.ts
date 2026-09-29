@@ -3,7 +3,7 @@ import type { KnativeNextConfig } from '@getknext/core';
 /**
  * The file-manager config PROFILE for the nightly platform e2e (#1282).
  *
- * The nightly copies this over `apps/file-manager/kn-next.config.ts` inside the
+ * The nightly copies this over `apps/file-manager/knext.config.ts` inside the
  * runner's throwaway checkout, then runs the real `kn-next deploy`. The
  * committed config names a GCS bucket and a GCP registry, and neither exists
  * on an ephemeral kind cluster.

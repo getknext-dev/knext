@@ -16,9 +16,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { KnativeNextConfig } from '@getknext/core';
 import { ConfigValidationError, validateConfig } from '@getknext/core/validate';
-import config from '../kn-next.config';
+import config from '../knext.config';
 
-describe('knext-docs dogfood kn-next.config.ts', () => {
+describe('knext-docs dogfood knext.config.ts', () => {
   it('passes the real validateConfig', () => {
     expect(() => validateConfig(config)).not.toThrow();
   });

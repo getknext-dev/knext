@@ -77,7 +77,7 @@ interface Fixture {
 function makeVinextApp(bun: FakeBun): Fixture {
     const dir = mkdtempSync(join(tmpdir(), "knext-948-"));
     writeFileSync(
-        join(dir, "kn-next.config.ts"),
+        join(dir, "knext.config.ts"),
         [
             "const config = {",
             "  name: 'smoke-app',",

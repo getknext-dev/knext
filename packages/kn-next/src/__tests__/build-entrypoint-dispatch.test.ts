@@ -257,7 +257,7 @@ describe("#1235 build.ts's isEntrypoint dispatcher — the usage-error path", ()
 describe("#1235 build.ts's isEntrypoint dispatcher — the missing-config path", () => {
     it("exits 1 and renders the missing-config guidance, never reaching log.fatal", async () => {
         loadConfig.mockRejectedValue(
-            new ConfigNotFoundError(join(dir, "kn-next.config.ts"), dir),
+            new ConfigNotFoundError(join(dir, "knext.config.ts"), dir),
         );
 
         const { exitCode } = await runEntrypoint([]);
@@ -268,7 +268,7 @@ describe("#1235 build.ts's isEntrypoint dispatcher — the missing-config path",
         // dispatcher before `handleUsageError` is ever reached.
         expect(handleUsageErrorCalls).toHaveLength(0);
         expect(fatal).not.toHaveBeenCalled();
-        expect(capturedWrites.join("")).toContain("No kn-next.config.ts found");
+        expect(capturedWrites.join("")).toContain("No knext.config.ts found");
     });
 });
 

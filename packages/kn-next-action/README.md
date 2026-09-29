@@ -96,7 +96,7 @@ only with a cluster-admin one.
 | `registry` | yes | — | registry host and namespace; the app's `name` is appended (`ghcr.io/acme` → `ghcr.io/acme/<name>`) |
 | `registry-token` | no | — | on GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
-| `working-directory` | no | `.` | where `kn-next.config.ts` lives |
+| `working-directory` | no | `.` | where `knext.config.ts` lives |
 | `tag` | no | `github.sha` | a timestamp cannot be traced to a commit |
 | `bucket` | no | from config | object storage for static assets |
 | `skip-upload` | no | `false` | the credential-free path — no cloud CLI needed |

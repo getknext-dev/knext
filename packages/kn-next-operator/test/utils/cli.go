@@ -79,7 +79,7 @@ func RunCLI(args ...string) (CLIResult, error) {
 }
 
 // RunCLIInDir is RunCLI with an explicit working directory — needed by the
-// e2e_gc suite because `kn-next gc` loads kn-next.config.ts from the CURRENT
+// e2e_gc suite because `kn-next gc` loads knext.config.ts from the CURRENT
 // directory (the suite renders a throwaway app dir with the test config).
 func RunCLIInDir(dir string, args ...string) (CLIResult, error) {
 	bin, err := CLIBin()

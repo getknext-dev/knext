@@ -45,9 +45,9 @@ there instead.
 
 ## Describe the deployment
 
-Create `kn-next.config.ts` beside `next.config.ts`:
+Create `knext.config.ts` beside `next.config.ts`:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
@@ -107,11 +107,11 @@ from it, and neither behavior means "put secrets there":
 - **Plain (non-`NEXT_PUBLIC_`) values are server-side only, and knext's runtime image never carries
   a baked `.env.production` for the server to read them from at boot.** If you are used to Next
   reading server-side config from that file at runtime, stop relying on it here — deploy it and the
-  value is simply absent. Move it to `kn-next.config.ts` instead:
+  value is simply absent. Move it to `knext.config.ts` instead:
 
-- **Plain, non-secret values** — `env` in `kn-next.config.ts`, applied straight to the container.
+- **Plain, non-secret values** — `env` in `knext.config.ts`, applied straight to the container.
 - **Secrets** — a Kubernetes Secret, referenced from `secrets.envFrom`/`secrets.envMap` in
-  `kn-next.config.ts`. The operator injects it at the container level; it is never written to a
+  `knext.config.ts`. The operator injects it at the container level; it is never written to a
   file inside the image.
 
 ## The one line that matters most

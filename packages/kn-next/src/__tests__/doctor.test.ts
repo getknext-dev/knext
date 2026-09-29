@@ -251,7 +251,7 @@ describe("runDoctor — healthy cluster", () => {
             "netpol",
         ]);
         for (const c of report.checks) {
-            // storage-mode is LOCAL (ADR-0047): with no kn-next.config.ts in
+            // storage-mode is LOCAL (ADR-0047): with no knext.config.ts in
             // the test's cwd it reports skip — an informational state, never
             // a failure, and never a reason for a healthy cluster to exit 1.
             if (c.id === "storage-mode") {

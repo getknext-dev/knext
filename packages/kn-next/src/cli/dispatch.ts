@@ -117,7 +117,7 @@ export function formatStrayPositional(token: string): string {
         } else {
             lines.push(
                 "knext deploy takes no positional arguments — the app it deploys",
-                "comes from kn-next.config.ts in the current directory.",
+                "comes from knext.config.ts in the current directory.",
             );
         }
     }

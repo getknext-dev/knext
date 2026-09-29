@@ -7,8 +7,9 @@
  *  - dbMain routing: unknown subcommand throws, `migrate` delegates, `bind`
  *    resolves an app name (positional or config) and runs the dry-run patch.
  *
- * dbMain reads existsSync("kn-next.config.ts") from cwd, so these run in a temp
- * cwd with no config file (app name must come from the positional).
+ * dbMain calls loadConfig() (knext.config.ts) unconditionally and swallows a
+ * missing-file error (#1559), so these run in a temp cwd with no config file
+ * (app name must come from the positional).
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -119,7 +120,7 @@ describe("dbMain", () => {
     });
 
     it("bind: resolves the positional app name and runs the dry-run patch", async () => {
-        // No kn-next.config.ts in the temp cwd → app name must come from argv.
+        // No knext.config.ts in the temp cwd → app name must come from argv.
         await expect(
             dbMain(["bind", "my-app", "--secret", "shop-db", "--dry-run"]),
         ).resolves.toBeUndefined();

@@ -30,11 +30,5 @@
     ".source",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": [
-    "node_modules",
-    "_design-reference",
-    "next-adapter.ts",
-    "kn-next.config.ts",
-    "scripts"
-  ]
+  "exclude": ["node_modules", "_design-reference", "next-adapter.ts", "knext.config.ts", "scripts"]
 }

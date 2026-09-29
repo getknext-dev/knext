@@ -13,7 +13,7 @@ This project is a serverless, cloud-agnostic platform for Next.js. Following a p
 - **Bytecode Caching**: Utilizes Node.js 24's `NODE_COMPILE_CACHE` with ReadWriteMany persistent volumes to bypass V8 JIT compilation and significantly reduce cold start times.
 
 ## 2. Core Principles
-1. **The Internalization Principle**: The application directory should only contain code and policy configuration (`kn-next.config.ts`). Infrastructure manifests (`knative-service.yaml`, `open-next.config.ts`) and shell scripts should NOT be checked in; they are managed by the CLI.
+1. **The Internalization Principle**: The application directory should only contain code and policy configuration (`knext.config.ts`). Infrastructure manifests (`knative-service.yaml`, `open-next.config.ts`) and shell scripts should NOT be checked in; they are managed by the CLI.
 2. **Cache Key Stability Principle**: The framework distinguishes between Incremental Cache (versioned by `BUILD_ID`) and Tag Cache (stable across builds). By removing `BUILD_ID` from Redis tag keys, the system prevents deployment-time cache invalidation, maintaining high performance during rolling updates.
 3. **Atomic Build-Sync Pattern & Deterministic Build-Host Principle**: Always ensure environment variables flow predictably from build to host.
 4. **Self-Healing Schema Management**: Use `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for seamless schema evolutions without down-time. Unique constraints must be enforced for idempotent upsert operations.
@@ -27,7 +27,7 @@ This project is a serverless, cloud-agnostic platform for Next.js. Following a p
 ## 4. CI/CD and Deployment (CLI Tooling)
 - **Deployment via kn-next CLI**: Use `kn-next deploy` which supports full parameterization for automated environments. Uses flags for Registry Overrides (`KN_REGISTRY`), Dynamic Tagging (`KN_IMAGE_TAG`), and Namespace Isolation (`--namespace`).
 - **Idempotency and Dry Runs**: The CLI supports `--dry-run` to preview generated Knative Service manifests before applying them to the cluster.
-- **Knative Scaling configuration**: Use `minScale: 1` and `maxScale: 2` (or similar) through `kn-next.config.ts` to ensure consistent performance.
+- **Knative Scaling configuration**: Use `minScale: 1` and `maxScale: 2` (or similar) through `knext.config.ts` to ensure consistent performance.
 
 ## 5. Development & Git Standards
 - **Monorepo Management**: The project is structured as a Turborepo using `pnpm` workspaces. Ensure dependencies are properly scoped and managed at the root or workspace level.

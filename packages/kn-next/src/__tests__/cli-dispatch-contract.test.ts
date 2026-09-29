@@ -173,7 +173,7 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
         "db-bind.ts": [
             "not found in namespace",
             "operator predates spec.database.secretRef",
-            // Config/CR conflict — the fix is an edit to kn-next.config.ts, not
+            // Config/CR conflict — the fix is an edit to knext.config.ts, not
             // to the command line.
             "it is already defined in spec.secrets.envMap",
             // Internal invariant of an exported builder (unreachable from argv:
@@ -250,7 +250,7 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // argv today: `validate.ts` rejects every `build` value except
             // `vinext` before a deploy/build ever reaches this selector, so
             // there is no CLI flag whose removal fixes it). The fix, if this
-            // ever DOES trigger, is a `kn-next.config.ts` edit selecting a
+            // ever DOES trigger, is a `knext.config.ts` edit selecting a
             // known builder id — not a different command line. cr-1181 #3.
             "unrecognised build id",
         ],

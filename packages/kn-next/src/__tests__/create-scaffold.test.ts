@@ -375,9 +375,9 @@ describe("knext create --builder vinext — the generated package.json is runnab
     });
 
     it("ships the vinext × node cell too: a node entry, a node-preset arm, and its image (#1260)", () => {
-        // runtime: 'node' in kn-next.config.ts must produce a node-runnable
+        // runtime: 'node' in knext.config.ts must produce a node-runnable
         // artifact with no hand edits. The vite config reads the runtime from
-        // kn-next.config.ts (the one source `knext build` and `knext
+        // knext.config.ts (the one source `knext build` and `knext
         // deploy` also read), so both halves of the preset choice live there.
         const { appDir } = scaffoldVinextApp();
 
@@ -403,7 +403,7 @@ describe("knext create --builder vinext — the generated package.json is runnab
         );
 
         const vite = readFileSync(join(appDir, "vite.config.ts"), "utf8");
-        expect(vite).toContain("./kn-next.config");
+        expect(vite).toContain("./knext.config");
         expect(vite).toContain("./knext-node-entry.mjs");
         expect(vite).toContain("'node'");
 
@@ -720,7 +720,7 @@ describe("knext create — the CLI entry (createMain)", () => {
 describe("knext create — the app name is VALIDATED, never escaped-and-shipped", () => {
     /**
      * The name is interpolated into JSON (`package.json`), TypeScript
-     * (`kn-next.config.ts`) and JSX (the page) — and it becomes the NextApp /
+     * (`knext.config.ts`) and JSX (the page) — and it becomes the NextApp /
      * Knative Service name, which Kubernetes requires to be an RFC1123 label.
      * `renderScaffold` already refuses to emit an unsubstituted placeholder;
      * the same discipline applies here. REJECT, do not escape: an escaped
@@ -728,10 +728,7 @@ describe("knext create — the app name is VALIDATED, never escaped-and-shipped"
      * later and further from the cause.
      */
     const INVALID = [
-        [
-            'ev"il',
-            "breaks package.json out of JSON and kn-next.config out of TS",
-        ],
+        ['ev"il', "breaks package.json out of JSON and knext.config out of TS"],
         ["My App", "spaces are not RFC1123"],
         ["UPPER_Case", "uppercase + underscore are not RFC1123"],
         ["../escape", "path traversal"],
@@ -901,15 +898,15 @@ describe("knext create — the scaffolded config keeps the last pod warm (ADR-00
      * removed by deleting a line. So this is asserted on the generated app, not
      * on the CR builder.
      */
-    it('writes scaleDownDelay: "5m" into the generated kn-next.config.ts', () => {
+    it('writes scaleDownDelay: "5m" into the generated knext.config.ts', () => {
         const { appDir } = scaffoldApp("warm-app");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         expect(config).toMatch(/scaleDownDelay:\s*"5m"/);
     });
 
     it("puts it inside the scaling block (a stray top-level key is not the field)", () => {
         const { appDir } = scaffoldApp("warm-scope");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         const scalingBlock = /scaling:\s*\{([\s\S]*?)\n\s*\},/.exec(config);
         expect(scalingBlock).not.toBeNull();
         expect(scalingBlock?.[1]).toMatch(/scaleDownDelay:\s*"5m"/);
@@ -917,7 +914,7 @@ describe("knext create — the scaffolded config keeps the last pod warm (ADR-00
 
     it("states the idle cost and the opt-out in a comment next to it", () => {
         const { appDir } = scaffoldApp("warm-doc");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         const line = config
             .split("\n")
             .findIndex((l) => /scaleDownDelay:/.test(l));
@@ -931,7 +928,7 @@ describe("knext create — the scaffolded config keeps the last pod warm (ADR-00
 
     it("the scaffolded value SURVIVES the CLI's own validation (a config that cannot deploy is not a scaffold)", async () => {
         const { appDir } = scaffoldApp("warm-valid");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         const value = /scaleDownDelay:\s*"([^"]+)"/.exec(config)?.[1];
         expect(value).toBe("5m");
         const { validateConfig } = await import("../cli/validate");
@@ -951,7 +948,7 @@ describe("knext create — the scaffolded config keeps the last pod warm (ADR-00
 
     it("the scaffolded value FLOWS into the emitted NextApp CR (a config the builder drops is decoration)", async () => {
         const { appDir } = scaffoldApp("warm-flow");
-        const config = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const config = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         const value = /scaleDownDelay:\s*"([^"]+)"/.exec(config)?.[1];
         const { buildNextAppCRObject } = await import("../cli/cr-builder");
         const cr = buildNextAppCRObject(

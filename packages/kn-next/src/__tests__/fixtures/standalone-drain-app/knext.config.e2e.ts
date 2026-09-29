@@ -33,7 +33,7 @@
  *
  * Untyped on purpose: this fixture lives inside @getknext/core's own source
  * tree, where `import type { KnativeNextConfig } from "@getknext/core"` does
- * not resolve for the package typecheck (same reason `vinext-node-app/kn-next.config.ts`
+ * not resolve for the package typecheck (same reason `vinext-node-app/knext.config.ts`
  * is untyped). The shape is what a real app writes.
  */
 const config = {

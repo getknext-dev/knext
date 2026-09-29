@@ -91,7 +91,12 @@ import {
 } from "../cli/dispatch";
 import { parsePreviewArgs } from "../cli/preview";
 import { parseRollbackArgs } from "../cli/rollback";
-import { handleUsageError, USAGE_ERROR_CODE, UsageError } from "../cli/shared";
+import {
+    CONFIG_NOT_FOUND_CODE,
+    handleUsageError,
+    USAGE_ERROR_CODE,
+    UsageError,
+} from "../cli/shared";
 import { statusMain } from "../cli/status";
 
 /** Capture what a *Main writes to fd 1 without polluting the test output. */
@@ -144,7 +149,7 @@ describe("cleanupMain — a destructive verb that must not act on a flag", () =>
     it("rejects a stray positional and says where the app name comes from", async () => {
         await expect(cleanupMain(["myapp"])).rejects.toMatchObject({
             code: USAGE_ERROR_CODE,
-            message: expect.stringContaining("kn-next.config.ts"),
+            message: expect.stringContaining("knext.config.ts"),
         });
         expect(runQuiet).not.toHaveBeenCalled();
     });
@@ -216,7 +221,7 @@ describe("formatStrayPositional — three shapes of the same mistake", () => {
         const text = formatStrayPositional("xyzzy");
         expect(text).toContain("unexpected argument: xyzzy");
         expect(text).not.toContain("Did you mean");
-        expect(text).toContain("kn-next.config.ts");
+        expect(text).toContain("knext.config.ts");
     });
 
     it("quotes a token that would otherwise render as blank", () => {
@@ -363,6 +368,17 @@ describe("statusMain / parseRollbackArgs / parsePreviewArgs usage rejections", (
         const dir = mkdtempSync(join(tmpdir(), "knext-status-noapp-"));
         scratchDirs.push(dir);
         process.chdir(dir);
+        // statusMain now calls the (mocked) loadConfig unconditionally when no
+        // positional is given (#1559 — swallowed by discriminator code, not a
+        // pre-check `existsSync`, so the real implementation still surfaces the
+        // pre-rename-file error). Match that here: the global beforeEach makes
+        // loadConfig resolve by default, so this one call must reproduce
+        // "no config in this directory" for the usage rejection to fire.
+        loadConfig.mockRejectedValueOnce(
+            Object.assign(new Error("Config file not found"), {
+                code: CONFIG_NOT_FOUND_CODE,
+            }),
+        );
         await expect(statusMain([])).rejects.toMatchObject({
             code: USAGE_ERROR_CODE,
             message: expect.stringContaining("app name required"),
@@ -376,14 +392,14 @@ describe("statusMain / parseRollbackArgs / parsePreviewArgs usage rejections", (
         });
     });
 
-    it("statusMain takes the app from kn-next.config.ts when the positional is absent", async () => {
+    it("statusMain takes the app from knext.config.ts when the positional is absent", async () => {
         // Proves the loadConfig branch is reached, without a cluster: the
         // resolved name is what runStatus would query for, and kubectlRunner
         // (./doctor — the dep statusMain actually wires) is mocked to fail
         // fast, so it gets past the usage stage without spawning anything.
         const dir = mkdtempSync(join(tmpdir(), "knext-status-config-"));
         scratchDirs.push(dir);
-        writeFileSync(join(dir, "kn-next.config.ts"), "export default {};\n");
+        writeFileSync(join(dir, "knext.config.ts"), "export default {};\n");
         process.chdir(dir);
         runCapture.mockReturnValue("");
         await expect(statusMain([])).rejects.not.toMatchObject({

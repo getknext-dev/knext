@@ -6,10 +6,10 @@
  * function is exported and must refuse to build a patch with no secret),
  * `extractDsnFromSecretManifest`'s base64-decode-throws fallback (defensive:
  * `Buffer.from(x, "base64")` does not normally throw, so this is only
- * reachable by making it), the `dbMain` local-config load branch
- * (`existsSync("kn-next.config.ts")` true), and `dbMain`'s own post-bind
- * "Patched NextApp" log line on the non-dry-run leg (every existing dbMain
- * test uses `--dry-run`).
+ * reachable by making it), the `dbMain` local-config load branch (loadConfig()
+ * resolving `knext.config.ts` when present, #1559), and `dbMain`'s own
+ * post-bind "Patched NextApp" log line on the non-dry-run leg (every existing
+ * dbMain test uses `--dry-run`).
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -89,7 +89,7 @@ describe("extractDsnFromSecretManifest — base64 decode failure fallback", () =
     });
 });
 
-describe("dbMain — local kn-next.config.ts is loaded when present", () => {
+describe("dbMain — local knext.config.ts is loaded when present", () => {
     let dir: string;
     const savedCwd = process.cwd();
 
@@ -104,9 +104,9 @@ describe("dbMain — local kn-next.config.ts is loaded when present", () => {
         rmSync(dir, { recursive: true, force: true });
     });
 
-    it("resolves the app name from kn-next.config.ts's name when no positional is given", async () => {
+    it("resolves the app name from knext.config.ts's name when no positional is given", async () => {
         writeFileSync(
-            join(dir, "kn-next.config.ts"),
+            join(dir, "knext.config.ts"),
             [
                 "export default {",
                 '  name: "from-config",',

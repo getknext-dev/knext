@@ -447,7 +447,7 @@ describe("#1279 deploy.ts's isEntrypoint dispatcher — the missing-config path 
         // dispatcher before handleUsageError is ever reached.
         expect(handleUsageErrorCalls).toHaveLength(0);
         expect(fatal).not.toHaveBeenCalled();
-        expect(capturedWrites.join("")).toContain("No kn-next.config.ts found");
+        expect(capturedWrites.join("")).toContain("No knext.config.ts found");
     });
 });
 

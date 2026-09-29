@@ -28,7 +28,7 @@ inputs:
     required: true
 
   registry:
-    description: 'Container registry to push to (overrides kn-next.config.ts). Log in with docker/login-action before this step.'
+    description: 'Container registry to push to (overrides knext.config.ts). Log in with docker/login-action before this step.'
     required: false
 
   namespace:
@@ -41,7 +41,7 @@ inputs:
     required: false
 
   bucket:
-    description: 'Object-storage bucket for static assets (overrides kn-next.config.ts).'
+    description: 'Object-storage bucket for static assets (overrides knext.config.ts).'
     required: false
 
   skip-upload:
@@ -59,7 +59,7 @@ inputs:
     default: 'false'
 
   working-directory:
-    description: 'Directory containing kn-next.config.ts.'
+    description: 'Directory containing knext.config.ts.'
     required: false
     default: '.'
 

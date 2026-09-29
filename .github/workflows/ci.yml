@@ -1071,10 +1071,10 @@ jobs:
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
         run: bun run --filter @getknext/core build
 
-      # Config-validate gate: run the docs dogfood kn-next.config.ts through the
+      # Config-validate gate: run the docs dogfood knext.config.ts through the
       # REAL @getknext/core/validate (the public surface), same code path
       # `kn-next deploy` uses. Proves the workspace `./validate` export resolves.
-      - name: Validate the docs kn-next.config.ts (real validateConfig)
+      - name: Validate the docs knext.config.ts (real validateConfig)
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
         working-directory: apps/docs
         run: bun run config:validate

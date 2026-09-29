@@ -8,7 +8,7 @@
  * security boundary against an adversarial contributor — code review and the
  * compat lanes are that. The override scan therefore covers the runtime SURFACE
  * only (`inScope`): `packages/kn-next/src/**`, `packages/kn-next/templates/**`,
- * `apps/*\/vite.config*`, `apps/*\/kn-next.config*` (its `env` becomes pod env and an
+ * `apps/*\/vite.config*`, `apps/*\/knext.config*` (its `env` becomes pod env and an
  * explicit value is never overridden), every `knext-(node|bun)-entry.*` (they run
  * after the injected install module), `turbo/generators/templates/**` (scaffolder
  * output), every `Dockerfile*`, `apps/*\/deploy/**`, `.github/workflows/**` and
@@ -482,8 +482,8 @@ export function inScope(relPath: string): boolean {
         p.startsWith("packages/kn-next/templates/") ||
         /^apps\/[^/]+\/vite\.config[^/]*$/.test(p) ||
         /^apps\/[^/]+\/deploy\//.test(p) ||
-        // env: {} in kn-next.config* becomes pod env, an explicit value wins
-        /^apps\/[^/]+\/kn-next\.config[^/]*$/.test(p) ||
+        // env: {} in knext.config* becomes pod env, an explicit value wins
+        /^apps\/[^/]+\/knext\.config[^/]*$/.test(p) ||
         // runtime entries (they run after the injected install module)
         /^knext-(node|bun)-entry\./.test(b) ||
         // scaffolder templates emit the entries, vite/kn-next configs
@@ -754,7 +754,7 @@ describe(`the opt-out switch ${NORM} is scanned like ${NAME}`, () => {
         ["x.yaml", `env:\n  ${NORM}: !!str "0"`],
         ["x.yaml", `a: &a\n  ${NORM}: "0"\nenv:\n  <<: *a`],
         [
-            "apps/file-manager/kn-next.config.ts",
+            "apps/file-manager/knext.config.ts",
             `export default { env: { ${NORM}: '0' } };`,
         ],
         ["apps/docs/knext-bun-entry.mjs", `process.env.${NORM}='0';`],
@@ -764,7 +764,7 @@ describe(`the opt-out switch ${NORM} is scanned like ${NAME}`, () => {
         ],
         ["apps/docs/knext-bun-entry.mjs", `process.env.${NAME}='0';`],
         [
-            "apps/file-manager/kn-next.config.ts",
+            "apps/file-manager/knext.config.ts",
             `export default { env: { ${NAME}: "0" } };`,
         ],
     ];
@@ -818,14 +818,14 @@ describe("runtime-surface scope (the guard is a regression net, not a boundary)"
         "examples/bun-exec/Dockerfile.oke",
         ".env.example",
         "apps/file-manager/.env.local",
-        "apps/file-manager/kn-next.config.ts",
-        "apps/docs/kn-next.config.ts",
+        "apps/file-manager/knext.config.ts",
+        "apps/docs/knext.config.ts",
         "apps/docs/knext-bun-entry.mjs",
         "apps/file-manager/knext-bun-entry.mjs",
         "examples/bun-exec/knext-bun-entry.mjs",
         "turbo/generators/templates/zone/knext-bun-entry.mjs.hbs",
         "turbo/generators/templates/zone/vite.config.ts.hbs",
-        "turbo/generators/templates/zone/kn-next.config.ts.hbs",
+        "turbo/generators/templates/zone/knext.config.ts.hbs",
     ];
     for (const p of IN)
         it(`in scope: ${p}`, () => {
@@ -843,11 +843,11 @@ describe("runtime-surface scope (the guard is a regression net, not a boundary)"
         "scripts/deploy.sh",
         "benchmarks/run.sh",
         "docs/x.yaml",
-        "apps/file-manager/src/kn-next.config.ts",
+        "apps/file-manager/src/knext.config.ts",
         "apps/file-manager/next.config.ts",
         "turbo/generators/config.ts",
         "turbo/generatorsX/templates/x.hbs",
-        "examples/bun-exec/kn-next.config.ts",
+        "examples/bun-exec/knext.config.ts",
     ];
     for (const p of OUT)
         it(`documented limit — out of scope, ignored: ${p}`, () => {

@@ -18,8 +18,8 @@ import { unsafeAppliesInWorkflow } from '../scripts/lib/apply-safety-scan.mjs';
 const ROOT = resolve(import.meta.dirname, '..');
 const WF = resolve(ROOT, '.github/workflows/file-manager-platform-e2e-nightly.yml');
 const DATA_PLANE = resolve(ROOT, 'apps/file-manager/platform-e2e/data-plane.yaml');
-const PROFILE = resolve(ROOT, 'apps/file-manager/platform-e2e/kn-next.config.e2e.ts');
-const REAL_CONFIG = resolve(ROOT, 'apps/file-manager/kn-next.config.ts');
+const PROFILE = resolve(ROOT, 'apps/file-manager/platform-e2e/knext.config.e2e.ts');
+const REAL_CONFIG = resolve(ROOT, 'apps/file-manager/knext.config.ts');
 
 type Step = { name?: string; uses?: string; run?: string; if?: string; [k: string]: unknown };
 type Job = { steps: Step[]; needs?: string[]; if?: string; [k: string]: unknown };
