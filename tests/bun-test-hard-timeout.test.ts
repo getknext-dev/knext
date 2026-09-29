@@ -41,9 +41,20 @@ const GRANDCHILD_HANG_ABS = join(REPO_ROOT, GRANDCHILD_HANG_REL);
 // grandchild's — the grandchild is a bare `node -e ...`).
 const GRANDCHILD_MARKER = 'KNEXT_HARD_TIMEOUT_GRANDCHILD_CANARY_9f3a1c';
 
+// Third canary: the SAME grandchild-spawning shape, but under a LONG
+// file-timeout (never fires within the test) — what kills it here is
+// SIGINT delivered to the RUNNER itself, mirroring Ctrl-C / CI cancellation.
+// A distinct file + marker: this scenario's runner process and the
+// per-file-timeout scenario's runner process both exist briefly at once, and
+// sharing a marker would make one test's `ps` grep match the other's canary.
+const SIGINT_HANG_REL = 'tests/__hard-timeout-canary-sigint.test.ts';
+const SIGINT_HANG_ABS = join(REPO_ROOT, SIGINT_HANG_REL);
+const SIGINT_MARKER = 'KNEXT_HARD_TIMEOUT_GRANDCHILD_CANARY_SIGINT_2b71e0';
+
 afterEach(() => {
   rmSync(HANG_ABS, { force: true });
   rmSync(GRANDCHILD_HANG_ABS, { force: true });
+  rmSync(SIGINT_HANG_ABS, { force: true });
 });
 
 /**
@@ -84,6 +95,35 @@ function writeGrandchildHangingCanary() {
       '',
     ].join('\n'),
   );
+}
+
+function writeSigintGrandchildCanary() {
+  writeFileSync(
+    SIGINT_HANG_ABS,
+    [
+      "import { test } from 'bun:test';",
+      "import { spawnSync } from 'node:child_process';",
+      "test('hangs forever inside a spawnSync of a real, undying grandchild', () => {",
+      `  spawnSync('node', ['-e', '/* ${SIGINT_MARKER} */ setInterval(() => {}, 1000);'], { stdio: 'ignore' });`,
+      '}, 3_600_000);',
+      '',
+    ].join('\n'),
+  );
+}
+
+/**
+ * Polls `ps` for `marker` up to `timeoutMs`, so the caller does not send its
+ * signal before the grandchild has actually started (a fixed sleep would be
+ * either flaky-short or wastefully long).
+ */
+function waitForMarker(marker: string, timeoutMs: number): boolean {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const psOut = execSync('ps -eo command=', { encoding: 'utf8' });
+    if (psOut.includes(marker)) return true;
+    Bun.sleepSync(100);
+  }
+  return false;
 }
 
 describe('scripts/bun-test.mjs — per-file hard timeout', () => {
@@ -158,5 +198,50 @@ describe('scripts/bun-test.mjs — per-file hard timeout', () => {
       .filter((l) => l.includes(GRANDCHILD_MARKER))
       .join('\n');
     expect(survivors, `orphaned grandchild process(es) still running:\n${survivors}`).toBe('');
+  }, 40_000);
+
+  test("interrupting the runner itself (SIGINT) kills an in-flight file's grandchild too, not just the runner", async () => {
+    writeSigintGrandchildCanary();
+    // A file-timeout far longer than this test's own bound: what has to kill
+    // this run is SIGINT to the RUNNER, never the per-file kill-timer firing
+    // on its own — otherwise this test would pass for the wrong reason.
+    const proc = Bun.spawn(['node', RUNNER, SIGINT_HANG_REL, '--file-timeout=3600000'], {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      // Don't interrupt before the grandchild exists — that would trivially
+      // "pass" by never having anything to orphan.
+      const appeared = waitForMarker(SIGINT_MARKER, 15_000);
+      expect(appeared, 'grandchild canary never started').toBe(true);
+
+      proc.kill('SIGINT');
+      const exitCode = await proc.exited;
+      // The runner traps SIGINT and calls `process.exit(1)` itself, rather
+      // than letting the signal's default (uncatchable-from-here) action end
+      // it — that is what makes the group-kill in the handler run at all.
+      expect(exitCode).not.toBe(0);
+
+      // No orphan: the grandchild's process GROUP must be gone too, not just
+      // the runner and its immediate bun-test child.
+      const psOut = execSync('ps -eo pid=,ppid=,command=', { encoding: 'utf8' });
+      const survivors = psOut
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.includes(SIGINT_MARKER))
+        .join('\n');
+      expect(
+        survivors,
+        `orphaned grandchild process(es) still running after SIGINT:\n${survivors}`,
+      ).toBe('');
+    } finally {
+      // Belt-and-braces: never leave the runner itself running if an
+      // assertion above threw before `proc.exited` resolved.
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
   }, 40_000);
 });
