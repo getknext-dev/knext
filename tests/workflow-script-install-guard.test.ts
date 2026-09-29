@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
   findViolations,
   nonBuiltinPackagesFor,
@@ -92,18 +93,85 @@ describe('resolveScriptPath honors working-directory precedence (real case: ci.y
   });
 });
 
-describe('nonBuiltinPackagesFor — the spawnSync boundary is real, not assumed', () => {
-  it('ga-tarball-diff-gate.mjs reaches zero non-builtin packages (it spawns ga-tarball-diff.mjs as a CHILD PROCESS instead of importing it)', () => {
+describe('nonBuiltinPackagesFor — follows a spawned scripts/*.mjs into its own import closure (round 2)', () => {
+  it('ga-tarball-diff-gate.mjs reaches `tar` TRANSITIVELY, via the ga-tarball-diff.mjs it spawns as a CHILD PROCESS', () => {
     // This is the exact real file that motivated this guard (#1621/#1622) —
     // its own header comment explains it spawns a separate `node` process
-    // specifically so `tar` never enters ITS module graph. Checked here
-    // against the real file, not merely asserted in a comment.
-    expect(nonBuiltinPackagesFor('scripts/ga-tarball-diff-gate.mjs')).toEqual([]);
+    // specifically so `tar` never enters ITS OWN module graph. Round 1 of
+    // this guard stopped at that process boundary and reported `[]` here —
+    // which is exactly the #1621/#1622 shape it exists to catch: this step
+    // still runs inside the SAME CI job, so a missing install step here still
+    // crashes it. Checked against the real file, not a fixture.
+    const packages = nonBuiltinPackagesFor('scripts/ga-tarball-diff-gate.mjs');
+    expect(packages).toContain('tar');
   });
 
   it('ga-tarball-diff.mjs itself DOES reach a non-builtin package (tar) — the closure walker is not vacuously empty everywhere', () => {
     const packages = nonBuiltinPackagesFor('scripts/ga-tarball-diff.mjs');
     expect(packages.length).toBeGreaterThan(0);
+  });
+
+  it('does NOT follow a `bun` bareword subcommand as a script dispatch (`bun install`, `bun run build`, …)', () => {
+    // ga-tarball-diff.mjs also runs `execFileSync('bun', ['install', ...])`
+    // and `execFileSync('bun', ['run', 'build'], ...)` — neither names a
+    // scripts/*.mjs file, so following them would be a false trail, not a
+    // closed gap. Proven by the assertion above staying exactly `['tar']`
+    // (via rewrite-workspace-ranges.mjs, which has no external deps) rather
+    // than picking up unrelated packages from a misfired subcommand chase.
+    const packages = nonBuiltinPackagesFor('scripts/ga-tarball-diff-gate.mjs');
+    expect(packages).toEqual(['tar']);
+  });
+});
+
+describe('release.yml GA-tarball-diff job (round 2, #1639 review finding 1)', () => {
+  it('is clean today — the real install step still precedes the real spawn-reaching step', () => {
+    // Not a tautology: this walks release.yml's ACTUAL ga-tarball-diff job
+    // through the real spawn edge into ga-tarball-diff.mjs and its real `tar`
+    // dependency. It stays green only because the job's install step is
+    // still present — the next assertion proves the guard actually NOTICES
+    // when that step is removed, rather than this one passing vacuously.
+    const violations = findViolations();
+    expect(violations.filter((v) => v.workflow === 'release.yml')).toEqual([]);
+  });
+
+  it("REDS when the GA gate job's install step is removed — reproducing the exact #1621/#1622 job shape", () => {
+    // Copies the REAL release.yml into a temp workflow dir and strips only
+    // the "Install dependencies" step from the `ga-tarball-diff` job — byte-
+    // for-byte the pre-#1621 job shape (this is what PR #1651 round 1
+    // overclaimed coverage of: its own fixture used a synthetic direct
+    // import, not this spawn-based shape). The rest of the real repo
+    // (scripts/, other workflows) is scanned as-is via `repoRoot: REPO_ROOT`.
+    const root = makeFixture();
+    const doc = parseYaml(readFileSync(join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8'));
+    const job = doc.jobs['ga-tarball-diff'];
+    expect(
+      job,
+      'release.yml no longer has a `ga-tarball-diff` job — update this fixture',
+    ).toBeDefined();
+    job.steps = job.steps.filter(
+      (step: { run?: string }) =>
+        !(typeof step.run === 'string' && /\b(?:bun|npm|pnpm)\s+(?:install|ci)\b/.test(step.run)),
+    );
+    writeWorkflow(
+      root,
+      'release.yml',
+      stringifyYaml({ name: doc.name, on: doc.on, jobs: { 'ga-tarball-diff': job } }),
+    );
+
+    // repoRoot stays REPO_ROOT (the real repo) — only the workflow copy is
+    // synthetic, so `scripts/ga-tarball-diff-gate.mjs` resolves to the real
+    // file and its real spawn edge into `scripts/ga-tarball-diff.mjs` (tar).
+    const violations = findViolations({
+      workflowsDir: join(root, '.github', 'workflows'),
+      repoRoot: REPO_ROOT,
+    });
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      workflow: 'release.yml',
+      jobId: 'ga-tarball-diff',
+      script: 'scripts/ga-tarball-diff-gate.mjs',
+    });
+    expect(violations[0].packages).toContain('tar');
   });
 });
 
