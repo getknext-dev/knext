@@ -57,6 +57,22 @@ anchored regex and tests it against a representative tag (`v1.0.0`) rather
 than hardcoding a fixed set of accepted literal strings — a ruleset scoped to
 `refs/tags/v*`, `v*`, or `~ALL` all pass; `release-*` does not.
 
+`tagRulesetCoversVStar` (the function that decides whether one ruleset ACTUALLY
+protects v*) checks three things, all required:
+
+1. `conditions.ref_name.include` contains a v*-covering glob (above).
+2. `conditions.ref_name.exclude` does **not** also cover v* — a ruleset can
+   have an `include` that covers v* and an `exclude` that carves it back out
+   (a plausible "protect all tags except prereleases" config). Checking
+   `include` alone was a false PASS on exactly this axis; both an
+   `include`-covers case and an `exclude`-carves-it-back-out case are
+   mutation-proved separately.
+3. `enforcement === 'active'`. GitHub's other two values are `disabled`
+   (filtered out earlier, before the detail fetch) and `evaluate` — a real
+   dry-run mode that logs would-be violations but blocks nothing. An
+   evaluate-only ruleset would otherwise read as "protected" while a
+   force-push or tag deletion goes through unblocked.
+
 ## Two different kinds of "not verified" — never conflated
 
 The whole reason this module returns a `kind`, not a bare boolean:

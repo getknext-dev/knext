@@ -108,14 +108,36 @@ export function matchesVStarGlob(pattern) {
 }
 
 /**
- * @param {{ conditions?: { ref_name?: { include?: unknown } } }} ruleset one
- *   ruleset's FULL detail (`GET rulesets/{id}`), not the summary from the list
+ * Does one ruleset ACTUALLY protect v*-style tags — both halves of #1650
+ * round 2 finding 3 (previously only `include` was checked):
+ *
+ *   - `conditions.ref_name.exclude` can carve v* back OUT of an `include` that
+ *     otherwise covers it — a plausible "protect all tags except prereleases"
+ *     config (e.g. `include: ['*']`, `exclude: ['v*-rc*']` would still cover
+ *     `v1.0.0`, but `exclude: ['v*']` would not). Checking `include` alone was
+ *     a false PASS on exactly the axis this module exists to verify.
+ *   - `enforcement` must be `'active'`. GitHub's other two values are
+ *     `'disabled'` (already filtered out by the caller's candidate list
+ *     before this function ever sees it) and `'evaluate'` — a real,
+ *     non-hypothetical dry-run mode that logs would-be violations but blocks
+ *     nothing. An evaluate-only ruleset gives the exact false confidence
+ *     #1638 exists to catch: something targeting v* tags EXISTS, but a
+ *     force-push or tag deletion is not actually stopped.
+ *
+ * @param {{ enforcement?: unknown, conditions?: { ref_name?: { include?: unknown, exclude?: unknown } } }} ruleset
+ *   one ruleset's FULL detail (`GET rulesets/{id}`), not the summary from the list
  * @returns {boolean}
  */
 export function tagRulesetCoversVStar(ruleset) {
+  if (ruleset?.enforcement !== 'active') return false;
   const includes = ruleset?.conditions?.ref_name?.include;
   if (!Array.isArray(includes)) return false;
-  return includes.some((pattern) => matchesVStarGlob(pattern));
+  if (!includes.some((pattern) => matchesVStarGlob(pattern))) return false;
+  const excludes = ruleset?.conditions?.ref_name?.exclude;
+  if (Array.isArray(excludes) && excludes.some((pattern) => matchesVStarGlob(pattern))) {
+    return false;
+  }
+  return true;
 }
 
 /**

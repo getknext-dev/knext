@@ -84,23 +84,91 @@ describe('matchesVStarGlob', () => {
 });
 
 describe('tagRulesetCoversVStar', () => {
-  it('true when include contains a v*-covering pattern', () => {
-    expect(tagRulesetCoversVStar({ conditions: { ref_name: { include: ['refs/tags/v*'] } } })).toBe(
-      true,
-    );
+  it('true when include contains a v*-covering pattern and enforcement is active', () => {
+    expect(
+      tagRulesetCoversVStar({
+        enforcement: 'active',
+        conditions: { ref_name: { include: ['refs/tags/v*'] } },
+      }),
+    ).toBe(true);
   });
 
   it('false when include exists but none cover v*', () => {
     expect(
-      tagRulesetCoversVStar({ conditions: { ref_name: { include: ['refs/tags/release-*'] } } }),
+      tagRulesetCoversVStar({
+        enforcement: 'active',
+        conditions: { ref_name: { include: ['refs/tags/release-*'] } },
+      }),
     ).toBe(false);
   });
 
   it('false when conditions/ref_name/include is absent or malformed', () => {
-    expect(tagRulesetCoversVStar({})).toBe(false);
-    expect(tagRulesetCoversVStar({ conditions: {} })).toBe(false);
-    expect(tagRulesetCoversVStar({ conditions: { ref_name: {} } })).toBe(false);
-    expect(tagRulesetCoversVStar({ conditions: { ref_name: { include: 'v*' } } })).toBe(false);
+    expect(tagRulesetCoversVStar({ enforcement: 'active' })).toBe(false);
+    expect(tagRulesetCoversVStar({ enforcement: 'active', conditions: {} })).toBe(false);
+    expect(tagRulesetCoversVStar({ enforcement: 'active', conditions: { ref_name: {} } })).toBe(
+      false,
+    );
+    expect(
+      tagRulesetCoversVStar({
+        enforcement: 'active',
+        conditions: { ref_name: { include: 'v*' } },
+      }),
+    ).toBe(false);
+  });
+
+  // #1650 round 2, finding 3 — BOTH halves of the exclude-carve-out gap.
+  it('false when an exclude pattern carves v* back out of an otherwise-covering include (#1650 round 2)', () => {
+    expect(
+      tagRulesetCoversVStar({
+        enforcement: 'active',
+        conditions: { ref_name: { include: ['refs/tags/v*'], exclude: ['refs/tags/v*'] } },
+      }),
+    ).toBe(false);
+  });
+
+  it('true when include covers v* and exclude does NOT overlap it (the other half)', () => {
+    expect(
+      tagRulesetCoversVStar({
+        enforcement: 'active',
+        conditions: {
+          ref_name: { include: ['refs/tags/v*'], exclude: ['refs/tags/release-*'] },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('a malformed (non-array) exclude is ignored rather than throwing', () => {
+    expect(
+      tagRulesetCoversVStar({
+        enforcement: 'active',
+        conditions: { ref_name: { include: ['refs/tags/v*'], exclude: 'not-an-array' } },
+      }),
+    ).toBe(true);
+  });
+
+  // #1650 round 2, finding 3 — BOTH halves of the enforcement gap.
+  it('false when enforcement is "evaluate" (dry-run — a matching pattern exists but nothing is blocked) (#1650 round 2)', () => {
+    expect(
+      tagRulesetCoversVStar({
+        enforcement: 'evaluate',
+        conditions: { ref_name: { include: ['refs/tags/v*'] } },
+      }),
+    ).toBe(false);
+  });
+
+  it('false when enforcement is "disabled"', () => {
+    expect(
+      tagRulesetCoversVStar({
+        enforcement: 'disabled',
+        conditions: { ref_name: { include: ['refs/tags/v*'] } },
+      }),
+    ).toBe(false);
+  });
+
+  it('false when enforcement is missing entirely (fails closed, does not assume active)', () => {
+    expect(tagRulesetCoversVStar({ conditions: { ref_name: { include: ['refs/tags/v*'] } } })).toBe(
+      false,
+    );
   });
 });
 
@@ -123,10 +191,17 @@ describe('evaluateTagRulesetProtection', () => {
 
   it('passes when at least one candidate covers v*', () => {
     const result = evaluateTagRulesetProtection([
-      { conditions: { ref_name: { include: ['refs/tags/release-*'] } } },
-      { conditions: { ref_name: { include: ['refs/tags/v*'] } } },
+      { enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/release-*'] } } },
+      { enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
     ]);
     expect(result).toEqual({ ok: true });
+  });
+
+  it('fails when the only covering candidate is evaluate-mode (dry-run, blocks nothing)', () => {
+    const result = evaluateTagRulesetProtection([
+      { enforcement: 'evaluate', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
+    ]);
+    expect(result.ok).toBe(false);
   });
 
   it('fails closed on a non-array input rather than throwing', () => {
@@ -265,11 +340,47 @@ describe('fetchTagRulesetProtection', () => {
       },
       'repos/getknext-dev/knext/rulesets/3': {
         status: 200,
-        body: { conditions: { ref_name: { include: ['refs/tags/v*'] } } },
+        body: { enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
       },
     });
     const result = await fetchTagRulesetProtection({ ...args, api });
     expect(result).toEqual({ kind: 'ok' });
+  });
+
+  it('kind: missing — the ruleset LIST reports it active, but its own DETAIL is evaluate-mode (#1650 round 2)', async () => {
+    // GitHub's summary and detail responses can disagree in principle; the
+    // module must trust the DETAIL's own `enforcement`, since that is what
+    // `tagRulesetCoversVStar` actually reads.
+    const { api } = fakeApi({
+      'repos/getknext-dev/knext/rulesets': {
+        status: 200,
+        body: [{ id: 5, name: 'v-tags', target: 'tag', enforcement: 'active' }],
+      },
+      'repos/getknext-dev/knext/rulesets/5': {
+        status: 200,
+        body: { enforcement: 'evaluate', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
+      },
+    });
+    const result = await fetchTagRulesetProtection({ ...args, api });
+    expect(result.kind).toBe('missing');
+  });
+
+  it('kind: missing — an active ruleset covers v* via include but an exclude carves it back out (#1650 round 2)', async () => {
+    const { api } = fakeApi({
+      'repos/getknext-dev/knext/rulesets': {
+        status: 200,
+        body: [{ id: 6, name: 'v-tags', target: 'tag', enforcement: 'active' }],
+      },
+      'repos/getknext-dev/knext/rulesets/6': {
+        status: 200,
+        body: {
+          enforcement: 'active',
+          conditions: { ref_name: { include: ['refs/tags/v*'], exclude: ['refs/tags/v*'] } },
+        },
+      },
+    });
+    const result = await fetchTagRulesetProtection({ ...args, api });
+    expect(result.kind).toBe('missing');
   });
 
   it('kind: permission-error on the list call (403) — never reported as missing', async () => {
@@ -341,7 +452,7 @@ describe('runDriftCheck', () => {
       },
       'repos/getknext-dev/knext/rulesets/3': {
         status: 200,
-        body: { conditions: { ref_name: { include: ['refs/tags/v*'] } } },
+        body: { enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
       },
     });
     const report = await runDriftCheck({ ...args, api });

@@ -29,7 +29,28 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const SPEC = 'tests/npm-publish-drift-check.test.ts';
-const SUBJECT = 'scripts/lib/npm-publish-drift-check.mjs';
+
+// #912/#927 shape: a `subjects: { key: 'repo/relative/path' }` map plus a
+// `{ subject: 'key', anchor: '…' }` mutation table — the shape both static
+// liveness extractors in `scripts/lib/prover-lane.mjs` read (mirrors
+// `scripts/mutation-prove-credential-slot-watchdog.mjs`). The PREVIOUS shape
+// here (a bare `SUBJECT` constant used only inside `resolve(REPO_ROOT,
+// SUBJECT)`, with `m.anchor`/`m.replacement` read off the loop variable) was
+// invisible to both extractors: `auditAnchorLiveness`'s inline scan cannot
+// resolve `snap` (bound at runtime inside the loop, not `const X =
+// snapshot(PATH)`) or `m.anchor` (a property read, not a literal), and
+// `proverPathBindings` requires a binding to be passed DIRECTLY to
+// `readFileSync`/`snapshot` — `snapshot(resolve(REPO_ROOT, SUBJECT))` nests
+// `SUBJECT` inside `resolve(...)`, so it never counted as "read". Round 2 of
+// #1648 hit exactly that: `tests/mutation-prover-lane.test.ts`'s #912 check
+// ("EVERY prover resolves at least one anchor or one read-subject") failed —
+// zero of either, the review's own diagnosis, reproduced here rather than
+// exempted.
+const PROOF = {
+  subjects: {
+    lib: 'scripts/lib/npm-publish-drift-check.mjs',
+  },
+};
 
 const RUNNER = resolveSpecRunner(REPO_ROOT);
 
@@ -44,52 +65,78 @@ function specPasses() {
 const MUTATIONS = [
   {
     label: 'evaluateReviewerProtection: the required_reviewers rule lookup always "finds" one',
+    subject: 'lib',
     anchor: "  const rule = protectionRules.find((r) => r && r.type === 'required_reviewers');",
     replacement: "  const rule = { type: 'required_reviewers', reviewers: [{ id: 1 }] };",
   },
   {
     label:
       'evaluateReviewerProtection: zero-reviewers check disarmed (an empty reviewers[] passes)',
+    subject: 'lib',
     anchor: '  if (reviewers.length === 0) {',
     replacement: '  if (false) {',
   },
   {
     label:
       "matchesVStarGlob: the ~ALL special-case is dropped (GitHub's own all-tags literal stops matching)",
+    subject: 'lib',
     anchor: "  if (pattern === '~ALL') return true;",
     replacement: '',
   },
   {
     label: 'matchesVStarGlob: the regex test always returns true (any pattern "covers" v*)',
+    subject: 'lib',
     anchor: '  return new RegExp(`^${escaped}$`).test(SAMPLE_V_TAG);',
     replacement: '  return true;',
   },
   {
+    // #1650 round 2, finding 3 — the exclude-carve-out gap.
+    label:
+      'tagRulesetCoversVStar: stop checking conditions.ref_name.exclude — a carved-out v* still reads as covered',
+    subject: 'lib',
+    anchor:
+      '  const excludes = ruleset?.conditions?.ref_name?.exclude;\n  if (Array.isArray(excludes) && excludes.some((pattern) => matchesVStarGlob(pattern))) {\n    return false;\n  }',
+    replacement: '',
+  },
+  {
+    // #1650 round 2, finding 3 — the enforcement-mode gap (evaluate-only rulesets).
+    label:
+      'tagRulesetCoversVStar: stop requiring enforcement === "active" — a disabled/evaluate-only ruleset reads as covering',
+    subject: 'lib',
+    anchor: "  if (ruleset?.enforcement !== 'active') return false;",
+    replacement: '',
+  },
+  {
     label: 'evaluateTagRulesetProtection: the empty-candidate-list finding text is dropped',
+    subject: 'lib',
     anchor: "    return { ok: false, reason: 'no enabled ruleset targets tags' };",
     replacement: "    return { ok: false, reason: 'wrong reason on purpose' };",
   },
   {
     label:
       'fetchReviewerProtection: 403/404 is no longer routed to permission-error (silently becomes api-error)',
+    subject: 'lib',
     anchor: '  if (PERMISSION_ERROR_STATUSES.has(res.status)) {',
     replacement: '  if (false) {',
   },
   {
     label:
       'fetchTagRulesetProtection: the RULESETS-LIST 403/404 is no longer routed to permission-error',
+    subject: 'lib',
     anchor: '  if (PERMISSION_ERROR_STATUSES.has(listRes.status)) {',
     replacement: '  if (false) {',
   },
   {
     label:
       'fetchTagRulesetProtection: a RULESET-DETAIL 403/404 is no longer routed to permission-error',
+    subject: 'lib',
     anchor: '    if (PERMISSION_ERROR_STATUSES.has(detailRes.status)) {',
     replacement: '    if (false) {',
   },
   {
     label:
       'describeFinding: a permission-error is relabelled as "missing" (the exact conflation #1638 forbids)',
+    subject: 'lib',
     anchor:
       "      kind: 'permission-error',\n      message: `${setting}: UNVERIFIED (insufficient token permission) — ${result.message}`,",
     replacement:
@@ -97,6 +144,7 @@ const MUTATIONS = [
   },
   {
     label: 'runDriftCheck: the tag-ruleset finding is never pushed (only the reviewer is checked)',
+    subject: 'lib',
     anchor:
       "  if (tagRuleset.kind !== 'ok') {\n    findings.push(describeFinding('v*-covering tag ruleset', tagRuleset));\n  }",
     replacement:
@@ -104,10 +152,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(10);
+declareMutations(12);
 
-if (MUTATIONS.length !== 10) {
-  console.error(`FATAL: declared 10 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 12) {
+  console.error(`FATAL: declared 12 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
@@ -122,7 +170,7 @@ const decorative = [];
 for (const m of MUTATIONS) {
   console.log(`── mutation: ${m.label}`);
 
-  const snap = snapshot(resolve(REPO_ROOT, SUBJECT));
+  const snap = snapshot(resolve(REPO_ROOT, PROOF.subjects[m.subject]));
   try {
     mutate(snap, m.anchor, m.replacement);
     if (specPasses()) {
