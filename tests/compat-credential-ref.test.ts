@@ -629,9 +629,6 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
     // #1530: the 'node' lane's extraFiles ALSO declares the free-disk-floor
     // pre-check script the workflow invokes as a subprocess.
     writeFileSync(join(root, 'scripts/compat-disk-floor-check.mjs'), 'export const noop = 1;\n');
-    // #1614: the 'node' lane's extraFiles ALSO declares the pack-once
-    // tarball script the workflow invokes as a subprocess.
-    writeFileSync(join(root, 'scripts/pack-release-tarballs.mjs'), 'export const noop = 1;\n');
     // #1257: the 'node' lane's extraFiles ALSO declares the musl-lockfile
     // lookup helper and each committed musl-native lockfile FILE
     // individually (scripts/compat-window-audit.mjs's MUSL_NATIVE_LOCKFILE_FILES) —

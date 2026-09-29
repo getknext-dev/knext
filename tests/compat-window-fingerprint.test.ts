@@ -93,9 +93,6 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
   // #1530: the default lane also declares the free-disk-floor pre-check
   // script the workflow invokes as a subprocess.
   writeFileSync(join(root, 'scripts/compat-disk-floor-check.mjs'), 'export const noop = 1;\n');
-  // #1614: the default lane also declares the pack-once tarball script the
-  // "Pack knext adapter tarballs" step invokes as a subprocess.
-  writeFileSync(join(root, 'scripts/pack-release-tarballs.mjs'), 'export const noop = 1;\n');
   // #1321: the bun-vinext cell declares its quarantine ledger + script.
   writeFileSync(join(root, 'scripts/compat-vinext-ledger.mjs'), 'export const noop = 1;\n');
   writeFileSync(

@@ -476,9 +476,8 @@ jobs:
       # Setup Bun for knext's OWN workspace: the pnpm era ended with the bun
       # migration (fe28ad9c) — `packageManager` pins bun, so `pnpm install`
       # refuses with "This project is configured to use bun". pnpm remains
-      # below ONLY for next.js's harness (their repo pins pnpm); bun itself is
-      # still needed here to `bun install` + build knext's own packages
-      # (packing now uses `npm pack`, #1614 — see the pack step below).
+      # below ONLY for next.js's harness (their repo pins pnpm) and for
+      # `bun pm pack`'s job (bun rewrites workspace:^ like pnpm pack did).
       - name: Setup Bun (knext workspace)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -512,22 +511,15 @@ jobs:
       # lib+core made the preflight npm install 404 on the unpublished
       # @getknext/db. The preflight now DERIVES the required set from the packed
       # manifests, so a missing member fails loud with its name.
-      #
-      # #1614: `npm pack` — never `bun pm pack` — via the SAME shared packer
-      # `release.yml`'s `pack` job uses (`scripts/pack-release-tarballs.mjs` ->
-      # `scripts/lib/pack-publishable-group.mjs`): `npm pack` is the tool
-      # `changeset publish` actually shells to for a bun workspace, so this
-      # credential lane now installs+exercises the SAME bytes that ship,
-      # rather than `bun pm pack`'s (which rewrites `workspace:^` from
-      # `bun.lock`, a different source than the manifest, and — measured,
-      # #1562 — emits a multi-`bin`-key target as a duplicate tar entry).
-      - name: Pack knext adapter tarballs (npm pack — the real publish tool, #1614)
+      - name: Pack knext adapter tarballs (bun pm pack — rewrites workspace:^, npm-installable)
         working-directory: knext
         run: |
           set -euo pipefail
           DEST="${GITHUB_WORKSPACE}/knext-tarballs"
-          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
-            --dirs packages/lib,packages/db,packages/kn-next
+          mkdir -p "${DEST}"
+          (cd packages/lib && bun pm pack --destination "${DEST}")
+          (cd packages/db && bun pm pack --destination "${DEST}")
+          (cd packages/kn-next && bun pm pack --destination "${DEST}")
           ls -la "${DEST}"
 
       # The fail-fast gate that SHOULD have existed before run 28558576615:
