@@ -32,12 +32,12 @@ For typed database queries, see [`@getknext/db`](../db).
 | Node.js | ✓ | ✓ |
 | Bun     | ✓ | ✓ |
 
-Tested against Next.js 16.2.12. See the [compatibility page](https://knext.dev/docs/compatibility) for complete version coverage.
+See the [compatibility page](https://knext.dev/docs/compat-matrix) for supported Next.js versions and runtime/builder coverage.
 
 ## Learn more
 
 - [Documentation](https://knext.dev) — guides and configuration reference
-- [Compatibility](https://knext.dev/docs/compatibility) — supported runtimes and Next.js versions
+- [Compatibility](https://knext.dev/docs/compat-matrix) — supported runtimes and Next.js versions
 - [Security](https://knext.dev/docs/security) — threat model and hardening
 - [Contributing](https://github.com/getknext-dev/knext/blob/main/CONTRIBUTING.md) — report issues and contribute
 
