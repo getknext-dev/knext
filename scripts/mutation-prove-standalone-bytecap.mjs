@@ -31,10 +31,8 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PRELOAD = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/request-body-cap.cjs');
 const NODE_SERVER = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/node-server.ts');
-const STANDALONE_COMPILE = resolve(
-  REPO_ROOT,
-  'packages/kn-next/src/adapters/standalone-compile.mjs',
-);
+// biome-ignore format: the prover anchor-drift scan only reads a subject path written on one line
+const STANDALONE_COMPILE = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/standalone-compile.mjs');
 const SPEC = 'packages/kn-next/src/__tests__/request-body-cap.test.ts';
 
 const MUTATIONS = [
