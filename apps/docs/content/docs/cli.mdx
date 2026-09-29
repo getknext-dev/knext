@@ -527,14 +527,15 @@ prefixes, and the bare `<app>/` prefix is never a prune target. See
 
 Some entries ship in the package as directly runnable scripts rather than bin subcommands:
 
-- **preview** (`dist/cli/preview.js`) — deploy/destroy per-PR ephemeral
+- **preview** (`dist/cli/preview.js`) — **(experimental)** deploy/destroy per-PR ephemeral
   [preview environments](/docs/previews) (`preview deploy --pr <n> --branch <ref>` /
-  `preview destroy --pr <n>`).
-- **loadtest** (`dist/cli/loadtest.js`) — generate and apply an ephemeral k6 load-test Job
-  against a deployed service. An operability tool, not part of the deploy path. Accepts
-  `--url`, `--type`, `-n`/`--namespace`, and `--context <ctx>` (kubectl context to target;
-  default: your current-context; env fallback `KN_CONTEXT`). The k6 Job is applied to `<ctx>`,
-  never to whichever cluster your kubeconfig happens to point at.
+  `preview destroy --pr <n>`). Flags and output may change in a minor release.
+- **loadtest** (`dist/cli/loadtest.js`) — **(experimental)** generate and apply an ephemeral
+  k6 load-test Job against a deployed service. An operability tool, not part of the deploy
+  path. Accepts `--url`, `--type`, `-n`/`--namespace`, and `--context <ctx>` (kubectl context
+  to target; default: your current-context; env fallback `KN_CONTEXT`). The k6 Job is applied
+  to `<ctx>`, never to whichever cluster your kubeconfig happens to point at. Flags and output
+  may change in a minor release.
 
 ```bash
 node node_modules/@getknext/core/dist/cli/preview.js deploy --pr 42 --branch my-branch

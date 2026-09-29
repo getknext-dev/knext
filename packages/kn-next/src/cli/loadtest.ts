@@ -7,6 +7,10 @@
  * This is a MANUAL/NIGHTLY operability tool, NOT a PR gate. See the runbook:
  *   apps/file-manager/docs/loadtest-runbook.md
  *
+ * @experimental This directly-runnable entry's flags and output may change in
+ * a minor release — it is not part of the committed CLI verb contract. See
+ * PUBLIC_API.md's "Experimental surfaces" section.
+ *
  * Usage:
  *   knext loadtest --url https://app.example.com --type scale-to-zero [--namespace default]
  *
