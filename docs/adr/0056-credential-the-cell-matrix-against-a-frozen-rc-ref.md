@@ -9,7 +9,10 @@
   audit happens to be handed — a scheduled cron GitHub never fires now breaks the streak instead of
   silently bridging it. **Amended** by Amendment 3 (2026-09-30, founder decision #1642): a
   credential slot GitHub never ran resets the cell's window, accepted deliberately; the #1640
-  watchdog provides visibility.
+  watchdog provides visibility. **Amended** by Amendment 4 (2026-09-30, Accepted, founder rule:
+  highest jev score, #1553): a night may be graded VOID — bridged, not counted, not a reset — only
+  when a knext-owned marker proves the failure happened before any knext code ran, at most one void
+  night per open 14-night streak, recorded in the ledger so the audit can re-prove it.
 - **Amends** ADR-0039 (the frozen set is unchanged in scope — still tarball-inclusive, still not
   narrowed — but its *workflow* entry is now read from the commit that actually executed; see
   ADR-0039 Amendment 1). **Supersedes** the node-lane-only definition in `docs/V1_ROADMAP.md` §3.
@@ -472,3 +475,212 @@ backfill design is the fallback.
   cell.
 - **Revisit trigger:** two or more `missing-night` resets in one release cycle that the watchdog
   attributes to GitHub (no run created at all for the slot), not to a lane failure.
+
+## Amendment 4 (2026-09-30): a bounded VOID grade for a proven pre-knext failure (#1553)
+
+- **Status:** Accepted (2026-09-30, founder rule: highest jev score — option B scored 0.90 against
+  0.10 for A and 0.00 for C). **Amends:** D1's counting rule (rule 9 in
+  `scripts/compat-window-audit.mjs`'s header). **Implements:** #1553, raised from the #1550 round-1
+  review of #1520.
+- **Relates to:** #1520/#1550 (the `kind: 'deploy'` label, which this amendment does NOT grant a
+  VOID grade — see Context), Amendment 3 above (whose Option C — excusing N missing nights per
+  window unconditionally — was rejected for a reason this amendment takes care not to repeat).
+- **Trigger-class:** ADR + credential-window counting rule — flagged for the sprint-close design
+  review.
+
+### Context
+
+#1520 proposed grading a night whose only redness was a `kind: 'deploy'` shard failure as VOID —
+bridged over the streak, neither extending nor resetting it — on the theory that a `createNext`
+deploy-script/harness failure is evidence-free about the knext ref under test. The #1550 round-1
+review found the naive form unsound on three counts, all still true and none of them repealed here:
+
+1. **A `kind: 'deploy'` failure is not reliably evidence-free.** `scripts/e2e-deploy.sh` runs
+   `next build` through the knext adapter under test and boots the knext server, so "Custom deploy
+   script failed" is *also* what an adapter build crash or a server crash-on-boot reports. Grading
+   it VOID would let a real product regression go uncounted.
+2. **Unbounded bridging inflates the streak.** 13 green + N void + 1 green reading as a 14-night
+   streak, for any N, is exactly the shape a later #1604 round-1 attempt (an "invalid night pauses
+   the streak" semantic for the operator-digest guard) reproduced and had rejected on the identical
+   fixture: 13 green + 30 invalid + 1 green read `current=14, met=true`, and nothing in that case
+   had touched a cluster at all.
+3. **Message shape is not a safe per-file classifier.** Mixed files, retries and echoed logs mean a
+   shard's `kind: 'deploy'` count cannot be trusted to partition cleanly from a real assertion
+   failure without the count-match guard `isDeployOnlyRedShard` already carries.
+
+Round 2 (#1550, lead-directed) therefore removed the VOID grade entirely: a deploy-classified red
+disqualifies a night exactly like any other red, labelled only for readability. That is unchanged
+by this amendment. #1553 asked the sprint-close design gate a narrower question the round-2 fix
+deliberately left open: **is a VOID grade acceptable at all, and if so under what proof?**
+
+Amendment 3 above answered an adjacent question — whether to excuse a *missing* night — and its
+Option C ("excuse N missing nights per window") was rejected because "the audit cannot tell a
+scheduler drop from a broken lane." A VOID grade for #1553 must not repeat that mistake: it must
+excuse nothing by *absence* of information, only by *proof*.
+
+### Decision
+
+**A night may be graded VOID only when a knext-owned marker proves the failure happened before any
+knext code ran**, bounded to **at most one void night per 14-night window per cell**, recorded in
+the ledger so the audit can re-prove the exemption from the ledger alone.
+
+#### The marker: what it is, and why it cannot be knext's own failure wearing a costume
+
+The marker is a **preflight WORKFLOW STEP's own output**, never the deploy-test harness's — the
+same structural guarantee `scripts/compat-disk-floor-check.mjs`'s `kind: 'infra'` failure already
+relies on (its header: "the workflow step — not this script — writes the shard's OWN summary JSON
+directly"). Concretely, a shard's credential run has (at least) three phases in strict sequence,
+enforced by GitHub Actions' own step ordering (a step does not run once an earlier one without
+`continue-on-error` has failed):
+
+1. **`runner-setup`** — checkout, toolchain install, cache restore.
+2. **`dependency-install`** — installing the packed `@getknext/*` tarballs under test (installing
+   them is not running them — no adapter code executes here).
+3. **`cluster-bringup`** — kind/cluster provisioning, if the cell needs one, before a single
+   `next build` or server boot runs for this shard's first deploy-test file.
+
+A dedicated preflight step runs at the end of phase 3, immediately before the per-file deploy-test
+loop starts. If, and only if, an earlier phase failed, this step — and *only* this step — writes the
+shard's summary JSON directly with a single synthesized failure `{ kind: 'pre-knext', phase:
+'runner-setup' | 'dependency-install' | 'cluster-bringup' }`, `failed: 0`, `notRun: <the shard's
+whole expected file count>` (nothing ran), and stamps the run's ledger with a **self-referencing**
+`preKnextVoidMarker: { runId, lane, phase }` naming *this exact run and lane*. Two properties make
+this provably NOT a knext failure:
+
+- **It cannot run after knext code has.** The step that would write `kind: 'pre-knext'` is placed,
+  and only fires, *before* the step that invokes `next build` through the adapter or boots the
+  knext server for this shard. A knext adapter crash or server crash-on-boot — the #1550 round-1
+  finding's whole point — happens *inside* the deploy-test harness, strictly *after* this point, and
+  reports through the harness's own `kind: 'deploy'` path, never `kind: 'pre-knext'`. The two kinds
+  are therefore mutually exclusive by construction, not by convention.
+- **It is self-referencing.** A marker naming a different `runId` or `lane` — copied, forged, or
+  left over from a template — proves nothing about *this* night and is rejected (see "Fails
+  closed" below).
+
+`scripts/compat-window-audit.mjs`'s `isPreKnextVoidRedShard` grades a shard's redness
+void-*labelled* on this shape (mirroring `isDeployOnlyRedShard`/`isInfraOnlyRedShard`'s existing
+fail-closed conventions: `failedCount > 0` or `notRunCount === 0` is NEVER pre-knext; every named
+failure must carry `kind: 'pre-knext'` AND a recognised `phase` — checked independently, so a
+`kind: 'deploy'` failure carrying a forged pre-knext-shaped `phase` field still never classifies).
+`isValidPreKnextVoidMarker` separately validates the ledger's `preKnextVoidMarker` against the
+ledger's own `runId`/`lane`. A night is **void-eligible** only when (a) the marker validates and
+(b) *every* disqualifier on the graded night traces back to a pre-knext-attributed shard — a
+`bytecode-not-live` disqualifier on that SAME shard is allowed (a shard that never booted cannot
+prove liveness either, and that absence is not itself evidence of a knext regression), but any
+OTHER disqualifier — a bad ref, a rerun, a short ledger, a duplicate-slot, a red on a *different*
+shard that is not itself pre-knext-attributed — makes the night NOT void-eligible. The marker only
+ever excuses "this shard never ran"; it cannot launder anything else wrong with the night.
+
+**This is honest about what it does and does not prove.** Exactly like D4's bytecode-liveness trust
+assumption ("this is a check against knext regressing, not against a hostile fixture"), the
+preflight step's provenance rests on the workflow YAML being what it says it is — the same trust
+boundary every other ledger field in this ADR already sits on (D1's `credential`/`compatMode`
+markers, D5's `workflowFile` table). It is not a defense against a compromised workflow; it is a
+defense against the SPECIFIC hole #1550 found in the `kind: 'deploy'` heuristic — a real knext
+failure wearing a matching message shape.
+
+**Deferred, stated honestly (not implemented in this PR):** wiring the actual preflight step and
+its `continue-on-error: false` ordering into `test-e2e-deploy.yml` is untested here — this PR adds
+the ledger schema, the audit-side grading, and the counting rule, TDD'd against ledger fixtures
+that shape the marker exactly as the harness would produce it, but does not itself edit the
+credential workflow (a live-cluster-verified change this worktree cannot make: no kind/docker, no
+GHA run). Wiring the producer is tracked as a follow-up action item below. Until it lands, no real
+credential night can ever BE void-eligible — the marker a real night would need is never written —
+so this PR changes no currently-banked streak; it only makes the audit ABLE to grade one once the
+producer exists.
+
+#### The bridging rule: exactly what "13 green + 1 void + 1 green = 14" means
+
+A void-eligible night, when one is already open on the **same fingerprint**, **bridges** the
+streak: it is spliced out of the sequence — counted as neither one of the fourteen required nights,
+nor a reset. Fingerprint continuity is checked explicitly (not inferred): a void-eligible night
+whose `windowFingerprint` differs from the currently-open streak's does NOT bridge, because the
+fingerprint is what proves nothing else about the shipped bytes moved during the gap, and the
+marker only ever excuses "this shard never ran" — it says nothing about what ran on adjacent
+nights.
+
+**"One void night per 14-night window" means: at most one bridge per currently-OPEN streak
+attempt.** The budget (`auditWindow`'s `open.voidUsed`) is spent the instant the FIRST void-eligible
+night in an attempt is bridged, and is refilled only when that attempt next restarts from zero (any
+ordinary disqualifying reset, or a void-eligible night that could not bridge). Concretely:
+
+- **13 green + 1 void + 1 green = a 14-night MET streak.** The void night is bridged (spliced out);
+  the streak's own night-count goes 13 → (bridge, unchanged) → 14. `auditWindow` reports ONE streak
+  of 14 nights, not two streaks of 13 and 1.
+- **A SECOND void night before the streak next restarts is an ordinary reset**, not a second
+  bridge — `open.voidUsed` is already true, so `canBridge` is false, and the night falls through to
+  the same "night restarts the count" path any other disqualified night takes
+  (`restartCause: 'night-void-unbridged'`, distinct from `'night-disqualified'` so a report never
+  conflates "a proven exemption ran out of budget" with "an ordinary red").
+- **A void-eligible night with NO open streak to bridge** (the very first graded night, or the
+  night immediately after a reset) is also an ordinary reset — there is nothing on either side of it
+  to splice it out of.
+- **A void-eligible night whose fingerprint does not match the open streak** is also an ordinary
+  reset, for the reason above.
+
+This is deliberately a NARROWER shape than Amendment 3's rejected Option C ("excuse N missing
+nights per window"): that excused an *absence* of information (no run at all) for *any* number of
+nights up to a cap, and was rejected because the audit could not tell a scheduler drop from a
+broken lane. This amendment excuses nothing by absence — it requires a *positive, self-referencing,
+structurally-provable* marker for the ONE night it bridges, and every disqualifier that night
+carries must trace back to that proof.
+
+#### Recorded in the ledger so the audit can re-prove it
+
+Every night `gradeNight` grades carries `voidEligible` (recomputed a second time inside
+`auditWindow`, AFTER the rule-8 duplicate-slot pass, so a night that is ALSO a duplicate-slot
+violation is never void-eligible on stale information) and, if `auditWindow` actually bridges it,
+`bridgedVoid: true`. `auditWindow`'s own return value carries `voidNights` (every bridged night,
+with its marker) alongside each `streaks[*].voidNights` (scoped to the one streak it bridged),
+mirroring the existing `unresolvedNights` field's shape (rule 5) — a consumer does not have to
+re-derive which run was excused or why; it is printed by `formatReport` as `VOID — bridged, not
+counted (#1553)`, distinctly from the ordinary `NO — …` a non-bridged red (including a deploy- or
+infra-classified one) still prints.
+
+### Options considered
+
+| Option | What it means | jev score | Verdict |
+|---|---|---|---|
+| **B. A bounded VOID grade, gated on a knext-owned pre-knext marker** | As decided above: proof-gated, one bridge per open streak, fingerprint-continuity-checked, fully recorded. | **0.90** | **chosen (founder rule: highest score)** |
+| A. No VOID grade at all — keep #1550 round 2's answer permanently | Simplest; zero new surface in the frozen harness/audit. | 0.10 | rejected: leaves a real, previously-measured failure mode (run 36312054519, 419 files failed on a harness/deploy-script fault unrelated to the ref under test) with no path to ever being distinguished from a real regression, however strong the future evidence. |
+| C. Grade any `kind: 'deploy'`-only red night VOID (the original #1520/#1604-round-1 shape) | Reuses the existing label; no new marker. | 0.00 | rejected: this is the exact shape #1550 round 1 and the #1604 round-1 review both already found unsound — `kind: 'deploy'` is not reliably evidence-free (a knext adapter/server crash reports through it), and unbounded bridging measurably inflates the streak (the 13+30+1 fixture). Repeating it here would undo round 2's fix. |
+
+### Consequences
+
+- **No currently-banked or in-progress credential streak is affected by this PR.** The producer
+  (the preflight step + its ledger marker) is not wired in this PR (see the deferral note above), so
+  no real ledger can ever satisfy `isValidPreKnextVoidMarker` yet. This PR only adds the audit's
+  ABILITY to grade a night VOID once the producer exists.
+- **The credential's integrity is preserved, not traded for tolerance.** Every branch of the gate —
+  the kind check, the marker's three self-reference fields, the credential-scope restriction, the
+  fingerprint-continuity requirement, and the one-bridge-per-streak cap — is independently
+  mutation-proven (`scripts/mutation-prove-compat-window-audit.mjs`, guards 18-25): removing any one
+  of them is caught by a dedicated fixture in `tests/compat-window-audit.test.ts`.
+- **A `kind: 'deploy'` red still always resets, marker or not.** This amendment does not reopen
+  #1520/#1550 — the mutual-exclusion between `kind: 'deploy'` and `kind: 'pre-knext'` is structural
+  (see "why the marker cannot be knext's own failure"), so a knext adapter/server crash can never
+  acquire the grace this amendment grants.
+- **The one-bridge-per-streak cap means a genuinely flaky pre-knext-only failure mode (e.g. a
+  chronically unreliable cluster-bringup step) still eventually resets a streak** — the second such
+  night in the same attempt is an ordinary reset. This is deliberate: repeated pre-knext failures on
+  the SAME cell are themselves a signal the harness needs fixing, not indefinitely bridged over.
+
+### Action items
+
+- [x] Ledger schema (`preKnextVoidMarker`), shard-level classification
+      (`isPreKnextVoidRedShard`, `PRE_KNEXT_PHASES`), marker validation
+      (`isValidPreKnextVoidMarker`), night-level eligibility (`computeVoidEligible`,
+      `everyDisqualifierIsPreKnextVoid`), and the bridging rule in `auditWindow`
+      (`open.voidUsed`, `streaks[*].voidNights`, `audit.voidNights`).
+- [x] `formatReport` prints a bridged night as `VOID — bridged, not counted (#1553)`, distinctly
+      from an ordinary `NO — …` red.
+- [x] Mutation-proved (guards 18-25, `scripts/mutation-prove-compat-window-audit.mjs`) and
+      TDD'd (`tests/compat-window-audit.test.ts`, `#1553` describe block).
+- [ ] **Wire the producer**: the preflight step (per shard, one per `runner-setup` /
+      `dependency-install` / `cluster-bringup` phase boundary) in `test-e2e-deploy.yml`, writing the
+      shard summary JSON and the run-level `preKnextVoidMarker` exactly as specified above, ordered
+      so it structurally cannot run after any knext code has. This needs a real GHA run (and
+      arguably a controlled fault injection) to verify, which this PR's worktree cannot do.
+- [ ] Once wired: verify on a live credential-adjacent run (early-warning `main` night first) that
+      a genuine pre-knext failure (e.g. a deliberately broken `cluster-bringup` step) produces a
+      night the audit grades void-eligible, before ever relying on it on a credential cron.

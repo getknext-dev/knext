@@ -176,6 +176,41 @@
  *      early-warning `main` streak is a forecast with no such claim to protect
  *      and can never meet the gate anyway.
  *
+ *   9. A BOUNDED VOID GRADE FOR A PROVEN PRE-KNEXT FAILURE (#1553, founder
+ *      decision 2026-09-30, ADR-0056 Amendment 4). Rule 8's own sibling ADR
+ *      amendment (Amendment 3, missing-night backfill) rejected excusing N
+ *      missing nights per window UNCONDITIONALLY — "the audit cannot tell a
+ *      scheduler drop from a broken lane". This rule does not repeat that
+ *      mistake: it excuses nothing by absence, only by PROOF. A night whose
+ *      every red shard carries a `kind: 'pre-knext'` failure — synthesized by
+ *      a dedicated preflight WORKFLOW STEP that runs, and can only fail,
+ *      BEFORE the deploy-test loop invokes any knext code for that shard
+ *      (never the deploy-test harness itself, the same structural guarantee
+ *      `compat-disk-floor-check.mjs`'s `kind: 'infra'` already relies on) —
+ *      AND whose ledger carries a matching, self-referencing
+ *      `preKnextVoidMarker` (naming this exact `runId` and `lane`, so a
+ *      marker copied from another night proves nothing here) is VOID-ELIGIBLE.
+ *      A `kind: 'deploy'` failure (#1520/#1550) is NEVER void-eligible,
+ *      whatever fields it carries — the whole reason round 2 of #1550
+ *      rejected the message-shape heuristic is that a knext adapter crash or
+ *      server crash-on-boot reports THROUGH THE HARNESS with that same
+ *      message shape, so `kind` alone can never prove pre-knext-ness for it.
+ *
+ *      A void-eligible night, if one is ALREADY open on the SAME fingerprint,
+ *      BRIDGES the streak: it is spliced out — neither counted as one of the
+ *      fourteen, nor treated as a reset — capped at ONE bridge per OPEN
+ *      streak (`auditWindow`'s `open.voidUsed`), which is what "one void
+ *      night per 14-night window" means operationally: the budget is spent
+ *      the moment the first void night in an attempt is seen, and is
+ *      refilled only when that attempt next restarts from zero. So
+ *      13 green + 1 void + 1 green reads as a 14-night MET streak; a SECOND
+ *      void night before the streak next restarts is an ordinary reset, same
+ *      as a void-eligible night with no open streak to bridge, or one whose
+ *      fingerprint does not match the streak it would bridge. Every bridge is
+ *      recorded (`night.bridgedVoid`, `streak.voidNights`,
+ *      `audit.voidNights`) with its marker, so the audit can re-prove which
+ *      run was excused and why — never a silent gap.
+ *
  * USAGE
  *   node scripts/compat-window-audit.mjs --dir <dir-of-ledger-json>
  *   node scripts/compat-window-audit.mjs --fetch --limit 100  # needs `gh`
@@ -546,6 +581,127 @@ function isInfraOnlyRedShard(shard, failedCount) {
 }
 
 /**
+ * The three pre-knext PHASES a preflight step may attribute a void-eligible
+ * failure to (#1553, ADR-0056 Amendment 4). Each names a step that runs, and
+ * can fail, BEFORE any knext code (the adapter build, or the knext server) is
+ * ever invoked for a single deploy-test file in that shard:
+ *   - `runner-setup`        — checkout, toolchain install, cache restore;
+ *   - `dependency-install`  — installing the packed `@getknext/*` tarballs
+ *                              under test (installing them is not running
+ *                              them);
+ *   - `cluster-bringup`     — kind/cluster provisioning, before a single
+ *                              `next build` or server boot for this shard.
+ */
+export const PRE_KNEXT_PHASES = Object.freeze([
+  'runner-setup',
+  'dependency-install',
+  'cluster-bringup',
+]);
+
+/**
+ * Whether a shard's redness is ENTIRELY attributable to a PROVEN pre-knext
+ * failure (#1553, ADR-0056 Amendment 4) — never a knext-code failure wearing
+ * a similar shape, which is exactly the hole the `kind: 'deploy'` heuristic
+ * had (#1520/#1550 round 2). A `kind: 'pre-knext'` failure is synthesized by
+ * a dedicated preflight WORKFLOW STEP — never the deploy-test harness itself
+ * — that runs, and can only fail, before the per-file deploy-test loop starts
+ * for this shard, so `next build` through the knext adapter and the knext
+ * server boot NEVER RAN when this fires.
+ *
+ * Deliberately the mirror image of `isDeployOnlyRedShard`'s fail-closed
+ * shape, one axis over:
+ *   - `failedCount > 0` → NEVER pre-knext. A real asserted failure means
+ *     something DID run, so the shard cannot vouch for "nothing ran".
+ *   - `notRunCount === 0` → NEVER pre-knext. A preflight bailout means the
+ *     shard's whole file set never ran — there is nothing left for `notRun`
+ *     to be zero about.
+ *   - no `shard.failures`, an empty one, or any entry whose `kind` is not
+ *     EXACTLY `'pre-knext'` or whose `phase` is not one of `PRE_KNEXT_PHASES`
+ *     → NEVER pre-knext (fail closed). The `kind` check is checked
+ *     independently of `phase` on purpose — a `kind: 'deploy'` failure that
+ *     also happens to carry a pre-knext-shaped `phase` field (forged or
+ *     otherwise) must still not classify, because `kind` is what a knext
+ *     failure and a pre-knext failure can never legitimately share.
+ *
+ * USED FOR LABELLING a shard's redness only — `isNightVoidEligible` (below)
+ * is the separate, stricter, night-level gate that decides whether
+ * `auditWindow` may actually bridge the streak over it.
+ *
+ * @param {any} shard
+ * @param {number} failedCount
+ * @param {number} notRunCount
+ * @returns {boolean}
+ */
+function isPreKnextVoidRedShard(shard, failedCount, notRunCount) {
+  if (failedCount > 0 || notRunCount === 0) return false;
+  const failures = Array.isArray(shard?.failures) ? shard.failures : null;
+  if (!failures || failures.length === 0) return false;
+  return failures.every((f) => f?.kind === 'pre-knext' && PRE_KNEXT_PHASES.includes(f?.phase));
+}
+
+/**
+ * Is `marker` a genuine, SELF-REFERENCING pre-knext void marker for `ledger`
+ * (#1553)? Fails CLOSED on anything absent, malformed, or that does not name
+ * THIS run and THIS lane — a marker copy-pasted from another night, or one
+ * whose phase is not a recognised pre-knext phase, proves nothing about this
+ * particular night and must never grant it the grace.
+ *
+ * @param {any} marker
+ * @param {any} ledger
+ * @returns {boolean}
+ */
+function isValidPreKnextVoidMarker(marker, ledger) {
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return false;
+  if (!PRE_KNEXT_PHASES.includes(marker.phase)) return false;
+  if (String(marker.runId ?? '') !== String(ledger?.runId ?? '')) return false;
+  if (marker.lane !== ledger?.lane) return false;
+  return true;
+}
+
+/**
+ * Does every disqualifier on an already-graded night trace back to a
+ * pre-knext-attributed shard (#1553)? `preKnextShardIds` is the set of shard
+ * ids `gradeNight` found `isPreKnextVoidRedShard` true for. A night whose
+ * disqualifiers are anything else — a bad ref, a rerun, a short ledger, a
+ * duplicate-slot, an ordinary or deploy-classified red on a DIFFERENT shard —
+ * can never be void: the marker only ever excuses "this shard never ran",
+ * nothing more.
+ *
+ * `bytecode-not-live` on a pre-knext-attributed shard is expected and
+ * allowed: a shard that never booted cannot prove liveness either, and that
+ * absence is not itself evidence of a knext regression.
+ *
+ * @param {string[]} disqualifiers
+ * @param {Set<string>} preKnextShardIds
+ * @returns {boolean}
+ */
+function everyDisqualifierIsPreKnextVoid(disqualifiers, preKnextShardIds) {
+  return disqualifiers.every((d) => {
+    const m = /^(?:pre-knext-classified|bytecode-not-live): shard (\S+)/.exec(d);
+    return m !== null && preKnextShardIds.has(m[1]);
+  });
+}
+
+/**
+ * The single decision function for void-eligibility (#1553) — called both
+ * inside `gradeNight` (for a direct, single-night verdict) and again inside
+ * `auditWindow` AFTER the rule-8 duplicate-slot pass runs (which can append a
+ * fresh disqualifier to a night `gradeNight` already returned). Recomputing
+ * from the FINAL disqualifier list, rather than trusting a value frozen at
+ * `gradeNight` time, is what stops a night that is ALSO a duplicate-slot
+ * violation from being void-eligible on stale information.
+ *
+ * @param {string[]} disqualifiers
+ * @param {Set<string>} preKnextShardIds
+ * @param {boolean} voidMarkerValid
+ * @returns {boolean}
+ */
+function computeVoidEligible(disqualifiers, preKnextShardIds, voidMarkerValid) {
+  if (!voidMarkerValid || disqualifiers.length === 0) return false;
+  return everyDisqualifierIsPreKnextVoid(disqualifiers, preKnextShardIds);
+}
+
+/**
  * The reasons a scheduled run can end up with no gradeable ledger. Every one of
  * them produces a DISQUALIFIED night (rule 5), never a gap in the record.
  */
@@ -655,10 +811,18 @@ export function gradeNight(ledger, opts = {}) {
       eligible: false,
       unresolved: ledger.unresolved,
       date: ledger.calendarSlot ?? nightDateOf(ledger),
+      // #1553: an unresolved night has nothing to prove a pre-knext failure
+      // with — it stays disqualified, never void.
+      preKnextShardIds: [],
+      voidMarkerValid: false,
+      voidMarker: null,
+      voidEligible: false,
+      bridgedVoid: false,
     };
   }
   const disqualifiers = [];
   const shards = Array.isArray(ledger?.shards) ? ledger.shards : [];
+  const preKnextShardIds = new Set();
 
   let passed = 0;
   let failed = 0;
@@ -677,18 +841,29 @@ export function gradeNight(ledger, opts = {}) {
       // Round 2 (#1550): a deploy-classified red is labelled for readability
       // but disqualifies the night exactly like any other red — see
       // `isDeployOnlyRedShard`'s doc comment for why the original VOID grade
-      // was removed.
-      disqualifiers.push(
-        isDeployOnlyRedShard(shard, f.value, n.value)
-          ? `deploy-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — every ` +
-              'named failure is kind:deploy (a harness/deploy-script failure; #1520/#1553)'
-          : isInfraOnlyRedShard(shard, f.value)
-            ? `infra-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — the ` +
-              'free-disk floor aborted this shard before it ran a single test (#1530); it ' +
-              'still disqualifies the night (a runner fault proves nothing either way about ' +
-              'the ref under test) but is never mistaken for kind:assertion'
-            : `shard ${id} red (failed=${f.value} notRun=${n.value})`,
-      );
+      // was removed. #1553 adds a THIRD label, `pre-knext-classified:`, for
+      // the one shape that IS void-eligible (see `isNightVoidEligible`).
+      if (isPreKnextVoidRedShard(shard, f.value, n.value)) {
+        preKnextShardIds.add(String(id));
+        disqualifiers.push(
+          `pre-knext-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — every ` +
+            'named failure is kind:pre-knext (a preflight-step-proven pre-knext failure; ' +
+            '#1553, ADR-0056 Amendment 4) — eligible for a bounded VOID grade, never a silent ' +
+            'pass',
+        );
+      } else {
+        disqualifiers.push(
+          isDeployOnlyRedShard(shard, f.value, n.value)
+            ? `deploy-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — every ` +
+                'named failure is kind:deploy (a harness/deploy-script failure; #1520/#1553)'
+            : isInfraOnlyRedShard(shard, f.value)
+              ? `infra-classified: shard ${id} red (failed=${f.value} notRun=${n.value}) — the ` +
+                'free-disk floor aborted this shard before it ran a single test (#1530); it ' +
+                'still disqualifies the night (a runner fault proves nothing either way about ' +
+                'the ref under test) but is never mistaken for kind:assertion'
+              : `shard ${id} red (failed=${f.value} notRun=${n.value})`,
+        );
+      }
     }
   }
 
@@ -767,6 +942,13 @@ export function gradeNight(ledger, opts = {}) {
     disqualifiers.push(`shard ${missing} missing`);
   }
 
+  const uniqueDisqualifiers = [...new Set(disqualifiers)];
+  // #1553: void grading is a CREDENTIAL-scope concept only — an early-warning
+  // night makes no "fourteen consecutive nights" claim to protect, so there
+  // is nothing for a void grade to bridge.
+  const voidMarkerValid =
+    scope === 'credential' && isValidPreKnextVoidMarker(ledger?.preKnextVoidMarker, ledger);
+
   return {
     runId: String(ledger?.runId ?? ''),
     lane: ledger?.lane ?? null,
@@ -791,10 +973,22 @@ export function gradeNight(ledger, opts = {}) {
     passed,
     failed,
     notRun,
-    disqualifiers: [...new Set(disqualifiers)],
-    eligible: disqualifiers.length === 0,
+    disqualifiers: uniqueDisqualifiers,
+    eligible: uniqueDisqualifiers.length === 0,
     unresolved: null,
     date: ledger.calendarSlot ?? nightDateOf(ledger),
+    // #1553 (ADR-0056 Amendment 4). `preKnextShardIds`/`voidMarkerValid` are
+    // the raw ingredients; `voidEligible` is the verdict computed from THIS
+    // night's own disqualifiers. `auditWindow` recomputes `voidEligible` a
+    // second time after its own rule-8 duplicate-slot pass can append a
+    // disqualifier this function never saw — see `computeVoidEligible`.
+    // `bridgedVoid` starts false; only `auditWindow`'s streak loop ever sets
+    // it true, and only for a night it actually bridged.
+    preKnextShardIds: [...preKnextShardIds],
+    voidMarkerValid,
+    voidMarker: ledger?.preKnextVoidMarker ?? null,
+    voidEligible: computeVoidEligible(uniqueDisqualifiers, preKnextShardIds, voidMarkerValid),
+    bridgedVoid: false,
   };
 }
 
@@ -1411,8 +1605,19 @@ export function auditWindow(ledgers, opts = {}) {
       }
     }
   }
+  // #1553: recompute void-eligibility from each night's FINAL disqualifier
+  // list — the duplicate-slot pass above can append one `gradeNight` never
+  // saw, and a duplicate-slot night must never be void-eligible on stale
+  // information.
+  for (const n of nights) {
+    n.voidEligible = computeVoidEligible(
+      n.disqualifiers,
+      new Set(n.preKnextShardIds ?? []),
+      n.voidMarkerValid === true,
+    );
+  }
 
-  /** @type {Array<{fingerprint: string, nights: number, runIds: string[], startRunId: string, endRunId: string, restartCause: string|null}>} */
+  /** @type {Array<{fingerprint: string, nights: number, runIds: string[], startRunId: string, endRunId: string, restartCause: string|null, voidUsed: boolean, voidNights: Array<{runId: string, marker: any}>}>} */
   const streaks = [];
   let open = null;
   // Why the NEXT streak restarted, carried across the disqualified nights that
@@ -1421,18 +1626,37 @@ export function auditWindow(ledgers, opts = {}) {
   let pendingCause = null;
   for (const night of nights) {
     if (!night.eligible) {
+      // #1553 (ADR-0056 Amendment 4, rule 9) — a void-eligible night BRIDGES
+      // an already-open streak on the SAME fingerprint, at most once per open
+      // streak attempt (`open.voidUsed`): it is spliced out of the count,
+      // neither extending it nor resetting it. Every other disqualified
+      // night — including a void-eligible one with no open streak to bridge,
+      // a fingerprint mismatch, or a second void inside the same still-open
+      // attempt — restarts the count exactly as before.
+      const canBridge =
+        night.voidEligible &&
+        open !== null &&
+        open.fingerprint === night.fingerprint &&
+        !open.voidUsed;
+      if (canBridge) {
+        open.voidUsed = true;
+        open.voidNights.push({ runId: night.runId, marker: night.voidMarker });
+        night.bridgedVoid = true;
+        continue;
+      }
       // A disqualified night restarts the count. It does not pause it — and an
       // UNRESOLVED night (rule 5) is disqualified, not absent, which is what
       // stops the nights either side of it merging into one longer streak.
       // A rule-8 MISSING night (no run at all) gets its own cause so the
       // report never conflates "we lost the ledger" with "nothing ever ran".
-      open = null;
-      pendingCause =
-        night.unresolved === 'missing-night'
+      pendingCause = night.voidEligible
+        ? 'night-void-unbridged'
+        : night.unresolved === 'missing-night'
           ? 'night-missing'
           : night.unresolved
             ? 'night-unresolved'
             : 'night-disqualified';
+      open = null;
       continue;
     }
     if (open && open.fingerprint === night.fingerprint) {
@@ -1453,6 +1677,8 @@ export function auditWindow(ledgers, opts = {}) {
       startRunId: night.runId,
       endRunId: night.runId,
       restartCause,
+      voidUsed: false,
+      voidNights: [],
     };
     streaks.push(open);
   }
@@ -1547,6 +1773,18 @@ export function auditWindow(ledgers, opts = {}) {
       .map((n) => ({
         runId: n.runId,
         reason: n.unresolved,
+        ...(n.date ? { date: n.date } : {}),
+      })),
+    // #1553 (ADR-0056 Amendment 4) — every night `auditWindow` actually
+    // bridged, with its marker, so the audit can RE-PROVE the exemption
+    // rather than take "trust me" for it. Never more than one per streak
+    // (see `streaks[*].voidNights`), which this flattens for a single place
+    // to look.
+    voidNights: nights
+      .filter((n) => n.bridgedVoid)
+      .map((n) => ({
+        runId: n.runId,
+        marker: n.voidMarker,
         ...(n.date ? { date: n.date } : {}),
       })),
     // Rule 8 (#1607). `checked: false` means exactly what it says — no
@@ -1655,7 +1893,11 @@ export function formatReport(audit) {
   for (const n of audit.nights) {
     const fp = (n.fingerprint ?? '(none)').replace(/^sha256:/, '').slice(0, 8);
     const shards = `${n.shardsSeen}/${n.shardsExpected ?? '?'}`;
-    const verdict = n.eligible ? 'counts' : `NO — ${n.disqualifiers.join('; ')}`;
+    const verdict = n.eligible
+      ? 'counts'
+      : n.bridgedVoid
+        ? `VOID — bridged, not counted (#1553): ${n.disqualifiers.join('; ')}`
+        : `NO — ${n.disqualifiers.join('; ')}`;
     lines.push(
       `${n.runId.padEnd(12)} ${fp.padEnd(12)} ${shards.padEnd(7)} ${String(n.passed).padStart(4)}/${n.failed}/${n.notRun}${' '.repeat(12)}${verdict}`,
     );
@@ -1663,10 +1905,14 @@ export function formatReport(audit) {
   lines.push('');
   for (const s of audit.streaks) {
     const cause = s.restartCause ? ` (restarted: ${s.restartCause})` : '';
+    const voided =
+      s.voidNights && s.voidNights.length > 0
+        ? ` [voided: ${s.voidNights.map((v) => v.runId).join(', ')}]`
+        : '';
     lines.push(
       `streak ${String(s.nights).padStart(2)} night(s)  fp=${String(s.fingerprint)
         .replace(/^sha256:/, '')
-        .slice(0, 8)}  ${s.startRunId} → ${s.endRunId}${cause}`,
+        .slice(0, 8)}  ${s.startRunId} → ${s.endRunId}${cause}${voided}`,
     );
   }
   lines.push('');
@@ -1716,6 +1962,21 @@ export function formatReport(audit) {
     );
     for (const u of audit.unresolvedNights) {
       lines.push(`            ${u.runId}  ${u.reason}${u.date ? `  (${u.date})` : ''}`);
+    }
+  }
+
+  if (audit.voidNights.length > 0) {
+    lines.push('');
+    lines.push(
+      `VOID (#1553): ${audit.voidNights.length} night(s) bridged — a knext-owned marker proved`,
+    );
+    lines.push(
+      '       the failure happened before any knext code ran; at most one per open streak.',
+    );
+    for (const v of audit.voidNights) {
+      lines.push(
+        `       ${v.runId}  phase=${v.marker?.phase ?? '?'}${v.date ? `  (${v.date})` : ''}`,
+      );
     }
   }
 

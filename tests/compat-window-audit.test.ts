@@ -13,6 +13,7 @@ import {
   formatReport,
   gradeNight,
   MISSING_NIGHT_GRACE_HOURS,
+  PRE_KNEXT_PHASES,
   parseCredentialCronsFromWorkflow,
   readLedgerDir,
   selectLaneNights,
@@ -567,6 +568,237 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
       const report = formatReport(a);
       expect(report).not.toMatch(/VOID/);
       expect(report).toMatch(/NO —.*deploy-classified/);
+    });
+  });
+
+  describe('#1553 — a bounded VOID grade for a proven pre-knext failure (ADR-0056 Amendment 4)', () => {
+    /**
+     * A shard whose ENTIRE redness is one PROVEN `kind: 'pre-knext'` failure —
+     * synthesized by a preflight step, never the deploy-test harness, before
+     * the per-file loop ran for this shard. `bytecode` is deliberately
+     * cleared: nothing booted, so there is no liveness evidence either — the
+     * realistic shape, and it exercises the `bytecode-not-live` allowance in
+     * `everyDisqualifierIsPreKnextVoid`.
+     */
+    function preKnextVoidShard(base: ShardRow, phase = 'runner-setup') {
+      return {
+        ...base,
+        passed: 0,
+        failed: 0,
+        notRun: 49,
+        bytecode: undefined,
+        failures: [{ file: null, kind: 'pre-knext', phase }],
+      };
+    }
+
+    /** A marker that self-references `ledgerLike`'s own runId + lane (#1553). */
+    function voidMarkerFor(ledgerLike: Record<string, unknown>, phase = 'runner-setup') {
+      return { runId: ledgerLike.runId, lane: ledgerLike.lane ?? 'node', phase };
+    }
+
+    /** A whole credential night whose only redness is a proven pre-knext shard, with a valid marker. */
+    function preKnextVoidNight(
+      over: Record<string, unknown> = {},
+      shardIndex = 0,
+      phase = 'runner-setup',
+    ) {
+      const base = night(over);
+      const shards = base.shards.map((s: ShardRow, i: number) =>
+        i === shardIndex ? preKnextVoidShard(s, phase) : s,
+      );
+      return { ...base, shards, preKnextVoidMarker: voidMarkerFor(base, phase) };
+    }
+
+    it('PRE_KNEXT_PHASES lists the three phases a preflight step may attribute a void-eligible failure to', () => {
+      expect(PRE_KNEXT_PHASES).toEqual(['runner-setup', 'dependency-install', 'cluster-bringup']);
+    });
+
+    it('gradeNight: a proven pre-knext red shard with a valid, self-referencing marker is void-eligible', () => {
+      const n = preKnextVoidNight();
+      const g = gradeNight(n);
+      expect(g.eligible).toBe(false);
+      expect(hasReason(g, 'pre-knext-classified')).toBe(true);
+      expect(g.voidEligible).toBe(true);
+    });
+
+    it('gradeNight: a deploy-classified shard red (no pre-knext marker at all) is never void-eligible', () => {
+      const shards = night().shards;
+      shards[0] = {
+        ...shards[0],
+        passed: 48,
+        failed: 1,
+        failures: [{ file: 'test/e2e/a.test.ts', kind: 'deploy', cases: [] }],
+      };
+      const g = gradeNight(night({ shards }));
+      expect(g.eligible).toBe(false);
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('gradeNight: a deploy-kind failure carrying a FORGED pre-knext-shaped phase field is still never pre-knext-classified — kind is checked independently of phase', () => {
+      const shards = night().shards;
+      shards[0] = {
+        ...shards[0],
+        passed: 0,
+        failed: 0,
+        notRun: 49,
+        bytecode: undefined,
+        failures: [{ file: null, kind: 'deploy', phase: 'runner-setup' }],
+      };
+      const n = night({ shards });
+      const g = gradeNight({ ...n, preKnextVoidMarker: voidMarkerFor(n) });
+      expect(g.eligible).toBe(false);
+      expect(hasReason(g, 'pre-knext-classified')).toBe(false);
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('gradeNight: a genuinely pre-knext-attributed shard with NO marker on the ledger is never void-eligible — absent marker fails closed', () => {
+      const n = preKnextVoidNight();
+      const { preKnextVoidMarker, ...withoutMarker } = n;
+      const g = gradeNight(withoutMarker);
+      expect(hasReason(g, 'pre-knext-classified')).toBe(true);
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('gradeNight: a marker naming a DIFFERENT run is never void-eligible — a copy-pasted/forged marker fails closed', () => {
+      const n = preKnextVoidNight();
+      const g = gradeNight({
+        ...n,
+        preKnextVoidMarker: { ...n.preKnextVoidMarker, runId: '999999' },
+      });
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('gradeNight: a marker naming a DIFFERENT lane is never void-eligible', () => {
+      const n = preKnextVoidNight();
+      const g = gradeNight({ ...n, preKnextVoidMarker: { ...n.preKnextVoidMarker, lane: 'bun' } });
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('gradeNight: a marker with an unrecognised phase is never void-eligible', () => {
+      const n = preKnextVoidNight();
+      const g = gradeNight({
+        ...n,
+        preKnextVoidMarker: { ...n.preKnextVoidMarker, phase: 'something-else' },
+      });
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('gradeNight: void grading is credential-scope only — an early-warning night is never void-eligible even with a valid marker', () => {
+      const n = preKnextVoidNight({ compatMode: 'early-warning', credential: false });
+      const g = gradeNight(n, { scope: 'early-warning' });
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('gradeNight: a fully green night is never flagged void-eligible even carrying a marker — there is nothing to excuse', () => {
+      const n = night();
+      const g = gradeNight({ ...n, preKnextVoidMarker: voidMarkerFor(n) });
+      expect(g.eligible).toBe(true);
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('auditWindow: 13 green + 1 marker-present void + 1 green BRIDGES to a 14-night MET streak', () => {
+      const voidNight = preKnextVoidNight({
+        runId: '40000013000',
+        windowFingerprint: 'sha256:aaaa',
+      });
+      const a = auditDated([
+        ...streakOf(13, 'sha256:aaaa', 40000000000),
+        voidNight,
+        ...streakOf(1, 'sha256:aaaa', 40000014000),
+      ]);
+      expect(a.met).toBe(true);
+      expect(a.longest.nights).toBe(14);
+      // Never split into two streaks — the void was BRIDGED, not a restart.
+      expect(a.streaks).toHaveLength(1);
+      expect(a.voidNights).toHaveLength(1);
+      expect(a.voidNights[0]?.runId).toBe('40000013000');
+      // The marker itself is re-provable from the audit output alone — not
+      // just "trust the code": the exact phase the preflight step recorded.
+      expect(a.voidNights[0]?.marker).toEqual({
+        runId: '40000013000',
+        lane: 'node',
+        phase: 'runner-setup',
+      });
+      expect(a.streaks[0]?.voidNights).toEqual([
+        { runId: '40000013000', marker: a.voidNights[0]?.marker },
+      ]);
+      expect(formatReport(a)).toMatch(/VOID — bridged, not counted \(#1553\)/);
+      expect(formatReport(a)).toMatch(/VOID \(#1553\): 1 night\(s\) bridged/);
+      expect(formatReport(a)).toMatch(/40000013000\s+phase=runner-setup/);
+    });
+
+    it('auditWindow: a second void night in the same still-open streak is an ordinary reset — one bridge per streak', () => {
+      const void1 = preKnextVoidNight({ runId: '40000006000', windowFingerprint: 'sha256:aaaa' });
+      const void2 = preKnextVoidNight(
+        { runId: '40000013000', windowFingerprint: 'sha256:aaaa' },
+        1,
+      );
+      const a = auditDated([
+        ...streakOf(6, 'sha256:aaaa', 40000000000),
+        void1,
+        ...streakOf(6, 'sha256:aaaa', 40000007000),
+        void2,
+        ...streakOf(2, 'sha256:aaaa', 40000014000),
+      ]);
+      expect(a.met).toBe(false);
+      // Only the FIRST void was actually bridged — the budget was already
+      // spent by the time the second one arrived.
+      expect(a.voidNights).toHaveLength(1);
+      expect(a.voidNights[0]?.runId).toBe('40000006000');
+      expect(a.longest.nights).toBe(12);
+      expect(a.current.nights).toBe(2);
+      const restarted = a.streaks.find((s) => s.restartCause === 'night-void-unbridged');
+      expect(restarted).toBeDefined();
+      const report = formatReport(a);
+      expect(report.match(/VOID — bridged/g)).toHaveLength(1);
+      expect(report).toMatch(/NO —.*pre-knext-classified/);
+    });
+
+    it('auditWindow: a void-eligible night with a DIFFERENT fingerprint does not bridge — fingerprint continuity still applies', () => {
+      const voidNight = preKnextVoidNight({
+        runId: '40000006000',
+        windowFingerprint: 'sha256:bbbb',
+      });
+      const a = auditDated([
+        ...streakOf(6, 'sha256:aaaa', 40000000000),
+        voidNight,
+        ...streakOf(8, 'sha256:aaaa', 40000007000),
+      ]);
+      expect(a.met).toBe(false);
+      expect(a.voidNights).toHaveLength(0);
+      expect(a.streaks).toHaveLength(2);
+      expect(a.longest.nights).toBe(8);
+    });
+
+    it('auditWindow: a void-eligible night with no open streak to bridge is an ordinary reset', () => {
+      const voidNight = preKnextVoidNight({
+        runId: '40000000000',
+        windowFingerprint: 'sha256:aaaa',
+      });
+      const a = auditDated([voidNight, ...streakOf(3, 'sha256:aaaa', 40000001000)]);
+      expect(a.voidNights).toHaveLength(0);
+      expect(a.current.nights).toBe(3);
+    });
+
+    it('auditWindow: a knext build failure (kind:deploy) never bridges, marker or not', () => {
+      const shards = night().shards;
+      shards[0] = {
+        ...shards[0],
+        passed: 48,
+        failed: 1,
+        failures: [{ file: 'test/e2e/adapter-crash.test.ts', kind: 'deploy', cases: [] }],
+      };
+      const n = night({ runId: '40000006000', windowFingerprint: 'sha256:aaaa', shards });
+      const redNight = { ...n, preKnextVoidMarker: voidMarkerFor(n) };
+      const a = auditDated([
+        ...streakOf(6, 'sha256:aaaa', 40000000000),
+        redNight,
+        ...streakOf(8, 'sha256:aaaa', 40000007000),
+      ]);
+      expect(a.met).toBe(false);
+      expect(a.voidNights).toHaveLength(0);
+      expect(a.longest.nights).toBe(8);
+      expect(a.streaks.at(-1)?.restartCause).toBe('night-disqualified');
     });
   });
 
