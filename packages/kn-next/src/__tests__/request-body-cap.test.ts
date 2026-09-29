@@ -176,6 +176,60 @@ function raw(
     });
 }
 
+/**
+ * A client that is STILL UPLOADING when it is refused: send `head` plus body
+ * bytes until the 413 arrives, keep sending for another ~400ms, then stop
+ * (without half-closing) and wait for the server to close the connection.
+ *
+ * Deterministic where a single big write is not: once a server has torn the
+ * connection down, the next write after the 413 fails with ECONNRESET/EPIPE on
+ * every runtime, so `error` is set exactly when the server did not linger.
+ */
+function uploadAfterRefusal(
+    port: number,
+    head: string,
+    body: (n: number) => string,
+): Promise<{ status: string; error?: string; closedMs: number }> {
+    return new Promise((done) => {
+        const s = connect(port, "127.0.0.1");
+        let got = "";
+        let error: string | undefined;
+        let refusedAt = 0;
+        let stopAt = 0;
+        let connected = false;
+        const started = Date.now();
+        const pump = setInterval(() => {
+            if (!connected || s.destroyed) return;
+            if (stopAt && Date.now() > stopAt) return;
+            s.write(body(16 * 1024));
+        }, 10);
+        const hardStop = setTimeout(() => s.destroy(), 15_000);
+        s.on("connect", () => {
+            s.write(head);
+            connected = true;
+        });
+        s.on("data", (d) => {
+            got += d;
+            if (!refusedAt && got.includes("\r\n\r\n")) {
+                refusedAt = Date.now();
+                stopAt = refusedAt + 400;
+            }
+        });
+        s.on("error", (e: NodeJS.ErrnoException) => {
+            error = e.code ?? String(e);
+        });
+        s.on("close", () => {
+            clearInterval(pump);
+            clearTimeout(hardStop);
+            done({
+                status: statusLine(got),
+                error,
+                closedMs: Date.now() - (refusedAt || started),
+            });
+        });
+    });
+}
+
 const statusLine = (response: string) => response.split("\r\n")[0] ?? "";
 const bodyOf = (response: string) =>
     response.split("\r\n\r\n").slice(1).join("\r\n\r\n");
@@ -366,31 +420,26 @@ for (const [name, bin] of RUNTIMES) {
         it("a client still uploading when refused READS the 413 (no reset), and the connection closes within the linger bound", async () => {
             const b = await boot(bin, { KNEXT_MAX_REQUEST_BYTES: String(CAP) });
             try {
-                const big = 8 * 1024 * 1024;
-                const started = Date.now();
-                const declared = await raw(
+                const declared = await uploadAfterRefusal(
                     b.port,
-                    post("linger-declared", big),
-                    { keepOpen: true },
+                    "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: linger-declared\r\nContent-Length: 104857600\r\n\r\n",
+                    (n) => "a".repeat(n),
                 );
-                expect(statusLine(declared)).toBe(
-                    "HTTP/1.1 413 Payload Too Large",
-                );
-                const chunked = await raw(
+                expect(declared.status).toBe("HTTP/1.1 413 Payload Too Large");
+                // Kept uploading for a while AFTER the 413 with no reset: the
+                // server discarded the bytes instead of tearing down…
+                expect(declared.error).toBeUndefined();
+                // …and the SERVER closed it, inside the bound.
+                expect(declared.closedMs).toBeLessThan(6_000);
+
+                const chunked = await uploadAfterRefusal(
                     b.port,
-                    "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: linger-chunked\r\nTransfer-Encoding: chunked\r\n\r\n" +
-                        chunk(1024 * 1024).repeat(8) +
-                        "0\r\n\r\n",
-                    { keepOpen: true },
+                    "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: linger-chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+                    (n) => chunk(n),
                 );
-                expect(statusLine(chunked)).toBe(
-                    "HTTP/1.1 413 Payload Too Large",
-                );
-                // Both connections were closed by the SERVER (raw() resolves on
-                // close; its own 10s timeout would append "[timeout]").
-                expect(declared).not.toContain("[timeout]");
-                expect(chunked).not.toContain("[timeout]");
-                expect(Date.now() - started).toBeLessThan(9_000);
+                expect(chunked.status).toBe("HTTP/1.1 413 Payload Too Large");
+                expect(chunked.error).toBeUndefined();
+                expect(chunked.closedMs).toBeLessThan(6_000);
                 expect(b.out()).not.toContain("HANDLER_DONE linger-chunked");
             } finally {
                 b.stop();
