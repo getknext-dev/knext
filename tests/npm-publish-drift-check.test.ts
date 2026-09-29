@@ -35,13 +35,13 @@ describe('evaluateReviewerProtection', () => {
   it('fails when a required_reviewers rule exists but names zero reviewers', () => {
     const result = evaluateReviewerProtection([{ type: 'required_reviewers', reviewers: [] }]);
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/zero reviewers/);
+    expect((result as { ok: false; reason: string }).reason).toMatch(/zero reviewers/);
   });
 
   it('fails when other protection rule types exist but no required_reviewers rule does', () => {
     const result = evaluateReviewerProtection([{ type: 'wait_timer', wait_timer: 30 }]);
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/no required_reviewers/);
+    expect((result as { ok: false; reason: string }).reason).toMatch(/no required_reviewers/);
   });
 
   it('passes when a required_reviewers rule names at least one reviewer', () => {
@@ -110,7 +110,7 @@ describe('evaluateTagRulesetProtection', () => {
   it('fails when the candidate list is empty (the LIVE state today — no tag ruleset at all)', () => {
     const result = evaluateTagRulesetProtection([]);
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/no enabled ruleset/);
+    expect((result as { ok: false; reason: string }).reason).toMatch(/no enabled ruleset/);
   });
 
   it('fails when candidates exist but none cover v*', () => {
@@ -118,7 +118,7 @@ describe('evaluateTagRulesetProtection', () => {
       { conditions: { ref_name: { include: ['refs/tags/release-*'] } } },
     ]);
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/none of its ref_name/);
+    expect((result as { ok: false; reason: string }).reason).toMatch(/none of its ref_name/);
   });
 
   it('passes when at least one candidate covers v*', () => {
@@ -136,7 +136,7 @@ describe('evaluateTagRulesetProtection', () => {
 
 // ── fetchReviewerProtection (fetch layer, injected api) ──────────────────────
 
-function fakeApi(routes: Record<string, { status: number; body?: unknown }>) {
+function fakeApi(routes: Record<string, { status: number; body: unknown }>) {
   const calls: string[] = [];
   const api = async (path: string) => {
     calls.push(path);
