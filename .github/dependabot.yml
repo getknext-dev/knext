@@ -1,7 +1,7 @@
 # Dependabot — keeps the SHA-pinned GitHub Actions current (#522, scope widened #528).
 #
 # EVERY workflow now pins every `uses:` to a full commit SHA, not just the publish
-# path: release.yml / release-ghp.yml hold live publish credentials, and
+# path: release.yml holds a live publish credential, and
 # supply-chain.yml / operator-supply-chain.yml run cosign KEYLESS signing under an
 # `id-token: write` OIDC identity able to sign artifacts as this repo. `directory: '/'`
 # below already covers `.github/workflows` as a whole, so no per-file entry is needed

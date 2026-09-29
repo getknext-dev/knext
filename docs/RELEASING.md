@@ -9,10 +9,10 @@
 > [`docs/RELEASE_POLICY.md`](RELEASE_POLICY.md), and the version-by-version compatibility table is
 > [`docs/COMPATIBILITY.md`](COMPATIBILITY.md).
 >
-> Two paths exist: (a) the **canonical npmjs path** (`@getknext/*`, Changesets → `release.yml`)
-> documented first, and (b) an **interim GitHub Packages channel**
-> (`@getknext-dev/*`, `release-ghp.yml`) — see
-> [Interim channel — GitHub Packages](#interim-channel--github-packages-getknext-dev).
+> There is one publish path: the **canonical npmjs path** (`@getknext/*`, Changesets →
+> `release.yml`). The former interim GitHub Packages channel (`@getknext-dev/*`,
+> `release-ghp.yml`) is retired — see
+> [Retired: interim GitHub Packages channel](#retired-interim-github-packages-channel-getknext-dev).
 >
 > **Auth is configured.** This file used to say the npmjs path was "blocked on a human `NPM_TOKEN`".
 > It is not, and was not since 2026-07-25 — see [The gate](#the-gate-two-lanes-one-approval) for
@@ -355,100 +355,30 @@ running watcher does not read a variable it was not built to know, so the settin
 nothing — the same failure mode as a CLI running ahead of the CRD. The operational detail lives in
 the package runbook, `packages/scale-zero-pg/docs/operations.md` § "Upgrades".
 
-## Interim channel — GitHub Packages (`@getknext-dev/*`)
+## Retired: interim GitHub Packages channel (`@getknext-dev/*`)
 
-Introduced while the npmjs path was believed to be blocked on auth (issue #53), the maintainer
-directive was to ship an **interim** release channel on **GitHub Packages**
-(`npm.pkg.github.com`). This is a stopgap — **`@getknext/*` on npmjs remains the canonical future
-home**; the GHP names are temporary.
+**(#1644)** `release-ghp.yml` — the manual-only interim publish channel to
+`npm.pkg.github.com` under the `@getknext-dev/*` scope — is **deleted**. It was
+introduced while the npmjs path (`@getknext/*`, `release.yml`) was believed to be
+blocked on auth (issue #53); that premise stopped being true on 2026-07-25 (see
+[The gate](#the-gate-two-lanes-one-approval)), and the workflow carried none of
+`release.yml`'s gates (no GA-vs-rc tarball diff, no publish preflight, no group
+verification, no environment). **`@getknext/*` on npmjs is the only publish
+path.** A scan test (`tests/single-publish-workflow.test.ts`) enforces that no
+workflow other than `release.yml` runs `npm publish` / `changeset publish` /
+`bun publish`.
 
-### Why the packages are renamed
+If GitHub Packages publishing is ever needed again, it must be added as a
+gated job inside `release.yml`, not as a second standalone workflow.
+`scripts/rename-for-ghp.mjs` (the `@getknext/*` → `@getknext-dev/*` staging
+rewrite the old workflow used) is kept — it is still unit-tested
+(`tests/rename-for-ghp.test.ts`) and reused by the npm-scope contract test
+(`tests/npm-scope-getknext.test.ts`) — but nothing currently invokes it as a
+publish step. `scripts/ghp-install-smoke.mjs`, which existed only to
+consumer-smoke-test the retired channel, is deleted along with it.
 
-GitHub Packages requires the package **scope to match the owning org**, and `publishConfig` cannot
-override a package name or a dependency name. So this channel republishes under the org scope:
-
-| npmjs (canonical) | GitHub Packages (interim) |
-| ----------------- | ------------------------- |
-| `@getknext/core`     | `@getknext-dev/core`      |
-| `@getknext/lib`      | `@getknext-dev/lib`       |
-| `@getknext/db`       | `@getknext-dev/db`        |
-
-The rename is done by `scripts/rename-for-ghp.mjs`, which stages **copies** (it never mutates the
-working tree) and rewrites:
-
-- each package `name` → `@getknext-dev/*`;
-- the inter-package dependency keys (`@getknext/lib`, `@getknext/db`) → `@getknext-dev/*`, and any
-  `workspace:` specifier → a concrete version range (since `npm publish` from a staging dir
-  cannot rewrite the pnpm `workspace:` protocol like `pnpm publish` would);
-- **every hardcoded `@getknext/` import string inside the staged `dist/**`** — this is the critical
-  hazard: `@getknext/lib` **and `@getknext/db`** are externalized in
-  `packages/kn-next/tsup.config.ts` (and `@getknext/db`'s plain-tsc build preserves its
-  `@getknext/lib` imports), so the compiled outputs (`dist/adapters/node-server.js`,
-  `dist/cli/db-migrate.js`, `packages/db/dist/index.js`) contain literal `@getknext/lib/...` +
-  `@getknext/db/...` imports. Renaming only `package.json` would publish packages whose runtime
-  imports the never-published `@getknext/*` names. The script **fails loudly, per dependency**: for
-  every `@getknext/*` dep a staged package declares, its dist must contain at least one occurrence
-  of that exact specifier (a zero signals the externalization layout changed). It also refuses
-  any `@getknext/*` dependency that is not itself in the publish set;
-- `publishConfig.provenance` is **stripped** — provenance needs npmjs/OIDC and fails on GHP.
-
-### Publishing
-
-Run the **Release (GitHub Packages, interim)** workflow manually
-(**Actions → Release (GitHub Packages, interim) → Run workflow**). It builds `@getknext/lib`, then
-`@getknext/db`, then `@getknext/core`, stages the renamed copies, and publishes **lib, then db, then
-core** to `npm.pkg.github.com` using the built-in `GITHUB_TOKEN` (`packages: write`, no id-token). Re-running
-with an unchanged version fails with a clear "already published — bump versions via changesets
-first" message; bump versions before re-releasing.
-
-After publish, the workflow's `smoke-ghp` job runs `scripts/ghp-install-smoke.mjs`, which
-installs the just-published `@getknext-dev/*` FROM `npm.pkg.github.com` as a real consumer would
-(`GITHUB_TOKEN` + `packages: read`) and asserts the CLI + app-import surface — so a maintainer
-dispatch of `release-ghp.yml` yields the first live green proving the channel is installable, not
-just packable.
-
-### Consuming `@getknext-dev/*` from GitHub Packages
-
-GHP requires auth for installs **even for public packages**. In the consuming project add an
-`.npmrc`:
-
-```ini
-@getknext-dev:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
-```
-
-where `GITHUB_TOKEN` is a personal access token with the `read:packages` scope. Then:
-
-```sh
-npm install @getknext-dev/core @getknext-dev/lib @getknext-dev/db
-npx @getknext-dev/core --help    # runs the kn-next bin from the GHP package
-```
-
-> Caveat: anonymous installs get a `401` — the auth line above is mandatory. Once the npmjs
-> release goes live, migrate consumers back to `npx @getknext/core` / `@getknext/*`; the GHP scope is
-> interim only.
-
-### Deprecation plan for `@getknext-dev/*` (execute when npmjs goes live)
-
-Decided 2026-07 (architect sign-off on the interim channel): the GHP scope is **deprecated the
-day `@getknext/*` publishes to npmjs** (issue #53). When that happens, a maintainer should:
-
-1. Publish one final `@getknext-dev/*` patch whose README/description points at `@getknext/*` on
-   npmjs, **or** simply mark the existing GHP versions deprecated:
-
-   ```sh
-   npm deprecate @getknext-dev/core "moved to @getknext/core on registry.npmjs.org" \
-     --registry=https://npm.pkg.github.com
-   npm deprecate @getknext-dev/lib "moved to @getknext/lib on registry.npmjs.org" \
-     --registry=https://npm.pkg.github.com
-   ```
-
-2. Stop dispatching `release-ghp.yml` (leave the workflow in place for history; it is manual-only
-   so it cannot fire accidentally).
-3. Update this doc and any consumer `.npmrc` snippets to the `@getknext/*` install path.
-
-Do **not** unpublish the GHP versions — existing consumers keep working; deprecation warns them
-to migrate.
+Existing `@getknext-dev/*` packages already published to GitHub Packages are
+untouched by this — this only stops publishing *new* versions there.
 
 ## Troubleshooting
 

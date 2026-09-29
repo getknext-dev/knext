@@ -192,12 +192,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       'bun-sandbox-fetch-ab.yml': 1,
       // NEW (#926): the npm publish lane installed with `pnpm install
       // --frozen-lockfile` against a repo with NO pnpm-lock.yaml, so every job
-      // died at install. All three release.yml jobs and both release-ghp.yml
-      // jobs now install with bun, pinned like every other lane.
+      // died at install. All three release.yml jobs now install with bun,
+      // pinned like every other lane. (release-ghp.yml is retired — #1644.)
       // #1562: the `ga-tarball-diff` job builds + packs the rc tag and HEAD
       // with bun (the same toolchain as the publish job) — a fourth step.
       'release.yml': 4,
-      'release-ghp.yml': 2,
       // NEW (#1596, kn-next-action Bun toolchain fix): the composite action never
       // installed Bun, so the default runtime's compiled-standalone build
       // (`bun run …`) failed with ENOENT on every stock ubuntu-24.04 runner —
