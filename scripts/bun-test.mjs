@@ -46,7 +46,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,6 +80,20 @@ const bunBin = flag('bun', process.env.KNEXT_BUN ?? 'bun');
  */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const concurrency = Number(flag('concurrency', String(Math.max(2, cpus().length - 2))));
+/**
+ * A hard OUTER bound per spawned file (#1241). `coverage-margin.test.ts` was
+ * observed to hang 27+ minutes under `--coverage`, orphaned — nothing here
+ * bounded a single file's runtime beyond bun's own PER-TEST default (5000ms,
+ * which a genuinely-stuck event loop can also fail to enforce), and nothing
+ * killed a file that overran. Generous by design: legitimate files carry
+ * their own up-to-90s per-test timeouts (e.g.
+ * `tests/bytecode-liveness-wiring.test.ts`) and `--coverage` measurably slows
+ * every file down, so this must never fire on a merely-slow file — only on
+ * one that is actually stuck. 10 minutes is comfortably above the slowest
+ * observed legitimate file and comfortably below "left running for the rest
+ * of the day".
+ */
+const fileTimeoutMs = Number(flag('file-timeout', String(10 * 60_000)));
 // `-t <name>` filters test titles, forwarded to every bun child (#902 — the
 // prover lane runs single tests through this runner). Extracted BEFORE target
 // collection: `-t` starts with one dash, so the filter below would otherwise
@@ -212,7 +226,80 @@ console.log(`bun test — ${files.length} file(s), ${concurrency} at a time, iso
 // run would otherwise WIPE the outer run's reports halfway through it.
 const COVERAGE_OUT = resolve(REPO_ROOT, process.env.KNEXT_BUN_COVERAGE_DIR ?? BUN_COVERAGE_DIR);
 const COVERAGE_RAW = join(COVERAGE_OUT, '.raw');
+// Sibling to COVERAGE_OUT, deliberately NOT inside it — wiping the directory
+// below must never also delete the lock protecting that wipe.
+const COVERAGE_LOCK = `${COVERAGE_OUT}.lock`;
+
+/**
+ * Is `pid` a live process? `process.kill(pid, 0)` sends no signal, only
+ * probes. ESRCH means no such process; EPERM means it exists but is owned by
+ * someone else — still alive, from this check's point of view.
+ */
+function pidIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+/**
+ * Exclusive lock on COVERAGE_OUT for the life of this `--coverage` run
+ * (#1242). Before this, the runner unconditionally `rmSync`'d then
+ * `mkdirSync`'d the shared pile — two overlapping coverage runs in the same
+ * (non-worktree) checkout would race on that wipe, and whichever started
+ * second could silently delete the first's in-flight per-file reports
+ * mid-merge, producing a wrong coverage number with no error at all.
+ *
+ * A run that cannot acquire the lock FAILS LOUDLY and leaves the directory
+ * untouched — proceeding anyway is exactly the silent clobber this closes.
+ * Acquisition is atomic (`wx`: `O_CREAT|O_EXCL`), so two processes racing to
+ * create the SAME lock file can never both believe they won it — the OS
+ * guarantees exactly one `wx` create succeeds even when both attempts land
+ * in the same instant. A lock recorded by a PID that is no longer alive (a
+ * crashed prior run — e.g. SIGKILLed by this very runner's #1241 file
+ * timeout) is reclaimed rather than blocking every future run permanently.
+ */
+function acquireCoverageLock() {
+  for (;;) {
+    try {
+      writeFileSync(COVERAGE_LOCK, String(process.pid), { flag: 'wx' });
+      return;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+    let heldBy;
+    try {
+      heldBy = Number(readFileSync(COVERAGE_LOCK, 'utf8').trim());
+    } catch {
+      // Vanished between our failed create and this read — the holder
+      // released it (or another racer reclaimed it) in that window. Retry
+      // the atomic create rather than treating a read failure as a hold.
+      continue;
+    }
+    if (Number.isInteger(heldBy) && pidIsAlive(heldBy)) {
+      console.error(
+        `\nerror: another --coverage run (pid ${heldBy}) already owns ${COVERAGE_OUT}.\n` +
+          "Two coverage runs in the same checkout would silently clobber each other's " +
+          'in-flight output (#1242) — refusing rather than wiping it. Wait for the other ' +
+          'run to finish, or point KNEXT_BUN_COVERAGE_DIR at a different directory (e.g. ' +
+          'a separate worktree) to run coverage concurrently.\n',
+      );
+      process.exit(1);
+    }
+    // Stale — the recorded PID is gone. Reclaim (best-effort: a concurrent
+    // reclaimer's ENOENT here is not fatal) and retry the atomic create.
+    rmSync(COVERAGE_LOCK, { force: true });
+  }
+}
+
 if (withCoverage) {
+  acquireCoverageLock();
+  // Released on every exit path — including an uncaught throw or
+  // `process.exit()` elsewhere in this script — never a `finally` that a
+  // throw could skip.
+  process.on('exit', () => rmSync(COVERAGE_LOCK, { force: true }));
   if (existsSync(COVERAGE_OUT)) rmSync(COVERAGE_OUT, { recursive: true, force: true });
   mkdirSync(COVERAGE_RAW, { recursive: true });
 }
@@ -282,9 +369,19 @@ function runFile(file) {
     }
     const child = spawn(bunBin, args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
+    let timedOut = false;
     child.stdout.on('data', (d) => (output += d));
     child.stderr.on('data', (d) => (output += d));
+    // #1241: an OUTER kill — bun's own per-test timeout lives INSIDE the
+    // child and cannot help if the child's event loop is the thing stuck.
+    // SIGKILL, not SIGTERM: a truly-hung process is exactly the case a
+    // handler-based graceful exit cannot be trusted to run.
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, fileTimeoutMs);
     child.on('close', (code) => {
+      clearTimeout(killTimer);
       done++;
       // Flatten each spawn's report to `coverage-bun/<slug>.info`, so the
       // directory is a readable pile of per-file lcov rather than a tree of
@@ -296,11 +393,18 @@ function runFile(file) {
           rmSync(covDir, { recursive: true, force: true });
         }
       }
+      if (timedOut) {
+        output += `\n[bun-test.mjs] killed after exceeding the ${fileTimeoutMs}ms per-file timeout — treated as a hang, not a slow test. Raise --file-timeout if this file is legitimately slow.\n`;
+      }
       const violation = noSkip && code === 0 ? skipViolation(output) : null;
       if (violation) output += `\n${violation}\n`;
-      const ok = code === 0 && violation === null;
+      // timedOut overrides everything else: a killed process's exit code
+      // (whatever SIGKILL happens to report) must never read as success.
+      const ok = !timedOut && code === 0 && violation === null;
       if (!ok) failures.push({ file, output });
-      process.stdout.write(`  ${ok ? 'ok  ' : 'FAIL'} [${done}/${files.length}] ${file}\n`);
+      process.stdout.write(
+        `  ${ok ? 'ok  ' : timedOut ? 'KILL' : 'FAIL'} [${done}/${files.length}] ${file}\n`,
+      );
       // Under a -t filter (#902: the prover lane runs single tests through this
       // runner) the caller needs the CHILD's pass/fail counts — a filter that
       // matches nothing is a green file with zero tests, which a prover must
@@ -313,6 +417,7 @@ function runFile(file) {
       resolve(ok);
     });
     child.on('error', (err) => {
+      clearTimeout(killTimer);
       done++;
       failures.push({ file, output: String(err.message) });
       process.stdout.write(`  FAIL [${done}/${files.length}] ${file} (spawn error)\n`);
