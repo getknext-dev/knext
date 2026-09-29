@@ -57,6 +57,11 @@ const EXPECTED_ACTIONS: ReadonlySet<string> = new Set([
   'actions/checkout',
   'actions/setup-node',
   'actions/upload-artifact',
+  // #1614/#1616: the `pack` job's release-tarballs artifact is downloaded by
+  // both `ga-tarball-diff` (the ga/HEAD side of the diff) and `release`
+  // (the pre-publish drift check) — reviewed as a supply-chain decision like
+  // every other entry here, not just the upload half.
+  'actions/download-artifact',
   // #926: the publish path installs with bun (the workspace's lockfile is
   // bun.lock — `pnpm install --frozen-lockfile` cannot run at all without
   // pnpm-lock.yaml, which is what killed the lane). Same scope argument as the
@@ -78,6 +83,7 @@ const EXPECTED_ACTIONS_BY_FILE: Record<(typeof PINNED_WORKFLOWS)[number], Readon
     'actions/checkout',
     'actions/setup-node',
     'actions/upload-artifact',
+    'actions/download-artifact',
     'oven-sh/setup-bun',
     'changesets/action',
   ]),

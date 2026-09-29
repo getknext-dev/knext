@@ -102,18 +102,22 @@ jobs:
           test -f packages/kn-next/dist/cli/kn-next.js
 
       # Same closure/rewrite the compat harness lane packs (test-e2e-deploy.yml
-      # "Pack knext adapter tarballs"): `bun pm pack` rewrites the `workspace:^`
-      # deps @getknext/core carries on @getknext/lib + @getknext/db to a real
-      # semver, which is what makes the tarballs npm-installable standalone —
-      # `npm pack` ships the raw protocol and 404s on install.
-      - name: Pack knext adapter tarballs (bun pm pack — rewrites workspace:^, npm-installable)
+      # "Pack knext adapter tarballs"), now via the SAME shared packer
+      # `release.yml`'s `pack` job uses (`scripts/pack-release-tarballs.mjs`):
+      # `npm pack` — never `bun pm pack` (#1614) — after
+      # `rewrite-workspace-ranges.mjs` resolves the `workspace:^` deps
+      # @getknext/core carries on @getknext/lib + @getknext/db to a real
+      # semver, which is what makes the tarballs npm-installable standalone.
+      # `npm pack` is the tool `changeset publish` actually shells to for a
+      # bun workspace, so this lane installs+exercises the SAME bytes that
+      # ship, rather than `bun pm pack`'s (a different rewrite source, and —
+      # measured, #1562 — a duplicate tar entry for a multi-`bin`-key target).
+      - name: Pack knext adapter tarballs (npm pack — the real publish tool, #1614)
         run: |
           set -euo pipefail
           DEST="${RUNNER_TEMP}/knext-tarballs"
-          mkdir -p "${DEST}"
-          (cd packages/lib && bun pm pack --destination "${DEST}")
-          (cd packages/db && bun pm pack --destination "${DEST}")
-          (cd packages/kn-next && bun pm pack --destination "${DEST}")
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
           ls -la "${DEST}"
           echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
 

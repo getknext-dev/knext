@@ -70,6 +70,11 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  readPackManifest,
+  sha256File,
+  tarballDriftProblems,
+} from './lib/pack-publishable-group.mjs';
 import { workspaceRoots } from './lib/workspace-globs.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -468,13 +473,23 @@ function die(message) {
   process.exit(1);
 }
 
-function runPre() {
+/**
+ * @param {string} [compareDir] a directory holding a `pack-release-tarballs.mjs`
+ *   manifest (#1616) — `release.yml`'s `pack` job's downloaded artifact. When
+ *   given, the freshly-packed tarballs below are ALSO sha256-compared against
+ *   it and the run dies on any drift, PROVING (not merely hoping) that what
+ *   is about to publish is byte-identical to what the audit/GA-diff gates
+ *   already vouched for. This does not change what gets packed or how — it
+ *   is an additive check; omit it to reproduce the exact pre-#1616 behavior.
+ */
+function runPre(compareDir) {
   const publishable = publishableDirs();
   if (publishable.length === 0) {
     die('no publishable packages found — this gate would pass vacuously');
   }
   const workDir = mkdtempSync(join(tmpdir(), 'knext-verify-group-'));
   const manifests = [];
+  const freshShaByName = new Map();
   try {
     console.log(
       '[verify-published-group] packing the publishable set with `npm pack` (the publish tool)…',
@@ -489,7 +504,8 @@ function runPre() {
     }
     for (const file of readdirSync(workDir)) {
       if (!file.endsWith('.tgz')) continue;
-      const out = spawnSync('tar', ['-xzOf', join(workDir, file), 'package/package.json'], {
+      const tarballPath = join(workDir, file);
+      const out = spawnSync('tar', ['-xzOf', tarballPath, 'package/package.json'], {
         encoding: 'utf8',
       });
       if (out.status !== 0 || !out.stdout) {
@@ -497,7 +513,23 @@ function runPre() {
           `could not read package/package.json from ${file}: ${out.stderr || `exit ${out.status}`}`,
         );
       }
-      manifests.push(JSON.parse(out.stdout));
+      const manifest = JSON.parse(out.stdout);
+      manifests.push(manifest);
+      if (compareDir) freshShaByName.set(manifest.name, sha256File(tarballPath));
+    }
+
+    if (compareDir) {
+      console.log(
+        `[verify-published-group] comparing against the pack-once artifact (${compareDir})…`,
+      );
+      const packOnceManifest = readPackManifest(compareDir);
+      const driftProblems = tarballDriftProblems(freshShaByName, packOnceManifest);
+      if (driftProblems.length > 0) {
+        die(
+          `the freshly-packed tarballs DRIFT from the pack-once artifact (${compareDir}) — ` +
+            `refusing before the credentialed publish:\n  - ${driftProblems.join('\n  - ')}`,
+        );
+      }
     }
   } finally {
     rmSync(workDir, { recursive: true, force: true });
@@ -517,7 +549,8 @@ function runPre() {
     );
   }
   console.log(
-    '\n[verify-published-group] PASS (pre): no workspace: specs and the fixed group is coherent.',
+    '\n[verify-published-group] PASS (pre): no workspace: specs and the fixed group is coherent' +
+      (compareDir ? ', and matches the pack-once artifact byte-for-byte.' : '.'),
   );
 }
 
@@ -579,10 +612,13 @@ async function runPost() {
 }
 
 async function main() {
-  const mode = process.argv[2];
-  if (mode === '--pre') return runPre();
+  const argv = process.argv.slice(2);
+  const mode = argv[0];
+  const compareDirIdx = argv.indexOf('--compare-dir');
+  const compareDir = compareDirIdx !== -1 ? argv[compareDirIdx + 1] : undefined;
+  if (mode === '--pre') return runPre(compareDir);
   if (mode === '--post') return await runPost();
-  die('usage: verify-published-group.mjs --pre | --post');
+  die('usage: verify-published-group.mjs --pre [--compare-dir <dir>] | --post');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -31,6 +31,25 @@ export const PROVER_RE = /^mutation-prove-.*\.mjs$/;
 export const RESOLVER_DEFINITION_FILE = 'scripts/lib/ci-blocking-gate-proof.mjs';
 
 /**
+ * Files allowed to spawn a package manager for a reason THIS rule was never
+ * about, by PATH (#1614), same posture as `RESOLVER_DEFINITION_FILE` and for
+ * the same reason (a shape-based exemption is copy-instead-of-share bait).
+ *
+ * `resolveTestRunner`'s whole job is finding the binary that runs a TEST
+ * SUITE inside a fixture tree — `pnpm exec vitest` resolving nothing without
+ * a local `node_modules` is what it exists to avoid. `scripts/lib/
+ * pack-publishable-group.mjs` spawns `npm pack`/`npm install` for an entirely
+ * different reason: packing/publishing the real `@getknext/*` release
+ * tarballs (#1614/#1616), never running a test. There is no "test runner" to
+ * resolve there, so routing it through `resolveTestRunner` would be a
+ * category error, not a fix. `tests/mutation-prover-lane.test.ts` asserts why
+ * this file is exempt (a genuinely different domain), not merely that it is.
+ */
+export const NON_TEST_PACKAGE_MANAGEMENT_FILES = Object.freeze([
+  'scripts/lib/pack-publishable-group.mjs',
+]);
+
+/**
  * Shared DRIVERS that call the harness's mutating verbs on a prover's behalf.
  *
  * The convention scan below asks "does every file that mutates via the harness
@@ -385,15 +404,28 @@ export function auditRunnerResolution(source, relPath) {
   const findings = [];
   const pm = packageManagerCommand(codeStringLiterals(source));
   const spawner = spawnerCalled(source);
-  // The ONE legitimate package-manager SPAWN in the tree is the resolver's own
-  // last-resort fallback, so the exemption is the DEFINITION SITE — and #693
-  // made that literally true. It used to be `/function\s+resolveTestRunner\b/`
-  // against the source, i.e. a SHAPE: copying the function name into a new file
-  // exempted it, which is the copy-instead-of-share failure this guard exists to
-  // catch. It is now the PATH, cross-checked by a test asserting exactly one file
-  // in the tree defines that function.
+  // The ONE legitimate package-manager SPAWN in the tree for TEST-RUNNER
+  // resolution is the resolver's own last-resort fallback, so that exemption
+  // is the DEFINITION SITE — and #693 made that literally true. It used to be
+  // `/function\s+resolveTestRunner\b/` against the source, i.e. a SHAPE:
+  // copying the function name into a new file exempted it, which is the
+  // copy-instead-of-share failure this guard exists to catch. It is now the
+  // PATH, cross-checked by a test asserting exactly one file in the tree
+  // defines that function.
   const definesResolver = relPath === RESOLVER_DEFINITION_FILE;
-  if (pm !== undefined && spawner !== undefined && !definesResolver) {
+  // A SEPARATE, narrower exemption class (#1614): a file that spawns a
+  // package manager for real package MANAGEMENT (packing/publishing
+  // tarballs), never for resolving/running a test suite — see
+  // `NON_TEST_PACKAGE_MANAGEMENT_FILES`'s own doc for why `resolveTestRunner`
+  // does not apply there at all, rather than being satisfied-but-unused.
+  const isNonTestPackageManagement =
+    relPath !== undefined && NON_TEST_PACKAGE_MANAGEMENT_FILES.includes(relPath);
+  if (
+    pm !== undefined &&
+    spawner !== undefined &&
+    !definesResolver &&
+    !isNonTestPackageManagement
+  ) {
     findings.push(
       `spawns the package manager (${JSON.stringify(pm)}) — resolve the runner with resolveTestRunner instead; \`pnpm exec\` resolves nothing in a tree without its own node_modules`,
     );
@@ -405,6 +437,7 @@ export function auditRunnerResolution(source, relPath) {
   if (
     spawner !== undefined &&
     !definesResolver &&
+    !isNonTestPackageManagement &&
     !callsFunction(source, 'resolveTestRunner') &&
     // #902: the per-spec dispatcher is the OTHER sanctioned resolver — it
     // wraps resolveTestRunner for vitest specs and routes bun:test specs to

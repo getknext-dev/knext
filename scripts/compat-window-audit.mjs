@@ -270,6 +270,13 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1614 — the "Pack knext adapter tarballs" step invokes this via a
+      // `node scripts/pack-release-tarballs.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own (its
+      // own import closure — `scripts/lib/pack-publishable-group.mjs`,
+      // `scripts/rewrite-workspace-ranges.mjs` — IS discovered automatically
+      // from there, so only the entry point needs naming here).
+      'scripts/pack-release-tarballs.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -288,6 +295,13 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1614 — the "Pack knext adapter tarballs" step invokes this via a
+      // `node scripts/pack-release-tarballs.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own (its
+      // own import closure — `scripts/lib/pack-publishable-group.mjs`,
+      // `scripts/rewrite-workspace-ranges.mjs` — IS discovered automatically
+      // from there, so only the entry point needs naming here).
+      'scripts/pack-release-tarballs.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -309,6 +323,13 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1614 — the "Pack knext adapter tarballs" step invokes this via a
+      // `node scripts/pack-release-tarballs.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own (its
+      // own import closure — `scripts/lib/pack-publishable-group.mjs`,
+      // `scripts/rewrite-workspace-ranges.mjs` — IS discovered automatically
+      // from there, so only the entry point needs naming here).
+      'scripts/pack-release-tarballs.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -327,6 +348,13 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1614 — the "Pack knext adapter tarballs" step invokes this via a
+      // `node scripts/pack-release-tarballs.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own (its
+      // own import closure — `scripts/lib/pack-publishable-group.mjs`,
+      // `scripts/rewrite-workspace-ranges.mjs` — IS discovered automatically
+      // from there, so only the entry point needs naming here).
+      'scripts/pack-release-tarballs.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -360,6 +388,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-vinext-ledger.mjs',
       'test/compat-vinext-ledger.json',
       'scripts/lib/musl-lockfile-lookup.sh',
+      // #1614 — the "Pack knext tarballs" step invokes this via a
+      // `node scripts/pack-release-tarballs.mjs …` subprocess call, not an
+      // `import`/`source` the closure scanner can discover on its own.
+      'scripts/pack-release-tarballs.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),

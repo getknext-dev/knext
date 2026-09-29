@@ -1275,6 +1275,43 @@ describe('ga-tarball-diff CLI (--rc-ref/--ga-ref)', () => {
     expect(code).toBe(1);
     expect(output).toContain('ERROR');
   });
+
+  // #1616 — MIXED mode: the rc side still needs a worktree build (a different
+  // commit than HEAD), but the ga/HEAD side can consume tarballs
+  // `release.yml`'s `pack` job already produced for this exact commit,
+  // instead of `packRef` building+packing HEAD a SECOND time. This proves
+  // parseArgs accepts the mix (no "pass exactly one" error) and each side
+  // resolves independently — never that the two sides must share a mode.
+  it('accepts MIXED --rc-ref + --ga-dir (each side resolves independently, #1616)', () => {
+    const repoRoot = resolve(import.meta.dir, '..');
+    const emptyTreeSha = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+    const commitSha = execFileSync(
+      'git',
+      ['commit-tree', emptyTreeSha, '-m', 'ga-tarball-diff test fixture: mixed-mode rc side'],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'ga-tarball-diff-test',
+          GIT_AUTHOR_EMAIL: 'ga-tarball-diff-test@example.invalid',
+          GIT_COMMITTER_NAME: 'ga-tarball-diff-test',
+          GIT_COMMITTER_EMAIL: 'ga-tarball-diff-test@example.invalid',
+        },
+      },
+    ).trim();
+
+    const gaDir = mkFixtureDir('ga-diff-cli-mixed-ga-');
+    buildCleanTrio(gaDir, '1.0.0');
+
+    const { code, output } = runCli(['--rc-ref', commitSha, '--ga-dir', gaDir]);
+    // The rc side (empty-tree ref) reports every package missing from rc,
+    // never from ga — proving the ga side resolved from `gaDir`, not a
+    // second worktree build.
+    expect(code).toBe(1);
+    expect(output).toContain('missing from rc set');
+    expect(output).not.toContain('missing from GA set');
+  });
 });
 
 // --- packRef packs with the REAL publish tool (rehearsal-discovered, #1562) -

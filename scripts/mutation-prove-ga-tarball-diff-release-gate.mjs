@@ -66,12 +66,11 @@ const MUTATIONS = [
     claim:
       'the GA-side ref is changed from the literal "HEAD" to a branch name — release.yml runs this ' +
       'BEFORE changeset publish creates the tag, so the artifact under diff must be the exact ' +
-      'commit about to publish (HEAD), never a moving branch tip',
+      'commit about to publish (HEAD), never a moving branch tip. #1616: gaDir is unset in every ' +
+      'test here, so this still exercises the --ga-ref fallback branch, not --ga-dir.',
     subject: 'gate',
-    anchor:
-      "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'HEAD'], { log, repoRoot });",
-    replacement:
-      "const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'main'], { log, repoRoot });",
+    anchor: "const gaArgs = gaDir ? ['--ga-dir', gaDir] : ['--ga-ref', 'HEAD'];",
+    replacement: "const gaArgs = gaDir ? ['--ga-dir', gaDir] : ['--ga-ref', 'main'];",
   },
   {
     id: 'M5',
@@ -139,9 +138,13 @@ const MUTATIONS = [
       '        run: bun install --frozen-lockfile\n' +
       '\n' +
       '      - name: Run the GA-vs-rc tarball diff gate\n' +
+      '        env:\n' +
+      '          PACK_ONCE_GA_DIR: ${{ github.workspace }}/release-tarballs-head\n' +
       '        run: node scripts/ga-tarball-diff-gate.mjs\n',
     replacement:
       '      - name: Run the GA-vs-rc tarball diff gate\n' +
+      '        env:\n' +
+      '          PACK_ONCE_GA_DIR: ${{ github.workspace }}/release-tarballs-head\n' +
       '        run: node scripts/ga-tarball-diff-gate.mjs\n' +
       '\n' +
       '      - name: Install dependencies\n' +

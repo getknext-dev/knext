@@ -147,6 +147,13 @@ const TITLE = 'GA-tarball-diff gate';
  *   injectable so unit tests never spawn `git worktree`/`bun`/a child `node` process.
  * @param {(repoRoot: string) => string[]} [opts.listGitTags] injectable tag lister.
  * @param {string | undefined} [opts.summaryPath] `$GITHUB_STEP_SUMMARY`; unset locally.
+ * @param {string | undefined} [opts.gaDir] a directory of already-packed
+ *   tarballs for the ga/HEAD side (#1616) — `release.yml`'s `pack` job's
+ *   downloaded artifact. When set, the diff compares against THOSE tarballs
+ *   (`--ga-dir`) instead of building+packing HEAD a second time
+ *   (`--ga-ref HEAD`). Defaults to `PACK_ONCE_GA_DIR` so the live workflow
+ *   needs no code change beyond setting that env var; omitted (unset env,
+ *   unset opt) reproduces the exact pre-#1616 behavior.
  * @returns {number} process exit code
  */
 export function main({
@@ -155,6 +162,7 @@ export function main({
   runDiff = defaultRunDiff,
   listGitTags = listGitTagsDefault,
   summaryPath = process.env.GITHUB_STEP_SUMMARY,
+  gaDir = process.env.PACK_ONCE_GA_DIR,
 } = {}) {
   const announce = (level, verdict, reason) => {
     log(`::${level} title=${TITLE}::${verdict}: ${reason}`);
@@ -178,12 +186,14 @@ export function main({
     return 1;
   }
 
+  const gaArgs = gaDir ? ['--ga-dir', gaDir] : ['--ga-ref', 'HEAD'];
   announce(
     'notice',
     'RUN',
-    `${decision.reason} — comparing ${JSON.stringify(decision.rcTag)} against HEAD`,
+    `${decision.reason} — comparing ${JSON.stringify(decision.rcTag)} against ` +
+      (gaDir ? `the pack-once artifact (${gaDir})` : 'HEAD'),
   );
-  const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'HEAD'], { log, repoRoot });
+  const code = runDiff(['--rc-ref', decision.rcTag, ...gaArgs], { log, repoRoot });
   if (code === 0) {
     announce(
       'notice',

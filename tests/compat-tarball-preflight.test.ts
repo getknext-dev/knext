@@ -93,18 +93,21 @@ function findStep(job: string, namePattern: RegExp): string {
 }
 
 describe('compat-suite installable adapter tarball — pack once, workspace:^ rewritten (#147 fix round 1)', () => {
-  it('build-next packs @getknext/lib, @getknext/db AND @getknext/core with `bun pm pack` into a stable knext-tarballs dir', () => {
+  it('build-next packs @getknext/lib, @getknext/db AND @getknext/core with `npm pack` (via the shared packer) into a stable knext-tarballs dir', () => {
     // #255/#256: @getknext/core depends on @getknext/db (workspace:^ → ^0.1.0 on pack);
     // @getknext/db is unpublished, so a lib+core-only pack set 404s every install.
-    // `bun pm pack` since the bun migration — it rewrites workspace:^ exactly
-    // as `pnpm pack` did, and pnpm refuses the bun-pinned workspace outright.
+    // #1614: `npm pack` (never `bun pm pack`) via `scripts/pack-release-tarballs.mjs`
+    // — the SAME tool `changeset publish` shells to for a bun workspace, and the
+    // SAME packer `release.yml`'s `pack` job uses, so this credential lane
+    // installs+exercises the bytes that actually ship.
     const job = jobBlock('build-next');
     const pack = findStep(job, /[Pp]ack .*(tarball|adapter)/);
-    expect(pack).toMatch(/bun pm pack/);
-    expect(pack).toMatch(/--destination/);
+    expect(pack).toMatch(/pack-release-tarballs\.mjs/);
+    expect(pack).not.toMatch(/bun pm pack/);
+    expect(pack).toMatch(/--dest\b/);
     expect(pack).toMatch(/packages\/lib/);
     expect(pack).toMatch(/packages\/db/);
-    expect(pack).toMatch(/packages\/kn-next/);
+    expect(pack).toMatch(/packages\/kn-next\b/);
     expect(pack).toMatch(/knext-tarballs/);
   });
 

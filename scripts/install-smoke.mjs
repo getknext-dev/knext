@@ -53,6 +53,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { npmPackOne, rewriteWorkspaceRanges } from './lib/pack-publishable-group.mjs';
 import { findWorkspaceProtocolDeps } from './lib/workspace-protocol.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
@@ -207,24 +208,26 @@ function redirectScaffoldDepsToPacked(scaffoldDir, packed, label) {
 }
 
 /**
- * Pack a workspace package with `pnpm pack` into `dest`. pnpm is required (not npm)
- * because @getknext/core depends on @getknext/lib via `workspace:^`; pnpm rewrites that to a
- * real version (what `changeset publish` does), while `npm pack` leaves it verbatim and
- * the install fails with EUNSUPPORTEDPROTOCOL.
+ * Pack a workspace package with `npm pack` into `dest` — the SAME tool
+ * `changeset publish` shells to for a bun workspace (#1614). Was `bun pm
+ * pack` until #1614: bun rewrites `workspace:^` from `bun.lock`'s recorded
+ * sibling version (a DIFFERENT source than the real publish tool uses, and
+ * per #942 F1 sometimes a stale one) and, per the #1562 rehearsal, emits a
+ * multi-`bin`-key target as a DUPLICATE tar entry — neither of which this
+ * gate's job (proving the tarball a stranger installs actually installs) has
+ * any reason to reproduce. `rewriteWorkspaceRanges()` (the caller runs it
+ * ONCE, before the first pack — see below) is the fix `npm pack` itself
+ * needs: it does not rewrite `workspace:` on its own, and the install below
+ * fails with EUNSUPPORTEDPROTOCOL without it.
  */
 function packWorkspacePackage(pkgDir, dest, label) {
   console.log(`[install-smoke] packing ${label} -> ${dest}`);
-  execFileSync(BUN, ['pm', 'pack', '--destination', dest], {
-    cwd: pkgDir,
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
-  const tgz = readdirSync(dest)
-    .filter((f) => f.endsWith('.tgz'))
-    .map((f) => join(dest, f))
-    .sort()
-    .at(-1);
-  if (!tgz || !existsSync(tgz)) finish(FAIL, `bun pm pack produced no .tgz for ${label}`);
-  return tgz;
+  try {
+    return npmPackOne(pkgDir, dest);
+  } catch (err) {
+    finish(FAIL, `npm pack produced no .tgz for ${label}: ${err.message}`);
+    throw err; // unreachable — finish() exits the process; keeps tsc happy
+  }
 }
 
 /** Read the `exports` subpaths + `bin` targets from a workspace package.json. */
@@ -258,6 +261,13 @@ try {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
+
+  // Rewrite `workspace:` ranges to concrete versions BEFORE packing — the
+  // same fix the real publish job (`release.yml`) applies, and the reason
+  // `npm pack` (not `bun pm pack`) is safe to use below (#1614). Once, here —
+  // not per-package — since it rewrites every publishable manifest in one
+  // pass.
+  rewriteWorkspaceRanges(repoRoot);
 
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
   dbDest = mkdtempSync(join(tmpdir(), 'knext-pack-db-'));
