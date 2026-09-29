@@ -162,6 +162,58 @@ describe("1.0 contract: flags — pure-parser verbs (exercised directly)", () =>
     });
 });
 
+describe("1.0 contract: flags — manual-loop verbs, completeness (scanned from source)", () => {
+    /**
+     * The direct-invocation checks above prove every CONTRACT flag is
+     * accepted (removing support for one reds them). They do NOT prove the
+     * reverse — that the contract lists every flag the code accepts — since
+     * a pure "throw on anything unrecognised" probe can't enumerate a
+     * parser's accept-set. Each of these six parsers uses the SAME
+     * `a === "-x"` / `a === "--flag"` comparison idiom against one `for`
+     * loop's variable (verified: exactly one such loop per file), so
+     * scanning for that pattern gives the accept-set directly from source —
+     * closing the gap in both directions.
+     */
+    function extractEqualityFlags(source: string): string[] {
+        const flags = new Set<string>();
+        const re = /\ba === "(-{1,2}[A-Za-z][\w-]*)"/g;
+        let m: RegExpExecArray | null;
+        // biome-ignore lint/suspicious/noAssignInExpressions: standard regex exec loop
+        while ((m = re.exec(source)) !== null) {
+            if (m[1]) flags.add(m[1]);
+        }
+        return [...flags].sort();
+    }
+
+    function checkFile(
+        verb: string,
+        relFile: string,
+        opts: { includeHelp: boolean },
+    ) {
+        const src = readFileSync(join(cliDir, relFile), "utf8");
+        const real = extractEqualityFlags(src);
+        const contractFlags = opts.includeHelp
+            ? [...contractOf(verb).flags].sort()
+            : nonHelpFlags(contractOf(verb)).sort();
+        expect(real).toEqual(contractFlags);
+    }
+
+    // doctor's OWN loop recognises -h/--help itself (doctorMain's later
+    // `argv.includes` check is a redundant belt-and-braces, not the only
+    // path) — every other verb here handles help OUTSIDE this loop.
+    it("doctor (help handled in-loop)", () =>
+        checkFile("doctor", "doctor/args.ts", { includeHelp: true }));
+    it("status", () =>
+        checkFile("status", "status.ts", { includeHelp: false }));
+    it("gc", () => checkFile("gc", "gc.ts", { includeHelp: false }));
+    it("rollback", () =>
+        checkFile("rollback", "rollback.ts", { includeHelp: false }));
+    it("db bind", () =>
+        checkFile("db bind", "db-bind.ts", { includeHelp: false }));
+    it("db migrate", () =>
+        checkFile("db migrate", "db-migrate.ts", { includeHelp: false }));
+});
+
 describe("1.0 contract: flags — parseArgs-options verbs (scanned from source)", () => {
     /**
      * Every option key + its `short` alias inside a file's OWN
