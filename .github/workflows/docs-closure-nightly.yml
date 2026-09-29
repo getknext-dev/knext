@@ -101,11 +101,13 @@ jobs:
     name: Nightly red alert (pinned issue)
     needs: [docs-closure-scan]
     # always() so this job is not skipped when the scan fails; the needs-result
-    # check fires it ONLY on failure; the event check scopes it to the schedule.
+    # check fires on failure OR cancelled (#1645 — a cancelled/timed-out scan
+    # used to leave this condition false and the alert silent); the event
+    # check scopes it to the schedule.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.docs-closure-scan.result == 'failure'
+      (needs.docs-closure-scan.result == 'failure' || needs.docs-closure-scan.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

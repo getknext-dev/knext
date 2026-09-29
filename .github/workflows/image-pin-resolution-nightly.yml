@@ -83,10 +83,13 @@ jobs:
   nightly-red-alert:
     name: Nightly red alert (pinned issue)
     needs: [resolve-image-pins]
+    # #1645 — needs-result check fires on failure OR cancelled; a
+    # cancelled/timed-out run used to leave this condition false and the
+    # alert silent.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.resolve-image-pins.result == 'failure'
+      (needs.resolve-image-pins.result == 'failure' || needs.resolve-image-pins.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

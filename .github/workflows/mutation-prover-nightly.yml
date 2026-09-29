@@ -147,11 +147,13 @@ jobs:
     name: Nightly red alert (pinned issue)
     needs: [run-mutation-provers]
     # always() so this is not skipped when the lane fails; the needs-result check
-    # fires it ONLY on failure; the event check scopes it to the schedule.
+    # fires on failure OR cancelled (#1645 — a cancelled/timed-out lane used to
+    # leave this condition false and the alert silent, which is exactly what
+    # happened on 2026-09-28/09-29); the event check scopes it to the schedule.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.run-mutation-provers.result == 'failure'
+      (needs.run-mutation-provers.result == 'failure' || needs.run-mutation-provers.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
