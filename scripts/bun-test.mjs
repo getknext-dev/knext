@@ -53,6 +53,7 @@ import { fileURLToPath } from 'node:url';
 import { blankNonCode } from './lib/blank-non-code.mjs';
 import { skipViolation } from './lib/bun-test-no-skip.mjs';
 import { BUN_COVERAGE_DIR } from './lib/coverage-policy.mjs';
+import { killAllProcessTrees, killProcessTree } from './lib/kill-process-tree.mjs';
 import { importsFrom } from './lib/test-framework-import.mjs';
 
 const argv = process.argv.slice(2);
@@ -316,30 +317,12 @@ if (withCoverage) {
   mkdirSync(COVERAGE_RAW, { recursive: true });
 }
 
-/**
- * SIGKILL the whole process GROUP a spawned file's child started, not just
- * that one process (#1241 recurrence). A file that itself `spawnSync`s a
- * real child (e.g. `tests/bytecode-liveness-wiring.test.ts`,
- * `tests/kn-next-action-preflight.test.ts` do) leaves that grandchild
- * orphaned — reparented to pid 1 — if only the bun-test child is killed,
- * because the grandchild was never a member of the killed process alone.
- * Every child below is spawned with `detached: true`, which on POSIX makes
- * it the leader of its OWN new process group (pgid === its own pid), so
- * `-pid` reaches it and everything it forked. No such grouping exists on
- * Windows; fall back to a direct kill there.
- */
-function killProcessTree(pid) {
-  if (pid === undefined) return;
-  try {
-    if (process.platform === 'win32') {
-      process.kill(pid, 'SIGKILL');
-    } else {
-      process.kill(-pid, 'SIGKILL');
-    }
-  } catch (err) {
-    if (err.code !== 'ESRCH') throw err; // already gone — not an error here
-  }
-}
+// `killProcessTree` (whole-process-GROUP SIGKILL, tolerant of ESRCH/EPERM
+// races) and `killAllProcessTrees` (the isolated per-pid sweep the
+// SIGINT/SIGTERM handler below uses) now live in `./lib/kill-process-tree.mjs`
+// — extracted so the isolation behaviour is unit-testable with an injected
+// kill function (review round 3 on #1241; see
+// `tests/kill-process-tree-sweep-isolation.test.ts`).
 
 /** Every currently-running spawned file's pid, so a signal to THIS runner can reap them all. */
 const activeChildPids = new Set();
@@ -351,12 +334,19 @@ const activeChildPids = new Set();
  * runner's own death instead of one file overrunning. `process.exit()` here
  * (rather than letting the signal's default action terminate the process) is
  * also what makes the coverage-lock `exit` handler above actually run.
+ *
+ * The sweep is ISOLATED per pid (`killAllProcessTrees`, review round 3 on
+ * #1241): a bare `for (const pid of activeChildPids) killProcessTree(pid);`
+ * loop let ONE pid's uncaught error — a racy `EPERM` from
+ * `process.kill(-pid, 'SIGKILL')` under a pid-recycling race, reproduced
+ * live at 1-in-6 under `--coverage` with 3 concurrent files — abort the
+ * whole sweep and orphan every OTHER in-flight file's process tree too.
  */
 let interrupted = false;
 function handleTerminationSignal() {
   if (interrupted) return;
   interrupted = true;
-  for (const pid of activeChildPids) killProcessTree(pid);
+  killAllProcessTrees(activeChildPids);
   process.exit(1);
 }
 process.on('SIGINT', handleTerminationSignal);
