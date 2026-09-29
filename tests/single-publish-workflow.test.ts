@@ -52,12 +52,51 @@ function workflowFiles(): string[] {
     .sort();
 }
 
-/** Strip full-line YAML comments (a trimmed line starting with `#`). */
+/**
+ * Strip shell/YAML comments per line: a full-line comment, or a trailing
+ * `# ...` — but only when the `#` is preceded by whitespace (or is the
+ * first character), matching bash's own comment rule (`echo foo#bar` is
+ * NOT a comment, `echo foo #bar` is). A `#` inside a single/double-quoted
+ * string, or inside a `${{ ... }}` expression, is never treated as a
+ * comment start — otherwise a real command after it (e.g. `&& npm
+ * publish`) would silently vanish from the scanned text.
+ */
+function stripLineComment(line: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  let exprDepth = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (!inSingle && !inDouble && line.startsWith('${{', i)) {
+      exprDepth++;
+      i += 2;
+      continue;
+    }
+    if (exprDepth > 0 && ch === '}' && line[i + 1] === '}') {
+      exprDepth--;
+      i += 1;
+      continue;
+    }
+    if (!inDouble && ch === "'") {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (!inSingle && ch === '"') {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (!inSingle && !inDouble && exprDepth === 0 && ch === '#') {
+      const prev = i === 0 ? undefined : line[i - 1];
+      if (prev === undefined || prev === ' ' || prev === '\t') {
+        return line.slice(0, i).replace(/[ \t]+$/, '');
+      }
+    }
+  }
+  return line;
+}
+
 function stripLineComments(text: string): string {
-  return text
-    .split('\n')
-    .filter((line) => !line.trim().startsWith('#'))
-    .join('\n');
+  return text.split('\n').map(stripLineComment).join('\n');
 }
 
 function read(file: string): string {
@@ -98,6 +137,35 @@ describe('single publish workflow (#1644) — only release.yml may run a publish
     // below would mask it as "just another offender".
     expect(publishers(read('install-smoke.yml'))).toEqual([]);
     expect(publishers(read('action-pin-resolution-nightly.yml'))).toEqual([]);
+  });
+
+  it('a bare publish command with a trailing inline `#` comment is still detected (round 2 regression pin)', () => {
+    // #1646 round 1 gap: `npm publish # ship it now` (no other args) matched
+    // none of COMMAND_END's terminators, so it slipped past the scan.
+    expect(publishers(stripLineComments('run: npm publish # ship it now'))).toContain(
+      'npm publish',
+    );
+    expect(publishers(stripLineComments('run: npm publish  #x'))).toContain('npm publish');
+    expect(publishers(stripLineComments('run: bun publish # x'))).toContain('bun publish');
+    expect(publishers(stripLineComments('run: npx changeset publish #x'))).toContain(
+      'changeset publish',
+    );
+    // Neighbour that already worked (the `--` satisfies COMMAND_END on its
+    // own) — pinned so a future refactor can't silently regress it.
+    expect(publishers(stripLineComments('run: npm publish --access public # note'))).toContain(
+      'npm publish',
+    );
+  });
+
+  it('a `#` inside a quoted string or a GitHub Actions expression is not treated as a comment start', () => {
+    // If comment-stripping over-matched here, the real command after the
+    // `#` would be silently cut off, producing a FALSE NEGATIVE.
+    expect(
+      publishers(stripLineComments('run: echo "prefix #not-a-comment" && npm publish')),
+    ).toContain('npm publish');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions `${{ }}` expression syntax under test, not an unintended template placeholder.
+    const exprFixture = "run: echo ${{ 'safe #1644 marker' }} && npm publish";
+    expect(publishers(stripLineComments(exprFixture))).toContain('npm publish');
   });
 
   it('no workflow other than release.yml runs npm publish / changeset publish / bun publish', () => {

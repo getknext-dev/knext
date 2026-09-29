@@ -7,7 +7,7 @@ name: Action pin SHA↔tag resolution (nightly)
 # enumerated, so a file added tomorrow is resolved tonight.
 #
 # `tests/release-action-pins.test.ts` enforces the FORM and SCOPE of every pin on
-# the publish path (`release.yml`, `release-ghp.yml`): a 40-hex SHA, an auditable
+# the publish path (`release.yml`, `bun-base-build.yml`): a 40-hex SHA, an auditable
 # `# vX.Y.Z` comment, and an allowlist of which actions may touch a workflow that
 # holds `secrets.NPM_TOKEN`; `tests/workflow-action-pins.test.ts` enforces the
 # same FORM everywhere else. Neither asserts the SHA VALUE — an
@@ -150,7 +150,7 @@ jobs:
 
           **Severity depends on which workflow tripped** — do not assume the worst case, and do
           not assume the mildest:
-          - \`release.yml\` / \`release-ghp.yml\` hold a **live npm publish credential**.
+          - \`release.yml\` holds a **live npm publish credential**.
           - \`supply-chain.yml\` / \`operator-supply-chain.yml\` run **cosign keyless signing**
             under this repo's OIDC identity.
           - the root \`action.yml\` is the **PUBLISHED** \`Deploy with knext\` action: a bad pin

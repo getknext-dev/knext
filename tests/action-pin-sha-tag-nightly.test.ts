@@ -996,8 +996,8 @@ describe('nightly SHA↔tag resolution — verdicts (#539)', () => {
     const dir = workflowDirWith(`actions/checkout@${SHA_B} # v5.0.0`);
     const findings = await verifyWorkflows({ dir, api: matchingApi() });
     // Select the file under assertion rather than taking findings[0]: since
-    // #528 the scan is a sorted DIRECTORY listing, so `release-ghp.yml` sorts
-    // first. Indexing by position would assert on whichever file happens to
+    // #528 the scan is a sorted DIRECTORY listing, so `bun-base-build.yml`
+    // sorts first. Indexing by position would assert on whichever file happens to
     // come first, which is not what this test is about.
     const finding = findings.find((entry: { file: string }) => entry.file === 'release.yml');
     expect(finding, 'expected a finding on release.yml').toBeDefined();
