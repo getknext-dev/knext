@@ -456,7 +456,7 @@ describe('#1641 — the rcTag resolution step, executed against a real git remot
     baseTag: string | null;
     /** 'main' = tag a commit on main; 'side' = tag a commit only on a side branch; null = no tag. */
     tagOn: 'main' | 'side' | null;
-  }): { tag: string | null; commit: string | null; reachableFromMain: boolean } {
+  }): { tag: string | null; commit: string | null; reachableFromMain: boolean; stdout: string } {
     const { wf } = load();
     const step = wf.jobs['freeze-guard'].steps.find((s) => /Resolve the rcTag/.test(s.name ?? ''));
     if (!step?.run) throw new Error('rcTag resolution step not found');
@@ -481,13 +481,13 @@ describe('#1641 — the rcTag resolution step, executed against a real git remot
       }
       writeFileSync(join(work, 'head-pin.json'), JSON.stringify({ rcTag: fixture.headTag }));
       writeFileSync(join(work, 'merge-base-pin.json'), JSON.stringify({ rcTag: fixture.baseTag }));
-      execFileSync('bash', ['-c', step.run], {
+      const stdout = execFileSync('bash', ['-c', step.run], {
         cwd: work,
         env: GIT_ENV,
         encoding: 'utf8',
         timeout: EXEC_TIMEOUT_MS,
       });
-      return JSON.parse(readFileSync(join(work, 'rctag-state.json'), 'utf8'));
+      return { ...JSON.parse(readFileSync(join(work, 'rctag-state.json'), 'utf8')), stdout };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -502,6 +502,7 @@ describe('#1641 — the rcTag resolution step, executed against a real git remot
 
   it('tag missing on the remote → no commit, not reachable', () => {
     const state = resolveStep({ headTag: 'v1.0.0-rc.2', baseTag: 'v1.0.0-rc.1', tagOn: null });
+    expect(state.stdout).toContain('does not exist on the remote');
     expect(state.commit).toBeNull();
     expect(state.reachableFromMain).toBe(false);
   }, 30_000);
@@ -519,6 +520,8 @@ describe('#1641 — the rcTag resolution step, executed against a real git remot
 
   it('a non-RC head tag never reaches git (injection-shaped name) → no commit', () => {
     const state = resolveStep({ headTag: 'v1;touch pwned', baseTag: null, tagOn: null });
+    expect(state.stdout).toContain('head rcTag is not an RC tag name');
+    expect(state.stdout).not.toContain('does not exist on the remote');
     expect(state.commit).toBeNull();
     expect(state.reachableFromMain).toBe(false);
   }, 30_000);
