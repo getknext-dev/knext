@@ -24,39 +24,75 @@
  * those two expressions (plus the declared `schedule:` cron list) out of the
  * workflow file at RUN TIME, so a future lane added to test-e2e-deploy.yml
  * (a fifth credential cron, say) is picked up automatically without a second
- * edit here. `DEFAULT_CREDENTIAL_LANES` below is a fallback table only —
- * used when parsing throws (a malformed or unrecognisably restructured
- * workflow file) — never the primary source of truth. A dedicated test
- * (`tests/credential-slot-watchdog.test.ts`) asserts the REAL,
- * currently-checked-in test-e2e-deploy.yml parses successfully and matches
- * the fallback table exactly, so parsing drift is caught, not silently
- * masked by an always-available fallback.
+ * edit here.
  *
- * LANE-ATTRIBUTION CAVEAT (documented, not hidden). GitHub's workflow-run API
- * gives no field that names which `schedule:` cron literal fired a given
- * run — only `created_at` (when the run object was created) and
- * `run_started_at` (when it actually began executing, null while queued).
- * `attributeRunsToLanes` therefore matches each run to the CREDENTIAL lane
- * whose own expected slot is the nearest declared slot (credential OR
- * early-warning) at or before the run's `created_at`. Two credential crons
- * sit only 1.5h apart (22:17 / 23:47 UTC, the webpack lanes) — a run delayed
- * past the OTHER lane's slot time would be attributed to the wrong lane by
- * this heuristic. Nothing in this week's observed data (worst case 6.6h late)
- * crosses that particular 1.5h gap in the wrong direction, but it is a real,
- * acknowledged limitation of time-based attribution, not a solved problem.
+ * FAILS CLOSED ON A PARSE FAILURE (#1650 round 2, finding 1).
+ * `resolveCredentialLanes` used to catch a parsing failure and silently
+ * substitute `DEFAULT_CREDENTIAL_LANES`, with only a `console.warn`. `main()`
+ * (scripts/credential-slot-watchdog.mjs) never surfaced that fallback, so a
+ * workflow restructured enough to break parsing would make the watchdog keep
+ * reporting "quiet" against a table that no longer matches reality — silent,
+ * not safe. `resolveCredentialLanes` now THROWS on any parsing failure
+ * instead: the CLI's top-level handler turns that into
+ * `::error::credential-slot-watchdog: cannot read slots — <reason>` and a
+ * non-zero exit, which the companion workflow's `needs.<job>.result ==
+ * 'failure'` gate already treats as an alert — the same path a `missing`
+ * verdict takes. `DEFAULT_CREDENTIAL_LANES` below is retained ONLY as a
+ * static drift-detection fixture: `tests/credential-slot-watchdog.test.ts`
+ * asserts the REAL, currently-checked-in test-e2e-deploy.yml parses to
+ * exactly this table, so drift between the live workflow and this comment is
+ * caught at PR time. It is never consulted at runtime.
+ *
+ * LANE ATTRIBUTION — exact signal first, conservative heuristic only as a
+ * fallback (#1650 round 2, finding 2).
+ *
+ * test-e2e-deploy.yml's root job (`credential-ref`) unconditionally publishes
+ * two marker artifacts as its very first step, before anything that could
+ * lose the run: `compat-lane-<lane>` and `compat-mode-<credential|
+ * early-warning>` (see that job's "Record the lane + mode markers" step).
+ * `scripts/compat-window-audit.mjs` already reads these — from the artifacts
+ * LISTING, never downloaded — to attribute a run whose ledger is gone
+ * (`laneFromArtifacts` / `modeFromArtifacts`). This module's CLI layer
+ * (`scripts/credential-slot-watchdog.mjs`'s `attachExactLanes`) reuses those
+ * exact same functions to fetch each run's markers and hands
+ * `attributeRunsToLanes` a `run.exactLane` whenever the mode marker reads
+ * `credential` (an early-warning run's lane marker is deliberately never
+ * trusted here — `node`/`bun` early-warning nights publish the SAME lane
+ * names as their credential counterparts, so mode is what disambiguates).
+ * When the marker is present and unambiguous, attribution is exact — no
+ * time-based guessing, no cross-lane risk.
+ *
+ * The heuristic below is now a FALLBACK ONLY — used when the marker is
+ * missing, unreadable, or the artifacts API call itself fails. GitHub's
+ * workflow-run API gives no other field naming which cron fired a run — only
+ * `created_at` and `run_started_at` (null while queued) — so a fallback run
+ * is matched to the CREDENTIAL lane whose own expected slot is the nearest
+ * declared slot (credential OR early-warning) at or before `created_at`,
+ * exactly as before. What changed: this nearest-slot match is no longer
+ * trusted blindly. `detectAmbiguousAttribution` checks whether the run also
+ * falls inside the IMMEDIATELY PRECEDING credential lane's own grace window
+ * AND that lane has no other evidence of its own — i.e. whether this run
+ * could equally be that earlier lane's very-late run rather than the nearer
+ * lane's on-time one. When it could, the run satisfies NEITHER lane's
+ * "quiet" verdict; both lanes alert (`ambiguous`, not silently `quiet`).
+ * Traced against the real cron literals (node 01:17, bun 05:47, node-webpack
+ * 22:17, bun-webpack 23:47 UTC): the inter-lane gaps are 4.5h/16.5h/1.5h/1.5h
+ * against an 8h default grace, so 3 of the 4 adjacent pairs are within this
+ * risk — not only the two webpack lanes a purely time-based heuristic would
+ * suggest. The dangerous direction is a false "quiet", never a false alert,
+ * so the fallback errs toward alerting whenever it cannot be sure.
  */
 
 /** Default grace period (hours) if no override is supplied. */
 export const DEFAULT_GRACE_HOURS = 8;
 
 /**
- * Fallback lane table — used ONLY when `resolveCredentialLaneCrons` throws.
- * Mirrors test-e2e-deploy.yml's 4 credential crons as of #1640. Keeping this
- * in sync is a fallback-of-last-resort concern, not the primary contract:
- * `tests/credential-slot-watchdog.test.ts` asserts live parsing of the real
- * workflow file produces exactly this table, so drift between the two is
- * caught at PR time rather than discovered the night parsing silently falls
- * back.
+ * Static drift-detection fixture — NEVER consulted at runtime (see the
+ * "FAILS CLOSED" section of the module header). Mirrors test-e2e-deploy.yml's
+ * 4 credential crons as of #1640. `tests/credential-slot-watchdog.test.ts`
+ * asserts live parsing of the real workflow file produces exactly this
+ * table, so drift between the two is caught at PR time, not by a runtime
+ * fallback silently masking it.
  */
 export const DEFAULT_CREDENTIAL_LANES = Object.freeze([
   Object.freeze({ cron: '17 1 * * *', lane: 'node', hour: 1, minute: 17 }),
@@ -195,22 +231,20 @@ export function resolveCredentialLaneCrons(yamlText) {
 }
 
 /**
- * Resolve credential lanes, falling back to `DEFAULT_CREDENTIAL_LANES` (with
- * a warning) on any parsing failure — the "never hardcode a duplicate copy
- * ... except as a fallback/default if parsing fails" contract from #1640.
+ * Resolve credential lanes by parsing the live workflow text, attaching
+ * `graceHours` to each. FAILS CLOSED (#1650 round 2, finding 1): throws —
+ * never falls back to `DEFAULT_CREDENTIAL_LANES` — on any parsing failure.
+ * The thrown message always starts with "cannot read slots" so the CLI's
+ * generic top-level handler (`::error::<message>` + exit 1) reads as a clear
+ * alert without needing to special-case this error.
  */
-export function resolveCredentialLanes(
-  yamlText,
-  { defaultGraceHours = DEFAULT_GRACE_HOURS, warn = console.warn } = {},
-) {
+export function resolveCredentialLanes(yamlText, { defaultGraceHours = DEFAULT_GRACE_HOURS } = {}) {
   let lanes;
   try {
     lanes = resolveCredentialLaneCrons(yamlText);
   } catch (err) {
-    warn(
-      `credential-slot-watchdog: falling back to the hardcoded default lane table — ${err.message}`,
-    );
-    lanes = DEFAULT_CREDENTIAL_LANES;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`credential-slot-watchdog: cannot read slots — ${message}`);
   }
   return lanes.map((l) => ({ ...l, graceHours: defaultGraceHours }));
 }
@@ -241,22 +275,128 @@ export function computeExpectedSlots(lanes, now) {
 }
 
 /**
- * Attribute schedule-triggered runs to credential lanes by nearest-prior-slot
- * matching (see the module header caveat). `lanes` must already carry
- * `expectedSlotTime` (i.e. have gone through `computeExpectedSlots`).
+ * The credential lane whose own most-recent occurrence immediately precedes
+ * `laneDef`'s own current-cycle slot — computed relative to `laneDef`'s OWN
+ * slot time (never the global `now` the whole `lanes` array was resolved
+ * for), so it is correct across the day-boundary wraparound (e.g. node's
+ * 01:17 predecessor is bun-webpack's PREVIOUS day 23:47, not bun-webpack's
+ * own current-cycle occurrence, which is later the same day).
+ */
+function findPredecessorLane(laneDef, lanes) {
+  const justBeforeOwnSlot = new Date(new Date(laneDef.expectedSlotTime).getTime() - 1);
+  let best = null;
+  for (const other of lanes) {
+    if (other.lane === laneDef.lane) continue;
+    const occurrence = mostRecentSlotAtOrBefore(other.hour, other.minute, justBeforeOwnSlot);
+    if (!best || occurrence.getTime() > best.occurrence.getTime()) {
+      best = { laneDef: other, occurrence };
+    }
+  }
+  return best;
+}
+
+/**
+ * For heuristically-attributed runs ONLY (never the exact-marker path —
+ * ground truth is never ambiguous): find lanes whose nearest-slot-attributed
+ * run could equally be an earlier, currently-unattributed lane's very-late
+ * run (see the module header's "LANE ATTRIBUTION" section).
  *
- * @param {{event?: string, status: string, created_at: string, run_started_at: string|null}[]} runs
- * @param {{lane: string, cron: string, expectedSlotTime: string}[]} lanes already resolved for the CURRENT cycle (via `computeExpectedSlots`)
+ * A run assigned to lane `L` is ambiguous with `L`'s immediately preceding
+ * credential lane `P` (via `findPredecessorLane`, wrapping across the day)
+ * when BOTH:
+ *   - `P` has no OTHER heuristically-attributed run of its own (if it does,
+ *     `P` is independently covered and this run unambiguously belongs to `L`);
+ *   - the run's `created_at` also falls inside `P`'s own grace window
+ *     (`P`'s slot .. `P`'s slot + `P`'s graceHours) — i.e. it would still be
+ *     a timely-enough run to satisfy `P`, had it been `P`'s.
+ *
+ * An ambiguous run is dropped from BOTH lanes' evidence (never credited to
+ * either) and both lane names are returned in `ambiguousLanes`, so
+ * `decideCredentialSlotVerdicts` can alert `ambiguous` instead of silently
+ * `quiet` or a bare `missing`.
+ *
+ * @param {{lane: string, status: string, created_at: string, run_started_at: string|null}[]} heuristicRuns
+ * @param {{lane: string, hour: number, minute: number, expectedSlotTime: string, graceHours: number}[]} lanes
+ * @returns {{kept: typeof heuristicRuns, ambiguousLanes: Set<string>}}
+ */
+export function detectAmbiguousAttribution(heuristicRuns, lanes) {
+  const byLane = new Map(lanes.map((l) => [l.lane, []]));
+  for (const r of heuristicRuns) {
+    byLane.get(r.lane)?.push(r);
+  }
+  const predecessors = new Map(lanes.map((l) => [l.lane, findPredecessorLane(l, lanes)]));
+
+  const ambiguousLanes = new Set();
+  const kept = [];
+  for (const r of heuristicRuns) {
+    const pred = predecessors.get(r.lane);
+    const predHasOwnEvidence = pred && (byLane.get(pred.laneDef.lane)?.length ?? 0) > 0;
+    if (!pred || predHasOwnEvidence) {
+      kept.push(r);
+      continue;
+    }
+    const predSlotTime = pred.occurrence.getTime();
+    const predDeadline = predSlotTime + pred.laneDef.graceHours * 60 * 60 * 1000;
+    const createdAt = new Date(r.created_at).getTime();
+    if (createdAt >= predSlotTime && createdAt <= predDeadline) {
+      ambiguousLanes.add(r.lane);
+      ambiguousLanes.add(pred.laneDef.lane);
+      continue; // cannot safely credit either lane with this run
+    }
+    kept.push(r);
+  }
+  return { kept, ambiguousLanes };
+}
+
+/**
+ * Attribute schedule-triggered runs to credential lanes. `lanes` must already
+ * carry `expectedSlotTime` (i.e. have gone through `computeExpectedSlots`).
+ *
+ * EXACT SIGNAL FIRST: a run carrying `run.exactLane` (set by the CLI layer's
+ * `attachExactLanes` from the workflow's own `compat-lane-<lane>` /
+ * `compat-mode-<mode>` marker artifacts, only when the mode marker reads
+ * `credential`) is attributed directly to that lane — no time-based guessing,
+ * so it is never ambiguous. It is still checked against the CURRENT cycle's
+ * `expectedSlotTime` so a stale prior-day run is not credited to today.
+ *
+ * FALLBACK HEURISTIC: a run with no usable exact signal is matched to the
+ * CREDENTIAL lane whose own expected slot is the nearest declared slot
+ * (credential OR early-warning) at or before the run's `created_at`, exactly
+ * as before — then passed through `detectAmbiguousAttribution` (see the
+ * module header's "LANE ATTRIBUTION" section) before being trusted.
+ *
+ * @param {{event?: string, status: string, created_at: string, run_started_at: string|null, exactLane?: string|null}[]} runs
+ * @param {{lane: string, cron: string, hour: number, minute: number, expectedSlotTime: string, graceHours: number}[]} lanes already resolved for the CURRENT cycle (via `computeExpectedSlots`)
  * @param {{cron: string, hour: number, minute: number}[]} allSlots every declared cron (credential + early-warning)
+ * @returns {{attributed: {lane: string, status: string, created_at: string, run_started_at: string|null}[], ambiguousLanes: Set<string>}}
  */
 export function attributeRunsToLanes(runs, lanes, allSlots) {
   const expectedByLane = new Map(lanes.map((l) => [l.lane, l.expectedSlotTime]));
   const laneByCron = new Map(lanes.map((l) => [l.cron, l.lane]));
-  const out = [];
+  const laneDefByName = new Map(lanes.map((l) => [l.lane, l]));
+
+  const exact = [];
+  const heuristicCandidates = [];
 
   for (const run of runs) {
     if (run.event && run.event !== 'schedule') continue;
     const createdAt = new Date(run.created_at);
+
+    if (run.exactLane && laneDefByName.has(run.exactLane)) {
+      const laneDef = laneDefByName.get(run.exactLane);
+      const occurrence = mostRecentSlotAtOrBefore(laneDef.hour, laneDef.minute, createdAt);
+      if (occurrence.toISOString() === expectedByLane.get(run.exactLane)) {
+        exact.push({
+          lane: run.exactLane,
+          status: run.status,
+          created_at: run.created_at,
+          run_started_at: run.run_started_at ?? null,
+        });
+      }
+      // The exact marker already resolved this run's identity — never falls
+      // through to the nearest-slot heuristic below, ambiguous or not.
+      continue;
+    }
 
     let best = null;
     for (const slotDef of allSlots) {
@@ -277,14 +417,16 @@ export function attributeRunsToLanes(runs, lanes, allSlots) {
     // this line already subsumes it in every reachable case.
     if (best.time.toISOString() !== expectedByLane.get(lane)) continue;
 
-    out.push({
+    heuristicCandidates.push({
       lane,
       status: run.status,
       created_at: run.created_at,
       run_started_at: run.run_started_at ?? null,
     });
   }
-  return out;
+
+  const { kept, ambiguousLanes } = detectAmbiguousAttribution(heuristicCandidates, lanes);
+  return { attributed: [...exact, ...kept], ambiguousLanes };
 }
 
 /**
@@ -293,12 +435,19 @@ export function attributeRunsToLanes(runs, lanes, allSlots) {
  *
  * - `missing`          — no run recorded for the slot, and the grace window has elapsed.
  * - `queued-too-long`  — a run exists but has not started, and the grace window has elapsed.
+ * - `ambiguous`        — no UNAMBIGUOUS run for the slot, grace elapsed, and
+ *                        `detectAmbiguousAttribution` flagged this lane (its
+ *                        only nearby evidence could equally belong to a
+ *                        neighbouring lane — see the module header). Alerts,
+ *                        same as `missing`/`queued-too-long`; distinguished
+ *                        in the reason so an operator knows to check the
+ *                        neighbour too, not just this lane.
  * - `quiet`            — started on time, already resolved, or still within grace.
  *
- * @param {{lanes: {lane: string, expectedSlotTime: string, graceHours: number}[], runs: {lane: string, status: string, created_at: string, run_started_at: string|null}[], now: Date|string}} args
- * @returns {{lane: string, verdict: 'missing'|'queued-too-long'|'quiet', reason: string}[]}
+ * @param {{lanes: {lane: string, expectedSlotTime: string, graceHours: number}[], runs: {lane: string, status: string, created_at: string, run_started_at: string|null}[], now: Date|string, ambiguousLanes?: Set<string>}} args
+ * @returns {{lane: string, verdict: 'missing'|'queued-too-long'|'ambiguous'|'quiet', reason: string}[]}
  */
-export function decideCredentialSlotVerdicts({ lanes, runs, now }) {
+export function decideCredentialSlotVerdicts({ lanes, runs, now, ambiguousLanes = new Set() }) {
   const nowTime = (now instanceof Date ? now : new Date(now)).getTime();
 
   return lanes.map((laneDef) => {
@@ -311,6 +460,15 @@ export function decideCredentialSlotVerdicts({ lanes, runs, now }) {
     const relevant = started ?? candidates[0] ?? null;
 
     if (!relevant) {
+      if (graceElapsed && ambiguousLanes.has(laneDef.lane)) {
+        return {
+          lane: laneDef.lane,
+          verdict: 'ambiguous',
+          reason:
+            `no run could be unambiguously attributed to the ${laneDef.expectedSlotTime} slot — ` +
+            'a neighbouring lane has a late run that could equally belong here; treating as possibly missing',
+        };
+      }
       return {
         lane: laneDef.lane,
         verdict: graceElapsed ? 'missing' : 'quiet',

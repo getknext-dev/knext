@@ -83,11 +83,17 @@ const MUTATIONS = [
     replacement: 'if (false) continue;',
   },
   {
+    // #1650 round 2, finding 1: `resolveCredentialLanes` used to catch a
+    // parse failure and silently substitute DEFAULT_CREDENTIAL_LANES. This
+    // mutation reintroduces exactly that regression (bringing the fallback
+    // assignment back in place of the fail-closed throw) — it must red the
+    // "THROWS — never silently substitutes" test.
     label:
-      'resolveCredentialLanes: a parse failure RETHROWS instead of falling back to DEFAULT_CREDENTIAL_LANES',
+      'resolveCredentialLanes: swallow the parse failure and fall back to DEFAULT_CREDENTIAL_LANES instead of failing closed',
     subject: 'lib',
-    anchor: 'lanes = DEFAULT_CREDENTIAL_LANES;',
-    replacement: 'throw err;',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source text of the anchor line, not an interpolation
+    anchor: 'throw new Error(`credential-slot-watchdog: cannot read slots — ${message}`);',
+    replacement: 'lanes = DEFAULT_CREDENTIAL_LANES;',
   },
   {
     label:
@@ -109,12 +115,50 @@ const MUTATIONS = [
     anchor: 'runs?event=schedule&per_page=',
     replacement: 'runs?per_page=',
   },
+  {
+    // #1650 round 2, finding 2 — the cross-lane masking fix.
+    label:
+      "detectAmbiguousAttribution: stop checking whether the run falls inside the predecessor's grace window — everything looks unambiguous",
+    subject: 'lib',
+    anchor: 'if (createdAt >= predSlotTime && createdAt <= predDeadline) {',
+    replacement: 'if (false) {',
+  },
+  {
+    label:
+      "detectAmbiguousAttribution: drop the predecessor's-own-evidence escape hatch — a healthy neighbouring lane's run stops mattering",
+    subject: 'lib',
+    anchor: 'if (!pred || predHasOwnEvidence) {',
+    replacement: 'if (!pred) {',
+  },
+  {
+    label:
+      'decideCredentialSlotVerdicts: the "ambiguous" verdict literal replaced with "missing" (loses the distinguishing reason)',
+    subject: 'lib',
+    anchor: "          verdict: 'ambiguous',",
+    replacement: "          verdict: 'missing',",
+  },
+  {
+    // The mode-marker check is what stops an early-warning run's `compat-lane-*`
+    // marker (same lane names as its credential counterpart) from being
+    // trusted as a credential-lane signal.
+    label: 'attachExactLanes: trust the lane marker even when the mode marker is not "credential"',
+    subject: 'cli',
+    anchor: "exactLane: lane && mode === 'credential' ? lane : null",
+    replacement: 'exactLane: lane ? lane : null',
+  },
+  {
+    label:
+      "attributeRunsToLanes: stop checking the exact-marker run's occurrence against the CURRENT cycle — a stale exact-marker run is accepted",
+    subject: 'lib',
+    anchor: 'if (occurrence.toISOString() === expectedByLane.get(run.exactLane)) {',
+    replacement: 'if (true) {',
+  },
 ];
 
-declareMutations(9);
+declareMutations(14);
 
-if (MUTATIONS.length !== 9) {
-  console.error(`FATAL: declared 9 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 14) {
+  console.error(`FATAL: declared 14 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
