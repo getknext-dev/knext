@@ -66,10 +66,41 @@
  *     --base-pin-file base-pin.json \
  *     --head-pin-file head-pin.json \
  *     --changed-files-file changed-files.txt \
+ *     [--merge-base-pin-file merge-base-pin.json] \
+ *     [--rc-tag-state-file rctag-state.json] \
  *     [--now 2026-09-24T00:00:00Z]
+ *
+ * WHO INTRODUCED THE MARKER (#1635). A marker present at head is honoured
+ * only if THIS PR introduced it — compared against the pin as of the PR's
+ * MERGE BASE (the point its diff is measured from). Before #1635 the marker
+ * was read from head alone, so a marker that had merged to `main` was
+ * inherited by every PR branched afterwards and exempted every one of them
+ * until it expired. A head marker counts as introduced when the merge base
+ * carries no marker, or carries one with a different `date` or `reason` (a
+ * new, reviewed authorization replacing a stale one). Changing only
+ * `expires` or `paths` of an inherited marker is NOT an introduction.
+ *
+ * NARROWING-ONLY PIN DIFFS (#1635). The pin file is itself frozen, so a PR
+ * that only deletes or shortens a marker needed a valid marker to pass —
+ * removal was impossible. A pin-only diff whose every key except
+ * `rcBumpMarker` is unchanged from the merge base, and whose marker is
+ * removed, or keeps `date`/`reason` while shortening `expires` and/or
+ * narrowing `paths`, only ever shrinks an exemption, so it passes with no
+ * marker of its own.
+ *
+ * PATH SCOPE (#1635). `rcBumpMarker.paths` (optional, exact repo-relative
+ * paths) limits the exemption to those frozen files; the pin file itself is
+ * always covered. Absent = every frozen file (the pre-#1635 behaviour).
+ *
+ * RCTAG PRECHECK (#1641). A PR that changes `rcTag` to a new non-null tag
+ * fails unless that tag already exists on the remote and peels to a commit
+ * reachable from `main`. The workflow resolves those facts with git and
+ * hands them in as `--rc-tag-state-file`; `evaluateRcTagChange` decides. An
+ * rcTag change with no resolved state fails closed.
  */
 
 import { readFileSync } from 'node:fs';
+import { isRcTag } from './compat-credential-ref.mjs';
 import { CREDENTIAL_CELLS } from './compat-window-audit.mjs';
 import { collectHarness } from './compat-window-fingerprint.mjs';
 
@@ -185,6 +216,15 @@ export function markerValidity(pin, now) {
   if (typeof reason !== 'string' || reason.trim() === '') {
     return { valid: false, reason: 'rcBumpMarker.reason is missing or empty' };
   }
+  // #1635 — optional path scope. Present means "exactly these frozen files";
+  // an empty or malformed list is refused rather than read as "everything".
+  if ('paths' in marker && !isPathList(marker.paths)) {
+    return {
+      valid: false,
+      reason:
+        'rcBumpMarker.paths, when present, must be a non-empty array of non-empty path strings',
+    };
+  }
   // Lexicographic comparison is correct for YYYY-MM-DD strings.
   if (expires <= date) {
     return {
@@ -245,6 +285,147 @@ export function markerValidity(pin, now) {
   return { valid: true, reason: `valid through ${expires}` };
 }
 
+/** @param {unknown} v */
+function isPathList(v) {
+  return (
+    Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === 'string' && p.trim() !== '')
+  );
+}
+
+/** @param {unknown} pin */
+function markerOf(pin) {
+  const m = pin && typeof pin === 'object' ? /** @type {any} */ (pin).rcBumpMarker : undefined;
+  return m && typeof m === 'object' && !Array.isArray(m) ? m : undefined;
+}
+
+/** Key-order-independent JSON equality — pins are parsed JSON, nothing richer. */
+function sameJson(a, b) {
+  const canon = (v) =>
+    Array.isArray(v)
+      ? v.map(canon)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(
+            Object.keys(v)
+              .sort()
+              .map((k) => [k, canon(v[k])]),
+          )
+        : v;
+  return JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+}
+
+/**
+ * Did THIS PR introduce the head marker (#1635)? See the file header.
+ *
+ * @param {unknown} mergeBasePin the pin at the PR's merge base
+ * @param {unknown} headPin
+ * @returns {boolean}
+ */
+export function markerIntroducedByPr(mergeBasePin, headPin) {
+  const head = markerOf(headPin);
+  if (!head) return false;
+  const base = markerOf(mergeBasePin);
+  if (!base) return true;
+  return base.date !== head.date || base.reason !== head.reason;
+}
+
+/**
+ * Is `headPin` the merge-base pin with its marker only removed or narrowed
+ * (#1635)? Every other key must be unchanged; a narrowed marker keeps
+ * `date` and `reason`, never extends `expires`, never widens `paths`, and
+ * narrows at least one of them.
+ *
+ * @param {unknown} mergeBasePin
+ * @param {unknown} headPin
+ * @returns {boolean}
+ */
+export function isMarkerNarrowingOnly(mergeBasePin, headPin) {
+  if (!mergeBasePin || typeof mergeBasePin !== 'object') return false;
+  if (!headPin || typeof headPin !== 'object') return false;
+  const base = markerOf(mergeBasePin);
+  if (!base) return false;
+  const { rcBumpMarker: _b, ...baseRest } = /** @type {any} */ (mergeBasePin);
+  const { rcBumpMarker: headRaw, ...headRest } = /** @type {any} */ (headPin);
+  if (!sameJson(baseRest, headRest)) return false;
+  if (headRaw === undefined || headRaw === null) return true; // removal
+  const head = markerOf(headPin);
+  if (!head) return false;
+  const allowed = new Set(['date', 'expires', 'reason', 'paths']);
+  if (!Object.keys(head).every((k) => allowed.has(k))) return false;
+  if (head.date !== base.date || head.reason !== base.reason) return false;
+  if (
+    typeof head.expires !== 'string' ||
+    !DATE_RE.test(head.expires) ||
+    !isValidCalendarDate(head.expires) ||
+    typeof base.expires !== 'string' ||
+    head.expires > base.expires
+  ) {
+    return false;
+  }
+  let pathsNarrowed = false;
+  if ('paths' in head) {
+    if (!isPathList(head.paths)) return false;
+    if ('paths' in base) {
+      if (!isPathList(base.paths)) return false;
+      if (!head.paths.every((p) => base.paths.includes(p))) return false;
+      pathsNarrowed = new Set(head.paths).size < new Set(base.paths).size;
+    } else {
+      pathsNarrowed = true;
+    }
+  } else if ('paths' in base) {
+    return false; // dropping `paths` widens the scope to every frozen file
+  }
+  return head.expires < base.expires || pathsNarrowed;
+}
+
+/**
+ * #1641 — a PR that changes `rcTag` to a new non-null tag must name a tag
+ * that already exists on the remote and peels to a commit reachable from
+ * `main`. `tagState` is resolved by the workflow with git; this only
+ * decides. Clearing `rcTag` (to null) and leaving it unchanged both pass.
+ *
+ * @param {{ mergeBasePin: unknown, headPin: unknown, tagState?: { tag?: unknown, commit?: unknown, reachableFromMain?: unknown } | null }} input
+ * @returns {{ ok: boolean, reason: string }}
+ */
+export function evaluateRcTagChange({ mergeBasePin, headPin, tagState }) {
+  const tagOf = (pin) => {
+    const tag = pin && typeof pin === 'object' ? /** @type {any} */ (pin).rcTag : null;
+    return tag ?? null;
+  };
+  const before = tagOf(mergeBasePin);
+  const after = tagOf(headPin);
+  if (after === null || after === before) {
+    return { ok: true, reason: 'rcTag unchanged or cleared by this PR — no tag precheck needed' };
+  }
+  if (!isRcTag(after)) {
+    return {
+      ok: false,
+      reason: `rcTag ${JSON.stringify(after)} is not a release-candidate tag name (vX.Y.Z-rc.N)`,
+    };
+  }
+  if (!tagState || typeof tagState !== 'object' || tagState.tag !== after) {
+    return {
+      ok: false,
+      reason: `this PR changes rcTag to ${after} but no remote tag lookup was supplied for it — failing closed`,
+    };
+  }
+  if (typeof tagState.commit !== 'string' || !/^[0-9a-f]{40}$/.test(tagState.commit)) {
+    return {
+      ok: false,
+      reason: `this PR changes rcTag to ${after}, but that tag does not exist on the remote — push the tag first, then re-run this check`,
+    };
+  }
+  if (tagState.reachableFromMain !== true) {
+    return {
+      ok: false,
+      reason: `tag ${after} exists but peels to ${tagState.commit}, which is not reachable from main — tag a commit on main`,
+    };
+  }
+  return {
+    ok: true,
+    reason: `rcTag ${after} exists on the remote at ${tagState.commit}, reachable from main`,
+  };
+}
+
 /**
  * The union of every workflow-file-bearing CREDENTIAL_CELLS entry's
  * `collectHarness()` paths — the derived, never-hardcoded frozen file set
@@ -298,10 +479,21 @@ export function frozenFileSet(repoRoot, deps = {}) {
  * always what `markerValidity` is evaluated against — the marker a PR adds
  * to authorize itself necessarily exists only at head, never at base.
  *
- * @param {{ basePin: unknown, headPin: unknown, touchedFiles: string[], frozenSet: Set<string>, now: Date }} input
+ * `mergeBasePin` (#1635) is the pin at the PR's merge base — what decides
+ * whether the head marker was introduced by this PR and whether a pin-only
+ * diff merely narrows a marker. It defaults to `basePin`.
+ *
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, touchedFiles: string[], frozenSet: Set<string>, now: Date }} input
  * @returns {{ ok: boolean, reason: string, touchedFrozenFiles: string[] }}
  */
-export function evaluateFreezeGuard({ basePin, headPin, touchedFiles, frozenSet, now }) {
+export function evaluateFreezeGuard({
+  basePin,
+  headPin,
+  mergeBasePin = basePin,
+  touchedFiles,
+  frozenSet,
+  now,
+}) {
   if (!isFrozen(basePin)) {
     return {
       ok: true,
@@ -327,11 +519,38 @@ export function evaluateFreezeGuard({ basePin, headPin, touchedFiles, frozenSet,
     };
   }
 
-  const marker = markerValidity(headPin, now);
-  if (marker.valid) {
+  if (pinOnly && isMarkerNarrowingOnly(mergeBasePin, headPin)) {
     return {
       ok: true,
-      reason: `frozen and touches [${touchedFrozenFiles.join(', ')}], but a valid rcBumpMarker exempts it (${marker.reason})`,
+      reason: `pin-only diff that only removes or narrows the rcBumpMarker — it can only shrink an exemption`,
+      touchedFrozenFiles,
+    };
+  }
+
+  const validity = markerValidity(headPin, now);
+  const marker =
+    validity.valid && !markerIntroducedByPr(mergeBasePin, headPin)
+      ? {
+          valid: false,
+          reason:
+            'the rcBumpMarker at head was inherited from the merge base, not introduced by this PR — an inherited marker exempts nothing',
+        }
+      : validity;
+  if (marker.valid) {
+    const scope = markerOf(headPin)?.paths;
+    const uncovered = Array.isArray(scope)
+      ? touchedFrozenFiles.filter((f) => f !== PIN_FILE && !scope.includes(f))
+      : [];
+    if (uncovered.length === 0) {
+      return {
+        ok: true,
+        reason: `frozen and touches [${touchedFrozenFiles.join(', ')}], but a valid rcBumpMarker exempts it (${marker.reason})`,
+        touchedFrozenFiles,
+      };
+    }
+    return {
+      ok: false,
+      reason: `the rcBumpMarker is scoped to [${scope.join(', ')}] and does not cover frozen file(s): ${uncovered.join(', ')}`,
       touchedFrozenFiles,
     };
   }
@@ -359,6 +578,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const basePinFile = arg('base-pin-file', null);
   const headPinFile = arg('head-pin-file', null);
   const changedFilesFile = arg('changed-files-file', null);
+  const mergeBasePinFile = arg('merge-base-pin-file', null);
+  const rcTagStateFile = arg('rc-tag-state-file', null);
   const nowArg = arg('now', null);
 
   if (!basePinFile || !headPinFile || !changedFilesFile) {
@@ -378,6 +599,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   };
   const basePin = readPin(basePinFile);
   const headPin = readPin(headPinFile);
+  const mergeBasePin = mergeBasePinFile ? readPin(mergeBasePinFile) : basePin;
+  const tagState = rcTagStateFile ? readPin(rcTagStateFile) : null;
 
   const touchedFiles = readFileSync(changedFilesFile, 'utf8')
     .split('\n')
@@ -391,9 +614,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const frozenSet = frozenFileSet(repoRoot);
-  const result = evaluateFreezeGuard({ basePin, headPin, touchedFiles, frozenSet, now });
+  const result = evaluateFreezeGuard({
+    basePin,
+    headPin,
+    mergeBasePin,
+    touchedFiles,
+    frozenSet,
+    now,
+  });
+  const tagResult = evaluateRcTagChange({ mergeBasePin, headPin, tagState });
 
   console.log(result.ok ? '✅' : '❌', result.reason);
-  process.exit(result.ok ? 0 : 1);
+  console.log(tagResult.ok ? '✅' : '❌', tagResult.reason);
+  process.exit(result.ok && tagResult.ok ? 0 : 1);
 }
 /* c8 ignore stop */

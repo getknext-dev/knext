@@ -413,3 +413,49 @@ describe('#1300 review round 3, finding 1: no job-level if: in either workflow e
     });
   }
 });
+
+describe('#1643 — the nightly alert fires on cancelled / timed-out jobs, not only failed ones', () => {
+  // A job that exceeds its `timeout-minutes` reports `cancelled`. Every job the
+  // alert `needs` must be checked for BOTH results, or that job can go silent.
+  it('every needed job is checked for both failure and cancelled', () => {
+    const wf = parse(readFileSync(ALERT_WORKFLOW_PATH, 'utf8')) as {
+      jobs: Record<string, { needs?: string[]; if?: string }>;
+    };
+    const alert = wf.jobs['nightly-red-alert'];
+    const cond = String(alert.if);
+    expect(alert.needs?.length ?? 0).toBeGreaterThan(0);
+    for (const job of alert.needs ?? []) {
+      for (const result of ['failure', 'cancelled']) {
+        expect(cond, `${job} ${result}`).toContain(`needs.${job}.result == '${result}'`);
+      }
+    }
+  });
+});
+
+describe('#1643 — the matrix tracker runs after every credential slot has had its full grace', () => {
+  it('the tracker cron fires at least MISSING_NIGHT_GRACE_HOURS after every credential cron', async () => {
+    const { MISSING_NIGHT_GRACE_HOURS, parseCredentialCronsFromWorkflow } = await import(
+      '../scripts/compat-window-audit.mjs'
+    );
+    const minuteOfDay = (cron: string) => {
+      const [m, h] = cron.trim().split(/\s+/).map(Number);
+      return h * 60 + m;
+    };
+    const tracker = parse(readFileSync(TRACKER_WORKFLOW_PATH, 'utf8')) as {
+      on: { schedule: { cron: string }[] };
+    };
+    const trackerCrons = tracker.on.schedule.map((s) => s.cron);
+    expect(trackerCrons.length).toBe(1);
+    const t = minuteOfDay(trackerCrons[0]);
+    const credential = [
+      ...parseCredentialCronsFromWorkflow(readFileSync(ALERT_WORKFLOW_PATH, 'utf8')).values(),
+    ] as string[];
+    expect(credential.length).toBeGreaterThanOrEqual(4);
+    for (const c of credential) {
+      const since = (t - minuteOfDay(c) + 1440) % 1440;
+      expect(since, `tracker ${trackerCrons[0]} vs credential ${c}`).toBeGreaterThanOrEqual(
+        MISSING_NIGHT_GRACE_HOURS * 60,
+      );
+    }
+  });
+});

@@ -403,3 +403,123 @@ describe('the checkout has full history — required for both the diff and the b
     expect(checkout?.with?.['fetch-depth']).toBe(0);
   });
 });
+describe('#1635 / #1641 — merge-base pin read and rcTag resolution are wired into the guard', () => {
+  it('reads the pin at the merge base of BASE_SHA and HEAD_SHA into merge-base-pin.json', () => {
+    const { text } = load();
+    expect(text).toMatch(/MERGE_BASE="\$\(git merge-base "\$\{BASE_SHA\}" "\$\{HEAD_SHA\}"\)"/);
+    expect(text).toMatch(
+      /git show "\$\{MERGE_BASE\}:\.github\/compat-credential-ref\.json" > merge-base-pin\.json/,
+    );
+  });
+
+  it('the guard invocation passes --merge-base-pin-file and --rc-tag-state-file', () => {
+    const { wf } = load();
+    const step = wf.jobs['freeze-guard'].steps.find((s) =>
+      /Run the freeze guard/.test(s.name ?? ''),
+    );
+    expect(String(step?.run)).toContain('--merge-base-pin-file merge-base-pin.json');
+    expect(String(step?.run)).toContain('--rc-tag-state-file rctag-state.json');
+  });
+
+  it('both new reads run BEFORE the guard invocation', () => {
+    const { wf } = load();
+    const steps = wf.jobs['freeze-guard'].steps;
+    const mb = steps.findIndex((s) => /merge base/.test(s.name ?? ''));
+    const tag = steps.findIndex((s) => /Resolve the rcTag/.test(s.name ?? ''));
+    const runIdx = steps.findIndex((s) => /Run the freeze guard/.test(s.name ?? ''));
+    expect(mb).toBeGreaterThanOrEqual(0);
+    expect(tag).toBeGreaterThan(mb);
+    expect(runIdx).toBeGreaterThan(tag);
+  });
+});
+
+describe('#1641 — the rcTag resolution step, executed against a real git remote', () => {
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@example.com',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+  };
+  const git = (cwd: string, ...a: string[]) =>
+    execFileSync('git', a, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
+
+  /**
+   * Runs the EXACT "Resolve the rcTag" step script in a clone of a local
+   * "origin" repo. Tags are created in origin and deleted from the clone, so
+   * anything the step finds came from the remote, never a local leftover.
+   */
+  function resolveStep(fixture: {
+    headTag: string | null;
+    baseTag: string | null;
+    /** 'main' = tag a commit on main; 'side' = tag a commit only on a side branch; null = no tag. */
+    tagOn: 'main' | 'side' | null;
+  }): { tag: string | null; commit: string | null; reachableFromMain: boolean } {
+    const { wf } = load();
+    const step = wf.jobs['freeze-guard'].steps.find((s) => /Resolve the rcTag/.test(s.name ?? ''));
+    if (!step?.run) throw new Error('rcTag resolution step not found');
+    const dir = mkdtempSync(join(tmpdir(), 'knext-rctag-'));
+    try {
+      const origin = join(dir, 'origin');
+      const work = join(dir, 'work');
+      mkdirSync(origin);
+      git(origin, 'init', '-q', '-b', 'main');
+      git(origin, 'commit', '-q', '--allow-empty', '-m', 'root');
+      if (fixture.tagOn === 'main' && fixture.headTag) {
+        git(origin, 'tag', '-a', fixture.headTag, '-m', 'rc');
+      } else if (fixture.tagOn === 'side' && fixture.headTag) {
+        git(origin, 'checkout', '-q', '-b', 'side');
+        git(origin, 'commit', '-q', '--allow-empty', '-m', 'off main');
+        git(origin, 'tag', '-a', fixture.headTag, '-m', 'rc');
+        git(origin, 'checkout', '-q', 'main');
+      }
+      git(dir, 'clone', '-q', origin, work);
+      for (const t of git(work, 'tag', '--list').split('\n').filter(Boolean)) {
+        git(work, 'tag', '-d', t);
+      }
+      writeFileSync(join(work, 'head-pin.json'), JSON.stringify({ rcTag: fixture.headTag }));
+      writeFileSync(join(work, 'merge-base-pin.json'), JSON.stringify({ rcTag: fixture.baseTag }));
+      execFileSync('bash', ['-c', step.run], {
+        cwd: work,
+        env: GIT_ENV,
+        encoding: 'utf8',
+        timeout: EXEC_TIMEOUT_MS,
+      });
+      return JSON.parse(readFileSync(join(work, 'rctag-state.json'), 'utf8'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('existing tag on main → commit resolved, reachable', () => {
+    const state = resolveStep({ headTag: 'v1.0.0-rc.2', baseTag: 'v1.0.0-rc.1', tagOn: 'main' });
+    expect(state.tag).toBe('v1.0.0-rc.2');
+    expect(state.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(state.reachableFromMain).toBe(true);
+  }, 30_000);
+
+  it('tag missing on the remote → no commit, not reachable', () => {
+    const state = resolveStep({ headTag: 'v1.0.0-rc.2', baseTag: 'v1.0.0-rc.1', tagOn: null });
+    expect(state.commit).toBeNull();
+    expect(state.reachableFromMain).toBe(false);
+  }, 30_000);
+
+  it('tag on a commit not reachable from main → commit resolved, NOT reachable', () => {
+    const state = resolveStep({ headTag: 'v1.0.0-rc.2', baseTag: 'v1.0.0-rc.1', tagOn: 'side' });
+    expect(state.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(state.reachableFromMain).toBe(false);
+  }, 30_000);
+
+  it('rcTag unchanged → no lookup performed', () => {
+    const state = resolveStep({ headTag: 'v1.0.0-rc.1', baseTag: 'v1.0.0-rc.1', tagOn: 'main' });
+    expect(state.commit).toBeNull();
+  }, 30_000);
+
+  it('a non-RC head tag never reaches git (injection-shaped name) → no commit', () => {
+    const state = resolveStep({ headTag: 'v1;touch pwned', baseTag: null, tagOn: null });
+    expect(state.commit).toBeNull();
+    expect(state.reachableFromMain).toBe(false);
+  }, 30_000);
+});

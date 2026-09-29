@@ -2212,14 +2212,17 @@ jobs:
     # missing shard, which fires this alert for the shard-cancellation class for
     # the first time — but the ledger job itself, and the shard matrix, can also
     # be cancelled, and silence must never be indistinguishable from success.
+    # #1643 / #1645 — build-next was the one gap: a job that hits its
+    # `timeout-minutes` reports `cancelled`, not `failure`, so a timed-out or
+    # cancelled build went silent. Every needed job now alerts on both.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
       needs.credential-ref.outputs.state != 'not-cut' &&
       (needs.credential-ref.result == 'failure' || needs.credential-ref.result == 'cancelled' ||
-       needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure' ||
-       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||
-       needs.deploy-tests.result == 'cancelled')
+       needs.build-next.result == 'failure' || needs.build-next.result == 'cancelled' ||
+       needs.deploy-tests.result == 'failure' || needs.deploy-tests.result == 'cancelled' ||
+       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

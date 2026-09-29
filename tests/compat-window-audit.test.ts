@@ -1794,13 +1794,13 @@ describe('#1612 finding 2 — a night is dated by its CRON SLOT, not the wall cl
     const nights = slotStreak(3, 'bun-webpack', '23:47'); // 01-01..01-03
     const before = auditWindow(nights, {
       lane: 'bun-webpack',
-      now: new Date('2026-01-05T03:00:00.000Z'), // 01-04's slot fired 01-04 23:47; +6h = 01-05 05:47
+      now: new Date('2026-01-05T03:00:00.000Z'), // 01-04's slot fired 01-04 23:47; +10h = 01-05 09:47
     });
     expect(before.calendarChecked).toBe(true);
     expect(before.missingNights).toEqual([]);
     const after = auditWindow(nights, {
       lane: 'bun-webpack',
-      now: new Date('2026-01-05T05:47:00.000Z'),
+      now: new Date('2026-01-05T09:47:00.000Z'),
     });
     expect(after.missingNights.map((m: { date: string }) => m.date)).toEqual(['2026-01-04']);
   });
@@ -1814,6 +1814,40 @@ describe('#1612 finding 2 — a night is dated by its CRON SLOT, not the wall cl
         (m: { date: string }) => m.date,
       ),
     ).toEqual(['2026-01-02']);
+  });
+});
+
+describe('#1642 — the missed-night grace is 10h: a merely queued night is not a missing one', () => {
+  it('the grace constant is 10 hours', () => {
+    expect(MISSING_NIGHT_GRACE_HOURS).toBe(10);
+  });
+
+  it('a run still queued 9h after its slot fired is NOT yet a missing night', () => {
+    const nights = slotStreak(1, 'node', '01:17'); // 01-01
+    const a = auditWindow(nights, { now: new Date('2026-01-02T10:17:00.000Z') }); // 01-02 slot +9h
+    expect(a.calendarChecked).toBe(true);
+    expect(a.missingNights).toEqual([]);
+  });
+
+  it('a run that lands 9h late is dated to its own slot and counts — no gap, no missing night', () => {
+    const nights = slotStreak(2, 'node', '01:17'); // 01-01, 01-02
+    const lateNight = night({
+      lane: 'node',
+      runId: String(50000000000 + 2 * 1000),
+      scheduledAt: late('2026-01-03T01:17:00.000Z', 9 * 60),
+    });
+    const a = auditWindow([...nights, lateNight], { now: new Date('2026-01-03T12:00:00.000Z') });
+    expect(a.calendarChecked).toBe(true);
+    expect(a.missingNights).toEqual([]);
+    expect(
+      a.nights.find((n: { runId: string }) => n.runId === lateNight.runId)?.disqualifiers,
+    ).toEqual([]);
+  });
+
+  it('past the 10h grace with no run, the slot IS a missing night', () => {
+    const nights = slotStreak(1, 'node', '01:17'); // 01-01
+    const a = auditWindow(nights, { now: new Date('2026-01-02T11:18:00.000Z') }); // 01-02 slot +10h01m
+    expect(a.missingNights.map((m: { date: string }) => m.date)).toEqual(['2026-01-02']);
   });
 });
 
