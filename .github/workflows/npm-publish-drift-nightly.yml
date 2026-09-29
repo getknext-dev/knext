@@ -82,10 +82,15 @@ jobs:
   npm-publish-drift-red-alert:
     name: Nightly red alert (pinned issue)
     needs: [check-npm-publish-drift]
+    # #1645 — a cancelled/timed-out check job (runner loss, its own
+    # timeout-minutes) must alert exactly like a failed one; checking only
+    # 'failure' silently drops that case. Same fixed shape as
+    # action-pin-resolution-nightly.yml, main-side, tests/nightly-alert-
+    # cancelled-condition.test.ts scans for and enforces.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.check-npm-publish-drift.result == 'failure'
+      (needs.check-npm-publish-drift.result == 'failure' || needs.check-npm-publish-drift.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
