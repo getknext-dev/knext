@@ -25,7 +25,8 @@ import {
  */
 
 function mkFixtureDir(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  return dir;
 }
 
 /** A minimal, real, packable npm package directory — no workspace: deps. */

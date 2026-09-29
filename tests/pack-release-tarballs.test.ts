@@ -11,10 +11,6 @@ import { buildManifest, parseArgs, resolveGroup } from '../scripts/pack-release-
  * live `release.yml` `pack` job itself.
  */
 
-function mkFixtureDir(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
-}
-
 describe('parseArgs', () => {
   it('requires --dest', () => {
     expect(() => parseArgs([])).toThrow(/--dest/);
@@ -55,7 +51,7 @@ describe('resolveGroup', () => {
   });
 
   it('resolves a --dirs subset by reading each package.json name from disk', () => {
-    const repoRoot = mkFixtureDir('prt-resolve-root-');
+    const repoRoot = mkdtempSync(join(tmpdir(), 'prt-resolve-root-'));
     mkdirSync(join(repoRoot, 'packages', 'a'), { recursive: true });
     mkdirSync(join(repoRoot, 'packages', 'b'), { recursive: true });
     writeFileSync(
@@ -75,7 +71,7 @@ describe('resolveGroup', () => {
   });
 
   it('FAILS CLOSED when a --dirs entry package.json has no "name"', () => {
-    const repoRoot = mkFixtureDir('prt-resolve-noname-');
+    const repoRoot = mkdtempSync(join(tmpdir(), 'prt-resolve-noname-'));
     mkdirSync(join(repoRoot, 'packages', 'a'), { recursive: true });
     writeFileSync(
       join(repoRoot, 'packages', 'a', 'package.json'),
@@ -103,7 +99,7 @@ describe('buildManifest', () => {
   });
 
   it('degrades gitSha to "unknown" rather than throwing outside a git repo', () => {
-    const nonRepo = mkFixtureDir('prt-nongit-');
+    const nonRepo = mkdtempSync(join(tmpdir(), 'prt-nongit-'));
     const manifest = buildManifest([], nonRepo);
     expect(manifest.gitSha).toBe('unknown');
     rmSync(nonRepo, { recursive: true, force: true });
