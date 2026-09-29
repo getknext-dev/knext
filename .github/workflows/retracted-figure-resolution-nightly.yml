@@ -93,12 +93,14 @@ jobs:
     name: Nightly red alert (pinned issue)
     needs: [resolve-retracted-figures]
     # always() so this is not skipped when the check fails; the needs-result
-    # check fires it ONLY on failure; the event check scopes it to the schedule
-    # so a dispatch experiment never files or updates the pinned issue.
+    # check fires on failure OR cancelled (#1645 — a cancelled/timed-out run
+    # used to leave this condition false and the alert silent); the event
+    # check scopes it to the schedule so a dispatch experiment never files or
+    # updates the pinned issue.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.resolve-retracted-figures.result == 'failure'
+      (needs.resolve-retracted-figures.result == 'failure' || needs.resolve-retracted-figures.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
