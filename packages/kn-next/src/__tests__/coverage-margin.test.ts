@@ -63,9 +63,16 @@ describe("metrics — residual branches", () => {
         await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
         const port = (srv.address() as { port: number }).port;
 
+        // #1241: explicit, bun-enforced per-test bound. `fetchChildMetrics`'s
+        // own timeout (the 80ms below) SHOULD resolve this promise well inside
+        // that — this is defense in depth, not the primary fix. The primary
+        // fix is `scripts/bun-test.mjs`'s own outer per-file kill-timeout
+        // (`--file-timeout`, tested in tests/bun-test-hard-timeout.test.ts),
+        // which bounds the file even if something inside this test's own
+        // process — not just this specific promise — is what gets stuck.
         const body = await fetchChildMetrics(port, "127.0.0.1", 80);
         expect(body).toBe("");
-    });
+    }, 10_000);
 
     it("mergeExposition drops empty sources and normalises the seam newline", () => {
         expect(mergeExposition([])).toBe("");
