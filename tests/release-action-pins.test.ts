@@ -8,11 +8,14 @@ import { jobBlocks, jobNeeds } from './helpers/release-workflow';
  *
  * Threat model: `.github/workflows/release.yml`'s `changesets/action` step is
  * handed `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` — a live npm publish
- * credential — plus `GITHUB_TOKEN`. `release-ghp.yml` hands `GITHUB_TOKEN` to a
- * job with `packages: write`. A mutable ref (`@v1`, `@v4`, a branch, a moving
- * major tag) means whoever can retag/repoint that ref decides what code runs
- * with those credentials in scope. `changesets/action@v1` is the worst case: on
- * that repo `v1` is a *branch*, not even a tag.
+ * credential — plus `GITHUB_TOKEN`. `bun-base-build.yml` (the second entry in
+ * PINNED_WORKFLOWS below) runs with `id-token: write` — GCP workload-identity
+ * federation plus GitHub-OIDC keyless cosign signing — so a compromised action
+ * there can forge a "verified" Bun base build. (`release-ghp.yml`, which used
+ * to hold this slot, is retired — #1644.) A mutable ref (`@v1`, `@v4`, a
+ * branch, a moving major tag) means whoever can retag/repoint that ref decides
+ * what code runs with those credentials in scope. `changesets/action@v1` is
+ * the worst case: on that repo `v1` is a *branch*, not even a tag.
  *
  * This is the CI-supply-chain analogue of security.md's "pin images by digest;
  * reject `:latest`" rule. These tests are the tripwire so a future "tidy-up"
@@ -27,7 +30,7 @@ import { jobBlocks, jobNeeds } from './helpers/release-workflow';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
-const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml', 'bun-base-build.yml'] as const;
+const PINNED_WORKFLOWS = ['release.yml', 'bun-base-build.yml'] as const;
 
 /**
  * The actions ALLOWED to run on the publish path — the credentialed surface, so
@@ -77,12 +80,6 @@ const EXPECTED_ACTIONS_BY_FILE: Record<(typeof PINNED_WORKFLOWS)[number], Readon
     'actions/upload-artifact',
     'oven-sh/setup-bun',
     'changesets/action',
-  ]),
-  'release-ghp.yml': new Set([
-    'actions/checkout',
-    'actions/setup-node',
-    'actions/upload-artifact',
-    'oven-sh/setup-bun',
   ]),
   // Holds `id-token: write` (GCP federation + cosign keyless), so it is credential-bearing.
   'bun-base-build.yml': new Set([
