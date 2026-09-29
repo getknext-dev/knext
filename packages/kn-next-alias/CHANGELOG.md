@@ -1,5 +1,12 @@
 # kn-next
 
+## 1.0.0-rc.2
+
+### Patch Changes
+
+- Updated dependencies [e36eb32]
+  - @getknext/core@1.0.0-rc.2
+
 ## 1.0.0-rc.1
 
 ### Patch Changes
