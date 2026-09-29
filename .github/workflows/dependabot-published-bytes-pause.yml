@@ -1,0 +1,76 @@
+name: Dependabot published-bytes pause
+
+# #1663 — pauses Dependabot for the published packages' dependency manifests
+# while a credential window is open. See `scripts/dependabot-published-bytes-
+# pause.mjs`'s header for why this is an AUTO-CLOSE WORKFLOW rather than a
+# `.github/dependabot.yml` edit: that file has no npm/bun `package-ecosystem`
+# entry today (only `github-actions`), so a config "pause" would have nothing
+# to disable and would need a reviewed PR to toggle around every window
+# anyway. This closes any Dependabot PR whose content would be disallowed by
+# `scripts/published-bytes-freeze-check.mjs` — a dependency bump touching a
+# published package's manifest during an open, un-overridden window — using
+# the SAME scope/override decision (`decidePublishedBytesScope`), so the two
+# mechanisms cannot silently disagree.
+#
+# Gated at the JOB level on `github.actor == 'dependabot[bot]'`: a human PR
+# never reaches the `gh pr close` step, and the decision script itself never
+# runs for one either (cheaper than a script-level actor check).
+#
+# Scoped `pull-requests: write` only on this job, nowhere else in the repo's
+# default token grants — closing a PR is the one side effect this workflow
+# performs, and it is visible here, not buried in the script (see the
+# script's own header).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: ['**']
+
+permissions:
+  contents: read
+
+jobs:
+  pause-if-published-bytes-frozen:
+    name: Close if it touches a published package's manifest during a frozen window
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout code (full history — needed for the base...head diff)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Compute the files this PR changed (base...head)
+        run: |
+          set -euo pipefail
+          git diff --no-renames --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          echo "changed files in this PR:"
+          cat changed-files.txt
+
+      - name: Decide whether to close
+        id: decide
+        run: node scripts/dependabot-published-bytes-pause.mjs --changed-files-file changed-files.txt
+
+      # `gh pr close` is the only step that mutates anything — gated on the
+      # decision script's own output, never re-derived here.
+      - name: Close the PR (published bytes are frozen for this manifest)
+        if: steps.decide.outputs.should_close == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOSE_REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          set -euo pipefail
+          gh pr close "${PR_NUMBER}" --comment "Closing: ${CLOSE_REASON}"

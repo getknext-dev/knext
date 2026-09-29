@@ -135,6 +135,38 @@ shells to `npm publish` for a bun workspace) — never `bun pm pack`, which was 
 maps two command names, `knext` and `kn-next`, to that one file) and would have made this gate
 permanently, incorrectly red on every real GA cut.
 
+### PR-time: published bytes stay frozen for the whole life of a credential window
+
+The gate above catches a mismatch at the GA cut — 14 nights after the mismatch was actually
+introduced. `.github/workflows/published-bytes-freeze-guard.yml` catches it at PR time instead:
+while `.github/compat-credential-ref.json`'s `rcTag` is set, every PR that touches a path able to
+reach a published package (`scripts/lib/published-bytes-freeze-check.mjs`'s
+`publishScopeDirs` — derived from the same publishable-workspace-package list the GA-vs-rc gate
+uses, plus a small, documented set of root build-input files: `package.json`, `bun.lock`,
+`.changeset/config.json`, `scripts/rewrite-workspace-ranges.mjs`) is packed at its own merge ref and
+diffed against the pinned rc tag's tarballs, using the **exact same comparison rules**
+(`scripts/ga-tarball-diff.mjs`, reused as-is). A PR that touches none of that scope — the common
+case — exits in milliseconds, before anything is packed.
+
+An **intentional** rc.N+1 — real content is expected to differ from the currently-pinned rc — is
+authorized the same way `rcBumpMarker` authorizes touching the credential harness mid-window: add a
+dated, reviewed `publishedBytesBumpMarker: { date, expires, reason }` to the pin file in the same
+PR (capped at 14 days from today, same rule as `rcBumpMarker`). The check then skips itself for that
+PR; once the real content lands and a new `vX.Y.Z-rc.N+1` tag is cut and pinned, later PRs are
+diffed against the new baseline.
+
+This check fails closed — never silently skips — when the pinned `rcTag` does not resolve to a real
+git tag in the checkout, and it is not yet a required check (same status as the sibling
+`compat-credential-freeze-guard.yml`; flipping that is a branch-protection change a founder makes).
+
+Dependabot is paused for the same window by a companion workflow
+(`.github/workflows/dependabot-published-bytes-pause.yml`): any `dependabot[bot]` PR whose content
+would be disallowed by the check above (a dependency bump touching a published package's manifest
+during an open, un-overridden window) is auto-closed with an explanatory comment, using the exact
+same scope/override decision. `.github/dependabot.yml` has no `npm`/`bun` ecosystem entry today (only
+`github-actions`), so this is a no-op in practice until one is added — and correct from the day one
+is, with no further edit needed.
+
 ## First publish — DONE (2026-07-26)
 
 **The first npmjs publish has happened.** Verified against the registry:
