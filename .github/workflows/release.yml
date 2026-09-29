@@ -6,14 +6,23 @@
 #      (version bump + changelog). NO credential, NO environment, NO approval.
 #   3. Merging that PR is a second push to main. `publish-preflight` then finds a
 #      version in the tree that the registry does not have, and `release` — the
-#      only job that ever holds NPM_TOKEN — publishes it after the `npm-publish`
-#      environment's required reviewer approves.
+#      only job that ever holds NPM_TOKEN — runs under the `npm-publish`
+#      environment. CORRECTION (#1638, #1639): as of this writing that
+#      environment has NO protection rules (verified via
+#      `gh api repos/getknext-dev/knext/environments/npm-publish` —
+#      `protection_rules: []`), so a publish runs straight through with no
+#      reviewer click. Adding a required reviewer is a founder Settings action
+#      tracked in #1638; until then, do not read this workflow as gated by one.
 #
 # ┌─ WHY THIS IS THREE JOBS AND NOT ONE (the lane starved itself for a month) ───┐
 # │ It used to be one job, and that job declared `environment: npm-publish`.     │
-# │ That environment has a `required_reviewers` rule, so EVERY push to main —    │
+# │ At the time, that environment DID have a `required_reviewers` rule (the     │
+# │ `waiting` status below is only reachable with one), so EVERY push to main — │
 # │ including the ones that only wanted to open a Version PR — parked the run in │
-# │ `waiting` for a human click.                                                 │
+# │ `waiting` for a human click. That rule is not present today (see the        │
+# │ CORRECTION above) — the job split itself no longer depends on it existing,  │
+# │ since `publish-preflight` deciding to skip `release` outright is what       │
+# │ actually prevents parking, with or without a reviewer rule configured.      │
 # │                                                                             │
 # │ Run 30207128316 (2026-07-26) parked and was never approved. With a           │
 # │ WORKFLOW-level `concurrency: {group: release-<ref>, cancel-in-progress:      │
@@ -432,10 +441,14 @@ jobs:
     # NPM_TOKEN lives as an ENVIRONMENT secret on `npm-publish`, not a repo
     # secret. Environment secrets are only injected into jobs that declare the
     # environment — without this line `secrets.NPM_TOKEN` resolves to the empty
-    # string. Declaring it also lets the environment's protection rules
-    # (`required_reviewers: AhmedElBanna80`, measured 2026-08-25) gate the
-    # publish itself, which is the point of putting an irreversible action behind
-    # an environment in the first place.
+    # string. Declaring it would ALSO let the environment's protection rules
+    # gate the publish itself, which is the point of putting an irreversible
+    # action behind an environment in the first place — but CORRECTION
+    # (#1638, #1639): `npm-publish` currently has NO protection rules
+    # (`protection_rules: []`, live-verified), so today this line is purely
+    # about the secret, not a reviewer gate. The `required_reviewers:
+    # AhmedElBanna80, measured 2026-08-25` claim this comment used to make was
+    # false as of this writing and has been removed rather than left stale.
     environment: npm-publish
     # Publish-BLOCKING supply-chain gate: never publish tarballs the audit did
     # not clear (HIGH/CRITICAL fail-closed). `audit` is named directly as well as
@@ -600,3 +613,53 @@ jobs:
       - name: Verify the whole group published coherently (post-publish)
         if: ${{ !cancelled() && steps.gate.outcome == 'success' }}
         run: node scripts/verify-published-group.mjs --post
+
+  # #1639(c) — nothing previously alerted when a version bump landed on `main`
+  # and did NOT end up published, for ANY reason: a crash (the #1622 class),
+  # red CI, the environment gate never approved, or a registry outage. This
+  # re-asks EXACTLY the question `publish-preflight` asked before the run —
+  # is there a publishable name@version the registry does not have — a second
+  # time, after `release` has had its chance.
+  #
+  # `always()` so a hard-failed or never-run `release` job still gets this
+  # check — that is precisely the case it exists for. Gated on
+  # `publish-preflight` having SUCCEEDED (its `should_publish` output cannot
+  # be trusted otherwise) AND having said `true` (nothing to publish is not a
+  # drift to report).
+  publish-drift-alert:
+    name: Alert if main is still ahead of the registry after this run
+    runs-on: ubuntu-latest
+    needs: [version-pr, publish-preflight, release]
+    if: >-
+      always()
+      && github.repository == 'getknext-dev/knext'
+      && needs.version-pr.outputs.has_changesets == 'false'
+      && needs.publish-preflight.result == 'success'
+      && needs.publish-preflight.outputs.should_publish == 'true'
+    # Least privilege: only this job gets issues:write, and only to file/update
+    # the dedup-by-title alert (scripts/lib/nightly-alert-issue.mjs, #1347 —
+    # never pinned). Same HUMAN PRECONDITION as every other alert job in this
+    # repo (see docs-closure-nightly.yml): "Settings → Actions → General →
+    # Workflow permissions → Allow GitHub Actions to create and approve pull
+    # requests" must be enabled, or the default GITHUB_TOKEN cannot create the
+    # issue and no alert surfaces.
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # No install step: scripts/publish-verify-alert.mjs's whole closure
+      # (scripts/publish-preflight.mjs, scripts/lib/nightly-alert-issue.mjs)
+      # reaches only node: builtins — enforced by
+      # tests/workflow-script-install-guard.test.ts (#1639a) scanning this
+      # exact file, not merely claimed here.
+      - name: Check whether main is still ahead of the registry; alert if so
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-verify-alert.mjs
