@@ -66,7 +66,7 @@ limitations under the License.
 // WHY A SEPARATE BUILD TAG (`e2e_cli`):
 //
 //	Same reason as e2e_bundle: this needs cert-manager + Knative Serving +
-//	Kourier (heavier than the light per-PR e2e) PLUS a Node + pnpm toolchain to
+//	Kourier (heavier than the light per-PR e2e) PLUS a Node + Bun toolchain to
 //	build the CLI. It declares its OWN suite runner so it never collides with
 //	the `e2e || e2e_scale` BeforeSuite in e2e_suite_test.go. It runs in the
 //	nightly workflow (operator-e2e-nightly.yml, job `cli-e2e`) as an
@@ -252,15 +252,13 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 	existing := cliExistingContext()
 
 	BeforeAll(func() {
-		By("building the CLI from source with pnpm (plain-Node dist, no Bun)")
-		// Requires `pnpm install` to have run at the repo root (CI does; see the
+		By("building the CLI from source with bun (plain-Node dist)")
+		// Requires `bun install` to have run at the repo root (CI does; see the
 		// Makefile target's doc). tsup emits dist/cli/kn-next.js — the bin entry.
-		// The `...` filter suffix builds @getknext/core's WORKSPACE DEPENDENCIES
-		// first (@getknext/lib ships only dist/, and core's dts build imports
-		// @getknext/lib/clients — on a clean checkout the bare filter fails TS2307).
-		_, err := utils.RunAtRepoRoot("pnpm", "--filter", "@getknext/core...", "build")
+		// utils.BuildCLI builds @getknext/core's workspace deps first (#1208).
+		err := utils.BuildCLI()
 		Expect(err).NotTo(HaveOccurred(),
-			"failed to build the CLI — run `pnpm install --frozen-lockfile` at the repo root first")
+			"failed to build the CLI — run `bun install --frozen-lockfile` at the repo root first")
 		bin, err := utils.CLIBin()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(bin).To(BeAnExistingFile(), "CLI build produced no dist/cli/kn-next.js")
