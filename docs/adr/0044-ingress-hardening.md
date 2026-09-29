@@ -421,9 +421,9 @@ that gap. (Amendment 4's text is left as written; this is the correction.)
   `req.json()` rejects rather than resolving truncated (no partial processing). The remaining body
   is **discarded, never buffered**, for a bounded **2 s linger** (nginx's `lingering_close` shape)
   and then the socket is destroyed. The linger is measured, not decorative: closing immediately
-  sends a TCP reset over unread bytes, and a client still uploading lost the `413` to
-  EPIPE/ECONNRESET in 28/40 multi-megabyte refusals across Node and Bun; with the linger, 40/40
-  read the `413`. If the handler already began its response, the socket is destroyed at once.
+  sends a TCP reset over unread bytes: across Node and Bun (as server and as client), every
+  client still uploading a multi-megabyte body saw ECONNRESET/EPIPE, and 28/40 lost the `413`
+  itself to the reset; with the linger, 40/40 read the `413` and none saw a reset. If the handler already began its response, the socket is destroyed at once.
 - **Same knob, same default, same semantics as Amendment 4**: `KNEXT_MAX_REQUEST_BYTES`, 8 MiB, `0`
   uncaps loudly, invalid → default + warning. A lockstep test pins the resolver to
   `runtime-contract.mjs`'s. Users set it through `knext.config.ts`'s existing `env` map or

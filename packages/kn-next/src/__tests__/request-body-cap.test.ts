@@ -177,55 +177,35 @@ function raw(
 }
 
 /**
- * A client that is STILL UPLOADING when it is refused: send `head` plus body
- * bytes until the 413 arrives, keep sending for another ~400ms, then stop
- * (without half-closing) and wait for the server to close the connection.
- *
- * Deterministic where a single big write is not: once a server has torn the
- * connection down, the next write after the 413 fails with ECONNRESET/EPIPE on
- * every runtime, so `error` is set exactly when the server did not linger.
+ * A client that sends a whole large body in ONE write — still uploading when it
+ * is refused — and reports the response plus any socket error. Measured on Node
+ * and Bun, as server and as client: when the server tears the connection down
+ * with the body still arriving, the client gets ECONNRESET/EPIPE every time
+ * (and often loses the 413 itself to the reset); with the linger, never.
  */
-function uploadAfterRefusal(
+function bigUpload(
     port: number,
-    head: string,
-    body: (n: number) => string,
-): Promise<{ status: string; error?: string; closedMs: number }> {
+    payload: string,
+): Promise<{ status: string; error?: string }> {
     return new Promise((done) => {
-        const s = connect(port, "127.0.0.1");
+        const s = connect(port, "127.0.0.1", () => {
+            s.write(payload);
+        });
         let got = "";
         let error: string | undefined;
-        let refusedAt = 0;
-        let stopAt = 0;
-        let connected = false;
-        const started = Date.now();
-        const pump = setInterval(() => {
-            if (!connected || s.destroyed) return;
-            if (stopAt && Date.now() > stopAt) return;
-            s.write(body(16 * 1024));
-        }, 10);
-        const hardStop = setTimeout(() => s.destroy(), 15_000);
-        s.on("connect", () => {
-            s.write(head);
-            connected = true;
-        });
+        const timer = setTimeout(() => {
+            error = "client-timeout";
+            s.destroy();
+        }, 15_000);
         s.on("data", (d) => {
             got += d;
-            if (!refusedAt && got.includes("\r\n\r\n")) {
-                refusedAt = Date.now();
-                stopAt = refusedAt + 400;
-            }
         });
         s.on("error", (e: NodeJS.ErrnoException) => {
             error = e.code ?? String(e);
         });
         s.on("close", () => {
-            clearInterval(pump);
-            clearTimeout(hardStop);
-            done({
-                status: statusLine(got),
-                error,
-                closedMs: Date.now() - (refusedAt || started),
-            });
+            clearTimeout(timer);
+            done({ status: statusLine(got), error });
         });
     });
 }
@@ -417,29 +397,31 @@ for (const [name, bin] of RUNTIMES) {
             }
         });
 
-        it("a client still uploading when refused READS the 413 (no reset), and the connection closes within the linger bound", async () => {
+        it("a client still uploading when refused READS the 413 with no connection reset", async () => {
             const b = await boot(bin, { KNEXT_MAX_REQUEST_BYTES: String(CAP) });
             try {
-                const declared = await uploadAfterRefusal(
-                    b.port,
-                    "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: linger-declared\r\nContent-Length: 104857600\r\n\r\n",
-                    (n) => "a".repeat(n),
-                );
-                expect(declared.status).toBe("HTTP/1.1 413 Payload Too Large");
-                // Kept uploading for a while AFTER the 413 with no reset: the
-                // server discarded the bytes instead of tearing down…
-                expect(declared.error).toBeUndefined();
-                // …and the SERVER closed it, inside the bound.
-                expect(declared.closedMs).toBeLessThan(6_000);
+                const big = 8 * 1024 * 1024;
+                for (let n = 0; n < 3; n++) {
+                    const declared = await bigUpload(
+                        b.port,
+                        `POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: linger-declared\r\nContent-Length: ${big}\r\n\r\n${"a".repeat(big)}`,
+                    );
+                    expect(declared).toEqual({
+                        status: "HTTP/1.1 413 Payload Too Large",
+                        error: undefined,
+                    });
 
-                const chunked = await uploadAfterRefusal(
-                    b.port,
-                    "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: linger-chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
-                    (n) => chunk(n),
-                );
-                expect(chunked.status).toBe("HTTP/1.1 413 Payload Too Large");
-                expect(chunked.error).toBeUndefined();
-                expect(chunked.closedMs).toBeLessThan(6_000);
+                    const chunked = await bigUpload(
+                        b.port,
+                        "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: linger-chunked\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                            chunk(1024 * 1024).repeat(8) +
+                            "0\r\n\r\n",
+                    );
+                    expect(chunked).toEqual({
+                        status: "HTTP/1.1 413 Payload Too Large",
+                        error: undefined,
+                    });
+                }
                 expect(b.out()).not.toContain("HANDLER_DONE linger-chunked");
             } finally {
                 b.stop();

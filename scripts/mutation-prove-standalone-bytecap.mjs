@@ -31,7 +31,10 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PRELOAD = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/request-body-cap.cjs');
 const NODE_SERVER = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/node-server.ts');
-const STANDALONE_COMPILE = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/standalone-compile.mjs');
+const STANDALONE_COMPILE = resolve(
+  REPO_ROOT,
+  'packages/kn-next/src/adapters/standalone-compile.mjs',
+);
 const SPEC = 'packages/kn-next/src/__tests__/request-body-cap.test.ts';
 
 const MUTATIONS = [
@@ -131,7 +134,9 @@ console.log('Baseline: every filtered selection must be GREEN on the clean tree.
 for (const filter of new Set(MUTATIONS.map((m) => m.filter))) {
   const status = runSpec(filter);
   if (status !== 0) {
-    console.error(`FATAL: baseline for -t ${JSON.stringify(filter)} exited ${status} — nothing here would prove anything`);
+    console.error(
+      `FATAL: baseline for -t ${JSON.stringify(filter)} exited ${status} — nothing here would prove anything`,
+    );
     process.exit(1);
   }
   console.log(`   ok baseline green: ${filter}`);
