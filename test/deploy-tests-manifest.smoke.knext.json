@@ -159,7 +159,12 @@
       "test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts",
       "test/e2e/app-dir/app-prefetch/prefetching.test.ts",
       "test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts",
-      "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts"
+      "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts",
+      "test/e2e/app-dir/non-ascii-cache-item-name/non-ascii-cache-item-name.test.ts",
+      "test/e2e/app-dir/cache-components-prerender-matrix/cache-components-prerender-matrix.test.ts",
+      "test/e2e/incremental-cache-path-traversal/index.test.ts",
+      "test/e2e/app-dir/not-found-non-document/not-found-non-document.test.ts",
+      "test/e2e/app-dir/expire-time/expire-time.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -380,6 +385,80 @@
       "evidence": "run 28701712403 (node lane, the #210 closure run, shard 3/16): FINAL failure past retries — 789 passed / 1 failed across all 16 shards, the lone red being this file; the file PASSED in every prior cited full run (28578203671, 28590478386, 28593534713, 28596005486, 28597872225, 28601386408) — cross-run wobble, newest family member.",
       "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale at v16.2.0 (test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, 33 cases) and this file already carries upstream's own per-case deploy skip (#90601). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301. RE-AUDITED at v16.2.12 (#1570): GitHub compare v16.2.0...v16.2.12 (115 commits) does NOT contain vercel/next.js#95301 (the family root-cause fix) — the patch line has not picked up that canary fix, so the family mechanism is unchanged and the file-level quarantine still applies. The four v16.2.12 credential-cell dispatches (issue #1570) ran green with this file correctly excluded via rules.exclude. Re-test again on the first NEXTJS_REF containing #95301.",
       "reaudited": "v16.2.12"
+    },
+    {
+      "test": "test/e2e/app-dir/non-ascii-cache-item-name/non-ascii-cache-item-name.test.ts",
+      "nextjsRef": "v16.3.5",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["keeps caching a request with a non-ASCII query parameter"],
+      "mechanism": "Fixture assumes Vercel. next.config.js is `process.env.VERCEL ? {} : { cacheHandler: './cache-handler.js', cacheMaxMemorySize: 0 }`; the harness does not set VERCEL, so the fixture's probe handler is used, and its get() always returns null (set() is a no-op). The isNextDeploy branch then asserts two back-to-back renders return the same random values, which needs a real cache. Logs: BOTH values change between renders, including the pure-ASCII fetch-cache control (`fetched`), so the cache is absent, not mis-keyed; 0 `CACHE_PROBE unsafe` lines in all four cells (Next's own non-ASCII fix works under knext). knext's cache handler is not involved.",
+      "evidence": "runs 36332940411 (node x turbopack) / 36332946048 (node x webpack) / 36332951393 (bun x turbopack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts on all four cells, identical failing cases in every cell.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/1623 (per-test triage, #1571 founder decision option A 2026-09-28). Retire when the fixture stops swapping in the null probe handler for non-VERCEL deploys."
+    },
+    {
+      "test": "test/e2e/app-dir/cache-components-prerender-matrix/cache-components-prerender-matrix.test.ts",
+      "nextjsRef": "v16.3.5",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "does not share the entry at lang=en category=fresh id=fresh across category values (category included in the cache key)",
+        "does not share the entry at lang=fresh category=fresh id=fresh across category values (category included in the cache key)",
+        "does not share the entry at lang=fresh category=fresh id=fresh across lang values (lang included in the cache key)",
+        "serves everything except the [id] region from the cache at lang=en category=fresh id=fresh",
+        "serves everything except the [id] region from the cache at lang=fresh category=fresh id=fresh",
+        "serves nothing from the cache at lang=en category=fresh id=fresh",
+        "serves nothing from the cache at lang=fresh category=fresh id=fresh",
+        "serves the whole document from the cache at lang=en category=fresh id=fresh",
+        "serves the whole document from the cache at lang=en category=shoes id=fresh",
+        "serves the whole document from the cache at lang=fresh category=fresh id=fresh",
+        "shares the entry at lang=en category=fresh id=fresh with a fresh id value (id excluded from the cache key)",
+        "shares the entry at lang=en category=shoes id=fresh with a fresh id value (id excluded from the cache key)",
+        "shares the entry at lang=fresh category=fresh id=fresh with a fresh category value (category excluded from the cache key)",
+        "shares the entry at lang=fresh category=fresh id=fresh with a fresh id value (id excluded from the cache key)",
+        "shares the entry at lang=fresh category=fresh id=fresh with a fresh lang value (lang excluded from the cache key)"
+      ],
+      "mechanism": "Every failing assertion is `expect(response.headers.get('x-vercel-cache')).toBe(MISS|HIT|PRERENDER)` inside `if (isNextDeploy)`, Received: null in all 50 failures (20 MISS, 18 HIT, 12 PRERENDER). x-vercel-cache is set by Vercel's CDN; Next.js never emits it, and knext serves through Next's own standalone server. The 10 rows with no header check pass. No masked knext gap: with ONLY the four x-vercel-cache expectations stubbed (logged, not asserted), so the content partition checks behind them run, the whole file PASSED on all four cells.",
+      "evidence": "runs 36332940411 (node x turbopack) / 36332946048 (node x webpack) / 36332951393 (bun x turbopack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts on all four cells, identical failing cases in every cell (50 failed / 10 passed / 60). Stub runs (scratch branch, x-vercel-cache expectations only stubbed, content checks live): 36430353283 (node x turbopack) PASS, 36430358027 (bun x turbopack) PASS, 36430362513 (node x webpack) file PASS, 36430368139 (bun x webpack) file PASS; the two webpack runs are red only on an unrelated file (test/e2e/middleware-rewrites/test/index.test.ts, triaged separately in #1633).",
+      "provenance": "https://github.com/getknext-dev/knext/issues/1624 (per-test triage + the stubbed content-check run, #1571 founder decision option A 2026-09-28). Retire when the deploy branch stops asserting the Vercel CDN header for non-Vercel adapters."
+    },
+    {
+      "test": "test/e2e/incremental-cache-path-traversal/index.test.ts",
+      "nextjsRef": "v16.3.5",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["serves arbitrary json files"],
+      "mechanism": "isNextDeploy && isAdapterTest branch expects the catch-all `rest` of `GET /_next/data/<id>/pages-cache/..%2F..%2Fserver-reference-manifest.json` split as ['..','..','server-reference-manifest'] (Vercel's routing layer decodes %2F before segmenting). knext returns 200 with the page's own pageProps (no traversal, no manifest leak) and the single segment '../../server-reference-manifest', which is the self-hosted and non-adapter deploy expectation. Making it pass would widen %2F decoding on a traversal surface.",
+      "evidence": "runs 36332940411 (node x turbopack) / 36332946048 (node x webpack) / 36332951393 (bun x turbopack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts on all four cells, identical failing cases in every cell.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/1625 + vercel/next.js#98133 (merged to next-16-3 2026-09-02, aligned 16.3's deploy assertion with canary's Vercel-adapter routing; vercel/next.js#97892 is an open duplicate PR). #1571 founder decision option A 2026-09-28."
+    },
+    {
+      "test": "test/e2e/app-dir/not-found-non-document/not-found-non-document.test.ts",
+      "nextjsRef": "v16.3.5",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "returns a plain text 404 for font and manifest requests to unknown paths",
+        "returns a plain text 404 for subresource requests to unknown paths"
+      ],
+      "mechanism": "Both failures are in the `if (isNextDeploy)` branch, which expects content-type text/html because 'the deployed routing layer serves [the prerendered not-found] without invoking Next.js'. knext invokes Next for every request and returns `text/plain; charset=utf-8`, exactly what the self-hosted branch asserts and what Next 16.3.5 intends for image/font/manifest sec-fetch-dest. The 4 document/fetch/navigation cases pass. Upstream's own TODO says to align the CDN toward the plain-text 404.",
+      "evidence": "runs 36332940411 (node x turbopack) / 36332946048 (node x webpack) / 36332951393 (bun x turbopack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts on all four cells, identical failing cases in every cell.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/1626 + the upstream TODO in the test's isNextDeploy branch ('align the CDN behavior so subresource requests to unknown paths get the plain text 404 when deployed too'). #1571 founder decision option A 2026-09-28."
+    },
+    {
+      "test": "test/e2e/app-dir/expire-time/expire-time.test.ts",
+      "nextjsRef": "v16.3.5",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["should do a blocking revalidation when the cache entry has expired"],
+      "mechanism": "Declared `isNextDeploy ? it.failing : it` because Vercel's Proxy ignores expireTime. Under knext every assertion in the body PASSES (v3 is fresh after the 10 s wait: a blocking revalidation past expireTime: 10, the behaviour the test calls correct), so jest reds the `.failing` wrapper: 'Failing test passed even though it was supposed to fail'.",
+      "evidence": "runs 36332940411 (node x turbopack) / 36332946048 (node x webpack) / 36332951393 (bun x turbopack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts on all four cells, identical failing cases in every cell.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/1627 + the upstream comment on itFailsWhenDeployed (flip it.failing to it once Proxy honours expire). Retire the moment upstream makes that flip. #1571 founder decision option A 2026-09-28."
     }
   ],
   "$knextExclusions": [

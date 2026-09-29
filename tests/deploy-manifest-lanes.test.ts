@@ -71,8 +71,13 @@ const LANES = ['node', 'bun'] as const;
  * these; anything else fails loudly (a new family requires a reviewed amendment).
  *  - runtime-prefetch : the §d navigation-timing / segment-cache race family.
  *  - bun-edge-fetch   : the documented Bun edge-sandbox outbound-fetch gap.
+ *  - vercel-infra-coupled : ADR-0007 §h — a test whose DEPLOY branch asserts
+ *    behaviour only Vercel's own infrastructure produces (its CDN's
+ *    x-vercel-cache header, its Proxy's expire handling, its routing layer's
+ *    %2F segmenting, its CDN serving a prerendered not-found, a fixture that
+ *    swaps in a null cache unless VERCEL is set). Deterministic, not flaky.
  */
-const KNOWN_FAMILIES = new Set(['runtime-prefetch', 'bun-edge-fetch']);
+const KNOWN_FAMILIES = new Set(['runtime-prefetch', 'bun-edge-fetch', 'vercel-infra-coupled']);
 
 /**
  * The per-mechanism-family SOFT BOUND. A reviewed constant: the runtime-prefetch
@@ -287,6 +292,21 @@ describe('v5-P2 preserves every family entry mapping (lane+family are additive m
           'file',
         );
       }
+    }
+  });
+
+  it('each family:"vercel-infra-coupled" entry is a level:"file", NODE-lane §h quarantine', () => {
+    // §h: observed on all four credential cells (node/bun × turbopack/webpack),
+    // so it is booked against the node lane — the credential row — rather than
+    // hidden on the bun axis. File level because the failure is deterministic in
+    // the deploy branch, and §c.1's per-case suites entries are flakey-only.
+    const coupled = quarantines.filter((q) => q.family === 'vercel-infra-coupled');
+    expect(coupled.length, 'the §h family has live entries (sanity)').toBeGreaterThan(0);
+    for (const q of coupled) {
+      expect(q.level, `${q.test}: vercel-infra-coupled entries are file-level`).toBe('file');
+      expect(q.lane ?? 'node', `${q.test}: vercel-infra-coupled entries are node-lane`).toBe(
+        'node',
+      );
     }
   });
 });

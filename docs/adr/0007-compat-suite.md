@@ -624,6 +624,82 @@ quarantine cannot silently shrink the Node claim, and a family cannot grow unbou
 loud, escalating CI failure. The bound and the lane field are additive metadata — no entry was
 reclassified, no `suites`/`rules.exclude` selection changed, no matrix number moved.
 
+## Addendum (2026-09-28, #1571): the vercel-infra-coupled family
+
+### (h) Deterministic failures whose deploy branch encodes Vercel's infrastructure
+
+**Context.** Five tests added upstream between Next 16.2.x and 16.3.5 fail 3/3 retries on all four
+credential cells at `NEXTJS_REF=v16.3.5` (runs 36332940411 / 36332946048 / 36332951393 /
+36332959885). None exists at v16.2.12, the rc.1 credential ref. Per-test triage (issues #1623–#1627)
+found the same shape in all five: every failing assertion sits in the test's **deploy** branch
+(`isNextDeploy`, sometimes `isAdapterTest`). That branch encodes behaviour that only Vercel's own
+infrastructure produces:
+
+- the CDN's `x-vercel-cache` header (`cache-components-prerender-matrix`);
+- the Proxy ignoring `expireTime` (`expire-time` — declared `it.failing` when deployed; knext
+  passes the body, so the `.failing` wrapper reds);
+- the routing layer decoding `%2F` before segmenting (`incremental-cache-path-traversal`,
+  vercel/next.js#98133);
+- the CDN serving a prerendered not-found without invoking Next (`not-found-non-document`, whose own
+  TODO says to align the CDN *toward* the self-hosted behaviour);
+- a fixture that swaps in a null cache unless `VERCEL` is set (`non-ascii-cache-item-name`).
+
+In each case knext's result matches the self-hosted expectation, or the one upstream's own comment
+calls correct. These are not flakes. §c's ledger was designed for flakes, and none of its existing
+families fits them.
+
+**Decision (founder, #1571 option A, 2026-09-28).** A third mechanism-family,
+`vercel-infra-coupled`, joins the closed taxonomy (`tests/deploy-manifest-lanes.test.ts`). Its
+entries are **file-level**: a verbatim `rules.exclude` line plus a `level: "file"`,
+`lane: "node"` ledger record. File level because §c.1's per-case `suites` entries are flakey-only,
+and labelling a deterministic failure "flakey" would misstate it. The family bar, guarded by
+`tests/deploy-manifest.test.ts`'s `VERCEL_COUPLED_FILE_QUARANTINES` table:
+
+1. a FINAL (3/3) failure on the credential cells, with every run cited in `evidence`;
+2. a `mechanism` that names the `isNextDeploy` branch the failure sits in, read from the logs and
+   not guessed;
+3. `provenance` that links the per-test knext issue and, where one exists, the upstream PR;
+4. **no masked knext gap.** Where a Vercel-only assertion runs before content checks and so
+   prevents them from running, a run with ONLY that assertion stubbed must show the content checks
+   passing on knext (`stubRuns`). A content check that fails there is a knext gap. It gets fixed,
+   not quarantined. For `cache-components-prerender-matrix`, the four `x-vercel-cache`
+   expectations were stubbed (logged, not asserted) on a throwaway branch and the file dispatched
+   once per cell at v16.3.5: it **passed on all four** (runs 36430353283 node × turbopack,
+   36430358027 bun × turbopack, 36430362513 node × webpack, 36430368139 bun × webpack). The two
+   webpack runs are red only on an unrelated file (`middleware-rewrites`, #1633), which is
+   triaged separately and is not part of this family.
+
+Entries are booked against the **node** lane (the credential row), because they fail on every cell.
+Execution stays lane-blind. The family is bounded by the §g per-family soft bound. The §d
+file-level cap is now scoped to the runtime-prefetch family, and every `level: "file"` entry must
+sit in its own family's guard table.
+
+**Pre-staged ref stamps.** These entries are stamped `nextjsRef: "v16.3.5"`, the ref where they
+were observed, while the workflow default is still v16.2.12. Stamping them at v16.2.12 would be
+false, because the tests do not exist there. The §c.5 expiry gate therefore admits one more case:
+an entry observed at **exactly** the scaffold's shipped Next pin
+(`.github/compat-credentialed-next-version.json` `shippedNextPin`) while that pin is ahead of the
+workflow default. An arbitrary future stamp is still refused. Once the default reaches or passes the
+pin, the ordinary rule applies again: the rc.2 bump to v16.3.5 covers these entries, and a later bump
+requires a re-audit.
+
+**Options considered.**
+
+| Option | Honest? | Keeps content coverage | Verdict |
+|---|---|---|---|
+| (a) File-level `vercel-infra-coupled` quarantine with per-test provenance | yes | no (see Consequences) | **accepted** |
+| (b) Per-case `suites.failed` entries | yes | yes | rejected for now: §c.1 forbids knext-observed `failed` lists, and 50 prerender-matrix cases are one assertion |
+| (c) Emit `x-vercel-cache`, decode `%2F`, serve HTML 404s, set `VERCEL` in the harness | **no** | — | rejected: fakes Vercel's infrastructure, and the `%2F` change widens a traversal surface |
+| (d) `$knextExclusions` (architectural) | partly | no | rejected: no evidence or expiry fields, and `expire-time` must retire the moment upstream flips `it.failing` |
+
+**Consequences.** Coverage the file-level entries give up, stated plainly: the 10 passing DEPTH rows
+and the stubbed content checks of `cache-components-prerender-matrix`, and the 4 passing
+`not-found-non-document` cases, stop running as ongoing coverage. Option (b) would win them back if
+§c.1 ever admits deterministic per-case entries. The rc.2 credential at v16.3.5 carries five entries
+that rc.1 at v16.2.12 does not. They are listed here and in the ledger, not netted out of the
+scoreboard. Retirement triggers are per entry: an upstream change to the deploy branch, `it.failing`
+flipped back to `it`, or the fixture no longer conditioning on `VERCEL`.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**
