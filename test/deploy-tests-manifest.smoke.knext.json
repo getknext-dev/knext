@@ -98,9 +98,6 @@
         "searchparams-reuse-loading With Middleware should correctly return different RSC data for full prefetches with different searchParam values"
       ]
     },
-    "test/e2e/middleware-rewrites/test/index.test.ts": {
-      "failed": ["Middleware Rewrite should handle catch-all rewrite correctly"]
-    },
     "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts": {
       "flakey": [
         "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
@@ -164,7 +161,8 @@
       "test/e2e/app-dir/cache-components-prerender-matrix/cache-components-prerender-matrix.test.ts",
       "test/e2e/incremental-cache-path-traversal/index.test.ts",
       "test/e2e/app-dir/not-found-non-document/not-found-non-document.test.ts",
-      "test/e2e/app-dir/expire-time/expire-time.test.ts"
+      "test/e2e/app-dir/expire-time/expire-time.test.ts",
+      "test/e2e/middleware-rewrites/test/index.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -459,6 +457,17 @@
       "mechanism": "Declared `isNextDeploy ? it.failing : it` because Vercel's Proxy ignores expireTime. Under knext every assertion in the body PASSES (v3 is fresh after the 10 s wait: a blocking revalidation past expireTime: 10, the behaviour the test calls correct), so jest reds the `.failing` wrapper: 'Failing test passed even though it was supposed to fail'.",
       "evidence": "runs 36332940411 (node x turbopack) / 36332946048 (node x webpack) / 36332951393 (bun x turbopack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts on all four cells, identical failing cases in every cell.",
       "provenance": "https://github.com/getknext-dev/knext/issues/1627 + the upstream comment on itFailsWhenDeployed (flip it.failing to it once Proxy honours expire). Retire the moment upstream makes that flip. #1571 founder decision option A 2026-09-28."
+    },
+    {
+      "test": "test/e2e/middleware-rewrites/test/index.test.ts",
+      "nextjsRef": "v16.3.5",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["should preserve rewrite query and dynamic params in Pages API routes"],
+      "mechanism": "The failing assertion (test line 106) is `url: isNextDeploy ? '/foo/bar?key=value&added=1&extra=2' : '/foo/bar?key=value'`, with upstream's note that deployed proxies put rewrite-added query values into the URL passed to the function while locally they are only in req.query. knext serves through Next's own standalone server, whose NextNodeServer.runApi forwards the resolved query and params but deliberately keeps req.url as the original browser-visible URL (vercel/next.js#94905). knext returns url '/foo/bar?key=value' and query {key:'value', added:'1', extra:'2', slug:['bar']}, which matches the expected query exactly; only the deploy-branch req.url expectation differs. WEBPACK CELLS ONLY in effect: at v16.3.5 the file's setup has `skipDeployment: isAdapterTest && isTurbopackTest` (upstream FIXME), so the turbopack cells never run it and this lane-blind file exclusion changes only the two webpack cells. File level because §c.1's per-case suites entries are flakey-only and this failure is deterministic; the cost is the file's other 56 passing webpack cases, which stop running as ongoing coverage. Upstream's mirrored suites.failed entry for this file ('Middleware Rewrite should handle catch-all rewrite correctly') is subsumed by the exclusion and removed; restore it when this entry retires.",
+      "evidence": "runs 36332946048 (node x webpack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts, the case named in the shard 9/16 summary; runs 36430362513 (node x webpack) / 36430368139 (bun x webpack): FINAL 3/3 (1 failed, 2 skipped, 56 passed, 59 total). Turbopack cells 36332940411 / 36332951393 / 36430353283 / 36430358027: the file is skipped upstream (finished in 2.09 s with IS_TURBOPACK_TEST=1 and NEXT_ENABLE_ADAPTER=1), not passed.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/1633 (triage: https://github.com/getknext-dev/knext/issues/1633#issuecomment-5895614465; founder decision 2026-09-29 to evidence-quarantine on the webpack cells for rc.2) + vercel/next.js#94905 (runApi keeps req.url as the original URL) + vercel/next.js#99435 (upstream issue asking for an adapter-neutral expectation). Retire when upstream changes the deploy-branch req.url expectation for non-Vercel adapters, then restore the mirrored suites.failed entry."
     }
   ],
   "$knextExclusions": [
