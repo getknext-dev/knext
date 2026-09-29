@@ -107,6 +107,18 @@ export type KubeconfigState =
 
 export type KubeconfigInspectFn = () => KubeconfigState;
 
+/**
+ * Resolution outcome of the config-file check (#1559 round-2 review fix):
+ * whether the CURRENT directory holds ONLY the pre-rename config filename
+ * (no `knext.config.ts`). Any other outcome -- a valid config, genuinely
+ * nothing, or an unrelated load/validation error -- collapses to `"other"`:
+ * those states are owned by the existing per-check SKIP messaging
+ * (`storage-mode.ts`, `node-entry-staleness.ts`), unchanged by this type.
+ */
+export type ConfigFileResolution =
+    | { kind: "legacy"; legacyPath: string }
+    | { kind: "other" };
+
 export interface DoctorDeps {
     kubectl: KubectlFn;
     probeImage: ManifestProbeFn;
@@ -122,6 +134,17 @@ export interface DoctorDeps {
      * check (ADR-0047). Defaults to the real cwd loader; tests inject.
      */
     loadAppConfig?: () => Promise<KnativeNextConfig | undefined>;
+    /**
+     * Narrow, read-only probe (#1559 round-2 review fix): does the CURRENT
+     * directory hold ONLY the pre-rename config filename (no
+     * `knext.config.ts`)? Distinct from {@link loadAppConfig} — that one
+     * collapses EVERY failure (missing, legacy filename, invalid) into
+     * `undefined` by contract, so a check that wants to tell "you renamed
+     * nothing" apart from "you have no app here" needs this instead. Feeds
+     * the storage-mode FAIL row and the node-entry-staleness SKIP wording.
+     * Defaults to the real cwd `existsSync` check; tests inject fixtures.
+     */
+    resolveConfigFile?: () => ConfigFileResolution;
     /**
      * TOTAL time budget for the app-image pullability probes (#952) — the
      * whole fan-out, not per image, so many dead registries cannot stall

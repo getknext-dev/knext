@@ -34,6 +34,11 @@ import { DEFAULT_RUNTIME_ID } from "../../../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../../../config";
 import { templateRoot } from "../../create";
 import { loadConfig } from "../../shared";
+import {
+    CONFIG_FILE,
+    defaultResolveConfigFile,
+    LEGACY_CONFIG_FILE,
+} from "../config-file";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
 
@@ -104,6 +109,27 @@ export async function nodeEntryStalenessCheck(
     const loadAppConfig = ctx.deps.loadAppConfig ?? defaultLoadAppConfig;
     const config = await loadAppConfig();
     if (!isVinextOnNode(config)) {
+        // #1559 round-2 review fix: `loadAppConfig` collapses "only the
+        // pre-rename filename is here" into the same `undefined` as
+        // "no app here at all". The storage-mode check owns the single FAIL
+        // row naming the rename (it runs first, `../../doctor.ts`); this
+        // check only needs to stop implying "no knext.config.ts was found"
+        // when it actually knows better.
+        if (config === undefined) {
+            const resolution = (
+                ctx.deps.resolveConfigFile ?? defaultResolveConfigFile
+            )();
+            if (resolution.kind === "legacy") {
+                return [
+                    mk(
+                        "node-entry-staleness",
+                        "vinext-on-node entry freshness",
+                        "skip",
+                        `found ${LEGACY_CONFIG_FILE} in this directory instead of ${CONFIG_FILE} — see the static asset mode check above for the rename instructions; knext-node-entry.mjs, if scaffolded, is never evaluated until that is resolved`,
+                    ),
+                ];
+            }
+        }
         return [
             mk(
                 "node-entry-staleness",

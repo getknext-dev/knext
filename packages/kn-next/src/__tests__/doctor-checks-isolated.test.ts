@@ -36,6 +36,7 @@ import { operatorImageCheck } from "../cli/doctor/checks/operator-image";
 import { storageModeCheck } from "../cli/doctor/checks/storage-mode";
 import type {
     CheckContext,
+    ConfigFileResolution,
     DoctorDeps,
     KubectlFn,
     ManifestProbeFn,
@@ -83,6 +84,7 @@ function makeCtx(
         skipAll?: boolean;
         probeImage?: ManifestProbeFn;
         loadAppConfig?: () => Promise<KnativeNextConfig | undefined>;
+        resolveConfigFile?: () => ConfigFileResolution;
         appImageProbeBudgetMs?: number;
         operatorImage?: string;
         readNodeEntryFile?: () => string | undefined;
@@ -95,6 +97,7 @@ function makeCtx(
         kubectl,
         probeImage: opts.probeImage ?? (async () => "ok"),
         loadAppConfig: opts.loadAppConfig,
+        resolveConfigFile: opts.resolveConfigFile,
         appImageProbeBudgetMs: opts.appImageProbeBudgetMs,
         readNodeEntryFile: opts.readNodeEntryFile,
         readNodeEntryTemplate: opts.readNodeEntryTemplate,
@@ -213,10 +216,41 @@ describe("kubectlValidationCheck (isolated)", () => {
 describe("storageModeCheck (isolated)", () => {
     it("SKIP when no config in the directory", async () => {
         const [r] = await storageModeCheck(
-            makeCtx({}, { loadAppConfig: async () => undefined }),
+            makeCtx(
+                {},
+                {
+                    loadAppConfig: async () => undefined,
+                    resolveConfigFile: () => ({ kind: "other" }),
+                },
+            ),
         );
         expect(r?.status).toBe("skip");
         expect(r?.id).toBe("storage-mode");
+        expect(r?.detail).toContain("run doctor from the app directory");
+    });
+
+    // #1559 round-2 review fix: a directory holding ONLY the pre-rename
+    // kn-next.config.ts must not be told "no knext.config.ts in this
+    // directory" -- the app IS there, under the old name.
+    it("FAIL naming the rename when only the pre-rename kn-next.config.ts is present", async () => {
+        const [r] = await storageModeCheck(
+            makeCtx(
+                {},
+                {
+                    loadAppConfig: async () => undefined,
+                    resolveConfigFile: () => ({
+                        kind: "legacy",
+                        legacyPath: "/app/kn-next.config.ts",
+                    }),
+                },
+            ),
+        );
+        expect(r?.status).toBe("fail");
+        expect(r?.id).toBe("storage-mode");
+        expect(r?.detail).toContain("kn-next.config.ts");
+        expect(r?.detail).toContain("knext.config.ts");
+        expect(r?.detail).not.toContain("run doctor from the app directory");
+        expect(r?.hint).toContain("mv kn-next.config.ts knext.config.ts");
     });
 
     it("PASS naming the bucket when storage is configured", async () => {
@@ -320,12 +354,39 @@ describe("nodeEntryStalenessCheck (isolated, #1356)", () => {
                 {},
                 {
                     loadAppConfig: async () => undefined,
+                    resolveConfigFile: () => ({ kind: "other" }),
                     readNodeEntryFile: () => NO_MARKER,
                     readNodeEntryTemplate: () => CURRENT_MARKER,
                 },
             ),
         );
         expect(r?.status).toBe("skip");
+        expect(r?.detail).toContain("no knext.config.ts was found");
+    });
+
+    // #1559 round-2 review fix: mirrors the storageModeCheck FAIL case, but
+    // this check stays SKIP -- storage-mode.ts owns the single FAIL row --
+    // and simply stops implying "no knext.config.ts was found" when it
+    // actually knows the pre-rename file is sitting right there.
+    it('SKIP naming the legacy file (not "no config found") when only kn-next.config.ts is present', async () => {
+        const [r] = await nodeEntryStalenessCheck(
+            makeCtx(
+                {},
+                {
+                    loadAppConfig: async () => undefined,
+                    resolveConfigFile: () => ({
+                        kind: "legacy",
+                        legacyPath: "/app/kn-next.config.ts",
+                    }),
+                    readNodeEntryFile: () => NO_MARKER,
+                    readNodeEntryTemplate: () => CURRENT_MARKER,
+                },
+            ),
+        );
+        expect(r?.status).toBe("skip");
+        expect(r?.detail).toContain("kn-next.config.ts");
+        expect(r?.detail).not.toContain("no knext.config.ts was found");
+        expect(r?.detail).not.toContain("run doctor from the app directory");
     });
 
     it("SKIP when the app directory has no knext-node-entry.mjs at all", async () => {

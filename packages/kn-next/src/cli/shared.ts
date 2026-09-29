@@ -14,7 +14,7 @@ import type { KnativeNextConfig } from "../config";
 import { DOCS_URL } from "./help";
 import { validateConfig } from "./validate";
 
-const CONFIG_FILE = "knext.config.ts";
+export const CONFIG_FILE = "knext.config.ts";
 
 /**
  * The pre-rename filename (#1559: `kn-next.config.ts` -> `knext.config.ts`).
@@ -23,7 +23,7 @@ const CONFIG_FILE = "knext.config.ts";
  * has not migrated the file yet) to deserve one specific, actionable error
  * instead of the generic "no config found here" guidance.
  */
-const LEGACY_CONFIG_FILE = "kn-next.config.ts";
+export const LEGACY_CONFIG_FILE = "kn-next.config.ts";
 
 /** Default cap for {@link excerpt} — keeps a hint line to one terminal row-ish. */
 const DEFAULT_EXCERPT_MAX = 160;
