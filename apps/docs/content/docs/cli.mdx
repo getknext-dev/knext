@@ -102,6 +102,10 @@ knext create my-app --dry-run          # list the files it would write, write no
 | `--dry-run` | List the files that would be written and write nothing. |
 | `-h`, `--help` | Show the usage help. |
 
+**Exit code:** `0` on success (including `--dry-run` and `--help`); `1` on a usage error (an
+unrecognized `--builder` value, an unexpected extra argument) or a scaffold failure (for example an
+invalid app name, or an existing file without `--force`).
+
 The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the
 CLI and those packages release together, so a published CLI always scaffolds versions that exist on
 the registry. If the CLI you ran carries a version that was never published (typically a build from
@@ -162,6 +166,10 @@ Bearer tokens and client certificates are accepted — neither runs anything on 
 | `--push-secret <path>` | Read a kubeconfig from `<path>` and push it as `KNEXT_KUBECONFIG` — via `gh secret set` (github) or `glab variable set --masked --protected` (gitlab). Refuses a kubeconfig that needs cloud-account credentials, same as above. The value is never printed or logged — it is only ever piped to the provider CLI's stdin. With `--provider gitlab` and no `glab` on `PATH`, it prints the manual steps to add the variable in GitLab's UI instead of failing. |
 | `-h`, `--help` | Show the usage help. |
 
+**Exit code:** `0` on success (including `--help`); `1` on a usage error (missing `--namespace`, an
+unrecognized `--provider`) or a failure pushing `--push-secret` (a missing file, or the provider
+CLI's push itself failing).
+
 Re-running it without `--force` never clobbers a file you've edited: it names the exact file and
 points you at the flag, e.g. `.github/workflows/knext-deploy.yml already exists — left alone (use
 --force to overwrite)`.
@@ -189,9 +197,10 @@ knext ci-preflight --namespace my-app
 | `--kubeconfig <path>` | Kubeconfig file to check. Defaults to `$KUBECONFIG`. |
 | `-h`, `--help` | Show the usage help. |
 
-Exits `0` and prints `preflight: credential is correctly scoped for namespace "<ns>".` when the
-credential passes. Exits `1` on any refusal, printing the reason — never the kubeconfig's bytes —
-to stderr.
+**Exit code:** `0` (including `--help`) — prints `preflight: credential is correctly scoped for
+namespace "<ns>".` when the credential passes; `1` on a usage error (missing `--namespace`, no
+kubeconfig configured) or any refusal, printing the reason — never the kubeconfig's bytes — to
+stderr.
 
 ## `knext deploy` (default)
 
@@ -237,6 +246,10 @@ run `npm install` instead of printing a crash.
 | `--dry-run` | Print the `NextApp` CR without applying it. |
 | `-h`, `--help` / `-v`, `--version` | Help / version. |
 
+**Exit code:** `0` on success (including `--help`/`--version`); `1` on a usage error (an unknown
+flag, a stray positional), a missing `knext.config.ts`, or a deploy failure at any step (build,
+upload, image push, or the CR apply).
+
 Config validation runs automatically when the config loads. [`knext validate`](#knext-validate) runs
 the same checks on their own.
 
@@ -277,6 +290,9 @@ underlying error — the two are never conflated. See [the Bun runtime](/docs/bu
 | `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `knext.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. |
 | `-h`, `--help` | Show the usage help. |
 
+**Exit code:** `0` on success (including `--help`); `1` on a usage error (an unknown flag), a missing
+`knext.config.ts`, or a build/smoke failure.
+
 ## `knext cleanup`
 
 Tears down the app named in `knext.config.ts` by issuing exactly **one** cluster write:
@@ -291,6 +307,10 @@ ignored argument.
 |---|---|
 | `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). Cleanup deletes on `<ctx>`, never on whichever cluster your kubeconfig happens to point at — so `knext cleanup --context staging` cannot tear down production by mistake. |
 | `-h`, `--help` | Show the usage help. |
+
+**Exit code:** `0` on success (including `--help`); `1` on a usage error (any flag or positional
+other than `--context`/`-h`/`--help` — destructive commands never silently ignore an argument), a
+missing `knext.config.ts`, or a failed delete.
 
 ## `knext validate`
 
@@ -439,6 +459,9 @@ Because the bare form (`knext rollback <app>`) *clears* the pin, argument parsin
 deliberately strict: a dangling `--to`, an unknown flag, or an extra positional is a hard error —
 never a silent un-pin when you asked to pin.
 
+**Exit code:** `0` on success (including `--help`); `1` on a usage error (a dangling `--to`, an
+unknown flag, an extra positional) or a failed patch.
+
 ## `knext db bind`
 
 Binds an **existing** Postgres Secret to the app as `DATABASE_URL` (and optionally a read-only DSN
@@ -469,6 +492,10 @@ so a conflicting `envMap` entry is rejected), and after patching it **re-reads t
 pruned, so the CLI fails loudly and tells you to upgrade the operator bundle instead of logging a
 false success.
 
+**Exit code:** `0` on success (including `--dry-run`/`--help`); `1` on a usage error (an unknown
+`db` subcommand, a missing app name, a missing `--secret`) or a failed patch/verification —
+including the operator-too-old case above.
+
 ## `knext db migrate`
 
 Applies pending [drizzle-kit-generated migrations](/docs/data-sdk#migrations) against the
@@ -491,6 +518,9 @@ knext db migrate --url "$WRITER_DSN"   # explicit writer DSN override
   error exits non-zero so a CI step or Job fails instead of shipping a half-applied schema.
 - Run it as a CI step or a one-shot Kubernetes Job — **not** on pod boot. The
   [Data SDK page](/docs/data-sdk#migrations) has the full Job recipe.
+
+**Exit code:** `0` on success; `1` on a usage error (an unknown flag, an unexpected positional) or a
+failed migration (fail-loud by design — see above).
 
 ## `knext gc`
 
@@ -523,6 +553,10 @@ Shared, content-hashed directories (`chunks/`, `css/`, `media/`) are never treat
 prefixes, and the bare `<app>/` prefix is never a prune target. See
 [Skew protection](/docs/skew-protection).
 
+**Exit code:** `0` once a run completes — including the no-storage notice above and every
+fail-safe skip (keeping assets too long is never treated as a failure); `1` on a usage error or a
+missing `knext.config.ts`.
+
 ## Directly runnable entries
 
 Some entries ship in the package as directly runnable scripts rather than bin subcommands:
@@ -541,6 +575,12 @@ node node_modules/@getknext/core/dist/cli/preview.js deploy --pr 42 --branch my-
 node node_modules/@getknext/core/dist/cli/loadtest.js --type smoke
 node node_modules/@getknext/core/dist/cli/loadtest.js --type smoke --context staging
 ```
+
+**Exit codes:** both exit `0` on success and `1` on a usage error (a missing `--pr`/`--branch`, an
+unrecognized `preview` subcommand, a missing `--url` or an invalid `--type` for `loadtest`) or a
+failed run. Neither accepts `-h`/`--help` today — a bare invocation with no recognizable subcommand
+(`preview`) or a missing required flag (`loadtest`) is how you reach the usage message. `loadtest`
+does not reject an unrecognized flag (it parses permissively); `preview` does.
 
 `build` and `cleanup` also still ship as `dist/cli/build.js` / `dist/cli/cleanup.js`, but prefer
 the `knext build` / `knext cleanup` subcommands above.
