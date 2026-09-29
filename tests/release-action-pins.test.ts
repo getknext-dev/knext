@@ -27,7 +27,7 @@ import { jobBlocks, jobNeeds } from './helpers/release-workflow';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
-const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml', 'bun-base-build.yml'] as const;
+const PINNED_WORKFLOWS = ['release.yml', 'bun-base-build.yml'] as const;
 
 /**
  * The actions ALLOWED to run on the publish path — the credentialed surface, so
@@ -77,12 +77,6 @@ const EXPECTED_ACTIONS_BY_FILE: Record<(typeof PINNED_WORKFLOWS)[number], Readon
     'actions/upload-artifact',
     'oven-sh/setup-bun',
     'changesets/action',
-  ]),
-  'release-ghp.yml': new Set([
-    'actions/checkout',
-    'actions/setup-node',
-    'actions/upload-artifact',
-    'oven-sh/setup-bun',
   ]),
   // Holds `id-token: write` (GCP federation + cosign keyless), so it is credential-bearing.
   'bun-base-build.yml': new Set([

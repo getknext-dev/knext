@@ -325,7 +325,7 @@ describe('publish/sign workflows never cancel in progress (#674)', () => {
   it('non-vacuity: the marker scan actually classifies the known publish path', () => {
     const flagged = scanned.filter((w) => w.markers.length > 0).map((w) => w.file);
     expect(flagged, 'the publish path is not being classified at all').toEqual(
-      expect.arrayContaining(['release.yml', 'release-ghp.yml', 'supply-chain.yml']),
+      expect.arrayContaining(['release.yml', 'supply-chain.yml']),
     );
   });
 

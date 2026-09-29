@@ -7,14 +7,14 @@ import { fileURLToPath } from 'node:url';
  * GUARD TESTS for the npm/JS supply-chain gate (v4-P3).
  *
  * Container images are Trivy-gated before push (tests/supply-chain-workflow.test.ts,
- * tests/operator-supply-chain-workflow.test.ts). The npm TARBALLS that the release
- * workflows publish (`@getknext/{core,lib,db}` on npmjs; `@getknext-dev/{core,lib,db}`
- * on GitHub Packages) had NO equivalent gate — closing that real gap in
- * .claude/rules/security.md ("SBOM per image, scan every image, fail on
- * HIGH/CRITICAL"), extended here to the published JS dependency closure.
+ * tests/operator-supply-chain-workflow.test.ts). The npm TARBALLS that release.yml
+ * publishes (`@getknext/{core,lib,db}` on npmjs) had NO equivalent gate — closing
+ * that real gap in .claude/rules/security.md ("SBOM per image, scan every image,
+ * fail on HIGH/CRITICAL"), extended here to the published JS dependency closure.
+ * (release-ghp.yml, the former interim GitHub Packages channel, is retired — #1644.)
  *
  * The invariant these lock in:
- *   - Both release workflows run an audit + JS-SBOM job over the PRODUCTION
+ *   - release.yml runs an audit + JS-SBOM job over the PRODUCTION
  *     (`--omit=dev`) dependency closure of the PUBLISHED packages.
  *   - That job FAILS on HIGH/CRITICAL (`--audit-level=high`, mirror the Trivy
  *     HIGH/CRITICAL rule).
@@ -31,7 +31,6 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const RELEASE_PATH = resolve(REPO_ROOT, '.github/workflows/release.yml');
-const RELEASE_GHP_PATH = resolve(REPO_ROOT, '.github/workflows/release-ghp.yml');
 const AUDIT_SCRIPT_PATH = resolve(REPO_ROOT, 'scripts/audit-published.mjs');
 const ALLOWLIST_PATH = resolve(REPO_ROOT, 'security/npm-audit-allowlist.json');
 
@@ -90,37 +89,6 @@ describe('npm supply-chain gate: release.yml (npmjs canonical)', () => {
   it('the publish job is ordered AFTER the audit job (needs: audit)', () => {
     // release.yml's publish job is `release`.
     expect(jobNeeds(text, 'release')).toContain('audit');
-  });
-});
-
-describe('npm supply-chain gate: release-ghp.yml (GitHub Packages interim)', () => {
-  const text = read(RELEASE_GHP_PATH);
-
-  it('defines a dedicated audit/SBOM job that runs the shared audit script', () => {
-    expect(text).toMatch(/^ {2}audit:/m);
-    const audit = jobBlock(text, 'audit');
-    expect(audit).not.toBe('');
-    expect(AUDIT_SCRIPT_RE.test(audit), 'the audit job must run scripts/audit-published.mjs').toBe(
-      true,
-    );
-  });
-
-  it('the audit job uploads a JS SBOM artifact', () => {
-    const audit = jobBlock(text, 'audit');
-    expect(/uses:\s*actions\/upload-artifact/.test(audit), 'must upload the SBOM artifact').toBe(
-      true,
-    );
-    expect(/sbom/i.test(audit), 'the uploaded artifact must be the SBOM').toBe(true);
-  });
-
-  it('the publish job is ordered AFTER the audit job (needs: audit)', () => {
-    // release-ghp.yml's publish job is `publish-ghp`.
-    expect(jobNeeds(text, 'publish-ghp')).toContain('audit');
-  });
-
-  it('is guarded to the canonical repo on the audit job (never forks)', () => {
-    const audit = jobBlock(text, 'audit');
-    expect(audit).toContain("github.repository == 'getknext-dev/knext'");
   });
 });
 
