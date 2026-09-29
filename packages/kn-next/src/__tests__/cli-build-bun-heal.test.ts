@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 // Mock the config loader and asset upload so `build()` runs the real build
-// pipeline shape without a kn-next.config.ts or storage credentials.
+// pipeline shape without a knext.config.ts or storage credentials.
 const __knextRealShared = { ...(await import("../cli/shared")) };
 
 mock.module("../cli/shared", () => ({

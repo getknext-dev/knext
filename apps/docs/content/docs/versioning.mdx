@@ -36,7 +36,7 @@ The version follows [semantic versioning](https://semver.org/) over the document
 
 - **Patch and minor releases never break a public import.** New capabilities arrive in minors.
 - **Anything that removes or changes the shape of a public import requires a major.** That covers
-  the `knext` CLI too: a removed flag, or a `kn-next.config.ts` key that stops being accepted, is
+  the `knext` CLI too: a removed flag, or a `knext.config.ts` key that stops being accepted, is
   a major change.
 - **Imports under `@getknext/core/internal/` carry no guarantee.** They are framework wiring and can
   change in any release. If you need something that only exists there, open an issue — that is a

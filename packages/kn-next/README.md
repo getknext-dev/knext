@@ -26,7 +26,7 @@ Deploy your Next.js app:
 npx @getknext/core deploy
 ```
 
-Reference the adapter and config types from your `next.config` / `kn-next.config`:
+Reference the adapter and config types from your `next.config` / `knext.config`:
 
 ```ts
 import type { KnativeNextConfig } from '@getknext/core';

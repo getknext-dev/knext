@@ -2,7 +2,7 @@
 //
 // standalone-node-custom-health-path.docker-e2e — the standalone-node
 // compile-cache bake (#1264) warmed a HARDCODED `/api/health`, ignoring the
-// app's configured `healthCheckPath` (`kn-next.config.ts` /
+// app's configured `healthCheckPath` (`knext.config.ts` /
 // `config.healthCheckPath`, #326 in config.ts). An app with a custom health
 // route and NO `/api/health` route failed the docker BUILD itself — not just
 // its Knative probe — with no override available.

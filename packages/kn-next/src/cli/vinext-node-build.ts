@@ -53,7 +53,7 @@ export function assertNodePresetOutput(cwd: string): void {
                     ? "A bun-preset server calls Bun's own APIs at startup and exits 1 under node.\n"
                     : "") +
                 "Your vite.config.ts chooses the preset. Apps created by current `knext create` read it\n" +
-                "from kn-next.config.ts's `runtime`; an older app hardcodes `preset: 'bun'`. To fix:\n" +
+                "from knext.config.ts's `runtime`; an older app hardcodes `preset: 'bun'`. To fix:\n" +
                 "  1. copy knext-node-entry.mjs into this app (from a freshly created app —\n" +
                 "     `npx knext create` — it sits next to knext-bun-entry.mjs);\n" +
                 "  2. make the nitro plugin in vite.config.ts use `preset: 'node'` with\n" +

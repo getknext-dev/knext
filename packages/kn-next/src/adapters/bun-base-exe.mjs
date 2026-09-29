@@ -6,7 +6,7 @@
  * CI-verification only. The patched base exists to TEST upstream Bun fixes
  * against knext's compile before they are released; it is never shipped to
  * users. That is why the seam is an environment variable and nothing else:
- * it is deliberately not a `kn-next.config.ts` key and not a CLI flag.
+ * it is deliberately not a `knext.config.ts` key and not a CLI flag.
  *
  * This module IS bundled into the published `@getknext/core` (both compile
  * scripts import it), so the variable exists in what users install. It is

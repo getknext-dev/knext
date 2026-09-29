@@ -190,7 +190,7 @@ bun install
 
 ### 2. Configure Your App
 
-Create `kn-next.config.ts` in your app directory:
+Create `knext.config.ts` in your app directory:
 
 ```typescript
 import type { KnativeNextConfig } from '@getknext/core';
@@ -428,7 +428,7 @@ scaling: {
 ### Database Binding
 
 knext is **engine-agnostic** and provisions **no database** — bring your own Postgres (or
-whatever engine your app uses) and bind it into `kn-next.config.ts`. `database` binds an
+whatever engine your app uses) and bind it into `knext.config.ts`. `database` binds an
 **existing** Kubernetes Secret's connection string into the app as `DATABASE_URL` (and
 optionally a read-only replica DSN as `DATABASE_URL_RO`):
 
@@ -514,7 +514,7 @@ stops shared-caching ISR pages. In that setup, disable normalization and let
 your CDN consume the origin directives:
 
 ```ts
-// kn-next.config.ts — plain, non-secret env vars ride the NextApp resource's env field
+// knext.config.ts — plain, non-secret env vars ride the NextApp resource's env field
 export default {
     // ...
     env: {
@@ -731,7 +731,7 @@ flowchart TB
 ```
 ├── apps/
 │   └── file-manager/           # Example Next.js 16 app
-│       ├── kn-next.config.ts   # App configuration
+│       ├── knext.config.ts   # App configuration
 │       ├── deploy.sh           # Deployment script
 │       └── src/app/            # App Router pages
 │

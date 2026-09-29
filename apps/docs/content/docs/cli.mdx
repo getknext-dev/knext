@@ -17,7 +17,7 @@ installed, `npx knext` runs someone else's code instead of this CLI.
 ```bash
 knext create         # scaffold a new knext-ready app (writes files, no cluster changes)
 knext init-ci        # generate a deploy workflow and its scoped RBAC (writes files, no cluster changes)
-knext validate       # check kn-next.config.ts is filled in and valid (no cluster needed)
+knext validate       # check knext.config.ts is filled in and valid (no cluster needed)
 knext doctor         # cluster-prereq preflight (read-only)
 knext [deploy]       # default — build → push → apply the NextApp CR
 knext build          # the build + asset-upload steps only, without deploying
@@ -82,7 +82,7 @@ By default, `create` scaffolds the **standalone target**: plain `next build` (Tu
 `adapterPath` — `knext build`/`deploy` stage the matching runtime image automatically, so the
 scaffold ships no Dockerfile for it. Pass `--builder vinext` instead to scaffold
 the compiled single-executable target — its own `Dockerfile`, `vite.config.ts`, and
-`build: 'vinext'` pinned in `kn-next.config.ts`, plus a `Dockerfile.self-contained` reference
+`build: 'vinext'` pinned in `knext.config.ts`, plus a `Dockerfile.self-contained` reference
 recipe for the optional `--self-contained` single-executable build (see
 [Self-contained mode](/docs/build-pipeline#self-contained-mode-experimental)) — the standalone
 target never scaffolds that file, since `--self-contained` only applies to the vinext build. See
@@ -195,7 +195,7 @@ to stderr.
 
 ## `knext deploy` (default)
 
-Loads and validates `kn-next.config.ts`, runs your build (`next build` with standalone output on the
+Loads and validates `knext.config.ts`, runs your build (`next build` with standalone output on the
 default target), uploads static assets (with object storage configured), builds and pushes the
 container image, resolves its **digest**, and applies a digest-pinned `NextApp` CR. On the vinext
 build with your own Dockerfile that rebuilds in-image, the assets are extracted from the pushed
@@ -241,7 +241,7 @@ Config validation runs automatically when the config loads. [`knext validate`](#
 the same checks on their own.
 
 <Callout type="info">
-**No `kn-next.config.ts` in this directory?** That is treated as an expected state, not an error:
+**No `knext.config.ts` in this directory?** That is treated as an expected state, not an error:
 the CLI prints a short note explaining what the file is, points you at `knext create` for a new
 app, and exits with status 1 — no stack trace.
 </Callout>
@@ -274,12 +274,12 @@ underlying error — the two are never conflated. See [the Bun runtime](/docs/bu
 |---|---|
 | `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
 | `--skip-smoke` | Do not boot the compiled executable. For CI that cannot execute it (a foreign-architecture runner). The build prints a loud warning and the artifact ships unverified. |
-| `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `kn-next.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. |
+| `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `knext.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. |
 | `-h`, `--help` | Show the usage help. |
 
 ## `knext cleanup`
 
-Tears down the app named in `kn-next.config.ts` by issuing exactly **one** cluster write:
+Tears down the app named in `knext.config.ts` by issuing exactly **one** cluster write:
 `kubectl delete nextapp <name> --ignore-not-found`. Owned resources (Knative Service,
 ServiceAccount, PVC) go with it via owner-reference garbage collection, and the operator's finalizer
 clears that app's object-store prefix and Redis keyspace — scoped strictly to that app.
@@ -294,7 +294,7 @@ ignored argument.
 
 ## `knext validate`
 
-Checks `kn-next.config.ts` **without touching a cluster** — it reads your config file and nothing
+Checks `knext.config.ts` **without touching a cluster** — it reads your config file and nothing
 else: no kubectl, no docker, no network. It loads the config, runs every schema check, and flags
 placeholder values (like `ghcr.io/<your-user>`) that still need real ones, explaining per field
 what the value is for and what to put there.
@@ -406,7 +406,7 @@ knext deploy && knext status --watch  # CI gate: poll until Ready=True
 
 | Flag | Notes |
 |---|---|
-| `<app>` | Positional, optional — defaults to `name` from `kn-next.config.ts`. |
+| `<app>` | Positional, optional — defaults to `name` from `knext.config.ts`. |
 | `-n`, `--namespace` | Namespace (default `default`). |
 | `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). Reads the `NextApp` CR on `<ctx>`, never on whichever cluster your kubeconfig happens to point at. |
 | `--json` | One-shot only — rejected in combination with `--watch` (a 5s poll would emit concatenated JSON documents; poll `status --json` from your script instead). |

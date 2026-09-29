@@ -17,7 +17,7 @@ branding:
 
 inputs:
   working-directory:
-    description: Where kn-next.config.ts lives, relative to the repository root.
+    description: Where knext.config.ts lives, relative to the repository root.
     required: false
     default: .
   auth:
@@ -52,7 +52,7 @@ inputs:
   registry:
     description: >-
       Registry host and namespace, e.g. ghcr.io/acme. The app's `name` from
-      kn-next.config.ts is appended, so the image is pushed to ghcr.io/acme/<name>.
+      knext.config.ts is appended, so the image is pushed to ghcr.io/acme/<name>.
     required: true
   registry-token:
     description: Push token for that registry. On GHCR, github.token suffices.
@@ -66,7 +66,7 @@ inputs:
     required: false
     default: ${{ github.sha }}
   bucket:
-    description: Object-storage bucket for static assets. Defaults to kn-next.config.ts.
+    description: Object-storage bucket for static assets. Defaults to knext.config.ts.
     required: false
   skip-upload:
     description: >-
@@ -192,7 +192,7 @@ runs:
 
     # ── 2c. Bun toolchain — the compiled default runtime needs it (#1596) ────
     # `DEFAULT_RUNTIME_ID` (packages/kn-next/src/adapters/artifact-contract.ts)
-    # is "bun" — a bare `kn-next.config.ts` compiles the standalone server into
+    # is "bun" — a bare `knext.config.ts` compiles the standalone server into
     # a Bun single executable, and `standaloneCompileArgv()` shells out to a
     # bare `bun` to do it. Stock `ubuntu-24.04` runners ship no Bun at all
     # (github/actions/runner-images has never bundled it), so every

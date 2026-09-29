@@ -39,7 +39,7 @@ kubectl create secret generic acme-db \
   --from-literal=DATABASE_URL='postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=disable'
 ```
 
-**Your `kn-next.config.ts` does not change at all.** It still just names the Secret.
+**Your `knext.config.ts` does not change at all.** It still just names the Secret.
 
 That is the payoff of binding by reference from chapter 6: swapping an always-on Postgres for a
 scale-to-zero one is a **Secret change**. No application change. No config change. No redeploy of

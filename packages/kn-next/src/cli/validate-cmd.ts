@@ -24,7 +24,7 @@ import {
 import { loadConfig, UsageError } from "./shared";
 import { CONFIG_INVALID_CODE } from "./validate";
 
-const VALIDATE_HELP = `knext validate — check kn-next.config.ts without deploying anything
+const VALIDATE_HELP = `knext validate — check knext.config.ts without deploying anything
 
 Usage:
   knext validate
@@ -102,7 +102,7 @@ export async function validateMain(
     }
 
     io.out(
-        `kn-next.config.ts is valid — "${config.name}" is ready for \`knext deploy\`.\n`,
+        `knext.config.ts is valid — "${config.name}" is ready for \`knext deploy\`.\n`,
     );
     return 0;
 }

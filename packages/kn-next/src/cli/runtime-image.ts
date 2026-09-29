@@ -19,7 +19,7 @@
  * The runtime axis is decided by `config.build` (absent/`turbopack`/`webpack`
  * -> standalone, the default since #1183/ADR-0058; `vinext` -> single
  * executable) and, for the standalone shape, `config.runtime` (`bun`/`node`,
- * default `bun`). Both are read from `kn-next.config.ts` and can change AFTER
+ * default `bun`). Both are read from `knext.config.ts` and can change AFTER
  * an app is scaffolded, while `deploy` builds from a fixed build context. The
  * #1177 increment deliberately kept the standalone template OUT of
  * `templates/app/` (which `knext create` walks with no allowlist) precisely
@@ -221,7 +221,7 @@ export function isKnownGoodTemplateDockerfile(dockerfilePath: string): boolean {
  *
  * Selection is keyed off the artifact contract's `emits` shape
  * (`artifact-contract.ts`), NOT off "anything that isn't literally 'vinext'".
- * `config.build` is read from `kn-next.config.ts` at runtime, so it is not
+ * `config.build` is read from `knext.config.ts` at runtime, so it is not
  * TS-checked against `BuilderId` — an unrecognised id (e.g. a future
  * compiled `+exec` builder that emits a shape this module has never staged
  * a recipe for) THROWS here rather than silently building the

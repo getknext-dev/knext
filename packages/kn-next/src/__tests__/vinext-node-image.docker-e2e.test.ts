@@ -8,7 +8,7 @@
 // 1. The SHIPPED scaffold templates build a node-runnable artifact. The suite
 //    renders `vite.config.ts`, `knext-node-entry.mjs` and `runtime-contract.mjs`
 //    through `renderScaffold` (the function `knext create` uses) over a
-//    minimal fixture app whose kn-next.config.ts says `runtime: 'node'`, then
+//    minimal fixture app whose knext.config.ts says `runtime: 'node'`, then
 //    runs the app's own `vite build`. `.output/nitro.json` must say
 //    `node-server` — checked by the SHIPPED `assertNodePresetOutput`, the same
 //    gate `knext build` runs.
@@ -367,7 +367,7 @@ beforeAll(async () => {
     );
 
     // 4. The app's own build — the vite config picks the preset from
-    //    kn-next.config.ts, which says runtime: 'node'.
+    //    knext.config.ts, which says runtime: 'node'.
     const build = run("bun", ["run", "build"], {
         cwd: appDir,
         timeout: 600_000,

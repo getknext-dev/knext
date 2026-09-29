@@ -261,7 +261,7 @@ function applyOverrides(
             // partial storage block from a flag would deploy a config the
             // validator never saw. Say what is happening instead.
             throw new UsageError(
-                "--bucket overrides storage.bucket, but kn-next.config.ts has " +
+                "--bucket overrides storage.bucket, but knext.config.ts has " +
                     "no `storage` block (static assets are served from the " +
                     "image). Add a full storage block to the config before " +
                     "overriding its bucket.",
@@ -426,7 +426,7 @@ export async function deploy() {
     const options = parseCliArgs();
 
     // Load config with validation FIRST, then announce. Announcing first meant
-    // a user in a directory with no kn-next.config.ts saw "knext deploy"
+    // a user in a directory with no knext.config.ts saw "knext deploy"
     // printed after the "there is no config here" guidance (pino's transport is
     // async, so the banner lands last) — a confusing tail on an otherwise clean
     // message (UX ledger 1b).
@@ -545,7 +545,7 @@ export async function deploy() {
         if (configured !== undefined && configured !== buildId) {
             log.warn(
                 { configured, buildId },
-                `Ignoring env.${key} from kn-next.config: this deploy's ` +
+                `Ignoring env.${key} from knext.config: this deploy's ` +
                     "build id is the authority (it is what the assets are namespaced " +
                     "under and what the operator stamps on the revision). Remove it " +
                     "from the config, or set the deploy --tag instead.",
@@ -1265,7 +1265,7 @@ if (isEntrypoint(import.meta.url)) {
             await deploy();
         }
     } catch (err) {
-        // "There is no kn-next.config.ts here" is an EXPECTED state — the user
+        // "There is no knext.config.ts here" is an EXPECTED state — the user
         // is in the wrong directory, or has not wired the app up yet. Print
         // directions and leave; a FATAL line with a serialised Error (message,
         // stack, bundler chunk paths) reads as "the tool is broken" to the

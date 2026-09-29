@@ -26,7 +26,7 @@ describe('escalation triggers — fires when it must', () => {
     expect(fired.map((f: { id: string }) => f.id)).toContain('crd');
   });
 
-  it('the kn-next.config.ts schema', () => {
+  it('the knext.config.ts schema', () => {
     expect(
       classify([change('packages/kn-next/src/config.ts')]).map((f: { id: string }) => f.id),
     ).toContain('config-schema');

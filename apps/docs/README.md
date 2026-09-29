@@ -14,7 +14,7 @@ knext official adapter (`@getknext/core/adapter`) and can deploy as a scale-to-z
 contain **no ADR numbers, no issue/PR numbers (`#NN`), and no internal strategy jargon** (e.g.
 `vinext`, `Nitro`). Write for adopters, not maintainers. A soft, non-blocking CI reminder greps
 added `content/**` lines and warns. (This app's `next.config.ts` / `next-adapter.ts` /
-`kn-next.config.ts` legitimately reference internals — the rule is scoped to `content/**` only.)
+`knext.config.ts` legitimately reference internals — the rule is scoped to `content/**` only.)
 
 ## Stack
 
@@ -32,7 +32,7 @@ bun run --filter @getknext/lib build && bun run --filter @getknext/db build && b
 bun run --filter knext-docs dev               # next dev → http://localhost:3000
 bun run --filter knext-docs build             # vanilla (managed-host / Vercel) build
 KNEXT_ADAPTER=1 bun run --filter knext-docs build   # self-host / adapter dogfood → .next/standalone
-bun run --filter knext-docs config:validate   # validate kn-next.config.ts with the real knext validator
+bun run --filter knext-docs config:validate   # validate knext.config.ts with the real knext validator
 ```
 
 ## Layout
@@ -43,7 +43,7 @@ bun run --filter knext-docs config:validate   # validate kn-next.config.ts with 
 | `app/docs/` | The Fumadocs docs route. |
 | `content/docs/*.mdx` | The documentation pages (USER-FACING — see the content rule above). |
 | `next.config.ts` / `next-adapter.ts` | Standalone + official-adapter wiring (mirrors `apps/file-manager`). |
-| `kn-next.config.ts` | The dogfood deploy config (`KnativeNextConfig`). |
+| `knext.config.ts` | The dogfood deploy config (`KnativeNextConfig`). |
 | `vercel.json` | Vercel config — repo-root install/build so `workspace:*` resolves. |
 | `Dockerfile` | Runtime image (ported from `apps/file-manager/Dockerfile`). |
 | `DEPLOY.md` | The live-cluster deploy runbook. |

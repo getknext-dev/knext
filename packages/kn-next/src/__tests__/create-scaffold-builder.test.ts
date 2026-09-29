@@ -91,9 +91,9 @@ describe("knext create — default target is standalone (#1342/ADR-0058)", () =>
         expect(pkg.scripts?.dev).toBe("next dev");
     });
 
-    it("kn-next.config.ts pins no `build` — an absent build means turbopack (ADR-0058)", () => {
+    it("knext.config.ts pins no `build` — an absent build means turbopack (ADR-0058)", () => {
         const { appDir } = scaffold("std-config");
-        const src = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const src = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         // Strip comments first: the template's OWN prose mentions
         // `build: 'vinext'` as the --builder vinext alternative, which a raw
         // grep would match on its own explanation.
@@ -152,9 +152,9 @@ describe("knext create --builder vinext — unchanged shape (#1342)", () => {
         expect(existsSync(join(appDir, "runtime-contract.mjs"))).toBe(true);
     });
 
-    it("kn-next.config.ts pins build: 'vinext' explicitly", () => {
+    it("knext.config.ts pins build: 'vinext' explicitly", () => {
         const { appDir } = scaffold("vinext-config", "vinext");
-        const src = readFileSync(join(appDir, "kn-next.config.ts"), "utf8");
+        const src = readFileSync(join(appDir, "knext.config.ts"), "utf8");
         expect(src).toMatch(/build:\s*["']vinext["']/);
     });
 

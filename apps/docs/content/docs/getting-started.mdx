@@ -98,12 +98,12 @@ export default config;
 
 ## 2 · Write the deploy config
 
-knext reads a typed `kn-next.config.ts`. The config type is `KnativeNextConfig`, exported from
+knext reads a typed `knext.config.ts`. The config type is `KnativeNextConfig`, exported from
 `@getknext/core`. The minimum valid config requires just `name` and `registry`. The `storage`
 block is optional: without it, static assets are served from your app's container image — every
 deploy says so explicitly — and you can add the block later for bucket/CDN delivery.
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
@@ -177,7 +177,7 @@ are on the [CLI reference](/docs/cli).
 |---|---|---|
 | `npx @getknext/core create` | Scaffold a new knext-ready Next.js app. | New files only — no cluster changes. |
 | `npx @getknext/core init-ci` | Generate a deploy workflow and the scoped RBAC it needs. | Two files — no cluster changes. |
-| `npx @getknext/core validate` | Check `kn-next.config.ts` is complete and valid. | Nothing — reads only your config file. |
+| `npx @getknext/core validate` | Check `knext.config.ts` is complete and valid. | Nothing — reads only your config file. |
 | `npx @getknext/core deploy` | Build → push → apply the digest-pinned `NextApp` CR. The default. | Applies the `NextApp` CR; with object storage configured, also uploads static assets to your bucket. |
 | `npx @getknext/core build` | The build and asset-upload steps only, without deploying. | With object storage configured, uploads static assets to your bucket; no cluster write. |
 | `npx @getknext/core doctor` | Cluster-prereq preflight: CRD, operator, admission webhook, ingress class, Knative Serving. | Nothing — read-only. |

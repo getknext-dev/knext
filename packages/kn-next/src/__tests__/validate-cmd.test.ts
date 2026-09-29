@@ -83,7 +83,7 @@ describe("validateMain — verdicts", () => {
         loadConfig.mockResolvedValueOnce(clean);
         const r = await runValidate([]);
         expect(r.code).toBe(0);
-        expect(r.stdout).toContain("kn-next.config.ts");
+        expect(r.stdout).toContain("knext.config.ts");
         expect(r.stdout.toLowerCase()).toContain("valid");
         expect(r.stderr).toBe("");
     });

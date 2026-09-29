@@ -46,7 +46,7 @@ file-by-file bytecode approaches trade throughput for cold start.
 
 The compiled Bun executable is the default. A minimal config builds and deploys it:
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
   registry: 'registry.example.com/acme',
@@ -90,7 +90,7 @@ Two environment variables tune it:
   The first fires immediately; the rest follow one at a time, so a contended cold CPU isn't fighting
   several warm requests at once. Point it at the routes whose first render is expensive:
 
-  ```ts title="kn-next.config.ts"
+  ```ts title="knext.config.ts"
   const config: KnativeNextConfig = {
     name: 'acme',
     env: {
@@ -109,7 +109,7 @@ first real user. `/` is a good choice **only** when your home page is identical 
 otherwise leave the default `/api/health`.
 </Callout>
 
-Set these in your `kn-next.config.ts` `env:` block (they become `spec.env` on the `NextApp`), the
+Set these in your `knext.config.ts` `env:` block (they become `spec.env` on the `NextApp`), the
 same way as any other runtime environment variable.
 
 ## The vinext build: your app must be an ES module

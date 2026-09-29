@@ -10,7 +10,7 @@ behind the existing Kourier ingress. There is no hand-applied Knative Service an
 
 | What | Where |
 |---|---|
-| Deploy config | `apps/docs/kn-next.config.ts`: name, registry, scale 0..5, resources |
+| Deploy config | `apps/docs/knext.config.ts`: name, registry, scale 0..5, resources |
 | Image | `apps/docs/Dockerfile`: vinext `.output` run under Bun, built by `kn-next deploy` |
 | Readiness | `apps/docs/app/api/health/route.ts`: the operator probes `/api/health` |
 | CI credential | `ci-rbac.yaml` + `mint-ci-kubeconfig.sh` (below) |
@@ -35,7 +35,7 @@ To redeploy without a docs change: **Actions → Docs deploy (OKE) → Run workf
 `minScale: 0`. The hand-applied Knative Service this replaced pinned `min-scale: 1` to keep a pod
 warm. The docs site now uses the product default: an idle site holds no pod, and the first request
 after idle pays one cold start. To trade that back, set `scaling.minScale: 1` in
-`kn-next.config.ts`. Do not patch the ksvc, because the operator reverts it on the next reconcile.
+`knext.config.ts`. Do not patch the ksvc, because the operator reverts it on the next reconcile.
 
 ## Static assets: served from the image
 
@@ -50,7 +50,7 @@ scales away. That is acceptable for a docs site. Adding an object-storage bucket
 The `NextApp` CRD has no domain field, so the domains live in `domainmapping.yaml`: two
 `ClusterDomainClaim`s (this cluster has `autocreate-cluster-domain-claims` off) and two
 `DomainMapping`s whose `spec.ref.name` is `knext-docs`. That works because the operator names the
-Knative Service after the `NextApp` (`metadata.name`, which is `name` in `kn-next.config.ts`).
+Knative Service after the `NextApp` (`metadata.name`, which is `name` in `knext.config.ts`).
 **Renaming the app orphans both domains.** Change `domainmapping.yaml` in the same PR.
 
 The domain mappings are applied once by a cluster admin (`kubectl apply -f domainmapping.yaml`).

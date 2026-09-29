@@ -1,5 +1,5 @@
 /**
- * Track B2 — the `build` axis on `kn-next.config.ts`.
+ * Track B2 — the `build` axis on `knext.config.ts`.
  *
  * `build` and `runtime` are INDEPENDENT choices (see
  * `src/adapters/artifact-contract.ts`). This file asserts the validator treats

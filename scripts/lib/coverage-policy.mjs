@@ -182,7 +182,7 @@ export const PER_PATH_THRESHOLDS = {
  * diagnoses (pre-1.25 client vs. generic, incl. the probe-itself-throws leg);
  * rollback.ts's --context flag; db-bind.ts's --context flag, buildDbBindPatch's
  * required-secret guard, extractDsnFromSecretManifest's base64-decode-throws fallback,
- * the local kn-next.config.ts load branch, and dbMain's non-dry-run confirmation log.
+ * the local knext.config.ts load branch, and dbMain's non-dry-run confirmation log.
  * rollback.ts and db-bind.ts are now honest-100% on their own files.
  *
  * Full local suite (433 test files; 3 pre-existing environment-only failures unrelated

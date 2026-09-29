@@ -241,7 +241,7 @@ describe("deploy() applyOverrides — --bucket with no storage block (ADR-0047)"
         const deploy = await importDeploy();
 
         await expect(deploy()).rejects.toThrow(
-            /--bucket overrides storage\.bucket, but kn-next\.config\.ts has no `storage` block/,
+            /--bucket overrides storage\.bucket, but knext\.config\.ts has no `storage` block/,
         );
     });
 });

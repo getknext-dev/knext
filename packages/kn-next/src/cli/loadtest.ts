@@ -165,7 +165,7 @@ export async function runLoadTestCli(
             resolveKubeContext(values.context as string | undefined),
         );
     } catch (e: unknown) {
-        // A missing kn-next.config.ts is an expected state, not a failure to
+        // A missing knext.config.ts is an expected state, not a failure to
         // dump (UX ledger 1b): print the directions instead of the exception.
         if (handleConfigNotFound(e)) {
             return 1;

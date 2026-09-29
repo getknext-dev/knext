@@ -10,7 +10,7 @@ to verify upstream Bun fixes against knext's compile *before* Bun releases them.
   changes, it is a supply-chain decision that needs its own review, not a flag flip.
 - **Not a user option.** The only consumer seam is the `KNEXT_BUN_BASE_EXE` environment variable
   read by `packages/kn-next/src/adapters/{vinext,standalone}-compile.mjs`. It is deliberately not a
-  `kn-next.config.ts` key or CLI flag, and a guard test fails if one appears. Those compile scripts
+  `knext.config.ts` key or CLI flag, and a guard test fails if one appears. Those compile scripts
   are bundled into the published `@getknext/core`, so the variable *does* exist in what users
   install — which is why it is **refused unless `GITHUB_ACTIONS=true`**: anywhere else a set
   `KNEXT_BUN_BASE_EXE` fails the compile with a "CI-only" error. That is a guard against accidental

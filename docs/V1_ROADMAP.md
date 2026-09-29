@@ -27,7 +27,7 @@ failures that block this 1.0 are the ones that currently return `Ready=True`.
 
 - the public TypeScript surface of `@getknext/core`, `@getknext/lib`, `@getknext/db` per
   `docs/PUBLIC_API.md`;
-- the `kn-next.config.ts` schema;
+- the `knext.config.ts` schema;
 - the `kn-next` CLI verbs, flags and exit codes;
 - **the shape of the `NextApp` CR the CLI emits** — this is observable behaviour of a 1.0 artifact,
   which is why the CRD version question below is not academic;

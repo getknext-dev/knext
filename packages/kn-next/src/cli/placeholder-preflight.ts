@@ -129,7 +129,7 @@ export function formatPlaceholderFindings(
     findings: readonly PlaceholderFinding[],
 ): string {
     const lines: string[] = [
-        "kn-next.config.ts still contains placeholder values:",
+        "knext.config.ts still contains placeholder values:",
         "",
     ];
     for (const f of findings) {

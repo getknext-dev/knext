@@ -71,7 +71,7 @@ scheduled batch job.*
 declare, so you pay for warm capacity when the traffic is actually coming and scale to zero the
 rest of the time. This is the class where the trade is clearly worth it.
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 scaling: {
   minScale: 0,
   warmSchedule: [
@@ -157,7 +157,7 @@ no pattern to its arrival.*
 measurements above the wake you cannot predict is the one that can take ten seconds. A schedule
 does not help a workload with no schedule.
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 scaling: { minScale: 1, maxScale: 20 }
 ```
 
@@ -183,7 +183,7 @@ requests to a cold app were all served, within a tight band, in five to seven se
 slow first page, not an outage. Prewarming removes the largest avoidable slice of it without
 running any of your app.
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 scaling: { minScale: 0, maxScale: 20, imagePrewarm: true }
 ```
 
@@ -200,7 +200,7 @@ know they are early.*
 **Zero, nothing else on.** This is the configuration scale-to-zero exists for, and adding warm
 capacity to an app in this class is spending money to improve a number nobody is measuring.
 
-```ts title="kn-next.config.ts"
+```ts title="knext.config.ts"
 scaling: { minScale: 0, maxScale: 5 }
 ```
 

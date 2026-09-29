@@ -4,7 +4,7 @@ import type { KnativeNextConfig } from "../config";
 
 /**
  * #415 — surface the 6 app-scaling knobs the NextApp CRD already supports
- * (ADR-0028/0029/0030/0032/0033) in `kn-next.config.ts` → `spec.scaling`.
+ * (ADR-0028/0029/0030/0032/0033) in `knext.config.ts` → `spec.scaling`.
  *
  * Round-trip contract (issue acceptance criteria):
  *  - a config with all 6 fields set produces a NextApp CR whose spec.scaling

@@ -9,12 +9,21 @@
  */
 
 import { existsSync, writeSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import type { KnativeNextConfig } from "../config";
 import { DOCS_URL } from "./help";
 import { validateConfig } from "./validate";
 
-const CONFIG_FILE = "kn-next.config.ts";
+export const CONFIG_FILE = "knext.config.ts";
+
+/**
+ * The pre-rename filename (#1559: `kn-next.config.ts` -> `knext.config.ts`).
+ * knext no longer reads it -- NO dual-read (founder decision) -- but its
+ * presence, when `knext.config.ts` is absent, is common enough (an app that
+ * has not migrated the file yet) to deserve one specific, actionable error
+ * instead of the generic "no config found here" guidance.
+ */
+export const LEGACY_CONFIG_FILE = "kn-next.config.ts";
 
 /** Default cap for {@link excerpt} — keeps a hint line to one terminal row-ish. */
 const DEFAULT_EXCERPT_MAX = 160;
@@ -40,7 +49,7 @@ export function excerpt(raw: string, max = DEFAULT_EXCERPT_MAX): string {
 }
 
 /**
- * Discriminator carried by the "there is no kn-next.config.ts here" error.
+ * Discriminator carried by the "there is no knext.config.ts here" error.
  *
  * A `code` string rather than an `instanceof` check on purpose: the CLI ships
  * as a tsup bundle whose subcommands are dynamic-imported chunks, so two copies
@@ -58,6 +67,27 @@ export class ConfigNotFoundError extends Error {
         super(`Config file not found: ${configPath}`);
         this.name = "ConfigNotFoundError";
         this.searchedDir = searchedDir;
+    }
+}
+
+/**
+ * Discriminator carried by the "you still have the pre-rename config file"
+ * error (#1559). Distinct from {@link CONFIG_NOT_FOUND_CODE}: this fires when
+ * `knext.config.ts` is absent but `kn-next.config.ts` IS present -- the user
+ * has an app, just under the old filename -- so the guidance is "rename it",
+ * never a silent fallback (no dual-read, founder decision).
+ */
+export const LEGACY_CONFIG_FILE_CODE = "ERR_KN_LEGACY_CONFIG_FILE";
+
+/** The error {@link loadConfig} throws when only the pre-rename filename exists. */
+export class LegacyConfigFileError extends Error {
+    readonly code = LEGACY_CONFIG_FILE_CODE;
+    readonly legacyPath: string;
+
+    constructor(legacyPath: string) {
+        super(`Legacy config file found: ${legacyPath}`);
+        this.name = "LegacyConfigFileError";
+        this.legacyPath = legacyPath;
     }
 }
 
@@ -140,9 +170,27 @@ export function formatConfigNotFound(searchedDir: string): string {
 }
 
 /**
- * If `err` is the missing-config state, print the guidance and report that it
- * was handled; otherwise report false and write nothing, leaving genuine
- * failures to the caller's existing fatal path.
+ * Render the plain-English guidance for the pre-rename config file (#1559).
+ * ONE actionable line — rename the file — never a warning-and-continue: the
+ * founder decision recorded on the issue is NO dual-read.
+ */
+export function formatLegacyConfigFile(legacyPath: string): string {
+    const dir = dirname(legacyPath);
+    return `${[
+        `Found ${LEGACY_CONFIG_FILE} in ${dir}, but knext now reads ${CONFIG_FILE}.`,
+        "",
+        "Rename the file, then run this command again:",
+        `  mv ${LEGACY_CONFIG_FILE} ${CONFIG_FILE}`,
+        "",
+        `  Docs: ${DOCS_URL}`,
+    ].join("\n")}\n`;
+}
+
+/**
+ * If `err` is a config-resolution error — missing entirely, or present only
+ * under the pre-rename filename (#1559) — print the matching guidance and
+ * report that it was handled; otherwise report false and write nothing,
+ * leaving genuine failures to the caller's existing fatal path.
  *
  * Every runnable CLI entry routes its catch through this (scanned, not
  * enumerated, by cli-config-not-found.test.ts).
@@ -151,11 +199,19 @@ export function handleConfigNotFound(
     err: unknown,
     write: (text: string) => void = (text) => writeSync(2, text),
 ): boolean {
-    if (
-        typeof err !== "object" ||
-        err === null ||
-        (err as { code?: unknown }).code !== CONFIG_NOT_FOUND_CODE
-    ) {
+    if (typeof err !== "object" || err === null) {
+        return false;
+    }
+    const code = (err as { code?: unknown }).code;
+    if (code === LEGACY_CONFIG_FILE_CODE) {
+        const legacyPath =
+            typeof (err as { legacyPath?: unknown }).legacyPath === "string"
+                ? (err as { legacyPath: string }).legacyPath
+                : resolve(process.cwd(), LEGACY_CONFIG_FILE);
+        write(formatLegacyConfigFile(legacyPath));
+        return true;
+    }
+    if (code !== CONFIG_NOT_FOUND_CODE) {
         return false;
     }
     const dir =
@@ -212,14 +268,24 @@ export function resolveKubeContext(flag?: string): string | undefined {
 }
 
 /**
- * Loads kn-next.config.ts from the current working directory.
+ * Loads knext.config.ts from the current working directory.
  * Runs validation after loading — fails fast with clear error messages.
+ *
+ * No dual-read (#1559, founder decision): `knext.config.ts` wins when
+ * present. When it is ABSENT, a `kn-next.config.ts` in the same directory is
+ * not read as a fallback — it throws {@link LegacyConfigFileError} instead,
+ * so the caller can print one actionable "rename the file" error rather than
+ * silently continuing on the old name.
  */
 export async function loadConfig(): Promise<KnativeNextConfig> {
     const cwd = process.cwd();
     const configPath = resolve(cwd, CONFIG_FILE);
 
     if (!existsSync(configPath)) {
+        const legacyPath = resolve(cwd, LEGACY_CONFIG_FILE);
+        if (existsSync(legacyPath)) {
+            throw new LegacyConfigFileError(legacyPath);
+        }
         throw new ConfigNotFoundError(configPath, cwd);
     }
 

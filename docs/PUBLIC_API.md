@@ -18,7 +18,7 @@ Two packages make up the application surface:
 
 ### `@getknext/core`
 
-The configuration type for your `kn-next.config.ts`.
+The configuration type for your `knext.config.ts`.
 
 ```ts
 import type { KnativeNextConfig } from '@getknext/core';
@@ -208,7 +208,7 @@ calling it directly, so no type surface is exposed.
 
 ### `@getknext/core/validate`
 
-Validates a `kn-next.config.ts` against the **exact same rules** the `kn-next`
+Validates a `knext.config.ts` against the **exact same rules** the `kn-next`
 deploy step applies. Use it as a config-quality gate in your own CI — call it in
 a test or a build script so a bad deploy config fails fast, before it reaches the
 cluster.
@@ -216,7 +216,7 @@ cluster.
 ```ts
 import { validateConfig, ConfigValidationError } from '@getknext/core/validate';
 import type { KnativeNextConfig } from '@getknext/core';
-import config from './kn-next.config';
+import config from './knext.config';
 
 try {
   validateConfig(config); // returns void when valid

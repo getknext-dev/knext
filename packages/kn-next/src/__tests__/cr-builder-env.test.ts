@@ -9,7 +9,7 @@ import {
 /**
  * #186 — plain (non-secret) env vars via spec.env.
  *
- * kn-next.config.ts may declare `env: { NAME: "value" }` for NON-SECRET
+ * knext.config.ts may declare `env: { NAME: "value" }` for NON-SECRET
  * configuration flags (e.g. KNEXT_CACHE_CONTROL_NORMALIZE=0). The CR builder
  * must carry it as spec.env so the operator injects it on the ksvc container.
  * Secrets stay on the dedicated spec.secrets mechanism.
