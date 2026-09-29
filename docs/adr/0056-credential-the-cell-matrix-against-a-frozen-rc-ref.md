@@ -7,7 +7,9 @@
   **Amended** by Amendment 2 (2026-09-28, #1607): D1's "fourteen consecutive nights" is defined
   against the lane's own cron-derived UTC calendar, not sequence adjacency between the nights the
   audit happens to be handed — a scheduled cron GitHub never fires now breaks the streak instead of
-  silently bridging it.
+  silently bridging it. **Amended** by Amendment 3 (2026-09-30, founder decision #1642): a
+  credential slot GitHub never ran resets the cell's window, accepted deliberately; the #1640
+  watchdog provides visibility.
 - **Amends** ADR-0039 (the frozen set is unchanged in scope — still tarball-inclusive, still not
   narrowed — but its *workflow* entry is now read from the commit that actually executed; see
   ADR-0039 Amendment 1). **Supersedes** the node-lane-only definition in `docs/V1_ROADMAP.md` §3.
@@ -387,7 +389,7 @@ checks it before computing streaks:
   night at all** becomes a synthetic `missing-night` stand-in — graded exactly like a rule-5
   unresolved night: disqualified, restarting the streak, counted, never silently skipped.
 - **Grace, not zero tolerance.** A slot only counts as required once its own fire time plus a grace
-  window (`MISSING_NIGHT_GRACE_HOURS`, 6h — headroom over the run's own "better part of an hour"
+  window (`MISSING_NIGHT_GRACE_HOURS`, 10h — headroom over the run's own "better part of an hour"
   documented duration, plus queueing delay) has passed, so a night still plausibly in flight is
   never mistaken for one that never happened.
 - **Fail closed when the calendar cannot be verified.** The check needs a scheduling timestamp on
@@ -412,3 +414,53 @@ checks it before computing streaks:
 - One credential cron per lane is assumed (`parseCredentialCronsFromWorkflow` throws otherwise) —
   correct for every wired v1.0 cell today; a future design that runs a lane's credential night on
   more than one cron would need this amended again.
+
+## Amendment 3 (2026-09-30): a credential slot GitHub never ran
+
+- **Status:** Accepted (2026-09-30, founder decision #1642). **Amends:** D1 and Amendment 2
+  (the missing-night calendar).
+- **Relates to:** #1640 (the read-only credential-slot watchdog), #1649 (the rc.2 harness batch
+  that raises the grace).
+- **Trigger-class:** ADR + CI + release process — flagged for the sprint-close design review.
+
+### Context
+
+Amendment 2 made the audit date every night by its cron slot and turn a slot with no run into a
+`missing-night` that restarts the 14-night streak, once the slot's fire time plus
+`MISSING_NIGHT_GRACE_HOURS` has passed. Two things happened in the week of 2026-09-22:
+
+1. **Delay.** GitHub started scheduled credential runs up to 6h13m after their cron fire time
+   (the bun credential slot, 05:47 UTC, ran at about 12:00). With a 6h grace, a night that was
+   only queued read as missing. #1649 raises the grace to **10h**, which covers the measured worst
+   case with about 4h of headroom and still resolves each slot long before the next one fires.
+2. **Drop.** GitHub documents that scheduled workflows can be delayed, and under load dropped,
+   by its scheduler. A delay is now absorbed by the grace; a drop is not. ADR-0056 has no remedy
+   for a night GitHub itself never ran: the slot becomes a `missing-night`, and the cell's window
+   resets.
+
+The question was what the credential should do about a dropped slot.
+
+### Decision
+
+**Accept the reset risk.** A credential night stays a scheduled night; a slot GitHub never ran
+is a `missing-night` and restarts the cell's streak, as Amendment 2 already specifies.
+
+Why this option over the alternative (slot-stamped backfill dispatch): the credential is a public
+claim that a cell passed on fourteen consecutive unattended nights on a frozen tag. Its value is
+that nobody chose which nights counted. A backfill path keeps the tag and fingerprint fixed, but
+it reintroduces a dispatch that counts, and that dispatch then has to be authorized, rate-limited,
+audited and guarded against cherry-picking. All of that sits inside the frozen harness during a
+live window. The delay problem that actually happened this week is fixed by the 10h grace. What
+remains is outright drops, which have not been observed on these crons, only read about. If drops
+do start costing windows, this amendment should be revisited with measured drop counts, and a
+backfill design is the fallback.
+
+### Consequences
+
+- No change to D1, the audit, or the harness beyond the grace bump that #1649 already carries.
+- The #1640 watchdog is the operational answer. It alerts on a late or missing slot, so a drop is
+  seen the same morning, not at the next audit.
+- A dropped slot resets that cell's window. The rc.2 → GA plan should keep slack for one reset per
+  cell.
+- **Revisit trigger:** two or more `missing-night` resets in one release cycle that the watchdog
+  attributes to GitHub (no run created at all for the slot), not to a lane failure.
