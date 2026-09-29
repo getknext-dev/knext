@@ -125,6 +125,52 @@ the same head-marker check as any other frozen-file touch, so a PR cannot
 silently re-tag or extend a window through the pin file alone without
 carrying a marker ("exempt a pin-only diff, but keep it honest").
 
+## A marker exempts only the PR that introduces it (#1635)
+
+Reading the marker from head alone had a hole: once a PR carrying a marker
+merged, the marker was on `main`, every later PR branched from `main`
+inherited it, and every one of them could change any frozen file until the
+marker expired. The guard therefore also reads the pin **at the PR's merge
+base** (`git merge-base BASE HEAD`, the point the PR's diff is measured
+from) and honours a head marker only if **this PR introduced it**:
+
+- the merge base has no marker, or
+- the merge base has a marker with a different `date` or `reason` — a new,
+  reviewed authorization replacing a stale one.
+
+A head marker identical to the merge base's, or differing only in `expires`
+or `paths`, is **inherited** and exempts nothing.
+
+**Removing or narrowing a marker needs no marker.** The pin file is itself
+frozen, so before #1635 a PR that only deleted a marker could never pass (it
+needed a valid marker at its own head). A pin-only diff now passes with no
+marker of its own when every key except `rcBumpMarker` is unchanged from the
+merge base and the marker is either removed, or keeps `date` and `reason`
+while shortening `expires` and/or narrowing `paths` (never extending,
+never widening, and narrowing at least one). Such a diff can only shrink an
+exemption.
+
+**Optional path scope.** `rcBumpMarker.paths` — a non-empty array of exact
+repo-relative paths — limits the exemption to those frozen files (the pin
+file itself is always covered). Absent means every frozen file. An empty or
+malformed list invalidates the marker rather than meaning "everything".
+
+A marker on `main` is now harmless to later PRs, but it is still good
+hygiene to remove it once its PR has merged — and that removal PR now passes
+on its own.
+
+## An `rcTag` change needs the tag first (#1641)
+
+The rc.1 prep PR set `rcTag` before the tag existed, and every credential
+night until the tag was pushed refused with `tag-missing`. When a PR changes
+`rcTag` to a new, non-null value, the workflow's "Resolve the rcTag this PR
+names on the remote" step checks the name against the RC tag shape, looks it
+up with `git ls-remote` on `origin`, fetches it and `main`, and records
+whether it peels to a commit reachable from `main`. The guard then refuses
+the PR unless the tag exists on the remote and is reachable from `main`
+("push the tag first"). An rcTag change with no lookup supplied fails
+closed. Clearing `rcTag` or leaving it unchanged needs no lookup.
+
 ## The guard runs from a base-commit checkout of its own code — the SCRIPT, not the workflow YAML
 
 A PR must not be able to weaken `evaluateFreezeGuard`/`frozenFileSet`/
@@ -240,6 +286,16 @@ same bump WITH a valid head marker (green), a non-pin-only diff that also
 clears `rcTag` but still touches real harness bytes (red — the pin-only
 exemption does not leak into a combined diff), and `GUARD_SELF_FILES`
 actually landing in `frozenFileSet()`'s real output.
+
+The #1635 attack cases are covered at both levels too: an inherited marker
+(identical at merge base and head) is red; an inherited marker whose
+`expires` is merely extended is red; a marker added by the PR is green; a
+removal-only and a shorten-only pin diff are green with no marker of their
+own; an rcTag change or any other pin edit riding a removal is red; a
+path-scoped marker does not cover an unnamed frozen file. The #1641 rcTag
+precheck is red for a missing tag, an unreachable tag, a non-RC name and a
+missing lookup, and green for an existing reachable tag; the workflow's
+resolution step is executed against a real local git remote for each case.
 
 `tests/compat-credential-freeze-guard-workflow.test.ts` covers the workflow's
 own shape: no `${{ }}` interpolated inline into any `run:` script (PR-controlled

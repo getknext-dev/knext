@@ -1241,8 +1241,14 @@ function datesInclusive(from, to) {
  * declaring a silent night rather than a slow one — chosen deliberately larger
  * than the measured run length so a night that is merely late is never
  * mistaken for one that never happened.
+ *
+ * #1642: raised from 6 to 10. GitHub's scheduler delayed credential runs by
+ * up to 6h13m in the week of 2026-09-22, past the old bound, so a night that
+ * was merely queued read as missing. 10h keeps ~4h of headroom over that
+ * measured worst case and still resolves every slot well before the next
+ * night's fire time.
  */
-export const MISSING_NIGHT_GRACE_HOURS = 6;
+export const MISSING_NIGHT_GRACE_HOURS = 10;
 
 /**
  * A lane's cron calendar: every run belongs to exactly one SLOT — the date of

@@ -731,7 +731,10 @@ describe('deploy-tests-manifest — per-case quarantines outside the family (§c
     'test/e2e/app-dir/app-static/app-static.test.ts',
     'test/e2e/app-dir/metadata/metadata.test.ts',
     'test/e2e/app-dir/searchparams-reuse-loading/searchparams-reuse-loading.test.ts',
-    'test/e2e/middleware-rewrites/test/index.test.ts',
+    // test/e2e/middleware-rewrites/test/index.test.ts is excluded at file level
+    // by the §h vercel-infra-coupled family (#1633), which subsumes upstream's
+    // mirrored `failed` entry. Restore both here and in the manifest when that
+    // entry retires.
   ]);
 
   it('ANY suites entry outside the upstream mirror MUST have a complete $knextQuarantines record (generic, no hardcoded allowlist)', () => {
@@ -798,7 +801,13 @@ const V16_3_5_CELL_RUNS = ['36332940411', '36332946048', '36332951393', '3633295
 
 const VERCEL_COUPLED_FILE_QUARANTINES: Record<
   string,
-  { childIssue: number; observedRuns: string[]; stubRuns?: string[]; upstreamRef?: string }
+  {
+    childIssue: number;
+    observedRuns: string[];
+    stubRuns?: string[];
+    upstreamRef?: string;
+    upstreamIssue?: string;
+  }
 > = {
   'test/e2e/app-dir/non-ascii-cache-item-name/non-ascii-cache-item-name.test.ts': {
     childIssue: 1623,
@@ -822,6 +831,14 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
   'test/e2e/app-dir/expire-time/expire-time.test.ts': {
     childIssue: 1627,
     observedRuns: V16_3_5_CELL_RUNS,
+  },
+  // #1633 — webpack cells only in effect: the turbopack cells skip the file
+  // upstream (`skipDeployment: isAdapterTest && isTurbopackTest`).
+  'test/e2e/middleware-rewrites/test/index.test.ts': {
+    childIssue: 1633,
+    observedRuns: ['36332946048', '36332959885', '36430362513', '36430368139'],
+    upstreamRef: 'vercel/next.js#94905',
+    upstreamIssue: 'vercel/next.js#99435',
   },
 };
 
@@ -868,7 +885,7 @@ describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #
   });
 
   it('every §h provenance cites its knext child issue and, where one exists, the upstream PR', () => {
-    for (const [file, { childIssue, upstreamRef }] of coupled) {
+    for (const [file, { childIssue, upstreamRef, upstreamIssue }] of coupled) {
       const provenance = quarantines.find((q) => q.test === file)?.provenance ?? '';
       expect(
         provenance.includes(`${VERCEL_COUPLED_CHILD_ISSUE_URL}${childIssue}`),
@@ -878,6 +895,12 @@ describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #
         expect(
           provenance.includes(upstreamRef),
           `${file}: provenance must cite ${upstreamRef}`,
+        ).toBe(true);
+      }
+      if (upstreamIssue !== undefined) {
+        expect(
+          provenance.includes(upstreamIssue),
+          `${file}: provenance must cite ${upstreamIssue}`,
         ).toBe(true);
       }
     }

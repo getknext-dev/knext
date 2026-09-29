@@ -18,11 +18,16 @@ name: Compat v1.0 credential matrix tracker
 # report" vs. "the tracker itself stopped running".
 
 on:
-  # 05:10 UTC — after both credential crons (03:17 node, 22:17/23:47 webpack,
-  # 04:47 bun) have had time to land their ledgers, offset from the
-  # docs-closure nightly (04:23) and the mutation-prover nightly.
+  # 15:53 UTC (#1643) — after the missed-night grace
+  # (MISSING_NIGHT_GRACE_HOURS, 10h) of EVERY credential slot: 22:17, 23:47,
+  # 01:17 and 05:47 UTC (test-e2e-deploy.yml). The old 05:10 ran before the
+  # 05:47 bun credential cron, and GitHub has been starting scheduled
+  # credential runs up to ~6h late, so the tracker reported a night that had
+  # not run yet. Past every slot's grace, each night has either landed or is
+  # genuinely missing in the audit's own terms. Guarded by
+  # tests/compat-credential-alert-wiring.test.ts.
   schedule:
-    - cron: '10 5 * * *'
+    - cron: '53 15 * * *'
   workflow_dispatch:
     inputs:
       # Review round 2 (#1300, finding 4) — a manual dispatch is the live

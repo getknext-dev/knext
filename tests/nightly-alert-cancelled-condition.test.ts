@@ -293,7 +293,7 @@ describe("#1645 — every scheduled workflow's alert job fires on a cancelled up
     expect(
       stillBroken.sort(),
       'an allowlisted file no longer has the gap — remove it from the allowlist rather than leaving a stale exemption',
-    ).toEqual(['compat-vinext.yml', 'test-e2e-deploy.yml']);
+    ).toEqual(['compat-vinext.yml']); // test-e2e-deploy.yml was fixed by the rc.2 harness batch (#1643)
   });
 
   it('every non-allowlisted scheduled workflow checks cancelled alongside failure in every alert-shaped condition', () => {
