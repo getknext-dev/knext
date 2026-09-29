@@ -31,16 +31,53 @@
  * workflow triggers on `push: branches: [main]`, not on a tag push.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { run as runGaTarballDiff } from './ga-tarball-diff.mjs';
 import { decideGaTarballDiffGate } from './lib/ga-tarball-diff.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
+// `./ga-tarball-diff.mjs` is deliberately NOT imported at module scope here
+// (unlike the two imports above). It pulls in `lib/tar-entries.mjs`, which
+// imports the `tar` npm devDependency — a real package that must be
+// `bun install`ed. A SKIP or FAIL decision below never touches that code path
+// and must be answerable from git tags + package.json alone; a top-level (or
+// even a decision-gated dynamic `import()`, which would still bind `tar` into
+// THIS process's module graph the moment it resolves) import would make even
+// those outcomes depend on `node_modules` existing — exactly what crashed
+// `release.yml`'s `ga-tarball-diff` job (no install step there) on a decision
+// that never needed the diff at all. `defaultRunDiff`, below, instead runs
+// `ga-tarball-diff.mjs` as a SEPARATE `node` process, spawned only on a RUN
+// decision — the `tar` dependency chain never enters this script's own module
+// graph, in any outcome. (This also keeps `main` fully synchronous, matching
+// the sync contract its existing unit tests already assume.)
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRepoRoot = resolve(__dirname, '..');
+
+/**
+ * Runs `scripts/ga-tarball-diff.mjs` as a child `node` process rather than
+ * importing its `run()` export in-process — see the comment above for why.
+ *
+ * @param {string[]} argv forwarded verbatim to `ga-tarball-diff.mjs`'s CLI.
+ * @param {{ log?: typeof console.log, repoRoot?: string }} [opts]
+ * @returns {number} the child process's exit code
+ */
+export function defaultRunDiff(argv, { log = console.log, repoRoot = defaultRepoRoot } = {}) {
+  const diffScript = join(__dirname, 'ga-tarball-diff.mjs');
+  const result = spawnSync(process.execPath, [diffScript, ...argv], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  if (result.error) throw result.error;
+  if (result.stdout) log(result.stdout.replace(/\n$/, ''));
+  if (result.stderr) log(result.stderr.replace(/\n$/, ''));
+  if (result.status === null) {
+    throw new Error(`ga-tarball-diff.mjs was terminated by signal ${result.signal}`);
+  }
+  return result.status;
+}
 
 /**
  * The credential window's live rc pin, or `null` (no window open). Used only
@@ -106,8 +143,8 @@ const TITLE = 'GA-tarball-diff gate';
  * @param {object} [opts]
  * @param {string} [opts.repoRoot]
  * @param {(...args: unknown[]) => void} [opts.log]
- * @param {(argv: string[], opts?: { log?: typeof console.log }) => number} [opts.runDiff]
- *   injectable so unit tests never spawn `git worktree`/`bun`.
+ * @param {(argv: string[], opts?: { log?: typeof console.log, repoRoot?: string }) => number} [opts.runDiff]
+ *   injectable so unit tests never spawn `git worktree`/`bun`/a child `node` process.
  * @param {(repoRoot: string) => string[]} [opts.listGitTags] injectable tag lister.
  * @param {string | undefined} [opts.summaryPath] `$GITHUB_STEP_SUMMARY`; unset locally.
  * @returns {number} process exit code
@@ -115,7 +152,7 @@ const TITLE = 'GA-tarball-diff gate';
 export function main({
   repoRoot = defaultRepoRoot,
   log = console.log,
-  runDiff = runGaTarballDiff,
+  runDiff = defaultRunDiff,
   listGitTags = listGitTagsDefault,
   summaryPath = process.env.GITHUB_STEP_SUMMARY,
 } = {}) {
@@ -146,7 +183,7 @@ export function main({
     'RUN',
     `${decision.reason} — comparing ${JSON.stringify(decision.rcTag)} against HEAD`,
   );
-  const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'HEAD'], { log });
+  const code = runDiff(['--rc-ref', decision.rcTag, '--ga-ref', 'HEAD'], { log, repoRoot });
   if (code === 0) {
     announce(
       'notice',
