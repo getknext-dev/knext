@@ -1,20 +1,14 @@
 # kn-next
 
-The bare-name alias for [`@getknext/core`](https://www.npmjs.com/package/@getknext/core) — the
-scale-to-zero Next.js deployment CLI for Knative/Kubernetes.
-
-This package exists so the obvious command works:
+The bare-name alias for [`@getknext/core`](https://www.npmjs.com/package/@getknext/core) — use it to deploy Next.js apps on Knative with scale-to-zero Kubernetes.
 
 ```bash
-npx kn-next --help
+npm install kn-next
+npx kn-next create my-app
 ```
 
-All functionality lives in `@getknext/core`; this package only forwards to its CLI with the same
-arguments and exit codes. Install either one — they behave identically:
+All functionality lives in `@getknext/core`. Install either `kn-next` or `@getknext/core`—they're identical.
 
-```bash
-npm install kn-next          # this alias (pulls in @getknext/core)
-npm install @getknext/core   # the real package
-```
-
-Docs: https://knext.dev
+- [Documentation](https://knext.dev)
+- [Compatibility](https://knext.dev/docs/compatibility)
+- [Contributing](https://github.com/getknext-dev/knext/blob/main/CONTRIBUTING.md)
