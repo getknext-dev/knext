@@ -202,6 +202,46 @@ describe('bun.lock integrity (#879)', () => {
     });
   }
 
+  // GHSA-58mr-gqgx-xq4g / GHSA-qw65-cvwx-89v3 (fast-uri < 3.1.7). Arrives
+  // transitively via `ajv@8.20.0` (a dep of `schema-utils`, part of the
+  // webpack/build toolchain), which pins `fast-uri` at exactly `3.1.6` in its
+  // own package.json — a caret range elsewhere in the tree does not subsume
+  // an exact-pinned transitive leaf. Fixed at source (top-level override +
+  // relock), same bump-don't-suppress discipline as the rest of this block.
+  it('resolves no fast-uri below 3.1.7 — the GHSA-58mr-gqgx-xq4g/GHSA-qw65-cvwx-89v3 fix line', () => {
+    const floor = [3, 1, 7] as const;
+    const versions = [...lockText().matchAll(/fast-uri@(\d+)\.(\d+)\.(\d+)/g)];
+    expect(
+      versions.length,
+      'no fast-uri resolution found in bun.lock — the guard has no subject',
+    ).toBeGreaterThan(0);
+    const bad = versions
+      .map((m) => ({ raw: m[0], t: [Number(m[1]), Number(m[2]), Number(m[3])] as const }))
+      .filter(({ t }) => below(t, floor));
+    expect(
+      bad.map((b) => b.raw),
+      'bun.lock still resolves fast-uri below 3.1.7, which carries two HIGHs ' +
+        '(GHSA-58mr-gqgx-xq4g, GHSA-qw65-cvwx-89v3). Raise the top-level `fast-uri` ' +
+        'override floor and relock; do not suppress the finding.',
+    ).toEqual([]);
+  });
+
+  it('declares the fast-uri override floor at or above 3.1.7', () => {
+    const declared = manifest().overrides?.['fast-uri'];
+    expect(
+      declared,
+      'package.json declares no `fast-uri` override — the floor is what keeps the ' +
+        'ajv-pulled 3.1.6 line from resolving',
+    ).toBeDefined();
+    const min = String(declared).match(/>=\s*(\d+)\.(\d+)\.(\d+)/);
+    expect(min, 'the fast-uri override does not express a `>=x.y.z` floor').not.toBeNull();
+    const t = [Number(min?.[1]), Number(min?.[2]), Number(min?.[3])] as const;
+    expect(
+      below(t, [3, 1, 7]),
+      'the fast-uri override floor is below 3.1.7, the GHSA-58mr-gqgx-xq4g/GHSA-qw65-cvwx-89v3 fix line',
+    ).toBe(false);
+  });
+
   it('packageManager names the bun the lockfile was written by', () => {
     // Not enforcement — measured: bun ignores this field. It is the only place
     // recording WHICH version to install with, so the error messages above can
