@@ -110,11 +110,13 @@ jobs:
     name: Nightly red alert (pinned issue)
     needs: [resolve-action-pins]
     # always() so this is not skipped when the check fails; the needs-result
-    # check fires it ONLY on failure; the event check scopes it to the schedule.
+    # check fires on failure OR cancelled (#1645 — a cancelled/timed-out
+    # upstream job used to leave this condition false and the alert silent);
+    # the event check scopes it to the schedule.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.resolve-action-pins.result == 'failure'
+      (needs.resolve-action-pins.result == 'failure' || needs.resolve-action-pins.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -215,10 +217,13 @@ jobs:
   crane-pin-red-alert:
     name: Crane pin nightly red alert (never pinned — #1347)
     needs: [verify-crane-pin]
+    # #1645 — needs-result check fires on failure OR cancelled, same as the
+    # nightly-red-alert job above; a cancelled/timed-out run used to leave
+    # this condition false and the alert silent.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.verify-crane-pin.result == 'failure'
+      (needs.verify-crane-pin.result == 'failure' || needs.verify-crane-pin.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -73,9 +73,11 @@ jobs:
     # MAX_WAIT_MS default (90 min — tests/compat-shipped-pin-dispatch-isolation.test.ts
     # enforces this stays true). Equal or less lets GitHub's hard job-kill
     # race the script's own deadline: a job killed by ITS OWN timeout reports
-    # step status `cancelled`, never `failure`, so the alert job's
-    # `result == 'failure'` condition below would silently never fire on a
-    # hang — the exact way a timeout used to go unalerted.
+    # step status `cancelled`, never `failure`. #1645 fixed the alert job
+    # below to also check `result == 'cancelled'`, so this no longer goes
+    # unalerted on a hang, but the margin is still worth keeping — GitHub's
+    # hard kill still beats the alert to it if this window were ever equal
+    # or less than the script's own deadline.
     timeout-minutes: 100
     permissions:
       actions: write # to dispatch test-e2e-deploy.yml and read its runs
@@ -107,10 +109,13 @@ jobs:
   alert:
     name: Create or update the tracking issue (idempotent, never pinned)
     needs: [dispatch-and-wait]
+    # #1645 — needs-result check fires on failure OR cancelled; a
+    # cancelled/timed-out matrix leg used to leave this condition false and
+    # the alert silent (see the timeout-minutes comment above).
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      needs.dispatch-and-wait.result == 'failure'
+      (needs.dispatch-and-wait.result == 'failure' || needs.dispatch-and-wait.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -109,10 +109,13 @@ jobs:
   nightly-red-alert:
     name: Nightly red alert (pinned issue)
     needs: [anonymous-install]
+    # #1645 — needs-result check fires on failure OR cancelled; a
+    # cancelled/timed-out run used to leave this condition false and the
+    # alert silent.
     if: >-
       always() &&
       (github.event_name == 'schedule' || github.event_name == 'release') &&
-      needs.anonymous-install.result == 'failure'
+      (needs.anonymous-install.result == 'failure' || needs.anonymous-install.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
