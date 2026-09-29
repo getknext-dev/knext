@@ -3,11 +3,10 @@
  * audit-published.mjs — the npm/JS supply-chain gate (v4-P3).
  *
  * Container images are Trivy-gated before push (.github/workflows/supply-chain.yml,
- * operator-supply-chain.yml). The npm TARBALLS the release workflows publish —
- * `@getknext/{core,lib,db}` on npmjs (release.yml) and `@getknext-dev/{core,lib,db}`
- * on GitHub Packages (release-ghp.yml) — had NO equivalent gate. This script is
- * that gate, run as a publish-BLOCKING job in BOTH workflows (the publish job
- * `needs:` the audit job), closing a real .claude/rules/security.md gap ("scan
+ * operator-supply-chain.yml). The npm TARBALLS release.yml publishes —
+ * `@getknext/{core,lib,db}` on npmjs — had NO equivalent gate. This script is
+ * that gate, run as a publish-BLOCKING job (the publish job `needs:` the audit
+ * job), closing a real .claude/rules/security.md gap ("scan
  * every image, fail on HIGH/CRITICAL; SBOM per image") extended to the published
  * JS dependency closure.
  *
