@@ -683,6 +683,14 @@ describe('#1635 — a marker exempts only the PR that introduces it', () => {
         false,
       );
     });
+    it('ATTACK — extending expiry while narrowing paths is still not narrowing: RED', () => {
+      expect(
+        guard({
+          rcTag: TAG,
+          rcBumpMarker: { ...INHERITED, expires: '2026-10-05', paths: ['scripts/e2e-deploy.sh'] },
+        }).ok,
+      ).toBe(false);
+    });
     it('ATTACK — unchanged marker (no narrowing at all) through a pin-only diff: RED', () => {
       // e.g. a whitespace-only reformat of the pin: nothing is narrowed, so
       // this is not an exempt narrowing, and the inherited marker exempts nothing.
@@ -1029,6 +1037,23 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
       const { status, stdout } = run(pin, ['.github/workflows/test-e2e-deploy.yml'], pin, {
         mergeBasePin: pin,
       });
+      expect(status).toBe(1);
+      expect(stdout).toMatch(/inherited from the merge base/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'RED (exit 1): the marker is judged at the MERGE BASE, not the base tip — a PR that branched while a marker was on main stays unexempted after main removes it (#1635)',
+    () => {
+      const marker = { date: '2026-09-23', expires: '2026-10-01', reason: 'earlier PR' };
+      const withMarker = { rcTag: 'v1.0.0-rc.1', rcBumpMarker: marker };
+      const { status, stdout } = run(
+        { rcTag: 'v1.0.0-rc.1' }, // base tip: main has since removed the marker
+        ['.github/workflows/test-e2e-deploy.yml'],
+        withMarker, // head still carries the inherited marker
+        { mergeBasePin: withMarker },
+      );
       expect(status).toBe(1);
       expect(stdout).toMatch(/inherited from the merge base/);
     },
