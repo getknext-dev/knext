@@ -66,7 +66,7 @@
  *     --base-pin-file base-pin.json \
  *     --head-pin-file head-pin.json \
  *     --changed-files-file changed-files.txt \
- *     [--merge-base-pin-file merge-base-pin.json] \
+ *     --merge-base-pin-file merge-base-pin.json \
  *     [--rc-tag-state-file rctag-state.json] \
  *     [--now 2026-09-24T00:00:00Z]
  *
@@ -588,6 +588,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     );
     process.exit(2);
   }
+  if (!mergeBasePinFile) {
+    console.error(
+      'compat-credential-freeze-guard: --merge-base-pin-file is required — without it this would fail OPEN, silently treating the PR base as its own merge base (defeats the #1635 "who introduced the marker" and narrowing-only checks). Pass the pin read at `git merge-base` of the PR base and head, even when it is `{"rcTag": null}`.',
+    );
+    process.exit(2);
+  }
 
   const readPin = (file) => {
     try {
@@ -599,7 +605,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   };
   const basePin = readPin(basePinFile);
   const headPin = readPin(headPinFile);
-  const mergeBasePin = mergeBasePinFile ? readPin(mergeBasePinFile) : basePin;
+  const mergeBasePin = readPin(mergeBasePinFile);
   const tagState = rcTagStateFile ? readPin(rcTagStateFile) : null;
 
   const touchedFiles = readFileSync(changedFilesFile, 'utf8')

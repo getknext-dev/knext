@@ -761,6 +761,39 @@ describe('#1635 — a marker exempts only the PR that introduces it', () => {
         ),
       ).toBe(true);
     });
+
+    // #1649 review round 2: the "never widens `paths`" rule (the :369 subset
+    // check and the :370 pathsNarrowed computation) had no red test — deleting
+    // :369 or forcing :370's result to `true` kept every existing test green.
+    describe('never widens paths (#1649 review round 2)', () => {
+      it('ATTACK — base paths [A] -> head paths [A, B], shorter expiry, pin-only: RED (widening paths is never narrowing, even alongside a shorter expiry)', () => {
+        expect(
+          isMarkerNarrowingOnly(
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A'] } },
+            {
+              rcTag: TAG,
+              rcBumpMarker: { ...INHERITED, expires: '2026-09-25', paths: ['A', 'B'] },
+            },
+          ),
+        ).toBe(false);
+      });
+      it('ATTACK — base paths [A, B] -> head paths [B, A] (reordered, same set), same expiry: RED (not narrowing)', () => {
+        expect(
+          isMarkerNarrowingOnly(
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A', 'B'] } },
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['B', 'A'] } },
+          ),
+        ).toBe(false);
+      });
+      it('green counterpart — base paths [A, B] -> head paths [A], same expiry: GREEN (genuine narrowing)', () => {
+        expect(
+          isMarkerNarrowingOnly(
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A', 'B'] } },
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A'] } },
+          ),
+        ).toBe(true);
+      });
+    });
   });
 
   describe('path-scoped markers', () => {
@@ -913,11 +946,15 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
       writeFileSync(headPinFile, JSON.stringify(headPin));
       writeFileSync(changedFile, `${touchedFiles.join('\n')}\n`);
       const extraArgs: string[] = [];
-      if (extra.mergeBasePin !== undefined) {
-        const f = join(dir, 'merge-base-pin.json');
-        writeFileSync(f, JSON.stringify(extra.mergeBasePin));
-        extraArgs.push('--merge-base-pin-file', f);
-      }
+      // --merge-base-pin-file is REQUIRED by the CLI (fails closed otherwise,
+      // see the dedicated describe block below), so this harness always
+      // supplies it — defaulting to basePin, mirroring the pre-#1635
+      // behaviour for every test here that isn't specifically about the
+      // merge-base distinction.
+      const mergeBasePinValue = extra.mergeBasePin !== undefined ? extra.mergeBasePin : basePin;
+      const mergeBaseFile = join(dir, 'merge-base-pin.json');
+      writeFileSync(mergeBaseFile, JSON.stringify(mergeBasePinValue));
+      extraArgs.push('--merge-base-pin-file', mergeBaseFile);
       if (extra.tagState !== undefined) {
         const f = join(dir, 'rctag-state.json');
         writeFileSync(f, JSON.stringify(extra.tagState));
@@ -1134,4 +1171,71 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
     },
     CLI_TEST_TIMEOUT_MS,
   );
+
+  // #1649 review round 2: --merge-base-pin-file used to fall back to
+  // basePin when omitted (fail OPEN — silently treats the PR base as its
+  // own merge base, defeating the #1635 checks). It must now fail closed.
+  describe('--merge-base-pin-file is required, never falls back to basePin (#1649 review round 2)', () => {
+    it(
+      'RED — exits non-zero with a clear message when the flag is omitted, even in a scenario that would otherwise exit 0',
+      () => {
+        const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-guard-'));
+        try {
+          const basePinFile = join(dir, 'base-pin.json');
+          const headPinFile = join(dir, 'head-pin.json');
+          const changedFile = join(dir, 'changed-files.txt');
+          // Unfrozen at base — under the old fail-open fallback this scenario
+          // exits 0 regardless of mergeBasePin, so a failure here isolates the
+          // missing flag itself as the cause, not the scenario.
+          writeFileSync(basePinFile, JSON.stringify({ rcTag: null }));
+          writeFileSync(headPinFile, JSON.stringify({ rcTag: null }));
+          writeFileSync(changedFile, `${PIN_FILE}\n`);
+          let threw = false;
+          try {
+            execFileSync(
+              process.execPath,
+              [
+                SCRIPT,
+                '--repo-root',
+                REPO_ROOT,
+                '--base-pin-file',
+                basePinFile,
+                '--head-pin-file',
+                headPinFile,
+                '--changed-files-file',
+                changedFile,
+              ],
+              { encoding: 'utf8', timeout: EXEC_TIMEOUT_MS },
+            );
+          } catch (err) {
+            threw = true;
+            const e = err as { status: number | null; stderr?: string };
+            expect(e.status).not.toBe(0);
+            expect(e.status).not.toBeNull();
+            expect(String(e.stderr)).toMatch(/--merge-base-pin-file is required/);
+          }
+          expect(threw).toBe(true);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'GREEN — the identical scenario exits 0 once --merge-base-pin-file is supplied, isolating the flag as what changed',
+      () => {
+        const { status } = run(
+          { rcTag: null },
+          [PIN_FILE],
+          { rcTag: null },
+          {
+            mergeBasePin: { rcTag: null },
+          },
+        );
+        expect(status).toBe(0);
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+  });
 });
