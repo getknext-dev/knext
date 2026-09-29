@@ -237,6 +237,23 @@ const MUTATIONS = [
       "    ? readJsonObject(fingerprintFile, fingerprintFile.split('/').pop() ?? fingerprintFile)",
     replacement: "    ? { value: JSON.parse(readFileSync(fingerprintFile, 'utf8')), error: null }",
   },
+  // ── #1553 (ADR-0056 Amendment 4) — the preKnextVoidMarker builder ──────────
+  {
+    label: 'the kind check is dropped — a kind:deploy failure can produce a preKnextVoidMarker',
+    file: LEDGER_SCRIPT,
+    spec: COMPLETENESS_SPEC,
+    test: 'a kind:deploy failure never produces a preKnextVoidMarker',
+    anchor: ".find((f) => f?.kind === 'pre-knext' && typeof f?.phase === 'string');",
+    replacement: ".find((f) => typeof f?.phase === 'string');",
+  },
+  {
+    label: 'the marker is built even when no shard carries a proven pre-knext failure',
+    file: LEDGER_SCRIPT,
+    spec: COMPLETENESS_SPEC,
+    test: 'absent when no shard carries a kind:pre-knext failure',
+    anchor: '  const preKnextVoidMarker = preKnextFailure\n    ? { runId, lane, phase: preKnextFailure.phase }\n    : null;',
+    replacement: '  const preKnextVoidMarker = { runId, lane, phase: preKnextFailure?.phase ?? "runner-setup" };',
+  },
   {
     // Round 4's survivor, and the fourth instance of the same shape — this one
     // reaching into a NEIGHBOURING job. Row 19 below disarms the `if:` CLAUSE;

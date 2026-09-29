@@ -435,3 +435,77 @@ describe('#695 — end to end, in the shape the shard-ledger job runs it', () =>
     expect(damaged.stderr).toMatch(/compat-window-fingerprint\.json/);
   });
 });
+
+/**
+ * #1553 (ADR-0056 Amendment 4) — `preKnextVoidMarker` is built HERE (never
+ * trusted from a shard's own JSON) and self-references THIS run's own
+ * runId/lane, exactly what `isValidPreKnextVoidMarker`
+ * (scripts/compat-window-audit.mjs) requires to grade a night void-eligible.
+ */
+describe('#1553 — preKnextVoidMarker is self-referencing and only present when proven', () => {
+  it('absent when no shard carries a kind:pre-knext failure', () => {
+    const { ledger } = build(allShards());
+    expect(ledger.preKnextVoidMarker).toBeNull();
+  });
+
+  it('present, self-referencing this runId + lane, when a shard carries one', () => {
+    const shards = allShards();
+    shards[5] = shard(6, {
+      passed: 0,
+      failed: 0,
+      notRun: 49,
+      failures: [
+        {
+          file: '(pre-knext: dependency-install)',
+          kind: 'pre-knext',
+          phase: 'dependency-install',
+          cases: [],
+        },
+      ],
+    });
+    const { ledger } = build(shards, { runId: '999888777' });
+    expect(ledger.preKnextVoidMarker).toEqual({
+      runId: '999888777',
+      lane: 'node',
+      phase: 'dependency-install',
+    });
+  });
+
+  it('a kind:deploy failure never produces a preKnextVoidMarker, whatever fields it carries', () => {
+    const shards = allShards();
+    shards[5] = shard(6, {
+      passed: 48,
+      failed: 1,
+      failures: [{ file: 'x.test.ts', kind: 'deploy', phase: 'runner-setup', cases: [] }],
+    });
+    const { ledger } = build(shards);
+    expect(ledger.preKnextVoidMarker).toBeNull();
+  });
+
+  it('the marker takes the first pre-knext failure found when multiple shards carry one', () => {
+    const shards = allShards();
+    shards[2] = shard(3, {
+      passed: 0,
+      failed: 0,
+      notRun: 49,
+      failures: [
+        { file: '(pre-knext: runner-setup)', kind: 'pre-knext', phase: 'runner-setup', cases: [] },
+      ],
+    });
+    shards[9] = shard(10, {
+      passed: 0,
+      failed: 0,
+      notRun: 49,
+      failures: [
+        {
+          file: '(pre-knext: dependency-install)',
+          kind: 'pre-knext',
+          phase: 'dependency-install',
+          cases: [],
+        },
+      ],
+    });
+    const { ledger } = build(shards);
+    expect(ledger.preKnextVoidMarker?.phase).toBe('runner-setup');
+  });
+});

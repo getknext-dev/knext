@@ -182,6 +182,21 @@ on:
         required: false
         type: boolean
         default: false
+      # #1553 (ADR-0056 Amendment 4) — dispatch-only, DEFAULT OFF fault
+      # injection: deliberately fails ONE named pre-knext phase
+      # (runner-setup | dependency-install), strictly before the adapter
+      # build or the knext server ever starts for a shard, so the resulting
+      # ledger can be checked against the credential audit's VOID grade.
+      # Same contract as sandboxFetchDebug/selfContained above:
+      # github.event.inputs is empty on every `schedule` event, so no
+      # cron — credential or early-warning — can ever select this
+      # (tests/compat-suite-workflow.test.ts asserts it). Empty string (the
+      # default option) means no fault: steady state is untouched.
+      preKnextFault:
+        description: '#1553 — dispatch-only: fail ONE named pre-knext phase (runner-setup | dependency-install; any other value, including empty, means no fault) to prove the credential audit VOID grade live. Never runs on schedule.'
+        required: false
+        type: string
+        default: ''
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
@@ -313,6 +328,13 @@ env:
   # above: '' (off) on every schedule event, '1' only on an explicit dispatch
   # with selfContained=true. '1' is the exact value scripts/e2e-deploy.sh gates on.
   KNEXT_SELF_CONTAINED: ${{ github.event.inputs.selfContained == 'true' && '1' || '' }}
+  # #1553 (ADR-0056 Amendment 4) — dispatch input ONLY, same contract as
+  # KNEXT_SANDBOX_FETCH_DEBUG/KNEXT_SELF_CONTAINED above: '' (no fault) on
+  # every schedule event, one of PRE_KNEXT_PHASES
+  # (scripts/compat-window-audit.mjs: runner-setup | dependency-install) only
+  # on an explicit dispatch that requests it. Read by the two per-shard
+  # fault-injection steps in the `deploy-tests` job.
+  KNEXT_PREKNEXT_FAULT: ${{ github.event.inputs.preKnextFault || '' }}
   # #1301 — the ONE manifest-filename decision, made once at the workflow
   # level so both the test-selection step and the "Compute excluded count"
   # step (which must agree with it, or the reported excluded count would lie)
@@ -1033,6 +1055,79 @@ jobs:
           # evidence on its own.
           bun-version: ${{ github.event.inputs.bun-version || '1.4.2' }}
 
+      # #1553 (ADR-0056 Amendment 4) — dispatch-only, DEFAULT-OFF fault
+      # injection: deliberately fails HERE, before a single dependency-install
+      # step or any knext code, when explicitly requested. Same contract as
+      # `sandboxFetchDebug`/`selfContained` above: `env.KNEXT_PREKNEXT_FAULT`
+      # is '' on every `schedule` event (github.event.inputs is empty there),
+      # so no cron — credential or early-warning — can ever select this.
+      # Proves the void-grading mechanism live without waiting for a real
+      # runner-setup fault to occur on its own.
+      - name: Inject pre-knext fault — runner-setup (#1553, dispatch-only)
+        if: env.KNEXT_PREKNEXT_FAULT == 'runner-setup'
+        run: |
+          echo "::error::#1553 dispatch-only fault injection: failing the runner-setup phase on purpose"
+          exit 1
+
+      # #1553 — phase-boundary marker. Runs (default `if: success()`) only
+      # when every runner-setup step above — including the fault-injection
+      # step immediately above — completed. Its own `.outcome` is what the
+      # dependency-install fault-detector below reads to tell "runner-setup
+      # itself failed" apart from "dependency-install failed" — both leave
+      # the job in `failure()` from this point on, and without this marker
+      # the dependency-install detector could not tell which phase broke.
+      - name: Mark runner-setup phase complete (#1553)
+        id: pre-knext-runner-setup-ok
+        run: echo "runner-setup phase completed"
+
+      # #1553 (ADR-0056 Amendment 4) — PRE-KNEXT FAULT DETECTOR: runner-setup.
+      # `if: failure()` fires ONLY when an earlier step in THIS JOB already
+      # failed — and at this point in the step sequence nothing but
+      # runner-setup (download/unpack/node/pnpm/corepack/bun/the fault
+      # injection above) has run, so a failure here is PROVABLY a
+      # runner-setup fault, never a knext one: no knext code (the adapter
+      # build, the knext server) has been invoked yet, and no step after this
+      # one can ever reach this `if: failure()` branch for a LATER failure —
+      # each phase's detector is scoped to run at most once, immediately
+      # after its own phase's last step. This is the SAME structural
+      # guarantee `compat-disk-floor-check.mjs`'s `kind: 'infra'` relies on —
+      # a WORKFLOW STEP, never the deploy-test harness, writes the shard's
+      # summary JSON directly — extended from a measured precondition to a
+      # genuine unhandled step failure. See
+      # `isPreKnextVoidRedShard`/`PRE_KNEXT_PHASES`/`isValidPreKnextVoidMarker`
+      # in scripts/compat-window-audit.mjs for how the credential audit grades
+      # this; the run-level self-referencing marker is built in
+      # scripts/compat-run-ledger.mjs from these shard summaries.
+      - name: Pre-knext fault detector — runner-setup (#1553)
+        id: pre-knext-fault-runner-setup
+        if: failure()
+        working-directory: knext
+        run: |
+          set -euo pipefail
+          SAFE_SHARD="${{ matrix.shard }}"
+          SAFE_SHARD="${SAFE_SHARD/\//-}"
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("fs");
+            const safeShard = process.argv[1];
+            const shard = process.argv[2];
+            const phase = "runner-setup";
+            const summary = {
+              passed: 0,
+              failed: 0,
+              notRun: 1,
+              excluded: 0,
+              ref: process.env.NEXTJS_REF || "",
+              shard,
+              runtime: process.env.KNEXT_RUNTIME === "bun" ? "bun" : "node",
+              failures: [
+                { file: `(pre-knext: ${phase})`, kind: "pre-knext", phase, cases: [] },
+              ],
+            };
+            fs.writeFileSync(`compat-suite-summary-${safeShard}.json`, `${JSON.stringify(summary, null, 2)}\n`);
+            console.log(`wrote a pre-knext-classified summary for shard ${shard} (phase ${phase})`);
+          ' "${SAFE_SHARD}" "${{ matrix.shard }}"
+
       # #147 (the Upload-workspace OOM fix, Option A) — the compat-workspace
       # artifact ships SOURCE ONLY (no node_modules; shipping it OOM'd the upload,
       # run 28314500989). So the shard rebuilds next.js's node_modules locally.
@@ -1607,6 +1702,63 @@ jobs:
           fi
           echo "jest discovery alive: ${COUNT} match(es) for ${PROBE} (jest exit ${JEST_EXIT})"
 
+      # #1553 (ADR-0056 Amendment 4) — dispatch-only, DEFAULT-OFF fault
+      # injection for the dependency-install phase, same contract as the
+      # runner-setup injection above. The `steps...outcome == 'success'` guard
+      # is redundant with GitHub's own implicit `success()` (this `if:` names
+      # no status-check function, so GitHub ANDs one in) but is spelled out
+      # anyway — an `if:` here is exactly the kind of expression a later edit
+      # changes without reading the surrounding prose, and an explicit guard
+      # survives that better than an implicit one.
+      - name: Inject pre-knext fault — dependency-install (#1553, dispatch-only)
+        if: env.KNEXT_PREKNEXT_FAULT == 'dependency-install' && steps.pre-knext-runner-setup-ok.outcome == 'success'
+        run: |
+          echo "::error::#1553 dispatch-only fault injection: failing the dependency-install phase on purpose"
+          exit 1
+
+      # #1553 — phase-boundary marker, same role as the runner-setup one above.
+      - name: Mark dependency-install phase complete (#1553)
+        id: pre-knext-dependency-install-ok
+        run: echo "dependency-install phase completed"
+
+      # #1553 (ADR-0056 Amendment 4) — PRE-KNEXT FAULT DETECTOR:
+      # dependency-install. Guarded on the runner-setup marker's outcome so a
+      # runner-setup failure (already handled by its own detector above) is
+      # never ALSO attributed to dependency-install — `failure()` alone stays
+      # true for every step from the first failure onward, so without this
+      # guard both detectors would fire for one runner-setup fault. See the
+      # runner-setup detector above for the full reasoning (structural
+      # guarantee, audit-side grading, marker construction).
+      - name: Pre-knext fault detector — dependency-install (#1553)
+        id: pre-knext-fault-dependency-install
+        if: failure() && steps.pre-knext-runner-setup-ok.outcome == 'success'
+        working-directory: knext
+        run: |
+          set -euo pipefail
+          SAFE_SHARD="${{ matrix.shard }}"
+          SAFE_SHARD="${SAFE_SHARD/\//-}"
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("fs");
+            const safeShard = process.argv[1];
+            const shard = process.argv[2];
+            const phase = "dependency-install";
+            const summary = {
+              passed: 0,
+              failed: 0,
+              notRun: 1,
+              excluded: 0,
+              ref: process.env.NEXTJS_REF || "",
+              shard,
+              runtime: process.env.KNEXT_RUNTIME === "bun" ? "bun" : "node",
+              failures: [
+                { file: `(pre-knext: ${phase})`, kind: "pre-knext", phase, cases: [] },
+              ],
+            };
+            fs.writeFileSync(`compat-suite-summary-${safeShard}.json`, `${JSON.stringify(summary, null, 2)}\n`);
+            console.log(`wrote a pre-knext-classified summary for shard ${shard} (phase ${phase})`);
+          ' "${SAFE_SHARD}" "${{ matrix.shard }}"
+
       # #1530 (sprint B4) — the free-disk-floor risk guard. A shard's own steps
       # (this checkout, a musl-native rebuild per fixture, a `next build` +
       # server boot per deploy-test file) are disk-heavy; a runner that fills
@@ -1858,6 +2010,21 @@ jobs:
           # to prevent.
           if [ "${{ steps.disk-floor.outputs.ok }}" = 'false' ]; then
             echo "disk-floor breach recorded upstream — leaving its infra-classified summary in place, not re-summarizing"
+            exit 0
+          fi
+          # #1553 (ADR-0056 Amendment 4) — same reasoning as the disk-floor
+          # check above, one failure mode over: when a pre-knext
+          # fault-detector step actually FIRED (its `outcome` is 'success' —
+          # 'skipped' means it never ran, i.e. no pre-knext fault occurred),
+          # it already wrote THIS EXACT FILE directly (a pre-knext-classified
+          # summary). Running e2e-summary.mjs here would parse an EMPTY or
+          # nonexistent runner.log (the real test-run step never got a chance
+          # to run) into a false-green 0/0/0 result and clobber the honest
+          # pre-knext summary with exactly the silent-pass this guard exists
+          # to prevent.
+          if [ "${{ steps.pre-knext-fault-runner-setup.outcome }}" = 'success' ] || \
+             [ "${{ steps.pre-knext-fault-dependency-install.outcome }}" = 'success' ]; then
+            echo "pre-knext fault recorded upstream — leaving its pre-knext-classified summary in place, not re-summarizing"
             exit 0
           fi
           # #188 — VERSION-attribute the bun lane: with the bun-version dispatch
