@@ -121,6 +121,34 @@ const manifest: Manifest = existsSync(MANIFEST_PATH)
   ? JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'))
   : ({} as Manifest);
 
+/** Numeric semver comparison of two vX.Y.Z refs (negative when a < b). */
+function compareRefs(a: string, b: string): number {
+  const pa = a.replace(/^v/, '').split('.').map(Number);
+  const pb = b.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  }
+  return 0;
+}
+
+/**
+ * The ref-stamp expiry rule. An entry is current iff it was observed at the
+ * workflow default ref, re-audited at it, or (ADR-0007 §h) PRE-STAGED: observed
+ * at exactly the scaffold's shipped Next pin while the default still trails it.
+ */
+function isRefStampCovered(
+  q: { nextjsRef?: string; reaudited?: string },
+  defaultRef: string,
+  shippedRef: string,
+): boolean {
+  if (q.nextjsRef === defaultRef || q.reaudited === defaultRef) return true;
+  return (
+    q.nextjsRef !== undefined &&
+    q.nextjsRef === shippedRef &&
+    compareRefs(q.nextjsRef, defaultRef) > 0
+  );
+}
+
 describe('test/deploy-tests-manifest.knext.json — harness-compatible v2 selection (#147)', () => {
   it('the manifest file exists', () => {
     expect(existsSync(MANIFEST_PATH)).toBe(true);
@@ -339,6 +367,8 @@ interface KnextQuarantine {
   reaudited?: string;
   /** #214: "file" = family-level quarantine (whole file in rules.exclude). Absent = per-case. */
   level?: 'case' | 'file';
+  /** v5-P2 mechanism-family (closed taxonomy, tests/deploy-manifest-lanes.test.ts). */
+  family?: string;
 }
 
 /**
@@ -519,7 +549,11 @@ describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)'
   });
 
   it(`the family stays BOUNDED (≤ ${FAMILY_QUARANTINE_CAP} file-level entries) — a growing blanket skip is not a policy`, () => {
-    const fileLevel = quarantines.filter((q) => q.level === 'file');
+    // Scoped to the §d family: the §h vercel-infra-coupled family is a separate,
+    // separately-tabled family bounded by the per-family soft bound instead.
+    const fileLevel = quarantines.filter(
+      (q) => q.level === 'file' && q.family === 'runtime-prefetch',
+    );
     // The file-level cap BINDS to the single shared FAMILY_QUARANTINE_CAP
     // (tests/compat-quarantine-bounds.ts) — the SAME constant the per-family soft
     // bound in tests/deploy-manifest-lanes.test.ts uses, so they cannot diverge.
@@ -527,11 +561,20 @@ describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)'
     // And every level:"file" ledger entry must be one of the family files above —
     // promoting a NEW file requires updating BOTH this table (with its runs +
     // provenance) and the manifest, keeping the guard and the ledger in lockstep.
-    for (const q of fileLevel) {
+    // Scans EVERY level:"file" entry (not just the §d subset) so a file-level
+    // entry in neither family table — or in the wrong one — fails here.
+    for (const q of quarantines.filter((e) => e.level === 'file')) {
+      const table =
+        q.family === 'vercel-infra-coupled'
+          ? VERCEL_COUPLED_FILE_QUARANTINES
+          : q.family === 'runtime-prefetch'
+            ? FAMILY_FILE_QUARANTINES
+            : undefined;
       expect(
-        Object.keys(FAMILY_FILE_QUARANTINES).includes(q.test),
-        `level:"file" ledger entry ${q.test} is not in the guard's family table — ` +
-          'update FAMILY_FILE_QUARANTINES with its observed runs and provenance',
+        table !== undefined && Object.keys(table).includes(q.test),
+        `level:"file" ledger entry ${q.test} (family "${String(q.family)}") is not in its ` +
+          "family's guard table — update FAMILY_FILE_QUARANTINES (runtime-prefetch) or " +
+          'VERCEL_COUPLED_FILE_QUARANTINES (vercel-infra-coupled) with its runs and provenance',
       ).toBe(true);
     }
   });
@@ -736,6 +779,120 @@ describe('deploy-tests-manifest — per-case quarantines outside the family (§c
   });
 });
 
+// ── ADR-0007 §h: the vercel-infra-coupled family (#1571) ────────────────────
+// Five tests new in Next 16.3.5 fail deterministically, 3/3 retries, on all four
+// credential cells, and every failing assertion sits in the test's DEPLOY branch
+// (`isNextDeploy` / `isAdapterTest`), which encodes behaviour only Vercel's own
+// infrastructure produces. knext's behaviour matches the self-hosted expectation
+// (or the one upstream's own comment calls correct). They are quarantined at
+// FILE level (deterministic, so §c.1's flakey-only per-case entries do not fit),
+// each with its per-test knext issue as provenance and, where one exists, the
+// upstream PR. Where a header assertion masked content checks, a run with ONLY
+// that header assertion stubbed must show the content checks passing on knext
+// (`stubRuns`) — a failing content check is a knext gap, fixed, not quarantined.
+
+const VERCEL_COUPLED_CHILD_ISSUE_URL = 'https://github.com/getknext-dev/knext/issues/';
+
+/** The four v16.3.5 credential-cell dispatches that first observed all five. */
+const V16_3_5_CELL_RUNS = ['36332940411', '36332946048', '36332951393', '36332959885'];
+
+const VERCEL_COUPLED_FILE_QUARANTINES: Record<
+  string,
+  { childIssue: number; observedRuns: string[]; stubRuns?: string[]; upstreamRef?: string }
+> = {
+  'test/e2e/app-dir/non-ascii-cache-item-name/non-ascii-cache-item-name.test.ts': {
+    childIssue: 1623,
+    observedRuns: V16_3_5_CELL_RUNS,
+  },
+  'test/e2e/app-dir/cache-components-prerender-matrix/cache-components-prerender-matrix.test.ts': {
+    childIssue: 1624,
+    observedRuns: V16_3_5_CELL_RUNS,
+    // x-vercel-cache expectations stubbed, content partition checks live.
+    stubRuns: ['36430353283', '36430358027', '36430362513', '36430368139'],
+  },
+  'test/e2e/incremental-cache-path-traversal/index.test.ts': {
+    childIssue: 1625,
+    observedRuns: V16_3_5_CELL_RUNS,
+    upstreamRef: 'vercel/next.js#98133',
+  },
+  'test/e2e/app-dir/not-found-non-document/not-found-non-document.test.ts': {
+    childIssue: 1626,
+    observedRuns: V16_3_5_CELL_RUNS,
+  },
+  'test/e2e/app-dir/expire-time/expire-time.test.ts': {
+    childIssue: 1627,
+    observedRuns: V16_3_5_CELL_RUNS,
+  },
+};
+
+describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #1571)', () => {
+  const quarantines: KnextQuarantine[] =
+    (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
+  const coupled = Object.entries(VERCEL_COUPLED_FILE_QUARANTINES);
+
+  it('every §h file is excluded at FILE level via a verbatim rules.exclude entry', () => {
+    for (const [file] of coupled) {
+      expect(
+        manifest.rules.exclude.includes(file),
+        `${file} is a §h vercel-infra-coupled quarantine and must be in rules.exclude verbatim`,
+      ).toBe(true);
+    }
+  });
+
+  it('§h files carry NO per-case suites entry (the file-level exclusion is the whole record)', () => {
+    for (const [file] of coupled) {
+      expect(manifest.suites[file], `${file}: dead per-case suites entry`).toBeUndefined();
+    }
+  });
+
+  it('every §h file has a complete level:"file" ledger record — mechanism, cases, run-cited evidence', () => {
+    for (const [file, { observedRuns, stubRuns }] of coupled) {
+      const ledger = quarantines.find((q) => q.test === file);
+      expect(ledger, `no $knextQuarantines ledger entry for §h file ${file}`).toBeTruthy();
+      expect(ledger?.level, `${file}: §h quarantine must declare level:"file"`).toBe('file');
+      expect(ledger?.family, `${file}: §h family`).toBe('vercel-infra-coupled');
+      expect(ledger?.nextjsRef, `${file}: observed at v16.3.5`).toBe('v16.3.5');
+      expect((ledger?.cases ?? []).length, `${file}: failing cases preserved`).toBeGreaterThan(0);
+      // The mechanism must name the deploy branch it rests on — the whole §h bar.
+      expect(
+        /isNextDeploy/.test(ledger?.mechanism ?? ''),
+        `${file}: mechanism must name the isNextDeploy deploy branch the failure sits in`,
+      ).toBe(true);
+      for (const runId of [...observedRuns, ...(stubRuns ?? [])]) {
+        expect(
+          (ledger?.evidence ?? '').includes(runId),
+          `${file}: evidence must cite run ${runId}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('every §h provenance cites its knext child issue and, where one exists, the upstream PR', () => {
+    for (const [file, { childIssue, upstreamRef }] of coupled) {
+      const provenance = quarantines.find((q) => q.test === file)?.provenance ?? '';
+      expect(
+        provenance.includes(`${VERCEL_COUPLED_CHILD_ISSUE_URL}${childIssue}`),
+        `${file}: provenance must link ${VERCEL_COUPLED_CHILD_ISSUE_URL}${childIssue}`,
+      ).toBe(true);
+      if (upstreamRef !== undefined) {
+        expect(
+          provenance.includes(upstreamRef),
+          `${file}: provenance must cite ${upstreamRef}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('the ledger holds no vercel-infra-coupled entry outside the §h table (lockstep, both directions)', () => {
+    for (const q of quarantines.filter((e) => e.family === 'vercel-infra-coupled')) {
+      expect(
+        Object.keys(VERCEL_COUPLED_FILE_QUARANTINES).includes(q.test),
+        `${q.test} claims family vercel-infra-coupled but is not in VERCEL_COUPLED_FILE_QUARANTINES`,
+      ).toBe(true);
+    }
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #181 sys-design + #172 follow-up — quarantine REF-STAMP expiry gate.
 // A quarantine's licence is its evidence, and that evidence was gathered at a
@@ -764,6 +921,25 @@ describe('$knextQuarantines ref stamps — re-audit on NEXTJS_REF bump (#181/#17
     return (m as RegExpMatchArray)[1];
   }
 
+  /**
+   * ADR-0007 §h: the Next.js version the scaffold actually ships, as a vX.Y.Z ref
+   * (.github/compat-credentialed-next-version.json — itself lockstep-guarded by
+   * tests/nextjs-credential-lockstep.test.ts). An entry observed at exactly this
+   * ref, while the workflow default still trails it, is PRE-STAGED for the
+   * credential bump to it: the test it quarantines does not exist at the older
+   * default, so the entry is inert until the bump lands.
+   */
+  function shippedNextRef(): string {
+    const pin = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, '.github/compat-credentialed-next-version.json'), 'utf8'),
+    ) as { shippedNextPin?: string };
+    expect(
+      typeof pin.shippedNextPin === 'string' && /^\d+\.\d+\.\d+$/.test(pin.shippedNextPin),
+      'compat-credentialed-next-version.json must carry a X.Y.Z shippedNextPin',
+    ).toBe(true);
+    return `v${pin.shippedNextPin}`;
+  }
+
   const quarantines: KnextQuarantine[] =
     (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
 
@@ -784,8 +960,9 @@ describe('$knextQuarantines ref stamps — re-audit on NEXTJS_REF bump (#181/#17
 
   it('FAILS on a workflow ref bump until each entry is re-audited at the new ref', () => {
     const ref = workflowDefaultRef();
+    const shipped = shippedNextRef();
     for (const q of quarantines) {
-      const covered = q.nextjsRef === ref || q.reaudited === ref;
+      const covered = isRefStampCovered(q, ref, shipped);
       expect(
         covered,
         `${q.test}: quarantined at ${String(q.nextjsRef)} but the workflow default NEXTJS_REF is now ${ref}. ` +
@@ -794,6 +971,25 @@ describe('$knextQuarantines ref stamps — re-audit on NEXTJS_REF bump (#181/#17
           `Never bump the workflow ref past a stale quarantine ledger (ADR-0007 graduation addendum §c, mechanized).`,
       ).toBe(true);
     }
+  });
+
+  it('the ref-stamp rule admits a PRE-STAGED entry only at exactly the shipped Next pin, ahead of the default', () => {
+    const q = (nextjsRef: string, reaudited?: string) => ({ nextjsRef, reaudited });
+    // The two classic halves.
+    expect(isRefStampCovered(q('v16.2.12'), 'v16.2.12', 'v16.3.5')).toBe(true);
+    expect(isRefStampCovered(q('v16.2.0', 'v16.2.12'), 'v16.2.12', 'v16.3.5')).toBe(true);
+    expect(isRefStampCovered(q('v16.2.0'), 'v16.2.12', 'v16.3.5')).toBe(false);
+    // Pre-staged: observed at the shipped pin, which is AHEAD of the default.
+    expect(isRefStampCovered(q('v16.3.5'), 'v16.2.12', 'v16.3.5')).toBe(true);
+    // Ahead of the default but NOT the shipped pin: an arbitrary future stamp
+    // would otherwise escape the re-audit gate until the default caught up.
+    expect(isRefStampCovered(q('v16.4.0'), 'v16.2.12', 'v16.3.5')).toBe(false);
+    // Equal to the shipped pin but BEHIND the default (the default moved past it):
+    // stale, must be re-audited like any other entry.
+    expect(isRefStampCovered(q('v16.3.5'), 'v16.3.6', 'v16.3.5')).toBe(false);
+    // Semver, not string, ordering: v16.10.0 is ahead of v16.9.0.
+    expect(isRefStampCovered(q('v16.10.0'), 'v16.9.0', 'v16.10.0')).toBe(true);
+    expect(isRefStampCovered(q('v16.9.0'), 'v16.10.0', 'v16.9.0')).toBe(false);
   });
 
   // #194 gate follow-up: the old name claimed "not older than the stamp", but
