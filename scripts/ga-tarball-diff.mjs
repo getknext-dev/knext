@@ -245,11 +245,20 @@ function parseArgs(argv) {
     else if (arg === '--ga-ref') opts.gaRef = argv[++i];
     else throw new Error(`unrecognized argument: ${arg}`);
   }
-  const hasDirMode = opts.rcDir && opts.gaDir;
-  const hasRefMode = opts.rcRef && opts.gaRef;
-  if (hasDirMode === hasRefMode) {
-    throw new Error('pass exactly one of --rc-dir/--ga-dir or --rc-ref/--ga-ref');
-  }
+  // Each SIDE (rc, ga) independently needs exactly one of {dir, ref} — NOT
+  // "both sides use the same mode". #1616 needs a MIXED call
+  // (`--rc-ref <tag> --ga-dir <pack-once artifact>`): the rc side still needs
+  // a worktree build (a different commit than HEAD), but the ga/HEAD side
+  // can consume the SAME pre-packed tarballs `release.yml`'s `pack` job
+  // already produced for this exact commit, instead of building+packing HEAD
+  // a second time. `runInner`, below, already resolves each side
+  // independently (`opts.rcDir ? loadTarballDir(...) : packRef(...)`, same
+  // for ga) — this was only ever a `parseArgs` restriction, not a `runInner`
+  // one.
+  const rcModes = [opts.rcDir, opts.rcRef].filter(Boolean).length;
+  const gaModes = [opts.gaDir, opts.gaRef].filter(Boolean).length;
+  if (rcModes !== 1) throw new Error('pass exactly one of --rc-dir or --rc-ref');
+  if (gaModes !== 1) throw new Error('pass exactly one of --ga-dir or --ga-ref');
   return opts;
 }
 

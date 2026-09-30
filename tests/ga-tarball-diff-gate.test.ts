@@ -146,6 +146,36 @@ describe('main — every outcome is announced, never a silent green', () => {
     expect(r.summary).toContain('FAIL');
   });
 
+  // #1616 — when the caller supplies a pack-once artifact dir (the live
+  // wiring is `PACK_ONCE_GA_DIR`, exercised here via the injected `gaDir`
+  // opt so the test never touches env), the gate diffs against THAT dir
+  // instead of rebuilding+packing HEAD.
+  it('with gaDir set -> RUNS against the pack-once artifact instead of --ga-ref HEAD', () => {
+    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.2', packages: trio('1.0.0') });
+    const summaryPath = join(root, 'step-summary.md');
+    let capturedArgv: string[] | undefined;
+    const code = main({
+      repoRoot: root,
+      log: () => {},
+      runDiff: (argv: string[]) => {
+        capturedArgv = argv;
+        return 0;
+      },
+      listGitTags: () => tagsRc12,
+      summaryPath,
+      gaDir: '/tmp/pack-once-artifact',
+    });
+    expect(code).toBe(0);
+    expect(capturedArgv).toEqual([
+      '--rc-ref',
+      'v1.0.0-rc.2',
+      '--ga-dir',
+      '/tmp/pack-once-artifact',
+    ]);
+    const summary = existsSync(summaryPath) ? readFileSync(summaryPath, 'utf8') : '';
+    expect(summary).toContain('pack-once artifact');
+  });
+
   it('GA 1.0.0 with rcTag CLEARED (window closed) -> still RUNS, and a clean diff is recorded as PASS', () => {
     const r = runMain({ rcTag: null, version: '1.0.0', tags: tagsRc12, diffExit: 0 });
     expect(r.code).toBe(0);

@@ -52,6 +52,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { packPublishableGroup } from './lib/pack-publishable-group.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -346,6 +347,24 @@ function main() {
     );
   }
 
+  // ── #1614: the CVE audit + SBOM must describe what actually SHIPS ────────
+  // The bun-pack above is KEPT deliberately — it rewrites `workspace:^` from
+  // bun.lock, which is exactly how `siblingRangeProblems` (just run) catches
+  // a stale lock (#942 F1). But `changeset publish` ships `npm pack` bytes
+  // for a bun workspace (see `rewrite-workspace-ranges.mjs`), which measurably
+  // differ from `bun pm pack`'s (#1562: a duplicate tar entry for a
+  // multi-`bin`-key target, among other divergences) — so auditing the
+  // bun-packed tarballs describes a closure nobody is publishing. Pack the
+  // SAME already-built `dist/` a second time with the real publish tool
+  // (`packPublishableGroup`, shared with `pack-release-tarballs.mjs`) and
+  // audit THOSE bytes instead.
+  console.log(
+    '[audit-published] packing the published set again with `npm pack` (the publish tool)…',
+  );
+  const npmTarballDir = join(workDir, 'npm-tarballs');
+  mkdirSync(npmTarballDir, { recursive: true });
+  const npmTarballs = packPublishableGroup(PUBLISHED, npmTarballDir).map((p) => p.tarball);
+
   // Install the PROD closure only — outside the repo, no scripts, no audit yet.
   console.log('[audit-published] installing the production closure (--omit=dev)…');
   writeFileSync(
@@ -354,7 +373,7 @@ function main() {
   );
   const install = spawnSync(
     'npm',
-    ['install', ...tarballs, OMIT_DEV, '--ignore-scripts', '--no-audit', '--no-fund'],
+    ['install', ...npmTarballs, OMIT_DEV, '--ignore-scripts', '--no-audit', '--no-fund'],
     { cwd: consumerDir, encoding: 'utf8', stdio: ['ignore', 'inherit', 'inherit'] },
   );
   if (install.status !== 0) die('installing the production closure failed');

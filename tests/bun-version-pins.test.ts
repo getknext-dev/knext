@@ -202,7 +202,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // pinned like every other lane. (release-ghp.yml is retired — #1644.)
       // #1562: the `ga-tarball-diff` job builds + packs the rc tag and HEAD
       // with bun (the same toolchain as the publish job) — a fourth step.
-      'release.yml': 4,
+      // #1614/#1616: the new `pack` job (packs the fixed group ONCE) is a
+      // fifth — it needs bun too, to `bun install` + build before packing.
+      'release.yml': 5,
       // NEW (#1596, kn-next-action Bun toolchain fix): the composite action never
       // installed Bun, so the default runtime's compiled-standalone build
       // (`bun run …`) failed with ENOENT on every stock ubuntu-24.04 runner —

@@ -49,15 +49,16 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 
 ## The gate (two lanes, one approval)
 
-`release.yml` runs on every push to `main` and on manual `workflow_dispatch`, as **five jobs**:
+`release.yml` runs on every push to `main` and on manual `workflow_dispatch`, as **six jobs**:
 
 | job | environment | credential | what it does |
 | --- | --- | --- | --- |
-| `audit` | — | — | npm supply-chain audit + SBOM. Publish-blocking. |
+| `pack` | — | — | packs the `@getknext/*` fixed group **once**, with `npm pack` (the real publish tool), and uploads it as the `release-tarballs` artifact. See "pack once" below. |
+| `audit` | — | — | npm supply-chain audit + SBOM. Publish-blocking. Packs its **own** `bun pm pack` (a stale-lock detector, not the same concern) and a second `npm pack` from its own build for the actual audit target — deliberately NOT the `pack` job's artifact; see below. |
 | `version-pr` | **none** | **none** | opens/updates the "Version Packages" PR. Passes no `publish-script`, so it *cannot* publish. |
 | `publish-preflight` | none | none | runs `scripts/publish-preflight.mjs` — is any version in the tree absent from the registry? |
-| `ga-tarball-diff` | none | none | runs `scripts/ga-tarball-diff-gate.mjs` — a credentialed GA cut must differ from its last rc only in version fields; see below. Publish-blocking. |
-| `release` | `npm-publish` | `NODE_AUTH_TOKEN` | the only job that publishes. **Skipped** unless there are no pending changesets *and* something is genuinely unpublished. |
+| `ga-tarball-diff` | none | none | runs `scripts/ga-tarball-diff-gate.mjs` — a credentialed GA cut must differ from its last rc only in version fields; see below. Publish-blocking. Diffs the ga/HEAD side against the `pack` job's artifact rather than re-packing HEAD. |
+| `release` | `npm-publish` | `NODE_AUTH_TOKEN` | the only job that publishes. **Skipped** unless there are no pending changesets *and* something is genuinely unpublished. Verifies its own fresh pre-publish pack against the `pack` job's artifact byte-for-byte before using the token. |
 
 `NPM_TOKEN` is an **environment secret on `npm-publish`** — not a repo secret, which is why a plain
 `gh secret list` does not show it. That environment carries a **required-reviewer** rule, so the
@@ -135,9 +136,45 @@ shells to `npm publish` for a bun workspace) — never `bun pm pack`, which was 
 maps two command names, `knext` and `kn-next`, to that one file) and would have made this gate
 permanently, incorrectly red on every real GA cut.
 
+### Pack once, not three times (#1614/#1616)
+
+Before this, three places packed the `@getknext/*` fixed group from independent builds of the same
+commit: `audit` (`bun pm pack`), `ga-tarball-diff` (its own worktree build + `npm pack` of HEAD), and
+`release` itself (`verify-published-group.mjs --pre`, also its own `npm pack`). The bytes were
+measured byte-identical, but "measured identical today" is not "provably the same artifact" — and
+`audit`'s tool was measurably NOT the one the real publish uses.
+
+The `pack` job now packs the fixed group **once**, with `npm pack`, and uploads the tarballs plus a
+`manifest.json` (name/tarball/sha256 per member) as the `release-tarballs` artifact:
+
+- `ga-tarball-diff` downloads it and diffs the ga/HEAD side against those tarballs
+  (`ga-tarball-diff.mjs --ga-dir`) instead of building+packing HEAD a second time in a worktree.
+- `release` downloads it and, after packing its own fresh tree for the pre-publish check, sha256-
+  compares that fresh pack against the artifact's manifest (`verify-published-group.mjs --pre
+  --compare-dir`) and refuses to publish on any drift.
+
+**`audit` is deliberately NOT wired to the shared artifact.** Its `bun pm pack` step exists for a
+different reason than tool parity: bun rewrites a package's `workspace:^` sibling range from
+`bun.lock`'s recorded version rather than from the manifest, and `siblingRangeProblems`
+(`audit-published.mjs`) uses exactly that divergence to catch a stale lock (`bun install` never run
+after a version bump) — the `pack` job's `npm pack` artifact (rewritten from the manifest, always
+fresh) cannot reproduce that check. `audit` instead packs a **second** time with `npm pack`, from
+the build it already runs, and audits/SBOMs those bytes — a small, local, non-blocking duplication,
+kept out of the shared artifact's blast radius on purpose. What changed for `audit` is which bytes
+get audited (`npm pack`'s, matching what ships), not which tool detects a stale lock (still
+`bun pm pack`'s).
+
+**Still a deliberate gap, not an oversight:** `release`'s actual publish step (`changesets/action`
+running `changeset publish`) still packs from its own directory — `npm publish` for a bun workspace
+shells out per-package from the checked-out tree, never from a pre-built tarball file — so the
+literal bytes uploaded to npm are not (and cannot easily be, without forking that mechanism) the
+`pack` job's tarball files themselves. The drift check above is the mitigation: it proves the
+about-to-publish bytes are byte-identical to the audited/diffed ones, rather than literally
+forwarding them.
+
 ### PR-time: published bytes stay frozen for the whole life of a credential window
 
-The gate above catches a mismatch at the GA cut — 14 nights after the mismatch was actually
+The GA-vs-rc gate above catches a mismatch at the GA cut — 14 nights after the mismatch was actually
 introduced. `.github/workflows/published-bytes-freeze-guard.yml` catches it at PR time instead:
 while `.github/compat-credential-ref.json`'s `rcTag` is set, every PR that touches a path able to
 reach a published package (`scripts/lib/published-bytes-freeze-check.mjs`'s
