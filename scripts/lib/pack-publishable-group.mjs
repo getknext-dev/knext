@@ -61,10 +61,13 @@ export function rewriteWorkspaceRanges(cwd = REPO_ROOT) {
  * silent `npm pack` no-op can never be mistaken for success.
  *
  * @param {string} pkgDir
- * @param {string} destDir
+ * @param {string} relOrAbsDestDir resolved against process.cwd() when relative
  * @returns {string} the absolute path of the tarball just produced
  */
-export function npmPackOne(pkgDir, destDir) {
+export function npmPackOne(pkgDir, relOrAbsDestDir) {
+  // npm resolves --pack-destination against ITS cwd (pkgDir), so a relative
+  // destination must be anchored to the caller's cwd first.
+  const destDir = resolve(relOrAbsDestDir);
   mkdirSync(destDir, { recursive: true });
   const before = new Set(readdirSync(destDir).filter((f) => f.endsWith('.tgz')));
   execFileSync('npm', ['pack', '--pack-destination', destDir, '--ignore-scripts'], {
@@ -96,7 +99,7 @@ export function sha256File(path) {
  * @param {Array<{name: string, dir: string}>} pkgs in the order they should
  *   be packed (build order matters for the caller; this function does not
  *   build)
- * @param {string} destDir
+ * @param {string} relOrAbsDestDir resolved against process.cwd() when relative
  * @param {{cwd?: string, rewrite?: boolean}} [opts] `rewrite: false` skips
  *   the workspace-range rewrite (e.g. when the caller already ran it, or the
  *   packages carry no `workspace:` ranges — never used by the real lanes
