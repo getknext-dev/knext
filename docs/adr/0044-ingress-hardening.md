@@ -460,3 +460,50 @@ executable in `apps/file-manager/self-contained-e2e.test.ts` (`413` over a 4 KiB
 it — the embed proved behaviourally, not by a source scan). Mutation-proved by
 `scripts/mutation-prove-standalone-bytecap.mjs` (13/13 plus a canary, on the shared guard-prover driver); the compiled-exec check was
 mutation-proved once by hand (dropping the preload from the compile list reds it).
+
+## Amendment 6, Round 2 (2026-09-30): error-listener fix + linger-timing fix + byte-bound on linger
+
+**Status of this amendment: ACCEPTED** (v1.0 Phase 1 — lands before rc.2 tag).
+
+### Two defects discovered in Amendment 4/6 Round 1, both reproduced and fixed test-first
+
+1. **Process crash on cap refuse**: The preload replaced `req._destroy` so cap errors were always
+   forwarded to the request. Node's `IncomingMessage` swallows that error when there is no `'error'`
+   listener; forwarding it unconditionally raised an unhandled event, exiting the process and killing
+   every in-flight request. Measured on Node 24 and Bun 1.4.2 both. **Fix:** forward the error only
+   when `req.listenerCount('error') > 0` (checked on the next tick exactly as `IncomingMessage._destroy`
+   does). When the error is swallowed, the stream is destroyed and never emits `'end'`, so the handler
+   never processes a partial body.
+
+2. **Pipelined response loss on linger timeout**: The ≤2 s discard linger started at refusal time, not
+   at response-send time. With a slow earlier `GET /a` taking 3 s followed by an oversized `POST /b`
+   on the same socket, the socket was destroyed at 2 s and `/a`'s response went with it. **Fix:** the
+   linger is armed only on the 413's `'finish'` event, which for a queued pipelined response fires only
+   after every earlier response has flushed. Because the time bound can now wait on a slow earlier
+   response, the discard also has a **byte** bound: `LINGER_MAX_BYTES` = 16 MiB (2× the default cap).
+
+### Honest residuals on both halves
+
+- **Error-listener half:** Tests for handlers with and without an explicit `'error'` listener
+  (one reads via `on('data')`, the other ignores the body). In both, the client gets the 413, no
+  `Unhandled` to stderr, the process stays alive, no `HANDLER_DONE` is logged, and a following
+  request on a new connection gets 200. Both defects failed first.
+- **Linger-timing half:** Tests for `GET /slow` (3 s) pipelined with an oversized POST (declared
+  and chunked); `/slow`'s full response arrives, **then** the 413. Also tested: `GET /slow` with a
+  64 MiB declared body; the server closes on the byte bound in under 2.5 s, well before `/slow`
+  finishes. All three cases failed first for the reported reasons: process exit / `/a` lost at 2 s.
+
+### Guards and mutation proof
+
+`packages/kn-next/src/__tests__/request-body-cap.test.ts` is now 35 tests (was 25). Mutation-proved by
+`scripts/mutation-prove-standalone-bytecap.mjs` at **13/13 plus a canary** (was 10/10 plus a canary).
+The new rows M11 (error forwarded unconditionally), M12 (linger armed at refusal time), and M13 (byte
+bound removed) each individually failed on the reported ground; M6 was re-anchored to the new teardown
+call. `node scripts/scan-mutation-residue.mjs` is clean. `apps/file-manager/sigterm-drain-e2e.test.ts`
+and `self-contained-e2e.test.ts` remain green.
+
+### Compat evidence — no new runs needed
+
+The two v16.3.5 compat runs from Round 1 (bun × webpack: **36646418499**; node × turbopack:
+**36646409104**, with one documented flake unattributed to the cap) still stand. Round 2 changes only
+the preload internals, no builder change, so no new dispatch was made.
