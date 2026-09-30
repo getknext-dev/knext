@@ -61,9 +61,11 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 | `release` | `npm-publish` | `NODE_AUTH_TOKEN` | the only job that publishes. **Skipped** unless there are no pending changesets *and* something is genuinely unpublished. Verifies its own fresh pre-publish pack against the `pack` job's artifact byte-for-byte before using the token. |
 
 `NPM_TOKEN` is an **environment secret on `npm-publish`** — not a repo secret, which is why a plain
-`gh secret list` does not show it. That environment carries a **required-reviewer** rule, so the
-publish itself waits for a human click. That is deliberate: publishing to a public registry is
-irreversible.
+`gh secret list` does not show it. **As of this writing, that environment carries no protection
+rule** — the API returns an empty list, and `1.0.0-rc.1`/`1.0.0-rc.2` both published with no
+reviewer click. Adding a required-reviewer rule (plus `v*` tag protection) is the founder action
+tracked by #1638; a release run does not pause for approval today, and the GA-cut runbook below
+should not be read as assuming one exists until #1638 lands.
 
 **Opening a Version PR does not wait for anything.** It used to: `version-pr` and `release` were one
 job that declared the environment, so every push to `main` asked for an approval — including pushes
@@ -362,6 +364,201 @@ that touches that surface with neither a changeset nor an explicit opt-out.
   ahead of an `rc.N`), adding a new changeset here versions the **next prerelease** (e.g. `rc.2`),
   not a stable release. That is still the correct outcome — an `rc` that ships a behaviour change
   with no changelog entry is exactly the gap this check exists to close.
+
+## GA-cut runbook (rc → 1.0.0)
+
+This is the exact sequence from "the credential window closed 14/14 green on all four cells" to
+"`1.0.0` is on npm `latest`". It assumes the credential window's own gate (14 consecutive nightly
+green runs on the pinned rc, across every credentialed runtime/builder combination) has already
+closed successfully — this section does not re-derive that gate, only what happens after it.
+
+Steps marked **[FOUNDER]** are not agent-doable: they require a click a human must make (an
+environment approval, a `git push` of a release tag, or a branch-protection setting) or a decision
+about whether to proceed that should not be automated.
+
+### GA preconditions
+
+Confirm every box before starting step 1 below:
+
+- [ ] 14/14 credentialed nights, all four runtime × builder cells, on the currently pinned `rcTag`.
+- [ ] The GA-vs-rc tarball diff (`ga-tarball-diff-gate.mjs`) is green — version-only — as a
+      **pre-flight dry run** against the pinned rc, not first discovered mid-step-4 on the Version
+      PR itself.
+- [ ] Platform/operator e2e is green **at the rc tag**, with the operator built from that tag and
+      its image digest recorded (#1305).
+- [ ] The docs launch pass is live on knext.dev (quickstart, compatibility table, and version
+      numbers all reflect the rc under credential — not a stale prior release).
+- [ ] The operator tag-release line (`operator-vX.Y.Z`, semver GitHub Releases from a pushed tag)
+      has merged — **or**, if it has not, the fallback in step 7 below (the rolling
+      `operator-latest` channel) is explicitly accepted for this cut.
+- [ ] The rollback rehearsal on the `rc` npm dist-tag (see [Rollback runbook](#rollback-runbook-100-ships-broken)
+      below) has been run and its result recorded, so the rollback path is proven reachable
+      *before* it is ever needed for real.
+- [ ] **[FOUNDER]** #1638 (`npm-publish` environment required reviewer + `v*` tag protection) and
+      #1373 (credential freeze guard / published-bytes guard CODEOWNERS + required review) are
+      both made **required checks** — see [The gate](#the-gate-two-lanes-one-approval) above for
+      why the `npm-publish` environment carries no reviewer today without #1638.
+
+1. **Confirm the credential window is closed.** Every one of the four runtime × builder
+   combinations shows 14/14 green in the compat ledger for the pinned `rcTag`. If any cell is short,
+   stop — do not cut GA on a partial window.
+2. **Clear `rcTag`.** Open a PR that removes the pin from `.github/compat-credential-ref.json`. This
+   is the same pin PR shape the window-open step used in reverse. Merging it closes the credential
+   window and, from this PR's merge base onward, releases the PR-time published-bytes freeze guard
+   (`published-bytes-freeze-guard.yml`) and the Dependabot pause — published-package PRs can move
+   again once GA is actually cut.
+3. **Changeset `pre exit`.** Run `bunx changeset pre exit` and commit the result. This takes the
+   four `@getknext/*` fixed-group packages out of changesets' prerelease ("pre") mode, so the next
+   Version PR proposes a stable version rather than another `rc.N`. Open this as its own PR.
+4. **Prepare and hand-open the "Version Packages" PR → `1.0.0`.** `getknext-dev`'s org setting
+   ("Actions can create or approve pull requests") is **off**, so `version-pr`'s bot-driven PR-open
+   step is always refused (`release.yml`'s own step prints `GitHub Actions is not permitted to
+   create or approve pull requests` and tells you to open the PR by hand — this is not new for GA,
+   it is the standing state of every Version PR on this repo). Do **not** wait for a bot-opened PR
+   to appear. Use the same hand-prepared recipe already used twice for the rc.1 and rc.2 "prepare"
+   PRs (rc.1: #1591; rc.2 #1659, "same recipe as rc.1"):
+
+   ```sh
+   git switch -c release/1.0.0 main
+   bunx changeset version        # consumes every pending changeset, bumps the fixed
+                                  # group to 1.0.0 (pre.json is already gone from step 3)
+   git add -A
+   git commit -m "release: version packages"
+   git push -u origin release/1.0.0
+   gh pr create --base main --title "chore: version packages" \
+     --body "Prepares 1.0.0 on the fixed group (@getknext/core, @getknext/lib, @getknext/db, kn-next)."
+   ```
+
+   Verify the PR proposes `1.0.0` for all four fixed-group members before merging — a `pre exit`
+   that landed out of order, or a changeset still describing a `rc.N+1`-shaped bump, would show up
+   here as the wrong target version. **CI must be fully green on this PR before merging, especially
+   the GA-vs-rc tarball diff (versions only).** `ga-tarball-diff-gate.mjs` runs automatically on
+   this PR's `release.yml` invocation once it detects a stable target version with a matching
+   `vX.Y.Z-rc.N` tag in history (see [A credentialed GA must differ from its last rc ONLY in version
+   fields](#a-credentialed-ga-must-differ-from-its-last-rc-only-in-version-fields) above) — do not
+   merge if that check is red; a red diff means the tarball about to publish is not the one the 14
+   nights actually credentialed.
+5. **[FOUNDER] Approve the `npm-publish` environment deployment.** Merging the Version PR is a
+   second push to `main`; `release` starts and parks in `waiting` for the environment's
+   required-reviewer approval (see [Subsequent releases](#subsequent-releases) step 4). Check the
+   run's head SHA before approving — it must be the Version PR's merge commit, not a stale parked
+   run. `changeset publish` then ships `1.0.0` to all four packages on the `latest` dist-tag.
+6. **[FOUNDER] Push the `v1.0.0` tag.** `git tag v1.0.0 <merge-commit-sha> && git push origin
+   v1.0.0`. Verify it landed with `git ls-remote --tags origin v1.0.0` before moving on — a tag
+   that silently failed to push leaves every step below pointed at nothing.
+7. **Operator release, mechanism depends on whether the semver release line has merged.** The
+   operator's tag-triggered `operator-vX.Y.Z` release line (an immutable, digest-pinned,
+   cosign-signed GitHub Release built from a pushed `operator-vX.Y.Z` tag, which is also what moves
+   the `operator-latest` channel — a plain push to `main` moves only the rolling `operator-edge`
+   channel instead) is a **separate, currently-open PR**, not yet merged as of this writing. Check
+   its state before cutting GA:
+   - **If that PR has merged:** `git tag operator-v1.0.0 <operator-main-sha-to-ship> && git push
+     origin operator-v1.0.0`, then confirm the resulting `operator-v1.0.0` release exists, its
+     `install.yaml` resolves to a real signed image digest, and `operator-latest` now points at the
+     same digest (a stable, non-prerelease tag is what moves it).
+   - **If it has not merged:** fall back to what ships today — `operator-supply-chain.yml` already
+     builds, SBOMs, Trivy-gates, cosign-signs, and republishes the rolling `operator-latest`
+     GitHub Release (with its digest-pinned `install.yaml`) on every push to `main`. Confirm
+     `operator-latest`'s `install.yaml` was refreshed from a `main` commit at or after the GA cut,
+     record which operator commit SHA / image digest it carries in the GA release notes (there is
+     no separate `v1.0.0`-tagged operator artifact in this fallback — `operator-latest` IS the
+     artifact), and do not hand-apply an unsigned or untagged image either way.
+8. **Stranger install + upgrade verification against the live registry.** From a clean environment
+   with no local checkout state: `npm exec --package=@getknext/core@latest -- kn-next create` (the
+   documented quickstart) must scaffold and `npx kn-next --help` must exit 0. Separately, on a
+   cluster running the previous stable operator/CRD, apply the new `operator-v1.0.0` `install.yaml`
+   and confirm an existing `NextApp` reconciles cleanly — the [Upgrade order](#upgrade-order)
+   section's "operator/CRD first, then CLI" rule applies to this step itself.
+9. **Docs deploy.** Redeploy the docs site through the normal platform path so the published
+   version numbers, compatibility table, and quickstart on the live site match what `npm view` now
+   reports. A GA cut with stale docs is not "done" — see `.claude/rules/workflow.md` step 5's docs
+   requirement, which applies to this cut like any other user-visible change.
+10. **Announce.** Publish the announcement once steps 1–9 are all confirmed, not before — an
+    announcement pointing at a still-parked publish or a stale docs deploy sends strangers to a
+    broken front door on day one.
+
+### If a night reds between 14/14 and the cut
+
+**Do not re-run the reset night.** The credential is 14 *consecutive* green nights on the *same*
+pinned rc tarball; a red night after the window nominally closed but before GA is actually cut means
+the window is no longer 14/14 as of now — treat it exactly as a mid-window reset (see the VOID-night
+rule in the compat ledger for the one narrow exception: a night that failed before any knext code ran
+at all, proven by a knext-owned marker). **The window restarts from the next green night**, not from
+night 1's original calendar date and not from a manually-edited count. If the red points at a real
+defect in the pinned rc's tarball, fix forward on a new `rc.N+1` (a new prerelease is expected to
+differ from the last one — the freeze guard's `publishedBytesBumpMarker` override exists for exactly
+this) rather than patching the already-credentialed tag in place; the credential must always describe
+a `git tag`'s actual, unmodified bytes.
+
+## Rollback runbook (1.0.0 ships broken)
+
+If `1.0.0` reaches `latest` and turns out to be broken, this is the exact recovery. Read it before
+you need it — the middle of an incident is the wrong time to be deriving "does moving a dist-tag
+unpublish the version" from first principles.
+
+**The rule that governs every step below: never unpublish.** `npm unpublish` removes the version
+from the registry entirely, which breaks every consumer who has already installed or pinned it (npm
+disallows unpublishing a version more than 72 hours old for exactly this reason, but even inside
+that window it is the wrong tool here) — it does not undo the fact that people already ran the code.
+Recovery here means *redirecting new installs away from the broken version*, not erasing it.
+
+1. **Move `latest` back to `0.4.3` on all four publishable packages together** — `@getknext/core`,
+   `@getknext/lib`, `@getknext/db`, and `kn-next`. They are Changesets' `fixed` group and always ship
+   (and now roll back) as a set; moving three of the four and forgetting the fourth reproduces the
+   exact #255/#256 partial-group incident, just via a dist-tag move instead of a publish. Use
+   `scripts/npm-dist-tag-rollback.mjs` for this — see below.
+2. **`npm deprecate 1.0.0` with a pointer.** Once the tag is moved, deprecate the broken version on
+   each of the four packages with a message naming the safe version — `npm-dist-tag-rollback.mjs`
+   emits this command in the same run as step 1.
+3. **Roll back the operator image, never the CRD.** Re-point the operator Deployment at the previous
+   stable image digest (`operator-v0.4.x`'s pinned digest). Do **not** roll back the CRD: per
+   [Upgrade order](#upgrade-order), a CRD only ever moves forward (additive-only), and rolling it
+   back risks stripping a field an already-reconciled `NextApp` still carries, which is a worse
+   failure than leaving the newer, backward-compatible schema in place under the older operator
+   binary.
+4. **Revert the docs deploy.** Redeploy the previous docs-site build so the live compatibility table
+   and quickstart stop claiming `1.0.0` is current.
+5. **Fix forward as `1.0.1`.** Patch the actual defect and release it normally. `1.0.1` is not
+   credentialed by the 14-night rc process — the GA-vs-rc diff gate is designed to skip a GA version
+   with no matching `rc.N` tag (see the table in [A credentialed GA must differ from its last rc
+   ONLY in version fields](#a-credentialed-ga-must-differ-from-its-last-rc-only-in-version-fields))
+   — and that is the correct, honest behaviour: a hotfix does not get to borrow the previous rc's
+   credential.
+
+### `scripts/npm-dist-tag-rollback.mjs`
+
+Computes and prints the exact `npm dist-tag add` / `npm deprecate` commands for steps 1–2 above, for
+all four publishable packages at once. **Defaults to a dry run** — it only touches the registry with
+the explicit `--execute` flag:
+
+```sh
+# Print the plan (default — no registry writes):
+node scripts/npm-dist-tag-rollback.mjs --to 0.4.3 --broken 1.0.0
+
+# Actually run it (requires npm auth in the environment):
+node scripts/npm-dist-tag-rollback.mjs --to 0.4.3 --broken 1.0.0 --execute
+```
+
+It refuses before touching anything — exits 1 with no writes — if the rollback target is not
+published for all four packages (a typo'd or never-released target would otherwise point `latest`
+at nothing), or if the discovered publishable-package count is not exactly four (a workspace change
+the script does not yet know about). It is unit-tested against a stubbed `npm` on `PATH`
+(`tests/npm-dist-tag-rollback.test.ts`) — no network involved in that suite.
+
+### **[FOUNDER] Rehearsal on the `rc` dist-tag**
+
+The dist-tag-move and `npm deprecate` steps above are rehearsed on the **`rc`** dist-tag before ever
+being needed on `latest` — the same script, pointed at the non-production tag, so a mistake in the
+rehearsal cannot touch real users:
+
+```sh
+node scripts/npm-dist-tag-rollback.mjs --to 0.4.3 --broken 1.0.0-rc.2 --dist-tag rc --execute
+```
+
+This requires npm publish credentials against the real `@getknext/*` registry entries, so it is a
+**founder action**, not something an agent runs. Record the result (the commands the script printed,
+their outcome, and `npm view @getknext/core dist-tags.rc` / `npm view @getknext/core
+versions.1.0.0-rc.2.deprecated` confirming the rehearsal actually landed) on the tracking issue.
 
 ## Upgrade order
 
