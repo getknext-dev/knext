@@ -34,10 +34,17 @@ on:
     paths:
       - '.github/workflows/**'
       # #1352 — actionlint also lints composite action definitions directly.
-      # This repo has none today, but the glob is widened NOW (per the
-      # issue's own "once (or before) a composite action lands") so the gate
-      # does not need a second PR the day one is added.
+      # The glob is widened (per the issue's own "once (or before) a
+      # composite action lands") so the gate does not need a second PR the
+      # day one is added.
       - '.github/actions/**'
+      # #1352 follow-up — this repo's other composite actions, outside
+      # .github/actions: the credential-bearing packages/kn-next-action (the
+      # one workflows actually reference via `uses: ./packages/kn-next-action`)
+      # and the legacy root action.yml (#1598 — kept for backward
+      # compatibility, still linted like any other composite action).
+      - 'packages/kn-next-action/action.yml'
+      - 'action.yml'
       # #1397 review — this gate's own regression suite. General CI skips its
       # real-binary half (no actionlint on PATH there), so a PR touching only
       # the test file (or a local helper it imports) must trigger THIS
@@ -48,6 +55,8 @@ on:
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
+      - 'packages/kn-next-action/action.yml'
+      - 'action.yml'
       - 'tests/actionlint-workflow.test.ts'
 
 permissions:
@@ -122,7 +131,15 @@ jobs:
           base="${BASE_SHA}"
           head="${HEAD_SHA}"
           workflow_globs=('.github/workflows/*.yml' '.github/workflows/*.yaml')
-          action_globs=('.github/actions/**/action.yml' '.github/actions/**/action.yaml')
+          # #1352 follow-up — composite actions this repo actually has, not
+          # only the .github/actions/** convention: packages/kn-next-action
+          # (credential-bearing, referenced via `uses: ./packages/kn-next-action`
+          # in docs-deploy-oke.yml) and the legacy root action.yml (#1598).
+          action_globs=(
+            '.github/actions/**/action.yml' '.github/actions/**/action.yaml'
+            'packages/kn-next-action/action.yml' 'packages/kn-next-action/action.yaml'
+            'action.yml' 'action.yaml'
+          )
           # A push with no prior commit (`before` all-zeros, first push to a
           # new branch) has nothing to diff against — fall back to lint every
           # workflow file rather than silently linting nothing.
@@ -158,10 +175,13 @@ jobs:
           # `uses: ./.github/actions/...`; `uses: './.github/actions/...'`
           # and `uses: "./.github/actions/..."` (both valid YAML) silently
           # escaped detection. `[\"']?` makes the optional quote explicit.
+          # #1352 follow-up — widened beyond `.github/actions/` to also catch
+          # `uses: ./packages/kn-next-action`, the other local composite
+          # action a workflow actually references.
           referencing_workflows=""
           if [ -n "${changed_actions}" ]; then
             set +e
-            referencing_workflows="$(grep -lE "uses:[[:space:]]*[\"']?\./\.github/actions/" .github/workflows/*.y*ml 2>/tmp/actionlint-grep-stderr)"
+            referencing_workflows="$(grep -lE "uses:[[:space:]]*[\"']?\./(\.github/actions/|packages/kn-next-action)" .github/workflows/*.y*ml 2>/tmp/actionlint-grep-stderr)"
             grep_status=$?
             set -e
             # grep exit codes: 0 = matches found, 1 = no matches (fine — no

@@ -87,3 +87,38 @@ updates:
       prefix: 'ci'
     labels:
       - 'reliability'
+
+  # #1583 — packages/kn-next-operator is the only Go module in the repo, and
+  # had NO Dependabot coverage at all: google.golang.org/grpc sat two
+  # versions behind CVE-2026-84304's fix (and one behind CVE-2026-84445)
+  # until main's supply-chain Trivy gate caught it (run 36358447159, fixed by
+  # #1582) instead of a routine bump PR. This entry closes that detection
+  # gap so the NEXT transitive Go CVE is caught here, not there.
+  #
+  # `scripts/dependabot-published-bytes-pause.mjs` (#1663) cannot mis-close a
+  # PR this entry opens: it only closes a Dependabot PR that reaches
+  # `publishScopeDirs()` — derived from `publishablePackages()` over the npm
+  # WORKSPACE manifests (`packages/kn-next`, `packages/lib`, `packages/db`).
+  # `packages/kn-next-operator` has no `package.json` and is not an npm
+  # workspace member (root `package.json`'s `workspaces` globs `apps/*` and
+  # `packages/*`, but membership there still requires a `package.json` to be
+  # picked up), so a `gomod` bump under it is outside that scope by
+  # construction — confirmed by reading `publishScopeDirs`, not assumed.
+  - package-ecosystem: 'gomod'
+    directory: '/packages/kn-next-operator'
+    schedule:
+      interval: 'weekly'
+    # Grouped for the same reason as the github-actions entry above: a
+    # handful of Go modules bump most weeks, and an ungrouped config risks
+    # the same open-pull-requests-limit staleness this file already warns
+    # about for GH Actions.
+    groups:
+      kn-next-operator-gomod:
+        patterns:
+          - '*'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(operator)'
+    labels:
+      - 'operator'
+      - 'reliability'
