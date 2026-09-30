@@ -49,8 +49,10 @@ on:
   # 05:43 UTC — offset from every other nightly's cron in this repo (checked
   # against every `cron:` line under .github/workflows at authoring time) so
   # this doesn't queue behind an unrelated nightly.
+  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '43 5 * * *'
+    - cron: '43 5 * * 0'
   workflow_dispatch: {}
 
 permissions:

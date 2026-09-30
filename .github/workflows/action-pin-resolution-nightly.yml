@@ -57,8 +57,10 @@ on:
   # 05:11 UTC nightly — offset from the compat nightly (03:17) and the docs
   # closure nightly (04:23) so the security-signal jobs don't queue behind
   # each other.
+  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '11 5 * * *'
+    - cron: '11 5 * * 0'
   # Manual re-runs after fixing a pin; the alert job is scheduled-only (below)
   # so a dispatch experiment never files or updates the pinned issue.
   workflow_dispatch: {}

@@ -48,8 +48,10 @@ on:
   # not queue behind each other. #1301: moved from 05:41, which collided
   # (same UTC minute) with image-pin-resolution-nightly.yml (which keeps
   # 05:41 — see docs/ci/capacity-budget.md).
+  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '53 5 * * *'
+    - cron: '53 5 * * 0'
   # Manual re-runs after posting a correction.
   workflow_dispatch: {}
 

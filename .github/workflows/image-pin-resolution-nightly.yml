@@ -43,8 +43,10 @@ name: Operator image pin resolution (nightly)
 on:
   # 05:41 UTC — offset from the action-pin nightly (05:11) so the two
   # supply-chain signals do not queue behind each other.
+  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '41 5 * * *'
+    - cron: '41 5 * * 0'
   # Only the diffs that can introduce a pin. These paths MUST stay in step with
   # `discoverSources()` in scripts/verify-image-pins.mjs, and the claim is now
   # backed rather than asserted: `tests/operator-image-pin-resolution.test.ts`

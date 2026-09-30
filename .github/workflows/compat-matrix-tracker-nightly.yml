@@ -26,8 +26,11 @@ on:
   # not run yet. Past every slot's grace, each night has either landed or is
   # genuinely missing in the audit's own terms. Guarded by
   # tests/compat-credential-alert-wiring.test.ts.
+  #
+  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '53 15 * * *'
+    - cron: '53 15 * * 0'
   workflow_dispatch:
     inputs:
       # Review round 2 (#1300, finding 4) — a manual dispatch is the live
