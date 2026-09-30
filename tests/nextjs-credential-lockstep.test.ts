@@ -600,29 +600,46 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
       expect(shippedMinorPattern('not-a-version')).toBeUndefined();
     });
 
-    it('the public docs plainly explain the scaffold ships a newer Next than the credentialed version, citing the DERIVED minor line', () => {
+    it('when the manifest documents a divergence, the public docs plainly explain the scaffold ships a newer Next than the credentialed version, citing the DERIVED minor line; when credentialedNextRef has caught up to shippedNextPin, they must NOT claim a "newer" release that no longer exists', () => {
+      // rc.2's 16.3.5 re-credential (#1560) closes this divergence entirely
+      // (credentialedNextRef === v + shippedNextPin) — the original version
+      // of this test hardcoded "always diverging" and would have forced the
+      // docs to keep claiming a "newer" release once that stopped being
+      // true. The guard's job is catching SILENT drift, not forcing a false
+      // claim once the two genuinely converge; both directions are checked
+      // below so a future re-divergence still reds this test.
       const manifest = loadManifest();
       const pattern = shippedMinorPattern(manifest.shippedNextPin);
       expect(
         pattern,
         `could not derive a major.minor.x pattern from ${manifest.shippedNextPin}`,
       ).toBeDefined();
+      const diverges = manifest.credentialedNextRef !== `v${manifest.shippedNextPin}`;
 
       const mdxText = readFileSync(COMPAT_MATRIX_MDX_PATH, 'utf8');
-      // Plain-language, no issue/PR/ADR numbers (apps/docs/content-hygiene.test.ts
-      // enforces that repo-wide) — just requires the explanation to exist and to
-      // mention both the "newer" framing and the DERIVED shipped-minor line.
-      expect(mdxText).toMatch(/newer Next\.js release/i);
-      expect(
-        mdxText.includes(pattern as string),
-        `compat-matrix.mdx does not cite ${pattern}`,
-      ).toBe(true);
-
       const mdText = readFileSync(COMPAT_MATRIX_MD_PATH, 'utf8');
-      expect(
-        mdText.includes(pattern as string),
-        `docs/compat-matrix.md does not cite ${pattern}`,
-      ).toBe(true);
+
+      if (diverges) {
+        // Plain-language, no issue/PR/ADR numbers (apps/docs/content-hygiene.test.ts
+        // enforces that repo-wide) — just requires the explanation to exist and to
+        // mention both the "newer" framing and the DERIVED shipped-minor line.
+        expect(mdxText).toMatch(/newer Next\.js release/i);
+        expect(
+          mdxText.includes(pattern as string),
+          `compat-matrix.mdx does not cite ${pattern}`,
+        ).toBe(true);
+        expect(
+          mdText.includes(pattern as string),
+          `docs/compat-matrix.md does not cite ${pattern}`,
+        ).toBe(true);
+      } else {
+        expect(
+          mdxText,
+          'compat-matrix.mdx claims a "newer Next.js release" than the credentialed version, ' +
+            'but the manifest documents no divergence (credentialedNextRef already equals ' +
+            'shippedNextPin) — this claim is now false and must be removed or updated',
+        ).not.toMatch(/newer Next\.js release/i);
+      }
     });
   });
 
