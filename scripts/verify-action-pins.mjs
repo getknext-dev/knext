@@ -267,7 +267,13 @@ export function discoverPinnableFiles(repoRoot) {
       entries = readdirSync(absolute, { withFileTypes: true });
     } catch (error) {
       // See the FAILS CLOSED note above the function: an unreadable directory
-      // must red the whole scan, not silently shrink it.
+      // must red the whole scan, not silently shrink it. Kept as its own
+      // defense-in-depth catch even though `realpathSync` above already
+      // requires the SAME permission this runtime needs for readdirSync (a
+      // directory readable enough to resolve is, under bun, readable enough
+      // to list — measured, not assumed) — this branch is what protects the
+      // property if that ever stops being true (a looser realpath, a
+      // different runtime, an ACL-only restriction realpath does not check).
       throw new Error(
         `discoverPinnableFiles: cannot read directory "${relative || '.'}": ` +
           `${error instanceof Error ? error.message : error}`,
