@@ -901,11 +901,13 @@ describe('#1641 — an rcTag change needs the tag on the remote, reachable from 
 });
 
 describe('the pin file itself documents rcBumpMarker (#1302)', () => {
-  it('.github/compat-credential-ref.json parses, and once v1.0.0-rc.1 is live the window is frozen (#1529)', () => {
+  it('.github/compat-credential-ref.json parses, and the window is frozen on the live RC tag (#1529, #1560)', () => {
     const pin = JSON.parse(readFileSync(resolve(REPO_ROOT, PIN_FILE), 'utf8'));
-    // rc.1 (#1529) set rcTag to a real RC tag, so the window is now live on
-    // `main` — this documents the post-cut state, not the pre-cut one.
-    expect(pin.rcTag).toBe('v1.0.0-rc.1');
+    // rc.1 (#1529) set rcTag to a real RC tag, so the window went live on
+    // `main`; rc.2 (#1560) re-pins it to the next RC tag once that tag
+    // exists — this documents whichever post-cut state is live, not the
+    // pre-cut one.
+    expect(pin.rcTag).toBe('v1.0.0-rc.2');
     expect(isFrozen(pin)).toBe(true);
   });
 });

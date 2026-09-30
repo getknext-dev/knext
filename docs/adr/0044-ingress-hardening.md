@@ -383,3 +383,80 @@ Amendment 1's additivity note).
 the app-metrics port number moved. The Amendment-1 kind+Calico enforcement drill
 (`test/networkpolicy-enforcement-drill.sh`) is repointed to 9464 and must be re-run to remain the
 enforcement evidence; a drill run recorded against 9091 no longer proves the shipped policy.
+
+## Amendment 6 (2026-09-30): Option C covers the standalone build — every target is capped
+
+**Status of this amendment: ACCEPTED** (v1.0 release plan, Phase 1 — lands before the rc.2 tag).
+
+### The gap Amendment 4 left, named
+
+Amendment 4 closed the dated exception on the premise of ADR-0048 — "vinext is now the only
+available builder … the compiled binary's entry *is* the request path". That premise has since
+been reversed for v1.0: the credential is the **node/bun × turbopack/webpack** standalone matrix,
+and on that build `node-server.ts` still spawns Next's own `server.js`, which owns `$PORT`. srvx is
+not on that path, so Amendment 4's one-option-key cap never reached the **default** build. The
+exception was closed while the default build carried no body cap at all. This amendment closes
+that gap. (Amendment 4's text is left as written; this is the correction.)
+
+### Options considered
+
+| | Option | Covers node + bun standalone (incl. compiled)? | New hop / port / child? | Cold-start cost | Verdict |
+|---|---|---|---|---|---|
+| C1 | Decision 4's original shape: supervisor-owned front socket on `$PORT`, loopback-forward to `server.js` | Yes, if re-implemented inside the compiled exec too | **Yes** — every request pays a proxy hop; needs readiness-gates-on-listen and a two-stage drain | New listener + a proxy on the hot path | **Rejected**: most surface, most risk, and the compiled exec has no supervisor to host it |
+| C2 | A Next.js hook | — | — | — | **Not available**: Next exposes `serverActions.bodySizeLimit` (Server Actions only) and `proxyClientMaxBodySize` (proxy buffering only); nothing caps route-handler bodies |
+| C3 | **Dependency-free CJS preload in the server process** (`request-body-cap.cjs`), the same mechanism as the shipped `cache-control-normalize.cjs` / `bun-keepalive-guard.cjs` preloads | **Yes** — `node-server.ts` passes it to both a Node and a Bun child; `standalone-compile.mjs` compiles it into the executable's preload list | **No** | One module load before `server.js`; nothing per request beyond a counter | **Accepted** |
+
+### What shipped (C3)
+
+- The preload wraps `http.Server.prototype.emit` and gates the `'request'` event before any
+  listener — Next's `createServer(requestListener)` included — so it covers every server the
+  process creates. `'upgrade'` (WebSocket/101) is a different event and is never touched; response
+  streaming (RSC/SSE) is unaffected because only the request side is counted.
+- **Counted bytes, never `Content-Length` alone**: a declared length above the cap is refused
+  before the handler runs; otherwise every chunk is counted at the request stream's intake (its
+  `push`, which both Node's parser and Bun's node:http layer feed — a `'data'` listener would steal
+  the body). Measured on Node 24 and Bun 1.4.2: under/exact → 200, declared-over → 413,
+  chunked-over with no length → 413 mid-stream.
+- **On exceed**: `413` + `Connection: close`; the handler's body stream is errored so a pending
+  `req.json()` rejects rather than resolving truncated (no partial processing). The remaining body
+  is **discarded, never buffered**, for a bounded **2 s linger** (nginx's `lingering_close` shape)
+  and then the socket is destroyed. The linger is measured, not decorative: closing immediately
+  sends a TCP reset over unread bytes: across Node and Bun (as server and as client), every
+  client still uploading a multi-megabyte body saw ECONNRESET/EPIPE, and 28/40 lost the `413`
+  itself to the reset; with the linger, 40/40 read the `413` and none saw a reset. If the handler already began its response, the socket is destroyed at once.
+- **Same knob, same default, same semantics as Amendment 4**: `KNEXT_MAX_REQUEST_BYTES`, 8 MiB, `0`
+  uncaps loudly, invalid → default + warning. A lockstep test pins the resolver to
+  `runtime-contract.mjs`'s. Users set it through `knext.config.ts`'s existing `env` map or
+  `spec.env` — still **no CRD field**, for Amendment 4's ADR-0017/#548 reasons.
+- **Graceful shutdown / queue-proxy**: no new listener means no readiness or drain change; a
+  refused connection can hold `server.close()` for at most the 2 s linger, well inside the
+  `SHUTDOWN_GRACE_MS` hard cap; the queue-proxy still enforces concurrency and `timeoutSeconds` in front, and the cap
+  bounds bytes behind it on both ingress paths, including the co-resident direct dial.
+
+### Honest residuals
+
+- **The compat credential measures this control — no harness change needed.** `scripts/e2e-deploy.sh`
+  (frozen for the live window, and untouched here) boots the node cells **through the shipped
+  `node-server` supervisor** and the bun cells as the **compiled executable** built by the packed
+  `standalone-compile.js` — both from the packed tarball, so both load the preload. The official
+  deploy suite's only request bodies above 8 MiB are `client-max-body-size` (`skipDeployment: true`
+  — "deployed environment has its own configured limits") and `middleware-fetches-with-body`'s
+  10 MB case, which **expects** a `413`. Branch dispatches of all four cells are recorded on the PR.
+- **Server Actions are capped by Next first.** `serverActions.bodySizeLimit` (1 MB default) binds
+  before the 8 MiB platform cap, so an app that uploads through a Server Action — the reference
+  app does — must raise Next's limit to accept larger files, and the platform cap too above 8 MiB.
+- `Expect: 100-continue`: Node answers `100 Continue` before the `'request'` event, so a client
+  that waits for it will send an oversized body before receiving the `413`; the connection is
+  still closed and the body never reaches a handler.
+- The supervisor's own `:9464` listener is not behind this preload (it never reads a request body).
+
+### Guards
+
+`packages/kn-next/src/__tests__/request-body-cap.test.ts` (behavioural under **both** Node and Bun
+over raw sockets, plus the resolver lockstep and wiring of all three launch paths) and the
+shipped-bundle case in `apps/file-manager/sigterm-drain-e2e.test.ts` (the published supervisor →
+child, `413` declared and chunked, exact cap passes) and a boot of the **compiled** self-contained
+executable in `apps/file-manager/self-contained-e2e.test.ts` (`413` over a 4 KiB cap, pass under
+it — the embed proved behaviourally, not by a source scan). Mutation-proved by
+`scripts/mutation-prove-standalone-bytecap.mjs` (13/13 plus a canary, on the shared guard-prover driver); the compiled-exec check was
+mutation-proved once by hand (dropping the preload from the compile list reds it).

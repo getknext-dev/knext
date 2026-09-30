@@ -380,62 +380,34 @@ interface KnextQuarantine {
  * `upstreamSkipRevertPR` marks a later upstream REVERT of that skip (the file is
  * live again at canary) — the ledger must then cite BOTH, and may not claim the
  * file is still skipped.
+ *
+ * GRADUATED, empty as of rc.2's 16.3.5 re-credential (#1560, 2026-09-30), but
+ * NOT all 12 former members cleared the same way. All 12 were dispatched at
+ * v16.3.5 on the same throwaway un-exclude branch (all four credential
+ * cells, node/bun x turbopack/webpack, runs 36638853381/36638856495/
+ * 36638859599/36638862596). 8 of them ran and passed clean on first attempt
+ * (no retry) on all four cells, backed by the root-cause fix
+ * (vercel/next.js#95301), confirmed via the GitHub compare API to be an
+ * ancestor of v16.3.5 but not of v16.2.12 — those 8 cleared BECAUSE the fix
+ * landed. The remaining 4 — prefetch-layout-sharing (#92198),
+ * segment-cache-refresh (#92163), segment-cache-per-page-dynamic-stale-time
+ * (#92162), client-cache.parallel-routes (#92195) — are the four files this
+ * comment block already documents (above) as STILL upstream suite-skipped at
+ * canary (unlike cached-navigations/#92199, whose skip was reverted): they
+ * cleared because upstream's `describe.skip` means they did not execute at
+ * v16.3.5, not because they passed. All 12 are removed from
+ * $knextQuarantines and rules.exclude in the same PR regardless — a
+ * suite-skipped file needs no per-case ledger entry either — but "cleared"
+ * covers two different reasons here and this comment no longer collapses
+ * them into one "0 failed" claim. Every test below is now VACUOUSLY true (an
+ * empty table has no member to violate any of these checks) rather than
+ * deleted, so a future re-quarantine into this family is still caught by the
+ * same guards.
  */
 const FAMILY_FILE_QUARANTINES: Record<
   string,
   { observedRuns: string[]; upstreamSkipPR?: number; upstreamSkipRevertPR?: number }
-> = {
-  'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts': {
-    observedRuns: ['28593534713', '28590478386'],
-  },
-  'test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts': {
-    observedRuns: ['28593534713', '28578203671'],
-    upstreamSkipPR: 92198,
-  },
-  'test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts': {
-    observedRuns: ['28593534713'],
-    upstreamSkipPR: 92163,
-  },
-  'test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts': {
-    observedRuns: ['28596005486', '28590478386'],
-  },
-  'test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts': {
-    observedRuns: ['28578203671', '28596005486', '28607626868', '28700392845'],
-    upstreamSkipPR: 92162,
-  },
-  'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
-    observedRuns: ['28578203671', '28596005486', '28590478386', '28607626868'],
-  },
-  // Skip-then-REVERT history: #92199 (2026-04-15) it.skip'd all its cases as
-  // flaky, #93798 (2026-05-13) reverted — live at canary. The revert PREDATES
-  // the #95301 root-cause fix (2026-07-02) and our v16.2.0 pin predates both,
-  // so the race is un-fixed in our lane; membership rests on #95301 + knext's
-  // own final-post-retry evidence.
-  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
-    observedRuns: ['28618585946', '28612654960'],
-    upstreamSkipPR: 92199,
-    upstreamSkipRevertPR: 93798,
-  },
-  // #214: the newest member — final-past-retries in run 28701712403 (shard 3/16),
-  // a DIFFERENT case hung 60s on each of the 3 attempts (test.ts:232, :280, :57)
-  // while 9/11 cases passed per attempt.
-  'test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts': {
-    observedRuns: ['28701712403'],
-  },
-  'test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts': {
-    observedRuns: ['28597872225'],
-    upstreamSkipPR: 92195,
-  },
-  'test/e2e/app-dir/app-prefetch/prefetching.test.ts': {
-    observedRuns: ['28597872225', '28593534713', '28590478386'],
-  },
-  'test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts': {
-    observedRuns: ['28601386408', '28593534713'],
-  },
-  'test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts': {
-    observedRuns: ['28612654960', '28607626868'],
-  },
-};
+> = {};
 
 // Per-case quarantines OUTSIDE the family keep the original §c.1 mechanics:
 // exact observed cases only, never whole files.

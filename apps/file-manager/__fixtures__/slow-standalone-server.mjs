@@ -11,6 +11,8 @@
  *    `LISTENING:<the port actually bound>` — the socket's own address, never the
  *    requested value, so the spec can never probe a port this process is not on.
  *  - GET /slow holds the request open for ~1.5s, then responds 200 "drained".
+ *  - POST /echo-length buffers the request body and responds `got <bytes>`
+ *    (the request-body cap case in sigterm-drain-e2e.test.ts).
  *  - On SIGTERM it STOPS accepting new connections but WAITS for in-flight
  *    requests to finish (server.close callback) before exiting 0 — i.e. it
  *    drains. A request that was already in flight when SIGTERM arrived must
@@ -36,6 +38,18 @@ const server = http.createServer((req, res) => {
       res.end('drained');
       inFlight--;
     }, 1500);
+    return;
+  }
+  if (req.url === '/echo-length') {
+    // Buffers the body the way a route handler's `await req.json()` does, so the
+    // request-body cap e2e can prove an oversized body never reaches a handler.
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(`got ${Buffer.concat(chunks).length}`);
+    });
+    req.on('error', () => {});
     return;
   }
   res.writeHead(200, { 'content-type': 'text/plain' });

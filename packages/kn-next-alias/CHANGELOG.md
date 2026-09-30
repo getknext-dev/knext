@@ -1,5 +1,18 @@
 # kn-next
 
+## 1.0.0-rc.2
+
+### Patch Changes
+
+- 7661878: Rewrite package READMEs for v1.0 release: concise one-paragraph introductions, quickstart commands that work, supported platforms table (Node/Bun × Turbopack/Webpack, with the Next.js versions on the compatibility page), and clear links to docs, compatibility, security, and contributing pages. Remove internal references (ADR numbers, issue/PR numbers) to prepare for npm publication.
+- Updated dependencies [7661878]
+- Updated dependencies [d845497]
+- Updated dependencies [26807fc]
+- Updated dependencies [28f6d66]
+- Updated dependencies [e36eb32]
+- Updated dependencies [7c9576d]
+  - @getknext/core@1.0.0-rc.2
+
 ## 1.0.0-rc.1
 
 ### Patch Changes

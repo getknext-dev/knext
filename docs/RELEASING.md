@@ -172,6 +172,49 @@ literal bytes uploaded to npm are not (and cannot easily be, without forking tha
 about-to-publish bytes are byte-identical to the audited/diffed ones, rather than literally
 forwarding them.
 
+### PR-time: published bytes stay frozen for the whole life of a credential window
+
+The GA-vs-rc gate above catches a mismatch at the GA cut — 14 nights after the mismatch was actually
+introduced. `.github/workflows/published-bytes-freeze-guard.yml` catches it at PR time instead:
+while `.github/compat-credential-ref.json`'s `rcTag` is set, every PR that touches a path able to
+reach a published package (`scripts/lib/published-bytes-freeze-check.mjs`'s
+`publishScopeDirs` — derived from the same publishable-workspace-package list the GA-vs-rc gate
+uses, plus a small, documented set of root build-input files: `package.json`, `bun.lock`,
+`.changeset/config.json`, `scripts/rewrite-workspace-ranges.mjs`) is packed at its own merge ref and
+diffed against the pinned rc tag's tarballs, using the **exact same comparison rules**
+(`scripts/ga-tarball-diff.mjs`, reused as-is). A PR that touches none of that scope — the common
+case — exits in milliseconds, before anything is packed.
+
+The "is a window open" question is answered from the pin **as of this PR's base commit**, never its
+head — mirroring `compat-credential-freeze-guard.yml`'s own rule for `rcTag`/`rcBumpMarker` — so a
+PR cannot skip the check by clearing `rcTag` in the same diff that also changes published bytes; the
+window was still open at base, so the check still runs.
+
+An **intentional** rc.N+1 — real content is expected to differ from the currently-pinned rc — is
+authorized the same way `rcBumpMarker` authorizes touching the credential harness mid-window: add a
+dated, reviewed `publishedBytesBumpMarker: { date, expires, reason }` to the pin file in the same
+PR (capped at 14 days from today, same rule as `rcBumpMarker`), and it is honoured only when THIS PR
+introduces it, not when it is inherited from a marker already on `main`. The check then skips itself
+for that PR; once the real content lands and a new `vX.Y.Z-rc.N+1` tag is cut and pinned, later PRs
+are diffed against the new baseline.
+
+This check fails closed — never silently skips — when the pinned `rcTag` does not resolve to a real
+git tag in the checkout, and it is not yet a required check (same status as the sibling
+`compat-credential-freeze-guard.yml`; flipping that is a branch-protection change a founder makes).
+
+Dependabot is paused for the same window by a companion workflow
+(`.github/workflows/dependabot-published-bytes-pause.yml`): any `dependabot[bot]` PR whose content
+would be disallowed by the check above (a dependency bump touching a published package's manifest
+during an open, un-overridden window) is auto-closed with an explanatory comment, using the exact
+same scope/override decision. `.github/dependabot.yml` has no `npm`/`bun` ecosystem entry today (only
+`github-actions`), so this is a no-op in practice until one is added — and correct from the day one
+is, with no further edit needed. This workflow triggers on `pull_request_target`, not plain
+`pull_request` — GitHub forces `GITHUB_TOKEN` to read-only for a `dependabot[bot]`-authored
+`pull_request` event regardless of the workflow's own `permissions:` block, which would make `gh pr
+close` fail every time. It never checks out or executes the PR's own head content: the changed-file
+list comes from the GitHub API, and the PR's pin-file content is read as a git blob, never a
+checkout.
+
 ## First publish — DONE (2026-07-26)
 
 **The first npmjs publish has happened.** Verified against the registry:

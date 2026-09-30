@@ -1,46 +1,45 @@
 # @getknext/lib
 
-Shared runtime helpers for Next.js apps deployed with **knext** on Knative.
-
-Provides small, focused clients and utilities the knext runtime uses:
-
-- **Clients** — pooled Postgres, Redis, and object-storage (MinIO/S3) clients.
-- **Logger** — a structured (pino) logger.
-- **Health** — readiness/liveness health checks.
+Runtime helpers and clients for Next.js apps deployed with knext on Knative. Provides pooled Postgres (writer and read-only), Redis, and object-storage clients optimized for scale-to-zero, plus structured logging and health checks.
 
 ## Install
 
 ```bash
-npm i @getknext/lib
+npm install @getknext/lib
 ```
 
 ## Usage
 
-```ts
+Import the clients you need:
+
+```typescript
 import { getDbPool, getDbPoolRO, getMinioClient } from '@getknext/lib/clients';
 import { logger } from '@getknext/lib/logger';
 import { checkDeepHealth } from '@getknext/lib/health';
 ```
 
-### Postgres pools (writer + read-only)
+- **`getDbPool()`** — writer pool for writes and read-your-write queries over `DATABASE_URL`.
+- **`getDbPoolRO()`** — read-only pool over `DATABASE_URL_RO` for analytics and fan-out reads.
+- **`getMinioClient()`** — S3-compatible object storage client.
+- **`logger`** — structured logging with pino.
 
-- `getDbPool()` — the writer pool over `DATABASE_URL` (read-your-writes,
-  single-writer). Small bounded defaults tuned for scale-to-zero (`max 5`,
-  idle `10s` < the gateway's 60s idle, connect `15s` ≥ the ~2.5s cold-wake).
-  Override with `DB_POOL_MAX` / `DB_POOL_IDLE_TIMEOUT_MS` /
-  `DB_POOL_CONNECT_TIMEOUT_MS`.
-- `getDbPoolRO()` — the read-only pool over `DATABASE_URL_RO` (the scale-zero-pg
-  RO gateway, **bounded-staleness ~9s, no read-your-writes**). Returns `null`
-  when `DATABASE_URL_RO` is unset. Mirrors the writer defaults; override with
-  `DB_POOL_RO_MAX` / `DB_POOL_RO_IDLE_TIMEOUT_MS` / `DB_POOL_RO_CONNECT_TIMEOUT_MS`.
+For typed database queries, see [`@getknext/db`](../db).
 
-Reads are an **explicit opt-in** — nothing is auto-routed. Both pools drain on
-SIGTERM via `closeDbPool()` / `closeDbPoolRO()`. For typed schema, migrations,
-and drizzle queries over these pools, use [`@getknext/db`](../db).
+## Supported platforms
 
-## Documentation
+| Runtime | Turbopack | Webpack |
+|---------|-----------|---------|
+| Node.js | ✓ | ✓ |
+| Bun     | ✓ | ✓ |
 
-Full guides and configuration reference: <https://knext.dev>
+See the [compatibility page](https://knext.dev/docs/compat-matrix) for supported Next.js versions and runtime/builder coverage.
+
+## Learn more
+
+- [Documentation](https://knext.dev) — guides and configuration reference
+- [Compatibility](https://knext.dev/docs/compat-matrix) — supported runtimes and Next.js versions
+- [Security](https://knext.dev/docs/security) — threat model and hardening
+- [Contributing](https://github.com/getknext-dev/knext/blob/main/CONTRIBUTING.md) — report issues and contribute
 
 ## License
 

@@ -339,6 +339,9 @@ export interface KnativeNextConfig {
      * directory on the first image request); the other targets only record it
      * in the build log for now. It is opt-in and stays opt-in (ADR-0060), so
      * leaving it unset keeps the build output byte-identical.
+     *
+     * @experimental This mode's on-disk shape is still settling; it may change
+     * in a minor release. See PUBLIC_API.md's "Experimental surfaces" section.
      */
     selfContained?: boolean;
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services

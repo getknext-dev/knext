@@ -1,7 +1,7 @@
 {
   "name": "kn-next",
-  "version": "1.0.0-rc.1",
-  "description": "Alias package: makes `npx kn-next` work. All functionality lives in @getknext/core \u2014 this package only forwards to its CLI.",
+  "version": "1.0.0-rc.2",
+  "description": "Alias package: makes `npx kn-next` work. All functionality lives in @getknext/core — this package only forwards to its CLI.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

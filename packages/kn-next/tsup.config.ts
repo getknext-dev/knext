@@ -103,7 +103,7 @@ export default defineConfig([
       // The compiled standalone-on-Bun build (`build: turbopack` + `runtime:
       // bun`): `next build`'s server.js -> a bytecode single executable.
       // Spawned as a SCRIPT (`bun run …`) like vinext-compile, for the same
-      // reason; it resolves its two preloads (the .cjs entries below) beside
+      // reason; it resolves its preloads (the .cjs entries below) beside
       // itself in dist/adapters.
       'adapters/standalone-compile': 'src/adapters/standalone-compile.mjs',
       // The Bun.serve keep-alive guard (the vinext-lane sibling of the node
@@ -248,6 +248,9 @@ export default defineConfig([
       'adapters/cache-control-normalize': 'src/adapters/cache-control-normalize.cjs',
       // #188 — Bun ≤1.3.x keep-alive mitigation (bun lane only; Node-inert).
       'adapters/bun-keepalive-guard': 'src/adapters/bun-keepalive-guard.cjs',
+      // ADR-0044 Option C — the in-process request-body byte cap for the
+      // standalone server (node AND bun; compiled into the standalone exec).
+      'adapters/request-body-cap': 'src/adapters/request-body-cap.cjs',
       // #188 path 2 — opt-in edge-sandbox fetch instrumentation (inert unless
       // KNEXT_SANDBOX_FETCH_DEBUG=1; dispatch-only compat investigation lane).
       'adapters/sandbox-fetch-debug': 'src/adapters/sandbox-fetch-debug.cjs',
