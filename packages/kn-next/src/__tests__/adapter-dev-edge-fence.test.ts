@@ -17,7 +17,6 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -57,10 +56,21 @@ const REPO_ROOT = resolve(here, "../../../..");
 // coding agent (`node_modules/next/dist/server/lib/generate-agent-files.js`);
 // running it with FIXTURE as cwd left those files untracked in the working
 // tree on every run under an agent (#1505/#1658). The live run below always
-// happens in a throwaway copy (`WORKDIR`) instead.
+// happens in a throwaway copy (`workDir`) instead.
 const FIXTURE = join(here, "fixtures", "dev-edge-fence");
 const ADAPTER_SRC = resolve(here, "../adapters/next-adapter.ts");
 const NEXT_BIN = resolve(here, "../../node_modules/.bin/next");
+// `workDir` MUST live inside `packages/kn-next/` (never `os.tmpdir()`): `next`
+// resolves its OWN dist modules by walking cwd's ancestor directories for a
+// `node_modules/next` — a tmpdir outside the repo has no such ancestor and
+// `next dev` fails closed with `MODULE_NOT_FOUND: next/dist/pages/_app`
+// (round-2 review finding). A sibling of the tracked fixture, under this
+// same `fixtures/` dir, walks straight up to `packages/kn-next/node_modules`,
+// which already has `next` installed as a devDependency. Gitignored in the
+// repo root (`.dev-edge-fence-work-*/`) so a leftover from a killed run is
+// never mistaken for a tracked file.
+const WORKDIR_PARENT = join(here, "fixtures");
+const WORKDIR_PREFIX = join(WORKDIR_PARENT, ".dev-edge-fence-work-");
 
 /** Relative paths of every file under `dir`, sorted — used to prove `FIXTURE` is untouched. */
 function listFiles(dir: string): string[] {
@@ -178,7 +188,7 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         // of the fixture, never the tracked one, and the tracked fixture's
         // file listing is asserted unchanged at the end of this test.
         const fixtureListingBefore = listFiles(FIXTURE);
-        workDir = mkdtempSync(join(tmpdir(), "knext-dev-edge-fence-"));
+        workDir = mkdtempSync(WORKDIR_PREFIX);
         cpSync(FIXTURE, workDir, { recursive: true });
 
         await bundleAdapter(workDir);
