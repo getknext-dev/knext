@@ -2199,8 +2199,7 @@ function walk(code, st, ctx) {
         for (const t of targets) classifyTarget(t, { producerText, clause: text, st, ctx });
       }
 
-      const patchWhy = classifyPatchLike(ws, st, ctx);
-      if (patchWhy) offend(st, patchWhy, text);
+      classifyPatchLike(ws, st, ctx, text);
     }
   }
 }
@@ -2454,6 +2453,40 @@ function classifyTarget(t, { producerText, clause, st, ctx }) {
 }
 
 /**
+ * Reports a `kubectl patch`/`set env` value's taint the SAME way
+ * `reportStdinApply` reports a stdin-apply's: `STATEMENT_ALLOWLIST`-aware, so
+ * the one existing mechanism this module uses to pin "a value from an
+ * in-cluster endpoint, interpolated into content applied to the SAME
+ * cluster" (byte-exact statement text, every reachable source named and
+ * matched) covers this offense class too, rather than growing a second,
+ * unreviewed one. `val` is the specific interpolated value (the patch body,
+ * or a `set env` value) whose sources are traced against the entry's
+ * `sources` list; `clause` is the whole statement, used as the pin key.
+ */
+function reportPatchTaint(st, why, clause, val) {
+  const stmt = statementText(clause, st);
+  const entry = STATEMENT_ALLOWLIST.find((e) => e.file === st.file && e.statement === stmt);
+  if (entry) {
+    const found = new Set();
+    taintSources(clauseWithBodies(val, st), st, 0, { out: found, vars: new Set(), fns: new Set() });
+    const allowed = new Set(entry.sources);
+    const extra = [...found].filter((x) => !allowed.has(x));
+    if (extra.length > 0) {
+      offend(
+        st,
+        `${why}; allowlisted statement '${entry.id}' interpolates a value from an unpinned source: ${extra.join(' ; ')}`,
+        clause,
+      );
+      return;
+    }
+    for (const x of found) countAllowHit(st, `${entry.id}::${x}`);
+    countAllowHit(st, entry.id);
+    return;
+  }
+  offend(st, why, clause);
+}
+
+/**
  * `kubectl patch … -p/--patch <body>` and `kubectl … set env RESOURCE
  * KEY=VALUE …` mutate a live cluster resource with a value the shell hands
  * them directly — no `-f` manifest, so `applyTargets`/`classifyTarget` never
@@ -2462,7 +2495,7 @@ function classifyTarget(t, { producerText, clause, st, ctx }) {
  * `--patch-file <path>` is judged like any other applied file: a network-
  * tainted, unverified path is an offender.
  */
-function classifyPatchLike(ws, st, ctx) {
+function classifyPatchLike(ws, st, ctx, clause) {
   const u = ws.map(unquote);
   const patchIdx = u.indexOf('patch');
   if (patchIdx !== -1) {
@@ -2471,13 +2504,19 @@ function classifyPatchLike(ws, st, ctx) {
       if (w === '-p' || w === '--patch') {
         const val = unquote(ws[++k] ?? '');
         const why = textIsNetwork(val, st, ctx.depth + 1);
-        if (why) return `kubectl patch body carries network content (${why})`;
+        if (why) {
+          reportPatchTaint(st, `kubectl patch body carries network content (${why})`, clause, val);
+          return;
+        }
         continue;
       }
       const m = w.match(/^-p=(.*)$/) ?? w.match(/^--patch=(.*)$/);
       if (m) {
         const why = textIsNetwork(m[1], st, ctx.depth + 1);
-        if (why) return `kubectl patch body carries network content (${why})`;
+        if (why) {
+          reportPatchTaint(st, `kubectl patch body carries network content (${why})`, clause, m[1]);
+          return;
+        }
         continue;
       }
       let file = null;
@@ -2487,7 +2526,11 @@ function classifyPatchLike(ws, st, ctx) {
       if (file) {
         const c = canonical(file, st.vars);
         if (isTaintedPath(c, st) && !verificationCovers(c, st))
-          return `kubectl --patch-file names a network-fetched file that was not checksum-verified (${c})`;
+          offend(
+            st,
+            `kubectl --patch-file names a network-fetched file that was not checksum-verified (${c})`,
+            clause,
+          );
       }
     }
   }
@@ -2498,10 +2541,15 @@ function classifyPatchLike(ws, st, ctx) {
       const m = w.match(/^[A-Za-z_][\w.-]*=(.*)$/s);
       if (!m) continue;
       const why = textIsNetwork(m[1], st, ctx.depth + 1);
-      if (why) return `kubectl set env value carries network content (${why})`;
+      if (why)
+        reportPatchTaint(
+          st,
+          `kubectl set env value carries network content (${why})`,
+          clause,
+          m[1],
+        );
     }
   }
-  return null;
 }
 
 function heredocExpansions(body) {

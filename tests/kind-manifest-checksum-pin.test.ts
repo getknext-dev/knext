@@ -256,36 +256,60 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
   });
 
   /**
-   * #1466.3 (`kubectl patch -p`) surfaced a REAL, previously-invisible finding
-   * on `main`: `packages/scale-zero-pg/deploy/provision-app.sh` patches a
-   * bookkeeping ConfigMap with a value (`$tl`, a timeline id) whose taint
-   * chain runs through this scanner's existing "any curl output is network
-   * content, no loopback carve-out" rule — the same PS()/curl-to-the-pod's-
-   * own-pageserver pattern `STATEMENT_ALLOWLIST` already covers for a THROW-
-   * AWAY drill cluster elsewhere in this package, but here in a break-glass
-   * PRODUCTION provisioning script. Whether that is safe (an in-cluster,
-   * self-managed pageserver's own timeline id, versus an externally-supplied
-   * value) is a judgment call for a human security review, not something an
-   * agent should silently allowlist away. Listed here, byte-exact, so it is
-   * neither hidden nor silently dropped if the statement changes — narrowing
-   * the tree-wide assertion below only for THESE four exact strings.
+   * #1466.3 (`kubectl patch -p`) surfaced a REAL, previously-invisible
+   * finding on `main`: `packages/scale-zero-pg/deploy/provision-app.sh`
+   * patches a bookkeeping ConfigMap with a value (`$patch_body`, built from
+   * `$tl`, a timeline id) whose taint chain runs through this scanner's
+   * existing "any curl output is network content, no loopback carve-out"
+   * rule. The underlying INJECTION VULNERABILITY IS FIXED: `$tl` is now
+   * validated with a strict `case`-pattern match (32 lowercase/uppercase hex
+   * chars, matching the `skpresent` candidate list's own
+   * `grep -E '^[0-9a-fA-F]{32}$'` shape, but done as a `case` match on the
+   * shell VALUE rather than a `grep` pipeline — a `grep` line-anchored
+   * `^...$` is satisfiable by any ONE line of a multi-line value, so a
+   * newline-embedding `$tl` would defeat it; `case` matches the WHOLE
+   * parameter value, newlines included) before either function builds a
+   * patch body, and the body itself is built with `python3 -c
+   * '...json.dumps(...)'`, never raw string interpolation, so it can no
+   * longer carry injected JSON/JSONPatch structure either way (see
+   * `reclaim_tl_valid`, `record_reclaim_pending`, `clear_reclaim_pending`;
+   * proven by new red/green fixtures in
+   * `packages/scale-zero-pg/deploy/test_provision-app.sh`).
+   *
+   * What remains here is NOT the vulnerability — it is a SCANNER LIMITATION:
+   * this module tracks shell variables in a FLAT, whole-file namespace with
+   * no per-function scoping, so tracing `$patch_body` -> `$tl` walks every
+   * OTHER local variable named `tl` (and, through `positionalSources`'
+   * substring-based "owner" search over `$1`-style parameter writes, several
+   * unrelated variables in unrelated functions too) across this large,
+   * multi-function script, rather than just the `local tl="$1"` in scope
+   * here. `STATEMENT_ALLOWLIST` (the scanner's own byte-exact,
+   * source-pinned carve-out, already used 4x in this package for the
+   * structurally identical "in-cluster curl value applied within the same
+   * cluster" pattern) was evaluated and rejected as the fix: pinning came
+   * out to ~30 sources spanning functions with no relationship to timeline
+   * reclamation, which is not a reviewable list, just enumerated scanner
+   * noise. Closing this for real needs function-local variable scoping in
+   * the scanner (TODO, new issue) — tracked here, not silently re-hidden
+   * behind a broader allowlist entry. Listed byte-exact so it is neither
+   * hidden nor silently dropped if the statement changes.
    */
-  const PENDING_HUMAN_REVIEW = [
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (variable $tl holds network content): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "merge" "-p" "{"data":{"$tl":"safekeepers=$ords recorded=$ts"}}"',
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (variable $tl holds network content): K patch configmap "$RECLAIM_CM" --type merge     -p "{\\"data\\":{\\"$tl\\":\\"safekeepers=$ords recorded=$ts\\"}}" >/dev/null 2>&1',
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (variable $tl holds network content): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "json" "-p" "[{"op":"remove","path":"/data/$tl"}]"',
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (variable $tl holds network content): K patch configmap "$RECLAIM_CM" --type json     -p "[{\\"op\\":\\"remove\\",\\"path\\":\\"/data/$tl\\"}]" >/dev/null 2>&1',
+  const SCANNER_SCOPE_LIMITATION = [
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "merge" "-p" "$patch_body"',
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): K patch configmap "$RECLAIM_CM" --type merge -p "$patch_body" >/dev/null 2>&1',
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "json" "-p" "$patch_body"',
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): K patch configmap "$RECLAIM_CM" --type json -p "$patch_body" >/dev/null 2>&1',
   ];
 
   it('the real tree has NO unsafe apply anywhere (every script, every workflow job)', () => {
-    const offenders = scanRealTree().offenders.filter((o) => !PENDING_HUMAN_REVIEW.includes(o));
+    const offenders = scanRealTree().offenders.filter((o) => !SCANNER_SCOPE_LIMITATION.includes(o));
     expect(offenders).toEqual([]);
   });
 
-  it('every PENDING_HUMAN_REVIEW entry is still exactly what the scanner reports (nothing drifted underneath it)', () => {
+  it('every SCANNER_SCOPE_LIMITATION entry is still exactly what the scanner reports (nothing drifted underneath it)', () => {
     const all = scanRealTree().offenders;
-    for (const entry of PENDING_HUMAN_REVIEW) expect(all).toContain(entry);
-    expect(all.length).toBe(PENDING_HUMAN_REVIEW.length);
+    for (const entry of SCANNER_SCOPE_LIMITATION) expect(all).toContain(entry);
+    expect(all.length).toBe(SCANNER_SCOPE_LIMITATION.length);
   });
 
   // ---- bypass class 1: fetch spellings and one-line chains ---------------
