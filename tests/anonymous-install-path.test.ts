@@ -131,6 +131,54 @@ describe('discoverInstallUrl — resolved from the docs, never a second copy', (
   });
 });
 
+// `--print-url` (#1552) is the wiring the published-bundle-on-kind nightly
+// consumes: `INSTALL_URL=$(node scripts/verify-anonymous-install.mjs --print-url)`.
+// It has to be exercised as a real subprocess — `main()` is the `c8 ignore`d
+// CLI wrapper, deliberately not exported, so a unit test cannot call it
+// directly — and it has to prove the mode makes NO network request, or the
+// discovery step this nightly runs BEFORE bringing up a cluster would itself
+// depend on the network being reachable for a reason that is not a finding.
+describe('verify-anonymous-install.mjs --print-url — discovery only, no network', () => {
+  const SCRIPT = resolve(REPO_ROOT, 'scripts/verify-anonymous-install.mjs');
+
+  it('prints exactly the discovered URL and nothing else, exit 0', () => {
+    const result = Bun.spawnSync(['node', SCRIPT, '--print-url'], { cwd: REPO_ROOT });
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout.toString('utf8');
+    const found = discoverInstallUrl(REPO_ROOT);
+    expect(stdout.trim()).toBe(found.url);
+    // Nothing but the URL and its trailing newline — a caller that captures
+    // this with `$(...)` must not have to parse anything out of it.
+    expect(stdout.trim().split('\n')).toEqual([found.url]);
+  });
+
+  it('makes no fetch — offline still resolves the URL, since discovery reads only the docs', () => {
+    // A DNS-black-holed run still succeeds: --print-url never calls fetchInstallBundle
+    // or resolveAnonymousManifest, so it cannot be flaky on network reachability,
+    // which the step BEFORE cluster stand-up must not be.
+    const result = Bun.spawnSync(['node', SCRIPT, '--print-url', '--root', REPO_ROOT], {
+      cwd: '/',
+      env: { ...process.env, HTTP_PROXY: 'http://127.0.0.1:1', HTTPS_PROXY: 'http://127.0.0.1:1' },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString('utf8').trim()).toBe(discoverInstallUrl(REPO_ROOT).url);
+  });
+
+  it('exits 1 with no URL printed when the docs carry no install URL to walk', () => {
+    const scratch = `${REPO_ROOT}/.claude/tmp-print-url-empty-${process.pid}`;
+    Bun.spawnSync(['mkdir', '-p', `${scratch}/apps/docs/content/docs`]);
+    Bun.write(`${scratch}/apps/docs/content/docs/install.mdx`, '# nothing here\n');
+    try {
+      const result = Bun.spawnSync(['node', SCRIPT, '--print-url', '--root', scratch]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout.toString('utf8').trim()).toBe('');
+      expect(result.stderr.toString('utf8')).toMatch(/no install\.yaml URL/i);
+    } finally {
+      Bun.spawnSync(['rm', '-rf', scratch]);
+    }
+  });
+});
+
 describe('findAllInstallUrls — no OTHER published copy may point elsewhere', () => {
   it('every published copy in the real tree agrees with the canonical URL', () => {
     // The other half. Proving the docs SITE carries a working URL says nothing
