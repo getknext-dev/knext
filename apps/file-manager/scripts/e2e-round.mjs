@@ -27,6 +27,15 @@ import { existsSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  buildCompatSmokeEnv,
+  buildProdImageProbeEnv,
+  buildProdImageRunArgs,
+  buildRedisRunArgs,
+  buildRedisStopArgs,
+  defaultServerPath,
+  uniqueRedisContainerName,
+} from './e2e-round-config.mjs';
 import { LOCAL_LEGS } from './e2e-round-legs.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -105,8 +114,16 @@ async function legCompile() {
   sh('bun', ['run', '--filter', 'file-manager', 'build:exec']);
 }
 
+// Set by requireRedis() the first time --allow-docker starts a container this
+// round, and cleared by stopDockerRedis(). A unique name per round (never the
+// bare "knext-e2e-redis" constant) is what stops leg 2 colliding with a
+// container leg 1 already started; stopDockerRedis() runs from main()'s
+// finally so it fires on every leg outcome, including a failed one.
+let dockerRedis = null;
+
 function requireRedis() {
   if (process.env.REDIS_URL) return process.env.REDIS_URL;
+  if (dockerRedis) return 'redis://127.0.0.1:6379'; // already started this round
   if (!OPTS.allowDocker) {
     throw new Refuse(
       'REDIS_URL is not set. compat-smoke check (k) proves ISR against a REAL Redis and is ' +
@@ -116,25 +133,25 @@ function requireRedis() {
   // --allow-docker: the round would start its own redis. Kept explicit so the
   // default path never silently falls back to an in-memory cache.
   if (!onPath('docker')) throw new Refuse('--allow-docker given but docker is not on PATH.');
-  console.log('  --allow-docker: starting redis:7-alpine on :6379');
-  sh('docker', [
-    'run',
-    '-d',
-    '--rm',
-    '-p',
-    '6379:6379',
-    '--name',
-    'knext-e2e-redis',
-    'redis:7-alpine',
-  ]);
+  const name = uniqueRedisContainerName();
+  console.log(`  --allow-docker: starting redis:7-alpine on :6379 (container ${name})`);
+  sh('docker', buildRedisRunArgs(name));
+  dockerRedis = { name };
   return 'redis://127.0.0.1:6379';
+}
+
+function stopDockerRedis() {
+  if (!dockerRedis) return;
+  spawnSync('docker', buildRedisStopArgs(dockerRedis.name), { stdio: 'ignore' });
+  dockerRedis = null;
 }
 
 async function legCompatSmoke() {
   const redis = requireRedis();
+  const serverPath = process.env.SERVER_PATH || defaultServerPath(APP_DIR);
   sh('node', ['scripts/compat-smoke.mjs'], {
     cwd: APP_DIR,
-    env: { ...process.env, REDIS_URL: redis },
+    env: buildCompatSmokeEnv({ baseEnv: process.env, redisUrl: redis, serverPath }),
   });
 }
 
@@ -186,17 +203,20 @@ async function legProdImage() {
   // The self-test first proves the probe itself is fail-closed.
   sh('node', ['scripts/prod-image-probe.selftest.mjs'], { cwd: APP_DIR });
   const tag = 'knext-file-manager-e2e:local';
+  const name = 'knext-e2e-prod';
   sh('docker', ['build', '-f', 'apps/file-manager/Dockerfile', '-t', tag, '.']);
-  const run = spawnSync(
-    'docker',
-    ['run', '-d', '--rm', '-p', '8080:8080', '--name', 'knext-e2e-prod', tag],
-    { encoding: 'utf8', cwd: REPO_ROOT },
-  );
+  const run = spawnSync('docker', buildProdImageRunArgs({ tag, name }), {
+    encoding: 'utf8',
+    cwd: REPO_ROOT,
+  });
   if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
   try {
-    sh('node', ['scripts/prod-image-probe.mjs'], { cwd: APP_DIR });
+    sh('node', ['scripts/prod-image-probe.mjs'], {
+      cwd: APP_DIR,
+      env: buildProdImageProbeEnv(process.env),
+    });
   } finally {
-    spawnSync('docker', ['rm', '-f', 'knext-e2e-prod'], { stdio: 'ignore' });
+    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
   }
 }
 
@@ -221,20 +241,30 @@ async function main() {
   }
 
   const results = [];
-  for (const leg of legs) {
-    console.log(`\n=== leg: ${leg.id} — ${leg.title} ===`);
-    try {
-      await IMPL[leg.id]();
-      results.push({ id: leg.id, status: 'PASS' });
-    } catch (e) {
-      const status = e instanceof Refuse ? 'REFUSED' : 'FAIL';
-      results.push({ id: leg.id, status, why: e.message });
-      console.error(`\n[${status}] ${leg.id}: ${e.message}`);
-      printTable(results, legs);
-      process.exit(1);
+  let failed = false;
+  // Cleanup runs in `finally` around EVERY leg, not just per-leg, so a
+  // container --allow-docker started for an earlier leg is always stopped —
+  // on a passing round, and on a failed/thrown one — before the round exits.
+  try {
+    for (const leg of legs) {
+      console.log(`\n=== leg: ${leg.id} — ${leg.title} ===`);
+      try {
+        await IMPL[leg.id]();
+        results.push({ id: leg.id, status: 'PASS' });
+      } catch (e) {
+        const status = e instanceof Refuse ? 'REFUSED' : 'FAIL';
+        results.push({ id: leg.id, status, why: e.message });
+        console.error(`\n[${status}] ${leg.id}: ${e.message}`);
+        failed = true;
+        break;
+      }
     }
+  } finally {
+    stopDockerRedis();
   }
+
   printTable(results, legs);
+  if (failed) process.exit(1);
   console.log('\nfile-manager e2e round: all legs passed.');
 }
 
