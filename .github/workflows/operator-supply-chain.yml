@@ -62,11 +62,26 @@ name: Operator Supply Chain
 # channel instead, so "upgrade to latest" always means a real cut release, not
 # whatever HEAD happened to build last. Every step downstream of the Trivy gate
 # is now conditioned on `steps.channel.outputs.publish`, not a literal
-# `github.ref == 'refs/heads/main'` check. The `push.paths` filter is
-# deliberately NOT applied to tag pushes (GitHub evaluates `paths` against the
-# ref's own commit list, which a tag push — usually zero new commits — cannot
-# reliably satisfy) — so `paths` here scopes PRs only; every push to `main` or
-# an `operator-v*` tag runs the full job.
+# `github.ref == 'refs/heads/main'` check.
+#
+# `check-release-immutable.sh` runs before anything is built (#1667 review
+# round 2): softprops/action-gh-release UPDATES an existing release for a
+# given tag rather than refusing to touch one, so a re-pushed/force-moved
+# operator-vX.Y.Z tag could otherwise silently overwrite a previously
+# published install.yaml. It fails the run if a release for that tag already
+# carries an install.yaml asset. Scoped to real version tags only —
+# operator-edge/operator-latest are mutable by design.
+#
+# PATHS FILTERING (#1667 review round 2): GitHub evaluates a single `paths:`
+# filter against every ref a `push:` trigger matches — there is no way, in one
+# `on.push` block, to apply `paths` to `branches: [main]` while leaving
+# `tags: ['operator-v*']` unfiltered, and a tag push may legitimately repoint
+# at a commit whose own diff doesn't touch these paths. So `push.paths` is
+# NOT set on the trigger; instead the `changes` job below restores
+# paths-filter behavior for MAIN pushes only (via `hack/path-relevant.sh`,
+# a real `git diff`, unit-tested in tests/operator-path-relevant.test.ts) and
+# unconditionally treats every `operator-v*` tag push as relevant. The main
+# job's `if:` reads `needs.changes.outputs.relevant`.
 
 on:
   pull_request:
@@ -83,8 +98,42 @@ permissions:
   contents: read
 
 jobs:
+  # Restores push.paths-filter behavior for MAIN pushes only (see the PATHS
+  # FILTERING note above) — tag pushes and non-push events are always
+  # relevant and never depend on this job's output.
+  changes:
+    name: Detect operator-relevant changes (main pushes only)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.check.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check whether this push touched operator-relevant paths
+        id: check
+        env:
+          REF: ${{ github.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${REF}" == refs/tags/operator-v* ]]; then
+            # Tag pushes are always relevant — never gated by paths.
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            RELEVANT="$(bash packages/kn-next-operator/hack/path-relevant.sh "${BEFORE_SHA}" "${AFTER_SHA}" .)"
+            echo "relevant=${RELEVANT}" >> "$GITHUB_OUTPUT"
+          fi
+
   operator-image-supply-chain:
     name: Operator SBOM + Trivy (+ cosign sign on main)
+    needs: [changes]
+    # PR/workflow_dispatch events skip the `changes` job entirely (its `if:`
+    # is push-only), so `needs.changes.outputs.relevant` is empty for them —
+    # the first clause covers that; only a `push` event consults the job.
+    if: github.event_name != 'push' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create/update the GitHub Release that carries install.yaml
@@ -100,6 +149,20 @@ jobs:
       - name: Determine release channel (#1667)
         id: channel
         run: bash packages/kn-next-operator/hack/release-channel.sh "${{ github.ref }}" "${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # Enforces that operator-vX.Y.Z releases are ACTUALLY immutable, not just
+      # documented as such (#1667): softprops/action-gh-release UPDATES an
+      # existing release for a given tag_name rather than refusing to touch
+      # one, so a re-pushed/force-moved version tag could otherwise silently
+      # overwrite a previously published install.yaml. Runs early (before the
+      # multi-arch build) so a doomed re-publish fails fast. Deliberately
+      # scoped to a real version tag — operator-edge/operator-latest stay
+      # mutable by design (a rolling channel and a stable-tracking pointer).
+      - name: Guard operator-vX.Y.Z release immutability (#1667)
+        if: steps.channel.outputs.is_version_tag == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash packages/kn-next-operator/hack/check-release-immutable.sh "${{ github.repository }}" "${{ steps.channel.outputs.release_tag }}"
 
       # GHCR repository names must be lowercase; the owner can be mixed-case.
       # ${OWNER,,} lowercases it (mirrors the app job — fixes the #48 casing bug).

@@ -14,10 +14,14 @@
 #     ref_name: e.g. main            | operator-v1.2.3-rc.1
 #
 # Prints GITHUB_OUTPUT-style `key=value` lines to stdout:
-#   publish=true|false      — whether this ref should publish at all
-#   release_tag=<tag>       — the GitHub Release tag to attach install.yaml to
-#                             ("" when publish=false)
-#   is_stable=true|false    — whether operator-latest should also be moved
+#   publish=true|false        — whether this ref should publish at all
+#   release_tag=<tag>         — the GitHub Release tag to attach install.yaml to
+#                               ("" when publish=false)
+#   is_stable=true|false      — whether operator-latest should also be moved
+#   is_version_tag=true|false — whether release_tag is an operator-vX.Y.Z[-rc.N]
+#                               tag (immutability-guarded, see
+#                               hack/check-release-immutable.sh) as opposed to
+#                               the rolling operator-edge channel
 #
 # Exit codes:
 #   0 — ref parsed (publish may still be false for a non-publishing ref)
@@ -48,12 +52,15 @@ if [[ "${REF}" == refs/tags/operator-v* ]]; then
   echo "publish=true"
   echo "release_tag=${REF_NAME}"
   echo "is_stable=${IS_STABLE}"
+  echo "is_version_tag=true"
 elif [[ "${REF}" == "refs/heads/main" ]]; then
   echo "publish=true"
   echo "release_tag=operator-edge"
   echo "is_stable=false"
+  echo "is_version_tag=false"
 else
   echo "publish=false"
   echo "release_tag="
   echo "is_stable=false"
+  echo "is_version_tag=false"
 fi

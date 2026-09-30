@@ -28,6 +28,7 @@ interface ChannelOutput {
   publish: string;
   release_tag: string;
   is_stable: string;
+  is_version_tag: string;
 }
 
 function run(
@@ -37,7 +38,7 @@ function run(
   const result = spawnSync('bash', [SCRIPT, ref, refName], { encoding: 'utf8' });
   const out: Partial<ChannelOutput> = {};
   for (const line of result.stdout.split('\n')) {
-    const match = /^(publish|release_tag|is_stable)=(.*)$/.exec(line);
+    const match = /^(publish|release_tag|is_stable|is_version_tag)=(.*)$/.exec(line);
     if (match) out[match[1] as keyof ChannelOutput] = match[2];
   }
   return {
@@ -51,7 +52,12 @@ describe('release-channel.sh: tag-parsing / channel logic (#1667)', () => {
   it('a stable version tag publishes an immutable release AND moves operator-latest', () => {
     const { code, out } = run('refs/tags/operator-v1.2.3', 'operator-v1.2.3');
     expect(code).toBe(0);
-    expect(out).toEqual({ publish: 'true', release_tag: 'operator-v1.2.3', is_stable: 'true' });
+    expect(out).toEqual({
+      publish: 'true',
+      release_tag: 'operator-v1.2.3',
+      is_stable: 'true',
+      is_version_tag: 'true',
+    });
   });
 
   it('an rc (prerelease) tag publishes its own immutable release but does NOT move operator-latest', () => {
@@ -61,6 +67,7 @@ describe('release-channel.sh: tag-parsing / channel logic (#1667)', () => {
       publish: 'true',
       release_tag: 'operator-v1.2.3-rc.1',
       is_stable: 'false',
+      is_version_tag: 'true',
     });
   });
 
@@ -73,13 +80,23 @@ describe('release-channel.sh: tag-parsing / channel logic (#1667)', () => {
   it('a push to main publishes to the rolling operator-edge channel, never operator-latest', () => {
     const { code, out } = run('refs/heads/main', 'main');
     expect(code).toBe(0);
-    expect(out).toEqual({ publish: 'true', release_tag: 'operator-edge', is_stable: 'false' });
+    expect(out).toEqual({
+      publish: 'true',
+      release_tag: 'operator-edge',
+      is_stable: 'false',
+      is_version_tag: 'false',
+    });
   });
 
   it('a push to a non-main branch does not publish at all', () => {
     const { code, out } = run('refs/heads/feature/foo', 'feature/foo');
     expect(code).toBe(0);
-    expect(out).toEqual({ publish: 'false', release_tag: '', is_stable: 'false' });
+    expect(out).toEqual({
+      publish: 'false',
+      release_tag: '',
+      is_stable: 'false',
+      is_version_tag: 'false',
+    });
   });
 
   it('a malformed operator-v* tag fails loud rather than guessing a channel', () => {

@@ -24,10 +24,27 @@ command, after cert-manager:
 kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
-`operator-latest` tracks the newest **stable** release. To pin a specific version instead, use
-`releases/download/operator-vX.Y.Z/install.yaml` — see [Install → 4 · Install the
-operator](/docs/install#4--install-the-operator) for the cert-manager prerequisite, local-bundle
-fallback, versioned installs, and signature verification.
+`operator-latest` always points at the newest **stable** release — it moves only when a stable
+version is cut, never on every commit to `main`.
+
+**Prefer pinning an exact version for anything but a quick trial.** Every operator release —
+including release-candidate builds — is published under its own immutable tag (`operator-vX.Y.Z`,
+or `operator-vX.Y.Z-rc.N` for a release candidate), so you can pin the exact version you tested
+against instead of tracking whatever is newest:
+
+```sh title="shell"
+OPERATOR_TAG=operator-v1.2.3   # any published operator-vX.Y.Z(-rc.N) release tag
+kubectl apply --server-side -f "https://github.com/getknext-dev/knext/releases/download/${OPERATOR_TAG}/install.yaml"
+```
+
+- **`operator-latest`** — the newest stable release; moves only on a stable cut.
+- **`operator-vX.Y.Z`** (and pre-release tags like `operator-vX.Y.Z-rc.1`) — cut once and never
+  change: the exact bundle you pin stays the exact bundle you get.
+- **`operator-edge`** — tracks the tip of `main` between releases; a rolling, try-it-out channel,
+  not for a production cluster.
+
+See [Install → 4 · Install the operator](/docs/install#4--install-the-operator) for the
+cert-manager prerequisite, local-bundle fallback, and signature verification.
 
 **Upgrade order is load-bearing: upgrade the operator/CRD first, then the CLI.** The CLI can
 emit fields an older operator's CRD does not know about; upgrading the cluster before the CLI
