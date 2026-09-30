@@ -313,6 +313,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -331,6 +335,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -352,6 +360,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -370,6 +382,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
