@@ -1,6 +1,7 @@
 # ADR-0017: NextApp CRD stays v1alpha1; conversion webhook deferred
 
-- Status: Accepted (amended 2026-07-28: CRD versioning at 1.0 — see the amendment below)
+- Status: Accepted (amended 2026-07-28: CRD versioning at 1.0; amended 2026-09-30: v1.0 GA CRD
+  decision + §2.1 mechanical enforcement — see the amendments below)
 - Date: 2026-06-27
 - Deciders: knext architect
 - Related: ADR-0001 (operator = single source of truth), ADR-0008 (finalizer + reconcile predicate),
@@ -238,6 +239,88 @@ additive-only is why the operator-ahead case never needs protecting.
 - [x] **(amendment)** Cross-link this ADR from `docs/PUBLIC_API.md` § "Stability & versioning".
 - [ ] **(amendment, ESCALATED)** Design gate to decide §3.1 — whether declaring 1.0 is itself a
       graduation trigger. CRD-surface change; not an implementer's call.
-- [ ] **(amendment)** Enforce §2.1 (additive-only within `v1alpha1`) mechanically. Today it is
-      documented practice, which this repo's own rules say degrades unobservably; the schema-diff
-      preflight (#314) is the natural place for it.
+- [x] **(amendment)** Enforce §2.1 (additive-only within `v1alpha1`) mechanically — see the
+      2026-09-30 amendment below (#1670).
+
+## Amendment 2 (2026-09-30) — v1.0 CRD decision; §2.1 enforced mechanically
+
+Decided as part of v1.0 GA planning. This amendment answers §3.1's escalated question and closes
+the last open §2.1 action item; it does not reopen either the base decision or Amendment 1.
+
+### 1. The CRD stays `v1alpha1` at 1.0
+
+**Decision: knext 1.0 ships with the CRD still at `apps.kn-next.dev/v1alpha1`.** No `v1beta1`, no
+conversion webhook, for the reasons §3.1 already recorded on the "against" side: a second served
+version is standing cost (a schema to keep in sync, TLS cert plumbing, storage-version handling)
+bought for a graduation trigger (T-a/T-b/T-c) that has not fired — see §2 below. The npm surface,
+not the CRD's version string, is what carries the 1.0 stability claim.
+
+### 2. Has any trigger from §3 fired? Checked, not assumed
+
+- **T-a (a required change cannot be expressed additively):** not hit. Every `NextApp` schema
+  change to date has been additive (see §3 below — the current schema is byte-identical to the
+  `v1.0.0-rc.2` tag's).
+- **T-b (an external GitOps consumer depends on the CR shape across an upgrade):** not hit. The
+  one external-facing consumer this repo controls, the docs site (`apps/docs`), deploys through
+  the `kn-next` CLI's emit-and-apply path (`apps/docs/DEPLOY.md`: "emits a NextApp CR ... and
+  applies it"), not a hand-authored manifest sitting in a GitOps repository outside the CLI's
+  strict-validated apply. No Argo CD/Flux repository holding a raw `NextApp` manifest is known to
+  exist. This is a **negative check on what we can see**, not a claim that no such repository
+  exists anywhere — recorded honestly rather than asserted as proof of absence.
+- **T-c (`spec.security`/`spec.database`/`spec.revalidation` acquires a security-load-bearing
+  field whose silent pruning would be a security regression):** not hit; no such field has been
+  added since the base ADR.
+
+**Conclusion: no trigger has fired. Staying at `v1alpha1` for 1.0 is consistent with §3's own
+rule ("It feels mature enough" is not a trigger) as well as its outcome.**
+
+### 3. The npm surface is the stable 1.0 contract
+
+Restating §1's two-axis model as the 1.0-GA decision, explicitly, because that is what a reader of
+`PUBLIC_API.md` needs to know at the moment 1.0 ships: **`@getknext/{core,lib,db}` are the
+1.0-stable, semver-governed surface. The CRD is not semver-governed — it is governed by the
+Kubernetes `vNalphaM` convention and, within that, by §2.1's additive-only discipline.** A user
+who pins `@getknext/core@^1` gets the npm stability guarantee that implies; a user who
+hand-authors a `NextApp` manifest gets the additive-only guarantee of §2.1, not a 1.0 semver
+guarantee on the schema itself.
+
+### 4. §2.1 is now enforced mechanically, not just documented
+
+The base ADR's last open action item was exactly this gap: "Enforce §2.1 (additive-only within
+`v1alpha1`) mechanically. Today it is documented practice, which this repo's own rules say
+degrades unobservably." Closed by `scripts/crd-schema-diff.mjs` (`scripts/lib/crd-schema-diff.mjs`
+holds the pure diff), wired as the `crd-schema-additive-guard` job in `ci.yml`.
+
+**What it checks:** the generated CRD manifest
+(`packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml`) structurally diffed
+against the same file at the most recent `v*` tag. A violation is any of: a field removed, a
+field's `type` changed, a field newly added to `required`, an `enum` narrowed (a value removed, or
+an `enum` added where none constrained the field before), a validation bound narrowed
+(`minLength`/`minimum`/`minItems`/`minProperties` increased, or `maxLength`/`maximum`/`maxItems`/
+`maxProperties` decreased), a `pattern` changed or added where none existed, or a whole served CRD
+version dropped. Adding a new optional field, a new enum value, or widening a bound is always
+allowed — the guard is one-directional by construction, matching §2.1's own wording ("New optional
+fields are fine").
+
+**What it deliberately does NOT check**, stated so it is not later assumed to be covered: the Go
+type (`api/v1alpha1/nextapp_types.go`) that generates the CRD via `make manifests` — the generated
+YAML is what a cluster actually validates against, and is downstream of the Go type by
+construction, so diffing it is sufficient and diffing the Go type as well would only duplicate the
+same signal one step earlier; and any operator-side reconciliation *behavior* change that does not
+touch the schema — §2.1 already says field semantics are not frozen by the version string, and a
+schema-diff cannot and should not try to catch a semantic change.
+
+**Operator files are not npm-published, so they are not byte-frozen** — nothing in this amendment
+or its guard claims otherwise. `packages/kn-next-operator` ships with the operator image, on its
+own release cadence (ADR-0020), never inside an npm tarball. What this guard freezes is narrower
+and specific: the **schema shape** the CRD YAML declares, regardless of what else in the operator
+changes around it.
+
+### Action items
+
+- [x] Decide: CRD stays `v1alpha1` at 1.0 (§1).
+- [x] Check whether a §3 graduation trigger has fired; record the check, not just the conclusion
+      (§2).
+- [x] Restate the npm-surface-is-the-1.0-contract split as the 1.0-GA answer (§3).
+- [x] Enforce §2.1 mechanically: `scripts/crd-schema-diff.mjs` + `scripts/lib/crd-schema-diff.mjs`,
+      wired as `ci.yml`'s `crd-schema-additive-guard` job (§4).
