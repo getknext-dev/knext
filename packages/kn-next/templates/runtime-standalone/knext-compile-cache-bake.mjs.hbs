@@ -59,6 +59,7 @@
  */
 
 import { flushCompileCache, getCompileCacheDir } from "node:module";
+import { connect } from "node:net";
 
 const serverPath = process.env.STANDALONE_SERVER_PATH;
 if (!serverPath) {
@@ -75,26 +76,49 @@ const WARM_PATHS = (process.env.KNEXT_WARM_PATH ?? "/api/health")
     .map((p) => p.trim())
     .filter(Boolean);
 
+// HOSTNAME may be a bind address like 0.0.0.0; loopback is always
+// reachable from the same process regardless of what the server bound.
+const CONNECT_HOST = HOST === "0.0.0.0" || HOST === "::" ? "127.0.0.1" : HOST;
+
 function warmUrl(path) {
-    // HOSTNAME may be a bind address like 0.0.0.0; loopback is always
-    // reachable from the same process regardless of what the server bound.
-    const host = HOST === "0.0.0.0" || HOST === "::" ? "127.0.0.1" : HOST;
-    return `http://${host}:${PORT}${path}`;
+    return `http://${CONNECT_HOST}:${PORT}${path}`;
 }
 
-// #1572: readiness and warming both use `redirect: "manual"`. With the
-// default `redirect: "follow"`, a server that answers with a redirect LOOP
-// (measured: next@16.3.5's redirect-rewrite-dynamic fixture answers
-// `GET /` with `307 Location: /` under this bake's 127.0.0.1 bind) makes
-// fetch() throw "redirect count exceeded" — which the readiness loop used to
-// swallow as "not listening yet", burning the whole deadline against a server
-// that had answered every request. ANY HTTP response is a live server; only a
-// connection-level failure means "not yet".
-//
-// An attempt may run until the OVERALL deadline — never a shorter per-attempt
-// cap. Measured on next@16.3.5 (middleware-rewrite-dynamic): under the same
-// 127.0.0.1 bind a middleware rewrite is proxied externally and the FIRST
-// response (a 500) takes ~30s; a 5s cap aborted every attempt and never saw it.
+// #1572: READINESS is a TCP accept on $PORT — never an HTTP request through
+// the app's routing. Two measured next@16.3.5 shapes made an HTTP readiness
+// probe unreliable under this bake's 127.0.0.1 bind:
+//   - redirect-rewrite-dynamic{,-basepath}: `GET /` answers `307 Location: /`
+//     (a self-redirect); a following fetch() threw "redirect count exceeded",
+//     which the probe read as "not listening yet" until the deadline;
+//   - middleware-rewrite-dynamic / server-actions-redirect-middleware-rewrite:
+//     the middleware rewrite is proxied externally, hangs up, and the FIRST
+//     response (a 500) arrives only after ~30s — half the deadline, before the
+//     warm has even started.
+// The server is up the moment it accepts a connection (Next's standalone
+// server holds early requests until its handlers are ready). What the app
+// ANSWERS is the warm's job below, which still requires a real HTTP status.
+function tcpAccepts(timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const socket = connect({ host: CONNECT_HOST, port: Number(PORT) });
+        const timer = setTimeout(() => {
+            socket.destroy();
+            reject(new Error(`connect timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        socket.once("connect", () => {
+            clearTimeout(timer);
+            socket.destroy();
+            resolve();
+        });
+        socket.once("error", (err) => {
+            clearTimeout(timer);
+            socket.destroy();
+            reject(err);
+        });
+    });
+}
+
+// The WARM uses `redirect: "manual"` and follows redirects by hand (below),
+// so a redirect loop resolves to its real 3xx status instead of a throw.
 
 // Captured BEFORE server.js is imported: Next patches `globalThis.fetch` in
 // the server process (its data-cache instrumentation), and this driver IS that
@@ -110,18 +134,14 @@ async function waitForServer(deadlineMs) {
     let lastError = "no attempt made";
     for (;;) {
         try {
-            const res = await nativeFetch(warmUrl(WARM_PATHS[0] ?? "/"), {
-                redirect: "manual",
-                signal: AbortSignal.timeout(Math.max(1_000, deadline - Date.now())),
-            });
-            await res.body?.cancel();
+            await tcpAccepts(2_000);
             console.log(
                 `[knext bake] standalone server answered after ${Date.now() - start}ms`,
             );
             return;
         } catch (err) {
-            // not listening yet (or this attempt timed out) — keep the reason
-            lastError = err?.cause?.message ?? err?.message ?? String(err);
+            // not listening yet — keep the reason
+            lastError = err?.message ?? String(err);
         }
         if (Date.now() > deadline) {
             throw new Error(

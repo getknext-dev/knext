@@ -201,3 +201,51 @@ describe('bake readiness: a SLOW first answer is still an answer (#1572 round 2)
     expect(r.status, r.out).toBe(0);
   }, 90_000);
 });
+
+describe('bake readiness: a listening socket is ready — no HTTP round-trip through app routing (#1572 round 3)', () => {
+  // next@16.3.5 middleware-rewrite-dynamic (`rewrite(new URL('/render/next', request.url))`)
+  // and server-actions-redirect-middleware-rewrite (`rewrite(request.url)`):
+  // under the bake's 127.0.0.1 bind the rewrite is proxied externally, hangs
+  // up, and every response is a 500 after ~30s. Readiness must not spend its
+  // deadline waiting on that — the server is up the moment it accepts a
+  // connection; only the WARM request needs the (slow) HTTP answer.
+  for (const [name, routes, warm] of [
+    [
+      'middleware rewrite of every path (middleware-rewrite-dynamic)',
+      { '/': [500], '/render/next': [500] },
+      '/',
+    ],
+    ['middleware self-rewrite + server-action redirect page', { '/redirect': [500] }, '/redirect'],
+  ] as const) {
+    it(`${name}: readiness returns before the slow answer, the warm still records it`, () => {
+      const r = bake(routes, warm, { wrapper: true, accept: true, delayMs: 8_000 });
+      const m = r.stdout.match(/standalone server answered after (\d+)ms/);
+      expect(m, r.out).not.toBeNull();
+      expect(Number(m?.[1])).toBeLessThan(4_000);
+      expect(r.stdout).toContain(`WARMED:${warm} status=500 `);
+      expect(r.status, r.out).toBe(0);
+    }, 90_000);
+  }
+
+  it('the other half: nothing listening still fails at the deadline (fail-closed)', () => {
+    const { dir, driver } = fakeStandalone({});
+    const idle = join(dir, 'idle.js');
+    writeFileSync(idle, 'setInterval(() => {}, 1000);');
+    port += 1;
+    const r = spawnSync('node', [driver], {
+      encoding: 'utf8',
+      timeout: 80_000,
+      cwd: dir,
+      env: {
+        PATH: process.env.PATH ?? '',
+        PORT: String(port),
+        HOSTNAME: '127.0.0.1',
+        STANDALONE_SERVER_PATH: idle,
+        NODE_COMPILE_CACHE: join(dir, '.cc'),
+        KNEXT_WARM_PATH: '/',
+      },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('did not answer within 60000ms');
+  }, 90_000);
+});
