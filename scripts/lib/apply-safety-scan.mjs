@@ -53,6 +53,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { scanFrames } from './shell-lexer.mjs';
 
 /** Commands whose output is network content. */
 const FETCH_WORDS = new Set(['curl', 'wget', 'aria2c', 'http', 'https', 'xh', 'httpie']);
@@ -95,107 +96,13 @@ const NON_FETCHING = new Set([
 // Lexing — one frame-stack scanner shared by every splitter
 // ---------------------------------------------------------------------------
 
-/**
- * Walks shell text with bash's quoting CONTEXTS, not flat quote toggles: a
- * `$( … )` inside `"…"` starts a fresh code context, so `"$(printf 'a "b')"`
- * is one word. Calls `visit(i, depth)` for every index, where depth 0 means
- * top-level code (outside every quote, `$(…)`, `(…)`, `${…}`, backtick).
- * An OPENING quote/`$` is reported at the outer depth and a CLOSING one at
- * the inner depth, so neither is ever mistaken for top-level code. `visit`
- * may return an index to jump to. Returns the final frame-stack height (1
- * when the text is balanced).
- */
-export function scanFrames(text, visit) {
-  const stack = [{ t: 'code', paren: 0 }];
-  const depthOf = () => {
-    let d = stack.length - 1;
-    for (const f of stack) if (f.t === 'code') d += f.paren;
-    return d;
-  };
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i];
-    const top = stack.at(-1);
-    const d = depthOf();
-    const jump = visit(i, d, top.t);
-    if (typeof jump === 'number') {
-      i = jump;
-      continue;
-    }
-    // The second char of a `$(`/`${`/`$'` opener is visited (inside the new
-    // frame) but is not itself a paren/brace/quote.
-    if (top.opening) {
-      top.opening = false;
-      i++;
-      continue;
-    }
-    if (top.t === 'sq') {
-      if (c === "'") stack.pop();
-      i++;
-      continue;
-    }
-    if (top.t === 'sqa' || top.t === 'bq') {
-      if (c === '\\') i += 2;
-      else {
-        if ((top.t === 'sqa' && c === "'") || (top.t === 'bq' && c === '`')) stack.pop();
-        i++;
-      }
-      continue;
-    }
-    if (c === '\\') {
-      i += 2;
-      continue;
-    }
-    if (top.t === 'dq') {
-      if (c === '"') stack.pop();
-      else if (c === '$' && text[i + 1] === '(') {
-        stack.push({ t: 'code', paren: 0, opening: true });
-        i++;
-        continue;
-      } else if (c === '$' && text[i + 1] === '{') {
-        stack.push({ t: 'brace', n: 1, opening: true });
-        i++;
-        continue;
-      } else if (c === '`') stack.push({ t: 'bq' });
-      i++;
-      continue;
-    }
-    if (top.t === 'brace') {
-      if (c === '{') top.n++;
-      else if (c === '}') {
-        top.n--;
-        if (top.n === 0) stack.pop();
-      } else if (c === '"') stack.push({ t: 'dq' });
-      else if (c === "'") stack.push({ t: 'sq' });
-      i++;
-      continue;
-    }
-    // code frame
-    if (c === '$' && text[i + 1] === "'") {
-      stack.push({ t: 'sqa', opening: true });
-      i++;
-      continue;
-    }
-    if (c === "'") stack.push({ t: 'sq' });
-    else if (c === '"') stack.push({ t: 'dq' });
-    else if (c === '`') stack.push({ t: 'bq' });
-    else if (c === '$' && text[i + 1] === '(') {
-      stack.push({ t: 'code', paren: 0, opening: true });
-      i++;
-      continue;
-    } else if (c === '$' && text[i + 1] === '{') {
-      stack.push({ t: 'brace', n: 1, opening: true });
-      i++;
-      continue;
-    } else if (c === '(') top.paren++;
-    else if (c === ')') {
-      if (top.paren > 0) top.paren--;
-      else if (stack.length > 1) stack.pop();
-    }
-    i++;
-  }
-  return stack.length;
-}
+// #1444 step 1: the core frame-stack walk moved to `shell-lexer.mjs`, the
+// shared module both this file and (eventually — see that module's header
+// for what remains TODO) `tests/helpers/shell-statements.ts` are meant to
+// import instead of each carrying their own. Re-exported here (imported at
+// the top of this file) so every existing importer of `scanFrames` from
+// THIS file keeps working unchanged.
+export { scanFrames };
 
 /**
  * Pre-pass over raw shell text: extracts heredoc bodies (replacing each
@@ -468,6 +375,8 @@ class State {
     this.curChainTag = null;
     /** (path) => text | null: reads a `source`d file (the caller knows the tree). */
     this.resolveSource = null;
+    /** #1512: opt-in — follow a `node <file>.mjs` / `bun <file>.mjs` invocation. */
+    this.followScripts = false;
     /** repo-relative path of the source being scanned (keys STATEMENT_ALLOWLIST). */
     this.file = null;
     /** canonical paths already loaded via `source`, to stop cycles. */
@@ -1215,6 +1124,50 @@ export function isLoopbackUrl(u) {
   return LOOPBACK_URL.test(u) && u.split('://').length === 2 && !/\$/.test(u.split('/')[2]);
 }
 
+const LOOPBACK_HOST = /^(localhost|127(\.\d{1,3}){3}|::1|\[::1\])$/;
+export function isLoopbackHost(h) {
+  return LOOPBACK_HOST.test(h);
+}
+
+/**
+ * #1512: classifies the fetch shapes a `node <file>.mjs` / `bun <file>.mjs`
+ * invocation can reach that this scanner otherwise never sees. Resolves the
+ * script via `st.resolveSource` (the same hook `source` uses), then looks
+ * for the same fetch-shaped substrings `INTERPRETER_FETCH` matches inline.
+ * A literal `host: '…'` object field is checked first (the `http.get`/
+ * `.request` shape `e2e-probe-http.mjs` uses); a bare `https?://…` literal
+ * URL is checked next. Anything neither shape can pin down — no fetch shape
+ * at all, an unresolvable file, or a fetch whose host/URL is NOT a literal
+ * (a variable, `process.env…`, a template expression) — fails closed: "no
+ * fetch shape" passes silently, everything else is an offender. Cached per
+ * scanned source (`st.sourced`) so one script invoked from several call
+ * sites is read and judged once.
+ */
+function classifyJsScript(path, st) {
+  const key = `\0jsfetch\0${path}`;
+  if (st.sourced.has(key)) return null;
+  st.sourced.add(key);
+  const src = st.resolveSource(path);
+  if (src === null || src === undefined)
+    return `node/bun script ${path} could not be resolved to classify its fetches`;
+  if (!INTERPRETER_FETCH.test(src)) return null;
+  const hostMatches = [...src.matchAll(/\bhost\s*:\s*(['"`])([^'"`]*)\1/g)];
+  if (hostMatches.length > 0) {
+    for (const m of hostMatches) {
+      if (!isLoopbackHost(m[2])) return `${path}: fetch to non-loopback host '${m[2]}'`;
+    }
+    return null;
+  }
+  const urlMatches = [...src.matchAll(/https?:\/\/[^\s'"`)]+/g)];
+  if (urlMatches.length > 0) {
+    for (const m of urlMatches) {
+      if (!isLoopbackUrl(m[0])) return `${path}: fetch of ${m[0]}`;
+    }
+    return null;
+  }
+  return `${path}: fetch-shaped call with no literal host/URL to classify (fail closed)`;
+}
+
 export function isFetchSegment(ws, st) {
   for (let k = 0; k < ws.length; k++) {
     const w = canonical(ws[k], st.vars).replace(/^\\/, '');
@@ -1261,6 +1214,21 @@ export function unclassifiedFetch(ws, st, { pipedFromNetwork = false, depth = 0 
 
 function fetchShape(b, args, rawArgs, st, pipedFromNetwork, depth) {
   if (INTERPRETERS.has(b) && INTERPRETER_FETCH.test(args.join(' '))) return interpreterFetch(b);
+  // #1512: `node <file>.mjs` / `bun <file>.mjs` moves a fetch OUT of shell
+  // text into a JS file this module never reads — the escape hatch F6 (#1497)
+  // used legitimately. Follow it, opt-in on BOTH `st.followScripts` and
+  // `st.resolveSource`, so no existing caller sees new noise by default.
+  // Only the FIRST argument is checked (`node script.mjs …`, `bun
+  // script.mjs`), never any `.mjs`-suffixed word anywhere in the command —
+  // `bun build --compile … ./entry.mjs --outfile x` COMPILES a file, it does
+  // not RUN it, and must not be misread as one.
+  if ((b === 'node' || b === 'bun') && st.followScripts && st.resolveSource) {
+    const first = args[0] ?? '';
+    if (/\.mjs$/.test(first) && !/[$`]/.test(first)) {
+      const why = classifyJsScript(first, st);
+      if (why) return why;
+    }
+  }
   if (b === 'git' && gitFetches(args)) return 'git fetches a remote repository';
   if (b === 'gh' && ghDownloads(args)) return 'gh downloads a release/repo/run artifact';
   if (b === 'helm' && helmFetches(args)) return 'helm pulls a remote chart or repo index';
@@ -1461,6 +1429,29 @@ export function textIsNetwork(text, st, depth, { urlLiteralCounts = true, seen =
     for (const seg of splitPipeline(cl.text)) {
       const ws = words(seg);
       if (isFetchSegment(ws, st)) return `fetch command in \`${seg.slice(0, 80)}\``;
+      // `envsubst` (with no name list, or naming a tainted var) substitutes
+      // every EXPORTED shell variable into its stdin/template — a value
+      // fetched over the network and exported reaches the output the same as
+      // any other producer of network content would (#1466.2).
+      const envsubstBase = unquote(ws[0] ?? '')
+        .split('/')
+        .pop();
+      if (envsubstBase === 'envsubst') {
+        const named = withoutRedirects(ws.slice(1)).filter((w) => !unquote(w).startsWith('-'));
+        const names =
+          named.length > 0
+            ? named.flatMap((w) =>
+                unquote(w)
+                  .split(/[:,]/)
+                  .map((n) => n.replace(/^\$/, '')),
+              )
+            : null;
+        for (const [name, v] of st.vars) {
+          if (!v.exported || !v.content) continue;
+          if (names && !names.includes(name)) continue;
+          return `envsubst substitutes $${name}, which holds network content`;
+        }
+      }
       for (let k = 0; k < ws.length; k++) {
         const w = ws[k];
         const u = unquote(w);
@@ -1675,6 +1666,7 @@ export function applyTargets(ws) {
 function recordAssignments(ws, st, depth) {
   let k = 0;
   let nameref = false;
+  const exported = ws[0] === 'export';
   if (['export', 'local', 'declare', 'readonly', 'typeset'].includes(ws[0])) {
     k = 1;
     while (ws[k]?.startsWith('-')) {
@@ -1684,6 +1676,17 @@ function recordAssignments(ws, st, depth) {
   }
   let any = false;
   for (; k < ws.length; k++) {
+    // `export NAME` (no `=`): marks an already-set var exported, without
+    // touching its value/taint.
+    if (exported) {
+      const bare = ws[k].match(/^([A-Za-z_]\w*)$/);
+      if (bare) {
+        any = true;
+        const prev = st.vars.get(bare[1]);
+        if (prev) st.vars.set(bare[1], { ...prev, exported: true });
+        continue;
+      }
+    }
     const m = ws[k].match(/^([A-Za-z_]\w*)=(.*)$/s);
     if (!m) break;
     any = true;
@@ -1699,10 +1702,15 @@ function recordAssignments(ws, st, depth) {
     if (nameref) {
       // `declare -n R=V`: `$R` reads V at RUN time; nothing static says what
       // V will hold then, so R is network content (fail closed).
-      st.vars.set(m[1], { value: undefined, producer: value, url: true, content: true });
+      st.vars.set(m[1], { value: undefined, producer: value, url: true, content: true, exported });
       continue;
     }
-    st.vars.set(m[1], { value, url: URL_RE.test(expanded) || refs.some((r) => r.url), content });
+    st.vars.set(m[1], {
+      value,
+      url: URL_RE.test(expanded) || refs.some((r) => r.url),
+      content,
+      exported,
+    });
   }
   return any && k >= ws.length;
 }
@@ -2143,8 +2151,23 @@ function walk(code, st, ctx) {
           `${cmd} may be defined in unresolved sourced ${st.unresolvedSource}`,
           segs[si],
         );
+      // A heredoc this segment READS (as stdin, `cat <<HD`) or, more commonly,
+      // WRITES (`cat > f <<HD`) can interpolate a fetched value the shell
+      // itself expands — a redirect target fed by such a heredoc is a network
+      // write the same as a fetcher's own `-o` would be (#1466.1: heredoc ->
+      // file -> apply). Only an UNQUOTED delimiter expands.
+      const heredocNetwork = ws.some((w) => {
+        const m = w.match(/^<<__HD(\d+)__$/);
+        if (!m) return false;
+        const hd = st.heredocs[Number(m[1])];
+        if (!hd || hd.quoted) return false;
+        return !!textIsNetwork(heredocExpansions(hd.body), st, ctx.depth + 1, {
+          urlLiteralCounts: false,
+        });
+      });
       const readsNetwork =
         networkSoFar ||
+        heredocNetwork ||
         ws.some((w) => {
           const c = canonical(w, st.vars);
           return isTaintedPath(c, st) || varRefs(w).some((r) => st.vars.get(r)?.content);
@@ -2175,6 +2198,9 @@ function walk(code, st, ctx) {
         const producerText = [...segs.slice(0, si), ...stdinSources(ws)].join(' | ');
         for (const t of targets) classifyTarget(t, { producerText, clause: text, st, ctx });
       }
+
+      const patchWhy = classifyPatchLike(ws, st, ctx);
+      if (patchWhy) offend(st, patchWhy, text);
     }
   }
 }
@@ -2427,6 +2453,57 @@ function classifyTarget(t, { producerText, clause, st, ctx }) {
   }
 }
 
+/**
+ * `kubectl patch … -p/--patch <body>` and `kubectl … set env RESOURCE
+ * KEY=VALUE …` mutate a live cluster resource with a value the shell hands
+ * them directly — no `-f` manifest, so `applyTargets`/`classifyTarget` never
+ * see them (#1466.3). Found by VERB (`patch`, or `set` followed by `env`),
+ * never by the literal word `kubectl`, matching the rest of this module.
+ * `--patch-file <path>` is judged like any other applied file: a network-
+ * tainted, unverified path is an offender.
+ */
+function classifyPatchLike(ws, st, ctx) {
+  const u = ws.map(unquote);
+  const patchIdx = u.indexOf('patch');
+  if (patchIdx !== -1) {
+    for (let k = patchIdx + 1; k < ws.length; k++) {
+      const w = unquote(ws[k]);
+      if (w === '-p' || w === '--patch') {
+        const val = unquote(ws[++k] ?? '');
+        const why = textIsNetwork(val, st, ctx.depth + 1);
+        if (why) return `kubectl patch body carries network content (${why})`;
+        continue;
+      }
+      const m = w.match(/^-p=(.*)$/) ?? w.match(/^--patch=(.*)$/);
+      if (m) {
+        const why = textIsNetwork(m[1], st, ctx.depth + 1);
+        if (why) return `kubectl patch body carries network content (${why})`;
+        continue;
+      }
+      let file = null;
+      const patchFileEq = w.match(/^--patch-file=(.*)$/);
+      if (w === '--patch-file') file = unquote(ws[++k] ?? '');
+      else if (patchFileEq) file = patchFileEq[1];
+      if (file) {
+        const c = canonical(file, st.vars);
+        if (isTaintedPath(c, st) && !verificationCovers(c, st))
+          return `kubectl --patch-file names a network-fetched file that was not checksum-verified (${c})`;
+      }
+    }
+  }
+  const setIdx = u.findIndex((w, i) => w === 'set' && u[i + 1] === 'env');
+  if (setIdx !== -1) {
+    for (let k = setIdx + 2; k < ws.length; k++) {
+      const w = unquote(ws[k]);
+      const m = w.match(/^[A-Za-z_][\w.-]*=(.*)$/s);
+      if (!m) continue;
+      const why = textIsNetwork(m[1], st, ctx.depth + 1);
+      if (why) return `kubectl set env value carries network content (${why})`;
+    }
+  }
+  return null;
+}
+
 function heredocExpansions(body) {
   // Only what an unquoted heredoc EXPANDS matters; its literal YAML text does not.
   const bits = [];
@@ -2471,6 +2548,7 @@ export function unsafeApplies(
     resolveSource = null,
     allowHits = null,
     file = null,
+    followScripts = false,
   } = {},
 ) {
   const { code, heredocs, error } = lex(rawText);
@@ -2478,6 +2556,7 @@ export function unsafeApplies(
   st.resolveSource = resolveSource;
   st.allowHits = allowHits;
   st.file = file;
+  st.followScripts = followScripts;
   if (carry) {
     st.tainted = carry.tainted;
     st.verified = carry.verified;
@@ -2502,6 +2581,7 @@ export function unsafeApplies(
     sub.tainted = new Set(st.tainted);
     sub.verified = new Map(st.verified);
     sub.resolveSource = st.resolveSource;
+    sub.followScripts = st.followScripts;
     sub.allowHits = null; // a helper body is judged again at its call sites, which count
     sub.file = st.file;
     sub.sourced = new Set(st.sourced);
