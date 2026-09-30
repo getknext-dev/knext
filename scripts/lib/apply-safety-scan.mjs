@@ -1016,16 +1016,86 @@ function heredocWriteText(heredocs) {
   return out;
 }
 
+// A `local`/`declare`/`typeset` keyword at a command boundary; `declare`/
+// `typeset` at a script's OWN top level are not function-scoping at all, but
+// this is only ever consulted against a FUNCTION body (see `declaresLocal`),
+// where all three create a private binding unless `declare` carries `-g`.
+const LOCAL_KEYWORD_RE = /(?:^|[\s;&|(])(local|declare|typeset)\b/g;
+
+/**
+ * Whether `body` (a FUNCTION's own text) declares `name` function-local
+ * anywhere — `local name`, `local name=…`, `declare name` / `typeset name`
+ * (but NOT `declare -g name`, which is explicitly global). #1716 round 2: a
+ * reviewer-found bypass — `scopedTexts`/`reachableFunctionNames` scope
+ * PURELY by call graph, so a function that writes a followed name WITHOUT
+ * `local`izing it (a real bash global, however it got that value) escaped
+ * detection the moment it was not reachable from the tracing function, e.g.
+ * a helper called only from an unrelated command dispatcher. bash has no
+ * "file-scoped" variable: a write not `local`'d in the function that makes
+ * it is either a script-level global (if nothing ever locals it) or binds
+ * whatever enclosing call frame first declared it local (dynamic scoping) —
+ * this scanner does not attempt to resolve the LATTER precisely; it just
+ * treats any non-`local`'d write anywhere as a possible global and includes
+ * it from every scope (fail closed, see `globalWriterTexts`).
+ */
+function declaresLocal(body, name) {
+  for (const m of body.matchAll(LOCAL_KEYWORD_RE)) {
+    const kw = m[1];
+    const from = m.index + m[0].length;
+    const rest = body.slice(from, from + 2000).split(/[\n;&|]/, 1)[0];
+    let global = false;
+    let found = false;
+    for (const w of rest.trim().split(/\s+/)) {
+      if (w === '') continue;
+      if (w.startsWith('-')) {
+        if (kw === 'declare' && /g/.test(w)) global = true;
+        continue;
+      }
+      const n = w.split('=')[0].replace(/\[.*$/, '');
+      if (n === name) found = true;
+    }
+    if (found && !global) return true;
+  }
+  return false;
+}
+
+/**
+ * Every FUNCTION body that writes `name` (any `writeSites`/`assembledWrites`
+ * hit) without `local`izing it there (`declaresLocal`) — a real bash global,
+ * visible to every scope regardless of the call graph (#1716 round 2). Never
+ * scoped by reachability: that is exactly the bypass this closes. Cached per
+ * name + function-table size.
+ */
+function globalWriterTexts(st, name) {
+  const key = `\0globalWriters\0${name}\0${st.functions.size}`;
+  let texts = st.writeSiteCache.get(key);
+  if (!texts) {
+    const disp = dispatcherNames(st);
+    texts = [];
+    for (const body of st.functions.values()) {
+      if (declaresLocal(body, name)) continue;
+      if (writeSites(body, name, disp).length > 0 || assembledWrites(body, name, disp).length > 0)
+        texts.push(body);
+    }
+    st.writeSiteCache.set(key, texts);
+  }
+  return texts;
+}
+
 /**
  * writeSites over the texts visible in `scope` (#1716: function-local, see
- * `scopedTexts`), cached per scope + corpus size.
+ * `scopedTexts`) UNIONED with every function that writes `name` as a bash
+ * global anywhere in the file (#1716 round 2: `globalWriterTexts` — a
+ * non-`local`'d write is not something call-graph scoping may exclude).
+ * Cached per name + scope + corpus size.
  */
 function corpusWriteSites(name, st, scope = null) {
   const key = `${name}\0${scope ?? ''}\0${st.corpus.length}`;
   let sites = st.writeSiteCache.get(key);
   if (!sites) {
     const disp = dispatcherNames(st);
-    sites = scopedTexts(st, scope).flatMap((t) => [
+    const texts = new Set([...scopedTexts(st, scope), ...globalWriterTexts(st, name)]);
+    sites = [...texts].flatMap((t) => [
       ...writeSites(t, name, disp),
       ...assembledWrites(t, name, disp),
     ]);
