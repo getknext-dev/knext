@@ -94,7 +94,11 @@ unrelated and neither one turns the other on.
 Skipping compilation removes real work from every cold start, and the effect is measurable on the
 server-boot portion of a cold start. How much of your *end-to-end* cold start that represents
 depends heavily on your cluster: on a small cluster where pod scheduling and image pull dominate,
-compilation is a smaller slice of the total than on a fast, warm-image cluster.
+compilation is a smaller slice of the total than on a fast, warm-image cluster. Measured end to end
+on a quiet two-node cluster with the image already on the node, the compiled Bun executable and Node
+with its compile cache woke a small app from zero in about the same time — around 2.1–2.4 s at the
+median, within run-to-run noise of each other; see
+[the measured table](/docs/scale-to-zero#measured-cold-start-by-runtime-and-builder).
 
 Treat it as a real but **environment-dependent** improvement, not a guaranteed number. Measure your
 own cold start if it matters to your service-level objectives.
