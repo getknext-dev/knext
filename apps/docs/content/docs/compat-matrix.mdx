@@ -11,18 +11,22 @@ description: Honest, evidence-gated status of what the knext adapter supports.
 **The official suite runs per runtime × builder cell — not one number.** knext builds and runs a
 Next.js app more than one way (standalone on Node or Bun, built with Turbopack or webpack, or the
 `vinext` build), and each combination is tracked separately rather than folded into a single "the suite is green" headline.
-The most-verified cell today is the **Turbopack build on the Node runtime**: the main-branch
-nightly most recently observed **792 tests passed, 0 failed**, against Next.js v16.2.12. The default
-cell — Turbopack on the Bun runtime, the compiled bytecode executable — and the two webpack cells
-each have one 792/0 run behind them. That is current evidence, not a completed credential — see
-[Verified compatibility](/docs/compat-suite) for what credentialing requires and where every cell
-currently stands.
+The credential window now runs against Next.js v16.3.5. That is the same release new apps
+scaffold today — the deliberate gap between the two is closed. A dispatched confirmation run at
+this version passed cleanly on all four cells (node/bun x turbopack/webpack, 16 shards each, zero
+failures) right after the ref moved; nightly runs at this version are only just starting toward
+the 14-consecutive-night credential a version needs before it counts as fully credentialed. The
+most-verified cell overall is still the **Turbopack build on the Node runtime**, whose last
+completed 14-night-eligible run observed **792 tests passed, 0 failed**, at Next.js v16.2.12 — the
+prior credentialed ref, kept here for history. The default cell — Turbopack on the Bun runtime, the
+compiled bytecode executable — and the two webpack cells each have one 792/0 run behind them at
+that same prior ref. See [Verified compatibility](/docs/compat-suite) for what credentialing
+requires and where every cell currently stands.
 
-**New apps pin a newer Next.js release (16.3.x) than the version measured above.** The scaffold
-ships Next.js 16.3.x, while the numbers on this page were measured against the latest 16.2.x
-release. The 16.3.x line adds a handful of new upstream tests that knext has not yet passed, so
-credentialing on it is a separate, later step rather than a side effect of this measurement. The
-credentialed numbers will move forward onto the 16.3.x line once those tests are addressed.
+A handful of upstream tests introduced between the two releases encode behaviour that only
+Vercel's own hosting infrastructure produces (for example, a CDN cache header) rather than
+anything a self-hosted deploy can or should reproduce; those are documented and excluded the same
+way the architectural gaps below are, with their own evidence trail.
 </Callout>
 
 ## Legend

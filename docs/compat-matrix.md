@@ -4,24 +4,30 @@
 > real, on-disk evidence and a mechanical guard test (`tests/compat-matrix.test.ts`) fails CI if a
 > ✅ ("supported") row cannot be backed up. When in doubt we mark ⚠️, not ✅.
 >
-> **knext passes the official Next.js deploy-test suite on `main`** (the `vercel/next.js`
-> deploy-test harness, ADR-0007 option B): re-credentialed 2026-09-27 (#1570) — the four credential
-> cells (node/bun x turbopack/webpack) each ran green across 16 shards against `vercel/next.js` **v16.2.12**,
-> the latest published 16.2.x tag at or above the CVE floor 16.2.11. The exact scope of
-> that claim (architectural exclusions, the per-case flaky-quarantine ledger, Node-only) lives in the
-> official-suite row below — read it before repeating the claim. The guard test now **requires**
-> that row to cite its run ID + pinned ref + "N passed / 0 failed" result; an evidence-less ✅
-> fails CI. See **Maintenance & honesty** below.
+> **The compat credential window now runs against `vercel/next.js` **v16.3.5**** (rc.2's
+> re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
+> deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
+> this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
+> dispatch evidence: all four cells (node/bun x turbopack/webpack), each 16/16 shards, **0 failed**
+> (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). That is a single dispatched
+> confirmation, not the 14 consecutive scheduled credential nights the v1.0 gate requires — those
+> start fresh at this ref. Six upstream tests are evidence-quarantined at this ref (the
+> `vercel-infra-coupled` family, ADR-0007 §h addendum): each fails deterministically because its
+> `deploy` branch encodes behaviour only Vercel's own infrastructure produces, and knext's result
+> matches the self-hosted expectation in every case — full per-test provenance is in the ADR
+> addendum and `.github/compat-credentialed-next-version.json`.
 >
-> **New apps scaffolded by knext pin a newer Next.js release (16.3.x) than the `v16.2.12` measured
-> above.** Founder decision 2026-09-27 (#1570, grilling Q12 option b): **rc.1 is cut on the latest
-> Next 16.2.x tag at or above the CVE floor 16.2.11** (v16.2.12; v16.2.13 does not exist) as the rc.1
-> rehearsal window for the credential-window machinery. Re-credentialing all the way to the shipped
-> 16.3.5 pin moves to **rc.2** (#1571): the four 16.3.5 dispatches failed on five upstream tests added
-> after 16.2.x (none exist at v16.2.11) plus a knext-owned bytecode-liveness gate on the node cells —
-> quarantining tests knext has never passed would not be an honest credential, so 16.3.5 credentialing
-> waits until those five are fixed or evidence-quarantined. See
-> `.github/compat-credentialed-next-version.json` for the full, current record.
+> **The last COMPLETED 14-night-eligible credential evidence is the rc.1 rehearsal, still at
+> `v16.2.12`.** re-credentialed 2026-09-27 (#1570) — the four credential cells each ran green
+> across 16 shards at that ref, the latest published 16.2.x tag at or above the CVE floor 16.2.11.
+> That evidence is real and unchanged by the rc.2 ref bump above. The exact scope of that claim
+> (architectural exclusions, the per-case flaky-quarantine ledger, Node-only) lives in the
+> official-suite row below — read it before repeating the claim. The guard test **requires** that
+> row to cite its run ID + pinned ref + "N passed / 0 failed" result; an evidence-less ✅ fails CI.
+> See **Maintenance & honesty** below.
+>
+> See `.github/compat-credentialed-next-version.json` for the full, current record of which ref the
+> harness targets, which the scaffold ships, and the per-entry quarantine-ledger audit trail.
 
 ## Legend
 
