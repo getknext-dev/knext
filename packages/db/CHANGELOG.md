@@ -1,5 +1,13 @@
 # @getknext/db
 
+## 1.0.0-rc.2
+
+### Patch Changes
+
+- 7661878: Rewrite package READMEs for v1.0 release: concise one-paragraph introductions, quickstart commands that work, supported platforms table (Node/Bun × Turbopack/Webpack, with the Next.js versions on the compatibility page), and clear links to docs, compatibility, security, and contributing pages. Remove internal references (ADR numbers, issue/PR numbers) to prepare for npm publication.
+- Updated dependencies [7661878]
+  - @getknext/lib@1.0.0-rc.2
+
 ## 1.0.0-rc.1
 
 ### Patch Changes
