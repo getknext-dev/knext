@@ -324,12 +324,12 @@ function withCorrelationId(ctx: Context, id: string): Context
 function withDbWakeSpan<T>(fn: () => T): T
 
 ### ./validate
-const ConfigValidationError {
-  captureStackTrace(targetObject: object, constructorOpt?: Function): void
-  new (message: string): import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/packages/kn-next/src/cli/validate").ConfigValidationError
-  prepareStackTrace(err: Error, stackTraces: NodeJS.CallSite[]): any
-  prototype: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/packages/kn-next/src/cli/validate").ConfigValidationError
-  stackTraceLimit: number
+class ConfigValidationError {
+  cause?: unknown
+  code: "ERR_KN_CONFIG_INVALID"
+  message: string
+  name: string
+  stack?: string | undefined
 }
 
-function validateConfig(config: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/packages/kn-next/src/config").KnativeNextConfig, contract?: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/packages/kn-next/src/cli/validate").PairingContract): void
+function validateConfig(config: KnativeNextConfig, contract?: PairingContract): void

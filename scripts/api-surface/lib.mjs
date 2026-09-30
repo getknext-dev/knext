@@ -186,6 +186,40 @@ function isExternalDeclaration(symbol) {
   return decls.every((d) => d.getSourceFile().fileName.includes('/node_modules/'));
 }
 
+/**
+ * Resolves a `checker.getExportsOfModule` ALIAS symbol to its real target,
+ * following a chain (`export { X as Y } from 'z'` re-exporting something
+ * that is itself re-exported). `export * from` re-exports already come back
+ * from `getExportsOfModule` as the real target symbol (its `.flags` show the
+ * true kind — Function/Interface/etc, never Alias); named `export { X }
+ * from` re-exports do NOT — the symbol keeps the `Alias` flag and its OWN
+ * `.declarations` point at the local `ExportSpecifier`, not the target
+ * (measured: `@getknext/db/extensions/pgvector.ts`'s
+ * `export { cosineDistance, ... } from 'drizzle-orm'` — without this, the
+ * exported name resolves to a LOCAL declaration node, so
+ * `isExternalDeclaration` never fires and every drizzle-orm type reachable
+ * from its signature prints as an absolute-path `import("/…/node_modules/…")`
+ * reference instead of the collapsed external marker). The exported NAME
+ * (what a consumer actually imports) is kept from the ORIGINAL symbol by the
+ * caller; only the symbol used for type/declaration analysis is swapped.
+ */
+function resolveAliasTarget(checker, symbol) {
+  let current = symbol;
+  const seen = new Set();
+  while ((current.flags & ts.SymbolFlags.Alias) !== 0 && !seen.has(current)) {
+    seen.add(current);
+    let next;
+    try {
+      next = checker.getAliasedSymbol(current);
+    } catch {
+      break;
+    }
+    if (!next || next === current) break;
+    current = next;
+  }
+  return current;
+}
+
 function originPackageOf(decl) {
   const fileName = decl.getSourceFile().fileName;
   // Split on the LAST `/node_modules/` boundary, not the first: bun's
@@ -202,10 +236,17 @@ function originPackageOf(decl) {
   return last[0] ?? 'external';
 }
 
-function surfaceOfSymbol(checker, symbol, contextNode) {
+/**
+ * `exportedName` is the name a CONSUMER imports (from the original,
+ * possibly-alias `getExportsOfModule` symbol — a named re-export can rename,
+ * `export { X as Y }`); `symbol` is that symbol's fully alias-RESOLVED
+ * target (see `resolveAliasTarget`), used for every declaration/kind/type
+ * lookup below.
+ */
+function surfaceOfSymbol(checker, exportedName, symbol, contextNode) {
   const decl = symbol.declarations?.[0] ?? contextNode;
   if (isExternalDeclaration(symbol)) {
-    return `external ${symbol.getName()} (re-exported from ${originPackageOf(decl)} — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)`;
+    return `external ${exportedName} (re-exported from ${originPackageOf(decl)} — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)`;
   }
   const isTypeLike =
     (symbol.flags &
@@ -223,7 +264,7 @@ function surfaceOfSymbol(checker, symbol, contextNode) {
     return callSignatures
       .map(
         (sig) =>
-          `function ${symbol.getName()}${safeSignatureToString(
+          `function ${exportedName}${safeSignatureToString(
             checker,
             sig,
             decl,
@@ -264,9 +305,9 @@ function surfaceOfSymbol(checker, symbol, contextNode) {
     // `type Y = A & B`) — typeToString already gives a full, deterministic
     // structural rendering for these.
     const typeText = safeTypeToString(checker, type, decl, ts.TypeFormatFlags.InTypeAlias);
-    return `${kindOf(symbol)} ${symbol.getName()} = ${typeText}`;
+    return `${kindOf(symbol)} ${exportedName} = ${typeText}`;
   }
-  return `${kindOf(symbol)} ${symbol.getName()} {\n${parts.join('\n')}\n}`;
+  return `${kindOf(symbol)} ${exportedName} {\n${parts.join('\n')}\n}`;
 }
 
 function kindOf(symbol) {
@@ -308,7 +349,51 @@ function extractEntrySurface(program, checker, sourceFile) {
     .getExportsOfModule(moduleSymbol)
     .slice()
     .sort((a, b) => a.getName().localeCompare(b.getName()));
-  return exportsOfModule.map((symbol) => surfaceOfSymbol(checker, symbol, sourceFile)).join('\n\n');
+  const surface = exportsOfModule
+    .map((raw) =>
+      surfaceOfSymbol(checker, raw.getName(), resolveAliasTarget(checker, raw), sourceFile),
+    )
+    .join('\n\n');
+  return normalizeAbsolutePaths(surface);
+}
+
+/**
+ * Rewrites every `import("<absolute path>")` reference TypeScript's printer
+ * emits for a type it cannot name in context — the round-3 review fix. Two
+ * shapes, both made portable:
+ *
+ *  - a REPO-LOCAL absolute path (e.g. `@getknext/core`'s `validateConfig`
+ *    referencing `config.ts`'s `KnativeNextConfig` from `cli/validate.ts`)
+ *    becomes the REPO-RELATIVE path — identical text on any checkout.
+ *  - a `node_modules` absolute path becomes just the package specifier
+ *    (`<pkg>` or `<pkg>/<subpath>`), the same collapse `originPackageOf`
+ *    already does for whole-symbol external re-exports, so a version bump's
+ *    `.bun`/`.pnpm` store hash (`drizzle-orm@0.45.2+bc97d1609396e075`)
+ *    doesn't leak into the report either.
+ *
+ * Without this, the checked-in baseline embeds the CONTRIBUTOR'S absolute
+ * checkout path (measured: a git worktree under `.claude/worktrees/…`) —
+ * `check.mjs` then fails with a pure path diff on every OTHER checkout,
+ * including CI (`/home/runner/work/knext/knext`), and the path leaks into
+ * the repo. `tests/api-surface-no-absolute-paths.test.ts` is the guard that
+ * a future printed type can't reintroduce this.
+ */
+function normalizeAbsolutePaths(text) {
+  return text.replace(/import\("([^"]+)"\)/g, (whole, importPath) => {
+    const nmIdx = importPath.lastIndexOf('/node_modules/');
+    if (nmIdx !== -1) {
+      const rest = importPath.slice(nmIdx + '/node_modules/'.length);
+      const segs = rest.split('/');
+      const pkg = segs[0]?.startsWith('@') && segs.length > 1 ? `${segs[0]}/${segs[1]}` : segs[0];
+      const subpath = segs.slice(segs[0]?.startsWith('@') ? 2 : 1).join('/');
+      return `import("${pkg}${subpath ? `/${subpath}` : ''}")`;
+    }
+    if (importPath.startsWith(REPO_ROOT)) {
+      const rel = importPath.slice(REPO_ROOT.length).replace(/^\/+/, '');
+      return `import("${rel}")`;
+    }
+    return whole;
+  });
 }
 
 /**
@@ -375,7 +460,37 @@ export function generatePackageReport(pkg) {
     '# tracked wherever it is actually declared (checker.getExportsOfModule).',
     '',
   ].join('\n');
-  return `${banner}${sections.join('\n\n')}\n`;
+  const report = `${banner}${sections.join('\n\n')}\n`;
+  // Fail LOUD here, not just in the standalone test — a generator that can
+  // silently commit a contributor's home/worktree path is the round-3 defect.
+  assertNoAbsolutePaths(report, pkg.name);
+  return report;
+}
+
+/**
+ * `/Users/…` (macOS), `/home/…` (Linux, incl. CI's `/home/runner/work/…`),
+ * and `C:\…` (Windows) — plus a defensive direct check for THIS process's
+ * own `REPO_ROOT`, in case a path reaches the report through some route
+ * `normalizeAbsolutePaths` doesn't pattern-match (e.g. not wrapped in
+ * `import("...")`). Exported so the standalone regression test
+ * (`tests/api-surface-no-absolute-paths.test.ts`) checks the exact same rule
+ * against the COMMITTED report files, not a re-implementation of it.
+ */
+export function assertNoAbsolutePaths(text, label) {
+  const patterns = [/\/Users\//, /\/home\//, /[A-Za-z]:\\/, new RegExp(escapeRegExp(REPO_ROOT))];
+  for (const re of patterns) {
+    const match = text.match(re);
+    if (match) {
+      throw new Error(
+        `${label}: found an absolute local path (\`${match[0]}\`) in the generated report — ` +
+          'this leaks a contributor/CI checkout path and breaks the guard on every other machine.',
+      );
+    }
+  }
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export function reportPath(pkg) {

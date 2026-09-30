@@ -548,7 +548,7 @@ external ColumnsWithTable (re-exported from drizzle-orm — upstream type, not s
 
 external ConvertCustomConfig (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
-function cosineDistance(column: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/index").SQLWrapper | import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/column").AnyColumn, value: number[] | string[] | import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/query-builders/query-builder").TypedQueryBuilder<any> | string): import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/index").SQL
+external cosineDistance (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
 const CREATE_TIMESCALEDB_EXTENSION = "CREATE EXTENSION IF NOT EXISTS timescaledb;"
 
@@ -643,7 +643,7 @@ external IndexedExtraConfigType (re-exported from drizzle-orm — upstream type,
 
 external inet (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
-function innerProduct(column: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/index").SQLWrapper | import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/column").AnyColumn, value: number[] | string[] | import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/query-builders/query-builder").TypedQueryBuilder<any> | string): import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/index").SQL
+external innerProduct (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
 external integer (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
@@ -678,7 +678,7 @@ external json (re-exported from drizzle-orm — upstream type, not structurally 
 
 external jsonb (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
-function l2Distance(column: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/index").SQLWrapper | import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/column").AnyColumn, value: number[] | string[] | import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/query-builders/query-builder").TypedQueryBuilder<any> | string): import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/index").SQL
+external l2Distance (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
 external line (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
@@ -1226,7 +1226,7 @@ external Reference (re-exported from drizzle-orm — upstream type, not structur
 
 external ReferenceConfig (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
-function relations<TTableName extends string, TRelations extends Record<string, import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/relations").Relation<any>>>(table: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/table").AnyTable<{ name: TTableName; }>, relations: (helpers: import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/relations").TableRelationsHelpers<TTableName>) => TRelations): import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/relations").Relations<TTableName, TRelations>
+external relations (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
 external SelectedFields (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
@@ -1246,7 +1246,7 @@ external smallserial (re-exported from drizzle-orm — upstream type, not struct
 
 external sparsevec (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
-function sql<T>(strings: TemplateStringsArray, ...params: any[]): import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/node_modules/.bun/drizzle-orm@0.45.2+bc97d1609396e075/node_modules/drizzle-orm/index").SQL<T>
+external sql (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
 external SubqueryWithSelection (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
@@ -1254,7 +1254,7 @@ external TableConfig (re-exported from drizzle-orm — upstream type, not struct
 
 external TableLikeHasEmptySelection (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
-type TableRef = string | PgTable<import("/Users/banna/alpheya/pocs/knext/.claude/worktrees/agent-a4dd0f379c0e9881c/packages/db/src/schema").TableConfig>
+type TableRef = string | PgTable<import("packages/db/src/schema").TableConfig>
 
 external text (re-exported from drizzle-orm — upstream type, not structurally tracked; see this subpath's knext.publicApi entry)
 
