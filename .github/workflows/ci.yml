@@ -152,6 +152,19 @@ jobs:
       - name: Guard — ADR phase gates are internally consistent
         run: bun run verify:phase-gates
 
+      # Public API type-surface guard (#1669): public-api-surface.test.ts (PK5)
+      # proves WHICH subpaths of @getknext/{core,lib,db} are public; it does not
+      # look inside a subpath, so a renamed export or a narrowed type there
+      # passed untouched. This regenerates each package's type-surface report
+      # straight from source (TypeScript compiler API single-file `.d.ts`
+      # emit — no dist build needed, so it runs here rather than after the
+      # lib→db→core builds below) and diffs it against the checked-in baseline
+      # in api-surface/*.d.ts.report. Also exercised as a bun:test
+      # (api-surface-guard.test.ts) below; this step gives an explicit, early,
+      # named CI signal independent of the full bun suite.
+      - name: Guard — public API type-surface reports match source (#1669)
+        run: node scripts/api-surface/check.mjs
+
       # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
       # core MUST be built before the bun suite runs. @getknext/lib must be built first —
