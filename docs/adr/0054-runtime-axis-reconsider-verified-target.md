@@ -498,12 +498,13 @@ place to answer it.
 | Credential clocks | one independent 14-night window per cell, keyed on that cell's own fingerprint. A red night on one cell does not restart another cell's window, and a green night does not count toward it | ADR-0056 D1; `docs/compat-matrix.md` webpack rows |
 | Bytecode liveness | two mechanisms to grade, the compiled `--bytecode` exec on bun cells and the V8 compile cache on node cells | ADR-0058 Decision table; `docs/compat-matrix.md` "A credential night requires bytecode caching proven LIVE" |
 | Runtime image shapes | **4 template files, 6 final runtime stages, 3 base images**: `templates/app/Dockerfile.hbs` (vinext × bun, `alpine:3.22`), `Dockerfile.vinext-node.hbs` (`node:22-alpine`), `Dockerfile.self-contained.hbs` (`alpine:3.22`), and `runtime-standalone/Dockerfile.standalone.hbs` stages `standalone-bun`, `standalone-bun-self-contained` (`oven/bun:1.4.2-alpine`) and `standalone-node` (`node:22-alpine`) | the `FROM` lines of those files |
-| Per-image SBOM + scan + sign | runs on **one** image, `apps/file-manager/Dockerfile`, which is the vinext single executable. The base-image Trivy job is report-only and covers `oven/bun:1.4.2-alpine` and `node:22-alpine` | `supply-chain.yml:151`, `:374-385` |
+| Per-image SBOM + scan + sign | the full SBOM + Trivy + cosign gate runs on **one** image, `apps/file-manager/Dockerfile`, which is the vinext single executable. The built-image Trivy job scans the OS layer of the opt-in `standalone-bun-self-contained` stage, with no SBOM and no signature. The base-image Trivy job is report-only on the unpatched `oven/bun:1.4.2-alpine` and `node:22-alpine` bases | `supply-chain.yml:151`, `:433-453`, `:374-385` |
 | User docs to keep per-target accurate | 23 of the 50 pages under `apps/docs/content` name a builder | `git grep -l -E 'vinext\|webpack\|turbopack'` over `apps/docs/content` |
 
-**One gap is priced here but not decided.** No CI job SBOMs, scans or signs the **default**
-(turbopack × bun standalone) image shape. The only per-image supply-chain gate covers the vinext
-executable. `security.md` asks for an "SBOM per image", so this belongs on the sprint-close review
+**One gap is priced here but not decided.** No CI job SBOMs, signs, or scans the *built* image of
+the **default** disk-mode `standalone-bun` stage (turbopack × bun). The only scan that touches that
+stage is the report-only scan of its unpatched base image. The full per-image gate
+covers the vinext executable. `security.md` asks for an "SBOM per image", so this belongs on the sprint-close review
 as tech debt. This Amendment does not fix it.
 
 **ADR-0048's objection still holds.** Two matrices and several supply-chain surfaces are a real
