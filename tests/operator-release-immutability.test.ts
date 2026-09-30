@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -22,11 +22,19 @@ const SCRIPT = resolve(
   '../packages/kn-next-operator/hack/check-release-immutable.sh',
 );
 
+/** Every fake-`gh` PATH dir created below, removed in afterAll (#880/D9). */
+const fakeGhDirs: string[] = [];
+
+afterAll(() => {
+  for (const dir of fakeGhDirs) rmSync(dir, { recursive: true, force: true });
+});
+
 /** Writes a fake `gh` on a fresh PATH dir that behaves per `behavior`. */
 function fakeGhBin(
   behavior: 'no-release' | 'release-with-asset' | 'release-no-asset' | 'api-error',
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'fake-gh-'));
+  fakeGhDirs.push(dir);
   const bin = join(dir, 'gh');
   let body: string;
   switch (behavior) {
