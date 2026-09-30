@@ -108,9 +108,11 @@ the scaffolded `knext-bun-entry.mjs` and `knext-node-entry.mjs` read it.
   above the cap is refused before your route runs. A chunked body is refused the moment the count
   crosses the cap: the response is `413 Payload Too Large` with `Connection: close`, and if your
   handler had already started reading, its read fails instead of returning a truncated body. The
-  rest of the body is discarded as it arrives — never held in memory — for at most two seconds, so
-  a client that is still uploading can read the `413` rather than a connection reset, and then the
-  connection is closed. (If a handler has *already begun
+  rest of the body is discarded as it arrives — never held in memory — for at most two seconds
+  after the `413` is sent and at most 16 MiB, so a client that is still uploading can read the `413`
+  rather than a connection reset, and then the connection is closed. On a pipelined connection, any
+  earlier responses are delivered first. A refusal never affects other requests the server is
+  handling, even when your handler never listens for request errors. (If a handler has *already begun
   sending its response* before reading the body, a status can no longer be sent, so the connection
   is dropped instead.)
 - **WebSocket upgrades and streamed responses are not affected** — the cap applies to request
