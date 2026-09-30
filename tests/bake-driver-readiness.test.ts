@@ -3,6 +3,18 @@ import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+// #1686 round 3 — CI flake fix: a fixed 41_200-41_699 port RANGE, reused
+// across every call in this file and shared by nothing else in the repo,
+// collides with (a) itself when a earlier child's socket has not yet been
+// released by the kernel and (b) any OTHER concurrent bun-test worker/CI job
+// that happens to land in the same band. Both were caught live: an
+// `EADDRINUSE: address already in use 127.0.0.1:41466` from the fake
+// server's own `.listen()`, and — the SAME root cause one process-crash layer
+// up — a bake driver that died on bind() before printing a single byte,
+// observed downstream as an assertion against empty stdout. `freePort()` is
+// the repo's existing fix for exactly this class (#678/#683/#686): bind port
+// 0, let the OS hand back a genuinely free one, hold nothing guessed.
+import { freePort } from '../apps/file-manager/e2e-support/child-ports';
 
 /**
  * #1572 — the shipped standalone-node compile-cache BAKE driver must get a
@@ -80,15 +92,18 @@ function fakeStandalone(routes: Routes, patchFetch = false, delayMs = 0) {
   return { dir, driver, server: join(dir, 'server.js') };
 }
 
-let port = 41_200 + Math.floor(Math.random() * 500);
-
-function bake(
+async function bake(
   routes: Routes,
   warm: string,
   opts: { wrapper?: boolean; accept?: boolean; patchFetch?: boolean; delayMs?: number } = {},
 ) {
   const { dir, driver, server } = fakeStandalone(routes, opts.patchFetch, opts.delayMs);
-  port += 1;
+  // OS-assigned per call — never a guessed literal, never reused between
+  // tests. `freePort()`'s own doc names the residual window (release → the
+  // child's own bind()) as irreducible for a port someone else must bind;
+  // it is what collapses the wide fixed range this replaces down to that one
+  // unavoidable window.
+  const port = await freePort();
   const t0 = Date.now();
   const r = spawnSync('node', opts.wrapper ? [WRAPPER, 'node', driver] : [driver], {
     encoding: 'utf8',
@@ -200,8 +215,8 @@ describe('bake readiness: a redirect loop is an ANSWER, not "not listening" (#15
     ['basePath root loop (redirect-rewrite-dynamic-basepath)', BASEPATH_LOOP, '/base/path/', 307],
     ['two-hop cycle with absolute Locations', TWO_HOP_CYCLE, '/a', 307],
   ] as const) {
-    it(`${name}: the strict driver answers fast, flushes, and fails the loop as non-2xx`, () => {
-      const r = bake(routes, warm);
+    it(`${name}: the strict driver answers fast, flushes, and fails the loop as non-2xx`, async () => {
+      const r = await bake(routes, warm);
       expect(r.ms, r.out).toBeLessThan(FAST_MS);
       expect(r.out).not.toContain('did not answer within');
       expect(r.stdout).toContain('[knext bake] standalone server answered after');
@@ -212,8 +227,8 @@ describe('bake readiness: a redirect loop is an ANSWER, not "not listening" (#15
       expect(r.status, r.out).not.toBe(0);
     }, 90_000);
 
-    it(`${name}: the harness wrapper tolerates it (a real numeric status + a flush)`, () => {
-      const r = bake(routes, warm, { wrapper: true, accept: true });
+    it(`${name}: the harness wrapper tolerates it (a real numeric status + a flush)`, async () => {
+      const r = await bake(routes, warm, { wrapper: true, accept: true });
       expect(r.ms, r.out).toBeLessThan(FAST_MS);
       expect(r.status, r.out).toBe(0);
     }, 90_000);
@@ -235,31 +250,31 @@ describe('bake readiness: legitimate redirects still land on their 2xx target (o
       '/x',
     ],
   ] as const) {
-    it(`${name}: the strict driver passes (status=200)`, () => {
-      const r = bake(routes, warm);
+    it(`${name}: the strict driver passes (status=200)`, async () => {
+      const r = await bake(routes, warm);
       expect(r.status, r.out).toBe(0);
       expect(r.stdout).toContain(`WARMED:${warm} status=200 `);
       expect(r.ms, r.out).toBeLessThan(FAST_MS);
     }, 90_000);
   }
 
-  it('a 404 warm path still fails the strict driver (no loosening)', () => {
-    const r = bake({ '/ok': [200] }, '/missing');
+  it('a 404 warm path still fails the strict driver (no loosening)', async () => {
+    const r = await bake({ '/ok': [200] }, '/missing');
     expect(r.status, r.out).not.toBe(0);
     expect(r.stdout).toContain('WARMED:/missing status=404 ');
   }, 90_000);
 });
 
 describe('bake readiness: the driver uses the fetch it had BEFORE importing server.js (#1572)', () => {
-  it('a server that patches globalThis.fetch (as Next does) cannot hang the bake', () => {
-    const r = bake({ '/': [307, '/'] }, '/', { wrapper: true, accept: true, patchFetch: true });
+  it('a server that patches globalThis.fetch (as Next does) cannot hang the bake', async () => {
+    const r = await bake({ '/': [307, '/'] }, '/', { wrapper: true, accept: true, patchFetch: true });
     expect(r.ms, r.out).toBeLessThan(FAST_MS);
     expect(r.stdout).toContain('WARMED:/ status=307 ');
     expect(r.status, r.out).toBe(0);
   }, 90_000);
 
-  it('the other half: a 2xx warm through a fetch-patching server still passes strict', () => {
-    const r = bake({ '/ok': [200] }, '/ok', { patchFetch: true });
+  it('the other half: a 2xx warm through a fetch-patching server still passes strict', async () => {
+    const r = await bake({ '/ok': [200] }, '/ok', { patchFetch: true });
     expect(r.ms, r.out).toBeLessThan(FAST_MS);
     expect(r.status, r.out).toBe(0);
   }, 90_000);
@@ -272,8 +287,8 @@ describe('bake readiness: a SLOW first answer is still an answer (#1572 round 2)
   // externally and the FIRST response (a 500) takes ~30s. A short per-attempt
   // timeout aborts every attempt and never sees it; the attempt must be allowed
   // to run to the overall deadline.
-  it('a server whose every response takes 7s is answered, not timed out', () => {
-    const r = bake({ '/': [500] }, '/', { wrapper: true, accept: true, delayMs: 7_000 });
+  it('a server whose every response takes 7s is answered, not timed out', async () => {
+    const r = await bake({ '/': [500] }, '/', { wrapper: true, accept: true, delayMs: 7_000 });
     expect(r.out).not.toContain('did not answer within');
     expect(r.stdout).toContain('WARMED:/ status=500 ');
     expect(r.status, r.out).toBe(0);
@@ -295,8 +310,8 @@ describe('bake readiness: a listening socket is ready — no HTTP round-trip thr
     ],
     ['middleware self-rewrite + server-action redirect page', { '/redirect': [500] }, '/redirect'],
   ] as const) {
-    it(`${name}: readiness returns before the slow answer, the warm still records it`, () => {
-      const r = bake(routes, warm, { wrapper: true, accept: true, delayMs: 8_000 });
+    it(`${name}: readiness returns before the slow answer, the warm still records it`, async () => {
+      const r = await bake(routes, warm, { wrapper: true, accept: true, delayMs: 8_000 });
       const m = r.stdout.match(/standalone server answered after (\d+)ms/);
       expect(m, r.out).not.toBeNull();
       expect(Number(m?.[1])).toBeLessThan(4_000);
@@ -305,11 +320,11 @@ describe('bake readiness: a listening socket is ready — no HTTP round-trip thr
     }, 90_000);
   }
 
-  it('the other half: nothing listening still fails at the deadline (fail-closed)', () => {
+  it('the other half: nothing listening still fails at the deadline (fail-closed)', async () => {
     const { dir, driver } = fakeStandalone({});
     const idle = join(dir, 'idle.js');
     writeFileSync(idle, 'setInterval(() => {}, 1000);');
-    port += 1;
+    const port = await freePort();
     const r = spawnSync('node', [driver], {
       encoding: 'utf8',
       timeout: 80_000,
@@ -332,7 +347,7 @@ describe('bake readiness: a redirect Location is never followed off-origin (#168
   it('a cross-origin redirect is NOT followed — reported as its 3xx, strict fails', async () => {
     const bystander = await startBystanderOrigin('/login', 200);
     try {
-      const r = bake({ '/protected': [307, bystander.url] }, '/protected');
+      const r = await bake({ '/protected': [307, bystander.url] }, '/protected');
       expect(r.status, r.out).not.toBe(0);
       // The 2xx came from the bystander, not from following it — the warm
       // must record the ORIGINAL 3xx, never the off-origin 200.
@@ -349,28 +364,28 @@ describe('bake readiness: a redirect Location is never followed off-origin (#168
     }
   }, 90_000);
 
-  it('the other half: a same-origin ABSOLUTE Location (same host:port) is still followed', () => {
-    const r = bake({ '/abs': [307, 'ABS:/ok'], '/ok': [200] }, '/abs');
+  it('the other half: a same-origin ABSOLUTE Location (same host:port) is still followed', async () => {
+    const r = await bake({ '/abs': [307, 'ABS:/ok'], '/ok': [200] }, '/abs');
     expect(r.status, r.out).toBe(0);
     expect(r.stdout).toContain('WARMED:/abs status=200 ');
   }, 90_000);
 
-  it('the other half: a same-origin RELATIVE Location is still followed', () => {
-    const r = bake({ '/rel': [307, '/ok'], '/ok': [200] }, '/rel');
+  it('the other half: a same-origin RELATIVE Location is still followed', async () => {
+    const r = await bake({ '/rel': [307, '/ok'], '/ok': [200] }, '/rel');
     expect(r.status, r.out).toBe(0);
     expect(r.stdout).toContain('WARMED:/rel status=200 ');
   }, 90_000);
 });
 
 describe('bake readiness: the redirect hop limit is exactly 10 (#1686 round 2)', () => {
-  it('a chain of exactly 10 distinct redirects still lands on its 2xx target', () => {
-    const r = bake(chainRoutes(10), '/r0');
+  it('a chain of exactly 10 distinct redirects still lands on its 2xx target', async () => {
+    const r = await bake(chainRoutes(10), '/r0');
     expect(r.status, r.out).toBe(0);
     expect(r.stdout).toContain('WARMED:/r0 status=200 ');
   }, 90_000);
 
-  it('the other half: a chain of 11 distinct redirects exceeds the limit and fails as non-2xx', () => {
-    const r = bake(chainRoutes(11), '/r0');
+  it('the other half: a chain of 11 distinct redirects exceeds the limit and fails as non-2xx', async () => {
+    const r = await bake(chainRoutes(11), '/r0');
     expect(r.status, r.out).not.toBe(0);
     expect(r.stdout).toContain('WARMED:/r0 status=307 ');
     expect(r.stdout).not.toContain('status=200');
