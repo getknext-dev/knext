@@ -61,9 +61,11 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 | `release` | `npm-publish` | `NODE_AUTH_TOKEN` | the only job that publishes. **Skipped** unless there are no pending changesets *and* something is genuinely unpublished. Verifies its own fresh pre-publish pack against the `pack` job's artifact byte-for-byte before using the token. |
 
 `NPM_TOKEN` is an **environment secret on `npm-publish`** — not a repo secret, which is why a plain
-`gh secret list` does not show it. That environment carries a **required-reviewer** rule, so the
-publish itself waits for a human click. That is deliberate: publishing to a public registry is
-irreversible.
+`gh secret list` does not show it. **As of this writing, that environment carries no protection
+rule** — the API returns an empty list, and `1.0.0-rc.1`/`1.0.0-rc.2` both published with no
+reviewer click. Adding a required-reviewer rule (plus `v*` tag protection) is the founder action
+tracked by #1638; a release run does not pause for approval today, and the GA-cut runbook below
+should not be read as assuming one exists until #1638 lands.
 
 **Opening a Version PR does not wait for anything.** It used to: `version-pr` and `release` were one
 job that declared the environment, so every push to `main` asked for an approval — including pushes
@@ -379,12 +381,23 @@ about whether to proceed that should not be automated.
 Confirm every box before starting step 1 below:
 
 - [ ] 14/14 credentialed nights, all four runtime × builder cells, on the currently pinned `rcTag`.
+- [ ] The GA-vs-rc tarball diff (`ga-tarball-diff-gate.mjs`) is green — version-only — as a
+      **pre-flight dry run** against the pinned rc, not first discovered mid-step-4 on the Version
+      PR itself.
+- [ ] Platform/operator e2e is green **at the rc tag**, with the operator built from that tag and
+      its image digest recorded (#1305).
+- [ ] The docs launch pass is live on knext.dev (quickstart, compatibility table, and version
+      numbers all reflect the rc under credential — not a stale prior release).
 - [ ] The operator tag-release line (`operator-vX.Y.Z`, semver GitHub Releases from a pushed tag)
       has merged — **or**, if it has not, the fallback in step 7 below (the rolling
       `operator-latest` channel) is explicitly accepted for this cut.
 - [ ] The rollback rehearsal on the `rc` npm dist-tag (see [Rollback runbook](#rollback-runbook-100-ships-broken)
       below) has been run and its result recorded, so the rollback path is proven reachable
       *before* it is ever needed for real.
+- [ ] **[FOUNDER]** #1638 (`npm-publish` environment required reviewer + `v*` tag protection) and
+      #1373 (credential freeze guard / published-bytes guard CODEOWNERS + required review) are
+      both made **required checks** — see [The gate](#the-gate-two-lanes-one-approval) above for
+      why the `npm-publish` environment carries no reviewer today without #1638.
 
 1. **Confirm the credential window is closed.** Every one of the four runtime × builder
    combinations shows 14/14 green in the compat ledger for the pinned `rcTag`. If any cell is short,
