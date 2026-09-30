@@ -143,7 +143,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // leg) file-manager's self-contained vinext binary, running both e2e
       // suites via `bun:test` — ONE pinned setup-bun step for the whole job,
       // same reasoning as the vinext-node-image entry above it.
-      'ci.yml': 13,
+      // 14, was 13 (#1670 round 3): the crd-schema-additive-guard job installs
+      // the workspace's `yaml` dependency via `bun install --frozen-lockfile`
+      // to run `node scripts/crd-schema-diff.mjs` — its own pinned setup-bun,
+      // same lockstep version as every other step here. A count RISING is a
+      // decision, per the rule above.
+      'ci.yml': 14,
       // NEW (#1302): the freeze guard's frozenFileSet() computation needs the
       // workspace's bun to run scripts/compat-credential-freeze-guard.mjs — a
       // count RISING is a decision, per the rule above.
