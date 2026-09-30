@@ -175,11 +175,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // NEW (#1417): the default-builder standalone deploy kind e2e — one
       // "Setup bun" step (workspace install + the fixture's own `next build`).
       'standalone-deploy-kind-e2e.yml': 1,
-      // NEW (C1/#785): the publish lane now installs the workspace closure and
-      // scans it before building the image it pushes, so it needs the same bun
-      // the Dockerfile's builder stage uses. A count RISING is a decision too —
-      // this one is it.
-      'supply-chain.yml': 1,
+      // 2, was 1: #1722 added the `js-closure-fs-trivy` job — a second,
+      // independent job that installs the workspace + builds the reference app
+      // through `kn-next build`/`docker buildx`, so it needs its own pinned
+      // setup-bun step (same pin as the C1/#785 job below). A count RISING is
+      // a decision too — this one is it.
+      'supply-chain.yml': 2,
       // 2, was 1: the Prepare job's knext-deps install moved from pnpm to a
       // pinned setup-bun after the bun migration merged — pnpm refuses a
       // bun-pinned workspace ("This project is configured to use bun"), which
