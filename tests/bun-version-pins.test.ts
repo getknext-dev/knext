@@ -157,7 +157,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // NEW (#1481): the docs deploy — the PR dry-run job and the main deploy
       // job each install the workspace and build the CLI with bun.
       'docs-deploy-oke.yml': 2,
-      'file-manager-platform-e2e-nightly.yml': 1,
+      // Round 2 (#1305/#1563): the nightly and at-tag callers were
+      // de-duplicated into ONE reusable `workflow_call` implementation
+      // (file-manager-platform-e2e.yml) that both `uses:` — a single
+      // setup-bun step instead of one per caller.
+      'file-manager-platform-e2e.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
       // NEW (#1668/#1671): the operator upgrade-under-load e2e's single job
