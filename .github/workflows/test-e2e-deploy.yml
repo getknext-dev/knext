@@ -2032,6 +2032,15 @@ jobs:
             # upstream runs this suite at -c 2 on the same ubuntu-latest runners and
             # ledgers the residual 60s-timeout wobble; diverging would trade
             # env-parity for an unproven stability hypothesis at ~2x wall time.
+            #
+            # #1620 follow-up: in bun CREDENTIAL mode, pin the fixture install's
+            # sharp to the version that has a committed musl lockfile, so a sharp
+            # patch published mid-window cannot change what gets installed (the
+            # script is a pass-through for early-warning and the node lane).
+            # Assigned on its own line so `bash -e` fails the step if it refuses;
+            # `export VAR="$(...)"` would mask that exit code.
+            PINNED_PKG_PATHS="$(node "${GITHUB_WORKSPACE}/knext/scripts/compat-sharp-pin.mjs" --repo-root "${GITHUB_WORKSPACE}/knext")"
+            export NEXT_TEST_PKG_PATHS="${PINNED_PKG_PATHS}"
             node run-tests.js --type e2e -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
           fi
 
