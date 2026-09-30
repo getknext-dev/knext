@@ -104,3 +104,39 @@ export function buildRedisStopArgs(name) {
   if (!name) throw new Error('buildRedisStopArgs: name is required');
   return ['rm', '-f', name];
 }
+
+/**
+ * The round's leg-running control flow, extracted so the "cleanup runs even
+ * on a failed leg" half of defect 3 is testable as data — with fake
+ * `runLeg`/`cleanup`/`classifyError` — rather than only by reading
+ * e2e-round.mjs's main(). `cleanup` runs in a `finally` around every leg, so
+ * a docker-started redis container from an earlier leg gets stopped whether
+ * the round finishes clean or breaks on a failed leg.
+ *
+ * @param {{
+ *   legs: ReadonlyArray<{ id: string }>,
+ *   runLeg: (leg: { id: string }) => Promise<void>,
+ *   cleanup: () => Promise<void> | void,
+ *   classifyError?: (e: unknown) => string,
+ * }} opts
+ * @returns {Promise<{ results: Array<{id: string, status: string, why?: string}>, failed: boolean }>}
+ */
+export async function runLegsWithCleanup({ legs, runLeg, cleanup, classifyError = () => 'FAIL' }) {
+  const results = [];
+  let failed = false;
+  try {
+    for (const leg of legs) {
+      try {
+        await runLeg(leg);
+        results.push({ id: leg.id, status: 'PASS' });
+      } catch (e) {
+        results.push({ id: leg.id, status: classifyError(e), why: e?.message });
+        failed = true;
+        break;
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+  return { results, failed };
+}

@@ -13,6 +13,7 @@ import {
   buildRedisStopArgs,
   defaultServerPath,
   PROD_IMAGE_PORT,
+  runLegsWithCleanup,
   uniqueRedisContainerName,
 } from './scripts/e2e-round-config.mjs';
 
@@ -107,5 +108,58 @@ describe('#1331 defect 3 — redis container name is unique, not a shared consta
   it('buildRedisStopArgs targets the same unique name for cleanup', () => {
     const name = uniqueRedisContainerName('seed-2');
     expect(buildRedisStopArgs(name)).toEqual(['rm', '-f', name]);
+  });
+
+  it('cleanup runs exactly once when every leg passes', async () => {
+    let cleanupCalls = 0;
+    const legs = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    const ran = [];
+    const { results, failed } = await runLegsWithCleanup({
+      legs,
+      runLeg: async (leg) => {
+        ran.push(leg.id);
+      },
+      cleanup: () => {
+        cleanupCalls += 1;
+      },
+    });
+    expect(ran).toEqual(['a', 'b', 'c']);
+    expect(results.every((r) => r.status === 'PASS')).toBe(true);
+    expect(failed).toBe(false);
+    expect(cleanupCalls).toBe(1);
+  });
+
+  it('cleanup STILL runs when a leg throws — the leak this defect fixes', async () => {
+    let cleanupCalls = 0;
+    const legs = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    const ran = [];
+    const { results, failed } = await runLegsWithCleanup({
+      legs,
+      runLeg: async (leg) => {
+        ran.push(leg.id);
+        if (leg.id === 'b') throw new Error('leg b failed');
+      },
+      cleanup: () => {
+        cleanupCalls += 1;
+      },
+    });
+    // 'c' never runs (fail-closed on first failure) but cleanup still fires.
+    expect(ran).toEqual(['a', 'b']);
+    expect(failed).toBe(true);
+    expect(results.find((r) => r.id === 'b').status).toBe('FAIL');
+    expect(cleanupCalls).toBe(1);
+  });
+
+  it('classifyError lets the caller mark a Refuse distinctly from a real failure', async () => {
+    class Refuse extends Error {}
+    const { results } = await runLegsWithCleanup({
+      legs: [{ id: 'x' }],
+      runLeg: async () => {
+        throw new Refuse('no REDIS_URL');
+      },
+      cleanup: () => {},
+      classifyError: (e) => (e instanceof Refuse ? 'REFUSED' : 'FAIL'),
+    });
+    expect(results[0].status).toBe('REFUSED');
   });
 });

@@ -34,6 +34,7 @@ import {
   buildRedisRunArgs,
   buildRedisStopArgs,
   defaultServerPath,
+  runLegsWithCleanup,
   uniqueRedisContainerName,
 } from './e2e-round-config.mjs';
 import { LOCAL_LEGS } from './e2e-round-legs.mjs';
@@ -240,28 +241,24 @@ async function main() {
     }
   }
 
-  const results = [];
-  let failed = false;
-  // Cleanup runs in `finally` around EVERY leg, not just per-leg, so a
-  // container --allow-docker started for an earlier leg is always stopped —
-  // on a passing round, and on a failed/thrown one — before the round exits.
-  try {
-    for (const leg of legs) {
+  // Cleanup runs in `finally` around EVERY leg, not just per-leg (via
+  // runLegsWithCleanup, #1331 defect 3), so a container --allow-docker
+  // started for an earlier leg is always stopped — on a passing round, and
+  // on a failed/thrown one — before the round exits.
+  const { results, failed } = await runLegsWithCleanup({
+    legs,
+    runLeg: async (leg) => {
       console.log(`\n=== leg: ${leg.id} — ${leg.title} ===`);
       try {
         await IMPL[leg.id]();
-        results.push({ id: leg.id, status: 'PASS' });
       } catch (e) {
-        const status = e instanceof Refuse ? 'REFUSED' : 'FAIL';
-        results.push({ id: leg.id, status, why: e.message });
-        console.error(`\n[${status}] ${leg.id}: ${e.message}`);
-        failed = true;
-        break;
+        console.error(`\n[${e instanceof Refuse ? 'REFUSED' : 'FAIL'}] ${leg.id}: ${e.message}`);
+        throw e;
       }
-    }
-  } finally {
-    stopDockerRedis();
-  }
+    },
+    cleanup: stopDockerRedis,
+    classifyError: (e) => (e instanceof Refuse ? 'REFUSED' : 'FAIL'),
+  });
 
   printTable(results, legs);
   if (failed) process.exit(1);
