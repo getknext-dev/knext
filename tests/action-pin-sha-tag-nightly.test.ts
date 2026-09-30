@@ -1029,6 +1029,16 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
   });
 
   it('fails closed (throws) when a real directory cannot be read, rather than shrinking the scan (#1711)', () => {
+    // MEASURED under bun (not assumed from POSIX docs): `realpathSync` here
+    // requires the same READ permission `readdirSync` does — chmod 0o100
+    // (execute-only, no read) fails BOTH calls EACCES, and chmod 0o500
+    // (read+execute) passes both. There is no permission combination under
+    // bun's runtime where `realpathSync` succeeds but `readdirSync` fails, so
+    // this test exercises the `realpathSync` catch in `walk` — the ONE
+    // fail-closed branch a permissions-based fixture can independently prove
+    // here. The sibling `readdirSync` catch a few lines below stays as
+    // defense-in-depth (correct if ever reached, e.g. under Node's looser
+    // realpath semantics) but is not separately provable under this runtime.
     const root = mkdtempSync(join(tmpdir(), 'knext-pin-unreadable-dir-'));
     const locked = join(root, 'locked-action');
     mkdirSync(locked, { recursive: true });
