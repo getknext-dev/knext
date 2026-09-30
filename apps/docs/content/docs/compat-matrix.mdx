@@ -12,10 +12,9 @@ description: Honest, evidence-gated status of what the knext adapter supports.
 Next.js app more than one way (standalone on Node or Bun, built with Turbopack or webpack, or the
 `vinext` build), and each combination is tracked separately rather than folded into a single "the suite is green" headline.
 The credential window now runs against Next.js v16.3.5. That is the same release new apps
-scaffold today — the deliberate gap between the two is closed. A dispatched confirmation run at
-this version passed cleanly on all four cells (node/bun x turbopack/webpack, 16 shards each, zero
-failures) right after the ref moved, including knext's own build-cache verification step on the
-Node cells; nightly runs at this version are only just starting toward the 14-consecutive-night
+scaffold today — the deliberate gap between the two is closed. Dispatched confirmation runs at
+this version passed on all four cells (node/bun x turbopack/webpack, 16 shards each), including
+knext's own build-cache verification step on every Node shard after a fix to that step; nightly runs at this version are only just starting toward the 14-consecutive-night
 credential a version needs before it counts as fully credentialed. The
 most-verified cell overall is still the **Turbopack build on the Node runtime**, whose last
 completed 14-night-eligible run observed **792 tests passed, 0 failed**, at Next.js v16.2.12 — the
