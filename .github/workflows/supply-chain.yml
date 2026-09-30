@@ -660,8 +660,8 @@ jobs:
       - name: Stage the standalone-bun Dockerfile into the app's build context
         run: |
           set -euo pipefail
-          cat > "${RUNNER_TEMP}/stage-context.ts" <<'EOF'
-          import { stageStandaloneBuildContext } from "./packages/kn-next/src/cli/runtime-image";
+          cat > "${RUNNER_TEMP}/stage-context.ts" <<EOF
+          import { stageStandaloneBuildContext } from "${GITHUB_WORKSPACE}/packages/kn-next/src/cli/runtime-image";
           const appDir = process.env.APP_DIR;
           if (!appDir) throw new Error("APP_DIR not set");
           stageStandaloneBuildContext({ cwd: appDir, buildContext: appDir });
