@@ -128,7 +128,7 @@ const FAST_MS = 20_000;
 function startBystanderOrigin(
   path: string,
   status = 200,
-): Promise<{ child: ReturnType<typeof spawn>; url: string }> {
+): Promise<{ child: ReturnType<typeof spawn>; url: string; requestCount: () => number }> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
       'node',
@@ -137,7 +137,11 @@ function startBystanderOrigin(
         [
           "const { createServer } = require('node:http');",
           `const body = 'bystander';`,
+          // Logs REQUEST on every hit received — the test proves the driver
+          // never made this call at all (not just that it ignored the
+          // answer), i.e. no untimed outbound request left this process.
           'const server = createServer((_req, res) => {',
+          "  console.log('REQUEST');",
           `  res.writeHead(${status}, { 'content-length': Buffer.byteLength(body) });`,
           '  res.end(body);',
           '});',
@@ -148,12 +152,19 @@ function startBystanderOrigin(
     );
     children.push(child);
     let buf = '';
+    let requests = 0;
     const onData = (chunk: Buffer) => {
       buf += chunk.toString();
+      requests += (buf.match(/REQUEST/g) ?? []).length;
+      buf = buf.replace(/REQUEST/g, '');
       const m = buf.match(/PORT:(\d+)/);
       if (m) {
-        child.stdout?.off('data', onData);
-        resolvePromise({ child, url: `http://127.0.0.1:${m[1]}${path}` });
+        buf = buf.replace(/PORT:\d+/, '');
+        resolvePromise({
+          child,
+          url: `http://127.0.0.1:${m[1]}${path}`,
+          requestCount: () => requests,
+        });
       }
     };
     child.stdout?.on('data', onData);
@@ -329,6 +340,10 @@ describe('bake readiness: a redirect Location is never followed off-origin (#168
       expect(r.stdout).not.toContain('status=200');
       expect(r.stderr).toContain('off-origin');
       expect(r.stderr).toContain(bystander.url);
+      // Proves the redirect was never fetched at all (not merely that its
+      // answer was discarded) — the concern the review named: an untimed
+      // outbound request during a real `docker build`.
+      expect(bystander.requestCount()).toBe(0);
     } finally {
       bystander.child.kill();
     }
