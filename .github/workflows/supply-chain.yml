@@ -451,6 +451,16 @@ jobs:
           # --self-contained` actually ships.
           - name: kn-next standalone-bun-self-contained runtime
             file: packages/kn-next/Dockerfile.standalone-self-contained.trivyscan
+          # knext DEFAULT standalone runtime OS layer (#1718) — the
+          # standalone-bun stage of Dockerfile.standalone.hbs, the image
+          # `kn-next build`/`kn-next deploy` produce BY DEFAULT (disk-mode,
+          # non-self-contained). Only this entry also gets an SBOM (see the
+          # SBOM steps below, gated on matrix.name) — #1718's scope is the
+          # default target specifically; the other three entries in this
+          # matrix have no SBOM step today and adding one for them is out of
+          # scope here.
+          - name: kn-next standalone-bun runtime (default target)
+            file: packages/kn-next/Dockerfile.standalone-bun.trivyscan
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -459,6 +469,10 @@ jobs:
       # Build into a LOCAL OCI-layout directory (never pushed — this job holds no
       # packages:write). Trivy scans this exact built layout below. tar=false
       # because Trivy's --input accepts an OCI layout directory, not a tarball.
+      # provenance: false — this job never pushes or signs, so buildx's default
+      # provenance attestation would only complicate the SBOM step below (syft
+      # cannot parse the nested attestation index the file-manager job's SBOM
+      # step works around) for no benefit here.
       - name: Build the shipped runtime OS layer (local OCI layout)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -466,6 +480,7 @@ jobs:
           file: ${{ matrix.file }}
           platforms: linux/amd64
           outputs: type=oci,dest=image-oci,tar=false
+          provenance: false
 
       - name: Trivy scan BUILT image — FAIL on HIGH/CRITICAL
         # Report (don't block) on PRs and on the merge-queue ref; ENFORCE (fail)
@@ -479,3 +494,26 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
+
+      # #1718 — SBOM for the DEFAULT standalone-bun target only (this matrix's
+      # other three entries carry no SBOM step today; adding one for them is
+      # out of this issue's scope). `always()` so a failing Trivy gate above
+      # still publishes the evidence of what was scanned, matching the
+      # image-supply-chain job's app-closure SBOM upload above. `provenance:
+      # false` on the build step (above) keeps this a plain OCI layout, so
+      # syft reads it directly — no nested-index flattening needed.
+      - name: Generate SBOM (syft) — kn-next standalone-bun runtime (default target)
+        if: always() && matrix.name == 'kn-next standalone-bun runtime (default target)'
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: oci-dir:image-oci
+          format: spdx-json
+          output-file: sbom-standalone-bun.spdx.json
+
+      - name: Upload SBOM artifact — kn-next standalone-bun runtime (default target)
+        if: always() && matrix.name == 'kn-next standalone-bun runtime (default target)'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-standalone-bun-${{ github.sha }}
+          path: sbom-standalone-bun.spdx.json
+          if-no-files-found: error
