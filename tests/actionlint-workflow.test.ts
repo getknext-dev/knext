@@ -193,6 +193,36 @@ describe('#1352: actionlint gate covers .github/actions/** composite actions', (
     expect(run).toContain('.github/actions/**/action.yaml');
   });
 
+  it("#1352 follow-up: the path filters and diff globs also cover this repo's non-.github/actions composite actions", () => {
+    // #1352's own text: "extend the actionlint gate to .github/actions/**
+    // composites (and any other composite action.yml)". This repo has two:
+    // packages/kn-next-action (credential-bearing, referenced by
+    // docs-deploy-oke.yml via `uses: ./packages/kn-next-action`) and the
+    // legacy root action.yml (#1598).
+    const text = readFileSync(ACTIONLINT_WORKFLOW_PATH, 'utf8');
+    const parsed = parse(text) as {
+      on: { pull_request?: { paths?: string[] }; push?: { paths?: string[] } };
+    };
+    for (const path of ['packages/kn-next-action/action.yml', 'action.yml']) {
+      expect(parsed.on.pull_request?.paths, `pull_request paths must include ${path}`).toContain(
+        path,
+      );
+      expect(parsed.on.push?.paths, `push paths must include ${path}`).toContain(path);
+    }
+
+    const { steps } = jobSteps();
+    const diffStep = steps.find(
+      (s) => s.name && /Compute the .*files this diff actually changed/.test(String(s.name)),
+    );
+    expect(diffStep).toBeTruthy();
+    const run = String(diffStep!.run);
+    expect(run).toContain('packages/kn-next-action/action.yml');
+    expect(run).toContain('action.yml');
+    // And the local-reference regex must be widened to catch the actual
+    // consumer, not just .github/actions/.
+    expect(run).toMatch(/packages\/kn-next-action/);
+  });
+
   it('the diff excludes DELETED paths (--diff-filter=d), so a PR that only deletes a workflow/composite-action file does not false-red', () => {
     const { steps } = jobSteps();
     const diffStep = steps.find(

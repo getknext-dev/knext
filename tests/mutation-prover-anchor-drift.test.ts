@@ -53,8 +53,13 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
  * ground). NEVER LOWER them — a lowered floor is exactly the silent
  * regression this ratchet exists to make loud.
  */
-const MIN_RESOLVED_PAIRS = 66;
-const MIN_RESOLVED_PROVERS = 13;
+// #1480: raised to the measured values on this tree (316 pairs / 24
+// provers) — the old 66/13 floors were set before #1688/#1249/#1574's
+// re-anchoring and before the fleet grew past 40 provers, so a large
+// regression (losing a prover from discovery, or most of a prover's
+// anchors) could pass unnoticed with this much slack. RAISE, NEVER LOWER.
+const MIN_RESOLVED_PAIRS = 316;
+const MIN_RESOLVED_PROVERS = 24;
 
 describe("every mutation prover's STATICALLY-resolvable anchors still match the current tree", () => {
   it('discovers a non-vacuous set of provers (the scan is not silently matching nothing)', () => {

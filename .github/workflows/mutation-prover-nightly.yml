@@ -53,8 +53,10 @@ on:
   # 06:07 UTC nightly — after the compat (03:17), docs-closure (04:23),
   # action-pin (05:11) and image-pin (05:41) nightlies, so the longest-running
   # job of the set does not make the security signals queue behind it.
+  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '7 6 * * *'
+    - cron: '7 6 * * 0'
   # Manual re-runs after fixing a prover; the alert job is scheduled-only (below)
   # so a dispatch experiment never files or updates the pinned issue.
   workflow_dispatch: {}

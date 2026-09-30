@@ -1,3 +1,26 @@
+# LEGACY LOCATION (#1598) — kept for backward compatibility, not for new use.
+#
+# This file predates ADR-0049 (docs/adr/0049-git-integration-stage-1-deploy-to-the-clients-own-cluster.md).
+# `packages/kn-next-action/action.yml` is the CURRENT action — it additionally
+# runs a credential preflight (`packages/kn-next-action/kubeconfig-check.mjs`,
+# `packages/kn-next-action/preflight.mjs`) that refuses an over-broad
+# kubeconfig before it ever reaches a build step; this file does not.
+#
+# It is kept, rather than deleted, because a GitHub Action at a repository's
+# root is directly referenceable as `owner/repo@ref` (no subpath), and this
+# repo's own docs historically pointed consumers at exactly that form
+# (`getknext-dev/knext@v1` — see apps/docs/content/docs/learn/automate-with-ci.mdx,
+# fixed by #1598 to reference the canonical action instead). An external
+# workflow already pinned to `getknext-dev/knext@v1` would silently stop
+# resolving if this file vanished — that is a breaking change for someone
+# outside this repo, not tech debt to clean up unilaterally.
+#
+# It is still scanned for SHA-pinning by scripts/verify-action-pins.mjs
+# (discoverPinnableFiles) exactly like every other composite action in the
+# repo — being legacy does not exempt it from the same supply-chain guard.
+#
+# Do not add new capability here. New features belong in
+# packages/kn-next-action; this file should only ever shrink toward it.
 name: 'Deploy with knext'
 description: 'Build a Next.js app and deploy it to Knative as a scale-to-zero NextApp, from your own CI, against your own cluster.'
 author: 'getknext-dev'

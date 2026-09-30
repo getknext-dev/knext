@@ -117,10 +117,11 @@ docs site on knext**). gRPC layer = **design-now / build-later, after correctnes
     `prometheus.io/port` annotation, the entries' `METRICS_PORT` default and the shipped PodMonitor
     moved together, locksteped by `metrics-port-lockstep.test.ts`). Enforcement is proved by a kind+Calico drill, not by
     an envtest object assertion.
-  - **Still open and deliberately so:** the in-process byte cap (ADR-0044 Option C) is deferred on a
-    **dated exception with a hard expiry at Tier-A exit or v1.0**. Rate limiting and payload caps are
-    documented recipes today (`apps/docs .../hardening.mdx`), not platform features — do not claim
-    otherwise.
+  - **(RESOLVED 2026-09-30, #743)** The in-process byte cap (ADR-0044 Amendment 6) is shipped:
+    preload `request-body-cap.cjs` (dependency-free CJS, same mechanism as `cache-control-normalize.cjs`),
+    8 MiB default, `KNEXT_MAX_REQUEST_BYTES` (0 = uncapped), counted bytes, 2 s linger + 16 MiB byte
+    bound. Covers both Node and Bun standalone (incl. compiled). Rate limiting remains a documented
+    recipe, not a platform feature.
   - **Enforcement is CNI-conditional.** flannel — which OKE GA and OrbStack both run — ships no
     NetworkPolicy controller, so on those clusters the policy is declarative only. Any claim that
     knext "isolates" app pods must carry that caveat.
@@ -178,7 +179,8 @@ defer bucket 1.
 - npm: packages are unified under the **`@getknext/*`** scope. The **publishable** three are
   `@getknext/core`, `@getknext/lib`, `@getknext/db` — they must ship together or consumers 404 on the
   missing member. `@getknext/ui` is **private** and never publishes; don't list it as a released
-  package. The earlier `@kn-next`/`@knative-next` drift is resolved; the `kn-next` bin name is unchanged.
+  package. The earlier `@kn-next`/`@knative-next` drift is resolved; `knext` is the canonical bin
+  name (since #1369) and `kn-next` is a deprecated alias — both → `dist/cli/kn-next.js`.
   **No npm release published yet** — that final `npm publish` step (requires npm auth) still blocks
   `npx kn-next` for outside users.
 - **(RESOLVED 2026-06-21)** The `kn-next` **TS CLI in `@getknext/core` (`packages/kn-next/src/cli`) is the

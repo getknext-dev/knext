@@ -193,8 +193,12 @@ const MUTATIONS = [
     file: WORKFLOW,
     spec: WORKFLOW_SPEC,
     test: 'the load-bearing wiring is PRESENT',
-    anchor: '    needs: deploy-tests\n    if: always()\n',
-    replacement: '    needs: deploy-tests\n',
+    // #1688/#1249: the ledger job's `needs:` grew a `credential-ref` member
+    // (job/step reshuffles across #1147/#850-era commits) and the `if:
+    // always()` on the following line is now indented under the same job, so
+    // the old two-member text no longer matches.
+    anchor: '    needs: [credential-ref, deploy-tests]\n    if: always()\n',
+    replacement: '    needs: [credential-ref, deploy-tests]\n',
   },
   {
     label: 'the job stops exporting red_detail — the alert quotes an empty string',
@@ -225,8 +229,11 @@ const MUTATIONS = [
     file: WORKFLOW,
     spec: WORKFLOW_SPEC,
     test: 'no INHERITED env or defaults can redirect the evidence',
-    anchor: 'jobs:\n  build-next:',
-    replacement: 'defaults:\n  run:\n    working-directory: /tmp\njobs:\n  build-next:',
+    // #1688/#1249: a comment block now sits between `jobs:` and `build-next:`
+    // (the ROOT job doc-comment), so the two-line anchor no longer matches.
+    // `jobs:\n` alone occurs exactly once in the workflow.
+    anchor: 'jobs:\n',
+    replacement: 'defaults:\n  run:\n    working-directory: /tmp\njobs:\n',
   },
   {
     label: 'the FINGERPRINT artifact is read unguarded again — a damaged one kills the write',
@@ -269,16 +276,29 @@ const MUTATIONS = [
     file: WORKFLOW,
     spec: WORKFLOW_SPEC,
     test: 'every `needs.<job>` reference is BACKED by',
-    anchor: '    needs: [build-next, deploy-tests, shard-ledger]',
-    replacement: '    needs: [build-next, deploy-tests]',
+    // #1688/#1249: the bare `needs: [build-next, deploy-tests, shard-ledger]`
+    // now also has `credential-ref` prepended AND is shared verbatim by two
+    // jobs (`nightly-red-alert` and `credential-recovery`) — the old anchor
+    // is both stale and ambiguous. Scope to `nightly-red-alert` specifically
+    // (the job this mutation is about) by anchoring on its preceding job
+    // header, which occurs exactly once.
+    anchor:
+      '  nightly-red-alert:\n    name: Nightly red alert (pinned issue)\n    needs: [credential-ref, build-next, deploy-tests, shard-ledger]',
+    replacement:
+      '  nightly-red-alert:\n    name: Nightly red alert (pinned issue)\n    needs: [credential-ref, build-next, deploy-tests]',
   },
   {
     label: 'the red alert stops covering CANCELLED (silence becomes success again)',
     file: WORKFLOW,
     spec: WORKFLOW_SPEC,
     test: 'the red alert fires when the ledger or the shards are CANCELLED',
+    // #1688/#1249: the condition's clause order changed (deploy-tests now
+    // precedes shard-ledger, and shard-ledger's own clause is last, closing
+    // the paren) so the old two-line anchor spanning a deploy-tests clause
+    // after shard-ledger no longer matches. Anchor on shard-ledger's own
+    // failure/cancelled clause, which still closes the expression.
     anchor:
-      "       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||\n       needs.deploy-tests.result == 'cancelled')",
+      "       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled')",
     replacement: "       needs.shard-ledger.result == 'failure')",
   },
   // ── Round 5: the same argument, applied one job to the LEFT ────────────────

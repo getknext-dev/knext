@@ -15,12 +15,20 @@ import { join } from 'node:path';
  *
  * This guard SCANS the repo (never a hand-maintained call-site list — that is
  * exactly how the drift class this file guards against gets missed) for any
- * `minio/minio` or `minio/mc` image reference and asserts it is either:
- *   (a) one of the two pinned, known-working Bitnami digests below, or
- *   (b) one of the deliberate exceptions below — szpg's LIVE production
- *       manifests, left for szpg's own review process (getknext-dev/knext#1423),
- *       each scoped to its ONE offending line (never a whole-file skip) and each
- *       required to carry a WHY comment (asserted below, not a silent skip).
+ * `minio/minio` or `minio/mc` image reference and asserts it is one of the two
+ * pinned, known-working Bitnami digests below.
+ *
+ * #1423 (FIXED): szpg's LIVE production manifests (50-minio.yaml,
+ * 62-backup.yaml, 55-storage-init.yaml) were deliberately left pinned to the
+ * broken quay.io/docker.io refs, carved out below as EXEMPTIONS, pending
+ * szpg's own review of the PVC-ownership question (Bitnami's minio image
+ * defaults to non-root UID 1001; the live PVC's existing data is root-owned).
+ * That review landed: all three now use the same pinned Bitnami digests as
+ * every other consumer in the repo, with a fix-data-ownership initContainer
+ * in 50-minio.yaml chowning the PVC before the non-root main container
+ * starts. EXEMPTIONS is now empty — kept as a named, typed list (not deleted)
+ * so a FUTURE deliberate carve-out has an established, reviewed shape to
+ * reuse rather than reinventing an ad hoc skip.
  *
  * Mutation-prove: change either PINNED_MINIO_DIGEST/PINNED_MC_DIGEST, or add a
  * new unpinned/differently-pinned minio reference anywhere in the repo, and
@@ -39,36 +47,13 @@ const ALLOWED_MINIO_REFS = new Set([
 ]);
 
 /**
- * Deliberately-unfixed references — szpg's LIVE production manifests, tracked
- * for szpg's own review at getknext-dev/knext#1423. Each exemption is scoped
- * to its ONE offending line, not the whole file — a second, different broken
- * ref landing anywhere else in these files must still fail.
- *
- * `count` is the EXACT number of times this exact line is expected to occur
- * in the file — not "at least one". Without a count, copying the exempt line
- * verbatim into a NEW container (e.g. duplicating the ensure-bucket
- * initContainer in 55-storage-init.yaml) stays invisible: `isExemptLine`
- * would happily wave through every copy (#1413 review, round 2).
+ * Deliberate carve-outs for a REAL, unpinned/differently-pinned reference this
+ * guard would otherwise flag — none live today (#1423 fixed the three szpg
+ * exemptions this list used to hold; see the file header). Kept as a typed,
+ * empty list rather than deleted: a future deliberate exception has an
+ * established shape (ONE line, an exact `count`, a WHY comment) to reuse.
  */
-const EXEMPTIONS: Array<{ file: string; lineSubstring: string; count: number }> = [
-  {
-    file: 'packages/scale-zero-pg/deploy/50-minio.yaml',
-    lineSubstring:
-      'quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z@sha256:cc144348ad1e4126766279b042804fa4f130da531cc811e91fdbcb12c6bc8881',
-    count: 1,
-  },
-  {
-    file: 'packages/scale-zero-pg/deploy/62-backup.yaml',
-    lineSubstring: 'image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned — UNPULLABLE, see #1423',
-    count: 2, // the mirror CronJob (:161) and the prune CronJob (:635)
-  },
-  {
-    file: 'packages/scale-zero-pg/deploy/55-storage-init.yaml',
-    lineSubstring:
-      'image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned (matches backup mirror) — UNPULLABLE, see #1423',
-    count: 1,
-  },
-];
+const EXEMPTIONS: Array<{ file: string; lineSubstring: string; count: number }> = [];
 
 function isExemptLine(relPath: string, line: string): boolean {
   return EXEMPTIONS.some((e) => e.file === relPath && line.includes(e.lineSubstring));

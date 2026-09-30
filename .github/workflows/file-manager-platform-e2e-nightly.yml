@@ -10,8 +10,10 @@ name: File-manager platform e2e (nightly / dispatch)
 # Triggers: schedule + dispatch.
 
 on:
+  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '37 4 * * *'
+    - cron: '37 4 * * 0'
   workflow_dispatch: {}
 
 permissions:

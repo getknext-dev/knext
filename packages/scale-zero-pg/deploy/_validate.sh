@@ -979,8 +979,11 @@ grep -q 'OBJSTORE_ENDPOINT' 55-storage-init.yaml \
   || fail "55-storage-init must ensure the bucket on the CONFIGURED object-store endpoint (#105)"
 # MinIO is now OPTIONAL + digest-pinned; its minio-only bucket Job must be gone
 # (bucket creation is endpoint-agnostic in storage-init).
-grep -qE 'quay.io/minio/minio:[^ ]*@sha256:[0-9a-f]{64}' 50-minio.yaml \
-  || fail "50-minio.yaml must digest-pin MinIO (archived upstream, #105)"
+# #1423: quay.io/minio/minio became unpullable (anon pull unauthorized
+# repo-wide); repinned to Bitnami's legacy mirror. Either registry is accepted
+# here as long as it is digest-pinned (image@sha256:... or tag@sha256:...).
+grep -qE '(quay\.io/minio/minio|docker\.io/bitnamilegacy/minio)(:[^ @]*)?@sha256:[0-9a-f]{64}' 50-minio.yaml \
+  || fail "50-minio.yaml must digest-pin MinIO (archived upstream, #105/#1423)"
 grep -q 'name: minio-create-buckets' 50-minio.yaml \
   && fail "50-minio.yaml still carries the minio-only bucket Job — bucket creation moved to storage-init (#105)"
 ok "object-storage backend is configurable via storage-objstore; MinIO optional + digest-pinned (#105)"

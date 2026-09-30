@@ -24,12 +24,13 @@ spec:
       # reachability instead). mc talks SigV4 + path-style, exactly like neon.
       initContainers:
         - name: ensure-bucket
-          # #1423 (KNOWN BREAK, NOT FIXED HERE — needs szpg's own review, not a
-          # knext-side CI repin): docker.io/minio/mc now UNAUTHORIZES every
-          # anonymous pull, repo-wide (#1403). This LIVE bucket-init Job was
-          # deliberately left pinned to the broken tag; see
-          # getknext-dev/knext#1423 for the tracked fix.
-          image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned (matches backup mirror) — UNPULLABLE, see #1423
+          # #1423 (FIXED): docker.io/minio/mc's tag UNAUTHORIZES every
+          # anonymous pull, repo-wide (#1403). Repinned to Bitnami's "legacy"
+          # free mirror by immutable digest, matching 62-backup.yaml's mc
+          # containers. Runs as non-root UID 1001 by default with $HOME=/
+          # (unwritable to 1001) — the script below now exports HOME=/tmp
+          # before `mc alias set`, matching every other mc container here.
+          image: docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511 # digest-pinned (#1423)
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -44,6 +45,8 @@ spec:
           args:
             - |
               set -eu
+              # mc stores its config under $HOME/.mc; the bitnamilegacy image's
+              # default $HOME=/ is not writable by its non-root user (#1423).
               export HOME=/tmp; mkdir -p /tmp/.mc
               echo "ensuring bucket '${OBJSTORE_BUCKET}' on ${OBJSTORE_ENDPOINT} (region=${OBJSTORE_REGION}, SigV4 + path-style)"
               n=0
