@@ -271,9 +271,9 @@ describe('every workflow SHA-pins every action (#528)', () => {
 
   it('covers packages/kn-next-action/action.yml, the credential-bearing composite action (#1598)', () => {
     // The kubeconfig-accepting GitHub Action lives outside .github/actions and
-    // the repo root, so it needs its own line in NAMED_COMPOSITE_ACTION_DIRS —
-    // asserted here rather than merely documented, so deleting that entry (or
-    // the file itself vanishing without anyone noticing) reds this suite.
+    // the repo root; the full-tree walk (#1711) finds it without any named
+    // entry — asserted here so the file vanishing without anyone noticing
+    // still reds this suite.
     const pinnable = discoverPinnableFiles(REPO_ROOT) as string[];
     expect(pinnable, 'the credential-bearing composite action must be discovered').toContain(
       'packages/kn-next-action/action.yml',

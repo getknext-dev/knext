@@ -50,6 +50,14 @@ on:
       # the test file (or a local helper it imports) must trigger THIS
       # workflow or that half never runs. Guarded by the test itself.
       - 'tests/actionlint-workflow.test.ts'
+      # #1711 — this list stays ENUMERATED deliberately, unlike
+      # `scripts/verify-action-pins.mjs`'s `discoverPinnableFiles`. GitHub
+      # evaluates `on.<event>.paths` before checkout, so nothing here can run
+      # a filesystem walk to compute it — a composite action landing in a
+      # directory not named above will not trigger this gate at all, no
+      # matter how the runtime steps below discover files. That is a
+      # trigger-time constraint of GitHub Actions itself, not the same
+      # "named list drifts silently" problem #1711 closed in the script.
   push:
     branches: [main]
     paths:

@@ -122,8 +122,9 @@
  *
  * Usage: node scripts/verify-action-pins.mjs [--root <repo-root>]
  *   --root  repository root to scan (default: cwd). The scan covers
- *           .github/workflows, .github/actions/**, the root action.yml, and
- *           NAMED_COMPOSITE_ACTION_DIRS (packages/kn-next-action today).
+ *           .github/workflows plus every action.yml/action.yaml found by a
+ *           full-tree walk of the repo (skip-set: node_modules, .git, dist,
+ *           build caches, .claude/ worktrees — see discoverPinnableFiles).
  * Exits 1 (with an actionable report) if there is any finding, if it can see NO
  * files to check, or on an unrecognised argument. There is no combination of
  * arguments that makes this script exit 0 without having verified something.
@@ -173,32 +174,55 @@ const YAML = (file) => file.endsWith('.yml') || file.endsWith('.yaml');
  * (#528 review). `.github/workflows` is NOT the whole boundary:
  *
  *   - `.github/workflows/*.yml`      — the workflows themselves;
- *   - `.github/actions/** /action.yml` — local composite actions;
- *   - `action.yml` at the repo root  — the published `Deploy with knext` action;
- *   - `NAMED_COMPOSITE_ACTION_DIRS`  — composite actions that live elsewhere in
- *     the tree (today: `packages/kn-next-action`, the credential-bearing
- *     GitHub Action that accepts a kubeconfig — #1598).
+ *   - a composite action's manifest (`action.yml` / `action.yaml`) ANYWHERE
+ *     in the tree — the root `Deploy with knext` action, everything under
+ *     `.github/actions/**`, `packages/kn-next-action` (the credential-bearing
+ *     GitHub Action that accepts a kubeconfig — #1598), and any future one.
  *
  * A composite action's steps run INSIDE the caller's job, with the caller's
  * token, so a floating ref there is as credential-adjacent as one in a
  * workflow. Leaving it outside the scan would make "pinned by default" false
  * for a whole class of file while every guard stayed green.
  *
- * `NAMED_COMPOSITE_ACTION_DIRS` is ENUMERATED rather than walked (unlike
- * `.github/actions`, which is a tree of nothing but action manifests) because
- * a package directory also holds `node_modules`, `dist`, and everything else
- * npm publishes — walking it the way `.github/actions` is walked would mean
- * either descending into all of that or re-deriving an ignore list, and
- * getting the ignore list wrong is a silent hole in a boundary this file
- * claims is complete. A new composite action landing under `packages/*`
- * without an entry here shows up as a smaller `discoverPinnableFiles()`
- * result — asserted by `tests/workflow-action-pins.test.ts` and
- * `tests/action-pin-sha-tag-nightly.test.ts`, not merely assumed.
+ * DISCOVERED BY A FULL-TREE WALK, never an enumerated directory list (#1711).
+ * An earlier revision hardcoded `NAMED_COMPOSITE_ACTION_DIRS = ['packages/
+ * kn-next-action']` — complete on the day it was written, silently incomplete
+ * the day a THIRD composite action landed anywhere else, because nothing
+ * would have grown that list for it. `SKIP_DIRS` below (the same pattern as
+ * `scripts/check-ts-import-extensions.mjs`) keeps the walk from descending
+ * into `node_modules`, `.git`, build output, or a stray git worktree under
+ * `.claude/` — none of those can hold a composite action this repo owns, and
+ * walking `node_modules` in particular would be both slow and full of noise
+ * from every dependency's own `action.yml`.
+ *
+ * FAILS CLOSED on a directory this walk cannot read (#1711): a
+ * `readdirSync` failure on a directory that DOES exist (permissions, an I/O
+ * error) THROWS rather than silently skipping that subtree — silently
+ * skipping would let an unreadable directory hide an unpinned composite
+ * action from every downstream check, which is the opposite of what a
+ * boundary claiming to be complete is for. A BROKEN SYMLINK is treated
+ * differently and deliberately: `realpathSync` failing there means the link
+ * target does not exist, which is not a finding about pins, so that case
+ * still returns rather than throwing.
  *
  * This is the single definition of the boundary — the form guard imports it
  * rather than re-deriving one, because two definitions drift.
  */
-const NAMED_COMPOSITE_ACTION_DIRS = ['packages/kn-next-action'];
+const SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'dist',
+  '.next',
+  '.open-next',
+  '.turbo',
+  'coverage',
+  // Git worktrees for parallel agent sessions live under here (see
+  // `.claude/worktrees/`); walking them would rediscover every action.yml in
+  // every other in-progress worktree, none of which belong to THIS scan.
+  '.claude',
+]);
+const ACTION_FILE_NAMES = new Set(['action.yml', 'action.yaml']);
+
 export function discoverPinnableFiles(repoRoot) {
   const found = [];
 
@@ -209,7 +233,7 @@ export function discoverPinnableFiles(repoRoot) {
     }
   }
 
-  // Composite actions nest arbitrarily deep under .github/actions.
+  // Composite actions nest arbitrarily deep anywhere in the tree.
   //
   // SYMLINKED directories are descended, which `entry.isDirectory()` alone does
   // NOT do — that predicate is false for a symlink Dirent, so a symlinked
@@ -223,15 +247,42 @@ export function discoverPinnableFiles(repoRoot) {
     let real;
     try {
       real = realpathSync(absolute);
-    } catch {
-      return; // broken symlink: nothing to read, and not a finding about pins
+    } catch (error) {
+      // ENOENT here means the path does not exist at all — a broken symlink
+      // target, nothing to read, and not a finding about pins. Anything else
+      // (EACCES, say) is a directory that DOES exist but this process could
+      // not even stat — the same FAIL-CLOSED rule as the readdirSync catch
+      // below: swallowing it would hide a real, unreadable subtree.
+      if (error && error.code === 'ENOENT') return;
+      throw new Error(
+        `discoverPinnableFiles: cannot resolve "${relative || '.'}": ` +
+          `${error instanceof Error ? error.message : error}`,
+      );
     }
     if (visited.has(real)) return;
     visited.add(real);
 
-    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = readdirSync(absolute, { withFileTypes: true });
+    } catch (error) {
+      // See the FAILS CLOSED note above the function: an unreadable directory
+      // must red the whole scan, not silently shrink it. Kept as its own
+      // defense-in-depth catch even though `realpathSync` above already
+      // requires the SAME permission this runtime needs for readdirSync (a
+      // directory readable enough to resolve is, under bun, readable enough
+      // to list — measured, not assumed) — this branch is what protects the
+      // property if that ever stops being true (a looser realpath, a
+      // different runtime, an ACL-only restriction realpath does not check).
+      throw new Error(
+        `discoverPinnableFiles: cannot read directory "${relative || '.'}": ` +
+          `${error instanceof Error ? error.message : error}`,
+      );
+    }
+
+    for (const entry of entries) {
       const childAbs = join(absolute, entry.name);
-      const childRel = `${relative}/${entry.name}`;
+      const childRel = relative ? `${relative}/${entry.name}` : entry.name;
       let isDirectory = entry.isDirectory();
       if (entry.isSymbolicLink()) {
         try {
@@ -240,25 +291,15 @@ export function discoverPinnableFiles(repoRoot) {
           continue; // broken link
         }
       }
-      if (isDirectory) walk(childAbs, childRel);
-      else if (YAML(entry.name)) found.push(childRel);
+      if (isDirectory) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        walk(childAbs, childRel);
+      } else if (ACTION_FILE_NAMES.has(entry.name)) {
+        found.push(childRel);
+      }
     }
   };
-  const actionsDir = resolve(repoRoot, '.github/actions');
-  if (existsSync(actionsDir) && statSync(actionsDir).isDirectory()) {
-    walk(actionsDir, '.github/actions');
-  }
-
-  for (const name of ['action.yml', 'action.yaml']) {
-    if (existsSync(resolve(repoRoot, name))) found.push(name);
-  }
-
-  for (const dir of NAMED_COMPOSITE_ACTION_DIRS) {
-    for (const name of ['action.yml', 'action.yaml']) {
-      const rel = `${dir}/${name}`;
-      if (existsSync(resolve(repoRoot, rel))) found.push(rel);
-    }
-  }
+  walk(resolve(repoRoot), '');
 
   return found.sort();
 }
