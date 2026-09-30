@@ -374,6 +374,18 @@ Steps marked **[FOUNDER]** are not agent-doable: they require a click a human mu
 environment approval, a `git push` of a release tag, or a branch-protection setting) or a decision
 about whether to proceed that should not be automated.
 
+### GA preconditions
+
+Confirm every box before starting step 1 below:
+
+- [ ] 14/14 credentialed nights, all four runtime × builder cells, on the currently pinned `rcTag`.
+- [ ] The operator tag-release line (`operator-vX.Y.Z`, semver GitHub Releases from a pushed tag)
+      has merged — **or**, if it has not, the fallback in step 7 below (the rolling
+      `operator-latest` channel) is explicitly accepted for this cut.
+- [ ] The rollback rehearsal on the `rc` npm dist-tag (see [Rollback runbook](#rollback-runbook-100-ships-broken)
+      below) has been run and its result recorded, so the rollback path is proven reachable
+      *before* it is ever needed for real.
+
 1. **Confirm the credential window is closed.** Every one of the four runtime × builder
    combinations shows 14/14 green in the compat ledger for the pinned `rcTag`. If any cell is short,
    stop — do not cut GA on a partial window.
@@ -385,16 +397,34 @@ about whether to proceed that should not be automated.
 3. **Changeset `pre exit`.** Run `bunx changeset pre exit` and commit the result. This takes the
    four `@getknext/*` fixed-group packages out of changesets' prerelease ("pre") mode, so the next
    Version PR proposes a stable version rather than another `rc.N`. Open this as its own PR.
-4. **Merge the "Version Packages" PR → `1.0.0`.** Once the `pre exit` PR is merged, the normal
-   `version-pr` job (see [Subsequent releases](#subsequent-releases)) opens or updates a Version
-   PR. Verify it proposes `1.0.0` for all four fixed-group members before merging — a `pre exit`
+4. **Prepare and hand-open the "Version Packages" PR → `1.0.0`.** `getknext-dev`'s org setting
+   ("Actions can create or approve pull requests") is **off**, so `version-pr`'s bot-driven PR-open
+   step is always refused (`release.yml`'s own step prints `GitHub Actions is not permitted to
+   create or approve pull requests` and tells you to open the PR by hand — this is not new for GA,
+   it is the standing state of every Version PR on this repo). Do **not** wait for a bot-opened PR
+   to appear. Use the same hand-prepared recipe already used twice for the rc.1 and rc.2 "prepare"
+   PRs (rc.1: #1591; rc.2 #1659, "same recipe as rc.1"):
+
+   ```sh
+   git switch -c release/1.0.0 main
+   bunx changeset version        # consumes every pending changeset, bumps the fixed
+                                  # group to 1.0.0 (pre.json is already gone from step 3)
+   git add -A
+   git commit -m "release: version packages"
+   git push -u origin release/1.0.0
+   gh pr create --base main --title "chore: version packages" \
+     --body "Prepares 1.0.0 on the fixed group (@getknext/core, @getknext/lib, @getknext/db, kn-next)."
+   ```
+
+   Verify the PR proposes `1.0.0` for all four fixed-group members before merging — a `pre exit`
    that landed out of order, or a changeset still describing a `rc.N+1`-shaped bump, would show up
-   here as the wrong target version. **The GA-vs-rc tarball diff must be green (versions only).**
-   `ga-tarball-diff-gate.mjs` runs automatically on this PR's `release.yml` invocation once it
-   detects a stable target version with a matching `vX.Y.Z-rc.N` tag in history (see [A credentialed
-   GA must differ from its last rc ONLY in version fields](#a-credentialed-ga-must-differ-from-its-last-rc-only-in-version-fields)
-   above) — do not merge if that check is red; a red diff means the tarball about to publish is not
-   the one the 14 nights actually credentialed.
+   here as the wrong target version. **CI must be fully green on this PR before merging, especially
+   the GA-vs-rc tarball diff (versions only).** `ga-tarball-diff-gate.mjs` runs automatically on
+   this PR's `release.yml` invocation once it detects a stable target version with a matching
+   `vX.Y.Z-rc.N` tag in history (see [A credentialed GA must differ from its last rc ONLY in version
+   fields](#a-credentialed-ga-must-differ-from-its-last-rc-only-in-version-fields) above) — do not
+   merge if that check is red; a red diff means the tarball about to publish is not the one the 14
+   nights actually credentialed.
 5. **[FOUNDER] Approve the `npm-publish` environment deployment.** Merging the Version PR is a
    second push to `main`; `release` starts and parks in `waiting` for the environment's
    required-reviewer approval (see [Subsequent releases](#subsequent-releases) step 4). Check the
@@ -403,12 +433,23 @@ about whether to proceed that should not be automated.
 6. **[FOUNDER] Push the `v1.0.0` tag.** `git tag v1.0.0 <merge-commit-sha> && git push origin
    v1.0.0`. Verify it landed with `git ls-remote --tags origin v1.0.0` before moving on — a tag
    that silently failed to push leaves every step below pointed at nothing.
-7. **Operator release from the tag.** The operator's semver release line (the `operator-vX.Y.Z`
-   mechanism — an immutable, digest-pinned, cosign-signed release built from a pushed `v*` tag,
-   distinct from the `operator-latest` channel that moves only on stable tags) fires from the
-   `v1.0.0` tag pushed in the previous step. Confirm the resulting `operator-v1.0.0` release exists
-   and its `install.yaml` resolves to a real, signed image digest before proceeding — do not
-   hand-apply an unsigned or untagged operator image at GA.
+7. **Operator release, mechanism depends on whether the semver release line has merged.** The
+   operator's tag-triggered `operator-vX.Y.Z` release line (an immutable, digest-pinned,
+   cosign-signed GitHub Release built from a pushed `operator-vX.Y.Z` tag, which is also what moves
+   the `operator-latest` channel — a plain push to `main` moves only the rolling `operator-edge`
+   channel instead) is a **separate, currently-open PR**, not yet merged as of this writing. Check
+   its state before cutting GA:
+   - **If that PR has merged:** `git tag operator-v1.0.0 <operator-main-sha-to-ship> && git push
+     origin operator-v1.0.0`, then confirm the resulting `operator-v1.0.0` release exists, its
+     `install.yaml` resolves to a real signed image digest, and `operator-latest` now points at the
+     same digest (a stable, non-prerelease tag is what moves it).
+   - **If it has not merged:** fall back to what ships today — `operator-supply-chain.yml` already
+     builds, SBOMs, Trivy-gates, cosign-signs, and republishes the rolling `operator-latest`
+     GitHub Release (with its digest-pinned `install.yaml`) on every push to `main`. Confirm
+     `operator-latest`'s `install.yaml` was refreshed from a `main` commit at or after the GA cut,
+     record which operator commit SHA / image digest it carries in the GA release notes (there is
+     no separate `v1.0.0`-tagged operator artifact in this fallback — `operator-latest` IS the
+     artifact), and do not hand-apply an unsigned or untagged image either way.
 8. **Stranger install + upgrade verification against the live registry.** From a clean environment
    with no local checkout state: `npm exec --package=@getknext/core@latest -- kn-next create` (the
    documented quickstart) must scaffold and `npx kn-next --help` must exit 0. Separately, on a
