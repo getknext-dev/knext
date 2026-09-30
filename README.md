@@ -2,7 +2,7 @@
 
 > **Production-ready framework for deploying Next.js applications on Knative with Fluid Compute characteristics.**
 
-The default build compiles your app with **vinext** (an open-source Vite-based Next.js implementation) into a **single executable** with bytecode baked in — ~61 ms cold starts under scale-to-zero, with distributed caching (Redis). knext also maintains an adapter on the **official Next.js Adapter API** — the suite-verified lane its 778/778 compatibility credential was earned on — and keeps the two claims separate.
+The default build runs on the **official Next.js Adapter API** — the suite-verified lane its 778/778 compatibility credential was earned on — packaged as a bytecode-cached standalone executable, with distributed caching (Redis). An optional **vinext** build (an open-source Vite-based Next.js implementation) compiles your app into a single executable instead; knext keeps the two claims separate and measures each on its own evidence.
 
 ---
 
@@ -161,7 +161,7 @@ Bytecode is compiled **into the binary** at build time, as one unit, so every po
 *(This section previously described a `node:22` builder emitting `output: 'standalone'` and a distroless Node runtime reading a `NODE_COMPILE_CACHE` directory. That is the older shape and no longer what this Dockerfile builds.)*
 
 
-**What that buys, measured:** **61 ms** median cold start against the Node standalone's 884 ms, at **higher** steady-state throughput (1103 vs 630 req/s). The per-file bytecode pass that used to run for `runtime: bun` standalone builds is retired: it traded throughput for cold start (537 req/s), and the whole-bundle compile wins both axes.
+**What that buys, measured:** on a fresh local process with the binary already page-cached, this vinext executable's **process boot** measured **61 ms** median against the Node standalone's 884 ms, at **higher** steady-state throughput (1103 vs 630 req/s) — both local-machine numbers, not a cluster figure. A truly cold local spawn is closer to 1.8 s. On a real Knative cluster (OKE, N=7 paired cold cycles), scale-from-zero was a **tie**: node-standalone 3610 ms vs vinext single-exec 3401 ms median — cold start there is dominated by Knative activation/scheduling/container-create, not process boot, so it does not differentiate the two build targets. The per-file bytecode pass that used to run for `runtime: bun` standalone builds is retired: it traded throughput for cold start (537 req/s), and the whole-bundle compile wins both axes.
 
 **Running the legacy standalone shape on Bun?** One mechanism still applies:
 
