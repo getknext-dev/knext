@@ -1,20 +1,20 @@
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { describe, expect, it } from 'bun:test';
 import YAML from 'yaml';
 
 describe('#1675: thin early-warning nightlies during credential window', () => {
-  // Heavy-runner workflows thinned to weekly (compat suite, e2e/cluster builds)
+  // Heavy-runner workflows thinned to weekly (e2e/cluster builds only)
   const thinnedToWeekly = [
-    'compat-matrix-tracker-nightly.yml',
     'file-manager-platform-e2e-nightly.yml',
     'mutation-prover-nightly.yml',
     'operator-e2e-nightly.yml',
-    'retracted-figure-resolution-nightly.yml',
   ];
 
-  // Security/supply-chain gates MUST stay daily
+  // Security/supply-chain + light-runner gates MUST stay daily
   const keptDaily = [
+    'compat-matrix-tracker-nightly.yml', // GitHub API queries, lightweight
+    'retracted-figure-resolution-nightly.yml', // GitHub API queries, lightweight
     'secret-scan-nightly.yml',
     'action-pin-resolution-nightly.yml',
     'image-pin-resolution-nightly.yml',
