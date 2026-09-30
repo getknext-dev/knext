@@ -43,6 +43,39 @@ The user-facing docs site (knext.dev) lives in this monorepo at **`apps/docs/`**
   (The docs app's `next.config.ts` / `next-adapter.ts` / `knext.config.ts` legitimately reference
   internals; the guard is scoped to `content/**` only.)
 
+## How the lead merges a PR (`scripts/merge-train.mjs`)
+
+Once a PR has code review + spec review + CI green, the lead enqueues it with
+`scripts/merge-train.mjs` rather than `gh pr merge` directly — three incidents (a base-branch
+deletion auto-closing a stacked child PR, twice; a PR dequeued on a guard failure only visible on
+the combined tree) motivated promoting this out of an ad-hoc scratch script into a tested tool.
+
+```bash
+# Enqueue the EXACT reviewed head (full 40-hex SHA only — a short SHA or a
+# branch name is refused before anything is queued). Re-checks the PR's
+# head on every poll tick and aborts with "HEAD MOVED" if a push landed
+# after review. Before enqueueing, it merges current main into a scratch
+# worktree of the PR head and runs the PR's changed test files against the
+# COMBINED tree, refusing to enqueue (and printing the failing test) if that
+# is red — skip only with --skip-preflight.
+node scripts/merge-train.mjs enqueue <PR> <FULL_HEAD_SHA> [--timeout 8h] [--skip-preflight]
+
+# If a merge-train run reports "DEQUEUED", or after the fact: find and print
+# the merge-group run's failing job/step without digging through the UI.
+node scripts/merge-train.mjs investigate <PR>
+
+# Before deleting a merged base branch (the stacked-PR case): refuses and
+# lists any open PRs still based on it, unless --retarget is passed, in
+# which case it retargets them to main first.
+node scripts/merge-train.mjs delete-base <branch> [--retarget]
+```
+
+Exit/status lines are deliberately terse and machine-greppable: `MERGED <sha> head-in-main`,
+`HEAD MOVED: <old> != <new>`, `DEQUEUED: <reason>`, `TIMEOUT`. Every guard is mutation-proved
+(`scripts/mutation-prove-merge-train.mjs`) against fake-`gh` unit tests
+(`tests/merge-train.test.ts`, `tests/merge-train-cli.test.ts`) — no live GitHub call is made by
+the test suite.
+
 ## Building the docs locally
 
 From the repo root (workspace-aware install/build):
