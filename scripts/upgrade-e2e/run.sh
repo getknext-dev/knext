@@ -105,6 +105,14 @@ const config = {
 };
 export default config;
 EOF
+  # `deploy` computes its Docker build context by walking up for a lockfile
+  # even under --image (requireBuildContext), so the app dir needs one even
+  # though nothing in it is actually installed or built.
+  cat > "$app/package.json" <<EOF
+{ "name": "${APP_NAME}", "private": true }
+EOF
+  echo '{"name":"'"${APP_NAME}"'","lockfileVersion":3,"requires":true,"packages":{}}' \
+    > "$app/package-lock.json"
 
   kubectl create namespace "$APP_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
   (
