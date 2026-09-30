@@ -194,12 +194,28 @@ jobs:
       #       partition of the two, not a heuristic — reproduced locally
       #       against the real published `rc` CLI before relying on it here.
       #
-      # `healthCheckPath: "/"` is not a CLI-defect workaround — it is required
-      # by the TEST IMAGE, the same way `rollback_e2e_test.go` already needs
-      # it for the identical `ghcr.io/knative/helloworld-go` sample: the
-      # operator's readiness/liveness probes default to `/api/health`
-      # (nextapp_controller.go's `readinessProbePath`), which this image does
-      # not serve.
+      # `healthCheckPath: "/"` and `runtime: "node"` are not CLI-defect
+      # workarounds — they are required by the TEST IMAGE:
+      #   - the operator's readiness/liveness probes default to
+      #     `/api/health` (nextapp_controller.go's `readinessProbePath`),
+      #     which `ghcr.io/knative/helloworld-go` does not serve — the same
+      #     override `rollback_e2e_test.go` already needs for the identical
+      #     image;
+      #   - the CLI defaults `spec.runtime` to `"bun"` (DEFAULT_RUNTIME_ID),
+      #     and the operator's `buildDesiredKsvc` forces
+      #     `Command: ["bun", "run", "server.js"]` onto any standalone-shape
+      #     CR with `runtime: "bun"` (nextapp_controller.go, the branch
+      #     right after `readinessProbePath`) — correct for a REAL knext app
+      #     image, but it overrides `helloworld-go`'s own entrypoint with a
+      #     command that doesn't exist in that image, CrashLooping it
+      #     forever. `runtime: "node"` leaves the operator's `containerCommand`
+      #     nil, so the pre-built test image's own ENTRYPOINT/CMD runs — this
+      #     is what actually produced round 2's `kubectl wait
+      #     --for=condition=Ready` timeout on the CI run this comment
+      #     accompanies (the CR this step renders was applied for real, on a
+      #     live kind+Knative cluster, with `runtime` defaulted to `"bun"`);
+      #     diagnosed by reading `buildDesiredKsvc`'s command-selection
+      #     branch against that CR, not by inspecting the crashed pod live.
       - name: Scaffold + render a minimal NextApp via the published rc CLI
         run: |
           set -euo pipefail
@@ -222,7 +238,14 @@ jobs:
           # replacement: GNU vs BSD sed disagree on how a literal newline in
           # the replacement text is written, and this only needs to run on
           # the GNU sed ubuntu-latest ships.
+          # Two separate `a\` invocations, not one with an embedded `\n` in
+          # the appended text: GNU sed's one-line `a text` extension processes
+          # `\n` as a newline, but relying on that rather than on two
+          # unambiguous single-line appends is exactly the BSD-vs-GNU trap
+          # the comment above already flagged for `s///` — untestable here
+          # (no GNU sed on this machine), so not risked.
           sed -i '/^  name: "published-bundle-e2e",$/a\  healthCheckPath: "/",' knext.config.ts
+          sed -i '/^  healthCheckPath: "\/",$/a\  runtime: "node",' knext.config.ts
 
           # #1702(c): NODE_ENV=production disables pino-pretty's ANSI output,
           # so the interleaved log lines are structured JSON rather than
