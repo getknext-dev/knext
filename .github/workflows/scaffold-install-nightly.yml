@@ -48,10 +48,8 @@ on:
   # 06:41 UTC — offset from the action-pin (05:11), image-pin (05:41) and
   # anonymous-install (06:11) nightlies so the supply-chain signals do not
   # queue behind each other and a red one is attributable at a glance.
-  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
-  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '41 6 * * 0'
+    - cron: '41 6 * * *'
   # Publishing is when the answer changes. See the header.
   release:
     types: [published]

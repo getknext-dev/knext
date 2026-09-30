@@ -28,10 +28,8 @@ name: Docs closure nightly Trivy
 on:
   # 04:23 UTC nightly — offset from the compat nightly (03:17) so a busy runner
   # queue doesn't serialize the two security-signal jobs.
-  # (#1675) — WEEKLY during the rc credential window to reduce runner contention
-  # with the credential lanes. Restore to daily after GA.
   schedule:
-    - cron: '23 4 * * 0'
+    - cron: '23 4 * * *'
   # Manual runs for testing the scan; the alert job is scheduled-only (below) so
   # a dispatch experiment never files/updates the pinned issue.
   workflow_dispatch: {}
