@@ -59,8 +59,13 @@ function check(id, description, expected, actual) {
   console.log(`   ${ok ? 'ok' : 'FAIL'}  ${id} exit=${actual} — ${description}`);
 }
 
+// Scoped to only the files THIS prover touches, deliberately narrower than
+// the repo-wide `scripts`/`tests` scope some sibling provers use: this prover
+// can run alongside the full nightly lane (which mutates unrelated files all
+// over `scripts/`), and a repo-wide status check would false-positive on the
+// LANE's own in-flight, not-yet-restored mutation of some other file.
 function assertTreeClean(label) {
-  const dirty = git('status', '--porcelain', '--', 'scripts', 'tests')
+  const dirty = git('status', '--porcelain', '--', SUBJECT, join(REPO_ROOT, SPEC))
     .split('\n')
     .filter((line) => line.trim());
   if (dirty.length) throw new Error(`[${label}] working tree not clean:\n${dirty.join('\n')}`);
