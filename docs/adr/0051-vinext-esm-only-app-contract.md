@@ -8,6 +8,9 @@
   **ADR-0042** (vinext + Bun bytecode as the default runtime). ADR-0042 already listed an "ESM
   migration burden" as a *consequence*; this ADR promotes it from an incidental cost to an explicit
   **support boundary**, which ADR-0042 never did.
+- **Reconciled with ADR-0054 (2026-09-30, Proposed)** — see the last section. The ESM-only boundary
+  still stands for the vinext builder. Its premise that vinext is the only target is superseded:
+  the standalone builders are selectable again and are the default.
 
 ## Context
 
@@ -68,3 +71,27 @@ ESM apps, and a CommonJS app on the vinext target is out of scope for that numbe
 - This ADR **amends/relates ADR-0048 and ADR-0042** — ADR-0042 recorded the ESM migration only as a
   consequence; this ADR states it as a support boundary. Update the cross-references in both when
   this is Accepted.
+
+## Amendment — reconciled with ADR-0054 (2026-09-30)
+
+- **Status:** **Proposed — for the sprint-close design review** (#1151). This appends a
+  reconciliation and does not edit the text above. The "Decision (Proposed)" heading is history.
+  The Status line records the founder's endorsement on 2026-09-08.
+
+**Still stands:**
+- **The Decision**: the vinext builder supports ESM Next.js apps only (`"type":"module"`). #1033
+  closed as completed on 2026-09-18 with ESM-only confirmed as the permanent vinext contract. The
+  vinext build now fails fast on a non-ESM app before `vite build`, and that check is scoped to the
+  vinext target (#1078).
+- **The scoping of the vinext compat number to ESM apps.** Under ADR-0058 Decisions 3 and 6, that
+  number is a measurement, not a credential, in v1.0.
+
+**Superseded:**
+- **The Context premise that ADR-0048 made vinext "the only supported" target and retired
+  `turbopack` and `node` as options.** ADR-0054 superseded it. `turbopack`, `webpack` and `node` are
+  selectable (`packages/kn-next/src/adapters/artifact-contract.ts:86,89`), and the default is
+  `DEFAULT_BUILDER_ID = "turbopack"` × `DEFAULT_RUNTIME_ID = "bun"` (`:394,424`).
+- **The consequence "node builds CommonJS apps green but is not user-selectable".** The standalone
+  builders are user-selectable again and are the default. So ESM-only is now a boundary of one
+  opt-in builder, not of the product. The ESM check is target-gated, "so node/turbopack CommonJS
+  apps still build" (#1078, per the #1033 close-out).

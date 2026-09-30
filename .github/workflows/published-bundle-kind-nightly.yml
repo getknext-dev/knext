@@ -1,0 +1,340 @@
+name: Published install bundle on kind (nightly)
+
+# #1552 — found in the #1549 review, the gap the kind lane and the anonymous-
+# install nightly leave BETWEEN them:
+#   - `operator-bundle-e2e.yml` proves the bundle APPLIES and the operator
+#     RECONCILES, but builds the operator image LOCALLY and loads it into kind
+#     with the manager image OVERRIDDEN — it never touches the published GHCR
+#     image;
+#   - `anonymous-install-nightly.yml` (#586) proves every image in the
+#     PUBLISHED bundle is anonymously pullable, but never applies the bundle —
+#     it walks the OCI token dance itself and stops there.
+# Neither proves what a stranger actually experiences: `kubectl apply -f` the
+# documented, unmodified, digest-pinned install.yaml, with NO credentials, and
+# watch the operator come up on the REAL published image. This workflow is
+# that missing leg. #1064 is what makes it possible — the GHCR package went
+# public, so kind's own (anonymous, credential-free) containerd pull is now
+# the same path a real stranger's cluster takes.
+#
+# WHAT THIS DOES NOT DO. It does not replace either lane above:
+#   - it is not a build/load/override cycle, so it cannot tell you your LOCAL
+#     change works — that is still `operator-bundle-e2e.yml`'s job, and it
+#     stays a PR gate on operator changes;
+#   - it does not re-derive the anonymous-pull token dance — the URL is
+#     discovered through the SAME `discoverInstallUrl` #586 already ships
+#     (`node scripts/verify-anonymous-install.mjs --print-url`), so the two
+#     checks can never disagree about which URL a stranger is told to use.
+#
+# WHY NIGHTLY, NOT A PR GATE. Same reasoning as #586: the answer lives
+# upstream (the latest GitHub release + GHCR) and legitimately changes on its
+# own clock, so it has to be resolved at RUN time. Coupling every merge to a
+# live cluster stand-up plus two external services would go red for reasons
+# that are not findings about the PR under review.
+#
+# THE `release` TRIGGER IS THE POINT, same as #586: publishing is the moment
+# the answer can change.
+#
+# NO CREDENTIALS. `permissions: {}` at both workflow and job scope, no
+# `secrets.*`/`${{ github.token }}` interpolated anywhere in the check job,
+# and the operator image is pulled by kind's own containerd exactly the way a
+# stranger's cluster would — no `docker login`, no imagePullSecrets, no
+# `DOCKER_CONFIG` auth store. If the GHCR package is ever flipped back to
+# private, this pull fails openly (ImagePullBackOff, caught by the
+# `kubectl wait` timeout) rather than silently succeeding off an inherited
+# credential.
+#
+# AN UNREACHABLE CLUSTER/REGISTRY/RELEASE IS A FAILURE, NEVER A PASS — the
+# same ruling this repo already made for `scripts/verify-action-pins.mjs` and
+# `scripts/verify-anonymous-install.mjs`.
+
+on:
+  # 06:51 UTC — offset from the other supply-chain nightlies (action-pin
+  # 05:11, image-pin 05:41, anonymous-install 06:11) so a red signal is
+  # attributable to ITS OWN check rather than a shared runner queue. (Not
+  # 06:41 — that minute+hour is already taken by
+  # scaffold-install-nightly.yml; tests/ci-capacity-budget.test.ts enforces
+  # no two workflows share a UTC minute-of-day.)
+  schedule:
+    - cron: '51 6 * * *'
+  release:
+    types: [published]
+  workflow_dispatch: {}
+  # Scoped to exactly the two files this lane consists of — NOT a general
+  # PR gate (the whole point of "nightly, not per-PR" above still holds for
+  # every OTHER PR). A change to either file is validated against a real
+  # cluster before merge rather than trusted until the next 06:51 UTC run.
+  pull_request:
+    paths:
+      - '.github/workflows/published-bundle-kind-nightly.yml'
+      - 'scripts/verify-anonymous-install.mjs'
+
+permissions: {}
+
+jobs:
+  published-bundle-kind:
+    name: Apply the published install.yaml on kind, real GHCR image, no credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Node 22.18+ is required to run the published CLI directly from its
+      # `.ts` entry points under plain Node (native type stripping) — the same
+      # floor `docs/QUICKSTART.md` documents for consumers. Pinned rather than
+      # left to the runner's preinstalled default, which this workflow does
+      # not control.
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.18'
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name published-bundle-kind --wait 120s
+
+      # cert-manager + Knative Serving/Kourier are NOT the published bundle —
+      # they are prerequisites the docs already ask an installer to have, and
+      # their own images are pulled from their own public registries (not
+      # GHCR), so standing them up here is not part of what #1552 is proving.
+      - name: Install cert-manager (operator webhook certs)
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${KNATIVE_VERSION}"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+
+      # THE STEP THIS WHOLE WORKFLOW EXISTS FOR: the exact URL the install
+      # docs publish (discovered by #586's own `discoverInstallUrl`, never a
+      # second copy of the regex), applied UNMODIFIED — no manager-image
+      # override, no local build, no load into kind. kind's containerd pulls
+      # every image anonymously, the same way a stranger's cluster would.
+      - name: Apply the documented install.yaml, unmodified
+        run: |
+          set -euo pipefail
+          INSTALL_URL="$(node scripts/verify-anonymous-install.mjs --print-url)"
+          echo "documented install URL: ${INSTALL_URL}"
+          echo "INSTALL_URL=${INSTALL_URL}" >> "$GITHUB_ENV"
+          kubectl apply --server-side --validate=strict -f "${INSTALL_URL}"
+
+      - name: Wait for the operator to become Available on the REAL published image
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n kn-next-operator-system deployment/kn-next-operator-controller-manager
+
+      - name: Assert the NextApp CRD is Established
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/nextapps.apps.kn-next.dev
+
+      # Record what was ACTUALLY pulled, not what the bundle merely pins —
+      # `imageID` is the registry-resolved digest the kubelet reports after a
+      # real pull, so this is proof of what ran, not a restatement of the
+      # bundle's own claim.
+      - name: Record the operator image digest actually pulled
+        run: |
+          set -euo pipefail
+          IMAGE_ID="$(kubectl get pod -n kn-next-operator-system \
+            -l control-plane=controller-manager \
+            -o jsonpath='{.items[0].status.containerStatuses[0].imageID}')"
+          echo "operator image actually pulled: ${IMAGE_ID}"
+          {
+            echo "### Operator image actually pulled"
+            echo '```'
+            echo "${IMAGE_ID}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A minimal NextApp, generated by the PUBLISHED `@getknext/core` CLI on
+      # its `rc` dist-tag (the same artifact a real early adopter installs
+      # today) — not a hand-authored CR. `create` scaffolds a valid
+      # `knext.config.ts`; `deploy --dry-run` renders the CR from it without
+      # touching the cluster, so the ONLY apply is the explicit one below,
+      # through the SAME digest-pinned, server-side, strict-validated path
+      # every other CLI cluster write uses (ADR-0001).
+      # #1702 tracks three defects a real reproduction against the published
+      # `rc` CLI found in round 2 review, each worked around here rather than
+      # assumed away — remove each workaround when #1702 lands the CLI-side
+      # fix:
+      #   (a) `create` scaffolds `registry: "ghcr.io/<your-user>"`, and the
+      #       placeholder preflight (placeholder-preflight.ts) refuses ANY
+      #       `<...>`-shaped field even under `--image` (which never reads
+      #       registry at all) — worked around with `--registry` on `deploy`,
+      #       which the CLI already logs as ignored-but-harmless under
+      #       `--image`;
+      #   (b) `deploy` calls `requireBuildContext()` unconditionally (even
+      #       under `--dry-run --skip-build`), which walks up for a lockfile
+      #       and throws if none exists — `create` writes no lockfile, so
+      #       `npm install` runs first, purely to produce `package-lock.json`
+      #       (no build, no postinstall network dependency beyond npm's own);
+      #   (c) `deploy`'s pino logger writes structured JSON log LINES to the
+      #       same stdout the CR YAML is printed to (`NODE_ENV=production`
+      #       avoids pino-pretty's ANSI colour codes, which `kubectl apply`
+      #       rejects outright — "control characters are not allowed" — but
+      #       plain JSON lines still interleave with the YAML). The fix is
+      #       mechanical, not fragile: every log line pino emits is exactly
+      #       one line starting with `{`; the CR YAML `renderNextAppCR`
+      #       writes never starts a line with `{`. `grep -v '^{'` is an exact
+      #       partition of the two, not a heuristic — reproduced locally
+      #       against the real published `rc` CLI before relying on it here.
+      #
+      # `healthCheckPath: "/"` and `runtime: "node"` are not CLI-defect
+      # workarounds — they are required by the TEST IMAGE:
+      #   - the operator's readiness/liveness probes default to
+      #     `/api/health` (nextapp_controller.go's `readinessProbePath`),
+      #     which `ghcr.io/knative/helloworld-go` does not serve — the same
+      #     override `rollback_e2e_test.go` already needs for the identical
+      #     image;
+      #   - the CLI defaults `spec.runtime` to `"bun"` (DEFAULT_RUNTIME_ID),
+      #     and the operator's `buildDesiredKsvc` forces
+      #     `Command: ["bun", "run", "server.js"]` onto any standalone-shape
+      #     CR with `runtime: "bun"` (nextapp_controller.go, the branch
+      #     right after `readinessProbePath`) — correct for a REAL knext app
+      #     image, but it overrides `helloworld-go`'s own entrypoint with a
+      #     command that doesn't exist in that image, CrashLooping it
+      #     forever. `runtime: "node"` leaves the operator's `containerCommand`
+      #     nil, so the pre-built test image's own ENTRYPOINT/CMD runs — this
+      #     is what actually produced round 2's `kubectl wait
+      #     --for=condition=Ready` timeout on the CI run this comment
+      #     accompanies (the CR this step renders was applied for real, on a
+      #     live kind+Knative cluster, with `runtime` defaulted to `"bun"`);
+      #     diagnosed by reading `buildDesiredKsvc`'s command-selection
+      #     branch against that CR, not by inspecting the crashed pod live.
+      - name: Scaffold + render a minimal NextApp via the published rc CLI
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/published-bundle-e2e
+          npx --yes @getknext/core@rc create /tmp/published-bundle-e2e --name published-bundle-e2e
+          cd /tmp/published-bundle-e2e
+
+          # #1702(b): a lockfile is required for requireBuildContext() to
+          # resolve the project root, even though nothing is actually built.
+          npm install --no-audit --no-fund
+
+          # #1702: the scaffold's config.ts registry placeholder is not read
+          # under --image, but the placeholder preflight still refuses it —
+          # and the test image needs healthCheckPath: "/" regardless of any
+          # CLI defect (see above).
+          grep -q 'registry: "ghcr.io/<your-user>"' knext.config.ts
+          sed -i 's#registry: "ghcr.io/<your-user>"#registry: "ghcr.io/getknext-dev"#' knext.config.ts
+          grep -q 'name: "published-bundle-e2e",' knext.config.ts
+          # `a\` (append-after-match), not an embedded `\n` in a `s///`
+          # replacement: GNU vs BSD sed disagree on how a literal newline in
+          # the replacement text is written, and this only needs to run on
+          # the GNU sed ubuntu-latest ships.
+          # Two separate `a\` invocations, not one with an embedded `\n` in
+          # the appended text: GNU sed's one-line `a text` extension processes
+          # `\n` as a newline, but relying on that rather than on two
+          # unambiguous single-line appends is exactly the BSD-vs-GNU trap
+          # the comment above already flagged for `s///` — untestable here
+          # (no GNU sed on this machine), so not risked.
+          sed -i '/^  name: "published-bundle-e2e",$/a\  healthCheckPath: "/",' knext.config.ts
+          sed -i '/^  healthCheckPath: "\/",$/a\  runtime: "node",' knext.config.ts
+
+          # #1702(c): NODE_ENV=production disables pino-pretty's ANSI output,
+          # so the interleaved log lines are structured JSON rather than
+          # colour-coded text — see the partition note above.
+          NODE_ENV=production npx --yes @getknext/core@rc deploy --dry-run --skip-build --skip-upload \
+            --skip-image-lockstep-check \
+            --registry ghcr.io/getknext-dev \
+            --image ghcr.io/knative/helloworld-go@sha256:c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba \
+            -n default > /tmp/published-bundle-e2e-raw.txt
+
+          # #1702(c): an exact partition, not a heuristic — see above.
+          grep -v '^{' /tmp/published-bundle-e2e-raw.txt > /tmp/published-bundle-e2e-cr.yaml
+          echo "--- CLI-rendered NextApp CR ---"
+          cat /tmp/published-bundle-e2e-cr.yaml
+          # Fail loudly, not silently, if the partition ever yields nothing —
+          # a CLI change to the log format must not turn this into a
+          # vacuous `kubectl apply` of an empty file.
+          grep -q '^apiVersion: apps.kn-next.dev/' /tmp/published-bundle-e2e-cr.yaml
+
+      - name: Apply the CLI-rendered NextApp and wait for it to reconcile Ready
+        run: |
+          set -euo pipefail
+          kubectl apply --server-side --validate=strict -f /tmp/published-bundle-e2e-cr.yaml
+          APP_NAME="$(sed -n 's/^  name: //p' /tmp/published-bundle-e2e-cr.yaml | head -1)"
+          echo "NextApp name: ${APP_NAME}"
+          kubectl wait --for=condition=Ready --timeout=300s -n default "nextapp/${APP_NAME}"
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name published-bundle-kind || true
+
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [published-bundle-kind]
+    # Mirrors anonymous-install-nightly.yml's #1645 fix: fires on failure OR
+    # cancelled, not just failure, so a timed-out run does not go silent.
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'release') &&
+      (needs.published-bundle-kind.result == 'failure' || needs.published-bundle-kind.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or update the "published bundle on kind RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.published-bundle-kind.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          title='Published install bundle does not apply cleanly on kind'
+          body="The nightly published-bundle-on-kind check FAILED: the documented, unmodified
+          install.yaml — the real GHCR image, no credentials — did not apply, the operator did not
+          become Available, the NextApp CRD did not reach Established, or the CLI-rendered NextApp
+          did not reconcile to Ready. The job log names the exact step and, if it got far enough, the
+          operator image digest actually pulled.
+
+          - Run (full report in the job log): ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+          - Triggered by: ${EVENT}
+
+          **Why this is not cosmetic.** \`operator-bundle-e2e.yml\` only ever proves a LOCALLY built
+          image works; \`anonymous-install-nightly.yml\` only ever proves the published images are
+          PULLABLE. Neither proves the published bundle actually installs and reconciles on a real
+          cluster the way a stranger's does — this is the lane that does.
+
+          **Triage**
+          - A step before \"Apply the documented install.yaml\" failing is infrastructure (kind,
+            cert-manager, Knative) unrelated to the published bundle itself.
+          - \`kubectl apply\` failing on the install.yaml step is the bundle itself — a bad render,
+            an unreachable release asset, or a CRD schema issue.
+          - The operator Available wait timing out on the REAL image (no override here) after the
+            anonymous-install nightly is green is a strong signal the image runs but fails on
+            startup — check the pod logs from this run.
+          - The NextApp Ready wait timing out points at the operator's reconciliation of a real
+            serving image, not the install bundle.
+
+          Re-run this workflow to confirm green, then close this issue."
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs

@@ -451,6 +451,16 @@ jobs:
           # --self-contained` actually ships.
           - name: kn-next standalone-bun-self-contained runtime
             file: packages/kn-next/Dockerfile.standalone-self-contained.trivyscan
+          # knext DEFAULT standalone runtime OS layer (#1718) — the
+          # standalone-bun stage of Dockerfile.standalone.hbs, the image
+          # `kn-next build`/`kn-next deploy` produce BY DEFAULT (disk-mode,
+          # non-self-contained). Only this entry also gets an SBOM (see the
+          # SBOM steps below, gated on matrix.name) — #1718's scope is the
+          # default target specifically; the other three entries in this
+          # matrix have no SBOM step today and adding one for them is out of
+          # scope here.
+          - name: kn-next standalone-bun runtime (default target)
+            file: packages/kn-next/Dockerfile.standalone-bun.trivyscan
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -459,6 +469,12 @@ jobs:
       # Build into a LOCAL OCI-layout directory (never pushed — this job holds no
       # packages:write). Trivy scans this exact built layout below. tar=false
       # because Trivy's --input accepts an OCI layout directory, not a tarball.
+      # No `provenance:` override here — tests/supply-chain-workflow.test.ts
+      # bans a literal `provenance: false` anywhere in this workflow file
+      # (guards the file-manager job's own `provenance: mode=max`), so the
+      # SBOM step below handles buildx's default provenance attestation the
+      # same way the file-manager job's SBOM step does, rather than opting
+      # this build step out of it.
       - name: Build the shipped runtime OS layer (local OCI layout)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -479,3 +495,46 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
+
+      # #1718 — SBOM for the DEFAULT standalone-bun target only (this matrix's
+      # other three entries carry no SBOM step today; adding one for them is
+      # out of this issue's scope). syft cannot parse buildx's nested OCI
+      # index (image + attestation manifests wrapped in a second index) any
+      # more than it can in the file-manager job above, so this reproduces
+      # that job's flattened-view trick — a symlinked-blobs view with the
+      # attestation manifest entry dropped, falling back to a plain copy if
+      # the top manifest is not itself a nested index (e.g. no attestation
+      # was produced). `always()` so a failing Trivy gate above still
+      # publishes the evidence of what was scanned.
+      - name: Prepare SBOM view of the OCI layout (syft can't parse a nested attestation index) — kn-next standalone-bun runtime (default target)
+        if: always() && matrix.name == 'kn-next standalone-bun runtime (default target)'
+        run: |
+          set -euo pipefail
+          NESTED_DIGEST="$(jq -r '.manifests[0].digest' image-oci/index.json | cut -d: -f2)"
+          NESTED_TYPE="$(jq -r '.mediaType' "image-oci/blobs/sha256/${NESTED_DIGEST}")"
+          mkdir image-oci-sbom
+          ln -s "$(pwd)/image-oci/blobs" image-oci-sbom/blobs
+          cp image-oci/oci-layout image-oci-sbom/
+          if [ "${NESTED_TYPE}" = "application/vnd.oci.image.index.v1+json" ]; then
+            jq '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json",
+                 manifests: [.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")]}' \
+              "image-oci/blobs/sha256/${NESTED_DIGEST}" > image-oci-sbom/index.json
+          else
+            cp image-oci/index.json image-oci-sbom/index.json
+          fi
+
+      - name: Generate SBOM (syft) — kn-next standalone-bun runtime (default target)
+        if: always() && matrix.name == 'kn-next standalone-bun runtime (default target)'
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: oci-dir:image-oci-sbom
+          format: spdx-json
+          output-file: sbom-standalone-bun.spdx.json
+
+      - name: Upload SBOM artifact — kn-next standalone-bun runtime (default target)
+        if: always() && matrix.name == 'kn-next standalone-bun runtime (default target)'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-standalone-bun-${{ github.sha }}
+          path: sbom-standalone-bun.spdx.json
+          if-no-files-found: error

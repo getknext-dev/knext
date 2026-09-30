@@ -85,6 +85,11 @@ const APP_TEMPLATE = resolve(REPO_ROOT, 'packages/kn-next/templates/app/next.con
 const ZONE_TEMPLATE = resolve(REPO_ROOT, 'turbo/generators/templates/zone/next.config.ts.hbs');
 const DEPLOY = resolve(REPO_ROOT, 'packages/kn-next/src/cli/deploy.ts');
 const UPLOAD = resolve(REPO_ROOT, 'packages/kn-next/src/utils/asset-upload.ts');
+// #1574: the reserved-static-dirs set (`_vinext_fonts` et al.) was extracted
+// out of asset-upload.ts into its own module (round 2 of #1292's storage-mode
+// e2e leg) so a plain-node script outside the TS build could import it
+// directly. Row 14 below now anchors here, not in UPLOAD.
+const RESERVED_DIRS = resolve(REPO_ROOT, 'packages/kn-next/src/utils/reserved-static-dirs.ts');
 const CR_BUILDER = resolve(REPO_ROOT, 'packages/kn-next/src/cli/cr-builder.ts');
 
 const SPEC_TEMPLATES = 'packages/kn-next/src/__tests__/skew-build-id-templates.test.ts';
@@ -190,8 +195,12 @@ const MUTATIONS = [
   [
     UPLOAD,
     'ROUND 2: the write site TRUSTS the caller instead of verifying the prefix',
-    '        if (!check.ok) {\n',
-    '        if (false) {\n',
+    // #1574: `if (!check.ok) {` alone now occurs twice in this file (a second,
+    // unrelated asset/image-mismatch check was added at a different call
+    // site). Anchored on the `verifyVinextStaticPrefix` call immediately
+    // above it, which is unique and still targets the same write site.
+    '        const check = verifyVinextStaticPrefix(cwd, buildId);\n        if (!check.ok) {\n',
+    '        const check = verifyVinextStaticPrefix(cwd, buildId);\n        if (false) {\n',
     SPEC_STAGE,
   ],
   [
@@ -235,7 +244,7 @@ const MUTATIONS = [
     SPEC_STAGE,
   ],
   [
-    UPLOAD,
+    RESERVED_DIRS,
     "ROUND 2: _vinext_fonts drops out of the pruner's reserved set (the next/font app)",
     '    "_vinext_fonts",\n',
     '',

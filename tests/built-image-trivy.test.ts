@@ -197,6 +197,80 @@ describe('M3 — the knext self-contained standalone runtime image is Trivy-scan
 });
 
 /**
+ * #1718 — the knext DEFAULT standalone runtime image (`Dockerfile.standalone.hbs`'s
+ * `standalone-bun` stage — what `kn-next build`/`kn-next deploy` ship unless
+ * `--self-contained` is set) had no built-image Trivy leg AND no SBOM at all.
+ * M3 (above) closed the gap for the self-contained stage only; this closes it
+ * for the default one, reusing the SAME `built-image-trivy` matrix (per the
+ * issue's explicit scope) rather than a new workflow, plus an SBOM step
+ * scoped to this one matrix entry.
+ *
+ * Cannot reuse the shared `IMAGES`/`runtimeFrom()` "last FROM" lockstep for
+ * the same reason M3 can't: `Dockerfile.standalone.hbs` has FOUR stages and
+ * the last one is `standalone-node`. Uses the same stage-scoped extraction
+ * pattern as M3, pinned to the `standalone-bun` stage instead.
+ */
+describe('#1718 — the knext DEFAULT standalone-bun runtime image is Trivy-scanned as BUILT + SBOM-ed, enforce-on-main', () => {
+  const SHIPPED = 'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs';
+  const SCAN_FIXTURE = 'packages/kn-next/Dockerfile.standalone-bun.trivyscan';
+  const MATRIX_NAME = 'kn-next standalone-bun runtime (default target)';
+  const STAGE_FROM_MARKER = 'AS standalone-bun';
+
+  /** The default stage's own text, isolated from its sibling stages. */
+  function defaultStageText(): string {
+    const text = readJoinedDockerfile(SHIPPED);
+    // `AS standalone-bun` also matches `AS standalone-bun-self-contained` as a
+    // substring, so require the marker to be followed by end-of-line (the
+    // bare stage name), not by more stage-name characters.
+    const fromLine = [...text.matchAll(/^FROM\s+\S+.*$/gim)].find((m) =>
+      new RegExp(`${STAGE_FROM_MARKER}\\s*$`).test(m[0]),
+    );
+    expect(
+      fromLine,
+      `${SHIPPED} must still contain a bare ${STAGE_FROM_MARKER} stage`,
+    ).toBeDefined();
+    const start = (fromLine as RegExpMatchArray).index as number;
+    const next = text.indexOf('\nFROM ', start + 1);
+    return next === -1 ? text.slice(start) : text.slice(start, next);
+  }
+
+  it(`the built-image-trivy matrix includes the default target, built via ${SCAN_FIXTURE}`, () => {
+    const job = builtImageJob();
+    expect(job).toContain(MATRIX_NAME);
+    expect(job).toContain(SCAN_FIXTURE);
+  });
+
+  it(`${SCAN_FIXTURE} does not DRIFT from the standalone-bun stage (same runtime base digest)`, () => {
+    const stage = defaultStageText();
+    const stageFrom = [...stage.matchAll(/FROM\s+(\S+)/gi)].map((m) => m[1])[0];
+    expect(stageFrom, 'the standalone-bun stage must have its own FROM').toBeDefined();
+    expect(runtimeFrom(SCAN_FIXTURE)).toBe(stageFrom);
+  });
+
+  it(`${SCAN_FIXTURE} reproduces the stage's whole-base apk upgrade`, () => {
+    const stage = defaultStageText();
+    expect(stage).toMatch(/apk\s+upgrade\s+--no-cache/);
+    const body = readJoinedDockerfile(SCAN_FIXTURE);
+    expect(body).toMatch(/apk\s+upgrade\s+--no-cache/);
+    expect(body).not.toMatch(/apk\s+(add|upgrade)[^\n]*=\d/);
+  });
+
+  it('generates an SBOM (syft) for the default target and uploads it as an artifact', () => {
+    const job = builtImageJob();
+    expect(job).toMatch(/anchore\/sbom-action@/);
+    expect(job).toMatch(/format:\s*spdx-json/);
+    // The SBOM step(s) must be gated to this matrix entry — the other three
+    // entries in this shared matrix carry no SBOM step (out of #1718's scope).
+    const sbomGate = new RegExp(
+      `if:\\s*always\\(\\)\\s*&&\\s*matrix\\.name\\s*==\\s*'${MATRIX_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`,
+    );
+    expect(job).toMatch(sbomGate);
+    expect(job).toMatch(/actions\/upload-artifact@/);
+    expect(job).toContain('sbom-standalone-bun');
+  });
+});
+
+/**
  * #703 — the node:22-alpine base ships a bundled npm whose vendored
  * `node_modules` carry HIGH/CRITICAL CVEs (tar gzip-bomb, pacote, sigstore, …)
  * under `/usr/local/lib/node_modules/npm/node_modules/...`. These are JS library

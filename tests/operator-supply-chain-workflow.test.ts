@@ -155,17 +155,56 @@ describe('operator-supply-chain workflow: nothing is published before the Trivy 
     }
   });
 
-  it('the Trivy gate stays fail-loud: HIGH/CRITICAL, exit-code 1, enforced on main', () => {
+  it('the Trivy gate stays fail-loud: HIGH/CRITICAL, exit-code 1, ENFORCING on every publishing run (#1667 round 4)', () => {
     const trivy = stepBlock(TRIVY_RE);
     expect(/severity:\s*HIGH,CRITICAL/.test(trivy), 'must scan HIGH,CRITICAL').toBe(true);
     expect(/exit-code:\s*["']?1["']?/.test(trivy), 'must exit non-zero on findings').toBe(true);
-    // continue-on-error is allowed ONLY as the PR-phased-rollout expression —
-    // never a bare `true` that would soften the gate on main.
+    // The Trivy step must carry `id: trivy` — every downstream publish step
+    // checks `steps.trivy.outcome` (continue-on-error masks `conclusion`).
+    expect(
+      /^\s*id:\s*trivy\s*$/m.test(stripComments(trivy)),
+      'the Trivy step must have id: trivy so downstream steps can read steps.trivy.outcome',
+    ).toBe(true);
+    // continue-on-error must be keyed on steps.channel.outputs.publish — NOT
+    // a literal `github.ref != 'refs/heads/main'`. That literal was the #1667
+    // round-4 defect: on an operator-vX.Y.Z TAG push (any ref other than
+    // exactly refs/heads/main), continue-on-error was true, so a FAILING
+    // scan was swallowed and the image was pushed/signed/attached to an
+    // IMMUTABLE release anyway. The gate must be advisory ONLY when nothing
+    // downstream publishes (steps.channel.outputs.publish != 'true') —
+    // enforcing on every ref that intends to publish, main OR a tag.
     const coe = trivy.match(/continue-on-error:\s*(.+)/);
-    if (coe) {
+    expect(coe, 'expected a continue-on-error expression on the Trivy step').not.toBe(null);
+    expect(
+      coe?.[1].includes("steps.channel.outputs.publish != 'true'"),
+      `continue-on-error must be gated on steps.channel.outputs.publish != 'true', got: ${coe?.[1]}`,
+    ).toBe(true);
+    expect(
+      coe?.[1].includes("github.ref != 'refs/heads/main'"),
+      "continue-on-error must NOT use the old literal github.ref != 'refs/heads/main' — " +
+        'that is exactly what let a failing scan through on a tag push',
+    ).toBe(false);
+  });
+
+  it('every push/sign/release step ALSO requires steps.trivy.outcome == success (#1667 round 4)', () => {
+    // continue-on-error hides a real failure from `conclusion` (it always
+    // reports success there) — `outcome` is the one field that still tells
+    // the truth, so every step that pushes, signs, or publishes a release
+    // must check it explicitly, not just steps.channel.outputs.publish.
+    const trivyIdx = stepIndex(TRIVY_RE);
+    expect(trivyIdx, 'expected a Trivy scan step').toBeGreaterThanOrEqual(0);
+    const publishGatedSteps = stepBlocks()
+      .slice(trivyIdx + 1)
+      .filter((b) => /steps\.channel\.outputs\.(publish|is_stable)\s*==\s*'true'/.test(b));
+    expect(
+      publishGatedSteps.length,
+      'expected at least one publish-gated step after the Trivy scan',
+    ).toBeGreaterThan(0);
+    for (const block of publishGatedSteps) {
+      const ifLine = block.split('\n').find((l) => /^\s*if:/.test(l)) ?? '';
       expect(
-        coe[1].includes("github.ref != 'refs/heads/main'"),
-        `continue-on-error must be PR-only, got: ${coe[1]}`,
+        /steps\.trivy\.outcome\s*==\s*'success'/.test(ifLine),
+        `every publish-gated step must also require steps.trivy.outcome == 'success', missing in: ${ifLine.trim()}`,
       ).toBe(true);
     }
   });
@@ -174,7 +213,7 @@ describe('operator-supply-chain workflow: nothing is published before the Trivy 
     const push = stepBlock(PUSH_RE);
     expect(push, 'expected a crane push step').not.toBe('');
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(push),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(push),
       'the push step must be gated to main',
     ).toBe(true);
     expect(/^\s*id:\s*push\s*$/m.test(push), 'the push step must have id: push').toBe(true);
@@ -246,7 +285,7 @@ describe('operator release asset (install.yaml) is gated behind the Trivy gate +
     expect(pushIdx, 'installer pin must come after the push').toBeLessThan(installerIdx);
     const installer = stepBlock(INSTALLER_RE);
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(installer),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(installer),
       'the installer pin step must be gated to main',
     ).toBe(true);
     expect(
@@ -275,7 +314,7 @@ describe('operator release asset (install.yaml) is gated behind the Trivy gate +
     }
     const release = stepBlock(RELEASE_RE);
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(release),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(release),
       'the release-attach step must be gated to main',
     ).toBe(true);
   });
@@ -359,7 +398,7 @@ describe('operator buildkit provenance is restored without weakening the gate (#
     ).toBeLessThan(signIdx);
     const content = stripComments(check);
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(check),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(check),
       'the provenance check must be main-gated (nothing was pushed on PRs)',
     ).toBe(true);
     expect(

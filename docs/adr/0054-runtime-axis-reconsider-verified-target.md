@@ -6,6 +6,11 @@
   fallback below and makes the v1.0 surface the full bytecode-cached cell matrix. **Amendment 7's
   Decision 2 is amended by ADR-0058 (2026-09-24, Proposed):** the six-cell matrix stays the goal,
   and v1.0 credentials four cells (node/bun × turbopack/webpack).
+- **Proposed amendments (2026-09-30), for the sprint-close design review:** **Amendment 9** prices
+  the cost of N build targets and reaffirms the shared `RuntimeContract` (#1152); **Amendment 10**
+  records the reopen bar (#1154). The downstream-ADR reconcile this header asks for (#1151) is now
+  a dated, Proposed amendment appended to each of ADR-0036/0042/0048/0050/0051. The rules-file half
+  (`.claude/rules/architecture.md §4`, `CLAUDE.md §3`, #1149) is still the maintainer's.
 - **Supersedes** ADR-0048's *vinext-ONLY* mandate: vinext is no longer the only target. **Amends**
   ADR-0042 (default runtime), ADR-0036 (target matrix); the maintainer must reconcile ADR-0042/0050/
   0051 status lines + `.claude/rules/architecture.md §4` + `CLAUDE.md §3` (not an agent's to edit).
@@ -427,3 +432,146 @@ would give and is not yet measured on a cluster (#1226).
    lands, "self-contained" must not be read as "bytecode verified on every route".
 3. **A self-contained cell is a separate fingerprint.** Its compat window starts from zero (ADR-0056)
    and does not inherit the disk-mode cell's nights.
+
+## Amendment 9 — the cost of N build targets, and the shared RuntimeContract (2026-09-30)
+
+- **Status:** **Proposed — for the sprint-close design review** (#1152). It prices what running
+  several targets costs, using numbers taken from the tree and from CI runs, and it reaffirms an
+  invariant ADR-0036 and ADR-0042 already hold. It makes no new decision about which cells exist.
+- **Relates to:** ADR-0036 ("RuntimeContract applies to all three cells, via exactly TWO
+  implementations"), ADR-0042 Decision 3 and "What must NOT be done", ADR-0048 (which rejected a
+  dual target on cost: "two compat matrices, two supply-chain surfaces"), ADR-0055, ADR-0056,
+  ADR-0058, `docs/ci/capacity-budget.md`.
+
+### How many targets there are today
+
+- **Two artifact shapes.** The Next standalone output (`next build` → `.next/standalone`, built by
+  turbopack or webpack) and the vinext single executable. `artifact-contract.ts:30` says it
+  directly: "Two shapes, N runtimes". `BuilderId` is `turbopack | vinext | webpack` (`:86`),
+  `RuntimeId` is `node | bun` (`:89`), and the CRD enums match (`nextapp_types.go:130` runtime,
+  `:180` build).
+- **Cells.** There are **6 cells defined, 4 wired** in `CREDENTIAL_CELLS` (`scripts/compat-window-audit.mjs:286`).
+  node/bun × turbopack/webpack are `wired: true`; node × vinext and bun × vinext are
+  `wired: false`. v1.0 credentials the four wired cells (ADR-0058 Decision 2).
+- **The default is turbopack × bun**, shipped as the compiled `--bytecode` executable:
+  `DEFAULT_BUILDER_ID = "turbopack"` (`artifact-contract.ts:394`) and
+  `DEFAULT_RUNTIME_ID = "bun"` (`:424`), flipped in #1183. Amendment 7's Decision 3 still
+  describes vinext as the code default; that sentence is history now.
+
+### The invariant, reaffirmed: one config, one CRD, one operator, and **exactly two `RuntimeContract` implementations**
+
+Every cell sits behind the same `kn-next.config.ts` `build`/`runtime` keys, the same `NextApp` CRD
+and the same operator. Counted by source, the contract has two implementations:
+
+1. **The standalone supervisor**, `packages/kn-next/src/adapters/node-server.ts`. Every disk-mode
+   standalone runtime stage boots it through one entry file: `Dockerfile.standalone.hbs:139` (bun)
+   and `:279` (node) both `COPY knext-standalone-entry.mjs /app/knext-entry.mjs` (ADR-0055
+   Decision 1). It serves all four standalone cells on both runtimes.
+2. **The vinext in-process entry**, `packages/kn-next/templates/app/runtime-contract.mjs.hbs`. It
+   serves both vinext cells (ADR-0036, "vinext → one shared in-process entry").
+
+**A correction to Amendment 6.** Amendment 6 says "three implementations (bun-standalone /
+node-standalone / vinext)". That counts targets. The bun and node standalone entries are the same
+supervisor (`docs/compat-matrix.md`, official-suite row: "both entries are byte-identical copies of
+`node-server.ts`"). So the count is two, which is what ADR-0042's "a third is a **STOP**" requires.
+That rule stands, and adding a cell must not add an implementation.
+
+**An open exception, recorded for the review and not decided here.** The opt-in self-contained
+standalone stage (ADR-0060, Proposed, flag off by default) runs no supervisor. It folds SIGTERM
+drain and `:9464` metrics into the executable as a preload,
+`packages/kn-next/src/adapters/standalone-self-contained-supervisor.cjs`
+(`Dockerfile.standalone.hbs:174-188`). That file re-implements part of the contract, so it is a
+candidate third implementation. It is off by default and does not ship in any credentialed cell.
+Whether it breaches ADR-0042's STOP is a question for the sprint-close review, and ADR-0060 is the
+place to answer it.
+
+### What N targets cost, measured
+
+| cost | measured value | source |
+|---|---|---|
+| One full official-suite run | **16 shards**, 22 jobs, at most 8 concurrent | `test-e2e-deploy.yml:976-980`; `compat-vinext.yml:425-429`; `max-parallel: 8` per `docs/ci/capacity-budget.md` §2 |
+| Job-minutes for one run of each wired cell | 174 (node × turbopack), 253 (node × webpack), 228 (bun × turbopack), 287 (bun × webpack): **942 for the four, about 236 per cell** | runs 36348520937 / 36348526494 / 36348532038 / 36348537247 (rc.1 rehearsal, 2026-09-27), summed from each run's job start/finish times |
+| vinext × bun weekly measurement | 228 job-minutes, 19 jobs | run 36320845330 (2026-09-27, scheduled) |
+| Schedules | **6 scheduled crons** in `test-e2e-deploy.yml` (4 credential crons, one per wired cell; 2 early-warning crons on `main`), plus weekly `compat-vinext.yml` and the weekly 4-leg `compat-shipped-pin-early-warning.yml` | `test-e2e-deploy.yml:203,216,219,222,228,231`; `compat-vinext.yml:79`; `compat-shipped-pin-early-warning.yml:56` |
+| Nightly compat load | about 1.4k job-minutes a night (6 runs × ~236, derived rather than measured as a total), in line with capacity-budget's measured "about 1.2–1.3k" credential plus "about 0.5k" other | `docs/ci/capacity-budget.md` |
+| Cost of one more wired cell | one credential cron: 174–287 job-minutes a night, roughly 5.2k–8.6k per 30 days, and 8 of the Free plan's 20 concurrent jobs while it runs | the rows above; capacity-budget §2 |
+| Credential clocks | one independent 14-night window per cell, keyed on that cell's own fingerprint. A red night on one cell does not restart another cell's window, and a green night does not count toward it | ADR-0056 D1; `docs/compat-matrix.md` webpack rows |
+| Bytecode liveness | two mechanisms to grade, the compiled `--bytecode` exec on bun cells and the V8 compile cache on node cells | ADR-0058 Decision table; `docs/compat-matrix.md` "A credential night requires bytecode caching proven LIVE" |
+| Runtime image shapes | **4 template files, 6 final runtime stages, 3 base images**: `templates/app/Dockerfile.hbs` (vinext × bun, `alpine:3.22`), `Dockerfile.vinext-node.hbs` (`node:22-alpine`), `Dockerfile.self-contained.hbs` (`alpine:3.22`), and `runtime-standalone/Dockerfile.standalone.hbs` stages `standalone-bun`, `standalone-bun-self-contained` (`oven/bun:1.4.2-alpine`) and `standalone-node` (`node:22-alpine`) | the `FROM` lines of those files |
+| Per-image SBOM + scan + sign | the full SBOM + Trivy + cosign gate runs on **one** image, `apps/file-manager/Dockerfile`, which is the vinext single executable. The built-image Trivy job scans the OS layer of the opt-in `standalone-bun-self-contained` stage, with no SBOM and no signature. The base-image Trivy job is report-only on the unpatched `oven/bun:1.4.2-alpine` and `node:22-alpine` bases | `supply-chain.yml:151`, `:433-453`, `:374-385` |
+| User docs to keep per-target accurate | 23 of the 50 pages under `apps/docs/content` name a builder | `git grep -l -E 'vinext\|webpack\|turbopack'` over `apps/docs/content` |
+
+**One gap is priced here but not decided.** No CI job SBOMs, signs, or scans the *built* image of
+the **default** disk-mode `standalone-bun` stage (turbopack × bun). The only scan that touches that
+stage is the report-only scan of its unpatched base image. The full per-image gate
+covers the vinext executable. `security.md` asks for an "SBOM per image", so this belongs on the sprint-close review
+as tech debt. This Amendment does not fix it.
+
+**ADR-0048's objection still holds.** Two matrices and several supply-chain surfaces are a real
+cost, and the table above shows it: four credential lanes, six image stages. What answers the
+objection is the credential. The verdict above prefers 778/0 on a selectable axis over a cheaper
+single target at about 87%. The two-implementation invariant is what keeps the cost bounded.
+Adding a cell is a new credential cron, window, image stage and docs surface. It is not a new
+runtime.
+
+## Amendment 10 — the reopen bar (2026-09-30)
+
+- **Status:** **Proposed — for the sprint-close design review** (#1154). It sets out what evidence is
+  enough to put the runtime-axis decision back on the agenda. It does not reopen the decision.
+- **Why:** this is the fourth runtime-axis decision in about four months: ADR-0036 → ADR-0042 →
+  ADR-0048 → ADR-0054. Each earlier turn rested on one measurement that was later re-read: ADR-0048's
+  61 ms was a local process boot (its Amendment 5), and ADR-0036's Run 24 win came from running the
+  arms sequentially (its close-out). This bar asks for new evidence of the kind that has actually
+  held up, so the question is not re-argued on the same evidence a fifth time.
+- **Extends** the Amendment 7 reopen clause. R2 and R5 below include it.
+
+**The decision this bar protects:** the default is the turbopack × bun cell, shipped as the compiled
+`--bytecode` executable, on the Next standalone output. vinext stays a selectable option, measured
+and not credentialed in v1.0 (ADR-0058). Evidence may reopen it only if it meets **at least one** of
+the conditions below, and it has to be filed as an issue that cites run IDs.
+
+- **R1 — Cluster cold start separates.** A scale-from-zero A/B on a real Knative cluster, between
+  the default cell and an alternative cell, that passes ADR-0036's admissibility checklist. That
+  means the same application on both arms, checked by image digest; the requested endpoint
+  recorded; arms interleaved ABBA; build provenance tied to the deployed digest; and results
+  reported per sitting. It must also have **n ≥ 7 paired cold cycles per arm**, which is the size
+  of the recorded tie (ADR-0048 Amendment 5: 3610 ms vs 3401 ms, ranges overlapping), with all
+  pods on one node and image pull reported separately (ADR-0060 Decision 7). It reopens the
+  decision only if the alternative's median is below the default's median by **more than the
+  default arm's IQR** (ADR-0060 Decision 7's criterion), and the result reproduces in a second
+  sitting.
+- **R2 — The default cell loses parity.** The default cell grades red on **two consecutive
+  credential nights**, not counting VOID nights (ADR-0056 Amendment 4), on files that are green on
+  node × turbopack at the same pinned Next ref and RC tag. That is a runtime- or compile-attributable
+  loss, not a shared flake. The Amendment 7 case falls under this: the compiled executable cannot
+  hold the official suite after the disk-closure follow-ups (#1226).
+- **R3 — An alternative reaches the credential and has a measured edge.** A non-default cell (today
+  vinext × bun or vinext × node) banks its own ADR-0056 credential of 14 consecutive credential
+  nights on the frozen RC, which is the ADR-0058 Decision 5 route. It also has to show an advantage
+  **measured on a cluster** on an axis the verdict weighed: R1's cold-start bar, image size, or
+  warm throughput. Parity alone does not reopen the decision. The verdict chose 778/0 over about
+  87%, so the trade changes only when an alternative has parity and also wins somewhere.
+- **R4 — An upstream release removes a premise.** The release must be stable, not a canary. Examples:
+  Next.js drops or changes `output: 'standalone'` or the adapter API so the default can no longer be
+  built from it. Bun removes or changes `build --compile --bytecode`, or the
+  `compile.autoloadPackageJson` behaviour the compiled exec depends on (Amendment 7, #1225), so the
+  exec can no longer hold parity. A vinext release that lifts the ESM-only boundary (ADR-0051) or
+  restores image optimisation (ADR-0048 Amendment 2) does **not** reopen the decision by itself.
+  It goes through R3.
+- **R5 — Bytecode caching is dead.** A cell's bytecode mechanism is shown dead in a running pod and
+  cannot be made live. This is Amendment 7's clause unchanged. The founder decides whether that
+  cell leaves the supported set, and it is **not** quietly shipped uncompiled.
+
+**Does not reopen it:** a local process-boot micro-benchmark (ADR-0048 Amendment 5); a single
+dispatch run; a sequential A/B (ADR-0036 Run 24); an A/B across different applications (the Run 26
+defect); a median difference with overlapping ranges; a canary or prerelease Bun or Next result;
+the local warm-throughput gap already weighed above (1103 vs ~714 req/s), unless it is re-measured
+on a cluster as part of R3; and the N-target cost in Amendment 9. Cost can change **which cells are
+supported** (ADR-0058's cell set). It does not change the default axis.
+
+**Who decides.** The axis is a founder decision (Verdict above). The bar limits what agents and
+design gates may bring back as grounds to reopen. It does not limit what the founder may decide.
+
+**A citation note.** The Context section above cites `.claude/oke-coldstart-bench.md` for the
+N=7 cluster tie. That file is not tracked in git. The same numbers and method are in ADR-0048
+Amendment 5, which is the in-tree record R1 measures against.

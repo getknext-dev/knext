@@ -669,6 +669,44 @@ jobs:
       - name: Check all Dockerfile base images are digest-pinned
         run: bash scripts/check-base-images-pinned.sh --quiet
 
+  crd-schema-additive-guard:
+    name: NextApp CRD schema — additive-only vs. last v* tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # ADR-0017 Amendment 2 §2.1 (#1670): within v1alpha1, NextApp CRD schema
+    # changes must be additive-only — no removed fields, no type changes, no
+    # new required fields, no narrowed enums/validation. That was documented
+    # practice only; this job is the mechanical enforcement, diffing the
+    # generated CRD (config/crd/bases/apps.kn-next.dev_nextapps.yaml) against
+    # the same file at the most recent v* tag.
+    steps:
+      # fetch-depth: 0 + fetch-tags: true: the diff resolves the latest v*
+      # tag and reads that tag's CRD via `git show <tag>:<path>` — a shallow
+      # or tagless checkout must fail closed (scripts/crd-schema-diff.mjs
+      # surfaces a git failure as an error, never a silent pass), not read as
+      # "no prior CRD".
+      - name: Checkout code (full history + tags)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Diff the NextApp CRD schema against the last v* tag
+        run: node scripts/crd-schema-diff.mjs
+
   bench-harness-guards:
     name: Benchmark harness guards (no cluster)
     runs-on: ubuntu-latest

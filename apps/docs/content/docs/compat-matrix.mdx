@@ -7,21 +7,30 @@ description: Honest, evidence-gated status of what the knext adapter supports.
 > real, on-disk evidence and a mechanical guard test fails CI if a ✅ ("supported") row cannot be
 > backed up. When in doubt it is marked ⚠️, not ✅.
 
+<Callout type="warn">
+**Status: a credentialing window is currently in progress, not complete.**
+The credential window now runs against Next.js v16.3.5. That is the same release new apps scaffold
+today, and every credential night runs against that published release-candidate build, not the
+fast-moving main branch. The 14-consecutive-night count needed before any cell is
+considered fully credentialed **started recently and has not yet completed for any cell** — do not
+read anything on this page as "14 of 14, passing." Dispatched confirmation runs at this Next.js
+version have passed on all four v1.0 cells (node/bun x turbopack/webpack, 16 shards each),
+including knext's own build-cache verification step on every Node shard after a fix to that step —
+that is real evidence of current health, not a completed credential. See
+[Verified against the official Next.js test suite](/docs/compat-suite) for exactly what the
+credential covers, what counts as a credentialed night, and the honest current status.
+</Callout>
+
 <Callout type="info">
 **The official suite runs per runtime × builder cell — not one number.** knext builds and runs a
 Next.js app more than one way (standalone on Node or Bun, built with Turbopack or webpack, or the
-`vinext` build), and each combination is tracked separately rather than folded into a single "the suite is green" headline.
-The credential window now runs against Next.js v16.3.5. That is the same release new apps
-scaffold today — the deliberate gap between the two is closed. Dispatched confirmation runs at
-this version passed on all four cells (node/bun x turbopack/webpack, 16 shards each), including
-knext's own build-cache verification step on every Node shard after a fix to that step; nightly runs at this version are only just starting toward the 14-consecutive-night
-credential a version needs before it counts as fully credentialed. The
+`vinext` build), and each combination is tracked separately rather than folded into a single "the suite is green" headline. The
 most-verified cell overall is still the **Turbopack build on the Node runtime**, whose last
 completed 14-night-eligible run observed **792 tests passed, 0 failed**, at Next.js v16.2.12 — the
 prior credentialed ref, kept here for history. The default cell — Turbopack on the Bun runtime, the
 compiled bytecode executable — and the two webpack cells each have one 792/0 run behind them at
-that same prior ref. See [Verified compatibility](/docs/compat-suite) for what credentialing
-requires and where every cell currently stands.
+that same prior ref. See [Verified against the official Next.js test suite](/docs/compat-suite)
+for what credentialing requires and where every cell currently stands.
 
 A handful of upstream tests introduced between the two releases encode behaviour that only
 Vercel's own hosting infrastructure produces (for example, a CDN cache header) rather than
