@@ -586,8 +586,12 @@ describe('the self-contained drain legs cannot be switched off or weakened (roun
     expect(runner, 'a zero-exit file must be checked under --no-skip').toMatch(
       /const violation = noSkip && code === 0 \? skipViolation\(output\) : null;/,
     );
+    // #1241 added a per-file hard-timeout kill (`!timedOut`) ahead of the
+    // pre-existing violation check — the anchor now matches BOTH conditions
+    // explicitly rather than a bare prefix/suffix match, so neither one
+    // silently dropping out of `ok`'s computation passes unnoticed.
     expect(runner, 'a violation must make the file fail').toMatch(
-      /const ok = code === 0 && violation === null;/,
+      /const ok = !timedOut && code === 0 && violation === null;/,
     );
     expect(runner, 'a failed file must be recorded as a failure').toMatch(
       /if \(!ok\) failures\.push\(\{ file, output \}\);/,

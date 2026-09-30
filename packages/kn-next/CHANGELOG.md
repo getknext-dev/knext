@@ -1,5 +1,61 @@
 # @getknext/core
 
+## 1.0.0-rc.2
+
+### Minor Changes
+
+- e36eb32: The config file is now `knext.config.ts` (was `kn-next.config.ts`). **No
+  dual-read** — the CLI reads `knext.config.ts` only.
+  
+  If your app still has `kn-next.config.ts`, rename it before your next `knext`
+  command:
+  
+  ```
+  mv kn-next.config.ts knext.config.ts
+  ```
+  
+  Running any `knext` command in a directory that still has the old filename
+  (and no `knext.config.ts`) now fails fast with one actionable error naming
+  the exact rename to make — never a silent fallback read and never a warning
+  that lets an old-named config keep working.
+  
+  `knext create` scaffolds `knext.config.ts` for new apps. CLI messages, `doctor`
+  checks, the GitHub Action, and the docs site all say `knext.config.ts`
+  throughout.
+- 7c9576d: Request bodies are now capped in-process on the **standalone build** too
+  (Turbopack or webpack, on Node or Bun, compiled or not) — previously only the
+  vinext build capped them. The default is **8 MiB** per request body, on every
+  route. A larger body is answered with `413 Payload Too Large` and the connection
+  is closed (after discarding, never buffering, the rest of the body for at most
+  two seconds so an uploading client can read the status); the cap counts the bytes that actually arrive, so a chunked request
+  with no `Content-Length` is refused too, and an oversized body never reaches
+  your handler.
+  
+  **Behaviour change:** if your app accepts uploads larger than 8 MiB through a
+  route handler, raise the cap before upgrading — set `KNEXT_MAX_REQUEST_BYTES`
+  (bytes) in the `env` map of `knext.config.ts` or in `spec.env` on the
+  `NextApp`. `0` removes the cap (logged loudly at start); an invalid value keeps
+  the 8 MiB default with a warning. The app prints the cap in force on start:
+  `REQUEST_BYTE_CAP:<bytes> (<source>)`.
+
+### Patch Changes
+
+- 7661878: Rewrite package READMEs for v1.0 release: concise one-paragraph introductions, quickstart commands that work, supported platforms table (Node/Bun × Turbopack/Webpack, with the Next.js versions on the compatibility page), and clear links to docs, compatibility, security, and contributing pages. Remove internal references (ADR numbers, issue/PR numbers) to prepare for npm publication.
+- d845497: The standalone-node compile-cache bake no longer fails `docker build` with "standalone server did not answer" for apps whose routing redirects or rewrites the warm path. Readiness now waits for the server to accept a connection rather than for an HTTP answer through the app's middleware, redirects on the warm path are followed by hand (a redirect loop is reported as the non-2xx status it is, instead of a timeout), and the bake's own requests no longer go through the `fetch` that Next.js patches inside the server process. The bake also never follows a redirect off its own origin — a warm path that redirects to a third-party host (for example an auth middleware bouncing to an external IdP) is reported as the redirect it is, never fetched, so the bake can't be graded on a third party's response or make an unbounded outbound request during `docker build`.
+- 26807fc: 1.0 contract prep: adds a frozen, machine-checked CLI contract
+  (`cli/contract.ts`) covering every verb's flags and exit codes, cross-checked
+  against each verb's own parser/source so a flag or exit-code change without a
+  matching contract update fails a test. Documents exit codes for every verb in
+  the CLI reference (previously 3 of 12); no behaviour changed.
+- 28f6d66: Mark the `selfContained` config key / `knext build --self-contained` flag and
+  the `preview`/`loadtest` directly-runnable CLI entries as **experimental** —
+  they are excluded from the 1.0 semver commitment and may change in a minor
+  release. `docs/PUBLIC_API.md` now documents this carve-out under
+  "Experimental surfaces"; no behaviour changed.
+- Updated dependencies [7661878]
+  - @getknext/lib@1.0.0-rc.2
+  - @getknext/db@1.0.0-rc.2
+
 ## 1.0.0-rc.1
 
 ### Major Changes

@@ -79,10 +79,10 @@ function editsOf(m) {
 const MUTATIONS = [
   // ── Finding 1: the scan must catch every dispatch-default and env-fallback ──
   {
-    label: 'test-e2e-deploy.yml: bump the workflow_dispatch nextjsRef DEFAULT to the shipped pin',
+    label: 'test-e2e-deploy.yml: bump the workflow_dispatch nextjsRef DEFAULT to a drifted value',
     subject: 'testE2eDeploy',
     anchor:
-      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.2.12'",
+      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.5'",
     replacement:
       "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.3'",
   },
@@ -101,35 +101,37 @@ const MUTATIONS = [
     replacement: "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.3.3' }}",
   },
 
-  // ── Finding 2: docs must track the manifest, and explain the divergence ────
+  // ── Finding 2: docs must track the manifest, and explain a divergence ──────
+  // ── if and only if one exists (rc.2's 16.3.5 re-credential, #1560: ─────────
+  // ── credentialedNextRef caught up to shippedNextPin, so the ─────────────────
+  // ── ALWAYS-diverging premise no longer holds) ──────────────────────────────
   {
     label: 'docs/compat-matrix.md: drift the cited vercel/next.js version from the manifest',
     subject: 'docsMatrixMd',
-    anchor: 'against `vercel/next.js` **v16.2.12**,',
-    replacement: 'against `vercel/next.js` **v16.3.3**,',
+    anchor: 'against `vercel/next.js` **v16.3.5**',
+    replacement: 'against `vercel/next.js` **v16.3.3**',
   },
   {
     label: 'compat-matrix.mdx: drift the cited Next.js version from the manifest',
     subject: 'docsMatrixMdx',
-    anchor:
-      'nightly most recently observed **792 tests passed, 0 failed**, against Next.js v16.2.12.',
-    replacement:
-      'nightly most recently observed **792 tests passed, 0 failed**, against Next.js v16.3.3.',
+    anchor: 'The credential window now runs against Next.js v16.3.5.',
+    replacement: 'The credential window now runs against Next.js v16.3.3.',
   },
   {
-    label: 'compat-matrix.mdx: delete the newer-Next-release divergence explanation',
+    label:
+      'compat-matrix.mdx: falsely claim a "newer Next.js release" while the manifest shows NO divergence (credentialedNextRef already equals shippedNextPin)',
     subject: 'docsMatrixMdx',
     anchor:
-      '\n**New apps pin a newer Next.js release (16.3.x) than the version measured above.** The scaffold\nships Next.js 16.3.x, while the numbers on this page were measured against the latest 16.2.x\nrelease. The 16.3.x line adds a handful of new upstream tests that knext has not yet passed, so\ncredentialing on it is a separate, later step rather than a side effect of this measurement. The\ncredentialed numbers will move forward onto the 16.3.x line once those tests are addressed.\n',
-    replacement: '\n',
+      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n</Callout>',
+    replacement:
+      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n\nNew apps pin a newer Next.js release than what is credentialed above.\n</Callout>',
   },
   {
-    label: "compat-matrix.mdx: drop every '16.3.x' mention from the divergence explanation",
-    subject: 'docsMatrixMdx',
-    anchor:
-      '**New apps pin a newer Next.js release (16.3.x) than the version measured above.** The scaffold\nships Next.js 16.3.x, while the numbers on this page were measured against the latest 16.2.x\nrelease. The 16.3.x line adds a handful of new upstream tests that knext has not yet passed, so\ncredentialing on it is a separate, later step rather than a side effect of this measurement. The\ncredentialed numbers will move forward onto the 16.3.x line once those tests are addressed.',
-    replacement:
-      '**New apps pin a newer Next.js release (a newer release) than the version measured above.** The scaffold\nships Next.js a newer release, while the numbers on this page were measured against the latest 16.2.x\nrelease. The a-newer-release line adds a handful of new upstream tests that knext has not yet passed, so\ncredentialing on it is a separate, later step rather than a side effect of this measurement. The\ncredentialed numbers will move forward onto the a-newer-release line once those tests are addressed.',
+    label:
+      'manifest: reintroduce a divergence (credentialedNextRef != shippedNextPin) with no explanation added to the docs',
+    subject: 'manifest',
+    anchor: '"credentialedNextRef": "v16.3.5",',
+    replacement: '"credentialedNextRef": "v16.2.12",',
   },
 
   // ── Round 3, finding 1: every NEXTJS_REF assignment form, not just the ──

@@ -1,0 +1,173 @@
+name: Published-bytes freeze guard
+
+# #1663 — the PR-TIME complement to `release.yml`'s `ga-tarball-diff` job.
+# That job proves, AT RELEASE, that a GA cut differs from its credentialed rc
+# tag only in version fields. It says nothing about the 14 nights IN BETWEEN:
+# a PR merged to `main` while `.github/compat-credential-ref.json`'s `rcTag`
+# is still open can change package source, a template, or a package README,
+# and every one of those is exactly what makes the EVENTUAL GA-vs-rc diff fail
+# — forcing an unplanned rc.N+1 and 14 more credential nights. This job packs
+# the publishable group at the PR's own merge ref (whatever `actions/checkout`
+# hands it on `pull_request`/`merge_group`) and diffs it against the pinned
+# rc tag's already-packed tarballs, using the SAME comparison rules
+# (`scripts/lib/ga-tarball-diff.mjs`) as the release-time gate.
+#
+# CHEAP BY DEFAULT: `scripts/published-bytes-freeze-check.mjs` never packs
+# anything unless (a) a credential window was open AT THIS PR'S BASE COMMIT
+# AND (b) this PR's diff touches a path that can reach a published package
+# (`scripts/lib/published-bytes-freeze-check.mjs`'s `decidePublishedBytesScope`,
+# derived from the actual publishable workspace packages — never a hand-list).
+# Everything else — no window open at base, a docs/CI-only PR, a reviewed
+# `publishedBytesBumpMarker` override INTRODUCED BY THIS PR for an intentional
+# rc.N+1 — exits in the "Run the published-bytes freeze check" step alone,
+# before any `bun install`/pack/build ever runs.
+#
+# THE FREEZE STATE (rcTag) IS READ AT THE PR'S BASE COMMIT, not its head —
+# round-2 fix (PR #1680 review), mirroring `compat-credential-freeze-guard.yml`
+# one-for-one (see that workflow's own comment of the same name). Reading a
+# single ambient pin (whatever this PR's own merge ref carries) let a PR
+# SKIP this whole check by setting `rcTag: null` in the SAME diff that also
+# changed a publishable package's bytes — at head, no window looked open, so
+# the scope check was never even reached. `basePin` answers "was a window
+# ALREADY live before this PR"; `headPin` still answers "does this PR carry
+# an override marker"; `mergeBasePin` answers "did THIS PR introduce that
+# marker, or inherit one already on `main`" (the same #1635 rule the sibling
+# guard already applies to `rcBumpMarker`, applied here to
+# `publishedBytesBumpMarker`). A PR that BOTH closes the window AND changes
+# published bytes in the same diff still proceeds to pack-and-diff, because
+# the window was open at base regardless of what head says.
+#
+# FAILS CLOSED, NEVER SILENTLY: an unresolvable pinned `rcTag` (a shallow
+# checkout, a typo, a tag never pushed) is a FAIL, not a SKIP — "the window
+# claims to be open but the tag it names cannot be found" must never read as
+# "nothing to compare". A packing/build failure inside `ga-tarball-diff.mjs`
+# itself also fails this check, because that script's own exit code is
+# propagated verbatim.
+#
+# KNOWN, ACCEPTED LIMITATION (stated rather than hidden — same class of gap
+# `compat-credential-freeze-guard.mjs`'s header documents for itself): on a
+# plain `pull_request` trigger, GitHub evaluates BOTH this workflow file and
+# every script it invokes from the PR's OWN head ref. A PR could weaken
+# `scripts/published-bytes-freeze-check.mjs` (or this file) and have that
+# weakened copy run against itself. Unlike the compat-credential-freeze-guard,
+# THIS check does not run from a base-commit checkout of its own code — that
+# mitigation roughly doubles this workflow's complexity (a second worktree
+# checkout, a bootstrap branch for PRs that predate the guard) for a
+# process/cost gate rather than the sole defense against restarting a 14-night
+# credential streak. Flagged as a supply-chain trigger-class gap for the
+# sprint-close design review (`.claude/rules/workflow.md`'s escalation
+# triggers), not silently accepted.
+#
+# NOT required yet — turning it into a required check (alongside #1373) is a
+# repo branch-protection (Settings) change a founder makes, same as the
+# sibling compat-credential-freeze-guard. It still triggers on `merge_group`
+# regardless, so a future required-check flip needs no follow-up PR here.
+
+on:
+  pull_request:
+    branches: ['**']
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  published-bytes-freeze:
+    name: Published-bytes freeze — packs + diffs against the pinned rc tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    # Queue-safe base/head: `pull_request` and `merge_group` carry the SHAs
+    # under different event fields (same shape as
+    # compat-credential-freeze-guard.yml's job-level env).
+    env:
+      BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
+    steps:
+      # fetch-depth: 0 + fetch-tags: true — the diff, when it runs, resolves
+      # the pinned rc tag via `git worktree add --detach` (inside
+      # ga-tarball-diff.mjs) and needs that tag's history present; a tagless
+      # or shallow checkout must fail closed, never read as "no rc cut".
+      - name: Checkout code (full history + tags)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun (workspace install + pack)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      # `scripts/published-bytes-freeze-check.mjs` never imports the
+      # `tar`-dependent diff module at module scope (same discipline as
+      # `ga-tarball-diff-gate.mjs`, see its header) — a SKIP decision (the
+      # common case) does not need this. A RUN decision does, so it is
+      # installed unconditionally here anyway, matching `release.yml`'s
+      # `ga-tarball-diff` job.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Three-dot diff (merge-base...head), --no-renames: the SAME reasoning
+      # as compat-credential-freeze-guard.yml — a moved base branch must not
+      # surface main's own changes as this PR's, and rename detection must
+      # not make a moved file vanish from the changed-files list.
+      - name: Compute the files this PR changed (base...head)
+        run: |
+          set -euo pipefail
+          git diff --no-renames --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          echo "changed files in this PR:"
+          cat changed-files.txt
+
+      # Read the pin AS OF THE BASE COMMIT — the live-window state before
+      # this PR. Decides freeze/unfrozen; see the file header ("THE FREEZE
+      # STATE"). Same shape as compat-credential-freeze-guard.yml's identical
+      # step.
+      - name: Read the pin file at the PR's base commit
+        run: |
+          set -euo pipefail
+          if ! git show "${BASE_SHA}:.github/compat-credential-ref.json" > base-pin.json 2>/dev/null; then
+            echo "no pin file at the base commit — treating as unfrozen"
+            echo '{"rcTag": null}' > base-pin.json
+          fi
+          cat base-pin.json
+
+      # Read the pin AS OF THIS PR'S HEAD — the only state a
+      # publishedBytesBumpMarker THIS PR adds can ever appear in.
+      - name: Read the pin file at the PR's head commit
+        run: |
+          set -euo pipefail
+          if ! git show "${HEAD_SHA}:.github/compat-credential-ref.json" > head-pin.json 2>/dev/null; then
+            echo "no pin file at head — treating as unfrozen"
+            echo '{"rcTag": null}' > head-pin.json
+          fi
+          cat head-pin.json
+
+      # #1635-class rule, applied to publishedBytesBumpMarker: the pin AS OF
+      # THE MERGE BASE, the point this PR's diff is measured from. A head
+      # marker is honoured only if it is absent (or a different
+      # authorization) here — a marker already on `main` when the PR branched
+      # is inherited, and exempts nothing.
+      - name: Read the pin file at the PR's merge base
+        run: |
+          set -euo pipefail
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
+          if ! git show "${MERGE_BASE}:.github/compat-credential-ref.json" > merge-base-pin.json 2>/dev/null; then
+            echo "no pin file at the merge base — treating as unfrozen"
+            echo '{"rcTag": null}' > merge-base-pin.json
+          fi
+          cat merge-base-pin.json
+
+      - name: Run the published-bytes freeze check
+        run: |
+          node scripts/published-bytes-freeze-check.mjs \
+            --changed-files-file changed-files.txt \
+            --base-pin-file base-pin.json \
+            --head-pin-file head-pin.json \
+            --merge-base-pin-file merge-base-pin.json

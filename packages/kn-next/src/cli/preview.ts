@@ -24,6 +24,10 @@
  * asset prefix and its own `apps.kn-next.dev/build-id` revision label, so prod's
  * deploy-time GC (scoped to prod's `<app>/`) never touches it and a preview can't
  * skew prod. We do NOT emit spec.traffic on a preview (single revision, max-scale=1).
+ *
+ * @experimental This directly-runnable entry's flags and output may change in
+ * a minor release — it is not part of the committed CLI verb contract. See
+ * PUBLIC_API.md's "Experimental surfaces" section.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildChildEnv } from '../packages/kn-next/src/adapters/env';
@@ -78,9 +79,38 @@ function fakeStandalone() {
   return { dir, driver, server: join(dir, 'server.js') };
 }
 
-let port = 38_900 + Math.floor(Math.random() * 500);
-function runShippedBake(dir: string, driver: string, server: string, cache: string) {
-  port += 1;
+/**
+ * An OS-assigned free TCP port (#1477: the previous fixed 38900-39399 range
+ * plus a per-call increment was not actually collision-free — under the
+ * full-suite's concurrency, another process anywhere in the run could bind
+ * the guessed port first. The driver's own http server has no `'error'`
+ * handler, so a bind failure crashes it with a GENERIC uncaught exception
+ * rather than the documented "did not answer 2xx" exit — missing
+ * `evaluateBakeOutcome`'s failure-marker check and turning a pure port race
+ * into an apparently-real bake failure (this is the #1477 flake). Mirrors
+ * `free_port()` in scripts/e2e-deploy.sh: bind :0, read the OS-assigned
+ * port back, release it immediately so the DRIVER (a separate process) can
+ * bind it. Same documented TOCTOU as `free_port()` — a sibling process
+ * could in principle grab the freed port in the window between release and
+ * the driver's bind — but this replaces a fixed 500-port guessed range
+ * (shared by every concurrent process in the whole suite) with the OS's own
+ * free-port allocator, which is what the rest of this repo already relies
+ * on for exactly this reason.
+ */
+function freePort(): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const p = typeof addr === 'object' && addr !== null ? addr.port : 0;
+      srv.close(() => resolvePort(p));
+    });
+  });
+}
+
+async function runShippedBake(dir: string, driver: string, server: string, cache: string) {
+  const port = await freePort();
   return spawnSync('node', [driver], {
     encoding: 'utf8',
     timeout: 60_000,
@@ -112,10 +142,10 @@ function acceptedOnReload(dir: string, cache: string) {
 }
 
 describe("the SHIPPED bake driver (the standalone-node image's own), against a real node", () => {
-  it('bakes a cache that a later process ACCEPTS', () => {
+  it('bakes a cache that a later process ACCEPTS', async () => {
     const { dir, driver, server } = fakeStandalone();
     const cache = join(dir, '.next/compile-cache');
-    const r = runShippedBake(dir, driver, server, cache);
+    const r = await runShippedBake(dir, driver, server, cache);
     expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(acceptedOnReload(dir, cache)).toBeGreaterThanOrEqual(1);
   }, 90_000);
@@ -125,9 +155,9 @@ describe("the SHIPPED bake driver (the standalone-node image's own), against a r
     expect(acceptedOnReload(dir, join(dir, '.next/compile-cache-empty'))).toBe(0);
   });
 
-  it('exits non-zero when the warm path does not answer 2xx (the harness records bake=failed)', () => {
+  it('exits non-zero when the warm path does not answer 2xx (the harness records bake=failed)', async () => {
     const { dir, driver, server } = fakeStandalone();
-    port += 1;
+    const port = await freePort();
     const r = spawnSync('node', [driver], {
       encoding: 'utf8',
       timeout: 60_000,
@@ -141,7 +171,7 @@ describe("the SHIPPED bake driver (the standalone-node image's own), against a r
         KNEXT_WARM_PATH: '/not-there',
       },
     });
-    expect(r.status).not.toBe(0);
+    expect(r.status, `${r.stdout}\n${r.stderr}`).not.toBe(0);
   }, 90_000);
 });
 
@@ -151,9 +181,9 @@ describe("the SHIPPED bake driver (the standalone-node image's own), against a r
  * passed, is set on the DRIVER's own env anyway, to prove the driver
  * IGNORES it rather than merely defaulting it off.
  */
-function bakeWith(warm: string, knob?: string) {
+async function bakeWith(warm: string, knob?: string) {
   const { dir, driver, server } = fakeStandalone();
-  port += 1;
+  const port = await freePort();
   return spawnSync('node', [driver], {
     encoding: 'utf8',
     timeout: 60_000,
@@ -175,9 +205,9 @@ function bakeWith(warm: string, knob?: string) {
  * `KNEXT_WARM_ACCEPT_ANY_STATUS` interpretation the driver itself used to
  * do, now happening one process out, against the REAL shipped driver.
  */
-function bakeThroughWrapper(warm: string, accept?: string) {
+async function bakeThroughWrapper(warm: string, accept?: string) {
   const { dir, driver, server } = fakeStandalone();
-  port += 1;
+  const port = await freePort();
   const wrapper = join(ROOT, 'scripts/e2e-bake-accept.mjs');
   return spawnSync('node', [wrapper, 'node', driver], {
     encoding: 'utf8',
@@ -196,16 +226,20 @@ function bakeThroughWrapper(warm: string, accept?: string) {
 }
 
 describe('the shipped bake driver: UNCONDITIONALLY strict 2xx — no knob anywhere in these bytes (#1299)', () => {
-  it('PRODUCT DEFAULT: a 404 and a 500 both fail the bake', () => {
-    expect(bakeWith('/not-there').status).not.toBe(0);
-    expect(bakeWith('/boom').status).not.toBe(0);
+  it('PRODUCT DEFAULT: a 404 and a 500 both fail the bake', async () => {
+    const notThere = await bakeWith('/not-there');
+    expect(notThere.status, `${notThere.stdout}\n${notThere.stderr}`).not.toBe(0);
+    const boom = await bakeWith('/boom');
+    expect(boom.status, `${boom.stdout}\n${boom.stderr}`).not.toBe(0);
   }, 90_000);
 
-  it('the driver IGNORES KNEXT_WARM_ACCEPT_ANY_STATUS entirely now — even "1" stays strict', () => {
+  it('the driver IGNORES KNEXT_WARM_ACCEPT_ANY_STATUS entirely now — even "1" stays strict', async () => {
     // Pre-#1299 this ("1") would have passed the bake; post-#1299 the
     // shipped bytes read no such variable at all, so it still fails.
-    expect(bakeWith('/not-there', '1').status).not.toBe(0);
-    expect(bakeWith('/boom', '1').status).not.toBe(0);
+    const notThere = await bakeWith('/not-there', '1');
+    expect(notThere.status, `${notThere.stdout}\n${notThere.stderr}`).not.toBe(0);
+    const boom = await bakeWith('/boom', '1');
+    expect(boom.status, `${boom.stdout}\n${boom.stderr}`).not.toBe(0);
   }, 90_000);
 
   it('the shipped driver TEMPLATE contains no trace of the knob at all', () => {
@@ -243,39 +277,53 @@ describe('the shipped bake driver: startup deadline floor (#1572)', () => {
     ).toBe(1);
   });
 
-  it('the SHIPPED bake driver actually emits that log line at runtime, not just in the template text', () => {
+  it('the SHIPPED bake driver actually emits that log line at runtime, not just in the template text', async () => {
     const { dir, driver, server } = fakeStandalone();
     const cache = join(dir, '.next/compile-cache');
-    const r = runShippedBake(dir, driver, server, cache);
+    const r = await runShippedBake(dir, driver, server, cache);
     expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(r.stdout).toMatch(/\[knext bake] standalone server answered after \d+ms/);
   }, 90_000);
 });
 
 describe('e2e-bake-accept.mjs (#1299): the tolerance moved HERE, one process out, against the REAL driver', () => {
-  it('with the wrapper + KNEXT_WARM_ACCEPT_ANY_STATUS=1, a 404 or 500 render is tolerated', () => {
-    expect(bakeThroughWrapper('/not-there', '1').status).toBe(0);
-    expect(bakeThroughWrapper('/boom', '1').status).toBe(0);
+  it('with the wrapper + KNEXT_WARM_ACCEPT_ANY_STATUS=1, a 404 or 500 render is tolerated', async () => {
+    const notThere = await bakeThroughWrapper('/not-there', '1');
+    expect(notThere.status, `${notThere.stdout}\n${notThere.stderr}`).toBe(0);
+    const boom = await bakeThroughWrapper('/boom', '1');
+    expect(boom.status, `${boom.stdout}\n${boom.stderr}`).toBe(0);
   }, 90_000);
 
-  it('without the wrapper knob (unset), the wrapper still fails a 404 — no accidental loosening', () => {
-    expect(bakeThroughWrapper('/not-there').status).not.toBe(0);
+  it('without the wrapper knob (unset), the wrapper still fails a 404 — no accidental loosening', async () => {
+    const r = await bakeThroughWrapper('/not-there');
+    expect(r.status, `${r.stdout}\n${r.stderr}`).not.toBe(0);
   }, 90_000);
 
-  it('the "0"/"true" unset-equivalent values stay strict through the wrapper too (only "1" loosens)', () => {
-    expect(bakeThroughWrapper('/not-there', '0').status).not.toBe(0);
-    expect(bakeThroughWrapper('/not-there', 'true').status).not.toBe(0);
+  it('without the wrapper knob (unset), the wrapper still fails a 500 — no accidental loosening', async () => {
+    const r = await bakeThroughWrapper('/boom');
+    expect(r.status, `${r.stdout}\n${r.stderr}`).not.toBe(0);
   }, 90_000);
 
-  it('with the wrapper knob, a connection reset STILL fails the bake', () => {
+  it('the "0"/"true" unset-equivalent values stay strict through the wrapper too (only "1" loosens)', async () => {
+    const zero = await bakeThroughWrapper('/not-there', '0');
+    expect(zero.status, `${zero.stdout}\n${zero.stderr}`).not.toBe(0);
+    const trueVal = await bakeThroughWrapper('/not-there', 'true');
+    expect(trueVal.status, `${trueVal.stdout}\n${trueVal.stderr}`).not.toBe(0);
+  }, 90_000);
+
+  it('with the wrapper knob, a connection reset STILL fails the bake', async () => {
     // /ok first so the server-ready probe passes; the reset is then a warm-path failure.
-    expect(bakeThroughWrapper('/ok,/reset', '1').status).not.toBe(0);
-    expect(bakeThroughWrapper('/ok,/not-there', '1').status).toBe(0);
+    const reset = await bakeThroughWrapper('/ok,/reset', '1');
+    expect(reset.status, `${reset.stdout}\n${reset.stderr}`).not.toBe(0);
+    const okThenNotThere = await bakeThroughWrapper('/ok,/not-there', '1');
+    expect(okThenNotThere.status, `${okThenNotThere.stdout}\n${okThenNotThere.stderr}`).toBe(0);
   }, 90_000);
 
-  it('a fully successful (2xx) bake still exits 0 through the wrapper, knob or no knob', () => {
-    expect(bakeThroughWrapper('/ok').status).toBe(0);
-    expect(bakeThroughWrapper('/ok', '1').status).toBe(0);
+  it('a fully successful (2xx) bake still exits 0 through the wrapper, knob or no knob', async () => {
+    const noKnob = await bakeThroughWrapper('/ok');
+    expect(noKnob.status, `${noKnob.stdout}\n${noKnob.stderr}`).toBe(0);
+    const withKnob = await bakeThroughWrapper('/ok', '1');
+    expect(withKnob.status, `${withKnob.stdout}\n${withKnob.stderr}`).toBe(0);
   }, 90_000);
 
   it('only the harness sets the knob — the image build never does, and the wrapper is what interprets it now', () => {
