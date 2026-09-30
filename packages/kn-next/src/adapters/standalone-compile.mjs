@@ -61,9 +61,10 @@
  * ## Baked-in preloads
  *
  * The uncompiled cell runs `bun --require cache-control-normalize.cjs
- * --require bun-keepalive-guard.cjs server.js`. A compiled executable takes no
- * `--require`, so both preloads are the entry's first two statements instead:
- * the compiled cell serves the same Cache-Control shape the compat suite gates.
+ * --require request-body-cap.cjs --require bun-keepalive-guard.cjs server.js`.
+ * A compiled executable takes no `--require`, so the preloads are the entry's
+ * first statements instead: the compiled cell serves the same Cache-Control
+ * shape the compat suite gates, and caps request bodies the same way.
  *
  * ## The bytecode proof
  *
@@ -167,7 +168,7 @@ if (!isInside(realpathSync(SERVER), ROOT)) {
 // fold-vs-sidecar decision). Disk mode's preload list — and therefore its
 // compiled output — is byte-identical to before this existed.
 const here = dirname(fileURLToPath(import.meta.url));
-const PRELOAD_NAMES = ["cache-control-normalize.cjs", "bun-keepalive-guard.cjs"];
+const PRELOAD_NAMES = ["cache-control-normalize.cjs", "bun-keepalive-guard.cjs", "request-body-cap.cjs"];
 if (SELF_CONTAINED) PRELOAD_NAMES.push("standalone-self-contained-supervisor.cjs");
 const PRELOADS = PRELOAD_NAMES.map((f) => join(here, f));
 for (const p of PRELOADS) {

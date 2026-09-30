@@ -211,6 +211,29 @@ if (preloadArgs.length === 0) {
     );
 }
 
+// ── In-process request-body byte cap (ADR-0044 Option C) ─────────────────────
+// `containerConcurrency` bounds concurrent requests, never bytes per request:
+// one route handler that buffers an oversized body OOMKills the pod (SIGKILL —
+// no drain, no after(), no DB-pool drain). This preload gates every 'request'
+// the standalone child's http server emits — declared Content-Length over the
+// cap is refused before the handler runs, and chunked / lying-length bodies are
+// COUNTED as they arrive — answering 413 + Connection: close. Loaded for BOTH
+// runtimes (a Node child and a Bun child), unlike the keep-alive guard below.
+// Knob: KNEXT_MAX_REQUEST_BYTES (default 8 MiB, 0 uncaps, invalid → default),
+// the same one the compiled vinext entry reads.
+const requestBodyCapPreload = resolve(
+    import.meta.dirname,
+    "request-body-cap.cjs",
+);
+if (existsSync(requestBodyCapPreload)) {
+    preloadArgs.push("--require", requestBodyCapPreload);
+} else {
+    log.warn(
+        { requestBodyCapPreload },
+        "request-body-cap preload not found; request bodies are NOT size-capped",
+    );
+}
+
 // ── Bun ≤1.3.x keep-alive mitigation (#188) ──────────────────────────────────
 // Bun ≤1.3.14 resets a reused keep-alive socket when the next request arrives
 // immediately after the previous response completed (plain node:http repro;

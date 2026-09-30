@@ -55,7 +55,7 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
  */
 const DECLARED: Record<string, { skips: Record<string, number>; reason: string }> = {
   'apps/file-manager/sigterm-drain-e2e.test.ts': {
-    skips: { 'it.skipIf': 4 },
+    skips: { 'it.skipIf': 5 },
     reason:
       'Boots the shipped runtime entry against a real `.next/standalone` mirror, probed inside ' +
       'findStandaloneMirrorRoot(). LANE-BACKED (#932): the sigterm-drain-shipped job builds that ' +
