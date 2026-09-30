@@ -51,7 +51,10 @@ image is already cached on the node, and the app itself.
 knext publishes **measured distributions rather than a headline number**, because on a contended
 cluster the spread is wide enough that a median misleads. One measured example: on a two-node
 cluster, cold starts came out bimodal — a cluster of samples around ~2.5s and another around ~10.5s,
-with a clean gap between them. A single "average" of those two groups would describe neither.
+with a clean gap between them. A single "average" of those two groups would describe neither. On a
+quiet two-node cluster, the scaffolded app with one server-rendered page woke in about 2.1–2.4 s at
+the median, whichever runtime and builder it was built with — and even there, one wake in forty took
+over 10 s.
 
 See [Scale to zero](/docs/scale-to-zero) for the numbers and how they were taken.
 
