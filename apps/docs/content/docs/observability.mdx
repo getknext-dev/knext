@@ -46,7 +46,7 @@ The series depend on the build. The **vinext build** exposes:
 | Metric | Type | Meaning |
 |---|---|---|
 | `knext_bunexec_http_requests_total` | Counter | Requests served, labelled `status_class` (2xx/3xx/4xx/5xx) — request and error rate. |
-| `knext_bunexec_http_request_duration_seconds` | Histogram | Request latency (buckets down to 5 ms — process boot is ~61 ms). |
+| `knext_bunexec_http_request_duration_seconds` | Histogram | Request latency (buckets down to 5 ms — a local warm-binary process boot measured ~61 ms; on a real cluster, pod scheduling and container start dominate the actual wake time — see [Scale-to-zero & cold starts](/docs/scale-to-zero)). |
 | `knext_bunexec_http_inflight_requests` | Gauge | Current concurrency (saturation). |
 | `knext_bunexec_startup_duration_seconds` | Gauge | How long this pod took to become ready. |
 | `knext_bunexec_process_resident_memory_bytes` | Gauge | Resident set size. |

@@ -58,6 +58,14 @@ const ALLOWED_FILES = new Set([
   // exempt above. It needs the literal old name to create that file and to
   // `mv` it, not as a user-facing mention.
   'scripts/upgrade-e2e/run.sh',
+  // #1568 v1.0 announcement-kit draft: the release-notes draft names the
+  // pre-rename filename once, in a literal `mv kn-next.config.ts
+  // knext.config.ts` command a reader can copy-paste — the same
+  // grep/copy-paste value the migration error itself provides. This file is
+  // still a DRAFT (see its own "not published" banner); only this one
+  // announcement-kit file is exempted, and only for stating the rename,
+  // never for telling a reader to keep using the old name.
+  'docs/release/v1.0.0.md',
 ]);
 
 /**

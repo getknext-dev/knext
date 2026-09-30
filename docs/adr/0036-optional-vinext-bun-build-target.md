@@ -8,6 +8,9 @@
   not a return to hand-rolling a Nitro runtime.
 - **Relates to:** ADR-0035 (baked compile cache, the node path's own cold-start fix),
   the runtime decision recorded in memory `knext-runtime-decision-coldstart` (2026-06-20).
+- **Reconciled with ADR-0054 (2026-09-30, Proposed)** — see the last section. The status line above
+  is history. Today the default is a compiled Bun executable of the Next standalone output
+  (ADR-0054), not node, and the compiled vinext target is a selectable option (ADR-0058).
 
 ## Context
 
@@ -368,3 +371,39 @@ same defects would corrupt any future A/B.
   amendment permitting an opt-in compiled target is unchanged in principle — it is simply not
   exercised for 1.0.
 - No runtime code is removed by this decision.
+
+## Amendment — reconciled with ADR-0054 (2026-09-30)
+
+- **Status:** **Proposed — for the sprint-close design review** (#1151). This appends a
+  reconciliation and does not edit the text above. It records which of this ADR's decisions still
+  hold now that ADR-0054 (Accepted 2026-09-22) and ADR-0058 (Proposed, recording the founder
+  decision on #1295) have settled the runtime axis.
+
+**Still stands:**
+- **One config, one CRD, one operator, and exactly two `RuntimeContract` implementations** (the
+  "RuntimeContract applies to all three cells, via exactly TWO implementations" section). ADR-0054
+  Amendment 9 reaffirms it as the invariant across every cell. The two implementations are the
+  standalone supervisor (`node-server.ts`) and the vinext in-process entry
+  (`templates/app/runtime-contract.mjs.hbs`).
+- **Build and runtime are separate axes** (the 2026-07-22 Amendment). The code carries them as
+  separate types: `BuilderId` and `RuntimeId` (`artifact-contract.ts:86,89`), and separate CRD
+  enums (`nextapp_types.go:130,180`).
+- **The re-open trigger's admissibility checklist** in the close-out. ADR-0054 Amendment 10 R1 uses
+  it as the bar for any cluster cold-start A/B.
+- **The measurements in the close-out** (Runs 24 and 26) and what they do and do not establish.
+- **`examples/bun-exec` stays an example**, not a build target.
+
+**Superseded:**
+- **The Status line "Rejected for 1.0" and the close-out consequence "The default remains the
+  official Next.js adapter on node".** Both are superseded by ADR-0054. The v1.0 default is
+  turbopack × bun, compiled with `bun build --compile --bytecode` (`DEFAULT_BUILDER_ID =
+  "turbopack"` × `DEFAULT_RUNTIME_ID = "bun"`, `artifact-contract.ts:394,424`). A compiled Bun
+  target now ships for 1.0, but on the Next standalone output, not on vinext.
+- **"`bun-exec` ships only if the P1 OKE A/B shows a separated win".** ADR-0054 did not ship the
+  compiled target on a cold-start win. It shipped it on verified compat (778/0) with a tied cluster
+  cold start (ADR-0048 Amendment 5). ADR-0054 Amendment 7 made bytecode mandatory in every cell.
+- **The build × runtime matrix in the 2026-07-22 Amendment.** ADR-0054 Amendment 7 and ADR-0058
+  replace it: six cells are the goal, and v1.0 credentials four (node/bun × turbopack/webpack).
+  The vinext cells are selectable. They are measured, not credentialed, in v1.0.
+- **The `bun ⇒ vinext` pairing.** It was already abandoned, per this ADR's own state correction.
+  bun now pairs with the standalone builders by default.

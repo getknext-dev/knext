@@ -16,32 +16,24 @@
 # object store (e.g. OCI Object Storage's S3 Compatibility API — proven in
 # deploy/_verify-objstore.sh).
 #
-# IMAGE IS DIGEST-PINNED: MinIO's community project is archived, so we pin the
-# last-good RELEASE.2022-10-20 build by its immutable sha256 (the exact image the
-# live plane has been running) — a moved/retagged upstream can never change what
-# we pull.
+# IMAGE IS DIGEST-PINNED: MinIO's community project is archived, so we pin an
+# immutable sha256 — a moved/retagged upstream can never change what we pull.
 #
-# #1403 (KNOWN BREAK, NOT FIXED HERE — needs szpg's own review, not a knext-side
-# tech-debt PR): the digest below is UNPULLABLE. quay.io/minio/minio now
-# UNAUTHORIZES every anonymous pull, repo-wide — verified with `crane manifest`
-# against several tags including this exact "last-good" pin, not a transient
-# flake. Every THROWAWAY MinIO consumer in this repo (deploy/_verify-*.sh
-# drills, knext's own CI fixtures) was repinned to
+# #1423 (FIXED): quay.io/minio/minio's RELEASE.2022-10-20 build became
+# UNPULLABLE — quay.io now UNAUTHORIZES every anonymous pull, repo-wide,
+# verified with `crane manifest` against several tags including that exact
+# "last-good" pin, not a transient flake. Repinned to
 # docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
 # (Bitnami's post-license-change "legacy" free mirror — unmaintained but genuine
-# MinIO, proven S3-API-compatible). THIS file, 55-storage-init.yaml, and
-# 62-backup.yaml are szpg's LIVE production manifests and were deliberately
-# left UNFIXED (getknext-dev/knext#1423, filed for szpg's own review) — not
-# repinned to Bitnami. For THIS file specifically: it is szpg's LIVE persistent
-# plane with EXISTING root-owned PVC data (see the runAsNonRoot note below),
-# and Bitnami's image runs as non-root UID 1001 by default — swapping images
-# here needs either a chown-PVC initContainer or an explicit root override,
-# verified against real PVC data, which is a decision for szpg's own review
-# process (code review + architect + system-designer sign-off per
-# packages/scale-zero-pg/CLAUDE.md), not a unilateral edit from a knext-side CI
-# tech-debt pass. This file's own comment above already argues for migrating
-# off MinIO entirely (SeaweedFS/Ceph RGW/Garage) — #1403 is a live argument for
-# prioritizing that.
+# MinIO, proven S3-API-compatible; the same digest every throwaway MinIO
+# consumer in this repo already uses, #1403). Bitnami's image runs as non-root
+# UID 1001 by default (`crane config` confirms `User: "1001"`), but the bound
+# PVC's existing data is root-owned from years running as root — so a
+# `fix-data-ownership` initContainer chowns the volume to 1001:1001 as root
+# (CAP_CHOWN only, everything else dropped) BEFORE the main container starts as
+# non-root. This file's own comment above already argues for migrating off
+# MinIO entirely (SeaweedFS/Ceph RGW/Garage) — the archival is a live argument
+# for prioritizing that.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,15 +49,30 @@ spec:
     metadata:
       labels: { app: minio, plane: storage }
     spec:
-      # NOTE: this MinIO image defaults to root and the existing PVC data is
-      # root-owned, so we do NOT force runAsNonRoot here (would break on the
-      # bound volume). We still harden: no privilege escalation, drop all caps,
-      # seccomp RuntimeDefault. Prod should move to real S3 / non-root MinIO.
+      # Bitnami's minio image runs as non-root UID 1001 by default (#1423); the
+      # fix-data-ownership initContainer below chowns the PVC to 1001:1001 as
+      # root FIRST, so the main container can safely run non-root here.
       securityContext:
         seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # One-shot, as root: the bound PVC's data predates this image swap and
+        # is root-owned (years running the old root-default quay.io image).
+        # `chown -R` is idempotent — a no-op on a PVC already owned by 1001.
+        # CAP_CHOWN/CAP_FOWNER only (everything else dropped): the minimum a
+        # non-uid-0-owning chown as root actually needs, not full root.
+        - name: fix-data-ownership
+          image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c # same pin as the main container (#1423)
+          command: ["/bin/sh", "-c", "chown -R 1001:1001 /data"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"], add: ["CHOWN", "FOWNER"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z@sha256:cc144348ad1e4126766279b042804fa4f130da531cc811e91fdbcb12c6bc8881 # digest-pinned last-good (upstream archived, #105)
+          image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c # digest-pinned (#1423; upstream quay.io/minio/minio archived + unpullable)
           args: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
           # Root identity from the storage-s3-creds Secret (deploy/gen-secrets.sh),
           # never plaintext YAML. Same creds double as the S3 key for the storage
@@ -76,6 +83,8 @@ spec:
             - name: MINIO_ROOT_PASSWORD
               valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001 # Bitnami's default minio user (#1423); the PVC is chowned to it above
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
           ports:

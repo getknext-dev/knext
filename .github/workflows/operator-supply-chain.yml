@@ -50,6 +50,57 @@ name: Operator Supply Chain
 #   - contents: write  → create/update the GitHub Release that carries install.yaml
 #   No extra repo secrets are needed; GITHUB_TOKEN is sufficient for GHCR + OIDC +
 #   Releases.
+#
+# SEMVER RELEASE LINE (#1667): this job also runs on a pushed `operator-vX.Y.Z`
+# tag (including rc/prerelease tags), reusing this SAME publisher — there is no
+# second workflow. `hack/release-channel.sh` (unit-tested directly, see
+# tests/operator-release-channel.test.ts) turns the triggering ref into a
+# channel: a version tag publishes its OWN immutable release
+# (`operator-vX.Y.Z[-rc.N]`), and ONLY a stable (non-prerelease) tag also
+# re-points the `operator-latest` release. A plain push to `main` no longer
+# moves `operator-latest` at all — it publishes to the rolling `operator-edge`
+# channel instead, so "upgrade to latest" always means a real cut release, not
+# whatever HEAD happened to build last. Every step downstream of the Trivy gate
+# is now conditioned on `steps.channel.outputs.publish`, not a literal
+# `github.ref == 'refs/heads/main'` check.
+#
+# `check-release-immutable.sh` runs before anything is built (#1667 review
+# round 2): softprops/action-gh-release UPDATES an existing release for a
+# given tag rather than refusing to touch one, so a re-pushed/force-moved
+# operator-vX.Y.Z tag could otherwise silently overwrite a previously
+# published install.yaml. It fails the run if a release for that tag already
+# carries an install.yaml asset. Scoped to real version tags only —
+# operator-edge/operator-latest are mutable by design.
+#
+# PATHS FILTERING (#1667 review round 2): GitHub evaluates a single `paths:`
+# filter against every ref a `push:` trigger matches — there is no way, in one
+# `on.push` block, to apply `paths` to `branches: [main]` while leaving
+# `tags: ['operator-v*']` unfiltered, and a tag push may legitimately repoint
+# at a commit whose own diff doesn't touch these paths. So `push.paths` is
+# NOT set on the trigger; instead the `changes` job below restores
+# paths-filter behavior for MAIN pushes only (via `hack/path-relevant.sh`,
+# a real `git diff`, unit-tested in tests/operator-path-relevant.test.ts) and
+# unconditionally treats every `operator-v*` tag push (and every non-push
+# event) as relevant. The main job's `if:` reads `needs.changes.outputs.relevant`.
+#
+# `changes` ALWAYS runs, for every event (#1667 review round 3). It used to
+# carry `if: github.event_name == 'push'`, which meant the job was SKIPPED —
+# not "ran and reported relevant=false" — on pull_request. A `needs:` on a
+# SKIPPED job propagates the skip to the dependent job by default (GitHub's
+# `if:` on a dependent job defaults to `success()`, which a skipped need does
+# not satisfy), so `operator-image-supply-chain` — the Trivy/SBOM gate — was
+# silently skipped on every PR. Making `changes` unconditional (and reporting
+# relevant=true for any non-push event, since `pull_request.paths` already
+# scopes PRs natively) closes that hole without reintroducing `always()`
+# logic in the dependent job's `if:`.
+#
+# CONCURRENCY (#1667 review round 3): grouped by ref so two runs for the SAME
+# `operator-vX.Y.Z` tag (or the same branch) can never run concurrently — the
+# immutability guard above reads "does a release already exist" and then
+# publishes; two racing runs on the same ref could both observe "no release
+# yet" and then both attempt to create/attach one. `cancel-in-progress: false`
+# because this is a publish path: an in-flight publish must be allowed to
+# finish, not be cancelled mid-way through pushing/signing an image.
 
 on:
   pull_request:
@@ -58,17 +109,62 @@ on:
       - '.github/workflows/operator-supply-chain.yml'
   push:
     branches: [main]
-    paths:
-      - 'packages/kn-next-operator/**'
-      - '.github/workflows/operator-supply-chain.yml'
+    tags:
+      - 'operator-v*'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# See the CONCURRENCY note above the `on:` block.
+concurrency:
+  group: operator-supply-chain-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # Restores push.paths-filter behavior for MAIN pushes only (see the PATHS
+  # FILTERING note above). Runs UNCONDITIONALLY for every event — see the
+  # note above the `on:` block for why a push-only `if:` here silently
+  # skipped the Trivy/SBOM gate on every PR.
+  changes:
+    name: Detect operator-relevant changes (main pushes only; always relevant otherwise)
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.check.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check whether this push touched operator-relevant paths
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" != "push" ]]; then
+            # pull_request is already scoped by the pull_request.paths filter
+            # on the trigger above; workflow_dispatch is an explicit manual
+            # run. Neither is gated by this job's path check.
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${REF}" == refs/tags/operator-v* ]]; then
+            # Tag pushes are always relevant — never gated by paths.
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            RELEVANT="$(bash packages/kn-next-operator/hack/path-relevant.sh "${BEFORE_SHA}" "${AFTER_SHA}" .)"
+            echo "relevant=${RELEVANT}" >> "$GITHUB_OUTPUT"
+          fi
+
   operator-image-supply-chain:
     name: Operator SBOM + Trivy (+ cosign sign on main)
+    needs: [changes]
+    # `changes` runs unconditionally (see the note above the `on:` block), so
+    # its output is always defined — no `always()`/event-name fallback needed
+    # here, and a genuinely failed/skipped `changes` run correctly skips this
+    # job too (the default `success()` behavior for a `needs:` dependency).
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create/update the GitHub Release that carries install.yaml
@@ -76,6 +172,31 @@ jobs:
       id-token: write # cosign keyless signing via OIDC
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Determines the release channel from the triggering ref (#1667): a
+      # stable version tag / an rc-or-other prerelease tag / a main push
+      # (operator-edge) / anything else (no publish). Every publish-gated step
+      # below reads steps.channel.outputs.* instead of re-deriving this.
+      - name: Determine release channel (#1667)
+        id: channel
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: bash packages/kn-next-operator/hack/release-channel.sh "${REF}" "${REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      # Enforces that operator-vX.Y.Z releases are ACTUALLY immutable, not just
+      # documented as such (#1667): softprops/action-gh-release UPDATES an
+      # existing release for a given tag_name rather than refusing to touch
+      # one, so a re-pushed/force-moved version tag could otherwise silently
+      # overwrite a previously published install.yaml. Runs early (before the
+      # multi-arch build) so a doomed re-publish fails fast. Deliberately
+      # scoped to a real version tag — operator-edge/operator-latest stay
+      # mutable by design (a rolling channel and a stable-tracking pointer).
+      - name: Guard operator-vX.Y.Z release immutability (#1667)
+        if: steps.channel.outputs.is_version_tag == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash packages/kn-next-operator/hack/check-release-immutable.sh "${{ github.repository }}" "${{ steps.channel.outputs.release_tag }}"
 
       # GHCR repository names must be lowercase; the owner can be mixed-case.
       # ${OWNER,,} lowercases it (mirrors the app job — fixes the #48 casing bug).
@@ -91,7 +212,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Build into a LOCAL OCI-layout directory on every ref — never push here.
-      # The Trivy gate below scans this exact layout; publication (main only)
+      # The Trivy gate below scans this exact layout; publication (main & release tags)
       # happens in the explicit crane-push step AFTER the gate. This is what
       # guarantees a scan-failed operator image is never pullable at a stable
       # tag (#201). The OCI layout — unlike the `docker` exporter used before —
@@ -164,10 +285,22 @@ jobs:
           path: operator-sbom.spdx.json
 
       - name: Trivy scan — FAIL on HIGH/CRITICAL
-        # Report (don't block) on PRs; ENFORCE (fail) on main. Matches the app-image
-        # policy: a pre-existing base-image CVE can't block an unrelated PR, while
-        # main stays gated.
-        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        # ENFORCING on every PUBLISHING run (#1667 review round 4) — not just
+        # `main`. The old literal (`github.ref != 'refs/heads/main'`) meant a
+        # failing scan was SWALLOWED on an operator-vX.Y.Z tag push (any ref
+        # other than exactly `refs/heads/main`), and the image was pushed,
+        # cosign-signed, and attached to an IMMUTABLE release anyway — the
+        # supply-chain gate was decorative on the one channel that most needs
+        # it. `steps.channel.outputs.publish` is the single source of truth
+        # for "this run intends to publish" (main push, operator-edge; any
+        # operator-vX.Y.Z tag) — advisory (continue-on-error) only when
+        # NOTHING downstream publishes (an ordinary PR).
+        continue-on-error: ${{ steps.channel.outputs.publish != 'true' }}
+        # `id: trivy` (#1667 round 4): continue-on-error masks `conclusion`
+        # (it always reports success there) — every push/sign/release step
+        # below must additionally gate on `steps.trivy.outcome == 'success'`,
+        # which reflects the REAL pass/fail regardless of continue-on-error.
+        id: trivy
         # SHA-pinned (#202): this action is the publish GATE in a job holding
         # packages:write + id-token:write — a compromised mutable @master could
         # push/sign with this repo's OIDC identity. v0.36.0.
@@ -179,10 +312,13 @@ jobs:
           ignore-unfixed: true
           format: table
 
-      # ── Everything below runs ONLY after the Trivy gate passed ──────────────
+      # ── Everything below runs ONLY after the Trivy gate passed — both that
+      # it was intended to publish (steps.channel.outputs.publish) AND that
+      # the scan itself actually succeeded (steps.trivy.outcome), which
+      # continue-on-error above cannot hide (#1667 round 4). ────────────────
 
       - name: Log in to GHCR
-        if: github.ref == 'refs/heads/main'
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -195,7 +331,7 @@ jobs:
       # packages:write + id-token:write, the same discipline that SHA-pinned
       # trivy-action/sbom-action (#202).
       - name: Install crane (version + checksum pinned)
-        if: github.ref == 'refs/heads/main'
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         env:
           CRANE_VERSION: v0.21.7
           # sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7
@@ -217,8 +353,8 @@ jobs:
       # output that parameterizes signing, verification AND the install.yaml
       # digest pin below, and fail loud if it doesn't parse (we must never sign
       # — or bake into the release bundle — a guessed digest).
-      - name: Push operator image (main only, after the Trivy gate)
-        if: github.ref == 'refs/heads/main'
+      - name: Push operator image (publish channel, after the Trivy gate)
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         id: push
         run: |
           set -euo pipefail
@@ -235,8 +371,8 @@ jobs:
       # provenance attestation actually survived the push — and only sign
       # provenance-bearing images. Fails loud if the pushed index carries no
       # attestation manifest or the attestation has no SLSA provenance predicate.
-      - name: Verify buildkit provenance survived the push (main only)
-        if: github.ref == 'refs/heads/main'
+      - name: Verify buildkit provenance survived the push (publish channel)
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -254,13 +390,13 @@ jobs:
           echo "Buildkit SLSA provenance present: ${IMAGE}@${ATT_DIGEST}"
 
       - name: Install cosign
-        if: github.ref == 'refs/heads/main'
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # No working-directory default: this `run:` step executes at repo root, so it
       # references the SAME operator-sbom.spdx.json that the sbom-action wrote there.
       - name: Sign image + attest SBOM (keyless)
-        if: github.ref == 'refs/heads/main'
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         env:
           COSIGN_EXPERIMENTAL: "1"
           DIGEST: ${{ steps.push.outputs.digest }}
@@ -272,22 +408,22 @@ jobs:
       # (issue #117). This proves the keyless identity/issuer round-trips before we
       # advertise the image as signed, and exercises the same hack/cosign-verify.sh
       # a client runs. The identity-regexp/issuer default to this repo's signer.
-      - name: Verify operator image signature (cosign verify, main only)
-        if: github.ref == 'refs/heads/main'
+      - name: Verify operator image signature (cosign verify, publish channel)
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         env:
           IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
           DIGEST: ${{ steps.push.outputs.digest }}
         run: bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
 
-      # On main only: regenerate dist/install.yaml with the REAL pushed digest. This is
+      # On the publish channel (main or an operator-v* tag): regenerate dist/install.yaml with the REAL pushed digest. This is
       # the bootstrap-resolution step — the placeholder all-zeros digest in the
       # committed manifests is replaced here with the digest cosign just signed.
       # MUST consume the POST-gate pushed digest (steps.push.outputs.digest, #201):
       # this step only runs after the Trivy gate + push + sign + verify all passed,
       # so a scan-failed run can never refresh the operator-latest release asset.
       # This `run:` step runs at repo root, so it cd's into the operator package.
-      - name: Build installer + pin real digest (main only)
-        if: github.ref == 'refs/heads/main'
+      - name: Build installer + pin real digest (publish channel)
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -314,28 +450,47 @@ jobs:
 
       # Transient CI artifact (auth-gated) — handy for inspecting the exact bundle a
       # run produced, but NOT the user-facing install path.
-      - name: Upload install.yaml artifact (main only)
-        if: github.ref == 'refs/heads/main'
+      - name: Upload install.yaml artifact (main + release tags only)
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: operator-install-bundle-${{ github.sha }}
           path: packages/kn-next-operator/dist/install.yaml
 
-      # User-facing install path: attach the digest-pinned bundle to a GitHub Release
-      # tagged `operator-latest`, re-pointed to the current main on every publish.
+      # User-facing install path (#1667): attach the digest-pinned bundle to a
+      # GitHub Release tagged with the CHANNEL — `operator-vX.Y.Z[-rc.N]` for a
+      # version tag (a fresh tag every time, so this release is immutable: the
+      # same tag is never re-pushed), or the rolling `operator-edge` channel for
+      # a plain `main` push. `make_latest: "false"` here — the repo's default
+      # view is decided by the operator-latest step below, only for stable tags.
       #
-      # `make_latest` below does NOT make `/releases/latest/download/install.yaml` a
-      # dependable URL, and the docs must not use it. GitHub resolves /releases/latest/
-      # to the most RECENTLY PUBLISHED release repo-wide — and this repo also cuts npm
-      # package releases (`@getknext/core@…`, `@getknext/db@…`). Each of those steals the
-      # pointer, and they carry no assets, so the URL returns 404 until the next operator
-      # publish. That is exactly what happened: after the 2026-07-26 package releases the
-      # documented install command 404'd for every user. Docs now address the asset by
-      # tag (`releases/download/operator-latest/install.yaml`), which no other release
-      # can steal. make_latest is kept only so the operator release is the repo's default
-      # view immediately after a publish — never rely on it for asset URLs.
-      - name: Publish install.yaml as a Release asset (main only)
-        if: github.ref == 'refs/heads/main'
+      # `make_latest` on ANY release here does NOT make
+      # `/releases/latest/download/install.yaml` a dependable URL, and the docs
+      # must not use it. GitHub resolves /releases/latest/ to the most RECENTLY
+      # PUBLISHED release repo-wide — and this repo also cuts npm package
+      # releases (`@getknext/core@…`, `@getknext/db@…`). Each of those steals
+      # the pointer, and they carry no assets, so the URL returns 404 until the
+      # next operator publish. Docs address every asset by its OWN tag
+      # (`releases/download/<channel>/install.yaml`), which no other release
+      # can steal.
+      - name: Publish install.yaml to its channel release (#1667)
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.channel.outputs.release_tag }}
+          name: kn-next-operator ${{ steps.channel.outputs.release_tag }}
+          make_latest: "false"
+          files: packages/kn-next-operator/dist/install.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only a STABLE (non-prerelease) operator-vX.Y.Z tag also re-points
+      # operator-latest (#1667) — a plain main push no longer does, and neither
+      # does an rc/prerelease tag. This is the one release object in the flow
+      # that IS mutable by design: "install the latest operator" always means
+      # the newest cut stable version, re-published to this same tag.
+      - name: Move operator-latest to this stable release (#1667)
+        if: steps.channel.outputs.is_stable == 'true' && steps.trivy.outcome == 'success'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: operator-latest
