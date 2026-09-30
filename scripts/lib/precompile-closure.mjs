@@ -59,12 +59,16 @@ export const FAILING_SEVERITIES = new Set(['critical', 'high']);
  *     MIN_INSTALLED_PACKAGES has ~2× headroom, not more. It is the tighter of
  *     the two, deliberately: it is the floor that catches an empty tree.
  */
+// @ratchet-floor — mechanically enforced by scripts/check-ratchet-floors.mjs (#1253).
 export const MIN_NPM_COMPONENTS = 100;
+// @ratchet-floor — mechanically enforced by scripts/check-ratchet-floors.mjs (#1253).
 export const MIN_INSTALLED_PACKAGES = 100;
 
 /**
  * The fraction of the installed tree the SBOM must account for. The lockfile
  * shape scores 0.15 here; a correctly catalogued tree scores ~1.0.
+ *
+ * @ratchet-floor — mechanically enforced by scripts/check-ratchet-floors.mjs (#1253).
  */
 export const MIN_COVERAGE = 0.9;
 

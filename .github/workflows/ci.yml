@@ -296,6 +296,39 @@ jobs:
       - name: Typecheck root tests/ (tsc --noEmit)
         run: bun run typecheck
 
+  # Ratchet-floor guard (#1253) — mechanically enforced "raise it, never lower
+  # it" for every `@ratchet-floor`-marked constant (coverage floors, prover
+  # anchor-drift floors, the precompile-closure supply-chain floors, ...).
+  # `scripts/check-ratchet-floors.mjs` compares HEAD against the merge base
+  # and fails on any lowering (or removal — deleting the marker/declaration
+  # is treated as a lowering too) unless `ratchet-lowering-allowlist.json`
+  # carries a dated entry INTRODUCED by this PR.
+  #
+  # `fetch-depth: 0` is REQUIRED, not cosmetic: the guard resolves its own
+  # comparison base via `git merge-base HEAD origin/main` and FAILS CLOSED
+  # (refuses to run, never silently passes) when that resolves nothing — a
+  # shallow checkout is exactly the condition that would otherwise compare
+  # HEAD against itself and report "0 violations" for the wrong reason. No
+  # workspace install / build needed — the guard is pure Node + git.
+  ratchet-floor-guard:
+    name: Ratchet floors never lowered (#1253)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code (full history — needed for the merge-base read)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Run the ratchet-floor guard
+        run: node scripts/check-ratchet-floors.mjs
+
   compat-smoke:
     # knext adapter SMOKE suite — NOT the official Next.js compatibility suite (ADR-0007,
     # option C). Builds apps/file-manager through the knext adapter (output:'standalone'),
