@@ -3390,6 +3390,274 @@ describe('compat-suite sandbox-fetch debug knob (test-e2e-deploy.yml, #188 path 
   });
 });
 
+// ── #1553 (ADR-0056 Amendment 4) — the preKnextFault dispatch-only knob ────────
+// Proves the credential audit's bounded VOID grade live: dispatching with
+// preKnextFault=runner-setup|dependency-install deliberately fails ONE named
+// pre-knext phase, strictly before the adapter build / knext server start, so
+// the resulting ledger carries a `kind: 'pre-knext'` shard failure + a
+// self-referencing `preKnextVoidMarker` the audit can grade. Same contract as
+// sandboxFetchDebug/selfContained above, and the SAME shape of guard: a
+// scheduled (credential OR early-warning) night must NEVER be able to set
+// this, because github.event.inputs is empty on every `schedule` event.
+describe('compat-suite pre-knext fault injection (test-e2e-deploy.yml, #1553)', () => {
+  const src = workflowText();
+
+  function dispatchBlock(): string {
+    const m = src.match(/workflow_dispatch:[\s\S]*?(?=\n\s{2}schedule:)/);
+    return m ? m[0] : '';
+  }
+
+  /** The `preKnextFault:` input sub-block inside workflow_dispatch.inputs. */
+  function faultInputBlock(): string {
+    const block = dispatchBlock();
+    const m = block.match(/^(\s+)preKnextFault:\s*\n([\s\S]*?)(?=^\1[\w-]|\n*$(?![\s\S]))/m);
+    return m ? m[0] : '';
+  }
+
+  it('declares a `preKnextFault` workflow_dispatch input that DEFAULTS to no fault (empty string)', () => {
+    const input = faultInputBlock();
+    expect(input, 'workflow_dispatch must declare a preKnextFault input').not.toBe('');
+    expect(/type:\s*string/.test(input), 'the preKnextFault input must be type: string').toBe(true);
+    expect(
+      /default:\s*''/.test(input),
+      'the preKnextFault input must default to the empty string (steady state untouched)',
+    ).toBe(true);
+  });
+
+  it('derives KNEXT_PREKNEXT_FAULT from the dispatch input ONLY — no scheduled event, credential or early-warning, may ever set it', () => {
+    const envLine = src.split('\n').find((l) => /^\s*KNEXT_PREKNEXT_FAULT:\s*\$\{\{/.test(l));
+    expect(envLine, 'a workflow-level KNEXT_PREKNEXT_FAULT env expression must exist').toBeTruthy();
+    expect(
+      /inputs\.preKnextFault/.test(envLine ?? ''),
+      'the fault env must be driven by the preKnextFault dispatch input',
+    ).toBe(true);
+    expect(
+      /github\.event\.schedule/.test(envLine ?? ''),
+      'the fault env must NOT branch on github.event.schedule — no scheduled lane (credential or early-warning) may ever set a fault',
+    ).toBe(false);
+    expect(
+      /\|\|\s*''\s*\}\}/.test(envLine ?? ''),
+      'the fallback must be the empty string (schedule events carry no inputs → no fault)',
+    ).toBe(true);
+  });
+
+  it('every per-shard fault-injection step is gated on the workflow-level env, never re-reads github.event.inputs or github.event.schedule directly', () => {
+    const block = deployTestsJobBlock();
+    const steps = block
+      .split(/\n(?= {6}- name: )/)
+      .filter((b) => /^\s+- name: Inject pre-knext fault/.test(b));
+    expect(steps, 'expected exactly one fault-injection step per named phase').toHaveLength(2);
+    for (const step of steps) {
+      expect(
+        /if:\s*env\.KNEXT_PREKNEXT_FAULT ==/.test(step),
+        `fault-injection step must gate on env.KNEXT_PREKNEXT_FAULT, got:\n${step}`,
+      ).toBe(true);
+      expect(
+        /github\.event\.(inputs|schedule)/.test(step),
+        'a per-shard step must never re-read github.event directly — only the workflow-level env, so there is exactly one place a scheduled event is excluded',
+      ).toBe(false);
+    }
+    // Every phase named in PRE_KNEXT_PHASES that this workflow can actually
+    // fault-inject (cluster-bringup has no step here — this workflow never
+    // provisions a cluster) must have its own step, named exactly, so a typo
+    // in either the workflow or the audit's phase list is caught by string
+    // equality rather than a loose substring match.
+    const phases = ['runner-setup', 'dependency-install'];
+    for (const phase of phases) {
+      expect(
+        steps.some((s) => s.includes(`env.KNEXT_PREKNEXT_FAULT == '${phase}'`)),
+        `expected a fault-injection step gated on preKnextFault=${phase}`,
+      ).toBe(true);
+    }
+  });
+
+  it('each fault-injection step is followed by a phase-complete marker and a failure()-gated detector that writes kind: pre-knext', () => {
+    const block = deployTestsJobBlock();
+    for (const phase of ['runner-setup', 'dependency-install']) {
+      const markerRe = new RegExp(
+        `Mark ${phase} phase complete \\(#1553\\)\\n\\s*id: pre-knext-${phase}-ok`,
+      );
+      expect(markerRe.test(block), `expected a phase-complete marker for ${phase}`).toBe(true);
+      const detectorRe = new RegExp(
+        `Pre-knext fault detector — ${phase} \\(#1553\\)\\n\\s*id: pre-knext-fault-${phase}\\n\\s*if: failure\\(\\)`,
+      );
+      expect(detectorRe.test(block), `expected a failure()-gated detector for ${phase}`).toBe(true);
+    }
+    // The dependency-install detector must not ALSO fire for a runner-setup
+    // fault — both leave the job in failure() from that point on — so it
+    // must be guarded on the runner-setup marker's own outcome.
+    expect(
+      /Pre-knext fault detector — dependency-install \(#1553\)\n\s*id: pre-knext-fault-dependency-install\n\s*if: failure\(\) && steps\.pre-knext-runner-setup-ok\.outcome == 'success'/.test(
+        block,
+      ),
+      'the dependency-install detector must be guarded on the runner-setup marker outcome, or a runner-setup fault double-attributes to both phases',
+    ).toBe(true);
+    // Every detector step must synthesize kind: 'pre-knext' with a `phase`
+    // field the credential audit recognises (scripts/compat-window-audit.mjs
+    // PRE_KNEXT_PHASES) — never `kind: 'deploy'`/`'infra'`/`'assertion'`.
+    const detectorBodies = block
+      .split(/\n(?= {6}- name: )/)
+      .filter((b) => /^\s+- name: Pre-knext fault detector/.test(b));
+    expect(detectorBodies).toHaveLength(2);
+    for (const body of detectorBodies) {
+      expect(
+        /kind: "pre-knext"/.test(body),
+        `detector must write kind: "pre-knext", got:\n${body}`,
+      ).toBe(true);
+    }
+  });
+
+  it('the "Summarize shard result" step never overwrites a pre-knext-classified summary with a false-green parse', () => {
+    const block = deployTestsJobBlock();
+    const m = block.match(/- name: Summarize shard result\n[\s\S]*?(?=\n {6}- name: )/);
+    expect(m, 'expected a "Summarize shard result" step').not.toBeNull();
+    const step = m?.[0] ?? '';
+    expect(
+      /steps\.pre-knext-fault-runner-setup\.outcome.*=.*'success'/.test(step) ||
+        /steps\.pre-knext-fault-runner-setup\.outcome.*success/.test(step),
+      'Summarize shard result must check the runner-setup detector outcome before re-summarizing',
+    ).toBe(true);
+    expect(
+      /steps\.pre-knext-fault-dependency-install\.outcome.*success/.test(step),
+      'Summarize shard result must check the dependency-install detector outcome before re-summarizing',
+    ).toBe(true);
+    expect(
+      /exit 0/.test(step),
+      'Summarize shard result must exit early (not re-summarize) when a pre-knext fault was already recorded',
+    ).toBe(true);
+  });
+});
+
+// ── #1553 round 2 (review finding) — the adapter-tarball preflight must sit
+// OUTSIDE the dependency-install phase's fault-detection window ────────────
+// Round 1 placed "Preflight — adapter tarballs survived transport + still
+// npm-install" (scripts/e2e-preflight.mjs: npm-installs the packed
+// @getknext/* tarballs, resolves @getknext/core/adapter, and dynamically
+// IMPORTS @getknext/db/migrate — i.e. EXECUTES knext code) BEFORE the
+// dependency-install phase-complete marker. A knext-caused failure there
+// would have been misclassified `kind: 'pre-knext'` and could bridge a
+// credential streak over a real regression. This section proves, by an
+// explicit per-phase allowlist (not a substring search, which is how the
+// original finding hid), that no knext-executing step sits inside either
+// phase's fault window, and that the misplaced steps' failure is graded an
+// ordinary, always-resets `kind: 'deploy'` red.
+describe('compat-suite pre-knext phase boundaries stay knext-free (test-e2e-deploy.yml, #1553 round 2)', () => {
+  /** Ordered `{ name, block }` for every step in the deploy-tests job. */
+  function deployTestsSteps(): Array<{ name: string; block: string }> {
+    const block = deployTestsJobBlock();
+    return block
+      .split(/\n(?= {6}- name: )/)
+      .filter((b) => /^\s+- name: /.test(b))
+      .map((b) => {
+        const m = b.match(/^\s+- name:\s*(.+)$/m);
+        return { name: (m?.[1] ?? '').trim(), block: b };
+      });
+  }
+
+  /** The step NAMES strictly between (exclusive) two named steps, in order. */
+  function namesBetween(afterName: string, beforeName: string): string[] {
+    const steps = deployTestsSteps();
+    const afterIdx = steps.findIndex((s) => s.name === afterName);
+    const beforeIdx = steps.findIndex((s) => s.name === beforeName);
+    expect(afterIdx, `expected a step named "${afterName}"`).toBeGreaterThanOrEqual(0);
+    expect(beforeIdx, `expected a step named "${beforeName}"`).toBeGreaterThan(afterIdx);
+    return steps.slice(afterIdx + 1, beforeIdx).map((s) => s.name);
+  }
+
+  // Test 1 (review-required): an explicit allowlist of the steps inside each
+  // pre-knext phase's fault window. This FAILS if a knext-executing step
+  // (e.g. the adapter-tarball preflight) is placed — or ever re-placed —
+  // inside either window: the array comparison catches an insertion,
+  // deletion, OR reordering, not just the one known regression.
+  it('runner-setup phase: only the named allowlist of knext-free steps runs before its phase-complete marker', () => {
+    // Phase start = the job's very first step (Download workspace). Nothing
+    // in this list resolves, installs, or imports a single line of knext
+    // code — every action here is a generic GitHub Action, tar/node
+    // bookkeeping, or toolchain setup (node/pnpm/bun), and the fault
+    // injection step is workflow-only (echoes + exits 1).
+    const steps = deployTestsSteps();
+    expect(steps[0]?.name).toBe('Download workspace');
+    const names = namesBetween('Download workspace', 'Mark runner-setup phase complete (#1553)');
+    expect(names).toEqual([
+      'Unpack workspace tarball (restores symlinks + exec bits)',
+      'Setup Node.js',
+      'Setup pnpm',
+      'Enable corepack (next.js per-project package manager)',
+      'Setup Bun (bun lane only)',
+      'Inject pre-knext fault — runner-setup (#1553, dispatch-only)',
+    ]);
+  });
+
+  it('dependency-install phase: only the named allowlist of knext-free steps runs before its phase-complete marker — the adapter-tarball preflight (which DOES execute knext code) must be absent', () => {
+    const names = namesBetween(
+      'Pre-knext fault detector — runner-setup (#1553)',
+      'Mark dependency-install phase complete (#1553)',
+    );
+    expect(names).toEqual([
+      'Resolve next.js pnpm store path',
+      'Restore next.js pnpm store',
+      'Re-install next.js harness deps (offline cache hit; node_modules rebuilt)',
+      'Resolve Playwright version (for the chromium cache key)',
+      'Cache Playwright browsers',
+      'Install Playwright chromium (retry + per-attempt timeout, NON-FATAL)',
+      'Hydrate workspace next/dist from the prebuilt tarball (so jest can load tests)',
+      'Hydrate @next/* harness load closure from published tarballs (so test modules load)',
+      'Hydrate prebuilt @next/swc native binary (so next build skips the WASM/registry path)',
+      'Verify next.js jest harness is intact (do NOT override the upstream config)',
+      'Patch next/jest unescaped /.next/ ignore pattern (upstream bug)',
+      'Clear jest haste cache (fresh crawl against the patched next/jest)',
+      'Gate — jest --listTests must match >0 (loud-fail, no silent 0-test runs)',
+      'Inject pre-knext fault — dependency-install (#1553, dispatch-only)',
+    ]);
+    // Belt-and-suspenders on the exact regression this section exists to
+    // catch: neither knext-executing step may appear by NAME anywhere in the
+    // window, even if the allowlist above were loosened by a future edit.
+    expect(names).not.toContain('Make lifecycle scripts executable');
+    expect(
+      names.some((n) => /Preflight — adapter tarballs/.test(n)),
+      'the adapter-tarball preflight (executes knext code) must never sit inside the dependency-install fault window',
+    ).toBe(false);
+  });
+
+  it('the adapter-tarball preflight and its chmod sibling run AFTER both phase-complete markers, with their own failure()-gated detector that writes kind: "deploy" (never pre-knext-eligible)', () => {
+    const steps = deployTestsSteps();
+    const names = steps.map((s) => s.name);
+    const depOkIdx = names.indexOf('Mark dependency-install phase complete (#1553)');
+    const chmodIdx = names.indexOf('Make lifecycle scripts executable');
+    const preflightIdx = names.findIndex((n) => /Preflight — adapter tarballs/.test(n));
+    const diskFloorIdx = names.indexOf('Free disk floor (#1530)');
+    expect(depOkIdx).toBeGreaterThanOrEqual(0);
+    expect(chmodIdx).toBeGreaterThan(depOkIdx);
+    expect(preflightIdx).toBeGreaterThan(chmodIdx);
+    expect(diskFloorIdx).toBeGreaterThan(preflightIdx);
+
+    const detector = steps.find(
+      (s) => s.name === 'Adapter-tarball preflight fault detector (#1553 round 2)',
+    );
+    expect(detector, 'expected a dedicated detector for the moved preflight steps').toBeTruthy();
+    const body = detector?.block ?? '';
+    expect(/id: post-dependency-install-fault/.test(body)).toBe(true);
+    expect(
+      /if:\s*failure\(\)\s*&&\s*steps\.pre-knext-runner-setup-ok\.outcome == 'success'\s*&&\s*steps\.pre-knext-dependency-install-ok\.outcome == 'success'/.test(
+        body,
+      ),
+      'the detector must be guarded on BOTH phase markers, or an earlier-phase failure double-attributes here',
+    ).toBe(true);
+    expect(/kind: "deploy"/.test(body), `detector must write kind: "deploy", got:\n${body}`).toBe(
+      true,
+    );
+    expect(/kind: "pre-knext"/.test(body)).toBe(false);
+
+    // "Summarize shard result" must not clobber this detector's honest red
+    // with a false-green 0/0/0 parse of an empty/absent runner.log.
+    const summarize = steps.find((s) => s.name === 'Summarize shard result')?.block ?? '';
+    expect(
+      /steps\.post-dependency-install-fault\.outcome.*success/.test(summarize),
+      'Summarize shard result must check the adapter-tarball preflight detector outcome before re-summarizing',
+    ).toBe(true);
+  });
+});
+
 // ── #188 path 3 — the IN-REALM sandbox-fetch instrumentation (context.js patch) ──
 // Path 2's calibrated null proved a host-realm main-graph diagnostics_channel
 // subscriber cannot see the sandbox fetch under bun; path 3 patches the

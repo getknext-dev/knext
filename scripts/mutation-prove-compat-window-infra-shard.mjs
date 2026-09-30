@@ -73,15 +73,19 @@ console.log('   ok baseline green\n');
 
 // 1. Remove the `infra-classified:` label branch entirely, folding an infra
 //    shard into the generic red message.
+//
+// #1553 (ADR-0056 Amendment 4) nested this ternary one level deeper (inside
+// the `else` of a new pre-knext check) — the anchor below tracks that real
+// indentation, not the pre-#1553 shape.
 prove(
   'infra shard loses its distinct label, reads as a generic red',
-  `          : isInfraOnlyRedShard(shard, f.value)
-            ? \`infra-classified: shard \${id} red (failed=\${f.value} notRun=\${n.value}) — the \` +
-              'free-disk floor aborted this shard before it ran a single test (#1530); it ' +
-              'still disqualifies the night (a runner fault proves nothing either way about ' +
-              'the ref under test) but is never mistaken for kind:assertion'
-            : \`shard \${id} red (failed=\${f.value} notRun=\${n.value})\`,`,
-  `          : \`shard \${id} red (failed=\${f.value} notRun=\${n.value})\`,`,
+  `            : isInfraOnlyRedShard(shard, f.value)
+              ? \`infra-classified: shard \${id} red (failed=\${f.value} notRun=\${n.value}) — the \` +
+                'free-disk floor aborted this shard before it ran a single test (#1530); it ' +
+                'still disqualifies the night (a runner fault proves nothing either way about ' +
+                'the ref under test) but is never mistaken for kind:assertion'
+              : \`shard \${id} red (failed=\${f.value} notRun=\${n.value})\`,`,
+  `            : \`shard \${id} red (failed=\${f.value} notRun=\${n.value})\`,`,
 );
 
 // 2. Let a shard carrying a REAL failure alongside an infra marker be

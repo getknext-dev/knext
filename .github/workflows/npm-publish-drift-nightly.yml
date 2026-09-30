@@ -1,0 +1,133 @@
+name: npm-publish environment/tag protection drift (nightly)
+
+# ── #1638 item 2 — the `npm-publish` GITHUB ENVIRONMENT HAS NO PROTECTION ────
+# RULES, so a `release.yml` run on `main` publishes to npm with NO reviewer
+# click. Live-verified (`gh api repos/getknext-dev/knext/environments/npm-publish`):
+# `"protection_rules":[]`. There is also no repository ruleset covering `v*`
+# tags (`gh api repos/getknext-dev/knext/rulesets` lists only a `main`
+# branch ruleset, `target: "branch"`).
+#
+# ITEM 1 (adding the reviewer + the tag ruleset) IS FOUNDER-ONLY — a repo
+# settings change no agent can make. THIS WORKFLOW IS THEREFORE EXPECTED TO
+# BE RED FROM THE MOMENT IT MERGES, until the founder does that. That is the
+# point, not a bug: the issue's acceptance criterion is "red with protection
+# removed, green with it present", and today protection genuinely is removed.
+#
+# WHY NIGHTLY, NOT A PR GATE: same reasoning as
+# `action-pin-resolution-nightly.yml` — the answer lives in live repo
+# settings, not in anything this PR's diff touches, so it has to be resolved
+# at RUN time. A PR-blocking version would fail every PR for a founder-only
+# setting no PR can fix.
+#
+# DECISION LOGIC lives in `scripts/lib/npm-publish-drift-check.mjs` (pure,
+# offline-tested by `tests/npm-publish-drift-check.test.ts`, mutation-proved
+# by `scripts/mutation-prove-npm-publish-drift-check.mjs`); this workflow's
+# only job is to run `scripts/check-npm-publish-drift.mjs` against the live
+# API and alert on a scheduled failure, via the same shared
+# `scripts/nightly-alert-issue.mjs` idempotent-issue helper every other
+# nightly in this repo uses (#1347 — never `gh issue pin`, see that script's
+# header for why).
+#
+# TOKEN PERMISSIONS — read this before assuming a red run means "settings are
+# still missing". MEASURED, not assumed: `actionlint` rejects an
+# `environments:` key in a workflow's `permissions:` block outright — it is
+# not one of GITHUB_TOKEN's enumerable permission scopes. The rulesets
+# endpoints have no dedicated GITHUB_TOKEN scope either (GitHub's docs put
+# them behind repo "Administration"). LIVE-TESTED against this public repo
+# fully unauthenticated (no token at all): both the environment GET and the
+# rulesets GETs answered 200, not 403/404 — so GITHUB_TOKEN, which grants at
+# least as much as an anonymous request, is expected to resolve cleanly here.
+# `scripts/lib/npm-publish-drift-check.mjs` still treats a 403/404 from
+# EITHER endpoint as `permission-error`, reported distinctly from a genuine
+# `missing` finding — READ THE JOB LOG to see which kind fired before
+# concluding the settings are absent. If a permission error does fire on a
+# real run, the fix is a fine-grained PAT with "Administration: Read-only"
+# added as a repo secret and wired in here in place of `GITHUB_TOKEN` — see
+# `docs/security/npm-publish-drift-check.md`.
+
+on:
+  # 05:43 UTC — offset from every other nightly's cron in this repo (checked
+  # against every `cron:` line under .github/workflows at authoring time) so
+  # this doesn't queue behind an unrelated nightly.
+  schedule:
+    - cron: '43 5 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  # `environments` is NOT a valid GITHUB_TOKEN permission scope — actionlint
+  # rejects it outright (see the token-permissions note above). `contents:
+  # read` is the only grant this workflow needs or can make.
+  contents: read
+
+jobs:
+  check-npm-publish-drift:
+    name: Verify npm-publish environment reviewer + v* tag ruleset (FAIL on drift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No dependencies: dependency-free ESM on the runner's built-in Node,
+      # same reasoning as verify-action-pins.mjs — this cannot itself become a
+      # supply-chain surface while auditing one.
+      - name: Check npm-publish environment + v* tag ruleset protection (FAIL on any drift)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/check-npm-publish-drift.mjs
+
+  # ── Idempotent pinned alert (same pattern as every other migrated nightly) ─
+  npm-publish-drift-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [check-npm-publish-drift]
+    # #1645 — a cancelled/timed-out check job (runner loss, its own
+    # timeout-minutes) must alert exactly like a failed one; checking only
+    # 'failure' silently drops that case. Same fixed shape as
+    # action-pin-resolution-nightly.yml, main-side, tests/nightly-alert-
+    # cancelled-condition.test.ts scans for and enforces.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.check-npm-publish-drift.result == 'failure' || needs.check-npm-publish-drift.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or update the "npm-publish environment/tag protection drift" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.check-npm-publish-drift.result }}
+        run: |
+          set -euo pipefail
+          title='npm-publish environment/tag protection drift RED'
+          body="The nightly npm-publish drift check FAILED (#1638 item 2): the \`npm-publish\`
+          GitHub Environment's required-reviewer rule and/or the \`v*\`-covering tag ruleset is
+          missing OR could not be verified. **Read the job log before triaging** — it names each
+          setting separately and, critically, distinguishes two different failure shapes:
+
+          - **MISSING** — the API answered and the setting is genuinely absent. This is real drift.
+            Item 1 of #1638 (repo settings: add a required reviewer to \`npm-publish\`, add a tag
+            protection ruleset for \`v*\`) is founder-only and has not been done, or was undone.
+          - **UNVERIFIED (permission error)** — a 403/404 from the environment or rulesets API.
+            This does NOT mean the setting is absent — it means this check could not read it. See
+            \`scripts/lib/npm-publish-drift-check.mjs\`'s header and
+            \`docs/security/npm-publish-drift-check.md\` for the exact token-scope fix (a
+            fine-grained PAT with \"Administration: Read-only\", wired in as a repo secret, if
+            \`GITHUB_TOKEN\` proves insufficient for the rulesets endpoints).
+
+          - Run (full per-setting report in the job log): ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+
+          A release run should PAUSE for approval once item 1 is done; this alert is how you know
+          it still won't. Re-run this workflow after any settings change to confirm green, then
+          close this issue."
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs

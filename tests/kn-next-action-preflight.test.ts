@@ -109,27 +109,61 @@ function appWithStubCore(): string {
   return app;
 }
 
+// #1499: no timeout previously — under resource-starved CI concurrency an
+// unbounded spawnSync can only ever fail fast or hang the whole job forever;
+// this makes "hang" impossible and turns it into a loud, attributable
+// failure instead (never observed to hang here, but a bound costs nothing).
+const PREFLIGHT_TIMEOUT_MS = 60_000;
+
 function runPreflight(cwd: string) {
   return spawnSync('node', [PREFLIGHT, '--namespace', 'ns'], {
     cwd,
     encoding: 'utf8',
+    timeout: PREFLIGHT_TIMEOUT_MS,
     env: { ...process.env, PATH: `${fakeKubectlDir()}:${process.env.PATH ?? ''}` },
   });
+}
+
+/**
+ * #1499: every assertion on a `runPreflight`/`run` result below prints the
+ * child's own stdout/stderr/status/signal on failure — the CI flake this
+ * closes (run 36302339979, job 108572201855: `r.stdout` was `""`, and
+ * `r.stderr` did NOT contain the classifier-load message, meaning the
+ * process failed EARLIER, at the `SelfSubjectRulesReview` kubectl-exec step
+ * — but the assertion alone gave no way to tell that from anywhere else the
+ * process could have failed) reproduces under NO local stress this fix
+ * could apply (single-file 15x concurrent, fd-limited (`ulimit -n 256`)
+ * 30-way full-suite runs, 4 plain full-suite runs — all green; see the PR
+ * description for the full account) — the isolation this file already had
+ * (a fresh `mkdtempSync` per call, for both the app dir and the PATH-
+ * prefixed kubectl stub dir, never reused or shared across calls) was
+ * already correct. Diagnosability is the fix a failure that cannot be
+ * reproduced on demand actually needs: the next occurrence prints exactly
+ * what the child process said, rather than a bare "" a human has to
+ * re-derive a hypothesis for from scratch.
+ */
+function describeResult(r: {
+  status: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+}) {
+  return `status=${r.status} signal=${r.signal}\n--- stdout ---\n${r.stdout}\n--- stderr ---\n${r.stderr}`;
 }
 
 describe('kn-next-action preflight resolves @getknext/core from the app', () => {
   it('loads the classifier installed in the working directory', () => {
     const r = runPreflight(appWithStubCore());
-    expect(r.stderr).not.toContain('Could not load the credential classifier');
-    expect(r.stdout).toContain('correctly scoped');
-    expect(r.status).toBe(0);
+    expect(r.stderr, describeResult(r)).not.toContain('Could not load the credential classifier');
+    expect(r.stdout, describeResult(r)).toContain('correctly scoped');
+    expect(r.status, describeResult(r)).toBe(0);
   });
 
   it('fails CLOSED, naming the fix, when the app has no @getknext/core', () => {
     const r = runPreflight(tempDir('knext-preflight-empty-'));
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('Could not load the credential classifier');
-    expect(r.stderr).toContain('working-directory');
+    expect(r.status, describeResult(r)).toBe(1);
+    expect(r.stderr, describeResult(r)).toContain('Could not load the credential classifier');
+    expect(r.stderr, describeResult(r)).toContain('working-directory');
   });
 
   it('the action runs the preflight step in the app directory', () => {
@@ -361,6 +395,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     return spawnSync('node', [PREFLIGHT, '--namespace', 'knext-docs'], {
       cwd,
       encoding: 'utf8',
+      timeout: PREFLIGHT_TIMEOUT_MS,
       env: { ...process.env, PATH: `${kubectlDir}:${process.env.PATH ?? ''}` },
     });
   }
@@ -384,7 +419,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: SCOPED_REVIEW }));
     expect(r.stderr).not.toContain('Could not determine what this credential can do');
     expect(r.stdout).toContain('correctly scoped');
-    expect(r.status).toBe(0);
+    expect(r.status, describeResult(r)).toBe(0);
   });
 
   it('the SelfSubjectRulesReview it submits is scoped to the --namespace argument, not hardcoded', () => {
@@ -394,7 +429,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     // every other test here happens to pass with the wrong namespace evaluated.
     const kubectlDir = stubKubectl({ rawStdout: SCOPED_REVIEW });
     const r = run(appWithWildcardAwareCore(), kubectlDir);
-    expect(r.status).toBe(0);
+    expect(r.status, describeResult(r)).toBe(0);
     const captured = JSON.parse(readFileSync(capturedReviewPath(kubectlDir), 'utf8'));
     expect(captured).toEqual({
       apiVersion: 'authorization.k8s.io/v1',
@@ -405,7 +440,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
 
   it('(b) the review reports a wildcard rule → REFUSED, the same refusal message as before', () => {
     const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: WILDCARD_REVIEW }));
-    expect(r.status).toBe(1);
+    expect(r.status, describeResult(r)).toBe(1);
     expect(r.stderr).toContain('This kubeconfig grants more than knext needs. Refusing to use it.');
     expect(r.stderr).toContain('wildcard grant');
   });
@@ -418,7 +453,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
         rawStderr: 'error: the server could not find the requested resource',
       }),
     );
-    expect(r.status).toBe(1);
+    expect(r.status, describeResult(r)).toBe(1);
     expect(r.stderr).toContain('Could not determine what this credential can do');
     expect(r.stderr).toContain('the server could not find the requested resource');
   });
@@ -441,7 +476,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     );
     chmodSync(bin, 0o755);
     const r = run(appWithWildcardAwareCore(), dir);
-    expect(r.status).toBe(1);
+    expect(r.status, describeResult(r)).toBe(1);
     expect(r.stderr).toContain('Could not determine what this credential can do');
     expect(r.stderr).toContain('unknown command');
   });
@@ -451,7 +486,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     // ok:true (nothing to complain about), so defaulting a missing `status` to
     // an empty rule set would turn "the cluster didn't answer" into a PASS.
     const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: '{}' }));
-    expect(r.status).toBe(1);
+    expect(r.status, describeResult(r)).toBe(1);
     expect(r.stderr).toContain('Could not determine what this credential can do');
   });
 
@@ -462,7 +497,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     // bespoke assertion elsewhere.
     const kubectlDir = stubKubectl({ rawStdout: SCOPED_REVIEW });
     const r = run(appWithWildcardAwareCore(), kubectlDir);
-    expect(r.status).toBe(0);
+    expect(r.status, describeResult(r)).toBe(0);
     expect(r.stderr).not.toContain('customresourcedefinitions.apiextensions.k8s.io is forbidden');
   });
 
@@ -482,7 +517,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
   it('falls back, loudly, to `create -o json --validate=false -f -` only when `--raw` is unrecognized', () => {
     const kubectlDir = stubKubectl({ rawFlagUnknown: true, fallbackStdout: SCOPED_REVIEW });
     const r = run(appWithWildcardAwareCore(), kubectlDir);
-    expect(r.status).toBe(0);
+    expect(r.status, describeResult(r)).toBe(0);
     expect(r.stdout).toContain('correctly scoped');
     expect(r.stderr).toContain('::warning::');
     expect(r.stderr).toContain('does not recognize');
@@ -499,7 +534,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
       appWithWildcardAwareCore(),
       stubKubectl({ rawExit: 1, rawStderr: 'Error from server (Forbidden): ...' }),
     );
-    expect(r.status).toBe(1);
+    expect(r.status, describeResult(r)).toBe(1);
     expect(r.stderr).toContain('Could not determine what this credential can do');
     expect(r.stderr).not.toContain('does not recognize');
   });
@@ -527,7 +562,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     );
     chmodSync(bin, 0o755);
     const r = run(appWithWildcardAwareCore(), dir);
-    expect(r.status).toBe(0);
+    expect(r.status, describeResult(r)).toBe(0);
   });
 
   it('warns but does not fail closed when the review reports status.incomplete, quoting evaluationError', () => {
@@ -543,7 +578,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
       },
     });
     const r = run(appWithWildcardAwareCore(), stubKubectl({ rawStdout: INCOMPLETE_REVIEW }));
-    expect(r.status).toBe(0);
+    expect(r.status, describeResult(r)).toBe(0);
     expect(r.stdout).toContain('correctly scoped');
     expect(r.stderr).toContain('::warning::');
     expect(r.stderr).toContain('incomplete');

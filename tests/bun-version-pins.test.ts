@@ -156,6 +156,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
       'preview.yml': 2,
+      // NEW (#1663): the published-bytes freeze check's "run" decision packs
+      // the publishable group with the workspace's bun (mirrors
+      // ga-tarball-diff's own release.yml job) — one Setup bun step. The
+      // sibling dependabot-published-bytes-pause.yml has no setup-bun step at
+      // all (it only needs `git diff` + `node`), so it is not in this map.
+      'published-bytes-freeze-guard.yml': 1,
       'scale-zero-pg.yml': 1,
       // NEW (#1522/#1517): the self-contained standalone image kind e2e —
       // one "Setup bun" step (installs the workspace + builds the fixture's

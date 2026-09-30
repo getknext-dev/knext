@@ -35,9 +35,27 @@
  * disqualifier) used to be mutation-proven here as guards #6 and #7. Round 2
  * (#1550, lead-directed) REMOVED that grade entirely — a deploy-classified red
  * now disqualifies a night exactly like any other red (see
- * `isDeployOnlyRedShard`'s doc comment in the target file) — so there is no
- * longer a VOID behaviour here to prove. #1553 tracks the open design
- * question of whether some subset should someday be exempted.
+ * `isDeployOnlyRedShard`'s doc comment in the target file) — so there was no
+ * VOID behaviour here to prove, until #1553 (ADR-0056 Amendment 4, founder
+ * decision 2026-09-30) reintroduced a NARROWER one: a night void-eligible only
+ * on a PROVEN `kind: 'pre-knext'` failure plus a self-referencing marker,
+ * bridged at most once per open streak. Guards 18-25 below prove every branch
+ * of that gate independently:
+ *   18. KIND CHECK — a `kind: 'deploy'` failure carrying a forged pre-knext-
+ *       shaped `phase` field must still never classify (`kind` and `phase`
+ *       are checked independently on purpose).
+ *   19. MARKER RUNID — a marker naming a different run (copy-pasted/forged)
+ *       must never grant the grace.
+ *   20. MARKER LANE — a marker naming a different lane must never grant it.
+ *   21. MARKER PHASE — a marker with an unrecognised phase must never grant it.
+ *   22. CREDENTIAL-SCOPE GATE — void grading must never apply outside
+ *       `scope: 'credential'`.
+ *   23. FINGERPRINT CONTINUITY — a void-eligible night whose fingerprint does
+ *       not match the open streak must not bridge it.
+ *   24. ONE BRIDGE PER STREAK — a second void-eligible night in the same
+ *       still-open streak must not bridge again.
+ *   25. EMPTY-DISQUALIFIER GUARD — a fully green night (nothing to excuse)
+ *       must never be reported void-eligible, marker or not.
  *
  * A guard that stays green when the behaviour it protects is removed is
  * decoration. Each mutation below deletes one guard's behaviour and requires
@@ -73,7 +91,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = resolve(REPO_ROOT, 'scripts/compat-window-audit.mjs');
 const SPEC = 'tests/compat-window-audit.test.ts';
 
-declareMutations(17);
+declareMutations(25);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -247,6 +265,69 @@ prove(
   'stale cron: a credential cron absent from on.schedule is tolerated',
   'if (!scheduled.has(cron)) {',
   'if (false) {',
+);
+
+// ── #1553 (ADR-0056 Amendment 4) — the bounded VOID grade ───────────────────
+
+// 18. KIND CHECK: a `kind: 'deploy'` failure with a forged pre-knext-shaped
+//     `phase` field must still never classify as pre-knext.
+prove(
+  'kind check removed: a deploy-kind failure with a forged phase field classifies as pre-knext',
+  "return failures.every((f) => f?.kind === 'pre-knext' && PRE_KNEXT_PHASES.includes(f?.phase));",
+  'return failures.every((f) => PRE_KNEXT_PHASES.includes(f?.phase));',
+);
+
+// 19. MARKER RUNID: a marker naming a different run must never grant the grace.
+prove(
+  'marker runId check removed: a marker copy-pasted from another run still grants void',
+  "if (String(marker.runId ?? '') !== String(ledger?.runId ?? '')) return false;",
+  'if (false) return false;',
+);
+
+// 20. MARKER LANE: a marker naming a different lane must never grant it.
+prove(
+  'marker lane check removed: a marker for a different lane still grants void',
+  'if (marker.lane !== ledger?.lane) return false;',
+  'if (false) return false;',
+);
+
+// 21. MARKER PHASE: a marker with an unrecognised phase must never grant it.
+prove(
+  'marker phase check removed: a marker with a garbage phase still grants void',
+  'if (!PRE_KNEXT_PHASES.includes(marker.phase)) return false;',
+  'if (false) return false;',
+);
+
+// 22. CREDENTIAL-SCOPE GATE: void grading must never apply outside
+//     scope: 'credential'.
+prove(
+  'credential-scope gate removed: an early-warning night can be granted void',
+  "const voidMarkerValid =\n    scope === 'credential' && isValidPreKnextVoidMarker(ledger?.preKnextVoidMarker, ledger);",
+  'const voidMarkerValid = isValidPreKnextVoidMarker(ledger?.preKnextVoidMarker, ledger);',
+);
+
+// 23. FINGERPRINT CONTINUITY: a void-eligible night whose fingerprint does not
+//     match the open streak must not bridge it.
+prove(
+  'fingerprint continuity removed: a void-eligible night bridges across a fingerprint change',
+  '        open !== null &&\n        open.fingerprint === night.fingerprint &&\n        !open.voidUsed;',
+  '        open !== null &&\n        !open.voidUsed;',
+);
+
+// 24. ONE BRIDGE PER STREAK: a second void-eligible night in the same
+//     still-open streak must not bridge again.
+prove(
+  'budget cap removed: a second void night in the same open streak still bridges',
+  '        open.fingerprint === night.fingerprint &&\n        !open.voidUsed;',
+  '        open.fingerprint === night.fingerprint;',
+);
+
+// 25. EMPTY-DISQUALIFIER GUARD: a fully green night (nothing to excuse) must
+//     never be reported void-eligible, marker or not.
+prove(
+  'empty-disqualifier guard removed: a fully green night is reported void-eligible',
+  'if (!voidMarkerValid || disqualifiers.length === 0) return false;',
+  'if (!voidMarkerValid) return false;',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
