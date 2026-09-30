@@ -794,6 +794,9 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     }
   });
 
+  // #1716: these loop every allowlist entry and rescan a large file 2-3 times
+  // each; since globals are unioned from every scope that is ~6 s on a CI
+  // runner, over bun's 5000 ms default (the same reason beforeAll has one).
   it('round 7: removing ANY statement-allowlist entry reds the real-tree scan of its file', () => {
     for (const e of [...STATEMENT_ALLOWLIST]) {
       expect({ id: e.id, offenders: scanFile(e.file) }).toEqual({ id: e.id, offenders: [] });
@@ -809,7 +812,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       }
     }
     expect(STATEMENT_ALLOWLIST.length).toBe(8);
-  });
+  }, 60_000);
 
   it('round 7: an entry matches its statement byte-exactly — one changed byte in the site, or the same text in another file, is an offender', () => {
     for (const e of STATEMENT_ALLOWLIST) {
@@ -825,7 +828,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       const elsewhere = unsafeApplies(text, { file: 'scripts/not-the-allowlisted-file.sh' });
       expect({ id: e.id, flagged: elsewhere.length > 0 }).toEqual({ id: e.id, flagged: true });
     }
-  });
+  }, 60_000);
 
   // ---- #1410 round 8: the allowlist pins where the interpolated variables come from --
 
