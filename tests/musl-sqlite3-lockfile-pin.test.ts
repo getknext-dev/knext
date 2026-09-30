@@ -64,14 +64,40 @@ describe('the sqlite3 lockfile pin is wired into CREDENTIAL_CELLS.extraFiles (#1
 });
 
 describe('the sqlite3 lockfile pin is mounted by scripts/e2e-deploy.sh (#1426)', () => {
-  it('the docker run block mounts both sqlite3-5.0.2 files individually, same pattern as the sharp/libvips pair', () => {
-    const source = readFileSync(resolve(REPO_ROOT, 'scripts/e2e-deploy.sh'), 'utf8');
-    expect(source).toMatch(
-      /musl-native-lockfiles\/sqlite3-5\.0\.2\/package\.json:\/musl-native-lockfiles\/sqlite3-5\.0\.2\/package\.json:ro/,
-    );
-    expect(source).toMatch(
-      /musl-native-lockfiles\/sqlite3-5\.0\.2\/package-lock\.json:\/musl-native-lockfiles\/sqlite3-5\.0\.2\/package-lock\.json:ro/,
-    );
+  // #1620: e2e-deploy.sh no longer hardcodes per-version mounts; it mounts
+  // what musl_lockfile_mounts derives from the resolved tree. Run that real
+  // helper against a tree resolving sqlite3@5.0.2 and require both files,
+  // each mounted individually. (tests/musl-lockfile-mounts.test.ts proves
+  // e2e-deploy.sh hands these specs to docker.)
+  it('a tree resolving sqlite3@5.0.2 gets both sqlite3-5.0.2 files mounted individually', () => {
+    const { execFileSync } = require('node:child_process');
+    const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+    const { join } = require('node:path');
+    const root = mkdtempSync(join(require('node:os').tmpdir(), 'sqlite3-mount-'));
+    try {
+      const pkg = join(root, 'node_modules', 'sqlite3');
+      mkdirSync(join(pkg, 'build', 'Release'), { recursive: true });
+      writeFileSync(join(pkg, 'build', 'Release', 'node_sqlite3.node'), '');
+      writeFileSync(join(pkg, 'package.json'), '{"name":"sqlite3","version":"5.0.2"}');
+      const lockfiles = resolve(REPO_ROOT, 'scripts/musl-native-lockfiles');
+      const out: string = execFileSync(
+        'sh',
+        [
+          '-c',
+          `. "${resolve(REPO_ROOT, 'scripts/lib/musl-lockfile-lookup.sh')}"; musl_lockfile_mounts "$1" "$2" /musl-native-lockfiles`,
+          'sh',
+          root,
+          lockfiles,
+        ],
+        { encoding: 'utf8', env: { ...process.env, KNEXT_COMPAT_MODE: 'credential' } },
+      );
+      expect(out.trimEnd().split('\n')).toEqual([
+        `${lockfiles}/sqlite3-5.0.2/package.json:/musl-native-lockfiles/sqlite3-5.0.2/package.json:ro`,
+        `${lockfiles}/sqlite3-5.0.2/package-lock.json:/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json:ro`,
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

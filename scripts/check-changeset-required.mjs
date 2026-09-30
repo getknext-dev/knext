@@ -87,7 +87,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseNameStatus, publicSurfaceChanged } from './check-escalation-triggers.mjs';
@@ -108,25 +108,61 @@ export function fixedGroupNames(changesetConfig) {
 }
 
 /**
+ * Default classifier for `derivePackageRoots`: is `repoRelativePath` a directory on disk (relative
+ * to the process's cwd, which is the repo root for every real invocation)? A path that does not
+ * exist at all (renamed, not yet created) is treated as NOT a directory — fail toward watching it
+ * as an exact file rather than silently matching everything under a prefix that doesn't exist.
+ *
+ * @param {string} repoRelativePath
+ * @returns {boolean}
+ */
+function defaultIsDirectory(repoRelativePath) {
+  try {
+    return statSync(repoRelativePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Derive the watched roots for every fixed-group package from its manifest's
  * `files` allowlist — the "do not hand-enumerate more than the roots" rule
  * from #1615.
  *
+ * Each non-`dist` entry is resolved against the real tree (#1619): a directory entry (e.g.
+ * `templates`, `bin`) watches its prefix (`<pkg>/<entry>/`, unchanged from before); a FILE entry
+ * (e.g. `README.md`, a shipped single bin script) watches its exact path instead — `files`
+ * accepts plain files as well as directories, and a `${dir}/${entry}/` prefix never matches a
+ * changed file at `${dir}/${entry}` (no trailing slash), so it was silently unwatched.
+ *
  * @param {{ fixed?: string[][] }} changesetConfig
  * @param {Record<string, { name?: string, files?: string[] }>} packageManifestsByDir
  *   keyed by repo-relative package directory (e.g. `"packages/kn-next"`)
- * @returns {Array<{ name: string, dir: string, watchDir?: string, manifestPath?: string }>}
+ * @param {(repoRelativePath: string) => boolean} [isDirectory] injectable for tests; defaults to
+ *   a real filesystem check against the process cwd (the repo root at runtime)
+ * @returns {Array<{ name: string, dir: string, watchDir?: string, watchFile?: string, manifestPath?: string }>}
  */
-export function derivePackageRoots(changesetConfig, packageManifestsByDir) {
+export function derivePackageRoots(
+  changesetConfig,
+  packageManifestsByDir,
+  isDirectory = defaultIsDirectory,
+) {
   const fixedNames = new Set(fixedGroupNames(changesetConfig));
   const roots = [];
   for (const [dir, manifest] of Object.entries(packageManifestsByDir ?? {})) {
     if (!manifest?.name || !fixedNames.has(manifest.name)) continue;
     for (const entry of manifest.files ?? []) {
-      // "dist" is BUILD OUTPUT compiled from "src" and is not committed —
-      // watch the source. Everything else in `files` ships verbatim.
-      const watchDir = entry === 'dist' ? `${dir}/src/` : `${dir}/${entry}/`;
-      roots.push({ name: manifest.name, dir, watchDir });
+      if (entry === 'dist') {
+        // BUILD OUTPUT compiled from "src" and is not committed — watch the source instead.
+        roots.push({ name: manifest.name, dir, watchDir: `${dir}/src/` });
+        continue;
+      }
+      const entryPath = `${dir}/${entry}`;
+      if (isDirectory(entryPath)) {
+        roots.push({ name: manifest.name, dir, watchDir: `${entryPath}/` });
+      } else {
+        roots.push({ name: manifest.name, dir, watchFile: entryPath });
+      }
     }
     roots.push({ name: manifest.name, dir, manifestPath: `${dir}/package.json` });
   }
@@ -146,7 +182,7 @@ export function isTestOrDocsOnly(path) {
  * Which fixed-group packages does this diff touch on their SHIPPED surface?
  *
  * @param {string[]} changedPaths
- * @param {Array<{ name: string, watchDir?: string }>} roots
+ * @param {Array<{ name: string, watchDir?: string, watchFile?: string }>} roots
  * @param {Record<string, boolean>} manifestChanged package name -> did its
  *   package.json's PUBLIC surface change (see `publicSurfaceChanged`)
  * @returns {Set<string>}
@@ -157,6 +193,7 @@ export function touchedPackages(changedPaths, roots, manifestChanged) {
     if (isTestOrDocsOnly(path)) continue;
     for (const root of roots) {
       if (root.watchDir && path.startsWith(root.watchDir)) hit.add(root.name);
+      else if (root.watchFile && path === root.watchFile) hit.add(root.name);
     }
   }
   for (const [name, changed] of Object.entries(manifestChanged ?? {})) {
@@ -368,7 +405,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const manifest = readJsonSafe(resolve(repoRoot, dir, 'package.json'));
     if (manifest) headManifests[dir] = manifest;
   }
-  const roots = derivePackageRoots(changesetConfig, headManifests);
+  const roots = derivePackageRoots(changesetConfig, headManifests, (repoRelativePath) => {
+    try {
+      return statSync(resolve(repoRoot, repoRelativePath)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
   const fixedNames = new Set(fixedGroupNames(changesetConfig));
 
   const manifestChanged = {};

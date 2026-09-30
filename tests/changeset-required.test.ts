@@ -54,7 +54,7 @@ describe('derivePackageRoots', () => {
     void root;
   });
 
-  it('watches a non-dist files entry (templates, bin) directly', () => {
+  it('watches a non-dist DIRECTORY files entry (templates, bin) as a prefix', () => {
     expect(ROOTS.some((r) => r.watchDir === 'packages/kn-next/templates/')).toBe(true);
     expect(ROOTS.some((r) => r.watchDir === 'packages/kn-next-alias/bin/')).toBe(true);
   });
@@ -69,6 +69,66 @@ describe('derivePackageRoots', () => {
 
   it('excludes a package not in the fixed group, even if it has a manifest', () => {
     expect(ROOTS.some((r) => r.name === '@getknext/ui')).toBe(false);
+  });
+
+  describe('#1619 — a plain-FILE files entry (not a directory) is watched exactly', () => {
+    // kn-next-alias' `files` lists "LICENSE" — a single shipped file, not a directory. A
+    // `${dir}/${entry}/` prefix (the pre-#1619 behavior) never matches the real path
+    // `packages/kn-next-alias/LICENSE` (no trailing slash), so a change to it was silently
+    // unwatched. Classified against a fake filesystem (not the real tree) so the test does not
+    // depend on what happens to exist on disk.
+    const isDirectory = (p: string) => p.endsWith('/bin') || p.endsWith('/templates');
+    const rootsWithFakeFs = derivePackageRoots(CHANGESET_CONFIG, MANIFESTS, isDirectory);
+
+    it('produces a watchFile entry, not a watchDir entry, for the file', () => {
+      expect(rootsWithFakeFs.some((r) => r.watchFile === 'packages/kn-next-alias/LICENSE')).toBe(
+        true,
+      );
+      expect(rootsWithFakeFs.some((r) => r.watchDir === 'packages/kn-next-alias/LICENSE/')).toBe(
+        false,
+      );
+    });
+
+    it('a change to the watched file requires a changeset (fires)', () => {
+      const hit = touchedPackages(
+        ['packages/kn-next-alias/LICENSE'],
+        rootsWithFakeFs,
+        NO_MANIFEST_CHANGES,
+      );
+      expect([...hit]).toEqual(['kn-next']);
+    });
+
+    it('a sibling file NOT in `files` stays quiet (does not fire)', () => {
+      const hit = touchedPackages(
+        ['packages/kn-next-alias/NOTICE'],
+        rootsWithFakeFs,
+        NO_MANIFEST_CHANGES,
+      );
+      expect([...hit]).toEqual([]);
+    });
+
+    it('a directory entry (bin) still watches as a prefix under the same classifier', () => {
+      const hit = touchedPackages(
+        ['packages/kn-next-alias/bin/kn-next.js'],
+        rootsWithFakeFs,
+        NO_MANIFEST_CHANGES,
+      );
+      expect([...hit]).toEqual(['kn-next']);
+    });
+  });
+
+  describe('#1619 — default classifier resolves against the real repo tree', () => {
+    // No injected classifier: exercises the real `statSync`-backed default, against the actual
+    // checked-out files (both exist in this repo — see packages/kn-next-alias/).
+    const realRoots = derivePackageRoots(CHANGESET_CONFIG, MANIFESTS);
+
+    it('LICENSE (a real file) resolves to watchFile', () => {
+      expect(realRoots.some((r) => r.watchFile === 'packages/kn-next-alias/LICENSE')).toBe(true);
+    });
+
+    it('bin (a real directory) resolves to watchDir', () => {
+      expect(realRoots.some((r) => r.watchDir === 'packages/kn-next-alias/bin/')).toBe(true);
+    });
   });
 });
 

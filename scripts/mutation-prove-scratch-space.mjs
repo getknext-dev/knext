@@ -30,7 +30,7 @@
  *      names, which is exactly why existential pairing survived them both:
  *      `cli-node-runtime.test.ts` had nine `dir` creations and one removal and
  *      reported zero leaks. A same-named leak is the shape that got through.
- *   M5c adds a fourth repo write to the one file licensed for three, so the
+ *   M5c adds a third repo write to the one file licensed for two, so the
  *      write exception is proved to be pinned to what it licences rather than
  *      to the file's name.
  *   M5d SUBSTITUTES a licensed write for a `tests/*.tmp.ts` one. The count is
@@ -144,23 +144,23 @@ const MUTATIONS = [
     id: 'M5c',
     expect: 'red',
     claim:
-      'a FOURTH repo write is added to the one file licensed for three — the licence must not ' +
+      'a THIRD repo write is added to the one file licensed for two — the licence must not ' +
       'extend to whatever lands next to it',
     subject: 'licensed',
-    anchor: '    const typesDir = join(FIXTURE, "node_modules", "@types");',
+    anchor: '    writeFileSync(join(workDir, ".knext", ".gitignore"), "*\\n");',
     replacement:
       '    writeFileSync(join(FIXTURE, "extra-write.txt"), "x");\n' +
-      '    const typesDir = join(FIXTURE, "node_modules", "@types");',
+      '    writeFileSync(join(workDir, ".knext", ".gitignore"), "*\\n");',
   },
   {
     id: 'M5d',
     expect: 'red',
     claim:
       'a licensed write is SUBSTITUTED for a `tests/*.tmp.ts` scratch write — the COUNT stays ' +
-      'at three, so the count-pinned licence stayed GREEN through the exact #918 shape it was ' +
-      'meant to be narrowing. This is why the licence names destinations',
+      'at two, so a count-pinned licence would have stayed GREEN through the exact #918 shape ' +
+      'it was meant to be narrowing. This is why the licence names destinations',
     subject: 'licensed',
-    anchor: '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");',
+    anchor: '    writeFileSync(join(workDir, ".knext", ".gitignore"), "*\\n");',
     replacement: '    writeFileSync("tests/.a.tmp.ts", "*\\n");',
   },
   {
@@ -201,10 +201,10 @@ const MUTATIONS = [
       'licence covers a spelling however many times it appears, so the copy rode free. The ' +
       'licence is a multiset for this reason',
     subject: 'licensed',
-    anchor: '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");',
+    anchor: '    writeFileSync(join(workDir, ".knext", ".gitignore"), "*\\n");',
     replacement:
-      '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");\n' +
-      '    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\\n");',
+      '    writeFileSync(join(workDir, ".knext", ".gitignore"), "*\\n");\n' +
+      '    writeFileSync(join(workDir, ".knext", ".gitignore"), "*\\n");',
   },
   {
     id: 'M5h',

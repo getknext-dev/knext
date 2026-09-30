@@ -220,7 +220,11 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     const found = kindWorkflows();
     expect(found).toContain('.github/workflows/operator-e2e-nightly.yml');
     expect(found).toContain('.github/workflows/operator-bundle-e2e.yml');
-    expect(found).toContain('.github/workflows/file-manager-platform-e2e-nightly.yml');
+    // The nightly caller de-duplicated into the shared reusable workflow
+    // (#1305/#1563 round 2): the cert-manager/Knative install steps now live
+    // in file-manager-platform-e2e.yml, which both the nightly and the
+    // at-tag callers `uses:` — that is the file this scan should find.
+    expect(found).toContain('.github/workflows/file-manager-platform-e2e.yml');
     expect(found).toContain('.github/workflows/networkpolicy-enforcement.yml');
   });
 

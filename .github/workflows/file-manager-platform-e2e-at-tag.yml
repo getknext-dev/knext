@@ -1,0 +1,116 @@
+name: File-manager platform e2e at a tag (rc evidence)
+
+# Thin caller of the shared file-manager platform e2e implementation
+# (file-manager-platform-e2e.yml, #1282) - runs it against a specified git ref
+# (typically a release-candidate tag), with the operator built FROM THAT REF,
+# and records the operator image digest + ref + run id as rc evidence
+# (#1305, #1563). See the reusable workflow's own header for what the suite
+# covers and how the digest is captured (registry push + deployed-pod
+# imageID cross-check - never an unpushed `docker inspect`).
+#
+# Workflow inputs:
+#   git-ref: a git ref (tag, branch, SHA) to check out and build from
+#     (default: read from .github/compat-credential-ref.json::rcTag)
+#
+# BUDGET: same as the reusable job (~8-10 min wall).
+# Triggers: workflow_dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      git-ref:
+        description: 'Git ref (tag/branch/SHA) to check out and test (default: rcTag from .github/compat-credential-ref.json)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-git-ref:
+    name: Resolve git ref (default from rc tag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      git-ref: ${{ steps.resolve.outputs.git-ref }}
+      git-sha: ${{ steps.resolve.outputs.git-sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve git ref (input or rcTag default)
+        id: resolve
+        env:
+          # Never interpolate `${{ inputs.* }}` directly into a `run:` script
+          # body (GitHub's textual templating happens before the shell parses
+          # it, so an attacker-controlled dispatch input becomes script
+          # injection) - pass it via env: and read it as a quoted shell var.
+          GIT_REF_INPUT: ${{ inputs.git-ref }}
+        run: |
+          set -euo pipefail
+          GIT_REF="${GIT_REF_INPUT:-}"
+          if [ -z "$GIT_REF" ]; then
+            # Read rcTag from .github/compat-credential-ref.json
+            GIT_REF="$(jq -r '.rcTag' < .github/compat-credential-ref.json)"
+            if [ -z "$GIT_REF" ] || [ "$GIT_REF" = "null" ]; then
+              echo "::error::No git-ref input and rcTag is null or missing"
+              exit 1
+            fi
+          fi
+          GIT_SHA="$(git ls-remote origin "refs/tags/$GIT_REF" "refs/tags/$GIT_REF^{}" | awk '{print $1; exit}')"
+          if [ -z "$GIT_SHA" ]; then
+            echo "::error::Could not resolve $GIT_REF to a commit SHA"
+            exit 1
+          fi
+          echo "git-ref=$GIT_REF" >> "$GITHUB_OUTPUT"
+          echo "git-sha=$GIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved $GIT_REF to $GIT_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  platform-e2e-at-tag:
+    name: file-manager through kn-next deploy on kind (at tag)
+    needs: resolve-git-ref
+    uses: ./.github/workflows/file-manager-platform-e2e.yml
+    with:
+      ref: ${{ needs.resolve-git-ref.outputs.git-sha }}
+      cluster-name: fm-platform-e2e-tag
+
+  record-evidence:
+    name: Record rc evidence (git ref, operator digest, run id)
+    needs: [resolve-git-ref, platform-e2e-at-tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record rc evidence
+        env:
+          GIT_REF: ${{ needs.resolve-git-ref.outputs.git-ref }}
+          GIT_SHA: ${{ needs.resolve-git-ref.outputs.git-sha }}
+          OPERATOR_DIGEST: ${{ needs.platform-e2e-at-tag.outputs.operator-image-digest }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## RC Evidence (git ref, operator digest, run id)"
+            echo ""
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| Git Ref | \`${GIT_REF}\` |"
+            echo "| Git SHA | \`${GIT_SHA}\` |"
+            echo "| Operator Digest | \`${OPERATOR_DIGEST}\` |"
+            echo "| Run ID | \`${RUN_ID}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/rc-evidence
+          jq -n \
+            --arg git_ref "$GIT_REF" \
+            --arg git_sha "$GIT_SHA" \
+            --arg operator_image_digest "$OPERATOR_DIGEST" \
+            --arg run_id "$RUN_ID" \
+            --arg run_url "$RUN_URL" \
+            '{git_ref: $git_ref, git_sha: $git_sha, operator_image_digest: $operator_image_digest, run_id: $run_id, run_url: $run_url}' \
+            > /tmp/rc-evidence/rc-evidence.json
+
+      - name: Upload rc evidence artifact
+        uses: actions/upload-artifact@1456dbcda4d932bbb3f825f5c57c0e16dfc57ee8 # v4.1.0
+        with:
+          name: rc-evidence
+          path: /tmp/rc-evidence/rc-evidence.json
+          retention-days: 30

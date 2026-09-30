@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { currentPillText } from '../../lib/version-label';
 import styles from './home.module.css';
 
 /**
@@ -215,7 +216,7 @@ spec:
       <footer className={styles.footer}>
         <div className={styles.wrap}>
           <div>
-            <span className={styles.pill}>v0.1 · alpha</span> &nbsp; the scale-to-zero Next.js
+            <span className={styles.pill}>{currentPillText}</span> &nbsp; the scale-to-zero Next.js
             adapter for Knative. Apache-2.0.
           </div>
           <div>

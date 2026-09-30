@@ -574,17 +574,29 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
     # creates the intermediate directories for each mount, so the script's
     # lookup logic (LOCKFILES_DIR/<key>/package.json) sees the same tree
     # shape as a single directory mount would have produced.
+    #
+    # #1620: WHICH lockfiles under scripts/musl-native-lockfiles get mounted is derived from the native addons the
+    # app actually resolved (musl_lockfile_mounts), never a hardcoded version
+    # list. The hardcoded 0.34.5 / libvips 1.2.4 mounts are what turned every
+    # bun credential deploy red once Next 16.3.5 resolved sharp 0.35.5. A
+    # resolved pin with no committed lockfile fails closed here in credential
+    # mode, naming the lockfile to add, before docker starts.
+    # shellcheck source=./lib/musl-lockfile-lookup.sh
+    . "${SCRIPT_DIR}/lib/musl-lockfile-lookup.sh"
+    MUSL_LOCKFILE_MOUNT_SPECS="$(musl_lockfile_mounts "${STANDALONE_ROOT}" "${SCRIPT_DIR}/musl-native-lockfiles" /musl-native-lockfiles)" || {
+      echo "[e2e-deploy] a native addon the app resolved has no committed musl lockfile (see the ::error:: above); refusing to continue" >&2
+      exit 1
+    }
+    MUSL_LOCKFILE_MOUNTS=()
+    while IFS= read -r _mount; do
+      [ -n "${_mount}" ] && MUSL_LOCKFILE_MOUNTS+=(-v "${_mount}")
+    done <<<"${MUSL_LOCKFILE_MOUNT_SPECS}"
     docker run --rm \
       -e "KNEXT_COMPAT_MODE=${KNEXT_COMPAT_MODE:-}" \
       -v "${STANDALONE_ROOT}:${STANDALONE_ROOT}" \
       -v "${SCRIPT_DIR}/e2e-native-rebuild-musl.sh:/e2e-native-rebuild-musl.sh:ro" \
       -v "${SCRIPT_DIR}/lib/musl-lockfile-lookup.sh:/lib/musl-lockfile-lookup.sh:ro" \
-      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package.json:/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package.json:ro" \
-      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json:/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json:ro" \
-      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json:/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json:ro" \
-      -v "${SCRIPT_DIR}/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json:ro" \
-      -v "${SCRIPT_DIR}/musl-native-lockfiles/sqlite3-5.0.2/package.json:/musl-native-lockfiles/sqlite3-5.0.2/package.json:ro" \
-      -v "${SCRIPT_DIR}/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json:/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json:ro" \
+      "${MUSL_LOCKFILE_MOUNTS[@]+"${MUSL_LOCKFILE_MOUNTS[@]}"}" \
       "${STANDALONE_BUN_IMAGE}" \
       sh /e2e-native-rebuild-musl.sh "${STANDALONE_ROOT}" /musl-native-lockfiles >&2
 
