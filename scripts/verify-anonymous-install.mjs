@@ -1754,9 +1754,11 @@ function formatFinding(finding) {
 async function main(argv) {
   let root = process.cwd();
   let scrub = false;
+  let printUrl = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--root' && argv[i + 1]) root = argv[++i];
     else if (argv[i] === '--scrub') scrub = true;
+    else if (argv[i] === '--print-url') printUrl = true;
     else {
       console.error(`unrecognised argument: ${argv[i]}`);
       return 1;
@@ -1765,6 +1767,26 @@ async function main(argv) {
   if (!existsSync(root) || !statSync(root).isDirectory()) {
     console.error(`not a directory: ${root}`);
     return 1;
+  }
+
+  // `--print-url` is a DISCOVERY-ONLY mode: it makes no network request at
+  // all (no bundle fetch, no anonymous pull) and prints NOTHING but the
+  // resolved URL — so a workflow step can capture it with
+  // `INSTALL_URL=$(node scripts/verify-anonymous-install.mjs --print-url)`
+  // and feed it straight into `kubectl apply -f`. It reuses
+  // `discoverInstallUrl` rather than re-deriving the URL from the docs a
+  // second time — one discovery, walked twice for two different reasons
+  // (#586's anonymous-pull check here, #1552's real-apply-on-kind
+  // elsewhere), never a second regex that can drift from the first.
+  if (printUrl) {
+    try {
+      const { url } = discoverInstallUrl(root);
+      console.log(url);
+      return 0;
+    } catch (error) {
+      console.error(`FATAL: ${error.message}`);
+      return 1;
+    }
   }
 
   if (scrub) {
