@@ -83,6 +83,31 @@ describe('docs — stability tiers page', () => {
     expect(stableSection).toMatch(/Webpack/);
   });
 
+  // No scheduled, red-on-fail, real-cluster check exists yet for ISR/Redis
+  // caching or object storage on the default build target — so, by this
+  // page's own Stable definition ("only when a scheduled, red-on-fail check
+  // covers it"), they cannot be listed as Stable. Pin them to Beta here; move
+  // this list to Stable only once that check exists AND the page's own text
+  // says so. Do not let a docs edit quietly re-promote these without a real
+  // check landing first.
+  const PENDING_REAL_CLUSTER_CHECK = ['ISR/Redis caching', 'gcs', 's3', 'minio'] as const;
+
+  it('keeps ISR/Redis caching and object storage in Beta until a scheduled real-cluster check exists', () => {
+    const stableSection = page.slice(page.search(/^##\s+Stable/m), page.search(/^##\s+Beta/m));
+    const betaSection = page.slice(page.search(/^##\s+Beta/m), page.search(/^##\s+Experimental/m));
+    for (const item of PENDING_REAL_CLUSTER_CHECK) {
+      expect(stableSection, `"${item}" must not be listed as Stable yet`).not.toContain(item);
+      expect(betaSection, `"${item}" must be listed under Beta`).toContain(item);
+    }
+  });
+
+  it('states the promotion rule for the Beta caching/storage entries, without internal references', () => {
+    const betaSection = page.slice(page.search(/^##\s+Beta/m), page.search(/^##\s+Experimental/m));
+    expect(betaSection).toMatch(/move to Stable once/i);
+    expect(betaSection).toMatch(/scheduled/i);
+    expect(betaSection).toMatch(/real cluster/i);
+  });
+
   it('states NetworkPolicy enforcement depends on the cluster CNI', () => {
     expect(page).toMatch(/CNI|network plugin/i);
     expect(page.toLowerCase()).toContain('flannel');

@@ -20,7 +20,6 @@ or minor release never breaks them, and a breaking change requires a major versi
 - The core CLI verbs — `create`, `build`, `deploy`, `status`, `doctor` — including their exit
   codes.
 - The `NextApp` custom resource at `v1alpha1` (additive-only — see [Versioning](/docs/versioning)).
-- ISR/Redis caching and authenticated cache invalidation.
 - Image optimization.
 - Graceful shutdown (`SIGTERM` drain).
 - The in-process request body cap on the standalone build target.
@@ -29,7 +28,6 @@ or minor release never breaks them, and a breaking change requires a major versi
   OKE and OrbStack run by default) the policy is written but enforces nothing. `knext doctor` and
   the `NetworkPolicyEnforced` status condition report which case you're in — see
   [Security](/docs/security#network-isolation).
-- Object storage on `gcs`, `s3`, and `minio`.
 
 ## Beta
 
@@ -39,9 +37,15 @@ more room for change than a Stable feature.
 
 - `knext init-ci`
 - `knext db-bind`
+- ISR/Redis caching and authenticated cache invalidation
+- Object storage on `gcs`, `s3`, and `minio`
 - Object storage on `azure`
 - Metrics and observability wiring
 - The 0.4.x → 1.0 upgrade path
+
+ISR/Redis caching and object storage move to Stable once a scheduled, red-on-fail check covers
+them end-to-end on a real cluster against the default build target — the same bar every other
+Stable entry above already meets. That check does not exist yet.
 
 ## Experimental
 
