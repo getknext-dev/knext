@@ -1,14 +1,25 @@
 #!/usr/bin/env node
 /**
- * ready-flap — pure computation of how long a NextApp spent NOT Ready during
- * the operator upgrade-under-load e2e (#1668).
+ * ready-flap — pure computation of the CUMULATIVE time a NextApp spent NOT
+ * Ready during the operator upgrade-under-load e2e (#1668).
  *
  * The workflow polls `kubectl get nextapp <name> -o json` on an interval
  * across the whole upgrade window and appends each observed Ready condition
  * to a JSONL trace: `{ts: <ms epoch>, status: "True"|"False"|"Unknown"}`.
- * This module turns that trace into "total seconds spent not-Ready" and
- * compares it against a STATED bound, so the assertion is never eyeballed
- * from a log.
+ * This module SUMS every not-Ready gap in that trace (the CUMULATIVE
+ * duration across however many separate flaps occurred, not the longest
+ * single one) and compares the total against a STATED bound, so the
+ * assertion is never eyeballed from a log.
+ *
+ * Cumulative, deliberately, over "longest single flap": two short flaps that
+ * individually clear a longest-flap bound can still add up to real user-
+ * visible downtime across the upgrade window, and summing is what catches
+ * that — a longest-flap measure would pass a NextApp that flapped five times
+ * for 20s each while this correctly fails it at 100s against a 90s bound.
+ * The cost is the one this file's own naming used to obscure: a single 91s
+ * flap and five 20s flaps both fail the SAME 90s bound for different
+ * reasons, so a failure here does not by itself say which shape occurred —
+ * read the samples file to tell them apart.
  *
  * Pure (no fs/process) so it is unit-testable without a cluster — see
  * tests/upgrade-e2e-ready-flap.test.ts.
@@ -18,11 +29,13 @@
  * @param {{ts: number, status: string}[]} samples - Ready-condition samples,
  *   in chronological order (NOT necessarily deduplicated or evenly spaced —
  *   a poller records whatever it observed).
- * @returns {number} total milliseconds spent with status !== "True", summed
- *   between consecutive samples (the last sample's status is assumed to hold
- *   until the trace ends, contributing zero additional duration).
+ * @returns {number} CUMULATIVE milliseconds spent with status !== "True",
+ *   summed across EVERY gap between consecutive samples where that gap was
+ *   not-Ready (the last sample's status is assumed to hold until the trace
+ *   ends, contributing zero additional duration). This is a sum over
+ *   possibly-many flaps, not the duration of the single longest one.
  */
-export function totalNotReadyMillis(samples) {
+export function cumulativeNotReadyMillis(samples) {
   if (!Array.isArray(samples) || samples.length === 0) {
     // No samples at all means the poller never ran — that is NOT "always
     // Ready", it is "we never checked". Callers must treat this as a
@@ -48,14 +61,16 @@ export function totalNotReadyMillis(samples) {
 
 /**
  * @param {{ts: number, status: string}[]} samples
- * @param {number} boundMillis - the STATED maximum allowed not-Ready duration.
+ * @param {number} boundMillis - the STATED maximum allowed CUMULATIVE
+ *   not-Ready duration (sum across every flap in the window, not the
+ *   longest single one — see the module docblock).
  * @returns {{ok: boolean, notReadyMillis: number, boundMillis: number, sampleCount: number}}
  */
 export function evaluateReadyBound(samples, boundMillis) {
   if (!Array.isArray(samples) || samples.length === 0) {
     return { ok: false, notReadyMillis: -1, boundMillis, sampleCount: 0 };
   }
-  const notReadyMillis = totalNotReadyMillis(samples);
+  const notReadyMillis = cumulativeNotReadyMillis(samples);
   return {
     ok: notReadyMillis <= boundMillis,
     notReadyMillis,
@@ -88,8 +103,8 @@ async function main() {
   console.log(JSON.stringify(result));
   if (!result.ok) {
     console.error(
-      `ready-flap FAILED: ${result.notReadyMillis}ms not-Ready across ${result.sampleCount} ` +
-        `samples exceeds the ${boundMillis}ms bound`,
+      `ready-flap FAILED: ${result.notReadyMillis}ms CUMULATIVE not-Ready across ` +
+        `${result.sampleCount} samples exceeds the ${boundMillis}ms bound`,
     );
     process.exit(1);
   }

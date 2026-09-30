@@ -23,9 +23,10 @@ name: Operator upgrade-under-load e2e (0.4.x -> current)
 #      documented order (apps/docs/content/docs/upgrading.mdx,
 #      docs/release/v1.0.0-rc.1.md "Upgrading: install the operator before
 #      the CLI")
-#   5. assert: no NextApp not-Ready for longer than a stated bound, no
-#      request errors beyond a stated budget, the CR's spec reconciles
-#      byte-identical
+#   5. assert: no NextApp's CUMULATIVE not-Ready time (summed across every
+#      flap in the window, not the single longest one — scripts/upgrade-e2e/
+#      ready-flap.mjs) exceeds a stated bound, no request errors beyond a
+#      stated budget, the CR's spec reconciles byte-identical
 #   6. install the current CLI and redeploy the SAME app directory following
 #      apps/docs/content/docs/upgrading.mdx's 0.4.x -> 1.0 section: deploying
 #      under the pre-rename config filename must fail with the one
@@ -38,12 +39,20 @@ name: Operator upgrade-under-load e2e (0.4.x -> current)
 # by default and NEVER set by this workflow; see the PR description for the
 # local run that proves it reds the lane.
 #
-# Triggers: workflow_dispatch, a weekly schedule, and push-to-main paths
-# scoped to the operator (so an operator/CRD change gets this lane without
-# waiting for the weekly run). NEVER pull_request — a kind + Knative +
-# cert-manager + two-operator-build run is far too slow/expensive for PR CI,
-# same reasoning as every other lane in operator-e2e-nightly.yml.
-
+# Triggers: workflow_dispatch, a weekly schedule, push-to-main paths scoped
+# to the operator (so an operator/CRD change gets this lane without waiting
+# for the weekly run), and a NARROW pull_request trigger.
+#
+# The pull_request trigger is scoped to ONLY the two paths that make up this
+# lane itself (this workflow file and scripts/upgrade-e2e/**), never to
+# packages/kn-next-operator/** — a kind + Knative + cert-manager +
+# two-operator-build run is too slow/expensive to run on every operator PR,
+# same reasoning as every other lane in operator-e2e-nightly.yml. It exists
+# because workflow_dispatch cannot target a workflow file that has never been
+# merged to main (GitHub 404s that dispatch), so a PR that adds or changes
+# this lane needs a trigger that runs it on the PR's own branch to prove it
+# actually works before merge. After merge, changes to the lane itself keep
+# getting this same cheap self-check on every subsequent PR that touches it.
 on:
   workflow_dispatch: {}
   schedule:
@@ -56,6 +65,10 @@ on:
       - main
     paths:
       - 'packages/kn-next-operator/**'
+      - 'scripts/upgrade-e2e/**'
+      - '.github/workflows/operator-upgrade-e2e.yml'
+  pull_request:
+    paths:
       - 'scripts/upgrade-e2e/**'
       - '.github/workflows/operator-upgrade-e2e.yml'
 

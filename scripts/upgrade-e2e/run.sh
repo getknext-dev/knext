@@ -18,7 +18,9 @@
 #      never needs a full `next build`/docker build/push in CI)
 #   3. start a light continuous-traffic driver against the app
 #   4. upgrade the operator + CRD to THIS tree's build (operator first)
-#   5. assert: NextApp Ready-flap bound, request-error budget, spec unchanged
+#   5. assert: NextApp CUMULATIVE not-Ready bound (sum of every flap in the
+#      window, not the single longest one — see ready-flap.mjs), request-error
+#      budget, spec unchanged
 #   6. install the current CLI (this tree's built dist) and redeploy the SAME
 #      app directory, following the 0.4.x -> 1.0 upgrade guide's steps
 #      (apps/docs/content/docs/upgrading.mdx): the un-renamed config fails
@@ -44,7 +46,8 @@ OPERATOR_DIR="$ROOT/packages/kn-next-operator"
 : "${NEW_CLI_VERSION:=}" # empty => install this tree's built dist directly
 : "${APP_IMAGE:=ghcr.io/knative/helloworld-go@sha256:c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba}"
 : "${TRAFFIC_INTERVAL_MS:=500}"
-: "${READY_BOUND_SECONDS:=90}"     # no NextApp goes not-Ready longer than this
+: "${READY_BOUND_SECONDS:=90}"     # CUMULATIVE not-Ready time across the window (sum of every
+                                    # flap, not the single longest one — see ready-flap.mjs)
 : "${ERROR_BUDGET:=0.02}"          # <=2% request errors across the whole window
 : "${BREAK_CRD_UPGRADE:=0}"        # mutation-proof switch; must never be 1 in CI
 : "${WORKDIR:=$(mktemp -d /tmp/knext-upgrade-e2e.XXXXXX)}"
