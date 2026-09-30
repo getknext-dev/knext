@@ -35,9 +35,14 @@
 # @opentelemetry/api, resolved via a real npm install in the `standalone-deps`
 # builder stage and COPYed in as plain files — no npm BINARY reaches this
 # runtime layer) plus the app's own `.next/standalone` server tree. Neither is
-# an apk package, so Trivy's OS scan does not see them; that JS-dependency
-# surface is the same acknowledged gap #1525 tracks for the self-contained
-# stage's embedded closure.
+# an apk package, so Trivy's OS scan does not see them. THIS IS NOT THE SAME
+# GAP #1525 TRACKS (round-1 correction, #1722): #1525 is the JS closure
+# COMPILED INTO the self-contained executable, with no manifest/lockfile on
+# disk for any scanner to find. This stage's `node_modules` and
+# `.next/standalone` ARE plain files on disk — a real gap, but a DIFFERENT and
+# closeable one. `supply-chain.yml`'s `js-closure-fs-trivy` job (#1722,
+# report-only) now covers it: it builds this exact stage for a reference app
+# and Trivy-scans its `/app` directory in filesystem mode.
 FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
 
 RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc

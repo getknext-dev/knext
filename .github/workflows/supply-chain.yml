@@ -537,4 +537,189 @@ jobs:
         with:
           name: sbom-standalone-bun-${{ github.sha }}
           path: sbom-standalone-bun.spdx.json
+
+  # ── JS CLOSURE — DEFAULT TARGET, REPORT-ONLY (#1722) ─────────────────────
+  #
+  # `built-image-trivy` above is deliberately the OS-package layer only (see
+  # its own header). Every entry there — including the kn-next standalone-bun
+  # (default) target added by #1718 — misses CVEs in the production
+  # `node_modules`/runtime JS the shipped image actually carries: Next's own
+  # traced `.next/standalone/node_modules` plus `@getknext/core`'s resolved
+  # supervisor deps (pino, prom-client, @opentelemetry/api).
+  #
+  # This job closes THAT gap for one reference app (the `standalone-drain-app`
+  # fixture `standalone-deploy-kind-e2e.yml` already proves `kn-next build`
+  # against), through the DEFAULT builder (turbopack) and DEFAULT runtime
+  # image target (`standalone-bun`, non-self-contained): `kn-next build`
+  # produces the real `.next/standalone` tree + the compiled bytecode exec,
+  # the SAME `stageStandaloneBuildContext` helper `deploy`/`preview` use
+  # stages the ADR-0055 Dockerfile, and `docker buildx build --load` (no
+  # push — this job holds no `packages:write`) builds the actual
+  # `standalone-bun` stage locally. Trivy then scans the BUILT container's
+  # `/app` directory in filesystem/rootfs mode — the `node_modules` +
+  # `.next/standalone` runtime JS the OS-layer job above cannot see.
+  #
+  # REPORT-ONLY, deliberately, in THIS PR: `continue-on-error: true`
+  # unconditionally (not ref-gated) — an enforcing scan against the existing,
+  # untriaged JS dependency closure would red every PR on day one. Flipping it
+  # to enforce-on-main (with a dated/justified allowlist, same pattern as
+  # `security/npm-audit-allowlist.json`) is tracked as a follow-up once the
+  # first report's findings are triaged.
+  #
+  # Guarded by tests/js-closure-fs-trivy-workflow.test.ts.
+  js-closure-fs-trivy:
+    name: Trivy — kn-next standalone-bun JS closure (fs mode, report-only)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      # Same real-publish-tool packer `standalone-deploy-kind-e2e.yml` uses
+      # (`scripts/pack-release-tarballs.mjs`, #1614) — the reference app
+      # installs the SAME tarball bytes a consumer would.
+      - name: Pack knext adapter tarballs
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      # Staged OUTSIDE the repo, same fixture + no `build` key (proves the
+      # DEFAULT turbopack builder) as `standalone-deploy-kind-e2e.yml`. No
+      # `kn-next deploy` here — deploy always pushes and needs a live
+      # cluster/registry for the CR apply; this job only needs the build
+      # artifact `kn-next build` produces, which pushes and applies nothing.
+      - name: Stage the fixture app + install its own dependencies
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/js-closure-app"
+          cp -R packages/kn-next/src/__tests__/fixtures/standalone-drain-app "$APP_DIR"
+          cd "$APP_DIR"
+          npm pkg set "dependencies.next=16.3.5"
+          grep -q '"build": "next build"' package.json
+          cat > knext.config.ts <<'EOF'
+          const config = {
+            name: "js-closure-scan",
+            runtime: "bun",
+            registry: "localhost:5001",
+            healthCheckPath: "/api/health",
+            scaling: { minScale: 0, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+          };
+          export default config;
+          EOF
+          bun install
+          mkdir -p public
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+          test -d node_modules/@getknext/core
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      # `kn-next build` (NOT deploy): runs the project's own `next build`
+      # (turbopack, output:'standalone', the DEFAULT builder — no `build` key
+      # above), then compiles the bytecode exec and smokes it. No docker, no
+      # push, no cluster.
+      - name: kn-next build (default builder, bun runtime)
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          node "${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" build
+          test -d .next/standalone
+          test -f knext-standalone-exec-linux-x64
+
+      # Stages the SAME ADR-0055 Dockerfile + supervisor shims `deploy`/
+      # `preview` stage (`stageStandaloneBuildContext`, `runtime-image.ts`) —
+      # imported from source, not reimplemented, so this cannot drift from the
+      # recipe those commands actually build.
+      - name: Stage the standalone-bun Dockerfile into the app's build context
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/stage-context.ts" <<EOF
+          import { stageStandaloneBuildContext } from "${GITHUB_WORKSPACE}/packages/kn-next/src/cli/runtime-image";
+          const appDir = process.env.APP_DIR;
+          if (!appDir) throw new Error("APP_DIR not set");
+          stageStandaloneBuildContext({ cwd: appDir, buildContext: appDir });
+          EOF
+          bun run "${RUNNER_TEMP}/stage-context.ts"
+          test -f "$APP_DIR/Dockerfile.standalone"
+
+      # Local-only build (`--load`, no `--push`) — this job holds no
+      # `packages:write` and publishes nothing. `standalone-bun` is the
+      # DEFAULT target (non-self-contained, disk-mode) per ADR-0055.
+      - name: Build the standalone-bun image (local, --load, no push)
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 \
+            -f "$APP_DIR/Dockerfile.standalone" \
+            --target standalone-bun \
+            -t js-closure-scan:local \
+            --load \
+            "$APP_DIR"
+
+      # Extract the built image's /app (node_modules + .next/standalone
+      # runtime JS) to the runner filesystem for a filesystem/rootfs Trivy
+      # scan — `docker create` + `docker cp`, never `docker run` (no
+      # ENTRYPOINT execution needed to read the filesystem).
+      - name: Extract /app from the built image
+        run: |
+          set -euo pipefail
+          cid="$(docker create js-closure-scan:local)"
+          docker cp "${cid}:/app" "${RUNNER_TEMP}/extracted-app"
+          docker rm "${cid}"
+
+      # REPORT-ONLY (#1722): unconditional `continue-on-error`, not ref-gated
+      # — see the job header for why. `scan-type: fs` scans the extracted
+      # directory tree directly (npm-lockfile/package.json + node_modules
+      # detection), not the image reference.
+      - name: Trivy scan — JS closure (fs mode, report-only)
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ runner.temp }}/extracted-app
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: json
+          output: trivy-js-closure.json
+
+      # `always()` so a red scan still publishes both the raw JSON (for
+      # triage) and a human summary (counts by severity + the top affected
+      # packages) in the job summary.
+      - name: Summarise findings (counts by severity + top packages)
+        if: always()
+        run: node scripts/summarize-trivy-fs-report.mjs trivy-js-closure.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the JS closure Trivy report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-closure-trivy-report-${{ github.sha }}
+          path: trivy-js-closure.json
           if-no-files-found: error
