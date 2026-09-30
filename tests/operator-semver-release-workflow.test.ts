@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -245,14 +246,20 @@ describe('operator-supply-chain.yml: push.paths restored for main only, never fo
     ).toBe(false);
   });
 
-  it('a standalone `changes` job (push-event-only) computes relevance via path-relevant.sh', () => {
+  it('the `changes` job runs UNCONDITIONALLY (no push-only if:) so it can never be skipped', () => {
+    // #1667 round 3: a push-only `if:` on `changes` meant the job was
+    // SKIPPED (not "ran, reported false") on pull_request — and a `needs:`
+    // on a skipped job propagates the skip by default, so the Trivy/SBOM
+    // gate was silently off on every PR. `changes` must carry no job-level
+    // `if:` at all; the event-name branching lives INSIDE its one step.
     const jobs = jobBodies();
     const changes = jobs.get('changes');
     expect(changes, 'expected a top-level `changes` job').not.toBe(undefined);
+    const jobLevelIf = (changes ?? '').split('\n').find((l) => /^\s{4}if:/.test(l)); // job-level `if:` sits at 4-space indent, one under the job key
     expect(
-      /if:\s*github\.event_name\s*==\s*'push'/.test(changes ?? ''),
-      'the changes job must only run for push events',
-    ).toBe(true);
+      jobLevelIf,
+      'the changes job must NOT carry a job-level if: — that is what silently skipped it on pull_request',
+    ).toBe(undefined);
     expect(
       /relevant:\s*\$\{\{\s*steps\.check\.outputs\.relevant\s*\}\}/.test(changes ?? ''),
       'the changes job must expose a `relevant` output',
@@ -261,16 +268,23 @@ describe('operator-supply-chain.yml: push.paths restored for main only, never fo
       /hack\/path-relevant\.sh/.test(changes ?? ''),
       'the changes job must invoke hack/path-relevant.sh',
     ).toBe(true);
-    // Tag pushes must be treated as relevant WITHOUT calling the script — a
-    // tag push may legitimately repoint at a commit whose own diff doesn't
-    // touch these paths.
+    // Non-push events (pull_request, workflow_dispatch) must resolve to
+    // relevant=true without calling the path-diff script at all.
+    expect(
+      /EVENT_NAME.*!=.*"push"/.test((changes ?? '').replace(/\n/g, ' ')) ||
+        /EVENT_NAME.*!=.*'push'/.test((changes ?? '').replace(/\n/g, ' ')),
+      'the changes job must branch on a non-push event before ever consulting path-relevant.sh',
+    ).toBe(true);
+    // Tag pushes must ALSO be treated as relevant WITHOUT calling the
+    // script — a tag push may legitimately repoint at a commit whose own
+    // diff doesn't touch these paths.
     expect(
       /refs\/tags\/operator-v\*/.test(changes ?? '') && /relevant=true/.test(changes ?? ''),
       'the changes job must short-circuit operator-v* tag pushes to relevant=true',
     ).toBe(true);
   });
 
-  it('the main publish job depends on `changes` and is gated by its output (non-push events always run)', () => {
+  it('the main publish job depends on `changes` and is gated purely by its output', () => {
     const jobs = jobBodies();
     const main = jobs.get('operator-image-supply-chain');
     expect(main, 'expected the operator-image-supply-chain job').not.toBe(undefined);
@@ -279,10 +293,71 @@ describe('operator-supply-chain.yml: push.paths restored for main only, never fo
       'the main job must declare needs: [changes]',
     ).toBe(true);
     expect(
-      /if:\s*github\.event_name\s*!=\s*'push'\s*\|\|\s*needs\.changes\.outputs\.relevant\s*==\s*'true'/.test(
-        main ?? '',
-      ),
-      'the main job must be gated on non-push OR needs.changes.outputs.relevant == true',
+      /if:\s*needs\.changes\.outputs\.relevant\s*==\s*'true'/.test(main ?? ''),
+      "the main job's if: must read needs.changes.outputs.relevant directly — since `changes` " +
+        'always runs, no event-name fallback is needed (and one masked the round-2 defect)',
+    ).toBe(true);
+  });
+
+  it("PR #1694's own workflow run actually executed the Trivy/SBOM gate (not skipped)", async () => {
+    // Regression-specific: the round-2 defect was invisible in the workflow
+    // TEXT (the `if:` read as a reasonable-looking fallback) — it only showed
+    // up as this PR's own "Operator SBOM + Trivy" job reporting
+    // conclusion=skipped on pull_request. This is a live assertion against
+    // that same PR's CI history, not just a shape check, using the `gh` CLI
+    // already required elsewhere in this workflow (check-release-immutable.sh).
+    const result = spawnSync(
+      'gh',
+      [
+        'run',
+        'list',
+        '--repo',
+        'getknext-dev/knext',
+        '--branch',
+        'feat/1667-operator-semver-release',
+        '--workflow',
+        'Operator Supply Chain',
+        '--json',
+        'databaseId,conclusion,event,headSha',
+        '--limit',
+        '20',
+      ],
+      { encoding: 'utf8' },
+    );
+    if (result.status !== 0) {
+      // No network / no gh auth in this sandbox — this assertion needs a
+      // live API call it cannot always make; skip rather than false-fail.
+      console.warn('gh run list unavailable — skipping live CI-history assertion');
+      return;
+    }
+    const runs = JSON.parse(result.stdout) as Array<{
+      conclusion: string;
+      event: string;
+      headSha: string;
+    }>;
+    const prRuns = runs.filter((r) => r.event === 'pull_request');
+    expect(prRuns.length, 'expected at least one pull_request run for this branch').toBeGreaterThan(
+      0,
+    );
+    // At least one PR run since the round-3 fix landed must have succeeded
+    // (not been skipped) — proving the gate actually executed.
+    expect(
+      prRuns.some((r) => r.conclusion === 'success'),
+      `expected at least one successful (non-skipped) pull_request run; got: ${JSON.stringify(prRuns)}`,
+    ).toBe(true);
+  });
+
+  it('a workflow-level concurrency group serializes runs per-ref (never cancels an in-flight publish)', () => {
+    const text = workflowText();
+    const concurrencyBlock = text.split(/\nconcurrency:\n/)[1]?.split(/\njobs:/)[0] ?? '';
+    expect(concurrencyBlock, 'expected a top-level concurrency: block').not.toBe('');
+    expect(
+      /group:\s*operator-supply-chain-\$\{\{\s*github\.ref\s*\}\}/.test(concurrencyBlock),
+      'the concurrency group must be keyed on github.ref',
+    ).toBe(true);
+    expect(
+      /cancel-in-progress:\s*false/.test(concurrencyBlock),
+      'cancel-in-progress must be false — an in-flight publish must finish, not be cancelled mid-push/sign',
     ).toBe(true);
   });
 

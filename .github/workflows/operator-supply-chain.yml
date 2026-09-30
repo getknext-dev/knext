@@ -80,8 +80,27 @@ name: Operator Supply Chain
 # NOT set on the trigger; instead the `changes` job below restores
 # paths-filter behavior for MAIN pushes only (via `hack/path-relevant.sh`,
 # a real `git diff`, unit-tested in tests/operator-path-relevant.test.ts) and
-# unconditionally treats every `operator-v*` tag push as relevant. The main
-# job's `if:` reads `needs.changes.outputs.relevant`.
+# unconditionally treats every `operator-v*` tag push (and every non-push
+# event) as relevant. The main job's `if:` reads `needs.changes.outputs.relevant`.
+#
+# `changes` ALWAYS runs, for every event (#1667 review round 3). It used to
+# carry `if: github.event_name == 'push'`, which meant the job was SKIPPED —
+# not "ran and reported relevant=false" — on pull_request. A `needs:` on a
+# SKIPPED job propagates the skip to the dependent job by default (GitHub's
+# `if:` on a dependent job defaults to `success()`, which a skipped need does
+# not satisfy), so `operator-image-supply-chain` — the Trivy/SBOM gate — was
+# silently skipped on every PR. Making `changes` unconditional (and reporting
+# relevant=true for any non-push event, since `pull_request.paths` already
+# scopes PRs natively) closes that hole without reintroducing `always()`
+# logic in the dependent job's `if:`.
+#
+# CONCURRENCY (#1667 review round 3): grouped by ref so two runs for the SAME
+# `operator-vX.Y.Z` tag (or the same branch) can never run concurrently — the
+# immutability guard above reads "does a release already exist" and then
+# publishes; two racing runs on the same ref could both observe "no release
+# yet" and then both attempt to create/attach one. `cancel-in-progress: false`
+# because this is a publish path: an in-flight publish must be allowed to
+# finish, not be cancelled mid-way through pushing/signing an image.
 
 on:
   pull_request:
@@ -97,13 +116,18 @@ on:
 permissions:
   contents: read
 
+# See the CONCURRENCY note above the `on:` block.
+concurrency:
+  group: operator-supply-chain-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Restores push.paths-filter behavior for MAIN pushes only (see the PATHS
-  # FILTERING note above) — tag pushes and non-push events are always
-  # relevant and never depend on this job's output.
+  # FILTERING note above). Runs UNCONDITIONALLY for every event — see the
+  # note above the `on:` block for why a push-only `if:` here silently
+  # skipped the Trivy/SBOM gate on every PR.
   changes:
-    name: Detect operator-relevant changes (main pushes only)
-    if: github.event_name == 'push'
+    name: Detect operator-relevant changes (main pushes only; always relevant otherwise)
     runs-on: ubuntu-latest
     outputs:
       relevant: ${{ steps.check.outputs.relevant }}
@@ -114,12 +138,18 @@ jobs:
       - name: Check whether this push touched operator-relevant paths
         id: check
         env:
+          EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [[ "${REF}" == refs/tags/operator-v* ]]; then
+          if [[ "${EVENT_NAME}" != "push" ]]; then
+            # pull_request is already scoped by the pull_request.paths filter
+            # on the trigger above; workflow_dispatch is an explicit manual
+            # run. Neither is gated by this job's path check.
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${REF}" == refs/tags/operator-v* ]]; then
             # Tag pushes are always relevant — never gated by paths.
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
@@ -130,10 +160,11 @@ jobs:
   operator-image-supply-chain:
     name: Operator SBOM + Trivy (+ cosign sign on main)
     needs: [changes]
-    # PR/workflow_dispatch events skip the `changes` job entirely (its `if:`
-    # is push-only), so `needs.changes.outputs.relevant` is empty for them —
-    # the first clause covers that; only a `push` event consults the job.
-    if: github.event_name != 'push' || needs.changes.outputs.relevant == 'true'
+    # `changes` runs unconditionally (see the note above the `on:` block), so
+    # its output is always defined — no `always()`/event-name fallback needed
+    # here, and a genuinely failed/skipped `changes` run correctly skips this
+    # job too (the default `success()` behavior for a `needs:` dependency).
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create/update the GitHub Release that carries install.yaml
