@@ -79,7 +79,7 @@ const DRILL_SCRIPT = resolve(
 const KNATIVE_SCRIPT = resolve(REPO_ROOT, 'scripts/kind-manifests/apply-knative-kourier.sh');
 const SPEC = 'tests/kind-manifest-checksum-pin.test.ts';
 
-declareMutations(109);
+declareMutations(111);
 
 // Every subject must exist before anything is mutated: a missing one is a
 // FATAL throw here, never a run of vacuous reds.
@@ -190,7 +190,7 @@ prove(
 prove(
   'M6 class 2: a stdin apply fed by network content is no longer rejected',
   SCANNER,
-  '    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause);',
+  '    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause, ctx);',
   '    void why;',
 );
 
@@ -558,7 +558,7 @@ prove(
 prove(
   'M75 source pin: only the walk-time value is followed, not every write site in the corpus',
   SCANNER,
-  '    for (const site of corpusWriteSites(r, st)) {',
+  '    for (const site of corpusWriteSites(r, st, scope)) {',
   '    for (const site of []) {',
 );
 prove(
@@ -639,7 +639,7 @@ prove(
 prove(
   'M87 positional parameters: a `set --` rewrite is not opaque',
   SCANNER,
-  '  if (st.corpus.some(setsPositionals))',
+  '  if (rewriteScopes.some((s) => scopedTexts(st, s).some(setsPositionals)))',
   '  if (false)',
 );
 prove(
@@ -777,6 +777,21 @@ prove(
   SCANNER,
   "    continuation = c === '}' || (c === ')' && d > 0);",
   '    continuation = false;',
+);
+
+// round 11 (review round 2, #1716): call-graph scoping alone missed a real
+// bash GLOBAL write in a function not reachable from the tracer.
+prove(
+  "M110 round 11: a non-`local`'d global write in an unreachable function is not unioned into the trace",
+  SCANNER,
+  '    const texts = new Set([...scopedTexts(st, scope), ...globalWriterTexts(st, name)]);',
+  '    const texts = new Set([...scopedTexts(st, scope)]);',
+);
+prove(
+  'M111 round 11: `local`/`declare`/`typeset` is never recognized, so a real function-local write is (wrongly) treated as a global too',
+  SCANNER,
+  '    if (found && !global) return true;',
+  '    if (false) return true;',
 );
 
 // Every subject is byte-identical to its green baseline (checked after each

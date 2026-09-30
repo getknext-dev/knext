@@ -390,7 +390,108 @@ class State {
      */
     this.corpus = [];
     this.writeSiteCache = new Map();
+    /**
+     * #1716: the script's own text OUTSIDE any function (function bodies
+     * stripped), plus every `source`d file's own top level — the part of
+     * `corpus` that is genuinely global. `scopedTexts` unions this with ONE
+     * function's own body, never a sibling's, so a `local` variable of the
+     * same name validated in one function cannot launder — or be wrongly
+     * tainted by — an unrelated write in another.
+     */
+    this.topLevelText = '';
   }
+}
+
+/**
+ * Every function CALLED (by literal, static command word — same shape
+ * `taintSources`'/`textIsNetwork`'s own call-following use) anywhere in
+ * `text`, at any nesting. Used only to build the reachable-call closure
+ * below; a dispatcher's or a run-time command word's callee is NOT static
+ * here on purpose — the general walk / `dynamicNameWrites` already fail
+ * closed on those shapes, so this helper does not need to re-derive them.
+ */
+function calledFunctionNames(text, st) {
+  const names = new Set();
+  for (const seg of commandPieces(text)) {
+    const w = commandHead(words(seg))[0];
+    if (w === undefined) continue;
+    const u = unquote(w);
+    if (st.functions.has(u)) names.add(u);
+  }
+  return names;
+}
+
+/**
+ * Every function TRANSITIVELY reachable by a static call from `scope` (or
+ * from the script's own top level when `scope` is `null`). #1716's
+ * function-local scoping needs this to stay fail-closed: tracing `$V` at a
+ * call site must still see a write a CALLED helper makes (`setv STATIC_LSN
+ * "$val"` where `setv() { printf -v "$1" …; }` — round 9/10's fixtures), a
+ * REAL execution path from here, while never following into an unrelated
+ * SIBLING function nothing in this scope calls (the laundering #1716
+ * exists to close). Cached per scope + function-table size.
+ */
+function reachableFunctionNames(st, scope) {
+  const key = `\0reach\0${scope ?? ''}\0${st.functions.size}`;
+  let names = st.writeSiteCache.get(key);
+  if (names) return names;
+  const rootText =
+    scope !== null && st.functions.has(scope) ? st.functions.get(scope) : st.topLevelText;
+  names = new Set();
+  const queue = [...calledFunctionNames(rootText, st)];
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (names.has(name)) continue;
+    names.add(name);
+    const body = st.functions.get(name);
+    if (body === undefined) continue;
+    for (const n of calledFunctionNames(body, st)) if (!names.has(n)) queue.push(n);
+  }
+  st.writeSiteCache.set(key, names);
+  return names;
+}
+
+/**
+ * Every function with NO static call site anywhere in the corpus — never
+ * reached by `calledFunctionNames` from the top level or from any other
+ * function's body. Such a function might still run (a run-time/dispatched
+ * command word, a caller this scanner cannot see), so, like the top level
+ * itself, it stays visible from EVERY scope rather than silently dropping
+ * out of the trace: that would turn "no static call site" (a `positionalSources`
+ * opaque finding) into "not found at all" (silently clean) the moment
+ * function-local scoping shipped. Cached per function-table size.
+ */
+function orphanFunctionNames(st) {
+  const key = `\0orphans\0${st.functions.size}`;
+  let names = st.writeSiteCache.get(key);
+  if (names) return names;
+  const called = new Set(calledFunctionNames(st.topLevelText, st));
+  for (const [, body] of st.functions) for (const n of calledFunctionNames(body, st)) called.add(n);
+  names = new Set([...st.functions.keys()].filter((n) => !called.has(n)));
+  st.writeSiteCache.set(key, names);
+  return names;
+}
+
+/**
+ * The texts visible while tracing a variable reference lexically inside
+ * function `scope` (or at the script's own top level when `scope` is
+ * `null`): the global text, `scope`'s own body (when `scope` names a known
+ * function), every function `scope` transitively calls, and every ORPHAN
+ * function (no static call site anywhere — see `orphanFunctionNames`).
+ * Never an UNRELATED, REACHABLE sibling function's body: this is what gives
+ * `corpusWriteSites`/`corpusDynamicWrites` function-local scoping instead of
+ * scanning the whole, flat, multi-function corpus (#1716).
+ */
+function scopedTexts(st, scope) {
+  const key = `\0scopedTexts\0${scope ?? ''}\0${st.functions.size}`;
+  let texts = st.writeSiteCache.get(key);
+  if (texts) return texts;
+  texts = [st.topLevelText];
+  if (scope !== null && st.functions.has(scope)) texts.push(st.functions.get(scope));
+  for (const n of reachableFunctionNames(st, scope)) texts.push(st.functions.get(n));
+  for (const n of orphanFunctionNames(st)) if (n !== scope) texts.push(st.functions.get(n));
+  st.writeSiteCache.set(key, texts);
+  return texts;
 }
 
 const blockKey = (st) => st.blockStack.join('/');
@@ -885,13 +986,16 @@ function dispatcherNames(st) {
   return out;
 }
 
-/** dynamicNameWrites over this source's whole corpus (cached per corpus size). */
-function corpusDynamicWrites(st) {
-  const key = `\0dyn\0${st.corpus.length}`;
+/**
+ * dynamicNameWrites over the texts visible in `scope` (#1716: function-local,
+ * see `scopedTexts`), cached per scope + corpus size.
+ */
+function corpusDynamicWrites(st, scope = null) {
+  const key = `\0dyn\0${scope ?? ''}\0${st.corpus.length}`;
   let d = st.writeSiteCache.get(key);
   if (!d) {
     const disp = dispatcherNames(st);
-    d = st.corpus.flatMap((t) => dynamicNameWrites(t, disp));
+    d = scopedTexts(st, scope).flatMap((t) => dynamicNameWrites(t, disp));
     st.writeSiteCache.set(key, d);
   }
   return d;
@@ -912,13 +1016,87 @@ function heredocWriteText(heredocs) {
   return out;
 }
 
-/** writeSites over this source's whole corpus (cached per corpus size). */
-function corpusWriteSites(name, st) {
-  const key = `${name}\0${st.corpus.length}`;
+// A `local`/`declare`/`typeset` keyword at a command boundary; `declare`/
+// `typeset` at a script's OWN top level are not function-scoping at all, but
+// this is only ever consulted against a FUNCTION body (see `declaresLocal`),
+// where all three create a private binding unless `declare` carries `-g`.
+const LOCAL_KEYWORD_RE = /(?:^|[\s;&|(])(local|declare|typeset)\b/g;
+
+/**
+ * Whether `body` (a FUNCTION's own text) declares `name` function-local
+ * anywhere — `local name`, `local name=…`, `declare name` / `typeset name`
+ * (but NOT `declare -g name`, which is explicitly global). #1716 round 2: a
+ * reviewer-found bypass — `scopedTexts`/`reachableFunctionNames` scope
+ * PURELY by call graph, so a function that writes a followed name WITHOUT
+ * `local`izing it (a real bash global, however it got that value) escaped
+ * detection the moment it was not reachable from the tracing function, e.g.
+ * a helper called only from an unrelated command dispatcher. bash has no
+ * "file-scoped" variable: a write not `local`'d in the function that makes
+ * it is either a script-level global (if nothing ever locals it) or binds
+ * whatever enclosing call frame first declared it local (dynamic scoping) —
+ * this scanner does not attempt to resolve the LATTER precisely; it just
+ * treats any non-`local`'d write anywhere as a possible global and includes
+ * it from every scope (fail closed, see `globalWriterTexts`).
+ */
+function declaresLocal(body, name) {
+  for (const m of body.matchAll(LOCAL_KEYWORD_RE)) {
+    const kw = m[1];
+    const from = m.index + m[0].length;
+    const rest = body.slice(from, from + 2000).split(/[\n;&|]/, 1)[0];
+    let global = false;
+    let found = false;
+    for (const w of rest.trim().split(/\s+/)) {
+      if (w === '') continue;
+      if (w.startsWith('-')) {
+        // `typeset` is a full synonym of `declare`, `-g` included (#1716 round 3).
+        if ((kw === 'declare' || kw === 'typeset') && /g/.test(w)) global = true;
+        continue;
+      }
+      const n = w.split('=')[0].replace(/\[.*$/, '');
+      if (n === name) found = true;
+    }
+    if (found && !global) return true;
+  }
+  return false;
+}
+
+/**
+ * Every FUNCTION body that writes `name` (any `writeSites`/`assembledWrites`
+ * hit) without `local`izing it there (`declaresLocal`) — a real bash global,
+ * visible to every scope regardless of the call graph (#1716 round 2). Never
+ * scoped by reachability: that is exactly the bypass this closes. Cached per
+ * name + function-table size.
+ */
+function globalWriterTexts(st, name) {
+  const key = `\0globalWriters\0${name}\0${st.functions.size}`;
+  let texts = st.writeSiteCache.get(key);
+  if (!texts) {
+    const disp = dispatcherNames(st);
+    texts = [];
+    for (const body of st.functions.values()) {
+      if (declaresLocal(body, name)) continue;
+      if (writeSites(body, name, disp).length > 0 || assembledWrites(body, name, disp).length > 0)
+        texts.push(body);
+    }
+    st.writeSiteCache.set(key, texts);
+  }
+  return texts;
+}
+
+/**
+ * writeSites over the texts visible in `scope` (#1716: function-local, see
+ * `scopedTexts`) UNIONED with every function that writes `name` as a bash
+ * global anywhere in the file (#1716 round 2: `globalWriterTexts` — a
+ * non-`local`'d write is not something call-graph scoping may exclude).
+ * Cached per name + scope + corpus size.
+ */
+function corpusWriteSites(name, st, scope = null) {
+  const key = `${name}\0${scope ?? ''}\0${st.corpus.length}`;
   let sites = st.writeSiteCache.get(key);
   if (!sites) {
     const disp = dispatcherNames(st);
-    sites = st.corpus.flatMap((t) => [
+    const texts = new Set([...scopedTexts(st, scope), ...globalWriterTexts(st, name)]);
+    sites = [...texts].flatMap((t) => [
       ...writeSites(t, name, disp),
       ...assembledWrites(t, name, disp),
     ]);
@@ -995,10 +1173,28 @@ function hasPositional(text) {
  * nothing static reveals: opaque.
  */
 function positionalSources(word, r, st, depth, ctx) {
-  // `set -- …` rewrites the positionals of whatever scope runs it, top level or helper.
-  if (st.corpus.some(setsPositionals))
+  // #1716: `word` was found by `corpusWriteSites` searching ONLY the texts
+  // `scopedTexts(st, ctx.scope)` returns (the script's own top level,
+  // `ctx.scope`'s own body, and every function `ctx.scope` transitively
+  // calls) — so the owner, if any, is among THOSE, never an unrelated
+  // sibling function with the same literal write text (which would
+  // launder/taint across unrelated functions the old whole-corpus substring
+  // search did).
+  const scope = ctx.scope ?? null;
+  const candidates = [
+    ...(scope !== null ? [scope] : []),
+    ...reachableFunctionNames(st, scope),
+    ...orphanFunctionNames(st),
+  ];
+  const owner = candidates.find((s) => st.functions.get(s)?.includes(word)) ?? null;
+  const owners = owner !== null ? [owner] : [];
+  // `set -- …` rewrites the positionals of whatever scope RECEIVES them: the
+  // owning function's own body when `word` lives in one, or the script's own
+  // top level when it does not (#1716: scoped, so an unrelated function's
+  // `set --` elsewhere in the file cannot taint this one).
+  const rewriteScopes = owners.length > 0 ? owners : [null];
+  if (rewriteScopes.some((s) => scopedTexts(st, s).some(setsPositionals)))
     ctx.out.add(`opaque:$${r} is assigned from positional parameters that \`set\` rewrites`);
-  const owners = [...st.functions].filter(([, body]) => body.includes(word)).map(([n]) => n);
   if (owners.length === 0) return; // the script's own arguments: the caller's, like its environment
   for (const fn of owners) {
     const key = `\0callers\0${fn}`;
@@ -1403,8 +1599,12 @@ function loadSource(word, st) {
   }
   const adopted = adoptHeredocs(code, heredocs, st);
   st.corpus.push(adopted, ...heredocWriteText(heredocs));
-  const { functions: sourcedFns } = extractFunctions(adopted);
+  const { code: sourcedTop, functions: sourcedFns } = extractFunctions(adopted);
   for (const [n, fn] of sourcedFns) if (!st.functions.has(n)) st.functions.set(n, fn);
+  // #1716: a sourced file's own top level (and its unquoted heredocs' own
+  // expansions, same as the main file's) runs in the including script's
+  // global scope, same as `scopedTexts` treats the main file's.
+  st.topLevelText = `${st.topLevelText}\n${sourcedTop}\n${heredocWriteText(heredocs).join('\n')}`;
 }
 
 /** A call that may resolve into an unread sourced file, handed a remote URL. */
@@ -1822,6 +2022,67 @@ export const STATEMENT_ALLOWLIST = [
     statement:
       'cat <<[sha256:cd45b43f7d259d912957deba67fadacf777dcb4b899162e959eb699ef70b15a4] | $KD apply -f - >/dev/null',
   },
+  // #1716: `record_reclaim_pending`/`clear_reclaim_pending` in provision-app.sh
+  // interpolate `$tl` (validated 32-hex by `reclaim_tl_valid`, see that
+  // function's own comment) and, for the merge patch, `$ords`, into a
+  // `kubectl patch` body built by `python3 -c '...json.dumps(...)'` (never raw
+  // string interpolation — #1714). Function-local scoping (this module's
+  // `scopedTexts`) is what makes these four entries REVIEWABLE: before it, a
+  // trace of `$tl`/`$ords` from this statement walked EVERY other same-named
+  // write site in this large, multi-function script (~30 of them, spanning
+  // functions with no relationship to timeline reclamation) — not a
+  // reviewable list, so this site stayed a raw, carved-out offender instead
+  // of an allowlist entry. Scoped, the found set is exactly: the `url`/
+  // `content` flag this module's general walk already carried for `$tl`/
+  // `$ords` at this call site (`urlvar:…`), the pinned `$patch_body` value
+  // itself, and the pre-existing (unrelated to this fix) false-positive in
+  // `setsPositionals` that any `set -euo pipefail` shebang trips — none of
+  // these name a SPECIFIC producer, so a genuinely new fetch introduced
+  // inside either function (round-8 `PRODUCER_SWAPS` below) still reds.
+  // Each clause-text pair below is the SAME source line seen twice: once as
+  // literally written (`K patch …`) and once with `K` (a `kubectl --context
+  // "$KCTX" -n "$NS" "$@"` wrapper) inlined at its call site — both are
+  // independently recognised as patch-like statements by this module (found
+  // by VERB, not by the literal word `kubectl`), so both need an entry.
+  {
+    id: 'reclaim-record-merge-inlined',
+    anchor: '--type merge -p "$patch_body"',
+    file: 'packages/scale-zero-pg/deploy/provision-app.sh',
+    sources: ['urlvar:$tl', 'urlvar:$patch_body'],
+    statement:
+      'kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "merge" "-p" "$patch_body"',
+  },
+  {
+    id: 'reclaim-record-merge-raw',
+    anchor: '--type merge -p "$patch_body"',
+    file: 'packages/scale-zero-pg/deploy/provision-app.sh',
+    sources: [
+      'urlvar:$tl',
+      'opaque:$tl is assigned from positional parameters that `set` rewrites',
+      'opaque:$ords is assigned from positional parameters that `set` rewrites',
+      'urlvar:$patch_body',
+    ],
+    statement: 'K patch configmap "$RECLAIM_CM" --type merge -p "$patch_body" >/dev/null 2>&1',
+  },
+  {
+    id: 'reclaim-clear-json-inlined',
+    anchor: '--type json -p "$patch_body"',
+    file: 'packages/scale-zero-pg/deploy/provision-app.sh',
+    sources: ['urlvar:$tl', 'urlvar:$patch_body'],
+    statement:
+      'kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "json" "-p" "$patch_body"',
+  },
+  {
+    id: 'reclaim-clear-json-raw',
+    anchor: '--type json -p "$patch_body"',
+    file: 'packages/scale-zero-pg/deploy/provision-app.sh',
+    sources: [
+      'urlvar:$tl',
+      'opaque:$tl is assigned from positional parameters that `set` rewrites',
+      'urlvar:$patch_body',
+    ],
+    statement: 'K patch configmap "$RECLAIM_CM" --type json -p "$patch_body" >/dev/null 2>&1',
+  },
 ];
 
 /** The clause with each heredoc placeholder replaced by its literal body. */
@@ -1848,7 +2109,7 @@ const TAINT_TRACE_DEPTH = 60;
  * it cannot follow is reported as `opaque:` (fail closed).
  */
 function taintSources(text, st, depth, ctx) {
-  const { out, vars, fns } = ctx;
+  const { out, vars, fns, scope = null } = ctx;
   if (depth > TAINT_TRACE_DEPTH) {
     out.add('opaque:nesting too deep');
     return;
@@ -1860,17 +2121,20 @@ function taintSources(text, st, depth, ctx) {
     // The walk-time value (last `NAME=` write reached so far) …
     const v = st.vars.get(r);
     if (v?.value !== undefined) taintSources(v.value, st, depth + 1, ctx);
-    // … AND every write site anywhere in the corpus, in any order, in any
-    // helper or sourced file: a modeled `NAME=value` is traced, anything else
-    // that can bind the name is opaque. Found by scanning every occurrence of
-    // the name, so a write construct nobody listed is still opaque.
+    // … AND every write site VISIBLE IN THIS SCOPE (#1716: the script's own
+    // top level plus this ONE function's own body — never a sibling
+    // function's, so a same-named `local` elsewhere can neither launder nor
+    // taint this one), in any order: a modeled `NAME=value` is traced,
+    // anything else that can bind the name is opaque. Found by scanning
+    // every occurrence of the name, so a write construct nobody listed is
+    // still opaque.
     if (IMPLICIT_VARS.has(r)) out.add(`opaque:$${r} is assigned implicitly by the shell`);
     // A `source`d file the resolver could not read may write anything.
     if (st.unresolvedSource !== null)
       out.add(`opaque:$${r} may be written by unresolved sourced ${st.unresolvedSource}`);
-    for (const d of corpusDynamicWrites(st))
+    for (const d of corpusDynamicWrites(st, scope))
       out.add(`opaque:$${r} may be written through a run-time variable name: ${d}`);
-    for (const site of corpusWriteSites(r, st)) {
+    for (const site of corpusWriteSites(r, st, scope)) {
       if (site.kind === 'other') {
         out.add(`opaque:$${r} is written by \`${site.snippet}\``);
         continue;
@@ -1900,7 +2164,9 @@ function taintSources(text, st, depth, ctx) {
           const key = `${u}\0${args.join('\0')}`;
           if (!fns.has(key)) {
             fns.add(key);
-            taintSources(body, st, depth + 1, ctx);
+            // #1716: tracing INTO a callee enters ITS scope, not the caller's
+            // — its own `local` writes are visible, a sibling's are not.
+            taintSources(body, st, depth + 1, { ...ctx, scope: u });
           }
         }
         for (const inner of innerSubstitutions(w)) taintSources(inner, st, depth + 1, ctx);
@@ -1930,9 +2196,11 @@ function clauseWithBodies(clause, st) {
  * `valueText` is what `taintSources` traces: the WHOLE clause for a stdin
  * apply (the value could be anywhere in it), or just the interpolated
  * value for a patch/set-env (the rest of the clause is literal `kubectl`
- * plumbing, not part of what was fetched).
+ * plumbing, not part of what was fetched). `ctx` is the walk context at the
+ * statement's call site — its `callStack` names the enclosing function (if
+ * any), so the trace starts scoped to THAT function (#1716).
  */
-function checkStatementAllowlist(st, why, clause, valueText) {
+function checkStatementAllowlist(st, why, clause, valueText, ctx) {
   const stmt = statementText(clause, st);
   const entry = STATEMENT_ALLOWLIST.find((e) => e.file === st.file && e.statement === stmt);
   if (entry) {
@@ -1940,10 +2208,12 @@ function checkStatementAllowlist(st, why, clause, valueText) {
     // value elsewhere: judge every source that can reach it against the sources
     // this entry names. A new or different one reds the scan.
     const found = new Set();
+    const scope = ctx?.callStack?.at(-1) ?? null;
     taintSources(clauseWithBodies(valueText, st), st, 0, {
       out: found,
       vars: new Set(),
       fns: new Set(),
+      scope,
     });
     const allowed = new Set(entry.sources);
     const extra = [...found].filter((x) => !allowed.has(x));
@@ -1962,8 +2232,8 @@ function checkStatementAllowlist(st, why, clause, valueText) {
   offend(st, why, clause);
 }
 
-function reportStdinApply(st, why, clause) {
-  checkStatementAllowlist(st, why, clause, clause);
+function reportStdinApply(st, why, clause, ctx) {
+  checkStatementAllowlist(st, why, clause, clause, ctx);
 }
 
 /** Counts one allowlist match for the spec's exactly-once / liveness checks. */
@@ -2429,7 +2699,7 @@ function classifyTarget(t, { producerText, clause, st, ctx }) {
       return;
     }
     const why = producerIsNetwork(producerText, st, ctx.depth + 1);
-    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause);
+    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause, ctx);
     return;
   }
   if (/^[<>]\(/.test(raw)) {
@@ -2478,8 +2748,8 @@ function classifyTarget(t, { producerText, clause, st, ctx }) {
  * or a `set env` value) whose sources are traced against the entry's
  * `sources` list; `clause` is the whole statement, used as the pin key.
  */
-function reportPatchTaint(st, why, clause, val) {
-  checkStatementAllowlist(st, why, clause, val);
+function reportPatchTaint(st, why, clause, val, ctx) {
+  checkStatementAllowlist(st, why, clause, val, ctx);
 }
 
 /**
@@ -2501,7 +2771,13 @@ function classifyPatchLike(ws, st, ctx, clause) {
         const val = unquote(ws[++k] ?? '');
         const why = textIsNetwork(val, st, ctx.depth + 1);
         if (why) {
-          reportPatchTaint(st, `kubectl patch body carries network content (${why})`, clause, val);
+          reportPatchTaint(
+            st,
+            `kubectl patch body carries network content (${why})`,
+            clause,
+            val,
+            ctx,
+          );
           return;
         }
         continue;
@@ -2510,7 +2786,13 @@ function classifyPatchLike(ws, st, ctx, clause) {
       if (m) {
         const why = textIsNetwork(m[1], st, ctx.depth + 1);
         if (why) {
-          reportPatchTaint(st, `kubectl patch body carries network content (${why})`, clause, m[1]);
+          reportPatchTaint(
+            st,
+            `kubectl patch body carries network content (${why})`,
+            clause,
+            m[1],
+            ctx,
+          );
           return;
         }
         continue;
@@ -2543,6 +2825,7 @@ function classifyPatchLike(ws, st, ctx, clause) {
           `kubectl set env value carries network content (${why})`,
           clause,
           m[1],
+          ctx,
         );
     }
   }
@@ -2608,12 +2891,25 @@ export function unsafeApplies(
   }
   st.heredocs = heredocs;
   st.corpus.push(code, ...heredocWriteText(heredocs));
-  // A `trap` handler is a string the CURRENT shell runs later: its writes count.
-  for (const m of code.matchAll(/(?:^|[\s;&|(])trap\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")/g))
-    st.corpus.push(m[1] ?? m[2]);
   if (error) offend(st, 'unparseable', error);
   const { code: top, functions } = extractFunctions(code);
   st.functions = functions;
+  // #1716: the script's own top-level text is the GLOBAL half of function-
+  // local scoping — see `scopedTexts`. Set once `top` is known. An unquoted
+  // heredoc's `${V:=…}`/`${V=…}`/`$(( V = … ))` expansions are evaluated by
+  // whichever shell reads the heredoc body — not a lexical write inside one
+  // function — so they join the global text too.
+  st.topLevelText = `${top}\n${heredocWriteText(heredocs).join('\n')}`;
+  // A `trap` handler is a string the CURRENT shell runs later, not at a
+  // lexical call site inside any one function: its writes count, and — like
+  // the top level itself — it stays visible from every scope. Read back from
+  // `st.corpus` (rather than appending `m[1] ?? m[2]` again independently) so
+  // the two stay a single fact: removing the push below also drops it here.
+  for (const m of code.matchAll(/(?:^|[\s;&|(])trap\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")/g)) {
+    const before = st.corpus.length;
+    st.corpus.push(m[1] ?? m[2]);
+    st.topLevelText += `\n${st.corpus.slice(before).join('\n')}`;
+  }
 
   walk(top, st, { depth: 0, defeated: false, stdinProducer: null, standalone: false });
 
@@ -2633,12 +2929,18 @@ export function unsafeApplies(
     sub.unresolvedSource = st.unresolvedSource;
     sub.corpus = st.corpus;
     sub.writeSiteCache = st.writeSiteCache;
+    sub.topLevelText = st.topLevelText;
     walk(body, sub, {
       depth: 1,
       defeated: false,
       stdinProducer: null,
       standalone: true,
       inFunction: true,
+      // #1716: this standalone sub-walk IS `name`'s own body, so scope a
+      // STATEMENT_ALLOWLIST trace reached from here to `name`, the same as
+      // a call-site walk would (an empty callStack would fall back to the
+      // global scope and re-admit the flat, whole-file namespace here).
+      callStack: [name],
     });
     for (const o of sub.offenders) {
       const tagged = `${o} [in ${name}()]`;
