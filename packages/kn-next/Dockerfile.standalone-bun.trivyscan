@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+#
+# BUILT-image Trivy scan fixture for the knext DEFAULT standalone-bun runtime
+# image (#1718) — NOT a shipped image, mirrors
+# Dockerfile.standalone-self-contained.trivyscan's pattern one-for-one, but
+# for the OTHER (disk-mode, default) stage of the same source file.
+#
+# `Dockerfile.standalone.hbs`'s `standalone-bun` stage is the DEFAULT target —
+# the image `kn-next build`/`kn-next deploy` produces unless
+# `--self-contained`/`selfContained: true` is set — and it cannot be scanned
+# via the shared `IMAGES`/`runtimeFrom()` lockstep in
+# tests/built-image-trivy.test.ts (that helper takes the LAST `FROM` in a
+# Dockerfile, which for `Dockerfile.standalone.hbs` is the `standalone-node`
+# stage, not this one). This fixture gets its own describe block in that test
+# file, using the same stage-scoped extraction pattern already used for the
+# self-contained stage.
+#
+# Reproduces ONLY the runtime OS layer the `standalone-bun` stage actually
+# ships — same pinned base digest, same whole-base `apk upgrade --no-cache`,
+# same runtime link libs — so `supply-chain.yml`'s `built-image-trivy` job can
+# enforce-scan the PATCHED artifact on main (an actionable HIGH surviving the
+# upgrade fails; a base-ref-only CVE the upgrade clears does not — same
+# rationale as #981/#982).
+#
+# MEASURED CLEAN (2026-09-30, #1718): this OS layer is byte-identical to the
+# already-enforcing `standalone-bun-self-contained` stage's fixture (same
+# `FROM` + same `apk upgrade --no-cache && apk add --no-cache libstdc++
+# libgcc`) — the live enforce-on-main run for that stage
+# (getknext-dev/knext run 36708163698) reported `0` vulnerabilities at
+# HIGH/CRITICAL for `image-oci (alpine 3.22.5)`. No allowlist entry was
+# needed to land this gate enforcing.
+#
+# WHAT THIS LEG DOES NOT COVER: this is the OS layer ONLY. The `standalone-bun`
+# stage additionally ships `/app/node_modules` (pino/prom-client/
+# @opentelemetry/api, resolved via a real npm install in the `standalone-deps`
+# builder stage and COPYed in as plain files — no npm BINARY reaches this
+# runtime layer) plus the app's own `.next/standalone` server tree. Neither is
+# an apk package, so Trivy's OS scan does not see them; that JS-dependency
+# surface is the same acknowledged gap #1525 tracks for the self-contained
+# stage's embedded closure.
+FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
+
+RUN apk upgrade --no-cache && apk add --no-cache libstdc++ libgcc
