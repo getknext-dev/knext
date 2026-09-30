@@ -160,6 +160,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       'file-manager-platform-e2e-nightly.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
+      // NEW (#1668/#1671): the operator upgrade-under-load e2e's single job
+      // installs the workspace with bun (`bun install --frozen-lockfile`,
+      // needed to build the current-tree CLI in phase 6) — one pinned
+      // setup-bun step. A count RISING is a decision, per the rule above.
+      'operator-upgrade-e2e.yml': 1,
       'preview.yml': 2,
       // NEW (#1663): the published-bytes freeze check's "run" decision packs
       // the publishable group with the workspace's bun (mirrors
