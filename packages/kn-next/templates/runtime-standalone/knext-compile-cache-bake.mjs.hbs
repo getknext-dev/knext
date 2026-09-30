@@ -82,27 +82,72 @@ function warmUrl(path) {
     return `http://${host}:${PORT}${path}`;
 }
 
+// #1572: readiness and warming both use `redirect: "manual"`. With the
+// default `redirect: "follow"`, a server that answers with a redirect LOOP
+// (measured: next@16.3.5's redirect-rewrite-dynamic fixture answers
+// `GET /` with `307 Location: /` under this bake's 127.0.0.1 bind) makes
+// fetch() throw "redirect count exceeded" — which the readiness loop used to
+// swallow as "not listening yet", burning the whole deadline against a server
+// that had answered every request. ANY HTTP response is a live server; only a
+// connection-level failure means "not yet".
+const PROBE_TIMEOUT_MS = 5_000;
+
+// Captured BEFORE server.js is imported: Next patches `globalThis.fetch` in
+// the server process (its data-cache instrumentation), and this driver IS that
+// process. Measured on next@16.3.5: after the first request, a
+// `redirect: "manual"` call through the patched fetch never settles. The
+// bake's own requests are plain HTTP clients — they must not go through it.
+const nativeFetch = globalThis.fetch;
+const MAX_REDIRECTS = 10;
+
 async function waitForServer(deadlineMs) {
     const start = Date.now();
     const deadline = start + deadlineMs;
+    let lastError = "no attempt made";
     for (;;) {
         try {
-            const res = await fetch(warmUrl(WARM_PATHS[0] ?? "/"));
-            if (res.status) {
-                console.log(
-                    `[knext bake] standalone server answered after ${Date.now() - start}ms`,
-                );
-                return;
-            }
-        } catch {
-            // not listening yet
+            const res = await nativeFetch(warmUrl(WARM_PATHS[0] ?? "/"), {
+                redirect: "manual",
+                signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+            });
+            await res.body?.cancel();
+            console.log(
+                `[knext bake] standalone server answered after ${Date.now() - start}ms`,
+            );
+            return;
+        } catch (err) {
+            // not listening yet (or this attempt timed out) — keep the reason
+            lastError = err?.cause?.message ?? err?.message ?? String(err);
         }
         if (Date.now() > deadline) {
             throw new Error(
-                `standalone server did not answer within ${deadlineMs}ms`,
+                `standalone server did not answer within ${deadlineMs}ms (last error: ${lastError})`,
             );
         }
         await new Promise((r) => setTimeout(r, 100));
+    }
+}
+
+// Follows redirects by hand (at most MAX_REDIRECTS hops, stopping at the
+// first revisited URL) so a legitimate redirect still lands on its 2xx target,
+// while a loop resolves to the REAL 3xx status it answered with — a numeric
+// verdict — instead of a thrown fetch error.
+async function fetchFollowing(url) {
+    const seen = new Set([url]);
+    let current = url;
+    for (let hop = 0; ; hop++) {
+        const res = await nativeFetch(current, { redirect: "manual" });
+        const location = res.headers.get("location");
+        await res.body?.cancel();
+        if (res.status < 300 || res.status >= 400 || !location) {
+            return { status: res.status, loop: false };
+        }
+        const next = new URL(location, current).href;
+        if (seen.has(next) || hop + 1 >= MAX_REDIRECTS) {
+            return { status: res.status, loop: true, to: next };
+        }
+        seen.add(next);
+        current = next;
     }
 }
 
@@ -134,9 +179,14 @@ async function main() {
     for (const path of WARM_PATHS) {
         const t0 = Date.now();
         try {
-            const res = await fetch(warmUrl(path));
+            const res = await fetchFollowing(warmUrl(path));
             allOk &&= res.status >= 200 && res.status < 300;
             console.log(`WARMED:${path} status=${res.status} ms=${Date.now() - t0}`);
+            if (res.loop) {
+                console.error(
+                    `[knext bake] warm path ${path} is a redirect loop (${res.status} → ${res.to}) — not a 2xx`,
+                );
+            }
         } catch (err) {
             allOk = false;
             console.log(
