@@ -586,9 +586,25 @@ function isInfraOnlyRedShard(shard, failedCount) {
  * can fail, BEFORE any knext code (the adapter build, or the knext server) is
  * ever invoked for a single deploy-test file in that shard:
  *   - `runner-setup`        — checkout, toolchain install, cache restore;
- *   - `dependency-install`  — installing the packed `@getknext/*` tarballs
- *                              under test (installing them is not running
- *                              them);
+ *   - `dependency-install`  — resolving/restoring/reinstalling next.js's OWN
+ *                              harness dependencies (pnpm store, Playwright)
+ *                              and hydrating next.js's OWN prebuilt
+ *                              `dist`/`@next/*`/`@next/swc` closure from
+ *                              published tarballs, so the jest harness can
+ *                              load and discover deploy tests — none of
+ *                              which loads or executes a line of knext code.
+ *                              **Round 2 correction (#1553):** this phase's
+ *                              window does NOT include installing the packed
+ *                              `@getknext/*` tarballs under test — that step
+ *                              (`scripts/e2e-preflight.mjs`) npm-installs
+ *                              them and dynamically imports
+ *                              `@getknext/db/migrate`, i.e. DOES execute
+ *                              knext code, so it runs AFTER this phase's
+ *                              marker/detector with its own `kind: 'deploy'`
+ *                              detector instead — see
+ *                              `.github/workflows/test-e2e-deploy.yml`'s
+ *                              "Adapter-tarball preflight fault detector
+ *                              (#1553 round 2)";
  *   - `cluster-bringup`     — kind/cluster provisioning, before a single
  *                              `next build` or server boot for this shard.
  */

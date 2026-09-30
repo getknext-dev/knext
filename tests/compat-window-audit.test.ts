@@ -800,6 +800,68 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
       expect(a.longest.nights).toBe(8);
       expect(a.streaks.at(-1)?.restartCause).toBe('night-disqualified');
     });
+
+    // #1553 round 2 (review-required) — a MIXED night: some shards are a
+    // genuinely proven pre-knext failure, OTHERS are a real (non-pre-knext)
+    // failure on the SAME night. `everyDisqualifierIsPreKnextVoid` requires
+    // every disqualifier to trace back to a pre-knext-attributed shard, so a
+    // night carrying even one real red among several pre-knext reds must
+    // never be void-eligible — the marker only ever excuses "this shard
+    // never ran", never "the rest of the night is fine too".
+    it('gradeNight: a night with SOME pre-knext-attributed shards and SOME genuinely red shards is never void-eligible — a mixed night always resets', () => {
+      const base = night();
+      const shards = base.shards.map((s: ShardRow, i: number) => {
+        if (i < 8) return preKnextVoidShard(s, 'dependency-install');
+        if (i < 16) {
+          return {
+            ...s,
+            passed: 48,
+            failed: 1,
+            failures: [{ file: `test/e2e/real-${i}.test.ts`, kind: 'assertion', cases: [] }],
+          };
+        }
+        return s;
+      });
+      const n = { ...base, shards };
+      const g = gradeNight({ ...n, preKnextVoidMarker: voidMarkerFor(n, 'dependency-install') });
+      expect(g.eligible).toBe(false);
+      // Both flavours of redness are present in the disqualifier list...
+      expect(hasReason(g, 'pre-knext-classified')).toBe(true);
+      expect(g.disqualifiers.some((d: string) => /^shard \S+ red/.test(d))).toBe(true);
+      // ...but the mix as a whole is NOT void-eligible: the marker cannot
+      // launder the 8 genuinely red shards it never claims responsibility for.
+      expect(g.voidEligible).toBe(false);
+    });
+
+    it('auditWindow: the same mixed night (8 pre-knext + 8 real failures) disqualifies and resets the streak, never bridges', () => {
+      const base = night({ runId: '40000006000', windowFingerprint: 'sha256:aaaa' });
+      const shards = base.shards.map((s: ShardRow, i: number) => {
+        if (i < 8) return preKnextVoidShard(s, 'dependency-install');
+        return {
+          ...s,
+          passed: 48,
+          failed: 1,
+          failures: [{ file: `test/e2e/real-${i}.test.ts`, kind: 'assertion', cases: [] }],
+        };
+      });
+      const mixedNight = {
+        ...base,
+        shards,
+        preKnextVoidMarker: voidMarkerFor(base, 'dependency-install'),
+      };
+      const a = auditDated([
+        ...streakOf(6, 'sha256:aaaa', 40000000000),
+        mixedNight,
+        ...streakOf(8, 'sha256:aaaa', 40000007000),
+      ]);
+      expect(a.met).toBe(false);
+      // Not bridged — the mixed night is an ORDINARY reset, exactly like any
+      // other disqualified night, never a spliced-out void.
+      expect(a.voidNights).toHaveLength(0);
+      expect(a.longest.nights).toBe(8);
+      expect(a.streaks.at(-1)?.restartCause).toBe('night-disqualified');
+      expect(formatReport(a)).not.toMatch(/VOID — bridged/);
+    });
   });
 
   describe('auditWindow — reporting and the arithmetic it emits', () => {

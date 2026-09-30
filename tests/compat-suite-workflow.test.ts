@@ -3528,6 +3528,136 @@ describe('compat-suite pre-knext fault injection (test-e2e-deploy.yml, #1553)', 
   });
 });
 
+// ── #1553 round 2 (review finding) — the adapter-tarball preflight must sit
+// OUTSIDE the dependency-install phase's fault-detection window ────────────
+// Round 1 placed "Preflight — adapter tarballs survived transport + still
+// npm-install" (scripts/e2e-preflight.mjs: npm-installs the packed
+// @getknext/* tarballs, resolves @getknext/core/adapter, and dynamically
+// IMPORTS @getknext/db/migrate — i.e. EXECUTES knext code) BEFORE the
+// dependency-install phase-complete marker. A knext-caused failure there
+// would have been misclassified `kind: 'pre-knext'` and could bridge a
+// credential streak over a real regression. This section proves, by an
+// explicit per-phase allowlist (not a substring search, which is how the
+// original finding hid), that no knext-executing step sits inside either
+// phase's fault window, and that the misplaced steps' failure is graded an
+// ordinary, always-resets `kind: 'deploy'` red.
+describe('compat-suite pre-knext phase boundaries stay knext-free (test-e2e-deploy.yml, #1553 round 2)', () => {
+  /** Ordered `{ name, block }` for every step in the deploy-tests job. */
+  function deployTestsSteps(): Array<{ name: string; block: string }> {
+    const block = deployTestsJobBlock();
+    return block
+      .split(/\n(?= {6}- name: )/)
+      .filter((b) => /^\s+- name: /.test(b))
+      .map((b) => {
+        const m = b.match(/^\s+- name:\s*(.+)$/m);
+        return { name: (m?.[1] ?? '').trim(), block: b };
+      });
+  }
+
+  /** The step NAMES strictly between (exclusive) two named steps, in order. */
+  function namesBetween(afterName: string, beforeName: string): string[] {
+    const steps = deployTestsSteps();
+    const afterIdx = steps.findIndex((s) => s.name === afterName);
+    const beforeIdx = steps.findIndex((s) => s.name === beforeName);
+    expect(afterIdx, `expected a step named "${afterName}"`).toBeGreaterThanOrEqual(0);
+    expect(beforeIdx, `expected a step named "${beforeName}"`).toBeGreaterThan(afterIdx);
+    return steps.slice(afterIdx + 1, beforeIdx).map((s) => s.name);
+  }
+
+  // Test 1 (review-required): an explicit allowlist of the steps inside each
+  // pre-knext phase's fault window. This FAILS if a knext-executing step
+  // (e.g. the adapter-tarball preflight) is placed — or ever re-placed —
+  // inside either window: the array comparison catches an insertion,
+  // deletion, OR reordering, not just the one known regression.
+  it('runner-setup phase: only the named allowlist of knext-free steps runs before its phase-complete marker', () => {
+    // Phase start = the job's very first step (Download workspace). Nothing
+    // in this list resolves, installs, or imports a single line of knext
+    // code — every action here is a generic GitHub Action, tar/node
+    // bookkeeping, or toolchain setup (node/pnpm/bun), and the fault
+    // injection step is workflow-only (echoes + exits 1).
+    const steps = deployTestsSteps();
+    expect(steps[0]?.name).toBe('Download workspace');
+    const names = namesBetween('Download workspace', 'Mark runner-setup phase complete (#1553)');
+    expect(names).toEqual([
+      'Unpack workspace tarball (restores symlinks + exec bits)',
+      'Setup Node.js',
+      'Setup pnpm',
+      'Enable corepack (next.js per-project package manager)',
+      'Setup Bun (bun lane only)',
+      'Inject pre-knext fault — runner-setup (#1553, dispatch-only)',
+    ]);
+  });
+
+  it('dependency-install phase: only the named allowlist of knext-free steps runs before its phase-complete marker — the adapter-tarball preflight (which DOES execute knext code) must be absent', () => {
+    const names = namesBetween(
+      'Pre-knext fault detector — runner-setup (#1553)',
+      'Mark dependency-install phase complete (#1553)',
+    );
+    expect(names).toEqual([
+      'Resolve next.js pnpm store path',
+      'Restore next.js pnpm store',
+      'Re-install next.js harness deps (offline cache hit; node_modules rebuilt)',
+      'Resolve Playwright version (for the chromium cache key)',
+      'Cache Playwright browsers',
+      'Install Playwright chromium (retry + per-attempt timeout, NON-FATAL)',
+      'Hydrate workspace next/dist from the prebuilt tarball (so jest can load tests)',
+      'Hydrate @next/* harness load closure from published tarballs (so test modules load)',
+      'Hydrate prebuilt @next/swc native binary (so next build skips the WASM/registry path)',
+      'Verify next.js jest harness is intact (do NOT override the upstream config)',
+      'Patch next/jest unescaped /.next/ ignore pattern (upstream bug)',
+      'Clear jest haste cache (fresh crawl against the patched next/jest)',
+      'Gate — jest --listTests must match >0 (loud-fail, no silent 0-test runs)',
+      'Inject pre-knext fault — dependency-install (#1553, dispatch-only)',
+    ]);
+    // Belt-and-suspenders on the exact regression this section exists to
+    // catch: neither knext-executing step may appear by NAME anywhere in the
+    // window, even if the allowlist above were loosened by a future edit.
+    expect(names).not.toContain('Make lifecycle scripts executable');
+    expect(
+      names.some((n) => /Preflight — adapter tarballs/.test(n)),
+      'the adapter-tarball preflight (executes knext code) must never sit inside the dependency-install fault window',
+    ).toBe(false);
+  });
+
+  it('the adapter-tarball preflight and its chmod sibling run AFTER both phase-complete markers, with their own failure()-gated detector that writes kind: "deploy" (never pre-knext-eligible)', () => {
+    const steps = deployTestsSteps();
+    const names = steps.map((s) => s.name);
+    const depOkIdx = names.indexOf('Mark dependency-install phase complete (#1553)');
+    const chmodIdx = names.indexOf('Make lifecycle scripts executable');
+    const preflightIdx = names.findIndex((n) => /Preflight — adapter tarballs/.test(n));
+    const diskFloorIdx = names.indexOf('Free disk floor (#1530)');
+    expect(depOkIdx).toBeGreaterThanOrEqual(0);
+    expect(chmodIdx).toBeGreaterThan(depOkIdx);
+    expect(preflightIdx).toBeGreaterThan(chmodIdx);
+    expect(diskFloorIdx).toBeGreaterThan(preflightIdx);
+
+    const detector = steps.find(
+      (s) => s.name === 'Adapter-tarball preflight fault detector (#1553 round 2)',
+    );
+    expect(detector, 'expected a dedicated detector for the moved preflight steps').toBeTruthy();
+    const body = detector?.block ?? '';
+    expect(/id: post-dependency-install-fault/.test(body)).toBe(true);
+    expect(
+      /if:\s*failure\(\)\s*&&\s*steps\.pre-knext-runner-setup-ok\.outcome == 'success'\s*&&\s*steps\.pre-knext-dependency-install-ok\.outcome == 'success'/.test(
+        body,
+      ),
+      'the detector must be guarded on BOTH phase markers, or an earlier-phase failure double-attributes here',
+    ).toBe(true);
+    expect(/kind: "deploy"/.test(body), `detector must write kind: "deploy", got:\n${body}`).toBe(
+      true,
+    );
+    expect(/kind: "pre-knext"/.test(body)).toBe(false);
+
+    // "Summarize shard result" must not clobber this detector's honest red
+    // with a false-green 0/0/0 parse of an empty/absent runner.log.
+    const summarize = steps.find((s) => s.name === 'Summarize shard result')?.block ?? '';
+    expect(
+      /steps\.post-dependency-install-fault\.outcome.*success/.test(summarize),
+      'Summarize shard result must check the adapter-tarball preflight detector outcome before re-summarizing',
+    ).toBe(true);
+  });
+});
+
 // ── #188 path 3 — the IN-REALM sandbox-fetch instrumentation (context.js patch) ──
 // Path 2's calibrated null proved a host-realm main-graph diagnostics_channel
 // subscriber cannot see the sandbox fetch under bun; path 3 patches the

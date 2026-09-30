@@ -534,10 +534,32 @@ enforced by GitHub Actions' own step ordering (a step does not run once an earli
 `continue-on-error` has failed):
 
 1. **`runner-setup`** — checkout, toolchain install, cache restore.
-2. **`dependency-install`** — installing the packed `@getknext/*` tarballs under test (installing
-   them is not running them — no adapter code executes here).
+2. **`dependency-install`** — resolving/restoring/reinstalling next.js's own harness dependencies
+   and hydrating next.js's own prebuilt build closure from published tarballs, so the jest harness
+   can discover and load deploy tests.
 3. **`cluster-bringup`** — kind/cluster provisioning, if the cell needs one, before a single
    `next build` or server boot runs for this shard's first deploy-test file.
+
+**Correction (round 2, #1553, 2026-09-30 — review finding).** The line above originally read
+"`dependency-install` — installing the packed `@getknext/*` tarballs under test (installing them is
+not running them — no adapter code executes here)". That was wrong, and the wiring round it
+described matched the wrong text: `scripts/e2e-preflight.mjs` — the step that actually installs the
+packed `@getknext/*` tarballs — npm-installs them into a scratch dir, resolves
+`@getknext/core/adapter`, and dynamically **imports** `@getknext/db/migrate` (the exact import
+`kn-next db migrate` performs at runtime). That is knext code executing, not merely "installing", and
+the first wiring round had placed that step, plus a `chmod` of knext's own lifecycle scripts, INSIDE
+the `dependency-install` phase's fault-detection window — before "Mark dependency-install phase
+complete". A genuine knext packaging bug caught there would have graded `kind: 'pre-knext'` and could
+have bridged a credential streak over a real regression, the exact failure mode this whole amendment
+exists to rule out. Fixed by moving both steps to run AFTER the `dependency-install` phase's marker
+and detector, with their own `failure()`-gated detector ("Adapter-tarball preflight fault detector
+(#1553 round 2)") that writes `kind: 'deploy'`, not `kind: 'pre-knext'` — per `isDeployOnlyRedShard`
+(below), a `kind: 'deploy'`-only red is never void-eligible, so this failure mode now always resets
+the streak like any other real defect. The steps that remain INSIDE the `dependency-install` window
+are exactly the ones the corrected phase-2 description above lists — generic next.js-harness
+tooling only, verified step-by-step against `.github/workflows/test-e2e-deploy.yml` and locked by an
+explicit per-phase allowlist test (`tests/compat-suite-workflow.test.ts`, "pre-knext phase boundaries
+stay knext-free").
 
 A dedicated preflight step runs at the end of phase 3, immediately before the per-file deploy-test
 loop starts. If, and only if, an earlier phase failed, this step — and *only* this step — writes the
@@ -708,6 +730,13 @@ infra-classified one) still prints.
       `failure()`-gated detector in `test-e2e-deploy.yml`, writing the shard summary JSON and (via
       `scripts/compat-run-ledger.mjs`) the run-level `preKnextVoidMarker`. Proved live on two
       `workflow_dispatch` runs (fault + normal, run ids and the fed-through-the-audit result above).
+- [x] **Round 2 (#1553, review finding, 2026-09-30):** moved the adapter-tarball preflight
+      (`scripts/e2e-preflight.mjs`) and its `chmod` sibling OUT of the `dependency-install` phase's
+      fault-detection window (they execute real knext code — see the Correction above) and gave them
+      a dedicated `failure()`-gated detector writing `kind: 'deploy'`. Locked by an explicit
+      per-phase step allowlist (`tests/compat-suite-workflow.test.ts`) and a `gradeNight`/
+      `auditWindow` fixture for a MIXED night (some pre-knext shards, some genuinely red ones) never
+      being void-eligible (`tests/compat-window-audit.test.ts`).
 - [ ] `cluster-bringup` has no producer yet: `test-e2e-deploy.yml` runs no cluster today, so
       `PRE_KNEXT_PHASES` carries that phase name for a future cell that needs one, unproduced until
       then. Do not treat its absence as a defect in this PR.
