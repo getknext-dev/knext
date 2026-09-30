@@ -280,6 +280,50 @@ phase4_upgrade_operator() {
     > "$WORKDIR/spec-after.json"
 }
 
+# On traffic failure, dump everything needed to diagnose a Kourier
+# routing/Host-header problem without a re-run: a live curl through a FRESH
+# tunnel using the SAME Host this run used (both "/" and the app's health
+# path — the run's own tunnel is already closed by the time this runs, since
+# stop_traffic/stop_port_forward happen before phase5_assert), the first few
+# raw attempts, and the cluster's routing objects + gateway logs.
+diagnose_traffic_failure() {
+  log "diagnostics: traffic failure — dumping routing state"
+  local host
+  host="$(cat "$WORKDIR/app-host" 2>/dev/null || true)"
+
+  local diag_port=18099
+  kubectl -n kourier-system port-forward svc/kourier-internal \
+    "${diag_port}:80" >"$WORKDIR/diag-port-forward.log" 2>&1 &
+  local diag_pid=$!
+  for _ in $(seq 1 15); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${diag_port}") 2>/dev/null; then
+      exec 3>&- 3<&-
+      break
+    fi
+    sleep 1
+  done
+
+  log "diagnostics: curl -sv -H \"Host: $host\" http://127.0.0.1:${diag_port}/"
+  curl -sv -H "Host: ${host}" "http://127.0.0.1:${diag_port}/" 2>&1 | tail -60 || true
+  log "diagnostics: curl -sv -H \"Host: $host\" http://127.0.0.1:${diag_port}/api/health"
+  curl -sv -H "Host: ${host}" "http://127.0.0.1:${diag_port}/api/health" 2>&1 | tail -60 || true
+
+  kill -TERM "$diag_pid" 2>/dev/null || true
+  wait "$diag_pid" 2>/dev/null || true
+
+  log "diagnostics: first 5 lines of attempts.jsonl"
+  head -n 5 "$WORKDIR/attempts.jsonl" 2>/dev/null || true
+
+  log "diagnostics: kubectl get ksvc,route,kingress -A -o wide"
+  kubectl get ksvc,route,kingress -A -o wide 2>&1 || true
+
+  log "diagnostics: kourier gateway pod logs (last 30 lines each)"
+  for p in $(kubectl -n kourier-system get pods -o name 2>/dev/null); do
+    log "diagnostics: $p"
+    kubectl -n kourier-system logs "$p" --all-containers --tail=30 2>&1 || true
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Phase 5: assertions
 # ---------------------------------------------------------------------------
@@ -289,8 +333,15 @@ phase5_assert() {
 
   node "$ROOT/scripts/upgrade-e2e/ready-flap.mjs" "$WORKDIR/ready-samples.jsonl" "$READY_BOUND_SECONDS" \
     || status=1
+
+  local error_budget_rc=0
   node "$ROOT/scripts/upgrade-e2e/error-budget.mjs" "$WORKDIR/attempts.jsonl" "$ERROR_BUDGET" \
-    || status=1
+    || error_budget_rc=1
+  if [[ "$error_budget_rc" != "0" ]]; then
+    status=1
+    diagnose_traffic_failure
+  fi
+
   # selfContained: a structural-schema `default: false` field (#1522) the
   # 0.4.3-era CR never set; a newer CRD's default can materialize onto the
   # existing CR on the next apply/reconcile. See cr-diff.mjs's docblock for
