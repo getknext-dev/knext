@@ -29,10 +29,12 @@ jobs:
           username: ${{ secrets.REGISTRY_USER }}
           password: ${{ secrets.REGISTRY_TOKEN }}
 
-      - uses: getknext-dev/knext@v1
+      - uses: getknext-dev/knext/packages/kn-next-action@v1
         with:
           kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          namespace: acme
           registry: registry.example.com/acme
+          registry-token: ${{ secrets.REGISTRY_TOKEN }}
           skip-upload: 'true'
 ```
 
@@ -86,10 +88,12 @@ step using whichever action they publish:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SA }}
 
-      - uses: getknext-dev/knext@v1
+      - uses: getknext-dev/knext/packages/kn-next-action@v1
         with:
           kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          namespace: acme
           registry: registry.example.com/acme
+          registry-token: ${{ secrets.REGISTRY_TOKEN }}
           bucket: acme-assets
 ```
 
@@ -102,9 +106,12 @@ On pull requests, `dry-run` prints the `NextApp` resource that *would* be applie
 nothing:
 
 ```yaml title=".github/workflows/pr.yml"
-      - uses: getknext-dev/knext@v1
+      - uses: getknext-dev/knext/packages/kn-next-action@v1
         with:
           kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          namespace: acme
+          registry: registry.example.com/acme
+          registry-token: ${{ secrets.REGISTRY_TOKEN }}
           dry-run: 'true'
 ```
 

@@ -122,7 +122,8 @@
  *
  * Usage: node scripts/verify-action-pins.mjs [--root <repo-root>]
  *   --root  repository root to scan (default: cwd). The scan covers
- *           .github/workflows, .github/actions/** and the root action.yml.
+ *           .github/workflows, .github/actions/**, the root action.yml, and
+ *           NAMED_COMPOSITE_ACTION_DIRS (packages/kn-next-action today).
  * Exits 1 (with an actionable report) if there is any finding, if it can see NO
  * files to check, or on an unrecognised argument. There is no combination of
  * arguments that makes this script exit 0 without having verified something.
@@ -173,16 +174,31 @@ const YAML = (file) => file.endsWith('.yml') || file.endsWith('.yaml');
  *
  *   - `.github/workflows/*.yml`      — the workflows themselves;
  *   - `.github/actions/** /action.yml` — local composite actions;
- *   - `action.yml` at the repo root  — the published `Deploy with knext` action.
+ *   - `action.yml` at the repo root  — the published `Deploy with knext` action;
+ *   - `NAMED_COMPOSITE_ACTION_DIRS`  — composite actions that live elsewhere in
+ *     the tree (today: `packages/kn-next-action`, the credential-bearing
+ *     GitHub Action that accepts a kubeconfig — #1598).
  *
  * A composite action's steps run INSIDE the caller's job, with the caller's
  * token, so a floating ref there is as credential-adjacent as one in a
  * workflow. Leaving it outside the scan would make "pinned by default" false
  * for a whole class of file while every guard stayed green.
  *
+ * `NAMED_COMPOSITE_ACTION_DIRS` is ENUMERATED rather than walked (unlike
+ * `.github/actions`, which is a tree of nothing but action manifests) because
+ * a package directory also holds `node_modules`, `dist`, and everything else
+ * npm publishes — walking it the way `.github/actions` is walked would mean
+ * either descending into all of that or re-deriving an ignore list, and
+ * getting the ignore list wrong is a silent hole in a boundary this file
+ * claims is complete. A new composite action landing under `packages/*`
+ * without an entry here shows up as a smaller `discoverPinnableFiles()`
+ * result — asserted by `tests/workflow-action-pins.test.ts` and
+ * `tests/action-pin-sha-tag-nightly.test.ts`, not merely assumed.
+ *
  * This is the single definition of the boundary — the form guard imports it
  * rather than re-deriving one, because two definitions drift.
  */
+const NAMED_COMPOSITE_ACTION_DIRS = ['packages/kn-next-action'];
 export function discoverPinnableFiles(repoRoot) {
   const found = [];
 
@@ -235,6 +251,13 @@ export function discoverPinnableFiles(repoRoot) {
 
   for (const name of ['action.yml', 'action.yaml']) {
     if (existsSync(resolve(repoRoot, name))) found.push(name);
+  }
+
+  for (const dir of NAMED_COMPOSITE_ACTION_DIRS) {
+    for (const name of ['action.yml', 'action.yaml']) {
+      const rel = `${dir}/${name}`;
+      if (existsSync(resolve(repoRoot, rel))) found.push(rel);
+    }
   }
 
   return found.sort();
