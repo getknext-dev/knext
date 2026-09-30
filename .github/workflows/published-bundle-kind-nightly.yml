@@ -56,6 +56,14 @@ on:
   release:
     types: [published]
   workflow_dispatch: {}
+  # Scoped to exactly the two files this lane consists of — NOT a general
+  # PR gate (the whole point of "nightly, not per-PR" above still holds for
+  # every OTHER PR). A change to either file is validated against a real
+  # cluster before merge rather than trusted until the next 06:41 UTC run.
+  pull_request:
+    paths:
+      - '.github/workflows/published-bundle-kind-nightly.yml'
+      - 'scripts/verify-anonymous-install.mjs'
 
 permissions: {}
 
@@ -160,17 +168,79 @@ jobs:
       # touching the cluster, so the ONLY apply is the explicit one below,
       # through the SAME digest-pinned, server-side, strict-validated path
       # every other CLI cluster write uses (ADR-0001).
+      # #1702 tracks three defects a real reproduction against the published
+      # `rc` CLI found in round 2 review, each worked around here rather than
+      # assumed away — remove each workaround when #1702 lands the CLI-side
+      # fix:
+      #   (a) `create` scaffolds `registry: "ghcr.io/<your-user>"`, and the
+      #       placeholder preflight (placeholder-preflight.ts) refuses ANY
+      #       `<...>`-shaped field even under `--image` (which never reads
+      #       registry at all) — worked around with `--registry` on `deploy`,
+      #       which the CLI already logs as ignored-but-harmless under
+      #       `--image`;
+      #   (b) `deploy` calls `requireBuildContext()` unconditionally (even
+      #       under `--dry-run --skip-build`), which walks up for a lockfile
+      #       and throws if none exists — `create` writes no lockfile, so
+      #       `npm install` runs first, purely to produce `package-lock.json`
+      #       (no build, no postinstall network dependency beyond npm's own);
+      #   (c) `deploy`'s pino logger writes structured JSON log LINES to the
+      #       same stdout the CR YAML is printed to (`NODE_ENV=production`
+      #       avoids pino-pretty's ANSI colour codes, which `kubectl apply`
+      #       rejects outright — "control characters are not allowed" — but
+      #       plain JSON lines still interleave with the YAML). The fix is
+      #       mechanical, not fragile: every log line pino emits is exactly
+      #       one line starting with `{`; the CR YAML `renderNextAppCR`
+      #       writes never starts a line with `{`. `grep -v '^{'` is an exact
+      #       partition of the two, not a heuristic — reproduced locally
+      #       against the real published `rc` CLI before relying on it here.
+      #
+      # `healthCheckPath: "/"` is not a CLI-defect workaround — it is required
+      # by the TEST IMAGE, the same way `rollback_e2e_test.go` already needs
+      # it for the identical `ghcr.io/knative/helloworld-go` sample: the
+      # operator's readiness/liveness probes default to `/api/health`
+      # (nextapp_controller.go's `readinessProbePath`), which this image does
+      # not serve.
       - name: Scaffold + render a minimal NextApp via the published rc CLI
         run: |
           set -euo pipefail
           mkdir -p /tmp/published-bundle-e2e
           npx --yes @getknext/core@rc create /tmp/published-bundle-e2e --name published-bundle-e2e
           cd /tmp/published-bundle-e2e
-          npx --yes @getknext/core@rc deploy --dry-run --skip-build --skip-upload \
+
+          # #1702(b): a lockfile is required for requireBuildContext() to
+          # resolve the project root, even though nothing is actually built.
+          npm install --no-audit --no-fund
+
+          # #1702: the scaffold's config.ts registry placeholder is not read
+          # under --image, but the placeholder preflight still refuses it —
+          # and the test image needs healthCheckPath: "/" regardless of any
+          # CLI defect (see above).
+          grep -q 'registry: "ghcr.io/<your-user>"' knext.config.ts
+          sed -i 's#registry: "ghcr.io/<your-user>"#registry: "ghcr.io/getknext-dev"#' knext.config.ts
+          grep -q 'name: "published-bundle-e2e",' knext.config.ts
+          # `a\` (append-after-match), not an embedded `\n` in a `s///`
+          # replacement: GNU vs BSD sed disagree on how a literal newline in
+          # the replacement text is written, and this only needs to run on
+          # the GNU sed ubuntu-latest ships.
+          sed -i '/^  name: "published-bundle-e2e",$/a\  healthCheckPath: "/",' knext.config.ts
+
+          # #1702(c): NODE_ENV=production disables pino-pretty's ANSI output,
+          # so the interleaved log lines are structured JSON rather than
+          # colour-coded text — see the partition note above.
+          NODE_ENV=production npx --yes @getknext/core@rc deploy --dry-run --skip-build --skip-upload \
             --skip-image-lockstep-check \
+            --registry ghcr.io/getknext-dev \
             --image ghcr.io/knative/helloworld-go@sha256:c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba \
-            -n default > /tmp/published-bundle-e2e-cr.yaml
+            -n default > /tmp/published-bundle-e2e-raw.txt
+
+          # #1702(c): an exact partition, not a heuristic — see above.
+          grep -v '^{' /tmp/published-bundle-e2e-raw.txt > /tmp/published-bundle-e2e-cr.yaml
+          echo "--- CLI-rendered NextApp CR ---"
           cat /tmp/published-bundle-e2e-cr.yaml
+          # Fail loudly, not silently, if the partition ever yields nothing —
+          # a CLI change to the log format must not turn this into a
+          # vacuous `kubectl apply` of an empty file.
+          grep -q '^apiVersion: apps.kn-next.dev/' /tmp/published-bundle-e2e-cr.yaml
 
       - name: Apply the CLI-rendered NextApp and wait for it to reconcile Ready
         run: |
