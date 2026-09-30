@@ -58,7 +58,9 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 // re-anchoring and before the fleet grew past 40 provers, so a large
 // regression (losing a prover from discovery, or most of a prover's
 // anchors) could pass unnoticed with this much slack. RAISE, NEVER LOWER.
+// @ratchet-floor — mechanically enforced by scripts/check-ratchet-floors.mjs (#1253).
 const MIN_RESOLVED_PAIRS = 316;
+// @ratchet-floor — mechanically enforced by scripts/check-ratchet-floors.mjs (#1253).
 const MIN_RESOLVED_PROVERS = 24;
 
 describe("every mutation prover's STATICALLY-resolvable anchors still match the current tree", () => {

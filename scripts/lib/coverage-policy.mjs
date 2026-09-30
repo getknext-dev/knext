@@ -66,6 +66,10 @@ export const COVERAGE_EXCLUDE = [
  * The old global floors — 77 lines / 74 functions — still hold against that, so
  * they are UNCHANGED. Ratchet convention: floors sit just below the measured
  * baseline; raise them as coverage lands, never lower one to get green.
+ *
+ * @ratchet-floor — mechanically enforced by scripts/check-ratchet-floors.mjs
+ * (#1253): a PR that lowers this value against its merge base reds, unless
+ * ratchet-lowering-allowlist.json carries a PR-introduced entry for it.
  */
 export const THRESHOLDS = {
   lines: 77,
@@ -141,6 +145,8 @@ export const THRESHOLDS = {
  * excluded, a known separate hang, #1248-adjacent) raised
  * **`packages/kn-next/src/**` lines to 79.01% (9955/12600)**. The floor moves
  * to 79.0 — just below the measured number, rounded down to 0.5.
+ *
+ * @ratchet-floor — see the THRESHOLDS marker above; same guard, same rule.
  */
 export const PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
@@ -399,11 +405,14 @@ export const PER_PATH_THRESHOLDS = {
  * band this convention rounds an extra step for, so no extra step is taken
  * either. Raise to 94.5 in a later batch once the measurement clears it with
  * real headroom, not on this batch's marginal gain.
+ *
+ * @ratchet-floor — see the THRESHOLDS marker above; same guard, same rule.
  */
 export const HONEST_THRESHOLDS = {
   lines: 94.0,
 };
 
+// @ratchet-floor — see the THRESHOLDS marker above; same guard, same rule.
 export const HONEST_PER_PATH_THRESHOLDS = {
   'packages/kn-next/src/**': {
     lines: 94.0,
