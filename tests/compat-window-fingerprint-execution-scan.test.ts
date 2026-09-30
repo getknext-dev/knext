@@ -110,6 +110,18 @@ const NAMED_EXCEPTIONS: { path: string; reason: string; sources: readonly string
       "invoked only by compat-vinext.yml's vinext-red-alert job (and the 8 sibling nightly-red-alert jobs, none of which are CREDENTIAL_CELLS lanes), which needs the other jobs only for status gating and runs strictly after the credential build/test work — never part of the fingerprint-relevant harness.",
     sources: ['.github/workflows/compat-vinext.yml'],
   },
+  // #1620 — scripts/e2e-deploy.sh passes the lockfile DIRECTORY root to
+  // musl_lockfile_mounts, which derives from the app's resolved addons which
+  // FILES under it to bind-mount (one by one, never the directory). Every file
+  // under it is frozen individually via MUSL_NATIVE_LOCKFILE_FILES, and
+  // tests/musl-lockfile-credential-sharp-coverage.test.ts fails if the files on
+  // disk and that list ever differ, so the directory root adds nothing unfrozen.
+  {
+    path: 'scripts/musl-native-lockfiles',
+    reason:
+      'directory root handed to musl_lockfile_mounts; each file under it is frozen via MUSL_NATIVE_LOCKFILE_FILES, lockstep-enforced by tests/musl-lockfile-credential-sharp-coverage.test.ts.',
+    sources: ['scripts/e2e-deploy.sh'],
+  },
 ];
 
 /** Entries that declare no source file — dead exceptions that exempt nothing. */
