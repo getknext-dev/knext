@@ -1048,7 +1048,8 @@ function declaresLocal(body, name) {
     for (const w of rest.trim().split(/\s+/)) {
       if (w === '') continue;
       if (w.startsWith('-')) {
-        if (kw === 'declare' && /g/.test(w)) global = true;
+        // `typeset` is a full synonym of `declare`, `-g` included (#1716 round 3).
+        if ((kw === 'declare' || kw === 'typeset') && /g/.test(w)) global = true;
         continue;
       }
       const n = w.split('=')[0].replace(/\[.*$/, '');

