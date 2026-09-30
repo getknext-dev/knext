@@ -120,6 +120,7 @@ describe('#1300: pinned matrix tracker workflow', () => {
       expect(fields).toHaveLength(5);
       expect(fields[2]).toBe('*'); // day-of-month: every day
       expect(fields[3]).toBe('*'); // month: every month
+      expect(fields[4]).toBe('*'); // day-of-week: daily (not weekly)
     }
   });
 

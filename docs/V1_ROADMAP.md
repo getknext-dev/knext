@@ -21,7 +21,29 @@ failures that block this 1.0 are the ones that currently return `Ready=True`.
 
 ---
 
-## 1. What 1.0 commits us to
+## 1. The v1.0 release plan and timeline
+
+### Release phases
+
+**Phase 1** (before rc.2 tag) — Landed prerequisite features and fixes:
+- webpack builder (#1219)
+- compiled bytecode bun-standalone runtime (#1225)
+- bytecode-live verification (#1221)
+- vinext × node compile-cache wiring
+- ADR-0054 amendments (Bun-default runtime decision)
+- Pre-audit of all known quarantined failures (#1553, #1663, #743, #1664, #1665, #1666)
+
+**Phase 2** (14-night rc window, open now) — Release-candidate credential runs:
+- Each supported runtime × builder cell banks 14 consecutive scheduled nights against rc.2 tag
+- Early-warning nightlies moved to weekly to reduce runner contention (#1675)
+- No new features — only hotfixes for credential failures
+- GA gate: every cell must have `failed:0`, `notRun:0` on 14 consecutive nights
+
+**Expected GA timeline:** 26 October – 3 November 2026
+
+See the [v1.0 GA milestone](https://github.com/getknext-dev/knext/milestone/10) for the full scope and status.
+
+### 1. What 1.0 commits us to
 
 **Committed** (breaking change ⇒ major version):
 

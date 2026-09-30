@@ -51,6 +51,8 @@ on:
   schedule:
     # 08:17 UTC Monday — an unused minute-of-day (tests/ci-capacity-budget.test.ts
     # asserts no collision), weekly like compat-vinext.yml's own axis.
+    # (#1675) — Already weekly during the rc credential window to reduce runner
+    # contention with the credential lanes.
     - cron: '17 8 * * 1'
 
 permissions:

@@ -28,7 +28,9 @@ on:
     # cron in test-e2e-deploy.yml (which keeps 03:17 — it is cross-referenced
     # by docs/compat/window-node-lane.md and several tests, so this workflow
     # moves instead). See docs/ci/capacity-budget.md.
-    - cron: '29 3 * * *'
+    # (#1675) — WEEKLY during the rc credential window to reduce runner contention
+    # with the credential lanes. Restore to daily after GA.
+    - cron: '29 3 * * 0'
   workflow_dispatch:
     inputs:
       scale_test_image:
