@@ -121,6 +121,29 @@ const MUTATIONS = [
       '  if (cur !== expectedHead) {\n    console.log(`HEAD MOVED: ${cur} != ${expectedHead}`);\n    return 3;\n  }',
     replacement: '  if (false) {\n    return 3;\n  }',
   },
+  {
+    // Round 2 review (#1731): check-then-act between the head fetch and the
+    // merge call is a race a push can win; `--match-head-commit` makes
+    // GitHub refuse the merge atomically instead.
+    label:
+      'enqueueAndWait: drop --match-head-commit from the gh pr merge call, reopening the check-then-act race',
+    subject: 'cli',
+    anchor:
+      "  gh(['pr', 'merge', String(pr), '-R', repo, '--merge', '--match-head-commit', expectedHead]);",
+    replacement: "  gh(['pr', 'merge', String(pr), '-R', repo, '--merge']);",
+  },
+  {
+    // Round 2 review (#1731): a stacked PR's base is another feature
+    // branch, not main — merging main into it there preflights against the
+    // wrong tree.
+    label:
+      "runPreflight: merge origin/main instead of the PR's own base, breaking stacked-PR preflight",
+    subject: 'cli',
+    anchor:
+      "const merge = exec('git', ['-C', scratch, 'merge', '-q', '--no-edit', `origin/${baseRefName}`]);",
+    replacement:
+      "const merge = exec('git', ['-C', scratch, 'merge', '-q', '--no-edit', 'origin/main']);",
+  },
 ];
 
 declareMutations(MUTATIONS.length);

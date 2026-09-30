@@ -4,6 +4,7 @@ import {
   enqueueAndWait,
   investigateFailure,
   listOpenChildPRs,
+  runPreflight,
 } from '../scripts/merge-train.mjs';
 
 /**
@@ -66,6 +67,60 @@ describe('enqueueAndWait — SHA-lock guards', () => {
     const code = await enqueueAndWait(gh, REPO, 123, SHA);
     expect(code).toBe(3);
     expect(gh.calls.some((c) => c[0] === 'pr' && c[1] === 'merge')).toBe(false);
+  });
+});
+
+describe('enqueueAndWait — atomic SHA-lock on the merge call itself', () => {
+  it('passes --match-head-commit with the exact expected SHA on the gh pr merge call', async () => {
+    const gh = fakeGh([
+      [(a) => a[0] === 'api' && a[1].includes('/check-runs'), () => JSON.stringify([])],
+      [(a) => a[0] === 'api' && a[1].includes('/commits/'), () => `${SHA}\n`],
+      [
+        (a) => a[0] === 'pr' && a[1] === 'view' && a.includes('headRefOid') && a.length === 9,
+        () => `${SHA}\n`,
+      ],
+      [(a) => a[0] === 'pr' && a[1] === 'merge', () => ''],
+      [
+        (a) =>
+          a[0] === 'pr' &&
+          a[1] === 'view' &&
+          a.includes('state,headRefOid,mergeCommit,baseRefName,headRefName'),
+        () => JSON.stringify({ state: 'CLOSED', headRefOid: SHA, mergeCommit: null }),
+      ],
+    ]);
+    await enqueueAndWait(gh, REPO, 123, SHA, { skipPreflight: true, intervalSeconds: 0.01 });
+    const mergeCall = gh.calls.find((c) => c[0] === 'pr' && c[1] === 'merge');
+    expect(mergeCall).toBeDefined();
+    const idx = mergeCall?.indexOf('--match-head-commit') ?? -1;
+    expect(idx).toBeGreaterThan(-1);
+    expect(mergeCall?.[idx + 1]).toBe(SHA);
+  });
+});
+
+describe("runPreflight — merges against the PR's OWN base, not a hardcoded main", () => {
+  it('a stacked PR (base != main) preflights by merging origin/<base>, not origin/main', () => {
+    const base = 'feat/1406-base';
+    const gh = fakeGh([
+      [(a) => a[0] === 'pr' && a[1] === 'view' && a.includes('baseRefName'), () => `${base}\n`],
+      [(a) => a[0] === 'pr' && a[1] === 'diff', () => 'tests/some.test.ts\n'],
+    ]);
+    const execCalls: unknown[][] = [];
+    const exec = (cmd: string, args: string[], opts?: unknown) => {
+      execCalls.push([cmd, args, opts]);
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    runPreflight(gh, REPO, 456, SHA, { exec, scratchDir: '/tmp/merge-train-test-scratch' });
+    const mergeCall = execCalls.find(
+      (c) => c[0] === 'git' && Array.isArray(c[1]) && (c[1] as string[]).includes('merge'),
+    );
+    expect(mergeCall).toBeDefined();
+    const mergeArgs = mergeCall?.[1] as string[];
+    expect(mergeArgs).toContain(`origin/${base}`);
+    expect(mergeArgs).not.toContain('origin/main');
+    const fetchCall = execCalls.find(
+      (c) => c[0] === 'git' && Array.isArray(c[1]) && (c[1] as string[]).includes('fetch'),
+    );
+    expect((fetchCall?.[1] as string[]).includes(base)).toBe(true);
   });
 });
 

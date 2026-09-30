@@ -104,32 +104,74 @@ export function isHeadAncestorOfMain(repoRoot, headSha) {
 // ── Pre-enqueue preflight ───────────────────────────────────────────────────
 
 /**
- * Merge current origin/main into a scratch worktree copy of the PR head and
- * run the PR's changed test files. Refuses (throws) on a red result unless
- * `opts.skip` is set.
+ * Default `exec` dependency: runs a real child process. Injectable so
+ * `runPreflight` is unit-testable without a real git clone/merge or a real
+ * test-runner invocation — see `tests/merge-train-cli.test.ts`.
+ *
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {object} [opts]
+ */
+export function defaultExec(cmd, args, opts = {}) {
+  return spawnSync(cmd, args, { encoding: 'utf8', ...opts });
+}
+
+function run(exec, cmd, args, opts) {
+  const r = exec(cmd, args, opts);
+  if (r.status !== 0) {
+    throw new Error(`${cmd} ${args.join(' ')} failed: ${r.stderr ?? r.stdout}`);
+  }
+  return r.stdout;
+}
+
+/**
+ * Merge the PR's ACTUAL base branch (not a hardcoded "main" — a stacked PR's
+ * base is another feature branch, #1731 review round 2) into a scratch
+ * worktree copy of the PR head, and run the PR's changed test files. Refuses
+ * (throws) on a red result unless `opts.skip` is set.
+ *
+ * `opts.exec` is the injectable process runner (defaults to `defaultExec`),
+ * so this whole flow is unit-testable with a fake that never touches a real
+ * git remote or spawns a real test runner.
  */
 export function runPreflight(gh, repo, pr, headSha, opts = {}) {
   if (opts.skip) {
     console.log('PREFLIGHT SKIPPED (--skip-preflight)');
     return;
   }
+  const exec = opts.exec ?? defaultExec;
+
+  // The PR's OWN base — never a hardcoded "main". A stacked PR's base is
+  // another feature branch; merging main into it there would preflight
+  // against a tree the PR is not actually being merged into.
+  const baseRefName =
+    gh([
+      'pr',
+      'view',
+      String(pr),
+      '-R',
+      repo,
+      '--json',
+      'baseRefName',
+      '-q',
+      '.baseRefName',
+    ]).trim() || 'main';
+
   const filesRaw = gh(['pr', 'diff', String(pr), '-R', repo, '--name-only']);
   const paths = filesRaw
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const scratch = mkdtempSync(join(tmpdir(), 'merge-train-'));
+  const scratch = opts.scratchDir ?? mkdtempSync(join(tmpdir(), 'merge-train-'));
   try {
-    run('git', ['clone', '-q', REPO_ROOT, scratch]);
-    run('git', ['-C', scratch, 'fetch', '-q', 'origin', headSha, 'main']);
-    run('git', ['-C', scratch, 'checkout', '-q', headSha]);
-    const merge = spawnSync('git', ['-C', scratch, 'merge', '-q', '--no-edit', 'origin/main'], {
-      encoding: 'utf8',
-    });
+    run(exec, 'git', ['clone', '-q', REPO_ROOT, scratch]);
+    run(exec, 'git', ['-C', scratch, 'fetch', '-q', 'origin', headSha, baseRefName]);
+    run(exec, 'git', ['-C', scratch, 'checkout', '-q', headSha]);
+    const merge = exec('git', ['-C', scratch, 'merge', '-q', '--no-edit', `origin/${baseRefName}`]);
     if (merge.status !== 0) {
       throw new Error(
-        `REFUSING to enqueue: main does not merge cleanly into PR head.\n${merge.stderr}`,
+        `REFUSING to enqueue: origin/${baseRefName} does not merge cleanly into PR head.\n${merge.stderr}`,
       );
     }
 
@@ -148,7 +190,7 @@ export function runPreflight(gh, repo, pr, headSha, opts = {}) {
       if (files.length === 0) continue;
       const cmd = runner === 'bun' ? 'bun' : 'npx';
       const args = runner === 'bun' ? ['test', ...files] : ['vitest', 'run', ...files];
-      const res = spawnSync(cmd, args, { cwd: scratch, encoding: 'utf8' });
+      const res = exec(cmd, args, { cwd: scratch });
       const verdict = computePreflightVerdict({
         exitCode: res.status ?? 1,
         output: `${res.stdout}\n${res.stderr}`,
@@ -159,18 +201,12 @@ export function runPreflight(gh, repo, pr, headSha, opts = {}) {
         throw new Error('preflight failed');
       }
     }
-    console.log(`PREFLIGHT OK (${paths.length} changed file(s), main merges cleanly)`);
+    console.log(
+      `PREFLIGHT OK (${paths.length} changed file(s), origin/${baseRefName} merges cleanly)`,
+    );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-function run(cmd, args) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
-  if (r.status !== 0) {
-    throw new Error(`${cmd} ${args.join(' ')} failed: ${r.stderr ?? r.stdout}`);
-  }
-  return r.stdout;
 }
 
 // ── enqueue + poll ───────────────────────────────────────────────────────────
@@ -196,7 +232,12 @@ export async function enqueueAndWait(gh, repo, pr, expectedHead, opts = {}) {
     runPreflight(gh, repo, pr, expectedHead, { skip: false });
   }
 
-  gh(['pr', 'merge', String(pr), '-R', repo, '--merge']);
+  // `--match-head-commit` makes GitHub itself refuse the merge atomically if
+  // the PR's head has moved since we last read it — check-then-act between
+  // the `fetchPrHead` above and this call is otherwise a race a push can
+  // win. The per-poll HEAD MOVED check (below) still runs on every tick for
+  // defence in depth, but this is the SHA-lock's primary enforcement point.
+  gh(['pr', 'merge', String(pr), '-R', repo, '--merge', '--match-head-commit', expectedHead]);
 
   const timeoutSeconds = opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
   const intervalSeconds = opts.intervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS;
