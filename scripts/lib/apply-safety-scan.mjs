@@ -1921,7 +1921,18 @@ function clauseWithBodies(clause, st) {
   );
 }
 
-function reportStdinApply(st, why, clause) {
+/**
+ * The ONE `STATEMENT_ALLOWLIST` check both `reportStdinApply` (a stdin
+ * apply) and `reportPatchTaint` (#1466.3: a `kubectl patch`/`set env`
+ * value) use — factored out rather than carried twice, so a round-8 review
+ * finding fixed here is fixed for both offense classes, and a mutation
+ * prover's anchor on this logic never has to pick one copy over the other.
+ * `valueText` is what `taintSources` traces: the WHOLE clause for a stdin
+ * apply (the value could be anywhere in it), or just the interpolated
+ * value for a patch/set-env (the rest of the clause is literal `kubectl`
+ * plumbing, not part of what was fetched).
+ */
+function checkStatementAllowlist(st, why, clause, valueText) {
   const stmt = statementText(clause, st);
   const entry = STATEMENT_ALLOWLIST.find((e) => e.file === st.file && e.statement === stmt);
   if (entry) {
@@ -1929,7 +1940,7 @@ function reportStdinApply(st, why, clause) {
     // value elsewhere: judge every source that can reach it against the sources
     // this entry names. A new or different one reds the scan.
     const found = new Set();
-    taintSources(clauseWithBodies(clause, st), st, 0, {
+    taintSources(clauseWithBodies(valueText, st), st, 0, {
       out: found,
       vars: new Set(),
       fns: new Set(),
@@ -1949,6 +1960,10 @@ function reportStdinApply(st, why, clause) {
     return;
   }
   offend(st, why, clause);
+}
+
+function reportStdinApply(st, why, clause) {
+  checkStatementAllowlist(st, why, clause, clause);
 }
 
 /** Counts one allowlist match for the spec's exactly-once / liveness checks. */
@@ -2464,26 +2479,7 @@ function classifyTarget(t, { producerText, clause, st, ctx }) {
  * `sources` list; `clause` is the whole statement, used as the pin key.
  */
 function reportPatchTaint(st, why, clause, val) {
-  const stmt = statementText(clause, st);
-  const entry = STATEMENT_ALLOWLIST.find((e) => e.file === st.file && e.statement === stmt);
-  if (entry) {
-    const found = new Set();
-    taintSources(clauseWithBodies(val, st), st, 0, { out: found, vars: new Set(), fns: new Set() });
-    const allowed = new Set(entry.sources);
-    const extra = [...found].filter((x) => !allowed.has(x));
-    if (extra.length > 0) {
-      offend(
-        st,
-        `${why}; allowlisted statement '${entry.id}' interpolates a value from an unpinned source: ${extra.join(' ; ')}`,
-        clause,
-      );
-      return;
-    }
-    for (const x of found) countAllowHit(st, `${entry.id}::${x}`);
-    countAllowHit(st, entry.id);
-    return;
-  }
-  offend(st, why, clause);
+  checkStatementAllowlist(st, why, clause, val);
 }
 
 /**
@@ -2582,6 +2578,7 @@ function heredocExpansions(body) {
  *   resolveSource?: ((path: string) => string | null) | null,
  *   allowHits?: Map<string, number> | null,
  *   file?: string | null,
+ *   followScripts?: boolean,
  * }} [options]
  * @returns {string[]}
  */
