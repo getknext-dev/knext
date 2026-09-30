@@ -1,0 +1,355 @@
+name: File-manager platform e2e at a tag (rc evidence)
+
+# Run the nightly file-manager platform e2e (#1282) against a specified git ref
+# (typically a release-candidate tag), with the operator built FROM THAT REF, and
+# record the operator image digest + ref + run id as rc evidence (#1305, #1563).
+#
+# Workflow inputs:
+#   git-ref: a git ref (tag, branch, SHA) to check out and build from
+#     (default: read from .github/compat-credential-ref.json::rcTag)
+#
+# BUDGET: same as nightly (~8-10 min wall).
+# Triggers: workflow_dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      git-ref:
+        description: 'Git ref (tag/branch/SHA) to check out and test (default: rcTag from .github/compat-credential-ref.json)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CLUSTER: fm-platform-e2e-tag
+  APP_NS: fm-e2e
+  SCRAPE_NS: fm-e2e-scrape
+  CURL_IMAGE: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+
+jobs:
+  resolve-git-ref:
+    name: Resolve git ref (default from rc tag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      git-ref: ${{ steps.resolve.outputs.git-ref }}
+      git-sha: ${{ steps.resolve.outputs.git-sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve git ref (input or rcTag default)
+        id: resolve
+        run: |
+          set -euo pipefail
+          GIT_REF='${{ inputs.git-ref }}'
+          if [ -z "$GIT_REF" ]; then
+            # Read rcTag from .github/compat-credential-ref.json
+            GIT_REF="$(jq -r '.rcTag' < .github/compat-credential-ref.json)"
+            if [ -z "$GIT_REF" ] || [ "$GIT_REF" = "null" ]; then
+              echo "::error::No git-ref input and rcTag is null or missing"
+              exit 1
+            fi
+          fi
+          GIT_SHA="$(git ls-remote origin refs/tags/$GIT_REF refs/tags/$GIT_REF^{} | awk '{print $1; exit}')"
+          if [ -z "$GIT_SHA" ]; then
+            echo "::error::Could not resolve $GIT_REF to a commit SHA"
+            exit 1
+          fi
+          echo "git-ref=$GIT_REF" >> "$GITHUB_OUTPUT"
+          echo "git-sha=$GIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved $GIT_REF to $GIT_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  platform-e2e-at-tag:
+    name: file-manager through kn-next deploy on kind (at tag)
+    needs: resolve-git-ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      operator-image-digest: ${{ steps.build-operator.outputs.operator-image-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-git-ref.outputs.git-sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+          test -f packages/kn-next/dist/utils/reserved-static-dirs.js
+
+      - name: Self-test - the checks go red on deliberate defects
+        run: node apps/file-manager/scripts/platform-e2e.selftest.mjs
+
+      - name: Self-test - the storage-mode leg's checks go red on deliberate defects
+        run: node apps/file-manager/scripts/storage-mode-e2e.selftest.mjs
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier (scale-to-zero tuned)
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl patch configmap/config-autoscaler -n knative-serving --type merge \
+            --patch '{"data":{"scale-to-zero-pod-retention-period":"0s","stable-window":"6s"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      - name: Build + deploy the operator from the tag
+        id: build-operator
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e-tag
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG" | sed 's/.*@//')"
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Could not capture operator image digest"
+            exit 1
+          fi
+          echo "operator-image-digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+
+      - name: Data plane (redis, postgres, minio) + Secrets
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NS"
+          kubectl create namespace "$SCRAPE_NS"
+          kubectl label namespace "$SCRAPE_NS" knext.dev/metrics-scrape=true
+          rnd() { openssl rand -hex 16; }
+          PG_PW="$(rnd)"; MINIO_KEY="$(rnd)"; MINIO_SECRET="$(rnd)"
+          CACHE_TOKEN="$(rnd)"; OBS_TOKEN="$(rnd)"; API_TOKEN="$(rnd)"
+          for v in "$PG_PW" "$MINIO_KEY" "$MINIO_SECRET" "$CACHE_TOKEN" "$OBS_TOKEN" "$API_TOKEN"; do echo "::add-mask::$v"; done
+          kubectl -n "$APP_NS" create secret generic fm-e2e-pg --from-literal=password="$PG_PW"
+          kubectl -n "$APP_NS" create secret generic fm-e2e-minio --from-literal=access="$MINIO_KEY" --from-literal=secret="$MINIO_SECRET"
+          kubectl -n "$APP_NS" create secret generic fm-e2e-db \
+            --from-literal=DATABASE_URL="postgres://postgres:${PG_PW}@postgres.${APP_NS}.svc.cluster.local.:5432/filemanager"
+          kubectl -n "$APP_NS" create secret generic file-manager-credentials \
+            --from-literal=CACHE_INVALIDATE_TOKEN="$CACHE_TOKEN" \
+            --from-literal=OBSERVABILITY_TOKEN="$OBS_TOKEN" \
+            --from-literal=MINIO_ENDPOINT="minio.${APP_NS}.svc.cluster.local" \
+            --from-literal=MINIO_PORT=9000 \
+            --from-literal=MINIO_ACCESS_KEY="$MINIO_KEY" \
+            --from-literal=MINIO_SECRET_KEY="$MINIO_SECRET"
+          kubectl -n "$APP_NS" create secret generic global-tokens --from-literal=file_manager_token="$API_TOKEN"
+          {
+            echo "CACHE_INVALIDATE_TOKEN=$CACHE_TOKEN"
+            echo "OBSERVABILITY_TOKEN=$OBS_TOKEN"
+            echo "MINIO_ACCESS_KEY=$MINIO_KEY"
+            echo "MINIO_SECRET_KEY=$MINIO_SECRET"
+          } >> "$GITHUB_ENV"
+          kubectl apply -f apps/file-manager/platform-e2e/data-plane.yaml
+          kubectl -n "$APP_NS" rollout status deploy/redis deploy/postgres deploy/minio --timeout=180s
+
+      - name: kn-next deploy (config profile for kind)
+        run: |
+          set -euo pipefail
+          cp apps/file-manager/platform-e2e/knext.config.e2e.ts apps/file-manager/knext.config.ts
+          cd apps/file-manager
+          node ../../packages/kn-next/dist/cli/kn-next.js deploy \
+            --registry localhost:5001 --namespace "$APP_NS" --tag "${GITHUB_RUN_ID}"
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s nextapp/file-manager \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe nextapp file-manager; exit 1)
+
+      - name: Reach the cluster (kourier-internal + MinIO port-forwards)
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          kubectl -n "$APP_NS" port-forward svc/minio 9000:9000 >/tmp/pf-minio.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::port-forwards never came up"; cat /tmp/pf-*.log; exit 1
+
+      - name: Platform e2e (A app / B platform / C basics)
+        env:
+          PLATFORM_E2E_BASE_URL: http://127.0.0.1:8080
+          PLATFORM_E2E_NAMESPACE: ${{ env.APP_NS }}
+          PLATFORM_E2E_SCRAPE_NAMESPACE: ${{ env.SCRAPE_NS }}
+          KN_NEXT_CLI: ${{ github.workspace }}/packages/kn-next/dist/cli/kn-next.js
+          APP_DIR: ${{ github.workspace }}/apps/file-manager
+          MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
+        run: |
+          export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
+          node apps/file-manager/scripts/platform-e2e.mjs
+
+      - name: Storage-mode - create the MinIO bucket for the leg (anonymous-read)
+        run: |
+          set -euo pipefail
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
+          aws s3 mb s3://fm-e2e-storage-assets --endpoint-url http://127.0.0.1:9000 --region us-east-1
+          cat > /tmp/fm-e2e-storage-assets-policy.json <<'JSON'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::fm-e2e-storage-assets/*"
+              }
+            ]
+          }
+          JSON
+          aws s3api put-bucket-policy --bucket fm-e2e-storage-assets \
+            --policy file:///tmp/fm-e2e-storage-assets-policy.json --endpoint-url http://127.0.0.1:9000
+
+      - name: Storage-mode - kn-next deploy (object storage against in-cluster MinIO)
+        env:
+          STORAGE_TAG: ${{ github.run_id }}-storage
+          KN_APP_NAMESPACE: ${{ env.APP_NS }}
+        run: |
+          set -euo pipefail
+          cp apps/file-manager/platform-e2e/knext.config.storage-e2e.ts apps/file-manager/knext.config.ts
+          cd apps/file-manager
+          AWS_ENDPOINT_URL="http://127.0.0.1:9000" \
+          AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" \
+          AWS_DEFAULT_REGION=us-east-1 \
+            node ../../packages/kn-next/dist/cli/kn-next.js deploy \
+              --registry localhost:5001 --namespace "$APP_NS" --tag "$STORAGE_TAG"
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s nextapp/file-manager-storage \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe nextapp file-manager-storage; exit 1)
+
+      - name: Storage-mode - assets served from MinIO, build id matches the deploy tag
+        env:
+          PLATFORM_E2E_BASE_URL: http://127.0.0.1:8080
+          PLATFORM_E2E_NAMESPACE: ${{ env.APP_NS }}
+          STORAGE_APP_NAME: file-manager-storage
+          STORAGE_BUCKET_URL: http://minio.${{ env.APP_NS }}.svc.cluster.local:9000/fm-e2e-storage-assets
+          STORAGE_TAG: ${{ github.run_id }}-storage
+          MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
+        run: |
+          export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
+          node apps/file-manager/scripts/storage-mode-e2e.mjs
+
+      - name: Record rc evidence (git ref, operator digest, run id)
+        run: |
+          set -euo pipefail
+          echo "## RC Evidence (git ref, operator digest, run id)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Key | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Git Ref | \`${{ needs.resolve-git-ref.outputs.git-ref }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Git SHA | \`${{ needs.resolve-git-ref.outputs.git-sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Operator Digest | \`${{ steps.build-operator.outputs.operator-image-digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run ID | \`${{ github.run_id }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/rc-evidence
+          cat > /tmp/rc-evidence/rc-evidence.json <<EOF
+          {
+            "git_ref": "${{ needs.resolve-git-ref.outputs.git-ref }}",
+            "git_sha": "${{ needs.resolve-git-ref.outputs.git-sha }}",
+            "operator_image_digest": "${{ steps.build-operator.outputs.operator-image-digest }}",
+            "run_id": "${{ github.run_id }}",
+            "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload rc evidence artifact
+        uses: actions/upload-artifact@1456dbcda4d932bbb3f825f5c57c0e16dfc57ee8 # v4.1.0
+        with:
+          name: rc-evidence
+          path: /tmp/rc-evidence/rc-evidence.json
+          retention-days: 30
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods 2>&1 || true
+          kubectl -n "$APP_NS" get nextapp file-manager -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get nextapp file-manager-storage -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get revision -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .status.conditions[*]}{.type}={.status} {.reason} {.message}{" | "}{end}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          revs="$(kubectl -n "$APP_NS" get revision -o name --sort-by=.metadata.creationTimestamp)"
+          echo "revision count: $(echo "$revs" | wc -l)"
+          r1="$(echo "$revs" | sed -n 3p)"; r2="$(echo "$revs" | sed -n 4p)"
+          echo "--- diff of $r1 vs $r2 (spec + annotations)"
+          diff <(kubectl -n "$APP_NS" get "$r1" -o json | jq -S '{spec:.spec,ann:.metadata.annotations,lbl:.metadata.labels}') \
+               <(kubectl -n "$APP_NS" get "$r2" -o json | jq -S '{spec:.spec,ann:.metadata.annotations,lbl:.metadata.labels}') || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=40 2>&1 | cut -c1-400 || true
+          for p in $(kubectl -n "$APP_NS" get pods -l serving.knative.dev/service=file-manager -o name 2>/dev/null); do
+            kubectl -n "$APP_NS" logs "$p" --all-containers --tail=60 2>&1 || true
+          done
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+
+      - name: Diagnostics - storage bucket contents
+        if: failure()
+        run: |
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY" AWS_DEFAULT_REGION=us-east-1
+          aws s3 ls s3://fm-e2e-storage-assets/ --recursive --endpoint-url http://127.0.0.1:9000 2>&1 \
+            | awk '{print $4}' | sed -E 's#/[^/]*$##' | sort | uniq -c | head -40 || true
+          aws s3 ls s3://fm-e2e-storage-assets/file-manager-storage/_next/static/chunks/ --endpoint-url http://127.0.0.1:9000 2>&1 | head -30 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true
