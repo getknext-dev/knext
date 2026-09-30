@@ -150,7 +150,11 @@ describe.skipIf(skipReason !== null)(
         readFileSync(join(NEXT_DIR, 'server', 'server-reference-manifest.json'), 'utf8'),
       ) as { node: Record<string, { exportedName?: string; filename?: string }> };
       const uploadAction = Object.entries(refs.node).find(
-        ([, v]) => v.exportedName === 'uploadFile' && v.filename === 'app/actions.ts',
+        (
+          [, v], // webpack records `app/actions.ts`, turbopack the workspace-relative
+        ) =>
+          // `apps/file-manager/src/app/actions.ts` — match the path suffix.
+          v.exportedName === 'uploadFile' && /(^|\/)app\/actions\.ts$/.test(v.filename ?? ''),
       )?.[0];
       expect(uploadAction).toBeDefined();
       const plain = await boot(b.exec, { env });
