@@ -51,7 +51,13 @@ function lockVersion(
 
 function bunCellMuslFiles(): string[][] {
   return CREDENTIAL_CELLS.filter((c) => c.runtime === 'bun' && c.workflowFile).map((c) =>
-    c.extraFiles.filter((f: string) => f.startsWith(`${REL}/`)).sort(),
+    // Lockfile pairs only: the next-sharp-resolution.json record is also frozen
+    // (compat-sharp-pin.mjs reads it) but is not a lockfile directory.
+    c.extraFiles
+      .filter((f: string) =>
+        /^scripts\/musl-native-lockfiles\/[^/]+\/package(-lock)?\.json$/.test(f),
+      )
+      .sort(),
   );
 }
 
