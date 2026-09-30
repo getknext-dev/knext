@@ -1,5 +1,14 @@
 # @getknext/core
 
+## 1.0.0-rc.3
+
+### Patch Changes
+
+- Release-candidate re-cut with no changes to package code. The compatibility credential test harness now covers the sharp version that Next.js 16.3.5 ships, so the Bun credential runs can execute against this candidate.
+- Updated dependencies
+  - @getknext/lib@1.0.0-rc.3
+  - @getknext/db@1.0.0-rc.3
+
 ## 1.0.0-rc.2
 
 ### Minor Changes
