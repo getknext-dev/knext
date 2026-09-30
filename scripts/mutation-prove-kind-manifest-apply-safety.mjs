@@ -190,7 +190,7 @@ prove(
 prove(
   'M6 class 2: a stdin apply fed by network content is no longer rejected',
   SCANNER,
-  '    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause);',
+  '    if (why) reportStdinApply(st, `stdin apply fed by network content (${why})`, clause, ctx);',
   '    void why;',
 );
 
@@ -558,7 +558,7 @@ prove(
 prove(
   'M75 source pin: only the walk-time value is followed, not every write site in the corpus',
   SCANNER,
-  '    for (const site of corpusWriteSites(r, st)) {',
+  '    for (const site of corpusWriteSites(r, st, scope)) {',
   '    for (const site of []) {',
 );
 prove(
@@ -639,7 +639,7 @@ prove(
 prove(
   'M87 positional parameters: a `set --` rewrite is not opaque',
   SCANNER,
-  '  if (st.corpus.some(setsPositionals))',
+  '  if (rewriteScopes.some((s) => scopedTexts(st, s).some(setsPositionals)))',
   '  if (false)',
 );
 prove(
