@@ -176,17 +176,20 @@ prove(
   '',
 );
 
-// ── 5. BOTH CRONS PRESENT IS NOT ENOUGH. ───────────────────────────────────
-// The weekly schedule only reaches the Bun lane because the lane-selection
-// expression is now dispatch-input-or-node — the schedule comparison retired
-// with the weekly cron, and the guard asserts NO schedule branch exists. So
-// the mutation flips: RE-INTRODUCE a schedule comparison and the guard must
-// red (a resurrected branch is a second lane hiding in an expression).
+// ── 5. THE FORBIDDEN BRANCH SPECIFICALLY. ───────────────────────────────────
+// #1249: the credential-v1.0-per-cell rewrite (#850/#1147) replaced the
+// dispatch-input-or-node expression with a longer one carrying THREE
+// schedule-gated bun branches (one per bun credentialing/early-warning
+// cron) — so "no schedule branch exists" is no longer the guarded shape.
+// What the spec still asserts (`not.toMatch(/schedule == '17 3 \* \* \*'/)`)
+// is that the NODE cron specifically never becomes a comparison branch in
+// this expression — re-introducing exactly that retired node-cron branch is
+// still the mutation's intent, preserved against the new expression shape.
 prove(
-  'a schedule branch re-introduced into the lane-selection expression',
+  'a retired node-cron schedule branch re-introduced into the lane-selection expression',
   COMPAT_YML,
-  "KNEXT_RUNTIME: ${{ github.event.inputs.runtime || 'node' }}",
-  "KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 3 * * *' && 'node') || 'node' }}",
+  "  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || (github.event.schedule == '47 23 * * *' && 'bun') || 'node' }}",
+  "  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 3 * * *' && 'node') || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || (github.event.schedule == '47 23 * * *' && 'bun') || 'node' }}",
 );
 
 console.log(`\n${pass} mutation(s) went red as required, ${fail} were survived by the guard.`);

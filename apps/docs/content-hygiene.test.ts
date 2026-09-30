@@ -211,3 +211,118 @@ describe('docs content — CLI reference matches the real verb set', () => {
     }
   });
 });
+
+describe('docs content — compat-suite credential page stays honest about an open window', () => {
+  // apps/docs/content/docs/compat-suite.mdx is the "verified against the official suite" page.
+  // Its whole point is to never claim a completed 14-night credential before one exists. These
+  // checks are the mechanical backstop for that promise — a future edit that quietly asserts
+  // "14/14" or drops the in-progress framing should fail CI, not slip through review.
+  const compatSuite = readFileSync(join(DOCS_DIR, 'compat-suite.mdx'), 'utf-8');
+
+  // Matches "14/14", "14 / 14", "14 of 14" — the shapes a completed-streak claim would take —
+  // regardless of surrounding punctuation, so a reworded sentence can't dodge the guard.
+  const completedFourteenNightClaim = /14\s*(?:\/|of)\s*14/i;
+
+  // The guard below is deliberately CONDITIONAL, not absolute: a completed 14/14 claim is a lie
+  // only while a credentialing window is still open. `.github/compat-credential-ref.json` pins the
+  // release-candidate tag every credential night runs against — `rcTag: null` is that file's own
+  // documented "not cut yet" state, and per docs/RELEASING.md's GA runbook, clearing `rcTag` back
+  // to `null` is step 1 of cutting GA. So once GA clears the pin, this page is allowed (in fact
+  // expected) to report a completed streak; the guard must not block that honest edit. Extracted
+  // as a pure function of (page text, credential-ref shape) so it can be exercised against FIXTURE
+  // ref values below, rather than only the real (currently open) `.github/compat-credential-ref.json`
+  // — mutating that file is out of bounds here (it is under the credential freeze guard) and would
+  // not let us prove the "window closed" half anyway, since the real window is still open today.
+  function violatesCompletedClaimGuard(
+    pageText: string,
+    credentialRef: { rcTag: string | null },
+  ): boolean {
+    const windowOpen = credentialRef.rcTag !== null;
+    return windowOpen && completedFourteenNightClaim.test(pageText);
+  }
+
+  const realCredentialRef = JSON.parse(
+    readFileSync(resolve(DOCS_DIR, '../../../../.github/compat-credential-ref.json'), 'utf-8'),
+  ) as { rcTag: string | null };
+
+  it('never claims a completed 14-of-14 (or 14/14) credentialed night count while the window is open', () => {
+    expect(violatesCompletedClaimGuard(compatSuite, realCredentialRef)).toBe(false);
+  });
+
+  it('states the credentialing window is in progress, not finished', () => {
+    expect(compatSuite).toMatch(/in progress/i);
+    // The negative-space check: no sentence anywhere on the page claims the window itself is
+    // "complete" / "finished" / "done" (as opposed to a *cell's build* being "done" — no such
+    // phrase exists in this file, so a plain substring match is enough and stays honest even if
+    // unrelated wording changes elsewhere on the page).
+    expect(compatSuite).not.toMatch(/window (?:is|has) (?:complete|finished|done)/i);
+  });
+
+  it('lists all four v1.0 cells — Node/Bun x Turbopack/webpack — consistently with the credential matrix', () => {
+    // These are the same four combinations audited by ADR-0056's CREDENTIAL_CELLS / D2, and the
+    // same four rows the compat-matrix page tracks. Deriving the check from the config file
+    // itself (rather than hardcoding "four") would be nicer, but that file names cells by lane id
+    // (node/bun) with no builder axis in its schema — the axis lives in workflow YAML, not JSON —
+    // so this test instead pins the combinations by their prose, matching how the page names them.
+    for (const combo of [
+      /Node\s*\|\s*Turbopack/i,
+      /Node\s*\|\s*webpack/i,
+      /Bun\s*\|\s*Turbopack/i,
+      /Bun\s*\|\s*webpack/i,
+    ]) {
+      expect(compatSuite, `compat-suite.mdx should list the ${combo} cell`).toMatch(combo);
+    }
+  });
+
+  it("lists the quarantine ledger's families with counts derived from the manifest, so they can't drift", () => {
+    // test/deploy-tests-manifest.knext.json's $knextQuarantines ledger is the source of truth.
+    // Deriving the expected counts from it (rather than hand-copying numbers into this test) means
+    // a future manifest edit that changes a family's membership is the thing that moves these
+    // expectations, not a human remembering to update two places in lockstep.
+    const manifest = JSON.parse(
+      readFileSync(resolve(DOCS_DIR, '../../../../test/deploy-tests-manifest.knext.json'), 'utf-8'),
+    ) as { $knextQuarantines: Array<{ family: string; cases: string[] }> };
+    const byFamily = new Map<string, { entries: number; cases: number }>();
+    for (const entry of manifest.$knextQuarantines) {
+      const acc = byFamily.get(entry.family) ?? { entries: 0, cases: 0 };
+      acc.entries += 1;
+      acc.cases += entry.cases.length;
+      byFamily.set(entry.family, acc);
+    }
+    // Every family the manifest actually contains must be named on the page, with its real counts.
+    expect(byFamily.size).toBeGreaterThan(0);
+    for (const [family, { entries, cases }] of byFamily) {
+      expect(
+        compatSuite,
+        `compat-suite.mdx should name the \`${family}\` quarantine family`,
+      ).toContain(`\`${family}\``);
+      expect(
+        compatSuite,
+        `compat-suite.mdx's \`${family}\` count should read ${entries} entries / ${cases} cases`,
+      ).toMatch(new RegExp(`${entries}\\s*entries\\s*\\(${cases}\\s*test cases\\)`));
+    }
+  });
+
+  it('mutation control: the completed-14-night guard actually catches a false claim, and only while the window is open', () => {
+    // Not a doc-content check — proves the guard function above is live, so a typo in either the
+    // regex or the open/closed branch can't silently pass a future "14/14" claim through.
+    const claimText = 'the window banked 14/14 nights';
+    const claimTextOf = 'the window banked 14 of 14 nights';
+    const claimTextSpaced = 'the window banked 14 / 14 nights';
+    const honestText = 'the window is in progress';
+
+    // Half 1: a completed claim, with a still-open window (a real, non-null rc tag) -> red.
+    const openWindow = { rcTag: 'v1.0.0-rc.2' };
+    expect(violatesCompletedClaimGuard(claimText, openWindow)).toBe(true);
+    expect(violatesCompletedClaimGuard(claimTextOf, openWindow)).toBe(true);
+    expect(violatesCompletedClaimGuard(claimTextSpaced, openWindow)).toBe(true);
+    expect(violatesCompletedClaimGuard(honestText, openWindow)).toBe(false);
+
+    // Half 2: the SAME completed claim, once the window has closed (GA cleared rcTag to null,
+    // docs/RELEASING.md step 1) -> green. The claim text does not change; only the window does.
+    const closedWindow = { rcTag: null };
+    expect(violatesCompletedClaimGuard(claimText, closedWindow)).toBe(false);
+    expect(violatesCompletedClaimGuard(claimTextOf, closedWindow)).toBe(false);
+    expect(violatesCompletedClaimGuard(claimTextSpaced, closedWindow)).toBe(false);
+  });
+});

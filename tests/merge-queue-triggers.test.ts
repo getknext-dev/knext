@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
@@ -133,8 +134,39 @@ describe('merge queue — signing/publish side effects stay ref-gated to main', 
   const DANGEROUS_STEP =
     /(cosign\s+sign|cosign\s+attest|crane\s+push|docker\/login-action|gh-release|softprops\/action-gh-release)/;
 
+  /**
+   * The two workflows gate their side-effect steps DIFFERENTLY, and both are
+   * legitimate — this checks that each stays SAFE, not that they use the same
+   * literal.
+   *
+   * `supply-chain.yml` (the app image) gates directly on
+   * `github.ref == 'refs/heads/main'` — the merge_group ref
+   * (`refs/heads/gh-readonly-queue/main/...`) never equals that literal, so
+   * this is safe by construction.
+   *
+   * `operator-supply-chain.yml` (#1667) gates on
+   * `steps.channel.outputs.publish`/`is_stable` — booleans DERIVED from the
+   * ref by `hack/release-channel.sh` (only `refs/heads/main` or
+   * `refs/tags/operator-v*` ever produce `publish=true`; see the dedicated
+   * "publish is never true for pull_request/merge_group refs" test below,
+   * which proves that derivation directly against the real script rather
+   * than re-deriving it here as a second copy of the regex). It ALSO
+   * requires `steps.trivy.outcome == 'success'` (#1667 round 4) —
+   * `continue-on-error` on the Trivy step masks `conclusion`, so `outcome`
+   * is the only field that still tells the truth about a failed scan.
+   */
+  function mainGated(file: string, cond: string): boolean {
+    if (file === 'operator-supply-chain.yml') {
+      return (
+        /steps\.channel\.outputs\.(publish|is_stable)\s*==\s*'true'/.test(cond) &&
+        /steps\.trivy\.outcome\s*==\s*'success'/.test(cond)
+      );
+    }
+    return /github\.ref\s*==\s*'refs\/heads\/main'/.test(cond);
+  }
+
   for (const file of SIDE_EFFECT_WORKFLOWS) {
-    it(`${file}: every signing/publish step is gated on the main ref, not on event_name`, () => {
+    it(`${file}: every signing/publish step is gated safely against the merge-queue ref, not on event_name`, () => {
       const { doc } = readWorkflow(file);
       const jobs = (doc.jobs ?? {}) as Record<string, Record<string, unknown>>;
       const offenders: string[] = [];
@@ -144,8 +176,7 @@ describe('merge queue — signing/publish side effects stay ref-gated to main', 
           const body = `${step.run ?? ''}\n${step.uses ?? ''}`;
           if (!DANGEROUS_STEP.test(body)) continue;
           const cond = 'if' in step ? String(step.if) : '';
-          const mainGated = /github\.ref\s*==\s*'refs\/heads\/main'/.test(cond);
-          if (!mainGated) {
+          if (!mainGated(file, cond)) {
             const label = typeof step.name === 'string' ? step.name : (step.uses ?? step.run);
             offenders.push(`${file} job \`${jobId}\` step \`${label}\` if: ${cond || '(none)'}`);
           }
@@ -161,4 +192,27 @@ describe('merge queue — signing/publish side effects stay ref-gated to main', 
       expect(offenders, offenders.join('\n')).toEqual([]);
     });
   }
+
+  it('operator-supply-chain.yml: steps.channel.outputs.publish is never true for pull_request or merge_group refs', () => {
+    // Runs the REAL script (hack/release-channel.sh), not a re-derived
+    // regex, against refs representative of the two events this describe
+    // block cares about: a pull_request ref and a merge_group queue ref.
+    const script = resolve(REPO_ROOT, 'packages/kn-next-operator/hack/release-channel.sh');
+    const representativeRefs: Array<[ref: string, refName: string]> = [
+      ['refs/pull/1694/merge', '1694/merge'],
+      [
+        'refs/heads/gh-readonly-queue/main/pr-1694-abcdef1234567890',
+        'gh-readonly-queue/main/pr-1694-abcdef1234567890',
+      ],
+    ];
+    for (const [ref, refName] of representativeRefs) {
+      const result = spawnSync('bash', [script, ref, refName], { encoding: 'utf8' });
+      expect(result.status, `release-channel.sh must exit 0 for ref ${ref}`).toBe(0);
+      const publishLine = result.stdout.split('\n').find((l) => l.startsWith('publish='));
+      expect(
+        publishLine,
+        `expected a publish= line in the output for ref ${ref}: ${result.stdout}`,
+      ).toBe('publish=false');
+    }
+  });
 });

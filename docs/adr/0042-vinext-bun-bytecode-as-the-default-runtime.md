@@ -3,6 +3,9 @@
 - **Status:** **Accepted (2026-08-04) — founder decision.** The direction *and* the default flip are
   accepted. Delivery is phased (below); the flip itself lands at Phase 5 and is gated on the exit
   criteria there, not on this ADR alone.
+- **Reconciled with ADR-0054 (2026-09-30, Proposed)** — see the last section. Decision 1 (vinext as
+  the default runtime) is superseded, and the default is now turbopack × bun. Decision 3 (one
+  config/CRD/operator/`RuntimeContract`) and the bytecode objective still stand.
 - **Amends:** **ADR-0036** — its `Status` line, its close-out verdict *"Rejected for 1.0 (measured)"*,
   its clause *"What is explicitly NOT authorised: making `bun-exec` the default."*, and its
   **2026-07-22 build×runtime matrix**, which this ADR reduces from three valid cells to two by
@@ -1106,3 +1109,42 @@ first, then CLI**.
   the answer**, so a later reader can see what the answer was given against — the ADR can put the
   number on the table before the question, which is what A12 enforces; it cannot compel a *responsive*
   answer, and no phrasing could. That limit is stated rather than papered over.
+
+## Amendment — reconciled with ADR-0054 (2026-09-30)
+
+- **Status:** **Proposed — for the sprint-close design review** (#1151). This appends a
+  reconciliation and does not edit the text above. The chain after this ADR: ADR-0048 (2026-08-27)
+  made vinext × bun the *only* target. ADR-0054 (Accepted 2026-09-22) reversed that and made the
+  Next standalone output, compiled on Bun, the default. ADR-0054 Amendment 7 made bytecode mandatory
+  in every cell. ADR-0058 (Proposed, recording the founder decision on #1295) scoped the v1.0
+  credential to four cells.
+
+**Still stands:**
+- **Decision 3 — one config surface, one CRD, one operator, one `RuntimeContract`.** It also stands
+  in its "What must NOT be done" form: "Exactly **two** `RuntimeContract` implementations. A third
+  is a **STOP**." ADR-0054 Amendment 9 reaffirms both across all six cells and names the two
+  implementations. It also records one open candidate for a third: the opt-in self-contained
+  standalone preload. That goes to the sprint-close review.
+- **Bytecode as the mandatory objective** (Decision 1's second half). ADR-0054 Amendment 7 extends
+  it from vinext to every cell: a cell without live bytecode caching is not a supported cell.
+- **Decision 4 — the official corpus stays the gate for vinext.** `compat-vinext.yml` still runs it
+  against knext's vinext artifact. Under ADR-0058 Decisions 3 and 6, the vinext number is published
+  as a measurement, not a credential.
+- **The vinext-specific engineering record.** This covers the image-optimisation reconciliation for
+  local sources, the opaque-binary supply-chain rule, warm-on-boot, and the phase evidence. It still
+  describes the vinext builder, which remains selectable.
+
+**Superseded:**
+- **Decision 1 — vinext + `bun build --compile --bytecode` as the default runtime.** ADR-0054 and
+  #1183 replaced it. The code default is
+  `DEFAULT_BUILDER_ID = "turbopack"` × `DEFAULT_RUNTIME_ID = "bun"`
+  (`packages/kn-next/src/adapters/artifact-contract.ts:394,424`), compiled to a `--bytecode`
+  executable. vinext is a selectable builder.
+- **Decision 2 — "`node + vinext` is explicitly not a supported cell".** ADR-0054 Amendment 7 made
+  vinext × node a supported cell, with the V8 compile cache as its bytecode mechanism. ADR-0058
+  Decision 4 then descoped it from the v1.0 credential while keeping it in the goal matrix.
+- **Decision 5 — the Phase 5 default flip.** ADR-0048 flipped the default to vinext and ADR-0054
+  reversed it, so there is no pending vinext flip left for Phase 5 to gate.
+- **"Requires amendment of (Phase 5, not now)"** in the header. Those rule edits were meant to make
+  vinext the default. The rules now need reconciling toward ADR-0054 instead. That half is the
+  maintainer's (#1149).

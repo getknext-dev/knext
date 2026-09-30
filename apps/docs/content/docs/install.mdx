@@ -97,10 +97,16 @@ Install the control plane with one apply:
 kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
+`operator-latest` always points at the newest **stable** release — it moves only when a stable
+version is cut, never on every commit to `main`. **Prefer pinning an exact version for anything but
+a quick trial** — see [Operator → Installing the
+operator](/docs/operator#installing-the-operator) for the versioned-release URL pattern and what
+each release channel means.
+
 <Callout type="warn">
-**The `operator-latest` release URL resolves only once an operator release has been cut.** If no release
-exists yet — or you are building from a fork — generate the bundle locally instead, from the
-operator source directory:
+**The `operator-latest` release URL resolves only once an operator release has been cut.** If no
+release exists yet — or you are building from a fork — generate the bundle locally instead, from
+the operator source directory:
 
 ```sh title="shell"
 make build-installer IMG=<some-registry>/kn-next-operator:tag

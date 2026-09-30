@@ -1,136 +1,192 @@
 ---
-title: Verified compatibility
-description: knext is validated against the official Next.js deploy-mode e2e suite, per runtime × builder combination, with an honest per-cell credentialing bar.
+title: Verified against the official Next.js test suite
+description: Exactly what knext's compatibility credential covers, what it does not, and its current status — stated honestly, not as a marketing claim.
 ---
 
 knext's goal is **verified-adapter status**: open source, validated against the official
-Next.js compatibility suite, honest about every exclusion. This page describes exactly what is
-verified, how, and what the claim does and does not cover.
+Next.js compatibility suite, honest about every exclusion. This page states precisely what that
+credential covers today, what it explicitly does not cover, and the current status of the
+in-progress credentialing window — including while that window has not yet completed.
 
-<Callout type="info">
-**The claim.** knext runs the official `vercel/next.js` **deploy-mode e2e suite** against each
-combination of runtime (Node, Bun) and builder (Turbopack, webpack, or `vinext`). Each combination
-— a **cell** — is tracked separately: a green result on one cell says nothing about another.
-Four cells are in scope for v1.0: Node and Bun, each on Turbopack and on webpack. The `vinext`
-cells are measured, not credentialed. The scope — including the small set of documented
-exclusions — is spelled out below.
+<Callout type="warn">
+**Status, stated plainly.** The v1.0 credentialing window is **in progress**, not complete. A cell
+only counts as credentialed once it has banked **14 consecutive scheduled nights**, each with
+every shard reporting zero failed and zero not-run tests, run against one frozen release-candidate
+build. No cell has reached that bar yet. Treat every number on this page as current evidence for
+where a cell stands today — never as a finished, all-fourteen-nights-passing result. See
+[Verified compatibility numbers](/docs/compat-matrix) for the live per-cell counts and evidence,
+which this page deliberately does not duplicate.
 </Callout>
 
 ## What "the official suite" is
 
-There is no `@next/compat-suite` npm package. The official compatibility harness is a **mode** of
-Next.js's own e2e suite: you check out `vercel/next.js`, build it, and run its deploy-eligible e2e
-tests with `NEXT_TEST_MODE=deploy`, pointing the harness at your adapter's lifecycle scripts. Each
-test then builds a real app **through your adapter** and runs its assertions over HTTP against the
-deployment your scripts produce — the same validation path the reference adapters use.
+There is no separate `@next/compat-suite` package. The official compatibility harness is a
+**mode** of Next.js's own end-to-end test suite: check out `vercel/next.js`, build it, and run its
+deploy-eligible e2e tests with `NEXT_TEST_MODE=deploy`, pointing the harness at an adapter's own
+lifecycle scripts. Each test builds a real Next.js app **through the adapter** and asserts over
+real HTTP against the deployment those scripts produce — the same validation path the reference
+adapters use.
 
-## Runtime × builder cells
+## The four cells the v1.0 credential covers
 
-knext supports building and running a Next.js app in more than one shape. Each shape is its own
-compatibility cell, tracked with its own evidence:
+knext's v1.0 credential is a **matrix, not a single number**. Four combinations are in scope:
 
-- **Turbopack build, Bun runtime (the default).** `next build`'s standalone output, with the
-  server compiled ahead of time into a **bytecode executable** that runs on Bun. This is what
-  `knext build` produces when you set nothing.
-- **Turbopack build, Node runtime.** The same standalone output (`server.js`) booted under Node,
-  with a V8 compile cache baked into the image. Selectable with `runtime: 'node'`.
-- **Webpack build, Bun or Node runtime.** The same two runtimes, with `next build --webpack`
-  as the bundler (`build: 'webpack'`).
-- **`vinext` build, Bun runtime.** The vinext build, compiled into a bytecode executable on Bun.
-  Selectable with `build: 'vinext'`; measured, not credentialed for v1.0.
-- **`vinext` build, Node runtime.** The same vinext build, emitted for Node instead of compiled for
-  Bun, and run with a V8 compile cache baked into the image. It builds and boots today; the suite
-  has no lane for it yet.
-
-## How knext runs the suite
-
-- **Pinned upstream ref.** The harness checks out `vercel/next.js` at a pinned release tag
-  (currently `v16.2.12`) — never `canary` — so an upstream break is not mistaken for a knext
-  regression.
-- **Real lifecycle scripts.** The deploy tests run through knext's lifecycle scripts, which pack
-  the `@getknext/core` adapter, set `NEXT_ADAPTER_PATH`, and boot each cell's own artifact — the
-  standalone `server.js` on Node, or the compiled executable on Bun, depending on the cell under
-  test.
-- **16 shards, on a schedule.** Each cell's suite run is sharded 16 ways (matching the reference
-  adapter setup). Two kinds of scheduled run exist per cell — see **Credentialing**, below — plus
-  manual dispatch.
-- **Red means red.** A shard reporting any failed (or silently not-run) test fails the job, and a
-  red scheduled run opens a tracking alarm. Any claim on this page is only as good as its most
-  recently cited run, and the policy is to withdraw a claim the moment the run it rests on goes red.
-
-## Credentialing: what counts toward v1.0
-
-A single green run — even a green nightly — is evidence, not a credential. knext's v1.0 bar asks
-for more:
-
-- **Every v1.0 cell earns its own credential.** There is no single "the suite is green"
-  claim; each of the four cells (Node and Bun, each on Turbopack and on webpack) must independently
-  bank **14 consecutive scheduled nights**
-  where every shard reports zero failed and zero not-run tests, and no new entry lands in the
-  documented flaky-exceptions ledger for that cell.
-- **A credential night runs against a frozen release build of knext**, not against the
-  fast-moving main branch. This keeps a 14-night streak from being reset by unrelated day-to-day
-  changes while it is banking.
-- **Nightly runs on the main branch are early warning only.** They keep running, and a red one
-  still raises an alarm, but they can never advance a cell toward its 14-night credential — only a
-  scheduled run against a frozen release build counts.
-- **`vinext` is outside the v1.0 credential.** The `vinext` × Bun cell is selectable but measurably
-  below parity, so its number is published as a measurement and it gets no 14-night window. The
-  `vinext` × Node cell has no suite lane yet. Both can join the credential set in a later release.
-- **No cell is credentialed yet.** A frozen release build for credentialing has not been cut, so no
-  cell currently holds a 14-night streak. This page will be updated with per-cell credential status
-  once a streak exists to report.
-
-## Results
-
-The numbers below are the most recent runs for each cell. Treat them as current evidence of where
-each cell stands today, not as a completed v1.0 credential. Runs marked "one run" were a manually
-dispatched run against Next.js v16.2.12: verified once, not credentialed.
-
-| Cell | Most recent evidence | Cadence |
-|---|---|---|
-| Turbopack build, **Node** runtime | 792 tests passed, 0 failed, against Next.js v16.2.12, on the nightly | Nightly (main), early warning |
-| Turbopack build, **Bun** runtime, compiled executable (default) | 792 passed, 0 failed, on the compiled executable (one run, Bun 1.4.2); its nightly credential lane is wired and waiting for a release candidate | One run; credential lane scheduled |
-| Webpack build, **Node** runtime | 792 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
-| Webpack build, **Bun** runtime | 792 passed, 0 failed (one run); credential lane wired | One run; credential lane scheduled |
-| `vinext` build, **Bun** runtime | 728 passed, 38 failed, 12 quarantined of 778 — a measurement, not a credential. Tracked on its own bar, see [Bun & the compiled executable](/docs/bun-runtime) | Weekly |
-| `vinext` build, **Node** runtime | Buildable and booted on every PR (GET 200, compile cache baked and accepted); no suite lane yet | — |
-
-## What the claim covers — and what it doesn't
-
-The tests run at the pinned ref are Next.js's own **deploy-eligible e2e selection** (including
-upstream's own per-case skips), minus two documented, auditable subtractions:
-
-### 1 · Architectural exclusions (4 categories)
-
-These are capabilities knext does not have, excluded openly rather than silently skipped:
-
-| Excluded category | Why |
+| Runtime | Builder |
 |---|---|
-| Edge Runtime | knext targets the Node/Bun standalone server; it has no edge (V8-isolate) runtime. |
-| Edge Middleware | Edge Middleware needs the Edge Runtime; knext supports the Node middleware convention only. |
-| PPR | Partial Prerendering is not adapter-standardizable yet (upstream-gated). |
-| Cache Components | `'use cache'` / `cacheLife` is an evolving upstream API not yet stabilized for adapters. |
+| Node | Turbopack |
+| Node | webpack |
+| Bun | Turbopack |
+| Bun | webpack |
 
-### 2 · A per-case flaky-quarantine ledger
+Each cell is a **standalone build** (`next build`'s `output: 'standalone'` server), booted on its
+own runtime. Turbopack on Bun is knext's default — the standalone server compiled into a bytecode
+executable — and each of the other three combinations is user-selectable. Every cell runs the
+identical test corpus and shard layout; the only variable that changes between cells is the
+runtime and the builder.
 
-A small, evidence-guarded ledger quarantines individually-documented flaky tests. Every entry
-records the observed failure mechanism and its upstream provenance, and the ledger is guarded by a
-test so entries cannot be added without that evidence. It exists to keep the nightly signal clean —
-not to manufacture a green run.
+<Callout type="info">
+**What this table does not include.** The compiled `vinext` build (a separate, Vite-based
+implementation of Next.js) is measured against the same corpus, but it is **not** one of the four
+v1.0 cells — see [what's out of scope](#whats-out-of-scope) below.
+</Callout>
+
+For the current evidence behind each of these four cells — run counts, pass/fail totals, and
+credential-night progress — see [Verified compatibility numbers](/docs/compat-matrix); this page
+is the scope-and-methodology reference, not the scoreboard.
+
+## The Next.js version under credential
+
+The credential runs against a **pinned Next.js release tag**, never `canary`, so an upstream
+regression is never mistaken for a knext defect. As of the current credentialing round the pinned
+tag is the same Next.js release that `knext create` scaffolds today — there is no deliberate
+version gap between what is credentialed and what a new app ships with.
+
+## It runs against published release-candidate packages, not `main`
+
+A single green run — even a green nightly on the fast-moving `main` branch — is evidence, not a
+credential. The v1.0 bar requires every credential night to run against one **frozen
+release-candidate build**: a specific `@getknext/*` release-candidate tag, published to npm under
+the `rc` dist-tag, checked out at a fixed commit rather than re-resolved on each run. This keeps a
+14-night streak from being reset by unrelated day-to-day changes on `main` while it is banking —
+and it means the credential is earned by the exact bytes an outside user installing
+`@getknext/core@rc` would get, not by a moving target.
+
+Nightly runs on `main` keep running as an early-warning signal — a red one still raises an alarm —
+but they can never advance a cell toward its 14-night credential. Only a scheduled run against the
+pinned release-candidate build counts.
 
 <Callout type="warn">
-**No silent skips.** Every exclusion is named, categorized, and kept in a manifest that must shrink
-— never grow — except from observed, documented failures. If a category above ever becomes
-adapter-standardizable upstream, it comes off the list and into the run.
+**The 14-night window is currently open, not complete.** A release-candidate build is pinned and
+the credential nights are running against it. As of today, no cell has yet accumulated 14
+consecutive qualifying nights against this build — the count is in progress. This page will be
+updated with each cell's credentialed status once a streak actually completes; until then, no
+claim on this page should be read as a completed fourteen-night streak.
 </Callout>
+
+## The quarantine list — and why it exists
+
+The credential is scoped against Next.js's own deploy-eligible test selection, minus three
+documented, auditable categories of subtraction. All three shrink toward zero over time and none
+is added pre-emptively — only from an observed, evidenced failure.
+
+### 1 · Architectural exclusions
+
+A small, fixed set of test categories is excluded because knext does not implement the capability
+they test, not because the tests fail unpredictably:
+
+| Category | Why it's excluded |
+|---|---|
+| Edge Runtime | knext runs a Node/Bun standalone server; it has no V8-isolate edge runtime. |
+| Edge Middleware | Edge Middleware requires the Edge Runtime; knext supports only the Node middleware convention. |
+| Partial Prerendering (PPR) | Not yet adapter-standardizable upstream. |
+| Cache Components (`'use cache'`) | An evolving upstream API, not yet stabilized for adapters. |
+
+These are also documented on the [compatibility matrix](/docs/compat-matrix) as explicit `⛔`
+rows — out of scope today, not silently skipped.
+
+### 2 · Tests upstream itself already skips
+
+Next.js's own deploy-tests manifest marks some cases as known-unreliable against its own reference
+deploy target. knext mirrors those upstream skips verbatim — running them anyway would book
+upstream's own noise as a knext failure, which is not an honest signal either way. This category is
+not knext-specific debt; it is carried over from upstream's own manifest.
+
+### 3 · knext's own observed-failure quarantine ledger
+
+A separate, smaller ledger quarantines individual test cases — or, in a bounded number of cases,
+whole files — that knext itself has observed failing for a documented, evidenced reason. Every
+entry records its observed failure mechanism and upstream provenance, and is checked mechanically
+so an entry cannot be added without that evidence; this ledger is re-reviewed whenever the
+credentialed Next.js version moves. It currently holds two distinct families:
+
+- **`bun-edge-fetch`** — a Bun-runtime edge-sandbox outbound `fetch()` gap: an edge-runtime
+  `fetch()` call resolves but its response body never settles, hanging the test until it times out.
+  This is a Bun runtime limitation, independent of the Next.js version under test.
+- **`vercel-infra-coupled`** — tests whose deploy-mode assertion encodes behavior that only
+  Vercel's own hosting infrastructure produces (for example, a response header set by Vercel's own
+  CDN), not anything a self-hosted deployment can or should reproduce. Each entry in this family is
+  checked case-by-case: knext's actual result is confirmed to match the correct self-hosted
+  expectation before the entry is quarantined.
+
+<Callout type="info">
+**Counts, kept honest by a CI check.** As of the current manifest, `bun-edge-fetch` quarantines 2
+entries (3 test cases) and `vercel-infra-coupled` quarantines 6 entries (21 test cases). These
+numbers are asserted against the manifest by a docs test, so this page cannot silently drift from
+the ledger it describes.
+</Callout>
+
+Neither ledger above is used to manufacture a green run — both exist to keep the nightly signal
+honest, and both shrink toward zero over time rather than growing pre-emptively.
+
+## The harness boot-path caveat
+
+The credential harness and the platform's real runtime boot a Next.js app somewhat differently
+depending on the runtime, and that difference is not swept under the numbers above.
+
+- **Node cells.** The harness boots the standalone server **through knext's own shipped supervisor**
+  — the same wrapper process the operator runs in production, which handles graceful shutdown
+  (draining in-flight requests and running `after()` callbacks on `SIGTERM`) and exposes a metrics
+  endpoint. So the Node credential numbers are earned on close to the real production entrypoint.
+  Two differences remain, both artifacts of running many deployments concurrently in CI rather than
+  one in production: the metrics port is a dynamically chosen per-deploy port instead of the fixed
+  production default, and the shutdown grace period is shorter than production's default so
+  teardown fits inside the harness's own timeout.
+- **Bun cells.** The harness boots the compiled standalone executable **directly** — the compiled
+  binary itself, not through a supervisor wrapper. The shipped production image's own Bun boot path
+  does run through a supervisor-equivalent entrypoint; the harness's Bun cells do not exercise it,
+  so their pass/fail numbers cover the compiled executable's own behavior, not that wrapper.
+
+That gap is not left unverified, though: the supervisor-wrapped entrypoint's own behavior — that it
+applies the same compat-required response normalization, on both the Node- and Bun-standalone
+targets — is checked separately, by booting the actual shipped container image the way the operator
+boots it and asserting the normalized response over HTTP. So both boot paths are each verified,
+just by different checks, and a reader should not assume the harness numbers alone describe what
+production traffic actually boots on every cell.
+
+## What's out of scope
+
+Three things are explicitly **not** covered by this credential, stated here so no reader has to
+infer it from an absence:
+
+- **The compiled `vinext` executable.** knext also offers a separate, Vite-based build of Next.js,
+  compiled into a single Bun executable. It is measured against the same test corpus and the
+  number is published, but it does not carry a 14-night credential window and is not one of the
+  four v1.0 cells above — see [Bun & the compiled executable](/docs/bun-runtime) for its own,
+  separately-tracked status.
+- **Edge Middleware and Partial Prerendering / Cache Components.** Listed above as architectural
+  exclusions — they are outside what the suite can even test against knext, because knext does not
+  implement them, not because of a credentialing gap.
+- **Cluster-level behavior.** The suite validates one deployed app's HTTP behavior against a real
+  Next.js corpus. It does not exercise Knative autoscaling, multi-tenant cluster behavior, the
+  operator's reconciliation logic, or anything above the single-app HTTP surface — those are
+  covered by knext's own operator and integration tests, not by this credential.
 
 ## The per-PR smoke gate
 
 Independently of the official suite, a fast in-repo smoke gate runs on **every change**: it builds
-an example app through the adapter, boots it on a **Node + Bun** matrix, and hard-asserts real HTTP
+an example app through the adapter, boots it on a Node + Bun matrix, and hard-asserts real HTTP
 behavior (App Router HTML, RSC flight payloads, route handlers, dynamic/static routes, middleware
-header injection). The official suite is the correctness credential; the smoke gate is the
+header injection). The official suite above is the correctness credential; the smoke gate is the
 minutes-fast regression tripwire in front of it.
 
 <Callout type="info">

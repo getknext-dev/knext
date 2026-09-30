@@ -1,0 +1,29 @@
+# DRAFT — NOT FOR SUBMISSION until rc.2 reaches 14/14 on all four credential cells (Refs #1566).
+#
+# Target repo: vercel/next.js
+# Target file: docs/01-app/01-getting-started/17-deploying.mdx
+# Base ref:    canary @ df0228d4ff9fdcf1d0728f89ceb25660ffc3a9ec (fetched 2026-09-30 via
+#              `git clone --depth 1 --filter=blob:none --sparse` of vercel/next.js, sparse-checked
+#              out to docs/01-app/01-getting-started only)
+#
+# This is the minimal, precedent-shaped diff: one line added to the "Other Platforms" list,
+# matching the exact format of every other entry there (label + link, nothing else) per the
+# Hostinger review lesson (vercel/next.js#90246 — reviewer asked for "just the company name").
+# See NOTES.md in this directory for:
+#   - why this section's own framing ("not built on the public Adapter API") is factually WRONG
+#     for knext, and why this patch does not silently rewrite that framing inline
+#   - the alternative placement/wording options for the founder to choose from
+#   - what the PR body must say to flag the mismatch honestly (per issue #1566 comment)
+#
+# Apply with: git apply listing.patch   (from a vercel/next.js checkout root)
+diff --git a/docs/01-app/01-getting-started/17-deploying.mdx b/docs/01-app/01-getting-started/17-deploying.mdx
+index eb6f4f5..1c03a21 100644
+--- a/docs/01-app/01-getting-started/17-deploying.mdx
++++ b/docs/01-app/01-getting-started/17-deploying.mdx
+@@ -96,5 +96,6 @@ The following platforms offer their own Next.js integrations. These are not buil
+ - [Deno Deploy](https://docs.deno.com/examples/next_tutorial)
+ - [Firebase App Hosting](https://firebase.google.com/docs/app-hosting/get-started)
+ - [Netlify](https://docs.netlify.com/frameworks/next-js/overview/#next-js-support-on-netlify)
++- [knext](https://knext.dev/docs/getting-started)
+
+ For details on which Next.js features require specific platform capabilities, see [Deploying to Platforms](/docs/app/guides/deploying-to-platforms).
