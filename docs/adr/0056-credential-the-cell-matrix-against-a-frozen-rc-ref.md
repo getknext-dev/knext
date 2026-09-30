@@ -579,15 +579,41 @@ markers, D5's `workflowFile` table). It is not a defense against a compromised w
 defense against the SPECIFIC hole #1550 found in the `kind: 'deploy'` heuristic — a real knext
 failure wearing a matching message shape.
 
-**Deferred, stated honestly (not implemented in this PR):** wiring the actual preflight step and
-its `continue-on-error: false` ordering into `test-e2e-deploy.yml` is untested here — this PR adds
-the ledger schema, the audit-side grading, and the counting rule, TDD'd against ledger fixtures
-that shape the marker exactly as the harness would produce it, but does not itself edit the
-credential workflow (a live-cluster-verified change this worktree cannot make: no kind/docker, no
-GHA run). Wiring the producer is tracked as a follow-up action item below. Until it lands, no real
-credential night can ever BE void-eligible — the marker a real night would need is never written —
-so this PR changes no currently-banked streak; it only makes the audit ABLE to grade one once the
-producer exists.
+**Wired and proven live in this PR (lead-directed follow-up, 2026-09-30).** The producer — the
+per-shard fault-injection input, the two phase-boundary markers, and the two `failure()`-gated
+detector steps — is wired into `test-e2e-deploy.yml`, and `scripts/compat-run-ledger.mjs` builds the
+self-referencing `preKnextVoidMarker` from the aggregated shard summaries. Proved live by two
+`workflow_dispatch` runs on this branch, identified by their own `dispatchId` (never "latest"):
+
+- **Fault run** (`preKnextFault=runner-setup`, dispatchId `1553-fault-runner-setup`), run
+  [36648004813](https://github.com/getknext-dev/knext/actions/runs/36648004813): every one of 16
+  shards reported `kind: 'pre-knext', phase: 'runner-setup'` (`failed:0, notRun:1`), and the
+  `compat-run-ledger` artifact carried `"preKnextVoidMarker": {"runId": "36648004813", "lane":
+  "node", "phase": "runner-setup"}` — self-referencing this exact run. Per-shard step trace
+  confirms the intended sequencing: the fault-injection step failed, the runner-setup
+  phase-complete marker was correctly SKIPPED (never marks a phase complete that didn't complete),
+  the detector step ran and wrote the summary, every dependency-install-phase step and "Run
+  official deploy tests" were skipped (default `success()` gating), and "Summarize shard result"
+  did not clobber the honest summary with a false-green parse.
+- **Normal run** (no fault, dispatchId `1553-normal-smoke`), run
+  [36648007554](https://github.com/getknext-dev/knext/actions/runs/36648007554): concluded
+  `success`; `preKnextVoidMarker: null`, no shard carries a `kind: 'pre-knext'` failure — the
+  steady state is untouched.
+- **Fed through the real audit code** (`gradeNight`/`auditWindow`), the fault run's actual ledger —
+  byte-identical shard failures and marker, only the orthogonal "is this a scheduled credential
+  night" fields overlaid, since a `workflow_dispatch` can never itself be one (ADR-0056 D1) —
+  grades `voidEligible: true`, and spliced between 13 and 1 synthetic green credential nights on
+  the same fingerprint, `auditWindow` reports `met: true, longest.nights: 14, streaks: 1,
+  voidNights: [{runId, marker, date}]`: the exact 13+1+1=14 bridge this amendment specifies. An
+  earlier pass of this same check, with the marker's `runId` left unrenamed to match a relabelled
+  night, correctly reported `voidEligible: false` — the self-reference validation failing closed
+  exactly as designed, not a defect.
+
+No currently-banked or in-progress **credential** streak is affected: these are `workflow_dispatch`
+early-warning runs (ADR-0056 D1 — a dispatch is never a credential night), and
+`.github/compat-credential-ref.json`'s `paths`-scoped `rcBumpMarker` covers exactly the three files
+this touches (`scripts/compat-window-audit.mjs`, `scripts/compat-run-ledger.mjs`,
+`.github/workflows/test-e2e-deploy.yml`).
 
 #### The bridging rule: exactly what "13 green + 1 void + 1 green = 14" means
 
@@ -647,10 +673,11 @@ infra-classified one) still prints.
 
 ### Consequences
 
-- **No currently-banked or in-progress credential streak is affected by this PR.** The producer
-  (the preflight step + its ledger marker) is not wired in this PR (see the deferral note above), so
-  no real ledger can ever satisfy `isValidPreKnextVoidMarker` yet. This PR only adds the audit's
-  ABILITY to grade a night VOID once the producer exists.
+- **No currently-banked or in-progress credential streak is affected by this PR.** The producer is
+  wired and proven live (see above), but only `workflow_dispatch` runs have exercised it so far —
+  every credential cron still runs unmodified `main`/RC-tag code until this PR merges, and even
+  then a real credential night simply CANNOT need the grace unless a genuine pre-knext fault occurs
+  on one.
 - **The credential's integrity is preserved, not traded for tolerance.** Every branch of the gate —
   the kind check, the marker's three self-reference fields, the credential-scope restriction, the
   fingerprint-continuity requirement, and the one-bridge-per-streak cap — is independently
@@ -676,11 +703,15 @@ infra-classified one) still prints.
       from an ordinary `NO — …` red.
 - [x] Mutation-proved (guards 18-25, `scripts/mutation-prove-compat-window-audit.mjs`) and
       TDD'd (`tests/compat-window-audit.test.ts`, `#1553` describe block).
-- [ ] **Wire the producer**: the preflight step (per shard, one per `runner-setup` /
-      `dependency-install` / `cluster-bringup` phase boundary) in `test-e2e-deploy.yml`, writing the
-      shard summary JSON and the run-level `preKnextVoidMarker` exactly as specified above, ordered
-      so it structurally cannot run after any knext code has. This needs a real GHA run (and
-      arguably a controlled fault injection) to verify, which this PR's worktree cannot do.
-- [ ] Once wired: verify on a live credential-adjacent run (early-warning `main` night first) that
-      a genuine pre-knext failure (e.g. a deliberately broken `cluster-bringup` step) produces a
-      night the audit grades void-eligible, before ever relying on it on a credential cron.
+- [x] **Wire the producer**: a dispatch-only, default-off `preKnextFault` input plus, per phase
+      (`runner-setup`, `dependency-install`), a fault-injection step, a phase-complete marker, and a
+      `failure()`-gated detector in `test-e2e-deploy.yml`, writing the shard summary JSON and (via
+      `scripts/compat-run-ledger.mjs`) the run-level `preKnextVoidMarker`. Proved live on two
+      `workflow_dispatch` runs (fault + normal, run ids and the fed-through-the-audit result above).
+- [ ] `cluster-bringup` has no producer yet: `test-e2e-deploy.yml` runs no cluster today, so
+      `PRE_KNEXT_PHASES` carries that phase name for a future cell that needs one, unproduced until
+      then. Do not treat its absence as a defect in this PR.
+- [ ] Verify on a real SCHEDULED night (early-warning `main` first, never a credential cron
+      directly) that an UNPLANNED, genuine pre-knext failure — not the dispatch-only fault
+      injection — produces a night the audit grades void-eligible, before ever relying on the grace
+      on a credential cron.
