@@ -129,6 +129,15 @@ export const DEFAULT_FINGERPRINT_FILE = 'fingerprint/compat-window-fingerprint.j
  * @property {string[]} missingShards
  * @property {boolean} complete
  * @property {ShardRow[]} shards
+ * @property {{runId: string|undefined, lane: string, phase: string}|null} preKnextVoidMarker
+ *   #1553 (ADR-0056 Amendment 4) — present only when at least one reported
+ *   shard carries a proven `kind: 'pre-knext'` failure (written by a
+ *   test-e2e-deploy.yml pre-knext fault-detector step, never the deploy-test
+ *   harness itself). SELF-REFERENCES this exact run's own `runId`/`lane` —
+ *   built HERE, never by a shard job in isolation, because a shard cannot
+ *   know the run's own runId in a form the audit can trust. See
+ *   `isValidPreKnextVoidMarker`/`isPreKnextVoidRedShard` in
+ *   scripts/compat-window-audit.mjs for how the credential audit grades this.
  */
 
 /**
@@ -311,6 +320,20 @@ export function buildLedger({
   const lanes = [...new Set(reported.map(laneOf))];
   const lane = lanes.length === 1 ? String(lanes[0]) : `mixed(${lanes.join('+')})`;
 
+  // #1553 (ADR-0056 Amendment 4) — the SELF-REFERENCING void marker. Built
+  // here, from THIS run's own `runId`/`lane`, whenever at least one reported
+  // shard carries a proven `kind: 'pre-knext'` failure with a recognised
+  // `phase` — never trusted from a shard's own JSON (a shard cannot assert
+  // its own runId/lane in a form the audit can rely on; only the ledger
+  // builder, which is handed the run's real identity via env, can). Absent
+  // (`null`) on every night with no such shard, which is every night today —
+  // the workflow-side producer writes `kind: 'pre-knext'` only on a genuine
+  // pre-knext-phase fault (test-e2e-deploy.yml's fault-detector steps).
+  const preKnextFailure = reported
+    .flatMap((r) => (Array.isArray(r.failures) ? r.failures : []))
+    .find((f) => f?.kind === 'pre-knext' && typeof f?.phase === 'string');
+  const preKnextVoidMarker = preKnextFailure ? { runId, lane, phase: preKnextFailure.phase } : null;
+
   // `complete` is the SHARD-SET verdict, and it is cleared by every structural
   // problem — not only by a missing shard. A duplicate, an out-of-range id, a
   // malformed id or a denominator that disagrees with the declaration all mean
@@ -348,6 +371,7 @@ export function buildLedger({
     missingShards,
     complete,
     shards: rows,
+    preKnextVoidMarker,
   };
 
   // ── The pre-existing floors (#545), unchanged in meaning ───────────────────
