@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -35,8 +35,14 @@ const SHIPPED_BAKE = join(
 const WRAPPER = join(ROOT, 'scripts/e2e-bake-accept.mjs');
 
 const temps: string[] = [];
+const children: ReturnType<typeof spawn>[] = [];
 afterAll(() => {
   for (const d of temps) rmSync(d, { recursive: true, force: true });
+  // Belt-and-suspenders reap: each bystander test also kills its own child in
+  // a `finally`, but a thrown assertion before that point must not leak it.
+  for (const c of children) {
+    if (!c.killed) c.kill();
+  }
 });
 
 /** routes: path → [status, location?]. Anything unlisted answers 404. */
@@ -103,6 +109,67 @@ function bake(
 
 /** Well under the driver's 60s readiness deadline: the server answers at once. */
 const FAST_MS = 20_000;
+
+/**
+ * A bystander HTTP server on its OWN ephemeral port and its OWN `node`
+ * process — a different origin than the baked standalone server, standing in
+ * for the review's repro: a warm-path redirect that lands on a different
+ * origin entirely (e.g. an external IdP), which must be reported, not
+ * followed.
+ *
+ * Deliberately a spawned `node` child, NOT `node:http` in-process: this test
+ * file runs under `bun test`, and Bun's `node:http` compat server does not
+ * answer a real TCP client here (measured — a `curl`/plain-`node` `fetch`
+ * against it times out with 0 bytes received). A real `node` process serving
+ * real HTTP is what the driver's own spawned `node` process needs to talk to.
+ * The caller MUST kill the returned child once done (this file's "reap every
+ * test server" rule) — it is a real child process, tracked here for cleanup.
+ */
+function startBystanderOrigin(
+  path: string,
+  status = 200,
+): Promise<{ child: ReturnType<typeof spawn>; url: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(
+      'node',
+      [
+        '-e',
+        [
+          "const { createServer } = require('node:http');",
+          `const body = 'bystander';`,
+          'const server = createServer((_req, res) => {',
+          `  res.writeHead(${status}, { 'content-length': Buffer.byteLength(body) });`,
+          '  res.end(body);',
+          '});',
+          "server.listen(0, '127.0.0.1', () => { console.log('PORT:' + server.address().port); });",
+        ].join('\n'),
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    children.push(child);
+    let buf = '';
+    const onData = (chunk: Buffer) => {
+      buf += chunk.toString();
+      const m = buf.match(/PORT:(\d+)/);
+      if (m) {
+        child.stdout?.off('data', onData);
+        resolvePromise({ child, url: `http://127.0.0.1:${m[1]}${path}` });
+      }
+    };
+    child.stdout?.on('data', onData);
+    child.once('error', reject);
+  });
+}
+
+/** A straight chain of `n` distinct redirects, `/r0` → `/r1` → … → `/rn` (200). */
+function chainRoutes(n: number): Routes {
+  const routes: Record<string, readonly [number, string?]> = {};
+  for (let i = 0; i < n; i++) {
+    routes[`/r${i}`] = [307, `/r${i + 1}`];
+  }
+  routes[`/r${n}`] = [200];
+  return routes;
+}
 
 // The exact 16.3.5 shape: `/` → 307 `/` (proxy rewrite + redirect under a
 // 127.0.0.1 bind).
@@ -247,5 +314,50 @@ describe('bake readiness: a listening socket is ready — no HTTP round-trip thr
     });
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('did not answer within 60000ms');
+  }, 90_000);
+});
+
+describe('bake readiness: a redirect Location is never followed off-origin (#1686 round 2)', () => {
+  it('a cross-origin redirect is NOT followed — reported as its 3xx, strict fails', async () => {
+    const bystander = await startBystanderOrigin('/login', 200);
+    try {
+      const r = bake({ '/protected': [307, bystander.url] }, '/protected');
+      expect(r.status, r.out).not.toBe(0);
+      // The 2xx came from the bystander, not from following it — the warm
+      // must record the ORIGINAL 3xx, never the off-origin 200.
+      expect(r.stdout).toContain('WARMED:/protected status=307 ');
+      expect(r.stdout).not.toContain('status=200');
+      expect(r.stderr).toContain('off-origin');
+      expect(r.stderr).toContain(bystander.url);
+    } finally {
+      bystander.child.kill();
+    }
+  }, 90_000);
+
+  it('the other half: a same-origin ABSOLUTE Location (same host:port) is still followed', () => {
+    const r = bake({ '/abs': [307, 'ABS:/ok'], '/ok': [200] }, '/abs');
+    expect(r.status, r.out).toBe(0);
+    expect(r.stdout).toContain('WARMED:/abs status=200 ');
+  }, 90_000);
+
+  it('the other half: a same-origin RELATIVE Location is still followed', () => {
+    const r = bake({ '/rel': [307, '/ok'], '/ok': [200] }, '/rel');
+    expect(r.status, r.out).toBe(0);
+    expect(r.stdout).toContain('WARMED:/rel status=200 ');
+  }, 90_000);
+});
+
+describe('bake readiness: the redirect hop limit is exactly 10 (#1686 round 2)', () => {
+  it('a chain of exactly 10 distinct redirects still lands on its 2xx target', () => {
+    const r = bake(chainRoutes(10), '/r0');
+    expect(r.status, r.out).toBe(0);
+    expect(r.stdout).toContain('WARMED:/r0 status=200 ');
+  }, 90_000);
+
+  it('the other half: a chain of 11 distinct redirects exceeds the limit and fails as non-2xx', () => {
+    const r = bake(chainRoutes(11), '/r0');
+    expect(r.status, r.out).not.toBe(0);
+    expect(r.stdout).toContain('WARMED:/r0 status=307 ');
+    expect(r.stdout).not.toContain('status=200');
   }, 90_000);
 });

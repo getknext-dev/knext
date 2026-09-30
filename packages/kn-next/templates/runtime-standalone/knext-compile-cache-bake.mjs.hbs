@@ -152,11 +152,24 @@ async function waitForServer(deadlineMs) {
     }
 }
 
-// Follows redirects by hand (at most MAX_REDIRECTS hops, stopping at the
-// first revisited URL) so a legitimate redirect still lands on its 2xx target,
+// Follows redirects by hand (up to MAX_REDIRECTS hops, stopping at the first
+// revisited URL) so a legitimate redirect still lands on its 2xx target,
 // while a loop resolves to the REAL 3xx status it answered with — a numeric
 // verdict — instead of a thrown fetch error.
+//
+// #1686: a redirect Location is followed ONLY if it stays on the request's
+// own origin. A warm path is app-supplied (KNEXT_WARM_PATH), and the app's
+// own routing decides where a redirect points — an auth middleware bouncing
+// an unauthenticated request to an external IdP, for example. Measured: with
+// no origin check, this driver followed such a redirect wherever it led and
+// graded the bake on whatever THAT origin answered (a third party's 200
+// counted as this app's warm succeeding), and, in a real `docker build`, made
+// an untimed outbound network request the build sandbox may not even permit.
+// The fix stops at the first off-origin Location and reports it as its real
+// (non-2xx-graded, since it never reached a 2xx here) status, never follows
+// it, and never contacts that origin.
 async function fetchFollowing(url) {
+    const requestOrigin = new URL(url).origin;
     const seen = new Set([url]);
     let current = url;
     for (let hop = 0; ; hop++) {
@@ -167,7 +180,15 @@ async function fetchFollowing(url) {
             return { status: res.status, loop: false };
         }
         const next = new URL(location, current).href;
-        if (seen.has(next) || hop + 1 >= MAX_REDIRECTS) {
+        if (new URL(next, url).origin !== requestOrigin) {
+            return { status: res.status, loop: false, crossOrigin: next };
+        }
+        // Allows exactly MAX_REDIRECTS (10) hops to be FOLLOWED before giving
+        // up: `hop` is 0-indexed and this check runs before hop `hop` advances
+        // to `next`, so `hop + 1` is the count of hops this call is ABOUT to
+        // make if it proceeds — `> MAX_REDIRECTS` (not `>=`) is what lets the
+        // 10th hop still happen instead of stopping one short at the 9th.
+        if (seen.has(next) || hop + 1 > MAX_REDIRECTS) {
             return { status: res.status, loop: true, to: next };
         }
         seen.add(next);
@@ -209,6 +230,11 @@ async function main() {
             if (res.loop) {
                 console.error(
                     `[knext bake] warm path ${path} is a redirect loop (${res.status} → ${res.to}) — not a 2xx`,
+                );
+            }
+            if (res.crossOrigin) {
+                console.error(
+                    `[knext bake] warm path ${path} redirected off-origin to ${res.crossOrigin} — not followed (status=${res.status})`,
                 );
             }
         } catch (err) {
