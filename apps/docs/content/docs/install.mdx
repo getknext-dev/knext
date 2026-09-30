@@ -97,10 +97,25 @@ Install the control plane with one apply:
 kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
+**Prefer a pinned version for anything but a quick trial.** Every operator release — including
+release-candidate builds — is published under its own immutable tag, so you can pin the exact
+version you tested against instead of tracking whatever is newest:
+
+```sh title="shell"
+kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v1.2.3/install.yaml
+```
+
+- **`operator-latest`** always points at the newest **stable** release — it moves only when a
+  stable version is cut, never on every commit to `main`.
+- **`operator-vX.Y.Z`** (and pre-release tags like `operator-vX.Y.Z-rc.1`) are cut once and never
+  change — the exact bundle you pin stays the exact bundle you get.
+- **`operator-edge`** tracks the tip of `main` between releases — a rolling, unsigned-for-production
+  channel for trying out unreleased changes, not for a production cluster.
+
 <Callout type="warn">
-**The `operator-latest` release URL resolves only once an operator release has been cut.** If no release
-exists yet — or you are building from a fork — generate the bundle locally instead, from the
-operator source directory:
+**A version-tagged or `operator-latest` release URL resolves only once an operator release has been
+cut.** If no release exists yet — or you are building from a fork — generate the bundle locally
+instead, from the operator source directory:
 
 ```sh title="shell"
 make build-installer IMG=<some-registry>/kn-next-operator:tag

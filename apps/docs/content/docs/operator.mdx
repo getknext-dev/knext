@@ -24,8 +24,10 @@ command, after cert-manager:
 kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
-See [Install → 4 · Install the operator](/docs/install#4--install-the-operator) for the
-cert-manager prerequisite, local-bundle fallback, and signature verification.
+`operator-latest` tracks the newest **stable** release. To pin a specific version instead, use
+`releases/download/operator-vX.Y.Z/install.yaml` — see [Install → 4 · Install the
+operator](/docs/install#4--install-the-operator) for the cert-manager prerequisite, local-bundle
+fallback, versioned installs, and signature verification.
 
 **Upgrade order is load-bearing: upgrade the operator/CRD first, then the CLI.** The CLI can
 emit fields an older operator's CRD does not know about; upgrading the cluster before the CLI

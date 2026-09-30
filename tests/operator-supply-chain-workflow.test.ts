@@ -174,7 +174,7 @@ describe('operator-supply-chain workflow: nothing is published before the Trivy 
     const push = stepBlock(PUSH_RE);
     expect(push, 'expected a crane push step').not.toBe('');
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(push),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(push),
       'the push step must be gated to main',
     ).toBe(true);
     expect(/^\s*id:\s*push\s*$/m.test(push), 'the push step must have id: push').toBe(true);
@@ -246,7 +246,7 @@ describe('operator release asset (install.yaml) is gated behind the Trivy gate +
     expect(pushIdx, 'installer pin must come after the push').toBeLessThan(installerIdx);
     const installer = stepBlock(INSTALLER_RE);
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(installer),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(installer),
       'the installer pin step must be gated to main',
     ).toBe(true);
     expect(
@@ -275,7 +275,7 @@ describe('operator release asset (install.yaml) is gated behind the Trivy gate +
     }
     const release = stepBlock(RELEASE_RE);
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(release),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(release),
       'the release-attach step must be gated to main',
     ).toBe(true);
   });
@@ -359,7 +359,7 @@ describe('operator buildkit provenance is restored without weakening the gate (#
     ).toBeLessThan(signIdx);
     const content = stripComments(check);
     expect(
-      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(check),
+      /if:\s*steps\.channel\.outputs\.publish\s*==\s*'true'/.test(check),
       'the provenance check must be main-gated (nothing was pushed on PRs)',
     ).toBe(true);
     expect(
