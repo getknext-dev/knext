@@ -12,7 +12,8 @@ describe('extractRatchetFloors', () => {
 const MIN_RESOLVED_PAIRS = 316;
 `;
     expect(extractRatchetFloors(source, 'tests/x.test.ts')).toEqual({
-      'tests/x.test.ts::MIN_RESOLVED_PAIRS': 316,
+      floors: { 'tests/x.test.ts::MIN_RESOLVED_PAIRS': 316 },
+      errors: [],
     });
   });
 
@@ -24,8 +25,11 @@ const MIN_RESOLVED_PAIRS = 316;
 const MIN_RESOLVED_PROVERS = 24;
 `;
     expect(extractRatchetFloors(source, 'tests/x.test.ts')).toEqual({
-      'tests/x.test.ts::MIN_RESOLVED_PAIRS': 316,
-      'tests/x.test.ts::MIN_RESOLVED_PROVERS': 24,
+      floors: {
+        'tests/x.test.ts::MIN_RESOLVED_PAIRS': 316,
+        'tests/x.test.ts::MIN_RESOLVED_PROVERS': 24,
+      },
+      errors: [],
     });
   });
 
@@ -40,8 +44,11 @@ export const THRESHOLDS = {
 };
 `;
     expect(extractRatchetFloors(source, 'scripts/lib/coverage-policy.mjs')).toEqual({
-      'scripts/lib/coverage-policy.mjs::THRESHOLDS.lines': 77,
-      'scripts/lib/coverage-policy.mjs::THRESHOLDS.functions': 74,
+      floors: {
+        'scripts/lib/coverage-policy.mjs::THRESHOLDS.lines': 77,
+        'scripts/lib/coverage-policy.mjs::THRESHOLDS.functions': 74,
+      },
+      errors: [],
     });
   });
 
@@ -56,8 +63,11 @@ export const PER_PATH_THRESHOLDS = {
 };
 `;
     expect(extractRatchetFloors(source, 'x.mjs')).toEqual({
-      'x.mjs::PER_PATH_THRESHOLDS.packages/kn-next/src/**.lines': 79.0,
-      'x.mjs::PER_PATH_THRESHOLDS.packages/kn-next/src/**.functions': 76,
+      floors: {
+        'x.mjs::PER_PATH_THRESHOLDS.packages/kn-next/src/**.lines': 79.0,
+        'x.mjs::PER_PATH_THRESHOLDS.packages/kn-next/src/**.functions': 76,
+      },
+      errors: [],
     });
   });
 
@@ -65,7 +75,7 @@ export const PER_PATH_THRESHOLDS = {
     const source = `
 const UNMARKED = 5;
 `;
-    expect(extractRatchetFloors(source, 'x.mjs')).toEqual({});
+    expect(extractRatchetFloors(source, 'x.mjs')).toEqual({ floors: {}, errors: [] });
   });
 
   it('does NOT treat a mid-sentence mention of the marker as a real marker line (regression)', () => {
@@ -77,15 +87,41 @@ const UNMARKED = 5;
  */
 const UNMARKED = 5;
 `;
-    expect(extractRatchetFloors(source, 'x.mjs')).toEqual({});
+    expect(extractRatchetFloors(source, 'x.mjs')).toEqual({ floors: {}, errors: [] });
   });
 
-  it('throws when a marker is not followed by a const declaration', () => {
+  it('reports (never throws) when a marker is not followed by a const declaration', () => {
     const source = `
 // @ratchet-floor
 function notAConst() {}
 `;
-    expect(() => extractRatchetFloors(source, 'x.mjs')).toThrow(/must be followed by/);
+    const result = extractRatchetFloors(source, 'x.mjs');
+    expect(result.floors).toEqual({});
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatch(/must be followed by/);
+  });
+
+  it('reports (never throws) when a marked RHS fails to evaluate', () => {
+    const source = `
+// @ratchet-floor
+const BROKEN = someUndefinedIdentifier;
+`;
+    const result = extractRatchetFloors(source, 'x.mjs');
+    expect(result.floors).toEqual({});
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatch(/cannot evaluate floor BROKEN/);
+  });
+
+  it('a marked declaration that fails to evaluate does not block a DIFFERENT valid one in the same file', () => {
+    const source = `
+// @ratchet-floor
+const BROKEN = someUndefinedIdentifier;
+// @ratchet-floor
+const OK = 42;
+`;
+    const result = extractRatchetFloors(source, 'x.mjs');
+    expect(result.floors).toEqual({ 'x.mjs::OK': 42 });
+    expect(result.errors).toHaveLength(1);
   });
 
   it('the marker constant itself is the literal scanned for', () => {
@@ -106,10 +142,19 @@ describe('findLoweredFloors', () => {
     expect(findLoweredFloors(base, head)).toEqual([{ key: 'f.mjs::A', base: 10, head: 9 }]);
   });
 
-  it('ignores a floor removed entirely at head (not this guard concern)', () => {
+  it('treats a floor REMOVED entirely at head as a violation (deleting the marker is not an escape hatch)', () => {
     const base = { 'f.mjs::A': 10 };
     const head = {};
-    expect(findLoweredFloors(base, head)).toEqual([]);
+    expect(findLoweredFloors(base, head)).toEqual([{ key: 'f.mjs::A', base: 10, head: null }]);
+  });
+
+  it('a PR-introduced allowlist entry suppresses a REMOVED floor too, not only a numeric lowering', () => {
+    const base = { 'f.mjs::A': 10 };
+    const head = {};
+    const headAllowlist = [
+      { file: 'f.mjs', path: 'A', reason: 'deliberate removal', date: '2026-09-30' },
+    ];
+    expect(findLoweredFloors(base, head, headAllowlist, [])).toEqual([]);
   });
 
   it('suppresses a violation covered by an allowlist entry introduced at head', () => {

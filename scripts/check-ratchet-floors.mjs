@@ -7,11 +7,24 @@
  * floor went DOWN — unless `ratchet-lowering-allowlist.json` carries an entry
  * for that exact `{file, path}` that was INTRODUCED by this PR (present at
  * HEAD, absent at the merge base; an inherited entry exempts nothing, mirroring
- * `rcBumpMarker` / `publishedBytesBumpMarker`).
+ * `rcBumpMarker` / `publishedBytesBumpMarker`). A floor whose marker or
+ * declaration disappeared entirely at HEAD counts as lowered too (see
+ * `findLoweredFloors`'s doc) — deleting the marker is not an escape hatch.
  *
  * Scope: every tracked `.ts` / `.mjs` / `.js` file under the repo (excluding
  * `node_modules` and build output) is scanned for the marker — never an
  * enumerated file list, so a new ratchet is covered the moment it's written.
+ *
+ * FAIL CLOSED (review round 2, #1253). Two distinct failure classes, both
+ * fatal, both reported with a clear message rather than a raw stack trace:
+ *
+ *   1. the merge base cannot be resolved (e.g. `origin/main` unreachable —
+ *      the CI job forgot `fetch-depth: 0` / an explicit base fetch). This
+ *      guard refuses to silently compare HEAD to itself, which would report
+ *      "0 violations" for a reason that has nothing to do with the PR.
+ *   2. a marked declaration cannot be evaluated at EITHER ref (see
+ *      `extractRatchetFloors`'s `errors`). Reported the same way a real
+ *      lowering is — never a bypass.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -47,12 +60,26 @@ const gitQuiet = (...args) =>
     stdio: ['pipe', 'pipe', 'ignore'],
   });
 
+class RatchetFloorGuardError extends Error {}
+
+/**
+ * FAILS CLOSED: throws `RatchetFloorGuardError` rather than falling back to
+ * comparing HEAD against itself when `origin/main` is unreachable — a
+ * silent "nothing to compare against" must never read as "no violations".
+ * `RATCHET_FLOOR_BASE_REF` remains the explicit override for callers that
+ * legitimately have no `origin` remote (this guard's own e2e test, run
+ * inside a throwaway repo with no remote at all).
+ */
 function resolveMergeBase() {
   if (process.env.RATCHET_FLOOR_BASE_REF) return process.env.RATCHET_FLOOR_BASE_REF.trim();
   try {
     git('rev-parse', '--verify', 'origin/main');
   } catch {
-    return 'HEAD'; // no remote reachable (e.g. isolated test fixture) — nothing to compare
+    throw new RatchetFloorGuardError(
+      'cannot resolve origin/main — the checkout is missing history (needs fetch-depth: 0 or an ' +
+        'explicit fetch of the base ref) or has no origin remote. Refusing to compare HEAD ' +
+        'against itself; set RATCHET_FLOOR_BASE_REF to override explicitly.',
+    );
   }
   return git('merge-base', 'HEAD', 'origin/main').trim();
 }
@@ -80,16 +107,20 @@ function readAtRef(ref, path) {
   }
 }
 
-/** @param {string} ref @returns {Record<string, number>} */
+/** @param {string} ref @returns {{ floors: Record<string, number>, errors: string[] }} */
 function collectFloors(ref) {
   /** @type {Record<string, number>} */
-  const all = {};
+  const floors = {};
+  /** @type {string[]} */
+  const errors = [];
   for (const file of trackedSourceFiles(ref)) {
     const source = readAtRef(ref, file);
     if (source === null || !source.includes(RATCHET_FLOOR_MARKER)) continue;
-    Object.assign(all, extractRatchetFloors(source, file));
+    const extracted = extractRatchetFloors(source, file);
+    Object.assign(floors, extracted.floors);
+    errors.push(...extracted.errors);
   }
-  return all;
+  return { floors, errors };
 }
 
 /** @param {string} ref @returns {import('./lib/ratchet-floors.mjs').AllowlistEntry[]} */
@@ -106,33 +137,55 @@ function collectAllowlist(ref) {
 
 function main() {
   const baseRef = resolveMergeBase();
-  const headFloors = collectFloors('HEAD');
-  const baseFloors = collectFloors(baseRef);
+  const head = collectFloors('HEAD');
+  const base = collectFloors(baseRef);
   const headAllowlist = collectAllowlist('HEAD');
   const baseAllowlist = collectAllowlist(baseRef);
 
-  const violations = findLoweredFloors(baseFloors, headFloors, headAllowlist, baseAllowlist);
+  const evalErrors = [...head.errors, ...base.errors];
+  if (evalErrors.length > 0) {
+    console.error(
+      'ratchet-floor guard: UNRESOLVABLE marked declaration(s) — treated as violations:\n',
+    );
+    for (const e of evalErrors) console.error(`  ${e}`);
+    console.error('\nFix the declaration so it evaluates as a plain literal, or drop the marker.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const violations = findLoweredFloors(base.floors, head.floors, headAllowlist, baseAllowlist);
 
   if (violations.length === 0) {
     console.log(
-      `ratchet-floor guard: ${Object.keys(headFloors).length} floor(s) checked against ${baseRef}, none lowered.`,
+      `ratchet-floor guard: ${Object.keys(head.floors).length} floor(s) checked against ${baseRef}, none lowered.`,
     );
-    process.exit(0);
+    process.exitCode = 0;
+    return;
   }
 
   console.error('ratchet-floor guard: FLOOR(S) LOWERED without a PR-introduced allowlist entry:\n');
   for (const v of violations) {
-    console.error(`  ${v.key}: ${v.base} -> ${v.head}`);
+    console.error(`  ${v.key}: ${v.base} -> ${v.head === null ? 'REMOVED' : v.head}`);
   }
   console.error(
-    `\nRaise a ratchet floor; never lower one to get green. If this lowering is deliberate and ` +
-      `reviewed, add a dated entry to ${ALLOWLIST_FILE} naming the exact file+path in THIS PR.`,
+    '\nRaise a ratchet floor; never lower one to get green, and never delete its marker or ' +
+      `declaration to escape this check. If this lowering is deliberate and reviewed, add a ` +
+      `dated entry to ${ALLOWLIST_FILE} naming the exact file+path in THIS PR.`,
   );
-  process.exit(1);
+  process.exitCode = 1;
 }
 
 const isEntrypoint =
   process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
-if (isEntrypoint) main();
+if (isEntrypoint) {
+  try {
+    main();
+  } catch (err) {
+    console.error(
+      `ratchet-floor guard: FAILED CLOSED — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exitCode = 1;
+  }
+}
 
-export { collectFloors, collectAllowlist, resolveMergeBase };
+export { collectFloors, collectAllowlist, resolveMergeBase, RatchetFloorGuardError };

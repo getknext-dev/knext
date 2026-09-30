@@ -1,18 +1,23 @@
 #!/usr/bin/env node
 
 /**
- * Mutation proof for the ratchet-floor guard (#1253).
+ * Mutation proof for the ratchet-floor guard (#1253, review round 2).
  *
  * WHAT IS BEING PROVED
  * ---------------------
  * `scripts/lib/ratchet-floors.mjs` decides whether a marked floor went down
  * between two refs, and whether an allowlist entry legitimately exempts it.
- * Both halves must actually gate:
+ * Every load-bearing branch must actually gate:
  *
  *   1. lowering an undetected floor is not silently accepted — breaking the
  *      comparison direction, or the marker scan, must red the spec;
  *   2. an INHERITED allowlist entry (present at base too) must NOT exempt a
- *      lowering — breaking the "introduced by this PR" check must red the spec.
+ *      lowering — breaking the "introduced by this PR" check must red the spec;
+ *   3. a floor REMOVED entirely at head (deleted marker/declaration/rename)
+ *      is exactly as much a violation as a numeric lowering — breaking that
+ *      check must red the spec (review round 2: this was the bypass);
+ *   4. an unresolvable RHS is reported, never thrown — reintroducing an
+ *      uncaught throw must red the spec (review round 2).
  *
  * DISCIPLINE (`.claude/rules/workflow.md`)
  * ----------------------------------------
@@ -83,7 +88,7 @@ function prove(id, description, snap, edits, expected) {
   assertTreeClean(`after ${id}`);
 }
 
-declareMutations(6);
+declareMutations(8);
 
 console.log('── baseline: spec is green unmutated');
 assertTreeClean('baseline');
@@ -112,12 +117,7 @@ prove(
   'M1',
   'flipping the lowered-comparison direction (< -> >) must red',
   snap,
-  [
-    [
-      'if (headValue < baseValue && !introducedKeys.has(key)) {',
-      'if (headValue > baseValue && !introducedKeys.has(key)) {',
-    ],
-  ],
+  [['if (headValue < baseValue) {', 'if (headValue > baseValue) {']],
   1,
 );
 
@@ -125,7 +125,7 @@ prove(
   'M2',
   'dropping the allowlist-suppression check entirely (always flag) must red',
   snap,
-  [['if (headValue < baseValue && !introducedKeys.has(key)) {', 'if (headValue < baseValue) {']],
+  [['if (introducedKeys.has(key)) continue;', 'if (false) continue;']],
   1,
 );
 
@@ -158,19 +158,45 @@ prove(
   1,
 );
 
-console.log('── M6 (negative control): rewording a comment must stay GREEN');
+prove(
+  'M6',
+  'no longer treating a floor REMOVED entirely at head as a violation must red (the review-round-2 bypass)',
+  snap,
+  [
+    [
+      'if (!(key in headFloors)) {\n      violations.push({ key, base: baseValue, head: null });\n      continue;\n    }',
+      'if (false) {\n      violations.push({ key, base: baseValue, head: null });\n      continue;\n    }',
+    ],
+  ],
+  1,
+);
+
+prove(
+  'M7',
+  're-throwing an unresolvable RHS instead of reporting it must red (FAIL CLOSED, NEVER CRASH)',
+  snap,
+  [
+    [
+      `        \`cannot evaluate floor \${name} at \${filePath}:\${line}: \${err instanceof Error ? err.message : String(err)}\`,\n      );\n      continue;`,
+      `        \`cannot evaluate floor \${name} at \${filePath}:\${line}: \${err instanceof Error ? err.message : String(err)}\`,\n      );\n      throw err;`,
+    ],
+  ],
+  1,
+);
+
+console.log('── M8 (negative control): rewording a comment must stay GREEN');
 mutate(
   snap,
   'export const RATCHET_FLOOR_MARKER = ',
   '// harmless reword\nexport const RATCHET_FLOOR_MARKER = ',
 );
 try {
-  check('M6', 'a harmless comment reword must not red the spec', 0, runSpec(SPEC));
+  check('M8', 'a harmless comment reword must not red the spec', 0, runSpec(SPEC));
 } finally {
   restore(snap);
 }
 recordMutation();
-assertTreeClean('after M6');
+assertTreeClean('after M8');
 
 if (failures.length) {
   console.error(`\n${failures.length} mutation(s) failed to prove:\n${failures.join('\n')}`);

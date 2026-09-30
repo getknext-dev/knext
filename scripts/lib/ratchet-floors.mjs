@@ -12,7 +12,7 @@
  * MARKER, NOT AN ENUMERATED LIST. A declaration opts into this check by
  * carrying `RATCHET_FLOOR_MARKER` on the line (or block-comment) immediately
  * above it — `// @ratchet-floor` for a line comment, or as the last line of a
- * `/** ... *\/` block comment. `findRatchetDeclarations` SCANS source text for
+ * `/** ... *\/` block comment. `findMarkedDeclarations` SCANS source text for
  * the marker; a new ratchet floor written anywhere in the repo is picked up
  * the next time this runs, with no second place to register it.
  *
@@ -27,6 +27,17 @@
  * itself tracks (never external input), the same trust boundary the rest of
  * this repo's own config-literal parsing already relies on.
  *
+ * FAIL CLOSED, NEVER CRASH (review round 2, #1253). A marked declaration this
+ * module cannot make sense of — missing entirely, not a `const` at all, an
+ * RHS whose evaluation throws (e.g. it references an identifier that does
+ * not exist in a standalone `Function` scope) — is reported as a STRUCTURED
+ * error via `extractRatchetFloors`'s `errors` array, never thrown as an
+ * uncaught exception that crashes the CLI with a raw stack trace. The CALLER
+ * (`scripts/check-ratchet-floors.mjs`) treats any such error, at either ref,
+ * as a violation: "cannot evaluate floor X" is exactly as much a reason to
+ * fail the guard as a floor that measurably went down — an unparseable
+ * marked declaration could otherwise hide a lowering behind a RHS bug.
+ *
  * FLATTENING. A value is flattened to `{ "<path>": number }` pairs, where
  * `<path>` for a bare scalar is just its declared name, and for an object is
  * `NAME.key` or `NAME.key.subkey` for one level of nesting. Only numeric
@@ -36,11 +47,6 @@
 
 export const RATCHET_FLOOR_MARKER = '@ratchet-floor';
 
-/**
- * @param {string} source
- * @param {string} filePath repo-relative path, used only for error messages
- * @returns {Array<{ name: string, raw: string }>}
- */
 /**
  * A line COUNTS as the marker only when, after stripping a leading comment
  * prefix (`//`, `/**`, `*`, `/*`) and whitespace, it STARTS WITH the marker
@@ -56,9 +62,21 @@ function isMarkerLine(line) {
   return stripped.startsWith(RATCHET_FLOOR_MARKER);
 }
 
+/**
+ * @typedef {{ name: string, raw: string, line: number }} MarkedDeclaration
+ */
+
+/**
+ * @param {string} source
+ * @param {string} filePath repo-relative path, used only for error messages
+ * @returns {{ decls: MarkedDeclaration[], errors: string[] }}
+ */
 function findMarkedDeclarations(source, filePath) {
   const lines = source.split('\n');
-  const found = [];
+  /** @type {MarkedDeclaration[]} */
+  const decls = [];
+  /** @type {string[]} */
+  const errors = [];
   for (let i = 0; i < lines.length; i++) {
     if (!isMarkerLine(lines[i])) continue;
     // Walk forward past any remaining comment lines to the declaration.
@@ -67,16 +85,16 @@ function findMarkedDeclarations(source, filePath) {
       j++;
     }
     if (j >= lines.length) {
-      throw new Error(
-        `${RATCHET_FLOOR_MARKER} at ${filePath}:${i + 1} has no following declaration`,
-      );
+      errors.push(`${RATCHET_FLOOR_MARKER} at ${filePath}:${i + 1} has no following declaration`);
+      continue;
     }
     const declLine = lines[j];
     const nameMatch = declLine.match(/(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=/);
     if (!nameMatch) {
-      throw new Error(
+      errors.push(
         `${RATCHET_FLOOR_MARKER} at ${filePath}:${i + 1} must be followed by a "const NAME = ..." declaration, got: ${declLine.trim()}`,
       );
+      continue;
     }
     const name = nameMatch[1];
     // Capture the RHS: from after the `=` up to the statement-ending `;`
@@ -112,16 +130,17 @@ function findMarkedDeclarations(source, filePath) {
       }
     }
     if (!terminated) {
-      throw new Error(
+      errors.push(
         `${RATCHET_FLOOR_MARKER} declaration for ${name} in ${filePath} never terminates with ';'`,
       );
+      continue;
     }
     // Trim the trailing `;` (and anything after it on the terminating line).
     const semiIdx = rhs.lastIndexOf(';');
     rhs = rhs.slice(0, semiIdx);
-    found.push({ name, raw: rhs.trim() });
+    decls.push({ name, raw: rhs.trim(), line: i + 1 });
   }
-  return found;
+  return { decls, errors };
 }
 
 /**
@@ -154,23 +173,35 @@ function flattenNumericLeaves(name, value) {
 /**
  * Extracts every `@ratchet-floor`-marked numeric leaf from a source string.
  *
+ * NEVER THROWS. A structural problem (marker with no declaration, an RHS
+ * that fails to evaluate, ...) is reported via the returned `errors` array
+ * instead — see the file header ("FAIL CLOSED, NEVER CRASH").
+ *
  * @param {string} source
  * @param {string} filePath repo-relative path (used for error text + returned keys)
- * @returns {Record<string, number>} keyed by `"<filePath>::<dotted-path>"`
+ * @returns {{ floors: Record<string, number>, errors: string[] }} `floors` keyed by `"<filePath>::<dotted-path>"`
  */
 export function extractRatchetFloors(source, filePath) {
-  const decls = findMarkedDeclarations(source, filePath);
+  const { decls, errors } = findMarkedDeclarations(source, filePath);
   /** @type {Record<string, number>} */
-  const out = {};
-  for (const { name, raw } of decls) {
-    // eslint-disable-next-line no-new-func
-    const value = new Function(`"use strict"; return (${raw});`)();
+  const floors = {};
+  for (const { name, raw, line } of decls) {
+    let value;
+    try {
+      // eslint-disable-next-line no-new-func
+      value = new Function(`"use strict"; return (${raw});`)();
+    } catch (err) {
+      errors.push(
+        `cannot evaluate floor ${name} at ${filePath}:${line}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      continue;
+    }
     const leaves = flattenNumericLeaves(name, value);
     for (const [path, num] of Object.entries(leaves)) {
-      out[`${filePath}::${path}`] = num;
+      floors[`${filePath}::${path}`] = num;
     }
   }
-  return out;
+  return { floors, errors };
 }
 
 /**
@@ -178,17 +209,23 @@ export function extractRatchetFloors(source, filePath) {
  */
 
 /**
- * Compares HEAD floors against BASE floors, returning every regression
- * (a floor whose HEAD value is strictly lower than its BASE value) not
+ * Compares HEAD floors against BASE floors, returning every regression not
  * covered by an allowlist entry INTRODUCED by this PR (i.e. present at HEAD
  * but absent, for the same file+path, at BASE — an inherited entry exempts
- * nothing).
+ * nothing). A regression is either:
+ *
+ *   - a floor whose HEAD value is strictly lower than its BASE value, or
+ *   - a floor present at BASE and ABSENT at HEAD entirely — deleting the
+ *     `@ratchet-floor` marker, renaming the constant, or moving/removing the
+ *     declaration is exactly as much a "lowering" as editing the number
+ *     (review round 2, #1253): treating a removed floor as "not this
+ *     guard's concern" made deleting the marker a bypass.
  *
  * @param {Record<string, number>} baseFloors
  * @param {Record<string, number>} headFloors
  * @param {AllowlistEntry[]} headAllowlist
  * @param {AllowlistEntry[]} baseAllowlist
- * @returns {Array<{ key: string, base: number, head: number }>}
+ * @returns {Array<{ key: string, base: number, head: number | null }>}
  */
 export function findLoweredFloors(baseFloors, headFloors, headAllowlist = [], baseAllowlist = []) {
   const introducedKeys = new Set(
@@ -199,9 +236,13 @@ export function findLoweredFloors(baseFloors, headFloors, headAllowlist = [], ba
 
   const violations = [];
   for (const [key, baseValue] of Object.entries(baseFloors)) {
-    if (!(key in headFloors)) continue; // removed floor entirely — not this guard's concern
+    if (introducedKeys.has(key)) continue;
+    if (!(key in headFloors)) {
+      violations.push({ key, base: baseValue, head: null });
+      continue;
+    }
     const headValue = headFloors[key];
-    if (headValue < baseValue && !introducedKeys.has(key)) {
+    if (headValue < baseValue) {
       violations.push({ key, base: baseValue, head: headValue });
     }
   }
