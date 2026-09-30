@@ -41,11 +41,26 @@ export const RATCHET_FLOOR_MARKER = '@ratchet-floor';
  * @param {string} filePath repo-relative path, used only for error messages
  * @returns {Array<{ name: string, raw: string }>}
  */
+/**
+ * A line COUNTS as the marker only when, after stripping a leading comment
+ * prefix (`//`, `/**`, `*`, `/*`) and whitespace, it STARTS WITH the marker
+ * literal. This is deliberately narrower than "contains the marker
+ * substring": both this file's and the CLI's own header docs quote
+ * `@ratchet-floor` in prose (describing the contract), and a substring match
+ * would misread that prose as a real marker with no declaration beneath it.
+ * A real marker line reads `// @ratchet-floor` or `* @ratchet-floor`
+ * (optionally followed by an em-dash explanation) with nothing before it.
+ */
+function isMarkerLine(line) {
+  const stripped = line.replace(/^\s*(\/\*\*|\/\*|\*\/|\*|\/\/)\s*/, '').trimStart();
+  return stripped.startsWith(RATCHET_FLOOR_MARKER);
+}
+
 function findMarkedDeclarations(source, filePath) {
   const lines = source.split('\n');
   const found = [];
   for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].includes(RATCHET_FLOOR_MARKER)) continue;
+    if (!isMarkerLine(lines[i])) continue;
     // Walk forward past any remaining comment lines to the declaration.
     let j = i + 1;
     while (j < lines.length && (/^\s*(\*|\/\/|\/\*)/.test(lines[j]) || lines[j].trim() === '')) {

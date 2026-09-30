@@ -26,7 +26,26 @@ import {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ALLOWLIST_FILE = 'ratchet-lowering-allowlist.json';
 
+/**
+ * This guard's own test fixtures embed marker-line EXAMPLES (`// @ratchet-floor`)
+ * inside template-literal source strings to exercise the parser — those are not
+ * real declarations and must not be scanned as if they were, the same
+ * "small, necessarily hardcoded, documented" exclusion already used by
+ * `compat-credential-freeze-guard.mjs`'s `GUARD_SELF_FILES`.
+ */
+const GUARD_SELF_FILES = Object.freeze(['tests/ratchet-floor-guard.test.ts']);
+
 const git = (...args) => execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' });
+// Same as `git`, but with stderr swallowed — used only where a non-zero exit
+// (e.g. "path exists on disk, but not in <ref>") is an EXPECTED outcome the
+// caller already handles via try/catch, so git's own fatal: text would just
+// be noise on every run that touches a file added in the working PR.
+const gitQuiet = (...args) =>
+  execFileSync('git', args, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
 
 function resolveMergeBase() {
   if (process.env.RATCHET_FLOOR_BASE_REF) return process.env.RATCHET_FLOOR_BASE_REF.trim();
@@ -48,13 +67,14 @@ function trackedSourceFiles(ref) {
     .split('\n')
     .filter(Boolean)
     .filter((p) => /\.(ts|mjs|js)$/.test(p))
-    .filter((p) => !p.includes('node_modules/') && !p.includes('/dist/') && !p.startsWith('dist/'));
+    .filter((p) => !p.includes('node_modules/') && !p.includes('/dist/') && !p.startsWith('dist/'))
+    .filter((p) => !GUARD_SELF_FILES.includes(p));
 }
 
 /** @param {string} ref @param {string} path @returns {string|null} */
 function readAtRef(ref, path) {
   try {
-    return git('show', `${ref}:${path}`);
+    return gitQuiet('show', `${ref}:${path}`);
   } catch {
     return null; // file doesn't exist at that ref
   }

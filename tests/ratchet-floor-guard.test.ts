@@ -68,6 +68,18 @@ const UNMARKED = 5;
     expect(extractRatchetFloors(source, 'x.mjs')).toEqual({});
   });
 
+  it('does NOT treat a mid-sentence mention of the marker as a real marker line (regression)', () => {
+    // The guard's own header docs quote `@ratchet-floor` in prose while describing
+    // the contract; that prose line has no declaration beneath it and must not throw.
+    const source = `
+/**
+ * Reads every \`@ratchet-floor\`-marked constant and fails if it went down.
+ */
+const UNMARKED = 5;
+`;
+    expect(extractRatchetFloors(source, 'x.mjs')).toEqual({});
+  });
+
   it('throws when a marker is not followed by a const declaration', () => {
     const source = `
 // @ratchet-floor
