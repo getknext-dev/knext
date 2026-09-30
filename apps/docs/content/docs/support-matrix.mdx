@@ -61,10 +61,11 @@ too, rather than left implied.
 
 ## Bun
 
-- **CI pins `1.4.2`** everywhere Bun is used — the vinext/compiled-executable build target, and
-  running the CLI/test suite from a source checkout. `knext build`'s default (vinext) target
-  shells out to Bun to compile the single executable, so a consumer building an app on that target
-  needs Bun ≥ 1.4 on `PATH`; the published CLI itself runs under plain Node.
+- **CI pins `1.4.2`** everywhere Bun is used — the default `bun` runtime (compiled to a bytecode
+  single executable), the opt-in `vinext` build target, and running the CLI/test suite from a
+  source checkout. `knext build`'s default runtime (`bun`, see [Stability tiers](/docs/stability))
+  compiles the standalone server into a Bun single executable, so a consumer building an app needs
+  Bun ≥ 1.4 on `PATH`; the published CLI itself runs under plain Node.
 
 ## What this page does not claim
 

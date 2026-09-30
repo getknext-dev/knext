@@ -41,9 +41,10 @@ const config: KnativeNextConfig = {
 };
 ```
 
-The second target compiles your app with [**vinext**](https://vinext.dev), an open-source,
-Vite-based implementation of the Next.js framework, into a single executable. Select it explicitly
-with `build: 'vinext'`:
+The second target — **experimental**, outside the [stability tiers](/docs/stability) v1.0
+commitment — compiles your app with [**vinext**](https://vinext.dev), an open-source, Vite-based
+implementation of the Next.js framework, into a single executable. Select it explicitly with
+`build: 'vinext'`:
 
 ```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
@@ -287,7 +288,7 @@ Two differences from the Bun executable, stated plainly:
 - **The request body cap is enforced as the body is read**, not before your handler runs. The limit
   is the same `KNEXT_MAX_REQUEST_BYTES`.
 
-## The vinext pipeline
+## The vinext pipeline (experimental)
 
 On the vinext target, `knext build` produces the executable in two stages:
 
