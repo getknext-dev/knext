@@ -177,3 +177,10 @@ knext-standalone-exec*
 # from tracking in chore/remove-stray-automation-dirs.
 prewarm-analyze-*/
 triage-shape-*/
+
+# adapter-dev-edge-fence.test.ts's live `next dev` run (#1658): a mkdtemp
+# copy of the tracked dev-edge-fence fixture, made INSIDE this tree (not
+# os.tmpdir()) so `next` can still resolve itself by walking up to
+# packages/kn-next/node_modules. Removed in afterAll(); this pattern only
+# guards a run that was killed before cleanup ran.
+packages/kn-next/src/__tests__/fixtures/.dev-edge-fence-work-*/

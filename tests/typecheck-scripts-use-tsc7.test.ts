@@ -33,7 +33,12 @@ import { REPO_ROOT, readManifest, workspaceManifests } from './helpers/workspace
  *    which the classifier models itself);
  *  - commands are split the way sh splits them: separators inside single/double quotes,
  *    after a backslash, inside `$(…)`/backticks, or in a `#` comment are not separators;
- *    plain tsc inside a `$(…)`/backtick substitution is still caught;
+ *    plain tsc inside a `$(…)`/backtick substitution is still caught. A WHOLE-WORD
+ *    substitution — `$(bun run tc2)`, not a path fragment like `$(npm bin)/tsc` — is also
+ *    followed through the same runner/turbo classifier (masked: a substitution's own exit
+ *    status never propagates), so an indirection like `echo $(bun run tc2)` still catches
+ *    `tc2` resolving to plain tsc, and an unrecognised program (`$(make tc)`) fails closed
+ *    (#1445) instead of passing silently;
  *  - SHELL CONTROL STRUCTURES FAIL CLOSED: `if`/`then`/`fi`, `for`/`while`/`do`/`done`,
  *    `case`, `(…)` subshells and `{…}` groups are not modelled, so their keywords are
  *    classified as unknown (or dynamic) programs and go red. Write the typecheck as a flat
@@ -160,6 +165,26 @@ function closeTick(s: string, open: number): number {
 }
 
 /**
+ * The body of `token`, IF `token` is a command substitution occupying the ENTIRE shell word —
+ * `$(bun run tc2)` or `` `bun run tc2` `` — not a substitution concatenated into a larger word
+ * such as `$(npm bin)/tsc` (a path fragment, not a program invoked for its own effect).
+ * Undefined for anything else. This is the gate for the #1445 substitution-program classifier
+ * below: only a whole-word substitution's body is actually "the command run", so only those are
+ * followed into the runner/turbo classifier.
+ */
+function wholeWordSubstitutionBody(token: string): string | undefined {
+  if (token.startsWith('$(') && token.endsWith(')') && token.length > 2) {
+    const end = closeParen(token, 1);
+    if (end === token.length - 1) return token.slice(2, -1);
+  }
+  if (token.startsWith('`') && token.endsWith('`') && token.length > 1) {
+    const end = closeTick(token, 0);
+    if (end === token.length - 1) return token.slice(1, -1);
+  }
+  return undefined;
+}
+
+/**
  * Split a shell command list into commands, the way sh does: separators (`&&`, `||`, `;`,
  * `|`, `|&`, `&` — not the `&` of `2>&1`/`&>` — and newline) count only OUTSIDE single/double
  * quotes, backslash escapes and command substitutions; `#` at the start of a word outside
@@ -259,11 +284,17 @@ interface Segment {
 const firstProgram = (tokens: string[]) => tokens.find((t) => !ENV_ASSIGN.test(t));
 const TERMINATORS = new Set([undefined, ';', '\n', '&']);
 
-/** The errexit effect of a `set` command's arguments, in order: true (on), false (off), or undefined. */
+/**
+ * The errexit effect of a `set` command's arguments, in order: true (on), false (off), or
+ * undefined. Stops at a bare `--`: sh treats everything after it as `set`'s POSITIONAL
+ * parameters, not option flags, so `set -- -e` does NOT turn errexit on (#1445) —
+ * `sh -c 'set -- -e; false; echo survived'` prints `survived`.
+ */
 function errexitEffect(args: string[]): boolean | undefined {
   let effect: boolean | undefined;
   for (let j = 0; j < args.length; j++) {
     const a = args[j];
+    if (a === '--') break;
     if (/^[-+]o$/.test(a) && args[j + 1] === 'errexit') effect = a === '-o';
     else if (/^-[A-Za-z]*e/.test(a)) effect = true;
     else if (/^\+[A-Za-z]*e/.test(a)) effect = false;
@@ -528,6 +559,65 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
     out.unresolved.push(`${key}: unknown program ${prog} (not a known non-compiler): ${text}`);
   };
 
+  /**
+   * #1445 evasion form 2: the inside of a `$(…)`/backtick used to be searched only for a
+   * literal plain-`tsc` TOKEN (`substitutionTokens`, still handles that case) — a RUNNER call
+   * inside it was never classified, so `echo $(bun run tc2)` ran whatever `tc2` is (plain tsc
+   * or not) unverified, and an unrecognised program like `$(make tc)` passed silently instead
+   * of failing closed. This follows a WHOLE-WORD substitution body (see
+   * `wholeWordSubstitutionBody`) through the SAME classifier used for the top-level command:
+   * a runner/turbo call is resolved via `runner`/`turbo` (which recurse into `visitScript` →
+   * `classify`, so a resolved script's own plain-tsc usage is still caught, and an unresolvable
+   * target still fails closed) — always MASKED (a substitution's own exit status never
+   * propagates to the command, so it can never satisfy the enforced-tsc7 requirement); anything
+   * else that is not a known non-compiler/tsc-like program is reported unresolved directly.
+   */
+  const scanSubstitutionBody = (p: Pkg, key: string, body: string, masked: boolean) => {
+    for (const c of lex(body)) {
+      if (c.tokens.length === 0) continue;
+      let i = 0;
+      while (i < c.tokens.length && ENV_ASSIGN.test(c.tokens[i])) i++;
+      if (i < c.tokens.length && EXEC_WRAPPERS.has(c.tokens[i])) {
+        i++;
+        while (i < c.tokens.length && c.tokens[i].startsWith('-')) {
+          i += VALUE_FLAGS.has(c.tokens[i]) || c.tokens[i] === '-p' ? 2 : 1;
+        }
+      }
+      const prog = i < c.tokens.length ? c.tokens[i] : undefined;
+      if (prog !== undefined) {
+        const base = posix.basename(prog);
+        const known =
+          DYNAMIC.test(prog) ||
+          prog.includes('`') ||
+          NON_COMPILERS.has(prog) ||
+          SHELL_CONTROL.has(prog) ||
+          TSC7_BIN.test(prog) ||
+          PLAIN_TS_PKG.test(prog) ||
+          TSC_LIKE.test(prog);
+        if (!known) {
+          const args = c.tokens.slice(i + 1);
+          if (base === 'turbo') {
+            turbo(p, key, args, masked, `substitution: ${body}`);
+          } else if (RUNNERS.has(prog)) {
+            runner(p, key, prog, args, masked, `substitution: ${body}`);
+          } else {
+            out.unresolved.push(
+              `${key}: command substitution runs ${prog}, not classified: ${body}`,
+            );
+          }
+          continue;
+        }
+      }
+      // Not a runner/turbo call (or nothing to peel to) — still descend into any further
+      // whole-word substitution this command's own tokens carry, for deeper indirection
+      // (`echo $(echo $(bun run tc2))`).
+      for (const tok of c.tokens) {
+        const nested = wholeWordSubstitutionBody(tok);
+        if (nested !== undefined) scanSubstitutionBody(p, key, nested, masked);
+      }
+    }
+  };
+
   const classify = (p: Pkg, key: string, seg: Segment) => {
     const { tokens, masked } = seg;
     const text = seg.text.trim();
@@ -537,6 +627,13 @@ function resolveChain(pkg: Pkg, start: string, all: Pkg[], root = REPO_ROOT): Ch
     const plain = (t: string) => PLAIN_TS_PKG.test(t) || (TSC_LIKE.test(t) && !TSC7_BIN.test(t));
     if ([...tokens, ...substitutionTokens(seg.subs)].some(plain)) {
       out.plainTsc.push(`${key}: ${text}`);
+    }
+    for (const tok of tokens) {
+      const body = wholeWordSubstitutionBody(tok);
+      // Always masked, regardless of this command's OWN masked status: a substitution's exit
+      // code is never the command's (`echo $(x)`'s exit status is echo's, not x's), so whatever
+      // it resolves to can never satisfy the enforced-tsc7 requirement.
+      if (body !== undefined) scanSubstitutionBody(p, key, body, true);
     }
     let i = 0;
     let wrapped = false;
@@ -955,5 +1052,73 @@ describe('#1402 — runner/turbo commands are classified, never skipped', () => 
     ['plain typescript lib', `echo $(node node_modules/typescript/lib/_tsc.js) && ${TSC7}`],
   ])('plain tsc inside a command substitution is caught: %s', (_l, typecheck) => {
     expect(run(lib({ typecheck })).plainTsc).toHaveLength(1);
+  });
+});
+
+describe('#1445 — two documented evasion forms are closed', () => {
+  const pkg = (path: string, scripts: Scripts, name?: string): Pkg => ({ path, scripts, name });
+  const TSC7 = '../../node_modules/typescript-tsc7/bin/tsc --noEmit';
+  const lib = (scripts: Scripts) => pkg('packages/lib/package.json', scripts, '@getknext/lib');
+  const run = (l: Pkg, others: Pkg[] = []) => resolveChain(l, 'typecheck', [l, ...others]);
+
+  describe('evasion 1: `set -- -e` is not errexit', () => {
+    it('does NOT count a later tsc7 run as enforced (sh treats `-e` after `--` as a positional argument)', () => {
+      const c = run(lib({ typecheck: `set -- -e; ${TSC7}; echo done` }));
+      expect(c.tsc7).toBe(0);
+    });
+
+    it('a real `set -e` (no `--`) still enforces, proving the fix does not just disable `set -e` entirely', () => {
+      const c = run(lib({ typecheck: `set -e; ${TSC7}; echo done` }));
+      expect(c.tsc7).toBe(1);
+    });
+
+    it('`set -- -e -o errexit` still turns errexit on (the `-o errexit` form appears before `--`)', () => {
+      const c = run(lib({ typecheck: `set -o errexit -- -e; ${TSC7}; echo done` }));
+      expect(c.tsc7).toBe(1);
+    });
+  });
+
+  describe('evasion 2: a runner/unknown program inside a command substitution is classified, not skipped', () => {
+    it('a runner call resolving to plain tsc is caught: `echo $(bun run tc2)`', () => {
+      const c = run(lib({ typecheck: `echo $(bun run tc2) && ${TSC7}`, tc2: 'tsc --noEmit' }));
+      expect(c.plainTsc.some((e) => e.includes('tc2'))).toBe(true);
+    });
+
+    it('an unresolvable runner script inside a substitution fails closed, not silently', () => {
+      const c = run(lib({ typecheck: `echo $(bun run nope) && ${TSC7}` }));
+      expect(c.unresolved.some((e) => e.includes('nope'))).toBe(true);
+    });
+
+    it('an unrecognised program inside a substitution fails closed: `$(make tc)`', () => {
+      const c = run(lib({ typecheck: `${TSC7} && echo $(make tc)` }));
+      expect(c.unresolved.some((e) => e.includes('make'))).toBe(true);
+    });
+
+    it('deeper indirection is followed too: `echo $(echo $(bun run tc2))`', () => {
+      const c = run(
+        lib({ typecheck: `echo $(echo $(bun run tc2)) && ${TSC7}`, tc2: 'tsc --noEmit' }),
+      );
+      expect(c.plainTsc.some((e) => e.includes('tc2'))).toBe(true);
+    });
+
+    it('a substitution used as a path fragment (`$(npm bin)/tsc -p .`) is left to the existing dynamic-program check, not double-flagged', () => {
+      const c = run(lib({ typecheck: `${TSC7} && $(npm bin)/tsc -p .` }));
+      const dynamicHits = c.unresolved.filter((e) => e.includes('dynamic program'));
+      expect(dynamicHits).toHaveLength(1);
+      expect(c.unresolved).toHaveLength(1);
+    });
+
+    it('a substitution resolving to an enforced tsc7 run is still never counted (its exit status never propagates)', () => {
+      const c = run(lib({ typecheck: `echo $(bun run tc2) && ${TSC7}`, tc2: TSC7 }));
+      expect(c.tsc7).toBe(1); // only the top-level TSC7 run counts, not the one inside `$(…)`
+    });
+
+    it('existing patterns stay green: no false positive on ordinary runner/turbo chains outside substitutions', () => {
+      const c = run(lib({ typecheck: `${TSC7} && bun run lint` }), []);
+      // "lint" is not declared, so this is expected to be unresolved for an unrelated reason —
+      // confirms the new substitution scan added nothing extra beyond the ordinary chain result.
+      expect(c.unresolved).toHaveLength(1);
+      expect(c.unresolved[0]).toContain('lint');
+    });
   });
 });
