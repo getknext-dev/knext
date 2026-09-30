@@ -293,28 +293,64 @@ holds the pure diff), wired as the `crd-schema-additive-guard` job in `ci.yml`.
 
 **What it checks:** the generated CRD manifest
 (`packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml`) structurally diffed
-against the same file at the most recent `v*` tag. A violation is any of: a field removed, a
-field's `type` changed, a field newly added to `required`, an `enum` narrowed (a value removed, or
-an `enum` added where none constrained the field before), a validation bound narrowed
-(`minLength`/`minimum`/`minItems`/`minProperties` increased, or `maxLength`/`maximum`/`maxItems`/
-`maxProperties` decreased), a `pattern` changed or added where none existed, or a whole served CRD
-version dropped. Adding a new optional field, a new enum value, or widening a bound is always
-allowed — the guard is one-directional by construction, matching §2.1's own wording ("New optional
-fields are fine").
+against the same file at the most recent `v*` tag. The precise violation-class list, restated here
+because a decision record should not require reading the source to know what it enforces
+(`scripts/lib/crd-schema-diff.mjs`'s own header carries the same list, kept in sync by hand):
 
-**What it deliberately does NOT check**, stated so it is not later assumed to be covered: the Go
-type (`api/v1alpha1/nextapp_types.go`) that generates the CRD via `make manifests` — the generated
-YAML is what a cluster actually validates against, and is downstream of the Go type by
-construction, so diffing it is sufficient and diffing the Go type as well would only duplicate the
-same signal one step earlier; and any operator-side reconciliation *behavior* change that does not
-touch the schema — §2.1 already says field semantics are not frozen by the version string, and a
-schema-diff cannot and should not try to catch a semantic change.
+- a field (`properties` key) removed, at any depth;
+- a field's `type` changed;
+- a field newly added to `required`;
+- an `enum` narrowed — a value removed, or an `enum` added where none constrained the field before;
+- a validation bound narrowed — `minLength`/`minimum`/`minItems`/`minProperties` increased, or
+  `maxLength`/`maximum`/`maxItems`/`maxProperties` decreased;
+- a `pattern` changed, or added where none existed before;
+- a whole served CRD version (`spec.versions[].name`) dropped from the document;
+- a version's `served` flag flipping `true` → `false`;
+- a version's `storage: true` disappearing with no OTHER version gaining it (a storage-version
+  MOVE within the same diff is allowed; a net loss is not);
+- an `x-kubernetes-validations` (CEL) entry whose `rule` text is new — covers both a brand-new
+  rule and an existing rule's expression being edited (a REMOVED rule, with nothing new added, is
+  allowed — it widens what validates);
+- `nullable: true` flipping to `false` or being removed;
+- `x-kubernetes-preserve-unknown-fields: true` flipping to `false` or being removed;
+- `additionalProperties` narrowed — `true`/a schema narrowed to `false`, or (when both sides are
+  schemas) the nested schema narrowed further, recursively (any class above also applies inside
+  `additionalProperties`);
+- `format` added where none existed, or changed to a different value, on an existing field
+  (format REMOVED is not flagged — it widens);
+- `default` changed or removed on an existing field — a behavior change for objects relying on the
+  default, even where the field's accepted values are otherwise untouched.
+
+Adding a new optional field, a new enum value, widening a bound, or removing a CEL rule/`format` is
+always allowed — the guard is one-directional by construction, matching §2.1's own wording ("New
+optional fields are fine").
+
+**What it deliberately does NOT check**, stated so it is not later assumed to be covered:
+
+- the Go type (`api/v1alpha1/nextapp_types.go`) that generates the CRD via `make manifests` — the
+  generated YAML is what a cluster actually validates against, and is downstream of the Go type by
+  construction, so diffing it is sufficient and diffing the Go type as well would only duplicate
+  the same signal one step earlier;
+- `oneOf`/`anyOf`/`allOf`/`not` schema combinators — the `NextApp` CRD does not use them; partial
+  support for a construct this schema never exercises would be worse than the documented gap;
+- any operator-side reconciliation *behavior* change that does not touch the schema — §2.1 already
+  says field semantics are not frozen by the version string, and a schema-diff structurally cannot
+  see a semantic change that leaves the schema text untouched.
 
 **Operator files are not npm-published, so they are not byte-frozen** — nothing in this amendment
 or its guard claims otherwise. `packages/kn-next-operator` ships with the operator image, on its
 own release cadence (ADR-0020), never inside an npm tarball. What this guard freezes is narrower
 and specific: the **schema shape** the CRD YAML declares, regardless of what else in the operator
 changes around it.
+
+**Not yet a required check.** The `crd-schema-additive-guard` job runs on every PR and reports its
+status, but it is not (yet) in `main`'s required-status-checks list
+(`tests/merge-queue-triggers.test.ts`'s `REQUIRED_CONTEXT_OWNERS`) — it is not added there in this
+amendment, because doing so would assert a branch-protection state this PR did not create. Flipping
+a check from "reports" to "blocks merge" is a GitHub Settings change only a founder makes, same as
+every other check in that list; it is tracked alongside the rest of that backlog under #1373, not
+claimed as done here. Until that flip, a reviewer who sees this job fail on a PR should treat it the
+same way they would treat any other honest-but-not-required signal: read it, do not wave it through.
 
 ### Action items
 

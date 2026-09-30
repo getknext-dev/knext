@@ -235,4 +235,298 @@ describe('diffCrd', () => {
     expect(result.ok).toBe(false);
     expect(result.violations).toContain('version "v1alpha1", $.spec.image: field removed');
   });
+
+  function crdWithVersions(versions: unknown[]) {
+    return { spec: { versions } };
+  }
+
+  it('RED: served flipping true -> false on an existing version is a violation', () => {
+    const oldCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: true,
+        storage: true,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+    ]);
+    const newCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: false,
+        storage: true,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+    ]);
+    const result = diffCrd(oldCrd, newCrd);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toContain('version "v1alpha1": served flipped from true to false');
+  });
+
+  it('GREEN: served staying true is not a violation', () => {
+    const oldCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: true,
+        storage: true,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+    ]);
+    const newCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: true,
+        storage: true,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+    ]);
+    expect(diffCrd(oldCrd, newCrd).ok).toBe(true);
+  });
+
+  it('RED: losing storage:true with no other version gaining it is a violation', () => {
+    const oldCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: true,
+        storage: true,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+    ]);
+    const newCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: true,
+        storage: false,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+    ]);
+    const result = diffCrd(oldCrd, newCrd);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toContain(
+      'version "v1alpha1": storage:true removed with no other version gaining storage:true',
+    );
+  });
+
+  it('GREEN: a storage-version MOVE (one loses it, another gains it) is allowed', () => {
+    const oldCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: true,
+        storage: true,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+      {
+        name: 'v1beta1',
+        served: true,
+        storage: false,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+    ]);
+    const newCrd = crdWithVersions([
+      {
+        name: 'v1alpha1',
+        served: true,
+        storage: false,
+        schema: { openAPIV3Schema: schemaWith({}) },
+      },
+      { name: 'v1beta1', served: true, storage: true, schema: { openAPIV3Schema: schemaWith({}) } },
+    ]);
+    expect(diffCrd(oldCrd, newCrd).ok).toBe(true);
+  });
+});
+
+describe('diffOpenApiSchema — round 2 (#1693 review) violation classes', () => {
+  it('RED: a new x-kubernetes-validations CEL rule is a violation', () => {
+    const oldSchema = schemaWith({
+      spec: { type: 'object', 'x-kubernetes-validations': [{ rule: 'self.a == self.b' }] },
+    });
+    const newSchema = schemaWith({
+      spec: {
+        type: 'object',
+        'x-kubernetes-validations': [{ rule: 'self.a == self.b' }, { rule: 'self.c == self.d' }],
+      },
+    });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(
+      violations.some(
+        (v) => v.includes('x-kubernetes-validations') && v.includes('self.c == self.d'),
+      ),
+    ).toBe(true);
+  });
+
+  it('RED: a changed CEL rule expression is a violation', () => {
+    const oldSchema = schemaWith({
+      spec: { type: 'object', 'x-kubernetes-validations': [{ rule: 'self.a == self.b' }] },
+    });
+    const newSchema = schemaWith({
+      spec: { type: 'object', 'x-kubernetes-validations': [{ rule: 'self.a != self.b' }] },
+    });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(
+      violations.some(
+        (v) => v.includes('x-kubernetes-validations') && v.includes('self.a != self.b'),
+      ),
+    ).toBe(true);
+  });
+
+  it('GREEN: a removed CEL rule (nothing else added) is allowed (widens)', () => {
+    const oldSchema = schemaWith({
+      spec: {
+        type: 'object',
+        'x-kubernetes-validations': [{ rule: 'self.a == self.b' }, { rule: 'self.c == self.d' }],
+      },
+    });
+    const newSchema = schemaWith({
+      spec: { type: 'object', 'x-kubernetes-validations': [{ rule: 'self.a == self.b' }] },
+    });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toEqual([]);
+  });
+
+  it('RED: nullable true -> false is a violation', () => {
+    const oldSchema = schemaWith({ foo: { type: 'string', nullable: true } });
+    const newSchema = schemaWith({ foo: { type: 'string', nullable: false } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.foo.nullable: changed from true to false');
+  });
+
+  it('RED: nullable true -> removed is a violation', () => {
+    const oldSchema = schemaWith({ foo: { type: 'string', nullable: true } });
+    const newSchema = schemaWith({ foo: { type: 'string' } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain(
+      '$.foo.nullable: changed from true to removed (defaults to false)',
+    );
+  });
+
+  it('GREEN: nullable staying true is not a violation', () => {
+    const oldSchema = schemaWith({ foo: { type: 'string', nullable: true } });
+    const newSchema = schemaWith({ foo: { type: 'string', nullable: true } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toEqual([]);
+  });
+
+  it('RED: x-kubernetes-preserve-unknown-fields true -> false/removed is a violation', () => {
+    const oldSchema = schemaWith({
+      foo: { type: 'object', 'x-kubernetes-preserve-unknown-fields': true },
+    });
+    const newSchema = schemaWith({ foo: { type: 'object' } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations.some((v) => v.includes('x-kubernetes-preserve-unknown-fields'))).toBe(true);
+  });
+
+  it('GREEN: x-kubernetes-preserve-unknown-fields staying true is not a violation', () => {
+    const oldSchema = schemaWith({
+      foo: { type: 'object', 'x-kubernetes-preserve-unknown-fields': true },
+    });
+    const newSchema = schemaWith({
+      foo: { type: 'object', 'x-kubernetes-preserve-unknown-fields': true },
+    });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toEqual([]);
+  });
+
+  it('RED: additionalProperties true -> false is a violation', () => {
+    const oldSchema = schemaWith({ foo: { type: 'object', additionalProperties: true } });
+    const newSchema = schemaWith({ foo: { type: 'object', additionalProperties: false } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.foo.additionalProperties: narrowed to false');
+  });
+
+  it('RED: additionalProperties schema -> false is a violation', () => {
+    const oldSchema = schemaWith({
+      foo: { type: 'object', additionalProperties: { type: 'string' } },
+    });
+    const newSchema = schemaWith({ foo: { type: 'object', additionalProperties: false } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.foo.additionalProperties: narrowed to false');
+  });
+
+  it('RED: additionalProperties schema narrowed recursively (a nested field removed) is a violation', () => {
+    const oldSchema = schemaWith({
+      foo: {
+        type: 'object',
+        additionalProperties: { type: 'object', properties: { bar: { type: 'string' } } },
+      },
+    });
+    const newSchema = schemaWith({
+      foo: { type: 'object', additionalProperties: { type: 'object', properties: {} } },
+    });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.foo.additionalProperties.bar: field removed');
+  });
+
+  it('GREEN: additionalProperties staying true is not a violation', () => {
+    const oldSchema = schemaWith({ foo: { type: 'object', additionalProperties: true } });
+    const newSchema = schemaWith({ foo: { type: 'object', additionalProperties: true } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toEqual([]);
+  });
+
+  it('RED: format added where none existed is a violation', () => {
+    const oldSchema = schemaWith({ ts: { type: 'string' } });
+    const newSchema = schemaWith({ ts: { type: 'string', format: 'date-time' } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.ts.format: added ("date-time") where none existed before');
+  });
+
+  it('RED: format changed value is a violation', () => {
+    const oldSchema = schemaWith({ ts: { type: 'string', format: 'date' } });
+    const newSchema = schemaWith({ ts: { type: 'string', format: 'date-time' } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.ts.format: changed from "date" to "date-time"');
+  });
+
+  it('GREEN: format staying the same is not a violation', () => {
+    const oldSchema = schemaWith({ ts: { type: 'string', format: 'date-time' } });
+    const newSchema = schemaWith({ ts: { type: 'string', format: 'date-time' } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toEqual([]);
+  });
+
+  it('GREEN: format removed is allowed (widens)', () => {
+    const oldSchema = schemaWith({ ts: { type: 'string', format: 'date-time' } });
+    const newSchema = schemaWith({ ts: { type: 'string' } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toEqual([]);
+  });
+
+  it('RED: default changed on an existing field is a violation', () => {
+    const oldSchema = schemaWith({ replicas: { type: 'integer', default: 1 } });
+    const newSchema = schemaWith({ replicas: { type: 'integer', default: 2 } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.replicas.default: changed from 1 to 2');
+  });
+
+  it('RED: default removed on an existing field is a violation', () => {
+    const oldSchema = schemaWith({ replicas: { type: 'integer', default: 1 } });
+    const newSchema = schemaWith({ replicas: { type: 'integer' } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toContain('$.replicas.default: removed (was 1)');
+  });
+
+  it('GREEN: default staying the same is not a violation', () => {
+    const oldSchema = schemaWith({ replicas: { type: 'integer', default: 1 } });
+    const newSchema = schemaWith({ replicas: { type: 'integer', default: 1 } });
+    const violations: string[] = [];
+    diffOpenApiSchema(oldSchema, newSchema, '$', violations);
+    expect(violations).toEqual([]);
+  });
 });
