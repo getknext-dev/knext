@@ -17,8 +17,8 @@ Every npm dependency you add is compiled into the executable. That has three eff
 - **Binary size.** A vinext production build is around 70 MB before your dependencies. Each package that
   duplicates something Bun already does adds to what your cluster pulls on every deploy.
 - **Boot speed.** The whole point of compiling is starting fast — the vinext build **boots** in ~61 ms
-  to the first response (a fresh local process; on Knative scale-from-zero the platform's scheduling
-  dominates the end-to-end cold start — see [Scale-to-zero & cold starts](/docs/scale-to-zero)).
+  to the first response, on a fresh **local** process; on Knative scale-from-zero the platform's
+  scheduling dominates the end-to-end cold start — see [Scale-to-zero & cold starts](/docs/scale-to-zero).
   Bun's built-ins are native, so they add no JavaScript for the runtime to parse and execute at boot.
 - **Compatibility.** A package written for Node may reach for APIs Bun implements differently. A
   built-in cannot have that problem.

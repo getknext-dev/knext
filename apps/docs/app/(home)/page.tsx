@@ -20,10 +20,10 @@ export default function HomePage() {
             Scale&#8209;to&#8209;<span className={styles.z}>zero</span> Next.js, on Knative.
           </h1>
           <p className={styles.lede}>
-            knext deploys Next.js apps as <b>compiled single executables</b> with true{' '}
-            <b>scale-to-zero</b> — pods drop to nothing when idle and wake on the first request; the
-            bytecode-baked binary itself boots in <b>~61&nbsp;ms</b>. One operator. Any cloud. No
-            lock-in.
+            knext deploys Next.js apps on Knative with true <b>scale-to-zero</b> — pods drop to
+            nothing when idle and wake on the first request with an <b>optimized cold start</b>:
+            every build bakes in a bytecode cache at build time, so cold pods skip JS recompilation.
+            One operator. Any cloud. No lock-in.
           </p>
           <div className={styles.cta}>
             <Link className={`${styles.btn} ${styles.btnPrimary}`} href="/docs/learn">
@@ -73,13 +73,13 @@ export default function HomePage() {
               <div className={styles.n}>01</div>
               <h3>Verified in the open — claims match the code</h3>
               <p>
-                The default build compiles your app with <b>vinext</b>, an open-source Vite-based
-                Next.js implementation, into one fast binary. knext&apos;s compatibility record is
-                public and honest: <b>778 tests, zero failures</b> against Next.js&apos;s own
-                deploy-mode e2e suite on the Node adapter lane, re-verified nightly — and the
-                compiled path is measured per feature until its own suite lane is green. Scope,
-                exclusions, and what each claim covers:{' '}
-                <Link href="/docs/compat-suite">verified compatibility</Link>.
+                The default build runs on the official Next.js Deployment Adapter API, packaged as a
+                bytecode-cached standalone executable. knext&apos;s compatibility record is public
+                and honest: <b>778 tests, zero failures</b> against Next.js&apos;s own deploy-mode
+                e2e suite, re-verified nightly. An optional <b>vinext</b> build (an open-source
+                Vite-based Next.js implementation, compiled into one binary) is also available,
+                measured per feature until its own suite lane is green. Scope, exclusions, and what
+                each claim covers: <Link href="/docs/compat-suite">verified compatibility</Link>.
               </p>
             </div>
             <div className={styles.cell}>
@@ -95,10 +95,11 @@ export default function HomePage() {
               <div className={styles.n}>03</div>
               <h3>Bytecode-cached cold starts</h3>
               <p>
-                A V8 compile cache is baked into your image at build time — every cold pod skips JS
-                recompilation, with nothing to enable. Or run{' '}
-                <Link href="/docs/bun-runtime">Bun</Link> with build-time bytecode precompilation
-                (−47% measured boot). Self-hosted, on your cluster.
+                Every image bakes in a compiled bytecode cache at build time — every cold pod skips
+                JS recompilation, with nothing to enable. On a real cluster, scheduling and
+                container start dominate the wake time; see{' '}
+                <Link href="/docs/scale-to-zero">scale-to-zero &amp; cold starts</Link> for measured
+                numbers. Self-hosted, on your cluster.
               </p>
             </div>
             <div className={styles.cell}>

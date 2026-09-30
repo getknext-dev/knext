@@ -102,9 +102,11 @@ A cold start is **pod scheduling + container start + the server boot + first-req
 the last two are knext's to shave; the first two belong to the platform. The **boot** is where a
 Next.js app otherwise spends real CPU compiling JavaScript — so knext attacks exactly that by
 compiling **at build time**: the default target is a [compiled Bun executable](/docs/bun-runtime)
-whose server is precompiled to bytecode (the vinext build's whole-app executable measured **61 ms**
-median process boot against the Node standalone's 884 ms); with `runtime: 'node'`, a V8 compile
-cache baked into the image does the same job — see [bytecode caching](/docs/bytecode).
+whose server is precompiled to bytecode; with `runtime: 'node'`, a V8 compile cache baked into the
+image does the same job — see [bytecode caching](/docs/bytecode). On a fresh **local** process (the
+binary already page-cached, not an end-to-end cluster cold start), the optional vinext build's
+whole-app executable measured **61 ms** median process boot against the Node standalone's 884 ms —
+see the caveat right below on why that local number does not carry over to a real cluster.
 
 Be clear about where that win lands, though: on a real Knative cluster the **pod scheduling and
 container start dominate** the end-to-end budget — measured on the order of ~3.4–3.6 s from zero
