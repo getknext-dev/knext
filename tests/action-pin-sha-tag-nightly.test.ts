@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   copyFileSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -896,16 +898,25 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
     const root = mkdtempSync(join(tmpdir(), 'knext-pin-symlink-'));
     mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
     mkdirSync(join(root, '.github', 'actions'), { recursive: true });
-    mkdirSync(join(root, 'real-action'), { recursive: true });
+    // Deliberately OUTSIDE `root` (#1711 full-tree-walk update): a `real-action`
+    // directory sitting loose INSIDE `root` would now be discovered TWICE — once
+    // directly by the full-tree walk, once again through the symlink — which is
+    // correct behaviour for the walk but would make this fixture assert the
+    // wrong thing (it exists to prove symlink traversal, not to observe a
+    // duplicate). Keeping the real directory outside `root` isolates that.
+    const outside = mkdtempSync(join(tmpdir(), 'knext-pin-symlink-target-'));
+    mkdirSync(join(outside, 'real-action'), { recursive: true });
     writeFileSync(
-      join(root, 'real-action', 'action.yml'),
+      join(outside, 'real-action', 'action.yml'),
       ['runs:', '  steps:', '    - uses: actions/checkout@v7'].join('\n'),
     );
-    symlinkSync(join(root, 'real-action'), join(root, '.github', 'actions', 'linked'), 'dir');
+    symlinkSync(join(outside, 'real-action'), join(root, '.github', 'actions', 'linked'), 'dir');
     expect(discoverPinnableFiles(root)).toContain('.github/actions/linked/action.yml');
+    expect(discoverPinnableFiles(root)).toHaveLength(1);
     const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({ reason: 'not-sha-pinned' });
+    rmSync(outside, { recursive: true, force: true });
   });
 
   it('does not loop forever on a symlink cycle', () => {
@@ -924,6 +935,117 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
     const scanned = readdirSync(WORKFLOW_DIR).filter((file) => file.endsWith('.yml'));
     for (const file of ['supply-chain.yml', 'operator-supply-chain.yml']) {
       expect(scanned, `${file} must be inside the nightly's scan`).toContain(file);
+    }
+  });
+
+  // ── #1711 — full-tree walk replaces NAMED_COMPOSITE_ACTION_DIRS ──────────
+  // The whole point of the issue: a composite action dropped into a directory
+  // NOBODY named ahead of time must still be discovered and checked. These
+  // tests plant one in a fresh, arbitrary directory that is neither
+  // `.github/actions`, the repo root, nor `packages/kn-next-action` — the
+  // three the old enumerated list happened to cover.
+
+  it('discovers and REDS an unpinned composite action in a brand-new directory (#1711)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-newdir-red-'));
+    mkdirSync(join(root, 'tools', 'my-new-action'), { recursive: true });
+    writeFileSync(
+      join(root, 'tools', 'my-new-action', 'action.yml'),
+      ['runs:', '  using: composite', '  steps:', '    - uses: actions/checkout@v7'].join('\n'),
+    );
+    expect(discoverPinnableFiles(root)).toContain('tools/my-new-action/action.yml');
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      file: 'tools/my-new-action/action.yml',
+      reason: 'not-sha-pinned',
+    });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('discovers and clears a PINNED, tag-resolved composite action in a brand-new directory (#1711)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-newdir-green-'));
+    mkdirSync(join(root, 'tools', 'my-new-action'), { recursive: true });
+    writeFileSync(
+      join(root, 'tools', 'my-new-action', 'action.yml'),
+      [
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        `    - uses: actions/checkout@${SHA_A} # v5.0.0`,
+      ].join('\n'),
+    );
+    const { api } = fakeApi({
+      'repos/actions/checkout/git/ref/tags/v5.0.0': {
+        status: 200,
+        body: { object: { type: 'commit', sha: SHA_A } },
+      },
+    });
+    expect(await verifyPins({ repoRoot: root, api })).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('FAILS CLOSED on an unparseable action file in a brand-new directory (#1711)', async () => {
+    // A `with:`-shaped block this scanner cannot be sure about (an anchor) is
+    // exactly the "could not read the declaration" case the header docs call
+    // out — it must surface as a finding, never be silently skipped just
+    // because the file sits outside every previously-named directory.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-newdir-malformed-'));
+    mkdirSync(join(root, 'tools', 'weird-action'), { recursive: true });
+    writeFileSync(
+      join(root, 'tools', 'weird-action', 'action.yml'),
+      [
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        `    - uses: actions/checkout@${SHA_A} # v5.0.0`,
+        '      with: *anchor',
+      ].join('\n'),
+    );
+    const { api } = fakeApi({
+      'repos/actions/checkout/git/ref/tags/v5.0.0': {
+        status: 200,
+        body: { object: { type: 'commit', sha: SHA_A } },
+      },
+    });
+    const findings = await verifyPins({ repoRoot: root, api });
+    expect(findings.length).toBeGreaterThan(0);
+    expect(
+      findings.some((finding: { reason: string }) => finding.reason === 'with-unreadable'),
+    ).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('SKIPS node_modules, .git, dist, and .claude worktrees during the walk (#1711)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-skipset-'));
+    for (const skipDir of ['node_modules', '.git', 'dist', '.claude']) {
+      mkdirSync(join(root, skipDir, 'buried-action'), { recursive: true });
+      writeFileSync(
+        join(root, skipDir, 'buried-action', 'action.yml'),
+        ['runs:', '  steps:', '    - uses: actions/checkout@v7'].join('\n'),
+      );
+    }
+    expect(discoverPinnableFiles(root)).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('fails closed (throws) when a real directory cannot be read, rather than shrinking the scan (#1711)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-unreadable-dir-'));
+    const locked = join(root, 'locked-action');
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, 'action.yml'), ['runs:', '  steps: []'].join('\n'));
+    try {
+      chmodSync(locked, 0o000);
+      // Root itself is still readable, so the walk reaches `locked` and must
+      // fail closed there rather than quietly reporting fewer files. (No-op,
+      // not a failure of THIS test, when running as root — root ignores mode
+      // bits and can list the directory regardless.)
+      const isRoot = process.getuid?.() === 0;
+      if (!isRoot) {
+        expect(() => discoverPinnableFiles(root)).toThrow(/discoverPinnableFiles: cannot/);
+      }
+    } finally {
+      chmodSync(locked, 0o755);
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
