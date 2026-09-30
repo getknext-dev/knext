@@ -37,7 +37,10 @@ describe('evaluateErrorBudget', () => {
   });
 
   it('treats a non-boolean ok field as an error, not a pass', () => {
-    const attempts = [{ ok: true }, { status: 500 }];
+    // Deliberately malformed (missing `ok`) to prove the defensive `!== true`
+    // check — cast past the module's own `{ok: boolean}[]` JSDoc type on
+    // purpose, since that is exactly the shape this test needs to violate.
+    const attempts = [{ ok: true }, { status: 500 }] as unknown as { ok: boolean }[];
     const result = evaluateErrorBudget(attempts, 0.5);
     expect(result.errors).toBe(1);
   });

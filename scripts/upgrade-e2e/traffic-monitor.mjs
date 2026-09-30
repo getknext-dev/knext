@@ -32,7 +32,9 @@ import { appendFileSync } from 'node:fs';
 
 /**
  * @param {string} url - the Kourier gateway's loopback address (e.g. http://127.0.0.1:8080/).
- * @param {string} hostHeader - the app's real route host, e.g. `upgrade-e2e-app.upgrade-e2e-app.example.com`.
+ * @param {string | undefined} hostHeader - the app's real route host, e.g.
+ *   `upgrade-e2e-app.upgrade-e2e-app.example.com`; omitted sends no Host header.
+ * @param {typeof fetch} [fetchImpl]
  * @returns {Promise<{ok: boolean, status: number|string}>}
  */
 export async function attempt(url, hostHeader, fetchImpl = fetch) {
