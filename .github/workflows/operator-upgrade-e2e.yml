@@ -1,0 +1,170 @@
+name: Operator upgrade-under-load e2e (0.4.x -> current)
+
+# #1668 / #1671 — V1_ROADMAP §2.2 names "operator upgrade while CRs exist" as
+# a 1.0 failure mode, and nothing upgraded a RUNNING operator with LIVE
+# NextApps under traffic before this lane. This proves the documented
+# upgrade path end to end, on kind, using the SAME cluster-bootstrap steps
+# (kind, cert-manager, Knative Serving + Kourier) operator-e2e-nightly.yml's
+# rollback-e2e job already uses — no new harness invented.
+#
+# Sequence (scripts/upgrade-e2e/run.sh owns the orchestration):
+#   1. build + install the operator + CRD AS OF the kn-next@0.4.3 git tag
+#      (there is no separately-versioned operator release to download —
+#      `operator-latest` is a ROLLING release repointed to current main on
+#      every publish, so it cannot stand in for "the 0.4.x operator"; the
+#      0.4.3-tagged commit's own packages/kn-next-operator source is the
+#      honest substitute, built in its own git worktree)
+#   2. scaffold + deploy a NextApp with the PUBLISHED @getknext/core@0.4.3
+#      CLI from npm, against a real public digest-pinned image (--image, so
+#      this lane never needs a full next build/docker build/push)
+#   3. drive light continuous HTTP traffic against the app for the whole
+#      window
+#   4. upgrade the operator + CRD to THIS tree's build — operator FIRST, the
+#      documented order (apps/docs/content/docs/upgrading.mdx,
+#      docs/release/v1.0.0-rc.1.md "Upgrading: install the operator before
+#      the CLI")
+#   5. assert: no NextApp not-Ready for longer than a stated bound, no
+#      request errors beyond a stated budget, the CR's spec reconciles
+#      byte-identical
+#   6. install the current CLI and redeploy the SAME app directory following
+#      apps/docs/content/docs/upgrading.mdx's 0.4.x -> 1.0 section: deploying
+#      under the pre-rename config filename must fail with the one
+#      documented actionable rename error, then the rename + redeploy must
+#      succeed.
+#
+# Mutation-proof for this lane's own assertions (#1668 acceptance: "a
+# deliberately broken upgrade (CRD removed field) reds it") is
+# scripts/upgrade-e2e/break-crd.mjs, run via BREAK_CRD_UPGRADE=1 — gated off
+# by default and NEVER set by this workflow; see the PR description for the
+# local run that proves it reds the lane.
+#
+# Triggers: workflow_dispatch, a weekly schedule, and push-to-main paths
+# scoped to the operator (so an operator/CRD change gets this lane without
+# waiting for the weekly run). NEVER pull_request — a kind + Knative +
+# cert-manager + two-operator-build run is far too slow/expensive for PR CI,
+# same reasoning as every other lane in operator-e2e-nightly.yml.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 04:11 UTC weekly (Monday) — off-peak, and offset from the other
+    # nightlies' minutes (see docs/ci/capacity-budget.md) so this does not
+    # collide with the 03:17/03:29 crons already documented there.
+    - cron: '11 4 * * 1'
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/kn-next-operator/**'
+      - 'scripts/upgrade-e2e/**'
+      - '.github/workflows/operator-upgrade-e2e.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-e2e:
+    name: 0.4.x operator -> current, live NextApp under traffic (e2e_upgrade)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # fetch-depth: 0 — the script checks out the kn-next@0.4.3 tag into its
+      # own git worktree to build the 0.4.x-era operator; a shallow clone
+      # would not have that tag's history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name kn-next-operator-upgrade-e2e --wait 120s
+
+      - name: Install cert-manager (operator webhook certs)
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${KNATIVE_VERSION}"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/net-kourier-controller
+
+      # NEVER set BREAK_CRD_UPGRADE here — that switch is for the local
+      # mutation-proof run only (see the PR description).
+      - name: Run the operator upgrade-under-load e2e
+        env:
+          KIND_CLUSTER: kn-next-operator-upgrade-e2e
+          READY_BOUND_SECONDS: '90'
+          ERROR_BUDGET: '0.02'
+        run: bash scripts/upgrade-e2e/run.sh
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name kn-next-operator-upgrade-e2e || true
+
+  # Same pattern as operator-e2e-nightly.yml's nightly-red-alert: a scheduled
+  # run nobody is told about is not a regression gate.
+  weekly-red-alert:
+    name: Weekly red alert (pinned issue)
+    needs: [upgrade-e2e]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.upgrade-e2e.result == 'failure' || needs.upgrade-e2e.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or update the "Operator upgrade e2e weekly RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='Operator upgrade e2e weekly RED'
+          body="The weekly operator upgrade-under-load e2e (0.4.x -> current, kind) FAILED or was CANCELLED.
+
+          - Run: ${RUN_URL}
+
+          It upgrades a live 0.4.x operator + CRD to the current build while a NextApp deployed by the 0.4.3 CLI serves traffic, then redeploys with the current CLI. Open the failed job's log, fix the regression, re-run via workflow_dispatch to confirm green, then close this issue."
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs

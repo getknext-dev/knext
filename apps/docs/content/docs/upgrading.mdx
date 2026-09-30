@@ -89,6 +89,71 @@ Once that reports the version you expect, upgrade the CLI:
 npm install -D @getknext/core@latest
 ```
 
+## Version-specific step: upgrading a 0.4.x app to 1.0
+
+1.0 changes four things a 0.4.x app needs to walk through, in this order.
+
+### 1. Upgrade the operator and CRD first
+
+Same rule as above, restated for this specific jump: apply the 1.0 operator release before
+installing the 1.0 CLI anywhere that deploys to this cluster.
+
+```bash
+kubectl apply -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
+kubectl get crd nextapps.apps.kn-next.dev
+```
+
+An older CLI (0.4.x) continues to work against the upgraded operator — you do not need to touch
+every app's tooling in the same step. Only *installing the 1.0 CLI* before the operator is upgraded
+risks the rejected-field failure described above.
+
+### 2. Rename your config file to `knext.config.ts`
+
+The config file is now `knext.config.ts`. If your app's config still has the filename knext used
+before 1.0, there is no dual-read and no warning-and-continue: running any `knext` command in that
+directory fails fast with one actionable error naming the exact rename to make. Run the rename it
+tells you to, then run the command again — nothing renames an existing app's file for you.
+
+`knext create` scaffolds `knext.config.ts` for new apps.
+
+### 3. Pin your build target explicitly if you build with vinext
+
+The default build target changed from `vinext` (the compiled single executable) to `turbopack`
+(`next build` → the standalone runtime image), and the default runtime for that shape changed from
+`node` to `bun` (the compiled bytecode executable). If your `knext.config.ts` (after the rename
+above) omits `build`, your next deploy tries to build and ship a different artifact than before.
+
+**If your app builds with vinext** (its build script runs `vite build`), add `build: 'vinext'` to
+your config before upgrading, or `knext build`/`deploy` looks for a `.next/standalone` tree your
+build script never produces and fails:
+
+```ts title="knext.config.ts"
+const config = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'vinext',
+};
+export default config;
+```
+
+Apps already on the standalone target (`build: 'turbopack'`/`'webpack'`, or building with `next
+build`) are unaffected by the build-target change. If those apps also left `runtime` unset, it now
+defaults to `bun` (compiled bytecode) instead of `node` — set `runtime: 'node'` explicitly if you
+want the previous, uncompiled behaviour.
+
+### 4. Know about the new request-body cap
+
+Every route on a deployed app now rejects a request body larger than **8 MiB** by default, on every
+build target and runtime — a `413 Payload Too Large`, with the connection closed after the rest of
+the body is discarded (never buffered) for at most two seconds. A chunked request with no
+`Content-Length` is capped the same way.
+
+If your app accepts uploads larger than 8 MiB through a route handler, raise the cap before your
+users hit it — set `KNEXT_MAX_REQUEST_BYTES` (bytes) in your config's `env` map or in `spec.env` on
+the `NextApp`. `0` removes the cap entirely (the app logs this loudly on start so an unintentional
+`0` is visible). The app also prints the cap actually in force on start:
+`REQUEST_BYTE_CAP:<bytes> (<source>)`.
+
 ## Version-specific step: the metrics port moved from 9091 to 9464
 
 Older releases served app metrics on `:9091` — a port Knative's queue-proxy binds inside every pod
