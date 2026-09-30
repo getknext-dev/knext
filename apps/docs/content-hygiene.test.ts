@@ -211,3 +211,53 @@ describe('docs content — CLI reference matches the real verb set', () => {
     }
   });
 });
+
+describe('docs content — compat-suite credential page stays honest about an open window', () => {
+  // apps/docs/content/docs/compat-suite.mdx is the "verified against the official suite" page.
+  // Its whole point is to never claim a completed 14-night credential before one exists. These
+  // checks are the mechanical backstop for that promise — a future edit that quietly asserts
+  // "14/14" or drops the in-progress framing should fail CI, not slip through review.
+  const compatSuite = readFileSync(join(DOCS_DIR, 'compat-suite.mdx'), 'utf-8');
+
+  // Matches "14/14", "14 / 14", "14 of 14" — the shapes a completed-streak claim would take —
+  // regardless of surrounding punctuation, so a reworded sentence can't dodge the guard.
+  const completedFourteenNightClaim = /14\s*(?:\/|of)\s*14/i;
+
+  it('never claims a completed 14-of-14 (or 14/14) credentialed night count', () => {
+    expect(compatSuite).not.toMatch(completedFourteenNightClaim);
+  });
+
+  it('states the credentialing window is in progress, not finished', () => {
+    expect(compatSuite).toMatch(/in progress/i);
+    // The negative-space check: no sentence anywhere on the page claims the window itself is
+    // "complete" / "finished" / "done" (as opposed to a *cell's build* being "done" — no such
+    // phrase exists in this file, so a plain substring match is enough and stays honest even if
+    // unrelated wording changes elsewhere on the page).
+    expect(compatSuite).not.toMatch(/window (?:is|has) (?:complete|finished|done)/i);
+  });
+
+  it('lists all four v1.0 cells — Node/Bun x Turbopack/webpack — consistently with the credential matrix', () => {
+    // These are the same four combinations audited by ADR-0056's CREDENTIAL_CELLS / D2, and the
+    // same four rows the compat-matrix page tracks. Deriving the check from the config file
+    // itself (rather than hardcoding "four") would be nicer, but that file names cells by lane id
+    // (node/bun) with no builder axis in its schema — the axis lives in workflow YAML, not JSON —
+    // so this test instead pins the combinations by their prose, matching how the page names them.
+    for (const combo of [
+      /Node\s*\|\s*Turbopack/i,
+      /Node\s*\|\s*webpack/i,
+      /Bun\s*\|\s*Turbopack/i,
+      /Bun\s*\|\s*webpack/i,
+    ]) {
+      expect(compatSuite, `compat-suite.mdx should list the ${combo} cell`).toMatch(combo);
+    }
+  });
+
+  it('mutation control: the completed-14-night guard actually catches a false claim', () => {
+    // Not a doc-content check — proves the regex above is live, so a typo in it can't silently
+    // pass every future page edit that reintroduces a "14/14" claim.
+    expect(completedFourteenNightClaim.test('the window banked 14/14 nights')).toBe(true);
+    expect(completedFourteenNightClaim.test('the window banked 14 of 14 nights')).toBe(true);
+    expect(completedFourteenNightClaim.test('the window banked 14 / 14 nights')).toBe(true);
+    expect(completedFourteenNightClaim.test('the window is in progress')).toBe(false);
+  });
+});
