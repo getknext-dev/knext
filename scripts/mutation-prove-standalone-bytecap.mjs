@@ -77,7 +77,7 @@ const MUTATIONS = [
     claim: 'the linger is removed — a still-uploading client gets a connection reset',
     subject: 'preload',
     validate: jsStillParses,
-    anchor: '    lingerThenClose(socket);',
+    anchor: '    holdTeardown(socket, res);',
     replacement: '    if (socket && !socket.destroyed) socket.destroy();',
   },
   {
@@ -114,6 +114,37 @@ const MUTATIONS = [
     validate: jsStillParses,
     anchor: ', "request-body-cap.cjs"];',
     replacement: '];',
+  },
+  {
+    id: 'M11',
+    expect: 'red',
+    claim:
+      'the cap error is forwarded to a body stream nothing listens on — an unhandled error event exits the process',
+    subject: 'preload',
+    validate: jsStillParses,
+    anchor:
+      "          process.nextTick(() => callback(this.listenerCount('error') > 0 ? error : null));",
+    replacement: '          callback(error);',
+  },
+  {
+    id: 'M12',
+    expect: 'red',
+    claim:
+      'the linger is armed at refusal time, not when the 413 is written — a slow pipelined earlier response is lost',
+    subject: 'preload',
+    validate: jsStillParses,
+    anchor: "  if (typeof res.once === 'function') res.once('finish', () => armLinger(socket));",
+    replacement: '  armLinger(socket);',
+  },
+  {
+    id: 'M13',
+    expect: 'red',
+    claim:
+      'the discard byte bound is removed — a refused client streams unbounded bytes while an earlier response is pending',
+    subject: 'preload',
+    validate: jsStillParses,
+    anchor: '  if (state.discarded > LINGER_MAX_BYTES) socket.destroy();',
+    replacement: '  void LINGER_MAX_BYTES;',
   },
 ];
 

@@ -52,6 +52,29 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const id = req.headers['x-id'] || '?';
+  if (req.url === '/slow') {
+    // A slow earlier response on a pipelined connection.
+    setTimeout(() => res.end('slow-done'), 3000);
+    return;
+  }
+  if (req.url === '/ondata') {
+    // Reads with 'data'/'end' and attaches NO 'error' listener — the shape of
+    // any handler (or a Next internal window) that never expects a stream error.
+    process.stdout.write('HANDLER_START ' + id + '\\n');
+    let n = 0;
+    req.on('data', (c) => { n += c.length; });
+    req.on('end', () => {
+      process.stdout.write('HANDLER_DONE ' + id + ' ' + n + '\\n');
+      res.end('got ' + n);
+    });
+    return;
+  }
+  if (req.url === '/ignore') {
+    // Never touches the body at all — no listener of any kind.
+    process.stdout.write('HANDLER_START ' + id + '\\n');
+    setTimeout(() => { try { res.end('ignored'); } catch {} }, 300);
+    return;
+  }
   process.stdout.write('HANDLER_START ' + id + '\\n');
   const chunks = [];
   try {
@@ -78,6 +101,7 @@ interface Booted {
     port: number;
     out: () => string;
     err: () => string;
+    alive: () => boolean;
     stop: () => void;
 }
 
@@ -136,6 +160,8 @@ function boot(
                     port: Number(m[1]),
                     out: () => out,
                     err: () => err,
+                    alive: () =>
+                        child.exitCode === null && child.signalCode === null,
                     stop: () => child.kill("SIGKILL"),
                 });
             }
@@ -423,6 +449,134 @@ for (const [name, bin] of RUNTIMES) {
                     });
                 }
                 expect(b.out()).not.toContain("HANDLER_DONE linger-chunked");
+            } finally {
+                b.stop();
+            }
+        });
+
+        // A refusal must NEVER take the process down. Node's IncomingMessage
+        // swallows a destroy error when nothing listens for 'error'; a cap that
+        // forwards it anyway turns every such request into an unhandled 'error'
+        // event and a process exit — killing every co-resident request. Real
+        // Next has such windows (an early locale redirect, the cold-start
+        // `await handlersPromise`), so the fixtures here have NO error listener.
+        for (const [route, label] of [
+            ["/ondata", "reads via on('data') with no error listener"],
+            ["/ignore", "ignores the body entirely"],
+        ] as const) {
+            it(`a handler that ${label} survives an oversized chunked body: 413, and the process keeps serving`, async () => {
+                const b = await boot(bin, {
+                    KNEXT_MAX_REQUEST_BYTES: String(CAP),
+                });
+                try {
+                    const id = `nolistener${route.replace("/", "-")}`;
+                    const res = await raw(
+                        b.port,
+                        `POST ${route} HTTP/1.1\r\nHost: x\r\nX-Id: ${id}\r\nTransfer-Encoding: chunked\r\n\r\n` +
+                            chunk(1500).repeat(4) +
+                            "0\r\n\r\n",
+                    );
+                    expect(statusLine(res)).toBe(
+                        "HTTP/1.1 413 Payload Too Large",
+                    );
+                    // Give an unhandled 'error' event time to kill the child.
+                    await new Promise((r) => setTimeout(r, 500));
+                    expect(b.err()).not.toContain("Unhandled");
+                    expect(b.alive()).toBe(true);
+                    // No partial processing: the body never COMPLETED.
+                    expect(b.out()).not.toContain(`HANDLER_DONE ${id}`);
+                    // And the next request, on a new connection, is served.
+                    const next = await raw(b.port, post("after-refusal", 10));
+                    expect(statusLine(next)).toBe("HTTP/1.1 200 OK");
+                    expect(bodyOf(next)).toContain("got 10");
+                    expect(b.alive()).toBe(true);
+                } finally {
+                    b.stop();
+                }
+            });
+        }
+
+        // HTTP/1.1 pipelining: an earlier, slow response on the same socket must
+        // still be delivered when a LATER request on that socket is refused. The
+        // discard linger may only start once the 413 itself has been written —
+        // which, pipelined, is after every earlier response.
+        for (const [framing, oversized] of [
+            [
+                "declared Content-Length",
+                "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: piped-cl\r\nContent-Length: 6000\r\n\r\n" +
+                    "a".repeat(6000),
+            ],
+            [
+                "chunked (counted)",
+                "POST /upload HTTP/1.1\r\nHost: x\r\nX-Id: piped-chunked\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                    chunk(1500).repeat(4) +
+                    "0\r\n\r\n",
+            ],
+        ] as const) {
+            it(`a pipelined earlier response is delivered in full before the 413 (${framing})`, async () => {
+                const b = await boot(bin, {
+                    KNEXT_MAX_REQUEST_BYTES: String(CAP),
+                });
+                try {
+                    const res = await raw(
+                        b.port,
+                        `GET /slow HTTP/1.1\r\nHost: x\r\nX-Id: slow\r\n\r\n${oversized}`,
+                        { keepOpen: true },
+                    );
+                    expect(res).not.toContain("[timeout]");
+                    // /a's full response arrives first…
+                    expect(statusLine(res)).toBe("HTTP/1.1 200 OK");
+                    const slowAt = res.indexOf("slow-done");
+                    expect(slowAt).toBeGreaterThan(-1);
+                    // …then the 413 for the refused request.
+                    const refusedAt = res.indexOf(
+                        "HTTP/1.1 413 Payload Too Large",
+                    );
+                    expect(refusedAt).toBeGreaterThan(slowAt);
+                    expect(b.alive()).toBe(true);
+                } finally {
+                    b.stop();
+                }
+            });
+        }
+
+        it("the discard is bounded in BYTES while an earlier pipelined response is still pending", async () => {
+            const b = await boot(bin, { KNEXT_MAX_REQUEST_BYTES: String(CAP) });
+            try {
+                // /slow holds the socket for 3s; meanwhile the refused request
+                // keeps streaming far past the discard byte bound. The server
+                // must not keep reading it for as long as the earlier response
+                // takes — it tears the connection down on the byte bound.
+                const huge = 64 * 1024 * 1024;
+                const started = Date.now();
+                const outcome = await new Promise<string>((done) => {
+                    const s = connect(b.port, "127.0.0.1", () => {
+                        s.write(
+                            `GET /slow HTTP/1.1\r\nHost: x\r\n\r\nPOST /upload HTTP/1.1\r\nHost: x\r\nX-Id: piped-flood\r\nContent-Length: ${huge}\r\n\r\n`,
+                        );
+                        const block = Buffer.alloc(1024 * 1024, 97);
+                        let sent = 0;
+                        const pump = () => {
+                            while (sent < huge) {
+                                sent += block.length;
+                                if (!s.write(block)) {
+                                    s.once("drain", pump);
+                                    return;
+                                }
+                            }
+                        };
+                        pump();
+                    });
+                    s.on("error", () => {});
+                    s.on("close", () => done("closed"));
+                    setTimeout(() => {
+                        s.destroy();
+                        done("still-open");
+                    }, 2_500);
+                });
+                expect(outcome).toBe("closed");
+                expect(Date.now() - started).toBeLessThan(2_500);
+                expect(b.alive()).toBe(true);
             } finally {
                 b.stop();
             }

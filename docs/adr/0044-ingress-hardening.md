@@ -458,5 +458,5 @@ shipped-bundle case in `apps/file-manager/sigterm-drain-e2e.test.ts` (the publis
 child, `413` declared and chunked, exact cap passes) and a boot of the **compiled** self-contained
 executable in `apps/file-manager/self-contained-e2e.test.ts` (`413` over a 4 KiB cap, pass under
 it — the embed proved behaviourally, not by a source scan). Mutation-proved by
-`scripts/mutation-prove-standalone-bytecap.mjs` (10/10 plus a canary, on the shared guard-prover driver); the compiled-exec check was
+`scripts/mutation-prove-standalone-bytecap.mjs` (13/13 plus a canary, on the shared guard-prover driver); the compiled-exec check was
 mutation-proved once by hand (dropping the preload from the compile list reds it).
