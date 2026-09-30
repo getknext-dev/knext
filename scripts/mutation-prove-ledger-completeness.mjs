@@ -251,8 +251,10 @@ const MUTATIONS = [
     file: LEDGER_SCRIPT,
     spec: COMPLETENESS_SPEC,
     test: 'absent when no shard carries a kind:pre-knext failure',
-    anchor: '  const preKnextVoidMarker = preKnextFailure\n    ? { runId, lane, phase: preKnextFailure.phase }\n    : null;',
-    replacement: '  const preKnextVoidMarker = { runId, lane, phase: preKnextFailure?.phase ?? "runner-setup" };',
+    anchor:
+      '  const preKnextVoidMarker = preKnextFailure ? { runId, lane, phase: preKnextFailure.phase } : null;',
+    replacement:
+      '  const preKnextVoidMarker = { runId, lane, phase: preKnextFailure?.phase ?? "runner-setup" };',
   },
   {
     // Round 4's survivor, and the fourth instance of the same shape — this one
