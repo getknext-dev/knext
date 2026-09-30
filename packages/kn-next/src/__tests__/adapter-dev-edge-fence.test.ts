@@ -6,15 +6,19 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
 import {
+    cpSync,
     existsSync,
     mkdirSync,
+    mkdtempSync,
+    readdirSync,
     rmSync,
     symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
@@ -48,13 +52,29 @@ import { build } from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, "../../../..");
+// The TRACKED, read-only fixture template — never written to. `next dev`
+// itself writes AGENTS.md/CLAUDE.md into its cwd when it detects an AI
+// coding agent (`node_modules/next/dist/server/lib/generate-agent-files.js`);
+// running it with FIXTURE as cwd left those files untracked in the working
+// tree on every run under an agent (#1505/#1658). The live run below always
+// happens in a throwaway copy (`WORKDIR`) instead.
 const FIXTURE = join(here, "fixtures", "dev-edge-fence");
 const ADAPTER_SRC = resolve(here, "../adapters/next-adapter.ts");
-// next.config.mjs in the fixture points `adapterPath` here; the bundle is
-// generated below from the adapter SOURCE so this test never depends on a
-// prior `pnpm --filter @getknext/core build`.
-const ADAPTER_BUNDLE = join(FIXTURE, ".knext", "adapter.mjs");
 const NEXT_BIN = resolve(here, "../../node_modules/.bin/next");
+
+/** Relative paths of every file under `dir`, sorted — used to prove `FIXTURE` is untouched. */
+function listFiles(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (d: string) => {
+        for (const entry of readdirSync(d, { withFileTypes: true })) {
+            const abs = join(d, entry.name);
+            if (entry.isDirectory()) walk(abs);
+            else out.push(relative(dir, abs));
+        }
+    };
+    walk(dir);
+    return out.sort();
+}
 
 /** The edge-compile failure the fence exists to prevent. */
 const EDGE_COMPILE_FAILURE_RE =
@@ -91,11 +111,12 @@ async function freePort(): Promise<number> {
     });
 }
 
-async function bundleAdapter(): Promise<void> {
-    mkdirSync(dirname(ADAPTER_BUNDLE), { recursive: true });
+async function bundleAdapter(workDir: string): Promise<void> {
+    const adapterBundle = join(workDir, ".knext", "adapter.mjs");
+    mkdirSync(dirname(adapterBundle), { recursive: true });
     await build({
         entryPoints: [ADAPTER_SRC],
-        outfile: ADAPTER_BUNDLE,
+        outfile: adapterBundle,
         bundle: true,
         format: "esm",
         platform: "node",
@@ -106,26 +127,26 @@ async function bundleAdapter(): Promise<void> {
         packages: "external",
     });
     // The bundle is a build artifact of this test run, never committed.
-    writeFileSync(join(FIXTURE, ".knext", ".gitignore"), "*\n");
+    writeFileSync(join(workDir, ".knext", ".gitignore"), "*\n");
 }
 
 /**
- * Materialize the fixture's TypeScript types from the WORKSPACE's real
+ * Materialize the work copy's TypeScript types from the WORKSPACE's real
  * resolution. The fixture is a TS app on purpose (the .ts instrumentation
  * files are the fence's subject), so `next dev`'s TypeScript preflight
- * requires `@types/react` resolvable from the fixture — and the fixture's
- * `node_modules` is untracked, so a CI checkout has none: the dev server
- * booted, printed "Please install @types/react", and died as an unhandled
- * rejection, which this suite could only report as "never answered". That was
- * DETERMINISTIC in CI and invisible locally, where a stale install satisfied
- * it — the exact works-on-my-machine shape. Symlinked fresh on every run so
- * neither environment depends on leftover state.
+ * requires `@types/react` resolvable from it — and its `node_modules` is
+ * untracked, so a CI checkout has none: the dev server booted, printed
+ * "Please install @types/react", and died as an unhandled rejection, which
+ * this suite could only report as "never answered". That was DETERMINISTIC
+ * in CI and invisible locally, where a stale install satisfied it — the
+ * exact works-on-my-machine shape. Symlinked fresh on every run so neither
+ * environment depends on leftover state.
  */
-function materializeFixtureTypes(): void {
+function materializeFixtureTypes(workDir: string): void {
     const req = createRequire(
         join(REPO_ROOT, "apps", "file-manager", "package.json"),
     );
-    const typesDir = join(FIXTURE, "node_modules", "@types");
+    const typesDir = join(workDir, "node_modules", "@types");
     mkdirSync(typesDir, { recursive: true });
     for (const pkg of ["@types/react", "@types/react-dom"]) {
         const target = dirname(req.resolve(`${pkg}/package.json`));
@@ -134,6 +155,12 @@ function materializeFixtureTypes(): void {
         symlinkSync(target, dest, "dir");
     }
 }
+
+let workDir: string | undefined;
+/** Always removed in `afterAll`, alongside the dev-server process tree. */
+afterAll(() => {
+    if (workDir) rmSync(workDir, { recursive: true, force: true });
+});
 
 describe("#408 — the edge fence covers `next dev --webpack` (real dev server)", () => {
     it("serves a middleware app with guarded instrumentation, with no edge-compile failure", async () => {
@@ -146,13 +173,21 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
             `dev-edge-fence fixture missing at ${FIXTURE}`,
         ).toBe(true);
 
-        await bundleAdapter();
-        materializeFixtureTypes();
+        // #1658: `next dev` writes AGENTS.md/CLAUDE.md into its cwd when it
+        // detects an AI coding agent — so the live run gets a THROWAWAY copy
+        // of the fixture, never the tracked one, and the tracked fixture's
+        // file listing is asserted unchanged at the end of this test.
+        const fixtureListingBefore = listFiles(FIXTURE);
+        workDir = mkdtempSync(join(tmpdir(), "knext-dev-edge-fence-"));
+        cpSync(FIXTURE, workDir, { recursive: true });
+
+        await bundleAdapter(workDir);
+        materializeFixtureTypes(workDir);
         // Start from a clean `.next`: a SIGKILLed dev server leaves a stale
         // `.next/dev/lock` behind, and the next run refuses to start ("Another
         // next dev server is already running") — which would look like a fence
         // failure. Hermetic run, not a flaky one.
-        rmSync(join(FIXTURE, ".next"), { recursive: true, force: true });
+        rmSync(join(workDir, ".next"), { recursive: true, force: true });
 
         const port = await freePort();
         let out = "";
@@ -168,7 +203,7 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
             NEXT_BIN,
             ["dev", "--webpack", "-p", String(port), "-H", "127.0.0.1"],
             {
-                cwd: FIXTURE,
+                cwd: workDir,
                 detached: true,
                 env: { ...process.env, NODE_ENV: "development" },
             },
@@ -264,5 +299,11 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         expect(body).toContain("devfix ok");
         // The middleware (which is what forces the edge compile at all) really ran.
         expect(response.headers.get("x-devfix")).toBe("1");
+
+        killTree();
+        // #1658 acceptance: the tracked fixture dir is byte-for-byte the same
+        // set of files it was before this test ran — no AGENTS.md/CLAUDE.md
+        // (or anything else `next dev` writes) leaked into it.
+        expect(listFiles(FIXTURE)).toEqual(fixtureListingBefore);
     }, 180_000);
 });
