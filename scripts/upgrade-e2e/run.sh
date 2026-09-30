@@ -127,22 +127,44 @@ EOF
 # ---------------------------------------------------------------------------
 # Phase 3: traffic driver
 # ---------------------------------------------------------------------------
-# The NextApp's cluster-local address (http://<name>.<namespace>.svc.cluster.local)
-# only resolves and routes from INSIDE the cluster's pod network — the GitHub
-# Actions runner sits on the host network, outside it. The suite's Go e2e tests
-# reach it via ActivateAndGet (test/utils/utils.go), which spins up a curl POD
-# per request; this Node-driven light-traffic loop instead port-forwards the
-# ksvc's own Service ONCE and hits loopback for the whole window — cheaper for
-# a sub-second-interval driver than a `kubectl run` per attempt.
+# ROUND 3 (#1668/#1671): the first live run port-forwarded `svc/<app>`
+# directly and got 100% connection failures. CONFIRMED CAUSE: a Knative
+# ksvc's own Service is an ExternalName pointing at the shared Kourier
+# internal gateway, which `kubectl port-forward` cannot target (no backing
+# pod IP behind an ExternalName Service — port-forward needs a Service with
+# real endpoints/selectors). The proven pattern already in this repo
+# (`.github/workflows/standalone-self-contained-operator-e2e.yml`, step
+# "Reach the cluster (kourier-internal port-forward) and hit /api/health")
+# is: port-forward `svc/kourier-internal` in `kourier-system` ONCE, then send
+# every request with a `Host:` header naming the app's real route host
+# (`kubectl get nextapp -o jsonpath='{.status.url}'`, scheme stripped) — the
+# same header-based routing Kourier itself uses. Reused verbatim here rather
+# than reinvented.
 : "${TRAFFIC_LOCAL_PORT:=18080}"
 
 start_port_forward() {
-  kubectl -n "$APP_NAMESPACE" port-forward "svc/${APP_NAME}" \
+  kubectl -n kourier-system port-forward svc/kourier-internal \
     "${TRAFFIC_LOCAL_PORT}:80" >"$WORKDIR/port-forward.log" 2>&1 &
   echo $! > "$WORKDIR/port-forward.pid"
-  # Give kubectl a moment to establish the tunnel before traffic starts;
-  # readiness is checked by the first few traffic attempts' own retries.
-  sleep 2
+  # Wait for the tunnel to actually accept connections (same /dev/tcp probe
+  # the proven in-repo step uses) rather than a fixed sleep — a fixed sleep
+  # either races a slow tunnel or wastes time on a fast one, and neither
+  # tells you WHY a still-closed port failed.
+  local ready=0
+  for _ in $(seq 1 30); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${TRAFFIC_LOCAL_PORT}") 2>/dev/null; then
+      exec 3>&- 3<&-
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$ready" != "1" ]]; then
+    log "FAILED: kourier-internal port-forward never accepted a connection on 127.0.0.1:${TRAFFIC_LOCAL_PORT}"
+    log "port-forward.log:"
+    cat "$WORKDIR/port-forward.log" >&2 || true
+    return 1
+  fi
 }
 
 stop_port_forward() {
@@ -154,13 +176,31 @@ stop_port_forward() {
   fi
 }
 
+# The route Kourier's Host-header routing needs, resolved ONCE from the
+# NextApp's own status (the same source the proven in-repo step reads),
+# scheme stripped.
+resolve_app_host() {
+  local raw
+  raw="$(kubectl -n "$APP_NAMESPACE" get "nextapp/$APP_NAME" \
+    -o jsonpath='{.status.url}' 2>/dev/null || true)"
+  if [[ -z "$raw" ]]; then
+    log "FAILED: nextapp/$APP_NAME status.url is empty — cannot resolve the Host header for traffic"
+    kubectl -n "$APP_NAMESPACE" get "nextapp/$APP_NAME" -o yaml >&2 || true
+    return 1
+  fi
+  echo "$raw" | sed -E 's#^https?://##'
+}
+
 start_traffic() {
   log "phase 3: starting the traffic driver"
   start_port_forward
+  local host
+  host="$(resolve_app_host)"
+  echo "$host" > "$WORKDIR/app-host"
   local url
   url="$(app_url)"
   node "$ROOT/scripts/upgrade-e2e/traffic-monitor.mjs" "$url" "$WORKDIR/attempts.jsonl" \
-    "$TRAFFIC_INTERVAL_MS" &
+    "$TRAFFIC_INTERVAL_MS" "$host" &
   echo $! > "$WORKDIR/traffic.pid"
 }
 
@@ -175,8 +215,9 @@ stop_traffic() {
 }
 
 app_url() {
-  # Loopback end of the port-forward started in start_traffic — see the note
-  # above on why this cannot be the cluster-local DNS name directly.
+  # Loopback end of the kourier-internal port-forward started in
+  # start_traffic — the Host header (resolve_app_host) is what actually
+  # routes this to the right ksvc, same as production Kourier ingress.
   echo "http://127.0.0.1:${TRAFFIC_LOCAL_PORT}"
 }
 
