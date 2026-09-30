@@ -127,8 +127,36 @@ EOF
 # ---------------------------------------------------------------------------
 # Phase 3: traffic driver
 # ---------------------------------------------------------------------------
+# The NextApp's cluster-local address (http://<name>.<namespace>.svc.cluster.local)
+# only resolves and routes from INSIDE the cluster's pod network — the GitHub
+# Actions runner sits on the host network, outside it. The suite's Go e2e tests
+# reach it via ActivateAndGet (test/utils/utils.go), which spins up a curl POD
+# per request; this Node-driven light-traffic loop instead port-forwards the
+# ksvc's own Service ONCE and hits loopback for the whole window — cheaper for
+# a sub-second-interval driver than a `kubectl run` per attempt.
+: "${TRAFFIC_LOCAL_PORT:=18080}"
+
+start_port_forward() {
+  kubectl -n "$APP_NAMESPACE" port-forward "svc/${APP_NAME}" \
+    "${TRAFFIC_LOCAL_PORT}:80" >"$WORKDIR/port-forward.log" 2>&1 &
+  echo $! > "$WORKDIR/port-forward.pid"
+  # Give kubectl a moment to establish the tunnel before traffic starts;
+  # readiness is checked by the first few traffic attempts' own retries.
+  sleep 2
+}
+
+stop_port_forward() {
+  local pid
+  pid="$(cat "$WORKDIR/port-forward.pid" 2>/dev/null || true)"
+  if [[ -n "$pid" ]]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
 start_traffic() {
   log "phase 3: starting the traffic driver"
+  start_port_forward
   local url
   url="$(app_url)"
   node "$ROOT/scripts/upgrade-e2e/traffic-monitor.mjs" "$url" "$WORKDIR/attempts.jsonl" \
@@ -143,12 +171,13 @@ stop_traffic() {
     kill -TERM "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   fi
+  stop_port_forward
 }
 
 app_url() {
-  # cluster-local Kourier address, matching the pattern the rollback-e2e
-  # suite already routes through.
-  echo "http://${APP_NAME}.${APP_NAMESPACE}.svc.cluster.local"
+  # Loopback end of the port-forward started in start_traffic — see the note
+  # above on why this cannot be the cluster-local DNS name directly.
+  echo "http://127.0.0.1:${TRAFFIC_LOCAL_PORT}"
 }
 
 # ---------------------------------------------------------------------------
@@ -221,7 +250,13 @@ phase5_assert() {
     || status=1
   node "$ROOT/scripts/upgrade-e2e/error-budget.mjs" "$WORKDIR/attempts.jsonl" "$ERROR_BUDGET" \
     || status=1
+  # selfContained: a structural-schema `default: false` field (#1522) the
+  # 0.4.3-era CR never set; a newer CRD's default can materialize onto the
+  # existing CR on the next apply/reconcile. See cr-diff.mjs's docblock for
+  # why this is the ONE tolerated case, not a general "ignore new fields"
+  # policy.
   node "$ROOT/scripts/upgrade-e2e/cr-diff.mjs" "$WORKDIR/spec-before.json" "$WORKDIR/spec-after.json" \
+    "selfContained" \
     || status=1
 
   return "$status"

@@ -45,4 +45,46 @@ describe('specUnchanged', () => {
     expect(result.ok).toBe(false);
     expect(result.diffPaths).toContain('$.traffic[0].percent');
   });
+
+  describe('ignoreKeys (the CRD-default-materializing case)', () => {
+    it('tolerates a top-level key going from absent to a value when named in ignoreKeys', () => {
+      const before = { name: 'app' };
+      const after = { name: 'app', selfContained: false };
+      const result = specUnchanged(before, after, ['selfContained']);
+      expect(result.ok).toBe(true);
+      expect(result.diffPaths).toEqual([]);
+    });
+
+    it('still catches the SAME key changing if the before-spec DID set it', () => {
+      const before = { name: 'app', selfContained: true };
+      const after = { name: 'app', selfContained: false };
+      const result = specUnchanged(before, after, ['selfContained']);
+      expect(result.ok).toBe(false);
+      expect(result.diffPaths).toContain('$.selfContained');
+    });
+
+    it('still catches the key being REMOVED (present -> absent), even if ignored', () => {
+      const before = { name: 'app', selfContained: false };
+      const after = { name: 'app' };
+      const result = specUnchanged(before, after, ['selfContained']);
+      expect(result.ok).toBe(false);
+      expect(result.diffPaths).toContain('$.selfContained');
+    });
+
+    it('does not tolerate an UN-named key appearing the same way', () => {
+      const before = { name: 'app' };
+      const after = { name: 'app', someOtherNewField: true };
+      const result = specUnchanged(before, after, ['selfContained']);
+      expect(result.ok).toBe(false);
+      expect(result.diffPaths).toContain('$.someOtherNewField');
+    });
+
+    it('does not tolerate the ignored key appearing NESTED (not top-level)', () => {
+      const before = { database: {} };
+      const after = { database: { selfContained: false } };
+      const result = specUnchanged(before, after, ['selfContained']);
+      expect(result.ok).toBe(false);
+      expect(result.diffPaths).toContain('$.database.selfContained');
+    });
+  });
 });

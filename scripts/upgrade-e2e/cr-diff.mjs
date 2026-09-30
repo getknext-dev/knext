@@ -8,21 +8,26 @@
  * and similar server-stamped bookkeeping are expected to move and are not
  * compared. Kept pure (no fs) so it is unit-testable — see
  * tests/upgrade-e2e-cr-diff.test.ts.
+ *
+ * `ignoreKeys` (top-level `spec.*` keys only) exists for ONE narrow, real
+ * case, found on the first live run of this e2e: a newer CRD can add a
+ * field with a structural-schema `default` (e.g. `selfContained: false`,
+ * #1522) that a NEXT reconcile/apply materializes onto an existing CR that
+ * never set it. The user's declared intent did not change — the field was
+ * always absent from what they wrote — so a bare deep-equal flags a false
+ * positive on every upgrade that adds a defaulted field, which would make
+ * this assertion fail on EVERY real upgrade rather than on a real spec
+ * drift. This does NOT ignore removed fields, changed values on fields the
+ * before-spec DID set, or anything below the top level — only "was absent,
+ * is now present with a value" on an explicitly named key.
  */
-
-/**
- * @param {unknown} before - `spec` from `kubectl get nextapp -o json` before
- *   the upgrade.
- * @param {unknown} after - `spec` after the upgrade.
- * @returns {{ok: boolean, diffPaths: string[]}}
- */
-export function specUnchanged(before, after) {
+export function specUnchanged(before, after, ignoreKeys = []) {
   const diffPaths = [];
-  diffAt(before, after, '$', diffPaths);
+  diffAt(before, after, '$', diffPaths, new Set(ignoreKeys));
   return { ok: diffPaths.length === 0, diffPaths };
 }
 
-function diffAt(a, b, path, out) {
+function diffAt(a, b, path, out, ignoreKeys) {
   if (a === b) return;
   const aIsObj = a !== null && typeof a === 'object';
   const bIsObj = b !== null && typeof b === 'object';
@@ -39,30 +44,47 @@ function diffAt(a, b, path, out) {
   if (aIsArr) {
     const len = Math.max(a.length, b.length);
     for (let i = 0; i < len; i++) {
-      diffAt(a[i], b[i], `${path}[${i}]`, out);
+      diffAt(a[i], b[i], `${path}[${i}]`, out, ignoreKeys);
     }
     return;
   }
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const key of keys) {
-    diffAt(a[key], b[key], `${path}.${key}`, out);
+    // Only the narrow "absent -> defaulted value" case documented above,
+    // and only at the top level ($.<key>) — an ignored key nested deeper
+    // still gets compared normally.
+    if (path === '$' && ignoreKeys.has(key) && !(key in a) && key in b) {
+      continue;
+    }
+    diffAt(a[key], b[key], `${path}.${key}`, out, ignoreKeys);
   }
 }
 
 /**
- * CLI entry: `node cr-diff.mjs <before-spec.json> <after-spec.json>`.
+ * CLI entry: `node cr-diff.mjs <before-spec.json> <after-spec.json> [ignoreKeysCsv]`.
  */
 async function main() {
   const { readFileSync } = await import('node:fs');
-  const [, , beforePath, afterPath] = process.argv;
+  const [, , beforePath, afterPath, ignoreKeysCsv] = process.argv;
   if (!beforePath || !afterPath) {
-    console.error('usage: cr-diff.mjs <before-spec.json> <after-spec.json>');
+    console.error('usage: cr-diff.mjs <before-spec.json> <after-spec.json> [ignoreKeysCsv]');
     process.exit(2);
   }
+  const ignoreKeys = ignoreKeysCsv
+    ? ignoreKeysCsv
+        .split(',')
+        .map((k) => k.trim())
+        .filter(Boolean)
+    : [];
   const before = JSON.parse(readFileSync(beforePath, 'utf8'));
   const after = JSON.parse(readFileSync(afterPath, 'utf8'));
-  const result = specUnchanged(before, after);
+  const result = specUnchanged(before, after, ignoreKeys);
   console.log(JSON.stringify(result));
+  if (ignoreKeys.length > 0) {
+    console.error(
+      `cr-diff: ignoring top-level keys (absent -> defaulted only): ${ignoreKeys.join(', ')}`,
+    );
+  }
   if (!result.ok) {
     console.error(`cr-diff FAILED: spec changed at ${result.diffPaths.join(', ')}`);
     process.exit(1);
