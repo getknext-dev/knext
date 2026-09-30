@@ -49,7 +49,7 @@ type Routes = Record<string, readonly [number, string?]>;
  * `redirect: "manual"` call through the patched fetch hung the in-process bake
  * for minutes). The driver must not route its own requests through it.
  */
-function fakeStandalone(routes: Routes, patchFetch = false) {
+function fakeStandalone(routes: Routes, patchFetch = false, delayMs = 0) {
   const dir = mkdtempSync(join(tmpdir(), 'cc-bake-readiness-'));
   temps.push(dir);
   writeFileSync(
@@ -58,12 +58,14 @@ function fakeStandalone(routes: Routes, patchFetch = false) {
       `const routes = ${JSON.stringify(routes)};`,
       ...(patchFetch ? ['globalThis.fetch = () => new Promise(() => {});'] : []),
       "require('node:http').createServer((req, res) => {",
+      '  setTimeout(() => {',
       '  const r = routes[req.url];',
       "  if (!r) { res.writeHead(404); res.end('nf'); return; }",
       '  const [status, location] = r;',
       "  const loc = location && location.startsWith('ABS:') ? 'http://127.0.0.1:' + process.env.PORT + location.slice(4) : location;",
       '  res.writeHead(status, loc ? { location: loc } : {});',
       "  res.end('ok');",
+      `  }, ${delayMs});`,
       '}).listen(Number(process.env.PORT), process.env.HOSTNAME);',
     ].join('\n'),
   );
@@ -77,9 +79,9 @@ let port = 41_200 + Math.floor(Math.random() * 500);
 function bake(
   routes: Routes,
   warm: string,
-  opts: { wrapper?: boolean; accept?: boolean; patchFetch?: boolean } = {},
+  opts: { wrapper?: boolean; accept?: boolean; patchFetch?: boolean; delayMs?: number } = {},
 ) {
-  const { dir, driver, server } = fakeStandalone(routes, opts.patchFetch);
+  const { dir, driver, server } = fakeStandalone(routes, opts.patchFetch, opts.delayMs);
   port += 1;
   const t0 = Date.now();
   const r = spawnSync('node', opts.wrapper ? [WRAPPER, 'node', driver] : [driver], {
@@ -181,6 +183,21 @@ describe('bake readiness: the driver uses the fetch it had BEFORE importing serv
   it('the other half: a 2xx warm through a fetch-patching server still passes strict', () => {
     const r = bake({ '/ok': [200] }, '/ok', { patchFetch: true });
     expect(r.ms, r.out).toBeLessThan(FAST_MS);
+    expect(r.status, r.out).toBe(0);
+  }, 90_000);
+});
+
+describe('bake readiness: a SLOW first answer is still an answer (#1572 round 2)', () => {
+  // Measured on next@16.3.5 (upstream middleware-rewrite-dynamic, and
+  // server-actions-redirect-middleware-rewrite): under the bake's 127.0.0.1
+  // bind a middleware rewrite to `new URL(path, request.url)` is proxied
+  // externally and the FIRST response (a 500) takes ~30s. A short per-attempt
+  // timeout aborts every attempt and never sees it; the attempt must be allowed
+  // to run to the overall deadline.
+  it('a server whose every response takes 7s is answered, not timed out', () => {
+    const r = bake({ '/': [500] }, '/', { wrapper: true, accept: true, delayMs: 7_000 });
+    expect(r.out).not.toContain('did not answer within');
+    expect(r.stdout).toContain('WARMED:/ status=500 ');
     expect(r.status, r.out).toBe(0);
   }, 90_000);
 });

@@ -90,7 +90,11 @@ function warmUrl(path) {
 // swallow as "not listening yet", burning the whole deadline against a server
 // that had answered every request. ANY HTTP response is a live server; only a
 // connection-level failure means "not yet".
-const PROBE_TIMEOUT_MS = 5_000;
+//
+// An attempt may run until the OVERALL deadline — never a shorter per-attempt
+// cap. Measured on next@16.3.5 (middleware-rewrite-dynamic): under the same
+// 127.0.0.1 bind a middleware rewrite is proxied externally and the FIRST
+// response (a 500) takes ~30s; a 5s cap aborted every attempt and never saw it.
 
 // Captured BEFORE server.js is imported: Next patches `globalThis.fetch` in
 // the server process (its data-cache instrumentation), and this driver IS that
@@ -108,7 +112,7 @@ async function waitForServer(deadlineMs) {
         try {
             const res = await nativeFetch(warmUrl(WARM_PATHS[0] ?? "/"), {
                 redirect: "manual",
-                signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+                signal: AbortSignal.timeout(Math.max(1_000, deadline - Date.now())),
             });
             await res.body?.cancel();
             console.log(
