@@ -82,7 +82,7 @@ limitations under the License.
 // through the loopback endpoint.
 //
 // WHY A SEPARATE BUILD TAG (`e2e_gc`): same reason as e2e_cli/e2e_rollback —
-// needs cert-manager + Knative Serving + Kourier + Node/pnpm + the aws CLI,
+// needs cert-manager + Knative Serving + Kourier + Node/Bun + the aws CLI,
 // and its OWN suite runner so it never collides with the other suites'
 // BeforeSuite hooks. It runs in operator-e2e-nightly.yml as the INDEPENDENT
 // `gc-e2e` job — NIGHTLY/DISPATCH ONLY, never PR-gating (plan gate).
@@ -563,10 +563,10 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		Expect(err).NotTo(HaveOccurred(),
 			"the aws CLI is required (preinstalled on GitHub runners; `brew install awscli` locally)")
 
-		By("building the CLI from source with pnpm (plain-Node dist, no Bun)")
-		_, err = utils.RunAtRepoRoot("pnpm", "--filter", "@getknext/core...", "build")
+		By("building the CLI from source with bun (plain-Node dist)")
+		err = utils.BuildCLI()
 		Expect(err).NotTo(HaveOccurred(),
-			"failed to build the CLI — run `pnpm install --frozen-lockfile` at the repo root first")
+			"failed to build the CLI — run `bun install --frozen-lockfile` at the repo root first")
 		bin, err := utils.CLIBin()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(bin).To(BeAnExistingFile(), "CLI build produced no dist/cli/kn-next.js")

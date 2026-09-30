@@ -37,7 +37,7 @@ override, webhook-readiness wait, namespace creation/teardown) live in
   bundle/cli/rollback/gc additionally require cert-manager + Knative (+ Kourier
   for cli/rollback/gc) on the cluster — the CI workflows show the exact install
   steps. The cli/rollback/gc suites also build the CLI themselves, so run
-  `pnpm install --frozen-lockfile` at the repo root first. Before ANY cluster
+  `bun install --frozen-lockfile` at the repo root first. Before ANY cluster
   operation the suite pins the run to the `kind-$KIND_CLUSTER` kube context
   (`utils.EnsureKindContext`) and **refuses to fall back to the ambient
   current-context** when that kind context is absent — an ambient OKE/GKE

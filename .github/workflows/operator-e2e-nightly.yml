@@ -439,7 +439,7 @@ jobs:
           cache-dependency-path: packages/kn-next-operator/go.sum
 
       # The suite shells out to the built CLI with plain `node` and builds it
-      # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
+      # via `bun run --filter @getknext/core build` (utils.BuildCLI) — so the job needs Node + Bun
       # (version pinned by `packageManager` in package.json) + workspace deps.
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -525,7 +525,7 @@ jobs:
           cache-dependency-path: packages/kn-next-operator/go.sum
 
       # The suite shells out to the built CLI with plain `node` and builds it
-      # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
+      # via `bun run --filter @getknext/core build` (utils.BuildCLI) — so the job needs Node + Bun
       # (version pinned by `packageManager` in package.json) + workspace deps.
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -620,7 +620,7 @@ jobs:
           cache-dependency-path: packages/kn-next-operator/go.sum
 
       # The suite shells out to the built CLI with plain `node` and builds it
-      # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
+      # via `bun run --filter @getknext/core build` (utils.BuildCLI) — so the job needs Node + Bun
       # (version pinned by `packageManager` in package.json) + workspace deps.
       # The `aws` CLI (the s3 storage provider's data plane) is preinstalled
       # on ubuntu-latest runners and honors AWS_ENDPOINT_URL (v2.13+).
@@ -678,3 +678,54 @@ jobs:
       - name: Tear down kind cluster
         if: always()
         run: kind delete cluster --name kn-next-operator-test-e2e || true
+
+  # #1207 — route a red nightly to the repo's standard nightly-alert issue.
+  # Without this the nightly was red for weeks (#1208) with no signal: a
+  # nightly nobody is told about is not a regression gate. Fires on FAILURE
+  # **and** CANCELLED (a job that hits its own timeout-minutes or loses its
+  # runner is `cancelled`, not `failure` — #1645), and `always()` is required
+  # or GitHub's implicit `success() &&` never runs this once a need went red.
+  # Schedule-only: a dispatched run's author is already watching it.
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [scale-image-preflight, scale-to-zero-cache, cli-e2e, rollback-e2e, gc-e2e]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.scale-image-preflight.result == 'failure' || needs.scale-image-preflight.result == 'cancelled' ||
+       needs.scale-to-zero-cache.result == 'failure' || needs.scale-to-zero-cache.result == 'cancelled' ||
+       needs.cli-e2e.result == 'failure' || needs.cli-e2e.result == 'cancelled' ||
+       needs.rollback-e2e.result == 'failure' || needs.rollback-e2e.result == 'cancelled' ||
+       needs.gc-e2e.result == 'failure' || needs.gc-e2e.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      # scripts/nightly-alert-issue.mjs needs the repo checked out.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or update the "Operator e2e nightly RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: >-
+            scale-image-preflight=${{ needs.scale-image-preflight.result }}
+            e2e_scale=${{ needs.scale-to-zero-cache.result }}
+            e2e_cli=${{ needs.cli-e2e.result }}
+            e2e_rollback=${{ needs.rollback-e2e.result }}
+            e2e_gc=${{ needs.gc-e2e.result }}
+        run: |
+          set -euo pipefail
+          title='Operator e2e nightly RED'
+          body="The nightly operator e2e (kind) FAILED or was CANCELLED.
+
+          - Run: ${RUN_URL}
+          - Job results: ${RESULTS}
+
+          It runs the operator's scale-to-zero, CLI (doctor / db bind / status), rollback and asset-GC suites against a kind cluster. Open the failed job's log, fix the regression, re-run via workflow_dispatch to confirm green, then close this issue."
+          # Shared create-or-update helper; never pins (#1347).
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs

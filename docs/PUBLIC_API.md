@@ -415,6 +415,26 @@ this document) carry **no stability guarantee**. They may change or be removed i
 any release. If you find yourself needing one, please open an issue describing
 the use case so the capability can be considered for the public surface.
 
+## Experimental surfaces
+
+A small set of surfaces are public — they ship in the package and you can use
+them — but are **not yet covered by the semver policy above**: they **may
+change in a minor release**. Each carries a visible marker wherever you meet
+it (`@experimental` in its types, "Experimental" in `knext build --help`, or
+"(experimental)" in the CLI reference) so the carve-out is never a surprise.
+
+- **`selfContained` (`knext.config.ts`) / `knext build --self-contained`** —
+  opt-in single-executable build mode. The on-disk shape it produces is still
+  settling.
+- **`preview` and `loadtest`** — the directly-runnable CLI entries
+  (`dist/cli/preview.js`, `dist/cli/loadtest.js`) for per-PR preview
+  environments and load testing. Their flags and output are not part of the
+  committed CLI verb contract and may change in a minor release while the
+  operability workflow around them settles.
+
+Nothing else in this document is experimental: every other public import
+follows the full semver policy above.
+
 ### The `NextApp` CRD is versioned separately
 
 The semver rules above cover the **npm packages only**. The `NextApp` custom

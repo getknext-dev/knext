@@ -112,7 +112,35 @@ func RunCLIInDir(dir string, args ...string) (CLIResult, error) {
 	return CLIResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: code}, nil
 }
 
-// RunAtRepoRoot runs a toolchain command (pnpm) from the monorepo root.
+// BuildCLISteps is the toolchain sequence that builds the kn-next CLI
+// (dist/cli/kn-next.js) from source at the repo root. It uses the repo's
+// package manager (root package.json `packageManager`, Bun) — the suites used
+// to shell out to pnpm, which silently broke all three CLI-driven nightly
+// suites when the monorepo moved to Bun (#1208). Bun's --filter has no
+// pnpm-style `...` dependency expansion, so core's workspace deps are built
+// explicitly first: @getknext/lib ships only dist/ and core's dts build imports
+// @getknext/lib/clients (TS2307 on a clean checkout otherwise). Same order as
+// the ci.yml build step. The CLI built this way is still the plain-Node dist.
+func BuildCLISteps() [][]string {
+	return [][]string{
+		{"bun", "run", "--filter", "@getknext/lib", "build"},
+		{"bun", "run", "--filter", "@getknext/db", "build"},
+		{"bun", "run", "--filter", "@getknext/core", "build"},
+	}
+}
+
+// BuildCLI runs BuildCLISteps in order from the repo root, stopping at the
+// first failure. Requires `bun install --frozen-lockfile` at the repo root.
+func BuildCLI() error {
+	for _, s := range BuildCLISteps() {
+		if _, err := RunAtRepoRoot(s[0], s[1:]...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RunAtRepoRoot runs a toolchain command (bun) from the monorepo root.
 // Run cannot be used here: it force-overrides cmd.Dir to the operator dir.
 func RunAtRepoRoot(name string, args ...string) (string, error) {
 	root, err := RepoRoot()

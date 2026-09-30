@@ -87,6 +87,8 @@ interface BuildOptions {
      * since #1460 (embeds the server runtime and `public/`). Routed to each
      * compile path and recorded in the build log either way, so the flag is
      * never silently swallowed.
+     *
+     * @experimental may change in a minor release.
      */
     selfContained?: boolean;
 }

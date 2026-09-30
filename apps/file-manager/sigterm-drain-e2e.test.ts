@@ -8,6 +8,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -438,4 +439,64 @@ describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flig
     },
     60_000,
   );
+
+  it.skipIf(skipReason !== null)(
+    'caps request bodies in the spawned server: 413 over the cap (declared or chunked), exact cap passes',
+    async () => {
+      // The request-body cap is a preload the SHIPPED supervisor passes to its
+      // child. Booting the published package and hitting the child proves the
+      // .cjs is in the tarball AND node-server wires it — a unit test of the
+      // preload alone would pass with either half missing.
+      const CAP = 4096;
+      child = await spawnShippedRuntime({ KNEXT_MAX_REQUEST_BYTES: String(CAP) });
+      const port = await waitForListeningPort(child, { label: 'runtime entry' });
+      await waitForStdout(/REQUEST_BYTE_CAP:4096 \(env\)/, 10_000, 'request-body cap boot line');
+
+      const exact = await rawHttp(
+        port,
+        `POST /echo-length HTTP/1.1\r\nHost: x\r\nContent-Length: ${CAP}\r\nConnection: close\r\n\r\n${'a'.repeat(CAP)}`,
+      );
+      expect(exact.split('\r\n')[0]).toBe('HTTP/1.1 200 OK');
+      expect(exact).toContain(`got ${CAP}`);
+
+      const declared = await rawHttp(
+        port,
+        `POST /echo-length HTTP/1.1\r\nHost: x\r\nContent-Length: ${CAP + 1}\r\n\r\n${'a'.repeat(CAP + 1)}`,
+      );
+      expect(declared.split('\r\n')[0]).toBe('HTTP/1.1 413 Payload Too Large');
+
+      const chunk = (n: number) => `${n.toString(16)}\r\n${'b'.repeat(n)}\r\n`;
+      const chunked = await rawHttp(
+        port,
+        `POST /echo-length HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n${chunk(3000)}${chunk(3000)}0\r\n\r\n`,
+      );
+      expect(chunked.split('\r\n')[0]).toBe('HTTP/1.1 413 Payload Too Large');
+      expect(chunked).not.toContain('got ');
+
+      child.kill('SIGTERM');
+    },
+    60_000,
+  );
 });
+
+/** Write raw bytes and collect the whole response (the server closes the socket). */
+function rawHttp(port: number, payload: string): Promise<string> {
+  return new Promise((done) => {
+    const socket = connect(port, '127.0.0.1', () => {
+      socket.write(payload);
+    });
+    let got = '';
+    const timer = setTimeout(() => {
+      socket.destroy();
+      done(`${got} [timeout]`);
+    }, 10_000);
+    socket.on('data', (d) => {
+      got += d.toString();
+    });
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      clearTimeout(timer);
+      done(got);
+    });
+  });
+}

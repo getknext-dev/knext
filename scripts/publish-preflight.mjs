@@ -159,10 +159,14 @@ export function preflight({ packages, viewSucceeds }) {
  * Branching on the exit code is the whole contract: npm's stderr wording has
  * changed between majors and a message match would rot silently.
  *
+ * Exported for reuse by `scripts/publish-verify-alert.mjs` (#1639c), which
+ * asks this exact registry question again after a release run, rather than
+ * re-implementing an npm-registry probe.
+ *
  * @param {string} spec
  * @param {string} registry
  */
-function npmViewSucceeds(spec, registry) {
+export function npmViewSucceeds(spec, registry) {
   const run = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['view', spec, 'version', '--registry', registry],
@@ -172,7 +176,8 @@ function npmViewSucceeds(spec, registry) {
   return run.status === 0;
 }
 
-function readIgnoreList(root) {
+/** Exported for reuse by `scripts/publish-verify-alert.mjs` (#1639c). */
+export function readIgnoreList(root) {
   const config = JSON.parse(readFileSync(join(root, '.changeset/config.json'), 'utf8'));
   return Array.isArray(config.ignore) ? config.ignore : [];
 }

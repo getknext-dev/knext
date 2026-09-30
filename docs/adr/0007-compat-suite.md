@@ -700,6 +700,20 @@ that rc.1 at v16.2.12 does not. They are listed here and in the ledger, not nett
 scoreboard. Retirement triggers are per entry: an upstream change to the deploy branch, `it.failing`
 flipped back to `it`, or the fixture no longer conditioning on `VERCEL`.
 
+**Sixth entry (founder decision, 2026-09-29, #1633; lands in the rc.2 harness batch #1643).**
+`test/e2e/middleware-rewrites/test/index.test.ts` › *should preserve rewrite query and dynamic
+params in Pages API routes* fails 3/3 on both **webpack** cells at v16.3.5 (runs 36332946048,
+36332959885, 36430362513, 36430368139). The failing `req.url` expectation sits in the
+`isNextDeploy` branch: deployed proxies put rewrite-added query values into the URL, while Next's
+own `runApi` deliberately keeps `req.url` as the original URL (vercel/next.js#94905). knext
+returns the exact expected `query` and the `next start` URL. The turbopack cells never run the
+file: upstream gates it with `skipDeployment: isAdapterTest && isTurbopackTest`. So the lane-blind
+file exclusion changes only the webpack cells. It is file-level for the same §c.1 reason as the
+other five, and the cost is larger here: the file's **56 other passing webpack cases** stop running
+as ongoing coverage. Upstream's mirrored `suites.failed` entry for the file is subsumed and
+removed, and must be restored when this entry retires. Upstream issue: vercel/next.js#99435. With
+this entry, the rc.2 credential carries six §h entries.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**

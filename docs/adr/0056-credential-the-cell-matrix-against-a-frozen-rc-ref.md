@@ -7,7 +7,12 @@
   **Amended** by Amendment 2 (2026-09-28, #1607): D1's "fourteen consecutive nights" is defined
   against the lane's own cron-derived UTC calendar, not sequence adjacency between the nights the
   audit happens to be handed — a scheduled cron GitHub never fires now breaks the streak instead of
-  silently bridging it.
+  silently bridging it. **Amended** by Amendment 3 (2026-09-30, founder decision #1642): a
+  credential slot GitHub never ran resets the cell's window, accepted deliberately; the #1640
+  watchdog provides visibility. **Amended** by Amendment 4 (2026-09-30, Accepted, founder rule:
+  highest jev score, #1553): a night may be graded VOID — bridged, not counted, not a reset — only
+  when a knext-owned marker proves the failure happened before any knext code ran, at most one void
+  night per open 14-night streak, recorded in the ledger so the audit can re-prove it.
 - **Amends** ADR-0039 (the frozen set is unchanged in scope — still tarball-inclusive, still not
   narrowed — but its *workflow* entry is now read from the commit that actually executed; see
   ADR-0039 Amendment 1). **Supersedes** the node-lane-only definition in `docs/V1_ROADMAP.md` §3.
@@ -387,7 +392,7 @@ checks it before computing streaks:
   night at all** becomes a synthetic `missing-night` stand-in — graded exactly like a rule-5
   unresolved night: disqualified, restarting the streak, counted, never silently skipped.
 - **Grace, not zero tolerance.** A slot only counts as required once its own fire time plus a grace
-  window (`MISSING_NIGHT_GRACE_HOURS`, 6h — headroom over the run's own "better part of an hour"
+  window (`MISSING_NIGHT_GRACE_HOURS`, 10h — headroom over the run's own "better part of an hour"
   documented duration, plus queueing delay) has passed, so a night still plausibly in flight is
   never mistaken for one that never happened.
 - **Fail closed when the calendar cannot be verified.** The check needs a scheduling timestamp on
@@ -412,3 +417,330 @@ checks it before computing streaks:
 - One credential cron per lane is assumed (`parseCredentialCronsFromWorkflow` throws otherwise) —
   correct for every wired v1.0 cell today; a future design that runs a lane's credential night on
   more than one cron would need this amended again.
+
+## Amendment 3 (2026-09-30): a credential slot GitHub never ran
+
+- **Status:** Accepted (2026-09-30, founder decision #1642). **Amends:** D1 and Amendment 2
+  (the missing-night calendar).
+- **Relates to:** #1640 (the read-only credential-slot watchdog), #1649 (the rc.2 harness batch
+  that raises the grace).
+- **Trigger-class:** ADR + CI + release process — flagged for the sprint-close design review.
+
+### Context
+
+Amendment 2 made the audit date every night by its cron slot and turn a slot with no run into a
+`missing-night` that restarts the 14-night streak, once the slot's fire time plus
+`MISSING_NIGHT_GRACE_HOURS` has passed. Two things happened in the week of 2026-09-22:
+
+1. **Delay.** GitHub started scheduled credential runs up to 6h13m after their cron fire time
+   (the bun credential slot, 05:47 UTC, ran at about 12:00). Under the grace in force then (6h), a
+   night that was only queued read as missing. #1649 raises the grace to **10h**, which covers the measured worst
+   case with about 4h of headroom and still resolves each slot long before the next one fires.
+2. **Drop.** GitHub documents that scheduled workflows can be delayed, and under load dropped,
+   by its scheduler. A delay is now absorbed by the grace; a drop is not. ADR-0056 has no remedy
+   for a night GitHub itself never ran: the slot becomes a `missing-night`, and the cell's window
+   resets.
+
+The question was what the credential should do about a dropped slot.
+
+### Options considered
+
+| Option | What it means | For | Against |
+|---|---|---|---|
+| **A. Slot-stamped backfill** | When a slot has **no run at all** at grace expiry, one `workflow_dispatch` run is started for that lane, stamped with the missing slot. The audit counts it as that slot's night only if it is the first and only backfill for the slot, runs on the same RC commit with the same window fingerprint, is a first attempt, and was started before the next slot fires. | A GitHub scheduler fault no longer costs up to 14 nights per cell. | Changes D1 ("a credential night is a scheduled night; dispatches never count"). Adds a path that can mint a credential night, which needs its own authorization story (who or what may dispatch, how the audit tells a sanctioned backfill from any other dispatch) and its own guards. #1640's watchdog is read-only by design; this makes something dispatch. More harness code inside the frozen set. |
+| **B. Accept the reset risk (chosen)** | A slot GitHub never ran stays a `missing-night` and restarts the streak. Delay is handled by the 10h grace; visibility by the #1640 watchdog, which alerts when a slot is late or missing. | Keeps D1's definition exact: every counted night was scheduled and ran unattended. No new write path into the credential. Nothing new to guard. | A true drop costs the cell its window (up to 14 more nights). The GA date absorbs that risk. |
+| C. Excuse N missing nights per window | Allow, say, one missing slot per 14-night window without a reset. | Simple to implement. | Weakens "fourteen consecutive nights" for every cause of a missing night, not only GitHub drops. The audit cannot tell a scheduler drop from a broken lane. |
+
+### Decision
+
+**Accept the reset risk.** A credential night stays a scheduled night; a slot GitHub never ran
+is a `missing-night` and restarts the cell's streak, as Amendment 2 already specifies.
+
+Why B over A (slot-stamped backfill dispatch) and C (excusing missing nights, rejected because it weakens "fourteen consecutive nights" for every cause of a missing night, and the audit cannot tell a scheduler drop from a broken lane): the credential is a public
+claim that a cell passed on fourteen consecutive unattended nights on a frozen tag. Its value is
+that nobody chose which nights counted. A backfill path keeps the tag and fingerprint fixed, but
+it reintroduces a dispatch that counts, and that dispatch then has to be authorized, rate-limited,
+audited and guarded against cherry-picking. All of that sits inside the frozen harness during a
+live window. The delay problem that actually happened this week is fixed by the 10h grace. What
+remains is outright drops, which have not been observed on these crons, only read about. If drops
+do start costing windows, this amendment should be revisited with measured drop counts, and a
+backfill design is the fallback.
+
+### Consequences
+
+- No change to D1, the audit, or the harness beyond the grace bump that #1649 already carries.
+- The #1640 watchdog is the operational answer. It alerts on a late or missing slot, so a drop is
+  seen the same morning, not at the next audit.
+- A dropped slot resets that cell's window. The rc.2 → GA plan should keep slack for one reset per
+  cell.
+- **Revisit trigger:** two or more `missing-night` resets in one release cycle that the watchdog
+  attributes to GitHub (no run created at all for the slot), not to a lane failure.
+
+## Amendment 4 (2026-09-30): a bounded VOID grade for a proven pre-knext failure (#1553)
+
+- **Status:** Accepted (2026-09-30, founder rule: highest jev score — option B scored 0.90 against
+  0.10 for A and 0.00 for C). **Amends:** D1's counting rule (rule 9 in
+  `scripts/compat-window-audit.mjs`'s header). **Implements:** #1553, raised from the #1550 round-1
+  review of #1520.
+- **Relates to:** #1520/#1550 (the `kind: 'deploy'` label, which this amendment does NOT grant a
+  VOID grade — see Context), Amendment 3 above (whose Option C — excusing N missing nights per
+  window unconditionally — was rejected for a reason this amendment takes care not to repeat).
+- **Trigger-class:** ADR + credential-window counting rule — flagged for the sprint-close design
+  review.
+
+### Context
+
+#1520 proposed grading a night whose only redness was a `kind: 'deploy'` shard failure as VOID —
+bridged over the streak, neither extending nor resetting it — on the theory that a `createNext`
+deploy-script/harness failure is evidence-free about the knext ref under test. The #1550 round-1
+review found the naive form unsound on three counts, all still true and none of them repealed here:
+
+1. **A `kind: 'deploy'` failure is not reliably evidence-free.** `scripts/e2e-deploy.sh` runs
+   `next build` through the knext adapter under test and boots the knext server, so "Custom deploy
+   script failed" is *also* what an adapter build crash or a server crash-on-boot reports. Grading
+   it VOID would let a real product regression go uncounted.
+2. **Unbounded bridging inflates the streak.** 13 green + N void + 1 green reading as a 14-night
+   streak, for any N, is exactly the shape a later #1604 round-1 attempt (an "invalid night pauses
+   the streak" semantic for the operator-digest guard) reproduced and had rejected on the identical
+   fixture: 13 green + 30 invalid + 1 green read `current=14, met=true`, and nothing in that case
+   had touched a cluster at all.
+3. **Message shape is not a safe per-file classifier.** Mixed files, retries and echoed logs mean a
+   shard's `kind: 'deploy'` count cannot be trusted to partition cleanly from a real assertion
+   failure without the count-match guard `isDeployOnlyRedShard` already carries.
+
+Round 2 (#1550, lead-directed) therefore removed the VOID grade entirely: a deploy-classified red
+disqualifies a night exactly like any other red, labelled only for readability. That is unchanged
+by this amendment. #1553 asked the sprint-close design gate a narrower question the round-2 fix
+deliberately left open: **is a VOID grade acceptable at all, and if so under what proof?**
+
+Amendment 3 above answered an adjacent question — whether to excuse a *missing* night — and its
+Option C ("excuse N missing nights per window") was rejected because "the audit cannot tell a
+scheduler drop from a broken lane." A VOID grade for #1553 must not repeat that mistake: it must
+excuse nothing by *absence* of information, only by *proof*.
+
+### Decision
+
+**A night may be graded VOID only when a knext-owned marker proves the failure happened before any
+knext code ran**, bounded to **at most one void night per 14-night window per cell**, recorded in
+the ledger so the audit can re-prove the exemption from the ledger alone.
+
+#### The marker: what it is, and why it cannot be knext's own failure wearing a costume
+
+The marker is a **preflight WORKFLOW STEP's own output**, never the deploy-test harness's — the
+same structural guarantee `scripts/compat-disk-floor-check.mjs`'s `kind: 'infra'` failure already
+relies on (its header: "the workflow step — not this script — writes the shard's OWN summary JSON
+directly"). Concretely, a shard's credential run has (at least) three phases in strict sequence,
+enforced by GitHub Actions' own step ordering (a step does not run once an earlier one without
+`continue-on-error` has failed):
+
+1. **`runner-setup`** — checkout, toolchain install, cache restore.
+2. **`dependency-install`** — resolving/restoring/reinstalling next.js's own harness dependencies
+   and hydrating next.js's own prebuilt build closure from published tarballs, so the jest harness
+   can discover and load deploy tests.
+3. **`cluster-bringup`** — kind/cluster provisioning, if the cell needs one, before a single
+   `next build` or server boot runs for this shard's first deploy-test file.
+
+**Correction (round 2, #1553, 2026-09-30 — review finding).** The line above originally read
+"`dependency-install` — installing the packed `@getknext/*` tarballs under test (installing them is
+not running them — no adapter code executes here)". That was wrong, and the wiring round it
+described matched the wrong text: `scripts/e2e-preflight.mjs` — the step that actually installs the
+packed `@getknext/*` tarballs — npm-installs them into a scratch dir, resolves
+`@getknext/core/adapter`, and dynamically **imports** `@getknext/db/migrate` (the exact import
+`kn-next db migrate` performs at runtime). That is knext code executing, not merely "installing", and
+the first wiring round had placed that step, plus a `chmod` of knext's own lifecycle scripts, INSIDE
+the `dependency-install` phase's fault-detection window — before "Mark dependency-install phase
+complete". A genuine knext packaging bug caught there would have graded `kind: 'pre-knext'` and could
+have bridged a credential streak over a real regression, the exact failure mode this whole amendment
+exists to rule out. Fixed by moving both steps to run AFTER the `dependency-install` phase's marker
+and detector, with their own `failure()`-gated detector ("Adapter-tarball preflight fault detector
+(#1553 round 2)") that writes `kind: 'deploy'`, not `kind: 'pre-knext'` — per `isDeployOnlyRedShard`
+(below), a `kind: 'deploy'`-only red is never void-eligible, so this failure mode now always resets
+the streak like any other real defect. The steps that remain INSIDE the `dependency-install` window
+are exactly the ones the corrected phase-2 description above lists — generic next.js-harness
+tooling only, verified step-by-step against `.github/workflows/test-e2e-deploy.yml` and locked by an
+explicit per-phase allowlist test (`tests/compat-suite-workflow.test.ts`, "pre-knext phase boundaries
+stay knext-free").
+
+A dedicated preflight step runs at the end of phase 3, immediately before the per-file deploy-test
+loop starts. If, and only if, an earlier phase failed, this step — and *only* this step — writes the
+shard's summary JSON directly with a single synthesized failure `{ kind: 'pre-knext', phase:
+'runner-setup' | 'dependency-install' | 'cluster-bringup' }`, `failed: 0`, `notRun: <the shard's
+whole expected file count>` (nothing ran), and stamps the run's ledger with a **self-referencing**
+`preKnextVoidMarker: { runId, lane, phase }` naming *this exact run and lane*. Two properties make
+this provably NOT a knext failure:
+
+- **It cannot run after knext code has.** The step that would write `kind: 'pre-knext'` is placed,
+  and only fires, *before* the step that invokes `next build` through the adapter or boots the
+  knext server for this shard. A knext adapter crash or server crash-on-boot — the #1550 round-1
+  finding's whole point — happens *inside* the deploy-test harness, strictly *after* this point, and
+  reports through the harness's own `kind: 'deploy'` path, never `kind: 'pre-knext'`. The two kinds
+  are therefore mutually exclusive by construction, not by convention.
+- **It is self-referencing.** A marker naming a different `runId` or `lane` — copied, forged, or
+  left over from a template — proves nothing about *this* night and is rejected (see "Fails
+  closed" below).
+
+`scripts/compat-window-audit.mjs`'s `isPreKnextVoidRedShard` grades a shard's redness
+void-*labelled* on this shape (mirroring `isDeployOnlyRedShard`/`isInfraOnlyRedShard`'s existing
+fail-closed conventions: `failedCount > 0` or `notRunCount === 0` is NEVER pre-knext; every named
+failure must carry `kind: 'pre-knext'` AND a recognised `phase` — checked independently, so a
+`kind: 'deploy'` failure carrying a forged pre-knext-shaped `phase` field still never classifies).
+`isValidPreKnextVoidMarker` separately validates the ledger's `preKnextVoidMarker` against the
+ledger's own `runId`/`lane`. A night is **void-eligible** only when (a) the marker validates and
+(b) *every* disqualifier on the graded night traces back to a pre-knext-attributed shard — a
+`bytecode-not-live` disqualifier on that SAME shard is allowed (a shard that never booted cannot
+prove liveness either, and that absence is not itself evidence of a knext regression), but any
+OTHER disqualifier — a bad ref, a rerun, a short ledger, a duplicate-slot, a red on a *different*
+shard that is not itself pre-knext-attributed — makes the night NOT void-eligible. The marker only
+ever excuses "this shard never ran"; it cannot launder anything else wrong with the night.
+
+**This is honest about what it does and does not prove.** Exactly like D4's bytecode-liveness trust
+assumption ("this is a check against knext regressing, not against a hostile fixture"), the
+preflight step's provenance rests on the workflow YAML being what it says it is — the same trust
+boundary every other ledger field in this ADR already sits on (D1's `credential`/`compatMode`
+markers, D5's `workflowFile` table). It is not a defense against a compromised workflow; it is a
+defense against the SPECIFIC hole #1550 found in the `kind: 'deploy'` heuristic — a real knext
+failure wearing a matching message shape.
+
+**Wired and proven live in this PR (lead-directed follow-up, 2026-09-30).** The producer — the
+per-shard fault-injection input, the two phase-boundary markers, and the two `failure()`-gated
+detector steps — is wired into `test-e2e-deploy.yml`, and `scripts/compat-run-ledger.mjs` builds the
+self-referencing `preKnextVoidMarker` from the aggregated shard summaries. Proved live by two
+`workflow_dispatch` runs on this branch, identified by their own `dispatchId` (never "latest"):
+
+- **Fault run** (`preKnextFault=runner-setup`, dispatchId `1553-fault-runner-setup`), run
+  [36648004813](https://github.com/getknext-dev/knext/actions/runs/36648004813): every one of 16
+  shards reported `kind: 'pre-knext', phase: 'runner-setup'` (`failed:0, notRun:1`), and the
+  `compat-run-ledger` artifact carried `"preKnextVoidMarker": {"runId": "36648004813", "lane":
+  "node", "phase": "runner-setup"}` — self-referencing this exact run. Per-shard step trace
+  confirms the intended sequencing: the fault-injection step failed, the runner-setup
+  phase-complete marker was correctly SKIPPED (never marks a phase complete that didn't complete),
+  the detector step ran and wrote the summary, every dependency-install-phase step and "Run
+  official deploy tests" were skipped (default `success()` gating), and "Summarize shard result"
+  did not clobber the honest summary with a false-green parse.
+- **Normal run** (no fault, dispatchId `1553-normal-smoke`), run
+  [36648007554](https://github.com/getknext-dev/knext/actions/runs/36648007554): concluded
+  `success`; `preKnextVoidMarker: null`, no shard carries a `kind: 'pre-knext'` failure — the
+  steady state is untouched.
+- **Fed through the real audit code** (`gradeNight`/`auditWindow`), the fault run's actual ledger —
+  byte-identical shard failures and marker, only the orthogonal "is this a scheduled credential
+  night" fields overlaid, since a `workflow_dispatch` can never itself be one (ADR-0056 D1) —
+  grades `voidEligible: true`, and spliced between 13 and 1 synthetic green credential nights on
+  the same fingerprint, `auditWindow` reports `met: true, longest.nights: 14, streaks: 1,
+  voidNights: [{runId, marker, date}]`: the exact 13+1+1=14 bridge this amendment specifies. An
+  earlier pass of this same check, with the marker's `runId` left unrenamed to match a relabelled
+  night, correctly reported `voidEligible: false` — the self-reference validation failing closed
+  exactly as designed, not a defect.
+
+No currently-banked or in-progress **credential** streak is affected: these are `workflow_dispatch`
+early-warning runs (ADR-0056 D1 — a dispatch is never a credential night), and
+`.github/compat-credential-ref.json`'s `paths`-scoped `rcBumpMarker` covers exactly the three files
+this touches (`scripts/compat-window-audit.mjs`, `scripts/compat-run-ledger.mjs`,
+`.github/workflows/test-e2e-deploy.yml`).
+
+#### The bridging rule: exactly what "13 green + 1 void + 1 green = 14" means
+
+A void-eligible night, when one is already open on the **same fingerprint**, **bridges** the
+streak: it is spliced out of the sequence — counted as neither one of the fourteen required nights,
+nor a reset. Fingerprint continuity is checked explicitly (not inferred): a void-eligible night
+whose `windowFingerprint` differs from the currently-open streak's does NOT bridge, because the
+fingerprint is what proves nothing else about the shipped bytes moved during the gap, and the
+marker only ever excuses "this shard never ran" — it says nothing about what ran on adjacent
+nights.
+
+**"One void night per 14-night window" means: at most one bridge per currently-OPEN streak
+attempt.** The budget (`auditWindow`'s `open.voidUsed`) is spent the instant the FIRST void-eligible
+night in an attempt is bridged, and is refilled only when that attempt next restarts from zero (any
+ordinary disqualifying reset, or a void-eligible night that could not bridge). Concretely:
+
+- **13 green + 1 void + 1 green = a 14-night MET streak.** The void night is bridged (spliced out);
+  the streak's own night-count goes 13 → (bridge, unchanged) → 14. `auditWindow` reports ONE streak
+  of 14 nights, not two streaks of 13 and 1.
+- **A SECOND void night before the streak next restarts is an ordinary reset**, not a second
+  bridge — `open.voidUsed` is already true, so `canBridge` is false, and the night falls through to
+  the same "night restarts the count" path any other disqualified night takes
+  (`restartCause: 'night-void-unbridged'`, distinct from `'night-disqualified'` so a report never
+  conflates "a proven exemption ran out of budget" with "an ordinary red").
+- **A void-eligible night with NO open streak to bridge** (the very first graded night, or the
+  night immediately after a reset) is also an ordinary reset — there is nothing on either side of it
+  to splice it out of.
+- **A void-eligible night whose fingerprint does not match the open streak** is also an ordinary
+  reset, for the reason above.
+
+This is deliberately a NARROWER shape than Amendment 3's rejected Option C ("excuse N missing
+nights per window"): that excused an *absence* of information (no run at all) for *any* number of
+nights up to a cap, and was rejected because the audit could not tell a scheduler drop from a
+broken lane. This amendment excuses nothing by absence — it requires a *positive, self-referencing,
+structurally-provable* marker for the ONE night it bridges, and every disqualifier that night
+carries must trace back to that proof.
+
+#### Recorded in the ledger so the audit can re-prove it
+
+Every night `gradeNight` grades carries `voidEligible` (recomputed a second time inside
+`auditWindow`, AFTER the rule-8 duplicate-slot pass, so a night that is ALSO a duplicate-slot
+violation is never void-eligible on stale information) and, if `auditWindow` actually bridges it,
+`bridgedVoid: true`. `auditWindow`'s own return value carries `voidNights` (every bridged night,
+with its marker) alongside each `streaks[*].voidNights` (scoped to the one streak it bridged),
+mirroring the existing `unresolvedNights` field's shape (rule 5) — a consumer does not have to
+re-derive which run was excused or why; it is printed by `formatReport` as `VOID — bridged, not
+counted (#1553)`, distinctly from the ordinary `NO — …` a non-bridged red (including a deploy- or
+infra-classified one) still prints.
+
+### Options considered
+
+| Option | What it means | jev score | Verdict |
+|---|---|---|---|
+| **B. A bounded VOID grade, gated on a knext-owned pre-knext marker** | As decided above: proof-gated, one bridge per open streak, fingerprint-continuity-checked, fully recorded. | **0.90** | **chosen (founder rule: highest score)** |
+| A. No VOID grade at all — keep #1550 round 2's answer permanently | Simplest; zero new surface in the frozen harness/audit. | 0.10 | rejected: leaves a real, previously-measured failure mode (run 36312054519, 419 files failed on a harness/deploy-script fault unrelated to the ref under test) with no path to ever being distinguished from a real regression, however strong the future evidence. |
+| C. Grade any `kind: 'deploy'`-only red night VOID (the original #1520/#1604-round-1 shape) | Reuses the existing label; no new marker. | 0.00 | rejected: this is the exact shape #1550 round 1 and the #1604 round-1 review both already found unsound — `kind: 'deploy'` is not reliably evidence-free (a knext adapter/server crash reports through it), and unbounded bridging measurably inflates the streak (the 13+30+1 fixture). Repeating it here would undo round 2's fix. |
+
+### Consequences
+
+- **No currently-banked or in-progress credential streak is affected by this PR.** The producer is
+  wired and proven live (see above), but only `workflow_dispatch` runs have exercised it so far —
+  every credential cron still runs unmodified `main`/RC-tag code until this PR merges, and even
+  then a real credential night simply CANNOT need the grace unless a genuine pre-knext fault occurs
+  on one.
+- **The credential's integrity is preserved, not traded for tolerance.** Every branch of the gate —
+  the kind check, the marker's three self-reference fields, the credential-scope restriction, the
+  fingerprint-continuity requirement, and the one-bridge-per-streak cap — is independently
+  mutation-proven (`scripts/mutation-prove-compat-window-audit.mjs`, guards 18-25): removing any one
+  of them is caught by a dedicated fixture in `tests/compat-window-audit.test.ts`.
+- **A `kind: 'deploy'` red still always resets, marker or not.** This amendment does not reopen
+  #1520/#1550 — the mutual-exclusion between `kind: 'deploy'` and `kind: 'pre-knext'` is structural
+  (see "why the marker cannot be knext's own failure"), so a knext adapter/server crash can never
+  acquire the grace this amendment grants.
+- **The one-bridge-per-streak cap means a genuinely flaky pre-knext-only failure mode (e.g. a
+  chronically unreliable cluster-bringup step) still eventually resets a streak** — the second such
+  night in the same attempt is an ordinary reset. This is deliberate: repeated pre-knext failures on
+  the SAME cell are themselves a signal the harness needs fixing, not indefinitely bridged over.
+
+### Action items
+
+- [x] Ledger schema (`preKnextVoidMarker`), shard-level classification
+      (`isPreKnextVoidRedShard`, `PRE_KNEXT_PHASES`), marker validation
+      (`isValidPreKnextVoidMarker`), night-level eligibility (`computeVoidEligible`,
+      `everyDisqualifierIsPreKnextVoid`), and the bridging rule in `auditWindow`
+      (`open.voidUsed`, `streaks[*].voidNights`, `audit.voidNights`).
+- [x] `formatReport` prints a bridged night as `VOID — bridged, not counted (#1553)`, distinctly
+      from an ordinary `NO — …` red.
+- [x] Mutation-proved (guards 18-25, `scripts/mutation-prove-compat-window-audit.mjs`) and
+      TDD'd (`tests/compat-window-audit.test.ts`, `#1553` describe block).
+- [x] **Wire the producer**: a dispatch-only, default-off `preKnextFault` input plus, per phase
+      (`runner-setup`, `dependency-install`), a fault-injection step, a phase-complete marker, and a
+      `failure()`-gated detector in `test-e2e-deploy.yml`, writing the shard summary JSON and (via
+      `scripts/compat-run-ledger.mjs`) the run-level `preKnextVoidMarker`. Proved live on two
+      `workflow_dispatch` runs (fault + normal, run ids and the fed-through-the-audit result above).
+- [x] **Round 2 (#1553, review finding, 2026-09-30):** moved the adapter-tarball preflight
+      (`scripts/e2e-preflight.mjs`) and its `chmod` sibling OUT of the `dependency-install` phase's
+      fault-detection window (they execute real knext code — see the Correction above) and gave them
+      a dedicated `failure()`-gated detector writing `kind: 'deploy'`. Locked by an explicit
+      per-phase step allowlist (`tests/compat-suite-workflow.test.ts`) and a `gradeNight`/
+      `auditWindow` fixture for a MIXED night (some pre-knext shards, some genuinely red ones) never
+      being void-eligible (`tests/compat-window-audit.test.ts`).
+- [ ] `cluster-bringup` has no producer yet: `test-e2e-deploy.yml` runs no cluster today, so
+      `PRE_KNEXT_PHASES` carries that phase name for a future cell that needs one, unproduced until
+      then. Do not treat its absence as a defect in this PR.
+- [ ] Verify on a real SCHEDULED night (early-warning `main` first, never a credential cron
+      directly) that an UNPLANNED, genuine pre-knext failure — not the dispatch-only fault
+      injection — produces a night the audit grades void-eligible, before ever relying on the grace
+      on a credential cron.

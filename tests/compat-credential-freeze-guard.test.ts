@@ -5,8 +5,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   evaluateFreezeGuard,
+  evaluateRcTagChange,
   frozenFileSet,
   isFrozen,
+  isMarkerNarrowingOnly,
+  markerIntroducedByPr,
   markerValidity,
   PIN_FILE,
 } from '../scripts/compat-credential-freeze-guard.mjs';
@@ -552,6 +555,351 @@ describe('evaluateFreezeGuard — the four required scenarios (#1302)', () => {
   });
 });
 
+describe('#1635 — a marker exempts only the PR that introduces it', () => {
+  const NOW = new Date('2026-09-24T12:00:00Z');
+  const FROZEN_SET = new Set([
+    '.github/workflows/test-e2e-deploy.yml',
+    'scripts/e2e-deploy.sh',
+    PIN_FILE,
+  ]);
+  const TAG = 'v1.0.0-rc.1';
+  const INHERITED = { date: '2026-09-23', expires: '2026-10-01', reason: 'an earlier PR' };
+  const OWN = { date: '2026-09-24', expires: '2026-10-01', reason: 'this PR' };
+
+  describe('markerIntroducedByPr', () => {
+    it('no marker at head is never "introduced"', () => {
+      expect(markerIntroducedByPr({ rcTag: TAG }, { rcTag: TAG })).toBe(false);
+    });
+    it('absent at merge base, present at head → introduced', () => {
+      expect(markerIntroducedByPr({ rcTag: TAG }, { rcTag: TAG, rcBumpMarker: OWN })).toBe(true);
+    });
+    it('identical at merge base and head → inherited, not introduced', () => {
+      expect(
+        markerIntroducedByPr(
+          { rcTag: TAG, rcBumpMarker: INHERITED },
+          { rcTag: TAG, rcBumpMarker: { ...INHERITED } },
+        ),
+      ).toBe(false);
+    });
+    it('only expires/paths changed → still inherited', () => {
+      expect(
+        markerIntroducedByPr(
+          { rcTag: TAG, rcBumpMarker: INHERITED },
+          { rcTag: TAG, rcBumpMarker: { ...INHERITED, expires: '2026-10-05', paths: ['x'] } },
+        ),
+      ).toBe(false);
+    });
+    it('a replacement marker (new date or reason) → introduced', () => {
+      const base = { rcTag: TAG, rcBumpMarker: INHERITED };
+      expect(markerIntroducedByPr(base, { rcTag: TAG, rcBumpMarker: OWN })).toBe(true);
+      expect(
+        markerIntroducedByPr(base, { rcTag: TAG, rcBumpMarker: { ...INHERITED, reason: 'new' } }),
+      ).toBe(true);
+    });
+  });
+
+  it('ATTACK — inherited marker: RED when a frozen harness file changes under a marker already on main', () => {
+    const pin = { rcTag: TAG, rcBumpMarker: INHERITED };
+    const result = evaluateFreezeGuard({
+      basePin: pin,
+      mergeBasePin: pin,
+      headPin: pin,
+      touchedFiles: ['scripts/e2e-deploy.sh'],
+      frozenSet: FROZEN_SET,
+      now: NOW,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/inherited from the merge base/);
+  });
+
+  it('ATTACK — inherited marker whose expiry is merely extended: still RED', () => {
+    const base = { rcTag: TAG, rcBumpMarker: INHERITED };
+    const result = evaluateFreezeGuard({
+      basePin: base,
+      mergeBasePin: base,
+      headPin: { rcTag: TAG, rcBumpMarker: { ...INHERITED, expires: '2026-10-05' } },
+      touchedFiles: [PIN_FILE, 'scripts/e2e-deploy.sh'],
+      frozenSet: FROZEN_SET,
+      now: NOW,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('marker added by the PR: GREEN', () => {
+    const result = evaluateFreezeGuard({
+      basePin: { rcTag: TAG },
+      mergeBasePin: { rcTag: TAG },
+      headPin: { rcTag: TAG, rcBumpMarker: OWN },
+      touchedFiles: [PIN_FILE, 'scripts/e2e-deploy.sh'],
+      frozenSet: FROZEN_SET,
+      now: NOW,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.reason).toMatch(/rcBumpMarker exempts it/);
+  });
+
+  it('marker added by the PR replacing an inherited one: GREEN', () => {
+    const base = { rcTag: TAG, rcBumpMarker: INHERITED };
+    const result = evaluateFreezeGuard({
+      basePin: base,
+      mergeBasePin: base,
+      headPin: { rcTag: TAG, rcBumpMarker: OWN },
+      touchedFiles: [PIN_FILE, 'scripts/e2e-deploy.sh'],
+      frozenSet: FROZEN_SET,
+      now: NOW,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  describe('narrowing-only pin diffs pass with no marker of their own', () => {
+    const base = { rcTag: TAG, rcBumpMarker: INHERITED };
+    const guard = (headPin: unknown, touched: string[] = [PIN_FILE]) =>
+      evaluateFreezeGuard({
+        basePin: base,
+        mergeBasePin: base,
+        headPin,
+        touchedFiles: touched,
+        frozenSet: FROZEN_SET,
+        now: NOW,
+      });
+
+    it('removal-only: GREEN', () => {
+      const result = guard({ rcTag: TAG });
+      expect(result.ok).toBe(true);
+      expect(result.reason).toMatch(/only removes or narrows/);
+    });
+    it('shorten-only: GREEN', () => {
+      expect(guard({ rcTag: TAG, rcBumpMarker: { ...INHERITED, expires: '2026-09-24' } }).ok).toBe(
+        true,
+      );
+    });
+    it('scope-narrowing (adding paths to an unscoped marker): GREEN', () => {
+      expect(
+        guard({ rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['scripts/e2e-deploy.sh'] } }).ok,
+      ).toBe(true);
+    });
+    it('ATTACK — extending expiry is not narrowing: RED', () => {
+      expect(guard({ rcTag: TAG, rcBumpMarker: { ...INHERITED, expires: '2026-10-05' } }).ok).toBe(
+        false,
+      );
+    });
+    it('ATTACK — extending expiry while narrowing paths is still not narrowing: RED', () => {
+      expect(
+        guard({
+          rcTag: TAG,
+          rcBumpMarker: { ...INHERITED, expires: '2026-10-05', paths: ['scripts/e2e-deploy.sh'] },
+        }).ok,
+      ).toBe(false);
+    });
+    it('ATTACK — unchanged marker (no narrowing at all) through a pin-only diff: RED', () => {
+      // e.g. a whitespace-only reformat of the pin: nothing is narrowed, so
+      // this is not an exempt narrowing, and the inherited marker exempts nothing.
+      expect(guard({ rcTag: TAG, rcBumpMarker: { ...INHERITED } }).ok).toBe(false);
+    });
+    it('ATTACK — rcTag change riding a marker removal: RED', () => {
+      const result = guard({ rcTag: 'v1.0.0-rc.2' });
+      expect(result.ok).toBe(false);
+    });
+    it('ATTACK — any other pin key changed alongside the removal: RED', () => {
+      expect(guard({ rcTag: TAG, $comment: 'edited' }).ok).toBe(false);
+    });
+    it('ATTACK — removal plus a harness file is not pin-only: RED', () => {
+      expect(guard({ rcTag: TAG }, [PIN_FILE, 'scripts/e2e-deploy.sh']).ok).toBe(false);
+    });
+  });
+
+  describe('isMarkerNarrowingOnly edge cases', () => {
+    const scoped = { ...INHERITED, paths: ['a', 'b'] };
+    it('no marker at merge base → never narrowing', () => {
+      expect(isMarkerNarrowingOnly({ rcTag: TAG }, { rcTag: TAG })).toBe(false);
+    });
+    it('dropping paths widens scope → not narrowing', () => {
+      expect(
+        isMarkerNarrowingOnly(
+          { rcTag: TAG, rcBumpMarker: scoped },
+          { rcTag: TAG, rcBumpMarker: { ...INHERITED, expires: '2026-09-24' } },
+        ),
+      ).toBe(false);
+    });
+    it('adding a path outside the base scope → not narrowing', () => {
+      expect(
+        isMarkerNarrowingOnly(
+          { rcTag: TAG, rcBumpMarker: scoped },
+          { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['a', 'c'] } },
+        ),
+      ).toBe(false);
+    });
+    it('dropping one path of a scoped marker → narrowing', () => {
+      expect(
+        isMarkerNarrowingOnly(
+          { rcTag: TAG, rcBumpMarker: scoped },
+          { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['a'] } },
+        ),
+      ).toBe(true);
+    });
+    it('changing date or reason, or adding an unknown key → not narrowing', () => {
+      const base = { rcTag: TAG, rcBumpMarker: INHERITED };
+      const shorter = { ...INHERITED, expires: '2026-09-24' };
+      expect(
+        isMarkerNarrowingOnly(base, {
+          rcTag: TAG,
+          rcBumpMarker: { ...shorter, date: '2026-09-22' },
+        }),
+      ).toBe(false);
+      expect(
+        isMarkerNarrowingOnly(base, { rcTag: TAG, rcBumpMarker: { ...shorter, reason: 'x' } }),
+      ).toBe(false);
+      expect(
+        isMarkerNarrowingOnly(base, { rcTag: TAG, rcBumpMarker: { ...shorter, other: 1 } }),
+      ).toBe(false);
+    });
+    it('key order in the pin does not matter', () => {
+      expect(
+        isMarkerNarrowingOnly(
+          { rcTag: TAG, $comment: 'c', rcBumpMarker: INHERITED },
+          { $comment: 'c', rcTag: TAG },
+        ),
+      ).toBe(true);
+    });
+
+    // #1649 review round 2: the "never widens `paths`" rule (the :369 subset
+    // check and the :370 pathsNarrowed computation) had no red test — deleting
+    // :369 or forcing :370's result to `true` kept every existing test green.
+    describe('never widens paths (#1649 review round 2)', () => {
+      it('ATTACK — base paths [A] -> head paths [A, B], shorter expiry, pin-only: RED (widening paths is never narrowing, even alongside a shorter expiry)', () => {
+        expect(
+          isMarkerNarrowingOnly(
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A'] } },
+            {
+              rcTag: TAG,
+              rcBumpMarker: { ...INHERITED, expires: '2026-09-25', paths: ['A', 'B'] },
+            },
+          ),
+        ).toBe(false);
+      });
+      it('ATTACK — base paths [A, B] -> head paths [B, A] (reordered, same set), same expiry: RED (not narrowing)', () => {
+        expect(
+          isMarkerNarrowingOnly(
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A', 'B'] } },
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['B', 'A'] } },
+          ),
+        ).toBe(false);
+      });
+      it('green counterpart — base paths [A, B] -> head paths [A], same expiry: GREEN (genuine narrowing)', () => {
+        expect(
+          isMarkerNarrowingOnly(
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A', 'B'] } },
+            { rcTag: TAG, rcBumpMarker: { ...INHERITED, paths: ['A'] } },
+          ),
+        ).toBe(true);
+      });
+    });
+  });
+
+  describe('path-scoped markers', () => {
+    const scoped = { ...OWN, paths: ['scripts/e2e-deploy.sh'] };
+    const guard = (touched: string[]) =>
+      evaluateFreezeGuard({
+        basePin: { rcTag: TAG },
+        mergeBasePin: { rcTag: TAG },
+        headPin: { rcTag: TAG, rcBumpMarker: scoped },
+        touchedFiles: touched,
+        frozenSet: FROZEN_SET,
+        now: NOW,
+      });
+    it('covers a named path (and the pin file itself): GREEN', () => {
+      expect(guard([PIN_FILE, 'scripts/e2e-deploy.sh']).ok).toBe(true);
+    });
+    it('does not cover an unnamed frozen file: RED', () => {
+      const result = guard([PIN_FILE, '.github/workflows/test-e2e-deploy.yml']);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(
+        /does not cover frozen file\(s\): \.github\/workflows\/test-e2e-deploy\.yml/,
+      );
+    });
+    it('an empty or malformed paths list invalidates the marker instead of meaning "everything"', () => {
+      for (const paths of [[], [''], 'scripts/e2e-deploy.sh', [1]]) {
+        const v = markerValidity({ rcTag: TAG, rcBumpMarker: { ...OWN, paths } }, NOW);
+        expect(v.valid).toBe(false);
+        expect(v.reason).toMatch(/paths/);
+      }
+    });
+  });
+});
+
+describe('#1641 — an rcTag change needs the tag on the remote, reachable from main', () => {
+  const SHA = 'a'.repeat(40);
+  const base = { rcTag: 'v1.0.0-rc.1' };
+  const head = { rcTag: 'v1.0.0-rc.2' };
+
+  it('GREEN: rcTag unchanged (no lookup needed)', () => {
+    expect(evaluateRcTagChange({ mergeBasePin: base, headPin: base, tagState: null }).ok).toBe(
+      true,
+    );
+  });
+  it('GREEN: rcTag cleared to null (closing a window)', () => {
+    expect(
+      evaluateRcTagChange({ mergeBasePin: base, headPin: { rcTag: null }, tagState: null }).ok,
+    ).toBe(true);
+  });
+  it('RED: rcTag changed with no lookup supplied — fails closed', () => {
+    const r = evaluateRcTagChange({ mergeBasePin: base, headPin: head, tagState: null });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/failing closed/);
+  });
+  it('RED: lookup for a different tag than the head names', () => {
+    const r = evaluateRcTagChange({
+      mergeBasePin: base,
+      headPin: head,
+      tagState: { tag: 'v1.0.0-rc.1', commit: SHA, reachableFromMain: true },
+    });
+    expect(r.ok).toBe(false);
+  });
+  it('RED: the tag does not exist on the remote — "push the tag first"', () => {
+    const r = evaluateRcTagChange({
+      mergeBasePin: base,
+      headPin: head,
+      tagState: { tag: 'v1.0.0-rc.2', commit: null, reachableFromMain: false },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/push the tag first/);
+  });
+  it('RED: the tag peels to a commit not reachable from main', () => {
+    const r = evaluateRcTagChange({
+      mergeBasePin: base,
+      headPin: head,
+      tagState: { tag: 'v1.0.0-rc.2', commit: SHA, reachableFromMain: false },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/not reachable from main/);
+  });
+  it('RED: a head rcTag that is not an RC tag name', () => {
+    const r = evaluateRcTagChange({
+      mergeBasePin: base,
+      headPin: { rcTag: 'main' },
+      tagState: { tag: 'main', commit: SHA, reachableFromMain: true },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/not a release-candidate tag/);
+  });
+  it('GREEN: the tag exists and is reachable from main', () => {
+    const r = evaluateRcTagChange({
+      mergeBasePin: base,
+      headPin: head,
+      tagState: { tag: 'v1.0.0-rc.2', commit: SHA, reachableFromMain: true },
+    });
+    expect(r.ok).toBe(true);
+  });
+  it('GREEN: the first cut (null → tag) with an existing reachable tag', () => {
+    const r = evaluateRcTagChange({
+      mergeBasePin: { rcTag: null },
+      headPin: base,
+      tagState: { tag: 'v1.0.0-rc.1', commit: SHA, reachableFromMain: true },
+    });
+    expect(r.ok).toBe(true);
+  });
+});
+
 describe('the pin file itself documents rcBumpMarker (#1302)', () => {
   it('.github/compat-credential-ref.json parses, and once v1.0.0-rc.1 is live the window is frozen (#1529)', () => {
     const pin = JSON.parse(readFileSync(resolve(REPO_ROOT, PIN_FILE), 'utf8'));
@@ -587,6 +935,7 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
     basePin: unknown,
     touchedFiles: string[],
     headPin: unknown = basePin,
+    extra: { mergeBasePin?: unknown; tagState?: unknown } = {},
   ): { status: number | null; stdout: string } {
     const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-guard-'));
     try {
@@ -596,6 +945,21 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
       writeFileSync(basePinFile, JSON.stringify(basePin));
       writeFileSync(headPinFile, JSON.stringify(headPin));
       writeFileSync(changedFile, `${touchedFiles.join('\n')}\n`);
+      const extraArgs: string[] = [];
+      // --merge-base-pin-file is REQUIRED by the CLI (fails closed otherwise,
+      // see the dedicated describe block below), so this harness always
+      // supplies it — defaulting to basePin, mirroring the pre-#1635
+      // behaviour for every test here that isn't specifically about the
+      // merge-base distinction.
+      const mergeBasePinValue = extra.mergeBasePin !== undefined ? extra.mergeBasePin : basePin;
+      const mergeBaseFile = join(dir, 'merge-base-pin.json');
+      writeFileSync(mergeBaseFile, JSON.stringify(mergeBasePinValue));
+      extraArgs.push('--merge-base-pin-file', mergeBaseFile);
+      if (extra.tagState !== undefined) {
+        const f = join(dir, 'rctag-state.json');
+        writeFileSync(f, JSON.stringify(extra.tagState));
+        extraArgs.push('--rc-tag-state-file', f);
+      }
       try {
         const stdout = execFileSync(
           process.execPath,
@@ -611,6 +975,7 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
             changedFile,
             '--now',
             NOW_ARG,
+            ...extraArgs,
           ],
           { encoding: 'utf8', timeout: EXEC_TIMEOUT_MS },
         );
@@ -700,6 +1065,93 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
   );
 
   it(
+    'RED (exit 1): an inherited marker (same at merge base and head) exempts nothing (#1635)',
+    () => {
+      const pin = {
+        rcTag: 'v1.0.0-rc.1',
+        rcBumpMarker: { date: '2026-09-23', expires: '2026-10-01', reason: 'earlier PR' },
+      };
+      const { status, stdout } = run(pin, ['.github/workflows/test-e2e-deploy.yml'], pin, {
+        mergeBasePin: pin,
+      });
+      expect(status).toBe(1);
+      expect(stdout).toMatch(/inherited from the merge base/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'RED (exit 1): the marker is judged at the MERGE BASE, not the base tip — a PR that branched while a marker was on main stays unexempted after main removes it (#1635)',
+    () => {
+      const marker = { date: '2026-09-23', expires: '2026-10-01', reason: 'earlier PR' };
+      const withMarker = { rcTag: 'v1.0.0-rc.1', rcBumpMarker: marker };
+      const { status, stdout } = run(
+        { rcTag: 'v1.0.0-rc.1' }, // base tip: main has since removed the marker
+        ['.github/workflows/test-e2e-deploy.yml'],
+        withMarker, // head still carries the inherited marker
+        { mergeBasePin: withMarker },
+      );
+      expect(status).toBe(1);
+      expect(stdout).toMatch(/inherited from the merge base/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'GREEN (exit 0): a pin-only diff that only removes the marker (#1635)',
+    () => {
+      const pin = {
+        rcTag: 'v1.0.0-rc.1',
+        rcBumpMarker: { date: '2026-09-23', expires: '2026-10-01', reason: 'earlier PR' },
+      };
+      const { status, stdout } = run(
+        pin,
+        [PIN_FILE],
+        { rcTag: 'v1.0.0-rc.1' },
+        { mergeBasePin: pin },
+      );
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/only removes or narrows/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'RED (exit 1): an rcTag bump whose tag is missing on the remote, even with a valid marker (#1641)',
+    () => {
+      const base = { rcTag: 'v1.0.0-rc.1' };
+      const head = {
+        rcTag: 'v1.0.0-rc.2',
+        rcBumpMarker: { date: '2026-09-24', expires: '2026-10-01', reason: 'rc.2 bump' },
+      };
+      const { status, stdout } = run(base, [PIN_FILE], head, {
+        mergeBasePin: base,
+        tagState: { tag: 'v1.0.0-rc.2', commit: null, reachableFromMain: false },
+      });
+      expect(status).toBe(1);
+      expect(stdout).toMatch(/push the tag first/);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'GREEN (exit 0): an rcTag bump whose tag exists and is reachable, with a valid marker (#1641)',
+    () => {
+      const base = { rcTag: 'v1.0.0-rc.1' };
+      const head = {
+        rcTag: 'v1.0.0-rc.2',
+        rcBumpMarker: { date: '2026-09-24', expires: '2026-10-01', reason: 'rc.2 bump' },
+      };
+      const { status } = run(base, [PIN_FILE], head, {
+        mergeBasePin: base,
+        tagState: { tag: 'v1.0.0-rc.2', commit: 'b'.repeat(40), reachableFromMain: true },
+      });
+      expect(status).toBe(0);
+    },
+    CLI_TEST_TIMEOUT_MS,
+  );
+
+  it(
     'exits 2 (usage error) when a required flag is missing, not a silent pass',
     () => {
       expect(() =>
@@ -719,4 +1171,71 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
     },
     CLI_TEST_TIMEOUT_MS,
   );
+
+  // #1649 review round 2: --merge-base-pin-file used to fall back to
+  // basePin when omitted (fail OPEN — silently treats the PR base as its
+  // own merge base, defeating the #1635 checks). It must now fail closed.
+  describe('--merge-base-pin-file is required, never falls back to basePin (#1649 review round 2)', () => {
+    it(
+      'RED — exits non-zero with a clear message when the flag is omitted, even in a scenario that would otherwise exit 0',
+      () => {
+        const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-guard-'));
+        try {
+          const basePinFile = join(dir, 'base-pin.json');
+          const headPinFile = join(dir, 'head-pin.json');
+          const changedFile = join(dir, 'changed-files.txt');
+          // Unfrozen at base — under the old fail-open fallback this scenario
+          // exits 0 regardless of mergeBasePin, so a failure here isolates the
+          // missing flag itself as the cause, not the scenario.
+          writeFileSync(basePinFile, JSON.stringify({ rcTag: null }));
+          writeFileSync(headPinFile, JSON.stringify({ rcTag: null }));
+          writeFileSync(changedFile, `${PIN_FILE}\n`);
+          let threw = false;
+          try {
+            execFileSync(
+              process.execPath,
+              [
+                SCRIPT,
+                '--repo-root',
+                REPO_ROOT,
+                '--base-pin-file',
+                basePinFile,
+                '--head-pin-file',
+                headPinFile,
+                '--changed-files-file',
+                changedFile,
+              ],
+              { encoding: 'utf8', timeout: EXEC_TIMEOUT_MS },
+            );
+          } catch (err) {
+            threw = true;
+            const e = err as { status: number | null; stderr?: string };
+            expect(e.status).not.toBe(0);
+            expect(e.status).not.toBeNull();
+            expect(String(e.stderr)).toMatch(/--merge-base-pin-file is required/);
+          }
+          expect(threw).toBe(true);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'GREEN — the identical scenario exits 0 once --merge-base-pin-file is supplied, isolating the flag as what changed',
+      () => {
+        const { status } = run(
+          { rcTag: null },
+          [PIN_FILE],
+          { rcTag: null },
+          {
+            mergeBasePin: { rcTag: null },
+          },
+        );
+        expect(status).toBe(0);
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+  });
 });
