@@ -1,0 +1,65 @@
+---
+title: Stability tiers
+description: What knext promises for a given feature at v1.0 — Stable, Beta, or Experimental — and what each tier means for your app.
+---
+
+Not every part of knext carries the same promise. This page states, plainly, which tier a feature
+is in and what that tier commits to, so you can decide what to build on without guessing.
+
+## Stable
+
+A feature is **Stable** only when a scheduled, red-on-fail check covers it — not because it has
+"been around a while." Stable features follow the full [semver policy](/docs/versioning): a patch
+or minor release never breaks them, and a breaking change requires a major version.
+
+- The four credentialed runtime x builder combinations: Node/Bun runtime, each with the Turbopack
+  or Webpack builder, on the standalone build target (see [How your app is built](/docs/build-pipeline)
+  and [Compatibility matrix](/docs/compat-matrix)).
+- The `knext.config.ts` schema and the public TypeScript types (`@getknext/core`,
+  `@getknext/lib`, `@getknext/db`).
+- The core CLI verbs — `create`, `build`, `deploy`, `status`, `doctor` — including their exit
+  codes.
+- The `NextApp` custom resource at `v1alpha1` (additive-only — see [Versioning](/docs/versioning)).
+- Image optimization.
+- Graceful shutdown (`SIGTERM` drain).
+- The in-process request body cap on the standalone build target.
+- The default `NetworkPolicy` — **enforced only where your cluster's network plugin (CNI)
+  supports NetworkPolicy** (Calico, Cilium, and similar); on a non-enforcing CNI (flannel, which
+  OKE and OrbStack run by default) the policy is written but enforces nothing. `knext doctor` and
+  the `NetworkPolicyEnforced` status condition report which case you're in — see
+  [Security](/docs/security#network-isolation).
+
+## Beta
+
+**Beta** features are shipped and usable, but may still change with notice — typically called out
+in release notes rather than gated behind a major version. Treat them as ready to build on, with
+more room for change than a Stable feature.
+
+- `knext init-ci`
+- `knext db-bind`
+- ISR/Redis caching and authenticated cache invalidation
+- Object storage on `gcs`, `s3`, and `minio`
+- Object storage on `azure`
+- Metrics and observability wiring
+- The 0.4.x → 1.0 upgrade path
+
+ISR/Redis caching and object storage move to Stable once a scheduled, red-on-fail check covers
+them end-to-end on a real cluster against the default build target — the same bar every other
+Stable entry above already meets. That check does not exist yet.
+
+## Experimental
+
+**Experimental** features are outside the v1.0 contract entirely — they may change in any minor
+release, with no deprecation window. Each one carries a visible marker where you meet it (in its
+types, in `--help` output, or in the relevant reference page) so the carve-out is never a
+surprise.
+
+- The `vinext` build target (`build: 'vinext'` in `knext.config.ts`, `--builder vinext` on
+  `knext create`) — see [The vinext pipeline](/docs/build-pipeline#the-vinext-pipeline-experimental).
+- `selfContained` (`knext.config.ts`) / `knext build --self-contained` — see
+  [Self-contained mode](/docs/build-pipeline#self-contained-mode-experimental).
+- The directly-runnable `preview` and `loadtest` CLI entries — see the
+  [CLI reference](/docs/cli#directly-runnable-entries).
+
+See also the [public API reference](https://github.com/getknext-dev/knext/blob/main/docs/PUBLIC_API.md)
+for the full experimental-surfaces policy over the TypeScript surface.

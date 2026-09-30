@@ -94,6 +94,13 @@ function runCompileSection(
       mkdirSync(d, { recursive: true });
     }
     writeFileSync(join(adapter, 'standalone-compile.js'), '');
+    // #1620: the section sources the REAL lockfile-lookup lib to derive its
+    // lockfile mounts; this tree has no *.node files, so it derives none.
+    mkdirSync(join(scriptDir, 'lib'), { recursive: true });
+    writeFileSync(
+      join(scriptDir, 'lib', 'musl-lockfile-lookup.sh'),
+      readFileSync(join(REPO_ROOT, 'scripts/lib/musl-lockfile-lookup.sh'), 'utf8'),
+    );
     const stub = (name: string, body: string) => {
       const p = join(bin, name);
       writeFileSync(p, `#!/bin/sh\n${body}\n`);

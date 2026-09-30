@@ -225,4 +225,64 @@ got="$(NS=pg-other minted_host create good-app)"
 echo "ok - the default gateway host follows \$NS"
 pass=$((pass + 1))
 
+# --- kubectl-patch injection guard (record_reclaim_pending / clear_reclaim_pending) ----
+# $tl reaches these two writers from the pageserver's OWN timeline-list JSON
+# (cmd_reclaim_orphans), not just the operator-written ConfigMap — so a value
+# that is NOT a 32-hex timeline id must never reach the `kubectl patch -p`
+# body these functions build. patch_calls <tl> <ords> — sources the script,
+# stubs K to capture every `patch ... -p <body>` invocation, and calls both
+# writers with the given (possibly malicious-looking) $tl. Echoes one line
+# per captured -p body (empty if neither writer ever called `K patch`).
+patch_calls() {
+  local tl="$1" ords="${2:-0}"
+  (
+    PROVISION_APP_SOURCED=1 . "$PROV"
+    K() {
+      if [ "$1" = "patch" ]; then
+        local a body="" prev_was_p=0
+        for a in "$@"; do
+          if [ "$prev_was_p" = 1 ]; then body="$a"; prev_was_p=0; fi
+          [ "$a" = "-p" ] && prev_was_p=1
+        done
+        printf '%s\n' "$body" >&3
+      fi
+      return 0
+    }
+    record_reclaim_pending "$tl" "$ords" >/dev/null 2>&1
+    clear_reclaim_pending "$tl" >/dev/null 2>&1
+  ) 3>&1 1>/dev/null 2>/dev/null
+}
+
+# A malicious-looking $tl (JSON-breaking quote/brace, a JSONPatch path
+# traversal, a newline) must never reach a `kubectl patch -p` body: both
+# writers must refuse it outright (no K patch call at all), not merely
+# escape it.
+for bad_tl in \
+  '"}}' \
+  'a","evil":"1' \
+  '../secrets' \
+  '0000000000000000000000000000000' \
+  'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG' \
+  '' \
+  "$(printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ninjected')"
+do
+  out="$(patch_calls "$bad_tl")"
+  [ -z "$out" ] || fail "record/clear_reclaim_pending patched with a rejected \$tl='$bad_tl': $out"
+done
+echo "ok - record_reclaim_pending/clear_reclaim_pending refuse a non-32-hex \$tl (no kubectl patch call at all)"
+pass=$((pass + 1))
+
+# A well-formed 32-hex timeline id still reaches exactly one K patch call per
+# writer, and its JSON body is valid and carries the real key/value — the fix
+# must not change behaviour for the legitimate shape.
+good_tl="abcdef0123456789abcdef0123456789"
+out="$(patch_calls "$good_tl" "0,1")"
+n="$(printf '%s\n' "$out" | grep -c .)"
+[ "$n" -eq 2 ] || fail "expected exactly 2 K patch calls for a valid \$tl, got $n: $out"
+case "$out" in *"\"$good_tl\""*) ;; *) fail "valid \$tl '$good_tl' missing from the patch body: $out";; esac
+case "$out" in *'safekeepers=0,1'*) ;; *) fail "ordinals missing from the patch body: $out";; esac
+case "$out" in *'"op": "remove"'*|*'"op":"remove"'*) ;; *) fail "clear_reclaim_pending body missing a remove op: $out";; esac
+echo "ok - a valid 32-hex \$tl still patches (record + clear), body carries the real key/value"
+pass=$((pass + 1))
+
 echo "provision-app.sh validation: $pass cases — PASSED"

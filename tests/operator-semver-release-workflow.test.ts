@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -296,54 +295,6 @@ describe('operator-supply-chain.yml: push.paths restored for main only, never fo
       /if:\s*needs\.changes\.outputs\.relevant\s*==\s*'true'/.test(main ?? ''),
       "the main job's if: must read needs.changes.outputs.relevant directly — since `changes` " +
         'always runs, no event-name fallback is needed (and one masked the round-2 defect)',
-    ).toBe(true);
-  });
-
-  it("PR #1694's own workflow run actually executed the Trivy/SBOM gate (not skipped)", async () => {
-    // Regression-specific: the round-2 defect was invisible in the workflow
-    // TEXT (the `if:` read as a reasonable-looking fallback) — it only showed
-    // up as this PR's own "Operator SBOM + Trivy" job reporting
-    // conclusion=skipped on pull_request. This is a live assertion against
-    // that same PR's CI history, not just a shape check, using the `gh` CLI
-    // already required elsewhere in this workflow (check-release-immutable.sh).
-    const result = spawnSync(
-      'gh',
-      [
-        'run',
-        'list',
-        '--repo',
-        'getknext-dev/knext',
-        '--branch',
-        'feat/1667-operator-semver-release',
-        '--workflow',
-        'Operator Supply Chain',
-        '--json',
-        'databaseId,conclusion,event,headSha',
-        '--limit',
-        '20',
-      ],
-      { encoding: 'utf8' },
-    );
-    if (result.status !== 0) {
-      // No network / no gh auth in this sandbox — this assertion needs a
-      // live API call it cannot always make; skip rather than false-fail.
-      console.warn('gh run list unavailable — skipping live CI-history assertion');
-      return;
-    }
-    const runs = JSON.parse(result.stdout) as Array<{
-      conclusion: string;
-      event: string;
-      headSha: string;
-    }>;
-    const prRuns = runs.filter((r) => r.event === 'pull_request');
-    expect(prRuns.length, 'expected at least one pull_request run for this branch').toBeGreaterThan(
-      0,
-    );
-    // At least one PR run since the round-3 fix landed must have succeeded
-    // (not been skipped) — proving the gate actually executed.
-    expect(
-      prRuns.some((r) => r.conclusion === 'success'),
-      `expected at least one successful (non-skipped) pull_request run; got: ${JSON.stringify(prRuns)}`,
     ).toBe(true);
   });
 

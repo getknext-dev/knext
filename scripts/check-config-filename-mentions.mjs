@@ -51,6 +51,13 @@ const ALLOWED_FILES = new Set([
   'CLAUDE.md',
   // This scan script's own docblock/sentinel — see the module docblock.
   'scripts/check-config-filename-mentions.mjs',
+  // #1668/#1671 operator upgrade-under-load e2e orchestrator: it scaffolds a
+  // NextApp with the PUBLISHED 0.4.3 CLI, which genuinely reads the
+  // pre-rename filename, then renames it and redeploys — exercising the
+  // exact migration this guard protects, the same reason test fixtures are
+  // exempt above. It needs the literal old name to create that file and to
+  // `mv` it, not as a user-facing mention.
+  'scripts/upgrade-e2e/run.sh',
   // #1568 v1.0 announcement-kit draft: the release-notes draft names the
   // pre-rename filename once, in a literal `mv kn-next.config.ts
   // knext.config.ts` command a reader can copy-paste — the same

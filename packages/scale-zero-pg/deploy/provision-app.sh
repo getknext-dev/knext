@@ -446,24 +446,52 @@ reclaim_timeline() {
   return 0
 }
 
+# reclaim_tl_valid <timeline> — the SAME strict shape the skpresent candidate
+# list is filtered to (cmd_reclaim_orphans, `grep -E '^[0-9a-fA-F]{32}$'`): a
+# 32-hex-char id. $tl reaches record_reclaim_pending/clear_reclaim_pending from
+# TWO sources — app_timeline's ConfigMap read (cmd_destroy) and the pageserver's
+# OWN timeline-list JSON (cmd_reclaim_orphans' `all`, unlike skpresent, is NOT
+# pre-filtered) — either of which is a value this script does not fully trust
+# by construction. Both functions interpolate $tl RAW into a `kubectl patch -p`
+# JSON body (a ConfigMap data KEY, then a JSONPatch PATH segment) with no
+# escaping, so anything other than this exact shape is rejected rather than
+# risking JSON/path injection into the patch this script issues as itself.
+#
+# Deliberately a `case` match on the shell VALUE, never a `grep` pipeline: a
+# newline-embedding $tl (e.g. "aaaa…aaaa\ninjected") satisfies
+# `^[0-9a-fA-F]{32}$` under grep's line-oriented matching the moment ANY one
+# of its lines is 32 hex chars, which is exactly the multi-line manifest
+# injection this scanner (#1466) exists to catch elsewhere in the tree — `*`
+# in a `case` pattern matches the WHOLE parameter value, newlines included,
+# so this cannot be bypassed the same way.
+reclaim_tl_valid() {
+  case "$1" in
+    '') return 1;;
+    *[!0-9a-fA-F]*) return 1;;
+  esac
+  [ "${#1}" -eq 32 ]
+}
+
 # record_reclaim_pending <timeline> <csv-ordinals> — durably note a safekeeper
 # DELETE that could not complete, so it is never silently lost (issue #91). Keyed
 # by the 32-hex timeline id (a valid ConfigMap data key).
 record_reclaim_pending() {
   local tl="$1" ords="$2" ts
+  reclaim_tl_valid "$tl" || { log "WARN: refusing to record a reclaim-pending entry for '$tl' — not a 32-hex timeline id"; return 1; }
   ts="$(date -u +%FT%TZ 2>/dev/null || echo unknown)"
   K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || K create configmap "$RECLAIM_CM" >/dev/null 2>&1 || true
   K label configmap "$RECLAIM_CM" tier=apps app=wal-reclaim --overwrite >/dev/null 2>&1 || true
-  K patch configmap "$RECLAIM_CM" --type merge \
-    -p "{\"data\":{\"$tl\":\"safekeepers=$ords recorded=$ts\"}}" >/dev/null 2>&1 || true
+  local patch_body; patch_body="$(python3 -c 'import json,sys;print(json.dumps({"data":{sys.argv[1]: "safekeepers=%s recorded=%s" % (sys.argv[2], sys.argv[3])}}))' "$tl" "$ords" "$ts")"
+  K patch configmap "$RECLAIM_CM" --type merge -p "$patch_body" >/dev/null 2>&1 || true
 }
 
 # clear_reclaim_pending <timeline> — drop a timeline's pending record once reclaimed.
 clear_reclaim_pending() {
   local tl="$1"
+  reclaim_tl_valid "$tl" || { log "WARN: refusing to clear a reclaim-pending entry for '$tl' — not a 32-hex timeline id"; return 1; }
   K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || return 0
-  K patch configmap "$RECLAIM_CM" --type json \
-    -p "[{\"op\":\"remove\",\"path\":\"/data/$tl\"}]" >/dev/null 2>&1 || true
+  local patch_body; patch_body="$(python3 -c 'import json,sys;print(json.dumps([{"op":"remove","path":"/data/"+sys.argv[1]}]))' "$tl")"
+  K patch configmap "$RECLAIM_CM" --type json -p "$patch_body" >/dev/null 2>&1 || true
 }
 
 cmd_destroy() {

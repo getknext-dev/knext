@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -66,6 +74,33 @@ describe('npmPackOne', () => {
 
     rmSync(pkgDir, { recursive: true, force: true });
     rmSync(destDir, { recursive: true, force: true });
+  });
+
+  it('resolves a RELATIVE destDir against the caller, not the package dir (release.yml passes `--dest release-tarballs`)', () => {
+    // npm resolves --pack-destination against ITS cwd (the package dir); a
+    // relative destDir used to land in <pkgDir>/release-tarballs, which did
+    // not exist, so the first real release run after the single-pack change
+    // died with ENOENT and published nothing.
+    // realpath: macOS tmpdir() is a symlink (/var → /private/var); the child's
+    // process.cwd() reports the resolved path.
+    const callerCwd = realpathSync(mkFixtureDir('ppg-caller-'));
+    const pkgDir = mkFixtureDir('ppg-rel-pkg-');
+    writeFixturePackage(pkgDir, 'ppg-fixture-rel', '1.0.0');
+    const modUrl = new URL('../scripts/lib/pack-publishable-group.mjs', import.meta.url).href;
+    const r = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        `const m = await import(${JSON.stringify(modUrl)}); console.log(m.npmPackOne(${JSON.stringify(pkgDir)}, 'rel-dest'));`,
+      ],
+      { cwd: callerCwd, encoding: 'utf8' },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    const tgz = r.stdout.trim().split('\n').at(-1) ?? '';
+    expect(tgz.startsWith(join(callerCwd, 'rel-dest'))).toBe(true);
+    expect(existsSync(tgz)).toBe(true);
+    expect(existsSync(join(pkgDir, 'rel-dest'))).toBe(false);
   });
 
   it('never emits a duplicate tar entry for a multi-`bin`-key target (the bun-pm-pack #1562 bug)', () => {

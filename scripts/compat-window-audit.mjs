@@ -276,6 +276,14 @@ const MUSL_NATIVE_LOCKFILE_FILES = Object.freeze([
   'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json',
   'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json',
   'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json',
+  // #1620: Next 16.3.5 resolves sharp 0.35.5 (libvips 1.3.4). e2e-deploy.sh
+  // now derives its mounts from the sharp the app resolved, and
+  // tests/musl-lockfile-credential-sharp-coverage.test.ts keeps this list in
+  // lockstep with the lockfile dirs on disk.
+  'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.35.5/package.json',
+  'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.35.5/package-lock.json',
+  'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.3.4/package.json',
+  'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.3.4/package-lock.json',
   // #1426: sqlite3 is the ORIGINAL motivating case for the musl rebuild
   // script (see its own header's ROUND 2/ROUND 7 notes) but had no
   // committed lockfile pin until now.
@@ -305,6 +313,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -323,6 +335,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -344,6 +360,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -362,6 +382,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // `node scripts/compat-disk-floor-check.mjs …` subprocess call, not an
       // `import`/`source` the closure scanner can discover on its own.
       'scripts/compat-disk-floor-check.mjs',
+      // #1620 follow-up — the bun-credential sharp pin the run step invokes
+      // via `node …/compat-sharp-pin.mjs`, and the record it reads.
+      'scripts/compat-sharp-pin.mjs',
+      'scripts/musl-native-lockfiles/next-sharp-resolution.json',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),

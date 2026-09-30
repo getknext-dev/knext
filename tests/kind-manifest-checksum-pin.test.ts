@@ -80,7 +80,14 @@ function kindWorkflows(): string[] {
 // was most of the whole-tree scan's wall time.
 let shellSources: string[] | undefined;
 let workflowSources: string[] | undefined;
+let scriptSources: string[] | undefined;
 const SHELL_SOURCES = () => (shellSources ??= gitLsFiles('*.sh', '*.bash'));
+// #1512: the resolver a `node <file>.mjs` / `bun <file>.mjs` invocation is
+// followed through must be able to find `.mjs` files too, not just `.sh`/
+// `.bash` — a wider tracked set for RESOLUTION only; the whole-tree scan
+// below still iterates `.sh`/`.bash` as entrypoints (a `.mjs` is not lexed
+// as shell text).
+const SCRIPT_SOURCES = () => (scriptSources ??= gitLsFiles('*.sh', '*.bash', '*.mjs'));
 const WORKFLOW_SOURCES = () =>
   (workflowSources ??= gitLsFiles(
     '.github/workflows/*.yml',
@@ -97,7 +104,7 @@ const WORKFLOW_SOURCES = () =>
  */
 let trackedShell: Set<string> | undefined;
 function sourceResolver(from: string): (p: string) => string | null {
-  const shell = SHELL_SOURCES();
+  const shell = SCRIPT_SOURCES();
   trackedShell ??= new Set(shell);
   const tracked = trackedShell;
   return (p) => {
@@ -125,7 +132,13 @@ function scanRealTreeUncached(): TreeScan {
   const allowHits = new Map<string, number>();
   for (const f of SHELL_SOURCES()) {
     scanned.push(f);
-    const opts = { resolveSource: sourceResolver(f), allowHits, file: f };
+    // #1512: follow `node <file>.mjs` / `bun <file>.mjs` for shell ENTRYPOINTS
+    // only, never for a workflow `run:` step below — the escape hatch this
+    // closes (#1497/F6) is specifically a shell script moving a fetch into a
+    // `.mjs` helper; a CI workflow step invoking arbitrary node tooling
+    // (linters, audit scripts, publish helpers) is a much wider, untriaged
+    // surface and stays out of scope of this fix.
+    const opts = { resolveSource: sourceResolver(f), allowHits, file: f, followScripts: true };
     for (const o of unsafeApplies(readFileSync(join(ROOT, f), 'utf8'), opts))
       offenders.push(`${f}: ${o}`);
   }
@@ -207,7 +220,11 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     const found = kindWorkflows();
     expect(found).toContain('.github/workflows/operator-e2e-nightly.yml');
     expect(found).toContain('.github/workflows/operator-bundle-e2e.yml');
-    expect(found).toContain('.github/workflows/file-manager-platform-e2e-nightly.yml');
+    // The nightly caller de-duplicated into the shared reusable workflow
+    // (#1305/#1563 round 2): the cert-manager/Knative install steps now live
+    // in file-manager-platform-e2e.yml, which both the nightly and the
+    // at-tag callers `uses:` — that is the file this scan should find.
+    expect(found).toContain('.github/workflows/file-manager-platform-e2e.yml');
     expect(found).toContain('.github/workflows/networkpolicy-enforcement.yml');
   });
 
@@ -242,8 +259,61 @@ describe('kind-cluster cert-manager/Knative/Calico manifests are checksum + imag
     expect(SHELL_SOURCES().length).toBeGreaterThan(100);
   });
 
+  /**
+   * #1466.3 (`kubectl patch -p`) surfaced a REAL, previously-invisible
+   * finding on `main`: `packages/scale-zero-pg/deploy/provision-app.sh`
+   * patches a bookkeeping ConfigMap with a value (`$patch_body`, built from
+   * `$tl`, a timeline id) whose taint chain runs through this scanner's
+   * existing "any curl output is network content, no loopback carve-out"
+   * rule. The underlying INJECTION VULNERABILITY IS FIXED: `$tl` is now
+   * validated with a strict `case`-pattern match (32 lowercase/uppercase hex
+   * chars, matching the `skpresent` candidate list's own
+   * `grep -E '^[0-9a-fA-F]{32}$'` shape, but done as a `case` match on the
+   * shell VALUE rather than a `grep` pipeline — a `grep` line-anchored
+   * `^...$` is satisfiable by any ONE line of a multi-line value, so a
+   * newline-embedding `$tl` would defeat it; `case` matches the WHOLE
+   * parameter value, newlines included) before either function builds a
+   * patch body, and the body itself is built with `python3 -c
+   * '...json.dumps(...)'`, never raw string interpolation, so it can no
+   * longer carry injected JSON/JSONPatch structure either way (see
+   * `reclaim_tl_valid`, `record_reclaim_pending`, `clear_reclaim_pending`;
+   * proven by new red/green fixtures in
+   * `packages/scale-zero-pg/deploy/test_provision-app.sh`).
+   *
+   * What remains here is NOT the vulnerability — it is a SCANNER LIMITATION:
+   * this module tracks shell variables in a FLAT, whole-file namespace with
+   * no per-function scoping, so tracing `$patch_body` -> `$tl` walks every
+   * OTHER local variable named `tl` (and, through `positionalSources`'
+   * substring-based "owner" search over `$1`-style parameter writes, several
+   * unrelated variables in unrelated functions too) across this large,
+   * multi-function script, rather than just the `local tl="$1"` in scope
+   * here. `STATEMENT_ALLOWLIST` (the scanner's own byte-exact,
+   * source-pinned carve-out, already used 4x in this package for the
+   * structurally identical "in-cluster curl value applied within the same
+   * cluster" pattern) was evaluated and rejected as the fix: pinning came
+   * out to ~30 sources spanning functions with no relationship to timeline
+   * reclamation, which is not a reviewable list, just enumerated scanner
+   * noise. Closing this for real needs function-local variable scoping in
+   * the scanner (TODO, new issue) — tracked here, not silently re-hidden
+   * behind a broader allowlist entry. Listed byte-exact so it is neither
+   * hidden nor silently dropped if the statement changes.
+   */
+  const SCANNER_SCOPE_LIMITATION = [
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "merge" "-p" "$patch_body"',
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): K patch configmap "$RECLAIM_CM" --type merge -p "$patch_body" >/dev/null 2>&1',
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): kubectl --context "$KCTX" -n "$NS" "patch" "configmap" "$RECLAIM_CM" "--type" "json" "-p" "$patch_body"',
+    'packages/scale-zero-pg/deploy/provision-app.sh: kubectl patch body carries network content (URL variable $patch_body): K patch configmap "$RECLAIM_CM" --type json -p "$patch_body" >/dev/null 2>&1',
+  ];
+
   it('the real tree has NO unsafe apply anywhere (every script, every workflow job)', () => {
-    expect(scanRealTree().offenders).toEqual([]);
+    const offenders = scanRealTree().offenders.filter((o) => !SCANNER_SCOPE_LIMITATION.includes(o));
+    expect(offenders).toEqual([]);
+  });
+
+  it('every SCANNER_SCOPE_LIMITATION entry is still exactly what the scanner reports (nothing drifted underneath it)', () => {
+    const all = scanRealTree().offenders;
+    for (const entry of SCANNER_SCOPE_LIMITATION) expect(all).toContain(entry);
+    expect(all.length).toBe(SCANNER_SCOPE_LIMITATION.length);
   });
 
   // ---- bypass class 1: fetch spellings and one-line chains ---------------

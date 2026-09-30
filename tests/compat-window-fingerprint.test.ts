@@ -93,6 +93,10 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
   // #1530: the default lane also declares the free-disk-floor pre-check
   // script the workflow invokes as a subprocess.
   writeFileSync(join(root, 'scripts/compat-disk-floor-check.mjs'), 'export const noop = 1;\n');
+  // #1620 follow-up: the bun-credential sharp pin + the record it reads.
+  writeFileSync(join(root, 'scripts/compat-sharp-pin.mjs'), 'export const noop = 1;\n');
+  mkdirSync(join(root, 'scripts/musl-native-lockfiles'), { recursive: true });
+  writeFileSync(join(root, 'scripts/musl-native-lockfiles/next-sharp-resolution.json'), '{}\n');
   // #1321: the bun-vinext cell declares its quarantine ledger + script.
   writeFileSync(join(root, 'scripts/compat-vinext-ledger.mjs'), 'export const noop = 1;\n');
   writeFileSync(
@@ -108,6 +112,8 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
   for (const pkgDir of [
     'img-sharp-linuxmusl-x64-0.34.5',
     'img-sharp-libvips-linuxmusl-x64-1.2.4',
+    'img-sharp-linuxmusl-x64-0.35.5', // #1620
+    'img-sharp-libvips-linuxmusl-x64-1.3.4', // #1620
     'sqlite3-5.0.2', // #1426
   ]) {
     mkdirSync(join(root, 'scripts/musl-native-lockfiles', pkgDir), { recursive: true });

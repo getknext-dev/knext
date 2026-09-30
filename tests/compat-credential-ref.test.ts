@@ -629,6 +629,10 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
     // #1530: the 'node' lane's extraFiles ALSO declares the free-disk-floor
     // pre-check script the workflow invokes as a subprocess.
     writeFileSync(join(root, 'scripts/compat-disk-floor-check.mjs'), 'export const noop = 1;\n');
+    // #1620 follow-up: the bun-credential sharp pin + the record it reads.
+    writeFileSync(join(root, 'scripts/compat-sharp-pin.mjs'), 'export const noop = 1;\n');
+    mkdirSync(join(root, 'scripts/musl-native-lockfiles'), { recursive: true });
+    writeFileSync(join(root, 'scripts/musl-native-lockfiles/next-sharp-resolution.json'), '{}\n');
     // #1257: the 'node' lane's extraFiles ALSO declares the musl-lockfile
     // lookup helper and each committed musl-native lockfile FILE
     // individually (scripts/compat-window-audit.mjs's MUSL_NATIVE_LOCKFILE_FILES) —
@@ -642,6 +646,11 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
       'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json',
       'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json',
       'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json',
+      // #1620: sharp 0.35.5 / libvips 1.3.4 (Next 16.3.5).
+      'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.35.5/package.json',
+      'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.35.5/package-lock.json',
+      'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.3.4/package.json',
+      'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.3.4/package-lock.json',
       // #1426: sqlite3's committed lockfile pin, added to
       // MUSL_NATIVE_LOCKFILE_FILES alongside the sharp entries above.
       'scripts/musl-native-lockfiles/sqlite3-5.0.2/package.json',

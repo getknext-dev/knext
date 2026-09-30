@@ -20,7 +20,9 @@ import {
  */
 
 const ROOT = resolve(import.meta.dirname, '..');
-const WF = resolve(ROOT, '.github/workflows/file-manager-platform-e2e-nightly.yml');
+// The storage-mode leg's steps live in the reusable workflow (#1305) - the
+// nightly caller only `uses:` it now, carrying no inline steps of its own.
+const WF = resolve(ROOT, '.github/workflows/file-manager-platform-e2e.yml');
 const STORAGE_PROFILE = resolve(ROOT, 'apps/file-manager/platform-e2e/knext.config.storage-e2e.ts');
 const REAL_CONFIG = resolve(ROOT, 'apps/file-manager/knext.config.ts');
 

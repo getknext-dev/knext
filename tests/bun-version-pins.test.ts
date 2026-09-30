@@ -157,9 +157,18 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // NEW (#1481): the docs deploy — the PR dry-run job and the main deploy
       // job each install the workspace and build the CLI with bun.
       'docs-deploy-oke.yml': 2,
-      'file-manager-platform-e2e-nightly.yml': 1,
+      // Round 2 (#1305/#1563): the nightly and at-tag callers were
+      // de-duplicated into ONE reusable `workflow_call` implementation
+      // (file-manager-platform-e2e.yml) that both `uses:` — a single
+      // setup-bun step instead of one per caller.
+      'file-manager-platform-e2e.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'operator-e2e-nightly.yml': 3,
+      // NEW (#1668/#1671): the operator upgrade-under-load e2e's single job
+      // installs the workspace with bun (`bun install --frozen-lockfile`,
+      // needed to build the current-tree CLI in phase 6) — one pinned
+      // setup-bun step. A count RISING is a decision, per the rule above.
+      'operator-upgrade-e2e.yml': 1,
       'preview.yml': 2,
       // NEW (#1663): the published-bytes freeze check's "run" decision packs
       // the publishable group with the workspace's bun (mirrors
@@ -175,11 +184,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // NEW (#1417): the default-builder standalone deploy kind e2e — one
       // "Setup bun" step (workspace install + the fixture's own `next build`).
       'standalone-deploy-kind-e2e.yml': 1,
-      // NEW (C1/#785): the publish lane now installs the workspace closure and
-      // scans it before building the image it pushes, so it needs the same bun
-      // the Dockerfile's builder stage uses. A count RISING is a decision too —
-      // this one is it.
-      'supply-chain.yml': 1,
+      // 2, was 1: #1722 added the `js-closure-fs-trivy` job — a second,
+      // independent job that installs the workspace + builds the reference app
+      // through `kn-next build`/`docker buildx`, so it needs its own pinned
+      // setup-bun step (same pin as the C1/#785 job below). A count RISING is
+      // a decision too — this one is it.
+      'supply-chain.yml': 2,
       // 2, was 1: the Prepare job's knext-deps install moved from pnpm to a
       // pinned setup-bun after the bun migration merged — pnpm refuses a
       // bun-pinned workspace ("This project is configured to use bun"), which
