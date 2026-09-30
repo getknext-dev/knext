@@ -154,7 +154,7 @@ prove(
   'M5',
   'accepting a declaration NOT preceded by the marker (dropping the marker check) must red',
   snap,
-  [['if (!lines[i].includes(RATCHET_FLOOR_MARKER)) continue;', 'if (false) continue;']],
+  [['if (!isMarkerLine(lines[i])) continue;', 'if (false) continue;']],
   1,
 );
 
