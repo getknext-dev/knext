@@ -1,0 +1,78 @@
+---
+title: Support matrix
+description: Which Kubernetes, Knative, cert-manager, Next.js, Node.js and Bun versions knext is actually tested against — taken from CI and the shipped packages, not aspiration.
+---
+
+This page states what is **actually tested**, sourced from the CI workflows and package manifests
+in the knext source repository — not a wish list. Where CI does not pin something, that is stated
+too, rather than left implied.
+
+## Kubernetes
+
+- **CI does not pin a specific Kubernetes minor version.** The kind-based end-to-end gates
+  (`kind create cluster`) use kind's default node image rather than a pinned
+  `kubernetesVersion`/node-image, so the exact server version drifts with whichever kind release is
+  installed at run time. Treat "CI-tested" as "recent kind default," not a fixed number.
+- **Client-side floor: kubectl ≥ 1.25.** `knext doctor` checks the local `kubectl` supports
+  `--validate=strict` (added in 1.25) and warns below that — every `kubectl apply` the CLI issues
+  passes that flag explicitly.
+- **The operator's Kubernetes client libraries track `k8s.io/api`/`k8s.io/apimachinery` v0.35** and
+  `controller-runtime` v0.23 — the server-side API surface the operator was built and tested
+  against.
+- **Live-cluster validation, by cloud** (see [Multi-cloud](/docs/multi-cloud) and the per-cloud
+  guides):
+  - **GKE** — the reference cloud: scale-to-zero, bytecode caching, and the full data plane
+    (GCS + Redis) are verified here.
+  - **OKE (Oracle)** — reference-validated end to end, including scale-to-zero and bytecode caching,
+    measured on a live 2-node cluster.
+  - **EKS (AWS)** — the core deploy path (`knext deploy` → `NextApp` → operator reconciles →
+    Knative Service → a live `200` route) is validated end to end.
+  - **AKS (Azure) and OpenShift** — portable by design (any cluster running Knative Serving works),
+    but not yet live-validated the way GKE/OKE/EKS are. Treat the AKS/OpenShift guides as
+    design-correct, unverified configurations.
+
+## Knative Serving
+
+- **`knative-v1.16.0`** is the version the kind-based operator/e2e workflows install and test
+  against (`net-kourier` as the ingress).
+- Any Knative Serving install that satisfies the operator's Kubernetes client version above should
+  work, but `knative-v1.16.0` is the only version CI actually exercises.
+
+## cert-manager
+
+- **`v1.16.2`** is the version the kind-based e2e workflows install for the operator's webhook
+  certificates.
+
+## Next.js
+
+- **Peer dependency floor: `next >=16.0.0`** — this is the minimum `@getknext/core` declares it
+  will work with.
+- **The compatibility credential window currently runs against `v16.3.5`** — the same release new
+  apps scaffold today. See [Verified compatibility](/docs/compat-suite) and the
+  [Compatibility matrix](/docs/compat-matrix) for exactly which official-suite cells have
+  passed at that version and which are still accumulating the 14-consecutive-night credential.
+- A version between the peer floor and the credentialed release is expected to work — Next's own
+  minor-version compatibility — but is not independently gated by knext's CI.
+
+## Node.js
+
+- **CI builds and tests on Node.js 24.** The standalone (Node) runtime target and the CLI itself
+  (published with a `#!/usr/bin/env node` shebang) are exercised at this version.
+
+## Bun
+
+- **CI pins `1.4.2`** everywhere Bun is used — the vinext/compiled-executable build target, and
+  running the CLI/test suite from a source checkout. `knext build`'s default (vinext) target
+  shells out to Bun to compile the single executable, so a consumer building an app on that target
+  needs Bun ≥ 1.4 on `PATH`; the published CLI itself runs under plain Node.
+
+## What this page does not claim
+
+This is a **support matrix**, not a compatibility guarantee for every permutation above. A version
+combination that has not been exercised in CI or on a live cluster may still work — Kubernetes,
+Knative and Next.js all carry their own compatibility promises — but knext has not verified it. If
+you hit a problem on a combination not listed here as tested, [open a bug report](https://github.com/getknext-dev/knext/issues/new/choose)
+naming the exact versions involved.
+
+See also: [Security](/docs/security) for what knext enforces versus what depends on your cluster,
+and [Compatibility matrix](/docs/compat-matrix) for feature-level (not version-level) support.

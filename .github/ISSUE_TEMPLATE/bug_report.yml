@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in knext (CLI, operator, or a generated app artifact) is not working as documented.
+title: "bug: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. If this is a **security vulnerability**,
+        please stop and use [private reporting](https://github.com/getknext-dev/knext/security/advisories/new)
+        instead — see [SECURITY.md](https://github.com/getknext-dev/knext/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: knext version
+      description: The `@getknext/core` version (`npx knext --version`, or your `package.json`).
+      placeholder: "1.0.0-rc.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Where does this happen?
+      options:
+        - CLI (knext deploy / doctor / status / db / rollback / gc / init-ci)
+        - Operator (NextApp reconciliation, cluster behavior)
+        - Generated app runtime (standalone or vinext build)
+        - Docs
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Cluster environment
+      description: Kubernetes distribution and version, Knative Serving version, cert-manager version, and cloud (GKE/EKS/AKS/OKE/kind/other) if relevant. Run `knext doctor` and paste its output if you can.
+      placeholder: |
+        kubectl version: ...
+        Knative Serving version: ...
+        Cloud / distro: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest steps that reproduce the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Paste `knext doctor`, pod logs, or CLI output. This will be rendered as a code block, no need for backticks.
+      render: shell

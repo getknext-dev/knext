@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question
+    url: https://github.com/getknext-dev/knext/discussions
+    about: "\"How do I...\" and general questions belong in Discussions, not the issue tracker."
+  - name: Report a security vulnerability
+    url: https://github.com/getknext-dev/knext/security/advisories/new
+    about: "Do not open a public issue for a security report — see SECURITY.md and use private reporting via GitHub Security Advisories instead."

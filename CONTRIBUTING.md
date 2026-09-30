@@ -1,5 +1,15 @@
 # Contributing to knext
 
+## Where things go (triage path)
+
+- **Bug?** Open an issue with the [bug report template](.github/ISSUE_TEMPLATE/bug_report.yml) —
+  it asks for the version and cluster environment up front, which is most of what triage needs.
+- **Feature idea?** Open an issue with the [feature request template](.github/ISSUE_TEMPLATE/feature_request.yml).
+- **"How do I...?" / general question?** Use [Discussions](https://github.com/getknext-dev/knext/discussions),
+  not the issue tracker — issues are for actionable work items.
+- **Security vulnerability?** Do **not** open a public issue. See [SECURITY.md](SECURITY.md) for
+  private reporting via GitHub Security Advisories.
+
 ## Mutation-proving a guard
 
 Every new guard is mutation-proved (delete the behaviour it protects, watch it go RED, restore).
