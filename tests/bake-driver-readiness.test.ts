@@ -267,7 +267,11 @@ describe('bake readiness: legitimate redirects still land on their 2xx target (o
 
 describe('bake readiness: the driver uses the fetch it had BEFORE importing server.js (#1572)', () => {
   it('a server that patches globalThis.fetch (as Next does) cannot hang the bake', async () => {
-    const r = await bake({ '/': [307, '/'] }, '/', { wrapper: true, accept: true, patchFetch: true });
+    const r = await bake({ '/': [307, '/'] }, '/', {
+      wrapper: true,
+      accept: true,
+      patchFetch: true,
+    });
     expect(r.ms, r.out).toBeLessThan(FAST_MS);
     expect(r.stdout).toContain('WARMED:/ status=307 ');
     expect(r.status, r.out).toBe(0);
