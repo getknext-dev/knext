@@ -7,6 +7,7 @@ import {
   defaultRunDiff,
   defaultTagResolves,
   main,
+  readPin,
 } from '../scripts/published-bytes-freeze-check.mjs';
 
 /**
@@ -15,31 +16,31 @@ import {
  * here so nothing in this file shells to `git worktree`/`bun`/a child `node`
  * process — the release-time diff machinery has its own extensive suite
  * (`tests/ga-tarball-diff.test.ts`).
+ *
+ * Round 2 (PR #1680 review): `main()` now takes `basePin`/`headPin`/
+ * `mergeBasePin` instead of reading a single ambient pin file from
+ * `repoRoot` — see `scripts/lib/published-bytes-freeze-check.mjs`'s "WHICH
+ * PIN STATE" header section. `buildFixtureRoot` no longer writes a pin file
+ * to disk (nothing reads it for the decision); `pin()` builds the plain
+ * objects `run()` passes as `basePin`/`headPin` directly.
  */
 
 const registry: string[] = [];
 
-function buildFixtureRoot(opts: {
-  rcTag: string | null;
-  overrideMarker?: unknown;
+function pin(rcTag: string | null, overrideMarker?: unknown) {
+  return { rcTag, ...(overrideMarker ? { publishedBytesBumpMarker: overrideMarker } : {}) };
+}
+
+function buildFixtureRoot(opts?: {
   packages?: Array<{ dir: string; name: string; version: string; private?: boolean }>;
 }): string {
   const root = mkdtempSync(join(tmpdir(), 'published-bytes-freeze-fixture-'));
   registry.push(root);
 
-  mkdirSync(join(root, '.github'), { recursive: true });
-  writeFileSync(
-    join(root, '.github', 'compat-credential-ref.json'),
-    JSON.stringify({
-      rcTag: opts.rcTag,
-      ...(opts.overrideMarker ? { publishedBytesBumpMarker: opts.overrideMarker } : {}),
-    }),
-  );
-
   mkdirSync(join(root, '.changeset'), { recursive: true });
   writeFileSync(join(root, '.changeset', 'config.json'), JSON.stringify({ ignore: [] }));
 
-  const packages = opts.packages ?? [
+  const packages = opts?.packages ?? [
     { dir: 'packages/kn-next', name: '@getknext/core', version: '1.0.0-rc.1' },
     { dir: 'packages/lib', name: '@getknext/lib', version: '1.0.0-rc.1' },
     { dir: 'packages/db', name: '@getknext/db', version: '1.0.0-rc.1' },
@@ -71,6 +72,8 @@ function run(
   const code = main({
     repoRoot: root,
     changedFiles,
+    basePin: pin(null),
+    headPin: pin(null),
     log: (...args: unknown[]) => logs.push(String(args[0])),
     now: new Date('2026-09-30T00:00:00Z'),
     tagResolves: () => true,
@@ -82,12 +85,14 @@ function run(
   return { code, out: logs.join('\n'), summary };
 }
 
-describe('main — rcTag null (no window) passes quickly, never touches tagResolves/runDiff', () => {
+describe('main — rcTag null at base (no window) passes quickly, never touches tagResolves/runDiff', () => {
   it('exits 0 with a SKIP announcement, regardless of changed files', () => {
-    const root = buildFixtureRoot({ rcTag: null });
+    const root = buildFixtureRoot();
     let tagResolvesCalled = false;
     let runDiffCalled = false;
     const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin(null),
+      headPin: pin(null),
       tagResolves: () => {
         tagResolvesCalled = true;
         return true;
@@ -105,11 +110,13 @@ describe('main — rcTag null (no window) passes quickly, never touches tagResol
   });
 });
 
-describe('main — a docs/CI-only PR passes quickly even with a window open', () => {
+describe('main — a docs/CI-only PR passes quickly even with a window open at base', () => {
   it('exits 0 with a SKIP announcement and never packs', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.1' });
+    const root = buildFixtureRoot();
     let runDiffCalled = false;
     const r = run(root, ['docs/RELEASING.md', '.github/workflows/ci.yml'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1'),
       runDiff: () => {
         runDiffCalled = true;
         return 0;
@@ -121,18 +128,26 @@ describe('main — a docs/CI-only PR passes quickly even with a window open', ()
   });
 });
 
-describe('main — a package source or README edit REDS while rcTag is set', () => {
+describe('main — a package source or README edit REDS while rcTag is set at base', () => {
   it('a clean diff (runDiff exits 0) still PASSES the check', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.1' });
-    const r = run(root, ['packages/kn-next/README.md'], { runDiff: () => 0 });
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/README.md'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1'),
+      runDiff: () => 0,
+    });
     expect(r.code).toBe(0);
     expect(r.summary).toContain('RUN');
     expect(r.summary).toContain('PASS');
   });
 
   it('a real content mismatch (runDiff exits 1) REDS the PR', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.1' });
-    const r = run(root, ['packages/kn-next/README.md'], { runDiff: () => 1 });
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/README.md'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1'),
+      runDiff: () => 1,
+    });
     expect(r.code).toBe(1);
     expect(r.out).toContain('::error');
     expect(r.summary).toContain('FAIL');
@@ -140,9 +155,11 @@ describe('main — a package source or README edit REDS while rcTag is set', () 
   });
 
   it('invokes the diff with --rc-ref <rcTag> --ga-ref HEAD', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.1' });
+    const root = buildFixtureRoot();
     let capturedArgv: string[] | undefined;
     run(root, ['packages/lib/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1'),
       runDiff: (argv: string[]) => {
         capturedArgv = argv;
         return 0;
@@ -152,11 +169,13 @@ describe('main — a package source or README edit REDS while rcTag is set', () 
   });
 });
 
-describe('main — fails closed when the pinned rcTag does not resolve to a git tag', () => {
+describe('main — fails closed when the base-pinned rcTag does not resolve to a git tag', () => {
   it('exits 1 with an ::error, and never attempts the diff', () => {
-    const root = buildFixtureRoot({ rcTag: 'v1.0.0-rc.99' });
+    const root = buildFixtureRoot();
     let runDiffCalled = false;
     const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.99'),
+      headPin: pin('v1.0.0-rc.99'),
       tagResolves: () => false,
       runDiff: () => {
         runDiffCalled = true;
@@ -172,17 +191,17 @@ describe('main — fails closed when the pinned rcTag does not resolve to a git 
 });
 
 describe('main — the reviewed override for an intentional rc.N+1', () => {
-  it('a valid publishedBytesBumpMarker skips the diff even though scope is touched', () => {
-    const root = buildFixtureRoot({
-      rcTag: 'v1.0.0-rc.1',
-      overrideMarker: {
+  it('a valid publishedBytesBumpMarker introduced by this PR skips the diff even though scope is touched', () => {
+    const root = buildFixtureRoot();
+    let runDiffCalled = false;
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1', {
         date: '2026-09-25',
         expires: '2026-10-02',
         reason: 'intentional rc.2 (#1663 example)',
-      },
-    });
-    let runDiffCalled = false;
-    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      }),
+      // mergeBasePin defaults to basePin, which carries no marker — introduced.
       runDiff: () => {
         runDiffCalled = true;
         return 0;
@@ -195,34 +214,111 @@ describe('main — the reviewed override for an intentional rc.N+1', () => {
   });
 
   it('an EXPIRED marker does not exempt — the diff still runs', () => {
-    const root = buildFixtureRoot({
-      rcTag: 'v1.0.0-rc.1',
-      overrideMarker: { date: '2026-08-01', expires: '2026-08-10', reason: 'stale' },
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1', { date: '2026-08-01', expires: '2026-08-10', reason: 'stale' }),
+      runDiff: () => 0,
     });
-    const r = run(root, ['packages/kn-next/src/index.ts'], { runDiff: () => 0 });
     expect(r.summary).toContain('RUN');
+  });
+
+  it('a marker INHERITED from the merge base (not introduced by this PR) does not exempt', () => {
+    const marker = { date: '2026-09-25', expires: '2026-10-02', reason: 'intentional rc.2' };
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1', marker),
+      headPin: pin('v1.0.0-rc.1', marker),
+      mergeBasePin: pin('v1.0.0-rc.1', marker),
+      runDiff: () => 0,
+    });
+    expect(r.summary).toContain('RUN');
+  });
+
+  it('closing the window together with a published-bytes change still runs the diff (round 2)', () => {
+    const root = buildFixtureRoot();
+    let runDiffCalled = false;
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin(null),
+      mergeBasePin: pin('v1.0.0-rc.1'),
+      runDiff: () => {
+        runDiffCalled = true;
+        return 0;
+      },
+    });
+    expect(runDiffCalled).toBe(true);
+    expect(r.summary).toContain('RUN');
+  });
+
+  it('closing the window with NO other change skips (round 2)', () => {
+    const root = buildFixtureRoot();
+    let runDiffCalled = false;
+    const r = run(root, ['.github/compat-credential-ref.json'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin(null),
+      mergeBasePin: pin('v1.0.0-rc.1'),
+      runDiff: () => {
+        runDiffCalled = true;
+        return 0;
+      },
+    });
+    expect(runDiffCalled).toBe(false);
+    expect(r.summary).toContain('SKIP');
   });
 });
 
-describe('main — an unparsable pin file fails closed rather than reading as "no window"', () => {
-  it('throws (the CLI entrypoint turns that into exit 1)', () => {
+describe('readPin — reads + parses the pin file at whatever is checked out at repoRoot', () => {
+  it('an unparsable pin file throws rather than reading as "no window"', () => {
     const root = mkdtempSync(join(tmpdir(), 'published-bytes-freeze-badpin-'));
     registry.push(root);
     mkdirSync(join(root, '.github'), { recursive: true });
     writeFileSync(join(root, '.github', 'compat-credential-ref.json'), '{ not json');
-    mkdirSync(join(root, '.changeset'), { recursive: true });
-    writeFileSync(join(root, '.changeset', 'config.json'), JSON.stringify({ ignore: [] }));
-    expect(() =>
-      main({ repoRoot: root, changedFiles: ['packages/kn-next/src/index.ts'] }),
-    ).toThrow();
+    expect(() => readPin(root)).toThrow();
+  });
+
+  it('returns the parsed pin for a well-formed file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'published-bytes-freeze-goodpin-'));
+    registry.push(root);
+    mkdirSync(join(root, '.github'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'compat-credential-ref.json'),
+      JSON.stringify({ rcTag: 'v1.0.0-rc.1' }),
+    );
+    expect(readPin(root)).toEqual({ rcTag: 'v1.0.0-rc.1' });
   });
 });
 
-describe('main — requires changedFiles to be provided explicitly', () => {
+describe('main — requires changedFiles/basePin/headPin to be provided explicitly', () => {
   it('throws rather than silently defaulting to an empty diff', () => {
-    const root = buildFixtureRoot({ rcTag: null });
-    // biome-ignore lint/suspicious/noExplicitAny: deliberately calling without the required field
-    expect(() => main({ repoRoot: root } as any)).toThrow(/changedFiles/);
+    const root = buildFixtureRoot();
+    expect(() =>
+      main({ repoRoot: root, basePin: pin(null), headPin: pin(null) } as Parameters<
+        typeof main
+      >[0]),
+    ).toThrow(/changedFiles/);
+  });
+
+  it('throws when basePin is not provided', () => {
+    const root = buildFixtureRoot();
+    expect(() =>
+      main({
+        repoRoot: root,
+        changedFiles: [],
+        headPin: pin(null),
+      } as unknown as Parameters<typeof main>[0]),
+    ).toThrow(/basePin/);
+  });
+
+  it('throws when headPin is not provided', () => {
+    const root = buildFixtureRoot();
+    expect(() =>
+      main({
+        repoRoot: root,
+        changedFiles: [],
+        basePin: pin(null),
+      } as unknown as Parameters<typeof main>[0]),
+    ).toThrow(/headPin/);
   });
 });
 

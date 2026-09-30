@@ -33,8 +33,21 @@
  * already uses, so both guards share one workflow-side "diff the PR" step
  * shape without this script needing to shell to `git diff` itself.
  *
+ * `basePin`/`headPin`/`mergeBasePin` are likewise REQUIRED/injected, never
+ * read from a single ambient checkout (round-2 fix, PR #1680 review — see
+ * `scripts/lib/published-bytes-freeze-check.mjs`'s "WHICH PIN STATE" header
+ * section): the CLI entrypoint reads them from `--base-pin-file`,
+ * `--head-pin-file`, `--merge-base-pin-file`, the same three-file shape
+ * `compat-credential-freeze-guard.mjs` already uses, resolved by the
+ * workflow the same way (`git show <sha>:.github/compat-credential-ref.json`
+ * at base/head/merge-base).
+ *
  * Usage:
- *   node scripts/published-bytes-freeze-check.mjs --changed-files-file <path>
+ *   node scripts/published-bytes-freeze-check.mjs \
+ *     --changed-files-file <path> \
+ *     --base-pin-file <path> \
+ *     --head-pin-file <path> \
+ *     --merge-base-pin-file <path>
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -51,10 +64,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRepoRoot = resolve(__dirname, '..');
 
 /**
- * Read + parse the pin file. Throws on a missing/unparsable file — mirrors
+ * Read + parse the pin file at whatever is currently checked out at
+ * `repoRoot`. Throws on a missing/unparsable file — mirrors
  * `ga-tarball-diff-gate.mjs`'s `readCredentialRcTag`: an unreadable answer
  * must never be mistaken for "nothing credentialed" (that would be fail-OPEN
  * on a corrupt file, the opposite of what a freeze check is for).
+ *
+ * NOT used by `main()`'s decision anymore (round-2 fix, PR #1680 review): a
+ * single ambient read cannot distinguish "base" from "head" from "merge
+ * base", which is exactly the bypass that fix closes — see
+ * `scripts/lib/published-bytes-freeze-check.mjs`'s "WHICH PIN STATE" header
+ * section. Kept exported as a small utility (e.g. for a caller that only
+ * has one checkout and genuinely wants its current pin, not a decision
+ * input).
  *
  * @param {string} repoRoot
  * @returns {unknown}
@@ -117,6 +139,18 @@ const TITLE = 'Published-bytes freeze check';
 /**
  * @param {object} opts
  * @param {string[]} opts.changedFiles required — the files this PR touched.
+ * @param {unknown} opts.basePin required — the pin file's content as of this
+ *   PR's BASE commit. Decides whether a credential window was open before
+ *   this PR (round-2 fix, PR #1680 review) — see
+ *   `scripts/lib/published-bytes-freeze-check.mjs`'s "WHICH PIN STATE"
+ *   header section for why this must never be the same read as `headPin`.
+ * @param {unknown} opts.headPin required — the pin file's content as of this
+ *   PR's HEAD commit. Decides whether a `publishedBytesBumpMarker` override
+ *   is present (a marker this PR adds necessarily exists only at head).
+ * @param {unknown} [opts.mergeBasePin] the pin file's content at this PR's
+ *   merge base; defaults to `basePin`. Decides whether a present head marker
+ *   was INTRODUCED by this PR rather than inherited (the #1635 rule, applied
+ *   here).
  * @param {string} [opts.repoRoot]
  * @param {(...args: unknown[]) => void} [opts.log]
  * @param {Date} [opts.now]
@@ -128,6 +162,9 @@ const TITLE = 'Published-bytes freeze check';
  */
 export function main({
   changedFiles,
+  basePin,
+  headPin,
+  mergeBasePin = basePin,
   repoRoot = defaultRepoRoot,
   log = console.log,
   now = new Date(),
@@ -138,15 +175,29 @@ export function main({
   if (!Array.isArray(changedFiles)) {
     throw new Error('main() requires changedFiles: string[] — the files this PR touched');
   }
+  if (basePin === undefined) {
+    throw new Error(
+      "main() requires basePin — the pin file's content at this PR's base commit (never the same read as headPin)",
+    );
+  }
+  if (headPin === undefined) {
+    throw new Error("main() requires headPin — the pin file's content at this PR's head commit");
+  }
 
   const announce = (level, verdict, reason) => {
     log(`::${level} title=${TITLE}::${verdict}: ${reason}`);
     if (summaryPath) appendFileSync(summaryPath, `- **${TITLE} — ${verdict}**: ${reason}\n`);
   };
 
-  const pin = readPin(repoRoot);
   const packageDirs = publishScopeDirs(repoRoot);
-  const decision = decidePublishedBytesScope({ pin, changedFiles, packageDirs, now });
+  const decision = decidePublishedBytesScope({
+    basePin,
+    headPin,
+    mergeBasePin,
+    changedFiles,
+    packageDirs,
+    now,
+  });
 
   if (decision.action === 'skip') {
     announce('notice', 'SKIP', decision.reason);
@@ -193,8 +244,23 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     return i === -1 ? null : args[i + 1];
   };
   const changedFilesFile = arg('changed-files-file');
-  if (!changedFilesFile) {
-    console.error('published-bytes-freeze-check: --changed-files-file is required');
+  const basePinFile = arg('base-pin-file');
+  const headPinFile = arg('head-pin-file');
+  const mergeBasePinFile = arg('merge-base-pin-file');
+  if (!changedFilesFile || !basePinFile || !headPinFile) {
+    console.error(
+      'published-bytes-freeze-check: --changed-files-file, --base-pin-file and --head-pin-file are all required',
+    );
+    process.exit(2);
+  }
+  if (!mergeBasePinFile) {
+    console.error(
+      'published-bytes-freeze-check: --merge-base-pin-file is required — without it this would ' +
+        'fail OPEN, silently treating the PR base as its own merge base (defeats the "who ' +
+        'introduced the marker" check — mirrors compat-credential-freeze-guard.mjs\'s identical ' +
+        'requirement). Pass the pin read at `git merge-base` of the PR base and head, even when ' +
+        'it is `{"rcTag": null}`.',
+    );
     process.exit(2);
   }
   let changedFiles;
@@ -209,8 +275,21 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     );
     process.exit(2);
   }
+  const readPinFile = (file, label) => {
+    try {
+      return JSON.parse(readFileSync(file, 'utf8'));
+    } catch (err) {
+      console.error(
+        `published-bytes-freeze-check: could not read/parse ${label} (${file}): ${err.message}`,
+      );
+      process.exit(2);
+    }
+  };
+  const basePin = readPinFile(basePinFile, 'base pin file');
+  const headPin = readPinFile(headPinFile, 'head pin file');
+  const mergeBasePin = readPinFile(mergeBasePinFile, 'merge-base pin file');
   try {
-    process.exit(main({ changedFiles }));
+    process.exit(main({ changedFiles, basePin, headPin, mergeBasePin }));
   } catch (err) {
     console.error(`[published-bytes-freeze-check] ERROR: ${err.message}`);
     process.exit(1);

@@ -16,13 +16,45 @@ name: Dependabot published-bytes pause
 # never reaches the `gh pr close` step, and the decision script itself never
 # runs for one either (cheaper than a script-level actor check).
 #
+# WHY `pull_request_target`, NOT PLAIN `pull_request` (round-2 fix, PR #1680
+# review — the original `pull_request`-triggered version of this job was
+# dead on arrival). GitHub forces `GITHUB_TOKEN` to READ-ONLY permissions for
+# a `pull_request` event whose actor is `dependabot[bot]`, REGARDLESS of this
+# file's own `permissions:` block — this is a platform restriction on the
+# Dependabot-triggered `pull_request` event specifically, not something a
+# workflow can opt out of. So the old `pull-requests: write` grant below was
+# always silently downgraded to read, and `gh pr close` always failed with a
+# 403 the one time this job's decision said to close. `pull_request_target`
+# runs with the BASE repository's own token grants (this file's declared
+# `permissions:` actually apply), which is what a job that needs to close a
+# bot PR requires.
+#
+# WHY THIS IS SAFE HERE (the standard caveat about `pull_request_target`:
+# it hands elevated permissions to a workflow triggered by a PR, so it must
+# never execute the PR's own content). This job NEVER checks out, builds, or
+# runs anything from the PR's head:
+#   - `actions/checkout` below takes NO `ref:`, so under `pull_request_target`
+#     it checks out the repository's BASE branch (this repo's own trusted
+#     tree) — every script this job runs (`scripts/dependabot-published-
+#     bytes-pause.mjs`) is the BASE branch's copy, never the PR's.
+#   - The PR's changed-file LIST comes from the GitHub REST API
+#     (`gh api .../pulls/:number/files`), never from a `git diff` against a
+#     checked-out head.
+#   - The PR's pin-file CONTENT at head is read as a git BLOB
+#     (`git show <sha>:<path>`) after fetching only the PR's head ref into a
+#     local tracking ref — a blob read never executes anything, and nothing
+#     from that ref is ever checked into the working tree or run.
+# `github.actor` cannot be spoofed to `dependabot[bot]` by an external PR —
+# that identity is tied to the platform's own Dependabot app installation —
+# so the job-level `if:` gate is a safe actor check for this trigger.
+#
 # Scoped `pull-requests: write` only on this job, nowhere else in the repo's
 # default token grants — closing a PR is the one side effect this workflow
 # performs, and it is visible here, not buried in the script (see the
 # script's own header).
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
     branches: ['**']
 
@@ -42,8 +74,13 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
+      REPO_FULL_NAME: ${{ github.repository }}
     steps:
-      - name: Checkout code (full history — needed for the base...head diff)
+      # NO `ref:` — under pull_request_target this checks out the BASE
+      # branch, never the PR's head. Every step below runs base-branch code
+      # only. fetch-depth: 0 is needed for `git merge-base` against the head
+      # ref fetched below.
+      - name: Checkout code (base branch only — never the PR's own head)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -53,16 +90,49 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Compute the files this PR changed (base...head)
+      # The PR's changed-file list, from the REST API — never a local `git
+      # diff` against a checked-out head (this job checks out only the base
+      # branch, see above).
+      - name: List the files this PR changed (via the API, no head checkout)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git diff --no-renames --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          gh api "repos/${REPO_FULL_NAME}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' > changed-files.txt
           echo "changed files in this PR:"
           cat changed-files.txt
 
+      # The pin file's content at base/head/merge-base, read as git BLOBS
+      # (`git show <ref>:<path>`) — never a checkout of the head commit's
+      # tree, and nothing from it is ever executed. The head ref is fetched
+      # into a local tracking ref ONLY so `git show`/`git merge-base` can see
+      # it; the working tree stays at the base branch checked out above.
+      - name: Read the pin file at base, head and merge-base (blobs only — never a head checkout)
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/remotes/pr/${PR_NUMBER}"
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "refs/remotes/pr/${PR_NUMBER}")"
+          read_pin() {
+            if ! git show "$1:.github/compat-credential-ref.json" > "$2" 2>/dev/null; then
+              echo "no pin file at $1 — treating as unfrozen"
+              echo '{"rcTag": null}' > "$2"
+            fi
+          }
+          read_pin "${BASE_SHA}" base-pin.json
+          read_pin "refs/remotes/pr/${PR_NUMBER}" head-pin.json
+          read_pin "${MERGE_BASE}" merge-base-pin.json
+          echo "base-pin.json:"; cat base-pin.json
+          echo "head-pin.json:"; cat head-pin.json
+          echo "merge-base-pin.json:"; cat merge-base-pin.json
+
       - name: Decide whether to close
         id: decide
-        run: node scripts/dependabot-published-bytes-pause.mjs --changed-files-file changed-files.txt
+        run: |
+          node scripts/dependabot-published-bytes-pause.mjs \
+            --changed-files-file changed-files.txt \
+            --base-pin-file base-pin.json \
+            --head-pin-file head-pin.json \
+            --merge-base-pin-file merge-base-pin.json
 
       # `gh pr close` is the only step that mutates anything — gated on the
       # decision script's own output, never re-derived here.

@@ -83,6 +83,28 @@ describe('injection safety: PR-controlled values flow through env:, never inline
     expect(String(step?.run)).not.toMatch(/\$\{\{/);
   });
 
+  it('the base/head/merge-base pin-read steps use BASE_SHA/HEAD_SHA as shell vars, never inline', () => {
+    const { wf } = load();
+    const baseStep = wf.jobs[JOB].steps.find((s) =>
+      /Read the pin file at the PR's base commit/.test(s.name ?? ''),
+    );
+    const headStep = wf.jobs[JOB].steps.find((s) =>
+      /Read the pin file at the PR's head commit/.test(s.name ?? ''),
+    );
+    const mergeBaseStep = wf.jobs[JOB].steps.find((s) =>
+      /Read the pin file at the PR's merge base/.test(s.name ?? ''),
+    );
+    expect(baseStep, 'base pin-read step not found').toBeTruthy();
+    expect(headStep, 'head pin-read step not found').toBeTruthy();
+    expect(mergeBaseStep, 'merge-base pin-read step not found').toBeTruthy();
+    expect(String(baseStep?.run)).toContain('"${BASE_SHA}:.github/compat-credential-ref.json"');
+    expect(String(headStep?.run)).toContain('"${HEAD_SHA}:.github/compat-credential-ref.json"');
+    expect(String(mergeBaseStep?.run)).toContain('git merge-base "${BASE_SHA}" "${HEAD_SHA}"');
+    expect(String(baseStep?.run)).not.toMatch(/\$\{\{/);
+    expect(String(headStep?.run)).not.toMatch(/\$\{\{/);
+    expect(String(mergeBaseStep?.run)).not.toMatch(/\$\{\{/);
+  });
+
   it('no step anywhere in the job interpolates ${{ }} directly into its run: script', () => {
     const { wf } = load();
     for (const step of wf.jobs[JOB].steps) {
@@ -134,6 +156,38 @@ describe('the check is invoked with a changed-files file, no hardcoded scope fla
     expect(step, 'check-invocation step not found').toBeTruthy();
     expect(String(step?.run)).toContain('--changed-files-file changed-files.txt');
     expect(String(step?.run)).not.toMatch(/--packages|--scope|--dirs/);
+  });
+
+  it('the invocation passes --base-pin-file, --head-pin-file and --merge-base-pin-file (round 2, PR #1680)', () => {
+    const { wf } = load();
+    const step = wf.jobs[JOB].steps.find(
+      (s) => typeof s.run === 'string' && /published-bytes-freeze-check\.mjs/.test(s.run),
+    );
+    expect(String(step?.run)).toContain('--base-pin-file base-pin.json');
+    expect(String(step?.run)).toContain('--head-pin-file head-pin.json');
+    expect(String(step?.run)).toContain('--merge-base-pin-file merge-base-pin.json');
+  });
+});
+
+describe('the base/head/merge-base pin reads precede the check invocation', () => {
+  it('ordering: diff -> base pin -> head pin -> merge-base pin -> check', () => {
+    const { wf } = load();
+    const steps = wf.jobs[JOB].steps;
+    const idx = (re: RegExp) => steps.findIndex((s) => re.test(s.name ?? ''));
+    const diffIdx = idx(/Compute the files/);
+    const baseIdx = idx(/Read the pin file at the PR's base commit/);
+    const headIdx = idx(/Read the pin file at the PR's head commit/);
+    const mergeBaseIdx = idx(/Read the pin file at the PR's merge base/);
+    const checkIdx = steps.findIndex(
+      (s) => typeof s.run === 'string' && /published-bytes-freeze-check\.mjs/.test(s.run),
+    );
+    for (const i of [diffIdx, baseIdx, headIdx, mergeBaseIdx, checkIdx]) {
+      expect(i).toBeGreaterThanOrEqual(0);
+    }
+    expect(baseIdx).toBeGreaterThan(diffIdx);
+    expect(headIdx).toBeGreaterThan(baseIdx);
+    expect(mergeBaseIdx).toBeGreaterThan(headIdx);
+    expect(checkIdx).toBeGreaterThan(mergeBaseIdx);
   });
 });
 

@@ -37,8 +37,19 @@
  * conditionally, keeping the side effect (closing someone's PR) visible in
  * the workflow YAML rather than buried in a script.
  *
+ * `basePin`/`headPin`/`mergeBasePin` are required, same as the sibling
+ * `scripts/published-bytes-freeze-check.mjs` (round-2 fix, PR #1680 review):
+ * a single ambient pin read cannot tell "was a window open before this bump"
+ * from "does this bump's own diff carry an override", which is the exact
+ * bypass class that fix closes. See
+ * `scripts/lib/published-bytes-freeze-check.mjs`'s "WHICH PIN STATE" header.
+ *
  * Usage:
- *   node scripts/dependabot-published-bytes-pause.mjs --changed-files-file <path>
+ *   node scripts/dependabot-published-bytes-pause.mjs \
+ *     --changed-files-file <path> \
+ *     --base-pin-file <path> \
+ *     --head-pin-file <path> \
+ *     --merge-base-pin-file <path>
  */
 
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -53,7 +64,13 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRepoRoot = resolve(__dirname, '..');
 
-/** @param {string} repoRoot */
+/**
+ * Read + parse the pin file at whatever is currently checked out at
+ * `repoRoot`. NOT used by `decide()`'s decision anymore — see the file
+ * header. Kept exported as a small utility.
+ *
+ * @param {string} repoRoot
+ */
 export function readPin(repoRoot) {
   return JSON.parse(readFileSync(join(repoRoot, PIN_FILE), 'utf8'));
 }
@@ -61,6 +78,11 @@ export function readPin(repoRoot) {
 /**
  * @param {object} opts
  * @param {string[]} opts.changedFiles required — the files this bot PR touches.
+ * @param {unknown} opts.basePin required — the pin file's content as of this
+ *   PR's BASE commit.
+ * @param {unknown} opts.headPin required — the pin file's content as of this
+ *   PR's HEAD commit.
+ * @param {unknown} [opts.mergeBasePin] defaults to `basePin`.
  * @param {string} [opts.repoRoot]
  * @param {(...args: unknown[]) => void} [opts.log]
  * @param {Date} [opts.now]
@@ -69,6 +91,9 @@ export function readPin(repoRoot) {
  */
 export function decide({
   changedFiles,
+  basePin,
+  headPin,
+  mergeBasePin = basePin,
   repoRoot = defaultRepoRoot,
   log = console.log,
   now = new Date(),
@@ -77,9 +102,21 @@ export function decide({
   if (!Array.isArray(changedFiles)) {
     throw new Error('decide() requires changedFiles: string[] — the files this PR touched');
   }
-  const pin = readPin(repoRoot);
+  if (basePin === undefined) {
+    throw new Error("decide() requires basePin — the pin file's content at this PR's base commit");
+  }
+  if (headPin === undefined) {
+    throw new Error("decide() requires headPin — the pin file's content at this PR's head commit");
+  }
   const packageDirs = publishScopeDirs(repoRoot);
-  const decision = decidePublishedBytesScope({ pin, changedFiles, packageDirs, now });
+  const decision = decidePublishedBytesScope({
+    basePin,
+    headPin,
+    mergeBasePin,
+    changedFiles,
+    packageDirs,
+    now,
+  });
 
   const shouldClose = decision.action === 'proceed';
   const reason = shouldClose
@@ -105,8 +142,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     return i === -1 ? null : args[i + 1];
   };
   const changedFilesFile = arg('changed-files-file');
-  if (!changedFilesFile) {
-    console.error('dependabot-published-bytes-pause: --changed-files-file is required');
+  const basePinFile = arg('base-pin-file');
+  const headPinFile = arg('head-pin-file');
+  const mergeBasePinFile = arg('merge-base-pin-file');
+  if (!changedFilesFile || !basePinFile || !headPinFile || !mergeBasePinFile) {
+    console.error(
+      'dependabot-published-bytes-pause: --changed-files-file, --base-pin-file, --head-pin-file ' +
+        'and --merge-base-pin-file are all required',
+    );
     process.exit(2);
   }
   let changedFiles;
@@ -121,8 +164,21 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     );
     process.exit(2);
   }
+  const readPinFile = (file, label) => {
+    try {
+      return JSON.parse(readFileSync(file, 'utf8'));
+    } catch (err) {
+      console.error(
+        `dependabot-published-bytes-pause: could not read/parse ${label} (${file}): ${err.message}`,
+      );
+      process.exit(2);
+    }
+  };
+  const basePin = readPinFile(basePinFile, 'base pin file');
+  const headPin = readPinFile(headPinFile, 'head pin file');
+  const mergeBasePin = readPinFile(mergeBasePinFile, 'merge-base pin file');
   try {
-    decide({ changedFiles });
+    decide({ changedFiles, basePin, headPin, mergeBasePin });
     // This automation NEVER fails the job — it only ever decides whether to
     // close, and the workflow's own `if:` step reads the output. A non-zero
     // exit here would make an unrelated Dependabot PR (one that leaves scope

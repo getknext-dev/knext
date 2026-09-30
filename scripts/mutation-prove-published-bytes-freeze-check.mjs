@@ -16,6 +16,13 @@
  * because a spec that never recovers proves the restore is broken, not the
  * guard.
  *
+ * ROUND 2 (PR #1680 review): added mutations proving the base-vs-head pin fix
+ * — `decidePublishedBytesScope` must read the "is a window open" question
+ * from `basePin`, never `headPin` (a PR could otherwise skip the whole check
+ * by closing the window in the same diff that changes published bytes) — and
+ * the "#1635 rule" fix for `overrideMarkerIntroducedByPr` — a marker must be
+ * INTRODUCED by the PR under test, not merely present or inherited.
+ *
  * Shared harness, for the reasons this repo has already paid for:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise —
  *     a silently-failed substitution would certify a decorative guard green;
@@ -106,23 +113,46 @@ const MUTATIONS = [
 
   // ── decidePublishedBytesScope: the three-outcome decision itself ─────────
   {
-    label: 'decision: stop skipping when rcTag is null (would pack on every PR)',
+    label: 'decision: stop skipping when rcTag is null at base (would pack on every PR)',
     subject: 'lib',
     anchor:
-      "  if (rcTag === null || rcTag === undefined) {\n    return { action: 'skip', reason: `${PIN_FILE}'s rcTag is null — no credential window is open` };\n  }",
+      "  if (rcTag === null || rcTag === undefined) {\n    return {\n      action: 'skip',\n      reason: `${PIN_FILE}'s rcTag is null at this PR's base — no credential window was open before this PR`,\n    };\n  }",
     replacement: "  if (false) {\n    return { action: 'skip', reason: 'unreachable' };\n  }",
   },
   {
-    label: 'decision: let a valid override marker fall through to proceed anyway',
+    label: 'decision: let a valid, PR-introduced override marker fall through to proceed anyway',
     subject: 'lib',
-    anchor: '  if (marker.valid) {',
+    anchor: '  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {',
     replacement: '  if (false) {',
+  },
+  {
+    label:
+      'decision: round-2 bypass — read rcTag from headPin instead of basePin (the #1680 finding)',
+    subject: 'lib',
+    anchor:
+      "  const rcTag =\n    basePin && typeof basePin === 'object' ? /** @type {any} */ (basePin).rcTag : undefined;",
+    replacement:
+      "  const rcTag =\n    headPin && typeof headPin === 'object' ? /** @type {any} */ (headPin).rcTag : undefined;",
+  },
+  {
+    label:
+      'decision: honour ANY structurally-valid marker regardless of who introduced it (the #1635-class bypass)',
+    subject: 'lib',
+    anchor: '  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {',
+    replacement: '  if (marker.valid) {',
   },
   {
     label: 'decision: proceed even when the PR touches no publishable scope',
     subject: 'lib',
     anchor: '  if (!scope.touches) {',
     replacement: '  if (false) {',
+  },
+  {
+    label:
+      'overrideMarkerIntroducedByPr: treat an identical (date+reason-matching) merge-base marker as introduced anyway',
+    subject: 'lib',
+    anchor: '  return base.date !== head.date || base.reason !== head.reason;',
+    replacement: '  return true;',
   },
 
   // ── published-bytes-freeze-check.mjs (CLI wrapper) ────────────────────────
@@ -163,7 +193,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(14);
+declareMutations(17);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -176,8 +206,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 14) {
-  console.error(`FATAL: declared 14 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 17) {
+  console.error(`FATAL: declared 17 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

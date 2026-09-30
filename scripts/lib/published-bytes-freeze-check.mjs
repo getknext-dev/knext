@@ -33,7 +33,38 @@
  * no future-dated marker) as `rcBumpMarker` for social-process consistency —
  * this is a second reviewed-PR escalation marker, not a new authorization
  * model — but the code is independent so failure or edits to one guard's
- * heavy import chain can never break the other's cheap path.
+ * heavy import chain can never break the other's cheap path. THE SAME
+ * "INDEPENDENT CODE, SAME SHAPE" REASONING APPLIES to `overrideMarkerIntroducedByPr`
+ * below, which duplicates `compat-credential-freeze-guard.mjs`'s
+ * `markerIntroducedByPr` for `OVERRIDE_MARKER_FIELD` rather than importing it.
+ *
+ * WHICH PIN STATE (round-2 fix, PR #1680 review — mirrors the sibling guard's
+ * OWN header section of the same name, one-for-one). `decidePublishedBytesScope`
+ * used to read a SINGLE pin snapshot for both "is a window open" and "is
+ * there a valid override marker" — whatever was checked out when the CLI ran,
+ * i.e. the PR's own head/merge state. That let a PR SKIP the check entirely
+ * by setting `rcTag: null` (closing the window) in the very same diff that
+ * also changed a publishable package's bytes: read at head, no window looked
+ * open, so `decidePublishedBytesScope` never even reached the scope check.
+ * The fix mirrors `compat-credential-freeze-guard.mjs` exactly: "was a window
+ * ALREADY live before this PR" is answered from the pin **as of the PR's BASE
+ * commit** (`basePin`), never its head — this is what makes the closing-only
+ * diff (no other file touched) pass for a real reason (nothing published
+ * changed), while a diff that BOTH closes the window AND changes published
+ * bytes in the same PR still proceeds to pack-and-diff, because the window
+ * WAS open at base regardless of what head says. `headPin`, by contrast, is
+ * still what `overrideMarkerValidity` reads — a marker a PR adds to exempt
+ * itself necessarily exists only at head. `mergeBasePin` (default `basePin`)
+ * is what decides whether that head marker was INTRODUCED by this PR rather
+ * than inherited from a marker already on `main` when the PR branched (the
+ * #1635 lesson, applied here to `OVERRIDE_MARKER_FIELD` the same way it
+ * already applies to `rcBumpMarker`) — an inherited marker exempts nothing,
+ * or every PR branched after it would ride the same exemption until it
+ * expires. Unlike the sibling guard, this module needs no "pin-only diff"
+ * special case: `PIN_FILE` itself is never in `packageDirs` or
+ * `ROOT_BUILD_INPUT_FILES`, so a diff that touches only the pin file already
+ * fails `touchesPublishableScope` on its own — there is nothing frozen for a
+ * pin-only change to put at risk in the first place.
  *
  * WHY THE PACKAGE SCOPE IS DERIVED, NEVER HAND-LISTED: `publishScopeDirs`
  * calls the SAME `readWorkspaceManifests`/`publishablePackages` helpers
@@ -208,46 +239,87 @@ export function overrideMarkerValidity(pin, now) {
   return { valid: true, reason: `valid through ${expires}` };
 }
 
+/** @param {unknown} pin */
+function overrideMarkerOf(pin) {
+  const m =
+    pin && typeof pin === 'object' ? /** @type {any} */ (pin)[OVERRIDE_MARKER_FIELD] : undefined;
+  return m && typeof m === 'object' && !Array.isArray(m) ? m : undefined;
+}
+
+/**
+ * Did THIS PR introduce the `headPin`'s `OVERRIDE_MARKER_FIELD` marker, rather
+ * than inherit one already present at `mergeBasePin` (the point this PR's
+ * diff is measured from)? Duplicates `compat-credential-freeze-guard.mjs`'s
+ * `markerIntroducedByPr` for `OVERRIDE_MARKER_FIELD` (see the file header for
+ * why this module never imports that one) — a marker already on `main` when
+ * the PR branched is inherited, and exempts nothing; a marker with a
+ * different `date` or `reason` is a new, reviewed authorization replacing a
+ * stale one, and counts as introduced.
+ *
+ * @param {unknown} mergeBasePin
+ * @param {unknown} headPin
+ * @returns {boolean}
+ */
+export function overrideMarkerIntroducedByPr(mergeBasePin, headPin) {
+  const head = overrideMarkerOf(headPin);
+  if (!head) return false;
+  const base = overrideMarkerOf(mergeBasePin);
+  if (!base) return true;
+  return base.date !== head.date || base.reason !== head.reason;
+}
+
 /**
  * The whole SCOPE decision — everything answerable without shelling to `git`
  * for a tag or spawning the pack-and-diff — as a pure function of its inputs.
  *
  * Three outcomes:
- *   - `skip`: no window open, a valid override marker, or this PR touches no
+ *   - `skip`: no window was open at this PR's BASE commit, a valid override
+ *     marker INTRODUCED BY THIS PR exempts it, or this PR touches no
  *     publishable-package path. Never packs anything — this is what keeps the
  *     check cheap on every PR.
- *   - `proceed`: a window is open, no valid override, and the PR touches
- *     publishable scope. The CLI wrapper must still resolve `rcTag` as a real
- *     git tag before running the pack-and-diff — THAT half fails closed in the
- *     wrapper, not here, because resolving a tag needs `git`, which this pure
- *     function deliberately never shells to.
+ *   - `proceed`: a window was open at base, no valid PR-introduced override,
+ *     and the PR touches publishable scope. The CLI wrapper must still
+ *     resolve `rcTag` (from `basePin`) as a real git tag before running the
+ *     pack-and-diff — THAT half fails closed in the wrapper, not here,
+ *     because resolving a tag needs `git`, which this pure function
+ *     deliberately never shells to.
  *
- * @param {{ pin: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], now: Date }} input
+ * See the file header ("WHICH PIN STATE") for why `basePin` decides
+ * freeze/unfrozen while `headPin` decides the marker, and why no separate
+ * "pin-only diff" case is needed here the way the sibling guard needs one.
+ *
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], now: Date }} input
  * @returns {{ action: 'skip', reason: string } | { action: 'proceed', rcTag: string, reason: string, matchedFiles: string[] }}
  */
 export function decidePublishedBytesScope({
-  pin,
+  basePin,
+  headPin,
+  mergeBasePin = basePin,
   changedFiles,
   packageDirs,
   rootInputFiles = ROOT_BUILD_INPUT_FILES,
   now,
 }) {
-  const rcTag = pin && typeof pin === 'object' ? /** @type {any} */ (pin).rcTag : undefined;
+  const rcTag =
+    basePin && typeof basePin === 'object' ? /** @type {any} */ (basePin).rcTag : undefined;
   if (rcTag === null || rcTag === undefined) {
-    return { action: 'skip', reason: `${PIN_FILE}'s rcTag is null — no credential window is open` };
+    return {
+      action: 'skip',
+      reason: `${PIN_FILE}'s rcTag is null at this PR's base — no credential window was open before this PR`,
+    };
   }
   if (typeof rcTag !== 'string' || rcTag.length === 0) {
     return {
       action: 'skip',
-      reason: `${PIN_FILE}'s rcTag is not a non-empty string (${JSON.stringify(rcTag)}) — nothing to diff against`,
+      reason: `${PIN_FILE}'s rcTag at base is not a non-empty string (${JSON.stringify(rcTag)}) — nothing to diff against`,
     };
   }
 
-  const marker = overrideMarkerValidity(pin, now);
-  if (marker.valid) {
+  const marker = overrideMarkerValidity(headPin, now);
+  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {
     return {
       action: 'skip',
-      reason: `a credential window is open (rcTag=${JSON.stringify(rcTag)}), but a valid ${OVERRIDE_MARKER_FIELD} exempts this PR as an intentional rc bump (${marker.reason})`,
+      reason: `a credential window is open (rcTag=${JSON.stringify(rcTag)}), but a valid ${OVERRIDE_MARKER_FIELD} introduced by this PR exempts it as an intentional rc bump (${marker.reason})`,
     };
   }
 

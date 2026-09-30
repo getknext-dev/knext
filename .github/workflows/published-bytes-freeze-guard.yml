@@ -13,14 +13,29 @@ name: Published-bytes freeze guard
 # (`scripts/lib/ga-tarball-diff.mjs`) as the release-time gate.
 #
 # CHEAP BY DEFAULT: `scripts/published-bytes-freeze-check.mjs` never packs
-# anything unless (a) a credential window is open AND (b) this PR's diff
-# touches a path that can reach a published package
+# anything unless (a) a credential window was open AT THIS PR'S BASE COMMIT
+# AND (b) this PR's diff touches a path that can reach a published package
 # (`scripts/lib/published-bytes-freeze-check.mjs`'s `decidePublishedBytesScope`,
 # derived from the actual publishable workspace packages — never a hand-list).
-# Everything else — no window open, a docs/CI-only PR, a reviewed
-# `publishedBytesBumpMarker` override for an intentional rc.N+1 — exits in the
-# "Run the published-bytes freeze check" step alone, before any `bun
-# install`/pack/build ever runs.
+# Everything else — no window open at base, a docs/CI-only PR, a reviewed
+# `publishedBytesBumpMarker` override INTRODUCED BY THIS PR for an intentional
+# rc.N+1 — exits in the "Run the published-bytes freeze check" step alone,
+# before any `bun install`/pack/build ever runs.
+#
+# THE FREEZE STATE (rcTag) IS READ AT THE PR'S BASE COMMIT, not its head —
+# round-2 fix (PR #1680 review), mirroring `compat-credential-freeze-guard.yml`
+# one-for-one (see that workflow's own comment of the same name). Reading a
+# single ambient pin (whatever this PR's own merge ref carries) let a PR
+# SKIP this whole check by setting `rcTag: null` in the SAME diff that also
+# changed a publishable package's bytes — at head, no window looked open, so
+# the scope check was never even reached. `basePin` answers "was a window
+# ALREADY live before this PR"; `headPin` still answers "does this PR carry
+# an override marker"; `mergeBasePin` answers "did THIS PR introduce that
+# marker, or inherit one already on `main`" (the same #1635 rule the sibling
+# guard already applies to `rcBumpMarker`, applied here to
+# `publishedBytesBumpMarker`). A PR that BOTH closes the window AND changes
+# published bytes in the same diff still proceeds to pack-and-diff, because
+# the window was open at base regardless of what head says.
 #
 # FAILS CLOSED, NEVER SILENTLY: an unresolvable pinned `rcTag` (a shallow
 # checkout, a typo, a tag never pushed) is a FAIL, not a SKIP — "the window
@@ -110,5 +125,49 @@ jobs:
           echo "changed files in this PR:"
           cat changed-files.txt
 
+      # Read the pin AS OF THE BASE COMMIT — the live-window state before
+      # this PR. Decides freeze/unfrozen; see the file header ("THE FREEZE
+      # STATE"). Same shape as compat-credential-freeze-guard.yml's identical
+      # step.
+      - name: Read the pin file at the PR's base commit
+        run: |
+          set -euo pipefail
+          if ! git show "${BASE_SHA}:.github/compat-credential-ref.json" > base-pin.json 2>/dev/null; then
+            echo "no pin file at the base commit — treating as unfrozen"
+            echo '{"rcTag": null}' > base-pin.json
+          fi
+          cat base-pin.json
+
+      # Read the pin AS OF THIS PR'S HEAD — the only state a
+      # publishedBytesBumpMarker THIS PR adds can ever appear in.
+      - name: Read the pin file at the PR's head commit
+        run: |
+          set -euo pipefail
+          if ! git show "${HEAD_SHA}:.github/compat-credential-ref.json" > head-pin.json 2>/dev/null; then
+            echo "no pin file at head — treating as unfrozen"
+            echo '{"rcTag": null}' > head-pin.json
+          fi
+          cat head-pin.json
+
+      # #1635-class rule, applied to publishedBytesBumpMarker: the pin AS OF
+      # THE MERGE BASE, the point this PR's diff is measured from. A head
+      # marker is honoured only if it is absent (or a different
+      # authorization) here — a marker already on `main` when the PR branched
+      # is inherited, and exempts nothing.
+      - name: Read the pin file at the PR's merge base
+        run: |
+          set -euo pipefail
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
+          if ! git show "${MERGE_BASE}:.github/compat-credential-ref.json" > merge-base-pin.json 2>/dev/null; then
+            echo "no pin file at the merge base — treating as unfrozen"
+            echo '{"rcTag": null}' > merge-base-pin.json
+          fi
+          cat merge-base-pin.json
+
       - name: Run the published-bytes freeze check
-        run: node scripts/published-bytes-freeze-check.mjs --changed-files-file changed-files.txt
+        run: |
+          node scripts/published-bytes-freeze-check.mjs \
+            --changed-files-file changed-files.txt \
+            --base-pin-file base-pin.json \
+            --head-pin-file head-pin.json \
+            --merge-base-pin-file merge-base-pin.json
