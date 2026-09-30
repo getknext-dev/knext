@@ -41,9 +41,9 @@ describe('docs — stability tiers page', () => {
   });
 
   it('names the three tiers, in plain language', () => {
-    expect(page).toMatch(/^##\s+Stable/m);
-    expect(page).toMatch(/^##\s+Beta/m);
-    expect(page).toMatch(/^##\s+Experimental/m);
+    expect(page).toMatch(/^##\s+Stable\s*$/m);
+    expect(page).toMatch(/^##\s+Beta\s*$/m);
+    expect(page).toMatch(/^##\s+Experimental\s*$/m);
   });
 
   it('names every code-level experimental surface, sourced from the same guard code uses', () => {
