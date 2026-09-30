@@ -272,6 +272,14 @@ describe("deploy without storage (ADR-0047 conditions 1 + 3)", () => {
      * because the guard is OUT OF SCOPE, never because a stub agreed with it.
      */
     it("the vinext build-id guard is out of scope — it is never even consulted", async () => {
+        // #1574: DEFAULT_BUILDER_ID moved to turbopack (#1183) after this test
+        // was written, so `resolvedBuild === "vinext"` is false by default and
+        // the guard's own gate — not the no-storage mode this test is about —
+        // was keeping `verifyVinextStaticPrefix` uncalled. Pin `build: "vinext"`
+        // explicitly so the assertion below is proving what the test name says:
+        // that the no-storage `uploadsAssets` gate, not the builder choice, is
+        // why the guard is never consulted.
+        loadConfig.mockResolvedValue({ ...storagelessConfig, build: "vinext" });
         setArgv(["deploy", "--tag", "deploytag"]);
         const deploy = await importDeploy();
         await expect(deploy()).resolves.toBeUndefined();

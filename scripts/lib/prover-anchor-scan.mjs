@@ -82,31 +82,14 @@ const PROVER_FILE_RE = /^mutation-prove-.*\.mjs$/;
  * re-anchorable", so they are dated exceptions here, tracked by #1249 rather
  * than fixed blind.
  */
-export const KNOWN_STALE_PROVER_EXEMPTIONS = Object.freeze([
-  Object.freeze({
-    prover: 'scripts/mutation-prove-ledger-completeness.mjs',
-    justification:
-      'Three anchors in this table target .github/workflows/test-e2e-deploy.yml text that no ' +
-      'longer exists there (job/step reshuffles across #1147/#850-era commits): "needs: ' +
-      'deploy-tests\\n    if: always()\\n", "jobs:\\n  build-next:", and "needs: [build-next, ' +
-      'deploy-tests, shard-ledger]". Each needs the same re-anchoring investigation #1223 did ' +
-      'for compat-window-audit.mjs, mutation by mutation — filed as a follow-up rather than ' +
-      'fixed blind here.',
-    added: '2026-09-23',
-    expires: '2026-10-23',
-  }),
-  Object.freeze({
-    prover: 'scripts/mutation-prove-compat-lane-pointer.mjs',
-    justification:
-      'Mutation 5 anchors on "KNEXT_RUNTIME: ${{ github.event.inputs.runtime || \'node\' }}", ' +
-      'which the credential-v1.0-per-cell rewrite (#850) replaced with a longer expression ' +
-      "carrying two schedule-gated bun branches. Re-anchoring needs to preserve the mutation's " +
-      'intent (re-introducing a retired schedule comparison) against the new expression shape, ' +
-      'not just restring the anchor.',
-    added: '2026-09-23',
-    expires: '2026-10-23',
-  }),
-]);
+// #1688/#1249/#1574: both findings below are RESOLVED — every anchor in
+// mutation-prove-ledger-completeness.mjs and mutation-prove-compat-lane-
+// pointer.mjs is re-anchored to current tree content and mutation-proves red
+// end-to-end (`node scripts/mutation-prove-<name>.mjs` exits 0). The
+// exemption list stays exported (and empty) rather than deleted: the drift
+// test asserts every ACTIVE entry still has a real finding, and an empty
+// array is the honest state of "no known stale anchors right now".
+export const KNOWN_STALE_PROVER_EXEMPTIONS = Object.freeze([]);
 
 /** The exemptions still live at `now`. */
 export function activeStaleProverExemptions(now = new Date()) {
