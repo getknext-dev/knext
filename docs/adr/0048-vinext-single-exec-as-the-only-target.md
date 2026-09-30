@@ -10,6 +10,9 @@
   node/official-adapter target the default."* This ADR sets the official-adapter target aside
   entirely. `.claude/rules/` is not an agent's file to edit — **the maintainer must amend that rule
   or this ADR contradicts it.** Recorded here rather than left implicit.
+- **Reconciled with ADR-0054 (2026-09-30, Proposed)** — see the last section. The *only-target*
+  Decision is superseded by ADR-0054 (Accepted 2026-09-22). vinext is now a selectable option, and
+  the default is turbopack × bun. Amendments 2–5 still hold for the vinext cells.
 
 ## Context
 
@@ -302,3 +305,36 @@ until the founder revisits it.
    renderers) moves the *cluster* number. Its success criterion is B's median below A's by more than
    A's IQR, n ≥ 7, one node. Until that is met, Amendment 5's framing stands: no Knative cold-start
    win may be claimed for the single executable, self-contained or not.
+
+## Amendment — reconciled with ADR-0054 (2026-09-30)
+
+- **Status:** **Proposed — for the sprint-close design review** (#1151). This appends a
+  reconciliation and does not edit the text above. ADR-0054's header already says it supersedes
+  this ADR's vinext-only mandate. This section brings that pointer into this file and says what is
+  left.
+
+**Superseded:**
+- **The Decision — vinext + Bun single executable as the *only* target.** ADR-0054 superseded it.
+  `turbopack`, `webpack` and `node` are selectable again (`BuilderId`/`RuntimeId`,
+  `packages/kn-next/src/adapters/artifact-contract.ts:86,89`; CRD enums `nextapp_types.go:130,180`).
+  The default is `DEFAULT_BUILDER_ID = "turbopack"` × `DEFAULT_RUNTIME_ID = "bun"`
+  (`artifact-contract.ts:394,424`), set in #1183.
+- **"The measurement this rests on"** as grounds for the decision. Amendment 5 showed the 14.5×
+  figure is a process-boot number and that Knative scale-from-zero is a tie. ADR-0054's Context
+  rests on that.
+- **The "Amends a hard rule" note** in the header. The rules now need reconciling toward ADR-0054
+  instead. That half is the maintainer's (#1149).
+
+**Still stands:**
+- **Amendment 2** (image optimisation does not survive the single executable), **Amendment 3**
+  (bytecode means the single executable, and it ships whole) and **Amendment 4** (keep-alive reuse
+  disabled under Bun on the single executable). Each is a fact about the vinext × bun cell, which
+  is still selectable. Amendment 3's rule generalises through ADR-0054 Amendment 7: every cell must
+  have live bytecode caching. Whether Amendment 4's guard is needed on bun-standalone is #1153, which
+  is still open.
+- **Amendment 5**, as the measured premise of ADR-0054. ADR-0054 Amendment 10 uses its N=7 cluster
+  tie as the sample floor for any future cold-start reopen.
+- **Amendment 6** (cross-reference to ADR-0060), with its own Proposed status.
+- **The rejected option "Flip the default, keep node supported"** was rejected on cost: "two
+  compat matrices, two supply-chain surfaces". ADR-0054 accepted that cost. ADR-0054 Amendment 9
+  now prices it from the tree and CI runs rather than assuming it.

@@ -3,6 +3,9 @@
 - Status: Accepted
 - Date: 2026-09-05
 - Issue: #953 (sprint-2 exit criterion 2; S3-V verification row E)
+- **Reconciled with ADR-0054 (2026-09-30, Proposed)** — see the last section. The decision still
+  stands for the vinext builder. vinext is no longer the default or the only target, so this ADR
+  covers one selectable builder, not every scaffolded app.
 
 ## Context
 
@@ -152,3 +155,30 @@ one) is what makes STALE reachable at all.
       the per-config scanning guard into a single-symbol check. Not done here:
       it changes the scaffold's public shape and belongs behind its own design
       pass.
+
+## Amendment — reconciled with ADR-0054 (2026-09-30)
+
+- **Status:** **Proposed — for the sprint-close design review** (#1151). This appends a
+  reconciliation and does not edit the text above. When this ADR was written (2026-09-05), ADR-0048
+  made vinext the only target, so "a freshly scaffolded app" meant a vinext app. Under ADR-0054
+  that is no longer true.
+
+**Still stands:**
+- **The Decision**: on the vinext builder, knext's Redis handler is registered through the
+  `vinext()` plugin's `cache.data` adapter. The factory subpath
+  `@getknext/core/internal/vinext-cache-adapter`
+  (`packages/kn-next/src/adapters/vinext-cache-adapter.mjs`) is still wired in every `vinext()`
+  call site: `packages/kn-next/templates/app/vite.config.ts.hbs`,
+  `turbo/generators/templates/zone/vite.config.ts.hbs`, `apps/docs/vite.config.ts` and
+  `apps/file-manager/vite.config.ts`. It is still guarded by
+  `packages/kn-next/src/__tests__/vinext-isr-redis-wiring.test.ts`.
+- **Its public-surface obligation** for that internal subpath (`docs/PUBLIC_API.md`).
+
+**Superseded:** (scope only)
+- **The implied scope, "every scaffolded app"**. By default, `kn-next create` now emits the
+  standalone (turbopack) scaffold. The vinext templates are `*.vinext.hbs` overrides that apply
+  only with `--builder vinext` (`packages/kn-next/src/cli/create.ts`, `VINEXT_VARIANT_SUFFIX`).
+- **The consequence that `next.config.ts`'s `cacheHandler` "is inert on this target".** That is
+  still true on vinext. On the default standalone cells, `cacheHandler` is the live registration
+  path (`packages/kn-next/templates/app/next.config.ts.hbs:55`). The two entrances share one
+  handler, as this ADR intended.
