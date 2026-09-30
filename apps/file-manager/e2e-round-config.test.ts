@@ -74,6 +74,7 @@ describe('#1331 defect 2 — compat-smoke runtime classification', () => {
   });
 
   it('throws rather than silently defaulting when no serverPath is given', () => {
+    // @ts-expect-error — deliberately omitting the required serverPath to prove the runtime throw.
     expect(() => buildCompatSmokeEnv({ baseEnv: {}, redisUrl: 'redis://x' })).toThrow();
   });
 
@@ -113,7 +114,7 @@ describe('#1331 defect 3 — redis container name is unique, not a shared consta
   it('cleanup runs exactly once when every leg passes', async () => {
     let cleanupCalls = 0;
     const legs = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
-    const ran = [];
+    const ran: string[] = [];
     const { results, failed } = await runLegsWithCleanup({
       legs,
       runLeg: async (leg) => {
@@ -132,7 +133,7 @@ describe('#1331 defect 3 — redis container name is unique, not a shared consta
   it('cleanup STILL runs when a leg throws — the leak this defect fixes', async () => {
     let cleanupCalls = 0;
     const legs = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
-    const ran = [];
+    const ran: string[] = [];
     const { results, failed } = await runLegsWithCleanup({
       legs,
       runLeg: async (leg) => {
@@ -146,7 +147,8 @@ describe('#1331 defect 3 — redis container name is unique, not a shared consta
     // 'c' never runs (fail-closed on first failure) but cleanup still fires.
     expect(ran).toEqual(['a', 'b']);
     expect(failed).toBe(true);
-    expect(results.find((r) => r.id === 'b').status).toBe('FAIL');
+    const legB = results.find((r) => r.id === 'b');
+    expect(legB?.status).toBe('FAIL');
     expect(cleanupCalls).toBe(1);
   });
 

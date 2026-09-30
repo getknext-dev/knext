@@ -90,6 +90,7 @@ export function buildCompatSmokeEnv({ baseEnv, redisUrl, serverPath }) {
  * A redis container name unique to this invocation — never the bare
  * `knext-e2e-redis` constant, which collides with a still-running container
  * left over from an earlier leg (same round) or an earlier round.
+ * @param {string} [seed]
  */
 export function uniqueRedisContainerName(seed = randomUUID()) {
   return `knext-e2e-redis-${seed}`;
