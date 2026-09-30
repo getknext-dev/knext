@@ -8,10 +8,17 @@
 > re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
 > deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
 > this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
-> dispatch evidence: all four cells (node/bun x turbopack/webpack), each 16/16 shards, **0 failed**
-> (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). That is a single dispatched
-> confirmation, not the 14 consecutive scheduled credential nights the v1.0 gate requires — those
-> start fresh at this ref. Six upstream tests are evidence-quarantined at this ref (the
+> dispatch evidence: all four cells (node/bun x turbopack/webpack), 16/16 shards each attempted
+> (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). The two **bun** cells and the
+> ledger's test-content assertions on all four cells are clean. **The two node cells are NOT
+> clean**: both fail knext's own bytecode-liveness gate on shards 6 and 7 — new-in-16.3.x upstream
+> fixtures (`redirect-rewrite-dynamic-basepath.test.ts`, `redirect-rewrite-dynamic.test.ts`) whose
+> cold bake boot exceeds the driver's timeout. This is **#1572, reopened 2026-09-30** — a real,
+> currently-open defect, not an unrelated or pre-existing flake — and the node cells' credential at
+> v16.3.5 waits on that fix landing, separately from this ledger re-audit. That is a single
+> dispatched confirmation regardless, not the 14 consecutive scheduled credential nights the v1.0
+> gate requires — those start fresh at this ref, and cannot start clean on the node cells until
+> #1572 is fixed. Six upstream tests are evidence-quarantined at this ref (the
 > `vercel-infra-coupled` family, ADR-0007 §h addendum): each fails deterministically because its
 > `deploy` branch encodes behaviour only Vercel's own infrastructure produces, and knext's result
 > matches the self-hosted expectation in every case — full per-test provenance is in the ADR

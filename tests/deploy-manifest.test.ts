@@ -381,17 +381,28 @@ interface KnextQuarantine {
  * live again at canary) — the ledger must then cite BOTH, and may not claim the
  * file is still skipped.
  *
- * GRADUATED, empty as of rc.2's 16.3.5 re-credential (#1560, 2026-09-30): all
- * 12 former members were re-audited with REAL dispatch evidence at v16.3.5
- * (all four credential cells, node/bun x turbopack/webpack, 16/16 shards
- * each, 0 failed; every file finished on its first attempt, no retry) and
- * removed from $knextQuarantines and rules.exclude in the same PR. The root
- * cause (vercel/next.js#95301) is confirmed via the GitHub compare API to be
- * an ancestor of v16.3.5 but not of v16.2.12, which is why the family cleared
- * exactly at this bump. Every test below is now VACUOUSLY true (an empty
- * table has no member to violate any of these checks) rather than deleted,
- * so a future re-quarantine into this family is still caught by the same
- * guards.
+ * GRADUATED, empty as of rc.2's 16.3.5 re-credential (#1560, 2026-09-30), but
+ * NOT all 12 former members cleared the same way. All 12 were dispatched at
+ * v16.3.5 on the same throwaway un-exclude branch (all four credential
+ * cells, node/bun x turbopack/webpack, runs 36638853381/36638856495/
+ * 36638859599/36638862596). 8 of them ran and passed clean on first attempt
+ * (no retry) on all four cells, backed by the root-cause fix
+ * (vercel/next.js#95301), confirmed via the GitHub compare API to be an
+ * ancestor of v16.3.5 but not of v16.2.12 — those 8 cleared BECAUSE the fix
+ * landed. The remaining 4 — prefetch-layout-sharing (#92198),
+ * segment-cache-refresh (#92163), segment-cache-per-page-dynamic-stale-time
+ * (#92162), client-cache.parallel-routes (#92195) — are the four files this
+ * comment block already documents (above) as STILL upstream suite-skipped at
+ * canary (unlike cached-navigations/#92199, whose skip was reverted): they
+ * cleared because upstream's `describe.skip` means they did not execute at
+ * v16.3.5, not because they passed. All 12 are removed from
+ * $knextQuarantines and rules.exclude in the same PR regardless — a
+ * suite-skipped file needs no per-case ledger entry either — but "cleared"
+ * covers two different reasons here and this comment no longer collapses
+ * them into one "0 failed" claim. Every test below is now VACUOUSLY true (an
+ * empty table has no member to violate any of these checks) rather than
+ * deleted, so a future re-quarantine into this family is still caught by the
+ * same guards.
  */
 const FAMILY_FILE_QUARANTINES: Record<
   string,

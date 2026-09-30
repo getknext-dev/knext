@@ -13,9 +13,13 @@ Next.js app more than one way (standalone on Node or Bun, built with Turbopack o
 `vinext` build), and each combination is tracked separately rather than folded into a single "the suite is green" headline.
 The credential window now runs against Next.js v16.3.5. That is the same release new apps
 scaffold today — the deliberate gap between the two is closed. A dispatched confirmation run at
-this version passed cleanly on all four cells (node/bun x turbopack/webpack, 16 shards each, zero
-failures) right after the ref moved; nightly runs at this version are only just starting toward
-the 14-consecutive-night credential a version needs before it counts as fully credentialed. The
+this version was attempted on all four cells (node/bun x turbopack/webpack, 16 shards each) right
+after the ref moved. The two Bun cells came back clean. **The two Node cells did not**: both hit a
+known, currently-open defect in knext's own build-cache verification step on two fixtures new to
+this Next.js release, unrelated to test correctness — that is being fixed separately, and the Node
+cells' credential at this version waits on it. Nightly runs at this version are only just starting
+toward the 14-consecutive-night credential a version needs before it counts as fully credentialed,
+and cannot start clean on the Node cells until that fix lands. The
 most-verified cell overall is still the **Turbopack build on the Node runtime**, whose last
 completed 14-night-eligible run observed **792 tests passed, 0 failed**, at Next.js v16.2.12 — the
 prior credentialed ref, kept here for history. The default cell — Turbopack on the Bun runtime, the
