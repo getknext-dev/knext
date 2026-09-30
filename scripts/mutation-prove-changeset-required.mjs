@@ -30,8 +30,14 @@ const MUTATIONS = [
       'UNCOMMITTED dist/ output instead of src/, so real source edits stop counting and a stray ' +
       'dist/ diff (which cannot happen in a PR) would',
     subject: 'guard',
-    anchor: "const watchDir = entry === 'dist' ? `${dir}/src/` : `${dir}/${entry}/`;",
-    replacement: 'const watchDir = `${dir}/${entry}/`;',
+    anchor:
+      "      if (entry === 'dist') {\n" +
+      '        // BUILD OUTPUT compiled from "src" and is not committed — watch the source instead.\n' +
+      '        roots.push({ name: manifest.name, dir, watchDir: `${dir}/src/` });\n' +
+      '        continue;\n' +
+      '      }\n' +
+      '      const entryPath = `${dir}/${entry}`;',
+    replacement: '      const entryPath = `${dir}/${entry}`;',
   },
   {
     id: 'M2',

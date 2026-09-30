@@ -5,11 +5,11 @@
 
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
     cpSync,
     existsSync,
     mkdirSync,
-    mkdtempSync,
     readdirSync,
     rmSync,
     symlinkSync,
@@ -66,11 +66,22 @@ const NEXT_BIN = resolve(here, "../../node_modules/.bin/next");
 // `next dev` fails closed with `MODULE_NOT_FOUND: next/dist/pages/_app`
 // (round-2 review finding). A sibling of the tracked fixture, under this
 // same `fixtures/` dir, walks straight up to `packages/kn-next/node_modules`,
-// which already has `next` installed as a devDependency. Gitignored in the
-// repo root (`.dev-edge-fence-work-*/`) so a leftover from a killed run is
-// never mistaken for a tracked file.
+// which already has `next` installed as a devDependency.
+//
+// NOT `mkdtempSync` (round-3 review finding): `tests/temp-dirs-outside-the-repo.test.ts`
+// (#880) reds on ANY `mkdtemp`/`mkdtempSync` call whose prefix argument text
+// does not itself name `tmpdir`/`TMP` — unconditionally, with no exception
+// mechanism, because the whole point of that half of the guard is that an
+// in-repo `mkdtemp` is never legitimate. This directory genuinely needs to be
+// in-repo (the paragraph above), so it is created with a plain `mkdirSync`
+// instead — a call `tests/temp-dirs-outside-the-repo.test.ts`'s `mkdtemp`-only
+// scan does not even look at — and the resulting repo-rooted WRITE is
+// licensed instead, by name and reason, in `tests/scratch-space-exceptions.json`'s
+// `repoRootedWrites` (the mechanism `#918` provides for exactly this: a
+// write that has to land inside the checkout, not one this guard should stop
+// seeing). Gitignored (`.dev-edge-fence-work-*/`) so a leftover from a killed
+// run is never mistaken for a tracked file.
 const WORKDIR_PARENT = join(here, "fixtures");
-const WORKDIR_PREFIX = join(WORKDIR_PARENT, ".dev-edge-fence-work-");
 
 /** Relative paths of every file under `dir`, sorted — used to prove `FIXTURE` is untouched. */
 function listFiles(dir: string): string[] {
@@ -188,7 +199,7 @@ describe("#408 — the edge fence covers `next dev --webpack` (real dev server)"
         // of the fixture, never the tracked one, and the tracked fixture's
         // file listing is asserted unchanged at the end of this test.
         const fixtureListingBefore = listFiles(FIXTURE);
-        workDir = mkdtempSync(WORKDIR_PREFIX);
+        workDir = join(WORKDIR_PARENT, `.dev-edge-fence-work-${randomUUID()}`);
         cpSync(FIXTURE, workDir, { recursive: true });
 
         await bundleAdapter(workDir);
