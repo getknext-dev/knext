@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -197,6 +198,58 @@ func TestArpPrimerEnabled_GatesOnExactField(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := arpPrimerEnabled(tc.app); got != tc.want {
 				t.Fatalf("arpPrimerEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Simulates the admission-webhook rejection on a cluster where
+// kubernetes.podspec-init-containers is not enabled, using the EXACT literal
+// message Knative Serving's own validation returns (knative.dev/serving@
+// v0.48.0, pkg/apis/serving/k8s_validation.go, validateInitContainers:
+// `"pod spec support for init-containers is off, but found %d init containers"`),
+// wrapped the way the apiserver actually presents an admission denial. This
+// is the classifier Reconcile calls on the REAL CreateOrUpdate error before
+// deciding whether to abort the pass — see nextapp_controller.go's ksvc
+// apply block.
+func TestIsArpPrimerFeatureGateRejection(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "real Knative webhook rejection text, feature gate off",
+			err: errors.New(`admission webhook "validation.webhook.serving.knative.dev" denied the ` +
+				`request: validation failed: pod spec support for init-containers is off, but found 1 ` +
+				`init containers: spec.template.spec.initContainers`),
+			want: true,
+		},
+		{
+			name: "unrelated validation error must NOT be classified as the feature-gate rejection",
+			err:  errors.New(`admission webhook "validation.webhook.serving.knative.dev" denied the request: validation failed: missing field(s): spec.template.spec.containers`),
+			want: false,
+		},
+		{
+			name: "unrelated infra error (quota) must NOT be classified as the feature-gate rejection",
+			err:  errors.New(`pods "shop-00007-deployment" is forbidden: exceeded quota: compute-resources`),
+			want: false,
+		},
+		{
+			name: "a transient network error must NOT be classified as the feature-gate rejection",
+			err:  errors.New("context deadline exceeded"),
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isArpPrimerFeatureGateRejection(tc.err); got != tc.want {
+				t.Fatalf("isArpPrimerFeatureGateRejection(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

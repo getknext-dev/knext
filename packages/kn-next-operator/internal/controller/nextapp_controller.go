@@ -207,6 +207,15 @@ const (
 	// whole app from reconciling — so the withdrawal is surfaced as this
 	// non-fatal condition reason + a Warning event instead.
 	ReasonProvisionKafkaSourceInert = "ProvisionKafkaSourceInert"
+	// ReasonArpPrimerFeatureGateOff marks spec.coldStart.arpPrimer=true on a
+	// cluster where Knative Serving's kubernetes.podspec-init-containers
+	// feature flag is NOT Enabled (it defaults to Disabled upstream): the
+	// admission webhook rejects the init container this field renders. This
+	// is a non-fatal, DEGRADING outcome, same shape as ReasonImagePrewarmFailed
+	// — the opt-in cold-start spike must not block the app's status
+	// convergence, and the already-serving revision is untouched (the
+	// rejected update never reaches the cluster). See coldstart_arp_primer.go.
+	ReasonArpPrimerFeatureGateOff = "ArpPrimerFeatureGateOff"
 )
 
 // pinnedRevisionStallWindow is how long the child ksvc's RoutesReady/Ready
@@ -508,6 +517,27 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		envMapCollision, buildErr = r.buildDesiredKsvc(&nextApp, ksvc)
 		return buildErr
 	})
+	// coldStartState (spike, #1760): classify a ksvc apply failure ONCE,
+	// here, into a plain struct — computeStatusVerdict decides the
+	// condition/event, never this function (architecture.md: "new honest-
+	// status conditions ... go in computeStatusVerdict, never as new
+	// branches in Reconcile"). Only the ONE narrowly-matched failure mode —
+	// Knative's admission webhook rejecting the arpPrimer init container
+	// because kubernetes.podspec-init-containers is off on this cluster —
+	// is treated as non-fatal: the rejected update never reached the
+	// server, so the already-serving revision is untouched, and aborting
+	// the whole pass here would stop status from ever converging (same
+	// #471 item-4 precedent as image-prewarm). Every OTHER ksvc apply
+	// failure (quota, a malformed image, a network blip, an unrelated
+	// validation error) keeps its EXISTING abort-and-requeue behavior
+	// untouched below.
+	cs := coldStartState{enabled: arpPrimerEnabled(&nextApp)}
+	if err != nil && cs.enabled && isArpPrimerFeatureGateRejection(err) {
+		cs.rejectedMsg = err.Error()
+		logger.Error(err, "Knative rejected spec.coldStart.arpPrimer's init container; "+
+			"the kubernetes.podspec-init-containers feature flag is likely disabled on this cluster")
+		err = nil
+	}
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Knative Service")
 		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
@@ -707,7 +737,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		np.verdict, np.evidence = r.detectNetworkPolicyEnforcement(ctx)
 	}
 
-	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, time.Now())
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, cs, envMapCollision, time.Now())
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -145,6 +145,7 @@ func computeStatusVerdict(
 	rev revisionCheck,
 	ic imageCacheState,
 	np netpolEnforcementState,
+	cs coldStartState,
 	envMapCollision envMapCollisionReport,
 	now time.Time,
 ) statusVerdict {
@@ -628,6 +629,56 @@ func computeStatusVerdict(
 		v.conditions = append(v.conditions, cond)
 	case prevNetpol != nil:
 		v.removeConditions = append(v.removeConditions, ConditionNetworkPolicyEnforced)
+	}
+
+	// ArpPrimerReady (spike, #1760): non-fatal surface of whether the opt-in
+	// spec.coldStart.arpPrimer init container actually made it onto the
+	// cluster — same shape as ImageCacheReady above. Reconcile classifies a
+	// SINGLE, narrowly-matched ksvc-apply failure (Knative's admission
+	// webhook rejecting the init container because
+	// kubernetes.podspec-init-containers is not enabled on this cluster)
+	// into cs.rejectedMsg instead of aborting the pass; this is the only
+	// place that failure becomes visible. The condition names the exact
+	// feature flag AND the opt-out, so an operator reading `kubectl
+	// describe nextapp` has an actionable next step without reading this
+	// source.
+	prevArpPrimer := apimeta.FindStatusCondition(app.Status.Conditions, ConditionArpPrimerReady)
+	switch {
+	case cs.rejectedMsg != "":
+		message := fmt.Sprintf(
+			"spec.coldStart.arpPrimer is true, but Knative Serving rejected the init container it "+
+				"renders: the cluster's kubernetes.podspec-init-containers feature flag is not Enabled "+
+				"(it is Disabled by default). Either ask a cluster admin to enable that flag in the "+
+				"knative-serving config-features ConfigMap, or set spec.coldStart.arpPrimer to false "+
+				"to remove this init container. The app's previously-serving revision is unaffected: "+
+				"%s", cs.rejectedMsg)
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionArpPrimerReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonArpPrimerFeatureGateOff,
+			Message:            message,
+		})
+		if v.requeueAfter == 0 || v.requeueAfter > arpPrimerRejectionRequeueAfter {
+			v.requeueAfter = arpPrimerRejectionRequeueAfter
+		}
+		// Transition-gated: fire once on entry, not on every bounded retry.
+		if prevArpPrimer == nil || prevArpPrimer.Status != metav1.ConditionFalse ||
+			prevArpPrimer.Reason != ReasonArpPrimerFeatureGateOff {
+			v.events = append(v.events, verdictEvent{
+				corev1.EventTypeWarning, ReasonArpPrimerFeatureGateOff, message,
+			})
+		}
+	case cs.enabled:
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionArpPrimerReady,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             "Applied",
+			Message:            "spec.coldStart.arpPrimer's init container was accepted by Knative",
+		})
+	case prevArpPrimer != nil:
+		v.removeConditions = append(v.removeConditions, ConditionArpPrimerReady)
 	}
 
 	return v

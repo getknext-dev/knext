@@ -247,3 +247,12 @@ This is experimental and under evaluation: whether it helps depends on your clus
 configuration, and it is not yet the default. Leave it unset unless you've measured this stall on
 your own cluster.
 
+<Callout type="warn">
+**Prerequisite: your Knative Serving installation must have the `kubernetes.podspec-init-containers`
+feature flag Enabled.** Most Knative Serving installations ship with it Disabled. If it's not
+enabled, Knative rejects this startup step outright, and your NextApp reports an `ArpPrimerReady`
+status condition naming the flag and telling you to either enable it (in the `config-features`
+ConfigMap in your Knative Serving installation's namespace) or set `arpPrimer` back to `false`.
+Your app keeps serving normally either way — only this one startup step is affected.
+</Callout>
+

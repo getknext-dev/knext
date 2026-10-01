@@ -17,11 +17,71 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
+
+// ConditionArpPrimerReady surfaces (non-fatally, same shape as
+// ConditionImageCacheReady) whether the opt-in spec.coldStart.arpPrimer
+// init container actually made it onto the cluster. Dropped entirely when
+// the field is off, unless it was previously present (#98 no-op guard).
+const ConditionArpPrimerReady = "ArpPrimerReady"
+
+// arpPrimerFeatureGateRejectionText is Knative Serving's EXACT validation
+// message (knative.dev/serving@v0.48.0, pkg/apis/serving/k8s_validation.go,
+// validateInitContainers) when kubernetes.podspec-init-containers is not
+// Enabled — which is the upstream DEFAULT. It is deliberately NOT a prefix
+// match on "init container" alone: that also appears in unrelated,
+// genuinely-fatal validation errors (e.g. a duplicate container name), and
+// this string is specific to the feature-gate-off case.
+//
+// Re-check this string against the cluster's actual Knative Serving minor
+// version if the classification below stops matching — it is a literal
+// upstream message, not a contract knext owns.
+const arpPrimerFeatureGateRejectionText = "pod spec support for init-containers is off"
+
+// arpPrimerRejectionRequeueAfter bounds the retry when Knative rejects the
+// init container: same value as imagePrewarmFailureRequeueAfter (2m) — a
+// different opt-in cold-start feature, same "non-fatal, bounded retry"
+// shape. Kept as its own named constant so the two features' retry cadences
+// can diverge later without an unrelated rename.
+const arpPrimerRejectionRequeueAfter = 2 * time.Minute
+
+// coldStartState carries the observed outcome of rendering
+// spec.coldStart.arpPrimer into the pure status verdict — mirroring
+// imageCacheState (image_prewarm.go) and netpolEnforcementState
+// (netpol_enforcement.go). computeStatusVerdict never does cluster I/O or
+// string-matches an error itself; Reconcile classifies the CreateOrUpdate
+// outcome once and hands the verdict a plain struct.
+type coldStartState struct {
+	// enabled mirrors arpPrimerEnabled(app).
+	enabled bool
+	// rejectedMsg is non-empty when Knative's admission webhook rejected the
+	// ksvc update specifically BECAUSE of the arpPrimer init container (the
+	// kubernetes.podspec-init-containers feature flag is off on this
+	// cluster). Reconcile does NOT abort the pass on this specific,
+	// classified rejection — the already-serving revision is unaffected,
+	// since the rejected update never reaches the server — so this is the
+	// only place the failure becomes visible.
+	rejectedMsg string
+}
+
+// isArpPrimerFeatureGateRejection reports whether err is Knative's admission
+// rejection of the arpPrimer init container specifically because
+// kubernetes.podspec-init-containers is not enabled on this cluster — as
+// opposed to any OTHER reason the ksvc apply might fail (quota, a malformed
+// image, an unrelated validation error, a network blip). Reconcile must
+// keep every other failure mode's existing abort-and-requeue behaviour
+// untouched; only this one, narrowly-classified case is treated as
+// non-fatal.
+func isArpPrimerFeatureGateRejection(err error) bool {
+	return err != nil && strings.Contains(err.Error(), arpPrimerFeatureGateRejectionText)
+}
 
 // ARP primer (spike, issue #1760, spec.coldStart.arpPrimer).
 //

@@ -280,8 +280,21 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		TimeoutSeconds: 111,
 		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS},
 		BuildID:        "build-1",
+		// ArpPrimer (#1760) is a plain opt-in bool like SelfContained above —
+		// no CRD pairing, no exclusivity — but it must be non-zero in at
+		// least one fixture for the same reason: the field-completeness scan
+		// requires every leaf to be exercised. It gates an init container,
+		// not an annotation or a RevisionSpec field the guard reflects over
+		// (that reflection explicitly skips the inline PodSpec), so it needs
+		// no entry in previewDispositions/previewTemplateFieldDispositions —
+		// only to stop being the zero value somewhere.
+		ColdStart: &appsv1alpha1.ColdStartSpec{ArpPrimer: &arpPrimerGuardFixtureValue},
 	}
 }
+
+// arpPrimerGuardFixtureValue backs the ColdStart.ArpPrimer pointer above —
+// *bool needs an addressable value, not a literal.
+var arpPrimerGuardFixtureValue = true
 
 // pinnedTrafficSpec is the OTHER side of the #393 exclusivity: a pinned
 // revision, hence no warmSchedule. It is what covers the Traffic leaves.
