@@ -33,8 +33,23 @@
 // import, AND the adapter wiring stays in place (the app never hand-writes the
 // webpack hook — the platform owns it). That class must fail the gate, not the
 // deploy build — #342/#344/#356.
+import { resolveOtelOptions } from '@getknext/core/adapters/otel-config';
+
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') {
+    return;
+  }
+
+  // Tracing is DEFAULT-OFF (enabled only by OTEL_TRACING_ENABLED=true, which
+  // the operator sets from the NextApp CR's spec.observability.tracing.enabled).
+  // Everything `./instrumentation-node` wires — OTel, the span processors, the
+  // golden-signal/cold-start metrics that ride the spans, the log-correlation
+  // seams — sits behind that same gate, so with tracing off there is nothing to
+  // register. Check the gate BEFORE the import: evaluating that module pulls in
+  // the whole OTel/metrics/client stack (~0.9 s of every cold start) even
+  // though `registerNode()` would return at once. `otel-config` is
+  // dependency-free, so this static import is edge-clean.
+  if (!resolveOtelOptions(process.env)) {
     return;
   }
 
