@@ -110,7 +110,7 @@ prove(
 // (#1512) — disable the unresolved-script report.
 prove(
   'M6 fail-closed on an unresolved node/bun script (#1512)',
-  'if (src === null || src === undefined)\n    return `node/bun script ${path} could not be resolved to classify its fetches`;',
+  'if (rawSrc === null || rawSrc === undefined)\n    return `node/bun script ${path} could not be resolved to classify its fetches`;',
   'if (false) return `unreachable`; // MUTATION: disabled',
 );
 

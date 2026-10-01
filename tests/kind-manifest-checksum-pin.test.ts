@@ -82,12 +82,13 @@ let shellSources: string[] | undefined;
 let workflowSources: string[] | undefined;
 let scriptSources: string[] | undefined;
 const SHELL_SOURCES = () => (shellSources ??= gitLsFiles('*.sh', '*.bash'));
-// #1512: the resolver a `node <file>.mjs` / `bun <file>.mjs` invocation is
-// followed through must be able to find `.mjs` files too, not just `.sh`/
-// `.bash` — a wider tracked set for RESOLUTION only; the whole-tree scan
-// below still iterates `.sh`/`.bash` as entrypoints (a `.mjs` is not lexed
-// as shell text).
-const SCRIPT_SOURCES = () => (scriptSources ??= gitLsFiles('*.sh', '*.bash', '*.mjs'));
+// #1512/#1715: the resolver a `node <file>.mjs|.cjs|.js` / `bun <file>.mjs|
+// .cjs|.js` invocation is followed through must be able to find those files
+// too, not just `.sh`/`.bash` — a wider tracked set for RESOLUTION only; the
+// whole-tree scan below still iterates `.sh`/`.bash` as entrypoints (none of
+// `.mjs`/`.cjs`/`.js` is lexed as shell text).
+const SCRIPT_SOURCES = () =>
+  (scriptSources ??= gitLsFiles('*.sh', '*.bash', '*.mjs', '*.cjs', '*.js'));
 const WORKFLOW_SOURCES = () =>
   (workflowSources ??= gitLsFiles(
     '.github/workflows/*.yml',
@@ -132,12 +133,8 @@ function scanRealTreeUncached(): TreeScan {
   const allowHits = new Map<string, number>();
   for (const f of SHELL_SOURCES()) {
     scanned.push(f);
-    // #1512: follow `node <file>.mjs` / `bun <file>.mjs` for shell ENTRYPOINTS
-    // only, never for a workflow `run:` step below — the escape hatch this
-    // closes (#1497/F6) is specifically a shell script moving a fetch into a
-    // `.mjs` helper; a CI workflow step invoking arbitrary node tooling
-    // (linters, audit scripts, publish helpers) is a much wider, untriaged
-    // surface and stays out of scope of this fix.
+    // #1512: follow a `node`/`bun` script invocation (`.mjs`/`.cjs`/`.js`
+    // since #1715) for shell entrypoints.
     const opts = { resolveSource: sourceResolver(f), allowHits, file: f, followScripts: true };
     for (const o of unsafeApplies(readFileSync(join(ROOT, f), 'utf8'), opts))
       offenders.push(`${f}: ${o}`);
@@ -145,7 +142,22 @@ function scanRealTreeUncached(): TreeScan {
   for (const f of WORKFLOW_SOURCES()) {
     scanned.push(f);
     const doc = parse(readFileSync(join(ROOT, f), 'utf8'));
-    const opts = { resolveSource: sourceResolver(f), allowHits };
+    // #1715: `followScripts` is now on for workflow `run:` steps too — a
+    // fetch moved out of workflow shell text into a `.mjs`/`.cjs`/`.js`
+    // helper is covered the same way a shell entrypoint's is. The ~90
+    // untriaged findings this surfaced (#1714's deferred scope) turned out
+    // to all trace to one of two root causes, both fixed in the scanner
+    // rather than carved out per finding: (1) `unclassifiedFetch`'s
+    // fail-closed rules fired even in a script/job with no manifest apply
+    // anywhere to taint (`hasApplyAnywhere` gate, `textHasManifestApply`);
+    // (2) `classifyJsScript` matched a literal URL anywhere in the raw file
+    // text, including inside a comment or a `new URL(…)` call that performs
+    // no network I/O (`stripNonFetchText`). The small remainder — real e2e
+    // HTTP checks in a job that ALSO applies an unrelated manifest, and two
+    // `dist/cli/kn-next.js` invocations `resolveSource` can never read
+    // (build output, untracked) — are named, justified `REMOTE_FETCH_ALLOWLIST`
+    // entries, not a blanket carve-out.
+    const opts = { resolveSource: sourceResolver(f), allowHits, followScripts: true };
     for (const o of unsafeAppliesInWorkflow(doc, opts)) offenders.push(`${f}#${o}`);
   }
   return { scanned, offenders, allowHits };
@@ -1637,5 +1649,38 @@ tainted_fn
         },
       );
     });
+  });
+
+  // ---- #1715: followScripts for workflow `run:` steps -----------------------
+
+  it('#1715: unsafeAppliesInWorkflow follows a node/bun script ONLY when passed followScripts, gated per JOB', () => {
+    const remoteJs = `fetch('https://example.com/x');\n`;
+    const resolveSource = () => remoteJs;
+
+    // RED: followScripts on, and the job ALSO applies a manifest elsewhere.
+    const redDoc = workflow(
+      `      - run: node scripts/lib/probe.mjs\n      - run: kubectl apply -f m.yaml\n`,
+    );
+    const redOffenders = unsafeAppliesInWorkflow(redDoc, { resolveSource, followScripts: true });
+    expect(redOffenders.some((o) => o.includes('unclassified remote fetch'))).toBe(true);
+
+    // GREEN control 1 (false-positive shape): same job, same fetching
+    // script, but NO apply anywhere in the job — the #1512 escape hatch this
+    // rule exists for cannot be exploited when there is nothing to apply.
+    const noApplyDoc = workflow(`      - run: node scripts/lib/probe.mjs\n`);
+    expect(unsafeAppliesInWorkflow(noApplyDoc, { resolveSource, followScripts: true })).toEqual([]);
+
+    // GREEN control 2: followScripts left off (the pre-#1715 default) never
+    // follows the script, regardless of any apply in the job.
+    expect(unsafeAppliesInWorkflow(redDoc, { resolveSource })).toEqual([]);
+  });
+
+  it('#1715: the real tree has zero offenders with followScripts ALSO on for every workflow job', () => {
+    // scanRealTree() (beforeAll above) already runs with followScripts: true
+    // for both SHELL_SOURCES and WORKFLOW_SOURCES — this just names the
+    // property so a regression here is self-describing rather than only
+    // showing up as "round 1" failing with an unrelated-looking offender.
+    const { offenders } = scanRealTree();
+    expect(offenders).toEqual([]);
   });
 });

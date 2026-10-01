@@ -377,6 +377,18 @@ class State {
     this.resolveSource = null;
     /** #1512: opt-in — follow a `node <file>.mjs` / `bun <file>.mjs` invocation. */
     this.followScripts = false;
+    /**
+     * #1715: whether THIS scanned unit (a `.sh`/`.bash` entrypoint, or a
+     * workflow job's steps) contains a manifest apply (`kubectl apply|
+     * create|replace -f/-k`, see `textHasManifestApply`) ANYWHERE. Gates
+     * `unclassifiedFetch`'s fail-closed rules (followed-script / git-clone /
+     * gh-download / helm-pull / in-process-interpreter fetches): a fetch
+     * inside a unit that never applies anything cannot taint an apply that
+     * does not exist. Does NOT gate the curl/wget write-site taint tracking,
+     * which already only offends when a tainted path reaches a real apply
+     * target.
+     */
+    this.hasApplyAnywhere = false;
     /** repo-relative path of the source being scanned (keys STATEMENT_ALLOWLIST). */
     this.file = null;
     /** canonical paths already loaded via `source`, to stop cycles. */
@@ -1326,6 +1338,35 @@ export function isLoopbackHost(h) {
 }
 
 /**
+ * #1715: removes text that can never be an outbound fetch target before
+ * `classifyJsScript` scans a followed `.mjs`/`.cjs`/`.js` source for a
+ * literal host/URL. Two shapes, each independently justified:
+ *   - `/* … *\/` block comments and `// …` line comments (a comment can
+ *     mention a URL as documentation — e.g. "cluster-internal DNS, e.g.
+ *     http://foo.svc.cluster.local" — without the file ever fetching it).
+ *     A line comment is recognised only when the `//` is preceded by
+ *     whitespace or starts the line, so a URL's own `://` is never cut.
+ *   - `new URL(…)` call expressions: the WHATWG `URL` constructor is a pure
+ *     parser (resolves/joins a path against a base) and performs no network
+ *     I/O under any Node/Bun/browser semantics — a literal handed to it as
+ *     the `base` argument is never fetched.
+ * Over-stripping here only widens what passes (same fail-closed direction
+ * as the rest of this module); it can never hide a REAL `fetch(` call,
+ * since neither shape matches fetch/http.get/http.request/etc. text.
+ */
+export function stripNonFetchText(src) {
+  const noBlockComments = src.replace(/\/\*[\s\S]*?\*\//g, '');
+  const noLineComments = noBlockComments
+    .split('\n')
+    .map((line) => {
+      const m = line.match(/(^|\s)\/\//);
+      return m ? line.slice(0, m.index + m[1].length) : line;
+    })
+    .join('\n');
+  return noLineComments.replace(/\bnew\s+URL\([^)]*\)/g, '');
+}
+
+/**
  * #1512: classifies the fetch shapes a `node <file>.mjs` / `bun <file>.mjs`
  * invocation can reach that this scanner otherwise never sees. Resolves the
  * script via `st.resolveSource` (the same hook `source` uses), then looks
@@ -1338,14 +1379,20 @@ export function isLoopbackHost(h) {
  * fetch shape" passes silently, everything else is an offender. Cached per
  * scanned source (`st.sourced`) so one script invoked from several call
  * sites is read and judged once.
+ *
+ * #1715: the host/URL literal search runs on `stripNonFetchText(src)`, not
+ * raw `src` — a doc-comment mentioning a URL as an example, or a literal URL
+ * string handed only to `new URL(…)` (a pure path-join/parse, never network
+ * I/O), is not a fetch target and must not be read as one.
  */
 function classifyJsScript(path, st) {
   const key = `\0jsfetch\0${path}`;
   if (st.sourced.has(key)) return null;
   st.sourced.add(key);
-  const src = st.resolveSource(path);
-  if (src === null || src === undefined)
+  const rawSrc = st.resolveSource(path);
+  if (rawSrc === null || rawSrc === undefined)
     return `node/bun script ${path} could not be resolved to classify its fetches`;
+  const src = stripNonFetchText(rawSrc);
   if (!INTERPRETER_FETCH.test(src)) return null;
   const hostMatches = [...src.matchAll(/\bhost\s*:\s*(['"`])([^'"`]*)\1/g)];
   if (hostMatches.length > 0) {
@@ -1410,17 +1457,35 @@ export function unclassifiedFetch(ws, st, { pipedFromNetwork = false, depth = 0 
 
 function fetchShape(b, args, rawArgs, st, pipedFromNetwork, depth) {
   if (INTERPRETERS.has(b) && INTERPRETER_FETCH.test(args.join(' '))) return interpreterFetch(b);
-  // #1512: `node <file>.mjs` / `bun <file>.mjs` moves a fetch OUT of shell
-  // text into a JS file this module never reads — the escape hatch F6 (#1497)
-  // used legitimately. Follow it, opt-in on BOTH `st.followScripts` and
-  // `st.resolveSource`, so no existing caller sees new noise by default.
+  // #1512/#1715: `node <file>.mjs` / `bun <file>.mjs` moves a fetch OUT of
+  // shell text into a JS file this module never reads — the escape hatch F6
+  // (#1497) used legitimately. Follow it, opt-in on BOTH `st.followScripts`
+  // and `st.resolveSource`, so no existing caller sees new noise by default.
   // Only the FIRST argument is checked (`node script.mjs …`, `bun
   // script.mjs`), never any `.mjs`-suffixed word anywhere in the command —
   // `bun build --compile … ./entry.mjs --outfile x` COMPILES a file, it does
-  // not RUN it, and must not be misread as one.
-  if ((b === 'node' || b === 'bun') && st.followScripts && st.resolveSource) {
+  // not RUN it, and must not be misread as one. #1715 widens this to
+  // `.js`/`.cjs` targets too (same follow, same fail-closed shape) — plain
+  // CommonJS/`.js` tooling scripts invoked from workflow `run:` steps are the
+  // common case, not just `.mjs`.
+  //
+  // #1715: also gated on `st.hasApplyAnywhere` — UNIQUELY to this branch,
+  // not the other `unclassifiedFetch` shapes below. This rule exists
+  // specifically to close the #1497/F6 escape hatch (a fetch moved out of
+  // shell text so it can feed an apply undetected); a followed script in a
+  // unit with NO apply anywhere cannot feed one. `curl | sh`, `git clone`,
+  // `gh release download`, a remote helm chart etc. stay UNGATED: those are
+  // independently dangerous (arbitrary fetched code execution) whether or
+  // not an apply is nearby, which is exactly what the fixtures below
+  // (helmRemoteChart, curlPipeSh, …) assert with no apply in sight.
+  if (
+    (b === 'node' || b === 'bun') &&
+    st.followScripts &&
+    st.resolveSource &&
+    st.hasApplyAnywhere
+  ) {
     const first = args[0] ?? '';
-    if (/\.mjs$/.test(first) && !/[$`]/.test(first)) {
+    if (/\.(mjs|cjs|js)$/.test(first) && !/[$`]/.test(first)) {
       const why = classifyJsScript(first, st);
       if (why) return why;
     }
@@ -1832,6 +1897,30 @@ function isWget(ws) {
   return ws.some((w) => unquote(w).split('/').pop() === 'wget');
 }
 
+/**
+ * #1715: a coarse, line-based pre-scan for "does this text contain a
+ * manifest apply anywhere" (`kubectl apply|create|replace -f/-k`, or
+ * equivalent) — gates `unclassifiedFetch`'s fail-closed rules. Deliberately
+ * cheap and approximate (joins `\`-continued lines, splits on whitespace,
+ * reuses `applyTargets` per line) rather than a full shell parse: a false
+ * POSITIVE here only means the gate stays open (no behavior change from
+ * before #1715), and a false NEGATIVE would need an apply verb to appear
+ * nowhere near its own `-f`/`-k` flag on one logical line, which no real
+ * apply call in this tree does.
+ */
+function textHasManifestApply(text) {
+  const joined = String(text).replace(/\\\r?\n\s*/g, ' ');
+  for (const line of joined.split(/\r?\n/)) {
+    const words = line
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w.replace(/^["']|["']$/g, ''));
+    if (words.length > 0 && applyTargets(words)) return true;
+  }
+  return false;
+}
+
 /** Locates the apply verb and returns every -f/-k target after it, or null if the segment is not a manifest apply. */
 export function applyTargets(ws) {
   let v = -1;
@@ -1943,6 +2032,71 @@ export const REMOTE_FETCH_ALLOWLIST = [
     // enforces that pairing). The tree is only compiled into CI-verification binaries; the script
     // applies nothing to any cluster.
     segment: /^git remote add origin https:\/\/github\.com\/oven-sh\/bun\.git$/,
+  },
+  // #1715 (followScripts enabled for workflow `run:` steps): the four
+  // entries below are file-manager-platform-e2e.yml#platform-e2e findings
+  // that only exist because `followScripts` can now see workflow steps at
+  // all — none is a NEW fetch, each already ran on every nightly/PR e2e
+  // round before this change.
+  {
+    id: 'platform-e2e-http-check',
+    // apps/file-manager/scripts/platform-e2e.mjs: makes real HTTP requests,
+    // but only to PLATFORM_E2E_BASE_URL — the SAME runner-local Kourier
+    // port-forward (http://127.0.0.1:8080) the step just stood up a few
+    // lines earlier in this job, to assert the already-deployed app serves
+    // correctly. It reads; it never writes a file, let alone one `kubectl
+    // apply` could read. (The one non-loopback-shaped literal classifyJsScript
+    // can see, `http://x${p}`, is a `new URL(…)` base for client-side path
+    // parsing, not a fetch target — see `stripNonFetchText`.)
+    segment: /^node apps\/file-manager\/scripts\/platform-e2e\.mjs$/,
+  },
+  {
+    id: 'storage-mode-e2e-http-check',
+    // apps/file-manager/scripts/storage-mode-e2e.mjs: same shape as
+    // platform-e2e-http-check above, for the storage-mode (object-storage)
+    // leg — verifies served asset URLs resolve against the already-running
+    // in-cluster MinIO (reached via its own runner-local port-forward) and
+    // writes nothing any apply could read. Its only literal host (used
+    // purely in a file-header doc comment as a worked example, never
+    // fetched) is stripped by `stripNonFetchText` before matching; with no
+    // literal fetch target left, the file's genuine `http.request` calls
+    // (host comes from env, resolved at runtime) fall through to the
+    // "no literal host/URL" fail-closed branch, which this entry covers.
+    segment: /^node apps\/file-manager\/scripts\/storage-mode-e2e\.mjs$/,
+  },
+  {
+    id: 'platform-e2e-knext-deploy-image-leg',
+    // ../../packages/kn-next/dist/cli/kn-next.js deploy (image-served leg):
+    // `dist/` is build output, untracked, so `resolveSource` can never read
+    // it — fails closed as "could not be resolved" regardless of what it
+    // actually does. What it does is published, reviewed @getknext/core
+    // behavior: build, push by digest, and apply the `NextApp` CR per
+    // ADR-0001 — never a raw fetched manifest. `--registry`/`--namespace`/
+    // `--tag` here are workflow-literal/CI-controlled (`$APP_NS`,
+    // `${GITHUB_RUN_ID}`), not attacker- or network-fetched values.
+    segment: /localhost:5001 --namespace "\$APP_NS" --tag "\$\{GITHUB_RUN_ID\}"/,
+  },
+  {
+    id: 'platform-e2e-knext-deploy-storage-leg',
+    // Same CLI invocation and same justification as
+    // platform-e2e-knext-deploy-image-leg above, for the storage-mode leg
+    // (`$STORAGE_TAG` in place of `${GITHUB_RUN_ID}`); the AWS_* prefix vars
+    // configure the CLI's OWN `aws s3` calls against the runner-local MinIO
+    // port-forward, not a fetch this scanner needs to classify.
+    segment: /localhost:5001 --namespace "\$APP_NS" --tag "\$STORAGE_TAG"/,
+  },
+  {
+    id: 'rc-scaffold-platform-e2e-http-check',
+    // scripts/rc-scaffold-platform-e2e.mjs (the rc-default-scaffold-
+    // platform-e2e-weekly.yml#rc-scaffold-platform-e2e job, surfaced only
+    // because that job ALSO does `kubectl apply -f -` for an unrelated
+    // Secret/scrape-config heredoc). Same shape as platform-e2e-http-check:
+    // real HTTP requests, but only to the Kourier/MinIO port-forwards this
+    // same job stood up, with the target `host` read back from `kubectl get
+    // nextapp … -o jsonpath={.status.url}` — the cluster's own status, not
+    // fetched/attacker content — to verify the already-deployed rc app.
+    // Writes nothing any apply could read.
+    segment: /^node scripts\/rc-scaffold-platform-e2e\.mjs$/,
   },
 ];
 
@@ -2862,6 +3016,7 @@ function heredocExpansions(body) {
  *   allowHits?: Map<string, number> | null,
  *   file?: string | null,
  *   followScripts?: boolean,
+ *   hasApplyAnywhere?: boolean,
  * }} [options]
  * @returns {string[]}
  */
@@ -2877,6 +3032,7 @@ export function unsafeApplies(
     allowHits = null,
     file = null,
     followScripts = false,
+    hasApplyAnywhere = false,
   } = {},
 ) {
   const { code, heredocs, error } = lex(rawText);
@@ -2885,6 +3041,9 @@ export function unsafeApplies(
   st.allowHits = allowHits;
   st.file = file;
   st.followScripts = followScripts;
+  // #1715: caller-asserted (workflow-job-wide) OR this text's own scan —
+  // either is sufficient to open the gate in `unclassifiedFetch`.
+  st.hasApplyAnywhere = hasApplyAnywhere || textHasManifestApply(rawText);
   if (carry) {
     st.tainted = carry.tainted;
     st.verified = carry.verified;
@@ -2923,6 +3082,7 @@ export function unsafeApplies(
     sub.verified = new Map(st.verified);
     sub.resolveSource = st.resolveSource;
     sub.followScripts = st.followScripts;
+    sub.hasApplyAnywhere = st.hasApplyAnywhere;
     sub.allowHits = null; // a helper body is judged again at its call sites, which count
     sub.file = st.file;
     sub.sourced = new Set(st.sourced);
@@ -3024,10 +3184,14 @@ export function stepGuaranteed(step) {
  * @param {{
  *   resolveSource?: ((path: string) => string | null) | null,
  *   allowHits?: Map<string, number> | null,
+ *   followScripts?: boolean,
  * }} [options]
  * @returns {string[]}
  */
-export function unsafeAppliesInWorkflow(doc, { resolveSource = null, allowHits = null } = {}) {
+export function unsafeAppliesInWorkflow(
+  doc,
+  { resolveSource = null, allowHits = null, followScripts = false } = {},
+) {
   const offenders = [];
   const envPairs = (env) =>
     Object.entries(env ?? {}).map(([k, v]) => [
@@ -3041,6 +3205,10 @@ export function unsafeAppliesInWorkflow(doc, { resolveSource = null, allowHits =
     const carry = { tainted: new Set(), verified: new Map() };
     const persisted = new Map();
     const steps = (job?.steps ?? []).filter((s) => typeof s?.run === 'string');
+    // #1715: the gate is JOB-wide (a fetch in step 1 may feed an apply in
+    // step 3, same as the `carry` file-state above), computed once from
+    // every step's own run text — never from a single step in isolation.
+    const jobHasApply = steps.some((s) => textHasManifestApply(s.run));
     steps.forEach((step, i) => {
       const shell = effectiveShell(doc, job, step);
       const errexit = shellErrexit(shell);
@@ -3063,6 +3231,8 @@ export function unsafeAppliesInWorkflow(doc, { resolveSource = null, allowHits =
         finalCheck: i === steps.length - 1,
         resolveSource,
         allowHits,
+        followScripts,
+        hasApplyAnywhere: jobHasApply,
       });
       for (const o of result) offenders.push(`${jobId}[${i}]: ${o}`);
       if (!stepGuaranteed(step)) revokeStepVerifications(carry, before);
