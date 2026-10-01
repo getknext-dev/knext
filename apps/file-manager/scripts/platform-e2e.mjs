@@ -48,6 +48,7 @@ import {
   assertPrometheusText,
   assertRolloutClean,
   assertRscFlight,
+  assertStaticPathTagInvalidation,
   assertTagInvalidation,
   assertUploadAccepted,
   assertUploadStored,
@@ -66,6 +67,8 @@ import {
   ORDERS_CLASS,
   PRODUCTS_CLASS,
   SEEDED_USER_EMAIL,
+  STATIC_REVALIDATE_PATH,
+  staticRevalidateValue,
 } from './platform-e2e-checks.mjs';
 import { createClient, encodeMultipart } from './platform-e2e-http.mjs';
 
@@ -636,6 +639,38 @@ async function main() {
         after = await read();
       }
       return `${auth}; ${assertTagInvalidation({ before, after })}`;
+    },
+  );
+
+  await check(
+    'B. platform',
+    'Invalidation on a STATIC page via the implicit _N_T_ path tag (#1764)',
+    async () => {
+      // `/cache-tests/on-demand` above is force-dynamic — it only writes to
+      // the data cache, whose tags live on `ctx.tags` and were never the
+      // bug. This page is genuinely static (`revalidate = false`): the ONLY
+      // way its value can change is on-demand invalidation of the page's own
+      // implicit `_N_T_<path>` tag, which Next carries exclusively on
+      // `value.headers['x-next-cache-tags']` for this write.
+      const read = async () => {
+        const res = await get(STATIC_REVALIDATE_PATH);
+        if (res.status !== 200) throw new Error(`${STATIC_REVALIDATE_PATH} HTTP ${res.status}`);
+        return staticRevalidateValue(res.text);
+      };
+      const before = await read();
+      const between = await read();
+      const auth = await checkInvalidationEndpoint(
+        http.request,
+        token,
+        `_N_T_${STATIC_REVALIDATE_PATH}`,
+      );
+      let after = await read();
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline && after === before) {
+        await sleep(500);
+        after = await read();
+      }
+      return `${auth}; ${assertStaticPathTagInvalidation({ before, between, after })}`;
     },
   );
 
