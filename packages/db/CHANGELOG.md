@@ -1,5 +1,12 @@
 # @getknext/db
 
+## 1.0.0-rc.5
+
+### Patch Changes
+
+- Updated dependencies [65eef13]
+  - @getknext/lib@1.0.0-rc.5
+
 ## 1.0.0-rc.4
 
 ### Patch Changes
