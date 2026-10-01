@@ -418,6 +418,29 @@ jobs:
           };
           TS
 
+      # #1786 round 2 (adversarial review): the operator's default
+      # readOnlyRootFilesystem config mounts a writable `.next/cache` ONLY
+      # because `spec.storage` is configured below (this lane already does
+      # that, for the static-asset upload check) — the built-in image
+      # optimizer writes there before `image-cache-sync.ts` can push the
+      # variant to the bucket. A 1x1 PNG fixture + a page requesting it
+      # through `/_next/image` is the cheapest real proof that this mount
+      # actually lands: without it the optimizer's write is EROFS and the
+      # request 500s.
+      - name: Add a 1x1 PNG fixture for the image-optimization check
+        env:
+          APP_DIR: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$APP_DIR/public"
+          # 1x1 transparent PNG, base64-encoded — small enough to inline, and
+          # a real raster image sharp will actually re-encode (an SVG would
+          # not exercise the same code path).
+          base64 -d > "$APP_DIR/public/rc-e2e-optimize-fixture.png" <<'B64'
+          iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=
+          B64
+          test -s "$APP_DIR/public/rc-e2e-optimize-fixture.png"
+
       # The scaffold's own config names a placeholder registry/no cache/no
       # storage; this profile overrides EXACTLY what the kind cluster needs.
       # Neither `build` nor `runtime` is set — the default target under test.

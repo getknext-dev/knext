@@ -125,6 +125,11 @@ export function buildNextAppCRObject(
             ? {
                   cpuRequest: config.scaling.cpuRequest ?? "250m",
                   memoryRequest: config.scaling.memoryRequest ?? "512Mi",
+                  // #1778/#1786 round 2: a "4000m" default was tried and
+                  // REVERTED — matches the operator's own reverted default
+                  // (see nextapp_controller.go). A 16x request:limit ratio
+                  // trips a LimitRange's maxLimitRequestRatio on clusters
+                  // that set one. "1000m" stays the pinned default.
                   cpuLimit: config.scaling.cpuLimit ?? "1000m",
                   memoryLimit: config.scaling.memoryLimit ?? "1Gi",
               }

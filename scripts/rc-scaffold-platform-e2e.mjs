@@ -201,6 +201,27 @@ async function main() {
     },
   );
 
+  // ── 1b. image optimization with storage configured (#1786 round 2) ─────
+  // The operator's default readOnlyRootFilesystem config mounts a writable
+  // `.next/cache` ONLY because this app has `spec.storage` configured (see
+  // check 2 below) — the built-in image optimizer writes the variant there
+  // BEFORE image-cache-sync.ts can push it to the bucket. Without that
+  // mount this request would 500 on an EROFS write, not just miss a cache.
+  await check(
+    'Image optimization: /_next/image succeeds against a storage-configured app (no EROFS)',
+    async () => {
+      const res = await http.request('/_next/image?url=%2Frc-e2e-optimize-fixture.png&w=256&q=75');
+      if (res.status !== 200) {
+        throw new Error(`/_next/image returned ${res.status}, want 200 (EROFS surfaces as 500)`);
+      }
+      const contentType = res.headers?.['content-type'] ?? '';
+      if (!/^image\//.test(contentType)) {
+        throw new Error(`/_next/image content-type = "${contentType}", want an image/* type`);
+      }
+      return `200, content-type ${contentType}`;
+    },
+  );
+
   // ── 2. object-storage upload of static assets ──────────────────────────
   await check('Object storage: static assets uploaded to the in-cluster MinIO bucket', async () => {
     const listing = aws(['s3api', 'list-objects-v2', '--bucket', bucket, '--prefix', `${app}/`]);

@@ -99,6 +99,10 @@ func TestBuildDesiredKsvcAppliesDefaultResources(t *testing.T) {
 	// 1000m CPU limit in the source normalises to "1". Compare with
 	// resource.Quantity.Equal, not string equality, so the assertion is on the
 	// VALUE rather than its formatting.
+	// #1778/#1786 round 2: a 4000m default was tried and REVERTED — a
+	// 16x request:limit ratio trips a LimitRange's maxLimitRequestRatio
+	// (commonly 4) on clusters that set one, silently FailedCreate-ing pods.
+	// 1000m stays the pinned default; see the comment at the call site.
 	const (
 		defaultCPURequest    = "250m"
 		defaultMemoryRequest = "512Mi"
@@ -236,5 +240,48 @@ func TestBuildDesiredKsvcAppliesDefaultResources(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #1786 round 2 (adversarial review): pins the default CPU limit at 1000m
+// (request 250m), deliberately NOT 4000m. A 4000m limit against a 250m
+// request is a 16x request:limit ratio, which a cluster's LimitRange
+// (`maxLimitRequestRatio`, commonly set to 4) or a bare `max.cpu` below 4
+// rejects at admission with a silent FailedCreate — a broken default deploy,
+// not a cold-start win. jev `pick` over keep-1000m / 2000m / 4000m scored
+// 0.89 / 0.10 / 0.01; the measured ~675ms GKE saving from 4000m ships as a
+// documented per-app opt-in instead (docs/operator/scaling-cold-start.md),
+// never the platform default. This is a SEPARATE, narrowly-scoped guard from
+// TestBuildDesiredKsvcAppliesDefaultResources above (which also asserts this
+// value, among four) specifically so this exact regression — someone
+// "fixing" cold start by raising the default limit again — fails a test
+// whose name and comment say why, not just a generic resources assertion.
+func TestBuildDesiredKsvcDefaultCPULimitStaysAt1000m(t *testing.T) {
+	sch := runtime.NewScheme()
+	if err := appsv1alpha1.AddToScheme(sch); err != nil {
+		t.Fatalf("AddToScheme(apps): %v", err)
+	}
+	if err := servingv1.AddToScheme(sch); err != nil {
+		t.Fatalf("AddToScheme(serving): %v", err)
+	}
+
+	r := &NextAppReconciler{Scheme: sch}
+	app := &appsv1alpha1.NextApp{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default"},
+		Spec:       appsv1alpha1.NextAppSpec{Image: "registry.example.com/app:v1@sha256:abc123"},
+	}
+	ksvc := &servingv1.Service{ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace}}
+	if _, err := r.buildDesiredKsvc(app, ksvc); err != nil {
+		t.Fatalf("buildDesiredKsvc returned an unexpected error: %v", err)
+	}
+
+	res := ksvc.Spec.Template.Spec.Containers[0].Resources
+	wantRequest := resource.MustParse("250m")
+	wantLimit := resource.MustParse("1000m")
+	if gotReq := res.Requests[corev1.ResourceCPU]; !gotReq.Equal(wantRequest) {
+		t.Fatalf("default CPU request = %s, want %s (unchanged)", gotReq.String(), wantRequest.String())
+	}
+	if gotLim := res.Limits[corev1.ResourceCPU]; !gotLim.Equal(wantLimit) {
+		t.Fatalf("default CPU limit = %s, want %s — NOT 4000m (LimitRange ratio risk, see comment)", gotLim.String(), wantLimit.String())
 	}
 }
