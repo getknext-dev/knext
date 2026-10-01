@@ -263,3 +263,52 @@ export function resolveExportsUnderNode(exportsField, subpath) {
     }
     return subpath in exportsField ? pickTarget(exportsField[subpath]) : undefined;
 }
+
+/**
+ * Resolve a specifier the way the disk-loaded CJS code that names it actually
+ * requires it, OUTSIDE an active `Bun.build()` pass (`computeDiskClosure`, the
+ * turbopack-alias scan in `standalone-compile.mjs`) — both run BEFORE the
+ * compile's own `Bun.build()` call exists.
+ *
+ * `Bun.resolveSync(spec, dir)` takes an undocumented third `isESM` argument
+ * that selects which `package.json#exports` condition set to probe, and its
+ * DEFAULT differs by caller context: inside an active `Bun.build()` plugin
+ * (`format: "cjs"`), a bare two-arg call already resolves as `isESM: false`
+ * (the "require" condition) — matching the literal `require(...)` the bundled
+ * code actually executes. Called from plain, pre-build script code — exactly
+ * these two sites — the SAME two-arg call resolves as `isESM: true` instead.
+ *
+ * Measured on `minio@8.0.6` (`exports["."]`: `require` -> `dist/main/minio.js`
+ * — present; `default` -> `dist/esm/minio.mjs` — NOT present, because nft only
+ * traces the file a literal `require("minio")` call actually reaches): the
+ * two-arg call throws "Cannot find package 'minio'" here, even though
+ * `require.resolve("minio", { paths: [dir] })` finds it immediately. The
+ * disk-closure scan only ever follows `require(...)` / `import(...)` /
+ * `from "..."` literals out of CJS route-chunk output, so `isESM: false` is
+ * the specifier's real call-site kind — try it first. A package shipping NO
+ * "require" condition at all (pure ESM) still resolves via the `isESM: true`
+ * fallback, so this never narrows what the plain two-arg call used to find.
+ *
+ * On failure, throws an `Error` whose message names BOTH attempts' failures
+ * (`require` first, then the ESM fallback) — a caller reporting the failure
+ * (`standalone-compile.mjs`'s disk-closure warning, `planSelfContained`'s
+ * turbopack-alias `fail()`) gets full diagnostic detail from `err.message`
+ * alone, with no need to re-run either attempt itself.
+ */
+export function resolveRequireLike(spec, fromDir) {
+    let requireErr;
+    try {
+        return Bun.resolveSync(spec, fromDir, false);
+    } catch (err) {
+        requireErr = err;
+    }
+    try {
+        return Bun.resolveSync(spec, fromDir, true);
+    } catch (esmErr) {
+        const requireMsg = requireErr instanceof Error ? requireErr.message : String(requireErr);
+        const esmMsg = esmErr instanceof Error ? esmErr.message : String(esmErr);
+        throw new Error(
+            `cannot resolve ${JSON.stringify(spec)} from ${fromDir}: require condition failed (${requireMsg}); ESM/default condition failed (${esmMsg})`,
+        );
+    }
+}

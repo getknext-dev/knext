@@ -65,6 +65,9 @@
  * A compiled executable takes no `--require`, so the preloads are the entry's
  * first statements instead: the compiled cell serves the same Cache-Control
  * shape the compat suite gates, and caps request bodies the same way.
+ * `arp-primer.cjs` (#1760) is baked in FIRST of all — this is the earliest
+ * point anything in this process can fire its one best-effort outbound UDP
+ * datagram, since this stage ships with no supervisor to do it any sooner.
  *
  * ## The bytecode proof
  *
@@ -97,6 +100,7 @@ import { computedRequireInventory, moduleDisposition } from "./computed-require-
 import {
     DEV_ONLY_STUB_SOURCE,
     resolveExportsUnderNode,
+    resolveRequireLike,
     splitBareSpecifier,
     standaloneCacheHandlerFiles,
     standaloneExecEntrySource,
@@ -168,7 +172,17 @@ if (!isInside(realpathSync(SERVER), ROOT)) {
 // fold-vs-sidecar decision). Disk mode's preload list — and therefore its
 // compiled output — is byte-identical to before this existed.
 const here = dirname(fileURLToPath(import.meta.url));
-const PRELOAD_NAMES = ["cache-control-normalize.cjs", "bun-keepalive-guard.cjs", "request-body-cap.cjs"];
+// #1760: arp-primer.cjs is FIRST — this stage has NO supervisor
+// (`node-server.ts` never runs for the self-contained exec; see its own
+// ENTRYPOINT comment), so the compiled entry itself is the earliest point
+// anything in this process can send the one outbound packet the fix needs,
+// and it must run before every other preload, let alone Next's server.js.
+const PRELOAD_NAMES = [
+  "arp-primer.cjs",
+  "cache-control-normalize.cjs",
+  "bun-keepalive-guard.cjs",
+  "request-body-cap.cjs",
+];
 if (SELF_CONTAINED) PRELOAD_NAMES.push("standalone-self-contained-supervisor.cjs");
 const PRELOADS = PRELOAD_NAMES.map((f) => join(here, f));
 for (const p of PRELOADS) {
@@ -349,6 +363,27 @@ function cacheHandlerRoots() {
 }
 const CACHE_HANDLER_ROOTS = cacheHandlerRoots();
 
+// A dropped specifier is reported once per DISTINCT specifier, not once per
+// occurrence. The disk-closure scan is intentionally conservative (see the
+// comment above `DISK_SPECIFIER`): the same optional/peer module a package
+// try/catch-guards at its own call sites (a native binding nft never vendors
+// because the branch that needs it never ran during tracing, a dev-only
+// require the bundler cannot prove dead) can be required from dozens of
+// files the BFS visits, and warning on every occurrence would flood stderr
+// with repeats of the SAME miss — the thing this guard must not do, per the
+// issue. Deduping by specifier keeps each genuinely distinct drop visible
+// exactly once (which is what would have surfaced the minio bug immediately,
+// instead of ~550 KB later as an unrelated bytecode-marker failure) without
+// scaling the noise with how many files happen to reference it.
+const WARNED_DROPPED_SPECIFIERS = new Set();
+function warnDroppedSpecifier(spec, fromDir, err) {
+    if (WARNED_DROPPED_SPECIFIERS.has(spec)) return;
+    WARNED_DROPPED_SPECIFIERS.add(spec);
+    console.error(
+        `[knext standalone-compile] disk closure: dropping ${JSON.stringify(spec)} (required from ${fromDir}) — ${err instanceof Error ? err.message : String(err)}`,
+    );
+}
+
 function computeDiskClosure(extraRoots = []) {
     const seen = new Set();
     const queue = [
@@ -371,8 +406,9 @@ function computeDiskClosure(extraRoots = []) {
             if (!spec || isBuiltin(spec) || spec.startsWith("node:") || spec.startsWith("bun:")) continue;
             let resolved;
             try {
-                resolved = Bun.resolveSync(spec, dirname(file));
-            } catch {
+                resolved = resolveRequireLike(spec, dirname(file));
+            } catch (err) {
+                warnDroppedSpecifier(spec, dirname(file), err);
                 continue;
             }
             if (!isAbsolute(resolved)) continue;
@@ -436,7 +472,7 @@ function planSelfContained() {
     for (const name of existsSync(aliasDir) ? readdirSync(aliasDir) : []) {
         let entryFile;
         try {
-            entryFile = realpathSync(Bun.resolveSync(name, join(distAbs, "server")));
+            entryFile = realpathSync(resolveRequireLike(name, join(distAbs, "server")));
         } catch (err) {
             fail(`self-contained: turbopack external alias ${name} does not resolve: ${err instanceof Error ? err.message : String(err)}`);
         }

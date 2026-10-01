@@ -225,3 +225,20 @@ they don't change the tail, which stays dominated by cold start rather than by a
 reaction speed. Behavior like this is illustrative and environment-dependent, not a guarantee —
 see the perspective note above on cold-start numbers, which applies here too.
 </Callout>
+
+## Networking stall mitigation (on by default)
+
+On some clusters, a node's networking layer can briefly be unable to reach a freshly-started pod
+that reused an IP address recently freed by another pod — until that pod sends its own first
+outbound network traffic. Where this occurs, it has been measured adding several seconds to an
+otherwise-fast wake.
+
+knext's runtime sends one best-effort outbound network packet as early as possible at process
+start, before your app starts listening, specifically to avoid this stall. It never blocks
+startup and never fails your app's boot if it can't send the packet (e.g. no route found, or a
+non-Linux environment). There is no CRD field for this and no extra cluster privilege or feature
+flag required — it runs from inside your app's own process.
+
+If you need to disable it (for example, a security posture that forbids any outbound packet
+before your app's own readiness is established), set the environment variable
+`KNEXT_ARP_PRIMER=0` on your `NextApp`.

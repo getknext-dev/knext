@@ -44,14 +44,16 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 	ctx := context.Background()
 	const image = "registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
 
-	reconcileApp := func(name string, security *appsv1alpha1.SecuritySpec, build string) types.NamespacedName {
+	reconcileAppFull := func(name string, security *appsv1alpha1.SecuritySpec, build string, selfContained bool, storage *appsv1alpha1.StorageSpec) types.NamespacedName {
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		app := &appsv1alpha1.NextApp{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 			Spec: appsv1alpha1.NextAppSpec{
-				Image:    image,
-				Build:    build,
-				Security: security,
+				Image:         image,
+				Build:         build,
+				Security:      security,
+				SelfContained: selfContained,
+				Storage:       storage,
 			},
 		}
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
@@ -72,8 +74,11 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 		Expect(err).NotTo(HaveOccurred())
 		return nn
 	}
+	reconcileApp := func(name string, security *appsv1alpha1.SecuritySpec, build string) types.NamespacedName {
+		return reconcileAppFull(name, security, build, false, nil)
+	}
 
-	It("defaults the app container to readOnlyRootFilesystem: true and mounts /tmp + the image cache", func() {
+	It("defaults the app container to readOnlyRootFilesystem: true and mounts NO volume (#1778)", func() {
 		nn := reconcileApp("rorf-default", nil, "")
 
 		ksvc := &servingv1.Service{}
@@ -86,12 +91,10 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 		Expect(c.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil())
 		Expect(*c.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
 
-		var mountPaths []string
-		for _, m := range c.VolumeMounts {
-			mountPaths = append(mountPaths, m.MountPath)
-		}
-		Expect(mountPaths).To(ContainElement("/tmp"))
-		Expect(mountPaths).To(ContainElement("/app/.next/standalone/.next/cache"))
+		// #1778: writableCache defaults off, so NO emptyDir is provisioned —
+		// not just unwritten. No volumes, no mounts.
+		Expect(c.VolumeMounts).To(BeEmpty())
+		Expect(ksvc.Spec.Template.Spec.Volumes).To(BeEmpty())
 
 		By("passing Knative's own webhook defaulting + validation, not just this repo's rendering")
 		// Filtered to ErrorLevel (the documented pattern, apis.FieldError doc
@@ -105,8 +108,75 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
 	})
 
-	It("skips the standalone image-cache mount for the vinext single-executable shape", func() {
-		nn := reconcileApp("rorf-vinext", nil, "vinext")
+	It("default + spec.storage set: mounts ONLY the image cache, not /tmp (#1786 round 2)", func() {
+		nn := reconcileAppFull("rorf-storage", nil, "", false, &appsv1alpha1.StorageSpec{Provider: "gcs", Bucket: "b"})
+
+		ksvc := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+		c := ksvc.Spec.Template.Spec.Containers[0]
+
+		Expect(*c.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+		var mountPaths []string
+		for _, m := range c.VolumeMounts {
+			mountPaths = append(mountPaths, m.MountPath)
+		}
+		Expect(mountPaths).To(ContainElement("/app/.next/standalone/.next/cache"),
+			"image-cache-sync.ts's restore/push mkdir inside this dir, unguarded — EROFS without it")
+		Expect(mountPaths).NotTo(ContainElement("/tmp"))
+
+		fetched := ksvc.DeepCopy()
+		fetched.SetDefaults(ctx)
+		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
+	})
+
+	It("default + selfContained: true mounts ONLY /tmp, not the image cache (#1786 round 2)", func() {
+		nn := reconcileAppFull("rorf-selfcontained", nil, "turbopack", true, nil)
+
+		ksvc := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+		c := ksvc.Spec.Template.Spec.Containers[0]
+
+		Expect(*c.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+		var mountPaths []string
+		for _, m := range c.VolumeMounts {
+			mountPaths = append(mountPaths, m.MountPath)
+		}
+		Expect(mountPaths).To(ContainElement("/tmp"),
+			"the self-contained binary unpacks sharp's native libraries into /tmp and dlopen()s them")
+		Expect(mountPaths).NotTo(ContainElement("/app/.next/standalone/.next/cache"),
+			"a self-contained image has no .next/standalone tree at all")
+
+		fetched := ksvc.DeepCopy()
+		fetched.SetDefaults(ctx)
+		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
+	})
+
+	It("writableCache: true mounts /tmp + the image cache for the standalone shape", func() {
+		nn := reconcileApp("rorf-writable", &appsv1alpha1.SecuritySpec{WritableCache: ptr.To(true)}, "")
+
+		ksvc := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+		c := ksvc.Spec.Template.Spec.Containers[0]
+
+		Expect(c.SecurityContext).NotTo(BeNil())
+		Expect(c.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil())
+		Expect(*c.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+
+		var mountPaths []string
+		for _, m := range c.VolumeMounts {
+			mountPaths = append(mountPaths, m.MountPath)
+		}
+		Expect(mountPaths).To(ContainElement("/tmp"))
+		Expect(mountPaths).To(ContainElement("/app/.next/standalone/.next/cache"))
+
+		By("passing Knative's own webhook defaulting + validation")
+		fetched := ksvc.DeepCopy()
+		fetched.SetDefaults(ctx)
+		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
+	})
+
+	It("writableCache: true skips the standalone image-cache mount for the vinext single-executable shape", func() {
+		nn := reconcileApp("rorf-vinext", &appsv1alpha1.SecuritySpec{WritableCache: ptr.To(true)}, "vinext")
 
 		ksvc := &servingv1.Service{}
 		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())

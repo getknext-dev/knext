@@ -74,7 +74,12 @@ appends to the pod env:
 The app never reads config directly — only env. `resolveOtelOptions(process.env)`
 (`@getknext/core/adapters/otel-config`) returns `null` unless
 `OTEL_TRACING_ENABLED === 'true'`, and `instrumentation.ts` returns *without*
-initializing OTel on `null`.
+initializing OTel on `null`. Since #1773 it checks that gate **before** the
+`await import('./instrumentation-node')`, so with tracing off the OTel /
+metrics / client stack is never even loaded (it used to be imported on every
+cold start and cost ~0.9 s on GKE e2, see
+`docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md`).
+`registerNode()` keeps its own check as defense in depth.
 
 ## 3. The exporter (self-hostable OTLP only)
 
@@ -219,8 +224,10 @@ enters the edge bundle. The canonical pattern (see
 
 ```ts
 // instrumentation.ts — EDGE-CLEAN. No top-level import of a Node-only client.
+import { resolveOtelOptions } from '@getknext/core/adapters/otel-config'; // dependency-free
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return; // edge: no-op
+  if (!resolveOtelOptions(process.env)) return;       // tracing off: load nothing (#1773)
   const { registerNode } = await import('./instrumentation-node');
   registerNode();
 }

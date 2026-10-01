@@ -113,27 +113,38 @@ network-neighbour entry left behind by a recycled pod IP address — the node ha
 pod's network address for that IP and kept routing to it until the new pod's own outbound traffic
 corrected it.
 
-**This is a cluster networking condition, not something your app or knext's runtime controls.**
-If you're on a cluster using the flannel CNI and you see occasional wakes that take several
-seconds longer than your typical one, with the pod otherwise healthy, check whether your cluster
-shows the same pattern — a pod reachable from its own node immediately but unreachable from
-outside it for several seconds after it starts listening. A fix that primes the pod's own first
-outbound packet automatically is planned for a future release; until then, this is a condition to
-watch for rather than one knext currently works around for you.
+**This release ships a fix.** The runtime now sends one best-effort outbound packet of its own at
+process start, before anything else runs, so the stale neighbour entry gets corrected immediately
+instead of waiting on the app's real first packet. On an affected cluster this measured a median
+wake time dropping from roughly ten seconds to roughly three. It is on by default and a no-op on
+clusters that don't show this pattern; opt out with `KNEXT_ARP_PRIMER=0` if you need to.
 
-## What is coming
+## What's new in this release
 
 Every scaffolded knext app ships with an `instrumentation.ts` hook that Next.js runs once per
-server start, used to wire up tracing. Measured on two different clusters, this hook currently
-pulls in its full tracing client library **unconditionally and synchronously, before the server
-starts answering requests** — even on an app with tracing turned off, where none of that code
-ends up doing anything. That import alone was measured to cost **roughly 0.8 to 0.9 seconds** of
-the wake, on both the compiled Bun runtime and the standard Node runtime, consistently across
-multiple measurements.
+server start, used to wire up tracing. This hook used to pull in its full tracing client library
+**unconditionally and synchronously, before the server starts answering requests** — even on an
+app with tracing turned off, where none of that code ends up doing anything. That import alone was
+measured to cost **roughly 0.8 to 0.9 seconds** of the wake, on both the compiled Bun runtime and
+the standard Node runtime, consistently across multiple measurements.
 
-A future release of knext is planned to skip that import whenever tracing is off, so an app that
-doesn't use tracing doesn't pay for the client library it never calls. This has no version attached
-yet beyond "a future release" — treat it as a planned improvement, not something available today.
-If you have your own `instrumentation.ts`, the same pattern applies to your own code: anything it
-imports at the top level runs before your app can answer its first request, whether or not that
-code is actually needed.
+**This release skips that import whenever tracing is off**, so an app that doesn't use tracing
+doesn't pay for the client library it never calls. Tracing stays off by default in a scaffolded
+app, so this saving applies out of the box. If you have your own `instrumentation.ts`, the same
+pattern applies to your own code: anything it imports at the top level runs before your app can
+answer its first request, whether or not that code is actually needed.
+
+This release also removes an unconditional scratch-disk volume mount that previously cost pod-sandbox
+setup time on every cold wake whether or not anything was ever written to it. (Raising the default
+CPU **limit** available during boot was also measured and considered, but is **not** part of this
+release — the default stays where it was, because a higher limit against the default CPU request is
+a ratio some clusters' resource governance rejects at pod admission, which would be a worse outcome
+than the cold start it was meant to fix. Raising it per app remains available as an opt-in.) See
+[Read-only root filesystem](/docs/security#read-only-root-filesystem) for the opt-in
+`writableCache` field if your app needs the old guaranteed-local-write behavior back.
+
+### Combined effect
+
+The numbers above were each measured on their own, one change at a time. Their savings overlap, so
+they don't simply add up; measure your own app before and after upgrading to see the combined
+effect on your cluster.

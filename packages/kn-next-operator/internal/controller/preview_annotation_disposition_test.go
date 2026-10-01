@@ -231,6 +231,7 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 	provisionKafka := true
 	networkPolicy := true
 	readOnlyRootFS := true
+	writableCache := true
 	return appsv1alpha1.NextAppSpec{
 		Image:            guardFixtureImage,
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-secret"}},
@@ -278,7 +279,7 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		// annotation ever stamped from it stays inside the disposition guard.
 		SelfContained:  true,
 		TimeoutSeconds: 111,
-		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS},
+		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS, WritableCache: &writableCache},
 		BuildID:        "build-1",
 	}
 }
