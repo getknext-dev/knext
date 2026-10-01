@@ -50,7 +50,7 @@ function dbWakeRetryMaxMs(): number
 
 function ensureDialable(client: QuietRedisClient): void
 
-function getCerbosClient(): Promise<CerbosGRPC>
+function getCerbosClient(): Cerbos
 
 function getCorrelationId(): string | undefined
 
@@ -60,7 +60,7 @@ function getDbPoolRO(): Pool | null
 
 function getLastDbActivityAt(): number | undefined
 
-function getMinioClient(): Promise<MinioNS.Client>
+function getMinioClient(): Minio.Client
 
 function getRequestContext(): RequestContext | undefined
 
@@ -159,7 +159,7 @@ function dbWakeRetryBudgetMs(): number
 
 function dbWakeRetryMaxMs(): number
 
-function getCerbosClient(): Promise<CerbosGRPC>
+function getCerbosClient(): Cerbos
 
 function getDbPool(): Pool
 
@@ -167,7 +167,7 @@ function getDbPoolRO(): Pool | null
 
 function getLastDbActivityAt(): number | undefined
 
-function getMinioClient(): Promise<MinioNS.Client>
+function getMinioClient(): Minio.Client
 
 function isDbRecentlyActive(budgetMs?: number): boolean
 

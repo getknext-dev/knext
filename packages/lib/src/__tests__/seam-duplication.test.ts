@@ -41,6 +41,11 @@ class FakeMinioClient {
   constructor(public config: unknown) {
     minioCtorCalls += 1;
   }
+  // `listBuckets()` — a real, zero-arg, Promise-returning minio.Client method
+  // (used here only as a trigger for the lazy load, not for its real shape).
+  async listBuckets(): Promise<[]> {
+    return [];
+  }
 }
 class FakeCerbosGRPC {
   constructor(
@@ -48,6 +53,10 @@ class FakeCerbosGRPC {
     public opts: unknown,
   ) {
     cerbosCtorCalls += 1;
+  }
+  // `close()` — a real, zero-arg GRPC method (used here only as a trigger).
+  async close(): Promise<void> {
+    return;
   }
 }
 mock.module('minio', () => ({ Client: FakeMinioClient }));
@@ -134,47 +143,60 @@ describe('#1777 — lazy client-SDK seam (getCerbosClient/getMinioClient) surviv
     mod.resetClients();
   });
 
-  it('getMinioClient() loaded on instance A is the SAME cached client on instance B', async () => {
+  it('getMinioClient() on instance A returns the SAME facade as on instance B, and only one real client is built', async () => {
     type Clients = typeof import('../clients');
     const instanceA = await freshImport<Clients>('../clients');
-    const clientA = await instanceA.getMinioClient();
+    const facadeA = instanceA.getMinioClient(); // synchronous — no real client yet
 
     const instanceB = await freshImport<Clients>('../clients');
     expect(instanceB).not.toBe(instanceA); // genuinely two module instances
-    const clientB = await instanceB.getMinioClient();
+    const facadeB = instanceB.getMinioClient();
 
-    // Same object back, and only ONE construction process-wide — instance B
-    // did not pay to build (or load) a second client.
-    expect(clientB).toBe(clientA);
+    // The facade itself is anchored on globalThis, so both copies get the
+    // IDENTICAL object back before either has loaded the real SDK.
+    expect(facadeB).toBe(facadeA);
+    expect(minioCtorCalls).toBe(0);
+
+    // Using the facade from instance B, then from instance A, must share the
+    // SAME real client — instance A does not pay to build (or load) a second
+    // one once B has already triggered the load.
+    await facadeB.listBuckets();
+    await facadeA.listBuckets();
     expect(minioCtorCalls).toBe(1);
   });
 
-  it('getCerbosClient() loaded on instance A is the SAME cached client on instance B', async () => {
+  it('getCerbosClient() on instance A returns the SAME facade as on instance B, and only one real client is built', async () => {
     type Clients = typeof import('../clients');
     const instanceA = await freshImport<Clients>('../clients');
-    const clientA = await instanceA.getCerbosClient();
+    const facadeA = instanceA.getCerbosClient();
 
     const instanceB = await freshImport<Clients>('../clients');
     expect(instanceB).not.toBe(instanceA);
-    const clientB = await instanceB.getCerbosClient();
+    const facadeB = instanceB.getCerbosClient();
 
-    expect(clientB).toBe(clientA);
+    expect(facadeB).toBe(facadeA);
+    expect(cerbosCtorCalls).toBe(0);
+
+    await facadeB.close();
+    await facadeA.close();
     expect(cerbosCtorCalls).toBe(1);
   });
 
   it('resetClients() on any instance clears the shared cache for the next load', async () => {
     type Clients = typeof import('../clients');
     const instanceA = await freshImport<Clients>('../clients');
-    const clientA = await instanceA.getMinioClient();
+    const facadeA = instanceA.getMinioClient();
+    await facadeA.listBuckets(); // trigger the real load
 
     // Reset from a DIFFERENT instance — must clear the shared globalThis slot.
     const instanceB = await freshImport<Clients>('../clients');
     instanceB.resetClients();
 
     const instanceC = await freshImport<Clients>('../clients');
-    const clientC = await instanceC.getMinioClient();
+    const facadeC = instanceC.getMinioClient();
+    expect(facadeC).not.toBe(facadeA); // a fresh facade was built after reset
+    await facadeC.listBuckets();
 
-    expect(clientC).not.toBe(clientA); // a fresh client was built after reset
     expect(minioCtorCalls).toBe(2); // one before reset, one after
   });
 });
