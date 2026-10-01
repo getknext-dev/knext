@@ -1,14 +1,128 @@
-import { GRPC as Cerbos } from '@cerbos/grpc';
-import * as Minio from 'minio';
+import type { GRPC as Cerbos } from '@cerbos/grpc';
+import type * as Minio from 'minio';
 import { Pool } from 'pg';
 import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
+import { loadCerbosSdk, loadMinioSdk } from './lazy-sdk-loaders.mjs';
 import { logSlowDep } from './slow-dep';
 
-// Singleton instances
-let cerbosClient: Cerbos | null = null;
-let minioClient: Minio.Client | null = null;
+// Singleton instances. `pgPool`/`pgPoolRO` stay plain module-level `let`s —
+// see `getDbPool`/`getDbPoolRO` for why those two do not need the #352
+// cross-copy treatment the clients below need (ADR-0027, detailed there).
 let pgPool: Pool | null = null;
 let pgPoolRO: Pool | null = null;
+
+// ── Lazy client-SDK loading via synchronous require (#1777, ADR-0027) ───────
+// `@cerbos/grpc` (→ `@grpc/grpc-js`) and `minio` were, together, ~60% of the
+// ~0.8–0.9s `@getknext/lib/clients` cost measured in #1773's instrumentation
+// boot trace — paid at import time even for an app that never calls
+// `getCerbosClient()`/`getMinioClient()`. Both type-only imports above are
+// erased at compile time (no runtime import).
+//
+// History: the first attempt here wrapped a `Proxy` FACADE around a lazily
+// `import()`ed client so the getters could stay synchronous. That cannot
+// faithfully impersonate either SDK — real defects a review found: minio's
+// own sync-stream methods (`listObjects`, `listIncompleteUploads`,
+// `listenBucketNotification`) came back wrapped as `Promise`s, the
+// `extensions` GETTER came back as a function, property WRITES (region,
+// partSize, enableSHA256) were silently dropped (no `set` trap), and the
+// Proxy was accidentally thenable (`"then"` is a property name too), so
+// `await getMinioClient()` hung forever. A Proxy cannot stand in for an SDK
+// whose full surface this module does not own.
+//
+// This version returns the REAL SDK instance, synchronously, exactly as
+// before #1777 — `getCerbosClient()`/`getMinioClient()` keep their original
+// `Cerbos`/`Minio.Client` return types (the `api-surface` guard proves the
+// published .d.ts is unchanged; a `Promise<Client>` return type would be a
+// breaking change this package cannot ship as a patch). The only thing that
+// changed is WHEN the module evaluates: `require('@cerbos/grpc')` /
+// `require('minio')` now run inside the getter, on first call, instead of a
+// top-level `import` — a plain Node synchronous `require`, memoized on
+// `globalThis` so every call after the first (process-wide, see below)
+// returns the cached instance without touching the module system again.
+//
+// Round 3 (#1777 fix-forward) — WHERE the `require(...)` calls live, and
+// why: they are NOT inline in this file. `loadCerbosSdk`/`loadMinioSdk` are
+// imported from `./lazy-sdk-loaders.mjs`, a hand-written, UNPROCESSED plain
+// JS file that `tsup.config.ts` marks `external` so esbuild never reads its
+// contents.
+//
+// Two prior shapes of this seam were each defeated by a DIFFERENT static
+// tracer, and both failures are specific to webpack standalone output
+// (`next build --webpack`, the node×webpack / bun×webpack credential
+// cells) — turbopack inlines the SDK (nothing to trace) and the bun
+// compiled executable resolves differently again:
+//
+//  1. A local `const require = createRequire(import.meta.url)` bound at
+//     module scope, called as `require('minio')`. esbuild (tsup's bundler)
+//     renames a locally-bound identifier that collides with another
+//     chunk's own `require` local to `require2` when chunks sharing this
+//     pattern get merged — measured directly on `packages/lib/dist`:
+//     `const require2 = createRequire(...)` alongside `require2("minio")`.
+//     Next's output file tracer (`@vercel/nft`) and webpack's own
+//     `require(...)` call matching are SCOPE-AWARE — they resolve the
+//     callee identifier to its lexical binding — so a renamed local is
+//     invisible to both, and neither traces/bundles the target into
+//     `.next/standalone/node_modules`.
+//  2. Referencing the AMBIENT, unshadowed `require` global directly
+//     (`typeof require === 'function' ? require('minio') : …`) INLINE in
+//     this file, with no local binding to rename. That defeats (1), but
+//     esbuild bundling to ESM format ALWAYS rewrites a free `require`
+//     reference it encounters into its own `__require` shim
+//     (`var __require = (x) => typeof require !== "undefined" ? require :
+//     …`) — measured directly with esbuild 0.27.3, `--bundle --format=esm`,
+//     independent of `platform`/`external` settings; there is no flag to
+//     suppress it. `__require('minio')` is just as invisible to nft/webpack
+//     as `require2('minio')` was — same defect, different cause.
+//
+// The fix that survives both: keep the two loaders in a file esbuild never
+// bundles (an external relative import), so it is copied byte-for-byte into
+// `dist/` by the build's `onSuccess` hook instead of being parsed by
+// esbuild at all. `require('minio')` / `require('@cerbos/grpc')`,
+// referencing the ambient global directly (never a local binding), survive
+// unrenamed and unshimmed all the way to the published `dist/`, where
+// Next's webpack (bundling `@getknext/lib`'s source into the app bundle)
+// and `@vercel/nft` both see the real, literal, unshadowed `require(...)`
+// call. See `lazy-sdk-loaders.mjs`'s own file banner for the full detail.
+//
+// Anchored on `globalThis` via `Symbol.for('knext.lib.*')` rather than a
+// plain module-level `let` (#352, same reasoning as the pool instrumentor
+// below): in the Next.js standalone build `@getknext/lib` is bundled into
+// SEPARATE webpack layers for `instrumentation-node` and for the app-server
+// bundles, so the two are physically different module copies with
+// independent module-level state. The shared `globalThis` slot makes
+// whichever copy requires the SDK FIRST the only one that pays to load it —
+// a different copy's first call sees the already-constructed client.
+//
+// No single-flight bookkeeping is needed (unlike the DB wake above): this is
+// fully SYNCHRONOUS, so there is no `await` gap in which a second caller
+// could observe "loading" state — the whole check-build-store sequence runs
+// to completion before any other code gets to run at all. A load that THROWS
+// (bad config, a resolve failure) is never stored, so the next call retries
+// fresh — no explicit no-cache-on-failure logic required either.
+const CERBOS_CLIENT_KEY = Symbol.for('knext.lib.clients.cerbosClient');
+const MINIO_CLIENT_KEY = Symbol.for('knext.lib.clients.minioClient');
+
+interface LazyClientGlobal {
+  [CERBOS_CLIENT_KEY]?: Cerbos;
+  [MINIO_CLIENT_KEY]?: Minio.Client;
+}
+
+const lazyClientGlobal = globalThis as unknown as LazyClientGlobal;
+
+/**
+ * Return the cached client at `key` if present, else build, cache and return
+ * a fresh one. A throw from `build()` propagates and is never cached.
+ */
+function getOrCreateClient<T>(key: symbol, build: () => T): T {
+  const global = lazyClientGlobal as unknown as Record<symbol, T | undefined>;
+  const cached = global[key];
+  if (cached) {
+    return cached;
+  }
+  const client = build();
+  global[key] = client;
+  return client;
+}
 
 // ── Pool-instrumentor seam (dependency inversion, #317) ───────────────────────
 // This module stays OTel-free (mirroring `./context`'s `setTraceIdProvider`): an
@@ -231,8 +345,8 @@ export const resetDbWakeSingleflight = (): void => {
  * this: dropping a live pool's reference without ending it leaks sockets.
  */
 export const resetClients = (): void => {
-  cerbosClient = null;
-  minioClient = null;
+  delete lazyClientGlobal[CERBOS_CLIENT_KEY];
+  delete lazyClientGlobal[MINIO_CLIENT_KEY];
   pgPool = null;
   pgPoolRO = null;
   resetPoolInstrumentor();
@@ -585,25 +699,50 @@ const instrumentPool = (pool: Pool, role: PoolRole): Pool => {
   return pool;
 };
 
-export const getCerbosClient = () => {
-  if (!cerbosClient) {
+/**
+ * The cerbos client — SYNCHRONOUS, same `Cerbos` return type as before
+ * #1777 (public API frozen for v1.0). `require('@cerbos/grpc')` runs on
+ * first call only (see the block comment above `lazyClientGlobal`); every
+ * call after the first, process-wide, returns the memoized real instance.
+ */
+export const getCerbosClient = (): Cerbos => {
+  return getOrCreateClient(CERBOS_CLIENT_KEY, () => {
+    // `loadCerbosSdk()` — see the block comment above `CERBOS_CLIENT_KEY`
+    // for why the `require('@cerbos/grpc')` call lives in
+    // `./lazy-sdk-loaders.mjs` rather than inline here.
+    const { GRPC } = loadCerbosSdk() as {
+      GRPC: new (target: string, options: { tls: boolean }) => Cerbos;
+    };
     const target = process.env.CERBOS_URL || 'cerbos.default.svc.cluster.local:3593';
-    cerbosClient = new Cerbos(target, { tls: false });
-  }
-  return cerbosClient;
+    return new GRPC(target, { tls: false });
+  });
 };
 
-export const getMinioClient = () => {
-  if (!minioClient) {
-    minioClient = new Minio.Client({
+/**
+ * The MinIO client — SYNCHRONOUS, same `Minio.Client` return type as
+ * before #1777. `require('minio')` runs on first call only; this is the
+ * REAL SDK instance, so every method (including the sync-stream ones —
+ * `listObjects`, `listIncompleteUploads`, `listenBucketNotification`),
+ * every getter (`extensions`), and every property write (`region`,
+ * `partSize`, `enableSHA256`, …) behaves exactly as on a client built the
+ * old, eager way.
+ */
+export const getMinioClient = (): Minio.Client => {
+  return getOrCreateClient(MINIO_CLIENT_KEY, () => {
+    // `loadMinioSdk()` — see the block comment above `CERBOS_CLIENT_KEY` for
+    // why the `require('minio')` call lives in `./lazy-sdk-loaders.mjs`
+    // rather than inline here.
+    const { Client: MinioClient } = loadMinioSdk() as {
+      Client: new (opts: unknown) => Minio.Client;
+    };
+    return new MinioClient({
       endPoint: process.env.MINIO_ENDPOINT || 'minio.default.svc.cluster.local',
       port: Number.parseInt(process.env.MINIO_PORT || '9000', 10),
       useSSL: process.env.MINIO_USE_SSL === 'true',
       accessKey: process.env.MINIO_ACCESS_KEY || 'minio',
       secretKey: process.env.MINIO_SECRET_KEY || 'minio123',
     });
-  }
-  return minioClient;
+  });
 };
 
 // Scale-to-zero-sane pool defaults. Under Knative each pod owns its own pool,

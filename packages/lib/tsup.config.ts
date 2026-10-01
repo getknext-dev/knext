@@ -1,3 +1,4 @@
+import { copyFileSync } from 'node:fs';
 import { defineConfig } from 'tsup';
 
 /**
@@ -42,4 +43,19 @@ export default defineConfig({
   sourcemap: false,
   // Node 20+ is the floor the CLI already assumes.
   target: 'node20',
+  // `clients.ts`'s lazy `require('minio')` / `require('@cerbos/grpc')`
+  // loaders live in `src/lazy-sdk-loaders.mjs`, a hand-written, UNPROCESSED
+  // plain-JS file — marked external here so esbuild never reads its
+  // contents (see `clients.ts`'s block comment above `CERBOS_CLIENT_KEY`
+  // for why: esbuild unconditionally rewrites any free `require` reference
+  // it bundles into ESM output into its own `__require` shim, which defeats
+  // webpack's/`@vercel/nft`'s static require-call tracing just as a
+  // renamed local binding would). `onSuccess` copies the untouched file
+  // into `dist/`, a flat sibling of the chunk that imports it, so the
+  // relative specifier `./lazy-sdk-loaders.mjs` resolves the same way at
+  // runtime as it does in `src/`.
+  external: ['./lazy-sdk-loaders.mjs'],
+  onSuccess: async () => {
+    copyFileSync('src/lazy-sdk-loaders.mjs', 'dist/lazy-sdk-loaders.mjs');
+  },
 });
