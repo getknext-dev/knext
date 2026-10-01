@@ -7,19 +7,35 @@ name: Standalone deploy — kind e2e (build-id lock-step)
 # it: the nightlies deploy vinext apps, and the compat lanes use their own
 # deploy script rather than `kn-next deploy`.
 #
-# This lane runs the REAL CLI end to end on the default builder (turbopack) at
-# the Next version the scaffold pins (16.3.5): `kn-next deploy` -> NextApp CR ->
-# the operator built from HEAD -> Knative on an ephemeral kind cluster. It
-# asserts the built `.next/BUILD_ID` IS the deploy tag, the CR carries that
-# `spec.buildId`, the NextApp goes Ready, and `/api/health` answers 200.
+# This lane runs the REAL CLI end to end on both default builders
+# (turbopack, webpack — #1733) at the Next version the scaffold pins
+# (16.3.5): `kn-next deploy` -> NextApp CR -> the operator built from HEAD ->
+# Knative on an ephemeral kind cluster. It asserts the built `.next/BUILD_ID`
+# IS the deploy tag, the CR carries that `spec.buildId`, the NextApp goes
+# Ready, and `/api/health` answers 200 — the same health check on every leg.
 #
 # Job shape reused from `standalone-self-contained-operator-e2e.yml` (#1554,
 # the self-contained variant, which needs its own operator change): same
 # fixture staged outside the repo, same local-registry + certs.d recipe as
-# `file-manager-platform-e2e-nightly.yml`. Both runtimes of the default
-# builder run, since both are v1.0 cells.
+# `file-manager-platform-e2e-nightly.yml`. Both runtimes AND both default
+# builders (turbopack, webpack) run, since all four are v1.0 cells (#1733).
+#
+# Scheduled weekly on top of the path-filtered PR/push triggers (#1733): the
+# path filters above only fire this lane when one of the listed files
+# changes, so a credential-window stretch where none of them change never
+# runs it at all. Wed 10:23 UTC is off every credential slot (22:17, 23:47,
+# 01:17, 03:17, 04:47, 05:47 UTC + ~1h runtime each) and off the hour used by
+# every other WEEKLY lane (compat-vinext.yml Sun 07:17, bun-base-build.yml
+# Mon 04:17, operator-upgrade-e2e.yml Mon 04:11, mutation-prover-nightly.yml
+# Sun 06:07, file-manager-platform-e2e-nightly.yml Sun 04:37,
+# operator-e2e-nightly.yml Sun 03:29) — checked against
+# `tests/ci-capacity-budget.test.ts`'s repo-wide cron-overlap scan, which
+# would red on any genuine collision. Non-required: nothing in branch
+# protection names this job.
 
 on:
+  schedule:
+    - cron: '23 10 * * 3'
   pull_request:
     paths:
       - 'packages/kn-next/src/cli/deploy.ts'
@@ -54,13 +70,14 @@ permissions:
 
 jobs:
   standalone-deploy-e2e:
-    name: standalone (turbopack, ${{ matrix.runtime }}) through kn-next deploy on kind
+    name: standalone (${{ matrix.builder }}, ${{ matrix.runtime }}) through kn-next deploy on kind
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         runtime: [bun, node]
+        builder: [turbopack, webpack]
     env:
       CLUSTER: standalone-e2e
       APP_NS: standalone-e2e
@@ -123,9 +140,12 @@ jobs:
 
       # Staged OUTSIDE the repo (a real app is its own project dir; in place,
       # Next's tracing root and the docker context collapse onto the monorepo
-      # root). Next is moved to the version the scaffold pins; the build
-      # script stays the fixture's plain `next build` — turbopack, the default.
-      # No `build` key in the config: this lane proves the DEFAULT builder.
+      # root). Next is moved to the version the scaffold pins; on the
+      # turbopack leg the build script stays the fixture's plain `next
+      # build` and no `build` key is set in the config (absent means
+      # turbopack, ADR-0054); on the webpack leg both are switched to
+      # `--webpack` below (#1733). Both are the DEFAULT builders — this lane
+      # proves both on a real cluster.
       #
       # The Docker build context IS this directory (`kn-next deploy` builds
       # from `process.cwd()`), and `Dockerfile.standalone` COPYs `public` and
@@ -145,10 +165,22 @@ jobs:
           npm pkg set "dependencies.next=${NEXT_VERSION}"
           grep -q '"build": "next build"' package.json
           grep -q 'KNEXT_BUILD_ID' next.config.js
+          # The `build` key selects the builder (ADR-0054); absent means
+          # turbopack. The webpack leg needs BOTH the config key AND the
+          # fixture's own `build` script to carry `--webpack`
+          # (project-build.ts's guard reads the app's package.json script,
+          # not the config) — same `.next/standalone` shape either way.
+          if [ "${{ matrix.builder }}" = "webpack" ]; then
+            npm pkg set "scripts.build=next build --webpack"
+            BUILD_KEY_LINE='build: "webpack",'
+          else
+            BUILD_KEY_LINE=''
+          fi
           cat > knext.config.ts <<EOF
           const config = {
             name: "${APP_NAME}",
             runtime: "${{ matrix.runtime }}",
+            ${BUILD_KEY_LINE}
             registry: "localhost:5001",
             healthCheckPath: "/api/health",
             scaling: { minScale: 0, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "512Mi" },
@@ -164,7 +196,7 @@ jobs:
           npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
           test -d node_modules/@getknext/core
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-          echo "DEPLOY_TAG=r${GITHUB_RUN_ID}-${{ matrix.runtime }}" >> "$GITHUB_ENV"
+          echo "DEPLOY_TAG=r${GITHUB_RUN_ID}-${{ matrix.builder }}-${{ matrix.runtime }}" >> "$GITHUB_ENV"
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
@@ -246,7 +278,7 @@ jobs:
       # Through the product. A runner-level NEXT_DEPLOYMENT_ID is exported on
       # purpose: a CI environment that sets it must not put Next back on the
       # constant-build-id path — knext unsets it for the standalone build.
-      - name: kn-next deploy (default builder, ${{ matrix.runtime }})
+      - name: kn-next deploy (${{ matrix.builder }}, ${{ matrix.runtime }})
         env:
           NEXT_DEPLOYMENT_ID: inherited-from-the-runner
         run: |
