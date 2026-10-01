@@ -68,6 +68,13 @@ const MUTATIONS = [
     replacement:
       'for (const name of Object.keys(nextDeps)) {\n      const tarball = [...tarballsByName.values()][0];\n      nextDeps[name] = `file:${tarball}`;\n      changed = true;\n    }',
   },
+  {
+    label:
+      'applyLocalResolutions: stop adding overrides for transitive @getknext/* resolution (#1795)',
+    anchor:
+      "  if (tarballsByName.size > 0) {\n    const existingOverrides =\n      pkg.overrides && typeof pkg.overrides === 'object' ? pkg.overrides : {};\n    out.overrides = { ...existingOverrides, ...buildOverrides(tarballsByName) };\n  }\n  return out;",
+    replacement: '  return out;',
+  },
 ];
 
 declareMutations(MUTATIONS.length);
