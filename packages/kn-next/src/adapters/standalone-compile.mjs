@@ -252,6 +252,39 @@ function isInside(path, root) {
     return path === root || path.startsWith(`${root}/`);
 }
 
+/**
+ * Resolve a specifier the way the disk-loaded CJS code that names it actually
+ * requires it, OUTSIDE an active `Bun.build()` pass (`computeDiskClosure`, the
+ * turbopack-alias scan below) — both run BEFORE the compile's own `Bun.build()`
+ * call exists.
+ *
+ * `Bun.resolveSync(spec, dir)` takes an undocumented third `isESM` argument
+ * that selects which `package.json#exports` condition set to probe, and its
+ * DEFAULT differs by caller context: inside an active `Bun.build()` plugin
+ * (`format: "cjs"`), a bare two-arg call already resolves as `isESM: false`
+ * (the "require" condition) — matching the literal `require(...)` the bundled
+ * code actually executes. Called from plain, pre-build script code — exactly
+ * these two sites — the SAME two-arg call resolves as `isESM: true` instead.
+ *
+ * Measured on `minio@8.0.6` (`exports["."]`: `require` -> `dist/main/minio.js`
+ * — present; `default` -> `dist/esm/minio.mjs` — NOT present, because nft only
+ * traces the file a literal `require("minio")` call actually reaches): the
+ * two-arg call throws "Cannot find package 'minio'" here, even though
+ * `require.resolve("minio", { paths: [dir] })` finds it immediately. The
+ * disk-closure scan only ever follows `require(...)` / `import(...)` /
+ * `from "..."` literals out of CJS route-chunk output, so `isESM: false` is
+ * the specifier's real call-site kind — try it first. A package shipping NO
+ * "require" condition at all (pure ESM) still resolves via the `isESM: true`
+ * fallback, so this never narrows what the plain two-arg call used to find.
+ */
+function resolveRequireLike(spec, fromDir) {
+    try {
+        return Bun.resolveSync(spec, fromDir, false);
+    } catch {
+        return Bun.resolveSync(spec, fromDir, true);
+    }
+}
+
 const PRELOAD_SET = new Set(PRELOADS);
 
 /** `next`, `@swc/helpers/_/x` — not `./x`, `/abs`, or a builtin. */
@@ -384,7 +417,7 @@ function computeDiskClosure(extraRoots = []) {
             if (!spec || isBuiltin(spec) || spec.startsWith("node:") || spec.startsWith("bun:")) continue;
             let resolved;
             try {
-                resolved = Bun.resolveSync(spec, dirname(file));
+                resolved = resolveRequireLike(spec, dirname(file));
             } catch {
                 continue;
             }
@@ -449,7 +482,7 @@ function planSelfContained() {
     for (const name of existsSync(aliasDir) ? readdirSync(aliasDir) : []) {
         let entryFile;
         try {
-            entryFile = realpathSync(Bun.resolveSync(name, join(distAbs, "server")));
+            entryFile = realpathSync(resolveRequireLike(name, join(distAbs, "server")));
         } catch (err) {
             fail(`self-contained: turbopack external alias ${name} does not resolve: ${err instanceof Error ? err.message : String(err)}`);
         }
