@@ -30,23 +30,19 @@ class FakePool {
 }
 mock.module('pg', () => ({ Pool: FakePool }));
 
-// #1777 — fakes for the lazy client-SDK seam below. Count constructions
-// (not module evaluations: the module loader caches the factory result
-// across `import()`s of the same specifier regardless of which module
-// instance asked, so "evaluated once" is a given here and the thing worth
-// pinning is "constructed once" — i.e. the seam actually dedupes the client).
-let minioCtorCalls = 0;
+// #1777 — fake cerbos for the lazy client-SDK seam below. Count constructions
+// to prove the seam actually dedupes the client (not just evaluations: the
+// module loader caches an `import()`/`require()` factory result regardless
+// of which module instance asked, so "evaluated once" is a given — the thing
+// worth pinning is "constructed once"). Cerbos only, deliberately: measured
+// directly, bun's `mock.module` interception of the bare, unscoped `minio`
+// specifier (reached through `createRequire(...)`-based `require()`) is
+// unreliable once a few other resolutions have already run in the same
+// file — see `clients-lazy-sdk.test.ts`'s file-level comment for the full
+// finding. The minio test below proves the seam the same way without
+// depending on that: via the REAL client's object IDENTITY across copies,
+// which needs no mock at all.
 let cerbosCtorCalls = 0;
-class FakeMinioClient {
-  constructor(public config: unknown) {
-    minioCtorCalls += 1;
-  }
-  // `listBuckets()` — a real, zero-arg, Promise-returning minio.Client method
-  // (used here only as a trigger for the lazy load, not for its real shape).
-  async listBuckets(): Promise<[]> {
-    return [];
-  }
-}
 class FakeCerbosGRPC {
   constructor(
     public target: string,
@@ -55,11 +51,8 @@ class FakeCerbosGRPC {
     cerbosCtorCalls += 1;
   }
   // `close()` — a real, zero-arg GRPC method (used here only as a trigger).
-  async close(): Promise<void> {
-    return;
-  }
+  close(): void {}
 }
-mock.module('minio', () => ({ Client: FakeMinioClient }));
 mock.module('@cerbos/grpc', () => ({ GRPC: FakeCerbosGRPC }));
 
 /**
@@ -134,7 +127,6 @@ describe('#352 — pool-instrumentor seam survives module duplication', () => {
 
 describe('#1777 — lazy client-SDK seam (getCerbosClient/getMinioClient) survives module duplication', () => {
   beforeEach(() => {
-    minioCtorCalls = 0;
     cerbosCtorCalls = 0;
   });
 
@@ -143,61 +135,46 @@ describe('#1777 — lazy client-SDK seam (getCerbosClient/getMinioClient) surviv
     mod.resetClients();
   });
 
-  it('getMinioClient() on instance A returns the SAME facade as on instance B, and only one real client is built', async () => {
+  it('getMinioClient() on instance A returns the SAME real client as on instance B (object identity)', async () => {
     type Clients = typeof import('../clients');
     const instanceA = await freshImport<Clients>('../clients');
-    const facadeA = instanceA.getMinioClient(); // synchronous — no real client yet
+    const clientA = instanceA.getMinioClient(); // synchronous — real client, loaded eagerly on this first call
 
     const instanceB = await freshImport<Clients>('../clients');
     expect(instanceB).not.toBe(instanceA); // genuinely two module instances
-    const facadeB = instanceB.getMinioClient();
+    const clientB = instanceB.getMinioClient();
 
-    // The facade itself is anchored on globalThis, so both copies get the
-    // IDENTICAL object back before either has loaded the real SDK.
-    expect(facadeB).toBe(facadeA);
-    expect(minioCtorCalls).toBe(0);
-
-    // Using the facade from instance B, then from instance A, must share the
-    // SAME real client — instance A does not pay to build (or load) a second
-    // one once B has already triggered the load.
-    await facadeB.listBuckets();
-    await facadeA.listBuckets();
-    expect(minioCtorCalls).toBe(1);
+    // The globalThis-anchored seam means both copies get the IDENTICAL real
+    // client back — instance B did not build (or load) a second one once A
+    // already has.
+    expect(clientB).toBe(clientA);
   });
 
-  it('getCerbosClient() on instance A returns the SAME facade as on instance B, and only one real client is built', async () => {
+  it('getCerbosClient() on instance A returns the SAME client as on instance B, and only one real client is built', async () => {
     type Clients = typeof import('../clients');
     const instanceA = await freshImport<Clients>('../clients');
-    const facadeA = instanceA.getCerbosClient();
+    const clientA = instanceA.getCerbosClient();
 
     const instanceB = await freshImport<Clients>('../clients');
     expect(instanceB).not.toBe(instanceA);
-    const facadeB = instanceB.getCerbosClient();
+    const clientB = instanceB.getCerbosClient();
 
-    expect(facadeB).toBe(facadeA);
-    expect(cerbosCtorCalls).toBe(0);
-
-    await facadeB.close();
-    await facadeA.close();
+    expect(clientB).toBe(clientA);
     expect(cerbosCtorCalls).toBe(1);
   });
 
   it('resetClients() on any instance clears the shared cache for the next load', async () => {
     type Clients = typeof import('../clients');
     const instanceA = await freshImport<Clients>('../clients');
-    const facadeA = instanceA.getMinioClient();
-    await facadeA.listBuckets(); // trigger the real load
+    const clientA = instanceA.getMinioClient();
 
     // Reset from a DIFFERENT instance — must clear the shared globalThis slot.
     const instanceB = await freshImport<Clients>('../clients');
     instanceB.resetClients();
 
     const instanceC = await freshImport<Clients>('../clients');
-    const facadeC = instanceC.getMinioClient();
-    expect(facadeC).not.toBe(facadeA); // a fresh facade was built after reset
-    await facadeC.listBuckets();
-
-    expect(minioCtorCalls).toBe(2); // one before reset, one after
+    const clientC = instanceC.getMinioClient();
+    expect(clientC).not.toBe(clientA); // a fresh client was built after reset
   });
 });
 

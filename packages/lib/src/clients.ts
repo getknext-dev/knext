@@ -1,4 +1,4 @@
-import { PassThrough } from 'node:stream';
+import { createRequire } from 'node:module';
 import type { GRPC as Cerbos } from '@cerbos/grpc';
 import type * as Minio from 'minio';
 import { Pool } from 'pg';
@@ -11,177 +11,91 @@ import { logSlowDep } from './slow-dep';
 let pgPool: Pool | null = null;
 let pgPoolRO: Pool | null = null;
 
-// ── Lazy client-SDK loading behind a SYNCHRONOUS facade (#1777, ADR-0027) ────
+// ── Lazy client-SDK loading via synchronous require (#1777, ADR-0027) ───────
 // `@cerbos/grpc` (→ `@grpc/grpc-js`) and `minio` were, together, ~60% of the
 // ~0.8–0.9s `@getknext/lib/clients` cost measured in #1773's instrumentation
 // boot trace — paid at import time even for an app that never calls
 // `getCerbosClient()`/`getMinioClient()`. Both type-only imports above are
 // erased at compile time (no runtime import).
 //
-// `getCerbosClient()`/`getMinioClient()` MUST stay SYNCHRONOUS, returning the
-// same `Cerbos`/`Minio.Client` types as before — `@getknext/lib`'s
-// public type surface is frozen for v1.0 (the `api-surface` guard), so a
-// return-type change (e.g. to `Promise<Client>`) is a breaking change this
-// package cannot ship as a patch. So the getter hands back a lightweight
-// FACADE, synchronously and immediately: a `Proxy` with no real client behind
-// it yet. Only when the CALLER invokes a method on that facade does the real
-// SDK get `import()`ed — single-flighted and memoized on `globalThis` exactly
-// as before — and the call is forwarded to the real client once it resolves.
-// Every in-repo caller already `await`s the method call it makes (every SDK
-// method used here returns a Promise except one, handled below), so this is
-// invisible to them.
+// History: the first attempt here wrapped a `Proxy` FACADE around a lazily
+// `import()`ed client so the getters could stay synchronous. That cannot
+// faithfully impersonate either SDK — real defects a review found: minio's
+// own sync-stream methods (`listObjects`, `listIncompleteUploads`,
+// `listenBucketNotification`) came back wrapped as `Promise`s, the
+// `extensions` GETTER came back as a function, property WRITES (region,
+// partSize, enableSHA256) were silently dropped (no `set` trap), and the
+// Proxy was accidentally thenable (`"then"` is a property name too), so
+// `await getMinioClient()` hung forever. A Proxy cannot stand in for an SDK
+// whose full surface this module does not own.
+//
+// This version returns the REAL SDK instance, synchronously, exactly as
+// before #1777 — `getCerbosClient()`/`getMinioClient()` keep their original
+// `Cerbos`/`Minio.Client` return types (the `api-surface` guard proves the
+// published .d.ts is unchanged; a `Promise<Client>` return type would be a
+// breaking change this package cannot ship as a patch). The only thing that
+// changed is WHEN the module evaluates: `require('@cerbos/grpc')` /
+// `require('minio')` now run inside the getter, on first call, instead of a
+// top-level `import` — a plain Node synchronous `require`, memoized on
+// `globalThis` so every call after the first (process-wide, see below)
+// returns the cached instance without touching the module system again.
+//
+// `require` here is `createRequire(import.meta.url)`'s return value, bound
+// to a local identifier literally named `require` (not e.g. `req`) ON
+// PURPOSE: webpack/turbopack's static import-tracing matches the IDENTIFIER
+// `require` textually, not the variable's origin, so `require('minio')`
+// here is traced and bundled into the Next.js standalone server output (and
+// the Bun compiled executable) exactly like a static import would be — the
+// literal string argument is what makes it traceable at all. Renaming the
+// binding (`req('minio')`) would make the call invisible to output tracing:
+// `standalone-seam-alive.test.ts`-style build-artifact proof is what confirms
+// this in `apps/file-manager`, on both runtimes (ADR-0027's own standing
+// requirement for this class of seam) — see that app's
+// `instrumentation-edge-safe.test.ts` family and the standalone-build
+// assertions referenced from the PR.
 //
 // Anchored on `globalThis` via `Symbol.for('knext.lib.*')` rather than a
 // plain module-level `let` (#352, same reasoning as the pool instrumentor
-// above): in the Next.js standalone build `@getknext/lib` is bundled into
+// below): in the Next.js standalone build `@getknext/lib` is bundled into
 // SEPARATE webpack layers for `instrumentation-node` and for the app-server
 // bundles, so the two are physically different module copies with
-// independent module-level state. Anchoring BOTH the facade object and the
-// real client/in-flight-load state means every copy's `getMinioClient()`
-// returns the IDENTICAL facade, and only the FIRST copy to actually use it
-// pays to load the real SDK — a later copy's first use awaits the same
-// in-flight load (or reuses the already-resolved client) rather than
-// triggering its own `import()` + construction.
+// independent module-level state. The shared `globalThis` slot makes
+// whichever copy requires the SDK FIRST the only one that pays to load it —
+// a different copy's first call sees the already-constructed client.
 //
-// Single-flighted the same way as the DB wake above: concurrent first callers
-// of the facade (even across copies) share ONE in-flight `import()` +
-// construction rather than racing several. A REJECTED attempt (bad config, a
-// transient resolve failure) does NOT memoize — it clears the in-flight slot
-// so the NEXT call gets a fresh attempt rather than being stuck replaying the
-// same rejection forever.
-//
-// Deliberately `import()`, not `createRequire(...).require(...)`: this
-// package ships ESM specifically so bun's `mock.module` can intercept a
-// dependency reached through this module (see `tsup.config.ts`'s rationale) —
-// a `require()` reached the same way is NOT interceptable, which would make
-// these two SDKs untestable without a live Cerbos/MinIO target.
-const CERBOS_FACADE_KEY = Symbol.for('knext.lib.clients.cerbosFacade');
-const CERBOS_REAL_KEY = Symbol.for('knext.lib.clients.cerbosReal');
-const CERBOS_LOADING_KEY = Symbol.for('knext.lib.clients.cerbosLoading');
-const MINIO_FACADE_KEY = Symbol.for('knext.lib.clients.minioFacade');
-const MINIO_REAL_KEY = Symbol.for('knext.lib.clients.minioReal');
-const MINIO_LOADING_KEY = Symbol.for('knext.lib.clients.minioLoading');
+// No single-flight bookkeeping is needed (unlike the DB wake above): this is
+// fully SYNCHRONOUS, so there is no `await` gap in which a second caller
+// could observe "loading" state — the whole check-build-store sequence runs
+// to completion before any other code gets to run at all. A load that THROWS
+// (bad config, a resolve failure) is never stored, so the next call retries
+// fresh — no explicit no-cache-on-failure logic required either.
+const CERBOS_CLIENT_KEY = Symbol.for('knext.lib.clients.cerbosClient');
+const MINIO_CLIENT_KEY = Symbol.for('knext.lib.clients.minioClient');
 
 interface LazyClientGlobal {
-  [CERBOS_FACADE_KEY]?: Cerbos;
-  [CERBOS_REAL_KEY]?: Cerbos;
-  [CERBOS_LOADING_KEY]?: Promise<Cerbos>;
-  [MINIO_FACADE_KEY]?: Minio.Client;
-  [MINIO_REAL_KEY]?: Minio.Client;
-  [MINIO_LOADING_KEY]?: Promise<Minio.Client>;
+  [CERBOS_CLIENT_KEY]?: Cerbos;
+  [MINIO_CLIENT_KEY]?: Minio.Client;
 }
 
 const lazyClientGlobal = globalThis as unknown as LazyClientGlobal;
 
+// See the block comment above for why this is bound to an identifier
+// literally named `require`.
+const require = createRequire(import.meta.url);
+
 /**
- * Single-flighted, memoized, globalThis-anchored loader: resolves the cached
- * real client immediately if present, otherwise starts (or joins) the ONE
- * in-flight `import()` + construction. A rejection clears the in-flight slot
- * without memoizing, so the next call retries fresh.
+ * Return the cached client at `key` if present, else build, cache and return
+ * a fresh one. A throw from `build()` propagates and is never cached.
  */
-function lazyLoad<T>(realKey: symbol, loadingKey: symbol, build: () => Promise<T>): Promise<T> {
-  const global = lazyClientGlobal as unknown as Record<symbol, T | Promise<T> | undefined>;
-  const cached = global[realKey] as T | undefined;
+function getOrCreateClient<T>(key: symbol, build: () => T): T {
+  const global = lazyClientGlobal as unknown as Record<symbol, T | undefined>;
+  const cached = global[key];
   if (cached) {
-    return Promise.resolve(cached);
+    return cached;
   }
-  let loading = global[loadingKey] as Promise<T> | undefined;
-  if (!loading) {
-    loading = build()
-      .then((client) => {
-        global[realKey] = client;
-        return client;
-      })
-      .catch((err) => {
-        delete global[loadingKey];
-        throw err;
-      });
-    global[loadingKey] = loading;
-  }
-  return loading;
-}
-
-const loadRealCerbos = (): Promise<Cerbos> =>
-  lazyLoad(CERBOS_REAL_KEY, CERBOS_LOADING_KEY, () =>
-    import('@cerbos/grpc').then(({ GRPC: Cerbos }) => {
-      const target = process.env.CERBOS_URL || 'cerbos.default.svc.cluster.local:3593';
-      return new Cerbos(target, { tls: false });
-    }),
-  );
-
-const loadRealMinio = (): Promise<Minio.Client> =>
-  lazyLoad(MINIO_REAL_KEY, MINIO_LOADING_KEY, () =>
-    import('minio').then(
-      (Minio) =>
-        new Minio.Client({
-          endPoint: process.env.MINIO_ENDPOINT || 'minio.default.svc.cluster.local',
-          port: Number.parseInt(process.env.MINIO_PORT || '9000', 10),
-          useSSL: process.env.MINIO_USE_SSL === 'true',
-          accessKey: process.env.MINIO_ACCESS_KEY || 'minio',
-          secretKey: process.env.MINIO_SECRET_KEY || 'minio123',
-        }),
-    ),
-  );
-
-/**
- * `minio.Client#listObjectsV2` is the one SDK method actually used here that
- * does NOT return a `Promise` — it returns a `Readable` stream SYNCHRONOUSLY
- * (events, not a promise), and `image-cache-sync.ts` calls `.on(...)` on it
- * right after. A generic await-then-delegate wrapper would turn that into a
- * `Promise<Readable>`, breaking the caller. So this method is special-cased:
- * return a real `PassThrough` stream immediately, and once the real client
- * has loaded, pipe its `data`/`end`/`error` events into it.
- */
-const lazyListObjectsV2 = (
-  bucket: string,
-  prefix?: string,
-  recursive?: boolean,
-): NodeJS.ReadableStream => {
-  const through = new PassThrough({ objectMode: true });
-  loadRealMinio().then(
-    (real) => {
-      const stream = real.listObjectsV2(bucket, prefix, recursive);
-      stream.on('data', (obj: unknown) => through.write(obj));
-      stream.on('end', () => through.end());
-      stream.on('error', (err: unknown) => through.emit('error', err));
-    },
-    (err: unknown) => through.emit('error', err),
-  );
-  return through;
-};
-
-/**
- * Build a synchronous facade over a lazily-loaded client. Every property
- * access returns a bound function (cached per-property so identity is
- * stable); calling it runs `overrides[prop]` if one is supplied, else awaits
- * `load()` and forwards the call to the real client's same-named method.
- */
-function createLazyFacade<T extends object>(
-  load: () => Promise<T>,
-  overrides: Partial<Record<string, (...args: unknown[]) => unknown>> = {},
-): T {
-  const cache = new Map<string | symbol, (...args: unknown[]) => unknown>();
-  return new Proxy({} as T, {
-    get(_target, prop) {
-      const existing = cache.get(prop);
-      if (existing) return existing;
-      const override = typeof prop === 'string' ? overrides[prop] : undefined;
-      const fn =
-        override ??
-        ((...args: unknown[]) =>
-          load().then((real) => {
-            const method = (real as Record<string | symbol, unknown>)[prop];
-            if (typeof method !== 'function') {
-              throw new TypeError(
-                `lazy client facade: '${String(prop)}' is not a function on the loaded client`,
-              );
-            }
-            return (method as (...a: unknown[]) => unknown).apply(real, args);
-          }));
-      cache.set(prop, fn);
-      return fn;
-    },
-  }) as T;
+  const client = build();
+  global[key] = client;
+  return client;
 }
 
 // ── Pool-instrumentor seam (dependency inversion, #317) ───────────────────────
@@ -405,12 +319,8 @@ export const resetDbWakeSingleflight = (): void => {
  * this: dropping a live pool's reference without ending it leaks sockets.
  */
 export const resetClients = (): void => {
-  delete lazyClientGlobal[CERBOS_FACADE_KEY];
-  delete lazyClientGlobal[CERBOS_REAL_KEY];
-  delete lazyClientGlobal[CERBOS_LOADING_KEY];
-  delete lazyClientGlobal[MINIO_FACADE_KEY];
-  delete lazyClientGlobal[MINIO_REAL_KEY];
-  delete lazyClientGlobal[MINIO_LOADING_KEY];
+  delete lazyClientGlobal[CERBOS_CLIENT_KEY];
+  delete lazyClientGlobal[MINIO_CLIENT_KEY];
   pgPool = null;
   pgPoolRO = null;
   resetPoolInstrumentor();
@@ -765,36 +675,42 @@ const instrumentPool = (pool: Pool, role: PoolRole): Pool => {
 
 /**
  * The cerbos client — SYNCHRONOUS, same `Cerbos` return type as before
- * #1777 (public API frozen for v1.0). Returns a facade, memoized on
- * `globalThis` so every copy of this module hands back the SAME facade
- * object; the real `@cerbos/grpc` SDK is only `import()`ed the first time a
- * method is actually CALLED on it (see the block comment above
- * `lazyClientGlobal`).
+ * #1777 (public API frozen for v1.0). `require('@cerbos/grpc')` runs on
+ * first call only (see the block comment above `lazyClientGlobal`); every
+ * call after the first, process-wide, returns the memoized real instance.
  */
 export const getCerbosClient = (): Cerbos => {
-  let facade = lazyClientGlobal[CERBOS_FACADE_KEY];
-  if (!facade) {
-    facade = createLazyFacade<Cerbos>(loadRealCerbos);
-    lazyClientGlobal[CERBOS_FACADE_KEY] = facade;
-  }
-  return facade;
+  return getOrCreateClient(CERBOS_CLIENT_KEY, () => {
+    const { GRPC } = require('@cerbos/grpc') as {
+      GRPC: new (target: string, options: { tls: boolean }) => Cerbos;
+    };
+    const target = process.env.CERBOS_URL || 'cerbos.default.svc.cluster.local:3593';
+    return new GRPC(target, { tls: false });
+  });
 };
 
 /**
  * The MinIO client — SYNCHRONOUS, same `Minio.Client` return type as
- * before #1777. Mirrors `getCerbosClient`'s facade/memoization contract;
- * `listObjectsV2` is special-cased (see `lazyListObjectsV2`) because it
- * returns a stream synchronously rather than a `Promise`.
+ * before #1777. `require('minio')` runs on first call only; this is the
+ * REAL SDK instance, so every method (including the sync-stream ones —
+ * `listObjects`, `listIncompleteUploads`, `listenBucketNotification`),
+ * every getter (`extensions`), and every property write (`region`,
+ * `partSize`, `enableSHA256`, …) behaves exactly as on a client built the
+ * old, eager way.
  */
 export const getMinioClient = (): Minio.Client => {
-  let facade = lazyClientGlobal[MINIO_FACADE_KEY];
-  if (!facade) {
-    facade = createLazyFacade<Minio.Client>(loadRealMinio, {
-      listObjectsV2: lazyListObjectsV2 as (...args: unknown[]) => unknown,
+  return getOrCreateClient(MINIO_CLIENT_KEY, () => {
+    const { Client: MinioClient } = require('minio') as {
+      Client: new (opts: unknown) => Minio.Client;
+    };
+    return new MinioClient({
+      endPoint: process.env.MINIO_ENDPOINT || 'minio.default.svc.cluster.local',
+      port: Number.parseInt(process.env.MINIO_PORT || '9000', 10),
+      useSSL: process.env.MINIO_USE_SSL === 'true',
+      accessKey: process.env.MINIO_ACCESS_KEY || 'minio',
+      secretKey: process.env.MINIO_SECRET_KEY || 'minio123',
     });
-    lazyClientGlobal[MINIO_FACADE_KEY] = facade;
-  }
-  return facade;
+  });
 };
 
 // Scale-to-zero-sane pool defaults. Under Knative each pod owns its own pool,
