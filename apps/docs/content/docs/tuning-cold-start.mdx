@@ -1,0 +1,139 @@
+---
+title: Tuning cold start
+description: What a scale-from-zero wake is made of, which levers actually move it, and by how much — with the conditions behind every number.
+---
+
+[Scale-to-zero](/docs/scale-to-zero) covers how knext drops an idle service to zero and wakes it
+again. This page goes one level deeper: what the wake is actually spending time on, which of that
+is yours to change, and what each change was measured to cost or save — with the cluster, machine
+type and sample size behind every figure, so you can judge whether it applies to your workload.
+
+Treat every number on this page as **one measurement on one cluster**, not a guarantee. Re-measure
+on your own cluster and app before relying on a specific figure.
+
+## What a cold start is made of
+
+A wake from zero replicas moves through the same handful of phases regardless of cluster or
+runtime:
+
+| Phase | What happens |
+|---|---|
+| **Activation** | The request arrives at an idle service; the activator buffers it and tells the autoscaler to scale 0→1. |
+| **Scheduling** | Kubernetes picks a node for the new pod and binds it. |
+| **Container start** | The node pulls the image (skipped if it's already cached locally), creates the sandbox, and starts the container. |
+| **Runtime boot** | The server process starts and reaches "listening". |
+| **First response** | The app answers its readiness check, the pod is marked ready, and the buffered request is forwarded and rendered. |
+
+**In measurements on two different clusters, activation and scheduling together took well under
+a quarter of a second, while container start, runtime boot and the app's own first response
+together accounted for the rest — typically on the order of two to three seconds.** In other
+words: the scheduler doing its job is a small, mostly fixed cost; the node your pod lands on and
+the app booting on it are where the time actually goes, and where tuning has something to work
+with. The sections below are organized around that: machine choice and CPU availability act on
+container start and runtime boot; runtime choice acts on runtime boot; and the biggest single
+app-level cost sits inside "first response", in work the app itself does before it starts
+answering.
+
+## Levers you control today
+
+Each lever below states the cluster, machine type, sample size and whether images were already
+cached on the node — because all of these measurements were taken with images **already present**
+on every node, and that condition matters (see [keep images pre-pulled](#keep-images-pre-pulled)
+below).
+
+### Node machine family
+
+Moving the same pod from a smaller, shared-core machine type to a larger, dedicated-core one
+measured a real, substantial saving. On a managed Kubernetes cluster with every image already
+cached, moving from a 4-vCPU shared-core machine type to a 4-vCPU dedicated-core machine type of
+the next generation saved **roughly 1.3 seconds** for the compiled-executable runtime and
+**roughly 1.9–2.0 seconds** for the standard runtime, each at a sample size of ten wakes per
+machine type, with the difference clearly outside measurement noise. Every CPU-bound phase of the
+wake — container start, runtime boot, and the app's own first response — shrank; the fixed
+control-plane phases (activation and scheduling) did not move.
+
+This is the single largest lever measured on this page. The trade-off is cost: the
+dedicated-core machine type priced at roughly 55% more per hour than the shared-core one, on-demand,
+at the time of measurement. If your workload is cold-start-sensitive, moving the node pool it runs
+on to a dedicated-core machine type is worth evaluating against that price difference.
+
+### CPU available at boot
+
+On the same shared-core 4-vCPU machine type, raising the pod's CPU **limit** from 1 to 4 (its
+request left unchanged) measured a real saving of **roughly 0.7 seconds** on the compiled-executable
+runtime, at a sample size of ten wakes per arm. The same change, measured separately on a different
+cluster with its own different CPU architecture, saved only tens of milliseconds — so whether this
+lever helps you depends on the CPU your nodes actually run, not just on the number "4".
+
+Running every pod permanently at a 4-CPU limit costs tenancy headroom you'd otherwise share across
+more pods per node. A cheaper way to get the same effect only while a pod is booting, without
+paying for it once the pod is warm, is a **startup CPU boost** — your cloud provider's managed
+option if it has one, or the open-source [Kube Startup CPU Boost
+controller](https://github.com/google/kube-startup-cpu-boost), which raises a pod's CPU
+request/limit until it becomes ready and reverts them once it is. This is a recipe to evaluate on
+your own cluster, not a feature knext ships — the measurement above used a fixed 4-CPU limit as the
+upper bound of what a boost could buy; a real boost controller adds its own resize latency on top.
+
+### Runtime choice
+
+knext's default build target is a compiled Bun executable with its server bytecode baked in at
+build time; `runtime: 'node'` selects the standard Node server with a V8 compile cache baked into
+the image instead. See [Bytecode caching](/docs/bytecode) for how each cache works.
+
+With bytecode caching verified live on both, the compiled Bun executable booted **roughly 0.7
+seconds faster** than Node on a shared-core 4-vCPU machine type (sample size ten wakes per
+runtime, a clearly real difference, replicated in a second run at a similar size). On a
+dedicated-core machine type of the next generation, the same comparison measured only
+**roughly 0.1 second** of difference — not clearly distinguishable from noise at that sample size.
+**State this honestly: there is no "fastest runtime" here.** The gap between runtimes tracks how
+CPU-bound the node is — a slower, shared-core CPU stretches the work Bun does faster at boot into
+a visible gap; a faster, dedicated-core CPU narrows it to the point where it mostly disappears.
+Pick a runtime for compatibility and operational fit, not for cold start, and expect the gap to
+shrink on faster hardware.
+
+### Keep images pre-pulled
+
+Every cold-start figure on this page and on the [Scale-to-zero](/docs/scale-to-zero) page was
+measured with the image **already present on the node** before the wake — pre-pulled with a
+throwaway pod per image per node, confirmed by zero "pulling image" events across every measured
+wake. A wake whose image is not yet on the node pays an image pull on top of everything described
+here, and that cost is not included in any number above. If your deploys land on nodes that don't
+already have the image — a fresh node, a cluster autoscaler adding capacity, or a node pool that
+rotates — plan for that pull as an additional, separate cost, and consider keeping a warm pool or
+pre-pulling images where your platform supports it.
+
+### A node-networking stall on some clusters (flannel CNI)
+
+On at least one cluster using the flannel CNI — the network plugin some managed Kubernetes
+offerings run by default — a wake was observed to stall for **roughly 8.5 seconds** after the
+container had already started and the app was already listening: same-node traffic reached the pod
+immediately, but traffic from outside the node (the health-check probe, and the request itself)
+could not reach it until the pod sent its own first outbound packet. The pattern points at a stale
+network-neighbour entry left behind by a recycled pod IP address — the node had cached the previous
+pod's network address for that IP and kept routing to it until the new pod's own outbound traffic
+corrected it.
+
+**This is a cluster networking condition, not something your app or knext's runtime controls.**
+If you're on a cluster using the flannel CNI and you see occasional wakes that take several
+seconds longer than your typical one, with the pod otherwise healthy, check whether your cluster
+shows the same pattern — a pod reachable from its own node immediately but unreachable from
+outside it for several seconds after it starts listening. A fix that primes the pod's own first
+outbound packet automatically is planned for a future release; until then, this is a condition to
+watch for rather than one knext currently works around for you.
+
+## What is coming
+
+Every scaffolded knext app ships with an `instrumentation.ts` hook that Next.js runs once per
+server start, used to wire up tracing. Measured on two different clusters, this hook currently
+pulls in its full tracing client library **unconditionally and synchronously, before the server
+starts answering requests** — even on an app with tracing turned off, where none of that code
+ends up doing anything. That import alone was measured to cost **roughly 0.8 to 0.9 seconds** of
+the wake, on both the compiled Bun runtime and the standard Node runtime, consistently across
+multiple measurements.
+
+A future release of knext is planned to skip that import whenever tracing is off, so an app that
+doesn't use tracing doesn't pay for the client library it never calls. This has no version attached
+yet beyond "a future release" — treat it as a planned improvement, not something available today.
+If you have your own `instrumentation.ts`, the same pattern applies to your own code: anything it
+imports at the top level runs before your app can answer its first request, whether or not that
+code is actually needed.
