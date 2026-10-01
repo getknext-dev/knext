@@ -112,7 +112,19 @@ function checkoutTag(rcTag) {
   return worktreeDir;
 }
 
-/** Pack the publishable group the way the CREDENTIAL LANES do: bun pm pack. */
+/**
+ * Pack the publishable group the way the CREDENTIAL LANES do: `bun pm pack`.
+ *
+ * Each member is packed into its OWN scratch dest dir, identified by a
+ * before/after `readdirSync` diff (the same "did this actually produce a
+ * tarball" pattern `npmPackOne` uses) — NOT by reading the tarball's
+ * `package.json` with `readTarEntries`. `@getknext/core`'s `bun pm pack`
+ * output is the measured #1562 bug itself (a duplicate `dist/cli/kn-next.js`
+ * entry for its two `bin` keys), which `readTarEntries` fail-closed REJECTS;
+ * identifying tarballs by filename, rather than by parsing their
+ * (deliberately malformed) contents, means that bug surfaces later as a
+ * reported comparison finding, never as a crash before the comparison runs.
+ */
 function bunPackMembers(worktreeDir) {
   execFileSync('bun', ['install', '--frozen-lockfile'], { cwd: worktreeDir, stdio: 'inherit' });
   for (const m of BUN_PACKED_MEMBERS) {
@@ -121,14 +133,20 @@ function bunPackMembers(worktreeDir) {
       stdio: 'inherit',
     });
   }
-  const dest = scratchDir('knext-pack-parity-bun-dest-');
   const byName = new Map();
   for (const m of BUN_PACKED_MEMBERS) {
+    const dest = scratchDir('knext-pack-parity-bun-dest-');
     const pkgDir = join(worktreeDir, m.dir);
+    const before = new Set(readdirSync(dest).filter((f) => f.endsWith('.tgz')));
     execFileSync('bun', ['pm', 'pack', '--destination', dest], { cwd: pkgDir, stdio: 'inherit' });
-  }
-  for (const m of BUN_PACKED_MEMBERS) {
-    byName.set(m.name, findTarballFor(dest, m.name));
+    const created = readdirSync(dest).filter((f) => f.endsWith('.tgz') && !before.has(f));
+    if (created.length !== 1) {
+      throw new Error(
+        `bun pm pack in ${pkgDir} produced ${created.length} new tarball(s) in ${dest} ` +
+          `(expected exactly 1): ${created.join(', ') || '<none>'}`,
+      );
+    }
+    byName.set(m.name, join(dest, created[0]));
   }
   return byName;
 }
@@ -160,22 +178,6 @@ function npmPackMembers(worktreeDir) {
   return byName;
 }
 
-/** Find the single .tgz in `dir` that belongs to `name`, by reading its package.json. */
-function findTarballFor(dir, name) {
-  const candidates = readdirSync(dir).filter((f) => f.endsWith('.tgz'));
-  for (const f of candidates) {
-    const tgz = join(dir, f);
-    const entries = readTarEntries(tgz);
-    const pkgEntry = entries.find((e) => e.name === 'package/package.json' && e.type === 'file');
-    if (!pkgEntry) continue;
-    const pkg = JSON.parse(pkgEntry.data.toString('utf8'));
-    if (pkg.name === name) return tgz;
-  }
-  throw new Error(
-    `no tarball for ${name} found in ${dir} (candidates: ${candidates.join(', ') || '<none>'})`,
-  );
-}
-
 /** Download the real published tarball for name@version from the npm registry. */
 function downloadPublished(name, version) {
   const dest = scratchDir('knext-pack-parity-registry-dest-');
@@ -186,6 +188,37 @@ function downloadPublished(name, version) {
   const tgz = readdirSync(dest).find((f) => f.endsWith('.tgz'));
   if (!tgz) throw new Error(`npm pack ${name}@${version} produced no .tgz`);
   return join(dest, tgz);
+}
+
+/**
+ * Compare two tarballs, tolerating a tarball that `readTarEntries` itself
+ * refuses to read (e.g. the measured #1562 `bun pm pack` bug: a duplicate
+ * tar entry for `@getknext/core`'s `dist/cli/kn-next.js`, which the multi-
+ * `bin`-key target produces and `readTarEntries` fail-closed REJECTS rather
+ * than silently de-duplicating). An unreadable tarball is itself a drift
+ * finding — never a crash, and never silently skipped.
+ *
+ * @param {string} name
+ * @param {string} aPath
+ * @param {string} bPath
+ * @param {{aLabel: string, bLabel: string}} sides
+ * @returns {string | null} a report, or null when identical
+ */
+function compareTarballsSafely(name, aPath, bPath, sides) {
+  let aEntries;
+  let bEntries;
+  try {
+    aEntries = readTarEntries(aPath);
+  } catch (err) {
+    return `${name}: ${sides.aLabel} tarball is UNREADABLE (fails closed, itself a drift finding): ${err.message}`;
+  }
+  try {
+    bEntries = readTarEntries(bPath);
+  } catch (err) {
+    return `${name}: ${sides.bLabel} tarball is UNREADABLE (fails closed, itself a drift finding): ${err.message}`;
+  }
+  const result = comparePackedTarballEntries(aEntries, bEntries);
+  return formatPackParityReport(name, result, sides);
 }
 
 function writeSummary(lines) {
@@ -223,14 +256,9 @@ function main() {
     const allNames = new Set([...bunTarballs.keys(), ...npmTarballs.keys()]);
     for (const name of allNames) {
       const registryTarball = downloadPublished(name, version);
-      const registryEntries = readTarEntries(registryTarball);
 
       if (bunTarballs.has(name)) {
-        const result = comparePackedTarballEntries(
-          readTarEntries(bunTarballs.get(name)),
-          registryEntries,
-        );
-        const report = formatPackParityReport(name, result, {
+        const report = compareTarballsSafely(name, bunTarballs.get(name), registryTarball, {
           aLabel: 'bun pm pack (credential-lane way)',
           bLabel: 'npm registry (published bytes)',
         });
@@ -250,11 +278,7 @@ function main() {
       }
 
       if (npmTarballs.has(name)) {
-        const result = comparePackedTarballEntries(
-          readTarEntries(npmTarballs.get(name)),
-          registryEntries,
-        );
-        const report = formatPackParityReport(name, result, {
+        const report = compareTarballsSafely(name, npmTarballs.get(name), registryTarball, {
           aLabel: 'npm pack (publish-tool way)',
           bLabel: 'npm registry (published bytes)',
         });
