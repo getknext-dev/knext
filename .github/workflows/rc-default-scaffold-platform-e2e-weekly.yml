@@ -101,15 +101,28 @@ jobs:
       APP_NAME: rc-scaffold-e2e
       BUCKET: rc-scaffold-e2e-assets
     steps:
+      # The HARNESS checkout — the workflow's own commit (github.sha; main for
+      # scheduled runs). scripts/rc-scaffold-platform-e2e.mjs, the
+      # scripts/kind-manifests/ bring-up scripts, and the e2e-support HTTP
+      # client live here, so a scheduled run always has the assertions and
+      # cluster-bringup scripts this very workflow file ships with — never an
+      # older (or newer) copy pinned to whatever rcTag happens to resolve to.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A SECOND checkout, into rc-src/, used ONLY to build the operator image
+      # and apply its CRD/manifests — those must match each other, and both
+      # must match the rc ref under test. Nothing else reads from rc-src/.
+      - name: Checkout the resolved rc ref (operator + CRD source only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-git-ref.outputs.git-sha }}
+          path: rc-src
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: packages/kn-next-operator/go.mod
-          cache-dependency-path: packages/kn-next-operator/go.sum
+          go-version-file: rc-src/packages/kn-next-operator/go.mod
+          cache-dependency-path: rc-src/packages/kn-next-operator/go.sum
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -126,10 +139,10 @@ jobs:
         with:
           install_only: true
 
-      # The CHECKOUT (pinned to the resolved rc ref) builds ONLY the operator
-      # and lends the kind-manifest/support scripts below — the scaffolded
-      # app under test comes from npm, never from this tree.
-      - name: Install workspace dependencies (operator build support only)
+      # Workspace deps for the HARNESS checkout (scripts/kind-manifests/,
+      # scripts/rc-scaffold-platform-e2e.mjs). The operator build uses its
+      # OWN checkout (rc-src/) and never reads from this install.
+      - name: Install workspace dependencies (harness support only)
         run: bun install --frozen-lockfile
 
       - name: Create kind cluster (registry certs.d config_path)
@@ -175,12 +188,15 @@ jobs:
           kubectl wait --for=condition=Available --timeout=300s \
             -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
 
-      # The operator is built from the resolved rc ref, so an operator
-      # regression on that ref lands in the same run as the scaffold/deploy
-      # under test.
+      # The operator (and its CRD/manifests, via `make install`/`make deploy`
+      # below — both read from THIS checkout's config/) is built from the
+      # resolved rc ref, so an operator regression on that ref lands in the
+      # same run as the scaffold/deploy under test. Everything else in this
+      # job (the harness, the assertion script) comes from the default
+      # checkout above, never from rc-src/.
       - name: Build + push the operator image, capture + verify the deployed digest
         id: build-operator
-        working-directory: packages/kn-next-operator
+        working-directory: rc-src/packages/kn-next-operator
         run: |
           set -euo pipefail
           IMG="localhost:5001/kn-next-operator:rc-e2e-${GITHUB_RUN_ID}"
@@ -294,10 +310,24 @@ jobs:
           kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
           kubectl -n "$APP_NS" port-forward svc/minio 9000:9000 >/tmp/pf-minio.log 2>&1 &
           for _ in $(seq 1 30); do
-            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; then exit 0; fi
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then break; fi
             sleep 1
           done
-          echo "::error::port-forwards never came up"; cat /tmp/pf-*.log; exit 1
+          if ! (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then
+            echo "::error::kourier-internal port-forward never came up"; cat /tmp/pf-*.log; exit 1
+          fi
+          # A bare TCP connect-test is not a functional check for MinIO: `kubectl
+          # port-forward` opens its local listener (and accepts connections)
+          # immediately on startup, before the SPDY tunnel to the pod is actually
+          # proxying traffic — the very next step's `aws s3 mb` hit that window and
+          # got "Could not connect to the endpoint URL" even though the TCP check
+          # above had just passed. Verify end-to-end by hitting MinIO's own
+          # readiness endpoint THROUGH the forward, bounded and failing loudly.
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::MinIO port-forward never became reachable"; cat /tmp/pf-*.log; exit 1
 
       - name: Create the MinIO bucket for static assets (anonymous-read)
         run: |
