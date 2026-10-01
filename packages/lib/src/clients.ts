@@ -1,8 +1,8 @@
-import { createRequire } from 'node:module';
 import type { GRPC as Cerbos } from '@cerbos/grpc';
 import type * as Minio from 'minio';
 import { Pool } from 'pg';
 import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
+import { loadCerbosSdk, loadMinioSdk } from './lazy-sdk-loaders.mjs';
 import { logSlowDep } from './slow-dep';
 
 // Singleton instances. `pgPool`/`pgPoolRO` stay plain module-level `let`s —
@@ -40,19 +40,49 @@ let pgPoolRO: Pool | null = null;
 // `globalThis` so every call after the first (process-wide, see below)
 // returns the cached instance without touching the module system again.
 //
-// `require` here is `createRequire(import.meta.url)`'s return value, bound
-// to a local identifier literally named `require` (not e.g. `req`) ON
-// PURPOSE: webpack/turbopack's static import-tracing matches the IDENTIFIER
-// `require` textually, not the variable's origin, so `require('minio')`
-// here is traced and bundled into the Next.js standalone server output (and
-// the Bun compiled executable) exactly like a static import would be — the
-// literal string argument is what makes it traceable at all. Renaming the
-// binding (`req('minio')`) would make the call invisible to output tracing:
-// `standalone-seam-alive.test.ts`-style build-artifact proof is what confirms
-// this in `apps/file-manager`, on both runtimes (ADR-0027's own standing
-// requirement for this class of seam) — see that app's
-// `instrumentation-edge-safe.test.ts` family and the standalone-build
-// assertions referenced from the PR.
+// Round 3 (#1777 fix-forward) — WHERE the `require(...)` calls live, and
+// why: they are NOT inline in this file. `loadCerbosSdk`/`loadMinioSdk` are
+// imported from `./lazy-sdk-loaders.mjs`, a hand-written, UNPROCESSED plain
+// JS file that `tsup.config.ts` marks `external` so esbuild never reads its
+// contents.
+//
+// Two prior shapes of this seam were each defeated by a DIFFERENT static
+// tracer, and both failures are specific to webpack standalone output
+// (`next build --webpack`, the node×webpack / bun×webpack credential
+// cells) — turbopack inlines the SDK (nothing to trace) and the bun
+// compiled executable resolves differently again:
+//
+//  1. A local `const require = createRequire(import.meta.url)` bound at
+//     module scope, called as `require('minio')`. esbuild (tsup's bundler)
+//     renames a locally-bound identifier that collides with another
+//     chunk's own `require` local to `require2` when chunks sharing this
+//     pattern get merged — measured directly on `packages/lib/dist`:
+//     `const require2 = createRequire(...)` alongside `require2("minio")`.
+//     Next's output file tracer (`@vercel/nft`) and webpack's own
+//     `require(...)` call matching are SCOPE-AWARE — they resolve the
+//     callee identifier to its lexical binding — so a renamed local is
+//     invisible to both, and neither traces/bundles the target into
+//     `.next/standalone/node_modules`.
+//  2. Referencing the AMBIENT, unshadowed `require` global directly
+//     (`typeof require === 'function' ? require('minio') : …`) INLINE in
+//     this file, with no local binding to rename. That defeats (1), but
+//     esbuild bundling to ESM format ALWAYS rewrites a free `require`
+//     reference it encounters into its own `__require` shim
+//     (`var __require = (x) => typeof require !== "undefined" ? require :
+//     …`) — measured directly with esbuild 0.27.3, `--bundle --format=esm`,
+//     independent of `platform`/`external` settings; there is no flag to
+//     suppress it. `__require('minio')` is just as invisible to nft/webpack
+//     as `require2('minio')` was — same defect, different cause.
+//
+// The fix that survives both: keep the two loaders in a file esbuild never
+// bundles (an external relative import), so it is copied byte-for-byte into
+// `dist/` by the build's `onSuccess` hook instead of being parsed by
+// esbuild at all. `require('minio')` / `require('@cerbos/grpc')`,
+// referencing the ambient global directly (never a local binding), survive
+// unrenamed and unshimmed all the way to the published `dist/`, where
+// Next's webpack (bundling `@getknext/lib`'s source into the app bundle)
+// and `@vercel/nft` both see the real, literal, unshadowed `require(...)`
+// call. See `lazy-sdk-loaders.mjs`'s own file banner for the full detail.
 //
 // Anchored on `globalThis` via `Symbol.for('knext.lib.*')` rather than a
 // plain module-level `let` (#352, same reasoning as the pool instrumentor
@@ -78,10 +108,6 @@ interface LazyClientGlobal {
 }
 
 const lazyClientGlobal = globalThis as unknown as LazyClientGlobal;
-
-// See the block comment above for why this is bound to an identifier
-// literally named `require`.
-const require = createRequire(import.meta.url);
 
 /**
  * Return the cached client at `key` if present, else build, cache and return
@@ -681,7 +707,10 @@ const instrumentPool = (pool: Pool, role: PoolRole): Pool => {
  */
 export const getCerbosClient = (): Cerbos => {
   return getOrCreateClient(CERBOS_CLIENT_KEY, () => {
-    const { GRPC } = require('@cerbos/grpc') as {
+    // `loadCerbosSdk()` — see the block comment above `CERBOS_CLIENT_KEY`
+    // for why the `require('@cerbos/grpc')` call lives in
+    // `./lazy-sdk-loaders.mjs` rather than inline here.
+    const { GRPC } = loadCerbosSdk() as {
       GRPC: new (target: string, options: { tls: boolean }) => Cerbos;
     };
     const target = process.env.CERBOS_URL || 'cerbos.default.svc.cluster.local:3593';
@@ -700,7 +729,10 @@ export const getCerbosClient = (): Cerbos => {
  */
 export const getMinioClient = (): Minio.Client => {
   return getOrCreateClient(MINIO_CLIENT_KEY, () => {
-    const { Client: MinioClient } = require('minio') as {
+    // `loadMinioSdk()` — see the block comment above `CERBOS_CLIENT_KEY` for
+    // why the `require('minio')` call lives in `./lazy-sdk-loaders.mjs`
+    // rather than inline here.
+    const { Client: MinioClient } = loadMinioSdk() as {
       Client: new (opts: unknown) => Minio.Client;
     };
     return new MinioClient({

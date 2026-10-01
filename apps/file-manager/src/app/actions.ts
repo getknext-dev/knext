@@ -28,7 +28,21 @@ export async function uploadFile(formData: FormData) {
       await minio.putObject(bucketName, file.name, buffer, buffer.length);
       storagePath = `${bucketName}/${file.name}`;
     } catch (storageError) {
-      console.warn('Object storage unavailable, storing metadata only:', storageError);
+      // #1777 round 3: distinguish "the minio SDK itself failed to load"
+      // (`require('minio')` resolution failure — the webpack-standalone
+      // defect this round fixes) from an ordinary storage/network error
+      // (no reachable MinIO in this environment, which IS expected here and
+      // must not be conflated with it). Both land in this catch — the outer
+      // catch's generic "Failed to upload file" cannot tell them apart
+      // (self-contained-e2e.test.ts's upload assertion, #1784). A distinct,
+      // greppable marker on ONLY the module-resolution case lets a test
+      // assert the SDK loaded without needing a live MinIO target.
+      const code = (storageError as { code?: string } | undefined)?.code;
+      if (code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND') {
+        console.error('[minio-sdk-load-failed]', storageError);
+      } else {
+        console.warn('Object storage unavailable, storing metadata only:', storageError);
+      }
     }
 
     // Store file metadata in database

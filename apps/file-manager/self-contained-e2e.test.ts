@@ -183,6 +183,18 @@ describe.skipIf(skipReason !== null)(
         // a storage/DB failure, which is the action's own answer, not a cap).
         expect(ok.text).not.toContain('No file provided');
         expect(ok.text).toContain('"error":"Failed to upload file"');
+        // #1777 round 3: `"Failed to upload file"` is ALSO what the outer
+        // catch reports when `db.query` fails with no real Postgres — it
+        // cannot distinguish that from `require('minio')` itself failing to
+        // resolve in this standalone build (the webpack-standalone defect
+        // this round fixes: `getMinioClient()`'s error is swallowed by
+        // `actions.ts`'s own inner catch before the outer one ever runs).
+        // `actions.ts` logs a DISTINCT, greppable marker only on a
+        // module-resolution failure (`code === 'MODULE_NOT_FOUND'`), never on
+        // an ordinary storage/network error (expected here — no live MinIO
+        // target) — so asserting its ABSENCE is the unambiguous proof that
+        // the minio SDK loaded, independent of whether storage is reachable.
+        expect(plain.output()).not.toContain('[minio-sdk-load-failed]');
         // Over Next's 1 MB action limit: Next refuses it, knext does not.
         expect((await upload(2 * 1024 * 1024)).status).not.toBe(413);
         // Over knext's default cap: 413 before Next sees it.
