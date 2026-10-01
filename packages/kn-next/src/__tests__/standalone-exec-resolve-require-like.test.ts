@@ -37,9 +37,8 @@ function write(path: string, content: string): void {
  *     `require` attempt must fail and the ESM fallback must still resolve it.
  */
 function fixtureDir(): { dir: string; cleanup: () => void } {
-    const dir = realpathSync(
-        mkdtempSync(join(tmpdir(), "knext-resolve-require-like-")),
-    );
+    const raw = mkdtempSync(join(tmpdir(), "knext-resolve-require-like-"));
+    const dir = realpathSync(raw);
     write(
         join(dir, "node_modules/dual-condition-pkg/package.json"),
         JSON.stringify({
@@ -78,7 +77,7 @@ function fixtureDir(): { dir: string; cleanup: () => void } {
     );
     return {
         dir,
-        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+        cleanup: () => rmSync(raw, { recursive: true, force: true }),
     };
 }
 
