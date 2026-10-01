@@ -655,6 +655,9 @@ describe('the fingerprint hashes the EXECUTING workflow file (ADR-0039 Amendment
       // MUSL_NATIVE_LOCKFILE_FILES alongside the sharp entries above.
       'scripts/musl-native-lockfiles/sqlite3-5.0.2/package.json',
       'scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json',
+      // #1759: sqlite3 5.1.7 (the turbopack-reports fixture).
+      'scripts/musl-native-lockfiles/sqlite3-5.1.7/package.json',
+      'scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json',
     ]) {
       mkdirSync(join(root, dirname(rel)), { recursive: true });
       writeFileSync(join(root, rel), '{}\n');
