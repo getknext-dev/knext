@@ -91,24 +91,30 @@ func TestBuildDesiredKsvcReadOnlyRootFilesystem(t *testing.T) {
 	}
 }
 
-// The standalone (node/bun-standalone) shape gets an explicit emptyDir mount
-// for /tmp AND for Next's own optimized-image variant cache
-// (`.next/standalone/.next/cache/images`, image-cache-sync.ts / ADR-0006) —
-// the one runtime write path Next's built-in image optimizer uses that lives
-// under the (now read-only) app root. The vinext single-executable shape
-// (build="vinext") has no such write path (its own image optimizer never
-// touches local disk — vinext-image-optimizer.ts), so it renders with only
-// the universal /tmp mount, not the image-cache one.
+// #1778: by DEFAULT (writableCache unset/false), no emptyDir is mounted at
+// all, for ANY build shape, even though readOnlyRootFilesystem stays ON —
+// provisioning the volume cost ~300-360ms of pod-sandbox setup on every cold
+// wake (measured OKE + GKE) whether or not the app ever wrote to it. Setting
+// `spec.security.writableCache: true` opts back into the pre-#1778 mounts:
+// /tmp for every build shape, plus Next's own optimized-image variant cache
+// (`.next/standalone/.next/cache`, image-cache-sync.ts / ADR-0006) for the
+// standalone shape only — the vinext single-executable shape's own image
+// optimizer never touches local disk (vinext-image-optimizer.ts).
 func TestBuildDesiredKsvcReadOnlyRootFilesystemMounts(t *testing.T) {
 	cases := []struct {
 		name           string
 		build          string
+		writableCache  *bool
+		wantTmp        bool
 		wantImageCache bool
 	}{
-		{"standalone (turbopack) mounts /tmp and the image cache", "turbopack", true},
-		{"standalone (unset build) mounts /tmp and the image cache", "", true},
-		{"webpack mounts /tmp and the image cache", "webpack", true},
-		{"vinext mounts only /tmp", "vinext", false},
+		{"default (writableCache unset): no mounts at all, standalone", "turbopack", nil, false, false},
+		{"default (writableCache unset): no mounts at all, vinext", "vinext", nil, false, false},
+		{"writableCache explicitly false: no mounts, standalone", "turbopack", ptr.To(false), false, false},
+		{"writableCache true + standalone (turbopack): mounts /tmp and the image cache", "turbopack", ptr.To(true), true, true},
+		{"writableCache true + standalone (unset build): mounts /tmp and the image cache", "", ptr.To(true), true, true},
+		{"writableCache true + webpack: mounts /tmp and the image cache", "webpack", ptr.To(true), true, true},
+		{"writableCache true + vinext: mounts only /tmp", "vinext", ptr.To(true), true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,6 +133,9 @@ func TestBuildDesiredKsvcReadOnlyRootFilesystemMounts(t *testing.T) {
 					Image: "registry.example.com/app:v1@sha256:abc123",
 					Build: tc.build,
 				},
+			}
+			if tc.writableCache != nil {
+				app.Spec.Security = &appsv1alpha1.SecuritySpec{WritableCache: tc.writableCache}
 			}
 			ksvc := &servingv1.Service{
 				ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
@@ -152,11 +161,16 @@ func TestBuildDesiredKsvcReadOnlyRootFilesystemMounts(t *testing.T) {
 					foundImageCache = true
 				}
 			}
-			if !foundTmp {
-				t.Fatalf("build=%q: expected a /tmp VolumeMount, got %+v", tc.build, mounts)
+			if foundTmp != tc.wantTmp {
+				t.Fatalf("build=%q: /tmp mount present=%v, want %v (mounts=%+v)", tc.build, foundTmp, tc.wantTmp, mounts)
 			}
 			if foundImageCache != tc.wantImageCache {
 				t.Fatalf("build=%q: image-cache mount present=%v, want %v (mounts=%+v)", tc.build, foundImageCache, tc.wantImageCache, mounts)
+			}
+			if !tc.wantTmp && !tc.wantImageCache {
+				if len(ksvc.Spec.Template.Spec.Volumes) != 0 {
+					t.Fatalf("build=%q: expected NO volumes at all by default, got %+v", tc.build, ksvc.Spec.Template.Spec.Volumes)
+				}
 			}
 
 			// Every VolumeMount must resolve to a declared Volume — a dangling

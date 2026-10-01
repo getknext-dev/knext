@@ -73,7 +73,7 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 		return nn
 	}
 
-	It("defaults the app container to readOnlyRootFilesystem: true and mounts /tmp + the image cache", func() {
+	It("defaults the app container to readOnlyRootFilesystem: true and mounts NO volume (#1778)", func() {
 		nn := reconcileApp("rorf-default", nil, "")
 
 		ksvc := &servingv1.Service{}
@@ -86,12 +86,10 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 		Expect(c.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil())
 		Expect(*c.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
 
-		var mountPaths []string
-		for _, m := range c.VolumeMounts {
-			mountPaths = append(mountPaths, m.MountPath)
-		}
-		Expect(mountPaths).To(ContainElement("/tmp"))
-		Expect(mountPaths).To(ContainElement("/app/.next/standalone/.next/cache"))
+		// #1778: writableCache defaults off, so NO emptyDir is provisioned —
+		// not just unwritten. No volumes, no mounts.
+		Expect(c.VolumeMounts).To(BeEmpty())
+		Expect(ksvc.Spec.Template.Spec.Volumes).To(BeEmpty())
 
 		By("passing Knative's own webhook defaulting + validation, not just this repo's rendering")
 		// Filtered to ErrorLevel (the documented pattern, apis.FieldError doc
@@ -105,8 +103,32 @@ var _ = Describe("NextApp readOnlyRootFilesystem (#1332)", func() {
 		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
 	})
 
-	It("skips the standalone image-cache mount for the vinext single-executable shape", func() {
-		nn := reconcileApp("rorf-vinext", nil, "vinext")
+	It("writableCache: true mounts /tmp + the image cache for the standalone shape", func() {
+		nn := reconcileApp("rorf-writable", &appsv1alpha1.SecuritySpec{WritableCache: ptr.To(true)}, "")
+
+		ksvc := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+		c := ksvc.Spec.Template.Spec.Containers[0]
+
+		Expect(c.SecurityContext).NotTo(BeNil())
+		Expect(c.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil())
+		Expect(*c.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+
+		var mountPaths []string
+		for _, m := range c.VolumeMounts {
+			mountPaths = append(mountPaths, m.MountPath)
+		}
+		Expect(mountPaths).To(ContainElement("/tmp"))
+		Expect(mountPaths).To(ContainElement("/app/.next/standalone/.next/cache"))
+
+		By("passing Knative's own webhook defaulting + validation")
+		fetched := ksvc.DeepCopy()
+		fetched.SetDefaults(ctx)
+		Expect(fetched.Validate(ctx).Filter(apis.ErrorLevel)).To(BeNil())
+	})
+
+	It("writableCache: true skips the standalone image-cache mount for the vinext single-executable shape", func() {
+		nn := reconcileApp("rorf-vinext", &appsv1alpha1.SecuritySpec{WritableCache: ptr.To(true)}, "vinext")
 
 		ksvc := &servingv1.Service{}
 		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())

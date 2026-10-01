@@ -114,6 +114,56 @@ provided (measured ≈ −20% time-to-first-response on next@16.2.4 / Bun 1.3.5)
 This removes the JS recompile cost. It does **not** remove framework boot or the
 database pool re-establish — those are addressed below.
 
+### CPU limit at boot (`spec.resources.cpuLimit`, #1778)
+
+The operator's default CPU **limit** was raised from `1000m` to `4000m` — the
+**request** stays `250m`, unchanged, so this does not raise what the app is
+billed or scheduled against on a bin-packed cluster; it only raises the CFS
+quota ceiling a cold-starting pod can burst into while it is CPU-bound (JS
+parse, framework boot, and the first request's module evaluation). Measured on
+GKE (`e2-standard-4`, n=10, Holm p=0.0005): a 4-CPU limit with the request
+unchanged shaved **~675ms** off cold start — on a throttled 1-vCPU-class node
+the container was hitting its CFS quota during boot, not actually using 4
+cores. Fully overridable per app:
+
+```yaml
+spec:
+  resources:
+    cpuLimit: "1"   # revert to the old ceiling, or size up/down as needed
+```
+
+### No writable volume by default (`spec.security.writableCache`, #1778)
+
+Under the default-on `readOnlyRootFilesystem`, the operator used to always
+mount an `emptyDir` for `/tmp` and (for the standalone build shape) Next's
+`.next/cache` directory. Provisioning that volume costs pod-sandbox setup time
+on **every** cold wake — measured ~300-360ms on OKE and GKE — whether or not
+anything is ever written to it. The operator no longer mounts it by default:
+
+```yaml
+spec:
+  security:
+    readOnlyRootFilesystem: true   # default; unchanged
+    writableCache: false           # default: no emptyDir mounted
+```
+
+Under the default, `/tmp` and (for apps serving `next/image` without
+`spec.storage` configured) the image-optimizer's local variant cache become
+read-only-rejected (`EROFS`) instead of failing silently. This is **non-fatal**
+by design — the same pattern already accepted for Next's default
+ISR/fetch-cache fallback: a write failure is logged, and the app keeps serving
+from memory/baked state rather than crashing. The user-visible cost is
+performance, not correctness: an app using `next/image` heavily without
+object storage will re-optimize images on every request instead of caching
+the variant locally.
+
+Set `spec.security.writableCache: true` to restore the pre-#1778 mounts for an
+app that needs guaranteed local writes — most commonly an app that serves
+`next/image` without `spec.storage` configured, or one that has removed its
+`cacheHandler` and relies on Next's on-disk ISR fallback. Every knext-scaffolded
+app configures a `cacheHandler` unconditionally, so this is rarely required in
+practice.
+
 ### Database pool re-establishment (the other half of cold-start)
 
 Each Next.js instance opens its **own** connection pool to its zone's Postgres via

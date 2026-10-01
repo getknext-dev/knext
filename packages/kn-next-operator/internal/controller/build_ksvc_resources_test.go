@@ -96,13 +96,15 @@ func TestBuildDesiredKsvcRejectsMalformedResourceQuantity(t *testing.T) {
 // stop one app starving its neighbours.
 func TestBuildDesiredKsvcAppliesDefaultResources(t *testing.T) {
 	// Note on expected strings: Kubernetes canonicalises quantities, so the
-	// 1000m CPU limit in the source normalises to "1". Compare with
+	// 4000m CPU limit in the source normalises to "4". Compare with
 	// resource.Quantity.Equal, not string equality, so the assertion is on the
 	// VALUE rather than its formatting.
+	// #1778: CPU limit default raised 1000m -> 4000m (the REQUEST stays
+	// 250m) — measured ~675ms cold-start saving, GKE e2-standard-4.
 	const (
 		defaultCPURequest    = "250m"
 		defaultMemoryRequest = "512Mi"
-		defaultCPULimit      = "1000m"
+		defaultCPULimit      = "4000m"
 		defaultMemoryLimit   = "1Gi"
 	)
 

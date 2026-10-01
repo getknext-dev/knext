@@ -43,7 +43,7 @@ describe("buildNextAppCRObject — spec.resources (legacy scaling.cpu/memory kno
         expect((cr.spec as Record<string, unknown>).resources).toEqual({
             cpuRequest: "500m",
             memoryRequest: "512Mi",
-            cpuLimit: "1000m",
+            cpuLimit: "4000m",
             memoryLimit: "1Gi",
         });
     });

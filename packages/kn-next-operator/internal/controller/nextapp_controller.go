@@ -832,11 +832,17 @@ func deepHealthPath(nextApp *appsv1alpha1.NextApp) string {
 
 // buildWritableVolumes renders the emptyDir volumes + mounts the app
 // container needs to keep working under readOnlyRootFilesystem (#1332).
-// Returns (nil, nil) when the root stays writable — the pre-#1332 rendering,
-// byte-identical.
+// Returns (nil, nil) when the root stays writable, OR (#1778) when
+// writableCache is false/unset — provisioning this volume measurably costs
+// cold-start time (~300-360ms of pod-sandbox setup per wake, OKE + GKE,
+// `docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md`)
+// whether or not anything is ever written to it, so it is no longer
+// provisioned by default. See SecuritySpec.WritableCache for the opt-in and
+// what an app gives up by staying on the default (nothing fatal — see below).
 //
-// Two writable paths are provisioned, both audited against the ACTUAL
-// runtime write behaviour rather than assumed:
+// When writableCache is true, two writable paths are provisioned exactly as
+// before #1778, both audited against the ACTUAL runtime write behaviour
+// rather than assumed:
 //
 //   - /tmp: a universal scratch dir. Standard defense-in-depth practice, and
 //     cheap insurance against any as-yet-uncatalogued temp-file write (e.g. a
@@ -884,8 +890,8 @@ func deepHealthPath(nextApp *appsv1alpha1.NextApp) string {
 //     handler is registered) — so this residual EROFS is reachable only by an
 //     app that has removed or never had that wiring. Configuring a
 //     `cacheHandler` (Redis or otherwise) is the fix; see the operator docs.
-func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool) ([]corev1.Volume, []corev1.VolumeMount) {
-	if !readOnlyRootFS {
+func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool, writableCache bool) ([]corev1.Volume, []corev1.VolumeMount) {
+	if !readOnlyRootFS || !writableCache {
 		return nil, nil
 	}
 
@@ -1060,7 +1066,12 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// nil-means-true convention as the sibling NetworkPolicy field above.
 	readOnlyRootFS := nextApp.Spec.Security == nil || nextApp.Spec.Security.ReadOnlyRootFilesystem == nil ||
 		*nextApp.Spec.Security.ReadOnlyRootFilesystem
-	volumes, volumeMounts := buildWritableVolumes(nextApp, readOnlyRootFS)
+	// #1778: writableCache is nil-means-false (opt-IN), the opposite
+	// convention from the other SecuritySpec bools — the default no longer
+	// provisions the emptyDir.
+	writableCache := nextApp.Spec.Security != nil && nextApp.Spec.Security.WritableCache != nil &&
+		*nextApp.Spec.Security.WritableCache
+	volumes, volumeMounts := buildWritableVolumes(nextApp, readOnlyRootFS, writableCache)
 
 	// ContainerConcurrency default (#377, ADR-0028). Lowered from 100 → 20: a
 	// pod absorbing 100 concurrent requests before Knative added a 2nd replica
@@ -1076,13 +1087,28 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		cc = int64(nextApp.Spec.Scaling.ContainerConcurrency)
 	}
 
-	// Resource limits — aligned with CLI defaults
+	// Resource limits — aligned with CLI defaults.
+	//
+	// CPU LIMIT default raised 1000m -> 4000m (#1778). The REQUEST stays
+	// 250m — unchanged, so this does not raise what the app is billed/
+	// scheduled against on a bin-packed cluster. Measured (GKE e2-standard-4,
+	// n=10, Holm p=0.0005): a 4-CPU limit with the request unchanged shaves
+	// ~675ms off cold start by giving the CFS quota more headroom during the
+	// CPU-bound boot + post-listen window (the container is throttled against
+	// its LIMIT, not its request, under the default completely-fair
+	// scheduler). This is the cheapest available lever: no new controller, no
+	// CRD field, works on every cluster today, and is still fully overridable
+	// per app via spec.resources.cpuLimit. A startup-CPU-boost controller
+	// (K8s in-place pod resize, needs k8s>=1.33) was considered and would
+	// bound the same ceiling with more moving parts and its own resize
+	// latency; see
+	// docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md.
 	resourceRequests := corev1.ResourceList{
 		corev1.ResourceCPU:    resource.MustParse("250m"),
 		corev1.ResourceMemory: resource.MustParse("512Mi"),
 	}
 	resourceLimits := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse("1000m"),
+		corev1.ResourceCPU:    resource.MustParse("4000m"),
 		corev1.ResourceMemory: resource.MustParse("1Gi"),
 	}
 	if nextApp.Spec.Resources != nil {

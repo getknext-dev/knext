@@ -125,7 +125,10 @@ export function buildNextAppCRObject(
             ? {
                   cpuRequest: config.scaling.cpuRequest ?? "250m",
                   memoryRequest: config.scaling.memoryRequest ?? "512Mi",
-                  cpuLimit: config.scaling.cpuLimit ?? "1000m",
+                  // #1778: matches the operator's own default (raised from
+                  // "1000m") — the request is unchanged, only the boot-time
+                  // CPU ceiling, measured to save ~675ms cold start on GKE.
+                  cpuLimit: config.scaling.cpuLimit ?? "4000m",
                   memoryLimit: config.scaling.memoryLimit ?? "1Gi",
               }
             : undefined;
