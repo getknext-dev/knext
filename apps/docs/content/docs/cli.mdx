@@ -250,6 +250,21 @@ run `npm install` instead of printing a crash.
 flag, a stray positional), a missing `knext.config.ts`, or a deploy failure at any step (build,
 upload, image push, or the CR apply).
 
+<Callout type="warn">
+**Piping `--dry-run` to `kubectl apply -f -`.** On stdout, `--dry-run` currently interleaves its
+own log lines with the rendered `NextApp` YAML, so piping it straight into `kubectl apply -f -` or
+redirecting it to a file can fail with a YAML parse error. Set `LOG_LEVEL=silent` and stdout
+carries only the YAML document — this is the verified workaround for GitOps pipelines today:
+
+```bash title="shell"
+LOG_LEVEL=silent knext deploy --dry-run | kubectl apply --dry-run=client -f -
+```
+
+`NO_COLOR=1` on its own does **not** fix this — the log lines (and their color codes) still land
+on stdout alongside the YAML. Use `LOG_LEVEL=silent` until a future release separates the two
+streams.
+</Callout>
+
 Config validation runs automatically when the config loads. [`knext validate`](#knext-validate) runs
 the same checks on their own.
 
