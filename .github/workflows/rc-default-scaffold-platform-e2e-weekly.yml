@@ -294,10 +294,24 @@ jobs:
           kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
           kubectl -n "$APP_NS" port-forward svc/minio 9000:9000 >/tmp/pf-minio.log 2>&1 &
           for _ in $(seq 1 30); do
-            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; then exit 0; fi
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then break; fi
             sleep 1
           done
-          echo "::error::port-forwards never came up"; cat /tmp/pf-*.log; exit 1
+          if ! (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then
+            echo "::error::kourier-internal port-forward never came up"; cat /tmp/pf-*.log; exit 1
+          fi
+          # A bare TCP connect-test is not a functional check for MinIO: `kubectl
+          # port-forward` opens its local listener (and accepts connections)
+          # immediately on startup, before the SPDY tunnel to the pod is actually
+          # proxying traffic — the very next step's `aws s3 mb` hit that window and
+          # got "Could not connect to the endpoint URL" even though the TCP check
+          # above had just passed. Verify end-to-end by hitting MinIO's own
+          # readiness endpoint THROUGH the forward, bounded and failing loudly.
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::MinIO port-forward never became reachable"; cat /tmp/pf-*.log; exit 1
 
       - name: Create the MinIO bucket for static assets (anonymous-read)
         run: |

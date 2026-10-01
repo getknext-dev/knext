@@ -239,6 +239,45 @@ describe('rc-default-scaffold-platform-e2e-weekly — the four assertions are pr
   });
 });
 
+describe('rc-default-scaffold-platform-e2e-weekly — MinIO reachability (#1732 run 36808875670 fix)', () => {
+  const reach = stepByName('Reach the cluster (kourier-internal + MinIO port-forwards)');
+  const bucket = stepByName('Create the MinIO bucket for static assets (anonymous-read)');
+  const reachRun = String(reach?.run);
+  const bucketRun = String(bucket?.run);
+
+  it('port-forwards MinIO on the same port the bucket step talks to (127.0.0.1:9000)', () => {
+    expect(reachRun).toMatch(/port-forward svc\/minio 9000:9000/);
+    expect(bucketRun).toMatch(/--endpoint-url http:\/\/127\.0\.0\.1:9000\b/);
+  });
+
+  it('verifies MinIO end-to-end through the forward (HTTP health check), not just a bare TCP connect', () => {
+    // A bare `exec 3<>/dev/tcp/.../9000` connect-test passed in the failing run
+    // (36808875670) while the SPDY tunnel was not yet proxying traffic, so
+    // `aws s3 mb` immediately after it hit "Could not connect to the endpoint
+    // URL". The fix must verify MinIO's own readiness endpoint THROUGH the
+    // port-forward, which only returns 2xx once the tunnel is actually live.
+    expect(reachRun).toMatch(/curl\s+-fsS[^\n]*http:\/\/127\.0\.0\.1:9000\/minio\/health\/ready/);
+  });
+
+  it('the MinIO readiness wait is bounded and fails loudly on timeout (no silent pass-through)', () => {
+    const minioSection = reachRun.slice(reachRun.indexOf('/minio/health/ready'));
+    expect(reachRun).toMatch(/for _ in \$\(seq 1 \d+\); do[\s\S]*minio\/health\/ready/);
+    expect(minioSection).toMatch(/::error::.*MinIO/);
+    expect(minioSection).toMatch(/exit 1/);
+  });
+
+  it('still fails loudly if the kourier-internal forward never comes up (not silently skipped)', () => {
+    expect(reachRun).toMatch(/::error::.*kourier-internal.*never came up/);
+    const kourierSection = reachRun.slice(0, reachRun.indexOf('/minio/health/ready'));
+    expect(kourierSection).toMatch(/exit 1/);
+  });
+
+  it('never falls back to continue-on-error or `|| true` around the readiness checks', () => {
+    expect(reachRun).not.toMatch(/continue-on-error/);
+    expect(reachRun).not.toMatch(/\|\|\s*true/);
+  });
+});
+
 describe('rc-default-scaffold-platform-e2e-weekly — evidence recording', () => {
   it('records the git ref, the peeled commit, the operator digest and the run id', () => {
     const step = evidenceJob.steps?.find((s) => s.name === 'Record rc evidence');
