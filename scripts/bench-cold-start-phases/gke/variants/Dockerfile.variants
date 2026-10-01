@@ -6,6 +6,8 @@ ARG NODE_IMG=us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-node-turbop
 
 # ── compile stage: recompile the SAME standalone tree with the SAME core (rc.2)
 FROM ${BUN_IMG} AS compile
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
 USER root
 COPY bytecode-exec-verify.mjs bc-check.mjs /tools/
 RUN mkdir -p /out \
@@ -27,12 +29,16 @@ RUN cd /tools && for f in /app/.next/standalone/knext-standalone-exec /out/exec-
 
 # ── bun, compiled WITHOUT --bytecode (only the executable differs)
 FROM ${BUN_IMG} AS bun-nobc
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
 COPY --from=compile /out/exec-nobc /app/.next/standalone/knext-standalone-exec
 
 # ── bun, self-contained single executable (route chunks embedded + bytecode).
 # The operator runs `bun run server.js`; /app/server.js becomes the shipped
 # self-contained compat shim, which execs /app/knext-standalone-exec.
 FROM ${BUN_IMG} AS bun-sc
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
 USER root
 RUN cp /app/node_modules/@getknext/core/templates/runtime-standalone/knext-self-contained-server-shim.js.hbs /app/server.js \
  && mkdir -p /app/public /app/.next/static \
@@ -43,6 +49,8 @@ USER 65532:65532
 
 # ── warm-before-ready prototype (#1761), bun: the operator runs `bun run server.js`
 FROM ${BUN_IMG} AS bun-warm
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
 COPY warm-entry.mjs /app/server.js
 COPY warm-entry.mjs /app/knext-entry.mjs
 
@@ -53,12 +61,18 @@ COPY warm-entry.mjs /app/knext-entry.mjs
 # With tracing off (the default) register() does nothing else, so a no-op
 # register() is behaviourally identical to gating that import on tracing.
 FROM ${BUN_IMG} AS bun-noinstr
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
 COPY instrumentation-stub.js /app/.next/standalone/.next/server/instrumentation.js
 
 FROM ${NODE_IMG} AS node-noinstr
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
 COPY instrumentation-stub.js /app/.next/standalone/.next/server/instrumentation.js
 
 # ── warm-before-ready prototype (#1761), node: the image ENTRYPOINT is `node /app/knext-entry.mjs`
 FROM ${NODE_IMG} AS node-warm
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
 COPY warm-entry.mjs /app/knext-entry.mjs
 COPY warm-entry.mjs /app/server.js
