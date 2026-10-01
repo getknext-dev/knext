@@ -1,5 +1,17 @@
 # @getknext/core
 
+## 1.0.0-rc.4
+
+### Patch Changes
+
+- 5afa5f8: Fix on-demand invalidation of statically and ISR-cached pages with the Redis cache handler. `revalidateTag` and `revalidatePath` returned success but never evicted full-route-cached pages, because Next.js stores those pages' tags (including the implicit path tags `revalidatePath` uses) in the `x-next-cache-tags` header instead of the cache-write context. The handler now indexes both, so invalidating a tag or path refreshes the cached page on the next request.
+- 0a32380: Security: new apps now scaffold with Next.js 16.3.6. The default template moves from 16.3.5, and the vinext builder template from 16.3.3. Next.js 16.2.0 through 16.3.5 have a critical remote code execution vulnerability in `next/og` `ImageResponse` (GHSA-vcvr-r3jv-pc5j), fixed in 16.3.6. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.6` (or a later 16.3.x). The compatibility credential suite now runs against Next.js 16.3.6.
+  
+  `@getknext/lib` depends on `@grpc/grpc-js` through `@cerbos/grpc` with a range that already admits the patched 1.14.5 (GHSA-m9gg-hp2v-232j), so a fresh install resolves the fix. If your lockfile still holds `@grpc/grpc-js` 1.14.4 or older, update it.
+- Updated dependencies [0a32380]
+  - @getknext/lib@1.0.0-rc.4
+  - @getknext/db@1.0.0-rc.4
+
 ## 1.0.0-rc.3
 
 ### Patch Changes
