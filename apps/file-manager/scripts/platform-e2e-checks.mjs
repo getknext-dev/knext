@@ -25,6 +25,13 @@ export const SEEDED_USER_EMAIL = 'admin@example.com';
 /** apps/file-manager/src/app/cache-tests/on-demand/page.tsx — card classes. */
 export const PRODUCTS_CLASS = 'text-green-300';
 export const ORDERS_CLASS = 'text-blue-300';
+/**
+ * apps/file-manager/src/app/cache-tests/static-revalidate/page.tsx — the
+ * genuinely static (full-route-cached) fixture, invalidated ONLY via the
+ * implicit `_N_T_<path>` tag (#1764).
+ */
+export const STATIC_REVALIDATE_PATH = '/cache-tests/static-revalidate';
+export const STATIC_REVALIDATE_ATTR = 'data-static-revalidate-value';
 /** The streaming fixture's markers (knext-smoke/stream/page.tsx). */
 export const STREAM_SHELL = 'knext-stream-shell';
 export const STREAM_FALLBACK = 'knext-stream-fallback';
@@ -339,6 +346,40 @@ export function assertTagInvalidation({ before, after }) {
     `orders generatedAt changed (${before.orders} → ${after.orders}) — something other than revalidateTag('products') refreshed the page`,
   );
   return `products ${before.products} → ${after.products}; orders unchanged ${after.orders}`;
+}
+
+/**
+ * Pull the `data-static-revalidate-value` attribute from the static-revalidate
+ * fixture's HTML.
+ * @param {string} html
+ */
+export function staticRevalidateValue(html) {
+  const m = new RegExp(`${STATIC_REVALIDATE_ATTR}="([\\w-]+)"`).exec(html);
+  if (!m) throw new Error(`no ${STATIC_REVALIDATE_ATTR} marker found`);
+  return m[1];
+}
+
+/**
+ * A genuinely static (full-route-cached) page changed value ONLY after its
+ * implicit `_N_T_<path>` tag was busted via `revalidateTag` — proving
+ * `cache-handler.js` indexed that tag from `x-next-cache-tags`, not from
+ * `ctx.tags` (which Next never sets for this write). (#1764)
+ * @param {{ before: string, between: string, after: string }} obs
+ */
+export function assertStaticPathTagInvalidation({ before, between, after }) {
+  assert.equal(
+    between,
+    before,
+    `static-revalidate value changed (${before} → ${between}) BEFORE the ` +
+      'tag was busted — the page is not actually full-route-cached',
+  );
+  assert.notEqual(
+    after,
+    before,
+    `static-revalidate value did not change after revalidateTag('_N_T_${STATIC_REVALIDATE_PATH}') ` +
+      `(stuck at ${before}) — the implicit path tag was not indexed from x-next-cache-tags`,
+  );
+  return `static ${before} → ${after} (unchanged at ${between} pre-invalidate)`;
 }
 
 /**
