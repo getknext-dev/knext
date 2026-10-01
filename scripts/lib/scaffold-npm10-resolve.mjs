@@ -1,6 +1,7 @@
 /**
- * scaffold-npm10-resolve.mjs — decision logic for the #1771 release-prep fix
- * to `verify-scaffold-resolves-npm10.mjs` (the #985-class guard).
+ * scaffold-npm10-resolve.mjs — decision logic for the #1771/#1795
+ * release-prep fix to `verify-scaffold-resolves-npm10.mjs` (the #985-class
+ * guard).
  *
  * THE PROBLEM (#1771): the guard renders the scaffold template with the
  * WORKSPACE version baked into the `@getknext/*` ranges (`^<version>`). On a
@@ -10,12 +11,30 @@
  * publish job runs — so npm's arborist throws `ETARGET` ("No matching version
  * found for @getknext/core@^1.0.0-rc.4") on every such PR, every time.
  *
+ * THE DEEPER PROBLEM (#1795): the scaffold template only names `@getknext/core`
+ * and `@getknext/lib` directly, but `@getknext/core` itself depends on
+ * `@getknext/lib` and `@getknext/db` at the SAME unpublished workspace
+ * version. #1771's fix packed only the package(s) named in the FIRST
+ * `ETARGET`, so resolving `@getknext/core` against its local tarball just
+ * moved the ETARGET one level down, onto `@getknext/lib`/`@getknext/db`
+ * inside that tarball's own `package.json` — exactly the rc.5 failure this
+ * fixes. `isReleasePrepEtarget` already classifies a TRANSITIVE `@getknext/*`
+ * ETARGET (e.g. `@getknext/lib` reported because `@getknext/core`'s manifest
+ * requested it, not because the scaffold template did) the same way it
+ * classifies a direct one — npm's ETARGET text carries no depth information,
+ * so the name+version-equality test here is depth-agnostic by construction.
+ *
  * THE FIX: when EVERY `ETARGET` is for a `@getknext/*` package whose
  * requested version equals the WORKSPACE version — the exact release-prep
- * shape — resolve those packages against locally packed tarballs (reuse
- * `pack-publishable-group.mjs`) instead of the registry, and still run the
- * real npm-10 resolution for every other dependency. Any OTHER `ETARGET` (a
- * genuinely missing/mistyped version, a non-`@getknext` package, or a
+ * shape, at any depth — resolve the WHOLE fixed publishable group
+ * (`@getknext/core`, `@getknext/lib`, `@getknext/db`, `kn-next`) against
+ * locally packed tarballs (reuse `pack-publishable-group.mjs`, which applies
+ * `rewrite-workspace-ranges.mjs` first, exactly as the real release does) via
+ * npm `overrides` — which apply tree-wide regardless of nesting depth, so a
+ * transitive `@getknext/lib` reference inside the packed `@getknext/core`
+ * tarball resolves to the SAME local tarball — while every OTHER dependency
+ * still resolves against the real registry under npm 10. Any OTHER `ETARGET`
+ * (a genuinely missing/mistyped version, a non-`@getknext` package, or a
  * `@getknext/*` package whose requested version does NOT match the
  * workspace — e.g. someone bumped the template's range by hand without
  * bumping the workspace version) stays red, as does the `edgesOut` crash
@@ -142,10 +161,36 @@ export function decideResolveStrategy({ exitStatus, output, workspaceVersion }) 
 }
 
 /**
- * Rewrite a rendered scaffold `package.json` object so every dependency
- * entry named in `tarballsByName` points at its local tarball instead of the
- * registry range. Returns a NEW object (the input is never mutated) with
- * `dependencies`/`devDependencies` shallow-cloned as needed.
+ * Build an npm `overrides` object pinning every named package to its local
+ * tarball path. `overrides` apply tree-wide regardless of nesting depth —
+ * the mechanism that lets a TRANSITIVE `@getknext/*` reference (e.g.
+ * `@getknext/lib` pulled in by `@getknext/core`'s own `package.json`, not by
+ * the scaffold template directly) resolve against the same local tarball a
+ * direct dependency on that name would. A `dependencies`/`devDependencies`
+ * rewrite alone cannot reach that case: it only ever touches names the
+ * TOP-LEVEL `package.json` lists itself.
+ *
+ * @param {Map<string, string>} tarballsByName package name -> absolute tarball path
+ * @returns {Record<string, string>}
+ */
+export function buildOverrides(tarballsByName) {
+  const out = {};
+  for (const [name, tarball] of tarballsByName) {
+    out[name] = `file:${tarball}`;
+  }
+  return out;
+}
+
+/**
+ * Rewrite a rendered scaffold `package.json` object so:
+ *   1. every DIRECT dependency entry named in `tarballsByName` points at its
+ *      local tarball instead of the registry range (unchanged from #1771);
+ *   2. an `overrides` entry is added for every name in `tarballsByName`, so
+ *      a TRANSITIVE reference to that name — at any depth, from any packed
+ *      `@getknext/*` tarball's own `package.json` — also resolves locally
+ *      instead of ETARGETing on the unpublished release-prep version (#1795).
+ * Returns a NEW object (the input is never mutated); `dependencies`/
+ * `devDependencies`/`overrides` are shallow-cloned as needed.
  *
  * @param {Record<string, unknown>} pkg parsed rendered package.json
  * @param {Map<string, string>} tarballsByName package name -> absolute tarball path
@@ -165,6 +210,11 @@ export function applyLocalResolutions(pkg, tarballsByName) {
       }
     }
     if (changed) out[field] = nextDeps;
+  }
+  if (tarballsByName.size > 0) {
+    const existingOverrides =
+      pkg.overrides && typeof pkg.overrides === 'object' ? pkg.overrides : {};
+    out.overrides = { ...existingOverrides, ...buildOverrides(tarballsByName) };
   }
   return out;
 }

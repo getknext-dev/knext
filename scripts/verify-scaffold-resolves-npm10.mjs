@@ -28,6 +28,16 @@
  * template's `@getknext/*` entries against those `file:` paths instead, while every OTHER
  * dependency still resolves against the real registry under npm 10. Any other ETARGET, or
  * any other failure (including the `edgesOut` crash), stays red exactly as before.
+ *
+ * #1795: the template only names `@getknext/core` and `@getknext/lib` directly, but
+ * `@getknext/core` itself depends on `@getknext/lib` and `@getknext/db` at the SAME
+ * unpublished release-prep version — so packing only the package(s) the FIRST ETARGET
+ * named just moved the failure one level down, onto the TRANSITIVE `@getknext/lib`/
+ * `@getknext/db` reference inside `@getknext/core`'s own packed `package.json`. The fix:
+ * on a `release-prep-etarget` decision, pack the WHOLE fixed publishable group
+ * (`canonicalPublishableGroup` — core, lib, db, the `kn-next` alias) up front, and resolve
+ * ALL of them via npm `overrides` (`applyLocalResolutions`), which apply tree-wide
+ * regardless of nesting depth — not just the name(s) the first ETARGET happened to report.
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -99,19 +109,25 @@ try {
   }
 
   // release-prep-etarget: every unresolved package is @getknext/* at exactly the
-  // workspace version — pack it locally and retry.
+  // workspace version — but it may be a TRANSITIVE reference (e.g. @getknext/core
+  // depending on @getknext/lib/@getknext/db at the same unpublished version), so
+  // pack the WHOLE fixed publishable group up front and resolve all of them via
+  // `overrides`, which apply tree-wide regardless of nesting depth (#1795) — not
+  // just the name(s) this first ETARGET happened to report.
   console.log(
     `npm ${NPM_MAJOR} could not resolve ${decision.packages.join(', ')} at the unpublished ` +
-      `release-prep version ${version} — packing local tarballs and retrying …`,
+      `release-prep version ${version} — packing the whole @getknext/* publishable group ` +
+      `locally and retrying …`,
   );
   const packDir = join(dir, '.local-pack');
-  const group = canonicalPublishableGroup(REPO).filter((p) => decision.packages.includes(p.name));
-  if (group.length !== decision.packages.length) {
+  const group = canonicalPublishableGroup(REPO);
+  const groupNames = new Set(group.map((p) => p.name));
+  const uncovered = decision.packages.filter((name) => !groupNames.has(name));
+  if (uncovered.length > 0) {
     fail(
-      `release-prep-etarget named ${decision.packages.join(', ')}, but the canonical publishable ` +
-        `group only covers ${canonicalPublishableGroup(REPO)
-          .map((p) => p.name)
-          .join(', ')} — cannot pack a local tarball for the rest.`,
+      `release-prep-etarget named ${uncovered.join(', ')}, but the canonical publishable ` +
+        `group only covers ${[...groupNames].join(', ')} — cannot pack a local tarball for ` +
+        `the rest.`,
     );
   }
   const packed = packPublishableGroup(group, packDir);

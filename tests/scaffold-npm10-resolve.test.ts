@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   applyLocalResolutions,
+  buildOverrides,
   decideResolveStrategy,
   isGetknextScoped,
   isReleasePrepEtarget,
@@ -50,6 +51,16 @@ npm error notarget No matching version found for @getknext/core@^1.0.0-rc.3.
 const SAMPLE_EDGESOUT = `
 npm error Cannot read properties of null (reading 'edgesOut')
 npm error A complete log of this run can be found in: ...
+`;
+
+// #1795: the scaffold template only names @getknext/core directly. This is
+// the shape npm actually reports when @getknext/core's OWN package.json
+// (inside the first-retry tarball) requests @getknext/lib at the same
+// unpublished release-prep version — a TRANSITIVE ETARGET, not a direct one.
+// The scaffold template itself never mentions @getknext/lib in this sample.
+const SAMPLE_TRANSITIVE_ETARGET = `
+npm error code ETARGET
+npm error notarget No matching version found for @getknext/lib@^1.0.0-rc.5.
 `;
 
 describe('parseEtargetPackages', () => {
@@ -129,6 +140,16 @@ describe('isReleasePrepEtarget', () => {
     const entries = parseEtargetPackages(SAMPLE_NONSCOPED_SAME_VERSION_ETARGET);
     expect(isReleasePrepEtarget(entries, '1.0.0-rc.4')).toBe(false);
   });
+
+  // #1795: npm's ETARGET text carries no "direct vs transitive" distinction —
+  // a package reported only because a DEPENDENT's package.json requested it
+  // (here: @getknext/lib, pulled in by @getknext/core, never named by the
+  // scaffold template itself) must classify the same as a directly-named one.
+  it('is true for a TRANSITIVE @getknext/* ETARGET the scaffold template never names directly', () => {
+    const entries = parseEtargetPackages(SAMPLE_TRANSITIVE_ETARGET);
+    expect(entries).toEqual([{ name: '@getknext/lib', range: '^1.0.0-rc.5' }]);
+    expect(isReleasePrepEtarget(entries, '1.0.0-rc.5')).toBe(true);
+  });
 });
 
 describe('decideResolveStrategy', () => {
@@ -188,6 +209,16 @@ describe('decideResolveStrategy', () => {
     ).toEqual({ kind: 'other-etarget', packages: ['left-pad'] });
   });
 
+  it('returns release-prep-etarget for a TRANSITIVE @getknext/* ETARGET (#1795)', () => {
+    expect(
+      decideResolveStrategy({
+        exitStatus: 1,
+        output: SAMPLE_TRANSITIVE_ETARGET,
+        workspaceVersion: '1.0.0-rc.5',
+      }),
+    ).toEqual({ kind: 'release-prep-etarget', packages: ['@getknext/lib'] });
+  });
+
   it('returns other-failure for a non-ETARGET, non-edgesOut failure', () => {
     expect(
       decideResolveStrategy({
@@ -228,9 +259,68 @@ describe('applyLocalResolutions', () => {
     expect(JSON.stringify(pkg)).toBe(before);
   });
 
-  it('is a no-op when no named package is present', () => {
-    const tarballs = new Map([['@getknext/db', '/tmp/x/getknext-db.tgz']]);
-    const out = applyLocalResolutions(pkg, tarballs);
+  it('is a no-op (including overrides) when the tarball map is empty', () => {
+    const out = applyLocalResolutions(pkg, new Map());
     expect(out).toEqual(pkg);
+    expect(out.overrides).toBeUndefined();
+  });
+
+  // #1795: a transitive reference (e.g. @getknext/db, which the sample
+  // package.json never lists directly) must still resolve locally via
+  // `overrides` — this is the whole point of the #1795 fix, since a
+  // dependencies/devDependencies rewrite alone cannot reach it.
+  it('adds an overrides entry for every packed name, even one absent from dependencies/devDependencies', () => {
+    const tarballs = new Map([
+      ['@getknext/lib', '/tmp/x/getknext-lib.tgz'],
+      ['@getknext/core', '/tmp/x/getknext-core.tgz'],
+      ['@getknext/db', '/tmp/x/getknext-db.tgz'],
+    ]);
+    const out = applyLocalResolutions(pkg, tarballs) as { overrides: Record<string, string> };
+    expect(out.overrides).toEqual({
+      '@getknext/lib': 'file:/tmp/x/getknext-lib.tgz',
+      '@getknext/core': 'file:/tmp/x/getknext-core.tgz',
+      '@getknext/db': 'file:/tmp/x/getknext-db.tgz',
+    });
+  });
+
+  it('preserves pre-existing overrides not named in tarballsByName', () => {
+    const pkgWithOverrides = { ...pkg, overrides: { 'left-pad': '^1.0.0' } };
+    const tarballs = new Map([['@getknext/lib', '/tmp/x/getknext-lib.tgz']]);
+    const out = applyLocalResolutions(pkgWithOverrides, tarballs) as {
+      overrides: Record<string, string>;
+    };
+    expect(out.overrides).toEqual({
+      'left-pad': '^1.0.0',
+      '@getknext/lib': 'file:/tmp/x/getknext-lib.tgz',
+    });
+  });
+
+  it('leaves dependencies/devDependencies untouched, but still overrides, when the named package is absent from both', () => {
+    const tarballs = new Map([['@getknext/db', '/tmp/x/getknext-db.tgz']]);
+    const out = applyLocalResolutions(pkg, tarballs) as {
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+      overrides: Record<string, string>;
+    };
+    expect(out.dependencies).toEqual(pkg.dependencies);
+    expect(out.devDependencies).toEqual(pkg.devDependencies);
+    expect(out.overrides).toEqual({ '@getknext/db': 'file:/tmp/x/getknext-db.tgz' });
+  });
+});
+
+describe('buildOverrides', () => {
+  it('maps every entry to a file: spec', () => {
+    const tarballs = new Map([
+      ['@getknext/core', '/tmp/x/core.tgz'],
+      ['@getknext/lib', '/tmp/x/lib.tgz'],
+    ]);
+    expect(buildOverrides(tarballs)).toEqual({
+      '@getknext/core': 'file:/tmp/x/core.tgz',
+      '@getknext/lib': 'file:/tmp/x/lib.tgz',
+    });
+  });
+
+  it('returns an empty object for an empty map', () => {
+    expect(buildOverrides(new Map())).toEqual({});
   });
 });
