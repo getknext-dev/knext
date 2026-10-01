@@ -1,0 +1,69 @@
+name: RC pack parity nightly (bun pm pack vs npm registry)
+
+# ── G3 (#1734, residual of #1614) ──────────────────────────────────────────
+# The compat CREDENTIAL lanes (test-e2e-deploy.yml, compat-vinext.yml) pack
+# the @getknext/* publishable group with `bun pm pack`, while the real
+# publish tool (`changeset publish` -> `npm publish` for a bun workspace)
+# ships `npm pack` bytes (scripts/lib/pack-publishable-group.mjs's header has
+# the measured divergence). #1614 fixed every lane this repo controls to
+# pack with `npm pack`; the two credential lanes above are deliberately OUT
+# of scope for that fix — ADR-0056/ADR-0039 freeze them for the length of
+# the compat-credential window, so changing their packer would restart the
+# 14-night window.
+#
+# This workflow MEASURES, nightly, whether that frozen divergence is
+# actually present in the bytes a real user installs from npm for the
+# pinned rc tag (.github/compat-credential-ref.json :: rcTag). It never
+# touches the credential harness itself, is OFF the credential crons
+# (22:17/23:47/01:17/03:17/04:47/05:47 UTC, +~1h runtime each), and is
+# NON-REQUIRED (not a branch-protection check) — a red run here is a finding
+# to investigate, not a merge blocker.
+#
+# scripts/verify-rc-pack-parity.mjs does the work: checks out rcTag into a
+# scratch worktree, packs it the credential-lane way (bun pm pack) AND the
+# npm way (scripts/lib/pack-publishable-group.mjs, reused), downloads the
+# real published tarballs for that version from the npm registry, and
+# compares file-by-file (scripts/lib/pack-parity-diff.mjs — byte content
+# plus file list, ignoring tar metadata like mtimes). Any non-identical file
+# is listed in the job summary and fails the job.
+
+on:
+  schedule:
+    # 09:37 UTC — clear of every credential cron and its ~1h runtime tail
+    # (latest is 05:47 UTC + ~1h = 06:47 UTC) AND of every other workflow's
+    # cron in this repo (no exact UTC minute-of-day collision).
+    - cron: '37 9 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  pack-parity:
+    name: Compare bun pm pack / npm pack against the published npm registry bytes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The rcTag may not be reachable from a shallow, tagless checkout -
+          # the script `git worktree add`s it directly.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Install dependencies (for the comparator's own deps - tar, etc.)
+        run: bun install --frozen-lockfile
+
+      - name: Verify rc pack parity
+        run: node scripts/verify-rc-pack-parity.mjs
