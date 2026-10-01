@@ -176,6 +176,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // sibling dependabot-published-bytes-pause.yml has no setup-bun step at
       // all (it only needs `git diff` + `node`), so it is not in this map.
       'published-bytes-freeze-guard.yml': 1,
+      // NEW (#1732, G1): the weekly default-scaffold platform e2e builds the
+      // operator from the resolved rc ref — one pinned "Setup bun" step (the
+      // scaffolded app under test itself comes from npm, not this workspace).
+      'rc-default-scaffold-platform-e2e-weekly.yml': 1,
       'scale-zero-pg.yml': 1,
       // NEW (#1522/#1517): the self-contained standalone image kind e2e —
       // one "Setup bun" step (installs the workspace + builds the fixture's
