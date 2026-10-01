@@ -1,0 +1,518 @@
+name: RC default-scaffold platform e2e (weekly, npm @rc)
+
+# G1 (#1732). Every existing real-cluster lane deploys apps/file-manager,
+# which is a `build: 'vinext'` app — not a v1.0 cell. This lane instead:
+#   1. scaffolds a BRAND-NEW app with the PUBLISHED `@getknext/core@rc` CLI
+#      from npm (`npx`, no repo source) on the DEFAULT target — turbopack
+#      build x bun compiled single-executable runtime
+#      (DEFAULT_BUILDER_ID/DEFAULT_RUNTIME_ID,
+#      packages/kn-next/src/adapters/artifact-contract.ts: an absent `build`
+#      resolves to "turbopack", an absent `runtime` to "bun", so NOT setting
+#      either in the generated knext.config.ts IS the default);
+#   2. deploys it to a kind cluster through the real CLI -> NextApp CR ->
+#      the operator BUILT FROM the resolved rc ref -> Knative (same
+#      build-operator-from-ref + push-digest + deployed-pod-imageID
+#      cross-check recipe as file-manager-platform-e2e.yml/-at-tag.yml);
+#   3. asserts (scripts/rc-scaffold-platform-e2e.mjs): scale-to-zero then
+#      wake, Redis-backed ISR revalidated only by an authenticated
+#      invalidation, that invalidation rejecting without/with-a-wrong Bearer
+#      token, and static-asset upload to the in-cluster MinIO;
+#   4. records the git ref, the peeled commit, the operator image digest and
+#      the run id as an rc-evidence artifact (file-manager-platform-e2e-at-
+#      tag.yml's own pattern).
+#
+# OFF the credential slots (22:17/23:47/01:17/03:17/04:47/05:47 UTC, +~1h
+# runtime each — tests/ci-capacity-budget.test.ts enforces no two workflows
+# share a UTC minute-of-day), non-required, weekly. The cluster/registry/
+# cert-manager/Knative bring-up and the operator-build-from-ref steps are
+# copied from file-manager-platform-e2e.yml/-at-tag.yml, trimmed to a
+# redis+minio data plane only (this lane's generated app has no database).
+#
+# BUDGET: one ubuntu-latest job, timeout 45 min — building the app itself
+# (bun --compile --bytecode, the default runtime) adds real wall time beyond
+# the file-manager lanes' operator-build-only budget.
+
+on:
+  schedule:
+    - cron: '17 8 * * 0'
+  workflow_dispatch:
+    inputs:
+      git-ref:
+        description: 'Git ref (tag/branch/SHA) to build the operator from (default: rcTag from .github/compat-credential-ref.json)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-git-ref:
+    name: Resolve git ref (default from rc tag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      git-ref: ${{ steps.resolve.outputs.git-ref }}
+      git-sha: ${{ steps.resolve.outputs.git-sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve git ref (input or rcTag default), peeled to a commit
+        id: resolve
+        env:
+          # Never interpolate `${{ inputs.* }}` directly into a `run:` script
+          # body — pass it via env: and read it as a quoted shell var.
+          GIT_REF_INPUT: ${{ inputs.git-ref }}
+        run: |
+          set -euo pipefail
+          GIT_REF="${GIT_REF_INPUT:-}"
+          if [ -z "$GIT_REF" ]; then
+            GIT_REF="$(jq -r '.rcTag' < .github/compat-credential-ref.json)"
+            if [ -z "$GIT_REF" ] || [ "$GIT_REF" = "null" ]; then
+              echo "::error::No git-ref input and rcTag is null or missing"
+              exit 1
+            fi
+          fi
+          # ls-remote lists the lightweight ref first, the peeled (^{}) commit
+          # second for an annotated tag — `tail -n1` always takes the peeled
+          # commit when one exists, and the only line when it doesn't (a branch
+          # or a lightweight tag), so this is `<ref>^{commit}` either way.
+          GIT_SHA="$(git ls-remote origin "refs/tags/$GIT_REF" "refs/tags/$GIT_REF^{}" | awk '{print $1}' | tail -n1)"
+          if [ -z "$GIT_SHA" ]; then
+            GIT_SHA="$(git ls-remote origin "refs/heads/$GIT_REF" | awk '{print $1}' | head -n1)"
+          fi
+          if [ -z "$GIT_SHA" ]; then
+            echo "::error::Could not resolve $GIT_REF to a commit SHA"
+            exit 1
+          fi
+          echo "git-ref=$GIT_REF" >> "$GITHUB_OUTPUT"
+          echo "git-sha=$GIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved $GIT_REF to $GIT_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  rc-scaffold-platform-e2e:
+    name: npm @rc default scaffold through kn-next deploy on kind
+    needs: resolve-git-ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      operator-image-digest: ${{ steps.build-operator.outputs.operator-image-digest }}
+    env:
+      CLUSTER: rc-scaffold-e2e
+      APP_NS: rc-scaffold-e2e
+      APP_NAME: rc-scaffold-e2e
+      BUCKET: rc-scaffold-e2e-assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-git-ref.outputs.git-sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      # The CHECKOUT (pinned to the resolved rc ref) builds ONLY the operator
+      # and lends the kind-manifest/support scripts below — the scaffolded
+      # app under test comes from npm, never from this tree.
+      - name: Install workspace dependencies (operator build support only)
+        run: bun install --frozen-lockfile
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier (scale-to-zero tuned)
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl patch configmap/config-autoscaler -n knative-serving --type merge \
+            --patch '{"data":{"scale-to-zero-pod-retention-period":"0s","stable-window":"6s"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      # The operator is built from the resolved rc ref, so an operator
+      # regression on that ref lands in the same run as the scaffold/deploy
+      # under test.
+      - name: Build + push the operator image, capture + verify the deployed digest
+        id: build-operator
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG="localhost:5001/kn-next-operator:rc-e2e-${GITHUB_RUN_ID}"
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          make docker-push IMG="$IMG"
+          PUSH_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG" | sed 's/.*@//')"
+          if [ -z "$PUSH_DIGEST" ]; then
+            echo "::error::Could not capture the operator image digest from the registry push"
+            exit 1
+          fi
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+          POD_IMAGE_ID="$(kubectl get pods -n kn-next-operator-system \
+            -l control-plane=controller-manager \
+            -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="manager")].imageID}')"
+          if [ -z "$POD_IMAGE_ID" ]; then
+            echo "::error::Could not read the deployed operator pod's imageID"
+            exit 1
+          fi
+          case "$POD_IMAGE_ID" in
+            *"$PUSH_DIGEST"*) ;;
+            *)
+              echo "::error::Deployed pod imageID ($POD_IMAGE_ID) does not match the pushed digest ($PUSH_DIGEST)"
+              exit 1
+              ;;
+          esac
+          kubectl wait --for=condition=Ready --timeout=120s \
+            -n kn-next-operator-system certificate/kn-next-operator-serving-cert
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
+            -n kn-next-operator-system endpoints/kn-next-operator-webhook-service
+          "${GITHUB_WORKSPACE}/scripts/kind-manifests/wait-for-webhook-ready.sh"
+          echo "operator-image-digest=$PUSH_DIGEST" >> "$GITHUB_OUTPUT"
+
+      # Redis + MinIO only — this lane's generated app binds no database.
+      - name: Data plane (redis, minio) + Secrets
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NS"
+          rnd() { openssl rand -hex 16; }
+          MINIO_KEY="$(rnd)"; MINIO_SECRET="$(rnd)"; CACHE_TOKEN="$(rnd)"
+          for v in "$MINIO_KEY" "$MINIO_SECRET" "$CACHE_TOKEN"; do echo "::add-mask::$v"; done
+          kubectl -n "$APP_NS" create secret generic rc-e2e-minio --from-literal=access="$MINIO_KEY" --from-literal=secret="$MINIO_SECRET"
+          kubectl -n "$APP_NS" create secret generic rc-scaffold-credentials --from-literal=CACHE_INVALIDATE_TOKEN="$CACHE_TOKEN"
+          {
+            echo "CACHE_INVALIDATE_TOKEN=$CACHE_TOKEN"
+            echo "MINIO_ACCESS_KEY=$MINIO_KEY"
+            echo "MINIO_SECRET_KEY=$MINIO_SECRET"
+          } >> "$GITHUB_ENV"
+          cat <<YAML | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: redis } }
+            template:
+              metadata: { labels: { app: redis } }
+              spec:
+                containers:
+                  - name: redis
+                    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+                    ports: [{ containerPort: 6379 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            selector: { app: redis }
+            ports: [{ port: 6379 }]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: minio, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: minio } }
+            template:
+              metadata: { labels: { app: minio } }
+              spec:
+                containers:
+                  - name: minio
+                    image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+                    env:
+                      - name: MINIO_ROOT_USER
+                        valueFrom: { secretKeyRef: { name: rc-e2e-minio, key: access } }
+                      - name: MINIO_ROOT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: rc-e2e-minio, key: secret } }
+                    ports: [{ containerPort: 9000 }]
+                    readinessProbe:
+                      httpGet: { path: /minio/health/ready, port: 9000 }
+                      periodSeconds: 2
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: minio, namespace: $APP_NS }
+          spec:
+            selector: { app: minio }
+            ports: [{ port: 9000 }]
+          YAML
+          kubectl -n "$APP_NS" rollout status deploy/redis deploy/minio --timeout=180s
+
+      - name: Reach the cluster (kourier-internal + MinIO port-forwards)
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          kubectl -n "$APP_NS" port-forward svc/minio 9000:9000 >/tmp/pf-minio.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::port-forwards never came up"; cat /tmp/pf-*.log; exit 1
+
+      - name: Create the MinIO bucket for static assets (anonymous-read)
+        run: |
+          set -euo pipefail
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
+          aws s3 mb "s3://$BUCKET" --endpoint-url http://127.0.0.1:9000 --region us-east-1
+          cat > /tmp/rc-e2e-bucket-policy.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              { "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::$BUCKET/*" }
+            ]
+          }
+          JSON
+          aws s3api put-bucket-policy --bucket "$BUCKET" \
+            --policy file:///tmp/rc-e2e-bucket-policy.json --endpoint-url http://127.0.0.1:9000
+
+      # THE POINT OF THE LANE: the PUBLISHED CLI, no repo source, DEFAULT
+      # target (no --builder flag; the generated knext.config.ts sets neither
+      # `build` nor `runtime`, so DEFAULT_BUILDER_ID "turbopack" x
+      # DEFAULT_RUNTIME_ID "bun" apply).
+      - name: Scaffold a brand-new app with the published @rc CLI (no repo source)
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/rc-scaffold-app"
+          npx --yes @getknext/core@rc create "$APP_DIR" --name "$APP_NAME"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: Add an ISR page + an authenticated cache-invalidate route
+        env:
+          APP_DIR: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$APP_DIR/src/app/isr-smoke" "$APP_DIR/src/app/api/cache/invalidate"
+
+          cat > "$APP_DIR/src/app/isr-smoke/page.tsx" <<'TSX'
+          import { unstable_cache as cache } from "next/cache";
+
+          const getValue = cache(
+            async () => `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            ["rc-e2e-isr-smoke-value"],
+            { tags: ["isr-smoke"], revalidate: false },
+          );
+
+          export default async function Page() {
+            const value = await getValue();
+            return <div data-isr-value={value}>{value}</div>;
+          }
+          TSX
+
+          cat > "$APP_DIR/src/app/api/cache/invalidate/auth.ts" <<'TS'
+          import { timingSafeEqual } from "node:crypto";
+
+          // Fail-closed Bearer-token auth (security.md: "no unauthenticated
+          // mutating endpoints"). Mirrors apps/file-manager's own
+          // api/cache/invalidate/auth.ts.
+          export function isAuthorized(
+            authHeader: string | null | undefined,
+            expectedToken: string | undefined,
+          ): boolean {
+            if (!expectedToken) return false;
+            if (!authHeader) return false;
+            const prefix = "Bearer ";
+            if (!authHeader.startsWith(prefix)) return false;
+            const provided = Buffer.from(authHeader.slice(prefix.length));
+            const expected = Buffer.from(expectedToken);
+            if (provided.length !== expected.length) return false;
+            return timingSafeEqual(provided, expected);
+          }
+          TS
+
+          cat > "$APP_DIR/src/app/api/cache/invalidate/route.ts" <<'TS'
+          import { revalidateTag } from "next/cache";
+          import { NextResponse } from "next/server";
+          import { isAuthorized } from "./auth";
+
+          export const POST = async (request: Request) => {
+            if (!isAuthorized(request.headers.get("authorization"), process.env.CACHE_INVALIDATE_TOKEN)) {
+              return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+            }
+            const body = await request.json();
+            const { tag } = body;
+            if (!tag || typeof tag !== "string") {
+              return NextResponse.json({ error: 'Missing or invalid "tag" parameter' }, { status: 400 });
+            }
+            revalidateTag(tag, "max");
+            return NextResponse.json({ success: true, tag });
+          };
+          TS
+
+      # The scaffold's own config names a placeholder registry/no cache/no
+      # storage; this profile overrides EXACTLY what the kind cluster needs.
+      # Neither `build` nor `runtime` is set — the default target under test.
+      - name: Write the kind-cluster knext.config.ts (default build/runtime, explicit cache/storage)
+        env:
+          APP_DIR: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          cat > "$APP_DIR/knext.config.ts" <<TS
+          import type { KnativeNextConfig } from "@getknext/core";
+
+          const config: KnativeNextConfig = {
+            name: "$APP_NAME",
+            registry: "localhost:5001",
+            cache: {
+              provider: "redis",
+              url: "redis://redis.$APP_NS.svc.cluster.local.:6379",
+            },
+            storage: {
+              provider: "s3",
+              bucket: "$BUCKET",
+              region: "us-east-1",
+              publicUrl: "http://minio.$APP_NS.svc.cluster.local:9000/$BUCKET",
+            },
+            scaling: { minScale: 0, maxScale: 2, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+            secrets: { envFrom: ["rc-scaffold-credentials"] },
+          };
+
+          export default config;
+          TS
+
+      - name: npm install the scaffolded app (resolves @getknext/core@rc for real)
+        env:
+          APP_DIR: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          npm install --no-audit --no-fund
+          test -d node_modules/@getknext/core
+
+      # The real CLI (resolved from the app's own node_modules — the published
+      # bits, not this checkout) builds the default target and ships it: for
+      # `runtime: "bun"` that means compiling the standalone server into a Bun
+      # single executable with bytecode, then pushing that image's digest-
+      # pinned ref and applying the NextApp CR.
+      - name: kn-next deploy (published CLI, default target, against the kind cluster)
+        env:
+          APP_DIR: ${{ env.APP_DIR }}
+          AWS_ENDPOINT_URL: http://127.0.0.1:9000
+          AWS_ACCESS_KEY_ID: ${{ env.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          npx knext deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${GITHUB_RUN_ID}"
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$APP_NAME" \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
+
+      - name: Assert scale-to-zero+wake, ISR+authenticated invalidation, and storage upload
+        env:
+          RC_E2E_BASE_URL: http://127.0.0.1:8080
+          RC_E2E_NAMESPACE: ${{ env.APP_NS }}
+          RC_E2E_APP_NAME: ${{ env.APP_NAME }}
+          RC_E2E_BUCKET: ${{ env.BUCKET }}
+          MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
+        run: |
+          export RC_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
+          node scripts/rc-scaffold-platform-e2e.mjs
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods -o wide 2>&1 || true
+          kubectl -n "$APP_NS" get "nextapp/$APP_NAME" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+          for p in $(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o name 2>/dev/null); do
+            kubectl -n "$APP_NS" logs "$p" --all-containers --tail=80 2>&1 || true
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true
+
+  record-evidence:
+    name: Record rc evidence (git ref, peeled commit, operator digest, run id)
+    needs: [resolve-git-ref, rc-scaffold-platform-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record rc evidence
+        env:
+          GIT_REF: ${{ needs.resolve-git-ref.outputs.git-ref }}
+          GIT_SHA: ${{ needs.resolve-git-ref.outputs.git-sha }}
+          OPERATOR_DIGEST: ${{ needs.rc-scaffold-platform-e2e.outputs.operator-image-digest }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## RC Evidence (git ref, peeled commit, operator digest, run id)"
+            echo ""
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| Git Ref | \`${GIT_REF}\` |"
+            echo "| Peeled commit (\`<ref>^{commit}\`) | \`${GIT_SHA}\` |"
+            echo "| Operator Digest | \`${OPERATOR_DIGEST}\` |"
+            echo "| Run ID | \`${RUN_ID}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/rc-evidence
+          jq -n \
+            --arg git_ref "$GIT_REF" \
+            --arg peeled_commit "$GIT_SHA" \
+            --arg operator_image_digest "$OPERATOR_DIGEST" \
+            --arg run_id "$RUN_ID" \
+            --arg run_url "$RUN_URL" \
+            '{git_ref: $git_ref, peeled_commit: $peeled_commit, operator_image_digest: $operator_image_digest, run_id: $run_id, run_url: $run_url}' \
+            > /tmp/rc-evidence/rc-evidence.json
+
+      - name: Upload rc evidence artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rc-scaffold-e2e-evidence
+          path: /tmp/rc-evidence/rc-evidence.json
+          retention-days: 30
