@@ -280,27 +280,49 @@ type SecuritySpec struct {
 	// ReadOnlyRootFilesystem toggles `readOnlyRootFilesystem: true` on the
 	// rendered APP (serving) container's SecurityContext — defense in depth
 	// against in-container tampering/persistence, matching the image-prewarm
-	// job container's existing posture (image_prewarm.go). The runtime's few
-	// writable paths (a scratch dir at /tmp, and — for the standalone build
-	// shape only — Next's own `.next/standalone/.next/cache`, which holds
-	// both the optimized-image variant cache and, for an app with no
-	// `cacheHandler` configured, its default ISR/fetch-cache writes) are
-	// provisioned as explicit emptyDir mounts so the app keeps working with a
-	// read-only root; the vinext single-executable shape needs neither, so it
-	// renders with no extra mounts. The V8/Node compile-cache directory baked
-	// into the standalone image needs no mount: Node's compile cache is
-	// fail-open on an unwritable directory (falls back to the baked,
-	// read-only entries).
+	// job container's existing posture (image_prewarm.go).
+	//
+	// DEFAULT (nil, or WritableCache unset/false, #1778/#1786): the emptyDir
+	// volume this used to ALWAYS mount is now mounted only for the write
+	// paths that are NOT optional — see `buildWritableVolumes`'s doc comment
+	// for the exact rule, summarized here:
+	//
+	//   - /tmp is mounted whenever the app compiles to a self-contained
+	//     single executable (`spec.build: vinext`, or `selfContained: true`
+	//     on any other build) — that binary unpacks sharp's native
+	//     libraries there on the first image-optimization request and
+	//     `dlopen()`s them, unconditionally, regardless of this field.
+	//   - `.next/standalone/.next/cache` (standalone shape only — a
+	//     self-contained image has no such tree) is mounted whenever
+	//     `spec.storage` is configured — Next's built-in image optimizer
+	//     writes there BEFORE the object-store sync can run, and the sync's
+	//     own restore/push also `mkdir`s inside it.
+	//   - Otherwise (standalone, no storage, not self-contained): NO
+	//     emptyDir is mounted at all. Provisioning the volume costs
+	//     ~300-360ms of pod-sandbox setup on every cold wake regardless of
+	//     whether anything is ever written to it (measured on OKE and GKE,
+	//     `docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md`),
+	//     so it is skipped entirely rather than mounted-but-unwritten. The
+	//     image optimizer re-computes variants on every request instead of
+	//     caching them locally — a performance, not correctness, cost.
+	//
+	// See WritableCache below for the opt-in that restores the pre-#1778
+	// mounts unconditionally, for an app that needs guaranteed local writes
+	// outside the two always-on cases above. The V8/Node compile-cache
+	// directory baked into the standalone image needs no mount under any of
+	// this: Node's compile cache is fail-open on an unwritable directory
+	// (falls back to the baked, read-only entries).
 	//
 	// KNOWN RESIDUAL GAP: an app with no `cacheHandler` configured (every
 	// knext-scaffolded app and the file-manager reference app configure one
 	// unconditionally) ALSO has Next's default cache flush REVALIDATED page
 	// HTML onto `.next/standalone/.next/server/app/**` — a build-output path
-	// this cannot mount without shadowing the prebuilt pages every route
-	// depends on. That write stays read-only-rejected; verified non-fatal on
-	// a live cluster (Next logs the failure and keeps serving from memory —
-	// ISR degrades to memory-only, it does not crash). Configure a
-	// `cacheHandler` to avoid it.
+	// that cannot be mounted without shadowing the prebuilt pages every
+	// other route depends on, so it stays read-only-rejected even with
+	// WritableCache: true. That write therefore stays read-only-rejected;
+	// verified non-fatal on a live cluster (Next logs the failure and keeps
+	// serving from memory — ISR degrades to memory-only, it does not crash).
+	// Configure a `cacheHandler` to avoid it.
 	//
 	// Semantics: nil (unset) or true => read-only root is rendered
 	// (DEFAULT-ON); false => the container keeps a writable root filesystem
@@ -308,6 +330,37 @@ type SecuritySpec struct {
 	// write path this default does not yet cover.
 	// +optional
 	ReadOnlyRootFilesystem *bool `json:"readOnlyRootFilesystem,omitempty"`
+
+	// WritableCache opts back into the pre-#1778 behaviour UNCONDITIONALLY:
+	// when the rendered container has `readOnlyRootFilesystem: true` (the
+	// default), the operator provisions an explicit emptyDir, mounted at
+	// /tmp and — for the standalone (node/bun-standalone) build shape only —
+	// at `/app/.next/standalone/.next/cache`, so Next's built-in image
+	// optimizer and scratch-file writes keep landing on disk instead of
+	// failing EROFS, regardless of `spec.build`/`selfContained`/`spec.storage`.
+	//
+	// You do NOT need this field for the two cases ReadOnlyRootFilesystem's
+	// doc comment already covers unconditionally: a self-contained compile
+	// (`/tmp` for sharp's native-library unpack) and a storage-configured
+	// standalone app (`.next/cache` for the image-optimizer write the
+	// object-store sync depends on) both get their required mount by
+	// DEFAULT, with this field left unset.
+	//
+	// Set this to true for an app that wants guaranteed local writes OUTSIDE
+	// those two cases — most commonly a standalone app with no `spec.storage`
+	// that still wants its optimized-image variants to persist locally
+	// across requests rather than re-optimizing every time, or one that has
+	// removed its `cacheHandler` and relies on Next's default on-disk
+	// ISR/fetch-cache fallback.
+	//
+	// Ignored (no volume provisioned either way) when ReadOnlyRootFilesystem
+	// is explicitly false — a writable root already has these paths.
+	//
+	// Semantics: nil (unset) or false => only the two always-on cases above
+	// get a mount (DEFAULT); true => the emptyDir + both mounts are
+	// provisioned unconditionally.
+	// +optional
+	WritableCache *bool `json:"writableCache,omitempty"`
 }
 
 // DatabaseSpec is the author-facing surface of the app's database. knext is

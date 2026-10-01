@@ -183,8 +183,28 @@ Datadog, and similar) are not used as a default — they reintroduce lock-in. Yo
 `endpoint` at any OTLP backend you run.
 </Callout>
 
-When tracing is disabled, the instrumentation hook returns **without initializing OpenTelemetry** —
-no exporter, no span processors, **zero overhead**.
+When tracing is disabled, the instrumentation hook returns **before it loads any OpenTelemetry
+code** — no exporter, no span processors, and the tracing modules are never imported, so a cold
+start does not pay to load them. Turning tracing on is still only the config above: the app loads
+them at startup when `OTEL_TRACING_ENABLED=true` is present.
+
+<Callout>
+**Apps created with an earlier `knext create`** check the tracing switch only *after* importing
+`src/instrumentation-node.ts`, which loads the whole tracing stack on every cold start even with
+tracing off. To get the faster start, add the same check to `src/instrumentation.ts`, before that
+import:
+
+```ts
+import { resolveOtelOptions } from '@getknext/core/adapters/otel-config';
+
+export async function register() {
+  if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+  if (!resolveOtelOptions(process.env)) return; // tracing off: load nothing
+  const { registerNode } = await import('./instrumentation-node');
+  registerNode();
+}
+```
+</Callout>
 
 ## Load testing
 

@@ -830,62 +830,75 @@ func deepHealthPath(nextApp *appsv1alpha1.NextApp) string {
 	return readinessProbePath(nextApp) + "/deep"
 }
 
+// isSelfContainedShape reports whether nextApp compiles to ONE executable
+// with no `.next/standalone` tree and no `node_modules` — true vinext
+// (`Build == "vinext"`) and the standalone bundler's self-contained compile
+// (`SelfContained: true` on any other Build value) are the SAME shape for
+// this purpose (#1522, mirrors the containerCommand branch in
+// buildDesiredKsvc). Both ship via `Dockerfile.self-contained.hbs`, whose
+// binary unpacks sharp's native libraries into `$TMPDIR` (default /tmp) on
+// the FIRST image-optimization request, then `dlopen()`s them — a write (and
+// EXEC) that has nothing to do with `writableCache` or `spec.storage`, so it
+// is handled as its own case below rather than folded into either.
+func isSelfContainedShape(nextApp *appsv1alpha1.NextApp) bool {
+	return nextApp.Spec.Build == "vinext" || nextApp.Spec.SelfContained
+}
+
 // buildWritableVolumes renders the emptyDir volumes + mounts the app
 // container needs to keep working under readOnlyRootFilesystem (#1332).
-// Returns (nil, nil) when the root stays writable — the pre-#1332 rendering,
-// byte-identical.
+// Returns (nil, nil) when the root stays writable.
 //
-// Two writable paths are provisioned, both audited against the ACTUAL
-// runtime write behaviour rather than assumed:
+// #1778/#1786 round 2: provisioning this volume measurably costs cold-start
+// time (~300-360ms of pod-sandbox setup per wake, OKE + GKE,
+// `docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md`)
+// whether or not anything is ever written to it, so it is no longer
+// provisioned UNCONDITIONALLY. It is still provisioned, by default, for the
+// two write paths that are NOT optional (an adversarial review of the first
+// round of this change caught both — neither is behind `writableCache`):
 //
-//   - /tmp: a universal scratch dir. Standard defense-in-depth practice, and
-//     cheap insurance against any as-yet-uncatalogued temp-file write (e.g. a
-//     native addon spilling to disk) in either build shape.
-//   - `.next/standalone/.next/cache`, STANDALONE SHAPE ONLY (build != "vinext"
-//     — turbopack/webpack/unset all emit that same tree, mirroring the
-//     containerCommand branch above): Next's own built-in image optimizer
-//     writes optimized variants under `.next/cache/images` at request time
-//     (image-cache-sync.ts / ADR-0006 then syncs them to the object store).
-//     The WHOLE `.next/cache` dir is mounted, not just `images` — an app with
-//     no `cacheHandler` configured also has Next's default FileSystemCache
-//     write ISR/fetch-cache entries under `.next/cache/fetch-cache`, and
-//     mounting only the `images` subdir left that write EROFS (verified live
-//     on OKE, #1332 review round 2). It lives at
-//     `/app/.next/standalone/.next/cache` per the shipped recipe
-//     (Dockerfile.standalone.hbs, WORKDIR /app). The vinext single-executable
-//     shape's own image optimizer (vinext-image-optimizer.ts) never touches
-//     local disk, so it needs no second mount.
+//   - /tmp, whenever this is a self-contained-compiled shape
+//     (`isSelfContainedShape`): the binary unpacks sharp's native libraries
+//     there on the first image-optimization request and `dlopen()`s them —
+//     without a writable+executable /tmp this 500s every optimized-image
+//     request on every app of this shape, not just ones with `writableCache`
+//     set. See `Dockerfile.self-contained.hbs:11-22`.
+//   - `.next/standalone/.next/cache` (STANDALONE shape only — a
+//     self-contained image has no `.next/standalone` tree, so this never
+//     applies there), whenever `spec.storage` is configured: Next's built-in
+//     image optimizer writes the uncompressed variant under
+//     `.next/cache/images` BEFORE `image-cache-sync.ts` can sync it to the
+//     object store, and that sync's own `restore`/push also `mkdir`s inside
+//     this directory (`image-cache-sync.ts:140,301`) — unguarded, so it
+//     throws EROFS rather than failing open. Without the mount, a
+//     storage-configured app's sync loop errors on every wake and every
+//     image request re-optimizes from scratch, defeating the whole point of
+//     configuring storage. This is NOT limited to the no-storage case the
+//     original #1778 write-up described — storage does not remove this
+//     local write, it only adds a step that depends on it succeeding.
 //
-// Deliberately NOT mounted, and NOT fully fixed by the above:
-//
-//   - The baked V8/Node compile-cache directory
-//     (`.next/standalone/.next/compile-cache`, NODE_COMPILE_CACHE) — a SIBLING
-//     of `.next/cache`, not nested inside it, so the mount above does not
-//     touch it. V8's handling of an unwritable cache dir is fail-open
-//     (compile-cache-health.ts, __tests__/compile-cache-volume-fallback.test.ts)
-//     — it silently falls back to serving the baked, already-populated
-//     entries read-only rather than erroring, so a read-only root costs no
-//     correctness there, only the (already rare) chance of caching a NEW
-//     entry discovered at runtime.
-//   - `.next/standalone/.next/server/app/**` — Next's default FileSystemCache
-//     (active only on an app with NO `cacheHandler` configured) also
-//     flushes REVALIDATED page HTML back onto this BUILD-OUTPUT path, not
-//     just `.next/cache`. That path cannot be made writable without an
-//     emptyDir SHADOWING it — which would delete the prebuilt pages every
-//     other route depends on to serve at all, a strictly worse outage. This
-//     write therefore stays EROFS under a read-only root: verified live on
-//     OKE to be NON-FATAL (Next logs "Failed to update prerender cache" and
-//     keeps serving from its in-memory cache; the request that triggered the
-//     revalidation still returns 200) — degraded to memory-only ISR, not a
-//     crash. Every knext-authored app (the `kn-next create` scaffold and the
-//     `file-manager` reference app) configures a `cacheHandler` unconditionally
-//     in its `next.config.ts`, which makes Next skip FileSystemCache entirely
-//     (`IncrementalCache`'s constructor only instantiates it when NO custom
-//     handler is registered) — so this residual EROFS is reachable only by an
-//     app that has removed or never had that wiring. Configuring a
-//     `cacheHandler` (Redis or otherwise) is the fix; see the operator docs.
-func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool) ([]corev1.Volume, []corev1.VolumeMount) {
+// `writableCache: true` additionally provisions both mounts unconditionally
+// (the pre-#1778 behaviour) for an app that wants guaranteed local writes
+// outside the two cases above — e.g. an app with no `cacheHandler` that
+// relies on Next's on-disk ISR/fetch-cache fallback. See SecuritySpec's doc
+// comments for the full default-vs-opt-in semantics and what an app gives up
+// staying on the bare default (nothing fatal: the remaining writes — the
+// already-accepted `.next/server/app/**` gap, and a no-storage app's image
+// cache — fail EROFS non-fatally, logged, degraded to recompute-on-every-
+// request rather than crashing).
+func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool, writableCache bool) ([]corev1.Volume, []corev1.VolumeMount) {
 	if !readOnlyRootFS {
+		return nil, nil
+	}
+
+	selfContained := isSelfContainedShape(nextApp)
+	storageConfigured := nextApp.Spec.Storage != nil && nextApp.Spec.Storage.Provider != ""
+
+	mountTmp := writableCache || selfContained
+	// `.next/cache` never applies to a self-contained image — it has no
+	// `.next/standalone` tree at all (see isSelfContainedShape).
+	mountNextCache := !selfContained && (writableCache || storageConfigured)
+
+	if !mountTmp && !mountNextCache {
 		return nil, nil
 	}
 
@@ -893,10 +906,11 @@ func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool) ([
 	volumes := []corev1.Volume{
 		{Name: writableVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
-	volumeMounts := []corev1.VolumeMount{
-		{Name: writableVolumeName, MountPath: "/tmp", SubPath: "tmp"},
+	var volumeMounts []corev1.VolumeMount
+	if mountTmp {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: writableVolumeName, MountPath: "/tmp", SubPath: "tmp"})
 	}
-	if nextApp.Spec.Build != "vinext" {
+	if mountNextCache {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      writableVolumeName,
 			MountPath: "/app/.next/standalone/.next/cache",
@@ -1060,7 +1074,12 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// nil-means-true convention as the sibling NetworkPolicy field above.
 	readOnlyRootFS := nextApp.Spec.Security == nil || nextApp.Spec.Security.ReadOnlyRootFilesystem == nil ||
 		*nextApp.Spec.Security.ReadOnlyRootFilesystem
-	volumes, volumeMounts := buildWritableVolumes(nextApp, readOnlyRootFS)
+	// #1778: writableCache is nil-means-false (opt-IN), the opposite
+	// convention from the other SecuritySpec bools — the default no longer
+	// provisions the emptyDir.
+	writableCache := nextApp.Spec.Security != nil && nextApp.Spec.Security.WritableCache != nil &&
+		*nextApp.Spec.Security.WritableCache
+	volumes, volumeMounts := buildWritableVolumes(nextApp, readOnlyRootFS, writableCache)
 
 	// ContainerConcurrency default (#377, ADR-0028). Lowered from 100 → 20: a
 	// pod absorbing 100 concurrent requests before Knative added a 2nd replica
@@ -1076,7 +1095,26 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		cc = int64(nextApp.Spec.Scaling.ContainerConcurrency)
 	}
 
-	// Resource limits — aligned with CLI defaults
+	// Resource limits — aligned with CLI defaults.
+	//
+	// #1778/#1786 round 2 (adversarial review): a 4000m default CPU LIMIT was
+	// tried and REVERTED back to 1000m. The REQUEST stays 250m, so a 4000m
+	// limit is a 16x request:limit ratio — a cluster with a LimitRange
+	// capping `maxLimitRequestRatio` (a common value is 4) or a bare
+	// `max.cpu` below 4 rejects the pod outright at admission
+	// (`FailedCreate`), which is a silently-broken default deploy, not a
+	// cold-start win. jev `pick` over keep-1000m / raise-to-2000m /
+	// raise-to-4000m scored 0.89 / 0.10 / 0.01 — keep 1000m is the clear
+	// choice once the LimitRange risk is in the comparison, even though
+	// 4000m alone measured ~675ms faster on an unconstrained GKE
+	// `e2-standard-4` (Holm p=0.0005,
+	// docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md).
+	// The saving is real but NOT safe as a platform default; it ships as a
+	// documented per-app recipe instead (raise spec.resources.cpuLimit, or
+	// use a startup-CPU-boost controller) — see
+	// docs/operator/scaling-cold-start.md. #1788 tracks the operator not
+	// surfacing a LimitRange/quota FailedCreate in NextApp status, which is
+	// what would make any higher default detectable instead of silent.
 	resourceRequests := corev1.ResourceList{
 		corev1.ResourceCPU:    resource.MustParse("250m"),
 		corev1.ResourceMemory: resource.MustParse("512Mi"),

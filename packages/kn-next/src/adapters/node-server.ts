@@ -16,6 +16,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { createLogger } from "../utils/logger";
 import { bootTrace } from "./boot-trace";
@@ -45,6 +46,34 @@ import { childSpawnPlan } from "./standalone-exec";
 // process start rather than module load). A no-op unless KNEXT_BOOT_TRACE is
 // set, so the cold-start path pays nothing for it in production.
 bootTrace.mark("entry-eval");
+
+// ── ARP / neighbour-table primer (#1760) — THE supervisor's very first
+// action, before metrics bind and before the child is spawned. On a
+// flannel-VXLAN node a stale neighbour entry for a recycled pod IP can
+// black-hole this pod from outside its own node (including the kubelet's
+// readiness probe) for ~8.5s until the pod sends an outbound packet of its
+// own — measured 10234ms -> 2940ms median wake on the affected OKE node
+// (docs/benchmarks/arp-primer-oke-partial-ab-2026-10-01.md; mechanism
+// capture + the original phase breakdown in
+// docs/benchmarks/cold-start-phase-breakdown-2026-10-01.md). See
+// ./arp-primer.cjs for the primer itself: dependency-free, Linux-only,
+// contractually NEVER throws and NEVER blocks — requiring it returns
+// synchronously either way, and the UDP send is fire-and-forget.
+// KNEXT_ARP_PRIMER=0 disables it. This covers BOTH disk-mode children this
+// supervisor spawns (a Node or Bun `server.js`) — firing here, before the
+// child even exists, is earlier than any preload the child itself could
+// run. The compiled standalone-on-Bun executable has no supervisor, so it
+// bakes the same primer in as the FIRST preload instead (standalone-compile.mjs).
+const arpPrimerPath = resolve(import.meta.dirname, "arp-primer.cjs");
+if (existsSync(arpPrimerPath)) {
+    try {
+        createRequire(import.meta.url)(arpPrimerPath);
+    } catch {
+        // arp-primer.cjs's own contract is "never throws"; this catch only
+        // guards module resolution itself (e.g. a corrupted dist file), never
+        // the primer's internal logic.
+    }
+}
 
 const log = createLogger({ module: "server" });
 // Prometheus metrics port. Defaults to 9464 (no behavior change); overridable via
