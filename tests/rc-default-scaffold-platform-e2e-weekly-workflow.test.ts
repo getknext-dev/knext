@@ -162,11 +162,6 @@ describe('rc-default-scaffold-platform-e2e-weekly — operator built from the re
     expect(mainJob.needs).toBe('resolve-git-ref');
   });
 
-  it('checks out the resolved SHA before building the operator image', () => {
-    const checkout = mainJob.steps?.find((s) => (s.uses ?? '').includes('actions/checkout'));
-    expect(checkout?.with?.ref).toBe('${{ needs.resolve-git-ref.outputs.git-sha }}');
-  });
-
   it('captures the operator digest from the registry push, cross-checked against the deployed pod imageID', () => {
     const step = mainJob.steps?.find((s) => s.id === 'build-operator');
     expect(step).toBeDefined();
@@ -236,6 +231,86 @@ describe('rc-default-scaffold-platform-e2e-weekly — the four assertions are pr
     expect(assertionsScript).toMatch(/function requireEnv/);
     expect(assertionsScript).toMatch(/requireEnv\('RC_E2E_BASE_URL'\)/);
     expect(assertionsScript).toMatch(/requireEnv\('CACHE_INVALIDATE_TOKEN'\)/);
+  });
+});
+
+describe('rc-default-scaffold-platform-e2e-weekly — harness/operator checkout split (run 36812069073 fix)', () => {
+  // The default (first) checkout step has no `ref:` at all — it resolves to
+  // github.sha, i.e. the workflow's OWN commit (main for scheduled runs).
+  // This is the HARNESS: the assertion script, kind-manifests bring-up
+  // scripts, and e2e-support must always match the workflow file shipping
+  // them, never a stale rcTag that can predate the workflow itself (as
+  // v1.0.0-rc.3 did when run 36812069073 hit
+  // `Cannot find module .../scripts/rc-scaffold-platform-e2e.mjs`).
+  const checkoutSteps =
+    mainJob.steps?.filter((s) => (s.uses ?? '').includes('actions/checkout')) ?? [];
+  const harnessCheckout = checkoutSteps.find((s) => !s.with?.ref);
+  const rcCheckout = checkoutSteps.find(
+    (s) => s.with?.ref === '${{ needs.resolve-git-ref.outputs.git-sha }}',
+  );
+
+  it('has exactly two checkouts: one harness (no ref), one rc-pinned', () => {
+    expect(checkoutSteps).toHaveLength(2);
+    expect(harnessCheckout).toBeDefined();
+    expect(rcCheckout).toBeDefined();
+  });
+
+  it('the harness checkout is unconditionally the FIRST step (so every later step can rely on it)', () => {
+    expect(mainJob.steps?.[0]).toBe(harnessCheckout);
+  });
+
+  it('the rc checkout lands in rc-src/ — never at the workspace root', () => {
+    expect(rcCheckout?.with?.path).toBe('rc-src');
+  });
+
+  it('Go toolchain + operator build + CRD apply all resolve from rc-src/, not the harness root', () => {
+    const goSetup = mainJob.steps?.find((s) => (s.uses ?? '').includes('actions/setup-go'));
+    expect(String(goSetup?.with?.['go-version-file'])).toMatch(
+      /^rc-src\/packages\/kn-next-operator\//,
+    );
+    expect(String(goSetup?.with?.['cache-dependency-path'])).toMatch(
+      /^rc-src\/packages\/kn-next-operator\//,
+    );
+
+    const buildOperator = mainJob.steps?.find((s) => s.id === 'build-operator');
+    expect(buildOperator?.['working-directory']).toBe('rc-src/packages/kn-next-operator');
+    // `make install`/`make deploy` inside that working-directory apply the
+    // CRD/manifests from THIS SAME checkout's config/ — i.e. the rc ref's
+    // own CRD, matching the operator image also built from rc-src/.
+    expect(String(buildOperator?.run)).toMatch(/make install/);
+    expect(String(buildOperator?.run)).toMatch(/make deploy IMG=/);
+  });
+
+  it('the assertion script, kind-manifests, and webhook-ready wait are never read from rc-src/', () => {
+    const assertStep = mainJob.steps?.find((s) =>
+      String(s.run ?? '').includes('rc-scaffold-platform-e2e.mjs'),
+    );
+    expect(String(assertStep?.run)).not.toMatch(/rc-src\//);
+
+    const certManagerStep = stepByName('Install cert-manager');
+    const knativeStep = stepByName('Install Knative Serving + Kourier (scale-to-zero tuned)');
+    expect(String(certManagerStep?.run)).toMatch(/^\s*scripts\/kind-manifests\//m);
+    expect(String(certManagerStep?.run)).not.toMatch(/rc-src\//);
+    expect(String(knativeStep?.run)).toMatch(/^\s*scripts\/kind-manifests\//m);
+    expect(String(knativeStep?.run)).not.toMatch(/rc-src\//);
+
+    const buildOperator = mainJob.steps?.find((s) => s.id === 'build-operator');
+    expect(String(buildOperator?.run)).toMatch(/wait-for-webhook-ready\.sh/);
+    // Invoked via GITHUB_WORKSPACE (the harness root), never rc-src/.
+    expect(String(buildOperator?.run)).toMatch(
+      /\$\{GITHUB_WORKSPACE\}\/scripts\/kind-manifests\/wait-for-webhook-ready\.sh/,
+    );
+  });
+
+  it('no other step in the job references rc-src/ except the operator build + its own checkout', () => {
+    const offenders = (mainJob.steps ?? []).filter((s) => {
+      if (s === rcCheckout) return false;
+      if (s.id === 'build-operator') return false;
+      const goSetup = (s.uses ?? '').includes('actions/setup-go');
+      if (goSetup) return false; // asserted separately above — it's SUPPOSED to point at rc-src/
+      return String(s.run ?? '').includes('rc-src/');
+    });
+    expect(offenders).toEqual([]);
   });
 });
 
