@@ -1,0 +1,142 @@
+# The NextApps of the 2026-10-01 GKE "node vs bun (bytecode) + minimisation" sitting
+# (docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md). Applied with
+#   kubectl --context knext-coldstart apply --validate=strict -f nextapps-runtime-min.yaml
+# next to ../nextapps.yaml (whose bc-bun-turbopack / bc-node-turbopack / bc-bun-cpu4 /
+# bc-bun-rwfs are reused unchanged as baselines and arms).
+#
+# Every arm differs from its baseline in exactly ONE thing. Variant images are built FROM
+# the baseline digest (Dockerfile.variants in this directory), so all other bytes match.
+# Bench-only deltas identical across arms, as in ../nextapps.yaml: maxScale 1, no
+# scaleDownDelay.
+#
+# Bytecode family (Part 1):
+#   bc-bun-nobc     the compiled executable rebuilt from the same standalone tree WITHOUT --bytecode
+#   bc-bun-script   no executable at all: STANDALONE_SERVER_EXEC="" -> the supervisor runs
+#                   `bun server.js` (the uncompiled standalone server)
+#   bc-bun-sc       self-contained executable (route chunks embedded and compiled to bytecode too)
+#   bc-node-nocc    NODE_DISABLE_COMPILE_CACHE=1 (Node's documented opt-out) on the baseline image
+#   bc-node-ccdebug / bc-node-nocc-debug   evidence only, never timed: NODE_DEBUG_NATIVE=COMPILE_CACHE
+# Minimisation family (Part 2):
+#   bc-bun-noinstr / bc-node-noinstr   instrumentation register() is a no-op (= gating the
+#                   instrumentation-node import on tracing, which is off)
+#   bc-bun-warm / bc-node-warm         warm-before-ready prototype (localhost GET of the health
+#                   path from process start until the first 200)
+# Machine-family block (Part 2): bc-bun-twin / bc-node-twin are spec-identical twins of the
+#   baselines, woken only on the c3 pool while the baselines are woken only on default-pool.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-bun-nobc, namespace: bench-cells}
+spec:
+  image: us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-nobc@sha256:54040431870684c3e57200be3427a5fdba39a96073911082681e83026c07b102
+  runtime: bun
+  build: turbopack
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-bun-script, namespace: bench-cells}
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb
+  runtime: bun
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  env: {STANDALONE_SERVER_EXEC: ""}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-bun-sc, namespace: bench-cells}
+spec:
+  image: us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-sc@sha256:109b5271af3dd90f8713df05c967b6abed27a4d7a400fc51aa9fbfff6fb25fcf
+  runtime: bun
+  build: turbopack
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-node-nocc, namespace: bench-cells}
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-node-turbopack@sha256:c8d290ee1010d325112e9e214f26c52f12f76014e15321203eeb2040a1002d77
+  runtime: node
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  env: {NODE_DISABLE_COMPILE_CACHE: "1"}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-node-ccdebug, namespace: bench-cells}
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-node-turbopack@sha256:c8d290ee1010d325112e9e214f26c52f12f76014e15321203eeb2040a1002d77
+  runtime: node
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  env: {NODE_DEBUG_NATIVE: COMPILE_CACHE}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-node-nocc-debug, namespace: bench-cells}
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-node-turbopack@sha256:c8d290ee1010d325112e9e214f26c52f12f76014e15321203eeb2040a1002d77
+  runtime: node
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  env: {NODE_DEBUG_NATIVE: COMPILE_CACHE, NODE_DISABLE_COMPILE_CACHE: "1"}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-bun-warm, namespace: bench-cells}
+spec:
+  image: us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-warm@sha256:b17e1143cc9b7b64cfd0fd23126b4381374713c64e67e02d864760fdd3c88ea8
+  runtime: bun
+  build: turbopack
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-node-warm, namespace: bench-cells}
+spec:
+  image: us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-node-warm@sha256:56230a970fde8a038c21faa71eb345ee756e8e6a4f8ac1e957037fa91d2432c3
+  runtime: node
+  build: turbopack
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-bun-noinstr, namespace: bench-cells}
+spec:
+  image: us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-noinstr@sha256:018de50b81ff5e21e63702f051cbdedb5eedc1417d49cd3d39b8db00b7b08828
+  runtime: bun
+  build: turbopack
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-node-noinstr, namespace: bench-cells}
+spec:
+  image: us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-node-noinstr@sha256:3f4d10359bf7c5d2dcb04f6d89848e9b0f3d9f3be21fd399bef594282189e30b
+  runtime: node
+  build: turbopack
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-bun-twin, namespace: bench-cells}
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb
+  runtime: bun
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata: {name: bc-node-twin, namespace: bench-cells}
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-node-turbopack@sha256:c8d290ee1010d325112e9e214f26c52f12f76014e15321203eeb2040a1002d77
+  runtime: node
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}

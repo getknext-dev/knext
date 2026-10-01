@@ -1,0 +1,20 @@
+# Pre-pull every variant image of nextapps-runtime-min.yaml onto EVERY node (including
+# the c3 experiment pool) so no measured wake includes an image pull. One DaemonSet,
+# one sleeping container per image. The baselines' own pre-pull DaemonSets
+# (prepull-bun-turbopack / prepull-node-turbopack, from the Part 1 sitting) stay as they are.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: prepull-variants, namespace: bench-cells}
+spec:
+  selector: {matchLabels: {app: prepull-variants}}
+  template:
+    metadata: {labels: {app: prepull-variants}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - {name: bun-nobc, image: "us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-nobc@sha256:54040431870684c3e57200be3427a5fdba39a96073911082681e83026c07b102", command: [sleep, "172800"], resources: {requests: {cpu: 1m, memory: 8Mi}}}
+        - {name: bun-sc, image: "us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-sc@sha256:109b5271af3dd90f8713df05c967b6abed27a4d7a400fc51aa9fbfff6fb25fcf", command: [sleep, "172800"], resources: {requests: {cpu: 1m, memory: 8Mi}}}
+        - {name: bun-warm, image: "us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-warm@sha256:b17e1143cc9b7b64cfd0fd23126b4381374713c64e67e02d864760fdd3c88ea8", command: [sleep, "172800"], resources: {requests: {cpu: 1m, memory: 8Mi}}}
+        - {name: node-warm, image: "us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-node-warm@sha256:56230a970fde8a038c21faa71eb345ee756e8e6a4f8ac1e957037fa91d2432c3", command: [sleep, "172800"], resources: {requests: {cpu: 1m, memory: 8Mi}}}
+        - {name: bun-noinstr, image: "us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-bun-noinstr@sha256:018de50b81ff5e21e63702f051cbdedb5eedc1417d49cd3d39b8db00b7b08828", command: [sleep, "172800"], resources: {requests: {cpu: 1m, memory: 8Mi}}}
+        - {name: node-noinstr, image: "us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-variant-node-noinstr@sha256:3f4d10359bf7c5d2dcb04f6d89848e9b0f3d9f3be21fd399bef594282189e30b", command: [sleep, "172800"], resources: {requests: {cpu: 1m, memory: 8Mi}}}

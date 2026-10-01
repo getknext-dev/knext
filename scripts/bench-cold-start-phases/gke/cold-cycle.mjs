@@ -48,8 +48,18 @@ const AGENT_PODS = {
   'gke-knext-coldstart-default-pool-85fdd2ff-fm3s': 'agent-fm3s',
 };
 const agentIps = {};
+// 2026-10-01 runtime/minimisation sitting: nodes in extra experiment pools
+// (e.g. the c4 machine-family pool) are not in the static map above, so fall
+// back to the `app=phase-agent` pod scheduled on that node.
+async function agentPodFor(nodeName) {
+  if (AGENT_PODS[nodeName]) return AGENT_PODS[nodeName];
+  const list = await apiGet(`/api/v1/namespaces/${NS}/pods?labelSelector=app%3Dphase-agent`);
+  const hit = list.items.find((p) => p.spec.nodeName === nodeName);
+  if (hit) AGENT_PODS[nodeName] = hit.metadata.name;
+  return hit?.metadata.name ?? null;
+}
 async function agentIp(nodeName) {
-  const pod = AGENT_PODS[nodeName];
+  const pod = await agentPodFor(nodeName);
   if (!pod) return null;
   agentIps[pod] ??= (await apiGet(`/api/v1/namespaces/${NS}/pods/${pod}`)).status.podIP;
   return agentIps[pod];
