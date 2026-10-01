@@ -182,8 +182,8 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",
-    "@getknext/db": "^1.0.0-rc.5",
-    "@getknext/lib": "^1.0.0-rc.5",
+    "@getknext/db": "workspace:^",
+    "@getknext/lib": "workspace:^",
     "@opentelemetry/api": "^1.9.0",
     "ioredis": "^5.9.2",
     "kafkajs": "^2.2.4",
