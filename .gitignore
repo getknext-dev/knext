@@ -107,6 +107,24 @@ graphify-out/
 # so every other contributor saw it as untracked. Ignore both here instead.
 .claude/verdicts/
 .claude/worktrees/
+# Agent working notes and hand-offs. Never committed (three slipped in via
+# earlier PRs and were removed); keep them local.
+.claude/research/
+.claude/handoffs/
+# Temp dirs that test and build runs have leaked into the repo root when TMPDIR
+# pointed here: empty-dir suite scratch, vinext probes, node-gyp caches, the V8
+# compile cache, musl-lockfile generation and bunx shims.
+/ed-clean-*/
+/ed-dest-*/
+/ed-term-*/
+/ed-hup-*/
+/ed-exit-*/
+/ed-sete-*/
+/vinext-probe-*/
+/.*.node-gyp/
+/v8-compile-cache-*/
+/generate-musl-lockfile-*/
+/bunx-*/
 .maturity-brief.md
 .migration-spec.md
 skills-lock.json
