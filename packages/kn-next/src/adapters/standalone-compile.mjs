@@ -100,6 +100,7 @@ import { computedRequireInventory, moduleDisposition } from "./computed-require-
 import {
     DEV_ONLY_STUB_SOURCE,
     resolveExportsUnderNode,
+    resolveRequireLike,
     splitBareSpecifier,
     standaloneCacheHandlerFiles,
     standaloneExecEntrySource,
@@ -252,39 +253,6 @@ function isInside(path, root) {
     return path === root || path.startsWith(`${root}/`);
 }
 
-/**
- * Resolve a specifier the way the disk-loaded CJS code that names it actually
- * requires it, OUTSIDE an active `Bun.build()` pass (`computeDiskClosure`, the
- * turbopack-alias scan below) — both run BEFORE the compile's own `Bun.build()`
- * call exists.
- *
- * `Bun.resolveSync(spec, dir)` takes an undocumented third `isESM` argument
- * that selects which `package.json#exports` condition set to probe, and its
- * DEFAULT differs by caller context: inside an active `Bun.build()` plugin
- * (`format: "cjs"`), a bare two-arg call already resolves as `isESM: false`
- * (the "require" condition) — matching the literal `require(...)` the bundled
- * code actually executes. Called from plain, pre-build script code — exactly
- * these two sites — the SAME two-arg call resolves as `isESM: true` instead.
- *
- * Measured on `minio@8.0.6` (`exports["."]`: `require` -> `dist/main/minio.js`
- * — present; `default` -> `dist/esm/minio.mjs` — NOT present, because nft only
- * traces the file a literal `require("minio")` call actually reaches): the
- * two-arg call throws "Cannot find package 'minio'" here, even though
- * `require.resolve("minio", { paths: [dir] })` finds it immediately. The
- * disk-closure scan only ever follows `require(...)` / `import(...)` /
- * `from "..."` literals out of CJS route-chunk output, so `isESM: false` is
- * the specifier's real call-site kind — try it first. A package shipping NO
- * "require" condition at all (pure ESM) still resolves via the `isESM: true`
- * fallback, so this never narrows what the plain two-arg call used to find.
- */
-function resolveRequireLike(spec, fromDir) {
-    try {
-        return Bun.resolveSync(spec, fromDir, false);
-    } catch {
-        return Bun.resolveSync(spec, fromDir, true);
-    }
-}
-
 const PRELOAD_SET = new Set(PRELOADS);
 
 /** `next`, `@swc/helpers/_/x` — not `./x`, `/abs`, or a builtin. */
@@ -395,6 +363,27 @@ function cacheHandlerRoots() {
 }
 const CACHE_HANDLER_ROOTS = cacheHandlerRoots();
 
+// A dropped specifier is reported once per DISTINCT specifier, not once per
+// occurrence. The disk-closure scan is intentionally conservative (see the
+// comment above `DISK_SPECIFIER`): the same optional/peer module a package
+// try/catch-guards at its own call sites (a native binding nft never vendors
+// because the branch that needs it never ran during tracing, a dev-only
+// require the bundler cannot prove dead) can be required from dozens of
+// files the BFS visits, and warning on every occurrence would flood stderr
+// with repeats of the SAME miss — the thing this guard must not do, per the
+// issue. Deduping by specifier keeps each genuinely distinct drop visible
+// exactly once (which is what would have surfaced the minio bug immediately,
+// instead of ~550 KB later as an unrelated bytecode-marker failure) without
+// scaling the noise with how many files happen to reference it.
+const WARNED_DROPPED_SPECIFIERS = new Set();
+function warnDroppedSpecifier(spec, fromDir, err) {
+    if (WARNED_DROPPED_SPECIFIERS.has(spec)) return;
+    WARNED_DROPPED_SPECIFIERS.add(spec);
+    console.error(
+        `[knext standalone-compile] disk closure: dropping ${JSON.stringify(spec)} (required from ${fromDir}) — ${err instanceof Error ? err.message : String(err)}`,
+    );
+}
+
 function computeDiskClosure(extraRoots = []) {
     const seen = new Set();
     const queue = [
@@ -418,7 +407,8 @@ function computeDiskClosure(extraRoots = []) {
             let resolved;
             try {
                 resolved = resolveRequireLike(spec, dirname(file));
-            } catch {
+            } catch (err) {
+                warnDroppedSpecifier(spec, dirname(file), err);
                 continue;
             }
             if (!isAbsolute(resolved)) continue;

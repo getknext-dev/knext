@@ -49,3 +49,10 @@ export declare function resolveExportsUnderNode(
     exportsField: unknown,
     subpath: string,
 ): string | undefined;
+
+/**
+ * Resolve `spec` the way disk-loaded CJS code requires it: the `require`
+ * export condition first, falling back to the ESM/`default` condition. Throws
+ * an `Error` naming both attempts' failures when neither resolves.
+ */
+export declare function resolveRequireLike(spec: string, fromDir: string): string;
