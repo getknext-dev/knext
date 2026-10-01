@@ -112,7 +112,7 @@ const MUTATIONS = [
     claim: "the compiled standalone executable's preload list drops it",
     subject: 'standaloneCompile',
     validate: jsStillParses,
-    anchor: ', "request-body-cap.cjs"];',
+    anchor: '  "request-body-cap.cjs",\n];',
     replacement: '];',
   },
   {
