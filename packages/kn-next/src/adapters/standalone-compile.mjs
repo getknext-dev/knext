@@ -65,6 +65,9 @@
  * A compiled executable takes no `--require`, so the preloads are the entry's
  * first statements instead: the compiled cell serves the same Cache-Control
  * shape the compat suite gates, and caps request bodies the same way.
+ * `arp-primer.cjs` (#1760) is baked in FIRST of all — this is the earliest
+ * point anything in this process can fire its one best-effort outbound UDP
+ * datagram, since this stage ships with no supervisor to do it any sooner.
  *
  * ## The bytecode proof
  *
@@ -168,7 +171,17 @@ if (!isInside(realpathSync(SERVER), ROOT)) {
 // fold-vs-sidecar decision). Disk mode's preload list — and therefore its
 // compiled output — is byte-identical to before this existed.
 const here = dirname(fileURLToPath(import.meta.url));
-const PRELOAD_NAMES = ["cache-control-normalize.cjs", "bun-keepalive-guard.cjs", "request-body-cap.cjs"];
+// #1760: arp-primer.cjs is FIRST — this stage has NO supervisor
+// (`node-server.ts` never runs for the self-contained exec; see its own
+// ENTRYPOINT comment), so the compiled entry itself is the earliest point
+// anything in this process can send the one outbound packet the fix needs,
+// and it must run before every other preload, let alone Next's server.js.
+const PRELOAD_NAMES = [
+  "arp-primer.cjs",
+  "cache-control-normalize.cjs",
+  "bun-keepalive-guard.cjs",
+  "request-body-cap.cjs",
+];
 if (SELF_CONTAINED) PRELOAD_NAMES.push("standalone-self-contained-supervisor.cjs");
 const PRELOADS = PRELOAD_NAMES.map((f) => join(here, f));
 for (const p of PRELOADS) {
