@@ -225,3 +225,25 @@ they don't change the tail, which stays dominated by cold start rather than by a
 reaction speed. Behavior like this is illustrative and environment-dependent, not a guarantee —
 see the perspective note above on cold-start numbers, which applies here too.
 </Callout>
+
+## Node-level networking stalls (opt-in, experimental)
+
+On some clusters, a node's networking layer can briefly be unable to reach a freshly-started pod
+that reused an IP address recently freed by another pod — until that pod sends its own first
+outbound network traffic. Where this occurs, it has been measured adding several seconds to an
+otherwise-fast wake.
+
+`spec.coldStart.arpPrimer` is an **opt-in, off-by-default** field that renders an extra,
+minimal-privilege startup step whose only job is to send one outbound packet before your app
+starts, so your app is reachable from the moment it's ready rather than waiting on this stall.
+
+```yaml
+spec:
+  coldStart:
+    arpPrimer: true
+```
+
+This is experimental and under evaluation: whether it helps depends on your cluster's networking
+configuration, and it is not yet the default. Leave it unset unless you've measured this stall on
+your own cluster.
+
