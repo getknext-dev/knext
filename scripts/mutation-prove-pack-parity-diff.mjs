@@ -60,9 +60,44 @@ const MUTATIONS = [
     replacement:
       'return {\n    identical: true,\n    onlyInA,\n    onlyInB,\n    differingFiles,\n  };',
   },
+  {
+    label:
+      'tarEntriesAgree: file content never compared (two different duplicate copies always "agree")',
+    subject: 'packParityDiff',
+    anchor: '    return aData.equals(bData);',
+    replacement: '    return true;',
+  },
+  {
+    label:
+      'compareTarballEntriesTolerant: conflicting duplicates never detected (allAgree always true)',
+    subject: 'packParityDiff',
+    anchor: 'const allAgree = copies.every((c) => tarEntriesAgree(c, copies[0]));',
+    replacement: 'const allAgree = true;',
+  },
+  {
+    label:
+      'compareTarballEntriesTolerant: identical ignores conflictingDuplicates (never fails on disagreement)',
+    subject: 'packParityDiff',
+    anchor: 'identical: contentResult.identical && conflictingDuplicates.length === 0,',
+    replacement: 'identical: contentResult.identical,',
+  },
+  {
+    label:
+      'compareTarballEntriesTolerant: last-occurrence-wins dedup reverts to first-occurrence (extracted-copy content diff never caught)',
+    subject: 'packParityDiff',
+    anchor:
+      'dedupedA.push(copies[copies.length - 1]); // last occurrence wins, as extraction would',
+    replacement: 'dedupedA.push(copies[0]);',
+  },
+  {
+    label: 'formatTolerantPackParityReport: structural note suppressed even when present',
+    subject: 'packParityDiff',
+    anchor: 'if (result.identical && result.structuralDuplicates.length === 0) return null;',
+    replacement: 'if (result.identical) return null;',
+  },
 ];
 
-declareMutations(4);
+declareMutations(9);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -74,8 +109,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 4) {
-  console.error(`FATAL: declared 4 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 9) {
+  console.error(`FATAL: declared 9 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

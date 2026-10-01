@@ -3,9 +3,13 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import {
   comparePackedTarballEntries,
+  compareTarballEntriesTolerant,
   formatPackParityReport,
+  formatTolerantPackParityReport,
+  groupTarEntriesByName,
 } from '../scripts/lib/pack-parity-diff.mjs';
 import { readTarEntries } from '../scripts/lib/tar-entries.mjs';
 
@@ -164,5 +168,159 @@ describe('comparePackedTarballEntries', () => {
 
     const result = comparePackedTarballEntries(readTarEntries(a), readTarEntries(b));
     expect(result.identical).toBe(true);
+  });
+});
+
+// --- tolerant comparison: #1562-aware (#1734 review refinement) ------------
+//
+// A legitimate `bun pm pack` cannot be reproduced with `tar -czf` over a
+// staged directory (a filesystem cannot hold two files at the same path), so
+// — mirroring `tests/ga-tarball-diff.test.ts`'s own adversarial-fixture
+// approach exactly — these fixtures are built RAW, byte-for-byte, as the real
+// #1562 shape: two legitimately-checksummed headers for the SAME path.
+
+/** A raw 512-byte ustar header + its (zero-padded) data, matching the wire format exactly. */
+function rawTarHeader(name: string, data: Buffer): Buffer {
+  const h = Buffer.alloc(512);
+  h.write(name, 0, 100);
+  h.write('0000644\0', 100);
+  h.write('0000000\0', 108);
+  h.write('0000000\0', 116);
+  h.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124);
+  h.write('00000000000\0', 136);
+  h.write('0', 156); // regular file
+  h.write('ustar\0', 257);
+  h.write('00', 263);
+  h.fill(0x20, 148, 156);
+  let sum = 0;
+  for (const b of h) sum += b;
+  h.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
+  const pad = Buffer.alloc(Math.ceil(data.length / 512) * 512);
+  data.copy(pad);
+  return Buffer.concat([h, pad]);
+}
+
+function writeRawTarGz(dir: string, filename: string, parts: Buffer[]): string {
+  const tgzPath = join(dir, filename);
+  writeFileSync(tgzPath, gzipSync(Buffer.concat([...parts, Buffer.alloc(1024)])));
+  return tgzPath;
+}
+
+describe('compareTarballEntriesTolerant', () => {
+  it('duplicate copies identical to each other AND the registry -> identical:true, with a structural note', () => {
+    const dir = mkFixtureDir('pack-parity-dup-ok-');
+    const shared = Buffer.from("module.exports = 'shared';\n");
+    const bunTgz = writeRawTarGz(dir, 'bun.tgz', [
+      rawTarHeader('package/dist/cli/kn-next.js', shared),
+      rawTarHeader('package/dist/cli/kn-next.js', shared), // identical second copy
+    ]);
+    const registryTgz = writeRawTarGz(dir, 'registry.tgz', [
+      rawTarHeader('package/dist/cli/kn-next.js', shared),
+    ]);
+
+    const allEntriesA = readTarEntries(bunTgz, { allowDuplicates: true });
+    const entriesB = readTarEntries(registryTgz);
+    const result = compareTarballEntriesTolerant(allEntriesA, entriesB);
+
+    expect(result.identical).toBe(true);
+    expect(result.conflictingDuplicates).toEqual([]);
+    expect(result.structuralDuplicates).toEqual([
+      { name: 'package/dist/cli/kn-next.js', count: 2 },
+    ]);
+
+    const report = formatTolerantPackParityReport('@getknext/core', result, {
+      aLabel: 'bun pm pack',
+      bLabel: 'npm registry',
+    });
+    expect(report).toContain('STRUCTURAL NOTE (#1562');
+    expect(report).toContain('identical');
+    expect(report).not.toContain('FAIL');
+  });
+
+  it('duplicate copies that DISAGREE with each other -> identical:false, reported in conflictingDuplicates', () => {
+    const dir = mkFixtureDir('pack-parity-dup-conflict-');
+    const copyOne = Buffer.from("module.exports = 'copy-one';\n");
+    const copyTwo = Buffer.from("module.exports = 'copy-two';\n");
+    const bunTgz = writeRawTarGz(dir, 'bun.tgz', [
+      rawTarHeader('package/dist/cli/kn-next.js', copyOne),
+      rawTarHeader('package/dist/cli/kn-next.js', copyTwo),
+    ]);
+    const registryTgz = writeRawTarGz(dir, 'registry.tgz', [
+      rawTarHeader('package/dist/cli/kn-next.js', copyTwo), // matches the LAST (extracted) copy
+    ]);
+
+    const allEntriesA = readTarEntries(bunTgz, { allowDuplicates: true });
+    const entriesB = readTarEntries(registryTgz);
+    const result = compareTarballEntriesTolerant(allEntriesA, entriesB);
+
+    expect(result.identical).toBe(false);
+    expect(result.conflictingDuplicates).toEqual(['package/dist/cli/kn-next.js']);
+    // Last-wins content still matches the registry, so this is NOT ALSO
+    // reported as a content-diff — it is reported exactly once, as the
+    // internal-inconsistency finding it actually is.
+    expect(result.differingFiles).toEqual([]);
+
+    const report = formatTolerantPackParityReport('@getknext/core', result, {
+      aLabel: 'bun pm pack',
+      bLabel: 'npm registry',
+    });
+    expect(report).toContain('FAIL: duplicate tar entry "package/dist/cli/kn-next.js"');
+  });
+
+  it('a duplicate whose LAST (extracted) copy differs from the registry -> identical:false, a plain content diff', () => {
+    const dir = mkFixtureDir('pack-parity-dup-extracted-diff-');
+    const firstCopy = Buffer.from("module.exports = 'first';\n");
+    const lastCopy = Buffer.from("module.exports = 'last';\n");
+    const bunTgz = writeRawTarGz(dir, 'bun.tgz', [
+      rawTarHeader('package/dist/cli/kn-next.js', firstCopy),
+      rawTarHeader('package/dist/cli/kn-next.js', lastCopy),
+    ]);
+    const registryTgz = writeRawTarGz(dir, 'registry.tgz', [
+      rawTarHeader(
+        'package/dist/cli/kn-next.js',
+        Buffer.from("module.exports = 'DIFFERENT FROM BOTH';\n"),
+      ),
+    ]);
+
+    const allEntriesA = readTarEntries(bunTgz, { allowDuplicates: true });
+    const entriesB = readTarEntries(registryTgz);
+    const result = compareTarballEntriesTolerant(allEntriesA, entriesB);
+
+    expect(result.identical).toBe(false);
+    expect(result.differingFiles).toEqual(['package/dist/cli/kn-next.js']);
+    // ALSO internally inconsistent (first !== last), reported too, not hidden
+    // behind the content-diff finding.
+    expect(result.conflictingDuplicates).toEqual(['package/dist/cli/kn-next.js']);
+  });
+
+  it('no duplicates at all -> behaves exactly like comparePackedTarballEntries, no structural note', () => {
+    const dir = mkFixtureDir('pack-parity-no-dup-');
+    const a = buildFixtureTarball(dir, 'a.tgz', BASE_FILES);
+    const b = buildFixtureTarball(dir, 'b.tgz', BASE_FILES);
+
+    const result = compareTarballEntriesTolerant(
+      readTarEntries(a, { allowDuplicates: true }),
+      readTarEntries(b),
+    );
+
+    expect(result.identical).toBe(true);
+    expect(result.structuralDuplicates).toEqual([]);
+    expect(result.conflictingDuplicates).toEqual([]);
+    expect(
+      formatTolerantPackParityReport('@getknext/fixture', result, { aLabel: 'a', bLabel: 'b' }),
+    ).toBe(null);
+  });
+});
+
+describe('groupTarEntriesByName', () => {
+  it('groups every occurrence of a path together, in file order', () => {
+    const entries = [
+      { name: 'x', type: 'file', mode: 0o644, linkname: null, size: 1, data: Buffer.from('1') },
+      { name: 'y', type: 'file', mode: 0o644, linkname: null, size: 1, data: Buffer.from('2') },
+      { name: 'x', type: 'file', mode: 0o644, linkname: null, size: 1, data: Buffer.from('3') },
+    ];
+    const groups = groupTarEntriesByName(entries as never);
+    expect(groups.get('x')?.map((e) => e.data?.toString())).toEqual(['1', '3']);
+    expect(groups.get('y')?.map((e) => e.data?.toString())).toEqual(['2']);
   });
 });

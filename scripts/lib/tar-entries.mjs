@@ -41,7 +41,14 @@
  *   - `list()` delivers a legitimately-checksummed DUPLICATE path as two
  *     separate `onentry` calls, no warning at all — round 2 attack A's
  *     "duplicates keep the last entry" bug is not something `strict` closes;
- *     `readTarEntries` rejects a second occurrence of a path outright, here.
+ *     `readTarEntries` rejects a second occurrence of a path outright, here —
+ *     unless the caller opts in with `{ allowDuplicates: true }` (#1734 G3),
+ *     which exists for exactly one documented reason: `@getknext/core`'s
+ *     `bun pm pack` output legitimately contains a duplicate
+ *     `dist/cli/<bin>.js` entry (its two `bin` keys map to one file, and
+ *     bun's packer does not de-duplicate, #1562) and a caller measuring
+ *     whether that KNOWN quirk's copies agree needs to see every occurrence,
+ *     not have the read itself refuse.
  *   - a header whose `size` field decodes to `NaN` is silently normalised to
  *     `0` by `node-tar`'s own header parser (`nanUndef` in `header.js`) —
  *     if that entry is the LAST one in the archive, `list()` neither warns
@@ -66,9 +73,16 @@ const NODE_TAR_TYPE_TO_ENTRY_TYPE = {
 
 /**
  * @param {string} tgzPath
+ * @param {{allowDuplicates?: boolean}} [options] `allowDuplicates: true` skips
+ *   the second-occurrence rejection below and returns EVERY occurrence of a
+ *   path, in file order (never de-duplicated) — for a caller that wants to
+ *   judge for itself whether the duplicate copies agree (#1734 G3), rather
+ *   than have the read itself fail closed. Default `false` preserves this
+ *   function's original fail-closed behaviour for every existing caller
+ *   (`ga-tarball-diff.mjs` et al.) byte-for-byte.
  * @returns {Array<{name: string, type: string, mode: number, linkname: string|null, size: number, data: Buffer|null}>}
  */
-export function readTarEntries(tgzPath) {
+export function readTarEntries(tgzPath, { allowDuplicates = false } = {}) {
   const entries = [];
   const seenPaths = new Set();
 
@@ -80,10 +94,12 @@ export function readTarEntries(tgzPath) {
       throw new Error(`node-tar warning treated as fatal: ${code}: ${message}`);
     },
     onentry: (entry) => {
-      if (seenPaths.has(entry.path)) {
-        throw new Error(`duplicate tar entry path (rejected, not de-duplicated): ${entry.path}`);
+      if (!allowDuplicates) {
+        if (seenPaths.has(entry.path)) {
+          throw new Error(`duplicate tar entry path (rejected, not de-duplicated): ${entry.path}`);
+        }
+        seenPaths.add(entry.path);
       }
-      seenPaths.add(entry.path);
 
       const chunks = [];
       entry.on('data', (chunk) => chunks.push(chunk));

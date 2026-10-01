@@ -34,9 +34,30 @@
  *      file-by-file, via `scripts/lib/pack-parity-diff.mjs` — byte content
  *      plus file list, ignoring tar metadata (mtime, mode, order).
  *
- * Exits 0 only when every comparison is byte-identical. Any non-identical
- * file is listed in the job summary AND on stderr; this never weakens to a
- * skip on drift — a real divergence is the finding this job exists to catch.
+ * THE QUESTION THIS ASKS (#1734 review refinement, not "are the two tarballs
+ * byte-identical as archives"): does the credential lane's `bun pm pack`
+ * tarball actually install to the SAME bytes the registry ships? A real
+ * install extracts a tarball (`tar -x`/`npm install`), where a duplicate
+ * path's LAST occurrence simply overwrites the earlier one on disk — so the
+ * bun-pack side is read in duplicate-TOLERANT mode and compared as "what
+ * would actually land on disk" against the registry. A path that occurs
+ * more than once and whose copies all agree with each other is reported as
+ * a non-failing STRUCTURAL NOTE (named #1562, the measured `bun pm pack`
+ * multi-`bin`-key duplicate-entry quirk) — it does not, by itself, fail the
+ * check. The check STILL fails if: any duplicate's copies disagree with
+ * each other (an internally-inconsistent archive), the extracted (last-wins)
+ * content differs from the registry, or the file lists differ. The STRICT
+ * reader's own result (which `@getknext/core`'s known duplicate makes
+ * UNREADABLE) is also recorded, as an informational line only — never a
+ * failure on its own. The npm-pack vs registry comparison is unaffected by
+ * any of this: it uses the strict reader on both sides, as before, and
+ * fails loudly if it ever sees a duplicate (which would be a different,
+ * undocumented problem).
+ *
+ * Exits 0 only when every comparison passes under the rules above. Any
+ * finding (failing or merely a structural note) is listed in the job
+ * summary; this never weakens to a skip on drift — a real divergence is the
+ * finding this job exists to catch.
  *
  * Usage: node scripts/verify-rc-pack-parity.mjs [--rc-tag vX.Y.Z-rc.N]
  * (default: rcTag from .github/compat-credential-ref.json)
@@ -54,7 +75,12 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { comparePackedTarballEntries, formatPackParityReport } from './lib/pack-parity-diff.mjs';
+import {
+  comparePackedTarballEntries,
+  compareTarballEntriesTolerant,
+  formatPackParityReport,
+  formatTolerantPackParityReport,
+} from './lib/pack-parity-diff.mjs';
 import { canonicalPublishableGroup, packPublishableGroup } from './lib/pack-publishable-group.mjs';
 import { readTarEntries } from './lib/tar-entries.mjs';
 
@@ -191,12 +217,12 @@ function downloadPublished(name, version) {
 }
 
 /**
- * Compare two tarballs, tolerating a tarball that `readTarEntries` itself
- * refuses to read (e.g. the measured #1562 `bun pm pack` bug: a duplicate
- * tar entry for `@getknext/core`'s `dist/cli/kn-next.js`, which the multi-
- * `bin`-key target produces and `readTarEntries` fail-closed REJECTS rather
- * than silently de-duplicating). An unreadable tarball is itself a drift
- * finding — never a crash, and never silently skipped.
+ * Compare two tarballs with the STRICT reader on both sides (no tolerance
+ * for a duplicate path — an unreadable tarball is itself reported as a
+ * failure here). Used for the npm-pack vs registry comparison, which is
+ * expected to never carry a #1562-shaped duplicate; if it ever does, that
+ * is a different, undocumented problem and should fail loudly rather than
+ * be absorbed by the bun-side tolerance below.
  *
  * @param {string} name
  * @param {string} aPath
@@ -219,6 +245,70 @@ function compareTarballsSafely(name, aPath, bPath, sides) {
   }
   const result = comparePackedTarballEntries(aEntries, bEntries);
   return formatPackParityReport(name, result, sides);
+}
+
+/**
+ * Compare the CREDENTIAL-LANE (`bun pm pack`) tarball against the registry's
+ * published tarball, #1562-aware (#1734 review refinement).
+ *
+ * Reads side A TWICE:
+ *   - with the STRICT reader (no `allowDuplicates`) — purely informational,
+ *     reported as an extra line, never a failure on its own. For
+ *     `@getknext/core` this is expected to be UNREADABLE (the duplicate
+ *     `dist/cli/<bin>.js` entry), which is exactly what motivates the
+ *     tolerant comparison below; keeping this line makes that provenance
+ *     visible rather than silently superseded.
+ *   - with `{ allowDuplicates: true }`, which is what the TOLERANT
+ *     comparison (`compareTarballEntriesTolerant`) actually judges: does a
+ *     real install of this tarball (last-wins extraction) end up with the
+ *     same files/content the registry ships, and — separately — are any
+ *     duplicate copies internally consistent with each other.
+ *
+ * @param {string} name
+ * @param {string} aPath the bun-packed tarball
+ * @param {string} bPath the registry's tarball
+ * @param {{aLabel: string, bLabel: string}} sides
+ * @returns {{ identical: boolean, report: string | null }}
+ */
+function compareBunTarballToRegistryTolerant(name, aPath, bPath, sides) {
+  const lines = [];
+  try {
+    const n = readTarEntries(aPath).length;
+    lines.push(`strict reader: readable (${n} entries, no duplicate paths)`);
+  } catch (err) {
+    lines.push(`strict reader: UNREADABLE: ${err.message}`);
+  }
+
+  let allEntriesA;
+  let entriesB;
+  try {
+    allEntriesA = readTarEntries(aPath, { allowDuplicates: true });
+  } catch (err) {
+    return {
+      identical: false,
+      report: [
+        `${name}: ${sides.aLabel} tarball is UNREADABLE even in duplicate-tolerant mode ` +
+          `(fails closed, itself a drift finding): ${err.message}`,
+        ...lines,
+      ].join('\n'),
+    };
+  }
+  try {
+    entriesB = readTarEntries(bPath);
+  } catch (err) {
+    return {
+      identical: false,
+      report: [
+        `${name}: ${sides.bLabel} tarball is UNREADABLE (fails closed, itself a drift finding): ${err.message}`,
+        ...lines,
+      ].join('\n'),
+    };
+  }
+
+  const result = compareTarballEntriesTolerant(allEntriesA, entriesB);
+  const tolerantReport = formatTolerantPackParityReport(name, result, sides);
+  const report = tolerantReport ? [tolerantReport, ...lines].join('\n') : null;
+  return { identical: result.identical, report };
 }
 
 function writeSummary(lines) {
@@ -258,14 +348,19 @@ function main() {
       const registryTarball = downloadPublished(name, version);
 
       if (bunTarballs.has(name)) {
-        const report = compareTarballsSafely(name, bunTarballs.get(name), registryTarball, {
-          aLabel: 'bun pm pack (credential-lane way)',
-          bLabel: 'npm registry (published bytes)',
-        });
+        const { identical, report } = compareBunTarballToRegistryTolerant(
+          name,
+          bunTarballs.get(name),
+          registryTarball,
+          {
+            aLabel: 'bun pm pack (credential-lane way)',
+            bLabel: 'npm registry (published bytes)',
+          },
+        );
+        if (!identical) failures.push(report);
         if (report) {
-          failures.push(report);
           summaryLines.push(
-            `### ${name}: bun pm pack vs registry — DIFFERS`,
+            `### ${name}: bun pm pack vs registry — ${identical ? 'identical (with a structural note)' : 'DIFFERS'}`,
             '',
             '```',
             report,
