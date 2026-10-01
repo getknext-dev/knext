@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Per-phase scale-from-zero instrument — ONE cold cycle per invocation.
 //
-//   node harness.mjs <ksvc-name>          (run inside the `phase-bench` pod)
+//   node cold-cycle.mjs <ksvc-name>          (run inside the `phase-bench` pod)
 //
 // Prints one JSON object on stdout. Every `t_*` value is milliseconds since the
 // request was sent (t = 0), on THIS pod's wall clock, sampled with
@@ -30,7 +30,7 @@ import net from 'node:net';
 const NS = process.env.NS ?? 'bench-cells';
 const ARM = process.argv[2];
 const HEALTH = process.env.HEALTH_PATH ?? '/api/health';
-if (!ARM) throw new Error('usage: harness.mjs <ksvc>');
+if (!ARM) throw new Error('usage: cold-cycle.mjs <ksvc>');
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 const TOKEN = fs.readFileSync(`${SA}/token`, 'utf8');
 const CA = fs.readFileSync(`${SA}/ca.crt`);

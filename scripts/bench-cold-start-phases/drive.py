@@ -5,7 +5,7 @@
 
 Each round: wait until EVERY arm has zero pods (+10 s for endpoints to settle),
 then wake each arm once, serially, rotating the order by one each round (AB BA
-for two arms, ABC BCA CAB for three). One wake = one `harness.mjs` run inside
+for two arms, ABC BCA CAB for three). One wake = one `cold-cycle.mjs` run inside
 the in-cluster `phase-bench` pod (all timing happens there; the kubectl exec
 round trip is outside every timed interval). With --dns, right after the wake
 the driver also execs a DNS timing script inside the freshly started app
@@ -14,7 +14,7 @@ so it never perturbs the cold-start numbers.
 
 With --heal=<arm>, on EVEN rounds that arm gets the "early outbound packet"
 treatment: as soon as its new pod reports user-container running, the harness
-execs a one-shot DNS lookup inside the container (HEAL=1, see harness.mjs). The lookup's UDP packet makes
+execs a one-shot DNS lookup inside the container (HEAL=1, see cold-cycle.mjs). The lookup's UDP packet makes
 the pod ARP for its gateway, which refreshes the node's neighbour entry for the
 pod IP (the stale-ARP hypothesis in the benchmark doc). Odd rounds are the
 untreated control, so the treatment alternates ABAB on the same Knative Service.
@@ -90,7 +90,7 @@ def wake(arm, treat, seq):
     out = f"/tmp/run-{seq}.json"
     env = f"HEAL=1 HEAL_BIN={'bun' if 'bun' in arm else 'node'} " if treat else ""
     launch = ["exec", "phase-bench", "-c", "harness", "--", "sh", "-c",
-              f"[ -e {out} ] || {{ {env}nohup node /tmp/harness.mjs {arm} > {out} 2>&1 & }}"]
+              f"[ -e {out} ] || {{ {env}nohup node /tmp/cold-cycle.mjs {arm} > {out} 2>&1 & }}"]
     kc(launch, check=False)  # idempotent: the [ -e ] guard never starts a second run
     t = time.time()
     while time.time() - t < 240:
@@ -112,7 +112,7 @@ def main():
     rounds, arms, out = int(sys.argv[1]), sys.argv[2].split(","), sys.argv[3]
     do_dns = "--dns" in sys.argv
     heal_arm = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--heal=")), None)
-    kc(["cp", str(HERE / "harness.mjs"), "phase-bench:/tmp/harness.mjs", "-c", "harness"])
+    kc(["cp", str(HERE / "cold-cycle.mjs"), "phase-bench:/tmp/cold-cycle.mjs", "-c", "harness"])
     with open(out, "a") as f:
         for r in range(rounds):
             # Rotate the order each round (AB BA for two arms; ABC BCA CAB for

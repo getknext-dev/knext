@@ -264,7 +264,7 @@ nodes (every wake's events read `already present on machine`).
 
 **Instrument.** [`scripts/bench-cold-start-phases/`](../../scripts/bench-cold-start-phases/):
 
-- `harness.mjs` runs **inside the cluster** in the `phase-bench` pod (`node:22-alpine`, pinned to
+- `cold-cycle.mjs` (the harness) runs **inside the cluster** in the `phase-bench` pod (`node:22-alpine`, pinned to
   `10.0.1.118`), one cold cycle per run. It opens watches on the arm's Pods, Deployment and
   EndpointSlices, resolves the Service name (timed separately; median 8.6 ms), then sends
   `GET /` to the cluster-local Kourier address and records request start, response headers, first
