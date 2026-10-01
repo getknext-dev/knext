@@ -30,6 +30,29 @@ class FakePool {
 }
 mock.module('pg', () => ({ Pool: FakePool }));
 
+// #1777 — fakes for the lazy client-SDK seam below. Count constructions
+// (not module evaluations: the module loader caches the factory result
+// across `import()`s of the same specifier regardless of which module
+// instance asked, so "evaluated once" is a given here and the thing worth
+// pinning is "constructed once" — i.e. the seam actually dedupes the client).
+let minioCtorCalls = 0;
+let cerbosCtorCalls = 0;
+class FakeMinioClient {
+  constructor(public config: unknown) {
+    minioCtorCalls += 1;
+  }
+}
+class FakeCerbosGRPC {
+  constructor(
+    public target: string,
+    public opts: unknown,
+  ) {
+    cerbosCtorCalls += 1;
+  }
+}
+mock.module('minio', () => ({ Client: FakeMinioClient }));
+mock.module('@cerbos/grpc', () => ({ GRPC: FakeCerbosGRPC }));
+
 /**
  * Import a FRESH instance of a module — new module-level state, mimicking a
  * second bundle copy.
@@ -97,6 +120,62 @@ describe('#352 — pool-instrumentor seam survives module duplication', () => {
     const instanceC = await freshImport<Clients>('../clients');
     instanceC.getDbPool();
     expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe('#1777 — lazy client-SDK seam (getCerbosClient/getMinioClient) survives module duplication', () => {
+  beforeEach(() => {
+    minioCtorCalls = 0;
+    cerbosCtorCalls = 0;
+  });
+
+  afterEach(async () => {
+    const mod = await import('../clients');
+    mod.resetClients();
+  });
+
+  it('getMinioClient() loaded on instance A is the SAME cached client on instance B', async () => {
+    type Clients = typeof import('../clients');
+    const instanceA = await freshImport<Clients>('../clients');
+    const clientA = await instanceA.getMinioClient();
+
+    const instanceB = await freshImport<Clients>('../clients');
+    expect(instanceB).not.toBe(instanceA); // genuinely two module instances
+    const clientB = await instanceB.getMinioClient();
+
+    // Same object back, and only ONE construction process-wide — instance B
+    // did not pay to build (or load) a second client.
+    expect(clientB).toBe(clientA);
+    expect(minioCtorCalls).toBe(1);
+  });
+
+  it('getCerbosClient() loaded on instance A is the SAME cached client on instance B', async () => {
+    type Clients = typeof import('../clients');
+    const instanceA = await freshImport<Clients>('../clients');
+    const clientA = await instanceA.getCerbosClient();
+
+    const instanceB = await freshImport<Clients>('../clients');
+    expect(instanceB).not.toBe(instanceA);
+    const clientB = await instanceB.getCerbosClient();
+
+    expect(clientB).toBe(clientA);
+    expect(cerbosCtorCalls).toBe(1);
+  });
+
+  it('resetClients() on any instance clears the shared cache for the next load', async () => {
+    type Clients = typeof import('../clients');
+    const instanceA = await freshImport<Clients>('../clients');
+    const clientA = await instanceA.getMinioClient();
+
+    // Reset from a DIFFERENT instance — must clear the shared globalThis slot.
+    const instanceB = await freshImport<Clients>('../clients');
+    instanceB.resetClients();
+
+    const instanceC = await freshImport<Clients>('../clients');
+    const clientC = await instanceC.getMinioClient();
+
+    expect(clientC).not.toBe(clientA); // a fresh client was built after reset
+    expect(minioCtorCalls).toBe(2); // one before reset, one after
   });
 });
 

@@ -71,6 +71,10 @@ the adapter from `/adapter` (what `adapterPath` points at), the ISR cache handle
 `checkShallowHealth()`, the `logger`, and the request-correlation helpers — all also re-exported
 from the package root. `@getknext/db` exports `getDb()` / `getDbRO()` plus the whole of
 `drizzle-orm`.
+
+`getMinioClient()` and `getCerbosClient()` load their SDKs lazily, on first call, and both return a
+`Promise` — `await` them. This keeps a cold start from paying to load either SDK unless your app
+actually calls the corresponding getter.
 </Callout>
 
 ## 1 · Point Next.js at the adapter

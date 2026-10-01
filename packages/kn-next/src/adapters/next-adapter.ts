@@ -269,7 +269,7 @@ async function uploadBuildArtifacts({
     ) => Promise<unknown>;
     try {
         const { getMinioClient } = await import("@getknext/lib/clients");
-        const client = getMinioClient();
+        const client = await getMinioClient();
         putObject = (b, k, s) => client.putObject(b, k, s);
     } catch (err) {
         console.log(

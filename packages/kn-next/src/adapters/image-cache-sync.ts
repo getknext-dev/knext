@@ -122,7 +122,7 @@ function objectKey(prefix: string, cacheKey: string, file: string): string {
 async function defaultStore(): Promise<ImageVariantStore | null> {
     try {
         const { getMinioClient } = await import("@getknext/lib/clients");
-        const client = getMinioClient();
+        const client = await getMinioClient();
         return {
             async list(bucket, prefix) {
                 const keys: string[] = [];

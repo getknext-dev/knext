@@ -1,14 +1,63 @@
-import { GRPC as Cerbos } from '@cerbos/grpc';
-import * as Minio from 'minio';
+import type { GRPC as CerbosGRPC } from '@cerbos/grpc';
+import type * as MinioNS from 'minio';
 import { Pool } from 'pg';
 import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
 import { logSlowDep } from './slow-dep';
 
-// Singleton instances
-let cerbosClient: Cerbos | null = null;
-let minioClient: Minio.Client | null = null;
+// Singleton instances. `pgPool`/`pgPoolRO` stay plain module-level `let`s —
+// see `getDbPool`/`getDbPoolRO` for why those two do not need the #352
+// cross-copy treatment the clients below need (ADR-0027, detailed there).
 let pgPool: Pool | null = null;
 let pgPoolRO: Pool | null = null;
+
+// ── Lazy client-SDK loading, globalThis-anchored (#1777, ADR-0027) ───────────
+// `@cerbos/grpc` (→ `@grpc/grpc-js`) and `minio` were, together, ~60% of the
+// ~0.8–0.9s `@getknext/lib/clients` cost measured in #1773's instrumentation
+// boot trace — paid at import time even for an app that never calls
+// `getCerbosClient()`/`getMinioClient()`. Both type-only imports above are
+// erased at compile time (no runtime import), and the real modules are now
+// `import()`ed lazily, on FIRST USE of the corresponding getter. A caller that
+// never touches one of these clients never pays to load its SDK; a caller
+// that does pays it once, process-wide.
+//
+// "Process-wide" is the reason this is anchored on `globalThis` via
+// `Symbol.for('knext.lib.*')` rather than a plain module-level `let` (#352,
+// same reasoning as the pool instrumentor above): in the Next.js standalone
+// build `@getknext/lib` is bundled into SEPARATE webpack layers for
+// `instrumentation-node` and for the app-server bundles, so the two are
+// physically different module copies with independent module-level state. A
+// bare `let` here would mean the instrumentation-node copy's first
+// `getMinioClient()` call and a later Server Action's call (a DIFFERENT
+// copy) each pay their OWN `import('minio')` + construction — exactly the
+// cold-start cost this issue removes, just moved to the second caller instead
+// of eliminated. The shared `globalThis` slot makes the FIRST successful
+// load, from whichever copy reaches it first, visible to every copy.
+//
+// Single-flighted the same way as the DB wake above: concurrent first-callers
+// (even across copies) share ONE in-flight `import()` + construction rather
+// than racing several. A REJECTED attempt (bad config, a transient resolve
+// failure) does NOT memoize — it clears the in-flight slot so the NEXT call
+// gets a fresh attempt rather than being stuck replaying the same rejection
+// forever.
+//
+// Deliberately `import()`, not `createRequire(...).require(...)`: this
+// package ships ESM specifically so bun's `mock.module` can intercept a
+// dependency reached through this module (see `tsup.config.ts`'s rationale) —
+// a `require()` reached the same way is NOT interceptable, which would make
+// these two SDKs untestable without a live Cerbos/MinIO target.
+const CERBOS_CLIENT_KEY = Symbol.for('knext.lib.clients.cerbosClient');
+const CERBOS_LOADING_KEY = Symbol.for('knext.lib.clients.cerbosLoading');
+const MINIO_CLIENT_KEY = Symbol.for('knext.lib.clients.minioClient');
+const MINIO_LOADING_KEY = Symbol.for('knext.lib.clients.minioLoading');
+
+interface LazyClientGlobal {
+  [CERBOS_CLIENT_KEY]?: CerbosGRPC;
+  [CERBOS_LOADING_KEY]?: Promise<CerbosGRPC>;
+  [MINIO_CLIENT_KEY]?: MinioNS.Client;
+  [MINIO_LOADING_KEY]?: Promise<MinioNS.Client>;
+}
+
+const lazyClientGlobal = globalThis as unknown as LazyClientGlobal;
 
 // ── Pool-instrumentor seam (dependency inversion, #317) ───────────────────────
 // This module stays OTel-free (mirroring `./context`'s `setTraceIdProvider`): an
@@ -231,8 +280,10 @@ export const resetDbWakeSingleflight = (): void => {
  * this: dropping a live pool's reference without ending it leaks sockets.
  */
 export const resetClients = (): void => {
-  cerbosClient = null;
-  minioClient = null;
+  delete lazyClientGlobal[CERBOS_CLIENT_KEY];
+  delete lazyClientGlobal[CERBOS_LOADING_KEY];
+  delete lazyClientGlobal[MINIO_CLIENT_KEY];
+  delete lazyClientGlobal[MINIO_LOADING_KEY];
   pgPool = null;
   pgPoolRO = null;
   resetPoolInstrumentor();
@@ -585,25 +636,70 @@ const instrumentPool = (pool: Pool, role: PoolRole): Pool => {
   return pool;
 };
 
-export const getCerbosClient = () => {
-  if (!cerbosClient) {
-    const target = process.env.CERBOS_URL || 'cerbos.default.svc.cluster.local:3593';
-    cerbosClient = new Cerbos(target, { tls: false });
+/**
+ * The cerbos client, loaded lazily on first call, process-wide (see the
+ * #1777/ADR-0027 block comment above `lazyClientGlobal`). Returns the cached
+ * client immediately (still wrapped in `Promise.resolve`, so the signature
+ * never changes between the first and later calls) once ANY copy of this
+ * module has succeeded in loading one.
+ */
+export const getCerbosClient = (): Promise<CerbosGRPC> => {
+  const cached = lazyClientGlobal[CERBOS_CLIENT_KEY];
+  if (cached) {
+    return Promise.resolve(cached);
   }
-  return cerbosClient;
+  let loading = lazyClientGlobal[CERBOS_LOADING_KEY];
+  if (!loading) {
+    loading = import('@cerbos/grpc')
+      .then(({ GRPC: Cerbos }) => {
+        const target = process.env.CERBOS_URL || 'cerbos.default.svc.cluster.local:3593';
+        const client = new Cerbos(target, { tls: false });
+        lazyClientGlobal[CERBOS_CLIENT_KEY] = client;
+        return client;
+      })
+      .catch((err) => {
+        // Don't memoize a failed attempt (#1777) — a transient failure (e.g. a
+        // resolve hiccup) must not wedge every later call behind the same
+        // rejection forever.
+        delete lazyClientGlobal[CERBOS_LOADING_KEY];
+        throw err;
+      });
+    lazyClientGlobal[CERBOS_LOADING_KEY] = loading;
+  }
+  return loading;
 };
 
-export const getMinioClient = () => {
-  if (!minioClient) {
-    minioClient = new Minio.Client({
-      endPoint: process.env.MINIO_ENDPOINT || 'minio.default.svc.cluster.local',
-      port: Number.parseInt(process.env.MINIO_PORT || '9000', 10),
-      useSSL: process.env.MINIO_USE_SSL === 'true',
-      accessKey: process.env.MINIO_ACCESS_KEY || 'minio',
-      secretKey: process.env.MINIO_SECRET_KEY || 'minio123',
-    });
+/**
+ * The MinIO client, loaded lazily on first call, process-wide (see the
+ * #1777/ADR-0027 block comment above `lazyClientGlobal`). Mirrors
+ * `getCerbosClient`'s single-flight + no-cache-on-failure contract.
+ */
+export const getMinioClient = (): Promise<MinioNS.Client> => {
+  const cached = lazyClientGlobal[MINIO_CLIENT_KEY];
+  if (cached) {
+    return Promise.resolve(cached);
   }
-  return minioClient;
+  let loading = lazyClientGlobal[MINIO_LOADING_KEY];
+  if (!loading) {
+    loading = import('minio')
+      .then((Minio) => {
+        const client = new Minio.Client({
+          endPoint: process.env.MINIO_ENDPOINT || 'minio.default.svc.cluster.local',
+          port: Number.parseInt(process.env.MINIO_PORT || '9000', 10),
+          useSSL: process.env.MINIO_USE_SSL === 'true',
+          accessKey: process.env.MINIO_ACCESS_KEY || 'minio',
+          secretKey: process.env.MINIO_SECRET_KEY || 'minio123',
+        });
+        lazyClientGlobal[MINIO_CLIENT_KEY] = client;
+        return client;
+      })
+      .catch((err) => {
+        delete lazyClientGlobal[MINIO_LOADING_KEY];
+        throw err;
+      });
+    lazyClientGlobal[MINIO_LOADING_KEY] = loading;
+  }
+  return loading;
 };
 
 // Scale-to-zero-sane pool defaults. Under Knative each pod owns its own pool,

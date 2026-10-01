@@ -16,7 +16,7 @@ export async function uploadFile(formData: FormData) {
     // Try to upload to object storage if available
     let storagePath = null;
     try {
-      const minio = getMinioClient();
+      const minio = await getMinioClient();
       const bucketName = 'assets';
 
       const bucketExists = await minio.bucketExists(bucketName);
