@@ -158,9 +158,10 @@ and the reference app do this by default — to avoid it entirely.
 
 <Callout type="warn">
 **If your own code writes to a path under the app's working directory at runtime** (outside the
-paths above), a read-only root filesystem will reject that write. Either move the write under
-`/tmp`, set `spec.security.writableCache: true`, or set
-`spec.security.readOnlyRootFilesystem: false` to opt out entirely.
+paths above), including `/tmp` (`os.tmpdir()`), a read-only root filesystem will reject that write.
+Standalone apps get no writable `/tmp` by default; only single-executable builds do. Set
+`spec.security.writableCache: true` to mount writable `/tmp` and `.next/cache` scratch space, or
+set `spec.security.readOnlyRootFilesystem: false` to opt out entirely.
 </Callout>
 
 ## Digest pinning
