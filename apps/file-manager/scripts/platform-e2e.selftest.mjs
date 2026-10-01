@@ -15,6 +15,7 @@ import {
   assertIsr,
   assertObservabilityAuth,
   assertRolloutClean,
+  assertStaticPathTagInvalidation,
   assertUploadStored,
   checkImageOptimization,
   checkInvalidationEndpoint,
@@ -220,6 +221,16 @@ function mustThrow(label, fn) {
   report(`RED on: ${label}`, caught, caught ? '' : 'stayed green');
 }
 
+/** @param {string} label @param {() => unknown} fn */
+function mustPass(label, fn) {
+  try {
+    fn();
+    report(`GREEN on: ${label}`, true);
+  } catch (err) {
+    report(`GREEN on: ${label}`, false, err instanceof Error ? err.message : String(err));
+  }
+}
+
 const OVERVIEW = { status: 200, text: '<h1>Overview</h1>', body: Buffer.from('<h1>Overview</h1>') };
 mustThrow('/observability always 401 (right token refused)', () =>
   assertObservabilityAuth({
@@ -247,6 +258,15 @@ mustThrow('ISR read is always a MISS', () =>
 );
 mustThrow('ISR value never revalidates', () =>
   assertIsr({ reads: [{ cacheState: 'HIT' }, { cacheState: 'HIT' }], first: 'a', later: 'a' }),
+);
+mustPass('static-revalidate changes only AFTER the tag is busted', () =>
+  assertStaticPathTagInvalidation({ before: 'a', between: 'a', after: 'b' }),
+);
+mustThrow('static-revalidate (#1764 regression): revalidateTag never evicted the page', () =>
+  assertStaticPathTagInvalidation({ before: 'a', between: 'a', after: 'a' }),
+);
+mustThrow('static-revalidate page was never actually static (changed before invalidation)', () =>
+  assertStaticPathTagInvalidation({ before: 'a', between: 'b', after: 'c' }),
 );
 mustThrow('rollout drops a request', () =>
   assertRolloutClean({

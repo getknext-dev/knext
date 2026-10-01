@@ -276,7 +276,7 @@ const MUSL_NATIVE_LOCKFILE_FILES = Object.freeze([
   'scripts/musl-native-lockfiles/img-sharp-linuxmusl-x64-0.34.5/package-lock.json',
   'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package.json',
   'scripts/musl-native-lockfiles/img-sharp-libvips-linuxmusl-x64-1.2.4/package-lock.json',
-  // #1620: Next 16.3.5 resolves sharp 0.35.5 (libvips 1.3.4). e2e-deploy.sh
+  // #1620: Next 16.3.5 (and 16.3.6) resolves sharp 0.35.5 (libvips 1.3.4). e2e-deploy.sh
   // now derives its mounts from the sharp the app resolved, and
   // tests/musl-lockfile-credential-sharp-coverage.test.ts keeps this list in
   // lockstep with the lockfile dirs on disk.
@@ -289,6 +289,12 @@ const MUSL_NATIVE_LOCKFILE_FILES = Object.freeze([
   // committed lockfile pin until now.
   'scripts/musl-native-lockfiles/sqlite3-5.0.2/package.json',
   'scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json',
+  // #1759: the turbopack-reports fixture resolves sqlite3@5.1.7. Every native
+  // addon the pinned suite can deploy is recorded in
+  // scripts/musl-native-lockfiles/suite-native-addons.json and checked by
+  // tests/musl-lockfile-suite-native-addon-coverage.test.ts.
+  'scripts/musl-native-lockfiles/sqlite3-5.1.7/package.json',
+  'scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json',
 ]);
 
 export const CREDENTIAL_CELLS = Object.freeze([
