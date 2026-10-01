@@ -1247,6 +1247,14 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	}
 	ksvc.Spec.Template.Spec.Volumes = volumes
 
+	// ARP primer init container (spike, #1760, spec.coldStart.arpPrimer).
+	// Default OFF — nil leaves InitContainers unset, byte-identical
+	// back-compat. See buildArpPrimerInitContainer for the mechanism and
+	// hardened SecurityContext.
+	if arpPrimerEnabled(nextApp) {
+		ksvc.Spec.Template.Spec.InitContainers = []corev1.Container{buildArpPrimerInitContainer()}
+	}
+
 	// Traffic split (issue #92): render the rollback/canary intent from
 	// spec.traffic. nil => clear any prior split so Knative reverts to
 	// 100% latest-ready (no stale pin on transition back).
