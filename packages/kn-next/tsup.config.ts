@@ -251,6 +251,12 @@ export default defineConfig([
       // ADR-0044 Option C — the in-process request-body byte cap for the
       // standalone server (node AND bun; compiled into the standalone exec).
       'adapters/request-body-cap': 'src/adapters/request-body-cap.cjs',
+      // #1760 — the ARP/neighbour-table primer: one best-effort outbound UDP
+      // datagram to the pod's default gateway, fired as early as possible at
+      // process start (disk-mode: required directly by node-server.ts, before
+      // the child is spawned; compiled exec: baked in as the FIRST preload —
+      // see standalone-compile.mjs). Dependency-free, Linux-only, never throws.
+      'adapters/arp-primer': 'src/adapters/arp-primer.cjs',
       // #188 path 2 — opt-in edge-sandbox fetch instrumentation (inert unless
       // KNEXT_SANDBOX_FETCH_DEBUG=1; dispatch-only compat investigation lane).
       'adapters/sandbox-fetch-debug': 'src/adapters/sandbox-fetch-debug.cjs',
