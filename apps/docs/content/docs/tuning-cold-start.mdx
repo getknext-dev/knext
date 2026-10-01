@@ -118,7 +118,6 @@ process start, before anything else runs, so the stale neighbour entry gets corr
 instead of waiting on the app's real first packet. On an affected cluster this measured a median
 wake time dropping from roughly ten seconds to roughly three. It is on by default and a no-op on
 clusters that don't show this pattern; opt out with `KNEXT_ARP_PRIMER=0` if you need to.
-{/* RC5-NUMBERS */}
 
 ## What's new in this release
 
@@ -134,7 +133,6 @@ doesn't pay for the client library it never calls. Tracing stays off by default 
 app, so this saving applies out of the box. If you have your own `instrumentation.ts`, the same
 pattern applies to your own code: anything it imports at the top level runs before your app can
 answer its first request, whether or not that code is actually needed.
-{/* RC5-NUMBERS */}
 
 This release also removes an unconditional scratch-disk volume mount that previously cost pod-sandbox
 setup time on every cold wake whether or not anything was ever written to it. (Raising the default
@@ -144,10 +142,9 @@ a ratio some clusters' resource governance rejects at pod admission, which would
 than the cold start it was meant to fix. Raising it per app remains available as an opt-in.) See
 [Read-only root filesystem](/docs/security#read-only-root-filesystem) for the opt-in
 `writableCache` field if your app needs the old guaranteed-local-write behavior back.
-{/* RC5-NUMBERS */}
 
 ### Combined effect
 
-{/* RC5-NUMBERS */}
-The numbers above were each measured in isolation. A combined before/after measurement across all
-of this release's cold-start changes together is pending and will be added here.
+The numbers above were each measured on their own, one change at a time. Their savings overlap, so
+they don't simply add up; measure your own app before and after upgrading to see the combined
+effect on your cluster.
