@@ -907,7 +907,7 @@ describe('the pin file itself documents rcBumpMarker (#1302)', () => {
     // `main`; rc.2 (#1560) re-pins it to the next RC tag once that tag
     // exists — this documents whichever post-cut state is live, not the
     // pre-cut one.
-    expect(pin.rcTag).toBe('v1.0.0-rc.3');
+    expect(pin.rcTag).toBe('v1.0.0-rc.4');
     expect(isFrozen(pin)).toBe(true);
   });
 });
