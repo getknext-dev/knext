@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for the tech-debt closures on `scripts/lib/apply-safety-scan.mjs`
- * (#1466, #1512): heredoc -> file -> apply, an `envsubst` pipeline, `kubectl
- * patch -p`/`--patch`/`--patch-file`, `kubectl set env`, and following a
+ * (#1466, #1512, #1715): heredoc -> file -> apply, an `envsubst` pipeline,
+ * `kubectl patch -p`/`--patch`/`--patch-file`, `kubectl set env`, following a
  * `node <file>.mjs` / `bun <file>.mjs` invocation to classify the fetches it
- * moved out of shell text. `eval` was already covered (round-4 `execString`)
- * and is not re-proven here.
+ * moved out of shell text, and (round 2) the lexical tokenizer that decides
+ * which parts of a followed script are a real comment/`new URL(…)` call vs.
+ * string/template data that merely looks like one, plus its independent
+ * tokenizer-uncertainty fail-closed check. `eval` was already covered
+ * (round-4 `execString`) and is not re-proven here.
  *
  * Each mutation removes ONE rule `tests/apply-safety-scan-tech-debt.test.ts`
  * claims to enforce and requires that spec to go RED; the file is then
@@ -27,7 +30,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCANNER = resolve(REPO_ROOT, 'scripts/lib/apply-safety-scan.mjs');
 const SPEC = 'tests/apply-safety-scan-tech-debt.test.ts';
 
-declareMutations(6);
+declareMutations(8);
 
 readFileSync(SCANNER, 'utf8'); // FATAL if missing, before anything is mutated
 
@@ -114,7 +117,31 @@ prove(
   'if (false) return `unreachable`; // MUTATION: disabled',
 );
 
-const declared = 6;
+// M7: `stripNonFetchText` string-awareness (#1715 round 2) — disabling the
+// tokenizer's own notion of "which lexical context is this character in"
+// (forcing every character to be treated as plain code) reproduces the
+// round-2 bug: the decoy ("/* " then a real fetch() then "*/" as three
+// ordinary statements) is read as one comment and the fetch is swallowed.
+prove(
+  'M7 stripNonFetchText string-awareness (#1715 round 2)',
+  'const ctx = top();',
+  "const ctx = 'code';",
+);
+
+// M8: the tokenizer-uncertainty fail-closed check (#1715 round 2) — this is
+// INDEPENDENT of M7: even with a perfectly string-aware tokenizer, a file
+// that cannot be tokenized unambiguously at all (unterminated string/
+// template/comment/regex) must still fail closed. Disabling just the
+// `!clean` check (leaving the tokenizer itself untouched) must still red
+// the "unterminated template literal" fixture, which has no visible
+// INTERPRETER_FETCH shape for any other rule to catch.
+prove(
+  'M8 tokenizer-uncertainty fail-closed check (#1715 round 2)',
+  'if (!clean)\n    return `${path}: could not tokenize unambiguously (unterminated string/template/comment/regex) — fail closed`;',
+  'if (false) return `unreachable`; // MUTATION: disabled',
+);
+
+const declared = 8;
 console.log(`\n${caught}/${declared} mutations caught, ${decorative} decorative.`);
 if (decorative > 0 || caught !== declared) {
   console.error('Mutation proof FAILED: at least one rule is decorative or missing.');

@@ -1338,32 +1338,274 @@ export function isLoopbackHost(h) {
 }
 
 /**
+ * #1715 round 2: per-character tokenizer for a followed `.mjs`/`.cjs`/`.js`
+ * source. Tags every character `'code'`, `'string'` (single/double-quoted
+ * OR a regex literal), `'templatelit'` (the literal parts and the `` ` ``/
+ * `${`/`}` delimiters of a template literal), or `'comment'` (`//` or
+ * a slash-star…star-slash span). This is what makes `stripNonFetchText`
+ * STRING-AWARE: the round-2 bug was that the previous implementation
+ * matched block/line comments against the raw text with no notion of "am
+ * I inside a string right now", so a slash-star-space string literal
+ * followed by a real `fetch(…)` followed by a star-slash string literal —
+ * three ordinary statements, none of them an actual comment — was read as
+ * one giant comment swallowing the fetch. Each character's tag now reflects
+ * the LEXICAL state machine was actually in when it was scanned, so a
+ * quote/backtick/regex-slash always wins over a `/` that merely happens to
+ * sit next to another `/` or `*` inside string data.
+ *
+ * A `${…}` expression inside a template literal is tagged `'code'`
+ * throughout (recursing through the SAME state machine for any nested
+ * template/string/comment inside it) — a real call written there is
+ * genuine code, never string data, and must not be strippable.
+ *
+ * Regex literals are detected with the standard (conservative) JS lexer
+ * heuristic: a `/` opens a regex only when the previous significant
+ * character is one that cannot end an expression (an operator/punctuator,
+ * start-of-file, or a keyword like `return`/`typeof`/`case`/…) — otherwise
+ * it is division and left as plain code.
+ */
+function tagCharacters(src) {
+  const n = src.length;
+  const tags = new Array(n);
+  // Stack of lexical contexts. 'code' at index 0 is the top-level program.
+  // A 'code' pushed later (braceDepths gets a matching entry) means "inside
+  // a template literal's `${…}` expression hole".
+  const stack = ['code'];
+  const braceDepths = [];
+  const top = () => stack[stack.length - 1];
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    const c2 = i + 1 < n ? src[i + 1] : '';
+    const ctx = top();
+
+    if (ctx === 'linecomment') {
+      tags[i] = 'comment';
+      if (c === '\n') stack.pop();
+      i++;
+      continue;
+    }
+    if (ctx === 'blockcomment') {
+      tags[i] = 'comment';
+      if (c === '*' && c2 === '/') {
+        tags[i + 1] = 'comment';
+        stack.pop();
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (ctx === 'squote' || ctx === 'dquote' || ctx === 'regex') {
+      tags[i] = 'string';
+      if (c === '\\' && i + 1 < n) {
+        tags[i + 1] = 'string';
+        i += 2;
+        continue;
+      }
+      const closer = ctx === 'squote' ? "'" : ctx === 'dquote' ? '"' : '/';
+      if (c === closer) {
+        stack.pop();
+        i++;
+        if (ctx === 'regex') {
+          // trailing flags (g, i, m, …) are part of the literal too
+          while (i < n && /[a-zA-Z]/.test(src[i])) {
+            tags[i] = 'string';
+            i++;
+          }
+        }
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (ctx === 'templatelit') {
+      if (c === '\\' && i + 1 < n) {
+        tags[i] = 'templatelit';
+        tags[i + 1] = 'templatelit';
+        i += 2;
+        continue;
+      }
+      if (c === '`') {
+        tags[i] = 'templatelit';
+        stack.pop();
+        i++;
+        continue;
+      }
+      if (c === '$' && c2 === '{') {
+        tags[i] = 'templatelit';
+        tags[i + 1] = 'templatelit';
+        stack.push('code');
+        braceDepths.push(0);
+        i += 2;
+        continue;
+      }
+      tags[i] = 'templatelit';
+      i++;
+      continue;
+    }
+
+    // ctx === 'code' (top-level program OR inside a template `${…}` hole)
+    const inTemplateExpr = braceDepths.length > 0;
+    if (c === '/' && c2 === '/') {
+      tags[i] = 'comment';
+      tags[i + 1] = 'comment';
+      stack.push('linecomment');
+      i += 2;
+      continue;
+    }
+    if (c === '/' && c2 === '*') {
+      tags[i] = 'comment';
+      tags[i + 1] = 'comment';
+      stack.push('blockcomment');
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      tags[i] = 'string';
+      stack.push('squote');
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      tags[i] = 'string';
+      stack.push('dquote');
+      i++;
+      continue;
+    }
+    if (c === '`') {
+      tags[i] = 'templatelit';
+      stack.push('templatelit');
+      i++;
+      continue;
+    }
+    if (c === '{' && inTemplateExpr) {
+      braceDepths[braceDepths.length - 1]++;
+      tags[i] = 'code';
+      i++;
+      continue;
+    }
+    if (c === '}' && inTemplateExpr) {
+      if (braceDepths[braceDepths.length - 1] === 0) {
+        tags[i] = 'templatelit';
+        stack.pop();
+        braceDepths.pop();
+        i++;
+        continue;
+      }
+      braceDepths[braceDepths.length - 1]--;
+      tags[i] = 'code';
+      i++;
+      continue;
+    }
+    if (c === '/' && looksLikeRegexStart(src, tags, i)) {
+      tags[i] = 'string';
+      stack.push('regex');
+      i++;
+      continue;
+    }
+    tags[i] = 'code';
+    i++;
+  }
+  // The caller (`classifyJsScript`) checks this for "did the whole file
+  // tokenize cleanly" — exported only for that fail-closed check, which is
+  // why `stack`/`braceDepths` are returned alongside the per-char tags
+  // rather than thrown away.
+  return { tags, clean: stack.length === 1 && stack[0] === 'code' && braceDepths.length === 0 };
+}
+
+/**
+ * Standard (conservative) JS lexer heuristic for "is this `/` a regex
+ * literal or division": look at the previous significant (non-whitespace,
+ * non-comment) character already tagged by the walk so far. An identifier/
+ * number/`)`/`]` means the previous token was a value, so `/` is division —
+ * UNLESS that identifier is a keyword that itself introduces an expression
+ * (`return`, `typeof`, `case`, …), in which case `/` still opens a regex.
+ * Any operator/punctuator, or start-of-file, opens a regex.
+ */
+function looksLikeRegexStart(src, tags, i) {
+  let j = i - 1;
+  while (j >= 0 && (tags[j] === 'comment' || /\s/.test(src[j]))) j--;
+  if (j < 0) return true;
+  const c = src[j];
+  if (/[A-Za-z0-9_$)\]]/.test(c)) {
+    const word = src.slice(0, j + 1).match(/[A-Za-z_$][A-Za-z0-9_$]*$/);
+    if (
+      word &&
+      /^(return|typeof|instanceof|in|of|new|delete|void|throw|yield|case|do|else)$/.test(word[0])
+    ) {
+      return true;
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
  * #1715: removes text that can never be an outbound fetch target before
  * `classifyJsScript` scans a followed `.mjs`/`.cjs`/`.js` source for a
- * literal host/URL. Two shapes, each independently justified:
+ * literal host/URL. Two shapes, each independently justified, and each
+ * removed ONLY when `tagCharacters` (above) says the removed span is
+ * genuinely that shape — not merely text that LOOKS like it inside a
+ * string/template-literal payload (the round-2 fix):
  *   - `/* … *\/` block comments and `// …` line comments (a comment can
  *     mention a URL as documentation — e.g. "cluster-internal DNS, e.g.
  *     http://foo.svc.cluster.local" — without the file ever fetching it).
- *     A line comment is recognised only when the `//` is preceded by
- *     whitespace or starts the line, so a URL's own `://` is never cut.
+ *     Only characters `tagCharacters` tagged `'comment'` are dropped.
  *   - `new URL(…)` call expressions: the WHATWG `URL` constructor is a pure
  *     parser (resolves/joins a path against a base) and performs no network
- *     I/O under any Node/Bun/browser semantics — a literal handed to it as
- *     the `base` argument is never fetched.
- * Over-stripping here only widens what passes (same fail-closed direction
- * as the rest of this module); it can never hide a REAL `fetch(` call,
- * since neither shape matches fetch/http.get/http.request/etc. text.
+ *     I/O under any Node/Bun/browser semantics. Matched textually (`new`,
+ *     whitespace, `URL`, `(`), but the call is ONLY removed when both the
+ *     `new`/`URL(` text and its matching close paren are `'code'`-tagged,
+ *     and the paren depth used to find that matching close paren counts
+ *     ONLY `'code'`-tagged parens — so a `)` inside a string/template
+ *     argument can never end the call early, and a `(`/`)` that is itself
+ *     inside a comment or string is never treated as structural.
+ *
+ * Returns `{ text, clean }` — `clean` is `tagCharacters`'s own verdict on
+ * whether the WHOLE file tokenized unambiguously (no unterminated string/
+ * template/comment/regex at EOF). `classifyJsScript` fails closed on
+ * `clean === false` regardless of what `text` contains — see its own
+ * docstring for why that is a SEPARATE guarantee from "the tokenizer is
+ * correct", not a restatement of it.
  */
 export function stripNonFetchText(src) {
-  const noBlockComments = src.replace(/\/\*[\s\S]*?\*\//g, '');
-  const noLineComments = noBlockComments
-    .split('\n')
-    .map((line) => {
-      const m = line.match(/(^|\s)\/\//);
-      return m ? line.slice(0, m.index + m[1].length) : line;
-    })
-    .join('\n');
-  return noLineComments.replace(/\bnew\s+URL\([^)]*\)/g, '');
+  const { tags, clean } = tagCharacters(src);
+  const n = src.length;
+  const drop = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) if (tags[i] === 'comment') drop[i] = true;
+
+  const NEW_URL_RE = /\bnew\s+URL\s*\(/g;
+  for (const m of src.matchAll(NEW_URL_RE)) {
+    const start = m.index;
+    if (tags[start] !== 'code') continue; // `new` appeared inside a string/comment/template
+    const openParen = start + m[0].length - 1;
+    if (tags[openParen] !== 'code') continue;
+    let depth = 1;
+    let j = openParen + 1;
+    while (j < n && depth > 0) {
+      if (tags[j] === 'code') {
+        if (src[j] === '(') depth++;
+        else if (src[j] === ')') depth--;
+      }
+      j++;
+    }
+    if (depth !== 0) continue; // unterminated at EOF — `clean` already covers this
+    // Guard against `new URL(fetch(…), base)` — an unusual but syntactically
+    // legal nesting where a REAL fetch call is itself one of the `new URL`
+    // arguments. Never drop the span if its own CODE-tagged text (i.e.
+    // excluding any string/template-literal argument data) matches
+    // INTERPRETER_FETCH; leave it untouched so the later host/URL scan can
+    // still see and flag it.
+    let codeOnly = '';
+    for (let k = start; k < j; k++) if (tags[k] === 'code') codeOnly += src[k];
+    if (INTERPRETER_FETCH.test(codeOnly)) continue;
+    for (let k = start; k < j; k++) drop[k] = true;
+  }
+
+  let out = '';
+  for (let i = 0; i < n; i++) if (!drop[i]) out += src[i];
+  return { text: out, clean };
 }
 
 /**
@@ -1384,6 +1626,27 @@ export function stripNonFetchText(src) {
  * raw `src` — a doc-comment mentioning a URL as an example, or a literal URL
  * string handed only to `new URL(…)` (a pure path-join/parse, never network
  * I/O), is not a fetch target and must not be read as one.
+ *
+ * #1715 round 2 — exactly two guarantees, stated precisely (a round-1
+ * review found the previous docstring's "can never hide a REAL `fetch(`
+ * call" claim was FALSE — it stripped by raw-text regex with no notion of
+ * string/comment context, so a decoy slash-star-space string literal, a
+ * real `fetch(…)`, and a star-slash string literal, as three ordinary
+ * statements, were read as one giant comment):
+ *   1. `stripNonFetchText` only ever drops a character `tagCharacters`
+ *      itself tagged `'comment'`, or a `new URL(…)` call whose open/close
+ *      parens AND surrounding `new`/`URL(` text are `'code'`-tagged (so a
+ *      quote/backtick/regex-slash inside the dropped text always wins over
+ *      a `/` that merely looks like a comment delimiter) — this is the
+ *      PRIMARY fix, and is what the adversarial fixtures below exercise.
+ *   2. INDEPENDENT of (1)'s correctness: if `tagCharacters` could not
+ *      tokenize the WHOLE file unambiguously (`clean === false` — an
+ *      unterminated string/template/comment/regex at EOF), this function
+ *      fails closed UNCONDITIONALLY, before even checking for a fetch
+ *      shape. "The tokenizer is uncertain" and "the tokenizer found no
+ *      fetch" are different facts, and only the tokenizer-is-correct
+ *      guarantee (1) backs the second one — point (2) is what still holds
+ *      if (1) ever has a bug this module's own author did not anticipate.
  */
 function classifyJsScript(path, st) {
   const key = `\0jsfetch\0${path}`;
@@ -1392,7 +1655,9 @@ function classifyJsScript(path, st) {
   const rawSrc = st.resolveSource(path);
   if (rawSrc === null || rawSrc === undefined)
     return `node/bun script ${path} could not be resolved to classify its fetches`;
-  const src = stripNonFetchText(rawSrc);
+  const { text: src, clean } = stripNonFetchText(rawSrc);
+  if (!clean)
+    return `${path}: could not tokenize unambiguously (unterminated string/template/comment/regex) — fail closed`;
   if (!INTERPRETER_FETCH.test(src)) return null;
   const hostMatches = [...src.matchAll(/\bhost\s*:\s*(['"`])([^'"`]*)\1/g)];
   if (hostMatches.length > 0) {
@@ -3208,6 +3473,18 @@ export function unsafeAppliesInWorkflow(
     // #1715: the gate is JOB-wide (a fetch in step 1 may feed an apply in
     // step 3, same as the `carry` file-state above), computed once from
     // every step's own run text — never from a single step in isolation.
+    //
+    // KNOWN LIMITATION (tracked: #1780, non-blocking, matches `carry`'s own
+    // job-scoped design above rather than being a new gap): this can only
+    // see a `run:` step's OWN text, in THIS job object.
+    //   - A dependent job (`needs:` + artifact/output flow) that performs
+    //     the apply is invisible — job A's followed-script fetch is judged
+    //     only against job A's own steps, never job B's.
+    //   - A job that only `uses:` a composite action or reusable workflow
+    //     (no inline `run:` steps of its own) never contributes to
+    //     `jobHasApply` even if the called action/workflow applies a
+    //     manifest — `steps` here only ever holds THIS job's own
+    //     `step.run` strings.
     const jobHasApply = steps.some((s) => textHasManifestApply(s.run));
     steps.forEach((step, i) => {
       const shell = effectiveShell(doc, job, step);
