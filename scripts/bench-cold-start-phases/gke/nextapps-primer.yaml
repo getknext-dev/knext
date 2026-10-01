@@ -1,0 +1,30 @@
+# Part 2 (primer A/B) NextApps for the GKE cold-start sitting
+# (docs/benchmarks/cold-start-phase-breakdown-gke-2026-10-01.md). Same bun x turbopack image as
+# bc-bun-turbopack (nextapps.yaml); the only variable is spec.coldStart.arpPrimer, PR #1762's
+# opt-in init container. Requires: the PR #1762 CRD (coldStart.arpPrimer field) applied, the
+# PR #1762 operator image rolled, and kubernetes.podspec-init-containers enabled on the cluster.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: bc-bun-primer-off
+  namespace: bench-cells
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb
+  runtime: bun
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  coldStart: {arpPrimer: false}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: bc-bun-primer-on
+  namespace: bench-cells
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb
+  runtime: bun
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  coldStart: {arpPrimer: true}
