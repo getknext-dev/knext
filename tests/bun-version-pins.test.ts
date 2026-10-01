@@ -170,6 +170,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // setup-bun step. A count RISING is a decision, per the rule above.
       'operator-upgrade-e2e.yml': 1,
       'preview.yml': 2,
+      // NEW (#1734, G3): the nightly rc pack-parity check builds the
+      // publishable group with the workspace's bun before comparing — one
+      // pinned "Setup bun" step.
+      'rc-pack-parity-nightly.yml': 1,
       // NEW (#1663): the published-bytes freeze check's "run" decision packs
       // the publishable group with the workspace's bun (mirrors
       // ga-tarball-diff's own release.yml job) — one Setup bun step. The
