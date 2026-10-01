@@ -127,6 +127,10 @@ async function check(name, fn) {
 
 async function main() {
   // ── 1. Redis ISR + authenticated invalidation ──────────────────────────
+  // The value the authenticated invalidate produced; re-read after the
+  // scale-to-zero → wake cycle to prove the entry lives in Redis, not in the
+  // replaced pod's memory.
+  let isrAfterInvalidate;
   const readIsr = async () => {
     const res = await http.request('/isr-smoke');
     if (res.status !== 200) throw new Error(`/isr-smoke HTTP ${res.status}`);
@@ -192,6 +196,7 @@ async function main() {
           `ISR value did not change within ${ISR_REVALIDATE_DEADLINE_MS}ms of an authenticated invalidate`,
         );
       }
+      isrAfterInvalidate = after;
       return `401/401/200; value changed ${before} -> ${after}`;
     },
   );
@@ -283,6 +288,20 @@ async function main() {
       return `200 in ${ms}ms`;
     },
   );
+
+  await check('ISR entry survives scale-to-zero (served from Redis by the new pod)', async () => {
+    if (!isrAfterInvalidate)
+      throw new Error('no post-invalidate ISR value recorded (the ISR check failed earlier)');
+    // Stale-while-revalidate serves the cached entry on the first read even if it has
+    // expired, so the new pod must return exactly the value the old pod cached.
+    const v = await readIsr();
+    if (v !== isrAfterInvalidate) {
+      throw new Error(
+        `new pod served ${v}, want the cached ${isrAfterInvalidate} — ISR cache did not survive the pod`,
+      );
+    }
+    return `new pod served the cached ${v}`;
+  });
 
   // ── report ───────────────────────────────────────────────────────────────
   const failed = results.filter((r) => r.status === 'FAIL');

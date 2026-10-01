@@ -24,6 +24,7 @@ type Step = {
   if?: string;
   id?: string;
   env?: Record<string, string>;
+  with?: Record<string, unknown>;
   [k: string]: unknown;
 };
 type Job = {
@@ -208,6 +209,15 @@ describe('rc-default-scaffold-platform-e2e-weekly — the four assertions are pr
   it('asserts Redis-backed ISR changes only after an authenticated invalidation', () => {
     expect(assertionsScript).toMatch(/ISR served from Redis/);
     expect(assertionsScript).toMatch(/isr-smoke/);
+  });
+
+  it('re-reads the ISR value AFTER the wake and requires the cached value (Redis, not pod memory)', () => {
+    const wake = assertionsScript.indexOf("'Wake from zero");
+    const survive = assertionsScript.indexOf("'ISR entry survives scale-to-zero");
+    expect(wake).toBeGreaterThan(-1);
+    expect(survive).toBeGreaterThan(wake);
+    expect(assertionsScript).toMatch(/isrAfterInvalidate = after;/);
+    expect(assertionsScript).toMatch(/v !== isrAfterInvalidate/);
   });
 
   it('asserts invalidation rejects without a token and with a wrong token, and succeeds with the right one', () => {
