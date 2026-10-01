@@ -1,0 +1,92 @@
+2026-10-01T06:36:48.455883395Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 used 0/0/0 probes 4 STALE
+2026-10-01T06:36:48.455883395Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:49.457283093Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 used 0/0/0 probes 4 STALE
+2026-10-01T06:36:49.457283093Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:50.458889523Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 used 0/0/0 probes 4 STALE
+2026-10-01T06:36:50.458889523Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:51.460233955Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 used 0/0/0 probes 4 STALE
+2026-10-01T06:36:51.460233955Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:52.461591864Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 used 0/0/0 probes 4 STALE
+2026-10-01T06:36:52.461591864Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:53.463004026Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 used 0/0/0 probes 4 STALE
+2026-10-01T06:36:53.463004026Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:54.467726934Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 used 0/0/0 probes 4 STALE
+2026-10-01T06:36:54.467726934Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:55.469599380Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:36:55.469599380Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:56.471450634Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:36:56.471450634Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:57.473349259Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:36:57.473349259Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:58.475016556Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:36:58.475016556Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:36:59.476870205Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:36:59.476870205Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:00.478538171Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:37:00.478538171Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:01.480009976Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 1 PROBE
+2026-10-01T06:37:01.480009976Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:02.481711796Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 2 PROBE
+2026-10-01T06:37:02.481711796Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:03.483089431Z 10.244.0.77 dev cni0 lladdr 3e:9d:4b:f5:4c:63 ref 1 used 0/0/0 probes 3 PROBE
+2026-10-01T06:37:03.483089431Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:04.484463379Z 10.244.0.77 dev cni0 lladdr 7a:0b:53:b4:1e:49 ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:37:04.484463379Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:05.485858937Z 10.244.0.77 dev cni0 lladdr 7a:0b:53:b4:1e:49 ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:37:05.485858937Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:06.487236993Z 10.244.0.77 dev cni0 lladdr 7a:0b:53:b4:1e:49 ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:37:06.487236993Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:07.488652881Z 10.244.0.77 dev cni0 lladdr 7a:0b:53:b4:1e:49 ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:37:07.488652881Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:08.490052007Z 10.244.0.77 dev cni0 lladdr 7a:0b:53:b4:1e:49 ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:37:08.490052007Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:09.491436475Z 10.244.0.77 dev cni0 lladdr 7a:0b:53:b4:1e:49 ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:37:09.491436475Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:37:10.492878753Z 10.244.0.77 dev cni0 lladdr 7a:0b:53:b4:1e:49 ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:37:10.492878753Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:18.680392011Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:18.680392011Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:19.681767232Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:19.681767232Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:20.683270848Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:20.683270848Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:21.684657732Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:21.684657732Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:22.686458814Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:22.686458814Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:23.687851079Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:23.687851079Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:24.689223194Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:24.689223194Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:25.690584549Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:25.690584549Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:26.691997883Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:26.691997883Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:27.693698682Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:27.693698682Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:28.695272202Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:28.695272202Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:29.696681669Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:29.696681669Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:30.698103480Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:30.698103480Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:31.699601965Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:31.699601965Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:32.701033394Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:32.701033394Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:33.703379690Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:33.703379690Z 10.244.0.78 dev cni0 lladdr 5e:ba:78:ba:b5:1b used 0/0/0 probes 4 STALE
+2026-10-01T06:39:34.705162426Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:34.705162426Z 10.244.0.78 dev cni0 lladdr 7a:17:97:ae:4f:6f ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:39:35.706758577Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:35.706758577Z 10.244.0.78 dev cni0 lladdr 7a:17:97:ae:4f:6f ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:39:36.708229511Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:36.708229511Z 10.244.0.78 dev cni0 lladdr 7a:17:97:ae:4f:6f ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:39:37.709659828Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:37.709659828Z 10.244.0.78 dev cni0 lladdr 7a:17:97:ae:4f:6f ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:39:38.711586437Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:38.711586437Z 10.244.0.78 dev cni0 lladdr 7a:17:97:ae:4f:6f ref 1 used 0/0/0 probes 4 DELAY
+2026-10-01T06:39:39.713157000Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:39.713157000Z 10.244.0.78 dev cni0 lladdr 7a:17:97:ae:4f:6f ref 1 used 0/0/0 probes 4 REACHABLE
+2026-10-01T06:39:40.714824246Z 10.244.0.77 dev cni0  used 0/0/0 probes 6 FAILED
+2026-10-01T06:39:40.714824246Z 10.244.0.78 dev cni0 lladdr 7a:17:97:ae:4f:6f ref 1 used 0/0/0 probes 4 REACHABLE

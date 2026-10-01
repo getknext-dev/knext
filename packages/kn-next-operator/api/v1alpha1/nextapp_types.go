@@ -225,6 +225,13 @@ type NextAppSpec struct {
 	// +optional
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
 
+	// ColdStart holds opt-in levers that address measured cold-start defects
+	// which are NOT Knative's own latency (see the 2026-10-01 design study,
+	// `.claude/research/cold-start-design-study-2026-10-01.md`). Nil => none
+	// of these levers are applied (byte-identical back-compat).
+	// +optional
+	ColdStart *ColdStartSpec `json:"coldStart,omitempty"`
+
 	// BuildID is the deploy's Next.js BUILD_ID (issue #93 — skew protection).
 	// The CLI sets NEXT_DEPLOYMENT_ID == this value at build time, so the
 	// `_next/static/<BuildID>/` asset prefix in the object store is named by it.
@@ -241,6 +248,34 @@ type NextAppSpec struct {
 // BUILD_ID for skew-protection asset retention (issue #93). It MUST stay in
 // lock-step with the CLI's resolver in deploy.ts and the GC in asset-gc.ts.
 const BuildIDLabel = "apps.kn-next.dev/build-id"
+
+// ColdStartSpec holds opt-in cold-start mitigation levers. Each lever is
+// gated behind its own field so the operator keeps ADR-0001's write surface
+// legible — this is the single place to look for every cold-start-motivated
+// render decision.
+type ColdStartSpec struct {
+	// ArpPrimer renders a hardened init container (SPIKE, see issue #1760)
+	// that sends one outbound UDP datagram to its own default gateway
+	// (resolved at runtime via `ip route`, not the Downward API — Knative
+	// gates ANY env fieldRef behind its own feature flag) before the app
+	// container starts. On flannel VXLAN clusters whose pod-IP allocator has
+	// wrapped, a node can hold a stale
+	// ARP/neighbour entry for a recycled pod IP, making the new pod
+	// unreachable from the node's host namespace until the pod sends its
+	// own first outbound packet — measured as a ~7.5s stale-neighbour
+	// blackhole on OKE (median wake 9928ms -> 2379ms once a packet is sent
+	// at process start, p=0.007; see the design study referenced above).
+	// This is an OPERATOR-side workaround for a CNI/host behaviour, not a
+	// knext runtime change — the equivalent runtime-side fix is tracked
+	// separately for v1.1 and does not require this field.
+	//
+	// nil or false => no init container is rendered (DEFAULT-OFF for this
+	// spike; byte-identical back-compat). true => the init container is
+	// rendered with a digest-pinned, non-root, capability-dropped,
+	// read-only-rootfs image and no ServiceAccount token mount.
+	// +optional
+	ArpPrimer *bool `json:"arpPrimer,omitempty"`
+}
 
 // TrafficSpec expresses the desired Knative traffic target for rollback /
 // canary. When nil the operator emits no spec.traffic and Knative defaults to

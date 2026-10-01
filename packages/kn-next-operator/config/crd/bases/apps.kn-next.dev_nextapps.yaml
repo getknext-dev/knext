@@ -141,6 +141,36 @@ spec:
                   url:
                     type: string
                 type: object
+              coldStart:
+                description: |-
+                  ColdStart holds opt-in levers that address measured cold-start defects
+                  which are NOT Knative's own latency (see the 2026-10-01 design study,
+                  `.claude/research/cold-start-design-study-2026-10-01.md`). Nil => none
+                  of these levers are applied (byte-identical back-compat).
+                properties:
+                  arpPrimer:
+                    description: |-
+                      ArpPrimer renders a hardened init container (SPIKE, see issue #1760)
+                      that sends one outbound UDP datagram to its own default gateway
+                      (resolved at runtime via `ip route`, not the Downward API — Knative
+                      gates ANY env fieldRef behind its own feature flag) before the app
+                      container starts. On flannel VXLAN clusters whose pod-IP allocator has
+                      wrapped, a node can hold a stale
+                      ARP/neighbour entry for a recycled pod IP, making the new pod
+                      unreachable from the node's host namespace until the pod sends its
+                      own first outbound packet — measured as a ~7.5s stale-neighbour
+                      blackhole on OKE (median wake 9928ms -> 2379ms once a packet is sent
+                      at process start, p=0.007; see the design study referenced above).
+                      This is an OPERATOR-side workaround for a CNI/host behaviour, not a
+                      knext runtime change — the equivalent runtime-side fix is tracked
+                      separately for v1.1 and does not require this field.
+
+                      nil or false => no init container is rendered (DEFAULT-OFF for this
+                      spike; byte-identical back-compat). true => the init container is
+                      rendered with a digest-pinned, non-root, capability-dropped,
+                      read-only-rootfs image and no ServiceAccount token mount.
+                    type: boolean
+                type: object
               database:
                 description: |-
                   Database binds an EXISTING database to the app (ADR-0019). knext is

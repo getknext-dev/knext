@@ -100,7 +100,7 @@ func TestComputeStatusVerdict_BoundSecret(t *testing.T) {
 	}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeBound},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	// BYO binding: DatabaseReady=True (Bound), then the step-6 roll-up.
 	assertConditionOrder(t, v, []string{
@@ -126,7 +126,7 @@ func TestComputeStatusVerdict_NoDatabaseRemovesCondition(t *testing.T) {
 	app := verdictApp()
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	if len(v.removeConditions) != 1 || v.removeConditions[0] != ConditionDatabaseReady {
 		t.Fatalf("removeConditions: got %v, want [DatabaseReady]", v.removeConditions)
@@ -150,7 +150,7 @@ func TestComputeStatusVerdict_KsvcNotReadySurfacesKsvcDetail(t *testing.T) {
 	}})
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Status != metav1.ConditionFalse || readyCond.Reason != reasonKsvcNotReady {
@@ -179,7 +179,7 @@ func TestComputeStatusVerdict_KsvcNotReadyNilConditionDefaults(t *testing.T) {
 	ksvc := &servingv1.Service{} // no conditions at all
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	wantMsg := "Knative Service is not Ready (Pending): Knative Service has not reported Ready yet"
@@ -208,7 +208,7 @@ func TestComputeStatusVerdict_IngressStallVerdictAndTransitionEvent(t *testing.T
 		ksvcIngressNotConfiguredReason, ingressProgrammingStallWindow+3*time.Minute, now)
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Reason != ReasonIngressNotProgrammed || readyCond.Message != ingressStallMessage {
@@ -231,7 +231,7 @@ func TestComputeStatusVerdict_IngressStallVerdictAndTransitionEvent(t *testing.T
 		Reason: ReasonIngressNotProgrammed, Message: ingressStallMessage,
 	}}
 	v = computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 	if len(v.events) != 0 {
 		t.Fatalf("events on an already-stalled pass: got %+v, want none", v.events)
 	}
@@ -256,7 +256,7 @@ func TestComputeStatusVerdict_PinnedRevisionNotFoundTakesPrecedence(t *testing.T
 		ksvcIngressNotConfiguredReason, pinnedRevisionStallWindow+3*time.Minute, now)
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{notFound: true}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{notFound: true}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Reason != ReasonPinnedRevisionNotFound || readyCond.Message != pinnedNotFoundMessage {
@@ -277,7 +277,7 @@ func TestComputeStatusVerdict_PinnedRevisionNotFoundTakesPrecedence(t *testing.T
 		Reason: ReasonPinnedRevisionNotFound, Message: pinnedNotFoundMessage,
 	}}
 	v = computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{notFound: true}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{notFound: true}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 	if len(v.events) != 0 {
 		t.Fatalf("events on an already-degraded pass: got %+v, want none", v.events)
 	}
@@ -295,7 +295,7 @@ func TestComputeStatusVerdict_PinnedCheckUnknownKeepsPriorVerdict(t *testing.T) 
 		"RevisionMissing", pinnedRevisionStallWindow+time.Minute, now)
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{unknown: true}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{unknown: true}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Reason != ReasonPinnedRevisionNotFound || readyCond.Message != pinnedNotFoundMessage {
@@ -313,7 +313,7 @@ func TestComputeStatusVerdict_PinnedCheckUnknownKeepsPriorVerdict(t *testing.T) 
 	// fall through to the generic not-ready reason.
 	app.Status.Conditions = nil
 	v = computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{unknown: true}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{unknown: true}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 	if c := findVerdictCondition(t, v, ConditionReady); c.Reason != reasonKsvcNotReady {
 		t.Fatalf("Ready without prior verdict: got %+v", c)
 	}
@@ -325,7 +325,7 @@ func TestComputeStatusVerdict_GhostPinRequeuesWhileKsvcStillReady(t *testing.T) 
 	app.Spec.Traffic = &appsv1alpha1.TrafficSpec{RevisionName: "shop-00007"}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{notFound: true}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{notFound: true}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	// Knative hasn't reacted to the pin yet: do NOT degrade in that window, but
 	// keep re-evaluating so the stall window is eventually judged.
@@ -344,7 +344,7 @@ func TestComputeStatusVerdict_RevalidationDeferred(t *testing.T) {
 	app.Spec.Revalidation = &appsv1alpha1.RevalidationSpec{Queue: "kafka"}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionRevalidationDeferred)
 	if c.Status != metav1.ConditionTrue || c.Reason != "ConsumerNotProvisioned" {
@@ -378,7 +378,7 @@ func TestComputeStatusVerdict_ProvisionKafkaSourceIsInert(t *testing.T) {
 	}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionRevalidationDeferred)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonProvisionKafkaSourceInert {
@@ -412,7 +412,7 @@ func TestComputeStatusVerdict_ProvisionKafkaSourceIsInert(t *testing.T) {
 		Reason: ReasonProvisionKafkaSourceInert,
 	}}
 	v = computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 	if len(v.events) != 0 {
 		t.Fatalf("events on a repeat pass: got %+v, want none (transition-gated)", v.events)
 	}
@@ -425,7 +425,7 @@ func TestComputeStatusVerdict_ImageCacheReadyCached(t *testing.T) {
 
 	// Every targeted node has the image pulled+pinned => ImageCacheReady=True.
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 3}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 3}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionImageCacheReady)
 	if c.Status != metav1.ConditionTrue || c.Reason != "Cached" {
@@ -445,7 +445,7 @@ func TestComputeStatusVerdict_ImageCacheReadyPulling(t *testing.T) {
 
 	// Partial coverage => ImageCacheReady=False/Pulling (never gates Ready).
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 1}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 1}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionImageCacheReady)
 	if c.Status != metav1.ConditionFalse || c.Reason != "Pulling" {
@@ -464,7 +464,7 @@ func TestComputeStatusVerdict_ImageCacheDisabledNoCondition(t *testing.T) {
 	// Never prewarmed: no ImageCacheReady condition and no removal (order/#98
 	// no-op guard stays byte-identical to the pre-ADR-0037 verdict).
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	for _, c := range v.conditions {
 		if c.Type == ConditionImageCacheReady {
@@ -489,7 +489,7 @@ func TestComputeStatusVerdict_ImageCacheDisabledRemovesStaleCondition(t *testing
 	}}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: false}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: false}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	found := false
 	for _, rc := range v.removeConditions {
@@ -499,6 +499,149 @@ func TestComputeStatusVerdict_ImageCacheDisabledRemovesStaleCondition(t *testing
 	}
 	if !found {
 		t.Fatalf("a stale ImageCacheReady must be removed when prewarm is disabled, removeConditions=%v", v.removeConditions)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ArpPrimerReady (spike, #1760) — mirrors the ImageCacheReady tests above.
+//
+// The "simulated webhook rejection" the lead asked for: this feeds
+// computeStatusVerdict the EXACT literal message Knative Serving's admission
+// webhook returns (knative.dev/serving@v0.48.0, k8s_validation.go,
+// validateInitContainers) when kubernetes.podspec-init-containers is not
+// Enabled, via coldStartState.rejectedMsg — the same plain-struct seam
+// Reconcile uses after classifying the real apiserver error with
+// isArpPrimerFeatureGateRejection (see TestIsArpPrimerFeatureGateRejection
+// in coldstart_arp_primer_test.go for the classifier itself). No envtest/
+// real apiserver is needed to prove the CONDITION TEXT is honest and
+// actionable — that is what computeStatusVerdict owns, and it is a pure
+// function by design (#254).
+const simulatedArpPrimerWebhookRejection = `admission webhook "validation.webhook.serving.knative.dev" denied the request: validation failed: pod spec support for init-containers is off, but found 1 init containers: spec.template.spec.initContainers`
+
+func TestComputeStatusVerdict_ArpPrimerReady_Applied(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	trueVal := true
+	app.Spec.ColdStart = &appsv1alpha1.ColdStartSpec{ArpPrimer: &trueVal}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{enabled: true}, envMapCollisionReport{}, now)
+
+	c := findVerdictCondition(t, v, ConditionArpPrimerReady)
+	if c.Status != metav1.ConditionTrue || c.Reason != "Applied" {
+		t.Fatalf("ArpPrimerReady: got %+v, want True/Applied", c)
+	}
+	// Must not touch the app's own Ready/Degraded roll-up.
+	if r := findVerdictCondition(t, v, ConditionReady); r.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready must stay True when arpPrimer applied cleanly, got %+v", r)
+	}
+}
+
+func TestComputeStatusVerdict_ArpPrimerReady_RejectedByFeatureGate(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	trueVal := true
+	app.Spec.ColdStart = &appsv1alpha1.ColdStartSpec{ArpPrimer: &trueVal}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		coldStartState{enabled: true, rejectedMsg: simulatedArpPrimerWebhookRejection},
+		envMapCollisionReport{}, now)
+
+	c := findVerdictCondition(t, v, ConditionArpPrimerReady)
+	if c.Status != metav1.ConditionFalse || c.Reason != ReasonArpPrimerFeatureGateOff {
+		t.Fatalf("ArpPrimerReady: got %+v, want False/%s", c, ReasonArpPrimerFeatureGateOff)
+	}
+	// The condition MUST name the exact feature flag the cluster admin needs
+	// to flip, AND the opt-out — an operator reading `kubectl describe
+	// nextapp` needs an actionable next step without reading operator source.
+	if !strings.Contains(c.Message, "kubernetes.podspec-init-containers") {
+		t.Fatalf("ArpPrimerReady message does not name the feature flag: %q", c.Message)
+	}
+	if !strings.Contains(c.Message, "spec.coldStart.arpPrimer") || !strings.Contains(c.Message, "false") {
+		t.Fatalf("ArpPrimerReady message does not name the opt-out: %q", c.Message)
+	}
+	// Non-fatal: the already-serving revision's health is untouched — Ready
+	// stays True exactly as the ImageCacheReady precedent requires.
+	if r := findVerdictCondition(t, v, ConditionReady); r.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready must stay True on an arpPrimer rejection (the serving revision is unaffected), got %+v", r)
+	}
+	// Bounded retry, same shape as the image-prewarm precedent.
+	if v.requeueAfter != arpPrimerRejectionRequeueAfter {
+		t.Fatalf("requeueAfter = %v, want %v", v.requeueAfter, arpPrimerRejectionRequeueAfter)
+	}
+	// Transition-gated Warning event on entry.
+	foundEvent := false
+	for _, e := range v.events {
+		if e.reason == ReasonArpPrimerFeatureGateOff && e.eventType == corev1.EventTypeWarning {
+			foundEvent = true
+		}
+	}
+	if !foundEvent {
+		t.Fatalf("expected a transition-gated Warning event for %s, got %v", ReasonArpPrimerFeatureGateOff, v.events)
+	}
+}
+
+func TestComputeStatusVerdict_ArpPrimerReady_RejectionEventFiresOnlyOnTransition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	trueVal := true
+	app.Spec.ColdStart = &appsv1alpha1.ColdStartSpec{ArpPrimer: &trueVal}
+	// Prior status ALREADY carries the same False/reason — a requeue re-run,
+	// not a fresh transition.
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionArpPrimerReady, Status: metav1.ConditionFalse, Reason: ReasonArpPrimerFeatureGateOff,
+	}}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
+		coldStartState{enabled: true, rejectedMsg: simulatedArpPrimerWebhookRejection},
+		envMapCollisionReport{}, now)
+
+	for _, e := range v.events {
+		if e.reason == ReasonArpPrimerFeatureGateOff {
+			t.Fatalf("event must not re-fire on an unchanged rejection (churn guard), got %v", v.events)
+		}
+	}
+}
+
+func TestComputeStatusVerdict_ArpPrimerDisabledNoCondition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
+
+	for _, c := range v.conditions {
+		if c.Type == ConditionArpPrimerReady {
+			t.Fatalf("ArpPrimerReady must be absent when arpPrimer is off, got %+v", c)
+		}
+	}
+	for _, rc := range v.removeConditions {
+		if rc == ConditionArpPrimerReady {
+			t.Fatalf("must not remove a never-present ArpPrimerReady (would break the #98 no-op guard)")
+		}
+	}
+}
+
+func TestComputeStatusVerdict_ArpPrimerDisabledRemovesStaleCondition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionArpPrimerReady, Status: metav1.ConditionTrue, Reason: "Applied",
+	}}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
+
+	found := false
+	for _, rc := range v.removeConditions {
+		if rc == ConditionArpPrimerReady {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a stale ArpPrimerReady must be removed when arpPrimer is turned off, removeConditions=%v", v.removeConditions)
 	}
 }
 
@@ -523,7 +666,7 @@ func TestComputeStatusVerdict_ImagePrewarmReconcileErrorDegradesOnlyImageCache(t
 		revisionCheck{}, imageCacheState{
 			enabled:         true,
 			reconcileErrMsg: `daemonsets.apps is forbidden: User "system:serviceaccount:kn-next-operator-system:controller-manager" cannot create resource "daemonsets"`,
-		}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionImageCacheReady)
 	if c.Status != metav1.ConditionFalse || c.Reason != ReasonReconcileFailed {
@@ -573,7 +716,7 @@ func TestComputeStatusVerdict_ImagePrewarmErrorEventIsTransitionGated(t *testing
 	}}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: true, reconcileErrMsg: "still forbidden"}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: true, reconcileErrMsg: "still forbidden"}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	for _, e := range v.events {
 		if e.reason == ReasonImagePrewarmFailed {
@@ -601,7 +744,7 @@ func TestComputeStatusVerdict_ImagePrewarmCleanupErrorSurfacesInsteadOfRemoving(
 	}}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionImageCacheReady)
 	if c.Status != metav1.ConditionFalse || c.Reason != ReasonCleanupFailed {
@@ -628,7 +771,7 @@ func TestComputeStatusVerdict_ImagePrewarmErrorDoesNotOverrideKsvcRequeue(t *tes
 		"RevisionFailed", time.Minute, now)
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: true, reconcileErrMsg: "forbidden"}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: true, reconcileErrMsg: "forbidden"}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	// The ksvc-not-ready requeue is the tighter, more urgent one; the prewarm
 	// failure must not lengthen it.
@@ -650,7 +793,7 @@ func TestComputeStatusVerdict_ImagePrewarmCleanupErrorOnNeverPrewarmedAppIsSilen
 	app := verdictApp() // no spec.scaling, no prior ImageCacheReady condition
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	for _, c := range v.conditions {
 		if c.Type == ConditionImageCacheReady {
@@ -683,7 +826,7 @@ func TestComputeStatusVerdict_ImagePrewarmCleanupErrorStillSurfacesForARealOrpha
 	}}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionImageCacheReady)
 	if c.Status != metav1.ConditionFalse || c.Reason != ReasonCleanupFailed {
@@ -706,7 +849,7 @@ func TestComputeStatusVerdict_ImagePrewarmTransientConflictDoesNotFlapTheConditi
 	// Coverage is still complete and still observed — a Conflict says nothing
 	// about the DaemonSet's health.
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 3, transientErr: true}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 3, transientErr: true}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionImageCacheReady)
 	if c.Status != metav1.ConditionTrue || c.Reason != "Cached" {
@@ -735,7 +878,7 @@ func TestComputeStatusVerdict_ImagePrewarmErrorMessageCarriesObservedCoverage(t 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{
 			enabled: true, desired: 10, ready: 9, reconcileErrMsg: "forbidden",
-		}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionImageCacheReady)
 	if !strings.Contains(c.Message, "9/10") {
@@ -758,7 +901,7 @@ func TestVerdictNetpolEnforced(t *testing.T) {
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{},
 		netpolEnforcementState{enabled: true, verdict: netpolEnforcementEnforced,
-			evidence: "Calico DaemonSet calico-node (kube-system)"}, envMapCollisionReport{}, now)
+			evidence: "Calico DaemonSet calico-node (kube-system)"}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionNetworkPolicyEnforced)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonPolicyControllerDetected {
@@ -783,7 +926,7 @@ func TestVerdictNetpolLikelyUnenforced_ReportedLoudly(t *testing.T) {
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{},
 		netpolEnforcementState{enabled: true, verdict: netpolEnforcementLikelyUnenforced,
-			evidence: "flannel DaemonSet kube-flannel-ds (kube-system)"}, envMapCollisionReport{}, now)
+			evidence: "flannel DaemonSet kube-flannel-ds (kube-system)"}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionNetworkPolicyEnforced)
 	if c.Status != metav1.ConditionFalse || c.Reason != ReasonNoPolicyController {
@@ -815,7 +958,7 @@ func TestVerdictNetpolLikelyUnenforced_EventIsTransitionGated(t *testing.T) {
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{},
 		netpolEnforcementState{enabled: true, verdict: netpolEnforcementLikelyUnenforced,
-			evidence: "flannel DaemonSet kube-flannel-ds (kube-system)"}, envMapCollisionReport{}, now)
+			evidence: "flannel DaemonSet kube-flannel-ds (kube-system)"}, coldStartState{}, envMapCollisionReport{}, now)
 
 	for _, e := range v.events {
 		if e.reason == ReasonNoPolicyController {
@@ -829,7 +972,7 @@ func TestVerdictNetpolUnknown_IsDistinctFromEnforced(t *testing.T) {
 	app := verdictApp()
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{},
-		netpolEnforcementState{enabled: true, verdict: netpolEnforcementUnknown}, envMapCollisionReport{}, now)
+		netpolEnforcementState{enabled: true, verdict: netpolEnforcementUnknown}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionNetworkPolicyEnforced)
 	if c.Status != metav1.ConditionUnknown || c.Reason != ReasonEnforcementUnknown {
@@ -847,7 +990,7 @@ func TestVerdictNetpolDisabled_DropsConditionOnlyIfPresent(t *testing.T) {
 	// slice stays byte-identical (#98 no-op guard).
 	app := verdictApp()
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{enabled: false}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{enabled: false}, coldStartState{}, envMapCollisionReport{}, now)
 	for _, ct := range conditionTypes(v) {
 		if ct == ConditionNetworkPolicyEnforced {
 			t.Fatalf("netpol disabled must not report enforcement, got conditions %v", conditionTypes(v))
@@ -866,7 +1009,7 @@ func TestVerdictNetpolDisabled_DropsConditionOnlyIfPresent(t *testing.T) {
 		Reason: ReasonPolicyControllerDetected, Message: "prior",
 	}}
 	v2 := computeStatusVerdict(app2, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{enabled: false}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{enabled: false}, coldStartState{}, envMapCollisionReport{}, now)
 	var removed bool
 	for _, rc := range v2.removeConditions {
 		if rc == ConditionNetworkPolicyEnforced {
@@ -888,7 +1031,7 @@ func TestVerdictNetpolUnknown_CrashedAgentNamesTheDeadAgent(t *testing.T) {
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{},
 		netpolEnforcementState{enabled: true, verdict: netpolEnforcementUnknown,
-			evidence: "Calico DaemonSet calico-node (kube-system, not running)"}, envMapCollisionReport{}, now)
+			evidence: "Calico DaemonSet calico-node (kube-system, not running)"}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionNetworkPolicyEnforced)
 	if c.Status != metav1.ConditionUnknown || c.Reason != ReasonEnforcementUnknown {
@@ -911,7 +1054,7 @@ func TestVerdictNetpolEnforced_MessageKeepsTheHonestCeiling(t *testing.T) {
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{},
 		netpolEnforcementState{enabled: true, verdict: netpolEnforcementEnforced,
-			evidence: "Calico DaemonSet calico-node (kube-system)"}, envMapCollisionReport{}, now)
+			evidence: "Calico DaemonSet calico-node (kube-system)"}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionNetworkPolicyEnforced)
 	if !strings.Contains(c.Message, "should be enforced") ||

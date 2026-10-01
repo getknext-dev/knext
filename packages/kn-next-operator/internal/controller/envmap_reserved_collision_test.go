@@ -218,7 +218,7 @@ func TestComputeStatusVerdict_EnvMapCollision_OperatorWins_ConditionAndEvent(t *
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{operatorWins: []string{"HOSTNAME"}}, now)
+		coldStartState{}, envMapCollisionReport{operatorWins: []string{"HOSTNAME"}}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvVarIgnored {
@@ -244,7 +244,7 @@ func TestComputeStatusVerdict_EnvMapCollision_UserWins_ConditionAndEvent(t *test
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, now)
+		coldStartState{}, envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapUserOverride {
@@ -281,7 +281,7 @@ func TestComputeStatusVerdict_EnvMapCollision_ExemptOnly_NormalEventAndInformati
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWinsExempt: []string{"REDIS_URL"}}, now)
+		coldStartState{}, envMapCollisionReport{userWinsExempt: []string{"REDIS_URL"}}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapExpectedOverride {
@@ -317,7 +317,7 @@ func TestComputeStatusVerdict_EnvMapCollision_ExemptPlusGrandfathered_StillWarni
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{
+		coldStartState{}, envMapCollisionReport{
 			userWinsExempt:        []string{"REDIS_URL"},
 			userWinsGrandfathered: []string{"NODE_ENV"},
 		}, now)
@@ -356,7 +356,7 @@ func TestComputeStatusVerdict_ExemptPlusOperatorWins_StillWarning(t *testing.T) 
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{
+		coldStartState{}, envMapCollisionReport{
 			userWinsExempt: []string{"REDIS_URL"},
 			operatorWins:   []string{"HOSTNAME"},
 		}, now)
@@ -388,7 +388,7 @@ func TestComputeStatusVerdict_NoEnvMapCollision_ConditionFalse(t *testing.T) {
 	app := verdictApp()
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, coldStartState{}, envMapCollisionReport{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionFalse {
@@ -418,7 +418,7 @@ func TestComputeStatusVerdict_EnvMapCollision_TransitionGated(t *testing.T) {
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, now)
+		coldStartState{}, envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, now)
 
 	if len(v.events) != 0 {
 		t.Fatalf("events: got %+v, want none — the collision set is UNCHANGED from the prior reconcile", v.events)
