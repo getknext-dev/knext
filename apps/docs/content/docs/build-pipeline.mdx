@@ -154,10 +154,12 @@ current status before relying on this mode for a deployment that needs those sig
 On the vinext target, the binary embeds the server runtime and your `public` files, and unpacks
 its native image libraries into the temp directory the first time an image is optimized — so
 nothing needs to sit beside the binary, and the temp directory must be writable **and
-executable** (the knext operator mounts a writable `emptyDir` at `/tmp`, which is exec by
-default; with `docker run --read-only`, add `--tmpfs /tmp:exec` — Docker's `--tmpfs` defaults
-to `noexec`, and dlopen-ing the unpacked native library from a noexec mount fails with
-"failed to map segment from shared object").
+executable** (the knext operator always mounts a writable `emptyDir` at `/tmp` for this build
+shape — unconditionally, with no extra config needed — which is exec by default; with
+`docker run --read-only`, add `--tmpfs /tmp:exec` — Docker's `--tmpfs` defaults to `noexec`, and
+dlopen-ing the unpacked native library from a noexec mount fails with "failed to map segment from
+shared object"). See [Security → Read-only root filesystem](/docs/security#read-only-root-filesystem)
+for when knext mounts volumes on other build shapes.
 
 Both targets support it; nothing else does — there, setting it changes nothing about what
 `knext build` produces, and the choice is only recorded in the build log. The value must be a

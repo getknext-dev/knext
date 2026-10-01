@@ -94,7 +94,7 @@ export interface ScalingConfig {
     maxScale?: number; // Default: 10
     cpuRequest?: string; // Default: "250m"
     memoryRequest?: string; // Default: "512Mi"
-    cpuLimit?: string; // Default: "4000m" (request stays 250m; raised 2026-10, #1778 cold-start fix)
+    cpuLimit?: string; // Default: "1000m"
     memoryLimit?: string; // Default: "1Gi"
 
     // #415 — the following 6 knobs mirror the NextApp CRD's ScalingSpec

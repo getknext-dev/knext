@@ -114,55 +114,93 @@ provided (measured ≈ −20% time-to-first-response on next@16.2.4 / Bun 1.3.5)
 This removes the JS recompile cost. It does **not** remove framework boot or the
 database pool re-establish — those are addressed below.
 
-### CPU limit at boot (`spec.resources.cpuLimit`, #1778)
+### CPU limit at boot (`spec.resources.cpuLimit`) — opt-in recipe, not a new default
 
-The operator's default CPU **limit** was raised from `1000m` to `4000m` — the
-**request** stays `250m`, unchanged, so this does not raise what the app is
-billed or scheduled against on a bin-packed cluster; it only raises the CFS
-quota ceiling a cold-starting pod can burst into while it is CPU-bound (JS
-parse, framework boot, and the first request's module evaluation). Measured on
-GKE (`e2-standard-4`, n=10, Holm p=0.0005): a 4-CPU limit with the request
-unchanged shaved **~675ms** off cold start — on a throttled 1-vCPU-class node
-the container was hitting its CFS quota during boot, not actually using 4
-cores. Fully overridable per app:
+A higher CPU **limit** (request unchanged) measurably helps cold start: on GKE
+`e2-standard-4` (n=10, Holm p=0.0005) raising the limit from `1000m` to
+`4000m` saved **~675ms** by giving the CFS quota more headroom while the pod
+is CPU-bound (JS parse, framework boot, first-request module evaluation).
+**This was tried as a new DEFAULT and reverted** (#1778/#1786 round 2): a
+`4000m` limit against the default `250m` request is a **16x** request:limit
+ratio, and a cluster that sets a `LimitRange` `maxLimitRequestRatio` (a common
+value is `4`) or a bare `max.cpu` below `4` rejects the pod at admission
+(`FailedCreate`) — a silently broken default deploy on exactly the clusters
+that bother to set resource governance, which is a worse outcome than the
+cold start it was meant to fix. The operator's default stays `1000m`/`250m`.
+
+If your cluster has no such `LimitRange` (or you've sized one with headroom),
+raise the limit per app:
 
 ```yaml
 spec:
   resources:
-    cpuLimit: "1"   # revert to the old ceiling, or size up/down as needed
+    cpuLimit: "4"   # size to your cluster's LimitRange, if any
 ```
 
-### No writable volume by default (`spec.security.writableCache`, #1778)
+Or use a startup-CPU-boost mechanism instead of raising the standing limit
+(K8s in-place pod resize / a controller like
+[Kube Startup CPU Boost](https://github.com/google/kube-startup-cpu-boost)) —
+not installed by knext, and not evaluated in this sitting beyond the bound
+the `cpuLimit: "4"` experiment establishes.
+
+**Known gap:** the operator does not currently surface a `LimitRange`/quota
+`FailedCreate` rejection on the `NextApp`'s own status — if you raise
+`cpuLimit` past what your cluster's governance allows, you find out from
+`kubectl describe pod`, not from `kubectl get nextapp`. Tracked separately;
+check the project's issue tracker for status before relying on either knob
+without first checking your cluster's `LimitRange`s yourself
+(`kubectl get limitrange -A`).
+
+### No writable volume by default, except where it's unconditional (`spec.security.writableCache`)
 
 Under the default-on `readOnlyRootFilesystem`, the operator used to always
 mount an `emptyDir` for `/tmp` and (for the standalone build shape) Next's
 `.next/cache` directory. Provisioning that volume costs pod-sandbox setup time
 on **every** cold wake — measured ~300-360ms on OKE and GKE — whether or not
-anything is ever written to it. The operator no longer mounts it by default:
+anything is ever written to it. The operator mounts it only where the write is
+actually unconditional for your app's shape, not as a blanket default:
+
+- **`/tmp` is always mounted** when the app compiles to a self-contained
+  single executable — `spec.build: vinext`, or `selfContained: true` on any
+  other build. That binary unpacks a native image-processing library into
+  `/tmp` on the first image-optimization request and `dlopen()`s it; without
+  the mount, every optimized-image request on every app of this shape 500s.
+- **`.next/cache` is always mounted** (standalone build shape only — a
+  self-contained image has no `.next/standalone` tree) when `spec.storage` is
+  configured. Next's built-in image optimizer writes the variant there
+  *before* knext's object-store sync can run, and the sync's own restore/push
+  also writes inside this directory — without the mount, a storage-configured
+  app's sync errors on every wake and every image re-optimizes, which defeats
+  the point of configuring storage at all. **This was a real defect in the
+  first round of this change** (#1786 round 2, adversarial review): configuring
+  object storage does NOT remove this local write, it only adds a step that
+  depends on it succeeding.
+- **Otherwise** (standalone shape, no storage, not self-contained): no volume
+  is mounted:
 
 ```yaml
 spec:
   security:
     readOnlyRootFilesystem: true   # default; unchanged
-    writableCache: false           # default: no emptyDir mounted
+    writableCache: false           # default: only the two unconditional mounts above
 ```
 
-Under the default, `/tmp` and (for apps serving `next/image` without
-`spec.storage` configured) the image-optimizer's local variant cache become
-read-only-rejected (`EROFS`) instead of failing silently. This is **non-fatal**
-by design — the same pattern already accepted for Next's default
-ISR/fetch-cache fallback: a write failure is logged, and the app keeps serving
-from memory/baked state rather than crashing. The user-visible cost is
-performance, not correctness: an app using `next/image` heavily without
-object storage will re-optimize images on every request instead of caching
-the variant locally.
+In the "otherwise" case, the image-optimizer's local variant cache becomes
+read-only-rejected (`EROFS`) instead of persisting. This is **non-fatal** by
+design — the same pattern already accepted for Next's default ISR/fetch-cache
+fallback: a write failure is logged, and the app keeps serving from
+memory/baked state rather than crashing. The user-visible cost is
+performance, not correctness: an app using `next/image` with no storage
+configured re-optimizes images on every request instead of caching the
+variant locally.
 
-Set `spec.security.writableCache: true` to restore the pre-#1778 mounts for an
-app that needs guaranteed local writes — most commonly an app that serves
-`next/image` without `spec.storage` configured, or one that has removed its
-`cacheHandler` and relies on Next's on-disk ISR fallback. Every knext-scaffolded
-app configures a `cacheHandler` unconditionally, so this is rarely required in
-practice.
+Set `spec.security.writableCache: true` to restore the pre-#1778 mounts
+**unconditionally** for an app that wants guaranteed local writes outside the
+two always-on cases above — most commonly a standalone app with no
+`spec.storage` that still wants local image-cache persistence, or one that
+has removed its `cacheHandler` and relies on Next's on-disk ISR fallback.
+Every knext-scaffolded app configures a `cacheHandler` unconditionally, so
+the latter is rarely required in practice.
 
 ### Database pool re-establishment (the other half of cold-start)
 

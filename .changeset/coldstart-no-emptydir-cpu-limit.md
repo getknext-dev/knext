@@ -2,7 +2,8 @@
 "@getknext/core": patch
 ---
 
-Two cold-start fixes (measured on GKE, ~1s combined saving per wake):
+Cold-start fix: the operator no longer mounts an `emptyDir` volume by default under `readOnlyRootFilesystem: true` for a standalone app with no object storage configured — provisioning that volume cost pod-sandbox setup time on every scale-from-zero wake whether or not anything was ever written to it. `readOnlyRootFilesystem` stays on by default.
 
-- The operator no longer mounts an `emptyDir` volume by default under `readOnlyRootFilesystem: true` — provisioning that volume cost pod-sandbox setup time on every scale-from-zero wake whether or not anything was ever written to it. `readOnlyRootFilesystem` stays on by default. A new, additive opt-in field, `spec.security.writableCache`, restores the previous mounts (`/tmp`, and for the standalone build shape, Next's image-optimizer/ISR-fallback cache) for an app that needs guaranteed local writes.
-- The operator's default CPU **limit** is raised from `1000m` to `4000m` (the **request** is unchanged at `250m`), reducing CFS throttling during the CPU-bound boot window. `kn-next deploy`'s own default follows the same change. Both remain fully overridable per app.
+Two writes stay mounted unconditionally, by default, because they are not optional for the shape that needs them: `/tmp` for any self-contained single-executable build (`build: vinext`, or `selfContained: true`), and Next's image-optimizer cache directory for a standalone app with `spec.storage` configured. A new, additive opt-in field, `spec.security.writableCache`, restores the pre-existing unconditional mounts for an app that wants guaranteed local writes outside those two cases.
+
+(A companion change raising the default CPU limit was evaluated and reverted after review — it risked silent `FailedCreate` rejections on clusters with a `LimitRange`. The default CPU limit stays `1000m`; see `docs/operator/scaling-cold-start.md` for the opt-in recipe.)
