@@ -18,6 +18,7 @@ package controller
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -152,19 +153,25 @@ func TestBuildDesiredKsvc_ArpPrimer_EnabledRendersHardenedInitContainer(t *testi
 		}
 	}
 
-	// Sends via UDP (no NET_RAW needed), targets the pod's own node via the
-	// Downward API — never a hardcoded/guessed address.
-	foundHostIPEnv := false
+	// No env fieldRef at all (round 2, live-cluster finding): Knative gates
+	// ANY env valueFrom.fieldRef behind its own separately-disabled-by-
+	// default feature flag (kubernetes.podspec-fieldref), so the target is
+	// resolved INSIDE the container via `ip route`, never via the Downward
+	// API. Assert that invariant directly: no env var has a FieldRef at all.
 	for _, e := range c.Env {
-		if e.Name == arpPrimerTargetEnvVar {
-			if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil || e.ValueFrom.FieldRef.FieldPath != "status.hostIP" {
-				t.Fatalf("%s must come from the Downward API status.hostIP, got %+v", arpPrimerTargetEnvVar, e.ValueFrom)
-			}
-			foundHostIPEnv = true
+		if e.ValueFrom != nil && e.ValueFrom.FieldRef != nil {
+			t.Fatalf("init container env %q uses valueFrom.fieldRef (%+v) — Knative's "+
+				"kubernetes.podspec-fieldref feature flag gates ANY such field, and this "+
+				"spike intentionally avoids depending on it", e.Name, e.ValueFrom.FieldRef)
 		}
 	}
-	if !foundHostIPEnv {
-		t.Fatalf("init container has no %s env var sourced from status.hostIP", arpPrimerTargetEnvVar)
+	// Sends via UDP (no NET_RAW needed); the command resolves its own
+	// default gateway via `ip route` rather than a hardcoded address.
+	if !strings.Contains(c.Command[len(c.Command)-1], "ip route") {
+		t.Fatalf("init container command does not resolve its target via `ip route`: %v", c.Command)
+	}
+	if !strings.Contains(c.Command[len(c.Command)-1], "nc -u") {
+		t.Fatalf("init container command does not send via UDP (`nc -u`): %v", c.Command)
 	}
 }
 

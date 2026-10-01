@@ -151,9 +151,11 @@ spec:
                   arpPrimer:
                     description: |-
                       ArpPrimer renders a hardened init container (SPIKE, see issue #1760)
-                      that sends one outbound UDP datagram to the pod's own node (via
-                      status.hostIP) before the app container starts. On flannel VXLAN
-                      clusters whose pod-IP allocator has wrapped, a node can hold a stale
+                      that sends one outbound UDP datagram to its own default gateway
+                      (resolved at runtime via `ip route`, not the Downward API — Knative
+                      gates ANY env fieldRef behind its own feature flag) before the app
+                      container starts. On flannel VXLAN clusters whose pod-IP allocator has
+                      wrapped, a node can hold a stale
                       ARP/neighbour entry for a recycled pod IP, making the new pod
                       unreachable from the node's host namespace until the pod sends its
                       own first outbound packet — measured as a ~7.5s stale-neighbour

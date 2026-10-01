@@ -104,15 +104,6 @@ func isArpPrimerFeatureGateRejection(err error) bool {
 // for a UDP send.
 const arpPrimerContainerName = "arp-primer"
 
-// arpPrimerTargetEnvVar carries the pod's own node IP via the Downward API
-// (status.hostIP is one of the few fieldRef paths the API server allows —
-// container image is NOT, which is why this reuses prewarmHelperImage
-// rather than deriving an operator-self-image reference). The primer sends
-// its datagram here: any destination works for refreshing the node's
-// neighbour table, and the node's own IP is always topologically reachable,
-// unlike guessing the CNI gateway address.
-const arpPrimerTargetEnvVar = "KNEXT_ARP_PRIMER_TARGET"
-
 // arpPrimerEnabled reports whether spec.coldStart.arpPrimer is explicitly
 // true. nil or false => disabled (default-off for this spike).
 func arpPrimerEnabled(app *appsv1alpha1.NextApp) bool {
@@ -138,25 +129,30 @@ func arpPrimerEnabled(app *appsv1alpha1.NextApp) bool {
 //   - no ServiceAccount token: handled at the POD level
 //     (AutomountServiceAccountToken=false, nextapp_controller.go:~454) and
 //     reinforced here by mounting nothing into this container.
+//
+// Target resolution — NO Downward API (round 2, live-cluster finding): the
+// first cut passed the pod's node IP in via `valueFrom.fieldRef:
+// status.hostIP`, but Knative Serving gates ANY env fieldRef behind its OWN
+// separately-disabled-by-default feature flag (kubernetes.podspec-fieldref,
+// config/features.go) — a THIRD flag, on top of kubernetes.podspec-init-
+// containers, that a cluster admin would have to enable for nothing this
+// fix actually needs. The command instead reads `ip route show default`
+// INSIDE the container at runtime to find its own default gateway — no
+// Downward API, no extra feature flag, same mechanism requirement (any
+// outbound frame refreshes the node's neighbour entry for this pod's IP).
 func buildArpPrimerInitContainer() corev1.Container {
 	return corev1.Container{
 		Name:  arpPrimerContainerName,
 		Image: prewarmHelperImage,
-		// A single best-effort UDP datagram to the pod's own node. `|| true`
-		// means a closed/filtered port (the common case — nothing is
-		// listening on the chosen port) never fails the init container: the
-		// goal is the OUTBOUND frame leaving the veth, not a successful
-		// round trip.
-		Command: []string{"sh", "-c", "echo | nc -u -w1 \"$KNEXT_ARP_PRIMER_TARGET\" 9 || true"},
-		Env: []corev1.EnvVar{
-			{
-				Name: arpPrimerTargetEnvVar,
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "status.hostIP",
-					},
-				},
-			},
+		// Resolve the default gateway via `ip route`, then send it one
+		// best-effort UDP datagram. `|| true` on both the resolution and the
+		// send means a route-table hiccup or a closed/filtered port (the
+		// common case — nothing is listening) never fails the init
+		// container: the goal is the OUTBOUND frame leaving the veth, not a
+		// successful round trip or a resolved route.
+		Command: []string{"sh", "-c",
+			`GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}'); ` +
+				`[ -n "$GW" ] && (echo | nc -u -w1 "$GW" 9 || true) || true`,
 		},
 		SecurityContext: &corev1.SecurityContext{
 			RunAsNonRoot:             ptr.To(true),
