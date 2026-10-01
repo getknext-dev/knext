@@ -620,7 +620,7 @@ jobs:
           APP_DIR="${RUNNER_TEMP}/js-closure-app"
           cp -R packages/kn-next/src/__tests__/fixtures/standalone-drain-app "$APP_DIR"
           cd "$APP_DIR"
-          npm pkg set "dependencies.next=16.3.5"
+          npm pkg set "dependencies.next=16.3.6"
           grep -q '"build": "next build"' package.json
           cat > knext.config.ts <<'EOF'
           const config = {

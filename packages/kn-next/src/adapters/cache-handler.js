@@ -697,6 +697,39 @@ function tagKey(tag) {
   return `${KEY_PREFIX}:tag:${tag}`;
 }
 
+// ─── Tag resolution (#1764) ───
+//
+// `ctx.tags` is NOT where an APP_PAGE/APP_ROUTE/PAGES write's tags live. Next
+// 16.3.5's response-cache (`response-cache/index.js`) calls
+// `cacheHandler.set(key, value, ctx)` with `ctx = { cacheControl,
+// isRoutePPREnabled, isFallback }` for those kinds — no `tags` field at all.
+// The tags (including the implicit `_N_T_<path>` tag `revalidatePath`
+// targets) live only in `value.headers['x-next-cache-tags']`, a
+// comma-separated list. This is not knext's invention: Next's OWN default
+// handler (`incremental-cache/file-system-cache.js`) reads that exact header
+// for exactly those three kinds, precisely because `ctx.tags` is absent on
+// write for them.
+//
+// `ctx.tags` stays the source for the FETCH (data-cache) kind, which DOES
+// carry tags on ctx and never carries this header — unioning is therefore
+// safe for every kind, not just the three that need it.
+const NEXT_CACHE_TAGS_HEADER = 'x-next-cache-tags';
+
+/** Tags recorded in `value.headers['x-next-cache-tags']`, if any. */
+function tagsFromCacheValueHeader(value) {
+  const header = value?.headers?.[NEXT_CACHE_TAGS_HEADER];
+  if (typeof header !== 'string' || header.length === 0) return [];
+  return header
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+}
+
+/** The full tag set for one write: `ctx.tags` ∪ the header's tags, de-duped. */
+function resolveWriteTags(data, ctx) {
+  return Array.from(new Set([...(ctx?.tags || []), ...tagsFromCacheValueHeader(data)]));
+}
+
 // ─── Serialization Helpers ───
 // Next.js 16 cache entries contain Map (segmentData) and Buffer (rscData)
 // that JSON.stringify/parse can't round-trip. These helpers preserve types.
@@ -912,13 +945,16 @@ class CacheHandler {
       // revalidate window is what made stale-while-revalidate unreachable (#886).
       const ttl = __redisTtlSeconds(ctx);
       const cacheControl = writeCacheControl(ctx);
+      // ctx.tags ∪ value.headers['x-next-cache-tags'] — see resolveWriteTags
+      // above for why the header matters (#1764).
+      const tags = resolveWriteTags(data, ctx);
 
       if (client) {
         // Redis path: serialize Map/Buffer → JSON-safe types for JSON.stringify
         const redisEntry = {
           value: serializeCacheValue(data),
           lastModified: Date.now(),
-          tags: ctx?.tags || [],
+          tags,
           cacheControl,
         };
 
@@ -952,8 +988,8 @@ class CacheHandler {
         const commands = [
           ['SET', cacheKey(key), JSON.stringify(redisEntry), 'EX', String(ttl)],
         ];
-        if (ctx?.tags?.length) {
-          for (const tag of ctx.tags) {
+        if (tags.length) {
+          for (const tag of tags) {
             commands.push(['SADD', tagKey(tag), key]);
           }
         }
@@ -965,7 +1001,7 @@ class CacheHandler {
         const memEntry = {
           value: cloneCacheValue(data),
           lastModified: Date.now(),
-          tags: ctx?.tags || [],
+          tags,
           cacheControl,
         };
         memoryCache.set(key, memEntry);
@@ -973,7 +1009,7 @@ class CacheHandler {
 
       logCacheEvent('SET', source, key, {
         durationMs: Date.now() - startTime,
-        details: `TTL: ${ttl}s, Tags: [${(ctx?.tags || []).join(', ')}]`,
+        details: `TTL: ${ttl}s, Tags: [${tags.join(', ')}]`,
       });
     } catch (error) {
       console.error('[CacheHandler] Error setting cache:', key, error.message);
