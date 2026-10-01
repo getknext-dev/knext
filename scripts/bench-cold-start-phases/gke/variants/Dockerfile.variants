@@ -1,0 +1,76 @@
+# BENCH-ONLY variants of the 2026-09-30 release-cell images, one variable each.
+# Every variant is FROM the exact baseline digest, so everything not named here is
+# byte-identical to the measured baseline.
+
+# ── compile stage: recompile the SAME standalone tree with the SAME core (rc.2)
+FROM us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb AS compile
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
+USER root
+COPY bytecode-exec-verify.mjs bc-check.mjs /tools/
+RUN mkdir -p /out \
+ && cp -a /app/.next/standalone /work-bc && cp -a /app/.next/standalone /work-sc && cp -a /app/.next/standalone /work-nobc \
+ && rm -f /work-bc/knext-standalone-exec /work-sc/knext-standalone-exec /work-nobc/knext-standalone-exec
+ENV SC=/app/node_modules/@getknext/core/dist/adapters/standalone-compile.js
+# control: the shipped recipe (bytecode, verifier active)
+RUN bun run $SC --server /work-bc/server.js --outfile /out/exec-bc 2>&1 | tail -3 && test -s /out/exec-bc
+# self-contained: route chunks embedded + bytecode (verifier active)
+RUN bun run $SC --server /work-sc/server.js --outfile /out/exec-sc --self-contained 1 2>&1 | tail -4 && test -s /out/exec-sc
+# no bytecode: the test-only flag, with the fail-closed verifier disabled IN THIS STAGE ONLY
+RUN test "$(grep -c 'if (!verdict.ok)' $SC)" = 1 \
+ && sed -i 's/if (!verdict.ok)/if (false \&\& !verdict.ok)/' $SC \
+ && test "$(grep -c 'if (false && !verdict.ok)' $SC)" = 1 \
+ && KNEXT_STANDALONE_COMPILE_NO_BYTECODE_FOR_VERIFIER_TEST=1 bun run $SC --server /work-nobc/server.js --outfile /out/exec-nobc 2>&1 | tail -3 \
+ && test -s /out/exec-nobc
+RUN cd /tools && for f in /app/.next/standalone/knext-standalone-exec /out/exec-bc /out/exec-nobc; do bun bc-check.mjs $f; done | tee /out/bc-check.jsonl \
+ && ls -la /out
+
+# ── bun, compiled WITHOUT --bytecode (only the executable differs)
+FROM us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb AS bun-nobc
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
+COPY --from=compile /out/exec-nobc /app/.next/standalone/knext-standalone-exec
+
+# ── bun, self-contained single executable (route chunks embedded + bytecode).
+# The operator runs `bun run server.js`; /app/server.js becomes the shipped
+# self-contained compat shim, which execs /app/knext-standalone-exec.
+FROM us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb AS bun-sc
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
+USER root
+RUN cp /app/node_modules/@getknext/core/templates/runtime-standalone/knext-self-contained-server-shim.js.hbs /app/server.js \
+ && mkdir -p /app/public /app/.next/static \
+ && cp -a /app/.next/standalone/.next/static/. /app/.next/static/ \
+ && cp -a /app/.next/standalone/public/. /app/public/
+COPY --from=compile /out/exec-sc /app/knext-standalone-exec
+USER 65532:65532
+
+# ── warm-before-ready prototype (#1761), bun: the operator runs `bun run server.js`
+FROM us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb AS bun-warm
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
+COPY warm-entry.mjs /app/server.js
+COPY warm-entry.mjs /app/knext-entry.mjs
+
+# ── instrumentation gated off: the scaffolded instrumentation.ts awaits
+# import('./instrumentation-node') unconditionally, which evaluates its static
+# imports (@vercel/otel, @cerbos/grpc, minio, prom-client — a 1.7 MB chunk) right
+# after listen, even though registerNode() returns at once when tracing is off.
+# With tracing off (the default) register() does nothing else, so a no-op
+# register() is behaviourally identical to gating that import on tracing.
+FROM us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb AS bun-noinstr
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
+COPY instrumentation-stub.js /app/.next/standalone/.next/server/instrumentation.js
+
+FROM us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-node-turbopack@sha256:c8d290ee1010d325112e9e214f26c52f12f76014e15321203eeb2040a1002d77 AS node-noinstr
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
+COPY instrumentation-stub.js /app/.next/standalone/.next/server/instrumentation.js
+
+# ── warm-before-ready prototype (#1761), node: the image ENTRYPOINT is `node /app/knext-entry.mjs`
+FROM us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bc-node-turbopack@sha256:c8d290ee1010d325112e9e214f26c52f12f76014e15321203eeb2040a1002d77 AS node-warm
+# Inherited from the scaffold base image too; stated so the stage is self-describing.
+ENV NODE_ENV=production
+COPY warm-entry.mjs /app/knext-entry.mjs
+COPY warm-entry.mjs /app/server.js

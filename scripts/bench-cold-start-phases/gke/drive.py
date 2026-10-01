@@ -34,7 +34,7 @@ import time
 
 CTX = ["kubectl", "--context", "knext-coldstart", "-n", "bench-cells"]
 HERE = pathlib.Path(__file__).resolve().parent
-DNS_JS = (HERE / "dns-probe.js").read_text()
+DNS_JS = (HERE.parent / "dns-probe.js").read_text()  # shared with the OKE harness, one level up
 
 
 TRANSIENT = ("Unable to connect", "context deadline exceeded", "i/o timeout", "EOF", "connection reset")
@@ -71,6 +71,15 @@ def wait_zero(arms, timeout=900):
             return round(time.time() - t)
         time.sleep(3)
     raise SystemExit("timeout waiting for zero pods")
+
+
+def wait_zero_or_bound(arm):
+    """After a placed wake the pod is already bound (the harness returns after the
+    first byte), so the cordon can be changed for the next arm right away; this
+    only double-checks that no pod of `arm` is still Pending."""
+    j = json.loads(kc(["get", "pods", "-l", f"serving.knative.dev/service={arm}", "-o", "json"]))
+    if any(not p["spec"].get("nodeName") for p in j["items"]):
+        time.sleep(5)
 
 
 def dns_probe(arm, runtime):
@@ -113,8 +122,39 @@ def wake(arm, treat, seq):
     return {"arm": arm, "error": "harness produced no result in 240 s"}
 
 
+POOLS = {}  # pool label -> node names, filled lazily for `arm@pool` specs
+
+
+def nodes_by_pool():
+    if not POOLS:
+        j = json.loads(subprocess.run(["kubectl", "--context", "knext-coldstart", "get", "nodes", "-o", "json"],
+                                      capture_output=True, text=True, check=True).stdout)
+        for n in j["items"]:
+            pool = n["metadata"]["labels"].get("cloud.google.com/gke-nodepool", "?")
+            POOLS.setdefault(pool, []).append(n["metadata"]["name"])
+    return POOLS
+
+
+def place(pool):
+    """Machine-family block (2026-10-01): make ONLY `pool`'s nodes schedulable for
+    the next wake by cordoning every other pool's nodes (running pods are not
+    touched; DaemonSets tolerate cordons). `pool=None` uncordons everything."""
+    for p, names in nodes_by_pool().items():
+        verb = "uncordon" if pool is None or p == pool else "cordon"
+        for n in names:
+            subprocess.run(["kubectl", "--context", "knext-coldstart", verb, n], capture_output=True, text=True)
+
+
 def main():
     rounds, arms, out = int(sys.argv[1]), sys.argv[2].split(","), sys.argv[3]
+    try:
+        run(rounds, arms, out)
+    finally:
+        if any("@" in a for a in arms):
+            place(None)
+
+
+def run(rounds, arms, out):
     do_dns = "--dns" in sys.argv
     heal_arm = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--heal=")), None)
     kc(["cp", str(HERE / "cold-cycle.mjs"), "phase-bench:/tmp/cold-cycle.mjs", "-c", "harness"])
@@ -125,11 +165,18 @@ def main():
             # matters: the scheduler places successive wakes on alternating nodes.
             k = r % len(arms)
             order = arms[k:] + arms[:k]
-            waited = wait_zero(arms)
+            waited = wait_zero(sorted({a.split("@")[0] for a in arms}))
             time.sleep(10)
-            for arm in order:
+            for spec in order:
+                arm, _, pool = spec.partition("@")
+                if pool:
+                    place(pool)
                 treat = arm == heal_arm and r % 2 == 1
                 row = wake(arm, treat, f"{int(time.time())}-{arm}")
+                if pool:
+                    row["arm"] = spec
+                    row["pool"] = pool
+                    wait_zero_or_bound(arm)
                 row.update(round=r + 1, order="fwd" if r % 2 == 0 else "rev", waited_s=waited,
                            treatment="heal" if treat else "none")
                 if do_dns and "error" not in row:

@@ -1,0 +1,18 @@
+steps:
+- name: gcr.io/cloud-builders/docker
+  entrypoint: bash
+  args:
+  - -c
+  - |
+    set -euo pipefail
+    docker buildx create --use --name vb >/dev/null
+    REG=us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo
+    for t in bun-noinstr node-noinstr; do
+      docker buildx build --platform linux/amd64 -f Dockerfile.variants --target $$t --progress plain \
+        --provenance=false -t $$REG/bc-variant-$$t:$BUILD_ID --metadata-file /workspace/meta-$$t.json --push . > /workspace/b-$$t.log 2>&1 || { tail -40 /workspace/b-$$t.log; exit 1; }
+      echo "DIGEST $$t $$(grep -o '"containerimage.digest": *"[^"]*"' /workspace/meta-$$t.json)"
+    done
+timeout: 3600s
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY

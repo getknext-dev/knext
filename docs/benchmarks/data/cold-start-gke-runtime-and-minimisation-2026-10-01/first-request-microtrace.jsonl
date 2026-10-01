@@ -1,0 +1,29 @@
+{"variant":"node, compile cache ON (baked)","gap_ms":0,"listen_ms":573,"health1_ms":1099,"health2_ms":27,"root1_ms":258,"root2_ms":140}
+{"variant":"node, compile cache ON (baked)","gap_ms":0,"listen_ms":551,"health1_ms":1075,"health2_ms":12,"root1_ms":189,"root2_ms":205}
+{"variant":"node, compile cache ON (baked)","gap_ms":0,"listen_ms":530,"health1_ms":1087,"health2_ms":24,"root1_ms":165,"root2_ms":192}
+{"variant":"node, NODE_DISABLE_COMPILE_CACHE=1","gap_ms":0,"listen_ms":591,"health1_ms":1189,"health2_ms":12,"root1_ms":369,"root2_ms":119}
+{"variant":"node, NODE_DISABLE_COMPILE_CACHE=1","gap_ms":0,"listen_ms":585,"health1_ms":1184,"health2_ms":12,"root1_ms":199,"root2_ms":229}
+{"variant":"node, NODE_DISABLE_COMPILE_CACHE=1","gap_ms":0,"listen_ms":586,"health1_ms":1172,"health2_ms":36,"root1_ms":331,"root2_ms":167}
+{"variant":"node, compile cache ON + NODE_DEBUG_NATIVE=COMPILE_CACHE","gap_ms":0,"listen_ms":618,"health1_ms":1146,"health2_ms":12,"root1_ms":254,"root2_ms":144,"cc_accepted":516,"cc_rejected":0}
+{"variant":"bun, compiled exec + bytecode (shipped)","gap_ms":0,"listen_ms":234,"health1_ms":1063,"health2_ms":6,"root1_ms":184,"root2_ms":36}
+{"variant":"bun, compiled exec + bytecode (shipped)","gap_ms":0,"listen_ms":191,"health1_ms":1000,"health2_ms":7,"root1_ms":185,"root2_ms":45}
+{"variant":"bun, compiled exec + bytecode (shipped)","gap_ms":0,"listen_ms":200,"health1_ms":1000,"health2_ms":6,"root1_ms":192,"root2_ms":25}
+{"variant":"bun, uncompiled bun server.js","gap_ms":0,"listen_ms":504,"health1_ms":1176,"health2_ms":8,"root1_ms":162,"root2_ms":56}
+{"variant":"bun, uncompiled bun server.js","gap_ms":0,"listen_ms":484,"health1_ms":1247,"health2_ms":6,"root1_ms":158,"root2_ms":40}
+{"variant":"bun, uncompiled bun server.js","gap_ms":0,"listen_ms":471,"health1_ms":1200,"health2_ms":7,"root1_ms":172,"root2_ms":55}
+{"variant":"node, compile cache ON, --cpu-prof","gap_ms":1500,"listen_ms":653,"health1_ms":183,"health2_ms":14,"root1_ms":227,"root2_ms":77}
+{"variant":"bun, compiled exec + bytecode (shipped)","gap_ms":2000,"listen_ms":194,"health1_ms":60,"health2_ms":6,"root1_ms":148,"root2_ms":70}
+{"variant":"bun, compiled exec + bytecode (shipped)","gap_ms":2000,"listen_ms":191,"health1_ms":54,"health2_ms":6,"root1_ms":148,"root2_ms":68}
+{"variant":"node, compile cache ON (baked)","gap_ms":2000,"listen_ms":535,"health1_ms":163,"health2_ms":12,"root1_ms":174,"root2_ms":229}
+{"variant":"bun, compiled exec + bytecode, instrumentation register() no-op","gap_ms":0,"listen_ms":200,"health1_ms":372,"health2_ms":6,"root1_ms":174,"root2_ms":46}
+{"variant":"bun, compiled exec + bytecode, instrumentation register() no-op","gap_ms":0,"listen_ms":209,"health1_ms":385,"health2_ms":15,"root1_ms":157,"root2_ms":46}
+{"variant":"bun, compiled exec + bytecode, instrumentation register() no-op","gap_ms":0,"listen_ms":175,"health1_ms":371,"health2_ms":12,"root1_ms":164,"root2_ms":47}
+{"variant": "node, compile cache ON (baked), c3-standard-4", "gap_ms": 0, "listen_ms": 284, "health1_ms": 628, "health2_ms": 9, "root1_ms": 121, "root2_ms": 63}
+{"variant": "node, compile cache ON (baked), c3-standard-4", "gap_ms": 0, "listen_ms": 303, "health1_ms": 624, "health2_ms": 8, "root1_ms": 166, "root2_ms": 68}
+{"variant": "node, compile cache ON (baked), c3-standard-4", "gap_ms": 0, "listen_ms": 292, "health1_ms": 612, "health2_ms": 8, "root1_ms": 137, "root2_ms": 58}
+{"variant": "bun, compiled exec + bytecode (shipped), c3-standard-4", "gap_ms": 0, "listen_ms": 116, "health1_ms": 653, "health2_ms": 4, "root1_ms": 94, "root2_ms": 33}
+{"variant": "bun, compiled exec + bytecode (shipped), c3-standard-4", "gap_ms": 0, "listen_ms": 103, "health1_ms": 692, "health2_ms": 4, "root1_ms": 91, "root2_ms": 32}
+{"variant": "bun, compiled exec + bytecode (shipped), c3-standard-4", "gap_ms": 0, "listen_ms": 107, "health1_ms": 654, "health2_ms": 4, "root1_ms": 90, "root2_ms": 27}
+{"variant": "node, instrumentation register() no-op, tree copied to /tmp (compile cache misses: keyed by path)", "gap_ms": 0, "listen_ms": 624, "health1_ms": 577, "health2_ms": 20, "root1_ms": 238, "root2_ms": 80}
+{"variant": "node, instrumentation register() no-op, tree copied to /tmp (compile cache misses: keyed by path)", "gap_ms": 0, "listen_ms": 648, "health1_ms": 643, "health2_ms": 21, "root1_ms": 300, "root2_ms": 103}
+{"variant": "node, instrumentation register() no-op, tree copied to /tmp (compile cache misses: keyed by path)", "gap_ms": 0, "listen_ms": 679, "health1_ms": 665, "health2_ms": 11, "root1_ms": 287, "root2_ms": 95}
