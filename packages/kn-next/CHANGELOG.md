@@ -1,5 +1,23 @@
 # @getknext/core
 
+## 1.0.0-rc.5
+
+### Patch Changes
+
+- 13780ff: Send one best-effort outbound UDP datagram to the pod's default gateway as early as possible at process start, in both runtime entries (the standalone supervisor and the compiled standalone-on-Bun executable). On some clusters a node can briefly be unable to reach a freshly-started pod until it sends its own first outbound packet; this mitigates the resulting cold-start stall without requiring any extra cluster privilege or feature flag. Opt out with `KNEXT_ARP_PRIMER=0`.
+- f89e9db: Cold-start fix: the operator no longer mounts an `emptyDir` volume by default under `readOnlyRootFilesystem: true` for a standalone app with no object storage configured — provisioning that volume cost pod-sandbox setup time on every scale-from-zero wake whether or not anything was ever written to it. `readOnlyRootFilesystem` stays on by default.
+  
+  Two writes stay mounted unconditionally, by default, because they are not optional for the shape that needs them: `/tmp` for any self-contained single-executable build (`build: vinext`, or `selfContained: true`), and Next's image-optimizer cache directory for a standalone app with `spec.storage` configured. A new, additive opt-in field, `spec.security.writableCache`, restores the pre-existing unconditional mounts for an app that wants guaranteed local writes outside those two cases.
+  
+  (A companion change raising the default CPU limit was evaluated and reverted after review — it risked silent `FailedCreate` rejections on clusters with a `LimitRange`. The default CPU limit stays `1000m`; see `docs/operator/scaling-cold-start.md` for the opt-in recipe.)
+  
+  **Upgrade note:** standalone apps no longer get a writable `/tmp` (or `.next/cache`) by default. If your app code writes to `os.tmpdir()` or another path at runtime, set `spec.security.writableCache: true` before upgrading. Apps with `spec.storage` configured keep `.next/cache`, and single-executable builds keep `/tmp`.
+- da92b15: `knext create`: the scaffolded `src/instrumentation.ts` now checks the tracing switch (`OTEL_TRACING_ENABLED=true`) before it imports `src/instrumentation-node.ts`. With tracing off, which is the default, the app no longer loads the OpenTelemetry, metrics and client modules at startup, so cold starts are faster. On GKE e2-standard-4 nodes with a 1-CPU limit and pre-pulled images, the median scale-from-zero first request dropped by about 0.9 s on Bun and 0.8 s on Node. With tracing on, the app loads the same modules and registers the same span processors as before. Apps created earlier can copy the change by hand; the observability docs show how.
+- d972995: The compiled standalone-on-Bun build's disk-closure scan now logs a warning (once per distinct specifier) when a module a route chunk requires cannot be resolved under either the `require` or ESM/`default` export condition, instead of silently dropping it. The warning names the specifier, the directory it was required from, and both resolution attempts' errors.
+- Updated dependencies [65eef13]
+  - @getknext/lib@1.0.0-rc.5
+  - @getknext/db@1.0.0-rc.5
+
 ## 1.0.0-rc.4
 
 ### Patch Changes
