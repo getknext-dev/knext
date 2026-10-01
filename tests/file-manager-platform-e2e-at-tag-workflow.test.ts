@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
@@ -115,6 +116,49 @@ describe('file-manager platform e2e at tag - caller wiring', () => {
     expect(run).toMatch(/set -euo pipefail/);
     expect(run).toMatch(/Could not resolve .* to a commit SHA/);
     expect(run).toMatch(/exit 1/);
+  });
+
+  it('#1751: peels an annotated tag to its commit (^{}), never records the tag object SHA', () => {
+    const resolveStep = resolveJob.steps?.find((s) => s.id === 'resolve');
+    const run = String(resolveStep?.run);
+    // Must query the peeled form of the tag ref.
+    expect(run).toMatch(/refs\/tags\/\$GIT_REF\^\{\}/);
+    // And must prefer a peeled line over the plain tag-object line when
+    // both are present in the ls-remote output (annotated-tag case) -
+    // a plain `awk '{print $1; exit}'` over the combined output would
+    // take whichever line comes first, which is the tag object, not the
+    // commit. Assert the selection actually discriminates on `^{}`.
+    expect(run).toContain('^\\{\\}$');
+  });
+
+  it('#1751: resolving an annotated tag actually selects the peeled commit, not the tag object', () => {
+    // Hermetic re-execution of the resolve logic against FIXED, canned
+    // `git ls-remote` output (no network) - this is the exact shape git
+    // returns for an annotated tag: the tag-object line first, the peeled
+    // commit line second.
+    const resolveStep = resolveJob.steps?.find((s) => s.id === 'resolve');
+    const run = String(resolveStep?.run);
+    // Extract just the SHA-resolution logic (the lines operating on
+    // $TAG_REFS / ls-remote output) and re-run it under a stub `git`.
+    const script = [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'git() {',
+      "  cat <<'EOF'",
+      '900e8984588f46cd441a660af464012b81707a89\trefs/tags/v1.0.0-rc.3',
+      '86eef5171ccbd47a5bffc869f01a61d0a799737a\trefs/tags/v1.0.0-rc.3^{}',
+      'EOF',
+      '}',
+      'GIT_REF_INPUT="v1.0.0-rc.3"',
+      'GITHUB_OUTPUT="/dev/null"',
+      'GITHUB_STEP_SUMMARY="/dev/null"',
+      run,
+      'echo "RESOLVED_SHA=$GIT_SHA"',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('RESOLVED_SHA=86eef5171ccbd47a5bffc869f01a61d0a799737a');
+    expect(result.stdout).not.toContain('RESOLVED_SHA=900e8984588f46cd441a660af464012b81707a89');
   });
 });
 
