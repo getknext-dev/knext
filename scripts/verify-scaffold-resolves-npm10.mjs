@@ -16,22 +16,47 @@
  * Resolve-only (`--package-lock-only`): builds the ideal tree (where the crash happens)
  * without downloading tarballs. Network is required (registry metadata + `npx npm@10`).
  * Exits 0 when the tree resolves, 1 on the crash / any resolve failure.
+ *
+ * #1771: a release-prep PR (changeset version bump to e.g. `1.0.0-rc.4`) bakes that EXACT
+ * version into the template's `@getknext/*` ranges, and that version is not on npm until
+ * THIS PR merges and publishes — so plain registry resolution ETARGETs on every release-prep
+ * PR, every time, even though the tree is fine. When that happens — and ONLY when every
+ * ETARGET is for a `@getknext/*` package at exactly the workspace version
+ * (`decideResolveStrategy`'s `release-prep-etarget`, see `scripts/lib/scaffold-npm10-resolve.mjs`)
+ * — retry by packing the current workspace `@getknext/*` sources into real tarballs
+ * (`packPublishableGroup`, the same packer the publish lanes use) and resolving the
+ * template's `@getknext/*` entries against those `file:` paths instead, while every OTHER
+ * dependency still resolves against the real registry under npm 10. Any other ETARGET, or
+ * any other failure (including the `edgesOut` crash), stays red exactly as before.
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { canonicalPublishableGroup, packPublishableGroup } from './lib/pack-publishable-group.mjs';
+import { applyLocalResolutions, decideResolveStrategy } from './lib/scaffold-npm10-resolve.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..');
 const TEMPLATE = join(REPO, 'packages/kn-next/templates/app/package.json.hbs');
 const CORE_PKG = join(REPO, 'packages/kn-next/package.json');
 const NPM_MAJOR = '10'; // the stranger's npm; the version whose arborist crashes on a bad peer
+const NPM_INSTALL_ARGS = ['install', '--package-lock-only', '--no-audit', '--no-fund'];
 
 function fail(msg) {
   console.error(`FAIL [scaffold-resolves-npm10] ${msg}`);
   process.exit(1);
+}
+
+function runNpm10Install(dir) {
+  const r = spawnSync('npx', ['-y', '-p', `npm@${NPM_MAJOR}`, 'npm', ...NPM_INSTALL_ARGS], {
+    cwd: dir,
+    encoding: 'utf8',
+    timeout: 300_000,
+  });
+  if (r.error) fail(`could not run npm@${NPM_MAJOR}: ${r.error.message}`);
+  return { exitStatus: r.status ?? 1, output: `${r.stdout || ''}${r.stderr || ''}` };
 }
 
 const version = JSON.parse(readFileSync(CORE_PKG, 'utf8')).version ?? '0.0.0';
@@ -45,36 +70,85 @@ try {
   console.log(
     `resolving the repo scaffold template (pinned @getknext/* = ${version}) on npm ${NPM_MAJOR}.x …`,
   );
-  const r = spawnSync(
-    'npx',
-    [
-      '-y',
-      '-p',
-      `npm@${NPM_MAJOR}`,
-      'npm',
-      'install',
-      '--package-lock-only',
-      '--no-audit',
-      '--no-fund',
-    ],
-    { cwd: dir, encoding: 'utf8', timeout: 300_000 },
-  );
-  const out = `${r.stdout || ''}${r.stderr || ''}`;
-  if (r.error) fail(`could not run npm@${NPM_MAJOR}: ${r.error.message}`);
-  if (/edgesOut/.test(out)) {
+  const first = runNpm10Install(dir);
+  const decision = decideResolveStrategy({
+    exitStatus: first.exitStatus,
+    output: first.output,
+    workspaceVersion: version,
+  });
+
+  if (decision.kind === 'ok') {
+    console.log(`ok — the repo scaffold template resolves cleanly on npm ${NPM_MAJOR}.x`);
+    process.exit(0);
+  }
+
+  if (decision.kind === 'edgesOut') {
     fail(
       `the scaffold template CRASHES npm ${NPM_MAJOR} with the arborist edgesOut bug — a dependency ` +
         `pins a peer another pin cannot satisfy (the #985 class). A stranger on npm ${NPM_MAJOR} ` +
         `cannot install a scaffolded app. Align the offending peer (e.g. keep vitest's Vite peer ` +
-        `range covering the pinned vite). npm output:\n${out.trim().slice(0, 600)}`,
+        `range covering the pinned vite). npm output:\n${first.output.trim().slice(0, 600)}`,
     );
   }
-  if (r.status !== 0) {
+
+  if (decision.kind !== 'release-prep-etarget') {
     fail(
-      `npm ${NPM_MAJOR} install --package-lock-only exited ${r.status}:\n${out.trim().slice(0, 600)}`,
+      `npm ${NPM_MAJOR} install --package-lock-only exited ${first.exitStatus}:\n` +
+        `${first.output.trim().slice(0, 600)}`,
     );
   }
-  console.log(`ok — the repo scaffold template resolves cleanly on npm ${NPM_MAJOR}.x`);
+
+  // release-prep-etarget: every unresolved package is @getknext/* at exactly the
+  // workspace version — pack it locally and retry.
+  console.log(
+    `npm ${NPM_MAJOR} could not resolve ${decision.packages.join(', ')} at the unpublished ` +
+      `release-prep version ${version} — packing local tarballs and retrying …`,
+  );
+  const packDir = join(dir, '.local-pack');
+  const group = canonicalPublishableGroup(REPO).filter((p) => decision.packages.includes(p.name));
+  if (group.length !== decision.packages.length) {
+    fail(
+      `release-prep-etarget named ${decision.packages.join(', ')}, but the canonical publishable ` +
+        `group only covers ${canonicalPublishableGroup(REPO)
+          .map((p) => p.name)
+          .join(', ')} — cannot pack a local tarball for the rest.`,
+    );
+  }
+  const packed = packPublishableGroup(group, packDir);
+  const tarballsByName = new Map(packed.map((p) => [p.name, p.tarball]));
+
+  const pkgPath = join(dir, 'package.json');
+  const localResolved = applyLocalResolutions(
+    JSON.parse(readFileSync(pkgPath, 'utf8')),
+    tarballsByName,
+  );
+  writeFileSync(pkgPath, JSON.stringify(localResolved, null, 2));
+
+  const second = runNpm10Install(dir);
+  const secondDecision = decideResolveStrategy({
+    exitStatus: second.exitStatus,
+    output: second.output,
+    workspaceVersion: version,
+  });
+  if (secondDecision.kind === 'ok') {
+    console.log(
+      `ok — the repo scaffold template resolves cleanly on npm ${NPM_MAJOR}.x ` +
+        `(release-prep PR: ${decision.packages.join(', ')} resolved against local tarballs)`,
+    );
+    process.exit(0);
+  }
+  if (secondDecision.kind === 'edgesOut') {
+    fail(
+      `the scaffold template CRASHES npm ${NPM_MAJOR} with the arborist edgesOut bug even after ` +
+        `local-tarball resolution — a dependency pins a peer another pin cannot satisfy. npm ` +
+        `output:\n${second.output.trim().slice(0, 600)}`,
+    );
+  }
+  fail(
+    `npm ${NPM_MAJOR} install --package-lock-only still failed after resolving ` +
+      `${decision.packages.join(', ')} against local tarballs (exit ${second.exitStatus}):\n` +
+      `${second.output.trim().slice(0, 600)}`,
+  );
 } finally {
   try {
     rmSync(dir, { recursive: true, force: true });
