@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { EventEmitter } from 'node:events';
 
 /**
  * #1777 — `@cerbos/grpc` (→ `@grpc/grpc-js`) and `minio` must not be loaded
@@ -47,6 +48,16 @@ class FakeMinioClient {
   }
   async bucketExists(): Promise<boolean> {
     return true;
+  }
+  listObjectsV2(_bucket: string, _prefix?: string, _recursive?: boolean): EventEmitter {
+    const emitter = new EventEmitter();
+    // Emit asynchronously, like the real SDK's network-backed stream would.
+    queueMicrotask(() => {
+      emitter.emit('data', { name: 'a' });
+      emitter.emit('data', { name: 'b' });
+      emitter.emit('end');
+    });
+    return emitter;
   }
 }
 
@@ -169,5 +180,56 @@ describe('#1777 — @getknext/lib/clients loads @cerbos/grpc and minio lazily (s
     // The retry actually reconstructed with the working class (2 ctor calls:
     // the failed attempt + the successful retry).
     expect(cerbosCtorCalls).toHaveLength(2);
+  });
+
+  it('getMinioClient().listObjectsV2() returns a stream SYNCHRONOUSLY, before minio has loaded', async () => {
+    const { getMinioClient } = await import('../clients');
+    const stream = getMinioClient().listObjectsV2('assets', '', true);
+    // Nothing has been awaited yet — the real client cannot have been built.
+    expect(minioCtorCalls).toHaveLength(0);
+    expect(typeof stream.on).toBe('function');
+  });
+
+  it("getMinioClient().listObjectsV2() forwards the real stream's data/end events", async () => {
+    const { getMinioClient } = await import('../clients');
+    const stream = getMinioClient().listObjectsV2('assets', '', true);
+    const names: string[] = [];
+    const ended = new Promise<void>((resolve) => {
+      stream.on('data', (obj: { name: string }) => names.push(obj.name));
+      stream.on('end', () => resolve());
+    });
+    await ended;
+    expect(names).toEqual(['a', 'b']);
+    expect(minioEvaluated).toBe(true);
+    expect(minioCtorCalls).toHaveLength(1);
+  });
+
+  it('getMinioClient().listObjectsV2() forwards a real stream error', async () => {
+    mock.module('minio', () => ({
+      Client: class {
+        constructor(config: Record<string, unknown>) {
+          minioCtorCalls.push(config);
+        }
+        listObjectsV2(): EventEmitter {
+          const emitter = new EventEmitter();
+          queueMicrotask(() => emitter.emit('error', new Error('simulated list failure')));
+          return emitter;
+        }
+      },
+    }));
+    const { getMinioClient, resetClients: reset } = await import('../clients');
+    reset();
+    const stream = getMinioClient().listObjectsV2('assets', '', true);
+    const errored = new Promise<Error>((resolve) => {
+      stream.on('error', (err: Error) => resolve(err));
+    });
+    const err = await errored;
+    expect(err.message).toBe('simulated list failure');
+
+    // Restore the shared fake for later tests in this file.
+    mock.module('minio', () => {
+      minioEvaluated = true;
+      return { Client: FakeMinioClient };
+    });
   });
 });
