@@ -1,5 +1,15 @@
 # kn-next
 
+## 1.0.0-rc.5
+
+### Patch Changes
+
+- Updated dependencies [13780ff]
+- Updated dependencies [f89e9db]
+- Updated dependencies [da92b15]
+- Updated dependencies [d972995]
+  - @getknext/core@1.0.0-rc.5
+
 ## 1.0.0-rc.4
 
 ### Patch Changes
