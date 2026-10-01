@@ -56,7 +56,18 @@ jobs:
               exit 1
             fi
           fi
-          GIT_SHA="$(git ls-remote origin "refs/tags/$GIT_REF" "refs/tags/$GIT_REF^{}" | awk '{print $1; exit}')"
+          # An annotated tag's ls-remote output has TWO lines: the tag
+          # object SHA (`refs/tags/$GIT_REF`) and the peeled commit SHA
+          # (`refs/tags/$GIT_REF^{}`), in that order. Taking the first line
+          # unconditionally records the tag object, not the tested commit
+          # (#1751). Prefer the peeled (`^{}`) line when present; a
+          # lightweight tag has no peeled line, so fall back to the plain
+          # tag ref, which already names the commit directly.
+          TAG_REFS="$(git ls-remote origin "refs/tags/$GIT_REF" "refs/tags/$GIT_REF^{}")"
+          GIT_SHA="$(printf '%s\n' "$TAG_REFS" | awk '/\^\{\}$/ {print $1; exit}')"
+          if [ -z "$GIT_SHA" ]; then
+            GIT_SHA="$(printf '%s\n' "$TAG_REFS" | awk '{print $1; exit}')"
+          fi
           if [ -z "$GIT_SHA" ]; then
             echo "::error::Could not resolve $GIT_REF to a commit SHA"
             exit 1
