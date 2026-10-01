@@ -1,0 +1,125 @@
+# One small agent pod pinned to each worker node. Two endpoints:
+#   GET /        -> this node's wall clock (ms since epoch, sub-ms), for the
+#                   harness's NTP-style clock-offset estimate.
+#   GET /tcp?ip=&port=&ms=  -> polls a TCP connect to ip:port every 10 ms (200 ms
+#                   connect timeout) for up to `ms`, and answers with the wall
+#                   time of the first successful connect (or null). The harness
+#                   asks the agent on the NEW pod's node, so the answer is
+#                   SAME-NODE reachability (pod -> cni0 bridge -> pod), to set
+#                   against the harness's own CROSS-NODE poll (flannel VXLAN).
+#   GET /http?ip=&port=&path=&ms= -> polls GET http://ip:port<path> every 10 ms
+#                   (1 s timeout) and answers with the time of the first 2xx: the
+#                   app's own first health answer, bypassing queue-proxy. (Possible
+#                   only because flannel does not enforce the app's NetworkPolicy.)
+# Read-only; no service account token mounted.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-118
+  namespace: bench-cells
+  labels: {app: phase-agent}
+spec:
+  nodeName: 10.0.1.118
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: node:22-alpine
+      command: [node, -e]
+      args:
+        - |
+          const http = require('http'), net = require('net');
+          const now = () => performance.timeOrigin + performance.now();
+          http.createServer((q, s) => {
+            const u = new URL(q.url, 'http://x');
+            if (u.pathname === '/http') {
+              // Poll GET http://ip:port<path> until the first 2xx; answer its wall time.
+              const ip = u.searchParams.get('ip'), port = Number(u.searchParams.get('port'));
+              const path = u.searchParams.get('path') || '/';
+              const deadline = now() + Number(u.searchParams.get('ms') || 15000);
+              let attempts = 0;
+              const once = () => {
+                if (now() > deadline) return s.end(JSON.stringify({ at: null, attempts }));
+                attempts++;
+                const r = http.get({ host: ip, port, path, agent: false, timeout: 1000 }, (res) => {
+                  res.resume();
+                  if (res.statusCode >= 200 && res.statusCode < 300) return s.end(JSON.stringify({ at: now(), attempts }));
+                  setTimeout(once, 10);
+                });
+                r.on('timeout', () => r.destroy(new Error('timeout')));
+                r.on('error', () => setTimeout(once, 10));
+              };
+              return once();
+            }
+            if (u.pathname !== '/tcp') return s.end(String(now()));
+            const ip = u.searchParams.get('ip'), port = Number(u.searchParams.get('port'));
+            const deadline = now() + Number(u.searchParams.get('ms') || 15000);
+            let attempts = 0;
+            const once = () => {
+              if (now() > deadline) return s.end(JSON.stringify({ at: null, attempts }));
+              attempts++;
+              const c = net.connect({ host: ip, port });
+              const t = setTimeout(() => c.destroy(new Error('timeout')), 200);
+              c.once('connect', () => { const at = now(); clearTimeout(t); c.destroy(); s.end(JSON.stringify({ at, attempts })); });
+              c.once('error', () => { clearTimeout(t); setTimeout(once, 10); });
+            };
+            once();
+          }).listen(8080);
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-169
+  namespace: bench-cells
+  labels: {app: phase-agent}
+spec:
+  nodeName: 10.0.1.169
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: node:22-alpine
+      command: [node, -e]
+      args:
+        - |
+          const http = require('http'), net = require('net');
+          const now = () => performance.timeOrigin + performance.now();
+          http.createServer((q, s) => {
+            const u = new URL(q.url, 'http://x');
+            if (u.pathname === '/http') {
+              // Poll GET http://ip:port<path> until the first 2xx; answer its wall time.
+              const ip = u.searchParams.get('ip'), port = Number(u.searchParams.get('port'));
+              const path = u.searchParams.get('path') || '/';
+              const deadline = now() + Number(u.searchParams.get('ms') || 15000);
+              let attempts = 0;
+              const once = () => {
+                if (now() > deadline) return s.end(JSON.stringify({ at: null, attempts }));
+                attempts++;
+                const r = http.get({ host: ip, port, path, agent: false, timeout: 1000 }, (res) => {
+                  res.resume();
+                  if (res.statusCode >= 200 && res.statusCode < 300) return s.end(JSON.stringify({ at: now(), attempts }));
+                  setTimeout(once, 10);
+                });
+                r.on('timeout', () => r.destroy(new Error('timeout')));
+                r.on('error', () => setTimeout(once, 10));
+              };
+              return once();
+            }
+            if (u.pathname !== '/tcp') return s.end(String(now()));
+            const ip = u.searchParams.get('ip'), port = Number(u.searchParams.get('port'));
+            const deadline = now() + Number(u.searchParams.get('ms') || 15000);
+            let attempts = 0;
+            const once = () => {
+              if (now() > deadline) return s.end(JSON.stringify({ at: null, attempts }));
+              attempts++;
+              const c = net.connect({ host: ip, port });
+              const t = setTimeout(() => c.destroy(new Error('timeout')), 200);
+              c.once('connect', () => { const at = now(); clearTimeout(t); c.destroy(); s.end(JSON.stringify({ at, attempts })); });
+              c.once('error', () => { clearTimeout(t); setTimeout(once, 10); });
+            };
+            once();
+          }).listen(8080);
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}

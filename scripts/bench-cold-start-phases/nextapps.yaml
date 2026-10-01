@@ -1,0 +1,63 @@
+# The NextApps this benchmark measures. Applied with
+#   kubectl --context knext-oke-sa apply --validate=strict -f nextapps.yaml
+# The operator reconciles each into a Knative Service; nothing here writes Knative
+# objects directly. Images are the 2026-09-30 release-cell images (same digests),
+# so the two baseline arms are byte-identical to that sitting's cells.
+#
+# Bench-only deltas, identical across arms: maxScale 1 (one pod per wake), no
+# scaleDownDelay (each arm returns to zero between rounds), imagePullSecrets.
+#
+# Part 1 (baseline): bc-bun-turbopack (the default cell), bc-node-turbopack.
+# Part 2 (one variable each, vs bc-bun-turbopack):
+#   bc-bun-cpu4  resources.cpuLimit "4" (= the node's 4 vCPU; default limit is 1)
+#   bc-bun-rwfs  security.readOnlyRootFilesystem false (drops the writable emptyDir
+#                volume the operator adds for a read-only root filesystem)
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: bc-bun-turbopack
+  namespace: bench-cells
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb
+  runtime: bun
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: bc-node-turbopack
+  namespace: bench-cells
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-node-turbopack@sha256:c8d290ee1010d325112e9e214f26c52f12f76014e15321203eeb2040a1002d77
+  runtime: node
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: bc-bun-cpu4
+  namespace: bench-cells
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb
+  runtime: bun
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  resources: {cpuLimit: "4"}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: bc-bun-rwfs
+  namespace: bench-cells
+spec:
+  image: ghcr.io/getknext-dev/bench-cells-bun-turbopack@sha256:386c1c369a3a2f579af92165cabd0d9399f058415605bdf24ed44c9fdf778dcb
+  runtime: bun
+  build: turbopack
+  imagePullSecrets: [{name: ghcr-bench}]
+  scaling: {minScale: 0, maxScale: 1}
+  security: {readOnlyRootFilesystem: false}

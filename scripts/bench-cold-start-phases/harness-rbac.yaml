@@ -1,0 +1,101 @@
+# In-cluster instrument for the per-phase cold-start breakdown
+# (docs/benchmarks/cold-start-phase-breakdown-2026-10-01.md).
+#
+# Namespace-scoped. The harness lists/watches the bench namespace's pods,
+# deployments, endpointslices and events and reads pod logs; its one write is
+# the E1 exec into the app container (pods/exec below). The two `clock-*` pods
+# answer GET / with their node's wall clock (Part 1's offset source; E1-E3 use
+# the agent pods in node-agents.yaml, which also serve the clock).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: phase-bench
+  namespace: bench-cells
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: phase-bench-read
+  namespace: bench-cells
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events]
+    verbs: [get, list, watch]
+  # Experiment E1 only: the harness execs a one-shot DNS lookup in the new app
+  # container (HEAL=1). Namespace-scoped to the bench namespace.
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [get, create]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: phase-bench-read
+  namespace: bench-cells
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: phase-bench-read
+subjects:
+  - kind: ServiceAccount
+    name: phase-bench
+    namespace: bench-cells
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: phase-bench
+  namespace: bench-cells
+spec:
+  serviceAccountName: phase-bench
+  nodeName: 10.0.1.118
+  restartPolicy: Never
+  containers:
+    - name: harness
+      image: node:22-alpine
+      command: [sleep, "172800"]
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: clock-118
+  namespace: bench-cells
+  labels: {app: phase-clock}
+spec:
+  nodeName: 10.0.1.118
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: clock
+      image: node:22-alpine
+      command: [node, -e, "require('http').createServer((q,s)=>s.end(String(performance.timeOrigin+performance.now()))).listen(8080)"]
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: clock-169
+  namespace: bench-cells
+  labels: {app: phase-clock}
+spec:
+  nodeName: 10.0.1.169
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: clock
+      image: node:22-alpine
+      command: [node, -e, "require('http').createServer((q,s)=>s.end(String(performance.timeOrigin+performance.now()))).listen(8080)"]
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
