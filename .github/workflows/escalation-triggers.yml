@@ -42,7 +42,13 @@ name: Escalation triggers
 on:
   pull_request:
     branches: ['**']
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # `edited` IS REQUIRED: the PR-body acknowledgement line is one of the two
+    # acknowledgement mechanisms (the other is a label), and a label edit already
+    # re-triggers via `labeled`/`unlabeled`. Without `edited`, adding the body line
+    # to an ALREADY-OPEN PR never re-runs this check, so a PR that acknowledges by
+    # body alone stays red until an unrelated push happens to retrigger it — caught
+    # in review on #1804 (round 2). Guarded by tests/escalation-triggers.test.ts.
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
   # This job posts the REQUIRED "Escalation triggers acknowledged" context, so it
   # must report on the merge queue's `refs/heads/gh-readonly-queue/main/...` ref via
   # `merge_group` or the queue hangs. The trigger check itself CANNOT run there —
@@ -51,6 +57,20 @@ on:
   # runs a single no-op step and reports success (see the step guards below).
   # Guarded by tests/merge-queue-triggers.test.ts.
   merge_group:
+
+# `edited` (body edit) and `synchronize` (push) can land close together on the same
+# PR and race to post the same required context. Cancel the in-progress PR run when
+# a newer one starts so they don't fight over the status; NEVER cancel a merge_group
+# run — that ref only runs once per queue entry and a cancelled report there hangs
+# the queue.
+concurrency:
+  # Deliberately WITHOUT `github.event_name` in the group key: an `edited` run and a
+  # `synchronize` run on the SAME PR must share a group so the older one gets
+  # cancelled, not race it in a sibling group. `github.event.pull_request.number` is
+  # unset on `merge_group`, where it falls back to `github.ref` (the queue's own
+  # unique ref), so merge_group entries never collide with a PR's group or each other.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
