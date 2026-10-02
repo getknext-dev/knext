@@ -39,9 +39,23 @@ name: RC vinext beta proof (published rc.5 bytes, both runtimes)
 # other workflow's UTC minute-of-day in this repo (tests/ci-capacity-
 # budget.test.ts enforces no collision). Non-required: nothing in branch
 # protection names either job below.
+#
+# `workflow_dispatch` only triggers for a workflow file already present on
+# the default branch — unusable to prove this lane green on the PR that
+# introduces it. The `pull_request`/`push` triggers below, scoped to this
+# one file's own path, give that one proof run on the introducing PR
+# without waiting for a merge; every later invocation is the schedule or an
+# explicit dispatch.
 
 on:
   workflow_dispatch: {}
+  pull_request:
+    paths:
+      - '.github/workflows/rc5-vinext-beta-proof.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rc5-vinext-beta-proof.yml'
   schedule:
     - cron: '19 11 * * 2'
 
