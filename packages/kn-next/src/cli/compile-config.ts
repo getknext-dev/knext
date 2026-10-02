@@ -11,12 +11,47 @@
  * `$bunfs/root/<path relative to the app root>`, and it loads on its first
  * import. When a stock Bun release ships `--compile --include`
  * (oven-sh/bun#44059), the same plan can be passed that way instead.
+ *
+ * `compile.bun: 'knext-patched'` (opt-in, see `bun-toolchain.ts`) runs the
+ * compile with a knext-published Bun 1.4.2 build that has that flag: the SAME
+ * checked plan is then embedded through Bun's native `compile.include`. The
+ * config, the safety checks and the `$bunfs` paths are identical in both modes.
+ * RETIREMENT of the `bun` key: with `bun-toolchain.ts` (retirement probe
+ * `bun-patched-toolchain`).
  */
+
+export type BunToolchainId = "stock" | "knext-patched";
+
+export const BUN_TOOLCHAINS: readonly BunToolchainId[] = [
+    "stock",
+    "knext-patched",
+];
+
+/**
+ * The resolved compile toolchain (`resolveCompileToolchain` in
+ * bun-toolchain.ts): `bin` is the verified patched Bun, absent for stock.
+ */
+export interface CompileToolchain {
+    readonly bin?: string;
+}
 
 export interface CompileConfigShape {
     readonly compile?: unknown;
     readonly build?: unknown;
     readonly runtime?: unknown;
+}
+
+/** Did this config opt in to the patched toolchain? */
+export function wantsPatchedBun(config: CompileConfigShape): boolean {
+    return (
+        (config.compile as { bun?: unknown } | undefined)?.bun ===
+        "knext-patched"
+    );
+}
+
+/** Is this the compiled vinext executable? `compile.*` applies to it and nothing else. */
+function isCompiledVinext(config: CompileConfigShape): boolean {
+    return config.build === "vinext" && (config.runtime ?? "bun") === "bun";
 }
 
 /** The user's `compile.include` globs, or `[]`. */
@@ -42,15 +77,28 @@ export function validateCompileConfig(config: CompileConfigShape): string[] {
         ];
     }
     const errors: string[] = [];
-    const known = new Set(["include"]);
+    const known = new Set(["include", "bun"]);
     for (const key of Object.keys(compile)) {
         if (!known.has(key)) {
             errors.push(
-                `'compile.${key}' is not a known option (supported: include)`,
+                `'compile.${key}' is not a known option (supported: include, bun)`,
             );
         }
     }
-    const { include } = compile as { include?: unknown };
+    const { include, bun } = compile as { include?: unknown; bun?: unknown };
+    if (
+        bun !== undefined &&
+        !(BUN_TOOLCHAINS as readonly unknown[]).includes(bun)
+    ) {
+        errors.push(
+            `'compile.bun' must be one of: ${BUN_TOOLCHAINS.join(", ")} (got ${JSON.stringify(bun)})`,
+        );
+    } else if (bun === "knext-patched" && !isCompiledVinext(config)) {
+        errors.push(
+            "'compile.bun' is supported only on the compiled vinext executable " +
+                "(build: 'vinext' with the default runtime: 'bun'); remove it for this target",
+        );
+    }
     if (include === undefined) return errors;
     if (
         !Array.isArray(include) ||
@@ -62,8 +110,7 @@ export function validateCompileConfig(config: CompileConfigShape): string[] {
         );
         return errors;
     }
-    const runtime = config.runtime ?? "bun";
-    if (config.build !== "vinext" || runtime !== "bun") {
+    if (!isCompiledVinext(config)) {
         errors.push(
             "'compile.include' is supported only on the compiled vinext executable " +
                 "(build: 'vinext' with the default runtime: 'bun'); remove it for this target",

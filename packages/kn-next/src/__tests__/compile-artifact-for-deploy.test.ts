@@ -91,6 +91,67 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+describe("compileArtifactForDeploy — opt-in patched Bun toolchain fails closed", () => {
+    const patched = { compile: { bun: "knext-patched" as const } };
+
+    it.each([
+        ["standalone-bun", () => standaloneServer(), cfg(patched)],
+        ["vinext", () => vinextOutput(), cfg({ ...patched, build: "vinext" })],
+    ] as const)("%s: opted in with no resolved toolchain → throws, compiles nothing (never stock Bun)", (_n, stage, config) => {
+        stage();
+        for (const opts of [undefined, {}, { toolchain: {} }]) {
+            let err: unknown;
+            try {
+                compileArtifactForDeploy(config, dir, opts);
+            } catch (e) {
+                err = e;
+            }
+            expect(err).toBeInstanceOf(UsageError);
+            expect(String((err as Error).message)).toContain(
+                "refusing to fall back to stock Bun",
+            );
+        }
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+        expect(buildVinextExecutable).not.toHaveBeenCalled();
+    });
+
+    it("vinext opted in WITH a resolved toolchain → compiles with exactly that compiler", () => {
+        vinextOutput();
+        const toolchain = { bin: "/cache/bun-linux-x64" };
+        compileArtifactForDeploy(cfg({ ...patched, build: "vinext" }), dir, {
+            toolchain,
+        });
+        expect(buildVinextExecutable).toHaveBeenCalledWith(
+            expect.objectContaining({ compilerBin: "/cache/bun-linux-x64" }),
+        );
+    });
+
+    it("a non-vinext target opted in, even WITH a toolchain → throws (backstop for a bypassed validator), compiles nothing", () => {
+        standaloneServer();
+        let err: unknown;
+        try {
+            compileArtifactForDeploy(cfg(patched), dir, {
+                toolchain: { bin: "/cache/bun-linux-x64" },
+            });
+        } catch (e) {
+            err = e;
+        }
+        expect(err).toBeInstanceOf(UsageError);
+        expect(String((err as Error).message)).toContain(
+            "supported only on the compiled vinext executable",
+        );
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
+    it("the default (no compile.bun) never passes a compiler, so the argv stays plain bun", () => {
+        vinextOutput();
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        expect(buildVinextExecutable).toHaveBeenCalledWith(
+            expect.not.objectContaining({ compilerBin: expect.anything() }),
+        );
+    });
+});
+
 describe("compileArtifactForDeploy", () => {
     it("bare config (build+runtime absent) compiles the standalone-bun executable — the actual default cell", () => {
         standaloneServer();

@@ -44,7 +44,8 @@ import {
     resolveSelfContained,
     standaloneStepsApply,
 } from "./build-artifact";
-import { compileIncludeGlobs } from "./compile-config";
+import { resolveCompileToolchain } from "./bun-toolchain";
+import { type CompileToolchain, compileIncludeGlobs } from "./compile-config";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
@@ -170,6 +171,7 @@ async function smokeCompiledBinary(
     skipSmoke: boolean,
     selfContained: boolean,
     include: readonly string[] = [],
+    toolchain: CompileToolchain = {},
 ): Promise<void> {
     if (skipSmoke) {
         // LOUD, and it names what is now unverified rather than merely saying a
@@ -210,8 +212,10 @@ async function smokeCompiledBinary(
                 // The smoke must boot a binary built with the SAME mode as the
                 // shipped one, or it misses the one property the mode changes.
                 ...(selfContained ? { selfContained: true } : {}),
-                // ...and with the same embedded `compile.include` modules.
+                // ...and with the same embedded `compile.include` modules,
+                // compiled by the same toolchain.
                 ...(include.length > 0 ? { include } : {}),
+                ...(toolchain.bin ? { compilerBin: toolchain.bin } : {}),
             });
             // Self-contained mode embeds the staged tree at compile time and
             // extracts it lazily at runtime — it never consults
@@ -385,9 +389,20 @@ export async function build(options: BuildOptions = {}) {
     //     binary the Dockerfile ships. `skipViteBuild: true` inside the shared
     //     step — step 2 above (the project's own `vite build`) already
     //     produced `.output`.
+    // The opt-in patched Bun toolchain (`compile.bun: 'knext-patched'`):
+    // downloaded and sha256-verified here, BEFORE any compile, failing the
+    // build closed on any mismatch. The default config resolves to `{}`.
+    const toolchain = await resolveCompileToolchain(config);
+    if (toolchain.bin) {
+        log.info(
+            { bun: toolchain.bin },
+            "Compile step uses the knext-patched Bun toolchain (sha256 verified)",
+        );
+    }
     const compileResult = compileArtifactForDeploy(config, process.cwd(), {
         arch: SHIP_ARCH,
         selfContained: options.selfContained,
+        ...(toolchain.bin ? { toolchain } : {}),
     });
 
     if (standaloneStepsApply(artifact)) {
@@ -441,6 +456,7 @@ export async function build(options: BuildOptions = {}) {
             options.skipSmoke === true,
             resolveSelfContained(config, options.selfContained),
             compileIncludeGlobs(config),
+            toolchain,
         );
     }
 

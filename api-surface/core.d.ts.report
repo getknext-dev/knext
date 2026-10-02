@@ -18,6 +18,7 @@ type CacheConfig {
 type CacheProvider = "redis"
 
 interface CompileConfig {
+  bun?: "stock" | "knext-patched" | undefined
   include?: string[] | undefined
 }
 

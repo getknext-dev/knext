@@ -77,6 +77,12 @@ export interface MinioInfraConfig {
 export interface CompileConfig {
     /** Globs (relative to the app root) of JS/TS modules to embed. */
     include?: string[];
+    /**
+     * Which Bun runs the compile step. `'stock'` (the default): the Bun on
+     * PATH. `'knext-patched'`: a knext-published Bun 1.4.2 build with native
+     * `--compile --include`, downloaded and sha256-verified by knext.
+     */
+    bun?: "stock" | "knext-patched";
 }
 
 export interface InfrastructureConfig {
@@ -367,8 +373,23 @@ export interface KnativeNextConfig {
      * beside the binary. Works with stock Bun; a pattern that matches nothing, a
      * match that is really (through a symlink) outside the app root, an absolute
      * or `..` pattern, a glob match that looks like a secret (`.env*`, `*.pem`,
-     * `*.key`, `id_*`; name such a file exactly to include it) and a non-module
-     * match each fail the build.
+     * `*.key`, `id_*`; name such a file exactly to include it), a native addon
+     * (`.node`; load it with a static `require()` instead), a file name with a
+     * backslash and a non-module
+     * match each fail the build. A directory pattern never embeds the
+     * `node_modules` below it.
+     *
+     * `bun` — `'stock'` (default) or `'knext-patched'`: compile with a
+     * knext-published Bun 1.4.2 build that adds `--compile --include`.
+     * `knext build` downloads it once per machine and checks it against a
+     * sha256 pinned in knext; any mismatch, HTTP or network error fails the
+     * build — it never falls back to stock Bun. `include` is then planned and
+     * checked exactly as above and the same files are embedded through Bun's
+     * native `--include`, at the same paths. Used for the compile step only:
+     * the shipped executable still runs on the stock Bun base for its target.
+     * Build hosts: Linux (glibc) x64 and arm64 — on musl, macOS or Windows the
+     * build stops with an error saying so. Not covered by the compatibility
+     * credential; retired once a stock Bun release ships `--compile --include`.
      *
      * Supported on the compiled vinext executable only (`build: 'vinext'`,
      * runtime `'bun'`); the config check rejects it for other targets.

@@ -43,6 +43,7 @@ import {
 import { createLogger } from "../utils/logger";
 import { compileArtifactForDeploy } from "./build-artifact";
 import { exportBuildIdEnv } from "./build-id-env";
+import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -406,8 +407,15 @@ export async function defaultBuildAndPush(
     // stale binary already sitting in this checkout. Shares the EXACT compile
     // step `knext build` uses (build-artifact.ts) — preview has no
     // `--skip-build` flag, so this always runs fresh here, right after the
-    // project build that just produced what it compiles from.
-    compileArtifactForDeploy(config, process.cwd());
+    // project build that just produced what it compiles from. The opt-in
+    // patched Bun toolchain is resolved (downloaded + sha256-verified) first;
+    // the default config resolves to nothing and the call is unchanged.
+    const toolchain = await resolveCompileToolchain(config);
+    compileArtifactForDeploy(
+        config,
+        process.cwd(),
+        ...(toolchain.bin ? [{ toolchain }] : []),
+    );
 
     const taggedRef = `${config.registry}/${previewName}:${tag}`;
     const metadataFilePath = join(

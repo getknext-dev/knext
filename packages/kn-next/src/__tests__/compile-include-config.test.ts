@@ -73,9 +73,9 @@ describe("validateCompileConfig", () => {
         expect(
             validateCompileConfig({
                 ...vinext,
-                compile: { bun: "knext-patched" },
+                compile: { assets: ["x"] },
             }).join("\n"),
-        ).toContain("'compile.bun' is not a known option");
+        ).toContain("'compile.assets' is not a known option");
     });
 });
 

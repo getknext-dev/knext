@@ -126,6 +126,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // workspace's bun to execute `bun test`. A count RISING is a
       // decision, per the rule above.
       'actionlint.yml': 1,
+      // NEW (#1822): the dispatch-only (+ workflow_call from
+      // bun-patched-release.yml) end-to-end proof of the opt-in patched Bun
+      // toolchain — stock bun for the workspace install + vite build; the
+      // compile step uses the patched toolchain knext downloads itself.
+      'bun-patched-e2e.yml': 1,
       // NEW (compile.include): the dispatch-only end-to-end proof lane — one job,
       // stock bun 1.4.2 for the workspace, the vite build AND the compile step.
       'compile-include-e2e.yml': 1,

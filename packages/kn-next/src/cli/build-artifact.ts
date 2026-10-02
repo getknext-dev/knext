@@ -40,7 +40,11 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
-import { compileIncludeGlobs } from "./compile-config";
+import {
+    type CompileToolchain,
+    compileIncludeGlobs,
+    wantsPatchedBun,
+} from "./compile-config";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,
@@ -168,9 +172,23 @@ export interface CompileForDeployResult {
 export function compileArtifactForDeploy(
     config: KnativeNextConfig,
     cwd: string,
-    opts: { arch?: string; selfContained?: boolean } = {},
+    opts: {
+        arch?: string;
+        selfContained?: boolean;
+        /** From `resolveCompileToolchain(config)`; required when the config opts in. */
+        toolchain?: CompileToolchain;
+    } = {},
 ): CompileForDeployResult {
     const arch = opts.arch ?? DEPLOY_SHIP_ARCH;
+    // Fail closed: an opted-in config that reaches the compile without its
+    // resolved, verified toolchain must not quietly compile with stock Bun
+    // (the CLI resolves it in build/deploy/preview before calling this).
+    if (wantsPatchedBun(config) && !opts.toolchain?.bin) {
+        throw new UsageError(
+            "compile.bun: 'knext-patched' is set but the patched Bun toolchain was not resolved " +
+                "before the compile step — refusing to fall back to stock Bun.",
+        );
+    }
     // The single resolved value both compile paths receive, as an explicit
     // option. Spread ONLY when on, so with the flag off each path's options
     // are exactly the pre-flag shape.
@@ -178,6 +196,15 @@ export function compileArtifactForDeploy(
     const selfContainedOpt = selfContained ? { selfContained: true } : {};
     const { artifact, builder } = resolveBuildArtifact(config, cwd);
     const runtimeId = config.runtime ?? DEFAULT_RUNTIME_ID;
+    // Backstop for a bypassed validator: the patched toolchain runs ONLY the
+    // compiled vinext executable's compile. Any other target would silently
+    // ignore it and compile with stock Bun instead.
+    if (wantsPatchedBun(config) && artifact.shape !== "nitro-output-bun") {
+        throw new UsageError(
+            "compile.bun: 'knext-patched' is supported only on the compiled vinext executable " +
+                "(build: 'vinext', runtime: 'bun') — refusing to compile this target with stock Bun instead.",
+        );
+    }
 
     if (standaloneStepsApply(artifact)) {
         const standaloneDir = join(cwd, ".next", "standalone");
@@ -231,6 +258,7 @@ export function compileArtifactForDeploy(
             skipViteBuild: true,
             ...selfContainedOpt,
             ...(include.length > 0 ? { include } : {}),
+            ...(opts.toolchain?.bin ? { compilerBin: opts.toolchain.bin } : {}),
         });
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also

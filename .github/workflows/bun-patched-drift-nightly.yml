@@ -1,0 +1,36 @@
+# Informational drift check for the opt-in knext-patched Bun toolchain (deploy/bun-patched/):
+# goes RED when a newer stock Bun release has shipped and the patched toolchain has not been rebuilt
+# for it (scripts/bun-patched-drift.mjs). Also warns once the upstream PR the patch carries merges.
+#
+# Nightly, NOT a required check, never a gate on any PR or release: the red is the signal that a
+# maintainer has to refresh the patch, rebuild, re-pin and re-release. An unreachable GitHub API is
+# a failure (exit 2), never a pass. Schedule 16:29 UTC — clear of the credential slots.
+# RETIREMENT: delete with deploy/bun-patched/.
+name: bun-patched-drift-nightly
+
+on:
+  schedule:
+    - cron: '29 16 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bun-patched-drift-${{ github.event_name == 'schedule' && github.run_id || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Is the patched toolchain behind the latest stock Bun?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/bun-patched-drift.mjs | tee -a "$GITHUB_STEP_SUMMARY"
