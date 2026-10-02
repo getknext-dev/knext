@@ -26,12 +26,7 @@ import { join, resolve } from 'node:path';
 
 const RELEASE_DIR = resolve(import.meta.dirname);
 
-const KIT_FILES = [
-  'v1.0.0.md',
-  'launch-post-draft.md',
-  'readme-top-fold-draft.md',
-  'demo-script.md',
-];
+const KIT_FILES = ['v1.0.0.md', 'v1.0.0-launch-post.md', 'v1.0.0-demo-script.md'];
 
 const MS_COLD_START_RE = /\b\d+(\.\d+)?\s?ms\b.*cold\s?start|cold\s?start.*\b\d+(\.\d+)?\s?ms\b/i;
 const SUPERLATIVE_RE = /\bfastest\b|\bmost optimal\b/i;

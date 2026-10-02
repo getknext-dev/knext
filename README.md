@@ -1,8 +1,32 @@
-# kn-next: Cloud-Native Next.js for Knative
+# knext: the scale-to-zero Next.js adapter for Knative
 
-> **Production-ready framework for deploying Next.js applications on Knative with Fluid Compute characteristics.**
+knext deploys an existing Next.js app to Kubernetes as a Knative Service, built on the **official
+Next.js Deployment Adapter API** — so your app scales to zero when idle and scales back up on the
+next request, on any Kubernetes cluster with Knative Serving installed.
 
-The default build runs on the **official Next.js Adapter API** — the suite-verified lane its 778/778 compatibility credential was earned on — packaged as a bytecode-cached standalone executable, with distributed caching (Redis). An optional **vinext** build (an open-source Vite-based Next.js implementation) compiles your app into a single executable instead; knext keeps the two claims separate and measures each on its own evidence.
+knext is **not a general-purpose PaaS**. It does not run arbitrary containers or frameworks; it is
+a focused, Next.js-specific deployment tool.
+
+**The credential:** knext is validated against the official Next.js compatibility test suite,
+across four runtime x build-system combinations (Node/Bun x Turbopack/Webpack). v1.0 requires 14
+consecutive green nightly runs of that suite per combination, against a frozen release reference.
+See [`docs/compat-matrix.md`](docs/compat-matrix.md) for the current, evidence-gated status of
+each cell — do not rely on a number quoted here, which would go stale; that file is the live
+source of truth. See [`docs/release/v1.0.0.md`](docs/release/v1.0.0.md#the-v10-compatibility-credential)
+for which parts of knext the v1.0 contract covers (stability tiers).
+
+## Quick Start
+
+```sh
+npx @getknext/core create my-app
+cd my-app
+# fill in registry, bucket, and database settings in knext.config.ts
+npx @getknext/core deploy
+```
+
+That builds your app with the official Next.js adapter, pushes the image, and applies a `NextApp`
+custom resource that the knext operator reconciles into a Knative Service. See
+[Quick Start](#quick-start-1) below for the full walkthrough, including cluster prerequisites.
 
 ---
 
@@ -11,7 +35,7 @@ The default build runs on the **official Next.js Adapter API** — the suite-ver
 - [Why Knative?](#why-knative)
 - [How It Works: Next.js Adapter](#how-it-works-nextjs-adapter)
 - [Features](#features)
-- [Quick Start](#quick-start)
+- [Quick Start](#quick-start-1)
 - [Configuration Reference](#configuration-reference)
 - [Caching & Adapters](#caching--adapters)
 - [Multi-Cloud Deployment](#multi-cloud-deployment)
@@ -23,27 +47,34 @@ The default build runs on the **official Next.js Adapter API** — the suite-ver
 
 ## Why Knative?
 
-**Knative** is a Kubernetes-based platform that provides serverless capabilities without lock-in to any specific cloud provider. Unlike AWS Lambda or Vercel's Edge Functions, Knative runs on **any Kubernetes cluster** (GKE, EKS, AKS, or on-premise).
+**Knative** is a Kubernetes-based platform that provides serverless capabilities without lock-in to any specific cloud provider. Knative runs on **any Kubernetes cluster** (GKE, EKS, AKS, or on-premise).
 
 ### Benefits
 
-| Feature | Lambda/Vercel | Knative |
-|---------|--------------|---------|
-| **Portability** | Vendor-locked | Any Kubernetes cluster (portable by design; GKE/kind-verified, and the **core operator/CLI deploy path validated end-to-end on EKS** — remaining data-plane/CI legs and other clouds tracked in [#46](https://github.com/getknext-dev/knext/issues/46)) |
-| **Scale-to-Zero** | ✅ | ✅ |
-| **Autoscaling** | Managed | Configurable (KPA/HPA) |
-| **Cold Starts** | ~200-500ms | **Scheduling-dominated** — measured ~4s median on a 2-node OKE cluster ([benchmarks](docs/benchmarks/scale-to-zero-oke.md)); bytecode caching removes V8 compile work from every cold start, but end-to-end cold start is dominated by pod scheduling + Next.js's own boot and is environment-dependent |
-| **Container Control** | Limited | Full Docker access |
-| **Networking** | Platform-managed | Full K8s networking |
-| **Cost Model** | Per-invocation | Per-pod-second |
+| Feature | Knative (via knext) |
+|---------|----------------------|
+| **Portability** | Any Kubernetes cluster (portable by design; GKE/kind-verified, and the **core operator/CLI deploy path validated end-to-end on EKS** — remaining data-plane/CI legs and other clouds tracked in [#46](https://github.com/getknext-dev/knext/issues/46)) |
+| **Scale-to-Zero** | Idle apps run zero pods; the platform brings a pod back up on the next request |
+| **Autoscaling** | Configurable (KPA/HPA) |
+| **Cold starts** | Optimized for scale-to-zero — the build pipeline includes bytecode compile caching to remove V8 compilation work from a cold wake. End-to-end wake time is dominated by cluster scheduling and is environment-dependent; see [docs/benchmarks/scale-to-zero-oke.md](docs/benchmarks/scale-to-zero-oke.md) and the [tuning cold start](https://knext.dev/docs/tuning-cold-start) guide for measured numbers and their conditions — we do not publish a single number as a universal guarantee |
+| **Container control** | Full Docker/OCI image access |
+| **Networking** | Full Kubernetes networking; a default-on NetworkPolicy is reconciled per app, with enforcement depending on your cluster's CNI |
+| **Cost model** | Per-pod-second, not per-invocation |
 
-### Use Cases
+### Use cases
 
-- **Multi-cloud deployments** requiring platform portability
-- **On-premise** or **air-gapped** environments
-- **Low-latency** applications needing `minScale: 1` (no cold starts)
-- **Hybrid architectures** with existing Kubernetes workloads
-- **Cost optimization** for high-traffic applications
+- Multi-cloud deployments requiring platform portability
+- On-premise or air-gapped environments
+- Hybrid architectures with existing Kubernetes workloads
+- Cost optimization for spiky or low-traffic apps that don't need an always-on pod
+
+### What knext does not do (yet)
+
+- No global edge network or CDN — knext deploys to the cluster(s) you run.
+- No edge middleware or Partial Prerendering (PPR) — partly gated on upstream Next.js, not solely a
+  knext gap.
+- The compiled single-executable ("vinext") build target is experimental and outside the v1.0
+  compatibility credential's scope.
 
 ---
 
