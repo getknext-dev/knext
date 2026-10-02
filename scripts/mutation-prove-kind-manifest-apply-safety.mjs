@@ -292,13 +292,13 @@ prove(
 prove(
   'M21 remote: an interpreter fetching in-process (python -c urllib, node -e fetch) passes',
   SCANNER,
-  "  if (INTERPRETERS.has(b) && INTERPRETER_FETCH.test(args.join(' '))) return interpreterFetch(b);",
-  '  void interpreterFetch;',
+  "(INTERPRETER_FETCH.test(args.join(' ')) || hasComputedGlobalAccess(args.join(' ')))",
+  '(false)',
 );
 prove(
   'M22 remote: an interpreter program fed by heredoc (node - <<JS … fetch) passes',
   SCANNER,
-  '        else if (INTERPRETER_FETCH.test(body))',
+  '        else if (INTERPRETER_FETCH.test(body) || hasComputedGlobalAccess(body))',
   '        else if (false)',
 );
 prove(

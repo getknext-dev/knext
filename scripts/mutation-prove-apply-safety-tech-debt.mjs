@@ -30,7 +30,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCANNER = resolve(REPO_ROOT, 'scripts/lib/apply-safety-scan.mjs');
 const SPEC = 'tests/apply-safety-scan-tech-debt.test.ts';
 
-declareMutations(8);
+declareMutations(21);
 
 readFileSync(SCANNER, 'utf8'); // FATAL if missing, before anything is mutated
 
@@ -141,7 +141,139 @@ prove(
   'if (false) return `unreachable`; // MUTATION: disabled',
 );
 
-const declared = 8;
+// M9: aliased-fetch detection (#1787) — reverting `INTERPRETER_FETCH`'s bare
+// `fetch` boundary back to the old call-only `fetch\(` spelling must red the
+// `const f = fetch; f(url)` alias fixtures (both the followed-script and the
+// inline `node -e` shapes).
+prove(
+  'M9 aliased fetch (bare, non-call) detection (#1787)',
+  "    '(?<![\\\\w-])fetch(?![\\\\w-])',",
+  "    'fetch\\\\(', // MUTATION: disabled (reverted to call-only form)",
+);
+
+// M10: the computed-global-access gate in `classifyJsScript` (#1787) —
+// disabling it must red `globalThis["fe" + "tch"](url)`, which never spells
+// the literal substring "fetch" for `INTERPRETER_FETCH` to catch on its own.
+prove(
+  'M10 classifyJsScript computed-global-access gate (#1787)',
+  'if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src)) return null;',
+  'if (!INTERPRETER_FETCH.test(src)) return null;',
+);
+
+// M11: `isSinglePlainLiteral`'s early-close rejection (#1787) — this is what
+// makes `hasComputedGlobalAccess` itself work at all; disabling it collapses
+// the function to "never computed", redding every computed-access fixture
+// AND the two direct unit tests.
+prove(
+  'M11 hasComputedGlobalAccess single-literal check (#1787)',
+  'function isSinglePlainLiteral(s) {',
+  'function isSinglePlainLiteral(s) {\n  return true; // MUTATION: disabled',
+);
+
+// M12: the needs:+artifact/outputs component link (#1780) — disabling it
+// must red both cross-job fixtures (the outputs hand-off and the artifact
+// hand-off), which rely on the dependent job's apply opening the gate for
+// the fetching job it `needs:`.
+prove(
+  'M12 needs:+artifact/outputs component linking (#1780)',
+  'if (jobsLinkedByArtifactOrOutputs(depJob, depId, job)) union(jobId, depId);',
+  'if (false) union(jobId, depId); // MUTATION: disabled',
+);
+
+// M13: the `uses:`-only surface check (#1780) — disabling it must red every
+// LOCAL composite-action, LOCAL reusable-workflow, and REMOTE
+// reusable-workflow fixture (all three rely on `jobUsesSurfaceMightApply`
+// to see an apply this scanner otherwise never reads).
+prove(
+  'M13 uses:-only surface might-apply detection (#1780)',
+  'function jobUsesSurfaceMightApply(job, resolveSource, visited) {',
+  'function jobUsesSurfaceMightApply(job, resolveSource, visited) {\n  return false; // MUTATION: disabled',
+);
+
+// M14: the KNOWN_NON_APPLYING_ACTIONS exemption (#1780) — disabling it
+// (treating every remote action as "might apply") must red the GREEN
+// control that a uses:-only job calling a known-safe remote action (e.g.
+// `aquasecurity/trivy-action`) stays clean.
+prove(
+  'M14 KNOWN_NON_APPLYING_ACTIONS exemption (#1780)',
+  'return !KNOWN_NON_APPLYING_ACTIONS.has(base);',
+  'return true; // MUTATION: disabled',
+);
+
+// M15 (#1801 round 3, fix 1): the uses: surface is now checked WHETHER OR
+// NOT the job also has run: steps — disabling that (reverting to "only a
+// job with uses: steps and NO run: steps is checked") must red the mixed
+// run:+uses: fixture.
+prove(
+  'M15 uses: surface checked on jobs that ALSO have run: steps (#1801 fix 1)',
+  `function jobUsesSurfaceMightApply(job, resolveSource, visited) {
+  if (typeof job?.uses === 'string') {`,
+  `function jobUsesSurfaceMightApply(job, resolveSource, visited) {
+  if ((job?.steps ?? []).some((s) => typeof s?.run === 'string')) return false; // MUTATION: disabled
+  if (typeof job?.uses === 'string') {`,
+);
+
+// M16 (#1801 round 3, fix 2): docker:// steps fail CLOSED unconditionally —
+// disabling that (reverting to "docker:// is always non-applying") must red
+// the no-args docker:// fixture.
+prove(
+  'M16 docker:// steps fail closed unconditionally (#1801 fix 2)',
+  "if (uses.startsWith('docker://')) return dockerStepMightApply(s);",
+  "if (uses.startsWith('docker://')) return false; // MUTATION: disabled",
+);
+
+// M17 (#1801 round 3, fix 3): a LOCAL uses: target is followed RECURSIVELY
+// — disabling the recursive call (treating every local target as if it
+// never itself calls anything) must red the two-hop composite-wrapping
+// fixture.
+prove(
+  'M17 local uses: followed recursively (#1801 fix 3)',
+  "if (typeof s?.uses === 'string' && usesStepMightApply(s, resolveSource, visited)) return true;",
+  'if (false) return true; // MUTATION: disabled',
+);
+
+// M18 (#1801 round 3, fix 3): an unresolvable local uses: target fails
+// CLOSED — disabling that (reverting to fail OPEN) must red the
+// unresolvable-path fixture.
+prove(
+  'M18 unresolvable local uses: fails closed (#1801 fix 3)',
+  'if (!doc) return true; // unresolvable — fail closed',
+  'if (!doc) return false; // MUTATION: disabled',
+);
+
+// M19 (#1801 round 3, fix 4): the Reflect.get(globalThis, computedKey)
+// shape — disabling the whole reflectRe loop must red the Reflect.get
+// fixture while leaving the bracket-access fixtures (a separate loop)
+// unaffected.
+prove(
+  'M19 Reflect.get(globalThis, computedKey) detection (#1801 fix 4)',
+  'for (const m of text.matchAll(reflectRe)) {',
+  'for (const m of []) {',
+);
+
+// M20 (#1801 round 3, fix 5): changesets/action's with: script inputs are
+// scanned (instead of the action being a blanket allowlist exemption) —
+// disabling the dynamic-expression fail-closed check must red the dynamic
+// publish-script fixture.
+prove(
+  'M20 changesets/action with: script fail-closed on dynamic expression (#1801 fix 5)',
+  'if (/\\$\\{\\{/.test(v)) return true; // a dynamic expression — cannot verify, fail closed',
+  'if (false) return true; // MUTATION: disabled',
+);
+
+// M21 (#1801 round 4): a local action that is NEITHER a composite action
+// NOR a reusable workflow (a docker action, a JS action, …) must fail
+// CLOSED — restoring the old fall-through (`return false`, i.e. "proven
+// safe" for a shape nothing actually proved anything about) must red all
+// three new shape fixtures (Dockerfile image, docker://+apply args,
+// node20+main).
+prove(
+  'M21 non-composite/non-reusable-workflow local action fails closed (#1801 round 4)',
+  '  // else this module has no way to read the behavior of. Fail closed.\n  return true;\n}',
+  '  // else this module has no way to read the behavior of. Fail closed.\n  return false; // MUTATION: disabled\n}',
+);
+
+const declared = 21;
 console.log(`\n${caught}/${declared} mutations caught, ${decorative} decorative.`);
 if (decorative > 0 || caught !== declared) {
   console.error('Mutation proof FAILED: at least one rule is decorative or missing.');
