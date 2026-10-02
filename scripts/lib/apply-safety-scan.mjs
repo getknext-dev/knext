@@ -2683,6 +2683,13 @@ export const REMOTE_FETCH_ALLOWLIST = [
     // or published. Nothing is applied to any cluster.
     segment: /^gh release download "\$TAG" -R "\$GITHUB_REPOSITORY" -D out$/,
   },
+  {
+    id: 'bun-patched-release-assets-publish',
+    // .github/workflows/bun-patched-release.yml, publish job: re-downloads the same draft (the
+    // gates ran in other jobs) and re-checks every binary against RELEASE.sha256 at the tagged
+    // commit before signing, attesting or publishing it. Nothing is applied to any cluster.
+    segment: /^gh release download "\$TAG" -R "\$GITHUB_REPOSITORY" -D out --pattern '\*'$/,
+  },
   // #1715 (followScripts enabled for workflow `run:` steps): the four
   // entries below are file-manager-platform-e2e.yml#platform-e2e findings
   // that only exist because `followScripts` can now see workflow steps at

@@ -49,7 +49,7 @@ export function wantsPatchedBun(config: CompileConfigShape): boolean {
     );
 }
 
-/** The compiled vinext executable: the only target `compile.*` applies to. */
+/** Is this the compiled vinext executable? `compile.*` applies to it and nothing else. */
 function isCompiledVinext(config: CompileConfigShape): boolean {
     return config.build === "vinext" && (config.runtime ?? "bun") === "bun";
 }

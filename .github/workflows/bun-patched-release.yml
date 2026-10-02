@@ -174,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D out
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D out --pattern '*'
           cd out
           sha256sum -c --strict "$GITHUB_WORKSPACE/deploy/bun-patched/RELEASE.sha256"
           # SHA256SUMS = the pinned binaries + the SBOMs/manifests shipped beside them.

@@ -198,7 +198,7 @@ export function compileArtifactForDeploy(
     const runtimeId = config.runtime ?? DEFAULT_RUNTIME_ID;
     // Backstop for a bypassed validator: the patched toolchain runs ONLY the
     // compiled vinext executable's compile. Any other target would silently
-    // ignore it and compile with stock Bun.
+    // ignore it and compile with stock Bun instead.
     if (wantsPatchedBun(config) && artifact.shape !== "nitro-output-bun") {
         throw new UsageError(
             "compile.bun: 'knext-patched' is supported only on the compiled vinext executable " +

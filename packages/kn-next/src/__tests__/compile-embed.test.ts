@@ -218,7 +218,12 @@ describe("planEmbed", () => {
             includeSupported: true,
         }) as typeof fallback;
         expect(native.entrypoints).toEqual([entry]);
-        expect(native.compile.include).toEqual(plan.entrypoints);
+        // Bun's native `--include` refuses absolute paths ("must be relative
+        // to cwd", measured on the knext-patched Bun): the plan's files go
+        // `./`-relative to the compile cwd, which defaults to the plan root.
+        expect(native.compile.include).toEqual(
+            plan.entrypoints.map((abs) => `./${abs.slice(root.length + 1)}`),
+        );
         expect(() =>
             embedBuildOptions(plan, {
                 entry: "/elsewhere/e.js",

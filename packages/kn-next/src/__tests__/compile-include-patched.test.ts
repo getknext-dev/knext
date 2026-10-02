@@ -362,6 +362,19 @@ describe("native include on a Bun WITHOUT it fails closed (never a binary missin
 
 const PATCHED = process.env.KNEXT_TEST_PATCHED_BUN;
 
+// LANE-BACKED: bun-patched-e2e.yml (the release gate) sets
+// KNEXT_REQUIRE_PATCHED_BUN=1 with KNEXT_TEST_PATCHED_BUN, so a missing binary
+// FAILS there instead of the real-compile case below quietly skipping.
+it("a lane that requires the patched compile gets it (KNEXT_REQUIRE_PATCHED_BUN)", () => {
+    if (process.env.KNEXT_REQUIRE_PATCHED_BUN === "1") {
+        expect(
+            PATCHED,
+            "KNEXT_TEST_PATCHED_BUN must name the binary",
+        ).toBeTruthy();
+        expect(existsSync(PATCHED as string)).toBe(true);
+    }
+});
+
 describe.skipIf(!PATCHED)(
     "the knext-patched toolchain: native include, embedded, lazy, loaded from the executable",
     () => {

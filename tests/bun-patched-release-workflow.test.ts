@@ -103,6 +103,17 @@ describe('bun-patched-release: every gate runs BEFORE anything is signed or publ
     expect(seed?.run).toContain('$KNEXT_CACHE_DIR/bun-patched/$tag/bun-linux-x64');
   });
 
+  it('the e2e gate runs knext’s native-include tests on the gated binary, with skipping turned into failure', () => {
+    const step = (e2e.jobs['vinext-bun-patched'] as Job).steps?.find((x) =>
+      /compile-include-patched\.test\.ts/.test(x.run ?? ''),
+    ) as { if?: string; run?: string; env?: Record<string, string> } | undefined;
+    expect(step?.if).toContain("inputs.toolchain-artifact != ''");
+    expect(step?.env?.KNEXT_REQUIRE_PATCHED_BUN).toBe('1');
+    expect(step?.run).toContain(
+      'KNEXT_TEST_PATCHED_BUN="$RUNNER_TEMP/toolchain-under-test/bun-linux-x64"',
+    );
+  });
+
   it('provenance: cosign over SHA256SUMS and a build-provenance attestation per binary, both verified in-job', () => {
     const text = stepText(release.jobs.publish as Job);
     expect(text).toContain('cosign sign-blob');

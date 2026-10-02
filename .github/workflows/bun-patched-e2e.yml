@@ -56,6 +56,13 @@ jobs:
         with:
           bun-version: '1.4.2'
 
+      - name: Fetch the toolchain artifact under test (release gate only)
+        if: ${{ inputs.toolchain-artifact != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.toolchain-artifact }}
+          path: ${{ runner.temp }}/toolchain-under-test
+
       - name: Build + pack this commit's @getknext/* (the real publish tool)
         run: |
           set -euo pipefail
@@ -66,6 +73,17 @@ jobs:
           DEST="${RUNNER_TEMP}/knext-tarballs"
           node scripts/pack-release-tarballs.mjs --dest "${DEST}" --dirs packages/lib,packages/db,packages/kn-next
           echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      - name: knext's native-include tests on the binary under test (lane-backed, never skipped here)
+        if: ${{ inputs.toolchain-artifact != '' }}
+        env:
+          KNEXT_REQUIRE_PATCHED_BUN: '1'
+        run: |
+          set -euo pipefail
+          export KNEXT_TEST_PATCHED_BUN="$RUNNER_TEMP/toolchain-under-test/bun-linux-x64"
+          chmod +x "$KNEXT_TEST_PATCHED_BUN"
+          cd packages/kn-next
+          bun test src/__tests__/compile-include-patched.test.ts src/__tests__/vinext-compile-include.test.ts
 
       - name: Scaffold a vinext app with an --include'd plugin module
         run: |
@@ -101,13 +119,6 @@ jobs:
           npm install --no-audit --no-fund
           bun install --save-text-lockfile
           test -f bun.lock
-
-      - name: Fetch the toolchain artifact under test (release gate only)
-        if: ${{ inputs.toolchain-artifact != '' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ inputs.toolchain-artifact }}
-          path: ${{ runner.temp }}/toolchain-under-test
 
       - name: Seed knext's cache with it (knext's own sha256 check still decides)
         if: ${{ inputs.toolchain-artifact != '' }}
