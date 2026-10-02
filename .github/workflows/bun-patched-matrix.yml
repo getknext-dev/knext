@@ -1,0 +1,302 @@
+# RELEASE TEST MATRIX (#1822, founder 2026-10-03) for bun-patched-1.4.2-knext.2. Lives only on the
+# scratch branch test/bun-patched-matrix-1822; never merged. Every check writes
+# RESULT|<job>|<test>|PASS/FAIL/INFO|detail and each job fails at the end if any line is FAIL, so
+# one run covers everything and the run status is the verdict.
+name: bun-patched-matrix
+on:
+  push:
+    branches: [test/bun-patched-matrix-1822]
+permissions:
+  contents: read
+env:
+  TAG: bun-patched-1.4.2-knext.2
+  X64_SHA: 2f1bb84ad480fce9e618b8bf4b7eb4553d5a1179d2013c7d22cbe054ca271df3
+  ARM_SHA: aa931626fc2707aaf1911a99ee57d9de05ad3dc76bf3cc6e14b0497a5f6bb35a
+  STOCK_X64_ZIP_SHA: 36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
+  STOCK_ARM_ZIP_SHA: 54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
+  SIGNER: https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.2-knext.2
+  ISSUER: https://token.actions.githubusercontent.com
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  integrity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: integrity (sha256, SHA256SUMS, cosign, attestations, SBOM, pins)
+        run: |
+          set +e; set -uo pipefail
+          R="$RUNNER_TEMP/results.txt"; rec(){ echo "RESULT|integrity|$1|$2|$3" | tee -a "$R"; }
+          mkdir rel && cd rel
+          gh release download "$TAG" -R getknext-dev/knext && ls -la
+          [ "$(sha256sum bun-linux-x64 | cut -d' ' -f1)" = "$X64_SHA" ] && rec sha256-x64 PASS "$X64_SHA" || rec sha256-x64 FAIL "$(sha256sum bun-linux-x64)"
+          [ "$(sha256sum bun-linux-aarch64 | cut -d' ' -f1)" = "$ARM_SHA" ] && rec sha256-arm64 PASS "$ARM_SHA" || rec sha256-arm64 FAIL "$(sha256sum bun-linux-aarch64)"
+          sha256sum -c --strict SHA256SUMS >/dev/null && rec SHA256SUMS PASS "$(wc -l < SHA256SUMS) entries" || rec SHA256SUMS FAIL "$(sha256sum -c SHA256SUMS 2>&1 | tr '\n' ' ')"
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json --certificate-identity "$SIGNER" --certificate-oidc-issuer "$ISSUER" SHA256SUMS >/dev/null 2>&1 \
+            && rec cosign-documented-identity PASS "$SIGNER" || rec cosign-documented-identity FAIL "verify-blob failed"
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json --certificate-identity "${SIGNER/knext.2/knext.1}" --certificate-oidc-issuer "$ISSUER" SHA256SUMS >/dev/null 2>&1 \
+            && rec cosign-wrong-identity-rejected FAIL "knext.1 identity verified" || rec cosign-wrong-identity-rejected PASS "knext.1 identity rejected"
+          for f in bun-linux-x64 bun-linux-aarch64; do
+            gh attestation verify "$f" -R getknext-dev/knext --cert-identity "$SIGNER" --source-ref "refs/tags/$TAG" --deny-self-hosted-runners >/dev/null 2>&1 \
+              && rec "attestation[$f]" PASS "build provenance, signer + source ref" || rec "attestation[$f]" FAIL "$(gh attestation verify "$f" -R getknext-dev/knext --cert-identity "$SIGNER" 2>&1 | tail -n 3 | tr '\n' ' ')"
+            gh attestation verify "$f" -R getknext-dev/knext --cert-identity "$SIGNER" --source-ref refs/tags/bun-patched-1.4.2-knext.1 >/dev/null 2>&1 \
+              && rec "attestation-wrong-ref-rejected[$f]" FAIL "knext.1 ref accepted" || rec "attestation-wrong-ref-rejected[$f]" PASS "knext.1 ref rejected"
+          done
+          echo tampered > evil; cp bun-linux-x64 tampered-x64; printf 'x' >> tampered-x64
+          gh attestation verify tampered-x64 -R getknext-dev/knext --cert-identity "$SIGNER" >/dev/null 2>&1 \
+            && rec attestation-tampered-rejected FAIL "tampered binary verified" || rec attestation-tampered-rejected PASS "tampered binary has no attestation"
+          for a in x64 aarch64; do
+            s=$(jq -r '[.. | objects | select(has("alg")) | select(.alg=="SHA-256") | .content] | .[0] // empty' "bun-linux-$a.cdx.json")
+            [ "$s" = "$(sha256sum "bun-linux-$a" | cut -d' ' -f1)" ] && rec "sbom-digest[$a]" PASS "SBOM sha256 == binary" || rec "sbom-digest[$a]" FAIL "sbom=$s"
+          done
+          chmod +x bun-linux-x64; rec revision-x64 "$([ "$(./bun-linux-x64 --revision)" = 1.4.2+cc97fa834 ] && echo PASS || echo FAIL)" "$(./bun-linux-x64 --revision)"
+          rec glibc-floor-x64 INFO "$(objdump -T bun-linux-x64 | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n1)"
+          cd "$GITHUB_WORKSPACE"
+          grep -q "$X64_SHA  bun-linux-x64" deploy/bun-patched/RELEASE.sha256 && grep -q "$ARM_SHA  bun-linux-aarch64" deploy/bun-patched/RELEASE.sha256 \
+            && grep -q "$X64_SHA" packages/kn-next/src/cli/bun-toolchain.ts && grep -q "$ARM_SHA" packages/kn-next/src/cli/bun-toolchain.ts && grep -q "tag: \"$TAG\"" packages/kn-next/src/cli/bun-toolchain.ts \
+            && rec repo-pins PASS "RELEASE.sha256 + bun-toolchain.ts pin $TAG" || rec repo-pins FAIL "pin mismatch"
+          old=$(gh release view bun-patched-1.4.2-knext.1 -R getknext-dev/knext --json body --jq .body | head -c 400)
+          case "$old" in *uperseded*) rec knext1-marked-superseded PASS "$(echo "$old" | head -n1 | cut -c1-120)";; *) rec knext1-marked-superseded FAIL "no supersession note";; esac
+          ! grep -q '|FAIL|' "$R"
+
+  parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '24' }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: { bun-version: '1.4.2' }
+      - name: build + pack this branch's @getknext/*, scaffold vinext x bun
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run --filter "@getknext/lib" build && bun run --filter "@getknext/db" build && bun run --filter "@getknext/core" build
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" --dirs packages/lib,packages/db,packages/kn-next
+          APP="${RUNNER_TEMP}/app"; echo "APP=$APP" >> "$GITHUB_ENV"
+          node packages/kn-next/dist/cli/kn-next.js create "$APP" --builder vinext --name patched-matrix
+          cd "$APP"
+          LIB_TGZ="$(find "$DEST" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "$DEST" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "$DEST" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm pkg set "devDependencies.@getknext/core=file:${CORE_TGZ}" "dependencies.@getknext/lib=file:${LIB_TGZ}" \
+            "overrides.@getknext/db=file:${DB_TGZ}" "overrides.@getknext/lib=file:${LIB_TGZ}"
+          mkdir -p plugins/node_modules/dep src/app/api/plugin
+          printf '%s\n' 'globalThis.__knextPluginEvaluated = (globalThis.__knextPluginEvaluated ?? 0) + 1;' 'export default "hello-from-included-module";' > plugins/greet.js
+          printf '%s\n' 'export default "must-not-be-embedded-7c1e";' > plugins/node_modules/dep/index.js
+          cp "$GITHUB_WORKSPACE/.github/bun-patched-e2e/plugin-route.ts" src/app/api/plugin/route.ts
+          npm install --no-audit --no-fund
+          bun install --save-text-lockfile >/dev/null 2>&1; test -f bun.lock
+          cp knext.config.ts knext.config.ts.orig
+      - name: knext build x4 (stock / patched / stock+include / patched+include) + real images
+        working-directory: ${{ env.APP }}
+        env:
+          KNEXT_CACHE_DIR: ${{ runner.temp }}/knext-cache
+        run: |
+          set +e; set -uo pipefail
+          R="$RUNNER_TEMP/results.txt"; rec(){ echo "RESULT|parity|$1|$2|$3" | tee -a "$R"; }
+          mkdir -p "$RUNNER_TEMP/ex"
+          setcfg(){ cp knext.config.ts.orig knext.config.ts; if [ -n "$1" ]; then node -e '
+            const fs=require("fs"); const s=fs.readFileSync("knext.config.ts","utf8"); const a="  build: \"vinext\",";
+            if (s.split(a).length!==2){console.error("anchor");process.exit(1)} fs.writeFileSync("knext.config.ts", s.replace(a, a+"\n  compile: "+process.argv[1]+","));' "$1"; fi; }
+          for v in stock patched stock-include patched-include; do
+            case $v in stock) setcfg "";; patched) setcfg '{ bun: "knext-patched" }';; stock-include) setcfg '{ include: ["plugins"] }';; patched-include) setcfg '{ bun: "knext-patched", include: ["plugins"] }';; esac
+            rm -f knext-exec-linux-x64; s=$(date +%s)
+            node_modules/.bin/knext build --skip-smoke > "$RUNNER_TEMP/ex/build-$v.log" 2>&1; rc=$?; e=$(date +%s)
+            echo "::group::build $v (rc=$rc)"; tail -n 25 "$RUNNER_TEMP/ex/build-$v.log"; echo "::endgroup::"
+            cp knext-exec-linux-x64 "$RUNNER_TEMP/ex/exec-$v" 2>/dev/null
+            rec "knext-build[$v]" "$([ $rc = 0 ] && echo PASS || echo FAIL)" "rc=$rc ${e}s-${s}s exec=$(stat -c %s knext-exec-linux-x64 2>/dev/null)"
+            grep -q '(bytecode: on' "$RUNNER_TEMP/ex/build-$v.log" && rec "bytecode-on[$v]" PASS "$(grep -o '(bytecode: [^)]*)' "$RUNNER_TEMP/ex/build-$v.log" | head -n1)" || rec "bytecode-on[$v]" FAIL ""
+            case $v in patched*) grep -q 'knext-patched Bun toolchain (sha256 verified)' "$RUNNER_TEMP/ex/build-$v.log" && rec "toolchain-verified[$v]" PASS "sha256 verified download of $TAG" || rec "toolchain-verified[$v]" FAIL "";; esac
+            case $v in *include) grep -q 'compile.include: embedded 1 module(s): plugins/greet.js' "$RUNNER_TEMP/ex/build-$v.log" && rec "include-plan[$v]" PASS "1 module, node_modules excluded" || rec "include-plan[$v]" FAIL ""
+              m=$([ $v = patched-include ] && echo 'native --include' || echo 'extra entrypoints'); grep -q "compile.include: via $m" "$RUNNER_TEMP/ex/build-$v.log" && rec "include-mode[$v]" PASS "$m" || rec "include-mode[$v]" FAIL "expected $m"
+              grep -q must-not-be-embedded-7c1e knext-exec-linux-x64 && rec "node_modules-not-embedded[$v]" FAIL "embedded" || rec "node_modules-not-embedded[$v]" PASS "absent";; esac
+            docker build -q -t "matrix:$v" . > "$RUNNER_TEMP/ex/docker-$v.log" 2>&1; drc=$?
+            [ $drc = 0 ] || tail -n 20 "$RUNNER_TEMP/ex/docker-$v.log"
+            rec "image-build[$v]" "$([ $drc = 0 ] && echo PASS || echo FAIL)" "image=$(docker image inspect "matrix:$v" -f '{{.Size}}' 2>/dev/null)"
+          done
+          cmp -s "$RUNNER_TEMP/ex/exec-stock" "$RUNNER_TEMP/ex/exec-patched"; rec exec-size-stock-vs-patched "$([ "$(stat -c %s "$RUNNER_TEMP/ex/exec-stock")" = "$(stat -c %s "$RUNNER_TEMP/ex/exec-patched")" ] && echo PASS || echo INFO)" "stock=$(stat -c %s "$RUNNER_TEMP/ex/exec-stock") patched=$(stat -c %s "$RUNNER_TEMP/ex/exec-patched")"
+          rec exec-size-include INFO "stock-include=$(stat -c %s "$RUNNER_TEMP/ex/exec-stock-include") patched-include=$(stat -c %s "$RUNNER_TEMP/ex/exec-patched-include")"
+          ! grep -q '|FAIL|' "$R"
+      - name: knext-level refusals with the patched compiler (the compile step knext runs, after vite build)
+        working-directory: ${{ env.APP }}
+        env:
+          KNEXT_CACHE_DIR: ${{ runner.temp }}/knext-cache
+        run: |
+          set +e; set -uo pipefail
+          R="$RUNNER_TEMP/results.txt"; rec(){ echo "RESULT|parity|$1|$2|$3" | tee -a "$R"; }
+          P="$(find "$KNEXT_CACHE_DIR/bun-patched/$TAG" -type f -name bun-linux-x64)"; SCRIPT="$PWD/node_modules/@getknext/core/dist/adapters/vinext-compile.js"
+          mkdir -p native secrets "$RUNNER_TEMP/outside"; printf '\x7fELF' > native/crc.node; echo 'export default 1' > "$RUNNER_TEMP/outside/x.js"
+          ln -s "$RUNNER_TEMP/outside" linked; echo 'export default 2' > secrets/a.js; echo 'export default 3' > secrets/.env.js; echo 'k' > secrets/server.pem
+          try(){ local name=$1 want=$2 json=$3; out=$("$P" run "$SCRIPT" --entry .output/server/index.mjs --outfile /tmp/refuse --target bun-linux-x64-musl --include-json "$json" --include-native 1 2>&1); rc=$?
+            if [ $rc -ne 0 ] && grep -q "$want" <<<"$out"; then rec "refused[$name]" PASS "$(grep -o "${want}[^:]*" <<<"$out" | head -n1)"; else rec "refused[$name]" FAIL "rc=$rc $(tail -n 2 <<<"$out" | tr '\n' ' ' | cut -c1-200)"; fi; }
+          try native-addon 'native addons cannot be included' '["native/*"]'
+          try dotdot-escape "contains '..'" '["../outside/*.js"]'
+          try symlink-escape 'resolve (through a symlink) outside the app root' '["linked/*.js"]'
+          try secret-file-env 'refusing to embed files that look like secrets' '["secrets/.env*"]'
+          try secret-file-pem 'refusing to embed files that look like secrets' '["secrets/*.pem"]'
+          try missing-path 'no file matches' '["nope/*.js"]'
+          try absolute-path 'is absolute' '["/etc/*.conf"]'
+          ! grep -q '|FAIL|' "$R"
+      - name: boot x10 in-image + container start x10 (interleaved)
+        working-directory: ${{ env.APP }}
+        run: |
+          set +e; set -uo pipefail
+          R="$RUNNER_TEMP/results.txt"; rec(){ echo "RESULT|parity|$1|$2|$3" | tee -a "$R"; }
+          H="$GITHUB_WORKSPACE/.github/bun-patched-matrix"
+          for v in stock patched stock-include patched-include; do
+            docker run --rm --user 0 --entrypoint /bin/sh -v "$H:/h:ro" -w /app "matrix:$v" -c "
+              apk add --no-cache curl coreutils bash >/dev/null 2>&1
+              bash /h/boot-bench.sh 10 /api/health $v=/app/server
+              PORT=5000 HOSTNAME=0.0.0.0 /app/server >/tmp/l 2>&1 & p=\$!; sleep 2
+              echo \"ROUTE|$v|/=\$(curl -s -o /dev/null -w %{http_code} http://127.0.0.1:5000/) health=\$(curl -s -o /dev/null -w %{http_code} http://127.0.0.1:5000/api/health) plugin=\$(curl -s http://127.0.0.1:5000/api/plugin | head -c 200)\"
+              kill \$p
+              echo \"REV|$v|\$(BUN_BE_BUN=1 /app/server --revision)\"" 2>&1 | tee "img-$v.txt"
+            grep -E 'BOOTSTAT' "img-$v.txt" | sed 's/^/RESULT|parity|boot-in-image|INFO|/' | tee -a "$R"
+            route=$(grep '^ROUTE|' "img-$v.txt")
+            case "$route" in *"/=200 health=200"*) rec "routes-200[$v]" PASS "$route";; *) rec "routes-200[$v]" FAIL "$route";; esac
+            case $v in *include) case "$route" in *'"before":0,"after":1'*hello-from-included-module*) rec "lazy-include-in-image[$v]" PASS "before 0 after 1";; *) rec "lazy-include-in-image[$v]" FAIL "$route";; esac;; esac
+            rev=$(grep '^REV|' "img-$v.txt" | cut -d'|' -f3); rec "shipped-runtime-stock[$v]" "$([ "$rev" = 1.4.2+744846f84 ] && echo PASS || echo FAIL)" "$rev"
+          done
+          for i in $(seq 1 10); do for v in stock patched stock-include patched-include; do
+            s=$(date +%s%N); cid=$(docker run -d -p 18000:3000 "matrix:$v"); ok=0
+            for _ in $(seq 1 3000); do curl -fs -o /dev/null http://127.0.0.1:18000/api/health && { ok=1; break; }; sleep 0.005; done
+            e=$(date +%s%N); docker rm -f "$cid" >/dev/null
+            echo "CTR|$v|$([ $ok = 1 ] && echo $(( (e-s)/1000000 )) || echo FAIL)"
+          done; done | tee ctr.txt
+          for v in stock patched stock-include patched-include; do
+            vals=$(grep "^CTR|$v|" ctr.txt | cut -d'|' -f3 | sort -n | tr '\n' ' ')
+            case "$vals" in *FAIL*) rec "container-start-ms[$v]" FAIL "$vals";; *) rec "container-start-ms[$v]" INFO "median=$(echo $vals | tr ' ' '\n' | sed -n 5p) all=$vals";; esac
+          done
+          ! grep -q '|FAIL|' "$R"
+      - if: ${{ always() }}
+        run: grep '^RESULT|' "$RUNNER_TEMP/results.txt" >> "$GITHUB_STEP_SUMMARY" || true
+
+  include:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '24' }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: { bun-version: '1.4.2' }
+      - name: raw --include matrix (lazy, globs, missing, 50 MB, 1,000 files, bytecode, cross targets)
+        run: |
+          gh release download "$TAG" -R getknext-dev/knext -p bun-linux-x64 -D "$RUNNER_TEMP/p"
+          echo "$X64_SHA  $RUNNER_TEMP/p/bun-linux-x64" | sha256sum -c - || exit 1
+          chmod +x "$RUNNER_TEMP/p/bun-linux-x64"
+          bash .github/bun-patched-matrix/include-tests.sh "$RUNNER_TEMP/p/bun-linux-x64" "$(command -v bun)" "$RUNNER_TEMP/out"
+          cat "$RUNNER_TEMP/out/sizes.txt"
+          ! grep -q '|FAIL|' "$RUNNER_TEMP/out/results.txt"
+      - name: knext's include tests with the patched compiler (x64)
+        env:
+          KNEXT_REQUIRE_PATCHED_BUN: '1'
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          export KNEXT_TEST_PATCHED_BUN="$RUNNER_TEMP/p/bun-linux-x64"
+          cd packages/kn-next
+          bun test src/__tests__/compile-include-patched.test.ts src/__tests__/vinext-compile-include.test.ts src/__tests__/compile-embed.test.ts 2>&1 | tee "$RUNNER_TEMP/knext-tests.txt"
+          echo "RESULT|include|knext-tests-x64|PASS|$(grep -E '^ [0-9]+ (pass|fail|skip)' "$RUNNER_TEMP/knext-tests.txt" | tr '\n' ' ')" >> "$RUNNER_TEMP/out/results.txt"
+      - if: ${{ always() }}
+        run: grep '^RESULT|' "$RUNNER_TEMP/out/results.txt" >> "$GITHUB_STEP_SUMMARY" || true
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: arm-execs, path: '${{ runner.temp }}/out/arm/' }
+
+  portability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: patched compiler + compiled lazy-include app across distros (x64)
+        run: |
+          set +e; set -uo pipefail
+          R="$RUNNER_TEMP/results.txt"; rec(){ echo "RESULT|portability|$1|$2|$3" | tee -a "$R"; }
+          gh release download "$TAG" -R getknext-dev/knext -p bun-linux-x64 -D p; echo "$X64_SHA  p/bun-linux-x64" | sha256sum -c - || exit 1; chmod +x p/bun-linux-x64
+          for img in ubuntu:22.04 ubuntu:24.04 debian:11 debian:12 debian:13; do
+            o=$(docker run --rm -v "$PWD/p:/b:ro" "$img" sh -c "
+              cd /tmp; g=\$( (ldd --version 2>&1 || true) | head -n1 | awk '{print \$NF}');
+              mkdir -p pl; echo 'export default \"ok\"' > pl/a.js; echo 'console.log(\"HELLO\", (await import(\"./pl/\"+process.argv[2])).default)' > m.mjs
+              /b/bun-linux-x64 build --compile m.mjs --include=./pl --outfile app >/dev/null 2>&1; mv pl pl-hidden
+              /b/bun-linux-x64 build --compile --bytecode --format=esm m.mjs --include=./pl-hidden --outfile appbc >/dev/null 2>&1 || true
+              echo \"glibc=\$g run=\$(./app a.js 2>&1 | head -n1)\"" 2>&1 | tail -n1)
+            case "$o" in *"HELLO ok"*) rec "$img" PASS "$o";; *) rec "$img" FAIL "$o";; esac
+          done
+          # the knext musl runtime base: a cross-compiled musl exe with an included module, in alpine + libstdc++
+          mkdir -p w/pl && cd w && echo 'export default "musl-ok"' > pl/a.js && echo 'console.log("HELLO", (await import("./pl/"+process.argv[2])).default)' > m.mjs
+          ../p/bun-linux-x64 build --compile m.mjs --include=./pl --target=bun-linux-x64-musl --outfile appmusl >/dev/null 2>&1; rm -rf pl
+          o=$(docker run --rm -v "$PWD:/w:ro" alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 sh -c 'apk add --no-cache libstdc++ libgcc >/dev/null; cd /tmp; /w/appmusl a.js' 2>&1 | tail -n1)
+          case "$o" in *"HELLO musl-ok"*) rec "knext-musl-runtime-base(alpine:3.23)" PASS "$o";; *) rec "knext-musl-runtime-base(alpine:3.23)" FAIL "$o";; esac
+          ! grep -q '|FAIL|' "$R"
+
+  arm64:
+    needs: include
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '24' }
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: { bun-version: '1.4.2' }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: arm-execs, path: arm-execs }
+      - name: arm64 toolchain (release asset), smoke, portability, cross-compiled runs
+        run: |
+          set +e; set -uo pipefail
+          R="$RUNNER_TEMP/results.txt"; rec(){ echo "RESULT|arm64|$1|$2|$3" | tee -a "$R"; }
+          gh release download "$TAG" -R getknext-dev/knext -p bun-linux-aarch64 -D arm
+          got=$(sha256sum arm/bun-linux-aarch64 | cut -d' ' -f1); [ "$got" = "$ARM_SHA" ] && rec sha256 PASS "$got" || rec sha256 FAIL "$got"
+          chmod +x arm/bun-linux-aarch64; P="$PWD/arm/bun-linux-aarch64"; S="$(command -v bun)"
+          rec revision "$([ "$($P --revision)" = 1.4.2+cc97fa834 ] && echo PASS || echo FAIL)" "$($P --revision) on $(uname -m)"
+          out=$(BUN="$P" STOCK_BUN="$S" bash deploy/bun-patched/smoke.sh 2>&1 | tail -n 4 | tr '\n' ' ')
+          [[ "$out" == *SMOKE_OK* ]] && rec lazy-include-smoke PASS "$out" || rec lazy-include-smoke FAIL "$out"
+          for img in ubuntu:22.04 ubuntu:24.04 debian:12; do
+            o=$(docker run --rm -v "$PWD/arm:/b:ro" "$img" sh -c "cd /tmp; mkdir -p pl; echo 'export default \"ok\"' > pl/a.js; echo 'console.log(\"HELLO\", (await import(\"./pl/\"+process.argv[2])).default)' > m.mjs; /b/bun-linux-aarch64 build --compile m.mjs --include=./pl --outfile app >/dev/null 2>&1; rm -rf pl; ./app a.js" 2>&1 | tail -n1)
+            case "$o" in *"HELLO ok"*) rec "portability[$img]" PASS "$o";; *) rec "portability[$img]" FAIL "$o";; esac
+          done
+          chmod +x arm-execs/* 2>/dev/null; mkdir -p empty
+          for e in x-bun-linux-arm64 xbc-bun-linux-arm64; do o=$(cd empty && ../arm-execs/$e p.js 2>&1 | tr '\n' ' '); [[ "$o" == *"RESULT plugin-ok"* ]] && rec "cross-compiled-from-x64[$e]" PASS "$o" || rec "cross-compiled-from-x64[$e]" FAIL "$(echo $o | cut -c1-200)"; done
+          for e in x-bun-linux-arm64-musl xbc-bun-linux-arm64-musl; do o=$(docker run --rm -v "$PWD/arm-execs:/b:ro" alpine:3.22 sh -c "apk add --no-cache libstdc++ libgcc >/dev/null; cd /tmp; /b/$e p.js" 2>&1 | tr '\n' ' '); [[ "$o" == *"RESULT plugin-ok"* ]] && rec "cross-compiled-musl-alpine[$e]" PASS "$o" || rec "cross-compiled-musl-alpine[$e]" FAIL "$(echo $o | cut -c1-200)"; done
+          ! grep -q '|FAIL|' "$R"
+      - name: knext's include tests with the arm64 patched compiler
+        env:
+          KNEXT_REQUIRE_PATCHED_BUN: '1'
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          export KNEXT_TEST_PATCHED_BUN="$PWD/arm/bun-linux-aarch64"
+          cd packages/kn-next
+          bun test src/__tests__/compile-include-patched.test.ts src/__tests__/vinext-compile-include.test.ts
+      - name: knext build on an arm64 host with the opt-in (knext downloads + verifies the arm64 asset)
+        env:
+          KNEXT_CACHE_DIR: ${{ runner.temp }}/knext-cache
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build && bun run --filter "@getknext/db" build && bun run --filter "@getknext/core" build
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" --dirs packages/lib,packages/db,packages/kn-next
+          APP="${RUNNER_TEMP}/app"
+          node packages/kn-next/dist/cli/kn-next.js create "$APP" --builder vinext --name patched-arm
+          cd "$APP"
+          npm pkg set "devDependencies.@getknext/core=file:$(ls "$DEST"/getknext-core-*.tgz)" "dependencies.@getknext/lib=file:$(ls "$DEST"/getknext-lib-*.tgz)" \
+            "overrides.@getknext/db=file:$(ls "$DEST"/getknext-db-*.tgz)" "overrides.@getknext/lib=file:$(ls "$DEST"/getknext-lib-*.tgz)"
+          mkdir -p plugins && echo 'export default "arm-included";' > plugins/greet.js
+          node -e 'const fs=require("fs");const p="knext.config.ts";const s=fs.readFileSync(p,"utf8");const a="  build: \"vinext\",";if(s.split(a).length!==2)process.exit(1);fs.writeFileSync(p,s.replace(a,a+"\n  compile: { bun: \"knext-patched\", include: [\"plugins\"] },"));'
+          npm install --no-audit --no-fund
+          bun install --save-text-lockfile >/dev/null 2>&1
+          node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
+          grep -q 'knext-patched Bun toolchain (sha256 verified)' build.log
+          grep -q 'compile.include: via native --include' build.log
+          find "$KNEXT_CACHE_DIR/bun-patched" -type f -name bun-linux-aarch64 -exec sha256sum {} \; | grep -q "$ARM_SHA"
+          echo "RESULT|arm64|knext-build-on-arm64-host|PASS|downloaded + verified bun-linux-aarch64, native include, exec $(stat -c %s knext-exec-linux-x64)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: ${{ always() }}
+        run: grep '^RESULT|' "$RUNNER_TEMP/results.txt" >> "$GITHUB_STEP_SUMMARY" || true
