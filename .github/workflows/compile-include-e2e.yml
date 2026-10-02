@@ -4,18 +4,15 @@
 # included module is embedded in the executable and loaded LAZILY from it (not evaluated at startup,
 # evaluated on the first `import()`, with no copy of it on disk in the image).
 #
-# Dispatch-only: no schedule, not a required check. It carries a TEMPORARY `pull_request` trigger
-# scoped to its own files (the 1812-vinext-stable-proof precedent) so the PR that introduces it gets
-# one green run — a workflow that is not on the default branch cannot be dispatched. Remove that
-# trigger once the run is recorded in the PR body.
+# Dispatch-only: no schedule, not a required check. It carried a temporary `pull_request` trigger
+# scoped to its own files (the 1812-vinext-stable-proof precedent) to get one green run on the PR
+# that introduced it — run 37063035742 on stock Bun 1.4.2+744846f84: health 200, the included module
+# loaded from /$bunfs/root/plugins/greet.js with before=0 / after=1, no copy on disk in the image.
+# Removed after.
 name: compile-include-e2e
 
 on:
   workflow_dispatch: {}
-  pull_request:
-    paths:
-      - '.github/workflows/compile-include-e2e.yml'
-      - '.github/compile-include-e2e/**'
 
 permissions:
   contents: read
