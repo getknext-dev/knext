@@ -7,14 +7,16 @@ import { join, relative, resolve } from "node:path";
  * moved from `knext.dev` to `knext-platform.dev` (2026-10-02 founder
  * correction — `knext.dev` is now a Cloudflare 403 page we do not own).
  * This asserts the bare literal `knext.dev` never reappears in the
- * CLI-facing surface of `@getknext/core` — help text, templates, error
- * messages, READMEs.
+ * published/user-facing surface of this PR's packages — CLI help text,
+ * templates, error messages, and READMEs across `@getknext/core`,
+ * `@getknext/lib`, `@getknext/db`, the `kn-next` alias package, and the
+ * (private) `@getknext/action` GitHub Action.
  *
- * Scope is deliberately narrow to the published packages fixed in this PR
- * (`packages/kn-next`, sibling guard in `packages/lib`) — docs/CI live in a
- * separate PR against `main` (#1824) because the two lines freeze bytes
- * differently. `packages/kn-next-operator` and `apps/file-manager` carry
- * only allowlisted K8s-label literals (see below) and are not re-scanned.
+ * Scope is deliberately narrow to the packages fixed in this PR — docs/CI
+ * live in a separate PR against `main` (#1824) because the two lines
+ * freeze bytes differently. `packages/kn-next-operator` and
+ * `apps/file-manager` carry only allowlisted K8s-label literals (see below)
+ * and are not re-scanned.
  *
  * ALLOWLIST: `apps.knext.dev/build-id` is a Kubernetes label KEY (API-group
  * style DNS prefix), not a web link — renaming the website domain must not
@@ -23,19 +25,27 @@ import { join, relative, resolve } from "node:path";
  * was written.
  */
 
-const PKG_ROOT = resolve(import.meta.dirname, "..", "..");
+const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..", "..");
 
-const ROOTS = ["README.md", "templates", "src"];
+const ROOTS = [
+    "packages/kn-next/README.md",
+    "packages/kn-next/templates",
+    "packages/kn-next/src",
+    "packages/lib/README.md",
+    "packages/db/README.md",
+    "packages/kn-next-alias/README.md",
+    "packages/kn-next-action/README.md",
+];
 
 const ALLOWLISTED_LABEL_MARKERS = ["build-id"];
 
 const SELF = relative(
-    PKG_ROOT,
+    REPO_ROOT,
     resolve(import.meta.dirname, "knext-platform-dev-domain-guard.test.ts"),
 );
 
 function walk(path: string): string[] {
-    const full = join(PKG_ROOT, path);
+    const full = join(REPO_ROOT, path);
     let st: ReturnType<typeof statSync>;
     try {
         st = statSync(full);
@@ -59,7 +69,7 @@ function findings(): string[] {
             if (file === SELF) continue;
             let text: string;
             try {
-                text = readFileSync(join(PKG_ROOT, file), "utf-8");
+                text = readFileSync(join(REPO_ROOT, file), "utf-8");
             } catch {
                 continue;
             }
@@ -75,7 +85,7 @@ function findings(): string[] {
     return out;
 }
 
-describe("domain-rename guard (knext.dev -> knext-platform.dev, @getknext/core)", () => {
+describe("domain-rename guard (knext.dev -> knext-platform.dev, published packages)", () => {
     it("scans a non-empty file set", () => {
         const count = ROOTS.flatMap((r) => walk(r)).length;
         expect(count).toBeGreaterThan(20);
