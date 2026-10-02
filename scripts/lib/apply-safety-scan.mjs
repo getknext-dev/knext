@@ -2666,6 +2666,30 @@ export const REMOTE_FETCH_ALLOWLIST = [
     // applies nothing to any cluster.
     segment: /^git remote add origin https:\/\/github\.com\/oven-sh\/bun\.git$/,
   },
+  {
+    id: 'bun-patched-upstream-source',
+    // deploy/bun-patched/build.sh (Cloud Build only, #1822): names the upstream Bun repository as
+    // `upstream` in a fresh local clone; the fetch that follows asks for the `bun-v1.4.2` tag and
+    // is checked by `test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"` (the commit pinned in
+    // deploy/bun-patched/UPSTREAM). The tree is compiled into the opt-in patched Bun toolchain; the
+    // script applies nothing to any cluster.
+    segment: /^git remote add upstream https:\/\/github\.com\/oven-sh\/bun\.git$/,
+  },
+  {
+    id: 'bun-patched-release-assets',
+    // .github/workflows/bun-patched-release.yml (#1822): downloads THIS repo's draft release of the
+    // patched Bun toolchain; the very next step checks every binary against
+    // deploy/bun-patched/RELEASE.sha256 at the tagged commit (fail closed) before anything is signed
+    // or published. Nothing is applied to any cluster.
+    segment: /^gh release download "\$TAG" -R "\$GITHUB_REPOSITORY" -D out$/,
+  },
+  {
+    id: 'bun-patched-release-assets-publish',
+    // .github/workflows/bun-patched-release.yml, publish job: re-downloads the same draft (the
+    // gates ran in other jobs) and re-checks every binary against RELEASE.sha256 at the tagged
+    // commit before signing, attesting or publishing it. Nothing is applied to any cluster.
+    segment: /^gh release download "\$TAG" -R "\$GITHUB_REPOSITORY" -D out --pattern '\*'$/,
+  },
   // #1715 (followScripts enabled for workflow `run:` steps): the four
   // entries below are file-manager-platform-e2e.yml#platform-e2e findings
   // that only exist because `followScripts` can now see workflow steps at

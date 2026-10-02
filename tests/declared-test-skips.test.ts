@@ -54,6 +54,23 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
  * grew to eleven files unobserved in the first place.
  */
 const DECLARED: Record<string, { skips: Record<string, number>; reason: string }> = {
+  'packages/kn-next/src/__tests__/compile-include-patched.test.ts': {
+    skips: { 'describe.skipIf': 1 },
+    reason:
+      'The real native-include compile needs the knext-patched Bun, a linux (glibc) binary. LANE-BACKED: ' +
+      'bun-patched-e2e.yml — the release gate — runs this file with KNEXT_TEST_PATCHED_BUN set to the ' +
+      'verified binary and KNEXT_REQUIRE_PATCHED_BUN=1, so a missing binary FAILS that lane rather than ' +
+      'vanishing; everywhere else (no patched binary on the host) the case skips and the always-on ' +
+      'stock-Bun fail-closed case in the same file still runs.',
+  },
+  'packages/kn-next/src/__tests__/vinext-patches.test.ts': {
+    skips: { 'it.skipIf': 1 },
+    reason:
+      'The read-only-directory test chmods a directory 0555 to make a real write fail; root ignores ' +
+      'directory permissions, so under uid 0 the failure it asserts cannot happen. CI runners are ' +
+      'non-root so it runs there, and an always-on sibling test injects the same EACCES staging ' +
+      "failure through the applier's fs seam, so the guarantee is covered even as root.",
+  },
   'apps/file-manager/sigterm-drain-e2e.test.ts': {
     skips: { 'it.skipIf': 5 },
     reason:

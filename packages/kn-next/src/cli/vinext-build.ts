@@ -136,6 +136,12 @@ export function compileArgv(
     arch: string,
     entry: string,
     outFile: string,
+    include: readonly string[] = [],
+    /**
+     * The opt-in knext-patched Bun (`compile.bun`, resolved + sha256-verified
+     * by bun-toolchain.ts). Absent: plain `bun` on PATH, argv unchanged.
+     */
+    compilerBin?: string,
 ): string[] {
     const target = bunCompileTarget(arch);
     // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and
@@ -152,7 +158,7 @@ export function compileArgv(
     // treatment knext's own reference app does rather than a second copy that
     // drifts.
     return [
-        "bun",
+        compilerBin ?? "bun",
         "run",
         compileScriptPath(),
         "--entry",
@@ -161,7 +167,20 @@ export function compileArgv(
         outFile,
         "--target",
         target,
+        // `compile.include` (knext.config.ts): appended only when set, so the
+        // default argv is exactly what it always was.
+        ...includeArgv(include),
+        // The patched toolchain embeds the SAME checked plan through its
+        // native `compile.include` (compile-embed.mjs nativeIncludePaths).
+        ...(compilerBin && include.length > 0 ? ["--include-native", "1"] : []),
     ];
+}
+
+/** `--include-json <json>` for the compile script, only when there are globs. */
+export function includeArgv(include: readonly string[] = []): string[] {
+    return include.length > 0
+        ? ["--include-json", JSON.stringify(include)]
+        : [];
 }
 
 /**
@@ -363,6 +382,18 @@ export interface VinextBuildOptions {
      * elsewhere.
      */
     readonly nativeDir?: string;
+    /**
+     * `compile.include` globs (knext.config.ts), relative to the app root:
+     * JS/TS modules embedded in the executable and loaded on their first
+     * import. Absent or empty: the compile argv is unchanged.
+     */
+    readonly include?: readonly string[];
+    /**
+     * The opt-in knext-patched Bun that runs the compile script
+     * (`compile.bun: 'knext-patched'`, resolved and sha256-verified by
+     * bun-toolchain.ts). Absent: stock `bun` on PATH.
+     */
+    readonly compilerBin?: string;
 }
 
 /**
@@ -391,7 +422,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     const arch = opts.arch ?? "linux-x64";
     const outFile = opts.outFile ?? `knext-exec-${arch}`;
 
-    const version = opts.bunVersion ?? detectBunVersion(run);
+    const version = opts.bunVersion ?? detectBunVersion(run, opts.compilerBin);
     if (!bunMeetsFloor(version)) {
         throw new UsageError(
             `The vinext single-executable target requires Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}.0 or newer; found '${version}'.\n\n` +
@@ -429,7 +460,13 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
         // copy beside the binary.
         stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
         run([
-            ...compileArgv(arch, entry, outFile),
+            ...compileArgv(
+                arch,
+                entry,
+                outFile,
+                opts.include,
+                opts.compilerBin,
+            ),
             "--self-contained",
             "1",
             "--native-dir",
@@ -439,7 +476,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     }
 
     // 2. compile + bytecode
-    run(compileArgv(arch, entry, outFile));
+    run(compileArgv(arch, entry, outFile, opts.include, opts.compilerBin));
 
     // 3. stage sharp's native module beside the binary — for the arch being
     // compiled, which is NOT necessarily the host's (#949).
@@ -1129,13 +1166,14 @@ function pickFetchVersion(
  */
 export function detectBunVersion(
     run: (argv: readonly string[]) => void,
+    bin = "bun",
 ): string {
     // `runQuiet` does not capture stdout, so the version is read via
     // execFileSync directly. The unused seam parameter stays so the injection
     // point remains explicit rather than pretending.
     void run;
     try {
-        return execFileSync("bun", ["--version"], {
+        return execFileSync(bin, ["--version"], {
             encoding: "utf8",
             // stderr is CAPTURED, never inherited: a failing bun's own words
             // must land IN the error message below (which the docs promise),

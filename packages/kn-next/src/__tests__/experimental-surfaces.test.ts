@@ -56,6 +56,27 @@ describe("1.0 contract: experimental surface markers", () => {
         });
     });
 
+    describe("compile config key (compile.include)", () => {
+        const configSrc = read("packages/kn-next/src/config.ts");
+
+        it("is tagged @experimental in its JSDoc, and listed in PUBLIC_API.md", () => {
+            const match = configSrc.match(
+                /\/\*\*([\s\S]*?)\*\/\s*compile\?:\s*CompileConfig;/,
+            );
+            expect(
+                match,
+                "compile?: CompileConfig must be preceded by a doc comment",
+            ).not.toBeNull();
+            expect((match?.[1] ?? "").includes("@experimental")).toBe(true);
+            expect(
+                occurrences(
+                    read("docs/PUBLIC_API.md"),
+                    "- **`compile.include` (`knext.config.ts`)**",
+                ),
+            ).toBe(1);
+        });
+    });
+
     describe("--self-contained CLI flag", () => {
         const buildSrc = read("packages/kn-next/src/cli/build.ts");
 

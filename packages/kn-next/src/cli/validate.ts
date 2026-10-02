@@ -13,6 +13,7 @@ import {
     type RuntimeAdapter,
 } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
+import { validateCompileConfig } from "./compile-config";
 
 // Storage providers with a real, tested upload/verify path in `asset-upload.ts`.
 // Kept in lock-step with the `StorageProvider` type (config.ts) and the
@@ -349,6 +350,9 @@ export function validateConfig(
     ) {
         errors.push("'selfContained' must be a boolean (true or false)");
     }
+
+    // compile (extra files embedded in the compiled executable).
+    errors.push(...validateCompileConfig(config));
 
     // Runtime validation
     if (

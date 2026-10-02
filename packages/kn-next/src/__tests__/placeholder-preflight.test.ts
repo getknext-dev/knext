@@ -197,7 +197,7 @@ describe("formatPlaceholderFindings — plain English, per field", () => {
     });
 
     it("points at the docs and carries no stack frame", () => {
-        expect(text).toContain("https://knext.dev");
+        expect(text).toContain("https://knext-platform.dev");
         expect(text).not.toMatch(/\n\s+at\s/);
     });
 });
