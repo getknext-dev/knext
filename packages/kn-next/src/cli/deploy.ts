@@ -1233,6 +1233,10 @@ if (isEntrypoint(import.meta.url)) {
             // equivalent (init-ci --provider gitlab's .gitlab-ci.yml).
             const { ciPreflightMain } = await import("./ci/ci-preflight-cmd");
             process.exit(await ciPreflightMain(process.argv.slice(3)));
+        } else if (sub === "vinext-patches") {
+            // Bundled upstream vinext fixes; a vinext app's postinstall runs it.
+            const { vinextPatchesMain } = await import("./vinext-patches");
+            process.exit(await vinextPatchesMain(process.argv.slice(3)));
         } else if (sub === "doctor") {
             const { doctorMain } = await import("./doctor");
             process.exit(await doctorMain(process.argv.slice(3)));

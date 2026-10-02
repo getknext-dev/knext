@@ -1,0 +1,27 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3423
+What it fixes: Server builds: a `require()` of a CommonJS dependency resolves the package's `require` export condition even when Vite would externalize that package.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3423.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/plugins/require-condition-resolution.js
++++ b/dist/plugins/require-condition-resolution.js
+@@ -105,8 +105,14 @@
+ 		name: "vinext:require-condition-resolution",
+ 		enforce: "pre",
+ 		configResolved(config) {
+-			resolveImport = createResolver(config, { isRequire: false });
+-			resolveRequire = createResolver(config, { isRequire: true });
++			resolveImport = createResolver(config, {
++				isRequire: false,
++				noExternal: true
++			});
++			resolveRequire = createResolver(config, {
++				isRequire: true,
++				noExternal: true
++			});
+ 		},
+ 		resolveId(source) {
+ 			if (virtualTargets.has(source)) return source;

@@ -383,6 +383,30 @@ native addon, copy that directory into the image next to the binary (as `/app/.o
 and build it on the platform the image runs on, because a native addon only loads on the operating
 system and CPU it was compiled for.
 
+### Bundled vinext fixes
+
+knext ships some vinext fixes before vinext itself releases them, so you do not wait on an upstream
+release. They are applied to the vinext installed for your app by `knext vinext-patches`, which a
+vinext app created by `knext create` runs from its `postinstall` script; `knext build` applies them
+again before building, so an app created before the script existed is covered too. The fixes
+target the exact vinext version `knext create` pins. With a different vinext version installed they
+are skipped, with a message saying so. Each fix is removed from knext once a vinext release
+includes it.
+
+The fixes bundled with vinext 1.0.1:
+
+- **Pages Router data requests:** `getServerSideProps` sees the original `/_next/data/…` URL as
+  `req.url`, as in Next.js, instead of the normalized page path.
+- **`require()` of CommonJS dependencies in server code** resolves the package's `require` export
+  condition, even for a package Vite would otherwise leave external.
+- **`turbopack.resolveExtensions` without `.mjs`** no longer breaks the build by hiding the server
+  preset's own entry file.
+- **Packages with a `react-server` export condition** get that condition in Server Components, because
+  their dependencies are now bundled into the server build.
+- **Web Workers** see `process.env.NEXT_DEPLOYMENT_ID` inlined, like the rest of the app.
+- **`outputFileTracingIncludes` / `outputFileTracingExcludes`** in `next.config` are applied to the
+  dependency files copied next to the server build.
+
 ## Requirements
 
 ### For vinext: your app must be an ES module
