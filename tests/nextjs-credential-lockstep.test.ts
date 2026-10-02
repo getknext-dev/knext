@@ -80,6 +80,26 @@ const SCAFFOLD_PACKAGE_JSON_PATH = resolve(
 const COMPAT_MATRIX_MD_PATH = resolve(REPO_ROOT, 'docs/compat-matrix.md');
 const COMPAT_MATRIX_MDX_PATH = resolve(REPO_ROOT, 'apps/docs/content/docs/compat-matrix.mdx');
 
+/**
+ * The three docker-e2e test fixtures (#1769) — each carries its OWN `next`
+ * pin and its OWN `bun.lock`, independent of both the scaffold template and
+ * the credential harness. Before #1769 these were pinned to a stale
+ * `16.3.3` with no guard tying them to anything, so they drifted silently
+ * (that drift is exactly what #1769 fixed and what this scan now prevents
+ * from recurring). Listed explicitly rather than directory-scanned: these
+ * are the only three fixtures in the repo with their own standalone
+ * `next`+`bun.lock` pair (not workspace members), so a directory scan would
+ * either need the same list restated as a filter or risk silently skipping
+ * a fixture that does not declare `next` at all (e.g. one with no Next.js
+ * dependency) — an enumerated, reviewed list is the honest tradeoff here,
+ * matched by `SCAFFOLD_PACKAGE_JSON_PATH` above using the same pattern.
+ */
+export const DOCKER_E2E_FIXTURE_PACKAGE_JSON_PATHS = [
+  'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/package.json',
+  'packages/kn-next/src/__tests__/fixtures/standalone-pages-app/package.json',
+  'packages/kn-next/src/__tests__/fixtures/vinext-node-app/package.json',
+];
+
 type NextjsRefSiteKind =
   | 'dispatch-default'
   | 'env-fallback'
@@ -522,6 +542,20 @@ describe('NEXTJS_REF <-> scaffold next pin lockstep (#1376)', () => {
       'could not find a single "next" pin in templates/app/package.json.hbs',
     ).toBeDefined();
     expect(pin).toBe(manifest.shippedNextPin);
+  });
+
+  describe('the docker-e2e fixtures (#1769) move in lockstep with the credentialed Next version', () => {
+    it("every docker-e2e fixture's own next pin matches the manifest's documented shippedNextPin", () => {
+      const manifest = loadManifest();
+      for (const relPath of DOCKER_E2E_FIXTURE_PACKAGE_JSON_PATHS) {
+        const pin = scaffoldNextPin(readFileSync(resolve(REPO_ROOT, relPath), 'utf8'));
+        expect(pin, `could not find a single "next" pin in ${relPath}`).toBeDefined();
+        expect(
+          pin,
+          `${relPath} pins next@${pin}, manifest documents ${manifest.shippedNextPin}`,
+        ).toBe(manifest.shippedNextPin);
+      }
+    });
   });
 
   describe('every nextjsRef occurrence across .github/workflows/** (scan, not enumerated list)', () => {

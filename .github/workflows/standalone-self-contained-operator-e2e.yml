@@ -111,14 +111,18 @@ jobs:
       # would ship the whole checkout as build context. A real user's app is a
       # standalone project dir — this is that.
       #
-      # `--webpack`: the fixture pins next@16.3.3, which `knext deploy`'s
-      # #1372 pre-build guard refuses on the turbopack target (the
+      # `--webpack`: this fixture used to pin next@16.3.3, which `knext
+      # deploy`'s #1372 pre-build guard refused on the turbopack target (the
       # adapter+standalone+turbopack regression, fixed upstream in 16.3.5).
-      # The profile is `build: "webpack"` to match; the switch is applied to
-      # this throwaway copy only, so the on-disk fixture keeps proving the
-      # turbopack build under the docker-e2e. The builder is not this lane's
-      # claim — the CR shape, nil Command and self-contained image stage are
-      # all keyed on the bun runtime.
+      # #1769 bumped the fixture to next@16.3.6 (>= the 16.3.5 fix), so that
+      # ORIGINAL forcing reason is gone — the guard would no longer refuse
+      # turbopack for this fixture. The override is kept as-is (behaviour
+      # unchanged by #1769) so this lane still deliberately proves the
+      # webpack builder path, leaving the on-disk fixture's turbopack build
+      # to the sibling docker-e2e lane. The builder is not this lane's claim
+      # — the CR shape, nil Command and self-contained image stage are all
+      # keyed on the bun runtime. Flagged for a maintainer to decide whether
+      # this override is still wanted now that it is no longer load-bearing.
       - name: Stage the fixture app outside the repo + install its own dependencies
         run: |
           set -euo pipefail
