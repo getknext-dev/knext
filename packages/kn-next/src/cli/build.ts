@@ -26,7 +26,7 @@
  * reconciles everything from the NextApp CR emitted by `deploy`.
  */
 
-import { existsSync, rmSync, writeSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import {
     DEFAULT_BUILDER_ID,
@@ -72,6 +72,41 @@ const log = createLogger({ module: "build" });
  */
 const SHIP_ARCH = "linux-x64";
 
+/**
+ * #1814 — where the post-compile smoke's host-arch TWIN stages its own sharp
+ * native pair, a cwd-nested sibling of the ship's `native/` (never that
+ * directory itself — see `smokeCompiledBinary`'s doc comment for why).
+ * Leading-dot: not a Dockerfile `COPY` source, not matched by `.gitignore`'s
+ * `native` entry, and cleaned up in the same `finally` as the smoke binary.
+ */
+export const SMOKE_NATIVE_DIR_NAME = ".knext-smoke-native";
+
+/**
+ * The exact `.node` file a sharp-native stage wrote under `nativeDir`, or
+ * `undefined` if the app has no sharp (staged dir exists but holds nothing —
+ * `stageSharpNative`'s own no-op-for-no-sharp contract). Scans rather than
+ * assumes the platform id, so it matches whatever `stageSharpNative` ACTUALLY
+ * staged for the arch it was given — the SAME discipline the dlopen shim
+ * itself uses at runtime (`sharp-addon-dlopen.mjs`'s `addonPath()`), not a
+ * second, independently-typed guess at the directory name.
+ */
+export function findStagedSharpAddon(nativeDir: string): string | undefined {
+    if (!existsSync(nativeDir)) return undefined;
+    for (const entry of readdirSync(nativeDir)) {
+        if (!entry.startsWith("sharp-") || entry.startsWith("sharp-libvips-")) {
+            continue;
+        }
+        const libDir = join(nativeDir, entry, "lib");
+        if (!existsSync(libDir)) continue;
+        for (const file of readdirSync(libDir)) {
+            if (file.startsWith("sharp-") && file.endsWith(".node")) {
+                return join(libDir, file);
+            }
+        }
+    }
+    return undefined;
+}
+
 interface BuildOptions {
     skipNextBuild?: boolean;
     /**
@@ -114,6 +149,22 @@ interface BuildOptions {
  * That the SHIPPED binary boots — only that the entry compiled from this
  * `.output` honours the contract on this machine's arch. The alpine e2e is what
  * covers the cross-target half, and it is a separate gate on purpose.
+ *
+ * ## The host-arch twin's own sharp staging (#1814)
+ *
+ * An app depending on `sharp` needs its native addon staged for WHICHEVER
+ * binary is about to boot — the twin's dlopen shim calls `process.dlopen` at
+ * the top level of sharp's module slot outside `--self-contained` mode, so a
+ * route graph that merely includes the image-optimizer route evaluates it at
+ * boot, not lazily on request. The twin is staged into `SMOKE_NATIVE_DIR_NAME`
+ * (a `cwd`-nested sibling of the ship's `native/`), never into `native/`
+ * itself: `stageSharpNative` clears its destination before writing, so
+ * staging the twin's arch into the SAME directory the ship build already
+ * staged silently replaces the ship's pair with the twin's — measured on a
+ * live glibc CI runner, where the shipped alpine image then failed to dlopen
+ * a glibc `.node` it should never have carried. `KNEXT_SHARP_ADDON` points the
+ * twin's own dlopen shim at its isolated file; both the dir and the env var
+ * are scoped to this smoke run and cleaned up in the `finally` below.
  */
 async function smokeCompiledBinary(
     config: { healthCheckPath?: string },
@@ -133,26 +184,45 @@ async function smokeCompiledBinary(
     }
 
     const plan = smokeBinaryPlan(SHIP_ARCH, hostSmokeArch());
-    if (!plan.reuseShipBinary) {
-        log.info(
-            { arch: plan.arch },
-            "Compiling a host-arch binary for the post-compile smoke (the ship binary is linux-musl and cannot run here)...",
-        );
-        buildVinextExecutable({
-            cwd: process.cwd(),
-            arch: plan.arch,
-            outFile: plan.outFile,
-            skipViteBuild: true,
-            // The smoke must boot a binary built with the SAME mode as the
-            // shipped one, or it misses the one property the mode changes.
-            ...(selfContained ? { selfContained: true } : {}),
-            // ...and with the same toolchain + include globs.
-            ...(toolchain.bin ? { toolchain } : {}),
-        });
-    }
-
+    // #1814 — a cwd-nested sibling of the ship's `native/`, never that
+    // directory itself. See this function's doc comment: staging the twin's
+    // arch into the SAME dir the ship build staged clobbers it.
+    const smokeNativeDir = join(process.cwd(), SMOKE_NATIVE_DIR_NAME);
     const binaryPath = join(process.cwd(), plan.outFile);
     try {
+        let smokeSharpAddon: string | undefined;
+        if (!plan.reuseShipBinary) {
+            log.info(
+                { arch: plan.arch },
+                "Compiling a host-arch binary for the post-compile smoke (the ship binary is linux-musl and cannot run here)...",
+            );
+            // #1814 round 4 — INSIDE the try: a throw here (a bad compile, a
+            // failed sharp-addon fetch) must still hit the `finally` below, or
+            // a FAILING build leaves `smokeNativeDir` behind — exactly the
+            // retry-blocks-itself shape `stageSharpNative`'s own ownership
+            // refusal exists to catch for `native/`, reintroduced here for its
+            // cwd-nested sibling if this call sat outside the try.
+            buildVinextExecutable({
+                cwd: process.cwd(),
+                arch: plan.arch,
+                outFile: plan.outFile,
+                skipViteBuild: true,
+                nativeDir: SMOKE_NATIVE_DIR_NAME,
+                // The smoke must boot a binary built with the SAME mode as the
+                // shipped one, or it misses the one property the mode changes.
+                ...(selfContained ? { selfContained: true } : {}),
+                // ...and with the same toolchain + include globs.
+                ...(toolchain.bin ? { toolchain } : {}),
+            });
+            // Self-contained mode embeds the staged tree at compile time and
+            // extracts it lazily at runtime — it never consults
+            // KNEXT_SHARP_ADDON, so finding a file for it here would be inert,
+            // not merely harmless.
+            if (!selfContained) {
+                smokeSharpAddon = findStagedSharpAddon(smokeNativeDir);
+            }
+        }
+
         log.info(
             "Smoking the compiled executable (health, metrics, SIGTERM)...",
         );
@@ -160,6 +230,9 @@ async function smokeCompiledBinary(
             binaryPath,
             cwd: process.cwd(),
             healthPath: config.healthCheckPath,
+            ...(smokeSharpAddon
+                ? { env: { KNEXT_SHARP_ADDON: smokeSharpAddon } }
+                : {}),
         });
         log.info(
             {
@@ -179,6 +252,9 @@ async function smokeCompiledBinary(
         // case where a developer runs the build repeatedly — cleans up too.
         if (!plan.reuseShipBinary) {
             rmSync(binaryPath, { force: true });
+            // The smoke-only native tree (#1814) — same reasoning, same
+            // lifecycle: it exists only for this run's boot check.
+            rmSync(smokeNativeDir, { recursive: true, force: true });
         }
     }
 }

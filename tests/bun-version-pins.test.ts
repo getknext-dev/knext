@@ -245,6 +245,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // scanned via EXTRA_SCAN_FILES, not WF_DIR, since this is not a
       // `.github/workflows/*.yml` file.
       'packages/kn-next-action/action.yml': 1,
+      // NEW (#1814): the one-off glibc sharp-smoke proof lane — one setup-bun
+      // step, the compile/serve runtime for its single job. Temporary (see
+      // the workflow's own header): removed once the proof has a result.
+      'pr-1814-glibc-sharp-smoke-proof.yml': 1,
       // NEW: the rc5-vinext-beta-proof.yml lane has two setup-bun steps —
       // the bun job's compile/serve runtime, and the node job's one-time
       // `bun install --save-text-lockfile` for sharp's native-addon staging
