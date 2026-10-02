@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "knext-ext-probe": "file:./ext-probe",
-    "next": "16.3.3",
+    "next": "16.3.6",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },
