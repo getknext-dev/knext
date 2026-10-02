@@ -11,7 +11,17 @@ name: bun-patched-e2e
 
 on:
   workflow_dispatch: {}
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      toolchain-artifact:
+        description: >-
+          Name of a workflow artifact holding the toolchain binaries (bun-patched-release.yml passes
+          its verified DRAFT binaries). Seeded into knext's cache, where knext's own embedded-sha256
+          check decides whether to use it — a rejected seed fails the build (the draft is not
+          downloadable). Empty: knext downloads the PUBLISHED release asset as a user would.
+        type: string
+        required: false
+        default: ''
   # It carried a temporary `pull_request` trigger scoped to its own files (the 1812-vinext-stable-proof
   # precedent) to get one green run on the PR that introduced it — run 37055710314: health 200, the
   # included module loaded from /$bunfs/root/plugins/greet.js with before=0 / after=1, no copy on
@@ -86,6 +96,25 @@ jobs:
           npm install --no-audit --no-fund
           bun install --save-text-lockfile
           test -f bun.lock
+
+      - name: Fetch the toolchain artifact under test (release gate only)
+        if: ${{ inputs.toolchain-artifact != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.toolchain-artifact }}
+          path: ${{ runner.temp }}/toolchain-under-test
+
+      - name: Seed knext's cache with it (knext's own sha256 check still decides)
+        if: ${{ inputs.toolchain-artifact != '' }}
+        env:
+          KNEXT_CACHE_DIR: ${{ runner.temp }}/knext-cache
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^    tag: "\(bun-patched-[^"]*\)",$/\1/p' packages/kn-next/src/cli/bun-toolchain.ts)"
+          test "$(printf '%s\n' "$tag" | grep -c .)" = 1
+          mkdir -p "$KNEXT_CACHE_DIR/bun-patched/$tag"
+          install -m 0755 "$RUNNER_TEMP/toolchain-under-test/bun-linux-x64" "$KNEXT_CACHE_DIR/bun-patched/$tag/bun-linux-x64"
+          echo "SEEDED_TAG=$tag" >> "$GITHUB_ENV"
 
       - name: knext build (vite build -> patched-Bun compile, bytecode)
         working-directory: ${{ env.APP }}
