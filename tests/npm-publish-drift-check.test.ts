@@ -437,7 +437,7 @@ describe('runDriftCheck', () => {
     expect(report.ok).toBe(false);
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].setting).toBe('v*-covering tag ruleset');
-    expect(report.reviewer.kind).toBe('missing');
+    expect((report.reviewer as { kind: string }).kind).toBe('missing');
   });
 
   it('ok: true when the tag ruleset verifies as present, regardless of the reviewer rule being absent (the LIVE state today)', async () => {
@@ -458,7 +458,7 @@ describe('runDriftCheck', () => {
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(true);
     expect(report.findings).toHaveLength(0);
-    expect(report.reviewer.kind).toBe('missing');
+    expect((report.reviewer as { kind: string }).kind).toBe('missing');
   });
 
   it('a reviewer permission-error is reported on `report.reviewer` but never turned into a finding', async () => {
@@ -479,7 +479,7 @@ describe('runDriftCheck', () => {
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(true);
     expect(report.findings).toHaveLength(0);
-    expect(report.reviewer.kind).toBe('permission-error');
+    expect((report.reviewer as { kind: string }).kind).toBe('permission-error');
   });
 
   it('a tag-ruleset permission-error finding reads as UNVERIFIED, never relabelled as MISSING', async () => {
