@@ -45,6 +45,7 @@ import {
     loadVinextPatchManifest,
     parseUnifiedPatch,
     VinextPatchConflictError,
+    VinextPatchRollbackError,
     VinextPatchWriteError,
     vinextPatchesDir,
     vinextPatchesMain,
@@ -708,6 +709,62 @@ describe("delivery", () => {
                     .includes("applied"),
             ).toBe(true);
             expect(snapshot()).not.toEqual(pristine);
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it("a double fault (install AND restore fail) never claims a rollback, and names the files", () => {
+        const app = fakeApp(manifest.vinext);
+        try {
+            const vinext = join(app, "node_modules", "vinext");
+            let indexRenames = 0;
+            let restoring = false;
+            const fs = {
+                writeFile: (path: string, text: string) => {
+                    // Fail the restore of next-config.js (written after the forward failure).
+                    if (restoring && path.includes("next-config.js")) {
+                        throw new Error("EIO: restore failed");
+                    }
+                    mkdirSync(dirname(path), { recursive: true });
+                    writeFileSync(path, text);
+                },
+                rename: (from: string, to: string) => {
+                    if (
+                        to.endsWith("index.js") &&
+                        from.includes("knext-patch")
+                    ) {
+                        indexRenames++;
+                        // 3436 is the 4th patch to rename index.js (its last file).
+                        if (indexRenames === 4) {
+                            restoring = true;
+                            throw new Error("EIO: simulated");
+                        }
+                    }
+                    renameSync(from, to);
+                },
+                remove: (path: string) => rmSync(path, { force: true }),
+            };
+            let thrown: unknown;
+            try {
+                applyVinextPatches(vinext, { fs });
+            } catch (err) {
+                thrown = err;
+            }
+            expect(thrown).toBeInstanceOf(VinextPatchRollbackError);
+            const msg = String((thrown as Error).message);
+            expect(msg).not.toContain("rolled back");
+            expect(msg).toContain(
+                join(vinext, "dist", "config", "next-config.js"),
+            );
+            expect(msg).toContain("rm -rf node_modules/vinext");
+            expect(msg).toContain("KNEXT_VINEXT_PATCHES=0");
+            // The file whose restore succeeded (the new one) is gone again.
+            expect(
+                existsSync(
+                    join(vinext, "dist", "build", "nitro-trace-includes.js"),
+                ),
+            ).toBe(false);
         } finally {
             rmSync(app, { recursive: true, force: true });
         }

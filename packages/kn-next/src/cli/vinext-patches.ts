@@ -100,6 +100,12 @@ export class VinextPatchConflictError extends UsageError {}
 /** Writing a patch's files failed; every file it touched was left as it was. */
 export class VinextPatchWriteError extends UsageError {}
 
+/**
+ * Writing a patch's files failed AND restoring the ones already replaced also
+ * failed (a double fault): vinext may now be inconsistent on disk.
+ */
+export class VinextPatchRollbackError extends UsageError {}
+
 /** The environment variable that turns the bundled fixes off entirely. */
 export const VINEXT_PATCHES_ENV = "KNEXT_VINEXT_PATCHES";
 
@@ -336,6 +342,8 @@ function commitPatch(
             renamed.push(w);
         }
     } catch (err) {
+        // Every restore step must succeed for "rolled back" to be true.
+        const inconsistent: string[] = [];
         for (const w of renamed) {
             try {
                 if (w.original === null) {
@@ -344,12 +352,23 @@ function commitPatch(
                     fs.writeFile(tmpOf(w.abs), w.original);
                     fs.rename(tmpOf(w.abs), w.abs);
                 }
-            } catch {}
+            } catch {
+                inconsistent.push(w.abs);
+            }
         }
         for (const w of writes.slice(renamed.length)) {
             try {
                 fs.remove(tmpOf(w.abs));
             } catch {}
+        }
+        if (inconsistent.length > 0) {
+            throw new VinextPatchRollbackError(
+                `knext could not install its bundled vinext fix ${entry.file} (${entry.upstream}): ${err instanceof Error ? err.message : String(err)}, ` +
+                    "and restoring the files it had already replaced ALSO failed. These files may now be inconsistent:\n" +
+                    inconsistent.map((f) => `  ${f}`).join("\n") +
+                    "\n\nReinstall vinext to get the unmodified package back (`rm -rf node_modules/vinext`, then run your package manager's install, e.g. `npm install` or `bun install`).\n" +
+                    OPT_OUT_HINT,
+            );
         }
         fail("install", err);
     }
