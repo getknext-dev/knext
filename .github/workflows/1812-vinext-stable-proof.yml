@@ -111,12 +111,16 @@ jobs:
           path: knext-src
           persist-credentials: false
 
+      - name: Install this ref's workspace (the applier runs from source)
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: knext-src
+        run: bun install --frozen-lockfile
+
       - name: Apply the bundled vinext fixes from this ref, and prove they took
         if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: app
         run: |
           set -euo pipefail
-          (cd knext-src && bun install --frozen-lockfile)
-          cd app
           # Before: the published 1.0.1 is unpatched, so --check must fail.
           if bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check; then
             echo "::error::--check passed BEFORE applying — the installed vinext already carries the fixes, so this run would prove nothing" >&2
@@ -223,12 +227,16 @@ jobs:
           path: knext-src
           persist-credentials: false
 
+      - name: Install this ref's workspace (the applier runs from source)
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: knext-src
+        run: bun install --frozen-lockfile
+
       - name: Apply the bundled vinext fixes from this ref, and prove they took
         if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: app
         run: |
           set -euo pipefail
-          (cd knext-src && bun install --frozen-lockfile)
-          cd app
           # Before: the published 1.0.1 is unpatched, so --check must fail.
           if bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check; then
             echo "::error::--check passed BEFORE applying — the installed vinext already carries the fixes, so this run would prove nothing" >&2

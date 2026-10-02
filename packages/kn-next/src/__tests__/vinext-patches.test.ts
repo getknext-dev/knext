@@ -58,10 +58,6 @@ const INSTALLED_VINEXT = (() => {
 const sha256 = (path: string) =>
     createHash("sha256").update(readFileSync(path)).digest("hex");
 
-function tmp(prefix: string): string {
-    return mkdtempSync(join(tmpdir(), prefix));
-}
-
 // ---------------------------------------------------------------------------
 // The applier, on synthetic input.
 // ---------------------------------------------------------------------------
@@ -162,7 +158,7 @@ describe("applier", () => {
     });
 
     it("replaces the file instead of writing through a hardlink (bun's global cache is hardlinked on Linux)", () => {
-        const dir = tmp("knext-vp-hardlink-");
+        const dir = mkdtempSync(join(tmpdir(), "knext-vp-hardlink-"));
         try {
             const pkg = join(dir, "vinext");
             mkdirSync(join(pkg, "dist"), { recursive: true });
@@ -410,7 +406,8 @@ describe("the bundled patches against the published tarball", () => {
             "node_modules/c/**",
         ]);
 
-        const app = realpathSync(tmp("knext-vp-trace-"));
+        const traceRoot = mkdtempSync(join(tmpdir(), "knext-vp-trace-"));
+        const app = realpathSync(traceRoot);
         try {
             const lib = join(app, "node_modules", "lib-a");
             mkdirSync(join(lib, "data"), { recursive: true });
@@ -452,7 +449,7 @@ describe("the bundled patches against the published tarball", () => {
                 join(lib, "data", "keep.txt"),
             ]);
         } finally {
-            rmSync(app, { recursive: true, force: true });
+            rmSync(traceRoot, { recursive: true, force: true });
         }
     });
 
@@ -485,7 +482,7 @@ describe("the bundled patches against the published tarball", () => {
 
 /** A throwaway app whose node_modules/vinext is a pristine copy of the tarball's target files. */
 function fakeApp(version: string): string {
-    const app = tmp("knext-vp-app-");
+    const app = mkdtempSync(join(tmpdir(), "knext-vp-app-"));
     writeFileSync(
         join(app, "package.json"),
         JSON.stringify({ name: "a", type: "module" }),
@@ -571,7 +568,7 @@ describe("delivery", () => {
     });
 
     it("ensureVinextPatches is a no-op without vinext", () => {
-        const app = tmp("knext-vp-novinext-");
+        const app = mkdtempSync(join(tmpdir(), "knext-vp-novinext-"));
         try {
             expect(ensureVinextPatches(app).kind).toBe("no-vinext");
         } finally {
