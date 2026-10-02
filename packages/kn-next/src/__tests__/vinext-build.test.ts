@@ -961,6 +961,30 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
             }
         }
     });
+
+    // #1814 — the smoke-only glibc twin (`linux-x64-gnu` / `linux-arm64-gnu`,
+    // COMPILE_TARGETS' SMOKE_ONLY_ARCHES) has no row in SHARP_PLATFORM_IDS on
+    // purpose (see the test above: "the gnu smoke binaries ... need no row").
+    // Before this fix, `stageSharpNative` threw `Unknown build arch` for it
+    // anyway, which broke `knext build --builder vinext` for EVERY sharp-using
+    // app on every glibc Linux host (every scaffolded vinext app ships sharp).
+    it.each([
+        "linux-x64-gnu",
+        "linux-arm64-gnu",
+    ])("#1814 does not throw for the smoke-only glibc twin arch '%s' — the smoke binary never ships and never hits the image route", (arch) => {
+        const cwd = darwinAppTree(FULL_LOCK, {
+            "sharp-linuxmusl-x64": SHARP_V,
+            "sharp-libvips-linuxmusl-x64": VIPS_V,
+        });
+
+        expect(() => stageSharpNative(cwd, { arch })).not.toThrow();
+
+        // Still leaves a `native/` dir (the Dockerfile's COPY contract),
+        // just with nothing staged into it — nothing dlopens it, since
+        // the smoke only exercises health/metrics/SIGTERM, never
+        // next/image, and the binary is deleted right after boot.
+        expect(existsSync(join(cwd, "native"))).toBe(true);
+    });
 });
 
 describe("#949 the registry fetch is verified against the lockfile pin", () => {
