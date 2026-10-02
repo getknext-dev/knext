@@ -365,7 +365,7 @@ export interface KnativeNextConfig {
      *   executable loads lazily, on the first `import()` of them). `knext build`
      *   downloads it once per machine, checks it against a sha256 pinned in
      *   knext and fails the build on any mismatch; it never falls back to
-     *   stock Bun. Used for the compile step only: the shipped executable still
+     *   stock Bun; it is used for the compile step only: the shipped executable still
      *   runs on the stock Bun base for its target. linux x64/arm64 (glibc) build
      *   hosts only. Not covered by the compatibility credential.
      * - `include` — glob patterns (relative to the app root) passed through as

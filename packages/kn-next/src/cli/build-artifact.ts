@@ -177,7 +177,8 @@ export function compileArtifactForDeploy(
 ): CompileForDeployResult {
     const arch = opts.arch ?? DEPLOY_SHIP_ARCH;
     // Fail closed: an opted-in config that reaches the compile without its
-    // resolved, verified toolchain must not quietly compile with stock Bun.
+    // resolved, verified toolchain must not quietly compile with stock Bun
+    // (the CLI resolves it in build/deploy/preview before calling this).
     if (wantsPatchedBun(config) && !opts.toolchain?.bin) {
         throw new UsageError(
             "compile.bun: 'knext-patched' is set but the patched Bun toolchain was not resolved " +

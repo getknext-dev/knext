@@ -12,6 +12,13 @@ name: bun-patched-e2e
 on:
   workflow_dispatch: {}
   workflow_call: {}
+  # TEMPORARY (same precedent as 1812-vinext-stable-proof.yml): scoped to this lane's own files so
+  # the PR that introduces it gets a green run (a workflow that is not on the default branch cannot
+  # be dispatched). Remove once that run is recorded in the PR body.
+  pull_request:
+    paths:
+      - '.github/workflows/bun-patched-e2e.yml'
+      - '.github/bun-patched-e2e/**'
 
 permissions:
   contents: read
@@ -105,6 +112,10 @@ jobs:
             sh -c 'apk add --no-cache libstdc++ libgcc >/dev/null; timeout 20 /w/knext-exec-linux-x64 --revision' \
             | tee shipped-revision.txt || true
           echo "compiler: $(cat patched-revision.txt) / shipped base: $(cat shipped-revision.txt)" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Compile step only: the shipped executable must run on STOCK 1.4.2 (744846f84), not on
+          # the patched compiler (measured on the first proof run: 1.4.2+744846f84 vs +cc97fa834).
+          grep -qx '1.4.2+744846f84' shipped-revision.txt
+          ! grep -qxF "$(cat shipped-revision.txt)" patched-revision.txt
 
       - name: docker build (the shipped musl image), boot, 200, lazy include
         working-directory: ${{ env.APP }}

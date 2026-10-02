@@ -107,8 +107,8 @@ lap sysroot
 # ── source at the tag's commit, patches applied ──────────────────────────────
 git init -q "$SRC"
 cd "$SRC"
-git remote add origin https://github.com/oven-sh/bun.git
-git fetch -q --depth 1 origin "refs/tags/$UPSTREAM_TAG"
+git remote add upstream https://github.com/oven-sh/bun.git
+git fetch -q --depth 1 upstream "refs/tags/$UPSTREAM_TAG"
 git checkout -q FETCH_HEAD
 test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA" || { echo "tag $UPSTREAM_TAG is $(git rev-parse HEAD), pinned $UPSTREAM_SHA" >&2; exit 1; }
 # Fixed committer + author date keeps the patched HEAD (embedded as Bun's revision) reproducible.
@@ -164,7 +164,7 @@ cat >"$OUT/manifest-$TARGET.json" <<JSON
   "patches": [$(for pf in "$WS"/patches/*.patch; do printf '"%s",' "$(basename "$pf")"; done | sed 's/,$//')],
   "target": "bun-linux-$TARGET",
   "profile": "release, canary=off, glibc 2.31 sysroot (ubuntu:20.04 + gcc-13 libstdc++)",
-  "toolchain": { "llvm": "clang-$LLVM_MAJOR=$LLVM_PKG", "bootstrap_bun": "$BOOTSTRAP_BUN", "rust": "$(rustc --version)", "webkit": "$wk" },
+  "toolchain": { "llvm": "clang-$LLVM_MAJOR=$LLVM_PKG", "bootstrap_bun": "$BOOTSTRAP_BUN", "rust": "$(rustc --version)", "webkit": "$wkshort (pinned prebuilt, fetch-pins.sha256)" },
   "max_glibc_symbol": "$maxglibc",
   "build_id": "${BUILD_ID:-local}"
 }

@@ -8,13 +8,14 @@
  * no fetch, no cache, plain `bun` on PATH, exactly as before.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import {
     existsSync,
     mkdtempSync,
     readdirSync,
     readFileSync,
+    rmSync,
     statSync,
     writeFileSync,
 } from "node:fs";
@@ -70,7 +71,15 @@ function fakeFetch(body: Uint8Array | null, status = 200) {
     return { fn, calls };
 }
 
-const tmp = () => mkdtempSync(join(tmpdir(), "knext-bun-toolchain-"));
+const created: string[] = [];
+const tmp = () => {
+    const d = mkdtempSync(join(tmpdir(), "knext-bun-toolchain-"));
+    created.push(d);
+    return d;
+};
+afterAll(() => {
+    for (const d of created) rmSync(d, { recursive: true, force: true });
+});
 
 describe("default stays stock Bun", () => {
     it("no compile block → plain `bun`, no fetch", async () => {
