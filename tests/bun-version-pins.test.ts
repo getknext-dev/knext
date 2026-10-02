@@ -114,6 +114,12 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
     // step: its pnpm drives the next.js compat harness (next.js's own repo uses
     // pnpm), not knext's workspace, so it was left alone.
     expect(byFile).toEqual({
+      // NEW (#1812): a dispatch-only (+ temporary pull_request on its own
+      // path) proof lane for the stable vinext pin bump — two jobs
+      // (vinext-bun-stable, vinext-node-stable), each pinning its own
+      // setup-bun step (the node job needs bun only for the sharp
+      // native-addon lockfile, same pattern as rc5-vinext-beta-proof.yml).
+      '1812-vinext-stable-proof.yml': 2,
       // NEW (#1397 round 2): the actionlint gate now runs
       // tests/actionlint-workflow.test.ts for real (so its describe.skipIf
       // regression coverage cannot go silently inert), which needs the

@@ -82,4 +82,18 @@ const nextConfig: NextConfig = {
   // Track: github.com/vercel/next.js Turbopack + serverExternalPackages.
 };
 
+// #1812: vinext 1.0.1 reads `output` itself (independent of `next build`) and,
+// when it is 'standalone', ALSO tries to emit its own standalone bundle from a
+// plain `vite build` output this app never produces — it builds via the
+// `nitro({ preset: 'bun' })` plugin instead (.output/server/index.mjs). See
+// vite.config.ts's KNEXT_VINEXT_BUILD comment: that process sets the env var
+// below, and ONLY that process — `next build` (this field's only real
+// consumer) never sets it, so that target's `output: 'standalone'` above is
+// unaffected. Applied as a post-build-of-the-object override, not inline,
+// so `output: 'standalone'` stays literal source for
+// adapter-migration.test.ts's official-adapter assertion.
+if (process.env.KNEXT_VINEXT_BUILD === '1') {
+  nextConfig.output = undefined;
+}
+
 export default nextConfig;
