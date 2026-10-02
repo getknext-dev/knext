@@ -51,7 +51,8 @@ const SPEC = 'tests/ensure-published-group.test.ts';
 
 const PUBLISH_CALL_LINE = '        return npmPublish(dirByName.get(name), registry, distTag);\n';
 
-const DIST_TAG_DERIVATION_LINE = '  const distTag = prereleaseDistTag(targetVersion);\n';
+const DIST_TAG_DERIVATION_LINE =
+  '  const distTag = prereleaseDistTag(targetVersion, readPreState());\n';
 
 const MUTATIONS = [
   {
@@ -108,10 +109,10 @@ prover.baseline();
 prover.proveCanSeeRed({
   subject: 'spec',
   anchor:
-    "  it('distTag itself is derived from prereleaseDistTag(targetVersion), never hard-coded', () => {\n" +
-    "    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion);');\n",
+    "  it('distTag itself is derived from prereleaseDistTag(targetVersion, readPreState()), never hard-coded', () => {\n" +
+    "    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion, readPreState());');\n",
   replacement:
-    "  it('distTag itself is derived from prereleaseDistTag(targetVersion), never hard-coded', () => {\n" +
+    "  it('distTag itself is derived from prereleaseDistTag(targetVersion, readPreState()), never hard-coded', () => {\n" +
     "    expect(source).toContain('const distTag = definitely not this string');\n",
 });
 
