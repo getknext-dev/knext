@@ -238,6 +238,57 @@ describe("verifyBytecodeExec — each half on its own", () => {
     });
 });
 
+describe("verifyBytecodeModules — the compile.include proof", () => {
+    const { verifyBytecodeModules } =
+        require("../adapters/bytecode-exec-verify.mjs") as typeof import("../adapters/bytecode-exec-verify.mjs");
+    const head = (pragma: string, body: string) =>
+        `${pragma}\n(function(){globalThis.m="${MARKER}";${body}})\n`;
+    const BC = "// @bun @bytecode @bun-cjs";
+    const PLAIN = "// @bun @bun-cjs";
+    const pool = `\0pool:${MARKER}\0`;
+    const bin = (...parts: string[]) =>
+        Buffer.from(`ELF\0${parts.join("\0".repeat(8192))}`, "latin1");
+
+    it("PASSES: entry + each included module under @bytecode, marker in a pool", () => {
+        expect(
+            verifyBytecodeModules(
+                bin(pool, head(BC, "entry"), head(BC, "plugin")),
+                MARKER,
+                2,
+            ),
+        ).toEqual({ ok: true });
+    });
+
+    it("FAILS when fewer bytecode modules than the entry + includes are present", () => {
+        const r = verifyBytecodeModules(
+            bin(pool, head(BC, "entry")),
+            MARKER,
+            2,
+        );
+        expect(r).toEqual({
+            ok: false,
+            reason: expect.stringContaining("expected at least 2"),
+        });
+    });
+
+    it("FAILS when an included module lost its bytecode, and with no pool copy", () => {
+        expect(
+            verifyBytecodeModules(
+                bin(pool, head(BC, "entry"), head(PLAIN, "plugin")),
+                MARKER,
+                2,
+            ).ok,
+        ).toBe(false);
+        expect(
+            verifyBytecodeModules(
+                bin(head(BC, "entry"), head(BC, "plugin")),
+                MARKER,
+                2,
+            ).ok,
+        ).toBe(false);
+    });
+});
+
 describe("verifyBytecodeEmbedded — the self-contained proof (#1456)", () => {
     const { routeMarker, verifyBytecodeEmbedded } =
         require("../adapters/bytecode-exec-verify.mjs") as typeof import("../adapters/bytecode-exec-verify.mjs");

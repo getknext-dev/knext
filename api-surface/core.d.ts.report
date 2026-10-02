@@ -17,6 +17,10 @@ type CacheConfig {
 
 type CacheProvider = "redis"
 
+interface CompileConfig {
+  include?: string[] | undefined
+}
+
 interface DatabaseConfig {
   roSecretRef?: DatabaseSecretRef | undefined
   secretRef?: DatabaseSecretRef | undefined
@@ -43,6 +47,7 @@ interface KafkaQueueConfig {
 interface KnativeNextConfig {
   build?: "turbopack" | "vinext" | "webpack" | undefined
   cache?: RedisCacheConfig | undefined
+  compile?: CompileConfig | undefined
   database?: DatabaseConfig | undefined
   env?: Record<string, string> | undefined
   healthCheckPath?: string | undefined

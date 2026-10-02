@@ -141,6 +141,21 @@ describe("compileArtifactForDeploy", () => {
         expect(buildStandaloneExecutable).not.toHaveBeenCalled();
     });
 
+    it("passes compile.include to the vinext compile; omits it when unset", () => {
+        vinextOutput();
+        compileArtifactForDeploy(
+            cfg({ build: "vinext", compile: { include: ["plugins/*.js"] } }),
+            dir,
+        );
+        expect(buildVinextExecutable).toHaveBeenCalledWith(
+            expect.objectContaining({ include: ["plugins/*.js"] }),
+        );
+        buildVinextExecutable.mockClear();
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        const [opts] = buildVinextExecutable.mock.calls[0] as [object];
+        expect(Object.hasOwn(opts, "include")).toBe(false);
+    });
+
     it("compiles nothing for vinext × node — the V8 compile cache is baked at docker build time", () => {
         const result = compileArtifactForDeploy(
             cfg({ build: "vinext", runtime: "node" }),

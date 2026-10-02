@@ -397,7 +397,7 @@ function scanScript(file: string, source: string): ScriptScan {
 const NOT_A_COMPILE_SCRIPT_REVIEWED = new Set(["compile-embed.mjs"]);
 /** How many compile objects each known compile script has (a dropped one is a lost seam). */
 const COMPILE_SITES: Record<string, number> = {
-    "vinext-compile.mjs": 2, // sidecar + self-contained
+    "vinext-compile.mjs": 3, // sidecar + self-contained + compile.include (disk mode)
     "standalone-compile.mjs": 2, // base + self-contained
 };
 

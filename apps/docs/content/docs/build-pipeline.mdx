@@ -445,6 +445,57 @@ tells you how to install it.
 CI and container builds get Bun the same way; the requirement is only on whoever runs the build, not
 on anyone deploying an already-built image.
 
+## Including extra files in the compiled executable (experimental)
+
+The compiled vinext executable carries the modules your server code imports statically. A module
+your code loads by a path the bundler cannot follow — a plugin whose file name is chosen at
+runtime, say — is not in it, and on a cluster there is nothing beside the binary to load it from. List such modules in `compile.include`:
+
+```ts title="knext.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'vinext',
+  compile: {
+    include: ['plugins/*.js'],   // globs, relative to the app root
+  },
+};
+```
+
+Each matching module is embedded in the executable at `/$bunfs/root/<its path relative to the app
+root>` — `plugins/greet.js` becomes `/$bunfs/root/plugins/greet.js` (a `.ts`, `.mjs` or `.cjs`
+source is embedded with a `.js` extension). It is **not run at startup**; it loads from inside the
+executable the first time your code imports it, and nothing needs to sit beside the binary. It is
+compiled to bytecode like the rest of the server, and `knext build` checks that it was. This works
+with the stock Bun on your `PATH`; no special toolchain is involved.
+
+Import an included module by its embedded path, from code the bundler does not rewrite. Vite turns
+an `import()` whose specifier it cannot analyse into a stub that fails at runtime, so build the
+call at runtime instead:
+
+```ts
+const load = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<any>;
+const plugin = await load(`/$bunfs/root/plugins/${name}.js`);
+```
+
+**Limits.** The build fails, naming the offending pattern or file, rather than embedding less than
+you asked for:
+
+- only JavaScript and TypeScript modules (`.js .mjs .cjs .ts .mts .cts .jsx .tsx`) can be included —
+  a glob that matches a JSON file, an image or any other file fails the build;
+- a pattern that matches nothing fails the build;
+- patterns are relative to the app root: an absolute pattern, or one containing `..`, fails the
+  build;
+- every match must really be inside the app root — a file or directory that is a symlink to
+  somewhere outside it fails the build (a glob does not follow a symlinked file at all), and
+  `node_modules` is never searched;
+- files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_*`) are never picked up by a glob —
+  the build fails and names them; list one by its exact path if it really belongs in the executable;
+- `compile.include` applies only to the compiled vinext executable (`build: 'vinext'` on the Bun
+  runtime); the config check rejects it for every other target.
+
+It is experimental: the option may change in a minor release.
+
 ## Optional vinext build
 
 `build: 'vinext'` is an **opt-in** build target, enabled by setting that one field in

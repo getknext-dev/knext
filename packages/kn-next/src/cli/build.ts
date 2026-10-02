@@ -44,6 +44,7 @@ import {
     resolveSelfContained,
     standaloneStepsApply,
 } from "./build-artifact";
+import { compileIncludeGlobs } from "./compile-config";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
@@ -168,6 +169,7 @@ async function smokeCompiledBinary(
     config: { healthCheckPath?: string },
     skipSmoke: boolean,
     selfContained: boolean,
+    include: readonly string[] = [],
 ): Promise<void> {
     if (skipSmoke) {
         // LOUD, and it names what is now unverified rather than merely saying a
@@ -208,6 +210,8 @@ async function smokeCompiledBinary(
                 // The smoke must boot a binary built with the SAME mode as the
                 // shipped one, or it misses the one property the mode changes.
                 ...(selfContained ? { selfContained: true } : {}),
+                // ...and with the same embedded `compile.include` modules.
+                ...(include.length > 0 ? { include } : {}),
             });
             // Self-contained mode embeds the staged tree at compile time and
             // extracts it lazily at runtime — it never consults
@@ -436,6 +440,7 @@ export async function build(options: BuildOptions = {}) {
             config,
             options.skipSmoke === true,
             resolveSelfContained(config, options.selfContained),
+            compileIncludeGlobs(config),
         );
     }
 
