@@ -111,18 +111,13 @@ jobs:
       # would ship the whole checkout as build context. A real user's app is a
       # standalone project dir — this is that.
       #
-      # `--webpack`: this fixture used to pin next@16.3.3, which `knext
-      # deploy`'s #1372 pre-build guard refused on the turbopack target (the
+      # This fixture used to pin next@16.3.3, which `knext deploy`'s #1372
+      # pre-build guard refused on the turbopack target (the
       # adapter+standalone+turbopack regression, fixed upstream in 16.3.5).
       # #1769 bumped the fixture to next@16.3.6 (>= the 16.3.5 fix), so that
-      # ORIGINAL forcing reason is gone — the guard would no longer refuse
-      # turbopack for this fixture. The override is kept as-is (behaviour
-      # unchanged by #1769) so this lane still deliberately proves the
-      # webpack builder path, leaving the on-disk fixture's turbopack build
-      # to the sibling docker-e2e lane. The builder is not this lane's claim
-      # — the CR shape, nil Command and self-contained image stage are all
-      # keyed on the bun runtime. Flagged for a maintainer to decide whether
-      # this override is still wanted now that it is no longer load-bearing.
+      # forcing reason is gone. #1803 dropped the `--webpack` override: the
+      # fixture now builds with its default builder (turbopack), proving the
+      # same path the docker-e2e sibling proves on disk, through the operator.
       - name: Stage the fixture app outside the repo + install its own dependencies
         run: |
           set -euo pipefail
@@ -130,8 +125,6 @@ jobs:
           cp -R packages/kn-next/src/__tests__/fixtures/standalone-drain-app "$APP_DIR"
           cd "$APP_DIR"
           cp knext.config.e2e.ts knext.config.ts
-          npm pkg set scripts.build="next build --webpack"
-          grep -q '"build": "next build --webpack"' package.json
           bun install
           # Dockerfile.standalone's `standalone-bun-self-contained` stage COPYs
           # `public` from the build context unconditionally (same as its
