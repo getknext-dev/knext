@@ -83,8 +83,12 @@ const INTERPRETERS = new Set(['node', 'bun', 'deno', 'python', 'python3', 'ruby'
 // `require('undici'|'node:https'|'node:http'|'https'|'http').request` (the
 // CommonJS form of the same module, where no bare `http`/`https` identifier
 // is ever bound to catch via the property-access clauses alone).
+// #1801 (final round): `.get` added alongside `.request` — `require('https').get`
+// is the CommonJS direct-chain form of the same shape `https?\.get` already
+// matches when an identifier is bound (`const h = https; h.get`), but the
+// chained call never binds an identifier at all.
 const REQUIRE_FETCH_MODULE_RE =
-  /require\(\s*['"`](?:undici|node:https|node:http|https|http)['"`]\s*\)\s*\.\s*request\b/;
+  /require\(\s*['"`](?:undici|node:https|node:http|https|http)['"`]\s*\)\s*\.\s*(?:request|get)\b/;
 export const INTERPRETER_FETCH = new RegExp(
   [
     '(?<![\\w-])fetch(?![\\w-])',
@@ -97,6 +101,16 @@ export const INTERPRETER_FETCH = new RegExp(
     'open-uri',
     'Net::HTTP',
     'LWP',
+    // #1801 (final round): raw sockets — net.connect/tls.connect open a
+    // network connection this scanner otherwise never classifies as a fetch
+    // shape at all (neither is HTTP-shaped, so none of the clauses above
+    // would ever match).
+    'net\\s*\\.\\s*connect\\b',
+    'tls\\s*\\.\\s*connect\\b',
+    // #1801 (final round): Python's stdlib HTTP client — `http.client.
+    // HTTPConnection(...)` — distinct from the `https?\.get`/`.request`
+    // clauses above, which only match a `.get`/`.request` call, not `.client`.
+    'http\\.client\\b',
   ].join('|'),
 );
 const APPLY_VERBS = new Set(['apply', 'create', 'replace']);
@@ -1700,7 +1714,8 @@ function classifyJsScript(path, st) {
   // #1787: a computed `globalThis`/`window`/`self[…]` access with a
   // non-literal key opens the gate too, even with no `INTERPRETER_FETCH`
   // text anywhere (`globalThis["fe"+"tch"](url)` never spells "fetch").
-  if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src)) return null;
+  if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src) && !hasExtraNetworkShape(src))
+    return null;
   const hostMatches = [...src.matchAll(/\bhost\s*:\s*(['"`])([^'"`]*)\1/g)];
   if (hostMatches.length > 0) {
     for (const m of hostMatches) {
@@ -1863,9 +1878,15 @@ function callArgSpanEnd(text, start) {
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export function hasComputedGlobalAccess(text) {
-  const names = new Set(['globalThis', 'window', 'self']);
+  // #1801 (final round): `global` joins `globalThis`/`window`/`self` as a
+  // fourth direct global-object name — Node's own legacy alias, matched the
+  // same as the other three everywhere below (`global[k]`).
+  const names = new Set(['globalThis', 'window', 'self', 'global']);
+  // #1801 (final round): the alias RHS may be parenthesized
+  // (`const g = (globalThis)`) — the previous pattern required the bare
+  // identifier immediately after `=`, so a wrapping paren broke the match.
   for (const m of text.matchAll(
-    /\b([A-Za-z_$][\w$]*)\s*=\s*(?:globalThis|window|self)(?=[;,\n)]|$)/g,
+    /\b([A-Za-z_$][\w$]*)\s*=\s*\(?\s*(?:globalThis|window|self|global)\s*\)?(?=[;,\n)]|$)/g,
   )) {
     names.add(m[1]);
   }
@@ -1874,6 +1895,11 @@ export function hasComputedGlobalAccess(text) {
   const bracketRes = [
     new RegExp(`\\b(?:${alt})\\s*(?:\\?\\.)?\\s*\\[`, 'g'),
     new RegExp(`\\(\\s*(?:${alt})\\s*\\)\\s*(?:\\?\\.)?\\s*\\[`, 'g'),
+    // #1801 (final round): a sequence (comma) expression ending in the
+    // global reference — `(0, globalThis)[k]` — never binds an alias name
+    // at all, so it has to be matched structurally like the plain-paren
+    // form above, just with an arbitrary leading expression before the comma.
+    new RegExp(`\\([^()]*,\\s*(?:${alt})\\s*\\)\\s*(?:\\?\\.)?\\s*\\[`, 'g'),
   ];
   for (const re of bracketRes) {
     for (const m of text.matchAll(re)) {
@@ -1885,7 +1911,13 @@ export function hasComputedGlobalAccess(text) {
     }
   }
 
-  const reflectRe = new RegExp(`\\bReflect\\s*\\.\\s*get\\s*\\(\\s*(?:${alt})\\s*,\\s*`, 'g');
+  // #1801 (final round): `Object.getOwnPropertyDescriptor(globalThis, k)` is
+  // the same "computed access spelled as a function call" shape
+  // `Reflect.get` already covers, under a different name.
+  const reflectRe = new RegExp(
+    `\\b(?:Reflect\\s*\\.\\s*get|Object\\s*\\.\\s*getOwnPropertyDescriptor)\\s*\\(\\s*(?:${alt})\\s*,\\s*`,
+    'g',
+  );
   for (const m of text.matchAll(reflectRe)) {
     const start = m.index + m[0].length;
     const end = callArgSpanEnd(text, start);
@@ -1893,6 +1925,110 @@ export function hasComputedGlobalAccess(text) {
     const inner = text.slice(start, end).trim();
     if (!isSinglePlainLiteral(inner)) return true;
   }
+
+  // #1801 (final round): destructuring a computed key straight off the
+  // global object — `const {[k]: f} = globalThis` — reads `globalThis[k]`
+  // without ever spelling a `[...]` access on `globalThis` itself; the
+  // bracket sits inside the destructuring PATTERN on the left of `=`, not on
+  // the global reference on the right.
+  const destructureRe = new RegExp(`\\{[^{}]*\\[([^\\]]+)\\][^{}]*\\}\\s*=\\s*(?:${alt})\\b`, 'g');
+  for (const m of text.matchAll(destructureRe)) {
+    if (!isSinglePlainLiteral(m[1].trim())) return true;
+  }
+  return false;
+}
+
+/**
+ * #1801 (final round): a `child_process` `exec`/`execSync`/`spawn`/
+ * `spawnSync` call whose own argument text mentions `curl`/`wget` — the
+ * fetch happens in a CHILD process this scanner would otherwise never read,
+ * because it only ever classifies the JS source text itself, never what it
+ * spawns. Requires the module to actually be imported/required so an
+ * unrelated local function literally named `exec` does not false-positive;
+ * requiring BOTH halves (the import AND the curl/wget mention inside a
+ * call) keeps this narrow rather than flagging every `child_process` use.
+ */
+function hasChildProcessNetworkExec(text) {
+  if (!/require\(\s*['"`]child_process['"`]\s*\)|from\s*['"`]child_process['"`]/.test(text))
+    return false;
+  for (const m of text.matchAll(/\b(?:exec|execSync|spawn|spawnSync)\s*\(([^)]*)\)/g)) {
+    if (/\b(?:curl|wget)\b/.test(m[1])) return true;
+  }
+  return false;
+}
+
+/**
+ * #1801 (final round): the Python equivalent of `hasChildProcessNetworkExec`
+ * — a `subprocess.run`/`call`/`check_call`/`check_output`/`Popen` call whose
+ * own argument text mentions `curl`/`wget`.
+ */
+function hasSubprocessNetworkExec(text) {
+  if (!/\bsubprocess\b/.test(text)) return false;
+  for (const m of text.matchAll(
+    /\bsubprocess\s*\.\s*(?:run|call|check_call|check_output|Popen)\s*\(([^)]*)\)/g,
+  )) {
+    if (/\b(?:curl|wget)\b/.test(m[1])) return true;
+  }
+  return false;
+}
+
+/**
+ * #1801 (final round): the alias/destructuring shapes of `https`/`http`/
+ * `undici` that `INTERPRETER_FETCH`'s literal substring matches cannot
+ * reach — none of `const h = require('node:https'); h.get(...)`,
+ * `require('https').get(...)` (now covered directly by
+ * `REQUIRE_FETCH_MODULE_RE`, kept here too for the aliased-identifier form),
+ * `const {request} = require('undici')`, `import {request} from 'undici'`,
+ * or `import * as u from 'undici'; u.request(...)` ever spell the literal
+ * substring `https?\.get`/`https?\.request`/`undici\s*\.\s*(request|fetch)`
+ * `INTERPRETER_FETCH` matches directly — the identifier bound to the module
+ * is either a local alias or a destructured function reference.
+ */
+function hasAliasedModuleNetworkCall(text) {
+  const httpAliases = new Set();
+  for (const m of text.matchAll(
+    /\b([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"`](?:node:)?https?['"`]\s*\)/g,
+  ))
+    httpAliases.add(m[1]);
+  for (const m of text.matchAll(
+    /\bimport\s+([A-Za-z_$][\w$]*)\s+from\s+['"`](?:node:)?https?['"`]/g,
+  ))
+    httpAliases.add(m[1]);
+  for (const a of httpAliases) {
+    if (new RegExp(`\\b${escapeRe(a)}\\s*\\.\\s*(?:get|request)\\b`).test(text)) return true;
+  }
+
+  const undiciAliases = new Set();
+  for (const m of text.matchAll(
+    /\bimport\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s+['"`]undici['"`]/g,
+  ))
+    undiciAliases.add(m[1]);
+  for (const m of text.matchAll(/\b([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"`]undici['"`]\s*\)/g))
+    undiciAliases.add(m[1]);
+  for (const a of undiciAliases) {
+    if (new RegExp(`\\b${escapeRe(a)}\\s*\\.\\s*(?:request|fetch)\\b`).test(text)) return true;
+  }
+
+  if (/\{[^}]*\brequest\b[^}]*\}\s*=\s*require\(\s*['"`]undici['"`]\s*\)/.test(text)) return true;
+  if (/\bimport\s*\{[^}]*\brequest\b[^}]*\}\s*from\s*['"`]undici['"`]/.test(text)) return true;
+  return false;
+}
+
+/**
+ * #1801 (final round): dynamic code (`eval(…)`, `new Function(…)`) can
+ * construct and run any of the above shapes as a STRING, which no literal
+ * scan can ever classify — gated here as a pure widener (never a positive
+ * identification of a fetch target), consistent with this module's
+ * documented "unclassifiable → fail closed" treatment of every shape the
+ * walk cannot follow. Bundles the four sibling network shapes above, each on
+ * its own line so the mutation prover can disable one without the others.
+ */
+export function hasExtraNetworkShape(text) {
+  if (/\beval\s*\(/.test(text)) return true;
+  if (/\bnew\s+Function\s*\(/.test(text)) return true;
+  if (hasChildProcessNetworkExec(text)) return true;
+  if (hasSubprocessNetworkExec(text)) return true;
+  if (hasAliasedModuleNetworkCall(text)) return true;
   return false;
 }
 
@@ -1904,7 +2040,8 @@ export function isFetchSegment(ws, st) {
     if (
       INTERPRETERS.has(base) &&
       (INTERPRETER_FETCH.test(ws.slice(k + 1).join(' ')) ||
-        hasComputedGlobalAccess(ws.slice(k + 1).join(' ')))
+        hasComputedGlobalAccess(ws.slice(k + 1).join(' ')) ||
+        hasExtraNetworkShape(ws.slice(k + 1).join(' ')))
     )
       return true;
     if (!FETCH_WORDS.has(base)) continue;
@@ -1948,7 +2085,9 @@ export function unclassifiedFetch(ws, st, { pipedFromNetwork = false, depth = 0 
 function fetchShape(b, args, rawArgs, st, pipedFromNetwork, depth) {
   if (
     INTERPRETERS.has(b) &&
-    (INTERPRETER_FETCH.test(args.join(' ')) || hasComputedGlobalAccess(args.join(' ')))
+    (INTERPRETER_FETCH.test(args.join(' ')) ||
+      hasComputedGlobalAccess(args.join(' ')) ||
+      hasExtraNetworkShape(args.join(' ')))
   )
     return interpreterFetch(b);
   // #1512/#1715: `node <file>.mjs` / `bun <file>.mjs` moves a fetch OUT of
@@ -3742,6 +3881,19 @@ function loadLocalUsesDoc(usesRaw, resolveSource) {
  */
 const KNOWN_NON_APPLYING_ACTIONS = new Set([
   'actions/cache',
+  // #1801 (final round, round-2 review fix): `actions/cache/save` and
+  // `actions/cache/restore` are DELIBERATELY ABSENT here, unlike the
+  // combined `actions/cache` action above. Allowlisting them was tried and
+  // reverted: it silenced the PRE-EXISTING generic "unknown remote action"
+  // fail-closed widening (`usesStepMightApply`) for every job using either
+  // split action, which is exactly what caught a save/restore-based
+  // exfiltration job on its own (no `needs:` edge, or the real apply in a
+  // DIFFERENT workflow file, required) before this module ever had a
+  // dedicated cache-linking rule. Leaving them unknown keeps that
+  // protection; the dedicated `jobsLinkedByArtifactOrOutputs` cache rule
+  // below is additional, cross-job evidence, not a substitute for it, and
+  // is proven by a DIRECT unit test precisely so it is never masked by this
+  // allowlist decision again.
   'actions/checkout',
   'actions/download-artifact',
   'actions/setup-go',
@@ -3868,14 +4020,38 @@ function localUsesMightApply(usesRaw, resolveSource, visited) {
  * actions at all, so this costs nothing there.
  */
 function calledUnitMightApply(calledDoc, resolveSource, visited) {
-  if (calledDoc?.jobs) {
-    const stepLists = Object.values(calledDoc.jobs).map((j) => j?.steps ?? []);
-    for (const steps of stepLists) {
+  // #1801 (final round): a `jobs:` key that is present but malformed — `{}`
+  // (empty) or not a map at all (a string, an array) — is NOT "a reusable
+  // workflow with zero jobs, safe by construction". It is especially
+  // suspicious paired with `runs.using: docker` (two shapes of the SAME
+  // document disagreeing about what kind of action/workflow this is), but
+  // fails closed regardless of what else is present: neither recognized
+  // shape (reusable workflow, composite action) can be proven here.
+  const jobsVal = calledDoc?.jobs;
+  const jobsIsValidMap =
+    jobsVal !== undefined &&
+    jobsVal !== null &&
+    typeof jobsVal === 'object' &&
+    !Array.isArray(jobsVal) &&
+    Object.keys(jobsVal).length > 0;
+  if (jobsVal !== undefined && !jobsIsValidMap) return true;
+  if (jobsIsValidMap) {
+    for (const [, j] of Object.entries(jobsVal)) {
+      const steps = j?.steps ?? [];
       for (const s of steps) {
         if (typeof s?.run === 'string' && textHasManifestApply(s.run)) return true;
         if (typeof s?.uses === 'string' && usesStepMightApply(s, resolveSource, visited))
           return true;
       }
+      // #1801 (final round): a JOB-LEVEL `uses:` inside the called reusable
+      // workflow is a NESTED reusable-workflow call (local or remote) — this
+      // loop used to look only at `j.steps`, so a job made entirely of
+      // `uses: ./another-workflow.yml` (no `steps` at all) was invisible.
+      if (
+        typeof j?.uses === 'string' &&
+        usesStepMightApply({ uses: j.uses, with: j.with }, resolveSource, visited)
+      )
+        return true;
     }
     return false;
   }
@@ -3937,6 +4113,23 @@ function jobUsesSurfaceMightApply(job, resolveSource, visited) {
   );
 }
 
+/**
+ * #1801 (final round): whether the workflow's own trigger includes
+ * `workflow_run` — a run of THIS workflow caused by another workflow
+ * finishing, in which the upstream run's identity (and so its artifacts)
+ * cannot be verified here (the classic "pwn request" pattern: a fork PR's
+ * untrusted workflow finishes, triggering a privileged base-repo workflow
+ * that then downloads the fork's own artifact). `on:` may be a bare string,
+ * an array of trigger names, or a map of trigger → config.
+ */
+function hasWorkflowRunTrigger(on) {
+  if (!on) return false;
+  if (typeof on === 'string') return on === 'workflow_run';
+  if (Array.isArray(on)) return on.includes('workflow_run');
+  if (typeof on === 'object') return Object.hasOwn(on, 'workflow_run');
+  return false;
+}
+
 /** Every job id a `needs:` value names, normalized to an array. */
 function jobNeeds(job) {
   const n = job?.needs;
@@ -3960,7 +4153,7 @@ function jobNeeds(job) {
  *     or the dependent's own text references `needs.<depId>.outputs`/
  *     `.result` anywhere (steps, `if:`, `with:`, `env:`).
  */
-function jobsLinkedByArtifactOrOutputs(depJob, depId, job) {
+export function jobsLinkedByArtifactOrOutputs(depJob, depId, job) {
   const depProducesArtifact = (depJob?.steps ?? []).some(
     (s) => typeof s?.uses === 'string' && /actions\/upload-artifact/.test(s.uses),
   );
@@ -3968,6 +4161,22 @@ function jobsLinkedByArtifactOrOutputs(depJob, depId, job) {
     (s) => typeof s?.uses === 'string' && /actions\/download-artifact/.test(s.uses),
   );
   if (depProducesArtifact || jobConsumesArtifact) return true;
+  // #1801 (final round): the SAME hand-off evidence, via `actions/cache`'s
+  // split save/restore actions instead of upload/download-artifact — a
+  // `save` in the dependency and a `restore` in the dependent is exactly as
+  // much a cross-job channel as an artifact upload/download. Deliberately
+  // scoped to the SPLIT actions (`actions/cache/save`, `actions/cache/
+  // restore`), not the combined `actions/cache` action every ordinary
+  // same-job dependency-cache step in this repo already uses — widening to
+  // the combined action would link nearly every `needs:`-connected pair in
+  // the real tree that merely caches its own dependencies independently.
+  const depSavesCache = (depJob?.steps ?? []).some(
+    (s) => typeof s?.uses === 'string' && /actions\/cache\/save\b/.test(s.uses),
+  );
+  const jobRestoresCache = (job?.steps ?? []).some(
+    (s) => typeof s?.uses === 'string' && /actions\/cache\/restore\b/.test(s.uses),
+  );
+  if (depSavesCache || jobRestoresCache) return true;
   if (depJob?.outputs && Object.keys(depJob.outputs).length > 0) return true;
   const hay = JSON.stringify(job ?? {});
   if (new RegExp(`needs\\.${depId}\\.(outputs|result)\\b`).test(hay)) return true;
@@ -4082,6 +4291,21 @@ export function unsafeAppliesInWorkflow(
       for (const o of result) offenders.push(`${jobId}[${i}]: ${o}`);
       if (!stepGuaranteed(step)) revokeStepVerifications(carry, before);
     });
+  }
+  // #1801 (final round): a workflow_run-triggered workflow that downloads
+  // an artifact AND applies a manifest anywhere — see `hasWorkflowRunTrigger`
+  // for why the artifact's provenance cannot be trusted here.
+  if (hasWorkflowRunTrigger(doc?.on) && [...componentApply.values()].some(Boolean)) {
+    for (const [jobId, job] of jobs) {
+      const downloadsArtifact = (job?.steps ?? []).some(
+        (s) => typeof s?.uses === 'string' && /actions\/download-artifact/.test(s.uses),
+      );
+      if (downloadsArtifact) {
+        offenders.push(
+          `${jobId}: workflow_run trigger downloads an artifact of unverifiable provenance, and this workflow applies a manifest (fail closed)`,
+        );
+      }
+    }
   }
   return [...new Set(offenders)];
 }

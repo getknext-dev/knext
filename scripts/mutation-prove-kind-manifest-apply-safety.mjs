@@ -292,7 +292,7 @@ prove(
 prove(
   'M21 remote: an interpreter fetching in-process (python -c urllib, node -e fetch) passes',
   SCANNER,
-  "(INTERPRETER_FETCH.test(args.join(' ')) || hasComputedGlobalAccess(args.join(' ')))",
+  "(INTERPRETER_FETCH.test(args.join(' ')) ||\n      hasComputedGlobalAccess(args.join(' ')) ||\n      hasExtraNetworkShape(args.join(' ')))",
   '(false)',
 );
 prove(

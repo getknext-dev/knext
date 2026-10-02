@@ -30,7 +30,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCANNER = resolve(REPO_ROOT, 'scripts/lib/apply-safety-scan.mjs');
 const SPEC = 'tests/apply-safety-scan-tech-debt.test.ts';
 
-declareMutations(21);
+declareMutations(39);
 
 readFileSync(SCANNER, 'utf8'); // FATAL if missing, before anything is mutated
 
@@ -156,8 +156,8 @@ prove(
 // the literal substring "fetch" for `INTERPRETER_FETCH` to catch on its own.
 prove(
   'M10 classifyJsScript computed-global-access gate (#1787)',
-  'if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src)) return null;',
-  'if (!INTERPRETER_FETCH.test(src)) return null;',
+  'if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src) && !hasExtraNetworkShape(src))\n    return null;',
+  'if (!INTERPRETER_FETCH.test(src) && !hasExtraNetworkShape(src)) return null; // MUTATION: disabled',
 );
 
 // M11: `isSinglePlainLiteral`'s early-close rejection (#1787) — this is what
@@ -273,7 +273,169 @@ prove(
   '  // else this module has no way to read the behavior of. Fail closed.\n  return false; // MUTATION: disabled\n}',
 );
 
-const declared = 21;
+// M22 (#1801 final round): `global` as a fourth global-object alias name —
+// disabling it must red the `global[k]` fixture while leaving
+// `globalThis[k]` etc. untouched.
+prove(
+  'M22 `global[k]` recognized as a global-object alias (#1801 final round)',
+  "const names = new Set(['globalThis', 'window', 'self', 'global']);",
+  "const names = new Set(['globalThis', 'window', 'self']); // MUTATION: disabled",
+);
+
+// M23 (#1801 final round): a parenthesized alias RHS (`const g =
+// (globalThis)`) — reverting to the bare-identifier-only pattern must red
+// that fixture while a bare `const g = globalThis` fixture stays caught.
+prove(
+  'M23 parenthesized alias RHS `const g = (globalThis)` (#1801 final round)',
+  '    /\\b([A-Za-z_$][\\w$]*)\\s*=\\s*\\(?\\s*(?:globalThis|window|self|global)\\s*\\)?(?=[;,\\n)]|$)/g,',
+  '    /\\b([A-Za-z_$][\\w$]*)\\s*=\\s*(?:globalThis|window|self|global)(?=[;,\\n)]|$)/g, // MUTATION: disabled',
+);
+
+// M24 (#1801 final round): the sequence-expression bracket shape
+// `(0, globalThis)[k]` — disabling that regex entry must red the fixture
+// while leaving the plain-paren `(globalThis)[k]` fixture caught by the
+// sibling regex entry.
+prove(
+  'M24 sequence-expression `(0, globalThis)[k]` (#1801 final round)',
+  "new RegExp(`\\\\([^()]*,\\\\s*(?:${alt})\\\\s*\\\\)\\\\s*(?:\\\\?\\\\.)?\\\\s*\\\\[`, 'g'),",
+  "new RegExp(`$MUTATED_NEVER_MATCHES^`, 'g'), // MUTATION: disabled",
+);
+
+// M25 (#1801 final round): `Object.getOwnPropertyDescriptor(globalThis, k)`
+// — disabling that alternative in reflectRe must red its fixture while
+// leaving the Reflect.get fixture caught.
+prove(
+  'M25 Object.getOwnPropertyDescriptor(globalThis, k) (#1801 final round)',
+  '    `\\\\b(?:Reflect\\\\s*\\\\.\\\\s*get|Object\\\\s*\\\\.\\\\s*getOwnPropertyDescriptor)\\\\s*\\\\(\\\\s*(?:${alt})\\\\s*,\\\\s*`,',
+  '    `\\\\bReflect\\\\s*\\\\.\\\\s*get\\\\s*\\\\(\\\\s*(?:${alt})\\\\s*,\\\\s*`, // MUTATION: disabled',
+);
+
+// M26 (#1801 final round): destructuring a computed key off the global
+// (`const {[k]: f} = globalThis`) — disabling the whole loop must red that
+// fixture.
+prove(
+  'M26 destructured computed key `{[k]: f} = globalThis` (#1801 final round)',
+  'for (const m of text.matchAll(destructureRe)) {',
+  'for (const m of []) { // MUTATION: disabled',
+);
+
+// M27 (#1801 final round): child_process exec/spawn running curl/wget —
+// disabling must red the execSync/spawn fixtures.
+prove(
+  'M27 child_process exec/spawn running curl/wget (#1801 final round)',
+  'function hasChildProcessNetworkExec(text) {',
+  'function hasChildProcessNetworkExec(text) {\n  return false; // MUTATION: disabled',
+);
+
+// M28 (#1801 final round): Python subprocess running curl/wget — disabling
+// must red the subprocess fixture.
+prove(
+  'M28 Python subprocess running curl/wget (#1801 final round)',
+  'function hasSubprocessNetworkExec(text) {',
+  'function hasSubprocessNetworkExec(text) {\n  return false; // MUTATION: disabled',
+);
+
+// M29 (#1801 final round): aliased/destructured https/undici module access
+// — disabling must red the aliased-https and undici-destructure fixtures.
+prove(
+  'M29 aliased/destructured https/undici module access (#1801 final round)',
+  'function hasAliasedModuleNetworkCall(text) {',
+  'function hasAliasedModuleNetworkCall(text) {\n  return false; // MUTATION: disabled',
+);
+
+// M30 (#1801 final round): `eval(...)` widens the gate as unclassifiable —
+// disabling must red the inline eval fixture.
+prove(
+  'M30 eval(...) widens the gate (#1801 final round)',
+  'export function hasExtraNetworkShape(text) {\n  if (/\\beval\\s*\\(/.test(text)) return true;',
+  'export function hasExtraNetworkShape(text) {\n  if (false) return true; // MUTATION: disabled',
+);
+
+// M31 (#1801 final round): `new Function(...)` widens the gate — disabling
+// must red the followed-script new Function fixture.
+prove(
+  'M31 new Function(...) widens the gate (#1801 final round)',
+  'if (/\\bnew\\s+Function\\s*\\(/.test(text)) return true;',
+  'if (false) return true; // MUTATION: disabled',
+);
+
+// M32 (#1801 final round): raw sockets net.connect/tls.connect — disabling
+// both INTERPRETER_FETCH entries must red both fixtures.
+prove(
+  'M32 raw sockets net.connect/tls.connect (#1801 final round)',
+  "    'net\\\\s*\\\\.\\\\s*connect\\\\b',\n    'tls\\\\s*\\\\.\\\\s*connect\\\\b',",
+  "    'net-connect-disabled-by-mutation-never-matches',\n    'tls-connect-disabled-by-mutation-never-matches', // MUTATION: disabled",
+);
+
+// M33 (#1801 final round): Python's `http.client` — disabling must red the
+// `http.client.HTTPSConnection` fixture.
+prove(
+  'M33 Python http.client (#1801 final round)',
+  "    'http\\\\.client\\\\b',",
+  "    'http-client-disabled-by-mutation-never-matches', // MUTATION: disabled",
+);
+
+// M34 (#1801 final round): `require('https').get` direct chain — reverting
+// REQUIRE_FETCH_MODULE_RE to `.request`-only must red that fixture while
+// leaving the `.request` fixtures caught.
+prove(
+  'M34 require(...).get direct chain (#1801 final round)',
+  '\\s*\\.\\s*(?:request|get)\\b/;',
+  '\\s*\\.\\s*(?:request)\\b/; // MUTATION: disabled',
+);
+
+// M35 (#1801 final round): cross-job linking via actions/cache save/
+// restore — disabling must red the cache save/restore cross-job fixture
+// while leaving the GREEN combined-cache control unaffected.
+prove(
+  'M35 cross-job linking via actions/cache save/restore (#1801 final round)',
+  'if (depSavesCache || jobRestoresCache) return true;',
+  'if (false) return true; // MUTATION: disabled',
+);
+
+// M36 (#1801 final round): a called reusable workflow's JOB-LEVEL `uses:`
+// (a nested reusable-workflow call) — disabling must red the two-hop
+// nested-reusable-workflow fixture.
+prove(
+  'M36 called reusable workflow job-level uses: followed (#1801 final round)',
+  `      if (
+        typeof j?.uses === 'string' &&
+        usesStepMightApply({ uses: j.uses, with: j.with }, resolveSource, visited)
+      )
+        return true;`,
+  `      if (false) return true; // MUTATION: disabled`,
+);
+
+// M37 (#1801 final round): malformed `jobs:` (empty `{}` or non-map) fails
+// closed — disabling must red both malformed-action.yml fixtures while
+// leaving the GREEN real-reusable-workflow control unaffected.
+prove(
+  'M37 malformed jobs: ({} or non-map) fails closed (#1801 final round)',
+  '    !Array.isArray(jobsVal) &&\n    Object.keys(jobsVal).length > 0;',
+  '    !Array.isArray(jobsVal); // MUTATION: disabled (drops the non-empty check)',
+);
+
+// M38 (#1801 final round): a workflow_run-triggered workflow that downloads
+// an artifact and applies a manifest — disabling must red that fixture
+// while leaving the push-triggered GREEN control unaffected.
+prove(
+  'M38 workflow_run-triggered artifact consumption fails closed (#1801 final round)',
+  'if (hasWorkflowRunTrigger(doc?.on) && [...componentApply.values()].some(Boolean)) {',
+  'if (false) { // MUTATION: disabled',
+);
+
+// M39 (#1801 final round): `classifyJsScript`'s own gate is widened by
+// `hasExtraNetworkShape`, not just the inline-interpreter gate — disabling
+// JUST this call site must red every FOLLOWED-script fixture above (eval,
+// new Function, child_process, undici, aliased https) while an inline
+// `node -e` one-liner (a separate call site) stays caught.
+prove(
+  "M39 classifyJsScript's own gate widened by hasExtraNetworkShape (#1801 final round)",
+  'if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src) && !hasExtraNetworkShape(src))\n    return null;',
+  'if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src)) return null; // MUTATION: disabled',
+);
+
+const declared = 39;
 console.log(`\n${caught}/${declared} mutations caught, ${decorative} decorative.`);
 if (decorative > 0 || caught !== declared) {
   console.error('Mutation proof FAILED: at least one rule is decorative or missing.');

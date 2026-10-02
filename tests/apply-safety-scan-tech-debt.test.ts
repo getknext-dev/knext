@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 import {
   hasComputedGlobalAccess,
+  hasExtraNetworkShape,
   INTERPRETER_FETCH,
+  jobsLinkedByArtifactOrOutputs,
   unsafeApplies,
   unsafeAppliesInWorkflow,
 } from '../scripts/lib/apply-safety-scan.mjs';
@@ -911,7 +913,7 @@ describe('apply-safety-scan: a non-composite/non-reusable-workflow local action 
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) =>
         p === './.github/actions/js-action/action.yml'
-          ? 'using: node20\nmain: index.js\n'
+          ? 'runs:\n  using: node20\n  main: index.js\n'
           : FETCH_JS,
       followScripts: true,
     });
@@ -1085,6 +1087,536 @@ describe('apply-safety-scan: fix 5 — changesets/action is no longer a blanket 
     };
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
+  });
+});
+describe('apply-safety-scan: #1801 (final round) — globalThis extra shapes', () => {
+  it('RED: `global[k]` — the fourth global-object alias', () => {
+    expect(hasComputedGlobalAccess('global[k]("https://x")')).toBe(true);
+  });
+
+  it('GREEN: `global["fetch"]` — a literal bracket key is not computed', () => {
+    expect(hasComputedGlobalAccess('global["fetch"]("https://x")')).toBe(false);
+  });
+
+  it('RED: `(0, globalThis)[k]` — a sequence expression hiding the global reference', () => {
+    expect(hasComputedGlobalAccess('(0, globalThis)[k]("https://x")')).toBe(true);
+  });
+
+  it('GREEN: `(0, globalThis)["fetch"]` — same shape, literal key', () => {
+    expect(hasComputedGlobalAccess('(0, globalThis)["fetch"]("https://x")')).toBe(false);
+  });
+
+  it('RED: `const {[k]: f} = globalThis` — destructuring a computed key off the global', () => {
+    expect(hasComputedGlobalAccess('const {[k]: f} = globalThis;\nf("https://x");\n')).toBe(true);
+  });
+
+  it('GREEN: `const {["fetch"]: f} = globalThis` — destructuring with a literal key', () => {
+    expect(hasComputedGlobalAccess('const {["fetch"]: f} = globalThis;\nf("https://x");\n')).toBe(
+      false,
+    );
+  });
+
+  it('RED: `const g = (globalThis)` — a parenthesized alias RHS', () => {
+    expect(hasComputedGlobalAccess('const g = (globalThis);\ng[k]("https://x");\n')).toBe(true);
+  });
+
+  it('GREEN: `const g = (somethingElse)` — a parenthesized non-global RHS is not an alias', () => {
+    expect(hasComputedGlobalAccess('const g = (somethingElse);\ng[k]("https://x");\n')).toBe(false);
+  });
+
+  it('RED: `Object.getOwnPropertyDescriptor(globalThis, k)` — a computed key via a second reflection API', () => {
+    expect(
+      hasComputedGlobalAccess('Object.getOwnPropertyDescriptor(globalThis, "fe" + "tch")'),
+    ).toBe(true);
+  });
+
+  it('GREEN: `Object.getOwnPropertyDescriptor(globalThis, "fetch")` with a literal key', () => {
+    expect(hasComputedGlobalAccess('Object.getOwnPropertyDescriptor(globalThis, "fetch")')).toBe(
+      false,
+    );
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — dynamic code (eval / new Function)', () => {
+  it('RED: `eval` building a network call is unclassifiable in a followed script, with no literal "fetch" substring anywhere', () => {
+    // The call is spelled "fe" + "tch" so only the eval(...) rule itself —
+    // never a plain INTERPRETER_FETCH substring match — can catch this.
+    const js = 'eval("fe" + "tch" + "(\\"https://example.com/x\\")");\n';
+    const src = 'node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n';
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+
+  it('RED: `new Function` building a network call in a followed script, with no literal "fetch" substring anywhere', () => {
+    const js =
+      'const f = new Function("u", "return " + "fe" + "tch" + "(u)");\nf("https://example.com/x");\n';
+    const src = 'node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n';
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+
+  it('GREEN (false-positive control): a followed script with no eval/new Function/fetch shape at all stays clean', () => {
+    const js = 'const sum = (a, b) => a + b;\nmodule.exports = sum;\n';
+    const src = 'node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n';
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders).toEqual([]);
+  });
+
+  it('GREEN (false-positive control, strengthened): "evaluate(...)" and "retrieval" are not caught by the eval(...) widener', () => {
+    expect(
+      hasExtraNetworkShape('function evaluate(x) { return x * 2; }\nconst retrieval = 1;\n'),
+    ).toBe(false);
+  });
+
+  it('GREEN (false-positive control, strengthened): a `new` call to an unrelated class named `Function` on a namespace is not the global `Function` constructor', () => {
+    // `ns.Function(...)` is a property access, never the bare identifier
+    // `Function` the `\bnew\s+Function\s*\(` widener matches on purpose.
+    expect(hasExtraNetworkShape('const f = new ns.Function("a", "b");\n')).toBe(false);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — raw sockets (net.connect / tls.connect)', () => {
+  it('RED: `net.connect` in an inline node one-liner', () => {
+    expect(INTERPRETER_FETCH.test('const s = net.connect(443, host);')).toBe(true);
+  });
+
+  it('RED: `tls.connect` in an inline node one-liner', () => {
+    expect(INTERPRETER_FETCH.test('const s = tls.connect({ host, port: 443 });')).toBe(true);
+  });
+
+  it('GREEN (false-positive control): unrelated code with neither net nor tls', () => {
+    expect(INTERPRETER_FETCH.test('const s = compute(host, port);')).toBe(false);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — shell-outs to curl/wget', () => {
+  it('RED: node child_process execSync running curl', () => {
+    const js =
+      "const { execSync } = require('child_process');\nexecSync('curl -s https://example.com/x -o m.yaml');\n";
+    expect(hasExtraNetworkShape(js)).toBe(true);
+  });
+
+  it('RED: node child_process spawn running wget', () => {
+    const js =
+      "import { spawn } from 'child_process';\nspawn('wget', ['https://example.com/x']);\n";
+    expect(hasExtraNetworkShape(js)).toBe(true);
+  });
+
+  it('GREEN (false-positive control): child_process execSync running a non-fetching command', () => {
+    const js = "const { execSync } = require('child_process');\nexecSync('echo hi');\n";
+    expect(hasExtraNetworkShape(js)).toBe(false);
+  });
+
+  it('RED: python subprocess running curl', () => {
+    const py = "import subprocess\nsubprocess.run(['curl', '-s', 'https://example.com/x'])\n";
+    expect(hasExtraNetworkShape(py)).toBe(true);
+  });
+
+  it('RED: python http.client', () => {
+    expect(
+      INTERPRETER_FETCH.test('import http.client\nc = http.client.HTTPSConnection(host)\n'),
+    ).toBe(true);
+  });
+
+  it('GREEN (false-positive control, strengthened): camelCase `httpClient` (no literal dot) does not match `http.client`', () => {
+    expect(INTERPRETER_FETCH.test('const httpClient = new ApiClient(host);\n')).toBe(false);
+  });
+
+  it('GREEN (false-positive control, strengthened): the prose "http client library" (a space, not a dot) does not match', () => {
+    expect(INTERPRETER_FETCH.test('// uses a plain http client library internally\n')).toBe(false);
+  });
+
+  it('GREEN (false-positive control): python subprocess running a non-fetching command', () => {
+    const py = "import subprocess\nsubprocess.run(['echo', 'hi'])\n";
+    expect(hasExtraNetworkShape(py)).toBe(false);
+  });
+
+  it('end-to-end: a followed script shelling out to curl feeds an apply job', () => {
+    const js =
+      "const { execSync } = require('child_process');\nexecSync('curl -s https://example.com/x -o m.yaml');\n";
+    const src = 'node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n';
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — undici destructure/namespace import', () => {
+  it('RED: `const {request} = require("undici")`', () => {
+    expect(hasExtraNetworkShape('const {request} = require("undici");\nrequest(url);\n')).toBe(
+      true,
+    );
+  });
+
+  it('RED: `import {request} from "undici"`', () => {
+    expect(hasExtraNetworkShape('import {request} from "undici";\nrequest(url);\n')).toBe(true);
+  });
+
+  it('RED: `import * as u from "undici"` then `u.request(...)`', () => {
+    expect(hasExtraNetworkShape('import * as u from "undici";\nu.request(url);\n')).toBe(true);
+  });
+
+  it('RED: `import * as u from "undici"` then `u.fetch(...)`', () => {
+    expect(hasExtraNetworkShape('import * as u from "undici";\nu.fetch(url);\n')).toBe(true);
+  });
+
+  it('GREEN (false-positive control): `import * as u from "somewhere-else"` is not undici', () => {
+    expect(hasExtraNetworkShape('import * as u from "somewhere-else";\nu.request(url);\n')).toBe(
+      false,
+    );
+  });
+
+  it('end-to-end: a followed script destructuring undici.request feeds an apply job', () => {
+    const js = 'const {request} = require("undici");\nrequest("https://example.com/x");\n';
+    const src = 'node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n';
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — https direct chain + aliased require', () => {
+  it("RED: `require('https').get` — direct chain, no identifier ever bound", () => {
+    expect(INTERPRETER_FETCH.test("require('https').get('https://example.com/x');")).toBe(true);
+  });
+
+  it("RED: `const h = require('node:https'); h.get(...)` — aliased identifier", () => {
+    expect(
+      hasExtraNetworkShape("const h = require('node:https');\nh.get('https://example.com/x');\n"),
+    ).toBe(true);
+  });
+
+  it('GREEN (false-positive control): an identifier aliased to an unrelated module', () => {
+    expect(
+      hasExtraNetworkShape("const h = require('node:path');\nh.get('https://example.com/x');\n"),
+    ).toBe(false);
+  });
+
+  it('end-to-end: a followed script aliasing node:https.get feeds an apply job', () => {
+    const js = "const h = require('node:https');\nh.get('https://example.com/x');\n";
+    const src = 'node scripts/lib/probe.mjs\nkubectl apply -f m.yaml\n';
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — cross-job links via actions/cache', () => {
+  // #1801 round-2 review fix: `actions/cache/save`/`actions/cache/restore`
+  // are DELIBERATELY NOT on `KNOWN_NON_APPLYING_ACTIONS` (see that const's
+  // own comment) — they stay "unknown remote action", which independently
+  // fail-closes any job that uses either one. That pre-existing mechanism
+  // would make a full-pipeline RED/GREEN pair here pass regardless of
+  // whether `jobsLinkedByArtifactOrOutputs`'s cache clause exists at all,
+  // so it can no longer be the proof vehicle for that clause — it is
+  // exercised DIRECTLY as a unit below instead.
+  it('RED (direct unit): a cache save in the dependency + a cache restore in the dependent links them', () => {
+    const depJob = {
+      steps: [{ uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } }],
+    };
+    const job = {
+      steps: [{ uses: 'actions/cache/restore@v4', with: { path: 'm.yaml', key: 'm' } }],
+    };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'fetchJob', job)).toBe(true);
+  });
+
+  it('RED (direct unit): a cache save alone (no restore on the other side) still links, mirroring the artifact rule', () => {
+    const depJob = {
+      steps: [{ uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } }],
+    };
+    const job = { steps: [{ run: 'kubectl apply -f m.yaml\n' }] };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'fetchJob', job)).toBe(true);
+  });
+
+  it('GREEN (direct unit, false-positive control): the combined `actions/cache` action on both sides is not this rule’s evidence', () => {
+    const depJob = { steps: [{ uses: 'actions/cache@v4', with: { path: 'node_modules' } }] };
+    const job = { steps: [{ uses: 'actions/cache@v4', with: { path: 'node_modules' } }] };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'buildJob', job)).toBe(false);
+  });
+
+  it('GREEN (direct unit, false-positive control): unrelated jobs with no cache/artifact/outputs evidence at all', () => {
+    const depJob = { steps: [{ run: 'echo hi\n' }] };
+    const job = { steps: [{ run: 'echo bye\n' }] };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'depJob', job)).toBe(false);
+  });
+
+  // End-to-end illustration (not the M35 proof vehicle — see above): this
+  // still reds today, via the generic unknown-action widening, with or
+  // without the dedicated cache-link rule.
+  it('end-to-end: a cache save in the fetching job, a cache restore in the applying job', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } },
+          ],
+        },
+        applyJob: {
+          needs: 'fetchJob',
+          steps: [
+            { uses: 'actions/cache/restore@v4', with: { path: 'm.yaml', key: 'm' } },
+            { run: 'kubectl apply -f m.yaml\n' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('GREEN (false-positive control): each job independently caches its own deps with the combined action, no hand-off', () => {
+    const doc = {
+      jobs: {
+        buildJob: {
+          steps: [
+            { uses: 'actions/cache@v4', with: { path: 'node_modules', key: 'deps' } },
+            { run: 'npm run build\n' },
+          ],
+        },
+        deployJob: {
+          needs: 'buildJob',
+          steps: [
+            { uses: 'actions/cache@v4', with: { path: 'node_modules', key: 'deps' } },
+            { run: 'echo noop\n' },
+          ],
+        },
+      },
+    };
+    expect(unsafeAppliesInWorkflow(doc)).toEqual([]);
+  });
+});
+
+describe('apply-safety-scan: #1801 round-2 review — regression fixtures C, D, G (split cache actions must stay fail-closed)', () => {
+  it('RED (C): a followed-script fetch + cache/save in ONE job, with no kubectl apply anywhere in this document (the apply lives in another workflow)', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('RED (D): a fetch+save job and a restore+apply job with NO `needs:` edge between them', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } },
+          ],
+        },
+        applyJob: {
+          steps: [
+            { uses: 'actions/cache/restore@v4', with: { path: 'm.yaml', key: 'm' } },
+            { run: 'kubectl apply -f m.yaml\n' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('RED (G): a restore+fetch job that an apply job `needs:`', () => {
+    const doc = {
+      jobs: {
+        restoreFetchJob: {
+          steps: [
+            { uses: 'actions/cache/restore@v4', with: { path: 'm.yaml', key: 'm' } },
+            { run: 'node scripts/lib/probe.mjs\n' },
+          ],
+        },
+        applyJob: {
+          needs: 'restoreFetchJob',
+          steps: [{ run: 'kubectl apply -f m.yaml\n' }],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('restoreFetchJob'))).toBe(true);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — workflow_run-triggered artifact consumption', () => {
+  it('RED: a workflow_run-triggered workflow downloads an artifact and applies a manifest', () => {
+    const doc = {
+      on: { workflow_run: { workflows: ['CI'], types: ['completed'] } },
+      jobs: {
+        deployJob: {
+          steps: [
+            {
+              uses: 'actions/download-artifact@v4',
+              with: { name: 'm', 'run-id': '${{ github.event.workflow_run.id }}' },
+            },
+            { run: 'kubectl apply -f m.yaml\n' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc);
+    expect(offenders.some((o) => o.startsWith('deployJob'))).toBe(true);
+  });
+
+  it('GREEN (false-positive control): a workflow_run-triggered workflow that downloads an artifact but never applies anything', () => {
+    const doc = {
+      on: { workflow_run: { workflows: ['CI'], types: ['completed'] } },
+      jobs: {
+        reportJob: {
+          steps: [
+            { uses: 'actions/download-artifact@v4', with: { name: 'm' } },
+            { run: 'echo done\n' },
+          ],
+        },
+      },
+    };
+    expect(unsafeAppliesInWorkflow(doc)).toEqual([]);
+  });
+
+  it('GREEN (false-positive control): a push-triggered workflow is not caught by the workflow_run rule', () => {
+    const doc = {
+      on: 'push',
+      jobs: {
+        deployJob: {
+          steps: [
+            { uses: 'actions/download-artifact@v4', with: { name: 'm' } },
+            { run: 'kubectl apply -f m.yaml\n' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc);
+    expect(offenders.some((o) => /workflow_run/.test(o))).toBe(false);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — a called reusable workflow nested job-level uses:', () => {
+  it('RED: a reusable workflow whose job is ENTIRELY a nested `uses:` call to an applying local workflow', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/workflows/outer-reusable.yml' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) => {
+        if (p === './.github/workflows/outer-reusable.yml')
+          return 'jobs:\n  nested:\n    uses: ./.github/workflows/inner-reusable.yml\n';
+        if (p === './.github/workflows/inner-reusable.yml')
+          return 'jobs:\n  applyJob:\n    steps:\n      - run: kubectl apply -f m.yaml\n';
+        return `fetch('https://example.com/x');\n`;
+      },
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('callerJob'))).toBe(true);
+  });
+
+  it('GREEN (false-positive control): the same nested shape with no apply anywhere in either reusable workflow', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/workflows/outer-reusable-noop.yml' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) => {
+        if (p === './.github/workflows/outer-reusable-noop.yml')
+          return 'jobs:\n  nested:\n    uses: ./.github/workflows/inner-reusable-noop.yml\n';
+        if (p === './.github/workflows/inner-reusable-noop.yml')
+          return 'jobs:\n  noopJob:\n    steps:\n      - run: echo hi\n';
+        return `const sum = (a, b) => a + b;\n`;
+      },
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('apply-safety-scan: #1801 (final round) — malformed action.yml fails closed', () => {
+  it('RED: `jobs: {}` (empty) paired with `runs.using: docker` must not read as "zero jobs, safe"', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/actions/malformed-action' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/malformed-action/action.yml'
+          ? 'jobs: {}\nruns:\n  using: docker\n  image: Dockerfile\n'
+          : `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('callerJob'))).toBe(true);
+  });
+
+  it('RED: a non-map `jobs:` (a string) paired with `runs.using: docker`', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/actions/malformed-action-2' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/malformed-action-2/action.yml'
+          ? 'jobs: oops\nruns:\n  using: docker\n  image: Dockerfile\n'
+          : `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('callerJob'))).toBe(true);
+  });
+
+  it('GREEN (false-positive control): a genuine reusable workflow with a real, non-empty jobs map stays clean when it has no apply', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/workflows/real-reusable.yml' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/workflows/real-reusable.yml'
+          ? 'jobs:\n  noopJob:\n    steps:\n      - run: echo hi\n'
+          : `const sum = (a, b) => a + b;\n`,
       followScripts: true,
     });
     expect(offenders).toEqual([]);
