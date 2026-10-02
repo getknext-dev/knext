@@ -43,6 +43,8 @@ its target (`bun-linux-*-musl`, which Bun downloads for a cross-target compile).
 | Toolchain | clang/lld `21.1.8` (apt.llvm.org `1:21.1.8~++20251221032922+2078da43e25a-1~exp1~20251221153059.70`), rustc `1.99.0-nightly (9f36de775 2026-07-19)` (bun-v1.4.2's `rust-toolchain.toml`), bootstrap Bun 1.4.2, prebuilt WebKit `2e2aa2290fac856d6f451ceacb58f7f5b44dd057` (non-LTO, sha256-pinned) |
 | linux-x64 | Cloud Build `67b747f8-4b26-4cd2-9796-3bce024ca7db` — sha256 `2f1bb84ad480fce9e618b8bf4b7eb4553d5a1179d2013c7d22cbe054ca271df3`, 75,109,864 bytes, highest glibc symbol `GLIBC_2.17`; smoke on ubuntu:20.04: startup `MAIN_START` only, on demand `PLUGIN_EVALUATED` + `RESULT plugin-ok`, stock 1.4.2 control `Cannot find module './plugins/p.js'` |
 
+| linux-arm64 | **Built, not published.** Cloud Build `b35c5945-54c5-4926-80bb-eff254a0e4c4` — sha256 `aa931626fc2707aaf1911a99ee57d9de05ad3dc76bf3cc6e14b0497a5f6bb35a`, 78,212,872 bytes, same patched HEAD, highest glibc symbol `GLIBC_2.17` — cross-compiled and never executed, so it is not pinned or released; `knext build` on linux-arm64 refuses the opt-in with "no pinned build". Publishing it needs an arm64 smoke gate in the release workflow first. |
+
 ## Known limits
 
 - **Signature scope.** The release workflow signs `SHA256SUMS` keyless with its own GitHub OIDC
