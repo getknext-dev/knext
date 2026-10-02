@@ -44,6 +44,7 @@ import {
     resolveSelfContained,
     standaloneStepsApply,
 } from "./build-artifact";
+import { resolveCompileToolchain } from "./bun-toolchain";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
@@ -56,6 +57,7 @@ import {
 } from "./shared";
 import {
     buildVinextExecutable,
+    type CompileToolchain,
     hostSmokeArch,
     smokeBinaryPlan,
     stageSharpForVinextNode,
@@ -117,6 +119,7 @@ async function smokeCompiledBinary(
     config: { healthCheckPath?: string },
     skipSmoke: boolean,
     selfContained: boolean,
+    toolchain: CompileToolchain = {},
 ): Promise<void> {
     if (skipSmoke) {
         // LOUD, and it names what is now unverified rather than merely saying a
@@ -143,6 +146,8 @@ async function smokeCompiledBinary(
             // The smoke must boot a binary built with the SAME mode as the
             // shipped one, or it misses the one property the mode changes.
             ...(selfContained ? { selfContained: true } : {}),
+            // ...and with the same toolchain + include globs.
+            ...(toolchain.bin ? { toolchain } : {}),
         });
     }
 
@@ -305,9 +310,20 @@ export async function build(options: BuildOptions = {}) {
     //     binary the Dockerfile ships. `skipViteBuild: true` inside the shared
     //     step — step 2 above (the project's own `vite build`) already
     //     produced `.output`.
+    // The opt-in patched Bun toolchain (`compile.bun: 'knext-patched'`):
+    // downloaded and sha256-verified here, BEFORE any compile, failing the
+    // build closed on any mismatch. The default config resolves to `{}`.
+    const toolchain = await resolveCompileToolchain(config);
+    if (toolchain.bin) {
+        log.info(
+            { bun: toolchain.bin, include: toolchain.include ?? [] },
+            "Compile step uses the knext-patched Bun toolchain (sha256 verified)",
+        );
+    }
     const compileResult = compileArtifactForDeploy(config, process.cwd(), {
         arch: SHIP_ARCH,
         selfContained: options.selfContained,
+        ...(toolchain.bin ? { toolchain } : {}),
     });
 
     if (standaloneStepsApply(artifact)) {
@@ -360,6 +376,7 @@ export async function build(options: BuildOptions = {}) {
             config,
             options.skipSmoke === true,
             resolveSelfContained(config, options.selfContained),
+            toolchain,
         );
     }
 

@@ -40,12 +40,13 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
+import { wantsPatchedBun } from "./bun-toolchain";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,
     standaloneExecFileName,
 } from "./standalone-exec-build";
-import { buildVinextExecutable } from "./vinext-build";
+import { buildVinextExecutable, type CompileToolchain } from "./vinext-build";
 
 export interface ResolvedBuild {
     readonly builder: BuilderAdapter;
@@ -167,9 +168,25 @@ export interface CompileForDeployResult {
 export function compileArtifactForDeploy(
     config: KnativeNextConfig,
     cwd: string,
-    opts: { arch?: string; selfContained?: boolean } = {},
+    opts: {
+        arch?: string;
+        selfContained?: boolean;
+        /** From `resolveCompileToolchain(config)`; required when the config opts in. */
+        toolchain?: CompileToolchain;
+    } = {},
 ): CompileForDeployResult {
     const arch = opts.arch ?? DEPLOY_SHIP_ARCH;
+    // Fail closed: an opted-in config that reaches the compile without its
+    // resolved, verified toolchain must not quietly compile with stock Bun.
+    if (wantsPatchedBun(config) && !opts.toolchain?.bin) {
+        throw new UsageError(
+            "compile.bun: 'knext-patched' is set but the patched Bun toolchain was not resolved " +
+                "before the compile step — refusing to fall back to stock Bun.",
+        );
+    }
+    const toolchainOpt = opts.toolchain?.bin
+        ? { toolchain: opts.toolchain }
+        : {};
     // The single resolved value both compile paths receive, as an explicit
     // option. Spread ONLY when on, so with the flag off each path's options
     // are exactly the pre-flag shape.
@@ -204,6 +221,7 @@ export function compileArtifactForDeploy(
             cwd,
             arch,
             ...selfContainedOpt,
+            ...toolchainOpt,
         });
         // #1351/#1414: stamp the exec with a hash of the WHOLE standalone
         // tree it was JUST compiled from (not just server.js — see
@@ -226,6 +244,7 @@ export function compileArtifactForDeploy(
             arch,
             skipViteBuild: true,
             ...selfContainedOpt,
+            ...toolchainOpt,
         });
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also

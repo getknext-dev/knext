@@ -64,7 +64,12 @@ import {
     wrapRequireBindings,
 } from "./entry-require-staticize.mjs";
 import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
-import { embedBuildOptions, planEmbed } from "./compile-embed.mjs";
+import {
+    embedBuildOptions,
+    parseIncludeJson,
+    planEmbed,
+    userIncludePart,
+} from "./compile-embed.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
 function parseArgs(argv) {
@@ -90,6 +95,15 @@ const TARGET = args.target?.trim();
 // require the analysis cannot bundle has nowhere on disk to fall back to, so it
 // must fail the build rather than the first request that reaches it.
 const SELF_CONTAINED = args["self-contained"] === "1";
+// knext.config.ts `compile.include` (opt-in patched Bun toolchain only): passed
+// through to `Bun.build`'s `compile.include`. Absent → [] → compile unchanged.
+let INCLUDE;
+try {
+    INCLUDE = parseIncludeJson(args["include-json"]);
+} catch (err) {
+    console.error(`[knext compile] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+}
 const NATIVE_DIR = args["native-dir"] ? resolve(args["native-dir"]) : null;
 const STRICT_REQUIRES =
     SELF_CONTAINED || process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1";
@@ -744,7 +758,11 @@ function selfContainedBuildOptions() {
     return {
         ...shape,
         naming: { entry: shape.naming, chunk: shape.naming, asset: shape.naming },
-        compile: sealCompile(shape.compile, TARGET ? { target: TARGET } : undefined),
+        compile: sealCompile(
+            shape.compile,
+            userIncludePart(INCLUDE, shape.compile.include),
+            TARGET ? { target: TARGET } : undefined,
+        ),
     };
 }
 
@@ -762,7 +780,11 @@ const result = await Bun.build(
                   // resolution beyond the sidecar. The sidecar is resolved by
                   // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
                   // server/node_modules (#1320).
-                  compile: sealCompile({ outfile: OUTFILE }, TARGET ? { target: TARGET } : undefined),
+                  compile: sealCompile(
+                      { outfile: OUTFILE },
+                      userIncludePart(INCLUDE),
+                      TARGET ? { target: TARGET } : undefined,
+                  ),
               },
     ),
 );

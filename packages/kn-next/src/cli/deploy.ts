@@ -43,6 +43,7 @@ import {
     KNEXT_BUILD_ID_ENV,
     NEXT_DEPLOYMENT_ID_ENV,
 } from "./build-id-env";
+import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -652,8 +653,15 @@ export async function deploy() {
         // tree the project build just produced and staleness cannot occur on
         // THIS path by construction. The `--skip-build` leg below instead
         // fails closed via `assertCompiledArtifactFresh`, since nothing
-        // rebuilds anything there.
-        compileArtifactForDeploy(config, process.cwd());
+        // rebuilds anything there. The opt-in patched Bun toolchain is
+        // resolved (downloaded + sha256-verified) first; the default config
+        // resolves to nothing and the call is exactly what it was.
+        const toolchain = await resolveCompileToolchain(config);
+        compileArtifactForDeploy(
+            config,
+            process.cwd(),
+            ...(toolchain.bin ? [{ toolchain }] : []),
+        );
     } else {
         // `--skip-build`: nothing above ran, so nothing recompiled the exec
         // either. Fail closed rather than silently shipping whatever happens

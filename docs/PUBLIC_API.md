@@ -426,6 +426,9 @@ it (`@experimental` in its types, "Experimental" in `knext build --help`, or
 - **`selfContained` (`knext.config.ts`) / `knext build --self-contained`** —
   opt-in single-executable build mode. The on-disk shape it produces is still
   settling.
+- **`compile` (`knext.config.ts`)** — the opt-in patched Bun toolchain
+  (`bun: 'knext-patched'`) and its `include` globs. Removed once a stock Bun
+  release ships `--compile --include`.
 - **`preview` and `loadtest`** — the directly-runnable CLI entries
   (`dist/cli/preview.js`, `dist/cli/loadtest.js`) for per-PR preview
   environments and load testing. Their flags and output are not part of the

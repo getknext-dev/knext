@@ -421,6 +421,54 @@ tells you how to install it.
 CI and container builds get Bun the same way; the requirement is only on whoever runs the build, not
 on anyone deploying an already-built image.
 
+## Optional patched Bun toolchain (experimental)
+
+By default the compile step runs the Bun on your `PATH`, and nothing below applies. As an
+**opt-in**, knext can run that one step with a knext-published build of **Bun 1.4.2 plus one
+addition that is not in a Bun release yet: `--compile --include`**. It embeds extra files into the
+executable as modules that are loaded **lazily** — not evaluated at startup, only when your code
+first `import()`s them — and read from inside the executable, so nothing needs to sit beside it.
+
+```ts
+// knext.config.ts
+compile: {
+  bun: "knext-patched",              // default: "stock" (the Bun on PATH)
+  include: ["./plugins/*.js"],       // optional; globs relative to the app root
+},
+```
+
+`include` is passed through as `--include` and requires `bun: "knext-patched"` — stock Bun has no
+such option and would silently embed nothing, so the config check rejects that combination.
+
+**How it is verified.** The first `knext build` on a machine downloads the toolchain from the knext
+GitHub release into a cache directory (`$KNEXT_CACHE_DIR`, else `$XDG_CACHE_HOME/knext`, else
+`~/.cache/knext`) and checks its **sha256 against a value pinned inside the knext version you
+installed**. A mismatch, an HTTP error or a network error **fails the build** — it never falls back
+to stock Bun, and nothing unverified is cached. A cached copy is re-hashed on every build, so a
+modified cache file is discarded and downloaded again.
+
+The release's checksum file is also **signed** (cosign, keyless, by the knext release workflow).
+`knext build` does not check that signature — the pinned sha256 is the binding check — but you can:
+
+```sh
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.2-knext.1" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+**What it changes, and what it does not.** The patched Bun runs the **compile step only**. The
+shipped executable targets linux-musl, which Bun builds on its own stock Bun base for that target,
+so the binary you deploy still runs on stock Bun. The toolchain is published for **glibc-based
+Linux build machines** (Linux x64, glibc 2.31 or newer, such as GitHub-hosted runners); on macOS or
+a musl-based (Alpine) build machine the build stops with an error that says so. Remove the
+`compile` block, or set `bun: "stock"`, to go back to the Bun on your `PATH`.
+
+**Not covered by the compatibility credential.** The verified results on this site were earned
+with stock Bun. Treat this toolchain as experimental: its shape may change in a minor release, and
+it will be **removed once a stock Bun release ships `--compile --include`** — at that point the same
+`include` globs work with the Bun on your `PATH`.
+
 ## Optional vinext build
 
 `build: 'vinext'` is an **opt-in** build target, enabled by setting that one field in

@@ -62,6 +62,43 @@ const PROBE_LINE = 'KNEXT_EMBED_PROBE_RESULT ';
 const MODULE_EXT = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const GLOB_META = /[*?[\]{}]/;
 
+/**
+ * The compile scripts' `--include-json <json>`: the user's `compile.include`
+ * globs (knext.config.ts), passed through to `Bun.build`'s `compile.include`
+ * (`--compile --include`, oven-sh/bun#44059 — only the opt-in patched Bun
+ * toolchain has it; the CLI refuses the option without it). Absent → `[]`.
+ * Anything else that is not a non-empty JSON array of non-empty strings throws.
+ */
+// @upstream-shim bun-patched-toolchain
+export function parseIncludeJson(raw) {
+  if (raw === undefined) return [];
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(`--include-json is not valid JSON: ${raw}`);
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((g) => typeof g === 'string' && g.length > 0)
+  ) {
+    throw new Error(`--include-json must be a non-empty JSON array of glob strings: ${raw}`);
+  }
+  return value;
+}
+
+/**
+ * The `compile` part that adds the user's globs, after any include the build
+ * already carries (the embed plan's), or `undefined` when there are none —
+ * `sealCompile()` skips an undefined part, so the default compile value is
+ * unchanged.
+ */
+export function userIncludePart(globs, existing) {
+  if (globs.length === 0) return undefined;
+  return { include: [...(Array.isArray(existing) ? existing : []), ...globs] };
+}
+
 /** Where Bun embeds a JS/TS source compiled as an entrypoint: `[dir]/[name].js`. */
 export function embeddedPath(rel) {
   return rel.replace(MODULE_EXT, '.js');

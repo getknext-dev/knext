@@ -7,6 +7,13 @@ export type EmbedPlan = {
     report: { excluded: string[]; nonModule: string[]; unmatched: string[] };
 };
 
+export declare function parseIncludeJson(raw: string | undefined): string[];
+
+export declare function userIncludePart(
+    globs: string[],
+    existing?: unknown,
+): { include: string[] } | undefined;
+
 export declare function embeddedPath(rel: string): string;
 
 export declare function planEmbed(input: { root: string; include: string[]; exclude?: string[] }): EmbedPlan;

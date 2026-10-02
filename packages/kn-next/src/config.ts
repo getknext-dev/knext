@@ -68,6 +68,18 @@ export interface MinioInfraConfig {
     secretKey?: string; // Default: "minioadmin"
 }
 
+/**
+ * The `bun build --compile` toolchain — see `KnativeNextConfig.compile`.
+ *
+ * @experimental
+ */
+export interface CompileConfig {
+    /** `'stock'` (default): Bun on PATH. `'knext-patched'`: the pinned patched build. */
+    bun?: "stock" | "knext-patched";
+    /** Globs passed through as `--include`. Requires `bun: 'knext-patched'`. */
+    include?: string[];
+}
+
 export interface InfrastructureConfig {
     postgres?: PostgresConfig;
     redis?: RedisInfraConfig;
@@ -344,6 +356,26 @@ export interface KnativeNextConfig {
      * in a minor release. See PUBLIC_API.md's "Experimental surfaces" section.
      */
     selfContained?: boolean;
+    /**
+     * The `bun build --compile` toolchain. Absent (the default): the Bun on
+     * PATH, unchanged.
+     *
+     * - `bun: 'knext-patched'` — compile with a knext-published Bun 1.4.2 build
+     *   that adds `--compile --include` (embed extra files as modules the
+     *   executable loads lazily, on the first `import()` of them). `knext build`
+     *   downloads it once per machine, checks it against a sha256 pinned in
+     *   knext and fails the build on any mismatch; it never falls back to
+     *   stock Bun. Used for the compile step only: the shipped executable still
+     *   runs on the stock Bun base for its target. linux x64/arm64 (glibc) build
+     *   hosts only. Not covered by the compatibility credential.
+     * - `include` — glob patterns (relative to the app root) passed through as
+     *   `--include`. Requires `bun: 'knext-patched'`.
+     *
+     * Retired once a stock Bun release ships `--compile --include`.
+     *
+     * @experimental Opt-in toolchain; its shape may change in a minor release.
+     */
+    compile?: CompileConfig;
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
     // #417 — bring-your-own database binding (ADR-0019/ADR-0025): binds an

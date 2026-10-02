@@ -1,0 +1,106 @@
+# Publishes the opt-in knext-patched Bun toolchain (`compile: { bun: 'knext-patched' }`):
+# bun-v1.4.2 + oven-sh/bun#44059 (`--compile --include`), built from deploy/bun-patched/ on Cloud
+# Build. RETIREMENT: delete this workflow with deploy/bun-patched/ once a stock Bun release ships
+# oven-sh/bun#44059 (the `bun-patched-toolchain` retirement probe goes red on it).
+#
+# Flow (a maintainer runs the Cloud Build and stages the release; this workflow is the gate):
+#   1. Cloud Build (deploy/bun-patched/cloudbuild.yaml) produces bun-linux-<arch> + SBOMs + manifests.
+#   2. A maintainer creates a DRAFT release for tag `bun-patched-<ver>-knext.<n>` carrying those files
+#      and commits their sha256 to deploy/bun-patched/RELEASE.sha256 and to the pins in
+#      packages/kn-next/src/cli/bun-toolchain.ts (a unit test keeps the two in lockstep).
+#   3. Pushing the tag (at a commit carrying those pins) runs this workflow, which:
+#      - downloads the draft's assets and checks EVERY binary against RELEASE.sha256 at the tagged
+#        commit (fail closed: a binary that does not match what knext pins is never signed);
+#      - smoke-tests the x64 binary (lazy `--include` from the executable; stock 1.4.2 control);
+#      - signs SHA256SUMS keyless with this workflow's GitHub OIDC identity and verifies it;
+#      - attaches the signature bundle and publishes the release (prerelease);
+#      - runs the dispatch-only end-to-end proof (bun-patched-e2e.yml) against the published asset.
+#
+# Every third-party action is SHA-pinned: this job holds `id-token: write` and `contents: write`.
+name: bun-patched-release
+
+on:
+  push:
+    tags: ['bun-patched-*']
+
+permissions: {}
+
+concurrency:
+  group: bun-patched-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-sign-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # read the draft release, attach the signature, publish
+      id-token: write # cosign keyless
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the draft release assets
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D out
+          ls -la out
+
+      - name: Verify every binary against the sums committed at this tag (fail closed)
+        working-directory: out
+        run: |
+          set -euo pipefail
+          pins="$GITHUB_WORKSPACE/deploy/bun-patched/RELEASE.sha256"
+          test -s "$pins"
+          # Every pinned file must be present and match; every shipped binary must be pinned.
+          sha256sum -c --strict "$pins"
+          for f in bun-linux-*; do
+            case "$f" in *.json|*.sha256|*.revision) continue ;; esac
+            grep -qE "^[0-9a-f]{64}  $f\$" "$pins" || { echo "::error::$f is not pinned in RELEASE.sha256"; exit 1; }
+          done
+          # SHA256SUMS = the pinned binaries + the SBOMs/manifests shipped beside them.
+          sha256sum bun-linux-* manifest-*.json bun-source-*.cdx.json 2>/dev/null | grep -v '\.sha256$' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Smoke-test the x64 toolchain (lazy --include from the executable)
+        run: |
+          set -euo pipefail
+          chmod +x out/bun-linux-x64
+          curl -fsSLo /tmp/bun-stock.zip https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip
+          echo "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913  /tmp/bun-stock.zip" | sha256sum -c -
+          unzip -q /tmp/bun-stock.zip -d /tmp/bun-stock
+          BUN="$PWD/out/bun-linux-x64" STOCK_BUN=/tmp/bun-stock/bun-linux-x64/bun bash deploy/bun-patched/smoke.sh
+          if [ -f out/bun-linux-aarch64 ]; then file out/bun-linux-aarch64 | grep -q 'ARM aarch64'; fi
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign SHA256SUMS keyless (GitHub OIDC) and verify the signature
+        working-directory: out
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "https://github.com/$WORKFLOW_REF" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            SHA256SUMS | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach SHA256SUMS + signature and publish the release
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber out/SHA256SUMS out/SHA256SUMS.sigstore.json
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --prerelease
+          echo "published $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  e2e:
+    needs: verify-sign-publish
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bun-patched-e2e.yml
