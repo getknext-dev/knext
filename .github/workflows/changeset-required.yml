@@ -18,7 +18,7 @@ name: Changeset required
 # and `docs/RELEASING.md` for the pre-release ("pre" mode) caveat.
 #
 # ESCAPE HATCH, DELIBERATELY: the `no-changeset` label, mirroring
-# `design-gate:cleared` (escalation-triggers.yml). Auditable, cheap — the PR
+# `trigger:acknowledged` (escalation-triggers.yml, #1161). Auditable, cheap — the PR
 # should also carry a one-line reason in its description (a review
 # convention, not something this script parses).
 

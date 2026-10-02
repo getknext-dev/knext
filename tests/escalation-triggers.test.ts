@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  ACK_BODY_PATTERN,
   ACK_LABEL,
   classify,
   isAcknowledged,
+  LEGACY_ACK_LABEL,
   parseNameStatus,
   publicSurfaceChanged,
 } from '../scripts/check-escalation-triggers.mjs';
@@ -158,5 +160,40 @@ describe('diff parsing and acknowledgement', () => {
     expect(isAcknowledged([ACK_LABEL.toUpperCase()])).toBe(true);
     expect(isAcknowledged(['tier-A', 'bug'])).toBe(false);
     expect(isAcknowledged([])).toBe(false);
+  });
+
+  it('the legacy design-gate:cleared label still counts (backward compatible)', () => {
+    expect(isAcknowledged([LEGACY_ACK_LABEL])).toBe(true);
+    expect(isAcknowledged([LEGACY_ACK_LABEL.toUpperCase()])).toBe(true);
+  });
+
+  it('a PR-body acknowledgement line counts, with no label present', () => {
+    const body = [
+      'Some PR description.',
+      '',
+      'Escalation trigger acknowledged: CLI surface — adds a new flag, no behaviour change.',
+      '',
+      'More text.',
+    ].join('\n');
+    expect(isAcknowledged([], body)).toBe(true);
+  });
+
+  it('the body line is matched case-insensitively and tolerates surrounding whitespace', () => {
+    expect(
+      isAcknowledged([], '  escalation TRIGGER acknowledged: adr — amends rationale only'),
+    ).toBe(true);
+  });
+
+  it('an unrelated body does NOT acknowledge', () => {
+    expect(isAcknowledged([], 'This PR touches the CLI surface but says nothing else.')).toBe(
+      false,
+    );
+    expect(isAcknowledged([])).toBe(false);
+    expect(isAcknowledged([], undefined)).toBe(false);
+  });
+
+  it('ACK_BODY_PATTERN matches the documented line shape directly', () => {
+    expect(ACK_BODY_PATTERN.test('Escalation trigger acknowledged: CRD — reason')).toBe(true);
+    expect(ACK_BODY_PATTERN.test('not an acknowledgement')).toBe(false);
   });
 });
