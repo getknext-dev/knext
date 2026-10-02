@@ -390,8 +390,8 @@ release. They are applied to the vinext installed for your app by `knext vinext-
 vinext app created by `knext create` runs from its `postinstall` script; `knext build` applies them
 again before building, so an app created before the script existed is covered too. The fixes
 target the exact vinext version `knext create` pins. With a different vinext version installed they
-are skipped, with a message saying so. Each fix is removed from knext once a vinext release
-includes it.
+are skipped, with a message saying so. Set `KNEXT_VINEXT_PATCHES=0` to turn them off, for example
+if you patch vinext yourself. Each fix is removed from knext once a vinext release includes it.
 
 The fixes bundled with vinext 1.0.1:
 

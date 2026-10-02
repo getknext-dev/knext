@@ -38,6 +38,7 @@ import {
     mkdirSync,
     readFileSync,
     renameSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -84,6 +85,7 @@ export interface PatchResult {
 
 export type EnsureResult =
     | { kind: "no-vinext" }
+    | { kind: "disabled" }
     | {
           kind: "version-mismatch";
           dir: string;
@@ -94,6 +96,22 @@ export type EnsureResult =
 
 /** A patch that neither applies cleanly nor is already present. */
 export class VinextPatchConflictError extends UsageError {}
+
+/** Writing a patch's files failed; every file it touched was left as it was. */
+export class VinextPatchWriteError extends UsageError {}
+
+/** The environment variable that turns the bundled fixes off entirely. */
+export const VINEXT_PATCHES_ENV = "KNEXT_VINEXT_PATCHES";
+
+const OPT_OUT_HINT = `To build without knext's bundled vinext fixes instead, set ${VINEXT_PATCHES_ENV}=0.`;
+
+/** `KNEXT_VINEXT_PATCHES=0` (or `false`/`off`/`no`) disables the bundled fixes. */
+export function vinextPatchesDisabled(
+    env: Record<string, string | undefined> = process.env,
+): boolean {
+    const v = env[VINEXT_PATCHES_ENV]?.trim().toLowerCase();
+    return v === "0" || v === "false" || v === "off" || v === "no";
+}
 
 /** Where the bundled patches live inside the installed @getknext/core. */
 export function vinextPatchesDir(): string {
@@ -249,12 +267,92 @@ export function applyFilePatchToText(
     return { status: "patch", text: lines.join("\n") };
 }
 
-/** Replace a file without writing through a hardlink to a shared cache. */
-function replaceFile(path: string, text: string): void {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.knext-patch-${process.pid}.tmp`;
-    writeFileSync(tmp, text);
-    renameSync(tmp, path);
+/** The filesystem calls a patch commit makes; injectable for failure tests. */
+export interface PatchFs {
+    writeFile: (path: string, text: string) => void;
+    rename: (from: string, to: string) => void;
+    remove: (path: string) => void;
+}
+
+const REAL_FS: PatchFs = {
+    writeFile: (path, text) => {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, text);
+    },
+    rename: renameSync,
+    remove: (path) => rmSync(path, { force: true }),
+};
+
+interface PlannedWrite {
+    abs: string;
+    /** The file's text before this patch (`null` = the patch creates it). */
+    original: string | null;
+    text: string;
+}
+
+/**
+ * Write one patch's files all-or-nothing, never in place (bun hardlinks
+ * node_modules to its global cache on Linux; a rename breaks the link, an
+ * in-place write would patch every project sharing it).
+ *
+ *   1. stage every new file as a temp file beside its target — if any staging
+ *      write fails, delete the temps: no target was touched;
+ *   2. rename each temp over its target — if a rename fails, restore the
+ *      targets already renamed from their in-memory originals (or delete the
+ *      ones this patch created) and delete the remaining temps.
+ */
+function commitPatch(
+    entry: VinextPatchEntry,
+    writes: PlannedWrite[],
+    fs: PatchFs,
+): void {
+    const tmpOf = (abs: string) => `${abs}.knext-patch-${process.pid}.tmp`;
+    const fail = (stage: string, err: unknown): never => {
+        throw new VinextPatchWriteError(
+            `knext could not ${stage} its bundled vinext fix ${entry.file} (${entry.upstream}): ${err instanceof Error ? err.message : String(err)}.\n\n` +
+                "No file was left half-patched: the fix was rolled back. Check that node_modules is writable, then run `knext vinext-patches` again.\n" +
+                OPT_OUT_HINT,
+        );
+    };
+    const staged: PlannedWrite[] = [];
+    try {
+        for (const w of writes) {
+            fs.writeFile(tmpOf(w.abs), w.text);
+            staged.push(w);
+        }
+    } catch (err) {
+        // Including the write that failed: it may have left a partial temp.
+        for (const w of writes) {
+            try {
+                fs.remove(tmpOf(w.abs));
+            } catch {}
+        }
+        fail("write", err);
+    }
+    const renamed: PlannedWrite[] = [];
+    try {
+        for (const w of writes) {
+            fs.rename(tmpOf(w.abs), w.abs);
+            renamed.push(w);
+        }
+    } catch (err) {
+        for (const w of renamed) {
+            try {
+                if (w.original === null) {
+                    fs.remove(w.abs);
+                } else {
+                    fs.writeFile(tmpOf(w.abs), w.original);
+                    fs.rename(tmpOf(w.abs), w.abs);
+                }
+            } catch {}
+        }
+        for (const w of writes.slice(renamed.length)) {
+            try {
+                fs.remove(tmpOf(w.abs));
+            } catch {}
+        }
+        fail("install", err);
+    }
 }
 
 /**
@@ -264,7 +362,7 @@ function replaceFile(path: string, text: string): void {
  */
 export function applyVinextPatches(
     vinextDir: string,
-    opts: { patchesDir?: string; check?: boolean } = {},
+    opts: { patchesDir?: string; check?: boolean; fs?: PatchFs } = {},
 ): PatchResult[] {
     const patchesDir = opts.patchesDir ?? vinextPatchesDir();
     const manifest = loadVinextPatchManifest(patchesDir);
@@ -281,7 +379,7 @@ export function applyVinextPatches(
             readFileSync(join(patchesDir, entry.file), "utf8"),
         );
         let changed = false;
-        const writes: [string, string][] = [];
+        const writes: PlannedWrite[] = [];
         for (const fp of files) {
             let out: { status: "patch" | "present"; text: string };
             try {
@@ -290,19 +388,27 @@ export function applyVinextPatches(
                 if (err instanceof VinextPatchConflictError) {
                     throw new VinextPatchConflictError(
                         `knext could not apply its bundled vinext fix ${entry.file} (${entry.upstream}) to ${vinextDir}: ${err.message}.\n\n` +
-                            "Reinstall dependencies (delete node_modules and install again) so vinext is the unmodified published package, then retry.",
+                            "If you did not change vinext yourself, reinstall dependencies (delete node_modules and install again) so vinext is the unmodified published package, then retry.\n" +
+                            `If you patch vinext yourself and want to keep your change, set ${VINEXT_PATCHES_ENV}=0 to build without knext's bundled vinext fixes.`,
                     );
                 }
                 throw err;
             }
             if (out.status === "patch") {
                 changed = true;
-                writes.push([fp.path, out.text]);
+                writes.push({
+                    abs: join(vinextDir, fp.path),
+                    original: read(fp.path),
+                    text: out.text,
+                });
             }
         }
-        for (const [rel, text] of writes) {
-            staged.set(rel, text);
-            if (!opts.check) replaceFile(join(vinextDir, rel), text);
+        if (!opts.check && writes.length > 0) {
+            commitPatch(entry, writes, opts.fs ?? REAL_FS);
+        }
+        for (const fp of files) {
+            const w = writes.find((x) => x.abs === join(vinextDir, fp.path));
+            if (w) staged.set(fp.path, w.text);
         }
         results.push({
             file: entry.file,
@@ -332,8 +438,13 @@ export function findVinextDir(cwd: string): string | undefined {
 /** Apply the bundled patches to the app's vinext when it is the validated version. */
 export function ensureVinextPatches(
     cwd: string,
-    opts: { patchesDir?: string; check?: boolean } = {},
+    opts: {
+        patchesDir?: string;
+        check?: boolean;
+        env?: Record<string, string | undefined>;
+    } = {},
 ): EnsureResult {
+    if (vinextPatchesDisabled(opts.env)) return { kind: "disabled" };
     const dir = findVinextDir(cwd);
     if (!dir) return { kind: "no-vinext" };
     const manifest = loadVinextPatchManifest(opts.patchesDir);
@@ -359,6 +470,11 @@ export function describeEnsureResult(
     opts: { check?: boolean } = {},
 ): string[] {
     if (res.kind === "no-vinext") return [];
+    if (res.kind === "disabled") {
+        return [
+            `knext: ${VINEXT_PATCHES_ENV}=0 is set — knext's bundled vinext fixes were NOT applied.`,
+        ];
+    }
     if (res.kind === "version-mismatch") {
         return [
             `knext: vinext ${res.installed} is installed; knext's bundled vinext fixes target ${res.expected} only, so they were not applied.`,
@@ -378,7 +494,8 @@ const USAGE = `Usage: knext vinext-patches [--check]
 
 Apply the vinext fixes knext bundles ahead of upstream vinext releases to this
 app's installed vinext. Runs automatically from a knext app's postinstall and
-before \`knext build\`; safe to re-run.
+before \`knext build\`; safe to re-run. Set ${VINEXT_PATCHES_ENV}=0 to turn
+the bundled fixes off (both here and in \`knext build\`).
 
 Options:
   --check   report whether the fixes are applied, without changing files

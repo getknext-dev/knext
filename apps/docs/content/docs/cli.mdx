@@ -213,7 +213,15 @@ The fixes are tied to one exact vinext version (the one `knext create` pins). Wi
 version installed it changes nothing and says so. Re-running it is safe: fixes that are already in
 place are left alone. If a fix neither applies cleanly nor is already present — vinext's files were
 modified some other way — it refuses rather than half-applying; reinstall your dependencies and run
-it again.
+it again. Applying is all-or-nothing per fix: if writing any of a fix's files fails (for example a
+read-only `node_modules`), the files it already changed are restored and the command exits `1`.
+
+The `postinstall` script skips this step quietly when `@getknext/core` is not installed, as in a
+production-only install (`npm ci --omit=dev`), because it is a development dependency.
+
+To turn the bundled fixes off, for example because you patch vinext yourself, set
+`KNEXT_VINEXT_PATCHES=0`. Both the `postinstall` step and `knext build` then leave vinext untouched
+and print a line saying the fixes were not applied.
 
 ```bash
 knext vinext-patches          # apply
@@ -223,6 +231,7 @@ knext vinext-patches --check  # report only, change nothing
 | Flag | Notes |
 |---|---|
 | `--check` | Report whether every fix is applied without changing any file; exit `1` when one is missing. |
+| `KNEXT_VINEXT_PATCHES=0` (env) | Skip the bundled fixes entirely, here and in `knext build`. |
 | `-h`, `--help` | Show the usage help. |
 
 **Exit code:** `0` (including `--help`, and when vinext is not installed or is a different version);

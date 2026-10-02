@@ -15,8 +15,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+    chmodSync,
     cpSync,
     existsSync,
     linkSync,
@@ -25,6 +27,7 @@ import {
     readdirSync,
     readFileSync,
     realpathSync,
+    renameSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
@@ -42,6 +45,7 @@ import {
     loadVinextPatchManifest,
     parseUnifiedPatch,
     VinextPatchConflictError,
+    VinextPatchWriteError,
     vinextPatchesDir,
     vinextPatchesMain,
 } from "../cli/vinext-patches";
@@ -531,8 +535,228 @@ describe("delivery", () => {
                 "utf8",
             ).replace(/\{\{[^}]+\}\}/g, "x"),
         ) as { scripts: Record<string, string> };
-        expect(tpl.scripts.postinstall).toBe("knext vinext-patches");
+        expect(tpl.scripts.postinstall).toMatch(/^node -e "[^"]+"$/);
+        expect(tpl.scripts.postinstall).toContain("'vinext-patches'");
     });
+
+    /** Run the scaffold's real postinstall guard script in `cwd`. */
+    function runPostinstall(cwd: string) {
+        const tpl = JSON.parse(
+            readFileSync(
+                join(PKG_ROOT, "templates", "app", "package.json.vinext.hbs"),
+                "utf8",
+            ).replace(/\{\{[^}]+\}\}/g, "x"),
+        ) as { scripts: Record<string, string> };
+        const script = /^node -e "([^"]+)"$/.exec(
+            tpl.scripts.postinstall ?? "",
+        )?.[1];
+        if (!script) throw new Error("postinstall is not a node -e guard");
+        return spawnSync("node", ["-e", script], { cwd, encoding: "utf8" });
+    }
+
+    /** An app whose node_modules/@getknext/core CLI just exits with `code`. */
+    function appWithFakeCore(code: number): string {
+        const app = mkdtempSync(join(tmpdir(), "knext-vp-postinstall-"));
+        const cli = join(
+            app,
+            "node_modules",
+            "@getknext",
+            "core",
+            "dist",
+            "cli",
+        );
+        mkdirSync(cli, { recursive: true });
+        writeFileSync(
+            join(cli, "kn-next.js"),
+            `process.stdout.write("argv:" + process.argv.slice(2).join(" ")); process.exit(${code});`,
+        );
+        return app;
+    }
+
+    it("postinstall is a silent no-op when @getknext/core is absent (production install)", () => {
+        const app = mkdtempSync(join(tmpdir(), "knext-vp-prodinstall-"));
+        try {
+            const r = runPostinstall(app);
+            expect(r.status).toBe(0);
+            expect(r.stdout).toContain("bundled vinext fixes were skipped");
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it("postinstall runs `knext vinext-patches` and propagates a real failure", () => {
+        const app = appWithFakeCore(3);
+        try {
+            const r = runPostinstall(app);
+            expect(r.stdout).toBe("argv:vinext-patches");
+            expect(r.status).toBe(3);
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it("postinstall finds a hoisted @getknext/core above the app and passes success through", () => {
+        const app = appWithFakeCore(0);
+        try {
+            const nested = join(app, "apps", "web");
+            mkdirSync(nested, { recursive: true });
+            const r = runPostinstall(nested);
+            expect(r.stdout).toBe("argv:vinext-patches");
+            expect(r.status).toBe(0);
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it("KNEXT_VINEXT_PATCHES=0 skips the fixes in postinstall AND in `knext build`, and says so", () => {
+        const app = fakeApp(manifest.vinext);
+        const before = process.env.KNEXT_VINEXT_PATCHES;
+        try {
+            const off = ensureVinextPatches(app, {
+                env: { KNEXT_VINEXT_PATCHES: "0" },
+            });
+            expect(off.kind).toBe("disabled");
+            expect(describeEnsureResult(off)[0]).toContain(
+                "KNEXT_VINEXT_PATCHES=0 is set",
+            );
+            process.env.KNEXT_VINEXT_PATCHES = "0";
+            runProjectBuild({ requireEsm: true, cwd: app, run: () => {} });
+            for (const [rel, hash] of Object.entries(manifest.pristine)) {
+                expect(sha256(join(app, "node_modules", "vinext", rel))).toBe(
+                    hash,
+                );
+            }
+            // Any other value leaves them on.
+            expect(
+                ensureVinextPatches(app, { env: { KNEXT_VINEXT_PATCHES: "1" } })
+                    .kind,
+            ).toBe("patched");
+        } finally {
+            if (before === undefined) delete process.env.KNEXT_VINEXT_PATCHES;
+            else process.env.KNEXT_VINEXT_PATCHES = before;
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it("a failed install of a multi-file patch rolls back: no file is half-patched, no temp left", () => {
+        const app = fakeApp(manifest.vinext);
+        try {
+            const vinext = join(app, "node_modules", "vinext");
+            const snapshot = () =>
+                Object.keys(manifest.pristine).map((rel) =>
+                    sha256(join(vinext, rel)),
+                );
+            const pristine = snapshot();
+            // vinext-3436 touches three files (one new); fail its 3rd rename.
+            let renames = 0;
+            const fs = {
+                writeFile: (path: string, text: string) => {
+                    mkdirSync(dirname(path), { recursive: true });
+                    writeFileSync(path, text);
+                },
+                rename: (from: string, to: string) => {
+                    if (
+                        to.endsWith("index.js") &&
+                        from.includes("knext-patch")
+                    ) {
+                        renames++;
+                        // index.js is renamed by 3226/3424/3241 first; fail 3436's.
+                        if (renames === 4) throw new Error("EIO: simulated");
+                    }
+                    renameSync(from, to);
+                },
+                remove: (path: string) => rmSync(path, { force: true }),
+            };
+            let thrown: unknown;
+            try {
+                applyVinextPatches(vinext, { fs });
+            } catch (err) {
+                thrown = err;
+            }
+            expect(thrown).toBeInstanceOf(VinextPatchWriteError);
+            expect(String((thrown as Error).message)).toContain(
+                "vinext-3436-nitro-output-file-tracing.patch",
+            );
+            expect(String((thrown as Error).message)).toContain(
+                "KNEXT_VINEXT_PATCHES=0",
+            );
+            // 3436's files are exactly as the earlier patches left them.
+            expect(
+                existsSync(
+                    join(vinext, "dist", "build", "nitro-trace-includes.js"),
+                ),
+            ).toBe(false);
+            expect(
+                readFileSync(
+                    join(vinext, "dist", "config", "next-config.js"),
+                    "utf8",
+                ),
+            ).not.toContain(
+                "outputFileTracingIncludes: readOutputFileTracingGlobs",
+            );
+            expect(
+                readFileSync(join(vinext, "dist", "index.js"), "utf8"),
+            ).not.toContain("createNitroTraceIncludesHook");
+            const leftovers = readdirSync(vinext, { recursive: true }).filter(
+                (f) => String(f).includes(".knext-patch-"),
+            );
+            expect(leftovers).toEqual([]);
+            // A re-run on the real filesystem then completes everything.
+            expect(
+                applyVinextPatches(vinext)
+                    .map((r) => r.status)
+                    .includes("applied"),
+            ).toBe(true);
+            expect(snapshot()).not.toEqual(pristine);
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it.skipIf(process.getuid?.() === 0)(
+        "a read-only directory fails the patch cleanly: nothing in it is half-written",
+        () => {
+            const app = fakeApp(manifest.vinext);
+            const configDir = join(
+                app,
+                "node_modules",
+                "vinext",
+                "dist",
+                "config",
+            );
+            try {
+                chmodSync(configDir, 0o555);
+                const vinext = join(app, "node_modules", "vinext");
+                expect(() => applyVinextPatches(vinext)).toThrow(
+                    VinextPatchWriteError,
+                );
+                // 3436 (the only patch touching dist/config) left NO file changed.
+                expect(
+                    existsSync(
+                        join(
+                            vinext,
+                            "dist",
+                            "build",
+                            "nitro-trace-includes.js",
+                        ),
+                    ),
+                ).toBe(false);
+                expect(
+                    sha256(join(vinext, "dist", "config", "next-config.js")),
+                ).toBe(manifest.pristine["dist/config/next-config.js"] ?? "");
+                expect(
+                    readFileSync(join(vinext, "dist", "index.js"), "utf8"),
+                ).not.toContain("createNitroTraceIncludesHook");
+                const leftovers = readdirSync(vinext, {
+                    recursive: true,
+                }).filter((f) => String(f).includes(".knext-patch-"));
+                expect(leftovers).toEqual([]);
+            } finally {
+                chmodSync(configDir, 0o755);
+                rmSync(app, { recursive: true, force: true });
+            }
+        },
+    );
 
     it("`vinext-patches` is a dispatchable CLI verb", () => {
         const verbs = COMMAND_GROUPS.flatMap((g) =>
@@ -649,7 +873,11 @@ describe("delivery", () => {
                     stderr: (t: string) => conflictErr.push(t),
                 }),
             ).toBe(1);
-            expect(conflictErr.join("")).toContain("Reinstall dependencies");
+            expect(conflictErr.join("")).toContain("reinstall dependencies");
+            // The opt-out is named, not just "reinstall".
+            expect(conflictErr.join("")).toContain(
+                "set KNEXT_VINEXT_PATCHES=0",
+            );
         } finally {
             rmSync(app, { recursive: true, force: true });
         }
