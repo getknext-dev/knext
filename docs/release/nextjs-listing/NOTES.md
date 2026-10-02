@@ -55,30 +55,30 @@ now, request (c) only after 14/14, and do not treat (c) as a gate for anything e
 (b) as a near-term goal; it requires org-hosting decisions (governance, who maintains
 `nextjs/deploy-knext`) that are out of scope for this draft and belong in the ADR #1565 asks for.
 
-## If #1565 picks the verified tier instead (still open as of 2026-10-02)
+## #1565 is decided: ADR-0062 (PR #1818) — ship the platform-list PR, ask the verified-tier
+## question in the same thread, no package transfer now
 
-This package defaults to the unblocked option: the plain platform-list PR above, which needs no
-org-hosting decision and has the strongest same-day-merge precedent. #1565 ("Next.js listing path:
-platform list vs verified tier") is **still open, no ADR merged** as of this pass — do not assume it
-has resolved to either option.
+#1565 ("Next.js listing path: platform list vs verified tier") is **resolved, not open**. ADR-0062
+records the founder-delegated choice between (a) platform-list only, (b) pursue the verified tier
+now (mirror/transfer the adapter package), and (c) both sequenced — jev scored (c) 0.59 vs (a) 0.39
+vs (b) 0.02, re-checked independently at 0.69, same direction. **Decision: (c).**
 
-If #1565 resolves to the verified tier (option (b)/(c) in its own framing) instead, what changes:
+Concretely, this means:
 
-- The `listing.patch` / `docs/deploying-add-knext` branch above stops being the deliverable — it
-  targets the wrong list (verified adapters require org hosting under `github.com/nextjs`, not a
-  link in "Other Platforms").
-- `apps/docs/LISTING.md` (already in this repo) is the draft for that path: a full adapter-listing
-  entry (name, category, description, adapter wiring, compat-suite evidence) rather than a one-line
-  link. It is currently gated on its own checklist (compat-suite green nightly, compat-matrix
-  promotion, npm publish) — re-read it before using it; its gate list is independent of and may be
-  stricter than the platform-list path's.
-- A **governance decision** is needed first: whether the adapter package (not the whole monorepo)
-  mirrors or transfers into a `nextjs/deploy-knext`-style repo, who maintains it day-to-day, and how
-  that interacts with knext's own release cadence. That is exactly what #1565 asks the founder to
-  decide and record as an ADR — this draft package does not attempt to pre-decide it.
-- The WG request draft (`adapters-wg-request-draft.md`) becomes relevant sooner — WG membership is
-  the real path to verified status, per the research — rather than being purely a step taken
-  after 14/14.
+- Ship the plain platform-list docs PR (`listing.patch` / `docs/deploying-add-knext`) — still the
+  primary deliverable, unchanged. It needed no governance decision and keeps the strongest
+  same-day-merge precedent.
+- **In the same upstream PR thread**, ask the Next.js team what the verified-adapter tier
+  concretely requires of a community, open-source adapter that already runs the full compatibility
+  suite — see the updated PR body below. This is new: earlier drafts of this PR body only flagged
+  the framing mismatch and asked where knext should sit; it now also asks the verified-tier
+  question directly, per ADR-0062.
+- **No package transfer now.** ADR-0062 explicitly rules out mirroring/transferring the adapter
+  package into `github.com/nextjs` at this time — knext keeps the operator, the CLI, the docs site,
+  and governance unconditionally. `apps/docs/LISTING.md` (the fuller verified-tier entry draft)
+  stays parked; it is not the near-term deliverable.
+- The WG request draft (`adapters-wg-request-draft.md`) is unaffected by this decision — it was
+  already sequenced to come after 14/14, which ADR-0062 does not change.
 
 ## The framing mismatch — do not silently misfile
 
@@ -216,7 +216,10 @@ doesn't apply to knext, so flagging it here in case you'd rather place it elsewh
 separate sub-group for Adapter-API-based but unverified platforms). Happy to adjust the diff if
 you have a preferred placement.
 
-No compatibility-suite or verified-adapter claim is being made in this PR.
+No compatibility-suite or verified-adapter claim is being made in this PR. Separately, I'd be
+curious what the verified-adapter tier concretely expects from a community, open-source adapter
+that's already running the full compatibility suite — happy to open a separate issue if that's a
+better place to ask.
 EOF
 )"
 ```
@@ -226,10 +229,10 @@ paragraph to the body citing: the run IDs for all four cells, the Next.js ref te
 counts, and a link to `https://knext.dev/docs/compat-matrix`. Pull those from the real green
 getknext-dev/knext#1359 state at that moment — never carry over the night-1 numbers in this file.
 
-**jev guardrail run on the PR body text above (2026-10-02):** "does this read as AI-generated /
-unnatural for a human contributor" → 0.37 (no); "does this overclaim beyond what the four rc.5
-cells currently show" → 0.04 (no). Both read clean; re-run jev on the final body if it's edited
-again before submission.
+**jev guardrail run on the PR body text above (2026-10-02, re-checked after adding the ADR-0062
+verified-tier question):** "does this read as AI-generated / unnatural for a human contributor" →
+0.39 (no); "does this overclaim beyond what the four rc.5 cells currently show" → 0.05 (no). Both
+read clean; re-run jev on the final body if it's edited again before submission.
 
 ## Test guard
 
