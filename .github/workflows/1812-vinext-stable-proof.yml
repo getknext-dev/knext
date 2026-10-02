@@ -19,17 +19,15 @@ name: vinext stable pin proof (#1812, both runtimes)
 # on 1.0.0-beta.12 until that window closes (see the #1812 note in
 # tests/vinext-pin-lockstep.test.ts).
 #
-# workflow_dispatch-only, no schedule, not a required check. A workflow_dispatch
-# trigger needs the file on the default branch first, so this ALSO carries a
-# temporary `pull_request` trigger scoped to this file's own path, mirroring
-# the precedent in rc5-vinext-beta-proof.yml (PR #1813) — remove that trigger
-# once this file has one green run recorded, leaving it workflow_dispatch-only.
+# workflow_dispatch-only, no schedule, not a required check. It carried a
+# temporary `pull_request` trigger scoped to this file's own path (mirroring
+# the precedent in rc5-vinext-beta-proof.yml, PR #1813) to get one green run
+# on the PR that introduced it — both jobs passed (vinext-bun-stable,
+# vinext-node-stable, run 37040073176, PR #1817) — and that trigger is removed
+# here, leaving this workflow_dispatch-only for every run after.
 
 on:
   workflow_dispatch: {}
-  pull_request:
-    paths:
-      - '.github/workflows/1812-vinext-stable-proof.yml'
 
 permissions:
   contents: read
