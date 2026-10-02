@@ -12,13 +12,10 @@ name: bun-patched-e2e
 on:
   workflow_dispatch: {}
   workflow_call: {}
-  # TEMPORARY (same precedent as 1812-vinext-stable-proof.yml): scoped to this lane's own files so
-  # the PR that introduces it gets a green run (a workflow that is not on the default branch cannot
-  # be dispatched). Remove once that run is recorded in the PR body.
-  pull_request:
-    paths:
-      - '.github/workflows/bun-patched-e2e.yml'
-      - '.github/bun-patched-e2e/**'
+  # It carried a temporary `pull_request` trigger scoped to its own files (the 1812-vinext-stable-proof
+  # precedent) to get one green run on the PR that introduced it — run 37055710314: health 200, the
+  # included module loaded from /$bunfs/root/plugins/greet.js with before=0 / after=1, no copy on
+  # disk in the image, compiler 1.4.2+cc97fa834 vs shipped base 1.4.2+744846f84. Removed after.
 
 permissions:
   contents: read
