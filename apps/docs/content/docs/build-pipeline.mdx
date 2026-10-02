@@ -495,6 +495,7 @@ you asked for:
   it except anything under a `node_modules` directory;
 - files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_*`) are never picked up by a glob —
   the build fails and names them; list one by its exact path if it really belongs in the executable;
+- a file whose name contains a backslash cannot be included — the build fails and names it;
 - `compile.include` applies only to the compiled vinext executable (`build: 'vinext'` on the Bun
   runtime); the config check rejects it for every other target.
 
@@ -515,8 +516,9 @@ compile: {
 
 **Same option, same checks, same paths.** `include` is expanded and checked by knext exactly as on
 stock Bun — every limit in the list above applies unchanged — and the resulting list of files (never
-your raw globs) is handed to the patched Bun's `--include`. Each module lands at the same
-`/$bunfs/root/<its path relative to the app root>` and is imported the same way. If the compiler
+your raw globs) is handed to the patched Bun's `--include`, with any glob characters in a file name
+(`[ ] { } * ?`, as in `[id].js`) escaped so that exactly that file is embedded. Each module lands at
+the same `/$bunfs/root/<its path relative to the app root>` and is imported the same way. If the compiler
 does not actually embed a listed module, the build fails rather than shipping a binary without it.
 
 **How it is verified.** The first `knext build` on a machine downloads the toolchain from the knext
@@ -555,6 +557,20 @@ so the binary you deploy still runs on stock Bun. The toolchain is published for
 machines with glibc, x64 and arm64** (such as GitHub-hosted runners); on a musl-based (Alpine)
 machine, macOS or Windows the build stops with an error that says so. Remove `bun`, or set
 `bun: 'stock'`, to go back to the Bun on your `PATH`.
+
+**Known limits.** Read these before relying on it:
+
+- **No cluster-deploy proof yet.** It is tested by building the real container image with it,
+  booting that image and loading an included module, on x64 and arm64 build machines. A full
+  `knext deploy` to a Kubernetes cluster with this toolchain has not been run.
+- **Thin SBOM.** Each binary's SBOM records only the file and its digest, with no component list.
+  The separate source SBOM lists the Bun source tree's components but does not record the added
+  patch.
+- **Build identity.** The binaries are compiled on Google Cloud Build under the project's default
+  build service account, not a dedicated least-privilege one. The signature and attestation cover
+  the release workflow's checks and publication, not that build machine.
+- **A slower compiler.** It is not built with link-time optimisation, so the compile step runs
+  about 4–5% slower than stock Bun. The executable you ship is unaffected.
 
 **Not covered by the compatibility credential.** The verified results on this site were earned
 with stock Bun. Treat this toolchain as experimental: its shape may change in a minor release, and

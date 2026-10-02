@@ -23,6 +23,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readFileSync,
     realpathSync,
     rmSync,
     writeFileSync,
@@ -172,6 +173,54 @@ describe("native include: knext passes the CHECKED files, relative to the compil
         write(join(root, ".output/server/index.mjs"), "export {};\n");
         return { root, plan: planIncludes(root, ["plugins/**/*"]) };
     }
+
+    it("nativeIncludePaths escapes glob characters in file names, so Bun's --include takes each file literally", () => {
+        // Measured on the knext-patched Bun: an UNESCAPED `plugins/[id].js`
+        // is read as a glob and embeds `plugins/i.js` + `plugins/d.js`
+        // instead of the file itself; a backslash before each of
+        // [ ] { } * ? makes it match exactly that file.
+        const root = temp("knext-include-meta-");
+        for (const f of ["[id].js", "a{b}.js", "x*y.js", "q?.js"])
+            write(join(root, "plugins", f), "export default 1;\n");
+        write(join(root, "plugins/[dir]/n.js"), "export default 2;\n");
+        const p = planIncludes(root, [
+            "plugins/[id].js",
+            "plugins/a{b}.js",
+            "plugins/x*y.js",
+            "plugins/q?.js",
+            "plugins/[dir]/n.js",
+        ]);
+        expect(nativeIncludePaths(p, root).sort()).toEqual(
+            [
+                "./plugins/\\[dir\\]/n.js",
+                "./plugins/\\[id\\].js",
+                "./plugins/a\\{b\\}.js",
+                "./plugins/q\\?.js",
+                "./plugins/x\\*y.js",
+            ].sort(),
+        );
+    });
+
+    it("a file name with a backslash is refused by planIncludes (both modes), naming the file", () => {
+        const root = temp("knext-include-bs-");
+        write(join(root, "plugins/back\\slash.js"), "export default 1;\n");
+        expect(() => planIncludes(root, ["plugins/*.js"])).toThrow(
+            /backslash.*plugins\/back\\slash\.js/s,
+        );
+    });
+
+    it("nativeIncludePaths refuses a backslash name too (defense in depth for a hand-built plan)", () => {
+        const root = temp("knext-include-bs2-");
+        const plan = {
+            root,
+            entrypoints: [join(root, "plugins/back\\slash.js")],
+            relpaths: ["plugins/back\\slash.js"],
+            report: { excluded: [], nonModule: [], unmatched: [] },
+        };
+        expect(() => nativeIncludePaths(plan, root)).toThrow(
+            /backslash.*plugins\/back\\slash\.js/s,
+        );
+    });
 
     it("nativeIncludePaths: ./-relative paths of exactly the planned files", () => {
         const { root, plan: p } = plan();
@@ -396,6 +445,28 @@ describe.skipIf(!PATCHED)(
             expect(runAlone(r.exe, ["greet"])).toBe(
                 "STARTUP 0\nRESULT plugin-ok after=1",
             );
+        }, 180_000);
+
+        it("a file whose name holds glob characters embeds exactly that file, not its glob matches", () => {
+            const work = app();
+            write(
+                join(work, "plugins/[id].js"),
+                'export default "BRACKET_FILE_9f2";\n',
+            );
+            write(join(work, "plugins/i.js"), 'export default "I_FILE_9f2";\n');
+            write(join(work, "plugins/d.js"), 'export default "D_FILE_9f2";\n');
+            const r = compile(PATCHED as string, work, [
+                "--include-json",
+                '["plugins/[id].js"]',
+                "--include-native",
+                "1",
+            ]);
+            expect(r.status).toBe(0);
+            expect(r.stdout).toContain("embedded 1 module(s): plugins/[id].js");
+            const exe = readFileSync(r.exe, "latin1");
+            expect(exe).toContain("BRACKET_FILE_9f2");
+            expect(exe).not.toContain("I_FILE_9f2");
+            expect(exe).not.toContain("D_FILE_9f2");
         }, 180_000);
     },
 );

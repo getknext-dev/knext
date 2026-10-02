@@ -374,7 +374,8 @@ export interface KnativeNextConfig {
      * match that is really (through a symlink) outside the app root, an absolute
      * or `..` pattern, a glob match that looks like a secret (`.env*`, `*.pem`,
      * `*.key`, `id_*`; name such a file exactly to include it), a native addon
-     * (`.node`; load it with a static `require()` instead) and a non-module
+     * (`.node`; load it with a static `require()` instead), a file name with a
+     * backslash and a non-module
      * match each fail the build. A directory pattern never embeds the
      * `node_modules` below it.
      *

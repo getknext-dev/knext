@@ -138,6 +138,12 @@ export function planIncludes(root, include) {
       `compile.include: no file matches ${plan.report.unmatched.map((p) => `'${p}'`).join(', ')} under ${root}`,
     );
   }
+  const backslashed = [...plan.relpaths, ...plan.report.nonModule].filter((rel) => rel.includes('\\'));
+  if (backslashed.length > 0) {
+    throw new Error(
+      `compile.include: file names containing a backslash cannot be included: ${backslashed.join(', ')} — rename the file`,
+    );
+  }
   const realRoot = realpathSync(resolve(root));
   const matched = [
     ...plan.entrypoints,
@@ -205,7 +211,18 @@ export function nativeIncludePaths(plan, cwd) {
         '--include keeps paths relative to the cwd, so the embedded paths would shift',
     );
   }
-  return plan.entrypoints.map((abs) => `./${toPosix(relative(plan.root, abs))}`);
+  const rels = plan.entrypoints.map((abs) => toPosix(relative(plan.root, abs)));
+  const backslashed = rels.filter((rel) => rel.includes('\\'));
+  if (backslashed.length > 0) {
+    throw new Error(
+      `compile.include: the knext-patched Bun cannot include a file whose name contains a backslash: ${backslashed.join(', ')} — rename it, or build without compile.bun`,
+    );
+  }
+  // Bun's --include reads any path holding [ ] { } * ? as a glob — an
+  // unescaped `plugins/[id].js` embeds `plugins/i.js` and `plugins/d.js`
+  // instead (measured). A backslash makes each character literal, so the
+  // file embedded is exactly the file planned and checked.
+  return rels.map((rel) => `./${rel.replace(/[[\]{}*?]/g, '\\$&')}`);
 }
 
 /**

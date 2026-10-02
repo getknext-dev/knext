@@ -360,6 +360,18 @@ describe("lockstep with the release + docs", () => {
         );
         expect(docs).not.toContain("on Linux arm64");
     });
+
+    it("the docs state the toolchain's known limits plainly (no cluster-deploy proof, thin SBOM, default build account)", () => {
+        const docs = readFileSync(
+            join(repo, "apps/docs/content/docs/build-pipeline.mdx"),
+            "utf8",
+        );
+        expect(docs).toContain("**No cluster-deploy proof yet.**");
+        expect(docs).toContain("**Thin SBOM.**");
+        expect(docs.replace(/\s+/g, " ")).toContain(
+            "under the project's default build service account",
+        );
+    });
 });
 
 describe("config validation", () => {
