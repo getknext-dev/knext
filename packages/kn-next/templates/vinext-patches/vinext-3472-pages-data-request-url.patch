@@ -1,0 +1,30 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3472
+What it fixes: Pages Router: a `/_next/data/...` request reaches getServerSideProps with the original data URL as `req.url` (Next.js parity), not the normalized page path.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3472.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/server/pages-request-stage-entry.js
++++ b/dist/server/pages-request-stage-entry.js
+@@ -166,6 +166,7 @@
+ 			}
+ 		}
+ 		const middlewareRequest = request;
++		const originalRenderUrl = pathname + new URL(request.url).search;
+ 		const dataNorm = normalizeDataRequest(request);
+ 		if (dataNorm.notFoundResponse && !vinextConfig?.skipProxyUrlNormalize) return dataNorm.notFoundResponse;
+ 		const isDataReq = dataNorm.isDataReq;
+@@ -229,7 +230,10 @@
+ 					kind: "pages-page",
+ 					protocolVersion: 4,
+ 					requestHost: new URL(req.url).host,
+-					renderOptions: options ?? null,
++					renderOptions: isDataReq ? {
++						...options,
++						originalUrl: originalRenderUrl
++					} : options ?? null,
+ 					resolvedUrl,
+ 					stagedHeaders: isSharedStaticPage ? null : [...stagedHeaders ?? new Headers()]
+ 				});

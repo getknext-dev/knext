@@ -1,0 +1,80 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3241
+What it fixes: Web Worker bundles: `process.env.NEXT_DEPLOYMENT_ID` is inlined, as it is in the rest of the app.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3241.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -108,7 +108,7 @@
+ import { EXPORT_ALL_CANDIDATE_FILTER, hasExportAllCandidate, stripServerExports, validatePageExports } from "./plugins/strip-server-exports.js";
+ import { removeConsoleCalls } from "./plugins/remove-console.js";
+ import { createImportMetaUrlPlugin } from "./plugins/import-meta-url.js";
+-import { createWorkerImageImportsPlugin } from "./plugins/worker-image-imports.js";
++import { createWorkerDeploymentIdDefinePlugin, createWorkerImageImportsPlugin } from "./plugins/worker-image-imports.js";
+ import { createRequireContextPlugin } from "./plugins/require-context.js";
+ import { COMMONJS_SYNTAX_CODE_FILTER } from "./plugins/commonjs-syntax.js";
+ import { createRequireConditionResolutionPlugin, isConditionalRequireScriptModuleId } from "./plugins/require-condition-resolution.js";
+@@ -1586,7 +1586,7 @@
+ 							...!isSSR && !isMultiEnv ? { output: getClientOutputConfig(clientAssetsDir) } : {}
+ 						})
+ 					},
+-					worker: { plugins: () => [createWorkerImageImportsPlugin({ deploymentId: nextConfig.deploymentId })] },
++					worker: { plugins: () => [createWorkerImageImportsPlugin({ deploymentId: nextConfig.deploymentId }), createWorkerDeploymentIdDefinePlugin({ deploymentId: nextConfig.deploymentId })] },
+ 					server: {
+ 						watch: config.server?.watch === null ? null : {
+ 							ignored: [VINEXT_GENERATED_DIR_RE],
+--- a/dist/plugins/worker-image-imports.js
++++ b/dist/plugins/worker-image-imports.js
+@@ -130,5 +130,48 @@
+ 		}
+ 	};
+ }
++const WORKER_DEPLOYMENT_ID_IDENTS = ["process.env.NEXT_DEPLOYMENT_ID", "process.env.__VINEXT_DEPLOYMENT_ID"];
++const WORKER_DEPLOYMENT_ID_RE = /process\.env\.(?:NEXT_DEPLOYMENT_ID|__VINEXT_DEPLOYMENT_ID)\b/;
++/**
++* Inline the deployment-id defines into worker bundles.
++*
++* Worker builds run in their own plugin container that the top-level
++* `define`s do not reach, so a worker reading `process.env.NEXT_DEPLOYMENT_ID`
++* would otherwise see an un-replaced member access. Mirrors the top-level
++* define values (`NEXT_DEPLOYMENT_ID` -> the string or `false`;
++* `__VINEXT_DEPLOYMENT_ID` -> the string or `""`).
++*/
++function createWorkerDeploymentIdDefinePlugin(options = {}) {
++	const publicReplacement = options.deploymentId ? JSON.stringify(options.deploymentId) : "false";
++	const internalReplacement = JSON.stringify(options.deploymentId ?? "");
++	const replacementFor = (ident) => ident === "process.env.NEXT_DEPLOYMENT_ID" ? publicReplacement : internalReplacement;
++	return {
++		name: "vinext:worker-deployment-id-define",
++		enforce: "pre",
++		transform: {
++			filter: {
++				id: {
++					include: WORKER_SCRIPT_RE,
++					exclude: NODE_MODULES_PATH_RE
++				},
++				code: WORKER_DEPLOYMENT_ID_RE
++			},
++			handler(code) {
++				const output = new MagicString(code);
++				let changed = false;
++				for (const ident of WORKER_DEPLOYMENT_ID_IDENTS) {
++					const replacement = replacementFor(ident);
++					let idx = code.indexOf(ident);
++					while (idx !== -1) {
++						output.overwrite(idx, idx + ident.length, replacement);
++						changed = true;
++						idx = code.indexOf(ident, idx + ident.length);
++					}
++				}
++				return changed ? magicStringTransformResult(output) : null;
++			}
++		}
++	};
++}
+ //#endregion
+-export { createWorkerImageImportsPlugin };
++export { createWorkerDeploymentIdDefinePlugin, createWorkerImageImportsPlugin };

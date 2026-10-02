@@ -1,0 +1,43 @@
+{
+  "$comment": "Fixes knext bundles for vinext ahead of upstream releases. `vinext` is the ONLY version these patches were validated against; `pristine` records the sha256 of each target file in that published tarball. Bumping the vinext pin without re-porting and re-validating every patch fails vinext-patches.test.ts.",
+  "vinext": "1.0.1",
+  "patches": [
+    {
+      "file": "vinext-3472-pages-data-request-url.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3472",
+      "summary": "Pages Router: a `/_next/data/...` request reaches getServerSideProps with the original data URL as `req.url` (Next.js parity), not the normalized page path."
+    },
+    {
+      "file": "vinext-3423-require-condition-noexternal.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3423",
+      "summary": "Server builds: a `require()` of a CommonJS dependency resolves the package's `require` export condition even when Vite would externalize that package."
+    },
+    {
+      "file": "vinext-3226-nitro-resolve-extensions.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3226",
+      "summary": "Nitro builds: a `turbopack.resolveExtensions` list without `.mjs` no longer hides Nitro's own preset entry (the build failed to resolve it)."
+    },
+    {
+      "file": "vinext-3424-nitro-rsc-bundle-deps.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3424",
+      "summary": "Nitro builds: dependencies of the RSC environment are bundled, so a package's `react-server` export condition is honoured."
+    },
+    {
+      "file": "vinext-3241-worker-deployment-id.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3241",
+      "summary": "Web Worker bundles: `process.env.NEXT_DEPLOYMENT_ID` is inlined, as it is in the rest of the app."
+    },
+    {
+      "file": "vinext-3436-nitro-output-file-tracing.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3436",
+      "summary": "Nitro builds: `outputFileTracingIncludes` / `outputFileTracingExcludes` from next.config are applied to the traced server dependencies."
+    }
+  ],
+  "pristine": {
+    "dist/config/next-config.js": "4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
+    "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
+    "dist/plugins/require-condition-resolution.js": "f8776d98dfc63c228810a8f6d3691fb0f8f7c7b42f700e6ed40c3501607a8321",
+    "dist/plugins/worker-image-imports.js": "529c659ee78c07dc2e5b97e15f597434ac4024e65c238e90d633be4a405ff281",
+    "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a"
+  }
+}

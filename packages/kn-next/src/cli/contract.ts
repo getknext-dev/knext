@@ -81,6 +81,18 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
         ],
     },
     {
+        verb: "vinext-patches",
+        flags: ["--check", "-h", "--help"],
+        exitCodes: [
+            OK,
+            {
+                code: 1,
+                meaning:
+                    "usage error, a bundled vinext fix conflicts with the installed vinext, or --check found a fix not yet applied",
+            },
+        ],
+    },
+    {
         verb: "validate",
         flags: ["-h", "--help"],
         exitCodes: [

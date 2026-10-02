@@ -145,6 +145,15 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
      * different command line.
      */
     const NON_USAGE_ALLOWLIST: Record<string, readonly string[]> = {
+        // Parsing knext's OWN bundled vinext patch files. A malformed one is a
+        // knext packaging defect (caught by vinext-patches.test.ts before
+        // release), never something a user typed — a FATAL stack is right.
+        "vinext-patches.ts": [
+            "malformed patch:",
+            "malformed hunk header:",
+            "truncated hunk in patch",
+            "unexpected line in hunk",
+        ],
         // Injectable exec boundary. Empty argv is a programming error inside
         // knext, never something a user types.
         "exec.ts": [

@@ -202,6 +202,42 @@ namespace "<ns>".` when the credential passes; `1` on a usage error (missing `--
 kubeconfig configured) or any refusal, printing the reason — never the kubeconfig's bytes — to
 stderr.
 
+## `knext vinext-patches`
+
+Applies the vinext fixes knext bundles ahead of upstream vinext releases to the vinext installed
+for this app, so you do not wait for those fixes to ship upstream. An app created with
+`knext create --builder vinext` runs it from its `postinstall` script, and `knext build` runs it
+again before the vinext build, so it is not typically run by hand.
+
+The fixes are tied to one exact vinext version (the one `knext create` pins). With any other vinext
+version installed it changes nothing and says so. Re-running it is safe: fixes that are already in
+place are left alone. If a fix neither applies cleanly nor is already present — vinext's files were
+modified some other way — it refuses rather than half-applying; reinstall your dependencies and run
+it again. Applying is all-or-nothing per fix: if writing any of a fix's files fails (for example a
+read-only `node_modules`), the files it already changed are restored and the command exits `1`.
+
+The `postinstall` script skips this step quietly when `@getknext/core` is not installed, as in a
+production-only install (`npm ci --omit=dev`), because it is a development dependency.
+
+To turn the bundled fixes off, for example because you patch vinext yourself, set
+`KNEXT_VINEXT_PATCHES=0`. Both the `postinstall` step and `knext build` then leave vinext untouched
+and print a line saying the fixes were not applied.
+
+```bash
+knext vinext-patches          # apply
+knext vinext-patches --check  # report only, change nothing
+```
+
+| Flag | Notes |
+|---|---|
+| `--check` | Report whether every fix is applied without changing any file; exit `1` when one is missing. |
+| `KNEXT_VINEXT_PATCHES=0` (env) | Skip the bundled fixes entirely, here and in `knext build`. |
+| `-h`, `--help` | Show the usage help. |
+
+**Exit code:** `0` (including `--help`, and when vinext is not installed or is a different version);
+`1` on a usage error, a fix that conflicts with the installed vinext, or `--check` finding a fix not
+yet applied.
+
 ## `knext deploy` (default)
 
 Loads and validates `knext.config.ts`, runs your build (`next build` with standalone output on the
