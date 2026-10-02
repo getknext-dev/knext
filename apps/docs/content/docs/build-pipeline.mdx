@@ -439,6 +439,20 @@ credential (the 14-consecutive-night gate the four default-target cells carry �
 [verified compatibility](/docs/compat-suite)). vinext has its own, separate, not-yet-complete
 credentialing track.
 
+**Known gap on the Bun runtime: the build's own boot check can fail on Linux build machines.**
+After compiling, `knext build` on this target boots the executable itself to confirm it serves
+and drains correctly before finishing. On a glibc-based Linux machine — most Linux CI runners
+(including GitHub-hosted ones) and most Linux desktops; macOS is unaffected — that check
+currently fails with an "unknown build arch" error for any app that depends on `sharp` (every app
+`knext create --builder vinext` scaffolds does, for image optimization). The compiled binary
+itself is fine; the gap is in how the check stages a native addon for that one case.
+
+Until this is fixed, build on an affected Linux machine with `knext build --skip-smoke`, which
+skips that check and says so loudly. Do not skip verification outright: build the image your
+`Dockerfile` defines (the one `knext build` already generated — the real binary you will ship)
+and run it, and confirm it answers your configured health route, before you deploy. Track current
+known gaps on the project's public issue tracker.
+
 ## Compatibility, stated honestly
 
 knext's official-suite result — [792/792, re-verified nightly on Node](/docs/compat-suite) — was earned
