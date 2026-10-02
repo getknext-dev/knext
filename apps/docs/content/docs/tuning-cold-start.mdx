@@ -148,3 +148,20 @@ than the cold start it was meant to fix. Raising it per app remains available as
 The numbers above were each measured on their own, one change at a time. Their savings overlap, so
 they don't simply add up; measure your own app before and after upgrading to see the combined
 effect on your cluster.
+
+A combined measurement of this release's changes together, against the prior release, ran on
+Oracle Kubernetes Engine (two nodes of a 4-vCPU/16GB shared-core machine type), both versions
+pinned to the same node to remove machine-to-machine variance, images already pre-pulled, ten
+wakes per runtime per version unless noted below.
+
+On the wakes not affected by the node-networking stall described above, the Node runtime showed a
+real, measurable improvement; the Bun runtime's improvement was not clearly distinguishable from
+noise at the sample size this particular cluster could sustain for the comparison (three clean
+wakes for the prior release, ten for this one — most of the prior release's wakes on this cluster
+hit the stall described next, leaving few clean ones to compare).
+
+Separately: on a cluster affected by the node-networking stall described above, this release's fix
+removed it. Without the fix, 13 of 20 measured wakes (both runtimes, same node, same conditions)
+hit the roughly-8-second stall; with it, 0 of 20 did. If your cluster doesn't show this pattern,
+you won't see this difference — measure your own wake times before and after upgrading rather than
+expecting an across-the-board win of that size.
