@@ -1,14 +1,26 @@
 # Next.js listing PR — founder notes (Refs #1566, decision context #1565)
 
-**Status: DRAFT ONLY.** Nothing here has been submitted, forked, commented, or opened against
-`vercel/next.js` or `nextjs/adapters-wg`. Do not submit `listing.patch` or
-`adapters-wg-request-draft.md` until the rc.2 credential window shows **14/14 on all four cells**
-(per the #1566 rule: "submitted only after rc.2 reaches 14/14 ... the listing is the reward for the
-credential, never before the gate is stably green"). The founder's 2026-09-27 decision on #1565
-already reframed the *docs-list* PR specifically to file it now, without a credential claim — see
-"What's already decided" below. This package keeps both the pre-drafted PR and the deferred WG
-request ready so nothing blocks on drafting time once the gate is green (or once the founder
-re-confirms the docs-PR-now sequencing).
+**Status: DRAFT ONLY, now push-ready.** Nothing has been submitted, forked publicly, commented, or
+opened against `vercel/next.js` or `nextjs/adapters-wg`. The patch, PR body, and a local committed
+branch on the founder's fork are ready to go the moment #1565 confirms the placement and (if the
+"wait until it reaches 14/14" reading is the one that stands) the credential window closes. Do not submit
+`listing.patch` or `adapters-wg-request-draft.md` until that confirmation.
+
+## 2026-10-02 refresh (this pass)
+
+- **Patch still applies cleanly, unchanged**, against current `vercel/next.js` canary
+  (`c24d0f874c7af5721c5161c5545b8f1a800a5cca`, fetched 2026-10-02). The target file is still
+  `docs/01-app/01-getting-started/17-deploying.mdx` — filename unchanged since the 2026-09-30 base.
+  `git apply --check listing.patch` exits 0 with no fuzz.
+- **Credential state as of this pass:** v1.0 is on `v1.0.0-rc.5` (knextSha `5109bf75`), Next.js
+  `v16.3.6`. Night 1 of 14 completed 4/4 green across all four cells (node×turbopack, node×webpack,
+  bun×turbopack, bun×webpack) — see getknext-dev/knext#1359 (the pinned tracker) for the live
+  per-night count. **It has not reached 14/14 yet** — do not read anything below as the gate being met.
+- **A branch is committed, not pushed**, on the founder's fork (`AhmedElBanna80/next.js`), built off
+  current `upstream/canary`. See "Submit at GA" below for the exact commands and the PR text.
+  Evidence placeholders stay `[FILL AT GA]` per the honesty guard; nothing is fabricated.
+- **No upstream content (PR, issue, comment) was opened in this pass.** The fork clone and local
+  commit live only in this session's scratchpad, not pushed anywhere.
 
 ## What's already decided (read #1565 and #1566 comments before changing this)
 
@@ -42,6 +54,31 @@ both untracked in this worktree, read from the primary checkout):
 now, request (c) only after 14/14, and do not treat (c) as a gate for anything else.** Do not pursue
 (b) as a near-term goal; it requires org-hosting decisions (governance, who maintains
 `nextjs/deploy-knext`) that are out of scope for this draft and belong in the ADR #1565 asks for.
+
+## If #1565 picks the verified tier instead (still open as of 2026-10-02)
+
+This package defaults to the unblocked option: the plain platform-list PR above, which needs no
+org-hosting decision and has the strongest same-day-merge precedent. #1565 ("Next.js listing path:
+platform list vs verified tier") is **still open, no ADR merged** as of this pass — do not assume it
+has resolved to either option.
+
+If #1565 resolves to the verified tier (option (b)/(c) in its own framing) instead, what changes:
+
+- The `listing.patch` / `docs/deploying-add-knext` branch above stops being the deliverable — it
+  targets the wrong list (verified adapters require org hosting under `github.com/nextjs`, not a
+  link in "Other Platforms").
+- `apps/docs/LISTING.md` (already in this repo) is the draft for that path: a full adapter-listing
+  entry (name, category, description, adapter wiring, compat-suite evidence) rather than a one-line
+  link. It is currently gated on its own checklist (compat-suite green nightly, compat-matrix
+  promotion, npm publish) — re-read it before using it; its gate list is independent of and may be
+  stricter than the platform-list path's.
+- A **governance decision** is needed first: whether the adapter package (not the whole monorepo)
+  mirrors or transfers into a `nextjs/deploy-knext`-style repo, who maintains it day-to-day, and how
+  that interacts with knext's own release cadence. That is exactly what #1565 asks the founder to
+  decide and record as an ADR — this draft package does not attempt to pre-decide it.
+- The WG request draft (`adapters-wg-request-draft.md`) becomes relevant sooner — WG membership is
+  the real path to verified status, per the research — rather than being purely a step taken
+  after 14/14.
 
 ## The framing mismatch — do not silently misfile
 
@@ -115,9 +152,14 @@ own:
   README) per the Hostinger lesson (a repo-README link stalled review by 7 days; a rotted
   `github.com/hostinger/deploy-nextjs` link is still live on the page today as a cautionary
   example).
-- Disclosure: this PR's docs diff and body draft were prepared with AI assistance (Claude Code) and
-  reviewed by a human before submission. State this plainly in the PR body per vercel/next.js
-  contribution norms — do not omit it or phrase it evasively.
+- **AI-attribution decision (revised 2026-10-02, founder-directed for this task): the PR text
+  carries NO AI-attribution line and no internal references** (no issue/PR numbers, no "knext"
+  internal codenames beyond the project name itself). `vercel/next.js`'s `CONTRIBUTING.md` (checked
+  this pass, current canary) has no AI-disclosure requirement, so this is not a contribution-norms
+  violation — it supersedes the earlier draft of this bullet, which had assumed a disclosure
+  requirement that isn't actually documented upstream. The PR body is short, plain, human-toned
+  prose (jev-checked, see below) — have a human skim it before it is ever sent, same as any other
+  outbound PR.
 
 ## Precedent PRs (for the founder to skim, not to copy verbatim)
 
@@ -144,6 +186,50 @@ sourced from the actual green rc.2 run, not estimated or carried over from an ea
 - Pass/fail counts per cell
 - The quarantine ledger size and a link to it
 - The corresponding `docs/compat-matrix.md` row/anchor
+
+## Submit at GA (founder or lead) — exact commands, not to be run by this task
+
+This task deliberately did **not** push anything or open anything upstream. A branch
+`docs/deploying-add-knext` is committed locally on a scratch clone of the founder's fork
+(`AhmedElBanna80/next.js`), built on current `upstream/canary`, with the one-line patch applied and
+a plain commit (`docs: add knext to Other Platforms list`). To actually submit once #1565/#1566 are
+both confirmed green-lit:
+
+```bash
+# from the fork clone with the docs/deploying-add-knext branch checked out
+git push -u origin docs/deploying-add-knext
+
+gh pr create \
+  --repo vercel/next.js \
+  --base canary \
+  --head AhmedElBanna80:docs/deploying-add-knext \
+  --title "docs: add knext to Other Platforms list" \
+  --body "$(cat <<'EOF'
+Adds knext to the "Other Platforms" list.
+
+knext (https://knext.dev) is an open-source deployment framework for running Next.js on
+Knative/Kubernetes clusters, with scale-to-zero via Knative. Its default build target uses the
+official Next.js Deployment Adapter API (adapterPath), not a custom runtime.
+
+This section's intro line says these platforms "are not built on the public Adapter API" — that
+doesn't apply to knext, so flagging it here in case you'd rather place it elsewhere (e.g. a
+separate sub-group for Adapter-API-based but unverified platforms). Happy to adjust the diff if
+you have a preferred placement.
+
+No compatibility-suite or verified-adapter claim is being made in this PR.
+EOF
+)"
+```
+
+If the credential has reached 14/14 on all four cells by submission time, add one more short
+paragraph to the body citing: the run IDs for all four cells, the Next.js ref tested, pass/fail
+counts, and a link to `https://knext.dev/docs/compat-matrix`. Pull those from the real green
+getknext-dev/knext#1359 state at that moment — never carry over the night-1 numbers in this file.
+
+**jev guardrail run on the PR body text above (2026-10-02):** "does this read as AI-generated /
+unnatural for a human contributor" → 0.37 (no); "does this overclaim beyond what the four rc.5
+cells currently show" → 0.04 (no). Both read clean; re-run jev on the final body if it's edited
+again before submission.
 
 ## Test guard
 
