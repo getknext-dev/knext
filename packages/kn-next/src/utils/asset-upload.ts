@@ -73,7 +73,7 @@ export function hasStorage(
 
 /** The user-facing growth path for the no-storage mode (docs site). */
 export const NO_STORAGE_DOCS_URL =
-    "https://knext.dev/docs/multi-cloud#starting-without-object-storage";
+    "https://knext-platform.dev/docs/multi-cloud#starting-without-object-storage";
 
 /**
  * ADR-0047 condition 1: the ANNOUNCED mode. Printed at info by every deploy

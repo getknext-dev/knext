@@ -93,7 +93,7 @@ describe("formatConfigNotFound renders guidance, not an exception dump", () => {
 
     it("points at `create` for a new app and at the docs for an existing one", () => {
         expect(text).toContain("npx @getknext/core create");
-        expect(text).toContain("https://knext.dev");
+        expect(text).toContain("https://knext-platform.dev");
     });
 
     it("names the directory that was searched", () => {
@@ -251,7 +251,7 @@ describe("end-to-end: the real deploy entry in a directory with no config", () =
             expect(r.status).toBe(1);
             expect(combined).toContain("knext.config.ts");
             expect(combined).toContain("npx @getknext/core create");
-            expect(combined).toContain("https://knext.dev");
+            expect(combined).toContain("https://knext-platform.dev");
             expect(combined).not.toContain("FATAL");
             expect(combined).not.toMatch(STACK_FRAME_RE);
         } finally {

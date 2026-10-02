@@ -106,7 +106,7 @@ describe("help puts `create` first, under a start-here grouping", () => {
     });
 
     it("points a newcomer at the docs", () => {
-        expect(CLI_HELP).toContain("https://knext.dev");
+        expect(CLI_HELP).toContain("https://knext-platform.dev");
     });
 });
 
