@@ -123,6 +123,28 @@ describe("applier", () => {
         ).toThrow(VinextPatchConflictError);
     });
 
+    it("refuses a half-applied or partly-stale multi-hunk patch", () => {
+        const [fp] = parseUnifiedPatch(
+            "--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n+A\n b\n@@ -5,2 +6,3 @@\n x\n+X\n y\n",
+        );
+        if (!fp) throw new Error("no file patch");
+        expect(applyFilePatchToText("a\nb\nc\nd\nx\ny\n", fp).status).toBe(
+            "patch",
+        );
+        // First hunk already in, second not: never "finish" it silently.
+        expect(() => applyFilePatchToText("a\nA\nb\nc\nd\nx\ny\n", fp)).toThrow(
+            VinextPatchConflictError,
+        );
+        // First hunk applies, second's context is gone.
+        expect(() => applyFilePatchToText("a\nb\nc\nd\nx\nY\n", fp)).toThrow(
+            VinextPatchConflictError,
+        );
+        // First hunk applies, second's context is ambiguous: never guess.
+        expect(() =>
+            applyFilePatchToText("a\nb\nc\nx\ny\nd\nx\ny\n", fp),
+        ).toThrow(VinextPatchConflictError);
+    });
+
     it("creates a new file from a /dev/null patch, and accepts it once present", () => {
         const [fp] = parseUnifiedPatch(
             "--- /dev/null\n+++ b/dist/new.js\n@@ -0,0 +1,2 @@\n+a\n+b\n",
