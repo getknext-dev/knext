@@ -355,7 +355,7 @@ describe('docs-deploy-oke.yml — the deploy is verified, not assumed', () => {
     expect(s).toMatch(/\[ "\$code" = 200 \] \|\| \{[^\n]*exit 1/);
     const env = (step?.env ?? {}) as Record<string, string>;
     expect(env.LB).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
-    expect(env.HOST).toBe('knext.dev');
+    expect(env.HOST).toBe('knext-platform.dev');
   });
 
   it('continue-on-error appears on exactly one step: the advisory public-host check', () => {

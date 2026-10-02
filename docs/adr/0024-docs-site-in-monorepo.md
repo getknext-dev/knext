@@ -1,9 +1,9 @@
-# ADR-0024: The knext.dev docs site lives in the monorepo at `apps/docs/`
+# ADR-0024: The knext-platform.dev docs site lives in the monorepo at `apps/docs/`
 
 Status: Accepted · Date: 2026-07-15
 
 ## Context
-The user-facing docs site (Next.js 16 + Fumadocs, deployed on Vercel at **knext.dev**,
+The user-facing docs site (Next.js 16 + Fumadocs, deployed on Vercel at **knext-platform.dev**,
 package name `knext-docs`) previously lived in a **separate repository** (`getknext-dev/docs`,
 npm-based). To type-check and build the dogfood/self-host config it declared a dependency on
 `@getknext/core` via a `file:` specifier (`file:../knext/packages/kn-next`), which required a
@@ -35,7 +35,7 @@ ship from the same repo that owns `@getknext/core`.
 - **History:** the migration is a **content copy, not a `git subtree`.** knext squash-merges every
   PR, which would collapse a subtree graft anyway. Full commit history remains in the archived
   source repo (see Consequences); this ADR is the provenance pointer.
-- **Vercel:** the site keeps shipping from the same Vercel project at knext.dev. The in-repo
+- **Vercel:** the site keeps shipping from the same Vercel project at knext-platform.dev. The in-repo
   `apps/docs/vercel.json` runs **install and build at the REPO ROOT** (`cd ../..`), so `workspace:*`
   and the root `pnpm.overrides` (Trivy remediations) resolve — Vercel must NOT scope the install to
   `apps/docs`. The build is vanilla Next (`KNEXT_ADAPTER` unset); the platform handles output.
@@ -73,7 +73,7 @@ ship from the same repo that owns `@getknext/core`.
   CI reminder keeps it visible.
 - **Human-gated (NOT in this change):** in the Vercel dashboard — re-link the project to the
   monorepo repo, set **Root Directory = `apps/docs`**, confirm env vars (`NEXT_DEPLOYMENT_ID`,
-  etc.) and that `KNEXT_ADAPTER` is unset, and keep the knext.dev domain attached. Then **archive**
+  etc.) and that `KNEXT_ADAPTER` is unset, and keep the knext-platform.dev domain attached. Then **archive**
   (do not delete) `getknext-dev/docs`, replacing its README with a pointer to `apps/docs/` — it
   holds the full git history and the docs issue record.
 

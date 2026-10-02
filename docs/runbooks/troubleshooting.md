@@ -520,7 +520,7 @@ request-metrics protocol is prometheus, and the app metrics port therefore moved
   kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | head -3
   ```
 
-  See the [upgrading page](https://knext.dev/docs/upgrading) for the full ordered steps.
+  See the [upgrading page](https://knext-platform.dev/docs/upgrading) for the full ordered steps.
 
 ## When none of these match
 

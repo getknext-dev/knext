@@ -54,7 +54,7 @@ until the next publish (user-owned).**
 | 1a `npx kn-next` | npm 404, no guidance | **unchanged** (needs the user-owned `kn-next` alias publish; docs incantation unified in #810) |
 | 1b no-config | FATAL + stack + bundler chunk paths | plain-English: what the config is, `create my-app` pointer, docs link — no stack, and the state is guidance, not an error dump |
 | 1c doctor no-cluster | "check network/VPN and retry" misdirection | in review (iteration 3, `feat/ux-doctor-no-cluster`) |
-| 1d help surface | 7 of ~15 verbs, `create` hidden | grouped **Start here / Deploy and operate / Database** surface, `create` first, examples, `Docs: https://knext.dev` footer |
+| 1d help surface | 7 of ~15 verbs, `create` hidden | grouped **Start here / Deploy and operate / Database** surface, `create` first, examples, `Docs: https://knext-platform.dev` footer |
 
 **Found beyond the row-1 findings, fixed en route (review-driven, ADR-0046):** `cleanup`/`build`
 were advertised but undispatched and FELL THROUGH TO DEPLOY (a teardown that deployed); the first

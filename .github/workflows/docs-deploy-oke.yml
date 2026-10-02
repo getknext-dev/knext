@@ -272,13 +272,13 @@ jobs:
 
       # Smoke test through the Kourier LoadBalancer with an explicit Host: header —
       # the path Cloudflare itself takes to the origin. It does NOT go through
-      # https://knext.dev: that host 301s to www and Cloudflare's WAF answers 403
+      # https://knext-platform.dev: that host 301s to www and Cloudflare's WAF answers 403
       # to CI runners, so a check on it fails on every run whatever the deploy did.
       # This step is the deploy's real gate; it must never be continue-on-error.
       - name: Smoke-test the origin through the Kourier LB
         env:
           LB: '51.170.89.13'
-          HOST: knext.dev
+          HOST: knext-platform.dev
         run: |
           set -euo pipefail
           for path in /api/health / /docs; do
@@ -292,9 +292,9 @@ jobs:
       - name: Public host check (advisory - WAF blocks CI until #55)
         continue-on-error: true
         run: |
-          code="$(curl -sS -L -o /dev/null -w '%{http_code}' --max-time 30 https://knext.dev/api/health || true)"
-          echo "https://knext.dev/api/health -> ${code:-none}"
-          [ "$code" = 200 ] || echo "::warning::public https://knext.dev not reachable from CI (got ${code:-none}); expected while the WAF blocks runners"
+          code="$(curl -sS -L -o /dev/null -w '%{http_code}' --max-time 30 https://knext-platform.dev/api/health || true)"
+          echo "https://knext-platform.dev/api/health -> ${code:-none}"
+          [ "$code" = 200 ] || echo "::warning::public https://knext-platform.dev not reachable from CI (got ${code:-none}); expected while the WAF blocks runners"
 
       # The kubeconfig is a credential on a runner's disk: remove it whatever
       # happened above.

@@ -41,5 +41,5 @@ This policy covers the code in this repository: the `@getknext/core`, `@getknext
 - Findings that require deployment-time misconfiguration that this project explicitly documents as
   the operator's responsibility to set correctly (for example, running a CNI with no
   `NetworkPolicy` support and then relying on network isolation — see
-  [the docs security page](https://knext.dev/docs/security#network-isolation) for what is and is
+  [the docs security page](https://knext-platform.dev/docs/security#network-isolation) for what is and is
   not enforced automatically).

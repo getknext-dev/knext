@@ -56,7 +56,7 @@ custom resource that the knext operator reconciles into a Knative Service. See
 | **Portability** | Any Kubernetes cluster (portable by design; GKE/kind-verified, and the **core operator/CLI deploy path validated end-to-end on EKS** — remaining data-plane/CI legs and other clouds tracked in [#46](https://github.com/getknext-dev/knext/issues/46)) |
 | **Scale-to-Zero** | Idle apps run zero pods; the platform brings a pod back up on the next request |
 | **Autoscaling** | Configurable (KPA/HPA) |
-| **Cold starts** | Optimized for scale-to-zero — the build pipeline includes bytecode compile caching to remove V8 compilation work from a cold wake. End-to-end wake time is dominated by cluster scheduling and is environment-dependent; see [docs/benchmarks/scale-to-zero-oke.md](docs/benchmarks/scale-to-zero-oke.md) and the [tuning cold start](https://knext.dev/docs/tuning-cold-start) guide for measured numbers and their conditions — we do not publish a single number as a universal guarantee |
+| **Cold starts** | Optimized for scale-to-zero — the build pipeline includes bytecode compile caching to remove V8 compilation work from a cold wake. End-to-end wake time is dominated by cluster scheduling and is environment-dependent; see [docs/benchmarks/scale-to-zero-oke.md](docs/benchmarks/scale-to-zero-oke.md) and the [tuning cold start](https://knext-platform.dev/docs/tuning-cold-start) guide for measured numbers and their conditions — we do not publish a single number as a universal guarantee |
 | **Container control** | Full Docker/OCI image access |
 | **Networking** | Full Kubernetes networking; a default-on NetworkPolicy is reconciled per app, with enforcement depending on your cluster's CNI |
 | **Cost model** | Per-pod-second, not per-invocation |

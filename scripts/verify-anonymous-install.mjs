@@ -91,7 +91,7 @@ import { pathToFileURL } from 'node:url';
  * The user-facing docs page whose `kubectl apply` a stranger copies.
  *
  * Deliberately the docs SITE (`apps/docs/content/`) rather than `docs/`: the
- * site is what is published at knext.dev, so it is what an outside user reads.
+ * site is what is published at knext-platform.dev, so it is what an outside user reads.
  * The URL is read FROM it at run time and never duplicated here — a second copy
  * is a thing that drifts, and a check walking a URL nobody publishes proves
  * nothing about the path users take.

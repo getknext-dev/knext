@@ -24,6 +24,6 @@ index eb6f4f5..1c03a21 100644
  - [Deno Deploy](https://docs.deno.com/examples/next_tutorial)
  - [Firebase App Hosting](https://firebase.google.com/docs/app-hosting/get-started)
  - [Netlify](https://docs.netlify.com/frameworks/next-js/overview/#next-js-support-on-netlify)
-+- [knext](https://knext.dev/docs/getting-started)
++- [knext](https://knext-platform.dev/docs/getting-started)
 
  For details on which Next.js features require specific platform capabilities, see [Deploying to Platforms](/docs/app/guides/deploying-to-platforms).
