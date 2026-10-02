@@ -51,6 +51,16 @@
  * verify" (wrong/missing token scope — tell the founder which scope to add)
  * reads differently from "we verified and it is genuinely empty" (real drift,
  * points at #1638 item 1).
+ *
+ * SCOPE, as of 2026-10-02 (settings applied): a repository ruleset
+ * ("release tags (v*) immutable") now actively protects `refs/tags/v*`
+ * against deletion/update/non-fast-forward — that IS checked, and its
+ * disappearance fails the nightly. The `npm-publish` environment
+ * deliberately has NO required-reviewer rule, by founder decision (the sole
+ * maintainer is pre-authorized to publish and asked not to be a blocking
+ * step) — `runDriftCheck` still fetches that setting and returns it for
+ * logging, but never includes it in `findings` or `ok`, since alerting on a
+ * permanent, intentional absence is not drift.
  */
 
 const GITHUB_API_BASE = 'https://api.github.com/';
@@ -368,10 +378,18 @@ export async function runDriftCheck({ owner, repo, environment, api }) {
     fetchTagRulesetProtection({ owner, repo, api }),
   ]);
 
+  // `reviewer` is fetched and returned for INFORMATIONAL logging only — it is
+  // never pushed to `findings` and never affects `ok`. By founder decision
+  // (#1638, 2026-10-02) the `npm-publish` environment deliberately has NO
+  // required-reviewer rule: the sole maintainer is pre-authorized to publish
+  // and asked not to be a blocking step. That is a permanent choice, not
+  // drift, so alerting on its absence forever would be exactly the
+  // "documented expectation degrades, and nobody can tell real drift from
+  // the permanently-expected state" failure this repo's own rules warn
+  // about. Only the `v*`-covering tag ruleset is a pass/fail criterion now —
+  // that protection is enforced by an active repository ruleset today, and
+  // its disappearance IS real drift worth alerting on.
   const findings = [];
-  if (reviewer.kind !== 'ok') {
-    findings.push(describeFinding(`npm-publish environment required reviewer`, reviewer));
-  }
   if (tagRuleset.kind !== 'ok') {
     findings.push(describeFinding('v*-covering tag ruleset', tagRuleset));
   }
