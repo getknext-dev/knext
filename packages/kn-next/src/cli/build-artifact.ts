@@ -40,7 +40,7 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
-import { wantsPatchedBun } from "./bun-toolchain";
+import { wantsPatchedBun } from "./compile-config";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,

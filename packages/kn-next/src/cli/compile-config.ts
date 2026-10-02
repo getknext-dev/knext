@@ -3,8 +3,9 @@
  * see `bun-toolchain.ts`): its values and its validation.
  *
  * Deliberately import-free: `validate.ts` (behind the public
- * `@getknext/core/validate` entry) imports this, and must not pull in the
- * toolchain's download / build-step graph to check a config.
+ * `@getknext/core/validate` entry) and `build-artifact.ts` import this, and
+ * must not pull in the toolchain's download / build-step graph (tests mock
+ * `./vinext-build` around `build-artifact.ts`).
  *
  * RETIREMENT: goes with `bun-toolchain.ts` once a stock Bun release ships
  * `--compile --include` (retirement probe `bun-patched-toolchain`).
@@ -19,6 +20,14 @@ export const BUN_TOOLCHAINS: readonly BunToolchainId[] = [
 
 export interface CompileConfigShape {
     readonly compile?: unknown;
+}
+
+/** Did this config opt in to the patched toolchain? */
+export function wantsPatchedBun(config: CompileConfigShape): boolean {
+    return (
+        (config.compile as { bun?: unknown } | undefined)?.bun ===
+        "knext-patched"
+    );
 }
 
 /** `validateConfig` half for the `compile` block. Returns error strings. */

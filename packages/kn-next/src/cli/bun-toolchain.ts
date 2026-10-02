@@ -49,14 +49,19 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { BunToolchainId, CompileConfigShape } from "./compile-config";
+import {
+    type BunToolchainId,
+    type CompileConfigShape,
+    wantsPatchedBun,
+} from "./compile-config";
 import { UsageError } from "./shared";
-import { detectLinuxLibc, type LinuxLibc } from "./vinext-build";
+import type { LinuxLibc } from "./vinext-build";
 
 export {
     BUN_TOOLCHAINS,
     type BunToolchainId,
     validateCompileConfig,
+    wantsPatchedBun,
 } from "./compile-config";
 
 export interface BunToolchainAsset {
@@ -143,8 +148,31 @@ export function currentHost(): HostPlatform {
     return {
         platform: process.platform,
         arch: process.arch,
-        libc: process.platform === "linux" ? detectLinuxLibc() : "gnu",
+        libc: process.platform === "linux" ? hostLibc() : "gnu",
     };
+}
+
+/**
+ * glibc or musl, the same signal `vinext-build.ts`'s `detectLinuxLibc` reads
+ * (`process.report`'s `glibcVersionRuntime`, then the musl loader). Kept local
+ * so this module's only runtime imports are node builtins and `./shared` /
+ * `./compile-config` — tests mock `./vinext-build` around the CLI entries that
+ * import this one.
+ */
+function hostLibc(): LinuxLibc {
+    try {
+        const report = process.report?.getReport() as
+            | { header?: { glibcVersionRuntime?: string } }
+            | undefined;
+        if (report?.header?.glibcVersionRuntime) return "gnu";
+    } catch {
+        // fall through to the loader probe
+    }
+    const muslLoaders = [
+        "/lib/ld-musl-x86_64.so.1",
+        "/lib/ld-musl-aarch64.so.1",
+    ];
+    return muslLoaders.some((p) => existsSync(p)) ? "musl" : "gnu";
 }
 
 /** `$KNEXT_CACHE_DIR` → `$XDG_CACHE_HOME/knext` → `~/.cache/knext`, then `bun-patched/<tag>`. */
@@ -259,14 +287,6 @@ export async function resolveCompileBun(
     const compile = config.compile as { bun?: unknown } | undefined;
     if (compile?.bun !== "knext-patched") return { id: "stock", bin: "bun" };
     return { id: "knext-patched", bin: await ensurePatchedBun(deps) };
-}
-
-/** Did this config opt in to the patched toolchain? */
-export function wantsPatchedBun(config: CompileConfigShape): boolean {
-    return (
-        (config.compile as { bun?: unknown } | undefined)?.bun ===
-        "knext-patched"
-    );
 }
 
 /**
