@@ -45,13 +45,14 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { computedRequireSites } from './computed-require-scan.mjs';
 import { analyzeServerModule } from './entry-require-staticize.mjs';
 
@@ -89,19 +90,65 @@ export function parseIncludeJson(raw) {
  * `compile.include` on stock Bun: the embed plan for the user's globs, rooted at
  * the app root, so each matched module lands at `$bunfs/root/<path relative to
  * the app root>` (embedded unexecuted — loaded on its first import). Fails
- * instead of embedding less than was asked for: a pattern that matches nothing,
- * a match outside the root (planEmbed throws) and a non-module match (stock Bun
- * embeds extra entrypoints only for JS/TS modules) are all errors that name the
- * offending path.
+ * instead of embedding something it should not, or less than was asked for —
+ * each error names the offending pattern or path:
+ *
+ *   - an absolute pattern, or one with a `..` segment (refused up front);
+ *   - a match whose REAL path (symlinks resolved, for glob and literal matches
+ *     alike) is outside the app root's real path — planEmbed's own outside-root
+ *     check is textual and covers literals only, so this is the guard for
+ *     `compile.include`;
+ *   - a match that looks like a secret (`.env*`, `*.pem`, `*.key`, `id_*`)
+ *     unless the pattern names that exact file;
+ *   - a pattern that matches nothing, and a non-module match (stock Bun embeds
+ *     extra entrypoints only for JS/TS modules).
+ *
+ * The guards live here, not in planEmbed, which the self-contained build modes
+ * share for knext's own trees.
  *
  * @param {string} root the app root
  * @param {string[]} include the globs, relative to `root`
  */
 export function planIncludes(root, include) {
+  for (const pattern of include) {
+    const posix = pattern.split('\\').join('/');
+    if (isAbsolute(pattern) || posix.startsWith('/') || /^[A-Za-z]:/.test(posix)) {
+      throw new Error(
+        `compile.include: '${pattern}' is absolute — patterns are relative to the app root (${root})`,
+      );
+    }
+    if (posix.split('/').includes('..')) {
+      throw new Error(
+        `compile.include: '${pattern}' contains '..' — patterns cannot reach outside the app root (${root})`,
+      );
+    }
+  }
   const plan = planEmbed({ root, include });
   if (plan.report.unmatched.length > 0) {
     throw new Error(
       `compile.include: no file matches ${plan.report.unmatched.map((p) => `'${p}'`).join(', ')} under ${root}`,
+    );
+  }
+  const realRoot = realpathSync(resolve(root));
+  const matched = [
+    ...plan.entrypoints,
+    ...plan.report.nonModule.map((rel) => resolve(plan.root, rel)),
+  ];
+  const escaped = matched.filter((abs) => !insideRoot(realRoot, realpathSync(abs)));
+  if (escaped.length > 0) {
+    throw new Error(
+      `compile.include: these matches resolve (through a symlink) outside the app root ${realRoot}: ` +
+        escaped.map((abs) => toPosix(relative(plan.root, abs))).join(', '),
+    );
+  }
+  const literals = new Set(include.map((p) => p.split('\\').join('/').replace(/^\.\//, '')));
+  const secrets = matched
+    .map((abs) => toPosix(relative(plan.root, abs)))
+    .filter((rel) => SECRET_NAME.test(basename(rel)) && !literals.has(rel));
+  if (secrets.length > 0) {
+    throw new Error(
+      `compile.include: refusing to embed files that look like secrets: ${secrets.join(', ')} — ` +
+        'list a file by its exact path if it really belongs in the executable',
     );
   }
   if (plan.report.nonModule.length > 0) {
@@ -111,6 +158,15 @@ export function planIncludes(root, include) {
     );
   }
   return plan;
+}
+
+/** File names `compile.include` refuses to embed unless named exactly: `.env*`, `*.pem`, `*.key`, `id_*`. */
+const SECRET_NAME = /^(?:\.env(?:\..*)?|id_.*|.*\.(?:pem|key))$/i;
+
+/** Is `real` the root itself or strictly inside it (both already realpath'd)? */
+function insideRoot(realRoot, real) {
+  const rel = relative(realRoot, real);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 /** Where Bun embeds a JS/TS source compiled as an entrypoint: `[dir]/[name].js`. */

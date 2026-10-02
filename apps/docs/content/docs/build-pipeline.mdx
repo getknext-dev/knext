@@ -484,7 +484,13 @@ you asked for:
 - only JavaScript and TypeScript modules (`.js .mjs .cjs .ts .mts .cts .jsx .tsx`) can be included —
   a glob that matches a JSON file, an image or any other file fails the build;
 - a pattern that matches nothing fails the build;
-- matches must be inside the app root, and `node_modules` is never searched;
+- patterns are relative to the app root: an absolute pattern, or one containing `..`, fails the
+  build;
+- every match must really be inside the app root — a file or directory that is a symlink to
+  somewhere outside it fails the build (a glob does not follow a symlinked file at all), and
+  `node_modules` is never searched;
+- files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_*`) are never picked up by a glob —
+  the build fails and names them; list one by its exact path if it really belongs in the executable;
 - `compile.include` applies only to the compiled vinext executable (`build: 'vinext'` on the Bun
   runtime); the config check rejects it for every other target.
 

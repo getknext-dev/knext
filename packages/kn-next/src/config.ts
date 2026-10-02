@@ -365,7 +365,10 @@ export interface KnativeNextConfig {
      * `.cjs` source is embedded as `.js`), is NOT evaluated at startup, and
      * loads from the executable on its first import — nothing needs to sit
      * beside the binary. Works with stock Bun; a pattern that matches nothing, a
-     * match outside the app root and a non-module match each fail the build.
+     * match that is really (through a symlink) outside the app root, an absolute
+     * or `..` pattern, a glob match that looks like a secret (`.env*`, `*.pem`,
+     * `*.key`, `id_*`; name such a file exactly to include it) and a non-module
+     * match each fail the build.
      *
      * Supported on the compiled vinext executable only (`build: 'vinext'`,
      * runtime `'bun'`); the config check rejects it for other targets.

@@ -21,6 +21,7 @@ import {
     mkdtempSync,
     realpathSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -171,6 +172,99 @@ describe("compile.include fails the build instead of embedding nothing", () => {
     it("malformed --include-json fails", () => {
         const r = compile(app(), ["--include-json", "not-json"]);
         expect(r.status).not.toBe(0);
+    });
+});
+
+describe("planIncludes: nothing outside the app root, no secrets by glob", () => {
+    /** An app root with a sibling `outside/` holding a module that must never embed. */
+    function rooted(): { work: string; outside: string } {
+        const parent = temp("knext-include-root-");
+        const work = join(parent, "app");
+        const outside = join(parent, "outside");
+        write(join(work, "plugins/ok.js"), PLUGIN);
+        write(join(outside, "secret.js"), 'export default "outside";\n');
+        return { work, outside };
+    }
+
+    it("refuses a '..' glob up front", () => {
+        const { work } = rooted();
+        expect(() => planIncludes(work, ["../outside/*.js"])).toThrow(
+            /contains '\.\.'/,
+        );
+        expect(() =>
+            planIncludes(work, ["plugins/../../outside/*.js"]),
+        ).toThrow(/contains '\.\.'/);
+    });
+
+    it("refuses an absolute glob up front", () => {
+        const { work, outside } = rooted();
+        expect(() => planIncludes(work, [`${outside}/*.js`])).toThrow(
+            /is absolute/,
+        );
+        expect(() => planIncludes(work, ["/etc/*.js"])).toThrow(/is absolute/);
+    });
+
+    it("refuses a symlinked directory that resolves outside the root (glob match)", () => {
+        const { work, outside } = rooted();
+        symlinkSync(outside, join(work, "linkdir"));
+        expect(() => planIncludes(work, ["linkdir/*.js"])).toThrow(
+            /outside the app root[\s\S]*linkdir\/secret\.js/,
+        );
+    });
+
+    it("refuses a symlinked file that resolves outside the root; a glob never embeds it", () => {
+        const { work, outside } = rooted();
+        symlinkSync(join(outside, "secret.js"), join(work, "plugins/link.js"));
+        // Named literally: refused, naming it.
+        expect(() => planIncludes(work, ["plugins/link.js"])).toThrow(
+            /outside the app root[\s\S]*plugins\/link\.js/,
+        );
+        // By glob: Bun.Glob's file scan does not return a symlinked FILE at all
+        // (measured, Bun 1.4.2) — so it is never embedded either way.
+        const plan = planIncludes(work, ["plugins/*.js"]);
+        expect(plan.relpaths).toEqual(["plugins/ok.js"]);
+        expect(plan.entrypoints.some((e) => e.includes("outside"))).toBe(false);
+    });
+
+    it("a symlink that stays inside the root is fine", () => {
+        const { work } = rooted();
+        symlinkSync(
+            join(work, "plugins/ok.js"),
+            join(work, "plugins/alias.js"),
+        );
+        expect(
+            planIncludes(work, ["plugins/alias.js", "plugins/ok.js"]).relpaths,
+        ).toEqual(["plugins/alias.js", "plugins/ok.js"]);
+    });
+
+    it("refuses secret-looking matches by glob, allows them as an exact literal", () => {
+        const { work } = rooted();
+        write(join(work, "config/.env.js"), 'export default "x";\n');
+        write(join(work, "config/id_deploy.js"), 'export default "x";\n');
+        expect(() => planIncludes(work, ["config/.env*"])).toThrow(
+            /look like secrets: config\/\.env\.js/,
+        );
+        expect(() => planIncludes(work, ["config/*.js"])).toThrow(
+            /look like secrets: config\/id_deploy\.js/,
+        );
+        expect(planIncludes(work, ["config/id_deploy.js"]).relpaths).toEqual([
+            "config/id_deploy.js",
+        ]);
+        expect(planIncludes(work, ["./config/.env.js"]).relpaths).toEqual([
+            "config/.env.js",
+        ]);
+    });
+
+    it("the compile script refuses a '..' include end to end (nothing embedded)", () => {
+        const { work } = rooted();
+        write(join(work, ".output/server/index.mjs"), ENTRY);
+        write(
+            join(work, "package.json"),
+            JSON.stringify({ name: "app", private: true, type: "module" }),
+        );
+        const r = compile(work, ["--include-json", '["../outside/*.js"]']);
+        expect(r.status).not.toBe(0);
+        expect(String(r.stderr)).toContain("contains '..'");
     });
 });
 
