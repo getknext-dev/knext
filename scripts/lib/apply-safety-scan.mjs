@@ -3881,13 +3881,19 @@ function loadLocalUsesDoc(usesRaw, resolveSource) {
  */
 const KNOWN_NON_APPLYING_ACTIONS = new Set([
   'actions/cache',
-  // #1801 (final round): the split cache sub-actions are the SAME trust
-  // level as the combined `actions/cache` action above — without these,
-  // `usesStepMightApply`'s generic "unknown remote action" fail-closed
-  // widening would ALREADY flag every job using either one, independent of
-  // (and masking) the dedicated cross-job cache-linking rule below.
-  'actions/cache/restore',
-  'actions/cache/save',
+  // #1801 (final round, round-2 review fix): `actions/cache/save` and
+  // `actions/cache/restore` are DELIBERATELY ABSENT here, unlike the
+  // combined `actions/cache` action above. Allowlisting them was tried and
+  // reverted: it silenced the PRE-EXISTING generic "unknown remote action"
+  // fail-closed widening (`usesStepMightApply`) for every job using either
+  // split action, which is exactly what caught a save/restore-based
+  // exfiltration job on its own (no `needs:` edge, or the real apply in a
+  // DIFFERENT workflow file, required) before this module ever had a
+  // dedicated cache-linking rule. Leaving them unknown keeps that
+  // protection; the dedicated `jobsLinkedByArtifactOrOutputs` cache rule
+  // below is additional, cross-job evidence, not a substitute for it, and
+  // is proven by a DIRECT unit test precisely so it is never masked by this
+  // allowlist decision again.
   'actions/checkout',
   'actions/download-artifact',
   'actions/setup-go',
@@ -4147,7 +4153,7 @@ function jobNeeds(job) {
  *     or the dependent's own text references `needs.<depId>.outputs`/
  *     `.result` anywhere (steps, `if:`, `with:`, `env:`).
  */
-function jobsLinkedByArtifactOrOutputs(depJob, depId, job) {
+export function jobsLinkedByArtifactOrOutputs(depJob, depId, job) {
   const depProducesArtifact = (depJob?.steps ?? []).some(
     (s) => typeof s?.uses === 'string' && /actions\/upload-artifact/.test(s.uses),
   );

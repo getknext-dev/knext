@@ -3,6 +3,7 @@ import {
   hasComputedGlobalAccess,
   hasExtraNetworkShape,
   INTERPRETER_FETCH,
+  jobsLinkedByArtifactOrOutputs,
   unsafeApplies,
   unsafeAppliesInWorkflow,
 } from '../scripts/lib/apply-safety-scan.mjs';
@@ -1163,6 +1164,18 @@ describe('apply-safety-scan: #1801 (final round) — dynamic code (eval / new Fu
     const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
     expect(offenders).toEqual([]);
   });
+
+  it('GREEN (false-positive control, strengthened): "evaluate(...)" and "retrieval" are not caught by the eval(...) widener', () => {
+    expect(
+      hasExtraNetworkShape('function evaluate(x) { return x * 2; }\nconst retrieval = 1;\n'),
+    ).toBe(false);
+  });
+
+  it('GREEN (false-positive control, strengthened): a `new` call to an unrelated class named `Function` on a namespace is not the global `Function` constructor', () => {
+    // `ns.Function(...)` is a property access, never the bare identifier
+    // `Function` the `\bnew\s+Function\s*\(` widener matches on purpose.
+    expect(hasExtraNetworkShape('const f = new ns.Function("a", "b");\n')).toBe(false);
+  });
 });
 
 describe('apply-safety-scan: #1801 (final round) — raw sockets (net.connect / tls.connect)', () => {
@@ -1206,6 +1219,14 @@ describe('apply-safety-scan: #1801 (final round) — shell-outs to curl/wget', (
     expect(
       INTERPRETER_FETCH.test('import http.client\nc = http.client.HTTPSConnection(host)\n'),
     ).toBe(true);
+  });
+
+  it('GREEN (false-positive control, strengthened): camelCase `httpClient` (no literal dot) does not match `http.client`', () => {
+    expect(INTERPRETER_FETCH.test('const httpClient = new ApiClient(host);\n')).toBe(false);
+  });
+
+  it('GREEN (false-positive control, strengthened): the prose "http client library" (a space, not a dot) does not match', () => {
+    expect(INTERPRETER_FETCH.test('// uses a plain http client library internally\n')).toBe(false);
   });
 
   it('GREEN (false-positive control): python subprocess running a non-fetching command', () => {
@@ -1281,7 +1302,48 @@ describe('apply-safety-scan: #1801 (final round) — https direct chain + aliase
 });
 
 describe('apply-safety-scan: #1801 (final round) — cross-job links via actions/cache', () => {
-  it('RED: a cache save in the fetching job, a cache restore in the applying job', () => {
+  // #1801 round-2 review fix: `actions/cache/save`/`actions/cache/restore`
+  // are DELIBERATELY NOT on `KNOWN_NON_APPLYING_ACTIONS` (see that const's
+  // own comment) — they stay "unknown remote action", which independently
+  // fail-closes any job that uses either one. That pre-existing mechanism
+  // would make a full-pipeline RED/GREEN pair here pass regardless of
+  // whether `jobsLinkedByArtifactOrOutputs`'s cache clause exists at all,
+  // so it can no longer be the proof vehicle for that clause — it is
+  // exercised DIRECTLY as a unit below instead.
+  it('RED (direct unit): a cache save in the dependency + a cache restore in the dependent links them', () => {
+    const depJob = {
+      steps: [{ uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } }],
+    };
+    const job = {
+      steps: [{ uses: 'actions/cache/restore@v4', with: { path: 'm.yaml', key: 'm' } }],
+    };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'fetchJob', job)).toBe(true);
+  });
+
+  it('RED (direct unit): a cache save alone (no restore on the other side) still links, mirroring the artifact rule', () => {
+    const depJob = {
+      steps: [{ uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } }],
+    };
+    const job = { steps: [{ run: 'kubectl apply -f m.yaml\n' }] };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'fetchJob', job)).toBe(true);
+  });
+
+  it('GREEN (direct unit, false-positive control): the combined `actions/cache` action on both sides is not this rule’s evidence', () => {
+    const depJob = { steps: [{ uses: 'actions/cache@v4', with: { path: 'node_modules' } }] };
+    const job = { steps: [{ uses: 'actions/cache@v4', with: { path: 'node_modules' } }] };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'buildJob', job)).toBe(false);
+  });
+
+  it('GREEN (direct unit, false-positive control): unrelated jobs with no cache/artifact/outputs evidence at all', () => {
+    const depJob = { steps: [{ run: 'echo hi\n' }] };
+    const job = { steps: [{ run: 'echo bye\n' }] };
+    expect(jobsLinkedByArtifactOrOutputs(depJob, 'depJob', job)).toBe(false);
+  });
+
+  // End-to-end illustration (not the M35 proof vehicle — see above): this
+  // still reds today, via the generic unknown-action widening, with or
+  // without the dedicated cache-link rule.
+  it('end-to-end: a cache save in the fetching job, a cache restore in the applying job', () => {
     const doc = {
       jobs: {
         fetchJob: {
@@ -1325,6 +1387,72 @@ describe('apply-safety-scan: #1801 (final round) — cross-job links via actions
       },
     };
     expect(unsafeAppliesInWorkflow(doc)).toEqual([]);
+  });
+});
+
+describe('apply-safety-scan: #1801 round-2 review — regression fixtures C, D, G (split cache actions must stay fail-closed)', () => {
+  it('RED (C): a followed-script fetch + cache/save in ONE job, with no kubectl apply anywhere in this document (the apply lives in another workflow)', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('RED (D): a fetch+save job and a restore+apply job with NO `needs:` edge between them', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: 'actions/cache/save@v4', with: { path: 'm.yaml', key: 'm' } },
+          ],
+        },
+        applyJob: {
+          steps: [
+            { uses: 'actions/cache/restore@v4', with: { path: 'm.yaml', key: 'm' } },
+            { run: 'kubectl apply -f m.yaml\n' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('RED (G): a restore+fetch job that an apply job `needs:`', () => {
+    const doc = {
+      jobs: {
+        restoreFetchJob: {
+          steps: [
+            { uses: 'actions/cache/restore@v4', with: { path: 'm.yaml', key: 'm' } },
+            { run: 'node scripts/lib/probe.mjs\n' },
+          ],
+        },
+        applyJob: {
+          needs: 'restoreFetchJob',
+          steps: [{ run: 'kubectl apply -f m.yaml\n' }],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => `fetch('https://example.com/x');\n`,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('restoreFetchJob'))).toBe(true);
   });
 });
 
