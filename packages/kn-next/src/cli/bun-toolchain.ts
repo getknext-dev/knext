@@ -49,14 +49,15 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { BunToolchainId, CompileConfigShape } from "./compile-config";
 import { UsageError } from "./shared";
 import { detectLinuxLibc, type LinuxLibc } from "./vinext-build";
 
-export type BunToolchainId = "stock" | "knext-patched";
-export const BUN_TOOLCHAINS: readonly BunToolchainId[] = [
-    "stock",
-    "knext-patched",
-];
+export {
+    BUN_TOOLCHAINS,
+    type BunToolchainId,
+    validateCompileConfig,
+} from "./compile-config";
 
 export interface BunToolchainAsset {
     /** Release asset name. */
@@ -97,10 +98,6 @@ export const PATCHED_BUN: BunToolchainPins = {
 
 /** The keyless-signing identity of the release workflow, for `cosign verify-blob`. */
 export const PATCHED_BUN_SIGNER = `https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/${PATCHED_BUN.tag}`;
-
-export interface CompileConfigShape {
-    readonly compile?: unknown;
-}
 
 /** The resolved compiler for the `bun build --compile` step. */
 export interface CompileBun {
@@ -291,44 +288,4 @@ export async function resolveCompileToolchain(
 export function compileIncludeGlobs(config: CompileConfigShape): string[] {
     const compile = config.compile as { include?: unknown } | undefined;
     return Array.isArray(compile?.include) ? [...compile.include] : [];
-}
-
-/** `validateConfig` half for the `compile` block. Returns error strings. */
-export function validateCompileConfig(config: CompileConfigShape): string[] {
-    const errors: string[] = [];
-    const compile = config.compile;
-    if (compile === undefined) return errors;
-    if (
-        typeof compile !== "object" ||
-        compile === null ||
-        Array.isArray(compile)
-    ) {
-        return ["'compile' must be an object, e.g. { bun: 'knext-patched' }"];
-    }
-    const { bun, include } = compile as { bun?: unknown; include?: unknown };
-    if (
-        bun !== undefined &&
-        !(BUN_TOOLCHAINS as readonly unknown[]).includes(bun)
-    ) {
-        errors.push(
-            `'compile.bun' must be one of: ${BUN_TOOLCHAINS.join(", ")} (got ${JSON.stringify(bun)})`,
-        );
-    }
-    if (include !== undefined) {
-        if (
-            !Array.isArray(include) ||
-            include.length === 0 ||
-            !include.every((g) => typeof g === "string" && g.length > 0)
-        ) {
-            errors.push(
-                "'compile.include' must be a non-empty array of glob strings",
-            );
-        } else if (bun !== "knext-patched") {
-            errors.push(
-                "'compile.include' needs compile.bun: 'knext-patched' — stock Bun has no " +
-                    "`--compile --include` and would silently embed nothing",
-            );
-        }
-    }
-    return errors;
 }
