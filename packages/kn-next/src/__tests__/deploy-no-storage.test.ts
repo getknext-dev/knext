@@ -309,7 +309,7 @@ describe("deploy without storage (ADR-0047 conditions 1 + 3)", () => {
         expect(notice).toMatch(/CDN/);
         expect(notice).toMatch(/retention/);
         expect(notice).toMatch(/skew/i);
-        expect(notice).toMatch(/https:\/\/knext\.dev\/docs\//);
+        expect(notice).toMatch(/https:\/\/knext-platform\.dev\/docs\//);
     });
 
     it("announces on a dry-run too (every deploy means EVERY deploy)", async () => {
