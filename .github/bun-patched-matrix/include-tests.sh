@@ -145,6 +145,17 @@ info=$(c "$P" bc-cjs main.cjs --include=./plugins --bytecode); rec bytecode-cjs-
 info=$(c "$P" bc-default main.mjs --include=./plugins --bytecode); rec bytecode-default-format-compile INFO "$info $(grep -i error bin/bc-default.log | head -n1 | cut -c1-160)"
 hide
 for e in bc-esm bc-cjs bc-default; do
+  if [ "$e" = bc-default ] && [ ! -x "bin/$e" ]; then
+    # Top-level await under --bytecode's default (CJS) format: compare with stock 1.4.2, which has
+    # the same limitation — the same error from both is a Bun limitation, not a patch defect.
+    unhide; "$S" build --compile main.mjs --bytecode --outfile bin/bc-default-stock >bin/bc-default-stock.log 2>&1; src=$?; hide
+    if [ $src -ne 0 ] && grep -q 'can only be used inside an "async" function' bin/bc-default-stock.log && grep -q 'can only be used inside an "async" function' bin/bc-default.log; then
+      rec "include+bytecode[bc-default]" INFO "TLA + default (CJS) bytecode format fails identically on stock 1.4.2 (rc=$src) — a Bun limitation, not the patch"
+    else
+      rec "include+bytecode[bc-default]" FAIL "patched fails but stock rc=$src: $(head -c 160 bin/bc-default-stock.log | tr '\n' ' ')"
+    fi
+    continue
+  fi
   [ -x "bin/$e" ] || { rec "include+bytecode[$e]" FAIL "no exe ($(head -c 200 bin/$e.log | tr '\n' ' '))"; continue; }
   st=$(r $e); od=$(r $e p.js | tr '\n' ' ')
   [[ "$st" == "MAIN_START" && "$od" == *"PLUGIN_EVALUATED RESULT plugin-ok"* ]] && rec "include+bytecode[$e]" PASS "$od" || rec "include+bytecode[$e]" FAIL "st=$st od=$(echo $od | cut -c1-200)"
