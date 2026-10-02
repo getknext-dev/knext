@@ -62,6 +62,57 @@ const PROBE_LINE = 'KNEXT_EMBED_PROBE_RESULT ';
 const MODULE_EXT = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const GLOB_META = /[*?[\]{}]/;
 
+/**
+ * The compile scripts' `--include-json <json>`: the user's `compile.include`
+ * globs from knext.config.ts. Absent → `[]` (the compile is unchanged).
+ * Anything that is not a non-empty JSON array of non-empty strings throws.
+ */
+export function parseIncludeJson(raw) {
+  if (raw === undefined) return [];
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(`--include-json is not valid JSON: ${raw}`);
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((g) => typeof g === 'string' && g.length > 0)
+  ) {
+    throw new Error(`--include-json must be a non-empty JSON array of glob strings: ${raw}`);
+  }
+  return value;
+}
+
+/**
+ * `compile.include` on stock Bun: the embed plan for the user's globs, rooted at
+ * the app root, so each matched module lands at `$bunfs/root/<path relative to
+ * the app root>` (embedded unexecuted — loaded on its first import). Fails
+ * instead of embedding less than was asked for: a pattern that matches nothing,
+ * a match outside the root (planEmbed throws) and a non-module match (stock Bun
+ * embeds extra entrypoints only for JS/TS modules) are all errors that name the
+ * offending path.
+ *
+ * @param {string} root the app root
+ * @param {string[]} include the globs, relative to `root`
+ */
+export function planIncludes(root, include) {
+  const plan = planEmbed({ root, include });
+  if (plan.report.unmatched.length > 0) {
+    throw new Error(
+      `compile.include: no file matches ${plan.report.unmatched.map((p) => `'${p}'`).join(', ')} under ${root}`,
+    );
+  }
+  if (plan.report.nonModule.length > 0) {
+    throw new Error(
+      'compile.include embeds JavaScript/TypeScript modules only (.js .mjs .cjs .ts .mts .cts .jsx .tsx); ' +
+        `these matches are not: ${plan.report.nonModule.join(', ')}`,
+    );
+  }
+  return plan;
+}
+
 /** Where Bun embeds a JS/TS source compiled as an entrypoint: `[dir]/[name].js`. */
 export function embeddedPath(rel) {
   return rel.replace(MODULE_EXT, '.js');

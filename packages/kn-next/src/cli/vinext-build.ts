@@ -136,6 +136,7 @@ export function compileArgv(
     arch: string,
     entry: string,
     outFile: string,
+    include: readonly string[] = [],
 ): string[] {
     const target = bunCompileTarget(arch);
     // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and
@@ -161,7 +162,17 @@ export function compileArgv(
         outFile,
         "--target",
         target,
+        // `compile.include` (knext.config.ts): appended only when set, so the
+        // default argv is exactly what it always was.
+        ...includeArgv(include),
     ];
+}
+
+/** `--include-json <json>` for the compile script, only when there are globs. */
+export function includeArgv(include: readonly string[] = []): string[] {
+    return include.length > 0
+        ? ["--include-json", JSON.stringify(include)]
+        : [];
 }
 
 /**
@@ -363,6 +374,12 @@ export interface VinextBuildOptions {
      * elsewhere.
      */
     readonly nativeDir?: string;
+    /**
+     * `compile.include` globs (knext.config.ts), relative to the app root:
+     * JS/TS modules embedded in the executable and loaded on their first
+     * import. Absent or empty: the compile argv is unchanged.
+     */
+    readonly include?: readonly string[];
 }
 
 /**
@@ -429,7 +446,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
         // copy beside the binary.
         stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
         run([
-            ...compileArgv(arch, entry, outFile),
+            ...compileArgv(arch, entry, outFile, opts.include),
             "--self-contained",
             "1",
             "--native-dir",
@@ -439,7 +456,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     }
 
     // 2. compile + bytecode
-    run(compileArgv(arch, entry, outFile));
+    run(compileArgv(arch, entry, outFile, opts.include));
 
     // 3. stage sharp's native module beside the binary — for the arch being
     // compiled, which is NOT necessarily the host's (#949).

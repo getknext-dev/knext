@@ -117,30 +117,13 @@ export function routeMarker(marker, n) {
 }
 
 /**
- * The bytecode proof for a SELF-CONTAINED executable (#1456), whose embedded
- * modules — route chunks, Next's own `node_modules` — are compiled into it
- * beside the entry.
+ * Every module the build's banner heads sits under a `@bytecode` pragma, at
+ * least one such module exists, and a constant-pool copy of the marker exists.
+ * Returns how many banner-headed modules it found.
  *
- *   1. every module the build's banner heads (the entry AND each embedded
- *      module: the banner is per output file) sits under a `@bytecode` pragma,
- *      and at least one constant-pool copy of the marker exists;
- *   2. route chunks `0 .. routeCount-1` each carry bytecode by
- *      `verifyBytecodeExec`'s own rule on their unique `routeMarker` — so a
- *      build whose INCLUDED modules lost their bytecode fails even when the
- *      entry kept its own. `routeCount` must be at least 1.
- *
- * @param {Uint8Array} bytes the compiled executable
- * @param {string} marker the build's marker (the banner literal)
- * @param {number} routeCount how many route chunks the build marked
- * @returns {{ ok: true } | { ok: false, reason: string }}
+ * @returns {{ ok: true, sources: number } | { ok: false, reason: string }}
  */
-export function verifyBytecodeEmbedded(bytes, marker, routeCount) {
-    if (!Number.isInteger(routeCount) || routeCount < 1) {
-        return { ok: false, reason: `a self-contained build must mark at least one route chunk (got ${routeCount})` };
-    }
-    if (typeof marker !== "string" || marker.length < 16) {
-        return { ok: false, reason: "marker must be a unique string of >= 16 chars" };
-    }
+function scanBanner(bytes, marker) {
     const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let sources = 0;
     let pool = 0;
@@ -173,6 +156,61 @@ export function verifyBytecodeEmbedded(bytes, marker, routeCount) {
     if (pool === 0) {
         return { ok: false, reason: "no bytecode constant pool carries the build marker — compiled WITHOUT --bytecode" };
     }
+    return { ok: true, sources };
+}
+
+/**
+ * The bytecode proof for a build that embeds extra modules beside the entry
+ * (`compile.include`): the banner heads at least `minModules` modules, every
+ * one of them under a `@bytecode` pragma, and the marker is in a constant pool.
+ *
+ * @param {Uint8Array} bytes the compiled executable
+ * @param {string} marker the build's marker (the banner literal)
+ * @param {number} minModules the entry plus the included modules
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function verifyBytecodeModules(bytes, marker, minModules) {
+    if (typeof marker !== "string" || marker.length < 16) {
+        return { ok: false, reason: "marker must be a unique string of >= 16 chars" };
+    }
+    const banner = scanBanner(bytes, marker);
+    if (!banner.ok) return banner;
+    if (banner.sources < minModules) {
+        return {
+            ok: false,
+            reason: `the build marker heads ${banner.sources} bytecode module(s), expected at least ${minModules} (the entry and every included module)`,
+        };
+    }
+    return { ok: true };
+}
+
+/**
+ * The bytecode proof for a SELF-CONTAINED executable (#1456), whose embedded
+ * modules — route chunks, Next's own `node_modules` — are compiled into it
+ * beside the entry.
+ *
+ *   1. every module the build's banner heads (the entry AND each embedded
+ *      module: the banner is per output file) sits under a `@bytecode` pragma,
+ *      and at least one constant-pool copy of the marker exists;
+ *   2. route chunks `0 .. routeCount-1` each carry bytecode by
+ *      `verifyBytecodeExec`'s own rule on their unique `routeMarker` — so a
+ *      build whose INCLUDED modules lost their bytecode fails even when the
+ *      entry kept its own. `routeCount` must be at least 1.
+ *
+ * @param {Uint8Array} bytes the compiled executable
+ * @param {string} marker the build's marker (the banner literal)
+ * @param {number} routeCount how many route chunks the build marked
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function verifyBytecodeEmbedded(bytes, marker, routeCount) {
+    if (!Number.isInteger(routeCount) || routeCount < 1) {
+        return { ok: false, reason: `a self-contained build must mark at least one route chunk (got ${routeCount})` };
+    }
+    if (typeof marker !== "string" || marker.length < 16) {
+        return { ok: false, reason: "marker must be a unique string of >= 16 chars" };
+    }
+    const banner = scanBanner(bytes, marker);
+    if (!banner.ok) return banner;
     for (let n = 0; n < routeCount; n++) {
         const v = verifyBytecodeExec(bytes, routeMarker(marker, n));
         if (!v.ok) return { ok: false, reason: `route chunk ${n}: ${v.reason}` };

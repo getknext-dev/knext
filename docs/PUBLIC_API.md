@@ -423,6 +423,8 @@ change in a minor release**. Each carries a visible marker wherever you meet
 it (`@experimental` in its types, "Experimental" in `knext build --help`, or
 "(experimental)" in the CLI reference) so the carve-out is never a surprise.
 
+- **`compile.include` (`knext.config.ts`)** — JS/TS modules embedded in the
+  compiled vinext executable and loaded on their first import.
 - **`selfContained` (`knext.config.ts`) / `knext build --self-contained`** —
   opt-in single-executable build mode. The on-disk shape it produces is still
   settling.

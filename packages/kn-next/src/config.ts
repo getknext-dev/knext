@@ -68,6 +68,17 @@ export interface MinioInfraConfig {
     secretKey?: string; // Default: "minioadmin"
 }
 
+/**
+ * Extra files to embed in the compiled executable — see
+ * `KnativeNextConfig.compile`.
+ *
+ * @experimental
+ */
+export interface CompileConfig {
+    /** Globs (relative to the app root) of JS/TS modules to embed. */
+    include?: string[];
+}
+
 export interface InfrastructureConfig {
     postgres?: PostgresConfig;
     redis?: RedisInfraConfig;
@@ -344,6 +355,24 @@ export interface KnativeNextConfig {
      * in a minor release. See PUBLIC_API.md's "Experimental surfaces" section.
      */
     selfContained?: boolean;
+    /**
+     * Extra files to embed in the compiled executable.
+     *
+     * `include` — glob patterns, relative to the app root, for JavaScript /
+     * TypeScript modules the app loads at runtime by a path the bundler cannot
+     * follow (a computed `import()`). Each match is embedded in the executable
+     * at `/$bunfs/root/<its path relative to the app root>` (a `.ts`/`.mjs`/
+     * `.cjs` source is embedded as `.js`), is NOT evaluated at startup, and
+     * loads from the executable on its first import — nothing needs to sit
+     * beside the binary. Works on stock Bun. A pattern that matches nothing, a
+     * match outside the app root and a non-module match each fail the build.
+     *
+     * Supported on the compiled vinext executable only (`build: 'vinext'`,
+     * runtime `'bun'`); the config check rejects it for other targets.
+     *
+     * @experimental may change in a minor release.
+     */
+    compile?: CompileConfig;
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
     // #417 — bring-your-own database binding (ADR-0019/ADR-0025): binds an

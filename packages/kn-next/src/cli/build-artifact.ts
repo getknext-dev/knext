@@ -40,6 +40,7 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
+import { compileIncludeGlobs } from "./compile-config";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,
@@ -221,11 +222,15 @@ export function compileArtifactForDeploy(
         // skipViteBuild: the caller's OWN project build (runProjectBuild /
         // `npm run build`) already produced `.output` — mirrors build.ts's
         // step 2c comment exactly.
+        // `compile.include` (validated for this target only): spread only
+        // when set, so the default call is exactly what it was.
+        const include = compileIncludeGlobs(config);
         const binaryPath = buildVinextExecutable({
             cwd,
             arch,
             skipViteBuild: true,
             ...selfContainedOpt,
+            ...(include.length > 0 ? { include } : {}),
         });
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also
