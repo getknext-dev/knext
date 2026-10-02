@@ -1,0 +1,140 @@
+name: PR #1814 glibc sharp-smoke proof (this PR's packed tarballs)
+
+# One-off proof for #1814: `knext build --builder vinext` (default `runtime:
+# bun`) used to throw `Unknown build arch 'linux-x64-gnu'` on any glibc Linux
+# build host for an app depending on `sharp` (every app `knext create
+# --builder vinext` scaffolds does), because the post-compile smoke's
+# host-arch twin binary had no `SHARP_PLATFORM_IDS` row.
+#
+# Reuses `rc5-vinext-beta-proof.yml`'s job shape (scaffold -> install -> knext
+# build -> boot check), but against THIS PR'S PACKED TARBALLS (built from
+# this branch's source, never the npm registry) and WITH THE SMOKE ON (no
+# `--skip-smoke`) — the exact repro from the issue. Not a standing credential:
+# workflow_dispatch-only, no schedule, not a required check, removed once the
+# proof has a result (same lifecycle note as rc5-vinext-beta-proof.yml's own
+# header).
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vinext-bun-glibc-smoke:
+    name: vinext x bun — this PR's packed tarballs, smoke ON (glibc host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (the compile + serving runtime)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build @getknext/lib, @getknext/db, @getknext/core (dependency order)
+        run: |
+          set -euo pipefail
+          bun run --filter @getknext/lib build
+          bun run --filter @getknext/db build
+          bun run --filter @getknext/core build
+
+      # Same fix `release.yml`/`scripts/install-smoke.mjs` apply before `npm
+      # pack`: it does not rewrite the `workspace:` protocol on its own, and
+      # the scaffolded app's install below fails with EUNSUPPORTEDPROTOCOL
+      # without it.
+      - name: Rewrite workspace: ranges to concrete versions
+        run: node scripts/rewrite-workspace-ranges.mjs
+
+      - name: Pack this PR's tarballs (lib, db, core)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tgz
+          npm pack --silent --pack-destination /tmp/tgz ./packages/lib
+          npm pack --silent --pack-destination /tmp/tgz ./packages/db
+          npm pack --silent --pack-destination /tmp/tgz ./packages/kn-next
+          ls -la /tmp/tgz
+
+      - name: Scaffold with this PR's own built CLI (repo source, not npm)
+        run: |
+          set -euo pipefail
+          mkdir -p app
+          node packages/kn-next/dist/cli/kn-next.js create app --builder vinext --name pr1814-vinext-bun
+
+      - name: Redirect the scaffold's @getknext/* deps to this PR's packed tarballs
+        working-directory: app
+        run: |
+          set -euo pipefail
+          CORE_TGZ="$(ls /tmp/tgz/getknext-core-*.tgz)"
+          LIB_TGZ="$(ls /tmp/tgz/getknext-lib-*.tgz)"
+          npm pkg set "devDependencies.@getknext/core=file:${CORE_TGZ}"
+          npm pkg set "dependencies.@getknext/lib=file:${LIB_TGZ}"
+          npm install
+          # `knext build`'s sharp-native-addon staging pins the IMAGE target's
+          # `@img/sharp-*` version from `bun.lock` — it never reads
+          # `package-lock.json`.
+          bun install --save-text-lockfile
+          test -f bun.lock
+          node -e "
+            const p = require('./node_modules/@getknext/core/package.json');
+            const l = require('./node_modules/@getknext/lib/package.json');
+            console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version + ' (from this PR\'s tarballs)');
+          "
+
+      # THE REPRO: smoke ON (no --skip-smoke). Before the #1814 fix, this
+      # failed on every glibc Linux host with:
+      #   Unknown build arch 'linux-x64-gnu'. Known: linux-x64, linux-arm64,
+      #   darwin-arm64, darwin-x64.
+      - name: knext build (smoke ON — the #1814 repro)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node_modules/.bin/knext build 2>&1 | tee build.log
+          grep -q '\[knext compile\] wrote .*(bytecode: on' build.log || {
+            echo "::error::build.log never reported 'bytecode: on' — the compiled executable was not proven to carry bytecode" >&2
+            exit 1
+          }
+          grep -qi 'Post-compile smoke passed' build.log || {
+            echo "::error::build.log never reported the post-compile smoke passing — did it get skipped instead of fixed?" >&2
+            exit 1
+          }
+          echo "bytecode + smoke evidence: $(grep -E '\[knext compile\] wrote|Post-compile smoke passed' build.log)"
+          test -f Dockerfile
+          test -f knext-exec-linux-x64
+          test -d native
+
+      - name: docker build (the real shipped musl image) and assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -t pr1814-vinext-bun:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 pr1814-vinext-bun:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          cat /tmp/health.json || true
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x bun (this PR) never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
