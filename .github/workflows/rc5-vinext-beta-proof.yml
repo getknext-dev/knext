@@ -98,6 +98,13 @@ jobs:
           npm pkg set "devDependencies.@getknext/core=${RC_VERSION}"
           npm pkg set "dependencies.@getknext/lib=${RC_VERSION}"
           npm install
+          # `knext build`'s sharp-native-addon staging pins the IMAGE
+          # target's `@img/sharp-*` package from `bun.lock` — it never reads
+          # `package-lock.json`. The shipped image targets musl, this
+          # glibc runner's own sharp install cannot satisfy that, and the
+          # error names this exact command as the fix.
+          bun install --save-text-lockfile
+          test -f bun.lock
           node -e "
             const p = require('./node_modules/@getknext/core/package.json');
             const l = require('./node_modules/@getknext/lib/package.json');
@@ -155,6 +162,21 @@ jobs:
         with:
           node-version: '24'
 
+      # `knext build`'s vinext-node sharp-native-addon staging reads a
+      # `bun.lock` to pin the target platform's `@img/sharp-*` version —
+      # it never reads `package-lock.json`. That makes a one-time `bun
+      # install --save-text-lockfile` necessary for any app that depends on
+      # sharp (every app `knext create --builder vinext` scaffolds does), on
+      # EITHER runtime — a narrower claim than "Bun is not needed to build
+      # it" states for the node runtime today. Measured here, not fixed:
+      # this lane follows the product's own remediation (its UsageError
+      # names this exact command), and the docs PR this lane proves notes
+      # the caveat rather than repeating the overstated claim unqualified.
+      - name: Setup Bun (sharp native-addon lockfile only — build + boot stay on Node)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
       - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
         run: |
           set -euo pipefail
@@ -177,6 +199,8 @@ jobs:
           npm pkg set "devDependencies.@getknext/core=${RC_VERSION}"
           npm pkg set "dependencies.@getknext/lib=${RC_VERSION}"
           npm install
+          bun install --save-text-lockfile
+          test -f bun.lock
           node -e "
             const p = require('./node_modules/@getknext/core/package.json');
             const l = require('./node_modules/@getknext/lib/package.json');
