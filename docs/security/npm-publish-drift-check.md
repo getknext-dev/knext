@@ -6,13 +6,13 @@
 > resolution nightly (`action-pin-resolution-nightly.yml`), which this workflow
 > deliberately mirrors in shape.
 
-## The problem
+## The problem (as originally found) and the decision since (2026-10-02)
 
 The `npm-publish` GitHub Environment gates `release.yml`'s publish job. It had
 **no protection rules at all** — `GET /repos/getknext-dev/knext/environments/npm-publish`
 answered `"protection_rules":[]` — so a scheduled release run on `main`
 published to npm with no reviewer click. There was also no repository ruleset
-protecting `v*` tags. Both are confirmed live, not assumed:
+protecting `v*` tags. Both were confirmed live:
 
 ```
 $ gh api repos/getknext-dev/knext/environments/npm-publish
@@ -22,16 +22,20 @@ $ gh api repos/getknext-dev/knext/rulesets
 [{"id":13073078,"name":"main","target":"branch", ...}]   # no target: "tag" entry
 ```
 
-#1638 splits the fix in two:
+#1638 split the fix in two:
 
-1. **Founder-only.** Add a required reviewer to the `npm-publish` environment;
-   add a tag protection ruleset for `v*`. A repo-settings change, not something
-   an agent can do.
-2. **This detector.** A nightly workflow that reads both settings back through
-   the API and fails — with the standard pinned-issue alert — whenever either
-   is missing. It is **expected to be RED** from the moment it merges, until
-   item 1 is done; that is the acceptance criterion working as designed, not a
-   bug to chase.
+1. **Founder-only (settings applied 2026-10-02).** An active repository
+   ruleset, **"release tags (v\* ) immutable"**, now blocks deletion, update,
+   and non-fast-forward on any `refs/tags/v*` — creating new tags still works.
+   A required reviewer on `npm-publish` was **deliberately not added**: the
+   sole maintainer is pre-authorized to publish and asked not to be a
+   blocking step. That is a permanent choice, not an open item.
+2. **This detector.** A nightly workflow that reads the tag ruleset back
+   through the API and fails — with the standard pinned-issue alert — if no
+   active ruleset protects `refs/tags/v*`. It also reads the `npm-publish`
+   environment's reviewer rule for **information only** (logged, never
+   alerted on) — alerting on a setting the founder decided to never configure
+   would just be permanent noise, not drift.
 
 ## Design
 
@@ -103,9 +107,9 @@ drift, and nobody could tell which one to fix.
   ruleset detail fetch) answered `200`, not `403`/`404` — an anonymous request
   already has enough access to read this public repo's environment protection
   rules and rulesets. `GITHUB_TOKEN` in Actions presents at least that much
-  access, so the nightly is expected to resolve both settings cleanly (i.e.
-  read them as genuinely `missing` today, not `permission-error`) without any
-  extra token.
+  access, so the nightly is expected to resolve both reads cleanly (the tag
+  ruleset as `ok`, the reviewer rule as `missing` — informational only) without
+  any extra token.
 - **If that expectation turns out wrong on the Actions runner specifically**
   (the first live scheduled run is the actual proof — this workflow cannot be
   exercised by PR CI, since it is `schedule` + `workflow_dispatch` only): the
@@ -117,9 +121,10 @@ drift, and nobody could tell which one to fix.
 
 ## What this does not do
 
-- It does not add the reviewer or the ruleset (#1638 item 1, founder-only).
-- It does not touch `release.yml` (owned by a separate #1638 item 3 change —
-  the header-comment fix there is out of scope here).
+- It does not add a required reviewer — by founder decision that setting stays
+  absent permanently (#1638 item 1, settings applied 2026-10-02).
+- `release.yml`'s header comment (item 3) is corrected in the same PR as this
+  scope change, to stop claiming a required reviewer exists.
 - It does not gate PR merges — it is a nightly detector, same reasoning as
   `action-pin-resolution-nightly.yml`: the answer lives in live repo settings,
   not in anything a PR's diff touches, so a PR-blocking version would fail
