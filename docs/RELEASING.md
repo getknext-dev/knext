@@ -388,9 +388,9 @@ Confirm every box before starting step 1 below:
       its image digest recorded (#1305).
 - [ ] The docs launch pass is live on knext.dev (quickstart, compatibility table, and version
       numbers all reflect the rc under credential — not a stale prior release).
-- [ ] The operator tag-release line (`operator-vX.Y.Z`, semver GitHub Releases from a pushed tag)
-      has merged — **or**, if it has not, the fallback in step 7 below (the rolling
-      `operator-latest` channel) is explicitly accepted for this cut.
+- [ ] The operator tag-release line (`operator-vX.Y.Z`, semver GitHub Releases from a pushed tag,
+      #1667) has merged — it has, as of this writing; step 7 below's rolling-`operator-latest`
+      fallback is only a last resort if the `operator-v1.0.0` tag push is skipped.
 - [ ] The rollback rehearsal on the `rc` npm dist-tag (see [Rollback runbook](#rollback-runbook-100-ships-broken)
       below) has been run and its result recorded, so the rollback path is proven reachable
       *before* it is ever needed for real.
@@ -446,23 +446,23 @@ Confirm every box before starting step 1 below:
 6. **[FOUNDER] Push the `v1.0.0` tag.** `git tag v1.0.0 <merge-commit-sha> && git push origin
    v1.0.0`. Verify it landed with `git ls-remote --tags origin v1.0.0` before moving on — a tag
    that silently failed to push leaves every step below pointed at nothing.
-7. **Operator release, mechanism depends on whether the semver release line has merged.** The
-   operator's tag-triggered `operator-vX.Y.Z` release line (an immutable, digest-pinned,
-   cosign-signed GitHub Release built from a pushed `operator-vX.Y.Z` tag, which is also what moves
-   the `operator-latest` channel — a plain push to `main` moves only the rolling `operator-edge`
-   channel instead) is a **separate, currently-open PR**, not yet merged as of this writing. Check
-   its state before cutting GA:
-   - **If that PR has merged:** `git tag operator-v1.0.0 <operator-main-sha-to-ship> && git push
-     origin operator-v1.0.0`, then confirm the resulting `operator-v1.0.0` release exists, its
-     `install.yaml` resolves to a real signed image digest, and `operator-latest` now points at the
-     same digest (a stable, non-prerelease tag is what moves it).
-   - **If it has not merged:** fall back to what ships today — `operator-supply-chain.yml` already
-     builds, SBOMs, Trivy-gates, cosign-signs, and republishes the rolling `operator-latest`
-     GitHub Release (with its digest-pinned `install.yaml`) on every push to `main`. Confirm
-     `operator-latest`'s `install.yaml` was refreshed from a `main` commit at or after the GA cut,
-     record which operator commit SHA / image digest it carries in the GA release notes (there is
-     no separate `v1.0.0`-tagged operator artifact in this fallback — `operator-latest` IS the
-     artifact), and do not hand-apply an unsigned or untagged image either way.
+7. **Operator release.** The operator's tag-triggered `operator-vX.Y.Z` release line (#1667,
+   **merged**) is the standing mechanism: `operator-supply-chain.yml` builds, SBOMs, Trivy-gates,
+   cosign-signs, and publishes an immutable, digest-pinned GitHub Release from any pushed
+   `operator-vX.Y.Z[-rc.N]` tag, and **only a stable (non-prerelease) tag** also re-points the
+   rolling `operator-latest` channel — a plain push to `main` moves only the rolling
+   `operator-edge` channel, never `operator-latest`. Cut it:
+   ```sh
+   git tag operator-v1.0.0 <operator-main-sha-to-ship> && git push origin operator-v1.0.0
+   ```
+   Then confirm the resulting `operator-v1.0.0` release exists, its `install.yaml` resolves to a
+   real signed image digest, and `operator-latest` now points at the same digest.
+   **Fallback, only if this tag push is skipped for some reason:** `operator-latest` keeps
+   republishing on every push to `main` regardless, so GA could ship against that rolling channel
+   instead — but then record which operator commit SHA / image digest it carries in the GA release
+   notes (there is no separate `v1.0.0`-tagged operator artifact in that case — `operator-latest`
+   IS the artifact), and do not hand-apply an unsigned or untagged image either way. The tagged
+   path above is preferred and should be the default.
 8. **Stranger install + upgrade verification against the live registry.** From a clean environment
    with no local checkout state: `npm exec --package=@getknext/core@latest -- kn-next create` (the
    documented quickstart) must scaffold and `npx kn-next --help` must exit 0. Separately, on a
@@ -559,6 +559,38 @@ This requires npm publish credentials against the real `@getknext/*` registry en
 **founder action**, not something an agent runs. Record the result (the commands the script printed,
 their outcome, and `npm view @getknext/core dist-tags.rc` / `npm view @getknext/core
 versions.1.0.0-rc.2.deprecated` confirming the rehearsal actually landed) on the tracking issue.
+
+### Rehearsal evidence (#1673, 2026-10-02) — read-only half, agent-run
+
+The `--execute` step above is founder-only (it writes to the real registry). Everything that does
+**not** require npm publish credentials was rehearsed for real against the live `@getknext/*`
+registry entries, with `rcTag` pinned at `v1.0.0-rc.5`:
+
+1. **Dist-tag state read, all four packages:**
+   ```sh
+   npm view @getknext/core dist-tags   # { latest: '0.4.3', rc: '1.0.0-rc.5' }
+   npm view @getknext/lib dist-tags    # { latest: '0.4.3', rc: '1.0.0-rc.5' }
+   npm view @getknext/db dist-tags     # { latest: '0.4.3', rc: '1.0.0-rc.5' }
+   npm view kn-next dist-tags          # { latest: '0.4.3', rc: '1.0.0-rc.5' }
+   ```
+2. **Rollback plan dry run** (default mode — no `--execute`, so this only reads the registry via
+   `npm view` to confirm the rollback target is published for all four packages, then prints the
+   plan; it writes nothing):
+   ```sh
+   node scripts/npm-dist-tag-rollback.mjs --to 1.0.0-rc.4 --broken 1.0.0-rc.5 --dist-tag rc
+   ```
+   Printed the correct 8-command plan (4× `npm dist-tag add … rc`, 4× `npm deprecate`) after
+   confirming `1.0.0-rc.4` is published for all four packages — the "refuse if target isn't fully
+   published" guard was exercised on a real, valid target.
+3. **Previous-version install verification:** in a scratch directory, `npm install
+   @getknext/core@1.0.0-rc.4 --no-save` succeeded (203 packages), and the installed binary ran
+   (`kn-next --help` printed the deprecation notice for the `kn-next` alias and the usage banner) —
+   confirming a prior rc actually installs and runs, which is what "move `latest`/`rc` back" is
+   buying.
+
+**Not rehearsed by an agent, per the task rules:** moving the `rc` dist-tag itself
+(`--execute`) and `npm deprecate` are registry writes and remain **[FOUNDER]**-only, as documented
+above.
 
 ## Upgrade order
 
