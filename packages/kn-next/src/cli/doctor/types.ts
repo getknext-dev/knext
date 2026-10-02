@@ -39,7 +39,7 @@ export const SKIP_UNREACHABLE = "cluster unreachable — check skipped";
  * the dockerconfigjson Secret, attach it to the app ServiceAccount, redeploy.
  */
 export const PRIVATE_REGISTRY_DOCS_URL =
-    "https://knext.dev/docs/private-registries";
+    "https://knext-platform.dev/docs/private-registries";
 
 /**
  * Minimum kubectl CLIENT version for which `--validate=strict` is meaningful.

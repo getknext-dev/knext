@@ -37,7 +37,7 @@
 export const INTERNAL_ONLY_VERBS = ["preview", "loadtest"] as const;
 
 /** Where a user with no Kubernetes background is sent for the long version. */
-export const DOCS_URL = "https://knext.dev";
+export const DOCS_URL = "https://knext-platform.dev";
 
 /** One row of the help's command list. */
 export interface CliCommand {
