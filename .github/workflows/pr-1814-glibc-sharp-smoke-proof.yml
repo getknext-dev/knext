@@ -16,6 +16,16 @@ name: PR #1814 glibc sharp-smoke proof (this PR's packed tarballs)
 
 on:
   workflow_dispatch: {}
+  # TEMPORARY, scoped to this file's own path only — the same one-time
+  # mechanism rc5-vinext-beta-proof.yml's header documents using for its own
+  # introduction (PR #1813): `workflow_dispatch` only triggers for a workflow
+  # file already present on the default branch, which this one is not yet.
+  # This trigger lets the proof run automatically on THIS PR; remove it once
+  # the run is green and recorded, leaving the lane workflow_dispatch-only
+  # for any future re-run.
+  pull_request:
+    paths:
+      - '.github/workflows/pr-1814-glibc-sharp-smoke-proof.yml'
 
 permissions:
   contents: read
@@ -57,7 +67,7 @@ jobs:
       # pack`: it does not rewrite the `workspace:` protocol on its own, and
       # the scaffolded app's install below fails with EUNSUPPORTEDPROTOCOL
       # without it.
-      - name: Rewrite workspace: ranges to concrete versions
+      - name: Rewrite workspace ranges to concrete versions
         run: node scripts/rewrite-workspace-ranges.mjs
 
       - name: Pack this PR's tarballs (lib, db, core)
