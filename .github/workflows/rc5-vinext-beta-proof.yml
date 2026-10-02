@@ -1,0 +1,272 @@
+name: RC vinext beta proof (published rc.5 bytes, both runtimes)
+
+# ── Founder decision 2026-10-02 ─────────────────────────────────────────────
+# vinext ships in knext v1.0 as an opt-in Beta build option on BOTH runtimes
+# (bun and node, each with its own bytecode mechanism). It is not part of the
+# v1.0 compatibility credential and is not yet credentialed on its own track
+# — that is tracked separately. This lane exists to PROVE, against the real
+# PUBLISHED npm bytes at the pinned rc tag, that a consumer can actually:
+#
+#   1. `npx @getknext/core@<rc> create --builder vinext` (published CLI, not
+#      repo source);
+#   2. install the three published `@getknext/*` packages at that exact
+#      version (--save-exact — a caret range would happily resolve to a
+#      newer prerelease or GA and silently stop testing the rc.5 bytes this
+#      lane is named after);
+#   3. `knext build` it; boot the result; get a 200 from its health route;
+#   4. see the runtime's own bytecode mechanism actually engage — the
+#      compiled Bun executable's own `--bytecode` pipeline and liveness
+#      check on bun, the baked V8 NODE_COMPILE_CACHE bake on node.
+#
+# This is deliberately NOT the 16-shard official-suite credential lane
+# (compat-vinext.yml, bun-only, builds from repo source) — it answers a
+# narrower and more basic question (does the published artifact boot at
+# all, on each runtime) that no existing lane answers for the node runtime,
+# and that no existing lane answers against PUBLISHED bytes for either
+# runtime. compat-vinext.yml's own per-shard compat NUMBER is read, not
+# re-run, by the docs this lane's PR updates — see docs/compat-matrix.md.
+#
+# RC_VERSION is pinned to the specific release this lane is proving, not
+# read from .github/compat-credential-ref.json: that file tracks the
+# CREDENTIAL lanes' frozen window, which is a different, stricter claim this
+# lane does not make. Bumping RC_VERSION to a newer rc/GA is a normal,
+# reviewed PR edit — it does not touch the credential freeze and does not
+# reset any window.
+#
+# workflow_dispatch-only, no schedule, not a required check — nothing in
+# branch protection names either job below. This lane is a one-off (and
+# re-dispatchable) proof, not a standing credential: it does not need a
+# recurring cadence, so it carries none of the credential-cron-slot
+# bookkeeping that would come with one.
+#
+# `workflow_dispatch` only triggers for a workflow file already present on
+# the default branch — unusable to prove this lane green on the PR that
+# introduced it. That one-time proof ran instead via a temporary
+# `pull_request` trigger scoped to this file's own path (see PR #1813); the
+# green run is recorded there and in the linked issue below, and that
+# trigger was removed once the proof had a result, leaving this lane
+# workflow_dispatch-only for every run after.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RC_VERSION: '1.0.0-rc.5'
+
+jobs:
+  vinext-bun-rc5:
+    name: vinext x bun — published rc.5, compiled single executable
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (the compile + serving runtime)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          mkdir -p app
+          npx --yes "@getknext/core@${RC_VERSION}" create app --builder vinext --name rc5-vinext-bun
+
+      - name: Pin the published @getknext/* packages to the exact rc.5 bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${RC_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${RC_VERSION}"
+          npm install
+          # `knext build`'s sharp-native-addon staging pins the IMAGE
+          # target's `@img/sharp-*` package from `bun.lock` — it never reads
+          # `package-lock.json`. The shipped image targets musl, this
+          # glibc runner's own sharp install cannot satisfy that, and the
+          # error names this exact command as the fix.
+          bun install --save-text-lockfile
+          test -f bun.lock
+          node -e "
+            const p = require('./node_modules/@getknext/core/package.json');
+            const l = require('./node_modules/@getknext/lib/package.json');
+            if (p.version !== process.env.RC_VERSION || l.version !== process.env.RC_VERSION) {
+              console.error('installed versions do not match the pinned rc:', p.version, l.version);
+              process.exit(1);
+            }
+            console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version);
+          "
+
+      # `--skip-smoke`: the CLI's own post-compile smoke compiles a SECOND,
+      # glibc-linked binary to boot-check on hosts (like this one) that
+      # cannot execute the musl-linked SHIP binary directly — see
+      # packages/kn-next/src/cli/build.ts's own doc comment on
+      # `smokeCompiledBinary`. That smoke path's sharp-native-addon staging
+      # has no mapping for this host's glibc arch id ('linux-x64-gnu') in
+      # `SHARP_PLATFORM_IDS` (only musl Linux ids are listed there), so it
+      # fails on ANY glibc Linux host for an app that depends on sharp —
+      # every app this builder scaffolds does. Measured on the first run of
+      # this job (37024525618 / 37025016818); not fixed here (no product
+      # code changes). `--skip-smoke` is this CLI's own documented escape
+      # hatch for exactly this situation, and this job does its OWN boot
+      # check below anyway — on the REAL shipped musl binary, inside the
+      # REAL shipped Dockerfile, which the internal smoke does not even
+      # attempt (it smokes a stand-in glibc build, never the musl artifact).
+      - name: knext build --skip-smoke (vite build -> bun build --compile --bytecode)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
+          grep -q '\[knext compile\] wrote .*(bytecode: on' build.log || {
+            echo "::error::build.log never reported 'bytecode: on' — the compiled executable was not proven to carry bytecode" >&2
+            exit 1
+          }
+          echo "bytecode evidence: $(grep '\[knext compile\] wrote' build.log)"
+          test -f Dockerfile
+          test -f knext-exec-linux-x64
+          test -d native
+
+      - name: docker build (the real shipped musl image) and assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -t rc5-vinext-bun:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 rc5-vinext-bun:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          cat /tmp/health.json || true
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x bun (rc.5) never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  vinext-node-rc5:
+    name: vinext x node — published rc.5, baked V8 compile cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # `knext build`'s vinext-node sharp-native-addon staging reads a
+      # `bun.lock` to pin the target platform's `@img/sharp-*` version —
+      # it never reads `package-lock.json`. That makes a one-time `bun
+      # install --save-text-lockfile` necessary for any app that depends on
+      # sharp (every app `knext create --builder vinext` scaffolds does), on
+      # EITHER runtime — a narrower claim than "Bun is not needed to build
+      # it" states for the node runtime today. Measured here, not fixed:
+      # this lane follows the product's own remediation (its UsageError
+      # names this exact command), and the docs PR this lane proves notes
+      # the caveat rather than repeating the overstated claim unqualified.
+      - name: Setup Bun (sharp native-addon lockfile only — build + boot stay on Node)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          mkdir -p app
+          npx --yes "@getknext/core@${RC_VERSION}" create app --builder vinext --name rc5-vinext-node
+          node -e "
+            const fs = require('fs');
+            const path = 'app/knext.config.ts';
+            let s = fs.readFileSync(path, 'utf8');
+            if (!/build:\s*\"vinext\"/.test(s)) throw new Error('scaffold did not pin build: vinext');
+            s = s.replace(/build:\s*\"vinext\",/, 'build: \"vinext\",\n  runtime: \"node\",');
+            fs.writeFileSync(path, s);
+            console.log(s);
+          "
+
+      - name: Pin the published @getknext/* packages to the exact rc.5 bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${RC_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${RC_VERSION}"
+          npm install
+          bun install --save-text-lockfile
+          test -f bun.lock
+          node -e "
+            const p = require('./node_modules/@getknext/core/package.json');
+            const l = require('./node_modules/@getknext/lib/package.json');
+            if (p.version !== process.env.RC_VERSION || l.version !== process.env.RC_VERSION) {
+              console.error('installed versions do not match the pinned rc:', p.version, l.version);
+              process.exit(1);
+            }
+            console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version);
+          "
+
+      - name: knext build (vite build -> nitro node preset; stages Dockerfile.vinext-node)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node_modules/.bin/knext build 2>&1 | tee build.log
+          test -f Dockerfile.vinext-node
+          test -f .output/server/index.mjs
+
+      - name: docker build (bakes the V8 compile cache; fails under the byte floor)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.vinext-node -t rc5-vinext-node:proof . 2>&1 | tee docker-build.log
+          grep -q 'compile cache baked: .* bytes' docker-build.log || {
+            echo "::error::docker-build.log never reported the compile-cache bake line" >&2
+            exit 1
+          }
+          echo "bytecode evidence: $(grep 'compile cache baked:' docker-build.log)"
+
+      - name: Run the image and assert a live 200, with COMPILE_CACHE boot evidence
+        run: |
+          set -euo pipefail
+          CID="$(docker run -d -p 8099:3000 -e NODE_DEBUG_NATIVE=COMPILE_CACHE rc5-vinext-node:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          cat /tmp/health.json || true
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x node (rc.5) never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+          # The "COMPILE_CACHE:<dir>" line (the entry's own startup log,
+          # uppercase/no-space) confirms the dir is wired; "was accepted"
+          # (node's own `[compile cache]` debug line, lowercase, logged once
+          # per module as NODE_DEBUG_NATIVE=COMPILE_CACHE requests) is the
+          # actual boot-time cache-hit evidence — the two never share a line.
+          grep -q '^COMPILE_CACHE:' /tmp/container.log || {
+            echo "::error::container log never reported the COMPILE_CACHE startup line" >&2
+            cat /tmp/container.log >&2
+            exit 1
+          }
+          grep -q 'was accepted' /tmp/container.log || {
+            echo "::error::container log never reported a compile-cache entry being accepted on boot" >&2
+            cat /tmp/container.log >&2
+            exit 1
+          }
+          echo "compile-cache boot evidence: $(grep -m1 '^COMPILE_CACHE:' /tmp/container.log), $(grep -c 'was accepted' /tmp/container.log) entries accepted"

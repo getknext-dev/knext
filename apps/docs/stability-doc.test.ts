@@ -48,16 +48,25 @@ describe('docs — stability tiers page', () => {
 
   it('names every code-level experimental surface, sourced from the same guard code uses', () => {
     // Same list experimental-surfaces.test.ts pins: INTERNAL_ONLY_VERBS
-    // (preview/loadtest) + selfContained. vinext is NOT yet carved out in
-    // code (that marker lands in v1.1) so it is asserted as a literal here,
-    // not derived — do not silently drop it if this test is ever "fixed" to
-    // derive everything from code.
+    // (preview/loadtest) + selfContained. `vinext` the BUILD TARGET moved to
+    // Beta on 2026-10-02 (founder decision, both runtimes) — it is no longer
+    // asserted here. `selfContained` stays Experimental and is still
+    // asserted as a literal (its own `@experimental` JSDoc marker is checked
+    // below).
     const experimentalSection = page.slice(page.search(/^##\s+Experimental/m));
     for (const verb of INTERNAL_ONLY_VERBS) {
       expect(experimentalSection).toContain(verb);
     }
     expect(experimentalSection).toContain('selfContained');
-    expect(experimentalSection).toContain('vinext');
+  });
+
+  it('lists the vinext build target under Beta, on both runtimes, not under Experimental', () => {
+    const betaSection = page.slice(page.search(/^##\s+Beta/m), page.search(/^##\s+Experimental/m));
+    const experimentalSection = page.slice(page.search(/^##\s+Experimental/m));
+    expect(betaSection).toContain('vinext');
+    expect(betaSection.toLowerCase()).toContain('bun');
+    expect(betaSection.toLowerCase()).toContain('node');
+    expect(experimentalSection).not.toContain('vinext');
   });
 
   it('selfContained is still @experimental in config.ts (page would go stale otherwise)', () => {

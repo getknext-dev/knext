@@ -41,9 +41,10 @@ const config: KnativeNextConfig = {
 };
 ```
 
-The second target — **experimental**, outside the [stability tiers](/docs/stability) v1.0
-commitment — compiles your app with [**vinext**](https://vinext.dev), an open-source, Vite-based
-implementation of the Next.js framework, into a single executable. Select it explicitly with
+The second target — **opt-in, Beta** in the [stability tiers](/docs/stability) (implemented and
+tested on both runtimes, not yet behind its own compatibility credential) — compiles your app
+with [**vinext**](https://vinext.dev), an open-source, Vite-based implementation of the Next.js
+framework, into a single executable on Bun, or a plain server on Node. Select it explicitly with
 `build: 'vinext'`:
 
 ```ts title="knext.config.ts"
@@ -254,8 +255,12 @@ Nothing is compiled into an executable on this target. Instead:
   A `Dockerfile.vinext-node` staged before this fix (no `ARG KNEXT_HEALTH_CHECK_PATH`) needs
   re-staging if your app uses a custom `healthCheckPath`: delete the file and re-run `knext
   build`, which never overwrites an existing one.
-- **Bun is not needed to build it.** Only the Bun executable target requires Bun 1.4 on the build
-  machine.
+- **Bun is not needed to build or run it — with one exception.** If your app depends on `sharp`
+  (every app `knext create --builder vinext` scaffolds does, for image optimization), `knext
+  build` stages sharp's native addon for the image's target platform from your `bun.lock` — it
+  does not read `package-lock.json` for this. A plain `npm install` project therefore needs a
+  one-time `bun install --save-text-lockfile` to produce that lockfile before the first build on
+  this target; nothing after that needs Bun again unless you change the sharp version.
 - **`knext build` checks the preset.** If the build produced the Bun preset (see below), it
   stops before uploading anything and tells you what to change. Running a Bun-preset server under
   Node would crash on startup.
@@ -290,7 +295,7 @@ Two differences from the Bun executable, stated plainly:
 - **The request body cap is enforced as the body is read**, not before your handler runs. The limit
   is the same `KNEXT_MAX_REQUEST_BYTES`.
 
-## The vinext pipeline (experimental)
+## The vinext pipeline
 
 On the vinext target, `knext build` produces the executable in two stages:
 
@@ -416,6 +421,38 @@ tells you how to install it.
 CI and container builds get Bun the same way; the requirement is only on whoever runs the build, not
 on anyone deploying an already-built image.
 
+## Optional vinext build
+
+`build: 'vinext'` is an **opt-in** build target, enabled by setting that one field in
+`knext.config.ts` (or scaffolding a new app with `knext create --builder vinext`). It runs on
+**both** runtimes:
+
+- `runtime: 'bun'` (the default once you opt in) — the compiled Bun single executable described
+  above, with the whole server precompiled to bytecode.
+- `runtime: 'node'` — [vinext on Node](#vinext-on-node) above: a plain Node server with no
+  compile step, instead getting its bytecode caching from a **V8 compile cache baked into the
+  image** at `docker build` time (`Dockerfile.vinext-node`).
+
+**Tier: Beta** ([stability tiers](/docs/stability)) on both runtimes — implemented, built and
+booted end to end against the published package, but **not** covered by the v1.0 compatibility
+credential (the 14-consecutive-night gate the four default-target cells carry — see
+[verified compatibility](/docs/compat-suite)). vinext has its own, separate, not-yet-complete
+credentialing track.
+
+**Known gap on the Bun runtime: the build's own boot check can fail on Linux build machines.**
+After compiling, `knext build` on this target boots the executable itself to confirm it serves
+and drains correctly before finishing. On a glibc-based Linux machine — most Linux CI runners
+(including GitHub-hosted ones) and most Linux desktops; macOS is unaffected — that check
+currently fails with an "unknown build arch" error for any app that depends on `sharp` (every app
+`knext create --builder vinext` scaffolds does, for image optimization). The compiled binary
+itself is fine; the gap is in how the check stages a native addon for that one case.
+
+Until this is fixed, build on an affected Linux machine with `knext build --skip-smoke`, which
+skips that check and says so loudly. Do not skip verification outright: build the image your
+`Dockerfile` defines (the one `knext build` already generated — the real binary you will ship)
+and run it, and confirm it answers your configured health route, before you deploy. Track current
+known gaps on the project's public issue tracker.
+
 ## Compatibility, stated honestly
 
 knext's official-suite result — [792/792, re-verified nightly on Node](/docs/compat-suite) — was earned
@@ -423,16 +460,19 @@ on the **standalone** target (the `build: 'turbopack'` shape above), which is a 
 from the compiled vinext executable. The default Bun executable and the webpack builds each passed
 the suite once at 792/0; none of these cells is credentialed yet. The suite runs against the
 standalone server directly, so the result covers that output rather than the supervisor knext boots
-it with. The `vinext` build is **measured, not credentialed**: its latest run passed 728 of 778
-tests (38 failed, 12 quarantined). Read the per-feature status on the [compatibility matrix](/docs/compat-matrix) rather than
-assuming the standalone number carries over.
+it with. The `vinext` build (Bun runtime) is **measured, not credentialed**: its latest run passed
+728 of 778 tests (38 failed, 12 quarantined). The **Node** runtime for the vinext target has not
+been run through this 778-test suite at all — it is proven to build, boot and serve a live
+request against the published package, but has no official-suite number yet. Read the per-feature
+status on the [compatibility matrix](/docs/compat-matrix) rather than assuming the standalone
+number, or the Bun vinext number, carries over to Node.
 
 The remaining gaps are largely a function of how far the underlying vinext framework has matured on
 areas such as streaming/Suspense flushing, Partial Prerendering, Cache Components (`'use cache'`),
 edge middleware, and internationalized routing. The matrix marks each honestly — ✅ only where a
 red-on-fail check backs it, ⚠️ where something is implemented but unguarded, and ❌/⛔ where it is a
 known or upstream-gated gap. Nothing there is papered over, and the vinext number is published as it
-is measured, even when it is low.
+is measured, even when it is low. Track current known gaps on the project's public issue tracker.
 
 <Callout type="info">
 **Which page answers what.** This page covers *how* the build works and what it needs. For the
