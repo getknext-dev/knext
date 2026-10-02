@@ -417,7 +417,12 @@ describe('fetchTagRulesetProtection', () => {
 describe('runDriftCheck', () => {
   const args = { owner: 'getknext-dev', repo: 'knext', environment: 'npm-publish' };
 
-  it('ok: false with BOTH findings when both settings are missing (the LIVE state today)', async () => {
+  // #1638 (settings applied 2026-10-02): the npm-publish environment
+  // deliberately has NO required-reviewer rule, by founder decision — that
+  // axis is reported back for logging (`report.reviewer`) but must NEVER
+  // produce a finding or affect `ok`. Only the tag ruleset is pass/fail.
+
+  it('ok: false with exactly one finding when the tag ruleset is missing, even though the reviewer rule is ALSO missing (the pre-2026-10-02 state)', async () => {
     const { api } = fakeApi({
       'repos/getknext-dev/knext/environments/npm-publish': {
         status: 200,
@@ -430,21 +435,16 @@ describe('runDriftCheck', () => {
     });
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(false);
-    expect(report.findings).toHaveLength(2);
-    expect(report.findings.map((f) => f.setting)).toEqual([
-      'npm-publish environment required reviewer',
-      'v*-covering tag ruleset',
-    ]);
-    expect(report.findings.every((f) => f.kind === 'missing')).toBe(true);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].setting).toBe('v*-covering tag ruleset');
+    expect((report.reviewer as { kind: string }).kind).toBe('missing');
   });
 
-  it('ok: true when both settings verify as present', async () => {
+  it('ok: true when the tag ruleset verifies as present, regardless of the reviewer rule being absent (the LIVE state today)', async () => {
     const { api } = fakeApi({
       'repos/getknext-dev/knext/environments/npm-publish': {
         status: 200,
-        body: {
-          protection_rules: [{ type: 'required_reviewers', reviewers: [{ id: 1 }] }],
-        },
+        body: { protection_rules: [] },
       },
       'repos/getknext-dev/knext/rulesets': {
         status: 200,
@@ -458,9 +458,31 @@ describe('runDriftCheck', () => {
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(true);
     expect(report.findings).toHaveLength(0);
+    expect((report.reviewer as { kind: string }).kind).toBe('missing');
   });
 
-  it('names ONLY the setting that is actually missing when the other is fine', async () => {
+  it('a reviewer permission-error is reported on `report.reviewer` but never turned into a finding', async () => {
+    const { api } = fakeApi({
+      'repos/getknext-dev/knext/environments/npm-publish': {
+        status: 403,
+        body: { message: 'Forbidden' },
+      },
+      'repos/getknext-dev/knext/rulesets': {
+        status: 200,
+        body: [{ id: 3, name: 'v-tags', target: 'tag', enforcement: 'active' }],
+      },
+      'repos/getknext-dev/knext/rulesets/3': {
+        status: 200,
+        body: { enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
+      },
+    });
+    const report = await runDriftCheck({ ...args, api });
+    expect(report.ok).toBe(true);
+    expect(report.findings).toHaveLength(0);
+    expect((report.reviewer as { kind: string }).kind).toBe('permission-error');
+  });
+
+  it('a tag-ruleset permission-error finding reads as UNVERIFIED, never relabelled as MISSING', async () => {
     const { api } = fakeApi({
       'repos/getknext-dev/knext/environments/npm-publish': {
         status: 200,
@@ -468,18 +490,18 @@ describe('runDriftCheck', () => {
           protection_rules: [{ type: 'required_reviewers', reviewers: [{ id: 1 }] }],
         },
       },
-      'repos/getknext-dev/knext/rulesets': {
-        status: 200,
-        body: [{ id: 13073078, name: 'main', target: 'branch', enforcement: 'disabled' }],
-      },
+      'repos/getknext-dev/knext/rulesets': { status: 403, body: { message: 'Forbidden' } },
     });
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(false);
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].setting).toBe('v*-covering tag ruleset');
+    expect(report.findings[0].kind).toBe('permission-error');
+    expect(report.findings[0].message).toMatch(/UNVERIFIED/);
+    expect(report.findings[0].message).not.toMatch(/MISSING/);
   });
 
-  it('a permission-error finding reads differently from a missing finding (never conflated)', async () => {
+  it('names the tag ruleset when it is missing, with a MISSING-worded message', async () => {
     const { api } = fakeApi({
       'repos/getknext-dev/knext/environments/npm-publish': {
         status: 403,
@@ -492,13 +514,9 @@ describe('runDriftCheck', () => {
     });
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(false);
-    const reviewerFinding = report.findings.find(
-      (f) => f.setting === 'npm-publish environment required reviewer',
-    );
-    const tagFinding = report.findings.find((f) => f.setting === 'v*-covering tag ruleset');
-    expect(reviewerFinding?.kind).toBe('permission-error');
-    expect(reviewerFinding?.message).toMatch(/UNVERIFIED/);
-    expect(tagFinding?.kind).toBe('missing');
-    expect(tagFinding?.message).toMatch(/MISSING/);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].setting).toBe('v*-covering tag ruleset');
+    expect(report.findings[0].kind).toBe('missing');
+    expect(report.findings[0].message).toMatch(/MISSING/);
   });
 });

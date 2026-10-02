@@ -3,14 +3,18 @@
  * check-npm-publish-drift — thin CLI over `scripts/lib/npm-publish-drift-check.mjs`
  * (#1638 item 2).
  *
- * Reads two settings back from the live GitHub API and fails closed unless
- * BOTH verify as configured:
- *   1. the `npm-publish` Environment has a `required_reviewers` protection
- *      rule naming at least one reviewer;
- *   2. an enabled repository ruleset targets tags and covers `v*`.
+ * Reads two settings back from the live GitHub API:
+ *   1. the `npm-publish` Environment's `required_reviewers` protection rule
+ *      — read and logged for information ONLY. By founder decision
+ *      (#1638, 2026-10-02) this is deliberately absent and NOT a pass/fail
+ *      criterion: the sole maintainer is pre-authorized to publish and asked
+ *      not to be a blocking step.
+ *   2. an enabled repository ruleset that targets tags and covers `v*` —
+ *      THIS is the only setting that fails the check when missing. A
+ *      repository ruleset ("release tags (v*) immutable") protects
+ *      `refs/tags/v*` today, so this is expected to pass on a healthy run.
  *
- * This is expected to be RED right now and until the founder configures item 1
- * of #1638 — see the nightly workflow's header comment and
+ * See the nightly workflow's header comment and
  * `docs/security/npm-publish-drift-check.md`.
  *
  * Usage: node scripts/check-npm-publish-drift.mjs [--owner <o>] [--repo <r>]
@@ -43,7 +47,8 @@ async function main() {
   const report = await runDriftCheck({ owner, repo, environment: ENVIRONMENT, api: githubApi });
 
   console.log(
-    `${owner}/${repo} environment "${ENVIRONMENT}" reviewer rule: ${report.reviewer.kind}`,
+    `${owner}/${repo} environment "${ENVIRONMENT}" reviewer rule: ${report.reviewer.kind} ` +
+      '(informational only — not required by founder decision, #1638)',
   );
   console.log(`${owner}/${repo} v*-covering tag ruleset: ${report.tagRuleset.kind}`);
 
@@ -54,7 +59,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log('OK: npm-publish environment has a required reviewer AND a tag ruleset covers v*.');
+  console.log('OK: a tag ruleset covers v*.');
 }
 
 main().catch((error) => {

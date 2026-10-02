@@ -7,12 +7,15 @@
 #   3. Merging that PR is a second push to main. `publish-preflight` then finds a
 #      version in the tree that the registry does not have, and `release` — the
 #      only job that ever holds NPM_TOKEN — runs under the `npm-publish`
-#      environment. CORRECTION (#1638, #1639): as of this writing that
-#      environment has NO protection rules (verified via
-#      `gh api repos/getknext-dev/knext/environments/npm-publish` —
-#      `protection_rules: []`), so a publish runs straight through with no
-#      reviewer click. Adding a required reviewer is a founder Settings action
-#      tracked in #1638; until then, do not read this workflow as gated by one.
+#      environment. CORRECTION (#1638, settled 2026-10-02): that environment
+#      has NO required-reviewer protection rule, and by founder decision never
+#      will — the sole maintainer is pre-authorized to publish and asked not
+#      to be a blocking step. Do not read this workflow as gated by a
+#      reviewer. What DOES protect a release: a repository ruleset,
+#      "release tags (v*) immutable", blocks deleting, updating, or
+#      force-moving any `refs/tags/v*` (creating new tags still works), and
+#      `.github/workflows/npm-publish-drift-nightly.yml` alerts nightly if
+#      that ruleset is ever removed or narrowed.
 #
 # ┌─ WHY THIS IS THREE JOBS AND NOT ONE (the lane starved itself for a month) ───┐
 # │ It used to be one job, and that job declared `environment: npm-publish`.     │

@@ -566,7 +566,58 @@ describe("main()'s publish closure — the derived distTag actually reaches npmP
     ).toContain(anchor);
   });
 
-  it('distTag itself is derived from prereleaseDistTag(targetVersion), never hard-coded', () => {
-    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion);');
+  it('distTag itself is derived from prereleaseDistTag(targetVersion, readPreState()), never hard-coded', () => {
+    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion, readPreState());');
+  });
+});
+
+// 1.3.0-rc.1 (integration/v1.3) publishes to dist-tag `next`, while the v1.0
+// line keeps `rc` at 1.0.0-rc.5. `changeset publish` takes its dist-tag from
+// `.changeset/pre.json`'s `tag` in pre mode — NOT from the version string — so
+// a heal that derived `rc` from `1.3.0-rc.1` would re-publish a straggler to
+// `rc` and move the tag the v1.0 credential reads. The heal must use the SAME
+// tag `changeset publish` used.
+describe('prereleaseDistTag — follows the changesets pre-mode tag when one is set', () => {
+  it('pre mode {tag: next} + 1.3.0-rc.1 -> next (never the version-derived rc)', () => {
+    expect(prereleaseDistTag('1.3.0-rc.1', { mode: 'pre', tag: 'next' })).toBe('next');
+  });
+
+  it('pre mode {tag: rc} + 1.0.0-rc.5 -> rc (the v1.0 line is unchanged)', () => {
+    expect(prereleaseDistTag('1.0.0-rc.5', { mode: 'pre', tag: 'rc' })).toBe('rc');
+  });
+
+  it('no pre state -> falls back to the version-derived id', () => {
+    expect(prereleaseDistTag('1.3.0-rc.1', null)).toBe('rc');
+  });
+
+  it('pre.json left in "exit" mode is not pre mode -> version-derived id', () => {
+    expect(prereleaseDistTag('1.3.0-rc.1', { mode: 'exit', tag: 'next' })).toBe('rc');
+  });
+
+  it('a stable version is still null even in pre mode — never ships a stable off latest', () => {
+    expect(prereleaseDistTag('1.3.0', { mode: 'pre', tag: 'next' })).toBeNull();
+  });
+});
+
+// integration/v1.3 ONLY. Pins the branch's publish tag so 1.3.x can never land
+// on `rc` (the v1.0 credential + nightlies read it) or `latest`. DELETE this
+// block in the PR that merges integration/v1.3 into main after 1.0.0 GA (main
+// exits pre mode then, and its own release decides its tag).
+describe('integration/v1.3 — the fixed group publishes to dist-tag `next`', () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const pre = JSON.parse(readFileSync(resolve(repoRoot, '.changeset/pre.json'), 'utf8'));
+  const coreVersion = JSON.parse(
+    readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
+  ).version;
+
+  it('.changeset/pre.json is in pre mode with tag `next`', () => {
+    expect(pre.mode).toBe('pre');
+    expect(pre.tag).toBe('next');
+  });
+
+  it('the heal tag for the tree version is `next` — never rc, never latest', () => {
+    const tag = prereleaseDistTag(coreVersion, pre);
+    expect(tag).toBe('next');
+    expect(['rc', 'latest']).not.toContain(tag);
   });
 });

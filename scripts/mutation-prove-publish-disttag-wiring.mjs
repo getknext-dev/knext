@@ -51,7 +51,8 @@ const SPEC = 'tests/ensure-published-group.test.ts';
 
 const PUBLISH_CALL_LINE = '        return npmPublish(dirByName.get(name), registry, distTag);\n';
 
-const DIST_TAG_DERIVATION_LINE = '  const distTag = prereleaseDistTag(targetVersion);\n';
+const DIST_TAG_DERIVATION_LINE =
+  '  const distTag = prereleaseDistTag(targetVersion, readPreState());\n';
 
 const MUTATIONS = [
   {
@@ -77,6 +78,37 @@ const MUTATIONS = [
     replacement: '  const distTag = null;\n',
   },
   {
+    id: 'D4',
+    expect: 'red',
+    claim:
+      'dropping readPreState() from the derivation reverts the heal to the version-derived id: ' +
+      'on integration/v1.3 a re-published 1.3.0-rc.1 straggler would land on `rc`, moving the ' +
+      'dist-tag the v1.0 credential reads.',
+    subject: 'script',
+    anchor: DIST_TAG_DERIVATION_LINE,
+    replacement: '  const distTag = prereleaseDistTag(targetVersion);\n',
+  },
+  {
+    id: 'D5',
+    expect: 'red',
+    claim:
+      'removing the pre-mode branch inside prereleaseDistTag (always the version id) makes the ' +
+      'heal tag `rc` for 1.3.0-rc.1 even with pre.json tag `next`.',
+    subject: 'script',
+    anchor: '    return preState.tag;\n',
+    replacement: '    return m[1];\n',
+  },
+  {
+    id: 'D6',
+    expect: 'red',
+    claim:
+      'flipping .changeset/pre.json back to tag `rc` on integration/v1.3 would make changeset ' +
+      'publish ship 1.3.0-rc.1 to `rc` — the branch pin must red.',
+    subject: 'pre',
+    anchor: '"tag": "next"',
+    replacement: '"tag": "rc"',
+  },
+  {
     id: 'D3',
     expect: 'green',
     claim:
@@ -97,6 +129,7 @@ const prover = createGuardProver({
   subjects: {
     script: 'scripts/ensure-published-group.mjs',
     spec: SPEC,
+    pre: '.changeset/pre.json',
   },
 });
 
@@ -108,10 +141,10 @@ prover.baseline();
 prover.proveCanSeeRed({
   subject: 'spec',
   anchor:
-    "  it('distTag itself is derived from prereleaseDistTag(targetVersion), never hard-coded', () => {\n" +
-    "    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion);');\n",
+    "  it('distTag itself is derived from prereleaseDistTag(targetVersion, readPreState()), never hard-coded', () => {\n" +
+    "    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion, readPreState());');\n",
   replacement:
-    "  it('distTag itself is derived from prereleaseDistTag(targetVersion), never hard-coded', () => {\n" +
+    "  it('distTag itself is derived from prereleaseDistTag(targetVersion, readPreState()), never hard-coded', () => {\n" +
     "    expect(source).toContain('const distTag = definitely not this string');\n",
 });
 

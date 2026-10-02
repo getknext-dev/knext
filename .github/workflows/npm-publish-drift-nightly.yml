@@ -1,17 +1,18 @@
 name: npm-publish environment/tag protection drift (nightly)
 
-# ── #1638 item 2 — the `npm-publish` GITHUB ENVIRONMENT HAS NO PROTECTION ────
-# RULES, so a `release.yml` run on `main` publishes to npm with NO reviewer
-# click. Live-verified (`gh api repos/getknext-dev/knext/environments/npm-publish`):
-# `"protection_rules":[]`. There is also no repository ruleset covering `v*`
-# tags (`gh api repos/getknext-dev/knext/rulesets` lists only a `main`
-# branch ruleset, `target: "branch"`).
+# ── #1638 item 2 — v*-TAG RULESET PROTECTION, NIGHTLY DRIFT DETECTOR ────────
+# Settings applied (founder, 2026-10-02): an active repository ruleset,
+# "release tags (v*) immutable", now blocks deleting, updating, or
+# force-moving any `refs/tags/v*` — creating new tags still works. THIS is
+# the only pass/fail criterion this workflow alerts on; its disappearance
+# would be real drift.
 #
-# ITEM 1 (adding the reviewer + the tag ruleset) IS FOUNDER-ONLY — a repo
-# settings change no agent can make. THIS WORKFLOW IS THEREFORE EXPECTED TO
-# BE RED FROM THE MOMENT IT MERGES, until the founder does that. That is the
-# point, not a bug: the issue's acceptance criterion is "red with protection
-# removed, green with it present", and today protection genuinely is removed.
+# The `npm-publish` GitHub Environment's required-reviewer rule is
+# DELIBERATELY, PERMANENTLY absent — a founder decision, not an open item:
+# the sole maintainer is pre-authorized to publish and asked not to be a
+# blocking step. The check script still reads that setting and logs it, but
+# never alerts on it — alerting on a setting nobody intends to ever add
+# would just be permanent noise, indistinguishable from real drift.
 #
 # WHY NIGHTLY, NOT A PR GATE: same reasoning as
 # `action-pin-resolution-nightly.yml` — the answer lives in live repo
@@ -61,7 +62,7 @@ permissions:
 
 jobs:
   check-npm-publish-drift:
-    name: Verify npm-publish environment reviewer + v* tag ruleset (FAIL on drift)
+    name: Verify v* tag ruleset protection (FAIL on drift)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -108,16 +109,17 @@ jobs:
           CHECK_RESULT: ${{ needs.check-npm-publish-drift.result }}
         run: |
           set -euo pipefail
-          title='npm-publish environment/tag protection drift RED'
-          body="The nightly npm-publish drift check FAILED (#1638 item 2): the \`npm-publish\`
-          GitHub Environment's required-reviewer rule and/or the \`v*\`-covering tag ruleset is
-          missing OR could not be verified. **Read the job log before triaging** — it names each
-          setting separately and, critically, distinguishes two different failure shapes:
+          title='npm-publish v* tag ruleset protection drift RED'
+          body="The nightly npm-publish drift check FAILED (#1638 item 2): the \`v*\`-covering
+          tag ruleset is missing OR could not be verified. (The \`npm-publish\` environment's
+          required-reviewer rule is read and logged for information only — by founder decision
+          it is permanently absent and never alerted on.) **Read the job log before triaging** —
+          it distinguishes two different failure shapes:
 
-          - **MISSING** — the API answered and the setting is genuinely absent. This is real drift.
-            Item 1 of #1638 (repo settings: add a required reviewer to \`npm-publish\`, add a tag
-            protection ruleset for \`v*\`) is founder-only and has not been done, or was undone.
-          - **UNVERIFIED (permission error)** — a 403/404 from the environment or rulesets API.
+          - **MISSING** — the API answered and the ruleset is genuinely absent or no longer
+            covers \`v*\`. This is real drift: the \"release tags (v*) immutable\" repository
+            ruleset (added by the founder 2026-10-02) was removed, disabled, or narrowed.
+          - **UNVERIFIED (permission error)** — a 403/404 from the rulesets API.
             This does NOT mean the setting is absent — it means this check could not read it. See
             \`scripts/lib/npm-publish-drift-check.mjs\`'s header and
             \`docs/security/npm-publish-drift-check.md\` for the exact token-scope fix (a
@@ -127,7 +129,8 @@ jobs:
           - Run (full per-setting report in the job log): ${RUN_URL}
           - Check job result: ${CHECK_RESULT}
 
-          A release run should PAUSE for approval once item 1 is done; this alert is how you know
-          it still won't. Re-run this workflow after any settings change to confirm green, then
-          close this issue."
+          Releases are pre-authorized and run without a reviewer click by design — the only
+          standing protection against a bad tag is the \`v*\` ruleset this check verifies. Re-run
+          this workflow after restoring/correcting the ruleset to confirm green, then close this
+          issue."
           TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs

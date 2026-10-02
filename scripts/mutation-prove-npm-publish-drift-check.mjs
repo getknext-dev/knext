@@ -143,7 +143,8 @@ const MUTATIONS = [
       "      kind: 'missing',\n      message: `${setting}: UNVERIFIED (insufficient token permission) — ${result.message}`,",
   },
   {
-    label: 'runDriftCheck: the tag-ruleset finding is never pushed (only the reviewer is checked)',
+    label:
+      'runDriftCheck: the tag-ruleset finding is never pushed (the only pass/fail criterion since #1638, 2026-10-02, goes silent)',
     subject: 'lib',
     anchor:
       "  if (tagRuleset.kind !== 'ok') {\n    findings.push(describeFinding('v*-covering tag ruleset', tagRuleset));\n  }",
