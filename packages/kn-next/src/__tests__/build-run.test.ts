@@ -38,6 +38,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requireIsolatedProcess } from "../../../../tests/helpers/require-isolated-process";
+import type { PostCompileSmokeOptions } from "../cli/postcompile-smoke";
 import type { StandaloneExecBuildOptions } from "../cli/standalone-exec-build";
 import type { VinextBuildOptions } from "../cli/vinext-build";
 
@@ -95,7 +96,7 @@ mock.module("../cli/vinext-build", () => ({
 // `postcompile-smoke.test.ts` (behaviour) + `postcompile-smoke-wiring.test.ts`
 // (that build() calls it, fail-closed).
 const runPostCompileSmoke = (() =>
-    mock(async () => ({
+    mock(async (_opts: PostCompileSmokeOptions) => ({
         appPort: 1,
         metricsPort: 2,
         healthStatus: 200,
@@ -330,6 +331,96 @@ describe("build()", () => {
         for (const call of smokeTwinCalls) {
             expect(call[0]?.nativeDir).toBe(SMOKE_NATIVE_DIR_NAME);
             expect(call[0]?.nativeDir).not.toBe("native");
+        }
+    });
+
+    it("#1814 round 4: passes KNEXT_SHARP_ADDON to the smoke child when the twin staged a real sharp addon", async () => {
+        // The mock below stands in for `stageSharpNative` (which the REAL
+        // `buildVinextExecutable` calls): it writes a addon file under
+        // SMOKE_NATIVE_DIR_NAME, the same shape `findStagedSharpAddon` scans
+        // for. Without the KNEXT_SHARP_ADDON wiring, the smoke-twin's own
+        // dlopen shim would look beside the TWIN binary instead (where
+        // nothing was staged for it) and crash on boot — exactly the #1814
+        // regression this line exists to prevent.
+        loadConfig.mockResolvedValue(cfg({ build: "vinext" }));
+        let stagedAddonPath: string | undefined;
+        buildVinextExecutable.mockImplementation((opts: VinextBuildOptions) => {
+            if (opts.nativeDir === SMOKE_NATIVE_DIR_NAME) {
+                // realpathSync: macOS resolves /tmp -> /private/tmp, and
+                // build.ts's process.cwd() (post-chdir) reports the resolved
+                // path, not the literal mkdtempSync string.
+                const libDir = join(
+                    realpathSync(dir),
+                    SMOKE_NATIVE_DIR_NAME,
+                    "sharp-linux-x64",
+                    "lib",
+                );
+                mkdirSync(libDir, { recursive: true });
+                stagedAddonPath = join(libDir, "sharp-linux-x64-1.0.0.node");
+                writeFileSync(stagedAddonPath, "FAKE ADDON");
+            }
+            return opts.outFile ?? "knext-exec-linux-x64";
+        });
+
+        await build({ skipNextBuild: true });
+
+        const smokeTwinCalls = buildVinextExecutable.mock.calls.filter(
+            (c) => c[0]?.arch !== "linux-x64",
+        );
+        // Same host-dependent caveat as the isolation test above.
+        if (smokeTwinCalls.length > 0) {
+            expect(stagedAddonPath).toBeDefined();
+            const smokeCall = runPostCompileSmoke.mock.calls.at(-1)?.[0];
+            expect(smokeCall?.env?.KNEXT_SHARP_ADDON).toBe(stagedAddonPath);
+        }
+    });
+
+    it("#1814 round 4: does NOT pass KNEXT_SHARP_ADDON when the app has no sharp (nothing staged)", async () => {
+        // The default mock (set in beforeEach) never writes anything under
+        // SMOKE_NATIVE_DIR_NAME — the same shape a real `stageSharpNative`
+        // leaves for an app with no sharp dependency (an empty, present dir).
+        // `findStagedSharpAddon` must find nothing, and the smoke child must
+        // get no env override at all.
+        loadConfig.mockResolvedValue(cfg({ build: "vinext" }));
+
+        await build({ skipNextBuild: true });
+
+        const smokeCall = runPostCompileSmoke.mock.calls.at(-1)?.[0];
+        expect(smokeCall?.env?.KNEXT_SHARP_ADDON).toBeUndefined();
+    });
+
+    it("#1814 round 4: cleans up the isolated native dir even when the twin's own compile/staging throws", async () => {
+        // The twin's compile + sharp-addon staging used to run BEFORE the
+        // try/finally — a throw there (a bad compile, a failed lockfile-pinned
+        // fetch inside the real stageSharpNative) left SMOKE_NATIVE_DIR_NAME
+        // behind forever: nothing else in the tree cleans up a leading-dot dir
+        // outside the Dockerfile's `COPY native` scope, so every retry would
+        // re-hit whatever the partial write left. Moving both calls inside the
+        // try is what makes this test pass; reverting that moves it back out.
+        loadConfig.mockResolvedValue(cfg({ build: "vinext" }));
+        const smokeNativeDir = join(realpathSync(dir), SMOKE_NATIVE_DIR_NAME);
+        let smokeTwinAttempted = false;
+        buildVinextExecutable.mockImplementation((opts: VinextBuildOptions) => {
+            if (opts.nativeDir === SMOKE_NATIVE_DIR_NAME) {
+                smokeTwinAttempted = true;
+                // A realistic partial write before the failure — the point is
+                // that SOMETHING landed on disk that must still be swept up.
+                mkdirSync(smokeNativeDir, { recursive: true });
+                throw new Error("simulated sharp-addon fetch failure");
+            }
+            return opts.outFile ?? "knext-exec-linux-x64";
+        });
+
+        const outcome = await build({ skipNextBuild: true }).then(
+            () => "resolved",
+            () => "rejected",
+        );
+
+        // Same host-dependent caveat as the isolation tests above: only
+        // assert anything once the twin path actually ran.
+        if (smokeTwinAttempted) {
+            expect(outcome).toBe("rejected");
+            expect(existsSync(smokeNativeDir)).toBe(false);
         }
     });
 

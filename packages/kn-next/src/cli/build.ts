@@ -185,32 +185,39 @@ async function smokeCompiledBinary(
     // directory itself. See this function's doc comment: staging the twin's
     // arch into the SAME dir the ship build staged clobbers it.
     const smokeNativeDir = join(process.cwd(), SMOKE_NATIVE_DIR_NAME);
-    let smokeSharpAddon: string | undefined;
-    if (!plan.reuseShipBinary) {
-        log.info(
-            { arch: plan.arch },
-            "Compiling a host-arch binary for the post-compile smoke (the ship binary is linux-musl and cannot run here)...",
-        );
-        buildVinextExecutable({
-            cwd: process.cwd(),
-            arch: plan.arch,
-            outFile: plan.outFile,
-            skipViteBuild: true,
-            nativeDir: SMOKE_NATIVE_DIR_NAME,
-            // The smoke must boot a binary built with the SAME mode as the
-            // shipped one, or it misses the one property the mode changes.
-            ...(selfContained ? { selfContained: true } : {}),
-        });
-        // Self-contained mode embeds the staged tree at compile time and
-        // extracts it lazily at runtime — it never consults KNEXT_SHARP_ADDON,
-        // so finding a file for it here would be inert, not merely harmless.
-        if (!selfContained) {
-            smokeSharpAddon = findStagedSharpAddon(smokeNativeDir);
-        }
-    }
-
     const binaryPath = join(process.cwd(), plan.outFile);
     try {
+        let smokeSharpAddon: string | undefined;
+        if (!plan.reuseShipBinary) {
+            log.info(
+                { arch: plan.arch },
+                "Compiling a host-arch binary for the post-compile smoke (the ship binary is linux-musl and cannot run here)...",
+            );
+            // #1814 round 4 — INSIDE the try: a throw here (a bad compile, a
+            // failed sharp-addon fetch) must still hit the `finally` below, or
+            // a FAILING build leaves `smokeNativeDir` behind — exactly the
+            // retry-blocks-itself shape `stageSharpNative`'s own ownership
+            // refusal exists to catch for `native/`, reintroduced here for its
+            // cwd-nested sibling if this call sat outside the try.
+            buildVinextExecutable({
+                cwd: process.cwd(),
+                arch: plan.arch,
+                outFile: plan.outFile,
+                skipViteBuild: true,
+                nativeDir: SMOKE_NATIVE_DIR_NAME,
+                // The smoke must boot a binary built with the SAME mode as the
+                // shipped one, or it misses the one property the mode changes.
+                ...(selfContained ? { selfContained: true } : {}),
+            });
+            // Self-contained mode embeds the staged tree at compile time and
+            // extracts it lazily at runtime — it never consults
+            // KNEXT_SHARP_ADDON, so finding a file for it here would be inert,
+            // not merely harmless.
+            if (!selfContained) {
+                smokeSharpAddon = findStagedSharpAddon(smokeNativeDir);
+            }
+        }
+
         log.info(
             "Smoking the compiled executable (health, metrics, SIGTERM)...",
         );
