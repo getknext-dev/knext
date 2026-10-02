@@ -47,7 +47,7 @@ import {
     rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import {
@@ -347,6 +347,22 @@ export interface VinextBuildOptions {
      * compile argv and the step order are exactly what they were.
      */
     readonly selfContained?: boolean;
+    /**
+     * #1814 round 3 — where to stage sharp's native tree, ABSOLUTE, defaulting
+     * to `<cwd>/native` (the dir the Dockerfile `COPY`s). The caller that sets
+     * this is `smokeCompiledBinary`'s host-arch TWIN compile: that twin is a
+     * SECOND `buildVinextExecutable` call for a DIFFERENT arch than the ship
+     * build, into the SAME `cwd`. Staging both into the shared `native/`
+     * clobbers whichever ran first — `stageSharpNative` clears its
+     * destination before writing, so the twin's glibc pair silently replaced
+     * the ship's musl pair in a real run (#1814, measured on a live glibc CI
+     * runner: the SHIPPED alpine image then failed to dlopen a glibc `.node`
+     * it never should have carried). Must sit under `cwd` in self-contained
+     * mode — `vinext-compile.mjs` refuses a `--native-dir` outside the app
+     * root — so the twin uses a cwd-nested sibling, never a dir rooted
+     * elsewhere.
+     */
+    readonly nativeDir?: string;
 }
 
 /**
@@ -399,18 +415,25 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
         );
     }
 
+    // #1814 round 3 — see VinextBuildOptions.nativeDir's doc: default to the
+    // ship path (`<cwd>/native`), honoured verbatim (relative or absolute) so
+    // a caller staging a SECOND arch into this same `cwd` (the post-compile
+    // smoke's host-arch twin) can point it somewhere that does not clobber
+    // the ship build's already-staged tree.
+    const nativeDirArg = opts.nativeDir ?? "native";
+
     if (opts.selfContained) {
         // Self-contained: stage sharp's native tree for the target arch FIRST
         // (the compile embeds it, and it is unpacked on the first image
         // request), then compile with it. Nothing is left for the image to
         // copy beside the binary.
-        stageSharpNative(opts.cwd, { arch });
+        stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
         run([
             ...compileArgv(arch, entry, outFile),
             "--self-contained",
             "1",
             "--native-dir",
-            "native",
+            nativeDirArg,
         ]);
         return outFile;
     }
@@ -420,7 +443,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
 
     // 3. stage sharp's native module beside the binary — for the arch being
     // compiled, which is NOT necessarily the host's (#949).
-    stageSharpNative(opts.cwd, { arch });
+    stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
 
     return outFile;
 }
@@ -462,6 +485,18 @@ export interface StageSharpNativeOptions {
         pkg: { name: string; version: string; integrity: string | null },
         destDir: string,
     ) => void;
+    /**
+     * #1814 round 3 — staging destination, relative-to-`cwd` or absolute;
+     * defaults to `<cwd>/native` (the Dockerfile's `COPY native` source). A
+     * caller staging a SECOND arch into the same `cwd` (the post-compile
+     * smoke's host-arch twin, built alongside the ship binary) MUST pass a
+     * different directory here, or this function's own clear-before-write
+     * silently replaces whatever the ship build already staged — the exact
+     * clobber measured on a live glibc CI runner (the shipped image then
+     * carried a glibc `.node` it could never dlopen, where the ship's own
+     * musl pair used to be).
+     */
+    readonly nativeDir?: string;
 }
 
 /**
@@ -501,7 +536,9 @@ export function stageSharpNative(
         );
     }
 
-    const dest = join(cwd, "native");
+    const dest = opts.nativeDir
+        ? resolve(cwd, opts.nativeDir)
+        : join(cwd, "native");
     clearStagedNative(dest);
     mkdirSync(dest, { recursive: true });
 

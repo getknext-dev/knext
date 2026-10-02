@@ -123,7 +123,7 @@ mock.module("../cli/postcompile-smoke", () => ({
     runPostCompileSmoke,
 }));
 
-import { build } from "../cli/build";
+import { build, SMOKE_NATIVE_DIR_NAME } from "../cli/build";
 
 let dir: string;
 const savedCwd = process.cwd();
@@ -302,6 +302,35 @@ describe("build()", () => {
             }),
         );
         expect(uploadAssets).toHaveBeenCalledTimes(1);
+    });
+
+    it("#1814 stages the post-compile smoke's host-arch TWIN sharp pair into an isolated dir, never the ship's native/", async () => {
+        // The ship compile (asserted above, shipCompiles()) must stage into
+        // the default `native/` (no nativeDir override — `buildVinextExecutable`
+        // defaults it internally). Any SECOND, non-ship-arch call is the
+        // post-compile smoke's host-arch twin (`smokeCompiledBinary` in
+        // build.ts) — it must carry a DIFFERENT nativeDir, or it clobbers the
+        // ship's already-staged sharp pair the moment it stages its own
+        // (measured on a live glibc CI runner: the shipped image then failed
+        // to dlopen a glibc `.node` it never should have carried).
+        loadConfig.mockResolvedValue(cfg({ build: "vinext" }));
+
+        await build({ skipNextBuild: true });
+
+        for (const call of shipCompiles()) {
+            expect(call[0]?.nativeDir).toBeUndefined();
+        }
+        const smokeTwinCalls = buildVinextExecutable.mock.calls.filter(
+            (c) => c[0]?.arch !== "linux-x64",
+        );
+        // On a host whose smoke arch IS the ship arch, no second compile
+        // happens at all (`reuseShipBinary`) — nothing to assert then, but
+        // this repo's CI hosts and most dev machines differ from linux-x64-musl,
+        // so this is expected to run for real on both macOS and glibc Linux.
+        for (const call of smokeTwinCalls) {
+            expect(call[0]?.nativeDir).toBe(SMOKE_NATIVE_DIR_NAME);
+            expect(call[0]?.nativeDir).not.toBe("native");
+        }
     });
 
     it("fails fast with an actionable message when turbopack produces no .next/standalone (#1184)", async () => {
