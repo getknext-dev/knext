@@ -354,7 +354,10 @@ export function ensureVinextPatches(
 }
 
 /** One human line per outcome; shared by the verb and `knext build`. */
-export function describeEnsureResult(res: EnsureResult): string[] {
+export function describeEnsureResult(
+    res: EnsureResult,
+    opts: { check?: boolean } = {},
+): string[] {
     if (res.kind === "no-vinext") return [];
     if (res.kind === "version-mismatch") {
         return [
@@ -365,7 +368,9 @@ export function describeEnsureResult(res: EnsureResult): string[] {
     return [
         applied === 0
             ? `knext: bundled vinext fixes already applied (${res.results.length}).`
-            : `knext: applied ${applied} bundled vinext fix(es) (${res.results.length} total).`,
+            : opts.check
+              ? `knext: ${applied} of ${res.results.length} bundled vinext fix(es) are not applied yet.`
+              : `knext: applied ${applied} bundled vinext fix(es) (${res.results.length} total).`,
     ];
 }
 
@@ -407,7 +412,9 @@ export async function vinextPatchesMain(argv: string[]): Promise<number> {
         const res = ensureVinextPatches(process.cwd(), {
             check: values.check,
         });
-        for (const line of describeEnsureResult(res)) {
+        for (const line of describeEnsureResult(res, {
+            check: values.check,
+        })) {
             process.stdout.write(`${line}\n`);
         }
         if (

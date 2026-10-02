@@ -36,6 +36,7 @@ import { runProjectBuild } from "../cli/project-build";
 import {
     applyFilePatchToText,
     applyVinextPatches,
+    describeEnsureResult,
     ensureVinextPatches,
     findVinextDir,
     loadVinextPatchManifest,
@@ -550,6 +551,23 @@ describe("delivery", () => {
         } finally {
             rmSync(app, { recursive: true, force: true });
         }
+    });
+
+    it("check mode reports missing fixes as not applied, never as applied", () => {
+        const res = {
+            kind: "patched" as const,
+            dir: "/x",
+            results: [
+                { file: "a", upstream: "u", status: "applied" as const },
+                { file: "b", upstream: "u", status: "already-applied" as const },
+            ],
+        };
+        expect(describeEnsureResult(res, { check: true })).toEqual([
+            "knext: 1 of 2 bundled vinext fix(es) are not applied yet.",
+        ]);
+        expect(describeEnsureResult(res)).toEqual([
+            "knext: applied 1 bundled vinext fix(es) (2 total).",
+        ]);
     });
 
     it("ensureVinextPatches leaves a different vinext version alone", () => {
