@@ -91,6 +91,40 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+describe("compileArtifactForDeploy — opt-in patched Bun toolchain fails closed", () => {
+    const patched = { compile: { bun: "knext-patched" as const } };
+
+    it.each([
+        ["standalone-bun", () => standaloneServer(), cfg(patched)],
+        ["vinext", () => vinextOutput(), cfg({ ...patched, build: "vinext" })],
+    ] as const)("%s: opted in with no resolved toolchain → throws, compiles nothing (never stock Bun)", (_n, stage, config) => {
+        stage();
+        for (const opts of [undefined, {}, { toolchain: {} }]) {
+            let err: unknown;
+            try {
+                compileArtifactForDeploy(config, dir, opts);
+            } catch (e) {
+                err = e;
+            }
+            expect(err).toBeInstanceOf(UsageError);
+            expect(String((err as Error).message)).toContain(
+                "refusing to fall back to stock Bun",
+            );
+        }
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+        expect(buildVinextExecutable).not.toHaveBeenCalled();
+    });
+
+    it("opted in WITH a resolved toolchain → compiles with exactly that toolchain", () => {
+        standaloneServer();
+        const toolchain = { bin: "/cache/bun-linux-x64", include: ["./p/*"] };
+        compileArtifactForDeploy(cfg(patched), dir, { toolchain });
+        expect(buildStandaloneExecutable).toHaveBeenCalledWith(
+            expect.objectContaining({ toolchain }),
+        );
+    });
+});
+
 describe("compileArtifactForDeploy", () => {
     it("bare config (build+runtime absent) compiles the standalone-bun executable — the actual default cell", () => {
         standaloneServer();

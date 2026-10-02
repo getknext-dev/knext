@@ -459,9 +459,9 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 **What it changes, and what it does not.** The patched Bun runs the **compile step only**. The
 shipped executable targets linux-musl, which Bun builds on its own stock Bun base for that target,
-so the binary you deploy still runs on stock Bun. The toolchain is published for **glibc-based
-Linux build machines** (Linux x64, glibc 2.31 or newer, such as GitHub-hosted runners); on macOS or
-a musl-based (Alpine) build machine the build stops with an error that says so. Remove the
+so the binary you deploy still runs on stock Bun. The toolchain is published for **Linux x64
+build machines with glibc** (glibc 2.31 or newer, such as GitHub-hosted x64 runners) only; on Linux
+arm64, a musl-based (Alpine) machine, macOS or Windows the build stops with an error that says so. Remove the
 `compile` block, or set `bun: "stock"`, to go back to the Bun on your `PATH`.
 
 **Not covered by the compatibility credential.** The verified results on this site were earned
