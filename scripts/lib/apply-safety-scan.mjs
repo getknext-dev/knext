@@ -3849,19 +3849,49 @@ function localUsesMightApply(usesRaw, resolveSource, visited) {
  * signal, not a full scan of the called file's own safety — that file is
  * scanned on its own merits wherever it is discovered as a tracked
  * workflow/composite-action source in its own right.
+ *
+ * #1801 round 4: this function used to inspect ONLY `runs.steps` (a
+ * composite action) and `jobs` (a reusable workflow) — a resolvable LOCAL
+ * action whose `action.yml` is neither of those shapes fell all the way
+ * through to the final `return false`, i.e. "proven safe", when it had
+ * proven NOTHING. Three real `action.yml` shapes read exactly that way:
+ * `runs.using: docker` + `image: Dockerfile` (a built image, no `steps` to
+ * scan at all), `runs.using: docker` + `image: docker://…` + `args: […]`
+ * (the action's OWN `apply -f …` args, never routed through
+ * `dockerStepMightApply` because that function only ever sees a CALLING
+ * job's `uses:` step, not a called action's own `runs:` block), and
+ * `using: node20` + `main: index.js` (an arbitrary compiled/bundled JS
+ * entry this module has no way to scan for manifest applies). None of
+ * these is a composite action or a reusable workflow, so NEITHER of the
+ * two recognized shapes applies — and "neither recognized shape" must fail
+ * CLOSED, not fall through to "no apply found". The real tree has no local
+ * actions at all, so this costs nothing there.
  */
 function calledUnitMightApply(calledDoc, resolveSource, visited) {
-  const stepLists = [];
-  if (Array.isArray(calledDoc?.runs?.steps)) stepLists.push(calledDoc.runs.steps);
-  if (calledDoc?.jobs)
-    for (const j of Object.values(calledDoc.jobs)) stepLists.push(j?.steps ?? []);
-  for (const steps of stepLists) {
+  if (calledDoc?.jobs) {
+    const stepLists = Object.values(calledDoc.jobs).map((j) => j?.steps ?? []);
+    for (const steps of stepLists) {
+      for (const s of steps) {
+        if (typeof s?.run === 'string' && textHasManifestApply(s.run)) return true;
+        if (typeof s?.uses === 'string' && usesStepMightApply(s, resolveSource, visited))
+          return true;
+      }
+    }
+    return false;
+  }
+  if (calledDoc?.runs?.using === 'composite') {
+    const steps = Array.isArray(calledDoc.runs.steps) ? calledDoc.runs.steps : [];
     for (const s of steps) {
       if (typeof s?.run === 'string' && textHasManifestApply(s.run)) return true;
       if (typeof s?.uses === 'string' && usesStepMightApply(s, resolveSource, visited)) return true;
     }
+    return false;
   }
-  return false;
+  // Neither a reusable workflow nor a composite action — a docker action
+  // (`using: docker`, `image: Dockerfile` or `docker://…` + its own `args:`),
+  // a JS action (`using: node20`/`node24`, `main: index.js`), or anything
+  // else this module has no way to read the behavior of. Fail closed.
+  return true;
 }
 
 /**

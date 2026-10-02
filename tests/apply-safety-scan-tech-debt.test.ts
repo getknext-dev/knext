@@ -565,7 +565,7 @@ describe('apply-safety-scan: hasApplyAnywhere sees an apply inside a called uses
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) =>
         p === './.github/actions/apply-thing/action.yml'
-          ? 'runs:\n  steps:\n    - run: kubectl apply -f m.yaml\n'
+          ? 'runs:\n  using: composite\n  steps:\n    - run: kubectl apply -f m.yaml\n'
           : FETCH_JS,
       followScripts: true,
     });
@@ -638,7 +638,7 @@ describe('apply-safety-scan: hasApplyAnywhere sees an apply inside a called uses
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) =>
         p === './.github/actions/noop-thing/action.yml'
-          ? 'runs:\n  steps:\n    - run: echo hi\n'
+          ? 'runs:\n  using: composite\n  steps:\n    - run: echo hi\n'
           : null,
     });
     expect(offenders).toEqual([]);
@@ -649,7 +649,7 @@ describe('apply-safety-scan: hasApplyAnywhere sees an apply inside a called uses
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) =>
         p === './.github/actions/noop-thing/action.yml'
-          ? 'runs:\n  steps:\n    - run: echo hi\n'
+          ? 'runs:\n  using: composite\n  steps:\n    - run: echo hi\n'
           : FETCH_JS,
       followScripts: true,
     });
@@ -673,7 +673,7 @@ describe('apply-safety-scan: fix 1 — a job with run: AND uses: steps is checke
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) =>
         p === './.github/actions/apply/action.yml'
-          ? 'runs:\n  steps:\n    - run: kubectl apply -f m.yaml\n'
+          ? 'runs:\n  using: composite\n  steps:\n    - run: kubectl apply -f m.yaml\n'
           : FETCH_JS,
       followScripts: true,
     });
@@ -767,7 +767,7 @@ describe('apply-safety-scan: fix 3 — local composite actions followed recursiv
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) => {
         if (p === './.github/actions/wrapper/action.yml')
-          return 'runs:\n  steps:\n    - uses: azure/k8s-deploy@v4\n';
+          return 'runs:\n  using: composite\n  steps:\n    - uses: azure/k8s-deploy@v4\n';
         return FETCH_JS;
       },
       followScripts: true,
@@ -786,9 +786,9 @@ describe('apply-safety-scan: fix 3 — local composite actions followed recursiv
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) => {
         if (p === './.github/actions/outer/action.yml')
-          return 'runs:\n  steps:\n    - uses: ./.github/actions/inner\n';
+          return 'runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n';
         if (p === './.github/actions/inner/action.yml')
-          return 'runs:\n  steps:\n    - run: kubectl apply -f m.yaml\n';
+          return 'runs:\n  using: composite\n  steps:\n    - run: kubectl apply -f m.yaml\n';
         return FETCH_JS;
       },
       followScripts: true,
@@ -822,9 +822,9 @@ describe('apply-safety-scan: fix 3 — local composite actions followed recursiv
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) => {
         if (p === './.github/actions/cycle-a/action.yml')
-          return 'runs:\n  steps:\n    - uses: ./.github/actions/cycle-b\n';
+          return 'runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/cycle-b\n';
         if (p === './.github/actions/cycle-b/action.yml')
-          return 'runs:\n  steps:\n    - uses: ./.github/actions/cycle-a\n';
+          return 'runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/cycle-a\n';
         return FETCH_JS;
       },
       followScripts: true,
@@ -846,9 +846,94 @@ describe('apply-safety-scan: fix 3 — local composite actions followed recursiv
     const offenders = unsafeAppliesInWorkflow(doc, {
       resolveSource: (p) => {
         if (p === './.github/actions/wrapper/action.yml')
-          return 'runs:\n  steps:\n    - uses: actions/checkout@v4\n';
+          return 'runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@v4\n';
         return FETCH_JS;
       },
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('apply-safety-scan: a non-composite/non-reusable-workflow local action fails closed (#1801 round 4)', () => {
+  const FETCH_JS = `fetch('https://example.com/x');\n`;
+
+  it('RED: `runs.using: docker` + `image: Dockerfile` (a built image, no steps at all)', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/actions/docker-build' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/docker-build/action.yml'
+          ? 'runs:\n  using: docker\n  image: Dockerfile\n'
+          : FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('callerJob'))).toBe(true);
+  });
+
+  it("RED: `runs.using: docker` + `image: docker://bitnami/kubectl` + `args: [apply, …]` — the ACTION's own args, not a calling step's `with:`", () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/actions/docker-apply' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/docker-apply/action.yml'
+          ? 'runs:\n  using: docker\n  image: docker://bitnami/kubectl\n  args:\n    - apply\n    - -f\n    - m.yaml\n'
+          : FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('callerJob'))).toBe(true);
+  });
+
+  it('RED: `using: node20` + `main: index.js` — an opaque JS entry this module cannot scan', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [{ run: 'node scripts/lib/probe.mjs\n' }, { uses: './.github/actions/js-action' }],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/js-action/action.yml'
+          ? 'using: node20\nmain: index.js\n'
+          : FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('callerJob'))).toBe(true);
+  });
+
+  it('GREEN (false-positive control): a genuine COMPOSITE action (runs.using: composite) with no apply anywhere stays clean', () => {
+    const doc = {
+      jobs: {
+        callerJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: './.github/actions/composite-noop' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/composite-noop/action.yml'
+          ? 'runs:\n  using: composite\n  steps:\n    - run: echo hi\n'
+          : FETCH_JS,
       followScripts: true,
     });
     expect(offenders).toEqual([]);

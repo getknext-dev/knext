@@ -30,7 +30,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCANNER = resolve(REPO_ROOT, 'scripts/lib/apply-safety-scan.mjs');
 const SPEC = 'tests/apply-safety-scan-tech-debt.test.ts';
 
-declareMutations(20);
+declareMutations(21);
 
 readFileSync(SCANNER, 'utf8'); // FATAL if missing, before anything is mutated
 
@@ -261,7 +261,19 @@ prove(
   'if (false) return true; // MUTATION: disabled',
 );
 
-const declared = 20;
+// M21 (#1801 round 4): a local action that is NEITHER a composite action
+// NOR a reusable workflow (a docker action, a JS action, …) must fail
+// CLOSED — restoring the old fall-through (`return false`, i.e. "proven
+// safe" for a shape nothing actually proved anything about) must red all
+// three new shape fixtures (Dockerfile image, docker://+apply args,
+// node20+main).
+prove(
+  'M21 non-composite/non-reusable-workflow local action fails closed (#1801 round 4)',
+  '  // else this module has no way to read the behavior of. Fail closed.\n  return true;\n}',
+  '  // else this module has no way to read the behavior of. Fail closed.\n  return false; // MUTATION: disabled\n}',
+);
+
+const declared = 21;
 console.log(`\n${caught}/${declared} mutations caught, ${decorative} decorative.`);
 if (decorative > 0 || caught !== declared) {
   console.error('Mutation proof FAILED: at least one rule is decorative or missing.');
