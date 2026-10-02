@@ -559,7 +559,11 @@ describe("delivery", () => {
             dir: "/x",
             results: [
                 { file: "a", upstream: "u", status: "applied" as const },
-                { file: "b", upstream: "u", status: "already-applied" as const },
+                {
+                    file: "b",
+                    upstream: "u",
+                    status: "already-applied" as const,
+                },
             ],
         };
         expect(describeEnsureResult(res, { check: true })).toEqual([
