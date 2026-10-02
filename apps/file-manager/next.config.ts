@@ -24,7 +24,13 @@ const nextConfig: NextConfig = {
   // `_next/static/<tag>/` prefix, and `pruneOldBuilds(..., buildId=tag)` all
   // line up. Returning null in dev falls back to Next's default nanoid.
   generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
-  output: 'standalone',
+  // #1812: vinext 1.0.1 reads this field itself (independent of `next build`)
+  // and, when it is 'standalone', ALSO tries to emit its own standalone
+  // bundle from a plain `vite build` output this app never produces (it
+  // builds via the `nitro({ preset: 'bun' })` plugin instead) — see
+  // vite.config.ts's KNEXT_VINEXT_BUILD comment. `next build` (this field's
+  // only real consumer) never sets that env var, so that target is unaffected.
+  output: process.env.KNEXT_VINEXT_BUILD === '1' ? undefined : 'standalone',
   // Ensure native node modules are traced into standalone output (not bundled).
   // pino-elasticsearch and thread-stream are excluded here to avoid Turbopack
   // bundling their test files (pre-existing upstream issue).
