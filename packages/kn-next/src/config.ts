@@ -364,7 +364,7 @@ export interface KnativeNextConfig {
      * at `/$bunfs/root/<its path relative to the app root>` (a `.ts`/`.mjs`/
      * `.cjs` source is embedded as `.js`), is NOT evaluated at startup, and
      * loads from the executable on its first import — nothing needs to sit
-     * beside the binary. Works on stock Bun. A pattern that matches nothing, a
+     * beside the binary. Works with stock Bun; a pattern that matches nothing, a
      * match outside the app root and a non-module match each fail the build.
      *
      * Supported on the compiled vinext executable only (`build: 'vinext'`,
