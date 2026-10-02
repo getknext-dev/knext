@@ -115,12 +115,39 @@ describe("compileArtifactForDeploy — opt-in patched Bun toolchain fails closed
         expect(buildVinextExecutable).not.toHaveBeenCalled();
     });
 
-    it("opted in WITH a resolved toolchain → compiles with exactly that toolchain", () => {
+    it("vinext opted in WITH a resolved toolchain → compiles with exactly that compiler", () => {
+        vinextOutput();
+        const toolchain = { bin: "/cache/bun-linux-x64" };
+        compileArtifactForDeploy(cfg({ ...patched, build: "vinext" }), dir, {
+            toolchain,
+        });
+        expect(buildVinextExecutable).toHaveBeenCalledWith(
+            expect.objectContaining({ compilerBin: "/cache/bun-linux-x64" }),
+        );
+    });
+
+    it("a non-vinext target opted in, even WITH a toolchain → throws (backstop for a bypassed validator), compiles nothing", () => {
         standaloneServer();
-        const toolchain = { bin: "/cache/bun-linux-x64", include: ["./p/*"] };
-        compileArtifactForDeploy(cfg(patched), dir, { toolchain });
-        expect(buildStandaloneExecutable).toHaveBeenCalledWith(
-            expect.objectContaining({ toolchain }),
+        let err: unknown;
+        try {
+            compileArtifactForDeploy(cfg(patched), dir, {
+                toolchain: { bin: "/cache/bun-linux-x64" },
+            });
+        } catch (e) {
+            err = e;
+        }
+        expect(err).toBeInstanceOf(UsageError);
+        expect(String((err as Error).message)).toContain(
+            "supported only on the compiled vinext executable",
+        );
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
+    it("the default (no compile.bun) never passes a compiler, so the argv stays plain bun", () => {
+        vinextOutput();
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        expect(buildVinextExecutable).toHaveBeenCalledWith(
+            expect.not.objectContaining({ compilerBin: expect.anything() }),
         );
     });
 });
@@ -173,6 +200,21 @@ describe("compileArtifactForDeploy", () => {
             }),
         );
         expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
+    it("passes compile.include to the vinext compile; omits it when unset", () => {
+        vinextOutput();
+        compileArtifactForDeploy(
+            cfg({ build: "vinext", compile: { include: ["plugins/*.js"] } }),
+            dir,
+        );
+        expect(buildVinextExecutable).toHaveBeenCalledWith(
+            expect.objectContaining({ include: ["plugins/*.js"] }),
+        );
+        buildVinextExecutable.mockClear();
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        const [opts] = buildVinextExecutable.mock.calls[0] as [object];
+        expect(Object.hasOwn(opts, "include")).toBe(false);
     });
 
     it("compiles nothing for vinext × node — the V8 compile cache is baked at docker build time", () => {

@@ -27,6 +27,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
+import { describeEnsureResult, ensureVinextPatches } from "./vinext-patches";
 
 /** Exit code every POSIX shell uses for "command not found". */
 const EXIT_COMMAND_NOT_FOUND = 127;
@@ -287,6 +288,13 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
 
     if (opts.requireEsm) {
         preflightEsmPackage(cwd);
+        // The vinext target: (re-)apply knext's bundled vinext fixes before
+        // `vite build` sees vinext. The app's postinstall normally did this
+        // already (then it is a no-op); this covers apps scaffolded before
+        // the postinstall existed and installs run with scripts disabled.
+        for (const line of describeEnsureResult(ensureVinextPatches(cwd))) {
+            process.stderr.write(`${line}\n`);
+        }
     }
 
     if (opts.builderId !== undefined) {

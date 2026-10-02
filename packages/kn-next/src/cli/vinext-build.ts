@@ -126,23 +126,6 @@ export function bunMeetsFloor(version: string): boolean {
 export const COMPILE_LOG_PREFIX = "[knext compile]";
 
 /**
- * Which Bun runs the compile script, and the user's `compile.include` globs
- * (resolved by `bun-toolchain.ts`). Both absent = stock `bun`, no includes —
- * every compile argv is then byte-identical to the pre-option one.
- */
-export interface CompileToolchain {
-    readonly bin?: string;
-    readonly include?: readonly string[];
-}
-
-/** `--include-json <json>` for the compile scripts, only when there are globs. */
-export function includeArgv(include?: readonly string[]): string[] {
-    return include && include.length > 0
-        ? ["--include-json", JSON.stringify(include)]
-        : [];
-}
-
-/**
  * The `bun build --compile` argv for this target and entry.
  *
  * Exported so a test can assert the flags rather than trusting prose: dropping
@@ -153,7 +136,12 @@ export function compileArgv(
     arch: string,
     entry: string,
     outFile: string,
-    toolchain: CompileToolchain = {},
+    include: readonly string[] = [],
+    /**
+     * The opt-in knext-patched Bun (`compile.bun`, resolved + sha256-verified
+     * by bun-toolchain.ts). Absent: plain `bun` on PATH, argv unchanged.
+     */
+    compilerBin?: string,
 ): string[] {
     const target = bunCompileTarget(arch);
     // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and
@@ -169,11 +157,8 @@ export function compileArgv(
     // The script ships in this package, so a user's `knext build` gets the same
     // treatment knext's own reference app does rather than a second copy that
     // drifts.
-    //
-    // `toolchain.bin` is the opt-in patched Bun (bun-toolchain.ts) — absent, it
-    // is plain `bun` on PATH and the argv is exactly what it always was.
     return [
-        toolchain.bin ?? "bun",
+        compilerBin ?? "bun",
         "run",
         compileScriptPath(),
         "--entry",
@@ -182,8 +167,20 @@ export function compileArgv(
         outFile,
         "--target",
         target,
-        ...includeArgv(toolchain.include),
+        // `compile.include` (knext.config.ts): appended only when set, so the
+        // default argv is exactly what it always was.
+        ...includeArgv(include),
+        // The patched toolchain embeds the SAME checked plan through its
+        // native `compile.include` (compile-embed.mjs nativeIncludePaths).
+        ...(compilerBin && include.length > 0 ? ["--include-native", "1"] : []),
     ];
+}
+
+/** `--include-json <json>` for the compile script, only when there are globs. */
+export function includeArgv(include: readonly string[] = []): string[] {
+    return include.length > 0
+        ? ["--include-json", JSON.stringify(include)]
+        : [];
 }
 
 /**
@@ -386,10 +383,17 @@ export interface VinextBuildOptions {
      */
     readonly nativeDir?: string;
     /**
-     * The compile toolchain (`compile.bun` / `compile.include`, resolved by
-     * `bun-toolchain.ts`). Absent: stock `bun` on PATH, no includes.
+     * `compile.include` globs (knext.config.ts), relative to the app root:
+     * JS/TS modules embedded in the executable and loaded on their first
+     * import. Absent or empty: the compile argv is unchanged.
      */
-    readonly toolchain?: CompileToolchain;
+    readonly include?: readonly string[];
+    /**
+     * The opt-in knext-patched Bun that runs the compile script
+     * (`compile.bun: 'knext-patched'`, resolved and sha256-verified by
+     * bun-toolchain.ts). Absent: stock `bun` on PATH.
+     */
+    readonly compilerBin?: string;
 }
 
 /**
@@ -417,9 +421,8 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
             runQuiet(argv, { surfaceStdoutPrefix: COMPILE_LOG_PREFIX }));
     const arch = opts.arch ?? "linux-x64";
     const outFile = opts.outFile ?? `knext-exec-${arch}`;
-    const toolchain = opts.toolchain ?? {};
 
-    const version = opts.bunVersion ?? detectBunVersion(run, toolchain.bin);
+    const version = opts.bunVersion ?? detectBunVersion(run, opts.compilerBin);
     if (!bunMeetsFloor(version)) {
         throw new UsageError(
             `The vinext single-executable target requires Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}.0 or newer; found '${version}'.\n\n` +
@@ -457,7 +460,13 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
         // copy beside the binary.
         stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
         run([
-            ...compileArgv(arch, entry, outFile, toolchain),
+            ...compileArgv(
+                arch,
+                entry,
+                outFile,
+                opts.include,
+                opts.compilerBin,
+            ),
             "--self-contained",
             "1",
             "--native-dir",
@@ -467,7 +476,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     }
 
     // 2. compile + bytecode
-    run(compileArgv(arch, entry, outFile, toolchain));
+    run(compileArgv(arch, entry, outFile, opts.include, opts.compilerBin));
 
     // 3. stage sharp's native module beside the binary — for the arch being
     // compiled, which is NOT necessarily the host's (#949).

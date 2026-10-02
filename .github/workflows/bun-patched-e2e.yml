@@ -5,8 +5,10 @@
 # and loaded LAZILY from it (not evaluated at startup, evaluated on the first `import()`, with no
 # copy of it on disk in the image).
 #
-# Dispatch-only (plus `workflow_call` from bun-patched-release.yml, which runs it once after
-# publishing): no schedule, not a required check. RETIREMENT: delete with deploy/bun-patched/.
+# Dispatch-only, plus `workflow_call` from bun-patched-release.yml, which runs it as a GATE BEFORE
+# anything is signed or published, against the verified draft binary (seeded into knext's cache via
+# the `toolchain-artifact` input — knext's own embedded-sha256 check still decides whether to use
+# it). No schedule, not a required check. RETIREMENT: delete with deploy/bun-patched/.
 name: bun-patched-e2e
 
 on:
@@ -82,15 +84,18 @@ jobs:
           printf '%s\n' \
             'globalThis.__knextPluginEvaluated = (globalThis.__knextPluginEvaluated ?? 0) + 1;' \
             'export default "hello-from-included-module";' > plugins/greet.js
+          # A node_modules tree INSIDE the included directory: knext must not embed it.
+          mkdir -p plugins/node_modules/dep
+          printf '%s\n' 'export default "must-not-be-embedded-7c1e";' > plugins/node_modules/dep/index.js
           cp "$GITHUB_WORKSPACE/.github/bun-patched-e2e/plugin-route.ts" src/app/api/plugin/route.ts
-          # Opt in: the patched toolchain + the include glob.
+          # Opt in: the patched toolchain + a DIRECTORY include (same option as the stock path).
           node -e '
             const fs = require("fs");
             const p = "knext.config.ts";
             const s = fs.readFileSync(p, "utf8");
             const anchor = "  build: \"vinext\",";
             if (s.split(anchor).length !== 2) { console.error("anchor not found exactly once"); process.exit(1); }
-            fs.writeFileSync(p, s.replace(anchor, anchor + "\n  compile: { bun: \"knext-patched\", include: [\"./plugins/*.js\"] },"));
+            fs.writeFileSync(p, s.replace(anchor, anchor + "\n  compile: { bun: \"knext-patched\", include: [\"plugins\"] },"));
           '
           grep -n 'compile:' knext.config.ts
           npm install --no-audit --no-fund
@@ -125,6 +130,16 @@ jobs:
           node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
           grep -q 'knext-patched Bun toolchain (sha256 verified)' build.log
           grep -q '\[knext compile\] wrote .*(bytecode: on' build.log
+          # The SAME checked plan as the stock path, embedded through the patched Bun's native --include.
+          grep -q '\[knext compile\] compile.include: embedded 1 module(s): plugins/greet.js' build.log
+          grep -q '\[knext compile\] compile.include: via native --include (knext-patched Bun)' build.log
+          if grep -q 'must-not-be-embedded-7c1e' knext-exec-linux-x64; then
+            echo "::error::a node_modules file under the included directory was embedded"; exit 1
+          fi
+          if [ -n "${SEEDED_TAG:-}" ]; then
+            # Release gate: the binary knext used is the seeded draft binary it verified.
+            echo "compiled with the seeded release candidate for $SEEDED_TAG" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           test -f knext-exec-linux-x64
           PATCHED="$(find "$KNEXT_CACHE_DIR/bun-patched" -type f -name 'bun-linux-x64')"
           "$PATCHED" --revision | tee patched-revision.txt

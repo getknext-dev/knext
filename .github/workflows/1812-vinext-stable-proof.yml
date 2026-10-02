@@ -26,8 +26,22 @@ name: vinext stable pin proof (#1812, both runtimes)
 # vinext-node-stable, run 37040073176, PR #1817) — and that trigger is removed
 # here, leaving this workflow_dispatch-only for every run after.
 
+#
+# `bundled_vinext_patches` (v1.3): when true, each job also checks out THIS
+# ref and applies knext's bundled vinext fixes (packages/kn-next/templates/
+# vinext-patches/) to the scaffolded app's installed vinext with this ref's
+# `knext vinext-patches`, asserts `--check` reports them all applied, and only
+# then builds and boots — proving the patched vinext builds and serves on both
+# runtimes before those bytes ship in a published @getknext/core. Off by
+# default, so a plain dispatch still proves the unpatched pin.
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      bundled_vinext_patches:
+        description: "Apply knext's bundled vinext fixes from this ref before building"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -89,6 +103,31 @@ jobs:
             }
             console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version + ', vinext@' + v.version);
           "
+
+      - name: Check out this ref (bundled vinext fixes + their applier)
+        if: ${{ inputs.bundled_vinext_patches }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext-src
+          persist-credentials: false
+
+      - name: Install this ref's workspace (the applier runs from source)
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: knext-src
+        run: bun install --frozen-lockfile
+
+      - name: Apply the bundled vinext fixes from this ref, and prove they took
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: app
+        run: |
+          set -euo pipefail
+          # Before: the published 1.0.1 is unpatched, so --check must fail.
+          if bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check; then
+            echo "::error::--check passed BEFORE applying — the installed vinext already carries the fixes, so this run would prove nothing" >&2
+            exit 1
+          fi
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check
 
       - name: knext build --skip-smoke (vite build -> bun build --compile --bytecode)
         working-directory: app
@@ -180,6 +219,31 @@ jobs:
             }
             console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version + ', vinext@' + v.version);
           "
+
+      - name: Check out this ref (bundled vinext fixes + their applier)
+        if: ${{ inputs.bundled_vinext_patches }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext-src
+          persist-credentials: false
+
+      - name: Install this ref's workspace (the applier runs from source)
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: knext-src
+        run: bun install --frozen-lockfile
+
+      - name: Apply the bundled vinext fixes from this ref, and prove they took
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: app
+        run: |
+          set -euo pipefail
+          # Before: the published 1.0.1 is unpatched, so --check must fail.
+          if bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check; then
+            echo "::error::--check passed BEFORE applying — the installed vinext already carries the fixes, so this run would prove nothing" >&2
+            exit 1
+          fi
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check
 
       - name: knext build (vite build -> nitro node preset; stages Dockerfile.vinext-node)
         working-directory: app

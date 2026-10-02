@@ -40,13 +40,17 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
-import { wantsPatchedBun } from "./compile-config";
+import {
+    type CompileToolchain,
+    compileIncludeGlobs,
+    wantsPatchedBun,
+} from "./compile-config";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,
     standaloneExecFileName,
 } from "./standalone-exec-build";
-import { buildVinextExecutable, type CompileToolchain } from "./vinext-build";
+import { buildVinextExecutable } from "./vinext-build";
 
 export interface ResolvedBuild {
     readonly builder: BuilderAdapter;
@@ -185,9 +189,6 @@ export function compileArtifactForDeploy(
                 "before the compile step — refusing to fall back to stock Bun.",
         );
     }
-    const toolchainOpt = opts.toolchain?.bin
-        ? { toolchain: opts.toolchain }
-        : {};
     // The single resolved value both compile paths receive, as an explicit
     // option. Spread ONLY when on, so with the flag off each path's options
     // are exactly the pre-flag shape.
@@ -195,6 +196,15 @@ export function compileArtifactForDeploy(
     const selfContainedOpt = selfContained ? { selfContained: true } : {};
     const { artifact, builder } = resolveBuildArtifact(config, cwd);
     const runtimeId = config.runtime ?? DEFAULT_RUNTIME_ID;
+    // Backstop for a bypassed validator: the patched toolchain runs ONLY the
+    // compiled vinext executable's compile. Any other target would silently
+    // ignore it and compile with stock Bun.
+    if (wantsPatchedBun(config) && artifact.shape !== "nitro-output-bun") {
+        throw new UsageError(
+            "compile.bun: 'knext-patched' is supported only on the compiled vinext executable " +
+                "(build: 'vinext', runtime: 'bun') — refusing to compile this target with stock Bun instead.",
+        );
+    }
 
     if (standaloneStepsApply(artifact)) {
         const standaloneDir = join(cwd, ".next", "standalone");
@@ -222,7 +232,6 @@ export function compileArtifactForDeploy(
             cwd,
             arch,
             ...selfContainedOpt,
-            ...toolchainOpt,
         });
         // #1351/#1414: stamp the exec with a hash of the WHOLE standalone
         // tree it was JUST compiled from (not just server.js — see
@@ -240,12 +249,16 @@ export function compileArtifactForDeploy(
         // skipViteBuild: the caller's OWN project build (runProjectBuild /
         // `npm run build`) already produced `.output` — mirrors build.ts's
         // step 2c comment exactly.
+        // `compile.include` (validated for this target only): spread only
+        // when set, so the default call is exactly what it was.
+        const include = compileIncludeGlobs(config);
         const binaryPath = buildVinextExecutable({
             cwd,
             arch,
             skipViteBuild: true,
             ...selfContainedOpt,
-            ...toolchainOpt,
+            ...(include.length > 0 ? { include } : {}),
+            ...(opts.toolchain?.bin ? { compilerBin: opts.toolchain.bin } : {}),
         });
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also

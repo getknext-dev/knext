@@ -22,10 +22,6 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-    parseIncludeJson,
-    userIncludePart,
-} from "../adapters/compile-embed.mjs";
-import {
     type BunToolchainPins,
     ensurePatchedBun,
     PATCHED_BUN,
@@ -33,11 +29,11 @@ import {
     patchedBunCacheDir,
     patchedBunPlatformKey,
     resolveCompileBun,
+    resolveCompileToolchain,
     validateCompileConfig,
 } from "../cli/bun-toolchain";
 import { UsageError } from "../cli/shared";
 import { standaloneCompileArgv } from "../cli/standalone-exec-build";
-import { compileArgv } from "../cli/vinext-build";
 
 const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 const GOOD = new TextEncoder().encode("#!/bin/sh\necho patched-bun\n");
@@ -342,92 +338,100 @@ describe("lockstep with the release + docs", () => {
         );
         expect(docs).toContain(PATCHED_BUN_SIGNER);
     });
+
+    it("the platform list in the config JSDoc and the docs is exactly the pinned one", () => {
+        // An earlier revision promised arm64 while only x64 was pinned. Both
+        // texts now derive their claim from the pins.
+        const archs = Object.keys(PATCHED_BUN.assets)
+            .map((k) => k.replace(/^linux-/, ""))
+            .sort();
+        expect(archs).toEqual(["arm64", "x64"]);
+        const config = readFileSync(
+            join(repo, "packages/kn-next/src/config.ts"),
+            "utf8",
+        );
+        expect(config).toContain("Build hosts: Linux (glibc) x64 and arm64");
+        const docs = readFileSync(
+            join(repo, "apps/docs/content/docs/build-pipeline.mdx"),
+            "utf8",
+        );
+        expect(docs).toContain(
+            "Linux build\nmachines with glibc, x64 and arm64",
+        );
+        expect(docs).not.toContain("on Linux arm64");
+    });
 });
 
 describe("config validation", () => {
-    it("accepts absent, stock, and knext-patched with include globs", () => {
+    const vinext = { build: "vinext" };
+
+    it("accepts absent, stock, and knext-patched (with include globs) on the compiled vinext executable", () => {
         expect(validateCompileConfig({})).toEqual([]);
-        expect(validateCompileConfig({ compile: { bun: "stock" } })).toEqual(
-            [],
-        );
+        expect(
+            validateCompileConfig({ ...vinext, compile: { bun: "stock" } }),
+        ).toEqual([]);
         expect(
             validateCompileConfig({
-                compile: { bun: "knext-patched", include: ["./plugins/**"] },
+                ...vinext,
+                compile: { bun: "knext-patched", include: ["plugins/**"] },
             }),
         ).toEqual([]);
     });
 
-    it("rejects an unknown toolchain, a non-array include, and include without the patched toolchain", () => {
+    it("rejects an unknown toolchain, a non-array include, and knext-patched off the vinext target", () => {
         expect(
-            validateCompileConfig({ compile: { bun: "canary" } }).join("\n"),
+            validateCompileConfig({
+                ...vinext,
+                compile: { bun: "canary" },
+            }).join("\n"),
         ).toContain("compile.bun");
         expect(
             validateCompileConfig({
+                ...vinext,
                 compile: { bun: "knext-patched", include: "./x" },
             }).join("\n"),
         ).toContain("compile.include");
         expect(
-            validateCompileConfig({ compile: { include: ["./x"] } }).join("\n"),
-        ).toContain("knext-patched");
+            validateCompileConfig({
+                compile: { bun: "knext-patched" },
+            }).join("\n"),
+        ).toContain("supported only on the compiled vinext executable");
         expect(
             validateCompileConfig({ compile: "knext-patched" }).join("\n"),
         ).toContain("compile");
     });
 });
 
-describe("compile-script include pass-through", () => {
-    it("parseIncludeJson: absent → [], a glob list round-trips, junk throws", () => {
-        expect(parseIncludeJson(undefined)).toEqual([]);
-        expect(parseIncludeJson('["./plugins/**"]')).toEqual(["./plugins/**"]);
-        for (const bad of ["not json", "[]", '"./x"', "[1]", '[""]', "{}"]) {
-            expect(() => parseIncludeJson(bad)).toThrow();
-        }
-    });
-
-    it("userIncludePart: none → undefined (compile unchanged); appends after an existing include", () => {
-        expect(userIncludePart([])).toBeUndefined();
-        expect(userIncludePart(["./a/**"])).toEqual({ include: ["./a/**"] });
-        expect(userIncludePart(["./a/**"], ["./plan.js"])).toEqual({
-            include: ["./plan.js", "./a/**"],
-        });
+describe("resolveCompileToolchain", () => {
+    it("default → {} (no fetch); opted in → only the verified binary path", async () => {
+        const f = fakeFetch(GOOD);
+        expect(
+            await resolveCompileToolchain(
+                { compile: { include: ["p/*.js"] } },
+                { fetch: f.fn, host: LINUX_X64 },
+            ),
+        ).toEqual({});
+        expect(f.calls).toEqual([]);
+        const dir = tmp();
+        const r = await resolveCompileToolchain(
+            { compile: { bun: "knext-patched", include: ["p/*.js"] } },
+            { fetch: f.fn, host: LINUX_X64, cacheDir: dir, pins: pins() },
+        );
+        expect(r).toEqual({ bin: join(dir, "bun-linux-x64") });
     });
 });
 
-describe("compile argv", () => {
-    it("default argv still starts with plain `bun` (unchanged)", () => {
-        expect(compileArgv("linux-x64", "e.mjs", "out")[0]).toBe("bun");
-    });
-
-    it("runs the compile script with the resolved toolchain and passes include globs through", () => {
-        const argv = compileArgv("linux-x64", "e.mjs", "out", {
-            bin: "/cache/bun-linux-x64",
-            include: ["./plugins/**", "./data/*.json"],
-        });
-        expect(argv[0]).toBe("/cache/bun-linux-x64");
-        const i = argv.indexOf("--include-json");
-        expect(i).toBeGreaterThan(0);
-        expect(JSON.parse(argv[i + 1] ?? "null")).toEqual([
-            "./plugins/**",
-            "./data/*.json",
-        ]);
-    });
-
-    it("the standalone compile argv takes the same toolchain (and is unchanged without one)", () => {
-        const base = {
+describe("the standalone compile never takes the patched toolchain", () => {
+    it("standalone argv is plain bun with no include flags (compile.bun is vinext-only)", () => {
+        const argv = standaloneCompileArgv({
             arch: "linux-x64",
             server: "s.js",
             root: "r",
             outFile: "o",
             marker: "m",
-        };
-        const plain = standaloneCompileArgv(base);
-        expect(plain[0]).toBe("bun");
-        expect(plain).not.toContain("--include-json");
-        const patched = standaloneCompileArgv({
-            ...base,
-            toolchain: { bin: "/cache/bun-linux-x64", include: ["./p/**"] },
         });
-        expect(patched[0]).toBe("/cache/bun-linux-x64");
-        expect(patched.slice(-2)).toEqual(["--include-json", '["./p/**"]']);
+        expect(argv[0]).toBe("bun");
+        expect(argv).not.toContain("--include-json");
+        expect(argv).not.toContain("--include-native");
     });
 });

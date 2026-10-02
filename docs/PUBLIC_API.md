@@ -423,12 +423,14 @@ change in a minor release**. Each carries a visible marker wherever you meet
 it (`@experimental` in its types, "Experimental" in `knext build --help`, or
 "(experimental)" in the CLI reference) so the carve-out is never a surprise.
 
+- **`compile.include` (`knext.config.ts`)** — JS/TS modules embedded in the
+  compiled vinext executable and loaded on their first import.
 - **`selfContained` (`knext.config.ts`) / `knext build --self-contained`** —
   opt-in single-executable build mode. The on-disk shape it produces is still
   settling.
-- **`compile` (`knext.config.ts`)** — the opt-in patched Bun toolchain
-  (`bun: 'knext-patched'`) and its `include` globs. Removed once a stock Bun
-  release ships `--compile --include`.
+- **`compile.bun` (`knext.config.ts`)** — the opt-in patched Bun toolchain
+  (`bun: 'knext-patched'`) that embeds `compile.include` through Bun's native
+  `--compile --include`. Removed once a stock Bun release ships that flag.
 - **`preview` and `loadtest`** — the directly-runnable CLI entries
   (`dist/cli/preview.js`, `dist/cli/loadtest.js`) for per-PR preview
   environments and load testing. Their flags and output are not part of the

@@ -63,12 +63,13 @@ import {
     analyzeServerModule,
     wrapRequireBindings,
 } from "./entry-require-staticize.mjs";
-import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
+import { verifyBytecodeExec, verifyBytecodeModules } from "./bytecode-exec-verify.mjs";
 import {
     embedBuildOptions,
     parseIncludeJson,
     planEmbed,
-    userIncludePart,
+    embeddedPathsMissing,
+    planIncludes,
 } from "./compile-embed.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
@@ -95,15 +96,6 @@ const TARGET = args.target?.trim();
 // require the analysis cannot bundle has nowhere on disk to fall back to, so it
 // must fail the build rather than the first request that reaches it.
 const SELF_CONTAINED = args["self-contained"] === "1";
-// knext.config.ts `compile.include` (opt-in patched Bun toolchain only): passed
-// through to `Bun.build`'s `compile.include`. Absent → [] → compile unchanged.
-let INCLUDE;
-try {
-    INCLUDE = parseIncludeJson(args["include-json"]);
-} catch (err) {
-    console.error(`[knext compile] ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-}
 const NATIVE_DIR = args["native-dir"] ? resolve(args["native-dir"]) : null;
 const STRICT_REQUIRES =
     SELF_CONTAINED || process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1";
@@ -569,6 +561,24 @@ const EMBEDDED_PREFIX = "knext-embedded:";
 // Unique per build, so a stale binary cannot pass the bytecode proof.
 const BYTECODE_MARKER = `knext-vinext-exec:${randomBytes(12).toString("hex")}`;
 const APP_ROOT = dirname(dirname(ENTRY_DIR));
+// knext.config.ts `compile.include` → `--include-json` (stock Bun): the matched
+// JS/TS modules ride along as EXTRA entrypoints (compile-embed.mjs), embedded
+// unexecuted at `$bunfs/root/<path relative to the app root>` and loaded on
+// their first import. Absent → null → the compile options are unchanged.
+let INCLUDE_PLAN = null;
+// `--include-native 1`: the CLI resolved the opt-in knext-patched Bun toolchain
+// (compile.bun: 'knext-patched'), which has `compile.include` — the SAME checked
+// plan is embedded through it instead of as extra entrypoints. A Bun without the
+// option ignores it silently; the embedded-path check below fails that build.
+// @upstream-shim bun-patched-toolchain
+const INCLUDE_NATIVE = args["include-native"] === "1";
+try {
+    const globs = parseIncludeJson(args["include-json"]);
+    if (globs.length > 0) INCLUDE_PLAN = planIncludes(APP_ROOT, globs);
+} catch (err) {
+    console.error(`[knext compile] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+}
 const PUBLIC_DIR = join(APP_ROOT, ".output", "public");
 const EXTRACT_FILE = [
     join(compileHere, "sharp-native-extract.js"),
@@ -742,10 +752,11 @@ if (
  * the wrapped require bindings above.
  */
 function selfContainedBuildOptions() {
-    const shape = embedBuildOptions(planEmbed({ root: APP_ROOT, include: [] }), {
+    const shape = embedBuildOptions(INCLUDE_PLAN ?? planEmbed({ root: APP_ROOT, include: [] }), {
         entry: ENTRY,
         outfile: OUTFILE,
-        includeSupported: false,
+        includeSupported: INCLUDE_NATIVE && INCLUDE_PLAN !== null,
+        cwd: process.cwd(),
         bytecode: true,
         minify: true,
         extra: {
@@ -758,11 +769,32 @@ function selfContainedBuildOptions() {
     return {
         ...shape,
         naming: { entry: shape.naming, chunk: shape.naming, asset: shape.naming },
-        compile: sealCompile(
-            shape.compile,
-            userIncludePart(INCLUDE, shape.compile.include),
-            TARGET ? { target: TARGET } : undefined,
-        ),
+        compile: sealCompile(shape.compile, TARGET ? { target: TARGET } : undefined),
+    };
+}
+
+/**
+ * Disk mode with `compile.include`: the same options as below, plus the include
+ * plan's modules as extra entrypoints under `root` = the app root.
+ */
+function includeBuildOptions(plan) {
+    const shape = embedBuildOptions(plan, {
+        entry: ENTRY,
+        outfile: OUTFILE,
+        includeSupported: INCLUDE_NATIVE,
+        cwd: process.cwd(),
+        bytecode: true,
+        minify: true,
+        extra: {
+            plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
+            // Same bytecode-proof banner as self-contained mode: extra entrypoints
+            // change the build's shape, so the result is verified, not assumed.
+            banner: `globalThis.__knextVinextExecMarker=${JSON.stringify(BYTECODE_MARKER)};`,
+        },
+    });
+    return {
+        ...shape,
+        compile: sealCompile(shape.compile, TARGET ? { target: TARGET } : undefined),
     };
 }
 
@@ -770,7 +802,9 @@ const result = await Bun.build(
     sealBuild(
         SELF_CONTAINED
             ? selfContainedBuildOptions()
-            : {
+            : INCLUDE_PLAN
+              ? includeBuildOptions(INCLUDE_PLAN)
+              : {
                   entrypoints: [ENTRY],
                   target: "bun",
                   plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
@@ -780,11 +814,7 @@ const result = await Bun.build(
                   // resolution beyond the sidecar. The sidecar is resolved by
                   // sidecar-runtime.mjs instead, confined to <dir of the binary>/.output/
                   // server/node_modules (#1320).
-                  compile: sealCompile(
-                      { outfile: OUTFILE },
-                      userIncludePart(INCLUDE),
-                      TARGET ? { target: TARGET } : undefined,
-                  ),
+                  compile: sealCompile({ outfile: OUTFILE }, TARGET ? { target: TARGET } : undefined),
               },
     ),
 );
@@ -805,6 +835,43 @@ if (SELF_CONTAINED) {
     console.log(
         "[knext compile] self-contained: nothing needs to sit beside the binary " +
             `(sharp: ${sharpFacaded ? "embedded, unpacked on first use" : "not used"}); bytecode verified`,
+    );
+}
+if (INCLUDE_PLAN) {
+    // Fail closed: every planned module must be IN the executable at its
+    // `$bunfs/root` path. Catches a Bun that silently ignored `compile.include`
+    // (native mode on a stock Bun) before the bytecode count would.
+    const missing = embeddedPathsMissing(readFileSync(OUTFILE), INCLUDE_PLAN.relpaths);
+    if (missing.length > 0) {
+        rmSync(OUTFILE, { force: true });
+        console.error(
+            `[knext compile] compile.include: not embedded in the executable: ${missing.join(", ")}` +
+                (INCLUDE_NATIVE ? " (this Bun did not honour compile.include)" : ""),
+        );
+        process.exit(1);
+    }
+}
+if (INCLUDE_PLAN && !SELF_CONTAINED) {
+    // Fail closed, as self-contained mode does: a binary without bytecode boots
+    // and serves, just slower — the regression nobody notices.
+    const verdict = verifyBytecodeModules(
+        readFileSync(OUTFILE),
+        BYTECODE_MARKER,
+        1 + INCLUDE_PLAN.relpaths.length,
+    );
+    if (!verdict.ok) {
+        rmSync(OUTFILE, { force: true });
+        console.error(`[knext compile] the executable failed the bytecode check: ${verdict.reason}`);
+        process.exit(1);
+    }
+}
+if (INCLUDE_PLAN) {
+    console.log(
+        `[knext compile] compile.include: embedded ${INCLUDE_PLAN.relpaths.length} module(s): ` +
+            INCLUDE_PLAN.relpaths.join(", "),
+    );
+    console.log(
+        `[knext compile] compile.include: via ${INCLUDE_NATIVE ? "native --include (knext-patched Bun)" : "extra entrypoints (stock Bun)"}`,
     );
 }
 if (PLAN.embed.size > 0) {

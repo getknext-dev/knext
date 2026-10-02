@@ -1,11 +1,19 @@
 /**
  * The opt-in, knext-patched Bun toolchain for the `bun build --compile` step.
  *
- *   // knext.config.ts
- *   compile: { bun: "knext-patched", include: ["./plugins/**"] }
+ *   // knext.config.ts (build: "vinext", runtime "bun")
+ *   compile: { bun: "knext-patched", include: ["plugins/*.js"] }
  *
- * The default is stock Bun on PATH, unchanged: with no `compile` block (or
- * `bun: "stock"`) nothing here fetches, caches or runs anything.
+ * The default is stock Bun on PATH, unchanged: with no `compile.bun` (or
+ * `bun: "stock"`) nothing here fetches, caches or runs anything, and
+ * `compile.include` embeds through the stock-Bun extra-entrypoint path.
+ *
+ * Opted in, `compile.include` is planned and checked exactly as on stock Bun
+ * (compile-embed.mjs planIncludes: realpath root containment, `..`/absolute
+ * patterns, secret-looking files, native addons, `node_modules` never
+ * descended into), and the resulting FILE LIST — never the raw globs — is
+ * embedded through the patched Bun's native `compile.include`, at the same
+ * `/$bunfs/root/<path relative to the app root>` paths.
  *
  * Opted in, `knext build` downloads ONE pinned release asset —
  * `bun-v1.4.2` plus the `--compile --include` patch (oven-sh/bun#44059),
@@ -52,6 +60,7 @@ import { join } from "node:path";
 import {
     type BunToolchainId,
     type CompileConfigShape,
+    type CompileToolchain,
     wantsPatchedBun,
 } from "./compile-config";
 import { UsageError } from "./shared";
@@ -88,15 +97,22 @@ export interface BunToolchainPins {
  * build is a new tag and new sha256s here, in the same change.
  */
 export const PATCHED_BUN: BunToolchainPins = {
-    tag: "bun-patched-1.4.2-knext.1",
+    tag: "bun-patched-1.4.2-knext.2",
     bunVersion: "1.4.2",
     baseUrl:
-        "https://github.com/getknext-dev/knext/releases/download/bun-patched-1.4.2-knext.1",
+        "https://github.com/getknext-dev/knext/releases/download/bun-patched-1.4.2-knext.2",
     assets: {
         "linux-x64": {
             file: "bun-linux-x64",
             // Cloud Build 67b747f8 (gsw-mcp): bun-v1.4.2 + patch 001, HEAD cc97fa834.
+            // The same bytes knext.1 shipped; knext.2 adds the gated release.
             sha256: "2f1bb84ad480fce9e618b8bf4b7eb4553d5a1179d2013c7d22cbe054ca271df3",
+        },
+        "linux-arm64": {
+            file: "bun-linux-aarch64",
+            // Cloud Build b35c5945 (gsw-mcp): the same source, cross-compiled
+            // for aarch64; published only through the arm64 smoke gate.
+            sha256: "aa931626fc2707aaf1911a99ee57d9de05ad3dc76bf3cc6e14b0497a5f6bb35a",
         },
     },
 };
@@ -290,22 +306,14 @@ export async function resolveCompileBun(
 }
 
 /**
- * Everything the compile step needs from the `compile` block: which Bun to run
- * and the user's include globs. The default config resolves to `{}` — the
- * compile argv is then exactly the pre-option one.
+ * Which Bun runs the compile step for this config. The default config resolves
+ * to `{}` — the compile argv is then exactly the pre-option one.
  */
 export async function resolveCompileToolchain(
     config: CompileConfigShape,
     deps: ToolchainDeps = {},
-): Promise<{ bin?: string; include?: string[] }> {
+): Promise<CompileToolchain> {
     if (!wantsPatchedBun(config)) return {};
     const bun = await resolveCompileBun(config, deps);
-    const include = compileIncludeGlobs(config);
-    return include.length > 0 ? { bin: bun.bin, include } : { bin: bun.bin };
-}
-
-/** The user-declared `--include` globs, or none. */
-export function compileIncludeGlobs(config: CompileConfigShape): string[] {
-    const compile = config.compile as { include?: unknown } | undefined;
-    return Array.isArray(compile?.include) ? [...compile.include] : [];
+    return { bin: bun.bin };
 }

@@ -351,7 +351,7 @@ export function validateConfig(
         errors.push("'selfContained' must be a boolean (true or false)");
     }
 
-    // compile (opt-in patched Bun toolchain + `--include` globs).
+    // compile (extra files embedded in the compiled executable).
     errors.push(...validateCompileConfig(config));
 
     // Runtime validation

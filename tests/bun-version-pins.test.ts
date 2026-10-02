@@ -131,6 +131,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // toolchain — stock bun for the workspace install + vite build; the
       // compile step uses the patched toolchain knext downloads itself.
       'bun-patched-e2e.yml': 1,
+      // NEW (compile.include): the dispatch-only end-to-end proof lane — one job,
+      // stock bun 1.4.2 for the workspace, the vite build AND the compile step.
+      'compile-include-e2e.yml': 1,
       // 11, was 13: two jobs (compat-smoke, compile-cache-bun-probe) each set up
       // bun TWICE — 1.4.0, then 1.3.14 underneath it — so the second step
       // silently took the first one away, and every install in those jobs ran on

@@ -31,9 +31,7 @@ import { UsageError } from "./shared";
 import {
     bunCompileTarget,
     bunMeetsFloor,
-    type CompileToolchain,
     detectBunVersion,
-    includeArgv,
     MIN_BUN_MAJOR,
     MIN_BUN_MINOR,
 } from "./vinext-build";
@@ -85,13 +83,11 @@ export interface StandaloneCompileArgs {
     readonly marker: string;
     /** Embed `.next` and the modules route chunks load (self-contained mode). */
     readonly selfContained?: boolean;
-    /** `compile.bun` / `compile.include` (bun-toolchain.ts). Absent: stock `bun`. */
-    readonly toolchain?: CompileToolchain;
 }
 
 export function standaloneCompileArgv(args: StandaloneCompileArgs): string[] {
     return [
-        args.toolchain?.bin ?? "bun",
+        "bun",
         "run",
         standaloneCompileScriptPath(),
         "--server",
@@ -106,7 +102,6 @@ export function standaloneCompileArgv(args: StandaloneCompileArgs): string[] {
         args.marker,
         // Appended only when on, so disk mode's argv is exactly what it was.
         ...(args.selfContained ? ["--self-contained", "1"] : []),
-        ...includeArgv(args.toolchain?.include),
     ];
 }
 
@@ -129,8 +124,6 @@ export interface StandaloneExecBuildOptions {
      * `.next/static/` beside it. Off: the compile argv is exactly disk mode's.
      */
     readonly selfContained?: boolean;
-    /** The compile toolchain (bun-toolchain.ts). Absent: stock `bun` on PATH. */
-    readonly toolchain?: CompileToolchain;
 }
 
 /**
@@ -141,8 +134,7 @@ export function buildStandaloneExecutable(
     opts: StandaloneExecBuildOptions,
 ): string {
     const run = opts.run ?? runQuiet;
-    const version =
-        opts.bunVersion ?? detectBunVersion(run, opts.toolchain?.bin);
+    const version = opts.bunVersion ?? detectBunVersion(run);
     if (!bunMeetsFloor(version)) {
         throw new UsageError(
             `The compiled standalone-on-Bun target requires Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}.0 or newer; found '${version}'.\n\n` +
@@ -170,7 +162,6 @@ export function buildStandaloneExecutable(
             outFile,
             marker,
             ...(opts.selfContained ? { selfContained: true } : {}),
-            ...(opts.toolchain ? { toolchain: opts.toolchain } : {}),
         }),
     );
 

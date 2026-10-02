@@ -56,7 +56,7 @@ describe("1.0 contract: experimental surface markers", () => {
         });
     });
 
-    describe("compile config key (opt-in patched Bun toolchain)", () => {
+    describe("compile config key (compile.include)", () => {
         const configSrc = read("packages/kn-next/src/config.ts");
 
         it("is tagged @experimental in its JSDoc, and listed in PUBLIC_API.md", () => {
@@ -71,7 +71,7 @@ describe("1.0 contract: experimental surface markers", () => {
             expect(
                 occurrences(
                     read("docs/PUBLIC_API.md"),
-                    "- **`compile` (`knext.config.ts`)**",
+                    "- **`compile.include` (`knext.config.ts`)**",
                 ),
             ).toBe(1);
         });

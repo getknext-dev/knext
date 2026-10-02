@@ -45,6 +45,7 @@ import {
     standaloneStepsApply,
 } from "./build-artifact";
 import { resolveCompileToolchain } from "./bun-toolchain";
+import { type CompileToolchain, compileIncludeGlobs } from "./compile-config";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
@@ -57,7 +58,6 @@ import {
 } from "./shared";
 import {
     buildVinextExecutable,
-    type CompileToolchain,
     hostSmokeArch,
     smokeBinaryPlan,
     stageSharpForVinextNode,
@@ -170,6 +170,7 @@ async function smokeCompiledBinary(
     config: { healthCheckPath?: string },
     skipSmoke: boolean,
     selfContained: boolean,
+    include: readonly string[] = [],
     toolchain: CompileToolchain = {},
 ): Promise<void> {
     if (skipSmoke) {
@@ -211,8 +212,10 @@ async function smokeCompiledBinary(
                 // The smoke must boot a binary built with the SAME mode as the
                 // shipped one, or it misses the one property the mode changes.
                 ...(selfContained ? { selfContained: true } : {}),
-                // ...and with the same toolchain + include globs.
-                ...(toolchain.bin ? { toolchain } : {}),
+                // ...and with the same embedded `compile.include` modules,
+                // compiled by the same toolchain.
+                ...(include.length > 0 ? { include } : {}),
+                ...(toolchain.bin ? { compilerBin: toolchain.bin } : {}),
             });
             // Self-contained mode embeds the staged tree at compile time and
             // extracts it lazily at runtime — it never consults
@@ -392,7 +395,7 @@ export async function build(options: BuildOptions = {}) {
     const toolchain = await resolveCompileToolchain(config);
     if (toolchain.bin) {
         log.info(
-            { bun: toolchain.bin, include: toolchain.include ?? [] },
+            { bun: toolchain.bin },
             "Compile step uses the knext-patched Bun toolchain (sha256 verified)",
         );
     }
@@ -452,6 +455,7 @@ export async function build(options: BuildOptions = {}) {
             config,
             options.skipSmoke === true,
             resolveSelfContained(config, options.selfContained),
+            compileIncludeGlobs(config),
             toolchain,
         );
     }

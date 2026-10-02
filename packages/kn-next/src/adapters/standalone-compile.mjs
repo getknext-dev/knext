@@ -93,10 +93,8 @@ import { routeMarker, verifyBytecodeEmbedded, verifyBytecodeExec } from "./bytec
 import {
     detectCompileInclude,
     embedBuildOptions,
-    parseIncludeJson,
     planEmbed,
     unembeddedDynamicReport,
-    userIncludePart,
 } from "./compile-embed.mjs";
 import { computedRequireInventory, moduleDisposition } from "./computed-require-scan.mjs";
 import {
@@ -150,14 +148,6 @@ try {
 const SELF_CONTAINED = args["self-contained"] === "1";
 if (args["self-contained"] !== undefined && args["self-contained"] !== "1") {
     fail(`--self-contained takes 1, got ${JSON.stringify(args["self-contained"])}`);
-}
-// knext.config.ts `compile.include` (opt-in patched Bun toolchain only): passed
-// through to `Bun.build`'s `compile.include`. Absent → [] → compile unchanged.
-let INCLUDE;
-try {
-    INCLUDE = parseIncludeJson(args["include-json"]);
-} catch (err) {
-    fail(err instanceof Error ? err.message : String(err));
 }
 
 if (!existsSync(SERVER)) {
@@ -730,11 +720,7 @@ async function selfContainedBuildOptions(base) {
         banner: `globalThis.__knextStandaloneExecMarker=${JSON.stringify(MARKER)};`,
         // `base.compile` is already sealed; sealing again appends the seam LAST, so no
         // embed-plan field can displace the verified base executable.
-        compile: sealCompile(
-            opts.compile,
-            base.compile,
-            userIncludePart(INCLUDE, opts.compile.include),
-        ),
+        compile: sealCompile(opts.compile, base.compile),
     };
 }
 
@@ -763,7 +749,6 @@ try {
         compile: sealCompile(
             // The load-bearing flag — see the header.
             { outfile: OUTFILE, autoloadPackageJson: true },
-            userIncludePart(INCLUDE),
             TARGET ? { target: TARGET } : undefined,
         ),
     };

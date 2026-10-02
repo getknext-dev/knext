@@ -7,6 +7,7 @@
     "dev": "vinext dev",
     "build": "vite build",
     "start": "bun .output/server/index.mjs",
+    "postinstall": "node -e \"const f=require('fs'),p=require('path');let d=process.cwd();for(;;){const c=p.join(d,'node_modules','@getknext','core','dist','cli','kn-next.js');if(f.existsSync(c)){const r=require('child_process').spawnSync(process.execPath,[c,'vinext-patches'],{stdio:'inherit'});process.exit(r.status===null?1:r.status)}const u=p.dirname(d);if(u===d){console.log('knext: @getknext/core is not installed (a production install?), so its bundled vinext fixes were skipped.');process.exit(0)}d=u}\"",
     "test": "vitest run"
   },
   "dependencies": {

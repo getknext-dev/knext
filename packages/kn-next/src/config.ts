@@ -69,15 +69,20 @@ export interface MinioInfraConfig {
 }
 
 /**
- * The `bun build --compile` toolchain — see `KnativeNextConfig.compile`.
+ * Extra files to embed in the compiled executable — see
+ * `KnativeNextConfig.compile`.
  *
  * @experimental
  */
 export interface CompileConfig {
-    /** `'stock'` (default): Bun on PATH. `'knext-patched'`: the pinned patched build. */
-    bun?: "stock" | "knext-patched";
-    /** Globs passed through as `--include`. Requires `bun: 'knext-patched'`. */
+    /** Globs (relative to the app root) of JS/TS modules to embed. */
     include?: string[];
+    /**
+     * Which Bun runs the compile step. `'stock'` (the default): the Bun on
+     * PATH. `'knext-patched'`: a knext-published Bun 1.4.2 build with native
+     * `--compile --include`, downloaded and sha256-verified by knext.
+     */
+    bun?: "stock" | "knext-patched";
 }
 
 export interface InfrastructureConfig {
@@ -357,24 +362,38 @@ export interface KnativeNextConfig {
      */
     selfContained?: boolean;
     /**
-     * The `bun build --compile` toolchain. Absent (the default): the Bun on
-     * PATH, unchanged.
+     * Extra files to embed in the compiled executable.
      *
-     * - `bun: 'knext-patched'` — compile with a knext-published Bun 1.4.2 build
-     *   that adds `--compile --include` (embed extra files as modules the
-     *   executable loads lazily, on the first `import()` of them). `knext build`
-     *   downloads it once per machine, checks it against a sha256 pinned in
-     *   knext and fails the build on any mismatch; it never falls back to
-     *   stock Bun; it is used for the compile step only: the shipped executable still
-     *   runs on the stock Bun base for its target. Build host: linux-x64 (glibc
-     *   2.31+) only — on linux-arm64, musl, macOS or Windows the build stops with
-     *   an error saying so. Not covered by the compatibility credential.
-     * - `include` — glob patterns (relative to the app root) passed through as
-     *   `--include`. Requires `bun: 'knext-patched'`.
+     * `include` — glob patterns, relative to the app root, for JavaScript /
+     * TypeScript modules the app loads at runtime by a path the bundler cannot
+     * follow (a computed `import()`). Each match is embedded in the executable
+     * at `/$bunfs/root/<its path relative to the app root>` (a `.ts`/`.mjs`/
+     * `.cjs` source is embedded as `.js`), is NOT evaluated at startup, and
+     * loads from the executable on its first import — nothing needs to sit
+     * beside the binary. Works with stock Bun; a pattern that matches nothing, a
+     * match that is really (through a symlink) outside the app root, an absolute
+     * or `..` pattern, a glob match that looks like a secret (`.env*`, `*.pem`,
+     * `*.key`, `id_*`; name such a file exactly to include it), a native addon
+     * (`.node`; load it with a static `require()` instead) and a non-module
+     * match each fail the build. A directory pattern never embeds the
+     * `node_modules` below it.
      *
-     * Retired once a stock Bun release ships `--compile --include`.
+     * `bun` — `'stock'` (default) or `'knext-patched'`: compile with a
+     * knext-published Bun 1.4.2 build that adds `--compile --include`.
+     * `knext build` downloads it once per machine and checks it against a
+     * sha256 pinned in knext; any mismatch, HTTP or network error fails the
+     * build — it never falls back to stock Bun. `include` is then planned and
+     * checked exactly as above and the same files are embedded through Bun's
+     * native `--include`, at the same paths. Used for the compile step only:
+     * the shipped executable still runs on the stock Bun base for its target.
+     * Build hosts: Linux (glibc) x64 and arm64 — on musl, macOS or Windows the
+     * build stops with an error saying so. Not covered by the compatibility
+     * credential; retired once a stock Bun release ships `--compile --include`.
      *
-     * @experimental Opt-in toolchain; its shape may change in a minor release.
+     * Supported on the compiled vinext executable only (`build: 'vinext'`,
+     * runtime `'bun'`); the config check rejects it for other targets.
+     *
+     * @experimental may change in a minor release.
      */
     compile?: CompileConfig;
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
