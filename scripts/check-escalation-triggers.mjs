@@ -26,15 +26,37 @@
  *
  * Usage:
  *   node scripts/check-escalation-triggers.mjs --base <ref> [--head <ref>]
- *                                              [--labels "a,b"] [--json]
+ *                                              [--labels "a,b"] [--body "<text>"] [--json]
  *
  * Exit 0 = no trigger, or triggered and acknowledged. Exit 1 = triggered, unacknowledged.
+ *
+ * ACKNOWLEDGEMENT, not gate-clear (workflow.md amendment, 2026-09-22): a trigger-class
+ * PR no longer needs a design gate to sign off before merge — it needs a human/agent to
+ * have CONSCIOUSLY NOTED the trigger, so sprint close can collect it as a tech-debt
+ * backlog item. Any of the following counts:
+ *   - the `trigger:acknowledged` label (or, backward compatible, the older
+ *     `design-gate:cleared` label from when this WAS a gate);
+ *   - a line in the PR body matching `Escalation trigger acknowledged: <...>` — this
+ *     also records WHICH trigger and WHY inline, where sprint close can read it without
+ *     needing GitHub timeline/label history.
  */
 
 import { execFileSync } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 
-/** The label that records "the gate this trigger requires was summoned". */
-export const ACK_LABEL = 'design-gate:cleared';
+/** The label that records "a human/agent consciously noted this trigger". */
+export const ACK_LABEL = 'trigger:acknowledged';
+
+/** Kept for backward compatibility: this repo used `design-gate:cleared` while the
+ * check still required a gate sign-off. Still accepted as an acknowledgement. */
+export const LEGACY_ACK_LABEL = 'design-gate:cleared';
+
+/**
+ * A PR-body line that records the acknowledgement inline, e.g.:
+ *   "Escalation trigger acknowledged: CLI surface — adds a flag, no behaviour change."
+ * Case-insensitive; tolerates leading/trailing whitespace.
+ */
+export const ACK_BODY_PATTERN = /Escalation trigger acknowledged:/i;
 
 /**
  * Path rules, verbatim from workflow.md's list, with two deliberate refinements
@@ -114,8 +136,13 @@ export function classify(changes) {
   return fired;
 }
 
-export function isAcknowledged(labels) {
-  return labels.some((l) => l.trim().toLowerCase() === ACK_LABEL);
+export function isAcknowledged(labels, body) {
+  const labelHit = labels.some((l) => {
+    const normalized = l.trim().toLowerCase();
+    return normalized === ACK_LABEL || normalized === LEGACY_ACK_LABEL;
+  });
+  if (labelHit) return true;
+  return typeof body === 'string' && ACK_BODY_PATTERN.test(body);
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -133,6 +160,33 @@ function showJson(ref, path) {
     return JSON.parse(git(['show', `${ref}:${path}`]));
   } catch {
     return null; // absent on that side is a legitimate answer
+  }
+}
+
+/**
+ * Append the detected triggers to the job summary so sprint close can collect them
+ * without re-deriving the diff. Best-effort: `GITHUB_STEP_SUMMARY` is unset outside
+ * Actions (e.g. running this script locally), and a missing/unwritable path must not
+ * fail the check it is only decorating.
+ */
+function writeJobSummary(fired, acked) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (!summaryPath || fired.length === 0) return;
+  try {
+    const lines = [
+      '## Escalation triggers acknowledged',
+      '',
+      `Acknowledgement: ${acked ? 'yes' : 'no'}`,
+      '',
+      ...fired.flatMap((f) => [
+        `- **${f.label}** — ${f.why}`,
+        ...f.paths.map((p) => `  - \`${p}\``),
+      ]),
+      '',
+    ];
+    appendFileSync(summaryPath, `${lines.join('\n')}\n`);
+  } catch {
+    // Decoration, not the gate — never fail the check over a summary write.
   }
 }
 
@@ -163,7 +217,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const labels = (arg('labels', '') || '').split(',').filter(Boolean);
-  const acked = isAcknowledged(labels);
+  const body = arg('body', '') || '';
+  const acked = isAcknowledged(labels, body);
 
   // `--json` prints JSON and NOTHING else, so a caller can parse stdout directly.
   // It used to print the JSON *and* the human report, which made stdout unparseable —
@@ -171,6 +226,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // commits silently returned "fired on 0 of 40" because every parse threw and was
   // swallowed. A measurement that cannot fail loudly is worth nothing.
   if (process.argv.includes('--json')) {
+    writeJobSummary(fired, acked);
     console.log(JSON.stringify({ fired, acked, ackLabel: ACK_LABEL }, null, 2));
     process.exit(fired.length > 0 && !acked ? 1 : 0);
   }
@@ -188,19 +244,26 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   if (acked) {
-    console.log(`\nAcknowledged: the \`${ACK_LABEL}\` label is present. Passing.`);
+    writeJobSummary(fired, acked);
+    console.log(
+      `\nAcknowledged (\`${ACK_LABEL}\` label, \`${LEGACY_ACK_LABEL}\` label, or a` +
+        `\n"Escalation trigger acknowledged: ..." line in the PR body). Passing — logged to` +
+        `\nthe job summary for sprint close to collect.`,
+    );
     process.exit(0);
   }
 
   console.error(
     `\nThis PR touches a trigger-class surface and is NOT acknowledged.\n` +
-      `\n.claude/rules/workflow.md requires the architect / system-designer gate for these` +
-      `\nchanges rather than the per-sprint cadence. Summon it, then add the` +
-      `\n\`${ACK_LABEL}\` label to record that it happened.` +
-      `\n\nThis check does not judge the change — it asserts the gate was not skipped by` +
-      `\ndefault. If a trigger fired on something genuinely routine, say so on the PR and` +
-      `\nnarrow the rule; a guard that cries wolf gets worked around, which is worse than` +
-      `\nno guard.`,
+      `\n.claude/rules/workflow.md (2026-09-22 amendment) does not require a design-gate` +
+      `\nsign-off per PR for this — it requires that the trigger was CONSCIOUSLY NOTED, so` +
+      `\nsprint close can pick it up as tech debt. Acknowledge by either:` +
+      `\n  - adding the \`${ACK_LABEL}\` label, or` +
+      `\n  - adding a line to the PR body: "Escalation trigger acknowledged: <trigger> — <reason>"` +
+      `\n\nThis check does not judge the change and does not require a gate to clear it — it` +
+      `\nasserts the trigger was not skipped by default. If it fired on something genuinely` +
+      `\nroutine, say so on the PR and narrow the rule; a guard that cries wolf gets worked` +
+      `\naround, which is worse than no guard.`,
   );
   process.exit(1);
 }

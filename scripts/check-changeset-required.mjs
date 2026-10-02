@@ -58,7 +58,9 @@
  * `.changeset/config.json` and never publishes).
  *
  * ESCAPE HATCH, DELIBERATELY: the `no-changeset` label, mirroring
- * `design-gate:cleared` (`check-escalation-triggers.mjs`). It is auditable
+ * `trigger:acknowledged` (`check-escalation-triggers.mjs`, #1161; the older
+ * `design-gate:cleared` name is still accepted there as a backward-compatible
+ * alias). It is auditable
  * (shows in the PR timeline with who added it and when) and cheap. The PR
  * should also carry a one-line reason in its description — that half is a
  * REVIEW convention (the spec reviewer's job, the same way the docs-delta
@@ -92,7 +94,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseNameStatus, publicSurfaceChanged } from './check-escalation-triggers.mjs';
 
-/** The opt-out label, recorded on the PR the same way `design-gate:cleared` is. */
+/** The opt-out label, recorded on the PR the same way `trigger:acknowledged` is. */
 export const NO_CHANGESET_LABEL = 'no-changeset';
 
 /**
