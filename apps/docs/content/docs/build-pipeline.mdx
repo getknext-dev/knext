@@ -445,10 +445,9 @@ the executable itself to confirm it serves and drains correctly before finishing
 glibc-based Linux machine — most Linux CI runners (including GitHub-hosted ones) and most Linux
 desktops; macOS was unaffected — that check used to fail with an "unknown build arch" error for
 any app that depends on `sharp` (every app `knext create --builder vinext` scaffolds does, for
-image optimization). The boot check only exercises health, metrics, and shutdown drain — never
-the image-optimization route — and the binary it boots for that check is discarded immediately
-afterward, so it no longer needs sharp's native addon staged at all. The compiled binary you ship
-was never affected; only this build-time check was.
+image optimization). The boot check now stages a real `sharp` native addon for that check's own
+binary too, the same way the binary you ship always has, so the check boots cleanly. The compiled
+binary you ship was never affected; only this build-time check was.
 
 ## Compatibility, stated honestly
 

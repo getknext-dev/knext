@@ -440,6 +440,18 @@ export const SHARP_PLATFORM_IDS: Record<string, string> = {
     "linux-arm64": "linuxmusl-arm64",
     "darwin-arm64": "darwin-arm64",
     "darwin-x64": "darwin-x64",
+    // #1814 — the smoke-only glibc twin (`linux-x64-gnu` / `linux-arm64-gnu`,
+    // COMPILE_TARGETS' SMOKE_ONLY_ARCHES) DOES need a row, even though nothing
+    // SHIPS that binary: the compiled entry's sharp-addon-dlopen shim calls
+    // `process.dlopen` at the TOP LEVEL of sharp's module slot (measured — it
+    // is not deferred behind a `lazySharp()` wrapper outside `--self-contained`
+    // mode), so a Next.js route graph that merely INCLUDES the image-optimizer
+    // route evaluates it at boot, before any request — "it never hits
+    // next/image" was the wrong model; the smoke binary crashes loading sharp
+    // before it can even print its startup line if nothing is staged. sharp's
+    // own glibc (non-musl) package id has no `linuxmusl` prefix.
+    "linux-x64-gnu": "linux-x64",
+    "linux-arm64-gnu": "linux-arm64",
 };
 
 export interface StageSharpNativeOptions {
@@ -484,24 +496,6 @@ export function stageSharpNative(
     const arch = opts.arch ?? "linux-x64";
     const platformId = SHARP_PLATFORM_IDS[arch];
     if (!platformId) {
-        // #1814 — the smoke-only glibc twin (`linux-x64-gnu` / `linux-arm64-gnu`,
-        // COMPILE_TARGETS' SMOKE_ONLY_ARCHES) has no row in SHARP_PLATFORM_IDS
-        // on purpose: nothing ships it, and `smokeCompiledBinary`'s documented
-        // scope is health/metrics/SIGTERM-drain only — it never hits the
-        // next/image route, and the binary is deleted in a `finally` right
-        // after boot. So there is nothing for sharp's native addon to serve on
-        // that binary; staging it for real would mean fetching a THIRD
-        // platform's package pair (glibc, distinct from both the darwin host
-        // and the shipped linuxmusl target) for a binary that is about to be
-        // thrown away. Leave `native/` present-but-empty — the Dockerfile's
-        // `COPY native` contract — and move on, rather than refusing every
-        // glibc-Linux `knext build` on an app that merely depends on sharp.
-        if ((SMOKE_ONLY_ARCHES as readonly string[]).includes(arch)) {
-            const smokeDest = join(cwd, "native");
-            clearStagedNative(smokeDest);
-            mkdirSync(smokeDest, { recursive: true });
-            return;
-        }
         throw new UsageError(
             `Unknown build arch '${arch}'. Known: ${Object.keys(SHARP_PLATFORM_IDS).join(", ")}.`,
         );
