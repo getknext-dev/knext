@@ -386,7 +386,17 @@ Options:
   -h, --help
 `;
 
-export async function vinextPatchesMain(argv: string[]): Promise<number> {
+export async function vinextPatchesMain(
+    argv: string[],
+    io: {
+        cwd?: string;
+        stdout?: (text: string) => void;
+        stderr?: (text: string) => void;
+    } = {},
+): Promise<number> {
+    const out = io.stdout ?? ((text: string) => process.stdout.write(text));
+    const writeErr =
+        io.stderr ?? ((text: string) => process.stderr.write(text));
     let values: { check?: boolean; help?: boolean };
     try {
         ({ values } = parseArgs({
@@ -400,29 +410,30 @@ export async function vinextPatchesMain(argv: string[]): Promise<number> {
     } catch (err) {
         handleUsageError(
             new UsageError(err instanceof Error ? err.message : String(err)),
+            writeErr,
         );
-        process.stderr.write(USAGE);
+        writeErr(USAGE);
         return 1;
     }
     if (values.help) {
-        process.stdout.write(USAGE);
+        out(USAGE);
         return 0;
     }
     try {
-        const res = ensureVinextPatches(process.cwd(), {
+        const res = ensureVinextPatches(io.cwd ?? process.cwd(), {
             check: values.check,
         });
         for (const line of describeEnsureResult(res, {
             check: values.check,
         })) {
-            process.stdout.write(`${line}\n`);
+            out(`${line}\n`);
         }
         if (
             values.check &&
             res.kind === "patched" &&
             res.results.some((r) => r.status === "applied")
         ) {
-            process.stdout.write(
+            out(
                 "knext: some bundled vinext fixes are not applied — run `knext vinext-patches`.\n",
             );
             return 1;
@@ -430,7 +441,7 @@ export async function vinextPatchesMain(argv: string[]): Promise<number> {
         return 0;
     } catch (err) {
         if (err instanceof UsageError) {
-            handleUsageError(err);
+            handleUsageError(err, writeErr);
             return 1;
         }
         throw err;

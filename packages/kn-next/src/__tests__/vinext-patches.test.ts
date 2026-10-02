@@ -43,6 +43,7 @@ import {
     parseUnifiedPatch,
     VinextPatchConflictError,
     vinextPatchesDir,
+    vinextPatchesMain,
 } from "../cli/vinext-patches";
 
 const PKG_ROOT = join(import.meta.dir, "..", "..");
@@ -140,6 +141,27 @@ describe("applier", () => {
         expect(() =>
             applyFilePatchToText("a\nb\nc\nx\ny\nd\nx\ny\n", fp),
         ).toThrow(VinextPatchConflictError);
+    });
+
+    it("rejects a malformed patch file instead of guessing", () => {
+        expect(() => parseUnifiedPatch("--- a/f\nnot-plus\n")).toThrow(
+            "malformed patch",
+        );
+        expect(() =>
+            parseUnifiedPatch("--- a/f\n+++ b/f\n@@ bogus @@\n"),
+        ).toThrow("malformed hunk header");
+        expect(() =>
+            parseUnifiedPatch("--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a"),
+        ).toThrow("truncated hunk");
+        expect(() =>
+            parseUnifiedPatch("--- a/f\n+++ b/f\n@@ -1 +1 @@\n?x\n"),
+        ).toThrow("unexpected line in hunk");
+        // A missing target file is a conflict, never a silent create.
+        const [fp] = parseUnifiedPatch(SIMPLE_PATCH);
+        if (!fp) throw new Error("no file patch");
+        expect(() => applyFilePatchToText(null, fp)).toThrow(
+            VinextPatchConflictError,
+        );
     });
 
     it("creates a new file from a /dev/null patch, and accepts it once present", () => {
@@ -572,6 +594,81 @@ describe("delivery", () => {
         expect(describeEnsureResult(res)).toEqual([
             "knext: applied 1 bundled vinext fix(es) (2 total).",
         ]);
+    });
+
+    it("`knext vinext-patches`: --check is red before, apply patches, --check is green after", async () => {
+        const app = fakeApp(manifest.vinext);
+        try {
+            const out: string[] = [];
+            const io = { cwd: app, stdout: (t: string) => out.push(t) };
+            expect(await vinextPatchesMain(["--check"], io)).toBe(1);
+            expect(out.join("")).toContain("not applied");
+            // --check wrote nothing.
+            for (const [rel, hash] of Object.entries(manifest.pristine)) {
+                expect(sha256(join(app, "node_modules", "vinext", rel))).toBe(
+                    hash,
+                );
+            }
+            expect(await vinextPatchesMain([], io)).toBe(0);
+            expect(await vinextPatchesMain(["--check"], io)).toBe(0);
+            expect(out.join("")).toContain("already applied");
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it("`knext vinext-patches`: --help, a bad flag, and a conflicting vinext", async () => {
+        const out: string[] = [];
+        const err: string[] = [];
+        const io = {
+            stdout: (t: string) => out.push(t),
+            stderr: (t: string) => err.push(t),
+        };
+        expect(await vinextPatchesMain(["--help"], io)).toBe(0);
+        expect(out.join("")).toContain("Usage: knext vinext-patches");
+        expect(await vinextPatchesMain(["--bogus"], io)).toBe(1);
+        expect(err.join("")).toContain("Usage: knext vinext-patches");
+
+        const app = fakeApp(manifest.vinext);
+        try {
+            // vinext's files modified some other way: refuse, exit 1.
+            const target = join(
+                app,
+                "node_modules",
+                "vinext",
+                "dist",
+                "plugins",
+                "require-condition-resolution.js",
+            );
+            writeFileSync(target, "// replaced\n");
+            const conflictErr: string[] = [];
+            expect(
+                await vinextPatchesMain([], {
+                    cwd: app,
+                    stdout: () => {},
+                    stderr: (t: string) => conflictErr.push(t),
+                }),
+            ).toBe(1);
+            expect(conflictErr.join("")).toContain("Reinstall dependencies");
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
+    it("`knext vinext-patches` with another vinext version says so and exits 0", async () => {
+        const app = fakeApp("1.0.2");
+        try {
+            const out: string[] = [];
+            expect(
+                await vinextPatchesMain([], {
+                    cwd: app,
+                    stdout: (t: string) => out.push(t),
+                }),
+            ).toBe(0);
+            expect(out.join("")).toContain("vinext 1.0.2 is installed");
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
     });
 
     it("ensureVinextPatches leaves a different vinext version alone", () => {
