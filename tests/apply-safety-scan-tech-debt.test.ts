@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { unsafeApplies } from '../scripts/lib/apply-safety-scan.mjs';
+import {
+  hasComputedGlobalAccess,
+  unsafeApplies,
+  unsafeAppliesInWorkflow,
+} from '../scripts/lib/apply-safety-scan.mjs';
 
 /**
  * Tech-debt closures (#1466, #1512): the apply-safety scanner
@@ -363,5 +367,291 @@ describe('apply-safety-scan: stripNonFetchText (#1715)', () => {
     // whether INTERPRETER_FETCH matches anything.
     const src = 'import http from "node:http";\nconst s = `unterminated\n';
     expectFlagged(src);
+  });
+});
+
+// ---- #1787: aliased / computed fetch ---------------------------------------
+
+describe('apply-safety-scan: aliased/computed fetch (#1787)', () => {
+  const APPLY_AFTER = '\nkubectl apply -f m.yaml\n';
+
+  it('RED: a followed script aliases fetch to a local binding before calling it', () => {
+    const js = `const f = fetch;\nf('https://example.com/x');\n`;
+    const src = `node scripts/lib/probe.mjs\n${APPLY_AFTER}`;
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+
+  it('RED: a followed script reaches fetch through a computed globalThis[...] member access', () => {
+    const js = `globalThis["fe" + "tch"]('https://example.com/x');\n`;
+    const src = `node scripts/lib/probe.mjs\n${APPLY_AFTER}`;
+    const offenders = unsafeApplies(src, { resolveSource: () => js, followScripts: true });
+    expect(offenders.length).toBeGreaterThan(0);
+  });
+
+  it('RED: an inline `node -e` alias in shell text is caught without any followed script at all', () => {
+    // No `resolveSource`/`followScripts` needed — `isFetchSegment` scans the
+    // interpreter's OWN inline argument text.
+    const src = `node -e "const f = fetch; f('https://example.com/x').then(()=>{})"\n`;
+    expect(unsafeApplies(src).length).toBeGreaterThan(0);
+  });
+
+  it('RED: an inline `node -e` computed globalThis access is caught the same way', () => {
+    const src = `node -e "globalThis['fe'+'tch']('https://example.com/x')"\n`;
+    expect(unsafeApplies(src).length).toBeGreaterThan(0);
+  });
+
+  it('GREEN: a CLI flag literally spelled --fetch does not false-positive', () => {
+    // #1787 round 2 regression guard: the real tree invokes followed scripts
+    // with a `--fetch` flag (`compat-window-audit.mjs --fetch --matrix`) —
+    // the aliasing fix must not treat that hyphenated flag text as a fetch
+    // reference.
+    const src = 'node scripts/compat-window-audit.mjs --fetch --matrix --json\n';
+    expect(unsafeApplies(src)).toEqual([]);
+  });
+
+  it('GREEN: a kebab-case identifier containing "fetch" (not the API) does not false-positive', () => {
+    const src = 'node test/bun-sandbox-fetch-ab/run-trials.mjs --runtime node\n';
+    expect(unsafeApplies(src)).toEqual([]);
+  });
+
+  it('GREEN: globalThis[...] with a plain string literal key is not "computed" — the literal key still contains the word fetch and is caught by the ordinary bare-word match, not by a false "computed" positive on an UNRELATED literal key', () => {
+    const js = `globalThis['someOtherFunction']('https://loopback-not-used');\n`;
+    // No `fetch` text anywhere and the key is a plain literal — neither rule fires.
+    expect(hasComputedGlobalAccess(js)).toBe(false);
+  });
+
+  it('GREEN: a global member access with a literal numeric key is not computed', () => {
+    const js = `const x = window[0];\n`;
+    expect(hasComputedGlobalAccess(js)).toBe(false);
+  });
+
+  it('RED (unit): hasComputedGlobalAccess flags a variable key', () => {
+    expect(hasComputedGlobalAccess('globalThis[name]("https://x")')).toBe(true);
+  });
+
+  it('RED (unit): hasComputedGlobalAccess flags string concatenation', () => {
+    expect(hasComputedGlobalAccess('globalThis["fe" + "tch"]')).toBe(true);
+  });
+});
+
+// ---- #1780: hasApplyAnywhere gate widening ---------------------------------
+
+describe('apply-safety-scan: hasApplyAnywhere sees a dependent job via needs:+artifact/outputs (#1780)', () => {
+  const FETCH_JS = `fetch('https://example.com/x');\n`;
+
+  it('RED: job A fetches (no apply of its own), job B `needs:` A, consumes its output, and applies', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          outputs: { manifestUrl: '${{ steps.f.outputs.url }}' },
+          steps: [{ id: 'f', run: 'node scripts/lib/probe.mjs\n' }],
+        },
+        applyJob: {
+          needs: 'fetchJob',
+          steps: [
+            {
+              run: 'kubectl apply -f "${{ needs.fetchJob.outputs.manifestUrl }}"\n',
+            },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('RED: the same shape linked by an artifact hand-off instead of outputs', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: 'actions/upload-artifact@v4', with: { name: 'm', path: 'm.yaml' } },
+          ],
+        },
+        applyJob: {
+          needs: 'fetchJob',
+          steps: [
+            { uses: 'actions/download-artifact@v4', with: { name: 'm' } },
+            { run: 'kubectl apply -f m.yaml\n' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('GREEN (false-positive control): a bare `needs:` edge with NO artifact/outputs evidence stays job-scoped', () => {
+    // Most `needs:` edges in the real tree are pure sequencing (a
+    // "red-alert" job that only needs its predecessor to decide whether to
+    // fire) — widening on `needs:` alone would flag nearly every multi-job
+    // workflow and defeat the point of the gate.
+    const doc = {
+      jobs: {
+        fetchJob: { steps: [{ run: 'node scripts/lib/probe.mjs\n' }] },
+        unrelatedApplyJob: {
+          needs: 'fetchJob',
+          steps: [{ run: 'kubectl apply -f m.yaml\n' }],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(false);
+  });
+
+  it('GREEN (false-positive control): needs:+artifact with NEITHER job applying anything stays clean', () => {
+    const doc = {
+      jobs: {
+        fetchJob: {
+          steps: [
+            { run: 'node scripts/lib/probe.mjs\n' },
+            { uses: 'actions/upload-artifact@v4', with: { name: 'm', path: 'm.yaml' } },
+          ],
+        },
+        consumerJob: {
+          needs: 'fetchJob',
+          steps: [
+            { uses: 'actions/download-artifact@v4', with: { name: 'm' } },
+            { run: 'cat m.yaml\n' },
+          ],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('apply-safety-scan: hasApplyAnywhere sees an apply inside a called uses: (#1780)', () => {
+  const FETCH_JS = `fetch('https://example.com/x');\n`;
+
+  // Each case below pairs the `uses:`-only shape with a FETCHING sibling,
+  // linked by `needs:`+artifact — the apply hidden in the called unit is
+  // otherwise invisible, so only by widening `hasApplyAnywhere` across the
+  // linked component does the sibling's followed-script fetch get flagged.
+  // This proves the called unit's apply was actually SEEN, not just that
+  // nothing crashed.
+  const linkedDoc = (callerJob: Record<string, unknown>) => ({
+    jobs: {
+      fetchJob: {
+        steps: [
+          { run: 'node scripts/lib/probe.mjs\n' },
+          { uses: 'actions/upload-artifact@v4', with: { name: 'm', path: 'm.yaml' } },
+        ],
+      },
+      callerJob: { needs: 'fetchJob', ...callerJob },
+    },
+  });
+
+  it('RED: a job that ONLY `uses:` a LOCAL composite action, which itself applies, opens the gate for its linked component', () => {
+    // The job has no `run:` steps of its OWN, so the apply is invisible to
+    // `textHasManifestApply` unless the called action is read.
+    const doc = linkedDoc({ steps: [{ uses: './.github/actions/apply-thing' }] });
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/apply-thing/action.yml'
+          ? 'runs:\n  steps:\n    - run: kubectl apply -f m.yaml\n'
+          : FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('RED: a job-level LOCAL reusable-workflow call that applies feeds a fetching sibling in its needs:-linked component', () => {
+    const doc = linkedDoc({ uses: './.github/workflows/applies.yml' });
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/workflows/applies.yml'
+          ? 'jobs:\n  x:\n    steps:\n      - run: kubectl apply -f m.yaml\n'
+          : FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('RED: a job-level REMOTE reusable-workflow call fails closed as "might apply", opening the gate for its linked component', () => {
+    const doc = linkedDoc({ uses: 'org/repo/.github/workflows/x.yml@v1' });
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders.some((o) => o.startsWith('fetchJob'))).toBe(true);
+  });
+
+  it('GREEN (false-positive control): a job that `uses:` a well-known non-applying remote action ALONGSIDE its own run: steps is unaffected', () => {
+    const doc = {
+      jobs: {
+        normalJob: {
+          steps: [{ uses: 'actions/checkout@v4' }, { run: 'node scripts/lib/probe.mjs\n' }],
+        },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it('GREEN (false-positive control): a uses:-only job calling a KNOWN non-applying remote action stays clean', () => {
+    const doc = {
+      jobs: {
+        scanJob: { steps: [{ uses: 'aquasecurity/trivy-action@v1' }] },
+      },
+    };
+    expect(unsafeAppliesInWorkflow(doc)).toEqual([]);
+  });
+
+  it('GREEN (false-positive control): a KNOWN non-applying remote action linked to a fetching sibling stays clean', () => {
+    // A uses:-only job with no `run:` steps of its own never flags anything
+    // by itself (there's no step text to scan) — the exemption only has an
+    // observable effect once it feeds a linked, fetching sibling's gate.
+    const doc = linkedDoc({ steps: [{ uses: 'aquasecurity/trivy-action@v1' }] });
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: () => FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it('GREEN (false-positive control): a uses:-only job calling a NON-APPLYING local composite action stays clean', () => {
+    const doc = {
+      jobs: {
+        callerJob: { steps: [{ uses: './.github/actions/noop-thing' }] },
+      },
+    };
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/noop-thing/action.yml'
+          ? 'runs:\n  steps:\n    - run: echo hi\n'
+          : null,
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it('GREEN (false-positive control): a NON-applying uses:-only job linked to a fetching sibling stays clean', () => {
+    const doc = linkedDoc({ steps: [{ uses: './.github/actions/noop-thing' }] });
+    const offenders = unsafeAppliesInWorkflow(doc, {
+      resolveSource: (p) =>
+        p === './.github/actions/noop-thing/action.yml'
+          ? 'runs:\n  steps:\n    - run: echo hi\n'
+          : FETCH_JS,
+      followScripts: true,
+    });
+    expect(offenders).toEqual([]);
   });
 });

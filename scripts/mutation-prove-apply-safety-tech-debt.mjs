@@ -30,7 +30,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCANNER = resolve(REPO_ROOT, 'scripts/lib/apply-safety-scan.mjs');
 const SPEC = 'tests/apply-safety-scan-tech-debt.test.ts';
 
-declareMutations(8);
+declareMutations(14);
 
 readFileSync(SCANNER, 'utf8'); // FATAL if missing, before anything is mutated
 
@@ -141,7 +141,66 @@ prove(
   'if (false) return `unreachable`; // MUTATION: disabled',
 );
 
-const declared = 8;
+// M9: aliased-fetch detection (#1787) — reverting `INTERPRETER_FETCH`'s bare
+// `fetch` boundary back to the old call-only `fetch\(` spelling must red the
+// `const f = fetch; f(url)` alias fixtures (both the followed-script and the
+// inline `node -e` shapes).
+prove(
+  'M9 aliased fetch (bare, non-call) detection (#1787)',
+  'const INTERPRETER_FETCH =\n  /(?<![\\w-])fetch(?![\\w-])|urllib|requests\\.|https?\\.get|http\\.request|open-uri|Net::HTTP|LWP/;',
+  'const INTERPRETER_FETCH =\n  /fetch\\(|urllib|requests\\.|https?\\.get|http\\.request|open-uri|Net::HTTP|LWP/;',
+);
+
+// M10: the computed-global-access gate in `classifyJsScript` (#1787) —
+// disabling it must red `globalThis["fe" + "tch"](url)`, which never spells
+// the literal substring "fetch" for `INTERPRETER_FETCH` to catch on its own.
+prove(
+  'M10 classifyJsScript computed-global-access gate (#1787)',
+  'if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src)) return null;',
+  'if (!INTERPRETER_FETCH.test(src)) return null;',
+);
+
+// M11: `isSinglePlainLiteral`'s early-close rejection (#1787) — this is what
+// makes `hasComputedGlobalAccess` itself work at all; disabling it collapses
+// the function to "never computed", redding every computed-access fixture
+// AND the two direct unit tests.
+prove(
+  'M11 hasComputedGlobalAccess single-literal check (#1787)',
+  'if (!isSinglePlainLiteral(inner)) return true;',
+  'if (false) return true; // MUTATION: disabled',
+);
+
+// M12: the needs:+artifact/outputs component link (#1780) — disabling it
+// must red both cross-job fixtures (the outputs hand-off and the artifact
+// hand-off), which rely on the dependent job's apply opening the gate for
+// the fetching job it `needs:`.
+prove(
+  'M12 needs:+artifact/outputs component linking (#1780)',
+  'if (jobsLinkedByArtifactOrOutputs(depJob, depId, job)) union(jobId, depId);',
+  'if (false) union(jobId, depId); // MUTATION: disabled',
+);
+
+// M13: the `uses:`-only surface check (#1780) — disabling it must red every
+// LOCAL composite-action, LOCAL reusable-workflow, and REMOTE
+// reusable-workflow fixture (all three rely on `jobUsesSurfaceMightApply`
+// to see an apply this scanner otherwise never reads).
+prove(
+  'M13 uses:-only surface might-apply detection (#1780)',
+  'function jobUsesSurfaceMightApply(job, resolveSource) {',
+  'function jobUsesSurfaceMightApply(job, resolveSource) {\n  return false; // MUTATION: disabled',
+);
+
+// M14: the KNOWN_NON_APPLYING_ACTIONS exemption (#1780) — disabling it
+// (treating every remote action as "might apply") must red the GREEN
+// control that a uses:-only job calling a known-safe remote action (e.g.
+// `aquasecurity/trivy-action`) stays clean.
+prove(
+  'M14 KNOWN_NON_APPLYING_ACTIONS exemption (#1780)',
+  "return !KNOWN_NON_APPLYING_ACTIONS.has(s.uses.split('@')[0]);",
+  'return true; // MUTATION: disabled',
+);
+
+const declared = 14;
 console.log(`\n${caught}/${declared} mutations caught, ${decorative} decorative.`);
 if (decorative > 0 || caught !== declared) {
   console.error('Mutation proof FAILED: at least one rule is decorative or missing.');

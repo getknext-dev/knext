@@ -53,13 +53,31 @@
  */
 
 import { createHash } from 'node:crypto';
+import { parse as parseYaml } from 'yaml';
 import { scanFrames } from './shell-lexer.mjs';
 
 /** Commands whose output is network content. */
 const FETCH_WORDS = new Set(['curl', 'wget', 'aria2c', 'http', 'https', 'xh', 'httpie']);
 const INTERPRETERS = new Set(['node', 'bun', 'deno', 'python', 'python3', 'ruby', 'perl']);
+// #1787: `fetch` has NO trailing `\(` here (unlike every prior revision) —
+// a bare reference to the identifier (`const f = fetch;`, `obj.fn = fetch`)
+// is just as fetch-capable as a direct call, and the previous `fetch\(`
+// spelling only matched the call form, missing the alias. The other API
+// names below were never call-shaped in the first place (`https?\.get`,
+// `http\.request` already match an alias like `const g = https.get;`
+// without any change) — only `fetch` had the asymmetry.
+//
+// The boundary is `(?<![\w-])fetch(?![\w-])`, NOT plain `\bfetch\b` — a
+// bare `\b` word boundary sits on either side of a hyphen too (`-` is a
+// non-word character), so it matches the real tree's `--fetch` CLI flag
+// (`compat-window-audit.mjs --fetch --matrix`) and kebab-case substrings
+// (`bun-sandbox-fetch-ab`, `normal-fetch`) that are not the `fetch` API at
+// all. Excluding an adjacent hyphen on EITHER side keeps those out while
+// still matching every real shape: a call (`fetch(`), an alias (`= fetch;`,
+// `, fetch,`), and a plain identifier use anywhere code, not string, text
+// would spell it.
 const INTERPRETER_FETCH =
-  /fetch\(|urllib|requests\.|https?\.get|http\.request|open-uri|Net::HTTP|LWP/;
+  /(?<![\w-])fetch(?![\w-])|urllib|requests\.|https?\.get|http\.request|open-uri|Net::HTTP|LWP/;
 const APPLY_VERBS = new Set(['apply', 'create', 'replace']);
 const EXEC_STRING_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh']);
 const URL_RE = /\bhttps?:\/\//;
@@ -1658,7 +1676,10 @@ function classifyJsScript(path, st) {
   const { text: src, clean } = stripNonFetchText(rawSrc);
   if (!clean)
     return `${path}: could not tokenize unambiguously (unterminated string/template/comment/regex) — fail closed`;
-  if (!INTERPRETER_FETCH.test(src)) return null;
+  // #1787: a computed `globalThis`/`window`/`self[…]` access with a
+  // non-literal key opens the gate too, even with no `INTERPRETER_FETCH`
+  // text anywhere (`globalThis["fe"+"tch"](url)` never spells "fetch").
+  if (!INTERPRETER_FETCH.test(src) && !hasComputedGlobalAccess(src)) return null;
   const hostMatches = [...src.matchAll(/\bhost\s*:\s*(['"`])([^'"`]*)\1/g)];
   if (hostMatches.length > 0) {
     for (const m of hostMatches) {
@@ -1676,12 +1697,99 @@ function classifyJsScript(path, st) {
   return `${path}: fetch-shaped call with no literal host/URL to classify (fail closed)`;
 }
 
+/**
+ * #1787: the OTHER aliasing shape `INTERPRETER_FETCH`'s bare `\bfetch\b`
+ * cannot catch — `globalThis["fe"+"tch"](url)`, `window[name](url)` — where
+ * the fetch-capable reference is reached through a COMPUTED member access
+ * on a global object (`globalThis`/`window`/`self`) whose bracketed key is
+ * not a single string/number literal. Such a key could evaluate to `fetch`
+ * (or anything else) at runtime, so it is unclassifiable REGARDLESS of what
+ * the key actually spells — fail closed on the shape itself, not on
+ * recognizing "fetch" inside it. A literal key (`globalThis["fetch"]`) is
+ * NOT this function's concern: it contains the literal substring `fetch`
+ * and is already caught by `INTERPRETER_FETCH`'s bare-word match above.
+ * Scans with a small hand-rolled bracket-balance walk (quote-aware, so a
+ * `]`/`[` inside a string key never miscounts depth) — deliberately NOT
+ * `tagCharacters`-based, so this same function works unchanged on BOTH a
+ * followed `.mjs`/`.cjs`/`.js` source (JS) and a joined shell-word string
+ * (an inline `node -e '…'`/`bun -e '…'` payload, not real JS lexing). Over-
+ * approximating (treating any non-plain-literal key as computed) only ever
+ * makes the scan stricter — consistent with this module's stated design.
+ */
+/**
+ * True iff `s` is EXACTLY one quoted string literal (no concatenation, no
+ * early close) or a plain number — the only two bracketed-key shapes
+ * `hasComputedGlobalAccess` treats as "not computed". A naive
+ * `/^(['"\`])(?:[^\\]|\\.)*\1$/` regex is NOT sufficient here: `[^\\]`
+ * happily matches an interior unescaped quote too, so it would wrongly
+ * accept `"fe" + "tch"` as a single literal (it starts and ends with `"`
+ * with no backslash anywhere) — exactly the shape #1787 must flag. This
+ * walks the string and rejects the moment the SAME quote character closes
+ * before the final character.
+ */
+function isSinglePlainLiteral(s) {
+  if (/^-?\d+(\.\d+)?$/.test(s)) return true;
+  if (s.length < 2) return false;
+  const q = s[0];
+  if (q !== '"' && q !== "'" && q !== '`') return false;
+  if (s[s.length - 1] !== q) return false;
+  let i = 1;
+  while (i < s.length - 1) {
+    if (s[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (s[i] === q) return false; // closes before the end — not a single literal
+    i++;
+  }
+  return true;
+}
+
+export function hasComputedGlobalAccess(text) {
+  const re = /\b(?:globalThis|window|self)\s*\[/g;
+  for (const m of text.matchAll(re)) {
+    const start = m.index + m[0].length;
+    let depth = 1;
+    let j = start;
+    let inStr = null;
+    while (j < text.length && depth > 0) {
+      const c = text[j];
+      if (inStr) {
+        if (c === '\\') {
+          j += 2;
+          continue;
+        }
+        if (c === inStr) inStr = null;
+        j++;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') {
+        inStr = c;
+        j++;
+        continue;
+      }
+      if (c === '[') depth++;
+      else if (c === ']') depth--;
+      j++;
+    }
+    if (depth !== 0) continue; // unterminated at EOF — not this function's rule to flag
+    const inner = text.slice(start, j - 1).trim();
+    if (!isSinglePlainLiteral(inner)) return true;
+  }
+  return false;
+}
+
 export function isFetchSegment(ws, st) {
   for (let k = 0; k < ws.length; k++) {
     const w = canonical(ws[k], st.vars).replace(/^\\/, '');
     const base = w.split('/').pop();
     if (base === 'gh' && /^(api|release|run)$/.test(unquote(ws[k + 1] ?? ''))) return true;
-    if (INTERPRETERS.has(base) && INTERPRETER_FETCH.test(ws.slice(k + 1).join(' '))) return true;
+    if (
+      INTERPRETERS.has(base) &&
+      (INTERPRETER_FETCH.test(ws.slice(k + 1).join(' ')) ||
+        hasComputedGlobalAccess(ws.slice(k + 1).join(' ')))
+    )
+      return true;
     if (!FETCH_WORDS.has(base)) continue;
     // Every fetcher is a taint source — a loopback URL included: `localhost`
     // is only local until a port-forward, `--connect-to`, `--resolve`, a proxy
@@ -1721,7 +1829,11 @@ export function unclassifiedFetch(ws, st, { pipedFromNetwork = false, depth = 0 
 }
 
 function fetchShape(b, args, rawArgs, st, pipedFromNetwork, depth) {
-  if (INTERPRETERS.has(b) && INTERPRETER_FETCH.test(args.join(' '))) return interpreterFetch(b);
+  if (
+    INTERPRETERS.has(b) &&
+    (INTERPRETER_FETCH.test(args.join(' ')) || hasComputedGlobalAccess(args.join(' ')))
+  )
+    return interpreterFetch(b);
   // #1512/#1715: `node <file>.mjs` / `bun <file>.mjs` moves a fetch OUT of
   // shell text into a JS file this module never reads — the escape hatch F6
   // (#1497) used legitimately. Follow it, opt-in on BOTH `st.followScripts`
@@ -2820,7 +2932,7 @@ function walk(code, st, ctx) {
       for (const body of fed.bodies) {
         if (fed.runner === 'shell')
           walkScript(body, st, { ...ctx, defeated: verifyDefeated, depth: ctx.depth + 1 });
-        else if (INTERPRETER_FETCH.test(body))
+        else if (INTERPRETER_FETCH.test(body) || hasComputedGlobalAccess(body))
           reportRemoteFetch(st, interpreterFetch(fed.runner), segs[si]);
       }
 
@@ -3432,6 +3544,195 @@ export function stepGuaranteed(step) {
   return true;
 }
 
+/** A `uses:` target that names a LOCAL path (composite action directory or
+ * reusable workflow file) rather than a remote `owner/repo@ref`. */
+function usesLocalPath(uses) {
+  return typeof uses === 'string' && /^\.{1,2}\//.test(uses.split('@')[0]);
+}
+
+/**
+ * Resolves and parses a LOCAL `uses:` target's YAML. A composite action
+ * names a DIRECTORY (tries `action.yml`/`action.yaml` inside it); a
+ * reusable workflow names the `.yml`/`.yaml` file directly. Returns null
+ * when unreadable (no `resolveSource`, or every candidate path comes back
+ * empty) — the caller's own fail-closed rule (an unreadable `uses:` next to
+ * a fetch) covers that case; this function itself just reports "could not
+ * read it", never guesses.
+ */
+function loadLocalUsesDoc(usesRaw, resolveSource) {
+  if (!resolveSource) return null;
+  const usesPath = usesRaw.split('@')[0];
+  const candidates = /\.ya?ml$/i.test(usesPath)
+    ? [usesPath]
+    : [`${usesPath}/action.yml`, `${usesPath}/action.yaml`];
+  for (const c of candidates) {
+    const text = resolveSource(c);
+    if (typeof text === 'string') {
+      try {
+        return parseYaml(text);
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * #1780: a boolean "does this called composite action / reusable workflow
+ * document apply a manifest ANYWHERE" signal — deliberately just a gate
+ * input, not a full scan of the called file's own safety (that file is
+ * scanned on its own merits wherever IT is discovered as a tracked
+ * workflow/composite-action source; this only answers the narrow question
+ * the calling job's `hasApplyAnywhere` gate needs).
+ */
+function calledUnitHasApply(calledDoc) {
+  if (!calledDoc) return false;
+  if (Array.isArray(calledDoc?.runs?.steps)) {
+    return calledDoc.runs.steps.some(
+      (s) => typeof s?.run === 'string' && textHasManifestApply(s.run),
+    );
+  }
+  if (calledDoc?.jobs) {
+    return Object.values(calledDoc.jobs).some((j) =>
+      (j?.steps ?? []).some((s) => typeof s?.run === 'string' && textHasManifestApply(s.run)),
+    );
+  }
+  return false;
+}
+
+/**
+ * Third-party GitHub Actions this repo's workflows actually call (derived by
+ * scanning every tracked `.github/workflows/*.yml` for a `uses:` base name
+ * — `git grep -hoE 'uses:\s*[A-Za-z0-9._/-]+@' .github/workflows/*.yml`). Every
+ * one is runner/toolchain setup, caching, artifact transfer, container
+ * build/scan/sign, or release automation — NONE of them is a cluster-apply
+ * action; every `kubectl`/`helm template | kubectl apply` in this repo is a
+ * `run:` shell step, which `textHasManifestApply` already scans directly.
+ * `jobUsesSurfaceMightApply` (#1780) uses this to scope its fail-closed
+ * widening to a remote `uses:` that is NOT already a known, auditable,
+ * non-applying action. This is a known, finite SET, not a blanket
+ * carve-out: a NEW remote action on a job's uses:-only surface is NOT on
+ * this list and still widens the gate, matching the issue's fail-closed
+ * intent for the unknown case.
+ */
+const KNOWN_NON_APPLYING_ACTIONS = new Set([
+  'actions/cache',
+  'actions/checkout',
+  'actions/download-artifact',
+  'actions/setup-go',
+  'actions/setup-node',
+  'actions/setup-python',
+  'actions/upload-artifact',
+  'anchore/sbom-action',
+  'anchore/sbom-action/download-syft',
+  'anchore/scan-action/download-grype',
+  'aquasecurity/trivy-action',
+  'changesets/action',
+  'codecov/codecov-action',
+  'docker/build-push-action',
+  'docker/login-action',
+  'docker/setup-buildx-action',
+  'docker/setup-qemu-action',
+  'dorny/paths-filter',
+  'google-github-actions/auth',
+  'google-github-actions/setup-gcloud',
+  'helm/kind-action',
+  'marocchino/sticky-pull-request-comment',
+  'oven-sh/setup-bun',
+  'pnpm/action-setup',
+  'sigstore/cosign-installer',
+  'softprops/action-gh-release',
+]);
+
+/**
+ * #1780, narrowed scope: a job is "`uses:`-only" when its OWN work is
+ * entirely a reusable-workflow call (job-level `uses:`) or composite-action
+ * step(s) — NO `run:` text of its own at all. This is deliberately NARROW:
+ * a job that ALSO has `run:` steps (the overwhelming common case —
+ * `actions/checkout` + toolchain setup ALONGSIDE real shell steps) is
+ * excluded, because its own `run:` text is already scanned directly by
+ * `textHasManifestApply`; widening on every job that merely references
+ * SOME remote action next to SOME fetch-looking text was tried and
+ * reverted — `actions/checkout`/`helm/kind-action` alone are common enough
+ * to open the gate on nearly every job in the tree, drowning the real
+ * signal. The uses:-only shape is the actual blind spot the issue names:
+ * "a job that only `uses:` ... is invisible to `textHasManifestApply`".
+ */
+function jobIsUsesOnly(job) {
+  if (typeof job?.uses === 'string') return true;
+  const steps = job?.steps ?? [];
+  const hasRun = steps.some((s) => typeof s?.run === 'string');
+  const hasUses = steps.some((s) => typeof s?.uses === 'string');
+  return !hasRun && hasUses;
+}
+
+/**
+ * #1780: does a `uses:`-only job's called surface contain — or fail to
+ * rule out — a manifest apply? A LOCAL target (`./…`) is read and judged
+ * for real via `calledUnitHasApply`. A REMOTE target this scanner can
+ * never read is treated as "might apply" UNLESS it is a known,
+ * non-applying action (`KNOWN_NON_APPLYING_ACTIONS`) — fail closed on the
+ * unknown case, unconditionally (no "does it also fetch" qualifier: a
+ * uses:-only job has no `run:` text of its own to fetch FROM, so that
+ * qualifier would never fire here anyway — the ambiguity of an unreadable
+ * call is itself the reason to fail closed). A `docker://` step reference
+ * is an image ref, not code this module could read either way; treated as
+ * non-applying, consistent with the rest of this module's `docker://`
+ * handling.
+ */
+function jobUsesSurfaceMightApply(job, resolveSource) {
+  if (!jobIsUsesOnly(job)) return false;
+  if (typeof job?.uses === 'string') {
+    if (usesLocalPath(job.uses))
+      return calledUnitHasApply(loadLocalUsesDoc(job.uses, resolveSource));
+    return true; // unreadable remote reusable workflow — fail closed
+  }
+  return (job?.steps ?? []).some((s) => {
+    if (typeof s?.uses !== 'string') return false;
+    if (s.uses.startsWith('docker://')) return false;
+    if (usesLocalPath(s.uses)) return calledUnitHasApply(loadLocalUsesDoc(s.uses, resolveSource));
+    return !KNOWN_NON_APPLYING_ACTIONS.has(s.uses.split('@')[0]);
+  });
+}
+
+/** Every job id a `needs:` value names, normalized to an array. */
+function jobNeeds(job) {
+  const n = job?.needs;
+  if (!n) return [];
+  return Array.isArray(n) ? n : [n];
+}
+
+/**
+ * #1780: are `depJob` (named by `depId`, something `job` `needs:`) and
+ * `job` linked closely enough that an apply in one should open the
+ * followed-script gate for a fetch in the other? Two kinds of evidence,
+ * matching the issue's own scoping — a bare `needs:` edge with NEITHER is
+ * NOT enough (most `needs:` edges in this repo are pure sequencing, e.g. a
+ * "red-alert" job that only needs its predecessor to decide whether to
+ * fire — widening on `needs:` alone would flag nearly every multi-job
+ * workflow in the tree and defeat the point of a gate):
+ *   - an artifact hand-off (`actions/upload-artifact` in the dependency,
+ *     `actions/download-artifact` in the dependent) — either side is
+ *     sufficient evidence SOMETHING could flow between them;
+ *   - an outputs hand-off — the dependency declares job-level `outputs:`,
+ *     or the dependent's own text references `needs.<depId>.outputs`/
+ *     `.result` anywhere (steps, `if:`, `with:`, `env:`).
+ */
+function jobsLinkedByArtifactOrOutputs(depJob, depId, job) {
+  const depProducesArtifact = (depJob?.steps ?? []).some(
+    (s) => typeof s?.uses === 'string' && /actions\/upload-artifact/.test(s.uses),
+  );
+  const jobConsumesArtifact = (job?.steps ?? []).some(
+    (s) => typeof s?.uses === 'string' && /actions\/download-artifact/.test(s.uses),
+  );
+  if (depProducesArtifact || jobConsumesArtifact) return true;
+  if (depJob?.outputs && Object.keys(depJob.outputs).length > 0) return true;
+  const hay = JSON.stringify(job ?? {});
+  if (new RegExp(`needs\\.${depId}\\.(outputs|result)\\b`).test(hay)) return true;
+  return false;
+}
+
 /**
  * Scans a parsed GitHub workflow (or composite action) document. A job's
  * `run:` steps execute in order on ONE runner filesystem, so they share FILE
@@ -3445,6 +3746,17 @@ export function stepGuaranteed(step) {
  * `>> $GITHUB_ENV` writes from earlier steps, so `env: { M: https://… }` +
  * `apply -f "$M"` is a bare-URL apply. The YAML parser has already folded
  * `run: >` blocks — exactly the single-line form bash receives.
+ *
+ * #1780: `hasApplyAnywhere` is no longer purely job-scoped. It is the OR of:
+ *   - this job's own `run:` text (as before);
+ *   - this job's `uses:`-only surface, if it has one (`jobUsesSurfaceMightApply`
+ *     — a job-level reusable-workflow call, or a job made ENTIRELY of
+ *     composite-action steps with no `run:` text of its own): a LOCAL
+ *     target is read and judged for real, a REMOTE one not on the known
+ *     non-applying list fails closed as "might apply";
+ *   - every job in its `needs:`-linked COMPONENT (see
+ *     `jobsLinkedByArtifactOrOutputs` for what "linked" requires), unioned
+ *     the same way.
  * @param {unknown} doc
  * @param {{
  *   resolveSource?: ((path: string) => string | null) | null,
@@ -3466,26 +3778,41 @@ export function unsafeAppliesInWorkflow(
   let jobs = [];
   if (doc?.jobs) jobs = Object.entries(doc.jobs);
   else if (doc?.runs?.steps) jobs = [['(composite)', { steps: doc.runs.steps }]];
+  const byId = new Map(jobs);
+
+  // #1780: union-find over `needs:` edges with artifact/outputs evidence —
+  // every job starts in its own singleton component.
+  const parent = new Map(jobs.map(([id]) => [id, id]));
+  const find = (x) => {
+    while (parent.get(x) !== x) x = parent.get(x);
+    return x;
+  };
+  const union = (a, b) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  for (const [jobId, job] of jobs) {
+    for (const depId of jobNeeds(job)) {
+      const depJob = byId.get(depId);
+      if (!depJob) continue;
+      if (jobsLinkedByArtifactOrOutputs(depJob, depId, job)) union(jobId, depId);
+    }
+  }
+  const jobOwnApply = (job) =>
+    (job?.steps ?? []).some((s) => typeof s?.run === 'string' && textHasManifestApply(s.run)) ||
+    jobUsesSurfaceMightApply(job, resolveSource);
+  const componentApply = new Map();
+  for (const [jobId, job] of jobs) {
+    const root = find(jobId);
+    componentApply.set(root, (componentApply.get(root) ?? false) || jobOwnApply(job));
+  }
+
   for (const [jobId, job] of jobs) {
     const carry = { tainted: new Set(), verified: new Map() };
     const persisted = new Map();
     const steps = (job?.steps ?? []).filter((s) => typeof s?.run === 'string');
-    // #1715: the gate is JOB-wide (a fetch in step 1 may feed an apply in
-    // step 3, same as the `carry` file-state above), computed once from
-    // every step's own run text — never from a single step in isolation.
-    //
-    // KNOWN LIMITATION (tracked: #1780, non-blocking, matches `carry`'s own
-    // job-scoped design above rather than being a new gap): this can only
-    // see a `run:` step's OWN text, in THIS job object.
-    //   - A dependent job (`needs:` + artifact/output flow) that performs
-    //     the apply is invisible — job A's followed-script fetch is judged
-    //     only against job A's own steps, never job B's.
-    //   - A job that only `uses:` a composite action or reusable workflow
-    //     (no inline `run:` steps of its own) never contributes to
-    //     `jobHasApply` even if the called action/workflow applies a
-    //     manifest — `steps` here only ever holds THIS job's own
-    //     `step.run` strings.
-    const jobHasApply = steps.some((s) => textHasManifestApply(s.run));
+    const jobHasApply = componentApply.get(find(jobId)) ?? false;
     steps.forEach((step, i) => {
       const shell = effectiveShell(doc, job, step);
       const errexit = shellErrexit(shell);
