@@ -54,6 +54,14 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
  * grew to eleven files unobserved in the first place.
  */
 const DECLARED: Record<string, { skips: Record<string, number>; reason: string }> = {
+  'packages/kn-next/src/__tests__/vinext-patches.test.ts': {
+    skips: { 'it.skipIf': 1 },
+    reason:
+      'The read-only-directory test chmods a directory 0555 to make a real write fail; root ignores ' +
+      'directory permissions, so under uid 0 the failure it asserts cannot happen. CI runners are ' +
+      'non-root so it runs there, and an always-on sibling test injects the same EACCES staging ' +
+      "failure through the applier's fs seam, so the guarantee is covered even as root.",
+  },
   'apps/file-manager/sigterm-drain-e2e.test.ts': {
     skips: { 'it.skipIf': 5 },
     reason:

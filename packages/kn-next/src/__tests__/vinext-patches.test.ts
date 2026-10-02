@@ -713,6 +713,49 @@ describe("delivery", () => {
         }
     });
 
+    it("an EACCES while staging a multi-file patch changes nothing and leaves no temp (always on, even as root)", () => {
+        const app = fakeApp(manifest.vinext);
+        try {
+            const vinext = join(app, "node_modules", "vinext");
+            const fs = {
+                writeFile: (path: string, text: string) => {
+                    if (path.includes(join("dist", "config"))) {
+                        throw Object.assign(
+                            new Error("EACCES: permission denied"),
+                            {
+                                code: "EACCES",
+                            },
+                        );
+                    }
+                    mkdirSync(dirname(path), { recursive: true });
+                    writeFileSync(path, text);
+                },
+                rename: renameSync,
+                remove: (path: string) => rmSync(path, { force: true }),
+            };
+            expect(() => applyVinextPatches(vinext, { fs })).toThrow(
+                VinextPatchWriteError,
+            );
+            expect(
+                existsSync(
+                    join(vinext, "dist", "build", "nitro-trace-includes.js"),
+                ),
+            ).toBe(false);
+            expect(
+                sha256(join(vinext, "dist", "config", "next-config.js")),
+            ).toBe(manifest.pristine["dist/config/next-config.js"] ?? "");
+            expect(
+                readFileSync(join(vinext, "dist", "index.js"), "utf8"),
+            ).not.toContain("createNitroTraceIncludesHook");
+            const leftovers = readdirSync(vinext, { recursive: true }).filter(
+                (f) => String(f).includes(".knext-patch-"),
+            );
+            expect(leftovers).toEqual([]);
+        } finally {
+            rmSync(app, { recursive: true, force: true });
+        }
+    });
+
     it.skipIf(process.getuid?.() === 0)(
         "a read-only directory fails the patch cleanly: nothing in it is half-written",
         () => {
