@@ -24,13 +24,7 @@ const nextConfig: NextConfig = {
   // `_next/static/<tag>/` prefix, and `pruneOldBuilds(..., buildId=tag)` all
   // line up. Returning null in dev falls back to Next's default nanoid.
   generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
-  // #1812: vinext 1.0.1 reads this field itself (independent of `next build`)
-  // and, when it is 'standalone', ALSO tries to emit its own standalone
-  // bundle from a plain `vite build` output this app never produces (it
-  // builds via the `nitro({ preset: 'bun' })` plugin instead) — see
-  // vite.config.ts's KNEXT_VINEXT_BUILD comment. `next build` (this field's
-  // only real consumer) never sets that env var, so that target is unaffected.
-  output: process.env.KNEXT_VINEXT_BUILD === '1' ? undefined : 'standalone',
+  output: 'standalone',
   // Ensure native node modules are traced into standalone output (not bundled).
   // pino-elasticsearch and thread-stream are excluded here to avoid Turbopack
   // bundling their test files (pre-existing upstream issue).
@@ -87,5 +81,19 @@ const nextConfig: NextConfig = {
   // not prevent the root cause (Turbopack entering node_modules even for externals).
   // Track: github.com/vercel/next.js Turbopack + serverExternalPackages.
 };
+
+// #1812: vinext 1.0.1 reads `output` itself (independent of `next build`) and,
+// when it is 'standalone', ALSO tries to emit its own standalone bundle from a
+// plain `vite build` output this app never produces — it builds via the
+// `nitro({ preset: 'bun' })` plugin instead (.output/server/index.mjs). See
+// vite.config.ts's KNEXT_VINEXT_BUILD comment: that process sets the env var
+// below, and ONLY that process — `next build` (this field's only real
+// consumer) never sets it, so that target's `output: 'standalone'` above is
+// unaffected. Applied as a post-build-of-the-object override, not inline,
+// so `output: 'standalone'` stays literal source for
+// adapter-migration.test.ts's official-adapter assertion.
+if (process.env.KNEXT_VINEXT_BUILD === '1') {
+  nextConfig.output = undefined;
+}
 
 export default nextConfig;
