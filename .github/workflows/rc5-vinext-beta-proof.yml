@@ -115,40 +115,54 @@ jobs:
             console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version);
           "
 
-      - name: knext build (vite build -> bun build --compile --bytecode)
+      # `--skip-smoke`: the CLI's own post-compile smoke compiles a SECOND,
+      # glibc-linked binary to boot-check on hosts (like this one) that
+      # cannot execute the musl-linked SHIP binary directly — see
+      # packages/kn-next/src/cli/build.ts's own doc comment on
+      # `smokeCompiledBinary`. That smoke path's sharp-native-addon staging
+      # has no mapping for this host's glibc arch id ('linux-x64-gnu') in
+      # `SHARP_PLATFORM_IDS` (only musl Linux ids are listed there), so it
+      # fails on ANY glibc Linux host for an app that depends on sharp —
+      # every app this builder scaffolds does. Measured on the first run of
+      # this job (37024525618 / 37025016818); not fixed here (no product
+      # code changes). `--skip-smoke` is this CLI's own documented escape
+      # hatch for exactly this situation, and this job does its OWN boot
+      # check below anyway — on the REAL shipped musl binary, inside the
+      # REAL shipped Dockerfile, which the internal smoke does not even
+      # attempt (it smokes a stand-in glibc build, never the musl artifact).
+      - name: knext build --skip-smoke (vite build -> bun build --compile --bytecode)
         working-directory: app
         run: |
           set -euo pipefail
-          node_modules/.bin/knext build 2>&1 | tee build.log
+          node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
           grep -q '\[knext compile\] wrote .*(bytecode: on' build.log || {
             echo "::error::build.log never reported 'bytecode: on' — the compiled executable was not proven to carry bytecode" >&2
             exit 1
           }
           echo "bytecode evidence: $(grep '\[knext compile\] wrote' build.log)"
+          test -f Dockerfile
+          test -f knext-exec-linux-x64
+          test -d native
 
-      - name: Boot the compiled executable and assert a live 200
+      - name: docker build (the real shipped musl image) and assert a live 200
         working-directory: app
         run: |
           set -euo pipefail
-          EXEC="$(find . -maxdepth 1 -name 'knext-exec-*' -type f | sort | head -n1)"
-          if [ -z "${EXEC}" ]; then
-            echo "::error::no knext-exec-* binary found after knext build" >&2
-            exit 1
-          fi
-          file "${EXEC}"
-          PORT=8099 HOSTNAME="" NODE_ENV=production "./${EXEC##*/}" &
-          PID=$!
+          docker build -t rc5-vinext-bun:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 rc5-vinext-bun:proof)"
           CODE=000
           for _ in $(seq 1 30); do
             CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
             [ "${CODE}" = "200" ] && break
             sleep 1
           done
-          kill "${PID}" 2>/dev/null || true
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
           echo "GET /api/health -> ${CODE}"
           cat /tmp/health.json || true
           if [ "${CODE}" != "200" ]; then
             echo "::error::vinext x bun (rc.5) never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
             exit 1
           fi
 
@@ -249,9 +263,19 @@ jobs:
             cat /tmp/container.log >&2 || true
             exit 1
           fi
-          grep -q 'COMPILE_CACHE.*was accepted' /tmp/container.log || {
-            echo "::error::container log never reported the compile cache being accepted on boot" >&2
+          # The "COMPILE_CACHE:<dir>" line (the entry's own startup log,
+          # uppercase/no-space) confirms the dir is wired; "was accepted"
+          # (node's own `[compile cache]` debug line, lowercase, logged once
+          # per module as NODE_DEBUG_NATIVE=COMPILE_CACHE requests) is the
+          # actual boot-time cache-hit evidence — the two never share a line.
+          grep -q '^COMPILE_CACHE:' /tmp/container.log || {
+            echo "::error::container log never reported the COMPILE_CACHE startup line" >&2
             cat /tmp/container.log >&2
             exit 1
           }
-          echo "compile-cache boot evidence: $(grep 'COMPILE_CACHE' /tmp/container.log)"
+          grep -q 'was accepted' /tmp/container.log || {
+            echo "::error::container log never reported a compile-cache entry being accepted on boot" >&2
+            cat /tmp/container.log >&2
+            exit 1
+          }
+          echo "compile-cache boot evidence: $(grep -m1 '^COMPILE_CACHE:' /tmp/container.log), $(grep -c 'was accepted' /tmp/container.log) entries accepted"
