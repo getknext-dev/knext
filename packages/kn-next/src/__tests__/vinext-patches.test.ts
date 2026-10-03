@@ -711,16 +711,20 @@ describe("the bundled patches against the published tarball", () => {
         expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
     });
 
-    it("vinext#3687: a function-form next.config gets the real pageExtensions default, not an empty object", async () => {
+    it("vinext#3687 (site A, resolveConfigValue): a CJS function-form next.config gets the real pageExtensions default, not an empty object", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             loadNextConfig: (
                 root: string,
             ) => Promise<{ pageExtensions?: string[] } | null>;
         }>("dist/config/next-config.js");
-        const tmpDir = mkdtempSync(join(tmpdir(), "knext-vp-pageext-"));
+        const tmpDir = mkdtempSync(join(tmpdir(), "knext-vp-pageext-cjs-"));
         try {
             // Ported from Next.js: test/e2e/custom-page-extension/next.config.js
+            // A plain CommonJS next.config.js: vinext's Vite-runner virtual-module
+            // loader (site B, below) throws evaluating `module.exports` as ESM and
+            // falls back to `loadConfigViaRequire` -> `resolveConfigValue` (site A),
+            // so this exercises ONLY site A's `{ defaultConfig: {} }` call.
             writeFileSync(
                 join(tmpDir, "next.config.js"),
                 "module.exports = (phase, { defaultConfig }) => ({\n" +
@@ -734,6 +738,48 @@ describe("the bundled patches against the published tarball", () => {
                 "jsx",
                 "js",
                 "page.js",
+            ]);
+        } finally {
+            rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it("vinext#3687 (site B, the virtual-module loader): a .ts function-form next.config gets the real pageExtensions default, not an empty object", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            loadNextConfig: (
+                root: string,
+            ) => Promise<{ pageExtensions?: string[] } | null>;
+        }>("dist/config/next-config.js");
+        const tmpDir = mkdtempSync(join(tmpdir(), "knext-vp-pageext-ts-"));
+        try {
+            symlinkSync(
+                join(PKG_ROOT, "node_modules"),
+                join(tmpDir, "node_modules"),
+                "junction",
+            );
+            writeFileSync(
+                join(tmpDir, "package.json"),
+                JSON.stringify({ type: "module" }),
+            );
+            // A .ts function-form config is valid ESM (unlike the CJS .js
+            // fixture above), so vinext's Vite-runner `runnerImport` of the
+            // generated virtual module (site B) succeeds on its own and never
+            // falls back to `loadConfigViaRequire` -- this exercises ONLY
+            // site B's embedded `{ defaultConfig: {} }` template literal.
+            writeFileSync(
+                join(tmpDir, "next.config.ts"),
+                "export default (phase: string, { defaultConfig }: { defaultConfig: { pageExtensions?: string[] } }) => ({\n" +
+                    '  pageExtensions: [...(defaultConfig.pageExtensions ?? []), "page.ts"],\n' +
+                    "});\n",
+            );
+            const config = await mod.loadNextConfig(tmpDir);
+            expect(config?.pageExtensions).toEqual([
+                "tsx",
+                "ts",
+                "jsx",
+                "js",
+                "page.ts",
             ]);
         } finally {
             rmSync(tmpDir, { recursive: true, force: true });
