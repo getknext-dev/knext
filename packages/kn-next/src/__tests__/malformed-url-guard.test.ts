@@ -621,6 +621,14 @@ function writeEntryApp(): string {
     pkg("@getknext/core", {
         "./internal/vinext-image-optimizer": "./image.mjs",
         "./internal/response-cache-control": "./cache-control.mjs",
+        // #1863: the real entry now side-effect-imports the ARP/neighbour-table
+        // primer as its very first statement. A no-op stub is enough — this
+        // fixture is proving the entry's OWN listener wiring, not the primer's
+        // logic (covered by arp-primer.test.ts); without this subpath declared,
+        // the real entry's `import '@getknext/core/internal/arp-primer';` fails
+        // to resolve under node's real ESM resolver and the child exits before
+        // ever printing LISTENING, which reads as a boot timeout.
+        "./internal/arp-primer": "./arp-primer.mjs",
     });
     w(
         "node_modules/@getknext/core/image.mjs",
@@ -631,6 +639,7 @@ function writeEntryApp(): string {
         "export const applyVinextDeployDefault = () => {};\n" +
             "export const cacheControlMiddleware = () => (_req, next) => next();\n",
     );
+    w("node_modules/@getknext/core/arp-primer.mjs", "");
     symlinkSync(
         realpathSync(join(REPO_ROOT, "apps/file-manager/node_modules/srvx")),
         join(dir, "node_modules/srvx"),
