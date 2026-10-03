@@ -22,7 +22,7 @@
  *
  * Out of scope: request routing, bun --compile, operator changes.
  */
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import type { NextAdapter } from "next";
@@ -54,6 +54,71 @@ type Legacy160RoutesCtx = {
         dynamicRoutes?: unknown;
     };
 };
+
+/** The module specifier every knext scaffold's `cache-handler.js` re-exports. */
+const KNEXT_CACHE_HANDLER_SPECIFIER = "@getknext/core/adapters/cache-handler";
+
+/**
+ * Whether `cacheHandlerPath` is knext's own cache handler: the module itself
+ * (a path inside the published package or this source tree), or an app file
+ * that re-exports it — the one-liner every scaffold generates. Unreadable =
+ * not knext's: the caller then leaves Next's default alone.
+ */
+function isKnextCacheHandler(cacheHandlerPath: string): boolean {
+    const p = cacheHandlerPath.replaceAll("\\", "/");
+    if (
+        /\/@getknext\/core\/.*\/cache-handler\.[cm]?js$/.test(p) ||
+        /\/kn-next\/src\/adapters\/cache-handler\.js$/.test(p)
+    ) {
+        return true;
+    }
+    try {
+        // A re-export file is a few lines; never read a whole bundle.
+        const head = readFileSync(cacheHandlerPath, "utf-8").slice(0, 4096);
+        return head.includes(KNEXT_CACHE_HANDLER_SPECIFIER);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Write-free runtime: route Next's optimized-image cache through the knext
+ * cache handler instead of `.next/cache/images` on local disk.
+ *
+ * Next 16.2+ stores image-optimizer variants through `cacheHandler` when
+ * `images.customCacheHandler` is true (the official option); otherwise it
+ * writes them to the build's `.next/cache/images`, which on a read-only root
+ * filesystem needs a writable volume — and every such volume costs
+ * pod-sandbox setup time on each cold wake. knext's handler stores the
+ * variant's bytes in Redis (shared across pods and wakes) or a byte-bounded
+ * in-process map, so with it the app needs no writable path for images.
+ *
+ * Applied only when:
+ *  - the app's `cacheHandler` is knext's (a user handler may not round-trip
+ *    the entry's raw Buffer, and a broken entry serves a broken image);
+ *  - this Next has the option at all — `modifyConfig` sees the RESOLVED
+ *    config, so a supporting Next always carries it as a boolean;
+ *  - `KNEXT_IMAGE_CACHE_HANDLER` is not `0` at build time (opt-out: keep
+ *    Next's disk cache, and give the app a writable volume yourself).
+ *
+ * `knext deploy` reads the built `required-server-files.json` back to decide
+ * whether the image is write-free (`spec.security.writeFree`).
+ */
+function imageCacheThroughHandler(
+    config: Parameters<NonNullable<NextAdapter["modifyConfig"]>>[0],
+): { images?: typeof config.images } {
+    const images = config.images as
+        | (typeof config.images & { customCacheHandler?: unknown })
+        | undefined;
+    if (!images || typeof images.customCacheHandler !== "boolean") return {};
+    if (images.customCacheHandler) return {};
+    if (process.env.KNEXT_IMAGE_CACHE_HANDLER === "0") return {};
+    const handler = config.cacheHandler;
+    if (typeof handler !== "string" || !isKnextCacheHandler(handler)) {
+        return {};
+    }
+    return { images: { ...images, customCacheHandler: true } };
+}
 
 const adapter: NextAdapter = {
     name: "knext-adapter",
@@ -101,6 +166,7 @@ const adapter: NextAdapter = {
         return {
             ...config,
             ...(isProductionBuild ? { output: "standalone" as const } : {}),
+            ...imageCacheThroughHandler(config),
             webpack(webpackConfig, ctx) {
                 const cfg = appWebpack
                     ? appWebpack(webpackConfig, ctx)

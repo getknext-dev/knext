@@ -2756,6 +2756,29 @@ export const REMOTE_FETCH_ALLOWLIST = [
     segment: /^node scripts\/rc-scaffold-platform-e2e\.mjs$/,
   },
   {
+    id: 'write-free-e2e-http-check',
+    // .github/workflows/write-free-runtime-kind-e2e.yml#write-free-e2e reuses
+    // the SAME assertion script as rc-scaffold-platform-e2e-http-check above
+    // (invoked as `./scripts/…` so each call site matches exactly one entry),
+    // with the same justification: HTTP only to the Kourier/MinIO
+    // port-forwards this job stood up, host read back from the NextApp's own
+    // status. The job's only apply is its own redis/minio heredoc, which
+    // reads nothing this script writes (it writes nothing at all).
+    segment: /^node \.\/scripts\/rc-scaffold-platform-e2e\.mjs$/,
+  },
+  {
+    id: 'write-free-e2e-knext-create',
+    // .github/workflows/write-free-runtime-kind-e2e.yml: `kn-next create` from
+    // this commit's build output scaffolds the app under test into
+    // $RUNNER_TEMP. `dist/` is untracked build output, so `resolveSource`
+    // cannot read it and it fails closed as "could not be resolved" (same as
+    // platform-e2e-knext-deploy-image-leg). What it does is published
+    // @getknext/core behavior: render templates to local files. It applies
+    // nothing to any cluster and fetches nothing an apply reads.
+    segment:
+      /^node packages\/kn-next\/dist\/cli\/kn-next\.js create "\$APP_DIR" --name "\$APP_NAME"$/,
+  },
+  {
     id: 'release-audit-npm-closure-fetch',
     // #1801 round 3 (fix 5): release.yml#audit's `node scripts/audit-published.mjs`
     // surfaced ONLY because `audit` is now needs:+artifact-linked into the

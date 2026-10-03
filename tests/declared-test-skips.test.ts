@@ -63,6 +63,13 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'vanishing; everywhere else (no patched binary on the host) the case skips and the always-on ' +
       'stock-Bun fail-closed case in the same file still runs.',
   },
+  'packages/kn-next/src/__tests__/image-cache-sync-write-free.test.ts': {
+    skips: { 'it.skipIf': 2 },
+    reason:
+      'Both read-only-cache-directory tests chmod a directory 0555 so the image sync has a real ' +
+      'unwritable target; root ignores directory permissions, so under uid 0 neither failure can ' +
+      'happen. CI runners are not root, so both run there; only a root shell skips them.',
+  },
   'packages/kn-next/src/__tests__/vinext-patches.test.ts': {
     skips: { 'it.skipIf': 1 },
     reason:

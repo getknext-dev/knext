@@ -236,6 +236,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // is what exposed the pnpm/bun mismatch (run 33883692192).
       'compat-vinext.yml': 2,
       'bun-sandbox-fetch-ab.yml': 1,
+      // The write-free runtime proof lane (dispatch-only): one setup-bun to
+      // build the workspace + compile the default bun runtime.
+      'write-free-runtime-kind-e2e.yml': 1,
       // NEW (#926): the npm publish lane installed with `pnpm install
       // --frozen-lockfile` against a repo with NO pnpm-lock.yaml, so every job
       // died at install. All three release.yml jobs now install with bun,

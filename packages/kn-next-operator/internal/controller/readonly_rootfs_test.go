@@ -116,6 +116,7 @@ func TestBuildDesiredKsvcReadOnlyRootFilesystemMounts(t *testing.T) {
 		selfContained  bool
 		storage        *appsv1alpha1.StorageSpec
 		writableCache  *bool
+		writeFree      *bool
 		wantTmp        bool
 		wantImageCache bool
 	}{
@@ -129,6 +130,14 @@ func TestBuildDesiredKsvcReadOnlyRootFilesystemMounts(t *testing.T) {
 		{name: "writableCache true + standalone (unset build): mounts /tmp and the image cache", build: "", writableCache: ptr.To(true), wantTmp: true, wantImageCache: true},
 		{name: "writableCache true + webpack: mounts /tmp and the image cache", build: "webpack", writableCache: ptr.To(true), wantTmp: true, wantImageCache: true},
 		{name: "writableCache true + vinext: mounts only /tmp", build: "vinext", writableCache: ptr.To(true), wantTmp: true},
+		// spec.security.writeFree (the CLI states the image's runtime writes
+		// nothing to local disk): the shape-inferred mounts above are dropped.
+		{name: "writeFree + vinext (disk-mode binary): no mounts at all", build: "vinext", writeFree: ptr.To(true)},
+		{name: "writeFree + standalone + spec.storage (images handler-routed): no mounts at all", build: "turbopack", storage: &appsv1alpha1.StorageSpec{Provider: "gcs", Bucket: "b"}, writeFree: ptr.To(true)},
+		{name: "writeFree + standalone selfContained (no native addons): no mounts at all", build: "turbopack", selfContained: true, writeFree: ptr.To(true)},
+		{name: "writeFree + writableCache true: the escape hatch still mounts both", build: "turbopack", writeFree: ptr.To(true), writableCache: ptr.To(true), wantTmp: true, wantImageCache: true},
+		{name: "writeFree explicitly false + vinext: today's inference (/tmp)", build: "vinext", writeFree: ptr.To(false), wantTmp: true},
+		{name: "writeFree explicitly false + standalone + storage: today's inference (image cache)", build: "turbopack", storage: &appsv1alpha1.StorageSpec{Provider: "gcs", Bucket: "b"}, writeFree: ptr.To(false), wantImageCache: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,8 +159,8 @@ func TestBuildDesiredKsvcReadOnlyRootFilesystemMounts(t *testing.T) {
 					Storage:       tc.storage,
 				},
 			}
-			if tc.writableCache != nil {
-				app.Spec.Security = &appsv1alpha1.SecuritySpec{WritableCache: tc.writableCache}
+			if tc.writableCache != nil || tc.writeFree != nil {
+				app.Spec.Security = &appsv1alpha1.SecuritySpec{WritableCache: tc.writableCache, WriteFree: tc.writeFree}
 			}
 			ksvc := &servingv1.Service{
 				ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
