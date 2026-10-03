@@ -48,6 +48,8 @@
       "default": "./dist/validate-public.js"
     },
     "./internal/cache-drain": "./dist/adapters/cache-write-registry.js",
+    "./internal/cache-handler-node": "./dist/adapters/cache-handler-node.js",
+    "./internal/cache-handler-bun": "./dist/adapters/cache-handler-bun.js",
     "./internal/vinext-cache-adapter": "./dist/adapters/vinext-cache-adapter.js",
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",

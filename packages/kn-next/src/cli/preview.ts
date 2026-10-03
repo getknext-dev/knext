@@ -33,7 +33,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -397,6 +400,7 @@ export async function defaultBuildAndPush(
     runProjectBuild({
         requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
         builderId: config.build ?? DEFAULT_BUILDER_ID,
+        runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
     });
 
     // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile for

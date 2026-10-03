@@ -2779,6 +2779,28 @@ export const REMOTE_FETCH_ALLOWLIST = [
       /^node packages\/kn-next\/dist\/cli\/kn-next\.js create "\$APP_DIR" --name "\$APP_NAME"$/,
   },
   {
+    id: 'node-redis-e2e-http-check',
+    // .github/workflows/runtime-redis-cache-kind-e2e.yml#node-redis-e2e reuses
+    // the SAME assertion script as the two http-check entries above (invoked
+    // as `scripts/./…` so each call site matches exactly one entry), with the
+    // same justification: HTTP only to the Kourier/MinIO port-forwards this
+    // job stood up, host read back from the NextApp's own status. The job's
+    // only apply is its own redis/minio heredoc, which reads nothing this
+    // script writes (it writes nothing at all).
+    segment: /^node scripts\/\.\/rc-scaffold-platform-e2e\.mjs$/,
+  },
+  {
+    id: 'node-redis-e2e-knext-create',
+    // .github/workflows/runtime-redis-cache-kind-e2e.yml: the same `kn-next
+    // create` from this commit's untracked build output as
+    // write-free-e2e-knext-create above (spelled `./packages/…` so each call
+    // site matches exactly one entry). It renders templates to local files
+    // under $RUNNER_TEMP, applies nothing to any cluster and fetches nothing
+    // an apply reads.
+    segment:
+      /^node \.\/packages\/kn-next\/dist\/cli\/kn-next\.js create "\$APP_DIR" --name "\$APP_NAME"$/,
+  },
+  {
     id: 'release-audit-npm-closure-fetch',
     // #1801 round 3 (fix 5): release.yml#audit's `node scripts/audit-published.mjs`
     // surfaced ONLY because `audit` is now needs:+artifact-linked into the
