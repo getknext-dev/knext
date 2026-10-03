@@ -340,7 +340,7 @@ export type RuntimeChoice = "bun" | "node";
  * so the two never disagree. Parses and re-serializes in the template's own
  * format (2-space JSON, trailing newline); every other key keeps its place.
  */
-function withNodeRedisClient(packageJson: string): string {
+export function withNodeRedisClient(packageJson: string): string {
     const pkg = JSON.parse(packageJson) as {
         dependencies?: Record<string, string>;
     };
