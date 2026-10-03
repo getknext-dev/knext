@@ -54,6 +54,7 @@
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
     "./internal/request-body-cap": "./dist/adapters/request-body-cap.cjs",
+    "./internal/arp-primer": "./dist/adapters/arp-primer.cjs",
     "./internal/bun-serve-keepalive-guard": "./dist/adapters/bun-serve-keepalive-guard.js",
     "./internal/response-cache-control": "./dist/adapters/response-cache-control.js",
     "./internal/sandbox-fetch-debug": "./dist/adapters/sandbox-fetch-debug.cjs",
