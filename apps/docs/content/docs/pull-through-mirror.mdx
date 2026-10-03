@@ -23,6 +23,13 @@ rest of this page is a recipe you apply at the cluster level, independent of any
 
 ## What it is worth
 
+**The mirror's benefit depends mostly on how far your nodes are from your registry.** The two
+measurements below pull the same class of image (a 78 MB layer) through the same kind of mirror,
+on two different clusters — one with the registry far from the cluster, one with the registry in
+the same region — and the gap moves with the distance, not with the mirror itself.
+
+### Measurement 1: remote registry (OKE)
+
 Measured on a two-node cluster (CRI-O 1.34.8, Oracle Linux 8), pulling a 78 MB image from a registry
 in a different region from the cluster, 12 cold starts per configuration:
 
@@ -32,22 +39,44 @@ in a different region from the cluster, 12 cold starts per configuration:
 | in-cluster pull-through mirror (already holding the image) | 5.73 s | 7.6 s |
 | `imagePrewarm` (image already resident, no pull) | 2.25 s | 2.8 s |
 
-Three things to take from that table, not just the headline number:
+Against a remote registry, the mirror cut the median cold start by about **48%**, and the
+first-ever pull through the mirror (the miss, before anything is cached) cost **about 0.8 seconds
+more** than pulling the same image directly, because the mirror fetches from upstream and relays
+to the node at the same time.
 
-- **`imagePrewarm` stays faster** than a mirror hit by roughly 2.5×, because it skips the pull
-  entirely rather than shortening it. If you can prewarm the app, prewarming beats mirroring.
-- **The mirror's advantage narrows with registry distance.** The gap above is for an upstream
-  registry remote from the cluster's region. A registry in the same region as your cluster closes
-  much of that gap on its own — in an earlier same-region measurement, a direct pull of a larger
-  image added about 2.3 seconds at the median, nowhere near the 10-second direct-pull figure
-  above. Quote the mirror's benefit against your own registry's distance, not against this table.
-- **The mirror only helps once an image has already been pulled through it once.** The first pull
-  of any new build — the miss — costs **about 0.8 seconds more** than pulling the same image
-  directly, because the mirror has to fetch from upstream and relay to the node at the same time.
-  A cluster that rebuilds images constantly, with few repeat pulls of the same digest, sees less
-  benefit than one that reuses the same image across many pods and nodes.
+### Measurement 2: same-region registry (GKE)
 
-A side effect, observed during the same measurement: because the mirror holds its own upstream
+Measured on a two-node GKE cluster (2 × e2-standard-4, containerd, Artifact Registry in the same
+region as the nodes), pulling a 78 MB-class image, 14 cold starts per configuration:
+
+| configuration | cold start, median | p95 |
+|---|---|---|
+| direct pull from the upstream registry | 9.83 s | 10.95 s |
+| in-cluster pull-through mirror (already holding the image) | 8.62 s | 11.15 s |
+| `imagePrewarm` (image already resident, no pull) | 3.78 s | 4.89 s |
+
+With the registry in the same region, the mirror's win falls to about **12%** (a statistically
+significant but small effect — p = 0.016 on the full run, and only p = 0.058 once two excluded
+cycles from a measurement-process error are counted back in, so treat the same-region win as
+fragile, not as a stable guarantee). The miss cost also shrinks to **about 0.2 seconds more** than
+a direct pull, because there is less distance for the mirror to add relay time to in the first
+place.
+
+Three things to take from both tables, not just the headline numbers:
+
+- **`imagePrewarm` wins on both clusters** — faster than a mirror hit by roughly 1.6–2.5×, because
+  it skips the pull entirely rather than shortening it. If you can prewarm the app, prewarming
+  beats mirroring regardless of registry distance.
+- **Quote the mirror's benefit against your own registry's distance from your nodes, not against
+  either table above.** A remote upstream registry is where this recipe earns its operational
+  cost; a same-region registry narrows the win to roughly a second, which may not be worth the
+  stateful component and the node-level configuration change described below.
+- **The mirror only helps once an image has already been pulled through it once.** A cluster that
+  rebuilds images constantly, with few repeat pulls of the same digest, sees less benefit than one
+  that reuses the same image across many pods and nodes — on both clusters above, every miss cost
+  more than a direct pull.
+
+A side effect, observed during the OKE measurement: because the mirror holds its own upstream
 credentials, a pod that pulls through it is unaffected by a node's own pull-secret failing — a
 failure mode that otherwise shows up as an intermittent `ImagePullBackOff` on the direct path.
 That is a side benefit of running a mirror, not a reason to run one on its own.
@@ -118,15 +147,27 @@ server = "https://your-upstream-registry.example.com"
   capabilities = ["pull", "resolve"]
 ```
 
-containerd picks this up without a config reload on most distributions; confirm the behavior on
-whichever Kubernetes distribution provisioned your nodes, since the exact containerd version and
-packaging vary.
+**Do not assume this is picked up without a config reload.** On a managed GKE node (COS,
+containerd 2.2), the stock containerd config ships the legacy `registry.mirrors."docker.io"` block
+and no `config_path` at all, and the two mechanisms cannot coexist — a `hosts.toml` mirror is
+silently ignored until `config_path` is set. Getting this recipe working on that cluster needed a
+containerd config edit (removing the legacy mirrors block, adding `config_path =
+"/etc/containerd/certs.d"`) **and a containerd restart**, not a reload: containerd has no
+reload-only path for this change. **Restarting containerd can disrupt the pods already running on
+that node**, so do this during node bootstrap (bake the edit into your node pool's bootstrap
+process or cloud-init, the same durability concern as the [risks](#risks) below), not by hand on a
+node already carrying traffic. A node-pool upgrade or node recreate on a managed platform drops a
+hand-applied edit, the same as the CRI-O drop-in. Confirm the exact containerd version and config
+layout on whichever Kubernetes distribution provisioned your nodes before relying on this.
 
-<Callout type="info">
-If your cluster runs containerd, **[Spegel](https://github.com/spegel-org/spegel)** is a
-containerd-only peer-to-peer alternative worth evaluating instead of a centralized proxy registry:
-nodes serve cached layers to each other directly, with no separate stateful registry to run. It
-has no CRI-O equivalent, so it is not an option on a CRI-O cluster.
+<Callout type="warn">
+**[Spegel](https://github.com/spegel-org/spegel)** is a containerd-only peer-to-peer alternative to
+a centralized proxy registry — nodes would serve cached layers to each other directly, with no
+separate stateful registry to run. knext has **not validated it**: in our test on a two-node GKE
+cluster, Spegel 0.7.4's peer lookup never resolved (the target node logged `MANIFEST_UNKNOWN could
+not find peer` on every attempt), so no cold start could be measured. We are not recommending it
+until that is understood. It has no CRI-O equivalent either way, so it is not an option on a
+CRI-O cluster.
 </Callout>
 
 ## Risks
