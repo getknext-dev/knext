@@ -181,22 +181,36 @@ afterAll(() => {
 });
 
 describe("next/og's ImageResponse survives the compiled single executable, shipped without its build dir", () => {
-    it("GET /api/og is 200, not the ENOENT 500 cluster C4 names", async () => {
+    // ONE fetch, body drained immediately — not one `fetch()` per assertion.
+    // The server answers `Connection: close` per request (vinext's default);
+    // leaving an earlier response's body unread before issuing the NEXT
+    // `fetch()` measurably corrupts that next response (empty body, null
+    // content-type, still status 200) on this exact build — not a cluster C4
+    // symptom, a test-harness connection-reuse hazard. Fetching once and
+    // asserting every facet from the one drained response sidesteps it.
+    let status: number;
+    let contentType: string | null;
+    let bytes: Uint8Array;
+
+    beforeAll(async () => {
         const res = await fetch(`http://127.0.0.1:${port}/api/og`);
-        expect(res.status).toBe(200);
+        status = res.status;
+        contentType = res.headers.get("content-type");
+        bytes = new Uint8Array(await res.arrayBuffer());
     });
 
-    it("the response is a real, decodable PNG — not an error page or empty body", async () => {
-        const res = await fetch(`http://127.0.0.1:${port}/api/og`);
-        const bytes = new Uint8Array(await res.arrayBuffer());
+    it("GET /api/og is 200, not the ENOENT 500 cluster C4 names", () => {
+        expect(status).toBe(200);
+    });
+
+    it("the response is a real, decodable PNG — not an error page or empty body", () => {
         // PNG magic: 89 50 4E 47 0D 0A 1A 0A
         const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
         expect([...bytes.slice(0, 8)]).toEqual(PNG_MAGIC);
         expect(bytes.byteLength).toBeGreaterThan(100);
     });
 
-    it("the response declares an image content-type", async () => {
-        const res = await fetch(`http://127.0.0.1:${port}/api/og`);
-        expect(res.headers.get("content-type")).toMatch(/^image\//);
+    it("the response declares an image content-type", () => {
+        expect(contentType).toMatch(/^image\//);
     });
 });
