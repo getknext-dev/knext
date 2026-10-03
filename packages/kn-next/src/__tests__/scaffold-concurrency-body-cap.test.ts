@@ -3,7 +3,7 @@
  * the value ADR-0044's request-body cap was sized for lets concurrent large
  * uploads buffer enough bytes to OOM-kill a 1Gi pod. `knext create`'s two app
  * templates and the in-repo zone scaffolder all set `containerConcurrency: 100`
- * — four to five times the operator's default of 20 (ADR-0028), which is the
+ * — five times the operator's default of 20 (ADR-0028), which is the
  * concurrency the 8 MiB cap's own arithmetic assumes (`DEFAULT_MAX_REQUEST_BYTES`'s
  * doc comment in `runtime-contract.mjs.hbs`: "1Gi memory limit, containerConcurrency
  * 20, so 20 worst-case buffered bodies must stay far under the limit").
@@ -12,15 +12,17 @@
  * `20` a second time — so if the cap's sizing assumption ever changes, this test's
  * notion of "safe" moves with it instead of silently going stale.
  *
- * Scope: every Handlebars scaffold template under `packages/kn-next/templates/`
- * and `turbo/generators/templates/` that emits a `scaling:` block. A template
- * added tomorrow in a directory nobody has thought of must be caught too, so
- * this scans the whole tree for `*.hbs` files rather than enumerating paths.
+ * Scope: every template/generator file (`.hbs`, `.ts`, `.js`, `.mjs`, `.json`,
+ * `.yaml`, `.yml`) under the scaffold template and generator directories — not
+ * only `*.hbs`, since a generator can also emit the key as quoted JSON
+ * (`"containerConcurrency": 100`) rather than a bare TS/JS object literal key.
+ * A file added tomorrow in one of these directories must be caught too, so this
+ * walks the whole subtree rather than enumerating paths.
  */
 
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,19 +44,48 @@ const SKIP_DIRS = new Set([
     "graphify-out",
 ]);
 
-/** Walk the whole repo tree and return every `.hbs` file's absolute path. */
-function findHbsFiles(dir: string, out: string[] = []): string[] {
+/** The scaffold template and generator directories this guard is scoped to. */
+const SCAN_DIRS = [
+    join(REPO_ROOT, "packages", "kn-next", "templates"),
+    join(REPO_ROOT, "packages", "kn-next", "src", "generators"),
+    join(REPO_ROOT, "turbo", "generators"),
+];
+
+/** File extensions a scaffold template or generator can plausibly use. */
+const SCAN_EXTENSIONS = new Set([
+    ".hbs",
+    ".ts",
+    ".js",
+    ".mjs",
+    ".json",
+    ".yaml",
+    ".yml",
+]);
+
+/** Walk a directory tree and return every file matching `SCAN_EXTENSIONS`. */
+function findScannableFiles(dir: string, out: string[] = []): string[] {
     for (const entry of readdirSync(dir)) {
         if (SKIP_DIRS.has(entry)) continue;
         const p = join(dir, entry);
         const st = statSync(p);
         if (st.isDirectory()) {
-            findHbsFiles(p, out);
-        } else if (entry.endsWith(".hbs")) {
+            findScannableFiles(p, out);
+        } else if (SCAN_EXTENSIONS.has(extname(entry))) {
             out.push(p);
         }
     }
     return out;
+}
+
+/**
+ * Extract every `containerConcurrency` value from a source string — the key
+ * optionally single- or double-quoted (the TS/JS object-literal form and the
+ * quoted-JSON form both appear across these directories), value unquoted
+ * (valid in both TS/JS and JSON).
+ */
+function extractContainerConcurrencyValues(src: string): number[] {
+    const matches = src.matchAll(/["']?containerConcurrency["']?\s*:\s*(\d+)/g);
+    return [...matches].map((m) => Number(m[1]));
 }
 
 /**
@@ -87,23 +118,53 @@ function deriveSafeContainerConcurrency(): number {
     return Number(match[1]);
 }
 
+describe("extractContainerConcurrencyValues", () => {
+    it("matches the bare TS/JS object-literal key form", () => {
+        expect(
+            extractContainerConcurrencyValues("containerConcurrency: 100,"),
+        ).toEqual([100]);
+    });
+
+    it("matches the double-quoted JSON key form", () => {
+        expect(
+            extractContainerConcurrencyValues('"containerConcurrency": 100,'),
+        ).toEqual([100]);
+    });
+
+    it("matches the single-quoted key form", () => {
+        expect(
+            extractContainerConcurrencyValues("'containerConcurrency': 50,"),
+        ).toEqual([50]);
+    });
+
+    it("matches multiple occurrences across a file", () => {
+        expect(
+            extractContainerConcurrencyValues(
+                'containerConcurrency: 20,\n"containerConcurrency": 100,',
+            ),
+        ).toEqual([20, 100]);
+    });
+
+    it("finds nothing when the key is absent", () => {
+        expect(extractContainerConcurrencyValues("maxScale: 10,")).toEqual([]);
+    });
+});
+
 describe("scaffold templates never exceed the body cap's sized concurrency (#1834)", () => {
     it("derives a safe ceiling from runtime-contract.mjs.hbs's own sizing arithmetic", () => {
         const safe = deriveSafeContainerConcurrency();
         expect(safe).toBe(20);
     });
 
-    it("no *.hbs scaffold template sets scaling.containerConcurrency above that ceiling", () => {
+    it("no template/generator file sets containerConcurrency above that ceiling, in either key form", () => {
         const safe = deriveSafeContainerConcurrency();
-        const hbsFiles = findHbsFiles(REPO_ROOT);
-        expect(hbsFiles.length).toBeGreaterThan(0);
+        const files = SCAN_DIRS.flatMap((dir) => findScannableFiles(dir));
+        expect(files.length).toBeGreaterThan(0);
 
         const offenders: string[] = [];
-        for (const file of hbsFiles) {
+        for (const file of files) {
             const src = readFileSync(file, "utf8");
-            const matches = src.matchAll(/containerConcurrency\s*:\s*(\d+)/g);
-            for (const m of matches) {
-                const value = Number(m[1]);
+            for (const value of extractContainerConcurrencyValues(src)) {
                 if (value > safe) {
                     offenders.push(
                         `${file} sets containerConcurrency: ${value} (max safe: ${safe})`,
