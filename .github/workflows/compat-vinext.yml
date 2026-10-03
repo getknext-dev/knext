@@ -785,19 +785,38 @@ jobs:
         run: |
           set -euo pipefail
           # R1 — dispatch-only targeted re-run (TEST_FILES, see the workflow_dispatch
-          # input above). Non-empty: every shard runs this same explicit file list as
-          # run-tests.js POSITIONAL patterns INSTEAD OF -g <shard> — a targeted re-run
-          # needs each requested file exercised, not whichever 1/16 it happens to land
-          # in. Empty (the schedule, and the default on dispatch): unchanged -g path.
+          # input above). Non-empty: every shard runs this same explicit file list
+          # INSTEAD OF -g <shard> — a targeted re-run needs each requested file
+          # exercised, not whichever 1/16 it happens to land in. Empty (the
+          # schedule, and the default on dispatch): unchanged -g path.
+          #
+          # run-tests.js (run-tests.js:279) only treats a positional argument as an
+          # explicit test file when it matches /\.test\.(js|ts|tsx)/ -- anything
+          # else is silently dropped and it falls through to globbing and
+          # selecting the WHOLE corpus from NEXT_EXTERNAL_TESTS_FILTERS instead
+          # (confirmed live: run 37133371831 printed "total: 789" for every shard
+          # after a bare-substring dispatch, each shard then running the full
+          # suite instead of 3 files). So a bare substring like "twoslash" is
+          # resolved HERE, in the workflow, to the real test file(s) under test/
+          # whose path contains it, and any pattern matching NONE aborts the job
+          # rather than letting that silent full-suite fallback happen again.
           if [ -n "${TEST_FILES}" ]; then
             IFS=',' read -ra RAW_PATTERNS <<< "${TEST_FILES}"
-            PATTERNS=()
+            RESOLVED=()
             for raw in "${RAW_PATTERNS[@]}"; do
               trimmed="$(echo "${raw}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-              [ -n "${trimmed}" ] && PATTERNS+=("${trimmed}")
+              [ -z "${trimmed}" ] && continue
+              MATCHES="$(find test -type f \( -name '*.test.js' -o -name '*.test.ts' -o -name '*.test.tsx' \) | grep -i -- "${trimmed}" || true)"
+              if [ -z "${MATCHES}" ]; then
+                echo "::error::testFiles pattern '${trimmed}' matched no file under test/*.test.{js,ts,tsx} — aborting rather than silently falling back to the full suite (see run-tests.js:279)"
+                exit 1
+              fi
+              while IFS= read -r m; do
+                [ -n "${m}" ] && RESOLVED+=("${m}")
+              done <<< "${MATCHES}"
             done
-            echo "testFiles dispatch: running ${#PATTERNS[@]} pattern(s) on shard ${{ matrix.shard }}: ${PATTERNS[*]}"
-            node run-tests.js --type e2e --retries 0 -c 2 "${PATTERNS[@]}" 2>&1 | tee runner.log || true
+            echo "testFiles dispatch: resolved ${#RESOLVED[@]} file(s) on shard ${{ matrix.shard }}: ${RESOLVED[*]}"
+            node run-tests.js --type e2e --retries 0 -c 2 "${RESOLVED[@]}" 2>&1 | tee runner.log || true
           else
             node run-tests.js --type e2e --retries 0 -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
           fi
