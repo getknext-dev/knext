@@ -593,9 +593,11 @@ jobs:
 
       - name: Report
         run: |
-          echo "### React Compiler — measured on default target (turbopack x bun)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| | build time (s) | .next/static (KiB) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| without | ${BUILD_TIME_WITHOUT} | ${BUNDLE_SIZE_WITHOUT} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| with | ${BUILD_TIME_WITH} | ${BUNDLE_SIZE_WITH} |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### React Compiler — measured on default target (turbopack x bun)"
+            echo ""
+            echo "| | build time (s) | .next/static (KiB) |"
+            echo "|---|---|---|"
+            echo "| without | ${BUILD_TIME_WITHOUT} | ${BUNDLE_SIZE_WITHOUT} |"
+            echo "| with | ${BUILD_TIME_WITH} | ${BUNDLE_SIZE_WITH} |"
+          } >> "$GITHUB_STEP_SUMMARY"
