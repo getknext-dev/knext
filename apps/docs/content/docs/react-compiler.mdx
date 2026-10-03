@@ -1,0 +1,119 @@
+---
+title: React Compiler
+description: An opt-in config change you make in your app — React Compiler optimizes client-side rendering memoization. It does not change server time, cold start, or any knext default.
+---
+
+[React Compiler](https://react.dev/learn/react-compiler) is a build-time optimization for React
+itself. This page covers how to turn it on for a knext app, on every build target knext supports,
+and what it does and does not affect.
+
+## What it does, and does not, affect
+
+React Compiler automatically memoizes components and values during the build, so your app does
+less unnecessary re-rendering **in the browser**. It is a **client-rendering** optimization.
+
+It does **not** change:
+
+- server response time — nothing it does runs on the server;
+- cold start — knext's cold start is dominated by pod scheduling and process boot, neither of
+  which this touches (see [Scale to zero](/docs/scale-to-zero));
+- knext's build pipeline, runtime image, or any default. Enabling it is entirely a change inside
+  your app's own `next.config.ts` (or `vite.config.ts` on the vinext target) — knext's scaffold,
+  CLI, and CRD are unaware of it.
+
+Verified working on every knext build target: the official adapter (`build: 'turbopack'` or
+`'webpack'`, either runtime) and the vinext target (either runtime) — six cells, each confirmed by
+inspecting the actual compiled output for the compiler's own memoization markers, not just a
+successful build.
+
+## Official adapter target (`build: 'turbopack'` or `'webpack'`)
+
+Add `reactCompiler: true` to `next.config.ts`, and install the optional Babel plugin that
+performs the transform:
+
+```ts title="next.config.ts"
+const nextConfig: NextConfig = {
+  // ...your existing config
+  reactCompiler: true,
+};
+```
+
+```bash title="install the transform"
+npm install -D babel-plugin-react-compiler
+```
+
+This works identically on both bundlers (`build: 'turbopack'` and `build: 'webpack'`) and both
+runtimes (`runtime: 'bun'` and `runtime: 'node'`). Nothing else in your `knext.config.ts` changes.
+
+**Eligibility matters.** Next only applies the compiler to files it judges "relevant" — in
+practice, Client Components with real work to memoize (props, state, derived values). A trivial
+component with no props and nothing to recompute can be skipped even with the config on; this is
+Next's own documented behavior, not a knext limitation, and not something to work around.
+
+## vinext target (`build: 'vinext'`, Beta)
+
+On the [vinext build target](/docs/build-pipeline#the-vinext-pipeline), React Compiler is **not**
+a `next.config.ts` key — vinext does not read `reactCompiler` from there. It is an option on
+vinext's own Vite plugin, in `vite.config.ts`:
+
+```ts title="vite.config.ts"
+import vinext from 'vinext';
+
+export default defineConfig({
+  plugins: [
+    vinext({
+      react: { compiler: true },
+      // ...your existing vinext options
+    }),
+    // ...
+  ],
+});
+```
+
+This needs four packages, not one — vinext resolves `@vitejs/plugin-react` itself but only
+registers the compiler when that package is 6.1 or newer; the transform itself needs the Babel
+plugin, a Rolldown-compatible Babel bridge (vinext's Vite dependency is Vite 8, which bundles with
+Rolldown), and `@vitejs/plugin-react` 6.1's own required peer for the non-compiler JSX transform
+path it also uses:
+
+```bash title="install"
+npm install -D @vitejs/plugin-react@^6.1.0 babel-plugin-react-compiler @rolldown/plugin-babel oxc-transform-react
+```
+
+Leaving out `oxc-transform-react` fails the build outright (not a silent no-op): `@vitejs/plugin-react`
+errors with "React Compiler requires the optional `oxc-transform-react` package" the moment
+`react: { compiler: true }` is set without it installed.
+
+This is the same option and the same four packages on both vinext runtimes
+(`runtime: 'bun'` and `runtime: 'node'`).
+
+## Measured conditions
+
+Measured on knext's default target (official adapter, `build: 'turbopack'`, `runtime: 'bun'`),
+one small app with a single eligible Client Component (a filter/sort list), one CI runner,
+`next build` only (no deploy/cold-start numbers — see the caveat above for why those are
+unaffected):
+
+| | build time | `.next/static` size |
+|---|---|---|
+| without the compiler | 10 s | 592 KiB |
+| with the compiler | 10 s | 592 KiB |
+
+No measurable difference at this scale — the memoization bookkeeping the compiler adds roughly
+offsets what it removes, for an app this small with no actual expensive re-renders to save. The
+compiler's benefit scales with how much re-render work a component would otherwise repeat; a
+small test app is not where that shows up. Treat these numbers as "enabling it here costs nothing
+measurable," not as the ceiling on what it can do for a larger app.
+
+## Known limits
+
+- Next's own "only apply to relevant files" heuristic can skip trivial components — see
+  Eligibility above. If you need to confirm the compiler ran on a specific component, look in a
+  built client chunk for `Symbol.for("react.memo_cache_sentinel")` being compared (not merely
+  present — React defines the symbol regardless) alongside a cache-indexed array pattern.
+- On the vinext target, asking for `react: { compiler: true }` with an `@vitejs/plugin-react`
+  older than 6.1 installed is silently ignored — no error, no effect. A missing
+  `oxc-transform-react`, by contrast, fails the build loudly (see above).
+- This page covers knext's own build targets only. React Compiler's own eslint plugin, incremental
+  adoption, and per-component opt-out are the same as in any other React project — see the
+  [React Compiler docs](https://react.dev/learn/react-compiler) for those.

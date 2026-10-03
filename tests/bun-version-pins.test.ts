@@ -239,6 +239,13 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // `bun install --save-text-lockfile` for sharp's native-addon staging
       // (knext build reads bun.lock, not package-lock.json, to pin it).
       'rc5-vinext-beta-proof.yml': 2,
+      // NEW: the react-compiler-proof.yml lane has four setup-bun steps —
+      // the official-adapter matrix job's one setup-bun (compiled
+      // bytecode exec, both bundler cells share one job), the vinext x
+      // bun job's compile/serve runtime, the vinext x node job's
+      // sharp-native-addon lockfile step, and the bundle-size job's
+      // setup-bun (its app is the default bun target).
+      'react-compiler-proof.yml': 4,
     });
   });
 

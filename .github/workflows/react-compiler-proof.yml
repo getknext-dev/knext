@@ -1,0 +1,763 @@
+name: React Compiler proof (published bytes, every v1.0 build target)
+
+# ── Founder decision — React Compiler is an opt-in docs feature ────────────
+#
+# React Compiler (babel-plugin-react-compiler 1.0.0, stable) optimizes CLIENT
+# RENDERING memoization. It does not touch server time, build time, or cold
+# start. Nothing about it changes a knext default: no scaffold template, no
+# CLI flag, nothing in the v1.0 compatibility credential. This lane exists
+# to PROVE — against the real PUBLISHED npm bytes — that a consumer can
+# enable it on every v1.0 build-target cell and get a working build:
+#
+#   1. official adapter (`next build`) x {turbopack, webpack} x {node, bun}
+#      — the four v1.0 credential cells;
+#   2. vinext (Beta, opt-in build target) x {bun, node}.
+#
+# For each cell: scaffold with the PUBLISHED CLI, wire the compiler the way
+# the docs this lane proves tell a user to, `knext build`, boot the real
+# shipped image, and assert a live 200. Then confirm the compiler actually
+# transformed the injected test component — a build that merely *accepts*
+# the config option without erroring is not proof the transform ran.
+#
+# EVIDENCE, corrected (2026-10-03): a literal grep for the ESM import
+# specifier `react/compiler-runtime` and the unminified `_c(` call shape
+# — the FIRST version of this lane's check — produced a false negative on
+# every cell. Turbopack/webpack resolve that import into their own
+# numbered-module registry and minify `_c` to a short alias; vinext's
+# Rolldown output does the same once the component is complex enough to
+# trigger code-splitting (confirmed on this lane's own build output —
+# `(0,i.c)(14)`, vinext's own renaming of the same cache call). The
+# marker that survives all three — `Symbol.for("react.memo_cache_sentinel")`,
+# COMPARED (not merely defined — React's dispatcher always defines the
+# property whether or not anything was compiled) inside the compiled
+# cache-array logic — intersected with a literal from the test
+# component's own source (`localeCompare`), confirms the transform ran.
+# Confirmed in four independent repros: this lane's own six cells
+# (all four official-adapter, both vinext), and a from-scratch
+# `create-next-app@16.3.6` repro completely outside knext on both
+# bundlers. **React Compiler works on all six v1.0-adjacent cells** —
+# 4 official-adapter + 2 vinext.
+#
+# A second, narrower finding survives from the original investigation: an
+# overly trivial Client Component (no props, no derived values worth
+# memoizing) is NOT judged "relevant" by Next's own file-selection
+# heuristic and is skipped — documented upstream behaviour
+# ("only applies ... to relevant files"), not a defect. The test
+# component below (props + filtered/sorted derived values) is eligible by
+# construction and is what every cell's evidence check now verifies
+# against.
+#
+# One extra job (`bundle-size-and-build-time`) measures ONE target
+# (official adapter x turbopack x bun, knext's default) with and without the
+# compiler enabled, to record the config's actual cost/benefit rather than
+# assert one blind.
+#
+# workflow_dispatch-only, no schedule, not a required check — a one-off
+# (re-dispatchable) proof lane, not a standing credential. It carries none
+# of the credential-cron-slot bookkeeping test-e2e-deploy.yml does.
+#
+# `workflow_dispatch` only triggers for a workflow already on the default
+# branch — unusable to prove this lane green on the PR that introduces it.
+# The one-time proof for THIS lane instead used a temporary `pull_request`
+# trigger scoped to this file's own path (removed in this same PR once the
+# proof had a result — see getknext-dev/knext#1829), leaving this lane
+# workflow_dispatch-only for every run after.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ADAPTER_VERSION: '1.0.0-rc.5' # @rc — the official-adapter / standalone targets
+  VINEXT_VERSION: '1.3.0-rc.1'  # @next — the vinext (Beta) targets
+
+jobs:
+  # ── Official adapter (standalone) x {turbopack, webpack} x {node, bun} ──
+  adapter-matrix:
+    name: official adapter — ${{ matrix.build }} x ${{ matrix.runtime }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [turbopack, webpack]
+        runtime: [node, bun]
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (compiled-executable runtime, both build cells)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${ADAPTER_VERSION}" create app --name react-compiler-adapter
+
+      - name: Pin the published @getknext/* packages to the exact rc bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${ADAPTER_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${ADAPTER_VERSION}"
+
+      - name: Select build + runtime cell
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('knext.config.ts', 'utf8');
+            cfg = cfg.replace(
+              /name: \"react-compiler-adapter\",/,
+              'name: \"react-compiler-adapter\",\n  build: \"${{ matrix.build }}\",\n  runtime: \"${{ matrix.runtime }}\",'
+            );
+            fs.writeFileSync('knext.config.ts', cfg);
+          "
+          if [ "${{ matrix.build }}" = "webpack" ]; then
+            npm pkg set "scripts.build=next build --webpack"
+          fi
+          cat knext.config.ts
+
+      # The scaffolded page is a Server Component with no hooks — its code
+      # never reaches the client bundle at all (RSC), so there is nothing
+      # for the compiler to transform regardless of whether it ran. Give it
+      # one Client Component with state so a compiler pass has a real
+      # target, and so the client-chunk evidence check means something.
+      - name: Add a client component (useState) so the compiler has something to transform
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
+            "  return (" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-proof</h1>" \
+            "      <Counter items={items} />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
+
+      # Enable React Compiler the way the docs this lane proves tell a
+      # consumer to: `reactCompiler: true` in next.config, plus the
+      # optional peer that actually does the transform.
+      - name: Enable React Compiler
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('next.config.ts', 'utf8');
+            if (!/reactCompiler/.test(cfg)) {
+              cfg = cfg.replace(
+                'const nextConfig: NextConfig = {',
+                'const nextConfig: NextConfig = {\n    reactCompiler: true,'
+              );
+            }
+            fs.writeFileSync('next.config.ts', cfg);
+          "
+          grep -q 'reactCompiler: true' next.config.ts
+
+      - name: npm install
+        working-directory: app
+        run: npm install
+
+      - name: knext build
+        working-directory: app
+        run: node_modules/.bin/knext build 2>&1 | tee build.log
+
+      # Evidence, corrected: `grep`-ing for the literal ESM specifier
+      # `react/compiler-runtime` or the unminified `_c(` call shape does NOT
+      # work on this target. Turbopack/webpack resolve the import into their
+      # own numbered-module registry (the literal specifier string is gone
+      # from the bundle) and minify `_c` to a short alias (`n.c`, `o`, ...).
+      # `Symbol.for("react.memo_cache_sentinel")` survives minification
+      # (it's a property/string literal, not a local identifier) — but its
+      # bare DEFINITION is insufficient, since React's own symbol table
+      # defines it unconditionally, compiled or not. Requiring it to be
+      # COMPARED (`=== Symbol.for(...)`, part of the compiled cache-array
+      # logic) in the SAME chunk as a literal from the TEST component's
+      # own source (`localeCompare`, a method name, which also survives
+      # minification) proves the call site is actually inside the
+      # component this lane injected. Confirmed against a from-scratch
+      # repro completely outside knext (plain `create-next-app@16.3.6`):
+      # both markers appear, intersected, in both Turbopack and Webpack
+      # output.
+      - name: Assert the compiler actually ran (client chunk evidence)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'memo_cache_sentinel' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client chunk has memo_cache_sentinel AND localeCompare together — compiler did not transform the test component" >&2
+            exit 1
+          fi
+          echo "compiler evidence found in ${MATCH}"
+
+      # `knext build` does NOT stage or build the standalone image — only
+      # `knext deploy`/`preview` do, via `stageStandaloneBuildContext` (which
+      # needs a registry + cluster to run end to end). The staged files
+      # themselves are plain copies of the published package's templates —
+      # no mustache placeholders (`Dockerfile.standalone.hbs`'s own header
+      # says so) — so this proof lane stages them directly instead of
+      # running a full deploy.
+      - name: Stage the standalone Dockerfile + entry (what `knext deploy` would stage)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          CORE_TEMPLATES="node_modules/@getknext/core/templates/runtime-standalone"
+          cp "${CORE_TEMPLATES}/Dockerfile.standalone.hbs" ./Dockerfile.standalone
+          cp "${CORE_TEMPLATES}/knext-standalone-entry.mjs.hbs" ./knext-standalone-entry.mjs
+          cp "${CORE_TEMPLATES}/knext-compile-cache-bake.mjs.hbs" ./knext-compile-cache-bake.mjs
+          # The scaffold's own .dockerignore (correctly) excludes .next,
+          # node_modules and knext-standalone-exec* for the VINEXT image —
+          # this recipe needs exactly those. Override for this build only.
+          printf '%s\n' '.git' > .dockerignore
+
+      - name: docker build (the real shipped standalone image) and assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.standalone --target "standalone-${{ matrix.runtime }}" \
+            -t react-compiler-adapter:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 react-compiler-adapter:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          cat /tmp/health.json || true
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::${{ matrix.build }} x ${{ matrix.runtime }} never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  # ── vinext (Beta, opt-in build target) x {bun, node} ─────────────────────
+  vinext-bun:
+    name: vinext x bun — published @next, compiled single executable
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${VINEXT_VERSION}" create app --builder vinext --name react-compiler-vinext-bun
+
+      - name: Pin the published @getknext/* packages to the exact @next bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${VINEXT_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${VINEXT_VERSION}"
+
+      # The scaffolded page is a Server Component with no hooks — its code
+      # never reaches the client bundle (RSC), so there is nothing for the
+      # compiler to transform regardless of whether it ran. Give it one
+      # Client Component with state so the evidence check means something.
+      - name: Add a client component (useState) so the compiler has something to transform
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
+            "  return (" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-proof</h1>" \
+            "      <Counter items={items} />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
+
+      # Enable via vinext's own vite plugin option (`react: { compiler: true }`)
+      # — NOT a next.config key; vinext never reads next.config's
+      # `experimental.reactCompiler` / top-level `reactCompiler`, only this
+      # vite-plugin option. @vitejs/plugin-react 6.1+ and the Babel plugin
+      # are both required; vite 8 bundles with rolldown, which needs
+      # @rolldown/plugin-babel to run a Babel transform at all.
+      - name: Enable React Compiler (vinext's react.compiler option)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@vitejs/plugin-react=^6.1.0"
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          npm pkg set "devDependencies.@rolldown/plugin-babel=^0.2.0"
+          npm pkg set "devDependencies.oxc-transform-react=^0.145.0"
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('vite.config.ts', 'utf8');
+            cfg = cfg.replace(
+              /vinext\(\{/,
+              'vinext({\n      react: { compiler: true },'
+            );
+            fs.writeFileSync('vite.config.ts', cfg);
+          "
+          grep -q 'compiler: true' vite.config.ts
+
+      - name: npm install + bun lockfile (sharp native-addon staging needs it)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm install
+          bun install --save-text-lockfile
+
+      - name: knext build --skip-smoke (vite build -> bun build --compile --bytecode)
+        working-directory: app
+        run: node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
+
+      # Measured directly on this lane's own build output (the compiled
+      # chunk's literal content): `(0,i.c)(14)` is vinext/Rolldown's own
+      # renaming of the compiler's `_c(N)` cache call — neither the ESM
+      # import specifier `react/compiler-runtime` NOR the property name
+      # `useMemoCache` survive vinext's code-splitting for this (richer,
+      # multi-chunk) component shape. `Symbol.for("react.memo_cache_sentinel")`
+      # DOES survive — it is compared, not just defined, inside the
+      # compiled cache-array logic — and that comparison landed in the
+      # exact same chunk as `localeCompare` (the test component's own
+      # method call), confirming the call site is genuinely inside this
+      # component. The same marker pair also matched on the
+      # official-adapter cells' Turbopack/webpack output.
+      - name: Assert the compiler actually ran (client chunk evidence)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'memo_cache_sentinel' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client build artifact has memo_cache_sentinel AND localeCompare together — compiler did not transform the test component" >&2
+            find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
+            exit 1
+          fi
+          echo "compiler evidence found in ${MATCH}"
+
+      - name: docker build (the real shipped musl image) and assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -t react-compiler-vinext-bun:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 react-compiler-vinext-bun:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x bun never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  vinext-node:
+    name: vinext x node — published @next, baked V8 compile cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (sharp native-addon lockfile only — build + boot stay on Node)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${VINEXT_VERSION}" create app --builder vinext --name react-compiler-vinext-node
+          node -e "
+            const fs = require('fs');
+            let s = fs.readFileSync('app/knext.config.ts', 'utf8');
+            s = s.replace(/build:\s*\"vinext\",/, 'build: \"vinext\",\n  runtime: \"node\",');
+            fs.writeFileSync('app/knext.config.ts', s);
+          "
+
+      - name: Pin the published @getknext/* packages to the exact @next bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${VINEXT_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${VINEXT_VERSION}"
+
+      # The scaffolded page is a Server Component with no hooks — its code
+      # never reaches the client bundle (RSC), so there is nothing for the
+      # compiler to transform regardless of whether it ran. Give it one
+      # Client Component with state so the evidence check means something.
+      - name: Add a client component (useState) so the compiler has something to transform
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
+            "  return (" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-proof</h1>" \
+            "      <Counter items={items} />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
+
+      - name: Enable React Compiler (vinext's react.compiler option)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@vitejs/plugin-react=^6.1.0"
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          npm pkg set "devDependencies.@rolldown/plugin-babel=^0.2.0"
+          npm pkg set "devDependencies.oxc-transform-react=^0.145.0"
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('vite.config.ts', 'utf8');
+            cfg = cfg.replace(
+              /vinext\(\{/,
+              'vinext({\n      react: { compiler: true },'
+            );
+            fs.writeFileSync('vite.config.ts', cfg);
+          "
+          grep -q 'compiler: true' vite.config.ts
+
+      - name: npm install + bun lockfile (sharp native-addon staging needs it)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm install
+          bun install --save-text-lockfile
+
+      - name: knext build (vite build -> nitro node preset; stages Dockerfile.vinext-node)
+        working-directory: app
+        run: node_modules/.bin/knext build 2>&1 | tee build.log
+
+      # Same reasoning as the vinext x bun job's identical step: require
+      # memo_cache_sentinel AND localeCompare (the test component's own
+      # method call) together in one file — neither react/compiler-runtime
+      # nor useMemoCache survive vinext's code-splitting for this
+      # (multi-chunk) component shape.
+      - name: Assert the compiler actually ran (client chunk evidence)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'memo_cache_sentinel' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client build artifact has memo_cache_sentinel AND localeCompare together — compiler did not transform the test component" >&2
+            find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
+            exit 1
+          fi
+          echo "compiler evidence found in ${MATCH}"
+
+      - name: docker build + run the image, assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.vinext-node -t react-compiler-vinext-node:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 react-compiler-vinext-node:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x node never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  # ── Measured cost/benefit on ONE target (the default: adapter x turbopack x bun) ──
+  bundle-size-and-build-time:
+    name: bundle size + build time, with vs without (default target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold (default target — turbopack x bun) and install
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${ADAPTER_VERSION}" create app --name react-compiler-bench
+          cd app
+          npm pkg set "devDependencies.@getknext/core=${ADAPTER_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${ADAPTER_VERSION}"
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          npm install
+
+      # Same reasoning as the per-cell jobs: a Server Component's code never
+      # reaches the client bundle, so without a real Client Component the
+      # size/time delta would measure nothing.
+      - name: Add a client component (useState) so there is something to measure
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
+            "  return (" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-bench</h1>" \
+            "      <Counter items={items} />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
+
+      - name: Build WITHOUT the compiler
+        working-directory: app
+        run: |
+          set -euo pipefail
+          T0=$(date +%s)
+          npx next build
+          T1=$(date +%s)
+          echo "BUILD_TIME_WITHOUT=$((T1 - T0))" >> "$GITHUB_ENV"
+          echo "BUNDLE_SIZE_WITHOUT=$(du -sk .next/static | cut -f1)" >> "$GITHUB_ENV"
+
+      # NEGATIVE CONTROL (#1829 review): the per-cell jobs only ever assert
+      # evidence is PRESENT when the compiler is on — which cannot by
+      # itself rule out a guard that would also false-positive on a build
+      # where the compiler never ran. This build (just above, compiler
+      # OFF) gets the exact same check, asserting the OPPOSITE: it must
+      # find NOTHING. Both directions, same component, same CI run.
+      - name: Assert NO compiler evidence (negative control — compiler is OFF here)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'memo_cache_sentinel' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
+          if [ -n "${MATCH}" ]; then
+            echo "::error::found memo_cache_sentinel AND localeCompare together in ${MATCH} with the compiler OFF — the guard cannot distinguish compiled from uncompiled output" >&2
+            exit 1
+          fi
+          echo "negative control passed: no compiler evidence with the compiler off"
+          rm -rf .next
+
+      - name: Build WITH the compiler
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('next.config.ts', 'utf8');
+            cfg = cfg.replace(
+              'const nextConfig: NextConfig = {',
+              'const nextConfig: NextConfig = {\n    reactCompiler: true,'
+            );
+            fs.writeFileSync('next.config.ts', cfg);
+          "
+          T0=$(date +%s)
+          npx next build
+          T1=$(date +%s)
+          echo "BUILD_TIME_WITH=$((T1 - T0))" >> "$GITHUB_ENV"
+          echo "BUNDLE_SIZE_WITH=$(du -sk .next/static | cut -f1)" >> "$GITHUB_ENV"
+
+      # POSITIVE CONTROL — the complement of the check above, same build
+      # output, compiler ON.
+      - name: Assert compiler evidence IS present (positive control — compiler is ON here)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'memo_cache_sentinel' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client chunk has memo_cache_sentinel AND localeCompare together with the compiler ON — compiler did not transform the test component" >&2
+            exit 1
+          fi
+          echo "positive control passed: compiler evidence found in ${MATCH}"
+
+      - name: Report
+        run: |
+          {
+            echo "### React Compiler — measured on default target (turbopack x bun)"
+            echo ""
+            echo "| | build time (s) | .next/static (KiB) |"
+            echo "|---|---|---|"
+            echo "| without | ${BUILD_TIME_WITHOUT} | ${BUNDLE_SIZE_WITHOUT} |"
+            echo "| with | ${BUILD_TIME_WITH} | ${BUNDLE_SIZE_WITH} |"
+          } >> "$GITHUB_STEP_SUMMARY"
