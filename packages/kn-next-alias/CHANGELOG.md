@@ -11,6 +11,7 @@
 - Updated dependencies [678d1da]
 - Updated dependencies [c0a664c]
 - Updated dependencies [70c5bbd]
+- Updated dependencies [24543bb]
   - @getknext/core@1.3.0-rc.2
 
 ## 1.3.0-rc.1
