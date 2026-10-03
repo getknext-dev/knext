@@ -2780,7 +2780,7 @@ export const REMOTE_FETCH_ALLOWLIST = [
   },
   {
     id: 'node-redis-e2e-http-check',
-    // .github/workflows/node-runtime-redis-kind-e2e.yml#node-redis-e2e reuses
+    // .github/workflows/runtime-redis-cache-kind-e2e.yml#node-redis-e2e reuses
     // the SAME assertion script as the two http-check entries above (invoked
     // as `scripts/./…` so each call site matches exactly one entry), with the
     // same justification: HTTP only to the Kourier/MinIO port-forwards this
@@ -2791,7 +2791,7 @@ export const REMOTE_FETCH_ALLOWLIST = [
   },
   {
     id: 'node-redis-e2e-knext-create',
-    // .github/workflows/node-runtime-redis-kind-e2e.yml: the same `kn-next
+    // .github/workflows/runtime-redis-cache-kind-e2e.yml: the same `kn-next
     // create` from this commit's untracked build output as
     // write-free-e2e-knext-create above (spelled `./packages/…` so each call
     // site matches exactly one entry). It renders templates to local files

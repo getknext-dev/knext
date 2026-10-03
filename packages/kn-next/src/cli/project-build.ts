@@ -25,6 +25,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { KNEXT_RUNTIME_ENV } from "../adapters/runtime-env";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
 import { describeEnsureResult, ensureVinextPatches } from "./vinext-patches";
@@ -100,6 +101,14 @@ export interface RunProjectBuildOptions {
      * skips the check rather than guessing.
      */
     readonly builderId?: string;
+    /**
+     * The app's configured runtime (`config.runtime ?? DEFAULT_RUNTIME_ID`),
+     * exported to the build as `KNEXT_RUNTIME` so the knext adapter points
+     * `cacheHandler` at that runtime's entry (#1843). Optional in the type so
+     * unit tests need not pass it; every CLI caller must, which a scan in
+     * project-build.test.ts enforces.
+     */
+    readonly runtimeId?: string;
 }
 
 /**
@@ -299,6 +308,10 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
 
     if (opts.builderId !== undefined) {
         checkTurbopackAdapterStandaloneRegression(cwd, opts.builderId);
+    }
+
+    if (opts.runtimeId !== undefined) {
+        process.env[KNEXT_RUNTIME_ENV] = opts.runtimeId;
     }
 
     try {

@@ -6,26 +6,27 @@
  *
  * Two halves, both pinned here:
  *
- *  1. The cause. `cache-handler.js` loads ioredis through a deliberately
- *     NON-literal specifier (so `bun build --compile` and bundlers never pull it
- *     in), which also means Next's standalone file tracing never copies ioredis
- *     into `.next/standalone`. The node image must therefore carry it some other
- *     way: the `standalone-deps` stage installs it, and its `node_modules` lands
- *     at a directory every traced file under `.next/standalone` resolves
- *     through (Node walks ancestor `node_modules`).
+ *  1. The cause. The handler loaded ioredis through a computed specifier, so
+ *     bundlers and `bun build --compile` would not pull it in — and Next's
+ *     standalone file tracing could not follow it either, so the node image
+ *     never carried it. The handler is now split per runtime: the NODE entry
+ *     imports ioredis LITERALLY (tracing follows it into the image) and the
+ *     BUN entry uses Bun's built-in client with no ioredis import at all. The
+ *     build picks the entry (adapter-runtime-cache-handler.test.ts).
  *
- *  2. The silence. When `REDIS_URL` is set and the client cannot be loaded, the
- *     handler must say so at error level — once, at startup — instead of
- *     degrading to memory with nothing but `(memory)` suffixes to show for it.
- *     Proved BEHAVIOURALLY: the real handler file runs under real `node` from a
- *     directory with no `node_modules` anywhere above it, which is exactly the
- *     image's situation before this fix.
+ *  2. The silence. When `REDIS_URL` is set and an entry's client cannot be
+ *     loaded, the handler says so at error level — once, at startup — instead
+ *     of degrading to memory with nothing but `(memory)` suffixes to show for
+ *     it. Proved BEHAVIOURALLY: the real handler files run under real `node`
+ *     from a directory with no `node_modules` anywhere above it, which is
+ *     exactly the node image's situation before this fix.
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
     copyFileSync,
+    existsSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
@@ -33,91 +34,71 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const PKG_ROOT = resolve(__dirname, "..", "..");
 const ADAPTERS = join(PKG_ROOT, "src", "adapters");
-const DOCKERFILE = join(
-    PKG_ROOT,
-    "templates",
-    "runtime-standalone",
-    "Dockerfile.standalone.hbs",
-);
+const DIST_ADAPTERS = join(PKG_ROOT, "dist", "adapters");
 
 /** The token the startup error carries, so an operator can grep for it. */
 const LOUD = "Redis client unavailable";
 
-// ─── 1. the image carries ioredis where the traced handler resolves it ───
+/** A literal ioredis import in any form a tracer (or a bundler) would follow. */
+const LITERAL_IOREDIS =
+    /\bimport\s*\(\s*["']ioredis["']\s*\)|\bfrom\s+["']ioredis["']|\brequire\s*\(\s*["']ioredis["']\s*\)/;
 
-function stageBody(name: string): string {
-    const code = readFileSync(DOCKERFILE, "utf8")
-        .replace(/\\\n/g, " ")
-        .split("\n")
-        .filter((line) => !line.trimStart().startsWith("#"))
-        .join("\n");
-    const part = code
-        .split(/^FROM /m)
-        .slice(1)
-        .find((p) =>
-            new RegExp(`\\bAS\\s+${name}\\s*$`, "i").test(
-                p.split("\n", 1)[0] ?? "",
-            ),
-        );
-    if (!part)
-        throw new Error(`no \`${name}\` stage in Dockerfile.standalone.hbs`);
-    return part;
+/** Code only: drop line and block comments so prose cannot trip a match. */
+function code(path: string): string {
+    return readFileSync(path, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
 }
 
-/** `COPY [--from=x] <src> <dest>` destinations in a stage, keyed by source. */
-function copyDest(stage: string, from: RegExp): string {
-    const lines = stage
-        .split("\n")
-        .filter((l) => /^COPY\s/.test(l.trim()) && from.test(l));
-    if (lines.length !== 1) {
-        throw new Error(
-            `expected exactly one COPY matching ${from} in the stage, found ${lines.length}`,
+// ─── 1. the per-runtime entries pick their client statically ───
+
+describe("#1843 — the per-runtime cache handler entries", () => {
+    it("the NODE entry imports ioredis literally (source)", () => {
+        expect(code(join(ADAPTERS, "cache-handler-node.js"))).toMatch(
+            LITERAL_IOREDIS,
         );
-    }
-    const words = lines[0].trim().split(/\s+/);
-    return words[words.length - 1];
-}
-
-describe("#1843 — the node standalone image carries ioredis", () => {
-    const pkg = JSON.parse(
-        readFileSync(join(PKG_ROOT, "package.json"), "utf8"),
-    );
-
-    it("@getknext/core depends on ioredis (the range the image must install)", () => {
-        expect(typeof pkg.dependencies?.ioredis).toBe("string");
     });
 
-    it("the standalone-deps stage installs ioredis at EXACTLY @getknext/core's range", () => {
-        const deps = stageBody("standalone-deps");
-        const m = deps.match(/npm\s+install[^\n]*\sioredis@(\S+)/);
-        expect(
-            m?.[1],
-            "standalone-deps does not install ioredis — the node runtime's cache handler cannot load its Redis client and silently uses memory",
-        ).toBe(pkg.dependencies.ioredis);
-    });
-
-    it("the node stage puts that node_modules on the ancestor path of the traced standalone tree", () => {
-        const node = stageBody("standalone-node");
-        const depsDest = copyDest(node, /--from=standalone-deps\s/);
-        const treeDest = copyDest(node, /^\s*COPY\s+\.next\/standalone\s/);
-        expect(posix.basename(depsDest)).toBe("node_modules");
-        // Where Next's tracing puts the handler: under the standalone tree.
-        const handler = posix.join(
-            treeDest,
-            "node_modules/@getknext/core/dist/adapters/cache-handler.js",
-        );
-        // Node's resolver tries `<ancestor>/node_modules` for every ancestor of
-        // the importing file. The deps dir is reachable iff its parent is one.
-        const ancestors: string[] = [];
-        for (let d = posix.dirname(handler); ; d = posix.dirname(d)) {
-            ancestors.push(posix.join(d, "node_modules"));
-            if (d === "/") break;
+    it("the NODE entry still imports ioredis literally after the package build (what Next's tracing reads)", () => {
+        const built = join(DIST_ADAPTERS, "cache-handler-node.js");
+        if (!existsSync(built)) {
+            throw new Error(
+                `${built} missing — run 'bun run build' in packages/kn-next first (CI builds @getknext/core before test)`,
+            );
         }
-        expect(ancestors).toContain(depsDest);
+        expect(code(built)).toMatch(LITERAL_IOREDIS);
+    });
+
+    it("the BUN entry reaches no ioredis import (source and built)", () => {
+        expect(code(join(ADAPTERS, "cache-handler-bun.js"))).not.toMatch(
+            /ioredis/,
+        );
+        expect(code(join(DIST_ADAPTERS, "cache-handler-bun.js"))).not.toMatch(
+            LITERAL_IOREDIS,
+        );
+    });
+
+    it("the shared module carries no LITERAL ioredis import (the generic path stays bundler-safe for vinext)", () => {
+        expect(code(join(ADAPTERS, "cache-handler.js"))).not.toMatch(
+            LITERAL_IOREDIS,
+        );
+    });
+
+    it("the package exports both entries on internal subpaths the adapter resolves", () => {
+        const pkg = JSON.parse(
+            readFileSync(join(PKG_ROOT, "package.json"), "utf8"),
+        );
+        expect(pkg.exports["./internal/cache-handler-node"]).toBe(
+            "./dist/adapters/cache-handler-node.js",
+        );
+        expect(pkg.exports["./internal/cache-handler-bun"]).toBe(
+            "./dist/adapters/cache-handler-bun.js",
+        );
+        expect(typeof pkg.dependencies?.ioredis).toBe("string");
     });
 });
 
@@ -126,33 +107,36 @@ describe("#1843 — the node standalone image carries ioredis", () => {
 const work = mkdtempSync(join(tmpdir(), "knext-1843-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
+const HANDLER_FILES = [
+    "cache-handler.js",
+    "cache-handler-node.js",
+    "cache-handler-bun.js",
+    "cache-write-registry.js",
+    "slow-dep-log.js",
+];
+
 /**
- * Stage the handler and its two relative imports in a directory with NO
- * `node_modules` above it, so `ioredis` cannot resolve — the image's exact
- * situation before the fix. tmpdir() is outside the repo by construction.
+ * Stage the handler entries and their relative imports in a directory with NO
+ * `node_modules` above it, so `ioredis` cannot resolve — the node image's
+ * exact situation before the fix. tmpdir() is outside the repo by construction.
  */
-function stageIsolatedHandler(): string {
+function stageIsolated(): string {
     const dir = join(work, "isolated", "adapters");
     mkdirSync(dir, { recursive: true });
-    for (const f of [
-        "cache-handler.js",
-        "cache-write-registry.js",
-        "slow-dep-log.js",
-    ]) {
+    for (const f of HANDLER_FILES)
         copyFileSync(join(ADAPTERS, f), join(dir, f));
-    }
     // ESM — the package's own `"type": "module"` does not travel with the copy.
     writeFileSync(join(dirname(dir), "package.json"), '{"type":"module"}\n');
-    return join(dir, "cache-handler.js");
+    return dir;
 }
 
-function runHandler(env: Record<string, string | undefined>) {
-    const handler = stageIsolatedHandler();
-    const driver = join(dirname(handler), "drive.mjs");
+function runEntry(entry: string, env: Record<string, string | undefined>) {
+    const dir = stageIsolated();
+    const driver = join(dir, `drive-${entry}.mjs`);
     writeFileSync(
         driver,
         [
-            `const { default: CacheHandler } = await import(${JSON.stringify(handler)});`,
+            `const { default: CacheHandler } = await import(${JSON.stringify(join(dir, entry))});`,
             "const h = new CacheHandler({});",
             "for (let i = 0; i < 4; i++) await h.get(`k${i}`);",
             "await h.set('k0', { kind: 'FETCH', data: { body: 'x' } }, {});",
@@ -171,7 +155,8 @@ function runHandler(env: Record<string, string | undefined>) {
         if (v === undefined) delete childEnv[k];
         else childEnv[k] = v;
     }
-    // Real `node` — the runtime this bug lives on (bun takes its native client).
+    // Real `node` — the runtime the node entry is for, and one with no Bun
+    // global, so the bun entry's client is unavailable too.
     const r = spawnSync("node", [driver], {
         env: childEnv,
         encoding: "utf8",
@@ -182,23 +167,26 @@ function runHandler(env: Record<string, string | undefined>) {
 
 describe("#1843 — the handler fails loudly when Redis is configured but its client cannot load", () => {
     it("sanity: ioredis really is unresolvable from the isolated copy (else this suite proves nothing)", () => {
-        const handler = stageIsolatedHandler();
-        const probe = join(dirname(handler), "probe.mjs");
+        const dir = stageIsolated();
+        const probe = join(dir, "probe.mjs");
         writeFileSync(
             probe,
-            "try { await import(['io','redis'].join('')); console.log('RESOLVED'); } catch { console.log('UNRESOLVED'); }\n",
+            "try { await import('ioredis'); console.log('RESOLVED'); } catch { console.log('UNRESOLVED'); }\n",
         );
         const r = spawnSync("node", [probe], { encoding: "utf8" });
         expect(r.stdout.trim()).toBe("UNRESOLVED");
     });
 
-    it("logs ONE error naming the missing client and the consequence, and still serves (fails open)", () => {
-        const r = runHandler({ REDIS_URL: "redis://127.0.0.1:6399" });
+    it.each([
+        ["cache-handler-node.js", "ioredis"],
+        ["cache-handler-bun.js", "Bun native"],
+        ["cache-handler.js", "ioredis"],
+    ])("%s: ONE error naming the %s client and the consequence, and it still serves (fails open)", (entry, client) => {
+        const r = runEntry(entry, { REDIS_URL: "redis://127.0.0.1:6399" });
         expect(r.status, r.stderr).toBe(0);
-        expect(r.stdout).toContain("DRIVER_DONE");
         const loud = r.stderr.split("\n").filter((l) => l.includes(LOUD));
         expect(loud.length, `stderr was:\n${r.stderr}`).toBe(1);
-        expect(loud[0]).toContain("ioredis");
+        expect(loud[0]).toContain(`the ${client} Redis client`);
         expect(loud[0]).toContain("REDIS_URL");
         expect(loud[0]).toMatch(/in-memory/i);
         expect(loud[0]).toMatch(/scale-to-zero/);
@@ -207,8 +195,12 @@ describe("#1843 — the handler fails loudly when Redis is configured but its cl
         expect(r.stdout).toContain("DRIVER_DONE served");
     });
 
-    it("says nothing when Redis is NOT configured (memory is then the intended store, not a degradation)", () => {
-        const r = runHandler({ REDIS_URL: undefined });
+    it.each([
+        "cache-handler-node.js",
+        "cache-handler-bun.js",
+        "cache-handler.js",
+    ])("%s: says nothing when Redis is NOT configured (memory is then the intended store)", (entry) => {
+        const r = runEntry(entry, { REDIS_URL: undefined });
         expect(r.status, r.stderr).toBe(0);
         expect(r.stdout).toContain("DRIVER_DONE");
         expect(r.stderr).not.toContain(LOUD);

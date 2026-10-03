@@ -75,17 +75,6 @@
 # Discarded stage: its npm binary NEVER reaches the bun runtime layer below
 # (only `/deps/node_modules` is copied out) — the bun stage stays npm-free.
 #
-# ioredis is here for the CACHE HANDLER, not the supervisor. The handler loads
-# it through a deliberately non-literal specifier (so `bun build --compile` and
-# bundlers never pull it in — see cache-handler.js), which also means Next's
-# standalone file tracing never copies it into `.next/standalone`. Without it
-# the node runtime's handler could not load its Redis client and fell back to
-# an in-memory store: ISR not shared between pods and lost on every
-# scale-to-zero. It resolves from here because `/app/node_modules` is an
-# ancestor `node_modules` of every traced file under `/app/.next/standalone`.
-# The bun stages do not need it (the handler uses Bun's native client there)
-# and carry it only as the `KNEXT_CACHE_REDIS_CLIENT=ioredis` escape hatch.
-#
 # @getknext/lib (the DB-pool-drain / image-cache-sync object-store client —
 # @cerbos/grpc + minio + pg, by far the heaviest graph either call site can
 # reach) is DELIBERATELY NOT installed here. Both call sites load it lazily
@@ -104,7 +93,7 @@ FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a55
 WORKDIR /deps
 
 RUN npm install --omit=dev --no-save --no-audit --no-fund \
-    pino@^9.6.0 prom-client@^15.1.3 @opentelemetry/api@^1.9.0 ioredis@^5.9.2
+    pino@^9.6.0 prom-client@^15.1.3 @opentelemetry/api@^1.9.0
 
 # ---------------------------------------------------------------------------
 # bun runtime — oven/bun ships bun ONLY (no node, no npm), which is what keeps

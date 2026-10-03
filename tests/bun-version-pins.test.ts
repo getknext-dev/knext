@@ -179,7 +179,7 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       'mutation-prover-nightly.yml': 1,
       // NEW (#1843): the node-runtime Redis cache kind e2e — one "Setup bun"
       // step (workspace install + building/packing the tarballs it deploys).
-      'node-runtime-redis-kind-e2e.yml': 1,
+      'runtime-redis-cache-kind-e2e.yml': 1,
       'operator-e2e-nightly.yml': 3,
       // NEW (#1668/#1671): the operator upgrade-under-load e2e's single job
       // installs the workspace with bun (`bun install --frozen-lockfile`,

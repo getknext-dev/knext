@@ -551,6 +551,60 @@ describe("checkTurbopackAdapterStandaloneRegression (#1372)", () => {
     });
 });
 
+describe("runProjectBuild exports the configured runtime to the build (#1843)", () => {
+    it("sets KNEXT_RUNTIME for the build it runs, so the adapter can pick the runtime's cache handler", () => {
+        const saved = process.env.KNEXT_RUNTIME;
+        try {
+            delete process.env.KNEXT_RUNTIME;
+            let seen: string | undefined;
+            const run = mock(() => {
+                seen = process.env.KNEXT_RUNTIME;
+            });
+            runProjectBuild({ requireEsm: false, runtimeId: "node", run });
+            expect(seen).toBe("node");
+            runProjectBuild({ requireEsm: false, runtimeId: "bun", run });
+            expect(seen).toBe("bun");
+        } finally {
+            if (saved === undefined) delete process.env.KNEXT_RUNTIME;
+            else process.env.KNEXT_RUNTIME = saved;
+        }
+    });
+
+    it("every CLI runProjectBuild( call passes runtimeId (scan, not enumeration)", async () => {
+        const { readFileSync, readdirSync } = await import("node:fs");
+        const { dirname, join, resolve } = await import("node:path");
+        const { fileURLToPath } = await import("node:url");
+        const cliDir = join(
+            resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+            "cli",
+        );
+        const offenders: string[] = [];
+        let calls = 0;
+        for (const file of readdirSync(cliDir)) {
+            if (!file.endsWith(".ts") || file === "project-build.ts") {
+                continue;
+            }
+            const src = readFileSync(join(cliDir, file), "utf8");
+            // Up to the call's closing `})` — an argument like
+            // `(config.build ?? X) === "vinext"` carries its own `)`.
+            for (const m of src.matchAll(
+                /runProjectBuild\(\{([\s\S]*?)\}\)/g,
+            )) {
+                calls++;
+                if (!/runtimeId/.test(m[1])) {
+                    offenders.push(`${file}: ${m[0].slice(0, 40)}`);
+                }
+            }
+        }
+        // The scan sees the real callers (build, deploy, preview).
+        expect(calls).toBeGreaterThanOrEqual(3);
+        expect(
+            offenders,
+            "pass runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID",
+        ).toEqual([]);
+    });
+});
+
 describe("every runProjectBuild caller computes requireEsm (scan, not enumeration)", () => {
     it("no CLI runProjectBuild( call omits the requireEsm argument", async () => {
         const { readFileSync, readdirSync } = await import("node:fs");

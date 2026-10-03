@@ -20,7 +20,10 @@ import { readFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -621,6 +624,7 @@ export async function deploy() {
         runProjectBuild({
             requireEsm: isVinextBuild,
             builderId: resolvedBuild,
+            runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
         });
         log.info(
             isVinextBuild
