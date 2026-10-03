@@ -1,0 +1,29 @@
+{
+  "name": "knext-vinext-bun-og-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal vinext + bun-exec app used ONLY by vinext-compile-og-exec.test.ts (cluster C4 — next/og ImageResponse in the compiled single executable). Same dependency versions as examples/bun-exec, which this is a trimmed copy of the SHAPE of (not a symlink or workspace member): its deps are installed into a throwaway build dir by the test, never built in place.",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "srvx": "0.11.22",
+    "vinext": "1.0.0-beta.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.0",
+    "@vitejs/plugin-rsc": "^0.5.26",
+    "next": "16.3.6",
+    "nitro": "3.0.260610-beta",
+    "react-server-dom-webpack": "^19.2.6",
+    "vite": "^8.0.0"
+  },
+  "overrides": {
+    "nanoid": "^3.3.18",
+    "fast-uri": "^3.1.7",
+    "sharp": "^0.35.4"
+  }
+}

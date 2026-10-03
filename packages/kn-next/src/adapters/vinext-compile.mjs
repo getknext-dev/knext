@@ -51,6 +51,7 @@ import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
+import { rewriteAssetAnchors } from "./entry-asset-anchor.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -349,6 +350,27 @@ function selfContainedEntryExprs(entryRelDir) {
 }
 
 /**
+ * A `new URL(<literal>, import.meta.url)` anchor in the module at `modulePath`
+ * resolves to a real on-disk sibling, or it does not (cluster C4 — see
+ * entry-asset-anchor.mjs's docstring for the full mechanism: nitro already
+ * staged the sibling next to the module that reads it, and a bundled module's
+ * `import.meta.url` under `--bytecode` is the BUILD machine's path, not a
+ * portable one). Only an existing file is ever returned — this is the one
+ * place the filesystem is consulted; entry-asset-anchor.mjs itself stays pure.
+ */
+function resolveAssetAnchor(literal, modulePath) {
+    const abs = resolve(dirname(modulePath), literal);
+    return existsSync(abs) ? abs : undefined;
+}
+
+/** `import <id> from <path> with { type: "file" };` lines, one per embedded asset. */
+function assetAnchorImports(assets) {
+    return assets
+        .map((a) => `import ${a.id} from ${JSON.stringify(a.absPath)} with { type: "file" };\n`)
+        .join("");
+}
+
+/**
  * Injects the keep-alive guard import into the nitro entry AND rewrites
  * `import.meta.*` so `--bytecode`'s CommonJS output can hold it. Both act on the
  * SAME entry file, so they share one onLoad (Bun calls only the first plugin
@@ -360,17 +382,40 @@ const importMetaToCjs = {
         build.onLoad({ filter: /\.m?js$/ }, async (args) => {
             const path = resolve(args.path);
             if (path !== ENTRY) {
-                // A chunk of the server output: wrap its require bindings only.
-                // Bun rewrites a bundled chunk's own `import.meta` itself; the
-                // guard imports and the import.meta rewrite below belong to the
+                // Any other module reaching the compile — a chunk of the server
+                // output, OR a server-external that stayed bundled because its
+                // entry is ESM (`@vercel/og`, cluster C4 — see
+                // entry-asset-anchor.mjs). The asset-anchor rewrite runs for
+                // BOTH: it only ever touches a literal that resolves to a real
+                // sibling file, so it is a no-op everywhere else. The require-
+                // binding wrap stays confined to the server output proper (the
+                // only place `PLAN.modules` has an analysis) — Bun rewrites a
+                // bundled chunk's own `import.meta` itself; the guard imports
+                // and the entry's import.meta rewrite below belong to the
                 // entry alone.
-                const analysis = PLAN.modules.get(path);
-                if (!analysis || !isServerOutputModule(path)) return undefined;
                 const raw = await Bun.file(path).text();
-                const wrapped = wrapRequireBindings(raw, analysis.aliases, [...PLAN.embed.keys()]);
-                return wrapped.count > 0 ? { contents: wrapped.contents, loader: "js" } : undefined;
+                const assetRewrite = rewriteAssetAnchors(raw, (literal) =>
+                    resolveAssetAnchor(literal, path),
+                );
+                let contents = assetRewrite.contents;
+                let changed = assetRewrite.assets.length > 0;
+                const analysis = PLAN.modules.get(path);
+                if (analysis && isServerOutputModule(path)) {
+                    const wrapped = wrapRequireBindings(contents, analysis.aliases, [...PLAN.embed.keys()]);
+                    contents = wrapped.contents;
+                    changed = changed || wrapped.count > 0;
+                }
+                if (!changed) return undefined;
+                return {
+                    contents: assetAnchorImports(assetRewrite.assets) + contents,
+                    loader: "js",
+                };
             }
-            const raw = await Bun.file(args.path).text();
+            const raw0 = await Bun.file(args.path).text();
+            const entryAssetRewrite = rewriteAssetAnchors(raw0, (literal) =>
+                resolveAssetAnchor(literal, path),
+            );
+            const raw = entryAssetRewrite.contents;
             // Prepend the guard imports FIRST, always — independent of whether the
             // entry uses import.meta. `import "<abs>";` is bundled + evaluated
             // before the rest of the entry's imports, patching Bun.serve in time.
@@ -389,6 +434,7 @@ const importMetaToCjs = {
             // not be able to answer a require), and `.output/public` embedded
             // through a generated module of file imports.
             const src =
+                assetAnchorImports(entryAssetRewrite.assets) +
                 `import ${JSON.stringify(GUARD_FILE)};\n` +
                 (SELF_CONTAINED ? "" : `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n`) +
                 `import ${JSON.stringify(CACHE_CONTROL_FILE)};\n` +
