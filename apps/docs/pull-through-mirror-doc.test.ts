@@ -64,10 +64,28 @@ describe('docs — in-cluster pull-through mirror', () => {
     expect(crio).toMatch(/\[\[registry\.mirror\]\]/);
   });
 
+  it('scopes the CRI-O drop-in with a repository prefix, not a bare registry host', () => {
+    // A bare-host [[registry]] entry mirrors every image on that host. The recipe must show
+    // `prefix` scoped to a specific repository, matching the discipline the source measurement
+    // used (one repository alias, so no unrelated image ref could match), and say why.
+    const crio = section(page, /CRI-O setup/i);
+    expect(crio).toMatch(/prefix\s*=\s*"[^"]+\/[^"]+"/);
+    expect(crio).toMatch(/typo|overly broad|broad match/i);
+  });
+
   it('says to reload CRI-O, not restart it, and that no pod restarts', () => {
     const crio = section(page, /CRI-O setup/i);
     expect(crio).toMatch(/systemctl reload crio/);
     expect(crio).not.toMatch(/systemctl restart crio/);
+  });
+
+  it('hedges the mirror-down fallback claim as observed, not drilled', () => {
+    // The fallback-to-upstream behavior was seen during the measurement but never deliberately
+    // tested with the mirror taken down, so the recipe must not present it as proven.
+    const crio = section(page, /CRI-O setup/i);
+    expect(crio).toMatch(/falls\s+back to the upstream/i);
+    expect(crio).toMatch(/observed/i);
+    expect(crio).toMatch(/did not drill|not drilled|never drilled/i);
   });
 
   it('gives the containerd certs.d/hosts.toml equivalent', () => {
@@ -103,7 +121,7 @@ describe('docs — in-cluster pull-through mirror', () => {
     expect(page).toMatch(/2\.25\s*s/);
     // Conditions: measurement basis must be named, not just the numbers.
     expect(page).toMatch(/median/i);
-    expect(page).toMatch(/CRI-O/i);
+    expect(page).toMatch(/CRI-O 1\.34\.8/);
   });
 
   it('states the mirror-miss cost relative to a direct pull', () => {

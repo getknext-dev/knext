@@ -23,7 +23,7 @@ rest of this page is a recipe you apply at the cluster level, independent of any
 
 ## What it is worth
 
-Measured on a two-node cluster (CRI-O 1.34, Oracle Linux 8), pulling a 78 MB image from a registry
+Measured on a two-node cluster (CRI-O 1.34.8, Oracle Linux 8), pulling a 78 MB image from a registry
 in a different region from the cluster, 12 cold starts per configuration:
 
 | configuration | cold start, median | p95 |
@@ -77,16 +77,21 @@ cache on every reschedule, which turns every pull after a reschedule back into a
 ### 2. Point CRI-O at it with a registries.conf.d drop-in
 
 CRI-O reads registry configuration from `/etc/containers/registries.conf.d/`. Add a drop-in file
-scoped to the specific registry host you want mirrored — not a wildcard — so a mistake in the
-file cannot silently redirect unrelated pulls:
+scoped to the specific registry host **and the specific repository prefix** you want mirrored —
+not a bare registry host, and not a wildcard — so a typo or an overly broad match cannot silently
+redirect pulls for images that have nothing to do with the one you meant to mirror. This is not
+a stylistic preference: the measurement this recipe is based on scoped its `[[registry]]` entry
+to one repository alias specifically to prove that no unrelated image ref could match it, and the
+recipe should carry the same discipline forward:
 
 ```toml
 # /etc/containers/registries.conf.d/99-knext-pull-through-mirror.conf
 [[registry]]
-location = "your-upstream-registry.example.com"
+prefix = "your-upstream-registry.example.com/your-org"
+location = "your-upstream-registry.example.com/your-org"
 
 [[registry.mirror]]
-location = "mirror.internal.svc.cluster.local:5000"
+location = "mirror.internal.svc.cluster.local:5000/your-org"
 ```
 
 ### 3. Reload CRI-O — do not restart it
@@ -96,9 +101,10 @@ systemctl reload crio
 ```
 
 `reload` sends CRI-O a `SIGHUP`, which re-reads `registries.conf.d/` without restarting the CRI-O
-process or any running pod. A `restart` is unnecessary and disruptive; use `reload`. If the mirror
-is unreachable, CRI-O falls back to the upstream `location` on its own, so a down mirror degrades
-to a direct pull rather than failing the pull outright.
+process or any running pod. A `restart` is unnecessary and disruptive; use `reload`. CRI-O falls
+back to the upstream `location` when the mirror is unreachable — we observed this behavior during
+the measurement above, but did not drill a mirror outage deliberately, so verify the fallback on
+your own cluster before relying on it rather than taking it as proven here.
 
 ## containerd setup
 
