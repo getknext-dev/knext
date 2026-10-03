@@ -1,0 +1,26 @@
+{
+  "name": "knext-vinext-bun-og-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal vinext + bun-exec app used ONLY by vinext-compile-og-exec.test.ts (cluster C4 — next/og ImageResponse in the compiled single executable). Pinned to the REPO's current vinext version (packages/kn-next/package.json), same as vinext-node-app, and checked by tests/vinext-pin-lockstep.test.ts. The vite.config.ts plugin shape (inlineDynamicImports) matches the real knext scaffold template and apps/file-manager, NOT a hand-rolled shortcut: a bare `nitro({preset:'bun'})` with code splitting on produces a server bundle that crashes at BOOT on this vinext version (a split-off chunk uses import.meta.filename, which --bytecode cannot carry for a non-entry chunk) — the exact failure class this app's own entry-asset-anchor.mjs fix is a sibling of, but for a DIFFERENT import.meta use this app does not touch. `overrides.@vercel/og` pins a KNOWN-WORKING og release: vinext@1.0.1 itself pins @vercel/og EXACTLY at 1.0.3, and 1.0.0 through 1.0.3 all ship broken standalone (missing dist/hb.wasm, confirmed with a bare `bun add @vercel/og` + ImageResponse call, zero vinext/nitro/Bun-compile involvement) -- filed separately, not this PR's bug, not fixable by this app's asset-anchor mechanism (hb.wasm is read via `__dirname`-based `locateFile()`, not `new URL(lit, import.meta.url)`, and the file does not exist ANYWHERE in the installed tree for this app to embed). Not a symlink or workspace member: its deps are installed into a throwaway build dir by the test, never built in place.",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-server-dom-webpack": "^19.2.6",
+    "vinext": "1.0.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.0",
+    "@vitejs/plugin-rsc": "^0.5.26",
+    "next": "16.3.6",
+    "nitro": "3.0.260610-beta",
+    "vite": "^8.2.2"
+  },
+  "overrides": {
+    "@vercel/og": "0.11.1"
+  }
+}

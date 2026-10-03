@@ -15,5 +15,10 @@
     "types": ["bun-types", "node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", ".open-next"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    ".open-next",
+    "src/__tests__/fixtures/vinext-bun-og-app"
+  ]
 }
