@@ -123,6 +123,10 @@ const config: KnativeNextConfig = {
 export default config;
 ```
 
+Bun is the default runtime and the recommended choice for most apps; Node is fully supported too
+— see [Which runtime should I use?](/docs/bun-runtime#which-runtime-should-i-use) before you set
+`runtime`.
+
 <Callout>
 If you configure `storage`, its `provider` is validated against `gcs | s3 | minio | azure`. Each
 shells out to that cloud's CLI (`gsutil` / `aws` / `mc` / `az`), which must be installed and
