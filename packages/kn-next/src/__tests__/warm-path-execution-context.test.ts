@@ -124,6 +124,13 @@ function writeApp(entryTemplate: string, contractPath: string): string {
     pkg("@getknext/core", {
         "./internal/vinext-image-optimizer": "./image.mjs",
         "./internal/response-cache-control": "./cache-control.mjs",
+        // #1863: the real entry now side-effect-imports the ARP/neighbour-table
+        // primer as its very first statement — a no-op stub is enough (this
+        // fixture proves after()/warm-path draining, not the primer's logic,
+        // covered separately by arp-primer.test.ts). Without this subpath
+        // declared, node's real ESM resolver throws
+        // ERR_PACKAGE_PATH_NOT_EXPORTED before the entry ever boots.
+        "./internal/arp-primer": "./arp-primer.mjs",
     });
     w(
         "node_modules/@getknext/core/image.mjs",
@@ -134,6 +141,7 @@ function writeApp(entryTemplate: string, contractPath: string): string {
         "export const applyVinextDeployDefault = () => {};\n" +
             "export const cacheControlMiddleware = () => (_req, next) => next();\n",
     );
+    w("node_modules/@getknext/core/arp-primer.mjs", "");
     pkg("sharp", { ".": "./index.mjs" });
     w("node_modules/sharp/index.mjs", "export default {};\n");
     symlinkSync(
