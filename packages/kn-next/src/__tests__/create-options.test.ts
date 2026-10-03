@@ -87,8 +87,8 @@ function render(choices: Partial<CreateChoices> = {}): Map<string, string> {
 
 function pkgOf(files: Map<string, string>): {
     scripts: Record<string, string>;
-    dependencies: Record<string, string>;
-    devDependencies: Record<string, string>;
+    dependencies: Record<string, string | undefined>;
+    devDependencies: Record<string, string | undefined>;
 } {
     return JSON.parse(files.get("package.json") ?? "");
 }
@@ -500,44 +500,59 @@ describe("mapping: every combination emits a config the validator accepts", () =
         else process.env.REDIS_URL = savedRedis;
     });
 
-    it("all 60 runtime × builder × cache × storage combinations load and validate", async () => {
+    it("every flag combination (120: runtime × builder × cache × storage × React Compiler) loads and validates", async () => {
         process.env.REDIS_URL = "redis://redis.example.svc:6379";
         let n = 0;
         for (const runtime of runtimes)
             for (const builder of builders)
                 for (const cache of caches)
-                    for (const storage of storages) {
-                        const c = {
-                            runtime,
-                            builder,
-                            cache,
-                            storage,
-                            reactCompiler: false,
-                        };
-                        const dir = join(root, `combo-${n++}`);
-                        mkdirSync(dir);
-                        const file = join(dir, "knext.config.ts");
-                        writeFileSync(
-                            file,
-                            render(c).get("knext.config.ts") ?? "",
-                        );
-                        const cfg = (await import(pathToFileURL(file).href))
-                            .default as KnativeNextConfig;
-                        expect(() => validateConfig(cfg)).not.toThrow();
-                        expect(cfg.runtime).toBe(
-                            runtime === "node" ? "node" : undefined,
-                        );
-                        expect(cfg.build).toBe(
-                            builder === "turbopack" ? undefined : builder,
-                        );
-                        expect(cfg.cache?.provider).toBe(
-                            cache === "redis" ? "redis" : undefined,
-                        );
-                        expect(cfg.storage?.provider).toBe(
-                            storage === "none" ? undefined : storage,
-                        );
-                    }
-        expect(n).toBe(60);
+                    for (const storage of storages)
+                        for (const rc of [true, false]) {
+                            // Through the real flag parser, as the CLI does.
+                            const c = parseChoiceFlags({
+                                runtime,
+                                builder,
+                                cache,
+                                storage,
+                                "react-compiler": rc,
+                                "no-react-compiler": !rc,
+                            });
+                            const files = render(c);
+                            const dir = join(root, `combo-${n++}`);
+                            mkdirSync(dir);
+                            const file = join(dir, "knext.config.ts");
+                            writeFileSync(
+                                file,
+                                files.get("knext.config.ts") ?? "",
+                            );
+                            const cfg = (await import(pathToFileURL(file).href))
+                                .default as KnativeNextConfig;
+                            expect(() => validateConfig(cfg)).not.toThrow();
+                            expect(cfg.runtime).toBe(
+                                runtime === "node" ? "node" : undefined,
+                            );
+                            expect(cfg.build).toBe(
+                                builder === "turbopack" ? undefined : builder,
+                            );
+                            expect(cfg.cache?.provider).toBe(
+                                cache === "redis" ? "redis" : undefined,
+                            );
+                            expect(cfg.storage?.provider).toBe(
+                                storage === "none" ? undefined : storage,
+                            );
+                            const pkg = pkgOf(files);
+                            expect(pkg.dependencies.ioredis).toBe(
+                                runtime === "node"
+                                    ? CORE_MANIFEST.dependencies.ioredis
+                                    : undefined,
+                            );
+                            expect(
+                                pkg.devDependencies[
+                                    "babel-plugin-react-compiler"
+                                ],
+                            ).toBe(rc ? "^1.0.0" : undefined);
+                        }
+        expect(n).toBe(120);
     });
 
     it("redis without REDIS_URL fails validation loudly instead of deploying a cacheless app", async () => {
