@@ -197,6 +197,7 @@ function __resetEnvForTests() {
   connectPromise = undefined;
   useRedis = !!REDIS_URL;
   unhealthyUntil = 0;
+  redisClientUnavailableReported = false;
   CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
   COMMAND_TIMEOUT_MS = envMs('REDIS_COMMAND_TIMEOUT_MS', 2000);
   RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
@@ -274,6 +275,37 @@ function markUnhealthy(reason) {
  * that resolves normally at runtime.
  */
 const IOREDIS_SPECIFIER = ['io', 'redis'].join('');
+
+/**
+ * Say so — loudly, once — when Redis is configured but its client cannot load.
+ *
+ * The non-literal specifier above has a cost: Next's standalone file tracing
+ * cannot follow it either, so the client is only present if the runtime image
+ * puts it there. When it did not (#1843, the standalone node image), this
+ * branch used to fall back to the in-memory store in silence. Every cache line
+ * still logged, just with a `(memory)` suffix, so the app looked healthy while
+ * ISR was neither shared between pods nor kept across a scale-to-zero.
+ *
+ * Failing open is still right — a missing cache must not take the app down —
+ * but a configured Redis that is never used is a deployment defect, not a
+ * transient fault, so it is reported at error level rather than left for
+ * someone to infer from log suffixes. The constructor attempts the connection
+ * eagerly, so this lands at startup. Once per process: `useRedis` is cleared
+ * alongside it, so nothing retries the import.
+ */
+let redisClientUnavailableReported = false;
+
+function reportRedisClientUnavailable(err) {
+  if (redisClientUnavailableReported) return;
+  redisClientUnavailableReported = true;
+  console.error(
+    `[CacheHandler] Redis client unavailable: REDIS_URL is set but the ioredis ` +
+      `client could not be loaded (${err?.message || err}). Falling back to an ` +
+      'in-memory cache: ISR and data-cache entries are NOT shared between pods ' +
+      'and are lost on every scale-to-zero. The runtime image must include the ' +
+      "'ioredis' package.",
+  );
+}
 
 /**
  * Bun's native client, or null when not running under Bun — or when the ioredis
@@ -445,8 +477,9 @@ async function getRedis() {
       try {
         const mod = await import(IOREDIS_SPECIFIER);
         Redis = mod.default || mod;
-      } catch {
+      } catch (err) {
         useRedis = false;
+        reportRedisClientUnavailable(err);
         return null;
       }
     }

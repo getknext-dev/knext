@@ -452,7 +452,13 @@ describe("@getknext/core's runtime closure actually resolves under what the Dock
      */
     describe("standalone-deps npm-install versions ↔ @getknext/core package.json (Dockerfile.standalone.hbs:66-68's claim, enforced)", () => {
         const depsStage = stageMap.get("standalone-deps") ?? "";
-        const LOCKSTEP_DEPS = ["pino", "prom-client", "@opentelemetry/api"];
+        const LOCKSTEP_DEPS = [
+            "pino",
+            "prom-client",
+            "@opentelemetry/api",
+            // #1843: the cache handler's Redis client on the node runtime.
+            "ioredis",
+        ];
 
         it.each(
             LOCKSTEP_DEPS,

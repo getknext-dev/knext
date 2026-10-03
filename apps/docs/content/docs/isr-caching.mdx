@@ -67,6 +67,11 @@ Redis, this block is the first thing to check.
   exactly at the revalidate window there would be nothing left to serve stale.
 - When `REDIS_URL` is unset (local dev), the handler falls back to in-memory caching, so `vinext
   dev` and local builds work without a Redis.
+- When `REDIS_URL` is set but the Redis client cannot be loaded in the pod, the handler still
+  serves from memory, but it logs one error at startup that starts with
+  `[CacheHandler] Redis client unavailable`. If you see it, cache entries are not shared between
+  pods and do not survive scale-to-zero. Check that the image includes the `ioredis` package;
+  images built by `knext deploy` include it.
 
 The connection details come from the environment — `REDIS_URL` and `REDIS_KEY_PREFIX` are injected
 into your pods from the `cache` block of your deploy config (see
