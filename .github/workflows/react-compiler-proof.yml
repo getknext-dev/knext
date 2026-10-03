@@ -205,11 +205,32 @@ jobs:
             echo "::warning::no client chunk imports react/compiler-runtime on this cell — matches the known, documented limit on the official-adapter target (see /docs/react-compiler)"
           fi
 
+      # `knext build` does NOT stage or build the standalone image — only
+      # `knext deploy`/`preview` do, via `stageStandaloneBuildContext` (which
+      # needs a registry + cluster to run end to end). The staged files
+      # themselves are plain copies of the published package's templates —
+      # no mustache placeholders (`Dockerfile.standalone.hbs`'s own header
+      # says so) — so this proof lane stages them directly instead of
+      # running a full deploy.
+      - name: Stage the standalone Dockerfile + entry (what `knext deploy` would stage)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          CORE_TEMPLATES="node_modules/@getknext/core/templates/runtime-standalone"
+          cp "${CORE_TEMPLATES}/Dockerfile.standalone.hbs" ./Dockerfile.standalone
+          cp "${CORE_TEMPLATES}/knext-standalone-entry.mjs.hbs" ./knext-standalone-entry.mjs
+          cp "${CORE_TEMPLATES}/knext-compile-cache-bake.mjs.hbs" ./knext-compile-cache-bake.mjs
+          # The scaffold's own .dockerignore (correctly) excludes .next,
+          # node_modules and knext-standalone-exec* for the VINEXT image —
+          # this recipe needs exactly those. Override for this build only.
+          printf '%s\n' '.git' > .dockerignore
+
       - name: docker build (the real shipped standalone image) and assert a live 200
         working-directory: app
         run: |
           set -euo pipefail
-          docker build -t react-compiler-adapter:proof . 2>&1 | tee docker-build.log
+          docker build -f Dockerfile.standalone --target "standalone-${{ matrix.runtime }}" \
+            -t react-compiler-adapter:proof . 2>&1 | tee docker-build.log
           CID="$(docker run -d -p 8099:3000 react-compiler-adapter:proof)"
           CODE=000
           for _ in $(seq 1 30); do
