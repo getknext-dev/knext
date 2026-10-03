@@ -711,13 +711,22 @@ describe("the bundled patches against the published tarball", () => {
         expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
     });
 
-    // Shared by both vinext#3689 cases below: the full option surface
+    // Shared by all three vinext#3689 cases below: the full option surface
     // `handleServerActionRscRequest` requires. Modeled on vinext's own
     // fixture (tests/app-server-action-execution.test.ts's
     // createRscOptions), trimmed to the fields this redirect path reads.
+    // `overrides` lets each test reach one of the fix's three distinct
+    // call sites: the default `dispatchRedirectTargetRequest` below always
+    // returns valid Flight content, which only ever reaches the THIRD site
+    // (the final, unconditional wrapper status). A test that needs the
+    // FIRST site (no internal redirect target at all) picks an external
+    // `redirectTargetUrl` instead; a test that needs the SECOND site (an
+    // internal target whose response is not usable Flight content) passes
+    // its own `dispatchRedirectTargetRequest` override.
     async function callHandleServerActionRscRequest(
         redirectTargetUrl: string,
         redirectType: string,
+        overrides: Record<string, unknown> = {},
     ): Promise<Response | null> {
         applyVinextPatches(patched);
         const actionMod = await importPatched<{
@@ -776,11 +785,11 @@ describe("the bundled patches against the published tarball", () => {
             currentRoutePathname: "/dashboard",
             decodeReply: () => Promise.resolve([]),
             draftModeSecret: "draft-secret",
-            // Always answers an internal-looking target with a valid Flight
-            // response — exercises the "forwarded response wrapper" leg.
-            // vinext#3689's other fix (the `!redirectTarget` early return,
-            // for an external target) is covered by the second test, where
-            // this is never reached.
+            // Default: answers an internal-looking target with a valid
+            // Flight response — exercises the THIRD site (the final,
+            // unconditional wrapper status). A test that overrides this
+            // reaches the SECOND site instead (see the shared helper's own
+            // comment above).
             async dispatchRedirectTargetRequest() {
                 return new Response(
                     JSON.stringify({
@@ -834,16 +843,20 @@ describe("the bundled patches against the published tarball", () => {
             toInterceptOpts: (intercept: { slotKey: string }) => ({
                 slot: intercept.slotKey,
             }),
+            ...overrides,
         });
     }
 
-    it("vinext#3689: a fetch action's redirect to an ordinary (non-forwarded, non-ancestor, same-runtime) route answers 200, not 303", async () => {
+    it("vinext#3689 (site 3, the final unconditional wrapper): a fetch action's redirect to an ordinary (non-forwarded, non-ancestor, same-runtime) route answers 200, not 303", async () => {
         // Ported from Next.js: test/e2e/app-dir/actions/app-action.test.ts —
         // the same fixture cloudflare/vinext#3689's own regression test
         // ports. Before the fix, exactly this case (a plain redirect to an
         // unrelated route, not already forwarded, not an ancestor or stale
         // sibling, not a cross-runtime target) fell through
-        // shouldUseForwardedActionRedirectStatus() to 303.
+        // shouldUseForwardedActionRedirectStatus() to 303. The default
+        // dispatchRedirectTargetRequest (valid Flight content) means this
+        // reaches site 3 only — sites 1 and 2 are each covered by their own
+        // test below.
         const response = await callHandleServerActionRscRequest(
             "/redirect-target",
             "push",
@@ -859,14 +872,15 @@ describe("the bundled patches against the published tarball", () => {
         });
     });
 
-    it("vinext#3689: a fetch action's redirect to an external URL also answers 200, not 303", async () => {
+    it("vinext#3689 (site 1, the `!redirectTarget` early return): a fetch action's redirect to an external URL also answers 200, not 303", async () => {
         // Exercises the `!redirectTarget` early return (resolveInternalActionRedirectTarget
         // returns null for a cross-origin target, so there is no internal
-        // Flight response to stream) — the OTHER branch this patch fixes.
-        // The target reaches the browser only via x-action-redirect, which
-        // the client already validates before navigating; this response
-        // carries no Location header, so the status change cannot turn it
-        // into a browser-followed redirect.
+        // Flight response to stream) — ONE of the three sites this patch
+        // fixes (the other two are covered by the tests immediately before
+        // and after this one). The target reaches the browser only via
+        // x-action-redirect, which the client already validates before
+        // navigating; this response carries no Location header, so the
+        // status change cannot turn it into a browser-followed redirect.
         const response = await callHandleServerActionRscRequest(
             "https://other.example/landing",
             "push",
@@ -876,6 +890,37 @@ describe("the bundled patches against the published tarball", () => {
             "https://other.example/landing",
         );
         expect(response?.headers.get("location")).toBeNull();
+        expect(await response!.text()).toBe("");
+    });
+
+    it("vinext#3689 (site 2, the forwarded-but-not-Flight fallback): a fetch action's redirect to an internal target whose dispatch returns non-Flight content also answers 200, not 303", async () => {
+        // Exercises the SECOND early return: resolveInternalActionRedirectTarget
+        // DOES resolve an internal target, but the dispatched response is
+        // not usable RSC Flight content (wrong content-type here; vinext's
+        // own suite also covers "not an App route", "an App route handler",
+        // "no page", and "a non-2xx fallback page" the same way — see
+        // app-server-action-execution.test.ts's "falls back to a
+        // header-only redirect..." tests, and upstream #3689's
+        // /pages-target, /api/logout, /layout-only, /protected fixtures).
+        // Before the fix this fell back to 303, same as the other two
+        // sites; after the fix it is 200 like every other fetch-action
+        // redirect, still with no Location header and no streamed body.
+        const response = await callHandleServerActionRscRequest(
+            "/protected",
+            "push",
+            {
+                async dispatchRedirectTargetRequest() {
+                    return new Response("unauthorized", {
+                        status: 401,
+                        headers: { "content-type": "text/plain" },
+                    });
+                },
+            },
+        );
+        expect(response?.status).toBe(200);
+        expect(response?.headers.get("x-action-redirect")).toBe("/protected");
+        expect(response?.headers.get("location")).toBeNull();
+        expect(response?.headers.get("content-type")).toBeNull();
         expect(await response!.text()).toBe("");
     });
 
