@@ -234,6 +234,60 @@ let unhealthyUntil = 0;
 // In-memory fallback
 const memoryCache = new Map();
 
+// ─── Optimized-image variants (write-free runtime) ───
+//
+// With `images.customCacheHandler: true` (the knext adapter sets it when the
+// app uses this handler), Next's image optimizer stores every optimized
+// variant HERE instead of writing `.next/cache/images`, so the app needs no
+// writable volume. On Redis they are shared and survive scale-to-zero like
+// every other entry. On the in-memory fallback they are per-pod, so they live
+// in their own map with a BYTE budget, evicting least-recently-used first: an
+// unbounded map would grow by one encoded image per distinct
+// (src, width, quality, format) a client asks for.
+const imageMemory = new Map();
+let imageMemoryBytes = 0;
+const DEFAULT_IMAGE_MEMORY_BYTES = 32 * 1024 * 1024;
+
+function imageMemoryBudget() {
+  const raw = Number(process.env.KNEXT_IMAGE_CACHE_MEMORY_BYTES);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_IMAGE_MEMORY_BYTES;
+}
+
+function isImageValue(data) {
+  return !!data && data.kind === 'IMAGE' && Buffer.isBuffer(data.buffer);
+}
+
+function dropImageFromMemory(key) {
+  const entry = imageMemory.get(key);
+  if (!entry) return;
+  imageMemory.delete(key);
+  imageMemoryBytes -= entry.value.buffer.byteLength;
+}
+
+function storeImageInMemory(key, entry) {
+  dropImageFromMemory(key);
+  const size = entry.value.buffer.byteLength;
+  const budget = imageMemoryBudget();
+  // A variant bigger than the whole budget is not cached at all — storing it
+  // would evict everything else and then itself on the next write.
+  if (size > budget) return false;
+  while (imageMemoryBytes + size > budget && imageMemory.size > 0) {
+    dropImageFromMemory(imageMemory.keys().next().value);
+  }
+  imageMemory.set(key, entry);
+  imageMemoryBytes += size;
+  return true;
+}
+
+function readImageFromMemory(key) {
+  const entry = imageMemory.get(key);
+  if (!entry) return undefined;
+  // Map iteration order is insertion order: re-inserting marks it most recent.
+  imageMemory.delete(key);
+  imageMemory.set(key, entry);
+  return entry;
+}
+
 /**
  * Trip the breaker and drop the current client.
  *
@@ -750,6 +804,13 @@ function serializeCacheValue(data) {
     serialized.rscData = data.rscData.toString('base64');
     serialized.__rscDataSerialized = true;
   }
+  // IMAGE buffer (an optimized variant): Buffer → base64 string. A plain
+  // JSON.stringify would write `{ type: 'Buffer', data: [...] }`, and Next
+  // sends `value.buffer` straight to the client on a hit.
+  if (isImageValue(data)) {
+    serialized.buffer = data.buffer.toString('base64');
+    serialized.__bufferSerialized = true;
+  }
   return serialized;
 }
 
@@ -768,6 +829,11 @@ function deserializeCacheValue(data) {
     value.rscData = Buffer.from(value.rscData, 'base64');
     value.__rscDataSerialized = undefined;
   }
+  // IMAGE buffer: base64 string → Buffer
+  if (value.__bufferSerialized && typeof value.buffer === 'string') {
+    value.buffer = Buffer.from(value.buffer, 'base64');
+    value.__bufferSerialized = undefined;
+  }
   return data;
 }
 
@@ -785,6 +851,9 @@ function cloneCacheValue(data) {
   // Clone Buffer to avoid shared memory
   if (Buffer.isBuffer(data.rscData)) {
     cloned.rscData = Buffer.from(data.rscData);
+  }
+  if (isImageValue(data)) {
+    cloned.buffer = Buffer.from(data.buffer);
   }
   return cloned;
 }
@@ -895,7 +964,7 @@ class CacheHandler {
       }
 
       // In-memory fallback
-      const entry = memoryCache.get(key);
+      const entry = memoryCache.get(key) ?? readImageFromMemory(key);
       if (!entry) {
         logCacheEvent('MISS', source, key, {
           durationMs: Date.now() - startTime,
@@ -935,6 +1004,7 @@ class CacheHandler {
       if (data === null) {
         if (client) await client.del(cacheKey(key));
         memoryCache.delete(key);
+        dropImageFromMemory(key);
         logCacheEvent('DELETE', source, key, {
           durationMs: Date.now() - startTime,
         });
@@ -1004,7 +1074,12 @@ class CacheHandler {
           tags,
           cacheControl,
         };
-        memoryCache.set(key, memEntry);
+        if (isImageValue(data)) {
+          // Byte-bounded, separately from ISR/data entries (see imageMemory).
+          storeImageInMemory(key, memEntry);
+        } else {
+          memoryCache.set(key, memEntry);
+        }
       }
 
       logCacheEvent('SET', source, key, {

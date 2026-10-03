@@ -1,0 +1,465 @@
+name: Write-free runtime — kind e2e (no writable volume)
+
+# Proof lane for the write-free runtime: a storage-configured app on the
+# DEFAULT standalone target (turbopack x bun, and turbopack x node) runs with
+# NO writable volume at all — no emptyDir, read-only root filesystem — and
+# still serves optimized images and ISR.
+#
+# Until this change, any app with `spec.storage` got an emptyDir at
+# `.next/standalone/.next/cache`, because Next's image optimizer wrote its
+# variants there. The adapter now routes them through the knext cache handler
+# (`images.customCacheHandler`), `kn-next deploy` reads that back from the
+# build and sets `spec.security.writeFree`, and the operator then renders no
+# volume. Each emptyDir costs pod-sandbox setup on every cold wake.
+#
+# What this lane asserts, end to end through the real CLI (packed tarballs,
+# the same bytes `npm publish` ships) and the operator built from this commit:
+#   1. the NextApp CR carries `spec.security.writeFree: true`;
+#   2. the rendered Knative revision has NO volumes, no volumeMounts on the app
+#      container, and `readOnlyRootFilesystem: true` — on the template AND on
+#      the pod that actually ran;
+#   3. the shared platform assertions (scripts/rc-scaffold-platform-e2e.mjs):
+#      scale-to-zero + wake, Redis-backed ISR revalidated only by an
+#      authenticated invalidation, `/_next/image` 200 with an image type, and
+#      the static-asset upload to the in-cluster MinIO;
+#   4. an optimized variant is a cache HIT on a SECOND request and again after
+#      a scale-to-zero (served from Redis, not from a pod-local disk);
+#   5. the app container never logged a read-only-filesystem write failure.
+#
+# The vinext disk-mode leg of the same change is proved by the file-manager
+# platform e2e (a vinext app), which asserts the same no-volume rendering.
+#
+# Dispatch-only: no schedule, no PR trigger, non-required. Ephemeral kind on
+# the runner only — never OKE/GKE.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  write-free-e2e:
+    name: write-free (${{ matrix.runtime }}) through kn-next deploy on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [bun, node]
+    env:
+      CLUSTER: write-free-e2e
+      APP_NS: write-free-e2e
+      APP_NAME: write-free-e2e
+      BUCKET: write-free-e2e-assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      - name: Pack knext tarballs (npm pack — the real publish tool)
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier (scale-to-zero tuned)
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl patch configmap/config-autoscaler -n knative-serving --type merge \
+            --patch '{"data":{"scale-to-zero-pod-retention-period":"0s","stable-window":"6s"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      - name: Build + deploy the operator from this commit
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+          kubectl wait --for=condition=Ready --timeout=120s \
+            -n kn-next-operator-system certificate/kn-next-operator-serving-cert
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
+            -n kn-next-operator-system endpoints/kn-next-operator-webhook-service
+          "${GITHUB_WORKSPACE}/scripts/kind-manifests/wait-for-webhook-ready.sh"
+
+      - name: Data plane (redis, minio) + Secrets
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NS"
+          rnd() { openssl rand -hex 16; }
+          MINIO_KEY="$(rnd)"; MINIO_SECRET="$(rnd)"; CACHE_TOKEN="$(rnd)"
+          for v in "$MINIO_KEY" "$MINIO_SECRET" "$CACHE_TOKEN"; do echo "::add-mask::$v"; done
+          kubectl -n "$APP_NS" create secret generic wf-e2e-minio --from-literal=access="$MINIO_KEY" --from-literal=secret="$MINIO_SECRET"
+          kubectl -n "$APP_NS" create secret generic rc-scaffold-credentials --from-literal=CACHE_INVALIDATE_TOKEN="$CACHE_TOKEN"
+          {
+            echo "CACHE_INVALIDATE_TOKEN=$CACHE_TOKEN"
+            echo "MINIO_ACCESS_KEY=$MINIO_KEY"
+            echo "MINIO_SECRET_KEY=$MINIO_SECRET"
+          } >> "$GITHUB_ENV"
+          cat <<YAML | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: redis } }
+            template:
+              metadata: { labels: { app: redis } }
+              spec:
+                containers:
+                  - name: redis
+                    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+                    ports: [{ containerPort: 6379 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            selector: { app: redis }
+            ports: [{ port: 6379 }]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: minio, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: minio } }
+            template:
+              metadata: { labels: { app: minio } }
+              spec:
+                containers:
+                  - name: minio
+                    image: docker.io/bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+                    env:
+                      - name: MINIO_ROOT_USER
+                        valueFrom: { secretKeyRef: { name: wf-e2e-minio, key: access } }
+                      - name: MINIO_ROOT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: wf-e2e-minio, key: secret } }
+                    ports: [{ containerPort: 9000 }]
+                    readinessProbe:
+                      httpGet: { path: /minio/health/ready, port: 9000 }
+                      periodSeconds: 2
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: minio, namespace: $APP_NS }
+          spec:
+            selector: { app: minio }
+            ports: [{ port: 9000 }]
+          YAML
+          kubectl -n "$APP_NS" rollout status deploy/redis deploy/minio --timeout=180s
+
+      - name: Reach the cluster (kourier-internal + MinIO port-forwards)
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          kubectl -n "$APP_NS" port-forward svc/minio 9000:9000 >/tmp/pf-minio.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::MinIO port-forward never became reachable"; cat /tmp/pf-*.log; exit 1
+
+      - name: Create the MinIO bucket for static assets (anonymous-read)
+        run: |
+          set -euo pipefail
+          export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
+          aws s3 mb "s3://$BUCKET" --endpoint-url http://127.0.0.1:9000 --region us-east-1
+          cat > /tmp/wf-e2e-bucket-policy.json <<JSON
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              { "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::$BUCKET/*" }
+            ]
+          }
+          JSON
+          aws s3api put-bucket-policy --bucket "$BUCKET" \
+            --policy file:///tmp/wf-e2e-bucket-policy.json --endpoint-url http://127.0.0.1:9000
+
+      # A brand-new app from THIS commit's scaffolder, so the generated
+      # next.config / cache-handler.js re-export are the ones users get.
+      - name: Scaffold a new app with this commit's CLI
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/write-free-app"
+          node packages/kn-next/dist/cli/kn-next.js create "$APP_DIR" --name "$APP_NAME"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: Add an ISR page, an authenticated invalidate route and an image fixture
+        run: |
+          set -euo pipefail
+          mkdir -p "$APP_DIR/src/app/isr-smoke" "$APP_DIR/src/app/api/cache/invalidate" "$APP_DIR/public"
+          cat > "$APP_DIR/src/app/isr-smoke/page.tsx" <<'TSX'
+          import { unstable_cache as cache } from "next/cache";
+
+          const getValue = cache(
+            async () => `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            ["rc-e2e-isr-smoke-value"],
+            { tags: ["isr-smoke"], revalidate: false },
+          );
+
+          export default async function Page() {
+            const value = await getValue();
+            return <div data-isr-value={value}>{value}</div>;
+          }
+          TSX
+          cat > "$APP_DIR/src/app/api/cache/invalidate/auth.ts" <<'TS'
+          import { timingSafeEqual } from "node:crypto";
+
+          // Fail-closed Bearer-token auth (no unauthenticated mutating endpoints).
+          export function isAuthorized(
+            authHeader: string | null | undefined,
+            expectedToken: string | undefined,
+          ): boolean {
+            if (!expectedToken) return false;
+            if (!authHeader) return false;
+            const prefix = "Bearer ";
+            if (!authHeader.startsWith(prefix)) return false;
+            const provided = Buffer.from(authHeader.slice(prefix.length));
+            const expected = Buffer.from(expectedToken);
+            if (provided.length !== expected.length) return false;
+            return timingSafeEqual(provided, expected);
+          }
+          TS
+          cat > "$APP_DIR/src/app/api/cache/invalidate/route.ts" <<'TS'
+          import { revalidateTag } from "next/cache";
+          import { NextResponse } from "next/server";
+          import { isAuthorized } from "./auth";
+
+          export const POST = async (request: Request) => {
+            if (!isAuthorized(request.headers.get("authorization"), process.env.CACHE_INVALIDATE_TOKEN)) {
+              return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+            }
+            const body = await request.json();
+            const { tag } = body;
+            if (!tag || typeof tag !== "string") {
+              return NextResponse.json({ error: 'Missing or invalid "tag" parameter' }, { status: 400 });
+            }
+            revalidateTag(tag, "max");
+            return NextResponse.json({ success: true, tag });
+          };
+          TS
+          base64 -d > "$APP_DIR/public/rc-e2e-optimize-fixture.png" <<'B64'
+          iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=
+          B64
+          test -s "$APP_DIR/public/rc-e2e-optimize-fixture.png"
+
+      - name: Write the kind-cluster knext.config.ts (default build, explicit cache/storage)
+        run: |
+          set -euo pipefail
+          cat > "$APP_DIR/knext.config.ts" <<TS
+          import type { KnativeNextConfig } from "@getknext/core";
+
+          const config: KnativeNextConfig = {
+            name: "$APP_NAME",
+            runtime: "${{ matrix.runtime }}",
+            registry: "localhost:5001",
+            cache: {
+              provider: "redis",
+              url: "redis://redis.$APP_NS.svc.cluster.local.:6379",
+            },
+            storage: {
+              provider: "s3",
+              bucket: "$BUCKET",
+              region: "us-east-1",
+              publicUrl: "http://minio.$APP_NS.svc.cluster.local:9000/$BUCKET",
+            },
+            scaling: { minScale: 0, maxScale: 2, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+            secrets: { envFrom: ["rc-scaffold-credentials"] },
+          };
+
+          export default config;
+          TS
+
+      # The three packed tarballs in one reify, so @getknext/core resolves its
+      # lib/db deps from them rather than the registry.
+      - name: Install the app with this commit's packed tarballs
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm install --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+          test -d node_modules/@getknext/core
+
+      - name: kn-next deploy (packed CLI, against the kind cluster)
+        env:
+          AWS_ENDPOINT_URL: http://127.0.0.1:9000
+          AWS_ACCESS_KEY_ID: ${{ env.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          npx knext deploy --registry localhost:5001 --namespace "$APP_NS" --tag "wf${GITHUB_RUN_ID}"
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$APP_NAME" \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
+
+      - name: Assert the build routed images through the cache handler and the CR is write-free
+        run: |
+          set -euo pipefail
+          routed="$(node -e "const r=require(process.argv[1]); process.stdout.write(String(r.config.images.customCacheHandler))" "$APP_DIR/.next/required-server-files.json")"
+          echo "built images.customCacheHandler=${routed}"
+          [ "$routed" = "true" ] || { echo "::error::the build did not route images through the cache handler"; exit 1; }
+          wf="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.security.writeFree}')"
+          echo "spec.security.writeFree=${wf}"
+          [ "$wf" = "true" ] || { echo "::error::NextApp spec.security.writeFree is '${wf}', want true"; exit 1; }
+
+      - name: Assert NO writable volume is rendered (template)
+        run: |
+          set -euo pipefail
+          ksvc="$(kubectl -n "$APP_NS" get ksvc "$APP_NAME" -o json)"
+          vols="$(echo "$ksvc" | jq -c '.spec.template.spec.volumes // []')"
+          mounts="$(echo "$ksvc" | jq -c '[.spec.template.spec.containers[].volumeMounts // []] | add // []')"
+          rorfs="$(echo "$ksvc" | jq -r '.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem')"
+          echo "volumes=${vols} mounts=${mounts} readOnlyRootFilesystem=${rorfs}"
+          [ "$vols" = "[]" ] || { echo "::error::ksvc template renders volumes: ${vols}"; exit 1; }
+          [ "$mounts" = "[]" ] || { echo "::error::ksvc template renders volumeMounts: ${mounts}"; exit 1; }
+          [ "$rorfs" = "true" ] || { echo "::error::readOnlyRootFilesystem is '${rorfs}', want true"; exit 1; }
+
+      - name: Assert scale-to-zero+wake, ISR+authenticated invalidation, images and storage upload
+        env:
+          RC_E2E_BASE_URL: http://127.0.0.1:8080
+          RC_E2E_NAMESPACE: ${{ env.APP_NS }}
+          RC_E2E_APP_NAME: ${{ env.APP_NAME }}
+          RC_E2E_BUCKET: ${{ env.BUCKET }}
+          MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
+        run: |
+          export RC_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
+          node scripts/rc-scaffold-platform-e2e.mjs
+
+      - name: Assert an optimized image is a cache HIT, also after scale-to-zero
+        run: |
+          set -euo pipefail
+          host="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          img() {
+            curl -s -o /dev/null -D - -H "Host: ${host}" -H 'Accept: image/webp' \
+              'http://127.0.0.1:8080/_next/image?url=%2Frc-e2e-optimize-fixture.png&w=128&q=75' \
+              | tr -d '\r' | awk 'tolower($1)=="x-nextjs-cache:"{print toupper($2)} /^HTTP\//{code=$2} END{print "status=" code}'
+          }
+          echo "first:  $(img | tr '\n' ' ')"
+          sleep 2
+          second="$(img | tr '\n' ' ')"; echo "second: ${second}"
+          case "$second" in *HIT*status=200*) ;; *) echo "::error::second request was not a 200 cache HIT: ${second}"; exit 1;; esac
+          # Wait for the app to scale to zero, so the next request lands on a
+          # NEW pod with no local state: a HIT there can only come from Redis.
+          for _ in $(seq 1 90); do
+            n="$(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" --field-selector=status.phase=Running -o name | wc -l)"
+            [ "$n" = "0" ] && break
+            sleep 2
+          done
+          [ "$n" = "0" ] || { echo "::error::app never scaled to zero"; exit 1; }
+          woke="$(img | tr '\n' ' ')"; echo "after scale-to-zero: ${woke}"
+          case "$woke" in *HIT*status=200*) ;; *) echo "::error::after a scale-to-zero the variant was not a 200 cache HIT: ${woke}"; exit 1;; esac
+
+      - name: Assert the pod that ran had no volume and logged no read-only write failure
+        run: |
+          set -euo pipefail
+          pod="$(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o name | head -n1)"
+          [ -n "$pod" ] || { echo "::error::no app pod found"; exit 1; }
+          vols="$(kubectl -n "$APP_NS" get "$pod" -o json | jq -c '[.spec.volumes[]? | select(.emptyDir != null)]')"
+          echo "${pod} emptyDir volumes: ${vols}"
+          [ "$vols" = "[]" ] || { echo "::error::the running pod has an emptyDir: ${vols}"; exit 1; }
+          logs="$(kubectl -n "$APP_NS" logs "$pod" -c user-container 2>&1 || true)"
+          if echo "$logs" | grep -Ei 'EROFS|read-only file system'; then
+            echo "::error::the app logged a read-only filesystem write failure"; exit 1
+          fi
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods -o wide 2>&1 || true
+          kubectl -n "$APP_NS" get "nextapp/$APP_NAME" -o yaml 2>&1 | head -80 || true
+          kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+          for p in $(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o name 2>/dev/null); do
+            kubectl -n "$APP_NS" logs "$p" --all-containers --tail=80 2>&1 || true
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true

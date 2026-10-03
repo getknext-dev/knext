@@ -124,21 +124,38 @@ Defense in depth against in-container tampering: knext renders your app's contai
   `readOnlyRootFilesystem: true` on the container (**default-on**); `false` keeps a writable root,
   the pre-existing behavior.
 - **No extra volume is mounted by default.** Writable scratch volumes cost pod-startup time on
-  every scale-from-zero wake, so knext only provisions one for the writes that are actually
-  unconditional for your app's build shape — not as a blanket default:
-  - If your build target compiles to a **single executable** (the vinext target, or
-    `selfContained: true` on any other target), knext always mounts a writable, executable `/tmp`
-    — the binary unpacks a native library there on the first image-optimization request.
-  - If you configure **object storage** (`spec.storage`) on the standalone (Node/Bun) build target,
-    knext always mounts Next's own cache directory — the built-in image optimizer writes the
-    variant there before knext can sync it to your bucket.
-  - Otherwise, no extra volume is mounted. Next's cache directory on the standalone target stays
-    read-only: the image optimizer re-computes each variant on every request instead of caching it
-    locally (a performance cost, not a correctness one), and an app with no `cacheHandler`
-    configured sees its default ISR/fetch-cache writes rejected (see the callout below).
+  every scale-from-zero wake, so knext only provisions one when your app's image actually needs it.
+  When `knext deploy` builds the image itself and knows it writes nothing to local disk, it sets
+  `spec.security.writeFree: true` on your `NextApp`, and the operator then mounts **no** writable
+  volume at all. That covers:
+  - **vinext apps built as a disk-mode binary** (the default): image optimization loads its native
+    library from the image's read-only `native/` directory.
+  - **Standalone (Node/Bun) apps with object storage** (`spec.storage`) that use the knext cache
+    handler (every `knext create` app does): the knext adapter turns on Next's
+    `images.customCacheHandler` option, so optimized images are stored through the cache handler
+    instead of `.next/cache/images` on disk. With Redis configured they are shared by every pod
+    and kept across scale-to-zero. Without Redis they are kept in each pod's memory, capped at
+    32 MiB by default (set `KNEXT_IMAGE_CACHE_MEMORY_BYTES` to change it). To keep Next's disk
+    cache instead, build with `KNEXT_IMAGE_CACHE_HANDLER=0` and set `writableCache: true`.
+  - **Self-contained standalone executables** (`selfContained: true` on the Bun runtime), which
+    carry no native libraries.
+- **Shapes that still get a volume.** knext keeps a writable volume when it cannot vouch for the
+  image:
+  - A **self-contained vinext binary** (`selfContained: true` with the vinext target) gets a
+    writable, executable `/tmp`, because it unpacks a native library there on the first
+    image-optimization request.
+  - A standalone app with object storage whose build still writes images to disk (a custom
+    `cacheHandler`, or a Next.js version without `images.customCacheHandler`) gets Next's cache
+    directory, so the image optimizer can write the variant before knext syncs it to your bucket.
+  - A deploy with `--image` or `--skip-build` never sets `writeFree`, so these shapes keep the
+    volumes they had before.
+- **Standalone apps without object storage** never got a volume. The image optimizer re-computes
+  each variant per request unless the app uses the knext cache handler, and an app with no
+  `cacheHandler` configured sees its default ISR/fetch-cache writes rejected (see the callout
+  below).
 - **Opt in to the old, always-mounted behavior** with `spec.security.writableCache: true` — this
   mounts both the `/tmp` scratch volume and (standalone target only) Next's cache directory
-  unconditionally, regardless of your build shape or storage configuration. Use this if you want
+  unconditionally, regardless of your build shape, storage configuration or `writeFree`. Use this if you want
   the image-optimizer's local cache to persist across requests on the standalone target with no
   object storage configured, or if your app has no `cacheHandler` and you want its default
   on-disk ISR fallback to actually persist rather than fail silently.
@@ -159,7 +176,7 @@ and the reference app do this by default — to avoid it entirely.
 <Callout type="warn">
 **If your own code writes to a path under the app's working directory at runtime** (outside the
 paths above), including `/tmp` (`os.tmpdir()`), a read-only root filesystem will reject that write.
-Standalone apps get no writable `/tmp` by default; only single-executable builds do. Set
+No app gets a writable `/tmp` by default except a self-contained vinext binary. Set
 `spec.security.writableCache: true` to mount writable `/tmp` and `.next/cache` scratch space, or
 set `spec.security.readOnlyRootFilesystem: false` to opt out entirely.
 </Callout>
