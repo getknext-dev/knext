@@ -1,0 +1,46 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3682
+What it fixes: A GET/HEAD request for an unmatched App Router path whose Sec-Fetch-Dest is a non-HTML subresource destination (image, font, script, manifest, ...) compiled and rendered the full not-found page. Next.js short-circuits these before invoking the not-found route, returning the same plain-text 'Not Found' body it already uses for invalid _next/static/* paths.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3682.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- /dev/null
++++ b/dist/server/is-non-html-sec-fetch-dest.js
+@@ -0,0 +1,12 @@
++//#region src/server/is-non-html-sec-fetch-dest.ts
++/**
++* `Sec-Fetch-Dest` values for subresource requests that can never render an
++* HTML response. Excludes destinations that can display HTML (`document`,
++* `iframe`, etc.) and `empty` (`fetch()`/XHR, including RSC requests).
++*/
++const NON_HTML_SEC_FETCH_DESTS = new Set(["audio", "audioworklet", "font", "image", "json", "manifest", "paintworklet", "report", "script", "serviceworker", "sharedworker", "style", "track", "video", "webidentity", "worker", "xslt"]);
++function isNonHtmlSecFetchDest(value) {
++	return typeof value === "string" && NON_HTML_SEC_FETCH_DESTS.has(value);
++}
++//#endregion
++export { isNonHtmlSecFetchDest };
+--- a/dist/server/app-rsc-handler.js
++++ b/dist/server/app-rsc-handler.js
+@@ -13,6 +13,7 @@
+ import { ACTION_REVALIDATED_HEADER, FLIGHT_HEADERS, VINEXT_PARAMS_HEADER, VINEXT_PRERENDER_REWRITTEN_HEADER, VINEXT_RENDERED_PATH_AND_SEARCH_HEADER } from "./headers.js";
+ import { isInterceptionMatchedUrlPath, normalizePath } from "./normalize-path.js";
+ import { badRequestResponse, notFoundResponse, notFoundStaticAssetResponse } from "./http-error-responses.js";
++import { isNonHtmlSecFetchDest } from "./is-non-html-sec-fetch-dest.js";
+ import { cloneRequestWithHeaders, cloneRequestWithUrl, filterInternalHeaders, normalizeTrailingSlash, resolvePublicFileRoute } from "./request-pipeline.js";
+ import { normalizeDefaultLocalePathname } from "./pages-i18n.js";
+ import { getCdnCacheAdapter } from "../shims/cdn-cache.js";
+@@ -980,6 +981,12 @@
+ 			options.clearRequestContext();
+ 			return new Response("", { status: 404 });
+ 		}
++		if ((request.method === "GET" || request.method === "HEAD") && isNonHtmlSecFetchDest(request.headers.get("sec-fetch-dest"))) {
++			options.clearRequestContext();
++			const headers = new Headers();
++			mergeMiddlewareResponseHeaders(headers, middlewareContext.headers);
++			return notFoundStaticAssetResponse(headers);
++		}
+ 		setFrameworkRequestRoute("/404", isRscRequest);
+ 		const notFoundResponseStage = transportedResponseStage ?? options.renderResponseStageLocally;
+ 		if (notFoundResponseStage) return composeResponseStageResponse(await notFoundResponseStage(responseStageRequest(), {
