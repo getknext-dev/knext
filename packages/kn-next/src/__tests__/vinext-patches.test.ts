@@ -484,9 +484,15 @@ describe("the bundled patches against the published tarball", () => {
     it("vinext#3424 / #3226 / #3472: the ported hunks are present in the patched dist", () => {
         applyVinextPatches(patched);
         const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
-        // #3424 — the RSC environment fully bundles under Nitro.
+        // #3424 (amended, R1) — the RSC environment fully bundles under
+        // Nitro, but default-external packages (Next's `serverExternalPackages`
+        // list, which includes sqlite3's `bindings` helper and typescript)
+        // stay external instead of being swept into the compiled executable.
+        // Un-amended this read `{ resolve: { noExternal: true } }` with no
+        // `external`, which is exactly the rc.1 regression (turbopack-reports,
+        // twoslash): see the dedicated behavioural test below.
         expect(index).toContain(
-            "...hasNitroPlugin && !hasCloudflarePlugin && userSsrExternal !== true ? { resolve: { noExternal: true } } : nitroDevEnvironmentResolve,",
+            "...hasNitroPlugin && !hasCloudflarePlugin && userSsrExternal !== true ? { resolve: { noExternal: true, external: [...userSsrExternal] } } : nitroDevEnvironmentResolve,",
         );
         // #3226 — the nitro environment keeps Vite's default extensions.
         expect(index).toContain(
@@ -501,6 +507,53 @@ describe("the bundled patches against the published tarball", () => {
             "const originalRenderUrl = pathname + new URL(request.url).search;",
         );
         expect(stage).toContain("originalUrl: originalRenderUrl");
+    });
+
+    it("vinext#3424 (R1 amendment): the Nitro RSC noExternal:true carries an explicit external list, so default-external packages (sqlite3's `bindings` helper, typescript) are never swept into the compiled executable", () => {
+        applyVinextPatches(patched);
+        const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
+        const marker =
+            "...hasNitroPlugin && !hasCloudflarePlugin && userSsrExternal !== true ? { resolve: { noExternal: true, external: [...userSsrExternal] } } : nitroDevEnvironmentResolve,";
+        expect(index).toContain(marker);
+        // Evaluate the EXACT ternary found in the patched dist (not a
+        // hand-duplicated copy) against representative inputs, so a future
+        // edit to the marker string above cannot silently diverge from what
+        // actually executes. `userSsrExternal` here stands in for Next's
+        // merged default server-external list — the rc.1 regression's two
+        // victims (turbopack-reports' sqlite3/bindings, twoslash's
+        // typescript) were both on that list.
+        const exprText = marker.replace(/^\.\.\./, "").replace(/,$/, "");
+        const evalExpr = new Function(
+            "hasNitroPlugin",
+            "hasCloudflarePlugin",
+            "userSsrExternal",
+            "nitroDevEnvironmentResolve",
+            `return (${exprText});`,
+        ) as (
+            hasNitroPlugin: boolean,
+            hasCloudflarePlugin: boolean,
+            userSsrExternal: string[] | true,
+            nitroDevEnvironmentResolve: Record<string, unknown>,
+        ) => unknown;
+        // Nitro build, no Cloudflare plugin, a concrete external list: the
+        // regression case — must bundle (noExternal:true) but carve the
+        // list back out (external:list), matching the pre-#3424 "patches
+        // OFF" behaviour for exactly those packages.
+        expect(
+            evalExpr(true, false, ["sqlite3", "typescript"], {
+                resolve: { noExternal: ["next"] },
+            }),
+        ).toEqual({
+            resolve: { noExternal: true, external: ["sqlite3", "typescript"] },
+        });
+        // Cloudflare builds are untouched by this branch (falls through to
+        // nitroDevEnvironmentResolve, which is `{}` outside dev-serve).
+        expect(evalExpr(true, true, ["sqlite3"], {})).toEqual({});
+        // userSsrExternal === true (the user opted every SSR dep external):
+        // the amendment's own guard excludes this case too.
+        expect(evalExpr(true, false, true, {})).toEqual({});
+        // Not a Nitro build at all: untouched.
+        expect(evalExpr(false, false, ["sqlite3"], {})).toEqual({});
     });
 });
 
