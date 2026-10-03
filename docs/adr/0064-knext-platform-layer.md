@@ -134,9 +134,43 @@ effective(field) = app.spec.field      if the app set it
   operator therefore changes nothing. New users get the defaults through a separate one-line profile
   apply in the quickstart, which existing installs never run. jev bundle-without-CR **0.93** / bundle
   with a `fastColdStart` CR 0.06 / operator-built-in profile 0.01.
+- **The quickstart does not apply `fastColdStart` until G12 has run.** Until the combined-profile
+  measurement (G12) exists, the quickstart applies nothing, or `profile: default` at most, and the
+  docs make no claim for `fastColdStart`. Switching the quickstart to `fastColdStart` is a separate
+  docs PR that cites G12.
+- **The CRD may be missing, and the operator must still start.** An operator upgraded on a cluster
+  where the `KnextPlatform` CRD was not installed (a partial bundle apply, or a GitOps tool that
+  syncs CRDs separately) must start and behave exactly as today.
+  - `SetupWithManager` registers the `KnextPlatform` watch **only if discovery reports the CRD**.
+    The watch list lives at `nextapp_controller.go:2058–2079`; the Revision watch mapping at `:2030`
+    is the nearest precedent for a non-owner watch.
+  - When the CRD is absent, the operator uses built-ins, logs once, and reports
+    `PlatformDefaultsApplied=True, reason=NoPlatformCRD`.
+  - When the CRD appears later, the operator picks it up on its next restart or discovery refresh.
+    It never crash-loops on a missing kind.
+- **Platform identity lives only in status, never in the revision template.** The platform
+  generation, the profile name and the inherited-field list are written to `NextApp.status.platform`
+  only. They never go into the Knative Service's revision template: no annotation, label or env
+  carries them. So an operator upgrade, or a platform edit that leaves every effective value
+  unchanged, creates **no new revision**. Only a change to an effective rendered value (D2) changes
+  the template.
 - **Proved, not asserted:** a golden test renders a fixture corpus of CLI-emitted `NextApp`s (v1.0
-  and 1.3 CLI shapes) with no platform CR and with `spec: {}`, and compares against the current
-  operator's output byte for byte, mutation-proved. jev on this P0 shape **0.80** yes.
+  and 1.3 CLI shapes) in **four** cases:
+  1. the `KnextPlatform` CRD is not installed at all;
+  2. the CRD is installed with no CR;
+  3. the CR is `spec: {}`;
+  4. the CR is `profile: default`.
+
+  In every case the test diffs **every object the operator renders from a `NextApp`** against the
+  current operator's output, byte for byte, and not only the Knative Service:
+  - the Knative Service, including the full container env and the revision-template annotations;
+  - the ServiceAccount;
+  - the `NetworkPolicy`;
+  - the `<app>-imgcache` DaemonSet;
+  - the Knative `Image`;
+  - the `KafkaSource`, where rendered.
+
+  The guard is mutation-proved. jev on this P0 shape **0.80** yes.
 
 ### D4. Profiles
 
@@ -305,7 +339,8 @@ a `connectionBudget` below an existing app's `maxScale × poolMax`; a default
 - **`KnextPlatform`:** `Accepted` (schema valid, singleton name), `DefaultsPropagated` (all
   inheriting apps re-rendered, or `Progressing` with counts), `Ready`; P1 `PrewarmPolicyReady`; P3
   `MirrorReady`, `NodeAgentReady` (per-runtime reason), `MirrorUpstreamAuthFailing`.
-- **`NextApp`:** `PlatformDefaultsApplied` — `True` with reason `Inherited` or `NoPlatform`;
+- **`NextApp`:** `PlatformDefaultsApplied` — `True` with reason `Inherited`, `NoPlatform` or
+  `NoPlatformCRD`;
   `False` with reason `EffectiveSpecInvalid` (names the field) or `PlatformNotAccepted`. Computed in
   `computeStatusVerdict`.
 
@@ -376,9 +411,21 @@ not edit them.
 1. **CLAUDE.md §1 / §10 — "NOT a general-purpose PaaS".** The boundary is restated, not dropped.
    knext stays the Next.js-on-Knative adapter. The platform layer is **opinionated runtime defaults
    and cold-start components for Next.js apps on Knative** — image presence, scaling and resource
-   defaults, read-only cluster checks. It never hosts non-Next workloads, never provisions
-   databases, caches, CDNs or ingress, and never becomes a deploy-anything control plane. Test for
-   any future platform field: *does it change how a `NextApp` starts or serves?* If not, it is out.
+   defaults, read-only cluster checks. The boundary has **three parts, and all three apply
+   together**. Passing one does not excuse failing another.
+
+   1. **Explicit exclusion list.** The platform never installs or provisions:
+      - a database, a pooler, or any DB machinery;
+      - a cache server (Redis or similar);
+      - a CDN;
+      - an ingress, gateway or load balancer;
+      - a general app-hosting or deploy-anything component (non-Next workloads, arbitrary
+        containers).
+   2. **The field test.** A platform field or component must change how a `NextApp` starts or
+      serves. If it does not, it is out.
+   3. **New components need their own ADR.** Phases 0–3 permit only the components listed in D6.
+      Any other component, even one that passes 1 and 2, needs its own ADR before it ships.
+
    jev **0.61** yes that this restatement reconciles the two. **Amendment A1** (CLAUDE.md §1, §10).
 2. **architecture.md §5 — "if a request expands scope, say so and recommend sequencing".** Said so
    (this ADR), and sequenced: after v1.0 GA, on the 1.4 line, P0 with zero behaviour change, each
@@ -455,8 +502,11 @@ re-litigated.
   or a CNI bridge address is CNI-dependent and is pinned per CNI in the P3-4 drill, not assumed),
   TLS, upstreams scoped by repository prefix. **On a CNI
   that does not enforce `NetworkPolicy` (flannel: OKE GA, OrbStack), the operator refuses to enable a
-  credentialed upstream** (`MirrorReady=False, reason=NetworkPolicyNotEnforced`) unless
-  `allowUnenforcedNetworkPolicy: true` is set. jev **0.98** / warn only 0.01 / public upstreams only
+  credentialed upstream** (`MirrorReady=False, reason=NetworkPolicyNotEnforced`). **Fail closed:**
+  enforcement must be *proven*, not inferred from a CNI name. The operator runs an active probe: a
+  short-lived pod that the mirror's policy should deny tries to connect, and must be refused.
+  An unknown CNI, a probe that cannot run, or an inconclusive probe all count as **non-enforcing**,
+  and the refusal holds unless `allowUnenforcedNetworkPolicy: true` is set. jev **0.98** / warn only 0.01 / public upstreams only
   0.01.
 - **F5 — Mirror credentials.** Stored only in a K8s Secret referenced by name; never in the CR,
   logs or the image. Short-lived tokens (Artifact Registry ~1 h) are not supported in phase 3; a
@@ -509,9 +559,22 @@ run.
 - **P0-2** Operator built-in defaults table: move today's constants (concurrency 20, resources,
   timeout 300, connection budget 80) into one table with no value change. *Exit:* existing tests
   unchanged and green.
-- **P0-3** **Zero-diff golden guard:** a fixture corpus of v1.0 and 1.3 CLI-emitted `NextApp`s
-  renders byte-identical Knative Services with no CR, with `spec: {}`, and with `profile: default`.
-  Mutation-proved. *Exit:* the guard reds when any built-in value changes.
+- **P0-3** **Zero-diff golden guard.** A fixture corpus of v1.0 and 1.3 CLI-emitted `NextApp`s is
+  rendered in four cases: the CRD not installed, the CRD with no CR, `spec: {}`, and
+  `profile: default`.
+  - The guard diffs **every** object the operator renders from a `NextApp`, byte for byte: the
+    Knative Service (container env and revision-template annotations included), the ServiceAccount,
+    the `NetworkPolicy`, the `<app>-imgcache` DaemonSet, the Knative `Image`, and the `KafkaSource`
+    where rendered.
+  - It also asserts that no platform generation or profile value appears in any revision template.
+  - Mutation-proved.
+  - *Exit:* the guard reds when any built-in value changes, when any rendered object differs, and
+    when platform identity leaks into a template.
+- **P0-3b** **CRD-absent startup.** `SetupWithManager` (`nextapp_controller.go:2058–2079`) registers
+  the `KnextPlatform` watch only when discovery reports the CRD. Without the CRD, the operator starts,
+  uses built-ins, and reports `reason=NoPlatformCRD`.
+  - *Exit:* an envtest starts the manager with the `KnextPlatform` CRD not installed, and the manager
+    becomes ready and reconciles a `NextApp`.
 - **P0-4** Render-time merge (app > platform > built-in), `NextApp.status.platform`, and the
   `PlatformDefaultsApplied` condition in `computeStatusVerdict`. *Exit:* envtest per precedence
   layer, per field.
@@ -531,6 +594,9 @@ run.
   that an app with an absent image starts without a `Pulling` event.
 - **P1-3** **G12:** the combined `fastColdStart` vs rc.5 A/B on OKE, image absent and present,
   n=12/arm. The only number docs may quote for the profile.
+- **P1-4** Quickstart: switch the quickstart's profile line to `fastColdStart` **only after P1-3
+  (G12) has run**, citing its result with conditions. Until then the quickstart applies no profile,
+  or `default` at most.
 
 ### Phase 2 — `doctor` checks (CLI, 1.4)
 
@@ -547,7 +613,9 @@ run.
   TLS, `NetworkPolicy` to node IPs, repository-prefix upstreams, Secret-referenced credentials;
   `MirrorReady`, `MirrorUpstreamAuthFailing`.
 - **P3-2** Node agent, tiered per D8; `preStop` revert; `KnextPlatform` finalizer; `NodeAgentReady`
-  with per-runtime reasons; refuse-by-default on the restart tier and on non-enforcing CNIs.
+  with per-runtime reasons; refuse-by-default on the restart tier and unless `NetworkPolicy`
+  enforcement is proven by an active deny probe (unknown CNI or an inconclusive probe ⇒ refuse;
+  F4).
 - **P3-3** Node-agent image: in-repo, distroless, cosign + SBOM + Trivy gate.
 - **P3-4** Drills: fallback on mirror outage (F6), node-pool upgrade (F7), deletion revert (F8), on
   kind (containerd), OKE (CRI-O) and GKE (containerd without `config_path`).
@@ -582,9 +650,13 @@ This PR edits none of these files. Exact proposed wording:
   > **Platform layer (ADR-0064, founder 2026-10-03).** knext has an opt-in platform layer — a
   > cluster-scoped `KnextPlatform` config the operator reads — that bakes in measured runtime and
   > cold-start defaults for Next.js apps on Knative (image prewarm policy, optional image mirror,
-  > read-only `doctor` checks, scaling/resource defaults). It is not general app hosting: it never
-  > runs non-Next workloads and never provisions databases, caches, CDNs or ingress. Test for any
-  > platform field: does it change how a `NextApp` starts or serves? If not, it is out of scope.
+  > read-only `doctor` checks, scaling/resource defaults). It is not general app hosting. Three
+  > rules apply **together**:
+  > (1) the platform never installs or provisions a database, pooler, cache server, CDN, ingress,
+  > gateway, or any general app-hosting component (non-Next workloads, arbitrary containers);
+  > (2) every platform field or component must change how a `NextApp` starts or serves;
+  > (3) any component beyond the prewarm policy, the optional image mirror with its node agent, and
+  > the read-only `doctor` checks needs its own ADR before it ships, even if it passes (1) and (2).
 
   **`CLAUDE.md` §10**, replace "stay the narrow Next.js+Knative adapter, not a general PaaS" with:
   > stay the narrow Next.js+Knative adapter, not a general PaaS (the ADR-0064 platform layer is
@@ -618,7 +690,8 @@ This PR edits none of these files. Exact proposed wording:
   >   while the image mirror is enabled), least privilege by runtime tier, its own pod-security
   >   `privileged` namespace, in-repo distroless signed image, no ServiceAccount token, egress
   >   denied, path allowlist, reverts host config on removal. A credentialed mirror upstream is
-  >   refused on a CNI that does not enforce `NetworkPolicy` unless explicitly acknowledged. The
+  >   refused unless `NetworkPolicy` enforcement is proven by an active deny probe (an unknown CNI
+  >   or an inconclusive probe counts as non-enforcing), or the risk is explicitly acknowledged. The
   >   mirror is pull-only: no push path, no `insecure` HTTP.
 
 - **A7 — ADR-0028**, append to the `containerConcurrency` decision:
