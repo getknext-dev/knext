@@ -40,18 +40,12 @@ name: React Compiler proof (published bytes, every v1.0 build target)
 # `workflow_dispatch` only triggers for a workflow already on the default
 # branch — unusable to prove this lane green on the PR that introduces it.
 # The one-time proof for THIS lane instead used a temporary `pull_request`
-# trigger scoped to this file's own path; that trigger is removed once the
-# proof has a result (see the PR this lane shipped in), leaving this lane
+# trigger scoped to this file's own path (removed in this same PR once the
+# proof had a result — see getknext-dev/knext#1829), leaving this lane
 # workflow_dispatch-only for every run after.
 
 on:
   workflow_dispatch: {}
-  # TEMPORARY — one-time proof trigger, scoped to this file's own path, so
-  # the PR that introduces this lane can prove it green before merge.
-  # Removed once the proof has a result (see the PR this lane shipped in).
-  pull_request:
-    paths:
-      - '.github/workflows/react-compiler-proof.yml'
 
 permissions:
   contents: read
