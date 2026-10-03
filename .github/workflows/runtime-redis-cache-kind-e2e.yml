@@ -33,10 +33,6 @@ name: Runtime Redis cache — kind e2e (node + bun)
 
 on:
   workflow_dispatch: {}
-  # TEMPORARY — one proof run on the PR that adds this lane; removed before merge.
-  pull_request:
-    paths:
-      - .github/workflows/runtime-redis-cache-kind-e2e.yml
 
 permissions:
   contents: read
