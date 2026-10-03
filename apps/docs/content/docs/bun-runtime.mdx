@@ -15,6 +15,39 @@ knext compiles your server ahead of time. Two builds do it, and this page covers
 Precompiling to bytecode means the server **boots** in tens of milliseconds instead of parsing your
 source at startup — the boot phase where a Next.js app otherwise spends real CPU.
 
+## Which runtime should I use?
+
+**Bun is the default for new apps, and the recommended choice for most of them.** Each reason
+below carries its own condition — none of them is "Bun is faster":
+
+- **The ISR/data cache's Redis client works out of the box.** The Bun runtime's standalone build
+  and the compiled executable both load the Redis client `@getknext/core` ships with; on the Node
+  runtime's standalone build, that same client can silently fail to load, and the cache falls back
+  to a per-pod in-memory cache instead of the shared Redis one. See the known issue on the
+  [ISR & the Redis cache](/docs/isr-caching#what-the-runtime-guarantees) page for the exact
+  affected combination, the symptoms, and the workaround — it's fixed in a later patch release.
+- **The compiled single-executable build is Bun-only.** The `vinext` build target — your whole app
+  compiled into one binary with the Bun runtime and its bytecode baked in — has no Node
+  equivalent; see [the vinext build](#nothing-to-configure) above.
+- **Cold start is cluster-dependent, and the gap is small or absent, not a Bun win.** On Oracle
+  Kubernetes Engine (2 shared-core 4-vCPU nodes, images pre-pulled, a default-scaffold app with no
+  database/cache/storage dependency, n=10 per combination), the four runtime x builder
+  combinations cold-started within about 0.3 s of each other at the median (roughly 2.1-2.4 s),
+  and none of the pairwise differences was distinguishable from measurement noise. On that same
+  cluster, **warm** requests were slightly faster on Node (~24 ms) than on Bun (~31 ms) — a real
+  but small (~7 ms) difference, negligible next to a cold start. On Google Kubernetes Engine,
+  moving the same pod from a shared-core 4-vCPU machine type to a dedicated-core one of the next
+  generation shrank the runtime gap from roughly 0.7 s (Bun ahead, ten wakes per runtime) to
+  roughly 0.1 s (not distinguishable from noise at that sample size) — see
+  [Runtime choice](/docs/tuning-cold-start#runtime-choice) for the full comparison and its
+  conditions. Measure your own app and cluster rather than picking a runtime for cold start alone.
+
+**Choose the Node runtime instead if:** your app or a dependency relies on a Node-only API or a
+native module Bun doesn't support, your team standardizes its tooling on Node, or you need
+Node-specific build or debugging tooling. Node is fully supported — the official Next.js adapter
+runs on it the same way it runs on Bun — and it carries the same compatibility credential as Bun:
+two of the four credentialed runtime x builder combinations (Turbopack and Webpack) are Node's.
+
 ## The numbers
 
 All figures are the same app and the same route, responses verified byte-identical, ten samples
