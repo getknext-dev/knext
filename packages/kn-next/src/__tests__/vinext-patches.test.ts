@@ -709,6 +709,174 @@ describe("the bundled patches against the published tarball", () => {
         // against that regression explicitly.
         expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
     });
+
+    // Shared by both vinext#3689 cases below: the full option surface
+    // `handleServerActionRscRequest` requires. Modeled on vinext's own
+    // fixture (tests/app-server-action-execution.test.ts's
+    // createRscOptions), trimmed to the fields this redirect path reads.
+    async function callHandleServerActionRscRequest(
+        redirectTargetUrl: string,
+        redirectType: string,
+    ): Promise<Response | null> {
+        applyVinextPatches(patched);
+        const actionMod = await importPatched<{
+            handleServerActionRscRequest: (
+                options: Record<string, unknown>,
+            ) => Promise<Response | null>;
+        }>("dist/server/app-server-action-execution.js");
+        const headersMod = await importPatched<{
+            setHeadersAccessPhase: (phase: string) => string;
+        }>("dist/shims/headers.js");
+
+        const dashboardRoute = {
+            id: "dashboard",
+            page: {},
+            params: [],
+            pattern: "/dashboard",
+        };
+        const targetRoute = {
+            id: "redirect-target",
+            page: {},
+            params: [],
+            pattern: "/redirect-target",
+        };
+        const matchRoute = (pathname: string) =>
+            pathname === "/redirect-target"
+                ? { params: {}, route: targetRoute }
+                : { params: {}, route: dashboardRoute };
+
+        const request = new Request(
+            "https://example.com/dashboard?tab=activity",
+            {
+                body: "encoded-flight-body",
+                method: "POST",
+                headers: {
+                    "content-type": "text/plain;charset=UTF-8",
+                    host: "example.com",
+                    origin: "https://example.com",
+                    "x-rsc-action": "action-id",
+                },
+            },
+        );
+
+        return actionMod.handleServerActionRscRequest({
+            actionId: "action-id",
+            allowedOrigins: [],
+            buildPageElement: () => "rendered-target",
+            cleanPathname: "/dashboard",
+            clearRequestContext() {},
+            contentType: "text/plain;charset=UTF-8",
+            createNotFoundElement: (routeId: string) => `not-found:${routeId}`,
+            createPayloadRouteId: (pathname: string, ctx: string | null) =>
+                `${pathname}:${ctx ?? "none"}`,
+            createRscOnErrorHandler: () => () => undefined,
+            createTemporaryReferenceSet: () => ({}),
+            currentRouteMatch: matchRoute("/dashboard"),
+            currentRoutePathname: "/dashboard",
+            decodeReply: () => Promise.resolve([]),
+            draftModeSecret: "draft-secret",
+            // Always answers an internal-looking target with a valid Flight
+            // response — exercises the "forwarded response wrapper" leg.
+            // vinext#3689's other fix (the `!redirectTarget` early return,
+            // for an external target) is covered by the second test, where
+            // this is never reached.
+            async dispatchRedirectTargetRequest() {
+                return new Response(
+                    JSON.stringify({
+                        root: "redirect-target:{}:none",
+                        returnValue: { ok: true },
+                    }),
+                    { headers: { "content-type": "text/x-component" } },
+                );
+            },
+            findIntercept: () => null,
+            getAndClearPendingCookies: () => [],
+            getDraftModeCookieHeader: () => null,
+            getRouteParamNames: (route: { params: string[] }) => route.params,
+            getSourceRoute: () => undefined,
+            isRscRequest: true,
+            loadServerAction(actionId: string) {
+                const action = () => {
+                    throw {
+                        digest: `NEXT_REDIRECT;${redirectType};${encodeURIComponent(redirectTargetUrl)};307`,
+                    };
+                };
+                // handleServerActionRscRequest requires a loaded action's
+                // registered reference id to match the request's actionId
+                // (requiresRegisteredServerReferenceMatch /
+                // matchesRegisteredServerReference) whenever the id has no
+                // dev-mode "#export" suffix — mirrors vinext's own
+                // registerTestServerReference test helper.
+                Object.defineProperty(action, "$$id", {
+                    configurable: true,
+                    value: actionId,
+                });
+                return Promise.resolve(action);
+            },
+            matchRoute,
+            maxActionBodySize: 1024,
+            maxActionBodySizeLabel: "1kb",
+            middlewareHeaders: null,
+            middlewareRequestHeaders: null,
+            middlewareStatus: null,
+            mountedSlotsHeader: null,
+            readBodyWithLimit: () => Promise.resolve("encoded-flight-body"),
+            readFormDataWithLimit: () => Promise.resolve(new FormData()),
+            renderToReadableStream: (model: unknown) =>
+                new Response(JSON.stringify(model)).body,
+            reportRequestError() {},
+            request,
+            sanitizeErrorForClient: (error: unknown) => error,
+            searchParams: new URLSearchParams("tab=activity"),
+            setHeadersAccessPhase: headersMod.setHeadersAccessPhase,
+            setNavigationContext() {},
+            toInterceptOpts: (intercept: { slotKey: string }) => ({
+                slot: intercept.slotKey,
+            }),
+        });
+    }
+
+    it("vinext#3689: a fetch action's redirect to an ordinary (non-forwarded, non-ancestor, same-runtime) route answers 200, not 303", async () => {
+        // Ported from Next.js: test/e2e/app-dir/actions/app-action.test.ts —
+        // the same fixture cloudflare/vinext#3689's own regression test
+        // ports. Before the fix, exactly this case (a plain redirect to an
+        // unrelated route, not already forwarded, not an ancestor or stale
+        // sibling, not a cross-runtime target) fell through
+        // shouldUseForwardedActionRedirectStatus() to 303.
+        const response = await callHandleServerActionRscRequest(
+            "/redirect-target",
+            "push",
+        );
+        expect(response?.status).toBe(200);
+        expect(response?.headers.get("x-action-redirect")).toBe(
+            "/redirect-target",
+        );
+        expect(response?.headers.get("location")).toBeNull();
+        expect(JSON.parse(await response!.text())).toEqual({
+            root: "redirect-target:{}:none",
+            returnValue: { ok: true },
+        });
+    });
+
+    it("vinext#3689: a fetch action's redirect to an external URL also answers 200, not 303", async () => {
+        // Exercises the `!redirectTarget` early return (resolveInternalActionRedirectTarget
+        // returns null for a cross-origin target, so there is no internal
+        // Flight response to stream) — the OTHER branch this patch fixes.
+        // The target reaches the browser only via x-action-redirect, which
+        // the client already validates before navigating; this response
+        // carries no Location header, so the status change cannot turn it
+        // into a browser-followed redirect.
+        const response = await callHandleServerActionRscRequest(
+            "https://other.example/landing",
+            "push",
+        );
+        expect(response?.status).toBe(200);
+        expect(response?.headers.get("x-action-redirect")).toBe(
+            "https://other.example/landing",
+        );
+        expect(response?.headers.get("location")).toBeNull();
+        expect(await response!.text()).toBe("");
+    });
 });
 
 // ---------------------------------------------------------------------------

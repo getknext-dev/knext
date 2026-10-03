@@ -406,6 +406,12 @@ The fixes bundled with vinext 1.0.1:
 - **Web Workers** see `process.env.NEXT_DEPLOYMENT_ID` inlined, like the rest of the app.
 - **`outputFileTracingIncludes` / `outputFileTracingExcludes`** in `next.config` are applied to the
   dependency files copied next to the server build.
+- **A server action's `redirect()` called from client-invoked (fetch) code** now answers `200`,
+  matching current Next.js, instead of sometimes falling back to `303`. The redirect target still
+  reaches the browser the same way (an `x-action-redirect` header, no `Location` header); only the
+  response's own status code changes, so this only matters if your own code inspects
+  `response.status` on a server action call. A no-JS `<form>` submission's redirect is unaffected
+  and still answers `303`.
 
 ## Requirements
 
