@@ -21,10 +21,10 @@ It does **not** change:
   your app's own `next.config.ts` (or `vite.config.ts` on the vinext target) — knext's scaffold,
   CLI, and CRD are unaware of it.
 
-## Official adapter target (`build: 'turbopack'` or `'webpack'`)
+## Official adapter target (`build: 'turbopack'` or `'webpack'`) — not currently verified working
 
-Add `reactCompiler: true` to `next.config.ts`, and install the optional Babel plugin that
-actually performs the transform:
+Next's own documented way to enable it is `reactCompiler: true` in `next.config.ts`, plus the
+optional Babel plugin that performs the transform:
 
 ```ts title="next.config.ts"
 const nextConfig: NextConfig = {
@@ -37,11 +37,16 @@ const nextConfig: NextConfig = {
 npm install -D babel-plugin-react-compiler
 ```
 
-This works identically on both bundlers (`build: 'turbopack'` and `build: 'webpack'`) and both
-runtimes (`runtime: 'bun'` and `runtime: 'node'`) — the four credentialed v1.0 cells. Nothing
-else in your `knext.config.ts` changes.
+**This configuration builds without error on both bundlers, on Next.js 16.3.6, but was not
+observed to actually run the transform.** Checked directly: `babel-plugin-react-compiler` 1.0.0
+produces the expected output (a `react/compiler-runtime` import and `_c()` memo-cache calls) when
+invoked on its own outside of Next; the same component built through `next build` with
+`reactCompiler: true` — on Turbopack and on Webpack, in a from-scratch minimal reproduction, not
+just inside a knext app — produces neither, with no warning or error either way. Until this is
+root-caused, do not rely on this option on knext's official-adapter target; it costs you an extra
+dependency for no observed effect.
 
-## vinext target (`build: 'vinext'`, Beta)
+## vinext target (`build: 'vinext'`, Beta) — verified working
 
 On the [vinext build target](/docs/build-pipeline#the-vinext-pipeline), React Compiler is **not**
 a `next.config.ts` key — vinext does not read `reactCompiler` from there. It is an option on
@@ -81,24 +86,28 @@ This is the same option and the same four packages on both vinext runtimes
 ## Measured conditions
 
 Measured on knext's default target (official adapter, `build: 'turbopack'`, `runtime: 'bun'`),
-one app, one CI runner, `next build` only (no deploy/cold-start numbers — see the caveat above for
-why those are unaffected):
+one small app with a single stateful Client Component, one CI runner, `next build` only (no
+deploy/cold-start numbers — see the caveat above for why those are unaffected):
 
 | | build time | `.next/static` size |
 |---|---|---|
-| without the compiler | — | — |
-| with the compiler | — | — |
+| without the compiler | 12 s | 592 KiB |
+| with the compiler | 12 s | 592 KiB |
+
+No measurable difference — expected, since the transform was not observed to run at all on this
+target (see above). These numbers describe the cost of *attempting* to enable it here (none,
+beyond installing a dependency), not the benefit of a working transform; a real measurement of
+the benefit needs the working target (vinext) or a fixed official-adapter integration.
 
 <!-- knext-docs: react-compiler-measured-conditions -->
 
 ## Known limits
 
-- Enabling `reactCompiler: true` without `babel-plugin-react-compiler` installed silently leaves
-  the compiler **disabled** on the official adapter target — there is no build error. Check a
-  built client chunk for a `react/compiler-runtime` import if you need to confirm it actually ran.
+- **The official adapter target does not currently show the compiler running**, as described
+  above — treat `reactCompiler: true` there as a no-op until this is root-caused.
 - On the vinext target, asking for `react: { compiler: true }` with an `@vitejs/plugin-react`
-  older than 6.1 installed is also silently ignored, for the same reason — but a missing
-  `oxc-transform-react` fails the build loudly instead (see above).
+  older than 6.1 installed is silently ignored — no error, no effect. A missing
+  `oxc-transform-react`, by contrast, fails the build loudly (see above).
 - This page covers knext's own build targets only. React Compiler's own eslint plugin, incremental
   adoption, and per-component opt-out are the same as in any other React project — see the
   [React Compiler docs](https://react.dev/learn/react-compiler) for those.
