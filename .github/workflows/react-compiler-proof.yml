@@ -65,11 +65,6 @@ name: React Compiler proof (published bytes, every v1.0 build target)
 
 on:
   workflow_dispatch: {}
-  # TEMPORARY, re-added — the detection fix below needs its own proof run
-  # before merge. Removed again once that run is green.
-  pull_request:
-    paths:
-      - '.github/workflows/react-compiler-proof.yml'
 
 permissions:
   contents: read
