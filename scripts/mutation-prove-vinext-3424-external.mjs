@@ -94,14 +94,8 @@ prover.baseline();
 
 prover.proveCanSeeRed({
   subject: 'spec',
-  anchor:
-    'expect(index).toContain(\n' +
-    '            "...hasNitroPlugin && !hasCloudflarePlugin && userSsrExternal !== true ? { resolve: { noExternal: true, external: [...userSsrExternal] } } : nitroDevEnvironmentResolve,",\n' +
-    '        );',
-  replacement:
-    'expect(index).toContain(\n' +
-    '            "this string can never occur in the patched dist // KNEXT-MUTATION",\n' +
-    '        );',
+  anchor: 'expect(index).toContain(marker);',
+  replacement: 'expect(index).toContain("marker");',
 });
 
 console.log('\n=== mutations ===');
