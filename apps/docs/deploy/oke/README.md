@@ -14,7 +14,7 @@ behind the existing Kourier ingress. There is no hand-applied Knative Service an
 | Image | `apps/docs/Dockerfile`: vinext `.output` run under Bun, built by `kn-next deploy` |
 | Readiness | `apps/docs/app/api/health/route.ts`: the operator probes `/api/health` |
 | CI credential | `ci-rbac.yaml` + `mint-ci-kubeconfig.sh` (below) |
-| Custom domains | `domainmapping.yaml`: `knext.dev` / `www.knext.dev` → ksvc `knext-docs` |
+| Custom domains | `domainmapping.yaml`: `knext-platform.dev` / `www.knext-platform.dev` → ksvc `knext-docs` |
 
 ## How a deploy runs
 
@@ -26,7 +26,7 @@ behind the existing Kourier ingress. There is no hand-applied Knative Service an
   HIGH/CRITICAL, before anything is built), logs in to OCIR, and deploys through the action with
   `tag: <commit sha>` and `skip-upload: true`. It then waits for the operator to report that
   `NextApp` generation Ready, checks that the image is this commit's (digest-pinned), and smoke-tests
-  `/api/health`, `/` and `/docs` on `https://knext.dev`. The step summary records the image and revision.
+  `/api/health`, `/` and `/docs` on `https://knext-platform.dev`. The step summary records the image and revision.
 
 To redeploy without a docs change: **Actions → Docs deploy (OKE) → Run workflow** on `main`.
 

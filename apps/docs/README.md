@@ -1,7 +1,7 @@
 # knext-docs
 
 The documentation site for **[knext](https://github.com/getknext-dev/knext)** — the scale-to-zero
-Next.js deployment adapter for Knative/Kubernetes. Deployed at **knext.dev**.
+Next.js deployment adapter for Knative/Kubernetes. Deployed at **knext-platform.dev**.
 
 This site is a **Next.js App-Router app** (Fumadocs + MDX) that lives in the knext monorepo at
 `apps/docs/` and **dogfoods knext**: with `KNEXT_ADAPTER=1` it builds `output: 'standalone'` with the

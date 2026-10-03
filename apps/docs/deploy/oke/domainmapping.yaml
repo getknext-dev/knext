@@ -1,6 +1,16 @@
 # Domain mappings for the docs site. Knative needs a ClusterDomainClaim per host
 # because autocreate-cluster-domain-claims is off on this cluster; the claim's
 # name MUST equal the host. Cloudflare's origin must point at the Kourier LB.
+#
+# Still knext.dev, NOT knext-platform.dev (#1832): the live public site is
+# served by Vercel at knext-platform.dev today, and this OKE cluster's
+# DomainMapping/ClusterDomainClaim objects were never pointed at that host —
+# applying knext-platform.dev here, with Vercel still answering for it, would
+# collide rather than migrate anything. This file migrates to
+# knext-platform.dev when OKE becomes the live host for the docs site (see
+# the follow-up issue tracking that cutover). Until then it intentionally
+# keeps the stale knext.dev name, which the domain-rename guard allowlists
+# for exactly this reason.
 apiVersion: networking.internal.knative.dev/v1alpha1
 kind: ClusterDomainClaim
 metadata:

@@ -275,6 +275,15 @@ jobs:
       # https://knext.dev: that host 301s to www and Cloudflare's WAF answers 403
       # to CI runners, so a check on it fails on every run whatever the deploy did.
       # This step is the deploy's real gate; it must never be continue-on-error.
+      #
+      # Still knext.dev, NOT knext-platform.dev (#1824/#1832): this Host header
+      # and the public-host check below exercise what THIS OKE cluster's
+      # DomainMapping/ClusterDomainClaim objects actually claim (see
+      # apps/docs/deploy/oke/domainmapping.yaml) — not the live public site,
+      # which is knext-platform.dev served by Vercel today. Both files migrate
+      # together when OKE becomes the live host for the docs site (follow-up
+      # issue tracks that cutover); until then this intentionally stays on the
+      # cluster's current hostname, allowlisted in the domain-rename guard.
       - name: Smoke-test the origin through the Kourier LB
         env:
           LB: '51.170.89.13'
@@ -289,6 +298,9 @@ jobs:
 
       # Advisory only, until the Cloudflare WAF stops blocking CI runners (#55).
       # `continue-on-error` is allowed on THIS step and no other.
+      #
+      # Same OKE-hostname caveat as the smoke-test step above: this probes
+      # what OKE's own DomainMapping claims, not the live public site.
       - name: Public host check (advisory - WAF blocks CI until #55)
         continue-on-error: true
         run: |

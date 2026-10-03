@@ -62,10 +62,10 @@ against the official Next.js compatibility suite.
 
 **Repo:** https://github.com/getknext-dev/knext
 
-**Docs:** https://knext.dev
+**Docs:** https://knext-platform.dev
 
 **Compatibility note:** knext publishes an evidence-gated
-[compatibility matrix](https://knext.dev/docs/compat-matrix): every claim cites the CI run that
+[compatibility matrix](https://knext-platform.dev/docs/compat-matrix): every claim cites the CI run that
 proves it, and the matrix row reverts on any unexplained red. Both runtimes (Node and Bun) and both
 builders (Turbopack and Webpack) run against the suite — `[FILL AT GA]` for per-cell run IDs and
 pass/fail counts once the 14-night credential window closes (tracked at

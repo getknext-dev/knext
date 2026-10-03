@@ -386,7 +386,7 @@ Confirm every box before starting step 1 below:
       PR itself.
 - [ ] Platform/operator e2e is green **at the rc tag**, with the operator built from that tag and
       its image digest recorded (#1305).
-- [ ] The docs launch pass is live on knext.dev (quickstart, compatibility table, and version
+- [ ] The docs launch pass is live on knext-platform.dev (quickstart, compatibility table, and version
       numbers all reflect the rc under credential — not a stale prior release).
 - [ ] The operator tag-release line (`operator-vX.Y.Z`, semver GitHub Releases from a pushed tag,
       #1667) has merged — it has, as of this writing; step 7 below's rolling-`operator-latest`

@@ -26,7 +26,7 @@ it ships one (`scripts/lib/mutation-harness.mjs`) so you do not hand-roll the re
 
 ## Docs live with the code (`apps/docs/`)
 
-The user-facing docs site (knext.dev) lives in this monorepo at **`apps/docs/`** and consumes
+The user-facing docs site (knext-platform.dev) lives in this monorepo at **`apps/docs/`** and consumes
 `@getknext/core` via `workspace:*` (see `docs/adr/0024-docs-site-in-monorepo.md`).
 
 - **If your PR changes documented behavior — public surface** (`@getknext/core` exports, the

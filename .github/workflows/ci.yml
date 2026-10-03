@@ -1079,7 +1079,7 @@ jobs:
           tests/db-live-workflow.test.ts
 
   docs-site:
-    # Docs site (apps/docs, knext.dev) build gate — mirrors the compat-smoke
+    # Docs site (apps/docs, knext-platform.dev) build gate — mirrors the compat-smoke
     # file-manager pattern: root workspace-aware install, build the @getknext chain
     # (lib→db→core) then knext-docs. The docs app consumes @getknext/core via
     # `workspace:*` (it imports @getknext/core, @getknext/core/adapter, and
@@ -1087,7 +1087,7 @@ jobs:
     #
     # Two build legs, BOTH required:
     #   1. vanilla (KNEXT_ADAPTER unset) — the managed-host build (what Vercel
-    #      ships at knext.dev). Asserts .vercel/output (Build Output API v3).
+    #      ships at knext-platform.dev). Asserts .vercel/output (Build Output API v3).
     #   2. the bun target (default preset) — the knext dogfood image — and the
     #      node target (NITRO_PRESET=node), kept as a regression guard even
     #      though the OKE deploy it used to validate (Dockerfile.oke) retired
@@ -1101,6 +1101,9 @@ jobs:
     # Path-filtered: only runs when the docs app OR the public @getknext/core surface
     # changes (turbo-cache-friendly — an unrelated PR skips the ~minutes-long
     # Fumadocs build).
+    # Job name kept verbatim: it is a REQUIRED status-check context in main's branch
+    # protection. Renaming it would block every PR. The public domain is
+    # knext-platform.dev; this string is an internal check name, not a link.
     name: Docs site build (apps/docs → knext.dev)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1220,7 +1223,7 @@ jobs:
           test -f apps/docs/.output/server/index.mjs
           ! grep -q 'metricsServer' apps/docs/.output/server/index.mjs
 
-      - name: Build knext-docs for Vercel (NITRO_PRESET=vercel — knext.dev)
+      - name: Build knext-docs for Vercel (NITRO_PRESET=vercel — knext-platform.dev)
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
         env:
           NITRO_PRESET: vercel
@@ -1289,7 +1292,7 @@ jobs:
     # SOFT, NON-BLOCKING nudge (judgment-based, never a hard gate):
     #   (a) if a PR changes public surface (packages/kn-next/src exports, config
     #       schema, CLI) WITHOUT touching apps/docs/content/**, warn "docs may
-    #       need an update — knext.dev is user-facing".
+    #       need an update — knext-platform.dev is user-facing".
     #   (b) grep the apps/docs/content/** DIFF for internal refs
     #       (ADR-NNNN | #NN | vinext | Nitro) and warn — the site stays
     #       user-facing even living beside the code + ADRs.
@@ -1312,7 +1315,7 @@ jobs:
           SURFACE="$(echo "$CHANGED" | grep -E '^packages/kn-next/src/|^packages/kn-next/package.json' || true)"
           DOCS="$(echo "$CHANGED" | grep -E '^apps/docs/content/' || true)"
           if [ -n "$SURFACE" ] && [ -z "$DOCS" ]; then
-            echo "::warning title=Docs may need an update::Public @getknext/core surface changed but apps/docs/content/** was not touched. knext.dev is user-facing — did the docs need an update? (Judgment-based reminder, not a gate.)"
+            echo "::warning title=Docs may need an update::Public @getknext/core surface changed but apps/docs/content/** was not touched. knext-platform.dev is user-facing — did the docs need an update? (Judgment-based reminder, not a gate.)"
           else
             echo "No public-surface-without-docs drift detected."
           fi
@@ -1326,7 +1329,7 @@ jobs:
           DIFF="$(git diff "$BASE"...HEAD -- 'apps/docs/content/**' || true)"
           HITS="$(echo "$DIFF" | grep -E '^\+' | grep -vE '^\+\+\+' | grep -EI 'ADR-[0-9]|#[0-9]{2,}|vinext|Nitro' || true)"
           if [ -n "$HITS" ]; then
-            echo "::warning title=Possible internal reference in user-facing docs::Added lines under apps/docs/content/** contain internal references (ADR-NNNN, #NN, vinext, or Nitro). knext.dev is user-facing — scrub internal refs. (Judgment-based reminder, not a gate.)"
+            echo "::warning title=Possible internal reference in user-facing docs::Added lines under apps/docs/content/** contain internal references (ADR-NNNN, #NN, vinext, or Nitro). knext-platform.dev is user-facing — scrub internal refs. (Judgment-based reminder, not a gate.)"
             echo "$HITS"
           else
             echo "No internal references detected in added content/** lines."

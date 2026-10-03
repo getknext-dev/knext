@@ -147,7 +147,7 @@ own:
   unverified platform publishes official-suite results; put the credentialed run id... in the PR
   body — that is the differentiator." A false or premature number here would burn exactly the
   credential this whole sprint track exists to earn.
-- Link target: `https://knext.dev/docs/getting-started` — verified to exist in this worktree as
+- Link target: `https://knext-platform.dev/docs/getting-started` — verified to exist in this worktree as
   `apps/docs/content/docs/getting-started.mdx`, a Next.js-specific quickstart (not a bare repo
   README) per the Hostinger lesson (a repo-README link stalled review by 7 days; a rotted
   `github.com/hostinger/deploy-nextjs` link is still live on the page today as a cautionary
@@ -171,7 +171,7 @@ own:
   reviewer asked for a Next.js-specific guide link (not a bare repo) and "preferably [in]
   hostinger's github org," and asked the label be just the company name. That
   `github.com/hostinger/deploy-nextjs` link **404s today** — a live example of what NOT to end up as
-  (a rotted repo-README link). This is why `listing.patch` links `knext.dev`, not a GitHub repo.
+  (a rotted repo-README link). This is why `listing.patch` links `knext-platform.dev`, not a GitHub repo.
 - [vercel/next.js#91849](https://github.com/vercel/next.js/pull/91849) — introduced the
   verified/unverified split itself (2026-03-24); useful background on how the Next.js team frames
   the distinction, not a PR to imitate for this docs-list submission.
@@ -207,7 +207,7 @@ gh pr create \
   --body "$(cat <<'EOF'
 Adds knext to the "Other Platforms" list.
 
-knext (https://knext.dev) is an open-source deployment framework for running Next.js on
+knext (https://knext-platform.dev) is an open-source deployment framework for running Next.js on
 Knative/Kubernetes clusters, with scale-to-zero via Knative. Its default build target uses the
 official Next.js Deployment Adapter API (adapterPath), not a custom runtime.
 
@@ -226,7 +226,7 @@ EOF
 
 If the credential has reached 14/14 on all four cells by submission time, add one more short
 paragraph to the body citing: the run IDs for all four cells, the Next.js ref tested, pass/fail
-counts, and a link to `https://knext.dev/docs/compat-matrix`. Pull those from the real green
+counts, and a link to `https://knext-platform.dev/docs/compat-matrix`. Pull those from the real green
 getknext-dev/knext#1359 state at that moment — never carry over the night-1 numbers in this file.
 
 **jev guardrail run on the PR body text above (2026-10-02, re-checked after adding the ADR-0062

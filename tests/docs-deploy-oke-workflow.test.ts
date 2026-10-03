@@ -355,6 +355,11 @@ describe('docs-deploy-oke.yml — the deploy is verified, not assumed', () => {
     expect(s).toMatch(/\[ "\$code" = 200 \] \|\| \{[^\n]*exit 1/);
     const env = (step?.env ?? {}) as Record<string, string>;
     expect(env.LB).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+    // Still knext.dev, not knext-platform.dev (#1824/#1832): this Host header
+    // exercises what OKE's own DomainMapping/ClusterDomainClaim currently
+    // claim, not the live public site (knext-platform.dev, served by
+    // Vercel). See the matching comment in docs-deploy-oke.yml and the
+    // domain-rename guard's ALLOWLISTED_OKE_HOSTNAME_FILES.
     expect(env.HOST).toBe('knext.dev');
   });
 
