@@ -621,6 +621,94 @@ describe("the bundled patches against the published tarball", () => {
         // Not a Nitro build at all: untouched.
         expect(evalExpr(false, false, ["sqlite3"], {})).toEqual({});
     });
+
+    it("vinext#3686: the image optimizer path honours trailingSlash (both branches)", async () => {
+        applyVinextPatches(patched);
+        // bun's module cache keys on the resolved path (a query-string
+        // cache-buster does not force re-evaluation), and __trailingSlash is
+        // read from process.env once at module scope — so each branch needs
+        // its OWN file path, not just its own import call, or the first
+        // branch's value sticks for the second import too.
+        const srcPath = join(patched, "dist", "shims", "image.js");
+        const truePath = join(
+            patched,
+            "dist",
+            "shims",
+            "image.trailingslash-true-probe.js",
+        );
+        const falsePath = join(
+            patched,
+            "dist",
+            "shims",
+            "image.trailingslash-false-probe.js",
+        );
+        cpSync(srcPath, truePath);
+        cpSync(srcPath, falsePath);
+        type ImageModule = {
+            imageOptimizationUrl: (
+                src: string,
+                width: number,
+                quality?: number,
+            ) => string;
+        };
+        try {
+            process.env.__VINEXT_TRAILING_SLASH = "true";
+            const trueMod = (await import(
+                pathToFileURL(truePath).href
+            )) as ImageModule;
+            expect(trueMod.imageOptimizationUrl("/test.jpg", 828, 75)).toBe(
+                "/_next/image/?url=%2Ftest.jpg&w=828&q=75",
+            );
+        } finally {
+            delete process.env.__VINEXT_TRAILING_SLASH;
+        }
+        // Unset: the pre-existing default-path behaviour, in its own fresh
+        // module instance (process.env.__VINEXT_TRAILING_SLASH is already
+        // deleted above, before this import).
+        const falseMod = (await import(
+            pathToFileURL(falsePath).href
+        )) as ImageModule;
+        expect(falseMod.imageOptimizationUrl("/test.jpg", 828, 75)).toBe(
+            "/_next/image?url=%2Ftest.jpg&w=828&q=75",
+        );
+    });
+
+    it("vinext#3686: a custom loader prop gets the built-in loader's per-breakpoint srcSet, with quality passed through unforced", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            getImageProps: (props: Record<string, unknown>) => {
+                props: { src: string; srcSet?: string };
+            };
+        }>("dist/shims/image.js");
+        // Ported from Next.js: test/e2e/next-image-new/loader-config/loader-config.test.ts
+        // (the "loader prop" / img2 cases — the "loaderFile" / img1 cases
+        // need the upstream images.loaderFile wiring, not bundled here; see
+        // the patch header).
+        const loader = ({
+            src,
+            width,
+            quality,
+        }: {
+            src: string;
+            width: number;
+            quality?: number;
+        }) => `${src}?wid=${width}&qual=${quality ?? 35}`;
+        const { props } = mod.getImageProps({
+            alt: "img2",
+            src: "/logo.png",
+            width: 200,
+            height: 200,
+            loader,
+        });
+        expect(props.src).toBe("/logo.png?wid=640&qual=35");
+        expect(props.srcSet).toBe(
+            "/logo.png?wid=256&qual=35 1x, /logo.png?wid=640&qual=35 2x",
+        );
+        // Before the fix: a single call at the raw width with quality
+        // forced to 75 — `/logo.png?wid=200&qual=75`, no srcSet. Guard
+        // against that regression explicitly.
+        expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
+    });
 });
 
 // ---------------------------------------------------------------------------
