@@ -413,6 +413,12 @@ The fixes bundled with vinext 1.0.1:
 - **A file that starts with a `#!` shebang line and also uses `module.exports`/`require()`** (for
   example, a CLI-style script imported by your app) no longer fails to build with an "Invalid
   Character" parse error.
+- **A server action's `redirect()` called from client-invoked (fetch) code** now answers `200`,
+  matching current Next.js, instead of sometimes falling back to `303`. The redirect target still
+  reaches the browser the same way (an `x-action-redirect` header, no `Location` header); only the
+  response's own status code changes, so this only matters if your own code inspects
+  `response.status` on a server action call. A no-JS `<form>` submission's redirect is unaffected
+  and still answers `303`.
 
 ## Requirements
 
