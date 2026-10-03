@@ -133,8 +133,9 @@ Defense in depth against in-container tampering: knext renders your app's contai
   - **Standalone (Node/Bun) apps with object storage** (`spec.storage`) that use the knext cache
     handler (every `knext create` app does): the knext adapter turns on Next's
     `images.customCacheHandler` option, so optimized images are stored through the cache handler
-    instead of `.next/cache/images` on disk. With Redis configured they are shared by every pod
-    and kept across scale-to-zero. Without Redis they are kept in each pod's memory, capped at
+    instead of `.next/cache/images` on disk. On the Bun runtime with Redis configured they are
+    shared by every pod and kept across scale-to-zero. On the Node runtime, and without Redis,
+    they are kept in each pod's memory, capped at
     32 MiB by default (set `KNEXT_IMAGE_CACHE_MEMORY_BYTES` to change it). To keep Next's disk
     cache instead, build with `KNEXT_IMAGE_CACHE_HANDLER=0` and set `writableCache: true`.
   - **Self-contained standalone executables** (`selfContained: true` on the Bun runtime), which

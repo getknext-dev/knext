@@ -144,8 +144,8 @@ than the cold start it was meant to fix. Raising it per app remains available as
 `writableCache` field if your app needs the old guaranteed-local-write behavior back.
 
 Apps with object storage and vinext apps no longer need a writable volume either. Optimized images
-are stored through the knext cache handler (in Redis when you configure it) instead of on local
-disk, and `knext deploy` tells the operator when the image it built writes nothing to disk, so
+are stored through the knext cache handler instead of on local disk (in Redis on the Bun runtime
+when you configure it; in each pod's memory on the Node runtime for now), and `knext deploy` tells the operator when the image it built writes nothing to disk, so
 those apps also start without a scratch volume. This change was not measured on its own, so
 measure your own app before and after upgrading.
 

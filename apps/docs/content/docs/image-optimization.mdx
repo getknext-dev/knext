@@ -35,8 +35,10 @@ When your app uses the knext cache handler (every `knext create` app does), the 
 on Next's `images.customCacheHandler` option at build time. Next then stores each optimized variant
 through the cache handler instead of writing it to local disk:
 
-- **With Redis configured**, variants live in Redis next to your ISR entries, so every pod shares
-  them and they survive scale-to-zero.
+- **On the Bun runtime with Redis configured**, variants live in Redis next to your ISR entries,
+  so every pod shares them and they survive scale-to-zero.
+- **On the Node runtime**, the standalone image cannot reach Redis yet, so the cache handler falls
+  back to the per-pod memory cache below. Variants are re-optimized after each scale-to-zero.
 - **Without Redis**, variants are kept in each pod's memory, capped at 32 MiB by default. Least
   recently used variants are dropped first. Set `KNEXT_IMAGE_CACHE_MEMORY_BYTES` to change the cap.
 
