@@ -56,7 +56,7 @@ const REQUIRED_CONTEXT_OWNERS: Record<string, string> = {
   'Operator Go tests (envtest + install bundle)': 'ci.yml',
   'Operator codegen is up-to-date (make generate + make manifests)': 'ci.yml',
   'No :latest images in operator manifests': 'ci.yml',
-  'Docs site build (apps/docs → knext-platform.dev)': 'ci.yml',
+  'Docs site build (apps/docs → knext.dev)': 'ci.yml',
   'Prod image next/image optimization (strict,': 'ci.yml',
   'SIGTERM drain (legacy standalone supervisor)': 'ci.yml',
   'bun-exec runs from a clean alpine (ADR-0042 A9)': 'ci.yml',

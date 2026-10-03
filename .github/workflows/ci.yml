@@ -1101,7 +1101,10 @@ jobs:
     # Path-filtered: only runs when the docs app OR the public @getknext/core surface
     # changes (turbo-cache-friendly — an unrelated PR skips the ~minutes-long
     # Fumadocs build).
-    name: Docs site build (apps/docs → knext-platform.dev)
+    # Job name kept verbatim: it is a REQUIRED status-check context in main's branch
+    # protection. Renaming it would block every PR. The public domain is
+    # knext-platform.dev; this string is an internal check name, not a link.
+    name: Docs site build (apps/docs → knext.dev)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

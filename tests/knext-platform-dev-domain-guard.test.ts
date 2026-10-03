@@ -60,6 +60,9 @@ const ALLOWLISTED_LABEL_MARKERS = [
   'knext.dev/purpose',
   'knext.dev/benchmark',
   'build-id',
+  // Required status-check context name in main's branch protection (not a URL);
+  // renaming the CI job would block every PR, so the literal stays.
+  'Docs site build (apps/docs → knext.dev)',
 ];
 
 /**
