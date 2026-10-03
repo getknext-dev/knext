@@ -1,0 +1,28 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3683
+What it fixes: vinext never warned about the deprecated Edge Runtime. Next.js emits 'The Edge Runtime is deprecated...' the first time a route's resolved runtime is edge/experimental-edge, via Log.warnOnce. This ports the warning into isEdgeRuntime(), the one shared predicate every runtime classification already calls, behind a module-level dedup flag.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3683.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/server/app-segment-config.js
++++ b/dist/server/app-segment-config.js
+@@ -215,8 +215,16 @@
+ function resolveAppRouteHandlerFetchCacheMode(handler) {
+ 	return isRouteSegmentFetchCache(handler.fetchCache) ? handler.fetchCache : null;
+ }
++let hasWarnedAboutEdgeRuntime = false;
++function warnAboutEdgeRuntimeOnce() {
++	if (hasWarnedAboutEdgeRuntime) return;
++	hasWarnedAboutEdgeRuntime = true;
++	console.warn('The Edge Runtime is deprecated. You can use the "nodejs" runtime instead. Learn more: https://nextjs.org/docs/messages/edge-runtime-deprecated');
++}
+ function isEdgeRuntime(runtime) {
+-	return isEdgeApiRuntime(runtime);
++	const isEdge = isEdgeApiRuntime(runtime);
++	if (isEdge) warnAboutEdgeRuntimeOnce();
++	return isEdge;
+ }
+ /**
+ * Resolve a `runtime` from a chain of segment values, outermost first: the
