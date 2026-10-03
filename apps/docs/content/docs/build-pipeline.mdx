@@ -41,6 +41,13 @@ const config: KnativeNextConfig = {
 };
 ```
 
+<Callout type="warn">
+**`runtime: 'node'` with `cache.provider: redis`:** the Redis-backed ISR/data cache can silently
+fall back to a per-pod in-memory cache on this runtime — see [ISR & the Redis
+cache](/docs/isr-caching) for the symptom and workarounds. `runtime: 'bun'` (the default) is not
+affected.
+</Callout>
+
 The second target — **opt-in, Beta** in the [stability tiers](/docs/stability) (implemented and
 tested on both runtimes, not yet behind its own compatibility credential) — compiles your app
 with [**vinext**](https://vinext.dev), an open-source, Vite-based implementation of the Next.js
