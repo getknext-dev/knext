@@ -31,6 +31,26 @@
       "file": "vinext-3436-nitro-output-file-tracing.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3436",
       "summary": "Nitro builds: `outputFileTracingIncludes` / `outputFileTracingExcludes` from next.config are applied to the traced server dependencies."
+    },
+    {
+      "file": "vinext-3681-lightningcss-custom-media-drafts.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3681",
+      "summary": "`experimental.lightningCssFeatures.include`'s `custom-media-queries` entry now also turns on lightningcss's `drafts.customMedia` parser flag, so `@custom-media` can parse at all."
+    },
+    {
+      "file": "vinext-3682-subresource-sec-fetch-dest-404.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3682",
+      "summary": "App Router: a GET/HEAD request for an unmatched path whose `Sec-Fetch-Dest` is a non-HTML subresource destination (image, font, script, ...) gets a plain-text 404 instead of the rendered not-found page."
+    },
+    {
+      "file": "vinext-3683-edge-runtime-deprecated-warning.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3683",
+      "summary": "Warn once, matching Next.js, when a route's resolved `runtime` is `edge`/`experimental-edge` — the Edge Runtime deprecation notice was never emitted."
+    },
+    {
+      "file": "vinext-3684-bare-double-slash-not-open-redirect.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3684",
+      "summary": "A bare `//` (in any literal/percent-encoded form, with nothing after it) is no longer treated as an open-redirect shape, matching Next.js serving it as the index route."
     }
   ],
   "pristine": {
@@ -38,6 +58,9 @@
     "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
     "dist/plugins/require-condition-resolution.js": "f8776d98dfc63c228810a8f6d3691fb0f8f7c7b42f700e6ed40c3501607a8321",
     "dist/plugins/worker-image-imports.js": "529c659ee78c07dc2e5b97e15f597434ac4024e65c238e90d633be4a405ff281",
-    "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a"
+    "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a",
+    "dist/server/app-rsc-handler.js": "b4a18a7636263b24b06ecaf48f88c85a975853f1c83805beb88cdbf779d9a9da",
+    "dist/server/app-segment-config.js": "13ca8d09a6a7baa5c19551b68c76f1e0a6fe15f98a40c0e0d1988c215ba14242",
+    "dist/server/open-redirect.js": "4e62ca39cf91cdc92ec9cb4d269a1fb0c64f3c48c6a90e1f7b8bb5efeb5cf475"
   }
 }

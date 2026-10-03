@@ -14,7 +14,7 @@
  * either, or if any patch no longer applies cleanly to the installed copy.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -507,6 +507,72 @@ describe("the bundled patches against the published tarball", () => {
             "const originalRenderUrl = pathname + new URL(request.url).search;",
         );
         expect(stage).toContain("originalUrl: originalRenderUrl");
+    });
+
+    it("vinext#3681: lightningCssFeatures.include('custom-media-queries') also turns on drafts.customMedia", () => {
+        applyVinextPatches(patched);
+        const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
+        expect(index).toContain(
+            '...(nextConfig.lightningCssFeatures.include & lightningCssFeatureNamesToMask(["custom-media-queries"])) !== 0 ? { drafts: { customMedia: true } } : {}',
+        );
+    });
+
+    it("vinext#3682: unmatched subresource requests get a plain-text 404", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            isNonHtmlSecFetchDest: (value: unknown) => boolean;
+        }>("dist/server/is-non-html-sec-fetch-dest.js");
+        expect(mod.isNonHtmlSecFetchDest("image")).toBe(true);
+        expect(mod.isNonHtmlSecFetchDest("font")).toBe(true);
+        expect(mod.isNonHtmlSecFetchDest("document")).toBe(false);
+        expect(mod.isNonHtmlSecFetchDest("empty")).toBe(false);
+        expect(mod.isNonHtmlSecFetchDest(undefined)).toBe(false);
+        expect(mod.isNonHtmlSecFetchDest(null)).toBe(false);
+        const handler = readFileSync(
+            join(patched, "dist", "server", "app-rsc-handler.js"),
+            "utf8",
+        );
+        expect(handler).toContain(
+            'isNonHtmlSecFetchDest(request.headers.get("sec-fetch-dest"))',
+        );
+        expect(handler).toContain(
+            "return notFoundStaticAssetResponse(headers);",
+        );
+    });
+
+    it("vinext#3683: isEdgeRuntime warns once, matching Next.js' Log.warnOnce", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            isEdgeRuntime: (runtime: string | undefined) => boolean;
+        }>("dist/server/app-segment-config.js");
+        const warn = spyOn(console, "warn").mockImplementation(() => {});
+        try {
+            expect(mod.isEdgeRuntime("nodejs")).toBe(false);
+            expect(warn).not.toHaveBeenCalled();
+            expect(mod.isEdgeRuntime("edge")).toBe(true);
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(String(warn.mock.calls[0]?.[0])).toContain(
+                "The Edge Runtime is deprecated",
+            );
+            expect(mod.isEdgeRuntime("experimental-edge")).toBe(true);
+            expect(warn).toHaveBeenCalledTimes(1);
+        } finally {
+            warn.mockRestore();
+        }
+    });
+
+    it("vinext#3684: a bare double slash is not an open-redirect shape", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            isOpenRedirectShaped: (rawPathname: string) => boolean;
+        }>("dist/server/open-redirect.js");
+        expect(mod.isOpenRedirectShaped("//")).toBe(false);
+        expect(mod.isOpenRedirectShaped("/\\")).toBe(false);
+        expect(mod.isOpenRedirectShaped("/%2F")).toBe(false);
+        expect(mod.isOpenRedirectShaped("/%5C")).toBe(false);
+        expect(mod.isOpenRedirectShaped("//evil.com")).toBe(true);
+        expect(mod.isOpenRedirectShaped("/\\evil.com")).toBe(true);
+        expect(mod.isOpenRedirectShaped("/%2F/evil.com")).toBe(true);
     });
 
     it("vinext#3424 (R1 amendment): the Nitro RSC noExternal:true carries an explicit external list, so default-external packages (sqlite3's `bindings` helper, typescript) are never swept into the compiled executable", () => {
