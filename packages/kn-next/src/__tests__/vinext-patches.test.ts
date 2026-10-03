@@ -567,8 +567,11 @@ describe("the bundled patches against the published tarball", () => {
             isOpenRedirectShaped: (rawPathname: string) => boolean;
         }>("dist/server/open-redirect.js");
         expect(mod.isOpenRedirectShaped("//")).toBe(false);
+        expect(mod.isOpenRedirectShaped("/\\")).toBe(false);
         expect(mod.isOpenRedirectShaped("/%2F")).toBe(false);
+        expect(mod.isOpenRedirectShaped("/%5C")).toBe(false);
         expect(mod.isOpenRedirectShaped("//evil.com")).toBe(true);
+        expect(mod.isOpenRedirectShaped("/\\evil.com")).toBe(true);
         expect(mod.isOpenRedirectShaped("/%2F/evil.com")).toBe(true);
     });
 
