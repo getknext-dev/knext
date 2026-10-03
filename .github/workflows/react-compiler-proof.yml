@@ -109,6 +109,44 @@ jobs:
           fi
           cat knext.config.ts
 
+      # The scaffolded page is a Server Component with no hooks — its code
+      # never reaches the client bundle at all (RSC), so there is nothing
+      # for the compiler to transform regardless of whether it ran. Give it
+      # one Client Component with state so a compiler pass has a real
+      # target, and so the client-chunk evidence check means something.
+      - name: Add a client component (useState) so the compiler has something to transform
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "export default function Counter() {" \
+            "  const [count, setCount] = useState(0);" \
+            "  const items = Array.from({ length: count }, (_, i) => i);" \
+            "  const doubled = items.map((i) => i * 2);" \
+            "  return (" \
+            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
+            "      {count} / {doubled.join(',')}" \
+            "    </button>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-proof</h1>" \
+            "      <Counter />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
+
       # Enable React Compiler the way the docs this lane proves tell a
       # consumer to: `reactCompiler: true` in next.config, plus the
       # optional peer that actually does the transform.
@@ -199,6 +237,43 @@ jobs:
           npm pkg set "devDependencies.@getknext/core=${VINEXT_VERSION}"
           npm pkg set "dependencies.@getknext/lib=${VINEXT_VERSION}"
 
+      # The scaffolded page is a Server Component with no hooks — its code
+      # never reaches the client bundle (RSC), so there is nothing for the
+      # compiler to transform regardless of whether it ran. Give it one
+      # Client Component with state so the evidence check means something.
+      - name: Add a client component (useState) so the compiler has something to transform
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "export default function Counter() {" \
+            "  const [count, setCount] = useState(0);" \
+            "  const items = Array.from({ length: count }, (_, i) => i);" \
+            "  const doubled = items.map((i) => i * 2);" \
+            "  return (" \
+            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
+            "      {count} / {doubled.join(',')}" \
+            "    </button>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-proof</h1>" \
+            "      <Counter />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
+
       # Enable via vinext's own vite plugin option (`react: { compiler: true }`)
       # — NOT a next.config key; vinext never reads next.config's
       # `experimental.reactCompiler` / top-level `reactCompiler`, only this
@@ -212,6 +287,7 @@ jobs:
           npm pkg set "devDependencies.@vitejs/plugin-react=^6.1.0"
           npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
           npm pkg set "devDependencies.@rolldown/plugin-babel=^0.2.0"
+          npm pkg set "devDependencies.oxc-transform-react=^0.145.0"
           node -e "
             const fs = require('fs');
             let cfg = fs.readFileSync('vite.config.ts', 'utf8');
@@ -238,10 +314,12 @@ jobs:
         working-directory: app
         run: |
           set -euo pipefail
-          if ! grep -rlq 'react/compiler-runtime' dist/client 2>/dev/null \
+          if ! grep -rlq 'react/compiler-runtime' .output/public 2>/dev/null \
+            && ! grep -rlq 'react/compiler-runtime' dist/client 2>/dev/null \
             && ! grep -rlq 'react/compiler-runtime' .nitro/dist 2>/dev/null \
             && ! grep -rlq 'react/compiler-runtime' build 2>/dev/null; then
             echo "::warning::no client build output directory matched a known vinext layout — reporting compiler evidence as UNVERIFIED, not failing the cell on a path guess"
+            find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
           else
             echo "compiler-runtime import found in a client build artifact"
           fi
@@ -300,6 +378,43 @@ jobs:
           npm pkg set "devDependencies.@getknext/core=${VINEXT_VERSION}"
           npm pkg set "dependencies.@getknext/lib=${VINEXT_VERSION}"
 
+      # The scaffolded page is a Server Component with no hooks — its code
+      # never reaches the client bundle (RSC), so there is nothing for the
+      # compiler to transform regardless of whether it ran. Give it one
+      # Client Component with state so the evidence check means something.
+      - name: Add a client component (useState) so the compiler has something to transform
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "export default function Counter() {" \
+            "  const [count, setCount] = useState(0);" \
+            "  const items = Array.from({ length: count }, (_, i) => i);" \
+            "  const doubled = items.map((i) => i * 2);" \
+            "  return (" \
+            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
+            "      {count} / {doubled.join(',')}" \
+            "    </button>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-proof</h1>" \
+            "      <Counter />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
+
       - name: Enable React Compiler (vinext's react.compiler option)
         working-directory: app
         run: |
@@ -307,6 +422,7 @@ jobs:
           npm pkg set "devDependencies.@vitejs/plugin-react=^6.1.0"
           npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
           npm pkg set "devDependencies.@rolldown/plugin-babel=^0.2.0"
+          npm pkg set "devDependencies.oxc-transform-react=^0.145.0"
           node -e "
             const fs = require('fs');
             let cfg = fs.readFileSync('vite.config.ts', 'utf8');
@@ -375,6 +491,42 @@ jobs:
           npm pkg set "dependencies.@getknext/lib=${ADAPTER_VERSION}"
           npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
           npm install
+
+      # Same reasoning as the per-cell jobs: a Server Component's code never
+      # reaches the client bundle, so without a real Client Component the
+      # size/time delta would measure nothing.
+      - name: Add a client component (useState) so there is something to measure
+        working-directory: app
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "'use client';" \
+            "" \
+            "import { useState } from 'react';" \
+            "" \
+            "export default function Counter() {" \
+            "  const [count, setCount] = useState(0);" \
+            "  const items = Array.from({ length: count }, (_, i) => i);" \
+            "  const doubled = items.map((i) => i * 2);" \
+            "  return (" \
+            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
+            "      {count} / {doubled.join(',')}" \
+            "    </button>" \
+            "  );" \
+            "}" \
+            > src/app/counter.tsx
+          printf '%s\n' \
+            "import Counter from './counter';" \
+            "" \
+            "export default function Page() {" \
+            "  return (" \
+            "    <main>" \
+            "      <h1>react-compiler-bench</h1>" \
+            "      <Counter />" \
+            "    </main>" \
+            "  );" \
+            "}" \
+            > src/app/page.tsx
 
       - name: Build WITHOUT the compiler
         working-directory: app
