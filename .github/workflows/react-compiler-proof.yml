@@ -411,6 +411,16 @@ jobs:
       # `useMemoCache` (a property name, survives both minification and
       # code-splitting) intersected with `localeCompare` (the test
       # component's own method call) in the SAME file.
+      - name: DEBUG — dump the counter chunk's actual content
+        working-directory: app
+        run: |
+          set -euo pipefail
+          F=$(grep -rl 'localeCompare' .output/public dist/client .nitro/dist build 2>/dev/null | head -1 || true)
+          echo "localeCompare chunk: ${F}"
+          if [ -n "${F}" ]; then
+            cat "${F}"
+          fi
+
       - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
         run: |
