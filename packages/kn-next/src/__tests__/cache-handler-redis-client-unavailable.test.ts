@@ -160,14 +160,10 @@ function runHandler(env: Record<string, string | undefined>) {
             "console.log('DRIVER_DONE', got ? 'served' : 'null');",
         ].join("\n"),
     );
-    const childEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-        if (
-            v !== undefined &&
-            !k.startsWith("REDIS_") &&
-            k !== "KNEXT_CACHE_REDIS_CLIENT"
-        ) {
-            childEnv[k] = v;
+    const childEnv = { ...process.env };
+    for (const k of Object.keys(childEnv)) {
+        if (k.startsWith("REDIS_") || k === "KNEXT_CACHE_REDIS_CLIENT") {
+            delete childEnv[k];
         }
     }
     childEnv.REDIS_KEY_PREFIX = "knext-1843";
