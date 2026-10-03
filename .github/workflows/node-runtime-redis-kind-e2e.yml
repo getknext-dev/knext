@@ -253,7 +253,7 @@ jobs:
         run: |
           set -euo pipefail
           APP_DIR="${RUNNER_TEMP}/node-redis-app"
-          node packages/kn-next/dist/cli/kn-next.js create "$APP_DIR" --name "$APP_NAME"
+          node ./packages/kn-next/dist/cli/kn-next.js create "$APP_DIR" --name "$APP_NAME"
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
 
       - name: Add an ISR page and an authenticated invalidate route
@@ -389,7 +389,7 @@ jobs:
           MINIO_LOCAL_ENDPOINT: http://127.0.0.1:9000
         run: |
           export RC_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
-          node ./scripts/rc-scaffold-platform-e2e.mjs
+          node scripts/./rc-scaffold-platform-e2e.mjs
 
       # The platform script proves ISR behaviour; this proves WHICH store served
       # it. A cache that answers from memory can still look stable inside one pod.
