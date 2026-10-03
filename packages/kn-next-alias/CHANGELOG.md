@@ -1,5 +1,18 @@
 # kn-next
 
+## 1.3.0-rc.1
+
+### Patch Changes
+
+- 1aa6b8f: knext's public docs site moved from `knext.dev` to `knext-platform.dev` (`knext.dev` now resolves to an unrelated Cloudflare 403 page). Updates every user-facing `knext.dev` URL in the CLI — help text (`knext --help`), error-message hints (`knext doctor`, missing-config guidance), scaffolded `knext.config.ts` template comments, the asset-upload multi-cloud hint, and package READMEs (`@getknext/core`, `@getknext/lib`, `@getknext/db`, the `kn-next` alias package) — to `knext-platform.dev`. `@getknext/action`'s README is also updated but carries no changeset entry since that package is `private: true` and never publishes. Kubernetes label keys that happen to share the domain string (e.g. the CRD-adjacent `apps.knext.dev/build-id` label) are unaffected; they are not web links.
+- Updated dependencies [e5d94c6]
+- Updated dependencies [51fbd7e]
+- Updated dependencies [1aa6b8f]
+- Updated dependencies [4945b10]
+- Updated dependencies [02f24e3]
+- Updated dependencies [056432d]
+  - @getknext/core@1.3.0-rc.1
+
 ## 1.0.0-rc.5
 
 ### Patch Changes
