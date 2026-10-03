@@ -1,6 +1,14 @@
 knext bundled fix for vinext 1.0.1 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3424
 What it fixes: Nitro builds: dependencies of the RSC environment are bundled, so a package's `react-server` export condition is honoured.
+Amended (rc.2, R1): the original hunk's blanket `resolve: { noExternal: true }` also swept
+Next's default server-external list (sqlite3's `bindings` helper, typescript) into the compiled
+executable, regressing the `turbopack-reports` and `twoslash` deploy-test fixtures — bindings
+walks up from its own file to find package.json and no longer finds one inside the binary;
+typescript's bare `import.meta` aborts the compile. Carrying `external: [...userSsrExternal]`
+alongside `noExternal: true` keeps those packages external under Nitro too, matching the
+non-Nitro RSC branch below (`external: userSsrExternal === true ? true : [...] `) and the
+pre-#3424 "patches OFF" build output.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3424.
 Ported by hand from the upstream src change to the published 1.0.1 dist files.
@@ -13,7 +21,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  					viteConfig.environments = {
  						rsc: {
 -							...nitroDevEnvironmentResolve,
-+							...hasNitroPlugin && !hasCloudflarePlugin && userSsrExternal !== true ? { resolve: { noExternal: true } } : nitroDevEnvironmentResolve,
++							...hasNitroPlugin && !hasCloudflarePlugin && userSsrExternal !== true ? { resolve: { noExternal: true, external: [...userSsrExternal] } } : nitroDevEnvironmentResolve,
  							...hasCloudflarePlugin || hasNitroPlugin ? {} : { resolve: {
  								external: userSsrExternal === true ? true : [
  									"satori",
