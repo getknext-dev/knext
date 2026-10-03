@@ -535,7 +535,9 @@ describe("the bundled patches against the published tarball", () => {
         expect(handler).toContain(
             'isNonHtmlSecFetchDest(request.headers.get("sec-fetch-dest"))',
         );
-        expect(handler).toContain("return notFoundStaticAssetResponse(headers);");
+        expect(handler).toContain(
+            "return notFoundStaticAssetResponse(headers);",
+        );
     });
 
     it("vinext#3683: isEdgeRuntime warns once, matching Next.js' Log.warnOnce", async () => {
