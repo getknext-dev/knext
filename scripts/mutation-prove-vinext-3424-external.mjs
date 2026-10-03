@@ -95,7 +95,10 @@ prover.baseline();
 prover.proveCanSeeRed({
   subject: 'spec',
   anchor: 'expect(index).toContain(marker);',
-  replacement: 'expect(index).toContain("marker");',
+  // A literal that cannot occur in a bundled vite/vinext dist file (unlike
+  // "marker" itself, which — unhelpfully for a canary — is already a local
+  // variable name elsewhere in dist/index.js).
+  replacement: 'expect(index).toContain("zzz-knext-canary-cannot-occur-zzz");',
 });
 
 console.log('\n=== mutations ===');
