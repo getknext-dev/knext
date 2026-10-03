@@ -15,18 +15,35 @@ name: React Compiler proof (published bytes, every v1.0 build target)
 #
 # For each cell: scaffold with the PUBLISHED CLI, wire the compiler the way
 # the docs this lane proves tell a user to, `knext build`, boot the real
-# shipped image, and assert a live 200. Then check for the compiler's own
-# runtime import (`react/compiler-runtime`) in the client bundle as
-# evidence it actually ran — a build that merely *accepts* the config
-# option without erroring is not proof the transform ran.
+# shipped image, and assert a live 200. Then confirm the compiler actually
+# transformed the injected test component — a build that merely *accepts*
+# the config option without erroring is not proof the transform ran.
 #
-# RESULT (first full run, 2026-10-03): the vinext cells show real evidence
-# and are documented as working. The official-adapter cells (all four)
-# build and boot clean but never show that evidence, confirmed in a
-# from-scratch local repro OUTSIDE knext too — the plugin works standalone,
-# Next's own build pipeline does not visibly invoke it. That check is
-# diagnostic (non-fatal) on the adapter cells for exactly this reason; see
-# the docs page's "Official adapter target" section for the finding.
+# EVIDENCE, corrected (2026-10-03): a literal grep for the ESM import
+# specifier `react/compiler-runtime` and the unminified `_c(` call shape
+# — the FIRST version of this lane's check — produced a false negative on
+# the official-adapter target. Turbopack/webpack resolve that import into
+# their own numbered-module registry (the literal specifier string never
+# appears in the bundle) and minify `_c` to a short alias. The real,
+# minification-surviving markers are PROPERTY names: `useMemoCache` (the
+# hook the compiler's output calls — intersected with a literal from the
+# test component's own source, since React's dispatcher always defines
+# this property whether or not anything was compiled) confirms the
+# transform ran. Confirmed in four independent repros: this lane's own
+# vinext cells (ESM output, the literal specifier survives there), this
+# lane's official-adapter cells once corrected, and a from-scratch
+# `create-next-app@16.3.6` repro completely outside knext on both
+# bundlers. **React Compiler works on all six v1.0-adjacent cells** —
+# 4 official-adapter + 2 vinext.
+#
+# A second, narrower finding survives from the original investigation: an
+# overly trivial Client Component (no props, no derived values worth
+# memoizing) is NOT judged "relevant" by Next's own file-selection
+# heuristic and is skipped — documented upstream behaviour
+# ("only applies ... to relevant files"), not a defect. The test
+# component below (props + filtered/sorted derived values) is eligible by
+# construction and is what every cell's evidence check now verifies
+# against.
 #
 # One extra job (`bundle-size-and-build-time`) measures ONE target
 # (official adapter x turbopack x bun, knext's default) with and without the
@@ -46,6 +63,11 @@ name: React Compiler proof (published bytes, every v1.0 build target)
 
 on:
   workflow_dispatch: {}
+  # TEMPORARY, re-added — the detection fix below needs its own proof run
+  # before merge. Removed again once that run is green.
+  pull_request:
+    paths:
+      - '.github/workflows/react-compiler-proof.yml'
 
 permissions:
   contents: read
@@ -124,14 +146,21 @@ jobs:
             "" \
             "import { useState } from 'react';" \
             "" \
-            "export default function Counter() {" \
-            "  const [count, setCount] = useState(0);" \
-            "  const items = Array.from({ length: count }, (_, i) => i);" \
-            "  const doubled = items.map((i) => i * 2);" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
             "  return (" \
-            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
-            "      {count} / {doubled.join(',')}" \
-            "    </button>" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
             "  );" \
             "}" \
             > src/app/counter.tsx
@@ -139,10 +168,15 @@ jobs:
             "import Counter from './counter';" \
             "" \
             "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
             "  return (" \
             "    <main>" \
             "      <h1>react-compiler-proof</h1>" \
-            "      <Counter />" \
+            "      <Counter items={items} />" \
             "    </main>" \
             "  );" \
             "}" \
@@ -177,27 +211,39 @@ jobs:
         working-directory: app
         run: node_modules/.bin/knext build 2>&1 | tee build.log
 
-      # KNOWN LIMIT, confirmed both in this lane and in a from-scratch local
-      # repro outside knext entirely: on Next.js 16.3.6, `reactCompiler: true`
-      # + `babel-plugin-react-compiler` installed builds clean on BOTH
-      # bundlers but does not visibly transform an eligible Client Component
-      # — no `react/compiler-runtime` import, no `_c()` memo-cache calls, no
-      # warning or error either way. A plain `babel.transformSync` with the
-      # same plugin version on the same source DOES produce that output, so
-      # the plugin itself works; Next's own build pipeline is not invoking
-      # it here. This check is diagnostic (non-fatal) until that is
-      # root-caused — see the docs page's "Official adapter target" section
-      # for the full finding.
-      - name: Check for compiler evidence (client chunk) — diagnostic only, see docs
+      # Evidence, corrected: `grep`-ing for the literal ESM specifier
+      # `react/compiler-runtime` or the unminified `_c(` call shape does NOT
+      # work on this target. Turbopack/webpack resolve the import into their
+      # own numbered-module registry (the literal specifier string is gone
+      # from the bundle) and minify `_c` to a short alias (`n.c`, `o`, ...).
+      # Two markers survive minification because they are PROPERTY names,
+      # not local identifiers: `useMemoCache` (the hook the compiler's
+      # output calls) and `react.memo_cache_sentinel` (its empty-slot
+      # marker). `useMemoCache` alone is insufficient — React's own
+      # dispatcher table defines the property unconditionally, compiled or
+      # not — so this also requires a literal from the TEST component's own
+      # source (`localeCompare`, a method name, which also survives
+      # minification) to land in the SAME chunk, proving the call site is
+      # actually inside the component this lane injected, not just React's
+      # hook definition. Confirmed against a from-scratch repro completely
+      # outside knext (plain `create-next-app@16.3.6`): both markers appear,
+      # intersected, in both Turbopack and Webpack output.
+      - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
         run: |
           set -euo pipefail
-          if grep -rlq 'react/compiler-runtime' .next/standalone/.next/static/chunks 2>/dev/null \
-            || grep -rlq 'react/compiler-runtime' .next/static/chunks 2>/dev/null; then
-            echo "compiler-runtime import found in a client chunk"
-          else
-            echo "::warning::no client chunk imports react/compiler-runtime on this cell — matches the known, documented limit on the official-adapter target (see /docs/react-compiler)"
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'useMemoCache' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client chunk has useMemoCache AND localeCompare together — compiler did not transform the test component" >&2
+            exit 1
           fi
+          echo "compiler evidence found in ${MATCH}"
 
       # `knext build` does NOT stage or build the standalone image — only
       # `knext deploy`/`preview` do, via `stageStandaloneBuildContext` (which
@@ -283,14 +329,21 @@ jobs:
             "" \
             "import { useState } from 'react';" \
             "" \
-            "export default function Counter() {" \
-            "  const [count, setCount] = useState(0);" \
-            "  const items = Array.from({ length: count }, (_, i) => i);" \
-            "  const doubled = items.map((i) => i * 2);" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
             "  return (" \
-            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
-            "      {count} / {doubled.join(',')}" \
-            "    </button>" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
             "  );" \
             "}" \
             > src/app/counter.tsx
@@ -298,10 +351,15 @@ jobs:
             "import Counter from './counter';" \
             "" \
             "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
             "  return (" \
             "    <main>" \
             "      <h1>react-compiler-proof</h1>" \
-            "      <Counter />" \
+            "      <Counter items={items} />" \
             "    </main>" \
             "  );" \
             "}" \
@@ -343,19 +401,31 @@ jobs:
         working-directory: app
         run: node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
 
+      # vinext/Vite (Rolldown) output keeps ESM import specifiers as literal
+      # text, unlike Turbopack/webpack's numbered module registry, so the
+      # `react/compiler-runtime` import string survives here. Still require
+      # it to appear alongside `localeCompare` (a method name from the test
+      # component's own source) in the SAME file, for the same reason as
+      # the official-adapter check: proving the call site is inside the
+      # component this lane injected, not merely that the import exists
+      # somewhere in the bundle.
       - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
         run: |
           set -euo pipefail
-          if ! grep -rlq 'react/compiler-runtime' .output/public 2>/dev/null \
-            && ! grep -rlq 'react/compiler-runtime' dist/client 2>/dev/null \
-            && ! grep -rlq 'react/compiler-runtime' .nitro/dist 2>/dev/null \
-            && ! grep -rlq 'react/compiler-runtime' build 2>/dev/null; then
-            echo "::warning::no client build output directory matched a known vinext layout — reporting compiler evidence as UNVERIFIED, not failing the cell on a path guess"
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'react/compiler-runtime' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client build artifact has react/compiler-runtime AND localeCompare together — compiler did not transform the test component" >&2
             find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
-          else
-            echo "compiler-runtime import found in a client build artifact"
+            exit 1
           fi
+          echo "compiler evidence found in ${MATCH}"
 
       - name: docker build (the real shipped musl image) and assert a live 200
         working-directory: app
@@ -424,14 +494,21 @@ jobs:
             "" \
             "import { useState } from 'react';" \
             "" \
-            "export default function Counter() {" \
-            "  const [count, setCount] = useState(0);" \
-            "  const items = Array.from({ length: count }, (_, i) => i);" \
-            "  const doubled = items.map((i) => i * 2);" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
             "  return (" \
-            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
-            "      {count} / {doubled.join(',')}" \
-            "    </button>" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
             "  );" \
             "}" \
             > src/app/counter.tsx
@@ -439,10 +516,15 @@ jobs:
             "import Counter from './counter';" \
             "" \
             "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
             "  return (" \
             "    <main>" \
             "      <h1>react-compiler-proof</h1>" \
-            "      <Counter />" \
+            "      <Counter items={items} />" \
             "    </main>" \
             "  );" \
             "}" \
@@ -477,6 +559,27 @@ jobs:
       - name: knext build (vite build -> nitro node preset; stages Dockerfile.vinext-node)
         working-directory: app
         run: node_modules/.bin/knext build 2>&1 | tee build.log
+
+      # Same reasoning as the vinext x bun job's identical step: require
+      # react/compiler-runtime AND localeCompare (the test component's own
+      # method call) together in one file, not just the import's presence.
+      - name: Assert the compiler actually ran (client chunk evidence)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'react/compiler-runtime' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client build artifact has react/compiler-runtime AND localeCompare together — compiler did not transform the test component" >&2
+            find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
+            exit 1
+          fi
+          echo "compiler evidence found in ${MATCH}"
 
       - name: docker build + run the image, assert a live 200
         working-directory: app
@@ -537,14 +640,21 @@ jobs:
             "" \
             "import { useState } from 'react';" \
             "" \
-            "export default function Counter() {" \
-            "  const [count, setCount] = useState(0);" \
-            "  const items = Array.from({ length: count }, (_, i) => i);" \
-            "  const doubled = items.map((i) => i * 2);" \
+            "type Item = { id: number; name: string };" \
+            "" \
+            "export default function Counter({ items }: { items: Item[] }) {" \
+            "  const [query, setQuery] = useState('');" \
+            "  const filtered = items.filter((item) => item.name.includes(query));" \
+            "  const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));" \
             "  return (" \
-            "    <button type=\"button\" onClick={() => setCount((c) => c + 1)}>" \
-            "      {count} / {doubled.join(',')}" \
-            "    </button>" \
+            "    <div>" \
+            "      <input value={query} onChange={(e) => setQuery(e.target.value)} />" \
+            "      <ul>" \
+            "        {sorted.map((item) => (" \
+            "          <li key={item.id}>{item.name}</li>" \
+            "        ))}" \
+            "      </ul>" \
+            "    </div>" \
             "  );" \
             "}" \
             > src/app/counter.tsx
@@ -552,10 +662,15 @@ jobs:
             "import Counter from './counter';" \
             "" \
             "export default function Page() {" \
+            "  const items = [" \
+            "    { id: 1, name: 'apple' }," \
+            "    { id: 2, name: 'banana' }," \
+            "    { id: 3, name: 'cherry' }," \
+            "  ];" \
             "  return (" \
             "    <main>" \
             "      <h1>react-compiler-bench</h1>" \
-            "      <Counter />" \
+            "      <Counter items={items} />" \
             "    </main>" \
             "  );" \
             "}" \
