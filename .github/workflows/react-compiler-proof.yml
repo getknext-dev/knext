@@ -22,16 +22,18 @@ name: React Compiler proof (published bytes, every v1.0 build target)
 # EVIDENCE, corrected (2026-10-03): a literal grep for the ESM import
 # specifier `react/compiler-runtime` and the unminified `_c(` call shape
 # — the FIRST version of this lane's check — produced a false negative on
-# the official-adapter target. Turbopack/webpack resolve that import into
-# their own numbered-module registry (the literal specifier string never
-# appears in the bundle) and minify `_c` to a short alias. The real,
-# minification-surviving markers are PROPERTY names: `useMemoCache` (the
-# hook the compiler's output calls — intersected with a literal from the
-# test component's own source, since React's dispatcher always defines
-# this property whether or not anything was compiled) confirms the
-# transform ran. Confirmed in four independent repros: this lane's own
-# vinext cells (ESM output, the literal specifier survives there), this
-# lane's official-adapter cells once corrected, and a from-scratch
+# every cell. Turbopack/webpack resolve that import into their own
+# numbered-module registry and minify `_c` to a short alias; vinext's
+# Rolldown output does the same once the component is complex enough to
+# trigger code-splitting (confirmed on this lane's own build output —
+# `(0,i.c)(14)`, vinext's own renaming of the same cache call). The
+# marker that survives all three — `Symbol.for("react.memo_cache_sentinel")`,
+# COMPARED (not merely defined — React's dispatcher always defines the
+# property whether or not anything was compiled) inside the compiled
+# cache-array logic — intersected with a literal from the test
+# component's own source (`localeCompare`), confirms the transform ran.
+# Confirmed in four independent repros: this lane's own six cells
+# (all four official-adapter, both vinext), and a from-scratch
 # `create-next-app@16.3.6` repro completely outside knext on both
 # bundlers. **React Compiler works on all six v1.0-adjacent cells** —
 # 4 official-adapter + 2 vinext.
@@ -216,18 +218,18 @@ jobs:
       # work on this target. Turbopack/webpack resolve the import into their
       # own numbered-module registry (the literal specifier string is gone
       # from the bundle) and minify `_c` to a short alias (`n.c`, `o`, ...).
-      # Two markers survive minification because they are PROPERTY names,
-      # not local identifiers: `useMemoCache` (the hook the compiler's
-      # output calls) and `react.memo_cache_sentinel` (its empty-slot
-      # marker). `useMemoCache` alone is insufficient — React's own
-      # dispatcher table defines the property unconditionally, compiled or
-      # not — so this also requires a literal from the TEST component's own
-      # source (`localeCompare`, a method name, which also survives
-      # minification) to land in the SAME chunk, proving the call site is
-      # actually inside the component this lane injected, not just React's
-      # hook definition. Confirmed against a from-scratch repro completely
-      # outside knext (plain `create-next-app@16.3.6`): both markers appear,
-      # intersected, in both Turbopack and Webpack output.
+      # `Symbol.for("react.memo_cache_sentinel")` survives minification
+      # (it's a property/string literal, not a local identifier) — but its
+      # bare DEFINITION is insufficient, since React's own symbol table
+      # defines it unconditionally, compiled or not. Requiring it to be
+      # COMPARED (`=== Symbol.for(...)`, part of the compiled cache-array
+      # logic) in the SAME chunk as a literal from the TEST component's
+      # own source (`localeCompare`, a method name, which also survives
+      # minification) proves the call site is actually inside the
+      # component this lane injected. Confirmed against a from-scratch
+      # repro completely outside knext (plain `create-next-app@16.3.6`):
+      # both markers appear, intersected, in both Turbopack and Webpack
+      # output.
       - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
         run: |
@@ -238,9 +240,9 @@ jobs:
               MATCH="${f}"
               break
             fi
-          done < <(grep -rl 'useMemoCache' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
+          done < <(grep -rl 'memo_cache_sentinel' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
           if [ -z "${MATCH}" ]; then
-            echo "::error::no client chunk has useMemoCache AND localeCompare together — compiler did not transform the test component" >&2
+            echo "::error::no client chunk has memo_cache_sentinel AND localeCompare together — compiler did not transform the test component" >&2
             exit 1
           fi
           echo "compiler evidence found in ${MATCH}"
@@ -401,26 +403,18 @@ jobs:
         working-directory: app
         run: node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
 
-      # Measured on this lane's own run (#1829 round 3): the simple,
-      # no-props counter produced a SINGLE client chunk, so the literal
-      # `react/compiler-runtime` import specifier and the component's code
-      # landed in the same file — but once swapped to the richer, eligible
-      # component, vinext/Vite code-splits into separate `index-*.js` /
-      # `counter-*.js` chunks, and the import specifier does not survive
-      # as literal text in either. Same fix as the official-adapter check:
-      # `useMemoCache` (a property name, survives both minification and
-      # code-splitting) intersected with `localeCompare` (the test
-      # component's own method call) in the SAME file.
-      - name: DEBUG — dump the counter chunk's actual content
-        working-directory: app
-        run: |
-          set -euo pipefail
-          F=$(grep -rl 'localeCompare' .output/public dist/client .nitro/dist build 2>/dev/null | head -1 || true)
-          echo "localeCompare chunk: ${F}"
-          if [ -n "${F}" ]; then
-            cat "${F}"
-          fi
-
+      # Measured directly on this lane's own build output (the compiled
+      # chunk's literal content): `(0,i.c)(14)` is vinext/Rolldown's own
+      # renaming of the compiler's `_c(N)` cache call — neither the ESM
+      # import specifier `react/compiler-runtime` NOR the property name
+      # `useMemoCache` survive vinext's code-splitting for this (richer,
+      # multi-chunk) component shape. `Symbol.for("react.memo_cache_sentinel")`
+      # DOES survive — it is compared, not just defined, inside the
+      # compiled cache-array logic — and that comparison landed in the
+      # exact same chunk as `localeCompare` (the test component's own
+      # method call), confirming the call site is genuinely inside this
+      # component. The same marker pair also matched on the
+      # official-adapter cells' Turbopack/webpack output.
       - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
         run: |
@@ -431,9 +425,9 @@ jobs:
               MATCH="${f}"
               break
             fi
-          done < <(grep -rl 'useMemoCache' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          done < <(grep -rl 'memo_cache_sentinel' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
           if [ -z "${MATCH}" ]; then
-            echo "::error::no client build artifact has useMemoCache AND localeCompare together — compiler did not transform the test component" >&2
+            echo "::error::no client build artifact has memo_cache_sentinel AND localeCompare together — compiler did not transform the test component" >&2
             find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
             exit 1
           fi
@@ -573,9 +567,9 @@ jobs:
         run: node_modules/.bin/knext build 2>&1 | tee build.log
 
       # Same reasoning as the vinext x bun job's identical step: require
-      # useMemoCache AND localeCompare (the test component's own method
-      # call) together in one file — not the react/compiler-runtime import
-      # specifier, which does not survive vinext's code-splitting for this
+      # memo_cache_sentinel AND localeCompare (the test component's own
+      # method call) together in one file — neither react/compiler-runtime
+      # nor useMemoCache survive vinext's code-splitting for this
       # (multi-chunk) component shape.
       - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
@@ -587,9 +581,9 @@ jobs:
               MATCH="${f}"
               break
             fi
-          done < <(grep -rl 'useMemoCache' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          done < <(grep -rl 'memo_cache_sentinel' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
           if [ -z "${MATCH}" ]; then
-            echo "::error::no client build artifact has useMemoCache AND localeCompare together — compiler did not transform the test component" >&2
+            echo "::error::no client build artifact has memo_cache_sentinel AND localeCompare together — compiler did not transform the test component" >&2
             find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
             exit 1
           fi
