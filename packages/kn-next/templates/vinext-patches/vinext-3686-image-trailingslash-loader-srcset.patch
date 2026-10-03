@@ -1,0 +1,146 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3686
+What it fixes: next/image's image optimizer path ignored `trailingSlash: true`
+(always emitted `/_next/image?...`, never `/_next/image/?...`), and a custom
+`loader` prop was called once at the intrinsic width with quality forced to
+75 -- producing no `srcSet` and overriding the loader's own quality default.
+This patch fixes the trailingSlash path and gives a custom loader the same
+per-breakpoint srcSet treatment as the built-in loader, passing `quality`
+through as given (including undefined) rather than forcing 75.
+Scope note: the upstream PR also wires up `images.loaderFile` (previously
+ignored entirely) via a build-time resolve.alias entry in index.ts; that
+part is NOT bundled here because it would add a cross-module import this
+dist file cannot resolve outside vinext's own Vite plugin pipeline, and is
+better delivered as a small, separate dist/index.js patch once proven.
+`images.loaderFile` remains ignored until the upstream release; the `loader`
+prop fix above is independent of it and fully bundled.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3686.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/shims/image.js	2026-10-03 21:09:23
++++ b/dist/shims/image.js	2026-10-03 21:15:27
+@@ -85,6 +85,7 @@
+ */
+ const __dangerouslyAllowLocalIP = process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP === "true";
+ const __globallyUnoptimized = process.env.__VINEXT_IMAGE_UNOPTIMIZED === "true";
++const __trailingSlash = process.env.__VINEXT_TRAILING_SLASH === "true";
+ /**
+ * Validate that a remote URL is allowed by the configured remote patterns.
+ * Returns true if the URL is allowed, false otherwise.
+@@ -268,7 +269,8 @@
+ function imageOptimizationUrl(src, width, quality = 75) {
+ 	const source = extractLocalDeploymentId(src);
+ 	const deploymentQuery = source.src.startsWith("/") && source.deploymentId ? `&dpl=${source.deploymentId}` : "";
+-	return `/_next/image?url=${encodeURIComponent(source.src)}&w=${width}&q=${quality}${deploymentQuery}`;
++	const basePath = __trailingSlash ? "/_next/image/" : "/_next/image";
++	return `${basePath}?url=${encodeURIComponent(source.src)}&w=${width}&q=${quality}${deploymentQuery}`;
+ }
+ function preloadImageResource(input) {
+ 	if (!input.shouldPreload) return;
+@@ -289,22 +291,32 @@
+ function getImageWidths(width) {
+ 	return [...new Set([width, width * 2].map((targetWidth) => ALL_IMAGE_WIDTHS.find((configuredWidth) => configuredWidth >= targetWidth) ?? ALL_IMAGE_WIDTHS[ALL_IMAGE_WIDTHS.length - 1]))];
+ }
+-function generateImageAttributes(src, width, quality = 75, sizes) {
++function generateAttributesWithResolver(resolveUrl, src, width, quality, sizes) {
+ 	if (sizes) {
+ 		const viewportPercentages = Array.from(sizes.matchAll(/(^|\s)(1?\d?\d)vw/g), (match) => Number.parseInt(match[2], 10));
+ 		const minimumWidth = viewportPercentages.length > 0 ? RESPONSIVE_WIDTHS[0] * (Math.min(...viewportPercentages) * .01) : 0;
+ 		const candidates = ALL_IMAGE_WIDTHS.filter((candidateWidth) => candidateWidth >= minimumWidth);
+ 		return {
+-			src: imageOptimizationUrl(src, candidates[candidates.length - 1], quality),
+-			srcSet: candidates.map((candidateWidth) => `${imageOptimizationUrl(src, candidateWidth, quality)} ${candidateWidth}w`).join(", ")
++			src: resolveUrl(src, candidates[candidates.length - 1], quality),
++			srcSet: candidates.map((candidateWidth) => `${resolveUrl(src, candidateWidth, quality)} ${candidateWidth}w`).join(", ")
+ 		};
+ 	}
+ 	const widths = getImageWidths(width);
+ 	return {
+-		src: imageOptimizationUrl(src, widths[widths.length - 1], quality),
+-		srcSet: widths.map((candidateWidth, index) => `${imageOptimizationUrl(src, candidateWidth, quality)} ${index + 1}x`).join(", ")
++		src: resolveUrl(src, widths[widths.length - 1], quality),
++		srcSet: widths.map((candidateWidth, index) => `${resolveUrl(src, candidateWidth, quality)} ${index + 1}x`).join(", ")
+ 	};
++}
++function generateImageAttributes(src, width, quality = 75, sizes) {
++	return generateAttributesWithResolver(imageOptimizationUrl, src, width, quality, sizes);
+ }
++function generateLoaderAttributes(loader, src, width, quality, sizes) {
++	return generateAttributesWithResolver((loaderSrc, loaderWidth, loaderQuality) => loader({
++		src: loaderSrc,
++		width: loaderWidth,
++		quality: loaderQuality
++	}), src, width, quality, sizes);
++}
+ const Image = forwardRef(function Image({ src: srcProp, alt, width, height, fill, preload, priority, quality, placeholder, blurDataURL, loader, sizes, className, style, onLoad, onLoadingComplete, onError, unoptimized: _unoptimized, overrideSrc, loading, ...rest }, ref) {
+ 	const lastLoadedSrcRef = useRef(void 0);
+ 	const lastErrorSrcRef = useRef(void 0);
+@@ -423,15 +435,18 @@
+ 		});
+ 	}
+ 	if (loader) {
+-		const resolvedQuality = typeof quality === "string" ? Number(quality) : quality ?? 75;
+-		const resolvedSrc = loader({
++		const resolvedQuality = typeof quality === "string" ? Number(quality) : quality;
++		const loaderAttributes = imgWidth && !fill ? generateLoaderAttributes(loader, src, imgWidth, resolvedQuality, sizes) : void 0;
++		const resolvedSrc = loaderAttributes ? loaderAttributes.src : loader({
+ 			src,
+ 			width: imgWidth ?? 0,
+ 			quality: resolvedQuality
+ 		});
++		const resolvedSrcSet = loaderAttributes?.srcSet;
+ 		preloadImageResource({
+ 			shouldPreload,
+ 			src: resolvedSrc,
++			srcSet: resolvedSrcSet,
+ 			sizes,
+ 			fetchPriority: priorityFetchPriority
+ 		});
+@@ -443,6 +458,7 @@
+ 			height: fill ? void 0 : imgHeight,
+ 			loading: imageLoading,
+ 			decoding: "async",
++			srcSet: resolvedSrcSet,
+ 			sizes,
+ 			className,
+ 			onLoad: handleLoad,
+@@ -613,16 +629,27 @@
+ 			}
+ 		}
+ 	}
+-	const imgQuality = typeof _quality === "string" ? Number(_quality) : _quality ?? 75;
+-	const resolvedSrc = blockedInProd ? "" : loader ? loader({
+-		src,
+-		width: imgWidth ?? 0,
+-		quality: imgQuality
+-	}) : src;
+-	const skipOpt = isSvgUrl(resolvedSrc) && !__dangerouslyAllowSVG || blockedInProd || !!loader || isRemoteUrl(resolvedSrc);
+-	const optimizedAttributes = imgWidth && !fill && !skipOpt ? generateImageAttributes(resolvedSrc, imgWidth, imgQuality, sizes) : null;
+-	const optimizedSrc = skipOpt ? resolvedSrc : optimizedAttributes ? optimizedAttributes.src : imageOptimizationUrl(resolvedSrc, RESPONSIVE_WIDTHS[0], imgQuality);
+-	const srcSet = optimizedAttributes?.srcSet;
++	const imgQuality = typeof _quality === "string" ? Number(_quality) : _quality;
++	let optimizedSrc;
++	let srcSet;
++	if (blockedInProd) {
++		optimizedSrc = "";
++		srcSet = void 0;
++	} else if (loader) {
++		const loaderAttributes = imgWidth && !fill ? generateLoaderAttributes(loader, src, imgWidth, imgQuality, sizes) : void 0;
++		optimizedSrc = loaderAttributes ? loaderAttributes.src : loader({
++			src,
++			width: imgWidth ?? 0,
++			quality: imgQuality
++		});
++		srcSet = loaderAttributes?.srcSet;
++	} else {
++		const resolvedQuality = imgQuality ?? 75;
++		const skipOpt = isSvgUrl(src) && !__dangerouslyAllowSVG || isRemoteUrl(src);
++		const optimizedAttributes = imgWidth && !fill && !skipOpt ? generateImageAttributes(src, imgWidth, resolvedQuality, sizes) : null;
++		optimizedSrc = skipOpt ? src : optimizedAttributes ? optimizedAttributes.src : imageOptimizationUrl(src, RESPONSIVE_WIDTHS[0], resolvedQuality);
++		srcSet = optimizedAttributes?.srcSet;
++	}
+ 	const sanitizedBlurURL = imgBlurDataURL ? sanitizeBlurDataURL(imgBlurDataURL) : void 0;
+ 	const blurStyle = placeholder === "blur" && sanitizedBlurURL ? {
+ 		backgroundImage: `url(${sanitizedBlurURL})`,

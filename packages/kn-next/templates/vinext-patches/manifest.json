@@ -31,6 +31,11 @@
       "file": "vinext-3436-nitro-output-file-tracing.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3436",
       "summary": "Nitro builds: `outputFileTracingIncludes` / `outputFileTracingExcludes` from next.config are applied to the traced server dependencies."
+    },
+    {
+      "file": "vinext-3686-image-trailingslash-loader-srcset.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3686",
+      "summary": "next/image: the optimizer path honours `trailingSlash`, and a custom `loader` prop gets the built-in loader's per-breakpoint `srcSet` treatment (quality passed through as given, not forced to 75). The upstream PR also wires up `images.loaderFile`; that part is not bundled (see the patch header) and `loaderFile` remains ignored until the upstream release."
     }
   ],
   "pristine": {
@@ -38,6 +43,7 @@
     "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
     "dist/plugins/require-condition-resolution.js": "f8776d98dfc63c228810a8f6d3691fb0f8f7c7b42f700e6ed40c3501607a8321",
     "dist/plugins/worker-image-imports.js": "529c659ee78c07dc2e5b97e15f597434ac4024e65c238e90d633be4a405ff281",
-    "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a"
+    "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a",
+    "dist/shims/image.js": "f498afc199ba102be93b93ae2098f6ed79bcae261485f6a807438efbe134f0b3"
   }
 }

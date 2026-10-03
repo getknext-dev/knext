@@ -321,6 +321,18 @@ async function importPatched<T>(rel: string): Promise<T> {
     return (await import(pathToFileURL(join(patched, rel)).href)) as T;
 }
 
+/**
+ * Same as `importPatched`, but with a cache-busting query string so the
+ * module is re-evaluated (re-reads `process.env`) instead of returning a
+ * namespace object cached from an earlier test's import of the same path.
+ * Needed for dist/shims/image.js, which reads `__VINEXT_TRAILING_SLASH` at
+ * module scope.
+ */
+async function importPatchedFresh<T>(rel: string): Promise<T> {
+    const href = pathToFileURL(join(patched, rel)).href;
+    return (await import(`${href}?t=${Date.now()}-${Math.random()}`)) as T;
+}
+
 describe("the bundled patches against the published tarball", () => {
     it("every patch applies cleanly to the installed vinext, then is idempotent", () => {
         const first = applyVinextPatches(patched);
@@ -554,6 +566,65 @@ describe("the bundled patches against the published tarball", () => {
         expect(evalExpr(true, false, true, {})).toEqual({});
         // Not a Nitro build at all: untouched.
         expect(evalExpr(false, false, ["sqlite3"], {})).toEqual({});
+    });
+
+    it("vinext#3686: the image optimizer path honours trailingSlash", async () => {
+        applyVinextPatches(patched);
+        // bun's module cache keys on the resolved path, not the full URL, so
+        // a query-string cache-buster does not force re-evaluation here —
+        // set the env var before this suite's ONLY import of this path.
+        process.env.__VINEXT_TRAILING_SLASH = "true";
+        try {
+            const mod = await importPatchedFresh<{
+                imageOptimizationUrl: (
+                    src: string,
+                    width: number,
+                    quality?: number,
+                ) => string;
+            }>("dist/shims/image.js");
+            expect(mod.imageOptimizationUrl("/test.jpg", 828, 75)).toBe(
+                "/_next/image/?url=%2Ftest.jpg&w=828&q=75",
+            );
+        } finally {
+            delete process.env.__VINEXT_TRAILING_SLASH;
+        }
+    });
+
+    it("vinext#3686: a custom loader prop gets the built-in loader's per-breakpoint srcSet, with quality passed through unforced", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            getImageProps: (props: Record<string, unknown>) => {
+                props: { src: string; srcSet?: string };
+            };
+        }>("dist/shims/image.js");
+        // Ported from Next.js: test/e2e/next-image-new/loader-config/loader-config.test.ts
+        // (the "loader prop" / img2 cases — the "loaderFile" / img1 cases
+        // need the upstream images.loaderFile wiring, not bundled here; see
+        // the patch header).
+        const loader = ({
+            src,
+            width,
+            quality,
+        }: {
+            src: string;
+            width: number;
+            quality?: number;
+        }) => `${src}?wid=${width}&qual=${quality ?? 35}`;
+        const { props } = mod.getImageProps({
+            alt: "img2",
+            src: "/logo.png",
+            width: 200,
+            height: 200,
+            loader,
+        });
+        expect(props.src).toBe("/logo.png?wid=640&qual=35");
+        expect(props.srcSet).toBe(
+            "/logo.png?wid=256&qual=35 1x, /logo.png?wid=640&qual=35 2x",
+        );
+        // Before the fix: a single call at the raw width with quality
+        // forced to 75 — `/logo.png?wid=200&qual=75`, no srcSet. Guard
+        // against that regression explicitly.
+        expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
     });
 });
 
