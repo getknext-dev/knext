@@ -65,6 +65,11 @@ name: React Compiler proof (published bytes, every v1.0 build target)
 
 on:
   workflow_dispatch: {}
+  # TEMPORARY, re-added — the negative control added by #1829 review needs
+  # its own proof run before merge. Removed again once that run is green.
+  pull_request:
+    paths:
+      - '.github/workflows/react-compiler-proof.yml'
 
 permissions:
   contents: read
@@ -688,6 +693,29 @@ jobs:
           T1=$(date +%s)
           echo "BUILD_TIME_WITHOUT=$((T1 - T0))" >> "$GITHUB_ENV"
           echo "BUNDLE_SIZE_WITHOUT=$(du -sk .next/static | cut -f1)" >> "$GITHUB_ENV"
+
+      # NEGATIVE CONTROL (#1829 review): the per-cell jobs only ever assert
+      # evidence is PRESENT when the compiler is on — which cannot by
+      # itself rule out a guard that would also false-positive on a build
+      # where the compiler never ran. This build (just above, compiler
+      # OFF) gets the exact same check, asserting the OPPOSITE: it must
+      # find NOTHING. Both directions, same component, same CI run.
+      - name: Assert NO compiler evidence (negative control — compiler is OFF here)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'memo_cache_sentinel' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
+          if [ -n "${MATCH}" ]; then
+            echo "::error::found memo_cache_sentinel AND localeCompare together in ${MATCH} with the compiler OFF — the guard cannot distinguish compiled from uncompiled output" >&2
+            exit 1
+          fi
+          echo "negative control passed: no compiler evidence with the compiler off"
           rm -rf .next
 
       - name: Build WITH the compiler
@@ -708,6 +736,25 @@ jobs:
           T1=$(date +%s)
           echo "BUILD_TIME_WITH=$((T1 - T0))" >> "$GITHUB_ENV"
           echo "BUNDLE_SIZE_WITH=$(du -sk .next/static | cut -f1)" >> "$GITHUB_ENV"
+
+      # POSITIVE CONTROL — the complement of the check above, same build
+      # output, compiler ON.
+      - name: Assert compiler evidence IS present (positive control — compiler is ON here)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          MATCH=""
+          while IFS= read -r f; do
+            if grep -q 'localeCompare' "${f}"; then
+              MATCH="${f}"
+              break
+            fi
+          done < <(grep -rl 'memo_cache_sentinel' .next/standalone/.next/static .next/static 2>/dev/null | sort -u)
+          if [ -z "${MATCH}" ]; then
+            echo "::error::no client chunk has memo_cache_sentinel AND localeCompare together with the compiler ON — compiler did not transform the test component" >&2
+            exit 1
+          fi
+          echo "positive control passed: compiler evidence found in ${MATCH}"
 
       - name: Report
         run: |
