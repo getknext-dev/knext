@@ -272,12 +272,11 @@ Nothing is compiled into an executable on this target. Instead:
   A `Dockerfile.vinext-node` staged before this fix (no `ARG KNEXT_HEALTH_CHECK_PATH`) needs
   re-staging if your app uses a custom `healthCheckPath`: delete the file and re-run `knext
   build`, which never overwrites an existing one.
-- **Bun is not needed to build or run it — with one exception.** If your app depends on `sharp`
-  (every app `knext create --builder vinext` scaffolds does, for image optimization), `knext
-  build` stages sharp's native addon for the image's target platform from your `bun.lock` — it
-  does not read `package-lock.json` for this. A plain `npm install` project therefore needs a
-  one-time `bun install --save-text-lockfile` to produce that lockfile before the first build on
-  this target; nothing after that needs Bun again unless you change the sharp version.
+- **Bun is not needed to build or run it, at all.** If your app depends on `sharp` (every app
+  `knext create --builder vinext` scaffolds does, for image optimization), `knext build` stages
+  sharp's native addon for the image's target platform from your lockfile — either `bun.lock` or
+  npm's `package-lock.json`. A plain `npm install` project (the default `knext create` tells you
+  to run) needs nothing extra: the lockfile it already has is enough.
 - **`knext build` checks the preset.** If the build produced the Bun preset (see below), it
   stops before uploading anything and tells you what to change. Running a Bun-preset server under
   Node would crash on startup.

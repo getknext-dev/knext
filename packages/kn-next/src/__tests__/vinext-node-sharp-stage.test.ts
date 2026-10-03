@@ -59,6 +59,30 @@ function lockText(entries: Record<string, string | undefined>): string {
     return `{\n  "lockfileVersion": 1,\n  "packages": {\n${lines.join("\n")}\n  }\n}\n`;
 }
 
+/**
+ * #1864 — npm's real `package-lock.json` `packages` shape (lockfileVersion
+ * 2/3): keyed by install PATH, not bun's `name@version` descriptor. npm pins
+ * EVERY `optionalDependencies` platform it resolved, including ones this
+ * (darwin) host never downloaded — the exact pin `knext create`'s own
+ * documented `npm install` leaves for a `--runtime node` scaffold.
+ */
+function npmLockText(entries: Record<string, string | undefined>): string {
+    const packages: Record<string, unknown> = { "": { name: "app" } };
+    for (const [name, version] of Object.entries(entries)) {
+        if (version === undefined) continue;
+        packages[`node_modules/${name}`] = {
+            version,
+            resolved: `https://registry.npmjs.org/${name}/-/x-${version}.tgz`,
+            integrity: `sha512-pin${name.length}${version.length}==`,
+        };
+    }
+    return JSON.stringify(
+        { name: "app", lockfileVersion: 3, packages },
+        null,
+        2,
+    );
+}
+
 const FULL_LOCK: Record<string, string> = {
     "@img/sharp-darwin-arm64": SHARP_V,
     "@img/sharp-libvips-darwin-arm64": VIPS_V,
@@ -67,14 +91,20 @@ const FULL_LOCK: Record<string, string> = {
 };
 
 /**
- * Simulates what a real `vite build` (node preset) + a darwin host's `bun
- * install` leaves behind: a host-platform `@img` install, a lockfile pinning
- * every platform, a FULL local `node_modules/sharp` (the host install, always
+ * Simulates what a real `vite build` (node preset) + a darwin host's install
+ * leaves behind: a host-platform `@img` install, a lockfile pinning every
+ * platform, a FULL local `node_modules/sharp` (the host install, always
  * complete), and — mirroring the measured nitro trace — an INCOMPLETE,
  * host-platform copy already sitting in `.output/server/node_modules`.
+ *
+ * `lockKind` picks which installer's lockfile shape to write — `"bun"` (the
+ * default, matching #1298's original fixture) or `"npm"` (#1864: the shape
+ * `knext create`'s own documented `npm install` leaves, which has no `bun.lock`
+ * for the fetch fallback to read at all before this fix).
  */
 function darwinNodeBuildTree(
     lock: Record<string, string | undefined> = FULL_LOCK,
+    lockKind: "bun" | "npm" = "bun",
 ): string {
     const cwd = tempDir("knext-1298-node-stage-");
 
@@ -98,7 +128,11 @@ function darwinNodeBuildTree(
     );
     writeFileSync(join(imgHost, "lib", "addon.node"), "darwin BYTES");
 
-    writeFileSync(join(cwd, "bun.lock"), lockText(lock));
+    if (lockKind === "npm") {
+        writeFileSync(join(cwd, "package-lock.json"), npmLockText(lock));
+    } else {
+        writeFileSync(join(cwd, "bun.lock"), lockText(lock));
+    }
     writeFileSync(
         join(cwd, "package.json"),
         JSON.stringify({ dependencies: { sharp: `^${SHARP_V}` } }),
@@ -240,6 +274,45 @@ describe("#1298 stageSharpForVinextNode", () => {
         ]);
     });
 
+    // #1864 — `knext create`'s own documented install step is `npm install`,
+    // not bun's, so a `--runtime node` app following it has ONLY a
+    // package-lock.json. Before the fix this is the exact repro: no bun.lock
+    // means `findLockfile` returns undefined, so the fetch fallback below
+    // throws instead of staging the real linuxmusl-x64 addon — leaving
+    // nitro's own host-platform trace in the image, which crashes
+    // `require('sharp')` at container boot with sharp's own "Could not load
+    // the sharp module using the linuxmusl-x64 runtime" (#1864's report).
+    it("stages via npm's package-lock.json when there is no bun.lock (#1864)", () => {
+        const cwd = darwinNodeBuildTree(FULL_LOCK, "npm");
+        const { calls, fetch } = recordingFetch();
+
+        const result = stageSharpForVinextNode(cwd, {
+            arch: "linux-x64",
+            fetchPackage: fetch,
+        });
+
+        expect(result.staged).toBe(true);
+        const imgDir = join(cwd, ".output", "server", "node_modules", "@img");
+        const staged = readdirSync(imgDir).sort();
+        expect(staged).toContain("sharp-linuxmusl-x64");
+        expect(staged).toContain("sharp-libvips-linuxmusl-x64");
+        expect(staged).not.toContain("sharp-darwin-arm64");
+        expect(calls.map((c) => `${c.name}@${c.version}`).sort()).toEqual([
+            "@img/sharp-libvips-linuxmusl-x64@1.3.3",
+            "@img/sharp-linuxmusl-x64@0.35.4",
+        ]);
+    });
+
+    it("fails loud when package-lock.json has no entry for the target platform (#1864)", () => {
+        const cwd = darwinNodeBuildTree(
+            { "@img/sharp-darwin-arm64": SHARP_V },
+            "npm",
+        );
+        expect(() =>
+            stageSharpForVinextNode(cwd, { arch: "linux-x64" }),
+        ).toThrow(/neither this host's install nor/);
+    });
+
     it("never touches sibling deps nitro traced alongside sharp (e.g. semver)", () => {
         const cwd = darwinNodeBuildTree();
         const { fetch } = recordingFetch();
@@ -342,7 +415,7 @@ describe("#1298 stageSharpForVinextNode", () => {
         ).toThrow(UsageError);
         expect(() =>
             stageSharpForVinextNode(cwd, { arch: "linux-x64" }),
-        ).toThrow(/no bun\.lock/);
+        ).toThrow(/no lockfile \(bun\.lock or package-lock\.json\)/);
     });
 
     it("fails loud when the lockfile has no entry for the target platform", () => {
