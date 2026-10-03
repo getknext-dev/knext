@@ -154,6 +154,15 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "truncated hunk in patch",
             "unexpected line in hunk",
         ],
+        // `knext create`'s answers are applied as anchored edits of knext's
+        // OWN bundled templates; a missing anchor (or a core manifest with no
+        // ioredis range) is a knext packaging defect, caught by
+        // create-options.test.ts before release — never something a user typed.
+        "create-options.ts": [
+            "knext create: expected a",
+            "copies of the anchor for",
+            "declares no ioredis dependency",
+        ],
         // Injectable exec boundary. Empty argv is a programming error inside
         // knext, never something a user types.
         "exec.ts": [
