@@ -52,7 +52,21 @@ const USAGE_OR_FAILURE: VerbExitCode = {
 export const CLI_CONTRACT: readonly VerbContract[] = [
     {
         verb: "create",
-        flags: ["--name", "--builder", "--force", "--dry-run", "-h", "--help"],
+        flags: [
+            "--name",
+            "--runtime",
+            "--builder",
+            "--cache",
+            "--storage",
+            "--react-compiler",
+            "--no-react-compiler",
+            "-y",
+            "--yes",
+            "--force",
+            "--dry-run",
+            "-h",
+            "--help",
+        ],
         exitCodes: [OK, USAGE_OR_FAILURE],
     },
     {

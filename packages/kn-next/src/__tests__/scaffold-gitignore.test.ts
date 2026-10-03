@@ -259,7 +259,7 @@ describe("#1398 (rev-1393 round 2): createMain's --force output does not falsely
             },
         );
         try {
-            const code = await createMain(argv);
+            const code = await createMain(argv, { stdinIsTTY: false });
             return { code, out, err };
         } finally {
             outSpy.mockRestore();
