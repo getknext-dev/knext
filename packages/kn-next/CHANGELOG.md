@@ -1,5 +1,85 @@
 # @getknext/core
 
+## 1.3.0-rc.2
+
+### Minor Changes
+
+- 3823881: `knext create` now asks for the runtime (`bun` or `node`), builder (`turbopack`, `webpack` or
+  `vinext`), ISR/data cache (`none` or `redis`), object storage provider and React Compiler when it
+  runs on a terminal with no flags. Each question has a flag (`--runtime`, `--builder`, `--cache`,
+  `--storage`, `--react-compiler`), and `--yes` skips them all. With any flag, `CI` set, or no
+  terminal, it asks nothing and uses the defaults, which scaffold exactly the same app as before.
+  
+  Choosing `node` adds `ioredis` to the app's dependencies, at the same range `@getknext/core` uses.
+  A Bun app gets nothing extra, because Bun has a Redis client built in.
+  `--builder` now accepts `turbopack` and `webpack`; `default` still works and means `turbopack`.
+  
+  New apps now have React Compiler turned on by default, on every builder. On turbopack/webpack,
+  `next.config.ts` gets `reactCompiler: true` and `babel-plugin-react-compiler`. On vinext,
+  `vite.config.ts` gets `react: { compiler: true }` plus the four packages it needs. Pass
+  `--no-react-compiler` (or answer `n`) to leave it off, which scaffolds exactly the same app as
+  before.
+- c0a664c: Cold start: apps with object storage, and vinext apps, no longer need a writable volume.
+  
+  Each writable `emptyDir` the operator mounts costs pod-sandbox setup time on every scale-from-zero wake. Two app shapes still got one by default; they no longer need it:
+  
+  - **Standalone apps with `storage` configured.** The knext adapter now sets Next's official `images.customCacheHandler` option when the app uses the knext cache handler, so optimized `next/image` variants are stored through the cache handler instead of `.next/cache/images` on local disk: on the Bun runtime with Redis configured, in Redis (shared across pods and kept across scale-to-zero). Otherwise they go in a per-pod in-memory cache capped at 32 MiB (`KNEXT_IMAGE_CACHE_MEMORY_BYTES`). That includes the Node runtime for now: its standalone image cannot reach Redis yet, so it falls back to the memory cache and re-optimizes variants after each scale-to-zero. Set `KNEXT_IMAGE_CACHE_HANDLER=0` at build time to keep Next's disk cache. The object-storage image sync now stands down when images are stored through the cache handler, or when its directory is not writable, instead of erroring on every wake.
+  - **vinext apps built as a disk-mode binary** (the default). sharp loads from the image's read-only `native/` directory, so nothing is written at runtime.
+  
+  `knext deploy` now sets a new optional `NextApp` field, `spec.security.writeFree: true`, for an image it built in the same run when that image writes nothing to local disk. The operator then renders no writable volume at all, with `readOnlyRootFilesystem` still on. The CLI sets it only when it changes the result, so a standalone app without storage gets the same `NextApp` as before. It is never set for `--image` / `--skip-build` deploys or for self-contained vinext binaries, which still unpack sharp into `/tmp`. `spec.security.writableCache: true` still mounts both writable paths.
+  
+  **Upgrade order:** upgrade the operator (and its CRD) before the CLI. A CLI that sets `spec.security.writeFree` against an older CRD fails the deploy preflight with `unknown field "spec.security.writeFree"`.
+
+### Patch Changes
+
+- 942ad38: Node runtime: the ISR and data cache now uses Redis when Redis is configured.
+  
+  On the standalone node runtime, the image did not include the Redis client. The cache handler fell back to an in-memory store without saying so: cache entries were not shared between pods and were lost on every scale-to-zero. The bun runtime was not affected.
+  
+  The cache handler now has one entry per runtime, and `knext build`, `knext deploy` and `knext preview` pick the entry that matches your configured runtime. On node it uses `ioredis`, which the build now copies into the image. On bun it uses Bun's built-in Redis client. Also, if Redis is configured but its client cannot be loaded, the handler now logs one error at startup, starting with `Redis client unavailable`, instead of quietly running from memory.
+- 5b1717d: Remove `scaling.containerConcurrency: 100` from the scaffold templates used by `knext create`
+  (both the standalone/turbopack and vinext builder templates). The operator's default of `20`
+  now applies, which is the concurrency the 8 MiB request-body cap is sized for — at `100`,
+  concurrent large uploads could buffer enough bytes to OOM-kill a 1Gi pod.
+  
+  Apps created before this change contain the `containerConcurrency: 100` line in their
+  `knext.config.ts`; delete it, or set it to `20` or lower.
+- 5dece2e: Fixed a regression in the bundled vinext fix for Nitro RSC dependency bundling (the
+  port of upstream `cloudflare/vinext#3424`): under the vinext/bun compiled-executable
+  build target, two deploy-test fixtures measured with 1.3.0-rc.1 broke because the
+  blanket bundling also swept Next's default server-external packages (including
+  sqlite3's `bindings` helper and typescript) into the compiled binary. Those packages
+  now stay external under Nitro too, matching the non-Nitro RSC branch's behaviour, so
+  the original fix (dependencies of the RSC environment are bundled so a package's
+  `react-server` export condition is honoured) no longer bundles packages that are not
+  safe to inline.
+  
+  Also adds an optional `testFiles` `workflow_dispatch` input to the
+  `compat-vinext.yml` CI lane for a targeted re-run of specific test files, instead of
+  waiting on a full 16-shard dispatch. Default is empty, which is unchanged behaviour.
+- 678d1da: Bundles 4 small vinext fixes ahead of their upstream release, each ported as its own
+  upstream PR against `cloudflare/vinext`:
+  
+  - `experimental.lightningCssFeatures.include`'s `custom-media-queries` entry now also
+    turns on lightningcss's `drafts.customMedia` parser flag, so a stylesheet using
+    `@custom-media` builds instead of failing to parse (`cloudflare/vinext#3681`).
+  - App Router: a GET/HEAD request for an unmatched path whose `Sec-Fetch-Dest` is a
+    non-HTML subresource destination (image, font, script, manifest, ...) now gets the
+    same plain-text 404 an invalid `_next/static/*` request already gets, instead of
+    compiling and rendering the full custom not-found page
+    (`cloudflare/vinext#3682`).
+  - A route whose resolved `runtime` is `edge`/`experimental-edge` now prints the "Edge
+    Runtime is deprecated" warning once per build/dev session, matching Next.js
+    (`cloudflare/vinext#3683`).
+  - A bare `//` (literal or percent-encoded, with nothing after it) in a request path is
+    no longer treated as an open-redirect shape and 404'd; it now serves the index route,
+    matching Next.js (`cloudflare/vinext#3684`).
+  
+  All 4 patches are runtime-agnostic (they also help a future vinext x node lane, not
+  just vinext x bun) and ship with their own behaviour test against the patched dist.
+- @getknext/db@1.3.0-rc.2
+  - @getknext/lib@1.3.0-rc.2
+
 ## 1.3.0-rc.1
 
 ### Minor Changes
