@@ -31,6 +31,9 @@ import {
 import type { KnativeNextConfig } from "../config";
 import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
+// Same reason as deploy-no-storage.test.ts: these mocks stand in for
+// functions with many different return types, so the return must be `any`.
+// biome-ignore lint/suspicious/noExplicitAny: the return must be `any`; see above
 type AnyFn = (...args: unknown[]) => any;
 
 const runQuiet = mock<AnyFn>();
