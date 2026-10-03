@@ -71,6 +71,18 @@ on:
         required: false
         type: boolean
         default: false
+      # R1 (vinext-bun-failure-triage-2026-10-03) — a full 16-shard dispatch
+      # takes ~1h per run, too slow to verify a single-file fix. DISPATCH-ONLY
+      # and DEFAULT EMPTY: github.event.inputs is empty on the weekly
+      # schedule, so the full-suite -g <shard> path is never altered by
+      # accident. When set, every shard runs this same explicit file list as
+      # run-tests.js positional args INSTEAD OF its -g shard group, so the
+      # targeted files are exercised without waiting on an unrelated 1/16.
+      testFiles:
+        description: 'Optional comma-separated test name substrings (e.g. "turbopack-reports, twoslash") passed to run-tests.js as positional patterns in place of -g <shard>. Empty (default) runs the full suite unchanged.'
+        required: false
+        type: string
+        default: ''
   schedule:
     # 07:17 UTC Sunday — weekly, and deliberately NOT nightly: the axis is new,
     # its number will move on knext/vinext changes rather than nightly noise, and
@@ -105,6 +117,10 @@ env:
   # with selfContained=true. '1' is the exact value
   # scripts/e2e-deploy-vinext.sh gates on.
   KNEXT_SELF_CONTAINED: ${{ github.event.inputs.selfContained == 'true' && '1' || '' }}
+  # R1 — dispatch-only targeted re-run. '' (off) on the weekly schedule and on
+  # a dispatch that leaves it unset; the run step below treats any non-empty
+  # value as "run exactly these files, on every shard, instead of -g".
+  TEST_FILES: ${{ github.event.inputs.testFiles || '' }}
 
 jobs:
   build-next:
@@ -767,7 +783,24 @@ jobs:
         # continue-on-error, no skip, no manifest narrowing.
         timeout-minutes: 105
         run: |
-          node run-tests.js --type e2e --retries 0 -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
+          set -euo pipefail
+          # R1 — dispatch-only targeted re-run (TEST_FILES, see the workflow_dispatch
+          # input above). Non-empty: every shard runs this same explicit file list as
+          # run-tests.js POSITIONAL patterns INSTEAD OF -g <shard> — a targeted re-run
+          # needs each requested file exercised, not whichever 1/16 it happens to land
+          # in. Empty (the schedule, and the default on dispatch): unchanged -g path.
+          if [ -n "${TEST_FILES}" ]; then
+            IFS=',' read -ra RAW_PATTERNS <<< "${TEST_FILES}"
+            PATTERNS=()
+            for raw in "${RAW_PATTERNS[@]}"; do
+              trimmed="$(echo "${raw}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [ -n "${trimmed}" ] && PATTERNS+=("${trimmed}")
+            done
+            echo "testFiles dispatch: running ${#PATTERNS[@]} pattern(s) on shard ${{ matrix.shard }}: ${PATTERNS[*]}"
+            node run-tests.js --type e2e --retries 0 -c 2 "${PATTERNS[@]}" 2>&1 | tee runner.log || true
+          else
+            node run-tests.js --type e2e --retries 0 -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
+          fi
 
       - name: Compute excluded count from manifest
         if: always()
