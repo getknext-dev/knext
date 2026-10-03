@@ -413,6 +413,10 @@ jobs:
         working-directory: app
         run: |
           set -euo pipefail
+          echo "--- debug: files with react/compiler-runtime ---"
+          grep -rl 'react/compiler-runtime' .output/public dist/client .nitro/dist build 2>/dev/null || echo "(none)"
+          echo "--- debug: files with localeCompare ---"
+          grep -rl 'localeCompare' .output/public dist/client .nitro/dist build 2>/dev/null || echo "(none)"
           MATCH=""
           while IFS= read -r f; do
             if grep -q 'localeCompare' "${f}"; then
