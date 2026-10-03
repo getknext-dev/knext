@@ -592,6 +592,26 @@ registry entries, with `rcTag` pinned at `v1.0.0-rc.5`:
 (`--execute`) and `npm deprecate` are registry writes and remain **[FOUNDER]**-only, as documented
 above.
 
+## Patch release runbook (1.0.1)
+
+`1.0.0` ships from the `1.0.0-rc.5` bytes with two known issues documented in
+`docs/release/v1.0.0.md` rather than held for a re-credentialed rc cycle (see [Rollback runbook](#rollback-runbook-100-ships-broken)'s
+note that a hotfix does not borrow the previous rc's credential — the same reasoning applies to a
+planned patch, not just an incident). `1.0.1` closes both, fixed on `integration/v1.3` ahead of GA.
+After GA:
+
+1. Cut a `release/1.0` line from the `1.0.0` tag if one does not already exist.
+2. Cherry-pick the #1843 fix (Node-runtime Redis client missing from the standalone output's
+   `node_modules`) from `integration/v1.3` onto `release/1.0`.
+3. Cherry-pick the #1834 fix (the scaffold template issue behind the `containerConcurrency: 100`
+   known issue) from `integration/v1.3` onto `release/1.0`.
+4. Run the normal release gate (`pack`, `audit`, the GA-tarball-diff check does not apply here —
+   `1.0.1` has no matching rc tag, which is expected per the diff gate's own skip condition) against
+   `release/1.0`, then publish `1.0.1` through the usual Changesets flow.
+5. Update `docs/release/v1.0.0.md`'s "Known issues" entries to say they are fixed in `1.0.1`
+   (already worded that way as of this writing — just confirm before publishing), and drop the
+   matching callouts from the affected `apps/docs` pages once `1.0.1` is the published `latest`.
+
 ## Upgrade order
 
 **Upgrade the operator (and therefore the CRD) BEFORE upgrading `@getknext/core`: operator/CRD

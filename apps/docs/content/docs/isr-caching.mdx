@@ -68,6 +68,15 @@ Redis, this block is the first thing to check.
 - When `REDIS_URL` is unset (local dev), the handler falls back to in-memory caching, so `vinext
   dev` and local builds work without a Redis.
 
+<Callout type="warn">
+**On the standalone build's Node runtime, the Redis-backed handler can silently fall back to a
+per-pod in-memory cache.** This affects `runtime: 'node'` only — the Bun runtime (the default) and
+the vinext compiled executable are not affected. The app still serves 200s, but pages render
+independently per pod, nothing survives scale-to-zero, and the provisioned Redis stays empty — the
+same symptom as deleting the `cacheHandler` block above. If you need a shared cache today, use the
+Bun runtime. This is fixed in the next patch release; check the release notes for your version.
+</Callout>
+
 The connection details come from the environment — `REDIS_URL` and `REDIS_KEY_PREFIX` are injected
 into your pods from the `cache` block of your deploy config (see
 [the operator reference](/docs/operator)); nothing about Redis is hardcoded in your app.
