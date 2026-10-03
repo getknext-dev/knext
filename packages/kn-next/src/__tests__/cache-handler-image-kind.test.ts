@@ -131,6 +131,26 @@ describe("IMAGE entries on the in-memory fallback", () => {
         expect(await handler.get("old")).toBeNull();
     });
 
+    it("evicts least-recently-USED, not least-recently-written: a read keeps a variant alive", async () => {
+        process.env.KNEXT_IMAGE_CACHE_MEMORY_BYTES = "100";
+        const handler = await memoryHandler();
+        await handler.set("a", imageValue(Buffer.alloc(40, 1)), IMAGE_CTX);
+        await handler.set("b", imageValue(Buffer.alloc(40, 2)), IMAGE_CTX);
+        // Read the OLDER entry, so it becomes the most recently used.
+        expect(await handler.get("a")).not.toBeNull();
+        // 40 + 40 + 40 > 100: one entry must go, and it must be the unread one.
+        await handler.set("c", imageValue(Buffer.alloc(40, 3)), IMAGE_CTX);
+        expect(
+            await handler.get("a"),
+            "the recently read entry survives",
+        ).not.toBeNull();
+        expect(
+            await handler.get("b"),
+            "the older, unread entry is evicted",
+        ).toBeNull();
+        expect(await handler.get("c")).not.toBeNull();
+    });
+
     it("never stores a single variant larger than the whole budget", async () => {
         process.env.KNEXT_IMAGE_CACHE_MEMORY_BYTES = "100";
         const handler = await memoryHandler();
