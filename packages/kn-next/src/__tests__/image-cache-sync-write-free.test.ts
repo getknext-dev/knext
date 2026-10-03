@@ -124,4 +124,27 @@ describe("startImageCacheSync — write-free runtime", () => {
             expect(lines.join("\n")).toContain("not writable");
         },
     );
+
+    it.skipIf(process.getuid?.() === 0)(
+        "stands down when the cache dir already exists but is read-only (a read-only image layer)",
+        async () => {
+            const app = join(root, "ro-existing");
+            const dir = join(app, ".next", "cache", "images");
+            mkdirSync(dir, { recursive: true });
+            chmodSync(dir, 0o555);
+            try {
+                const { store, calls } = countingStore();
+                const { log, lines } = capturingLog();
+                const handle = await startImageCacheSync(syncEnv(app), {
+                    store,
+                    log,
+                });
+                handle.stop();
+                expect(calls).toEqual([]);
+                expect(lines.join("\n")).toContain("not writable");
+            } finally {
+                chmodSync(dir, 0o755);
+            }
+        },
+    );
 });
