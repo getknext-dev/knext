@@ -18,8 +18,8 @@ v1.0 GA is not cut yet: `main` is still on the v1.0.0-rc.5 bytes, published to t
 `rc` (`.changeset/pre.json` on `main` carries `"tag": "rc"`). In parallel, a batch of vinext/Bun
 work landed — scaffold pin bump (#1817), a glibc smoke-only sharp fix (#1819), bundling six
 upstream vinext fixes as knext-applied patches (#1821), an opt-in knext-patched Bun toolchain
-(#1823), `compile.include` for embedding extra modules (#1826), and a `knext.dev` →
-`knext-platform.dev` rename (#1824, #1825) — plus two release PRs (#1820, #1828) that publish this
+(#1823), `compile.include` for embedding extra modules (#1826), and the public-site domain rename
+(#1824, #1825) — plus two release PRs (#1820, #1828) that publish this
 work as the `1.3.0-rc.1` line to the npm dist-tag `next`.
 
 That work needed a home. Landing it straight on `main` would mix two concerns that must stay
@@ -63,7 +63,7 @@ that same PR:
 - delete the `next`-tag pin block in `tests/ensure-published-group.test.ts`;
 - drop any expired override markers (the 2026-10-10 one and any others accumulated meanwhile);
 - **keep the required CI check names unchanged** — a rename blocks merges, as #1824 showed when
-  renaming `knext.dev` → `knext-platform.dev` touched check-name-adjacent surface.
+  the public-site domain rename touched check-name-adjacent surface.
 
 ## Options considered
 
