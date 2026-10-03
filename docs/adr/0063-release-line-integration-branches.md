@@ -2,8 +2,9 @@
 
 - **Status:** **Accepted (2026-10-03).** Founder-delegated decision. The founder delegated the
   choice between options (a)/(b) below to `jev`; it scored (a) "integration branch" 0.99 vs.
-  (b) "land on main, cut 1.0.0 from a `release/1.0` branch" 0.58. Trigger-class (ADR — a
-  release-line branching decision, founder-delegated, 2026-10-03), reviewed per
+  (b) "land on main, cut 1.0.0 from a `release/1.0` branch" 0.01. Recording that decision as this
+  ADR is a separate, later decision — also run through `jev` — which scored 0.58. Trigger-class
+  (ADR — a release-line branching decision, founder-delegated, 2026-10-03), reviewed per
   `.claude/rules/workflow.md`'s sprint-close process; not a merge gate.
 - **Relates to:** `CLAUDE.md` §9 (as-built truths on publishing/versioning), ADR-0036 (two build
   targets — the 1.3 line carries vinext/Bun patch work that is separate from the v1.0 GA line),
@@ -70,11 +71,13 @@ that same PR:
 | Option | Description | Trade-offs | jev score |
 |---|---|---|---|
 | **(a) Integration branch** *(chosen)* | New code (1.3 line) lives on `integration/v1.3`, publishes to `next`; `main` stays frozen at rc.5 bytes until GA, then one merge commit folds the line in. | + Clean separation: GA diff on `main` stays version-only and auditable. + The `next`-tag pin and the no-`paths` override marker are quarantined to a branch that is explicitly not GA-bound, instead of being a live hazard on `main`. + No rebase needed post-GA (merge commit preserves the 1.3 line's own history). − Two branches to keep in sync conceptually; a human must remember not to fast-forward `main` onto it. − The post-GA merge is itself a checklist item that must not be skipped or done carelessly (CI check-name rename is a proven failure mode, #1824). | **0.99** |
-| **(b) Land on main, cut 1.0.0 from a `release/1.0` branch** | Let the 1.3 work land on `main` as it's ready; branch `release/1.0` off `main` at the rc.5 commit to cut GA from, keeping `main` itself free to move forward. | + Only one branch (`main`) carries "current" work; no merge-back step needed later. − Inverts the usual release-branch convention (normally the *stable* line is isolated, not the experimental one) — reviewers and tooling expect `main` to be closest to shippable. − The published-bytes freeze guard is written against `main`'s diff; it would need rescoping to `release/1.0` instead, and the override-marker/no-`paths` hazard moves to being a live risk on `main` rather than quarantined. − `release/1.0` becomes a second thing to remember to delete/retire after GA, with no corresponding checklist discipline already in place. | **0.58** |
+| **(b) Land on main, cut 1.0.0 from a `release/1.0` branch** | Let the 1.3 work land on `main` as it's ready; branch `release/1.0` off `main` at the rc.5 commit to cut GA from, keeping `main` itself free to move forward. | + Only one branch (`main`) carries "current" work; no merge-back step needed later. − Inverts the usual release-branch convention (normally the *stable* line is isolated, not the experimental one) — reviewers and tooling expect `main` to be closest to shippable. − The published-bytes freeze guard is written against `main`'s diff; it would need rescoping to `release/1.0` instead, and the override-marker/no-`paths` hazard moves to being a live risk on `main` rather than quarantined. − `release/1.0` becomes a second thing to remember to delete/retire after GA, with no corresponding checklist discipline already in place. | **0.01** |
 
-The founder delegated the choice to `jev`; (a) scored materially higher (0.99 vs 0.58) and is the
-one actually implemented (`integration/v1.3` exists and `1.3.0-rc.1` is already published to
-`next`), so this ADR records the decision as made, not as a forward-looking recommendation.
+The founder delegated the choice to `jev`; (a) scored overwhelmingly higher (0.99 vs 0.01) and is
+the one actually implemented (`integration/v1.3` exists and `1.3.0-rc.1` is already published to
+`next`), so this ADR records the decision as made, not as a forward-looking recommendation. Writing
+that decision down as this ADR is itself a separate, later call — `jev` scored doing so now at
+0.58.
 
 ## Consequences
 
