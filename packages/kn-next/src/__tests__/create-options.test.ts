@@ -326,6 +326,27 @@ describe("mapping: each answer changes exactly what it should", () => {
         ).toBeUndefined();
     });
 
+    it("a template anchor that is missing or duplicated fails loudly instead of dropping the answer", () => {
+        const raw = renderScaffold({ name: "hello-knext", version: "1.3.0" });
+        const cfg = raw.get("knext.config.ts") ?? "";
+        const registry = '  registry: "ghcr.io/<your-user>",\n';
+        const twice = new Map(raw).set(
+            "knext.config.ts",
+            cfg.replace(registry, registry + registry),
+        );
+        const none = new Map(raw).set(
+            "knext.config.ts",
+            cfg.replace(registry, ""),
+        );
+        const node = { ...DEFAULT_CREATE_CHOICES, runtime: "node" as const };
+        expect(() =>
+            applyCreateChoices(twice, node, CORE_MANIFEST.dependencies),
+        ).toThrow(/2 copies of the anchor/);
+        expect(() =>
+            applyCreateChoices(none, node, CORE_MANIFEST.dependencies),
+        ).toThrow(/0 copies of the anchor/);
+    });
+
     it("React Compiler on vinext is refused, not silently ignored", () => {
         expect(() =>
             render({ builder: "vinext", reactCompiler: true }),
