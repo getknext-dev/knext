@@ -94,9 +94,27 @@ describe('docs — in-cluster pull-through mirror', () => {
     expect(containerd).toMatch(/hosts\.toml/);
   });
 
-  it('mentions Spegel as a containerd-only P2P alternative', () => {
+  it('says containerd needed a config edit and a restart on GKE, not a reload', () => {
+    // On GKE (COS, containerd 2.2) the legacy docker.io mirrors block and config_path
+    // cannot coexist, so hosts.toml mirrors are silently ignored without a config edit.
+    // Unlike CRI-O, there is no reload-only path here — a restart is required.
+    const containerd = section(page, /containerd setup/i);
+    expect(containerd).toMatch(/GKE/);
+    expect(containerd).toMatch(/config_path/);
+    expect(containerd).toMatch(/restart/i);
+  });
+
+  it('warns a containerd restart can disrupt pods and belongs at node bootstrap', () => {
+    const containerd = section(page, /containerd setup/i);
+    expect(containerd).toMatch(/disrupt/i);
+    expect(containerd).toMatch(/node bootstrap|bootstrap process|cloud-init/i);
+  });
+
+  it('mentions Spegel as a containerd-only P2P alternative, not validated by knext', () => {
     expect(page).toMatch(/Spegel/);
     expect(page).toMatch(/containerd-only/i);
+    expect(page).toMatch(/not validated/i);
+    expect(page).toMatch(/not recommending/i);
   });
 
   it('states the node-replacement durability risk', () => {
@@ -115,7 +133,7 @@ describe('docs — in-cluster pull-through mirror', () => {
     expect(risks).toMatch(/credential/i);
   });
 
-  it('gives the measured numbers with their conditions, not as bare figures', () => {
+  it('gives the OKE (remote-registry) measured numbers with their conditions', () => {
     expect(page).toMatch(/10\.95\s*s/);
     expect(page).toMatch(/5\.73\s*s/);
     expect(page).toMatch(/2\.25\s*s/);
@@ -124,12 +142,30 @@ describe('docs — in-cluster pull-through mirror', () => {
     expect(page).toMatch(/CRI-O 1\.34\.8/);
   });
 
-  it('states the mirror-miss cost relative to a direct pull', () => {
-    expect(page).toMatch(/miss/i);
-    expect(page).toMatch(/0\.8\s*second/i);
+  it('gives the GKE (same-region-registry) measured numbers with their conditions', () => {
+    expect(page).toMatch(/9\.83\s*s/);
+    expect(page).toMatch(/8\.62\s*s/);
+    expect(page).toMatch(/3\.78\s*s/);
+    expect(page).toMatch(/e2-standard-4/);
+    expect(page).toMatch(/Artifact Registry/);
   });
 
-  it('says the benefit narrows with a same-region registry', () => {
+  it('states the mirror-miss cost relative to a direct pull, for both measurements', () => {
+    expect(page).toMatch(/miss/i);
+    expect(page).toMatch(/0\.8\s*second/i);
+    expect(page).toMatch(/0\.2\s*second/i);
+  });
+
+  it('says the benefit narrows with a same-region registry, with a headline percentage per cluster', () => {
     expect(page).toMatch(/same[- ]region/i);
+    expect(page).toMatch(/48\s*%/);
+    expect(page).toMatch(/12\s*%/);
+  });
+
+  it('hedges the same-region effect as fragile under a sensitivity check', () => {
+    // The A-vs-B GKE contrast holds at p = 0.016 on the full run but only p = 0.058 once two
+    // excluded cycles are counted back in — the doc must not present it as a stable guarantee.
+    expect(page).toMatch(/fragile/i);
+    expect(page).toMatch(/0\.058/);
   });
 });
