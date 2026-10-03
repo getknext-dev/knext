@@ -556,7 +556,8 @@ export interface StageSharpNativeOptions {
  * inherit a previous build's (possibly foreign-platform) addons.
  *
  * Whatever lands here is then PINNED — every staged `@img` package checked
- * against the app's `bun.lock` and every staged file hashed into
+ * against the app's lockfile (`bun.lock` or `package-lock.json`, #1864) and
+ * every staged file hashed into
  * `native/.integrity.json`, which the dlopen shim re-checks in the image. This
  * copy is otherwise an unguarded path from the install store to native-code
  * privilege, and the closure SBOM does not cover `/app/native`.
@@ -628,8 +629,8 @@ export function stageSharpNative(
                 const name = `@img/${dir}`;
                 if (!lockfilePath || locked === undefined) {
                     throw new UsageError(
-                        `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
-                            "Run `bun install --save-text-lockfile` in the app and rebuild.",
+                        `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
+                            "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
                     );
                 }
                 const versions = locked.get(name);
@@ -638,8 +639,8 @@ export function stageSharpNative(
                         `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
                             "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
                             "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                            "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
-                            `'${name}', and rebuild.`,
+                            "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
+                            `that publishes '${name}', and rebuild.`,
                     );
                 }
                 const entry = pickFetchVersion(
@@ -767,7 +768,7 @@ export function stageSharpForVinextNode(
                 "host to stage into the node image (checked node_modules/sharp and the " +
                 "bun isolated-store/workspace-root equivalents). The vinext node build " +
                 "itself requires a resolvable sharp to have traced this far, so this is " +
-                "unexpected — reinstall (`bun install`) and rebuild.",
+                "unexpected — reinstall (`npm install`, or `bun install`) and rebuild.",
         );
     }
     const sharpDest = join(nodeModulesDest, "sharp");
@@ -805,8 +806,8 @@ export function stageSharpForVinextNode(
         const name = `@img/${dir}`;
         if (!lockfilePath || locked === undefined) {
             throw new UsageError(
-                `This app uses sharp, the vinext-node image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
-                    "Run `bun install --save-text-lockfile` in the app and rebuild.",
+                `This app uses sharp, the vinext-node image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
+                    "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
             );
         }
         const versions = locked.get(name);
@@ -815,8 +816,8 @@ export function stageSharpForVinextNode(
                 `The vinext-node image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
                     "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
                     "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                    "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
-                    `'${name}', and rebuild.`,
+                    "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
+                    `that publishes '${name}', and rebuild.`,
             );
         }
         const entry = pickFetchVersion(
@@ -949,14 +950,15 @@ export function fetchImgPackage(
     destDir: string,
 ): void {
     // Refused BEFORE any network: an unverifiable fetch would ship whatever
-    // the registry answered, at native-code privilege. bun.lock records a
-    // sha512 for every registry package, so a missing one means the entry is
-    // not a registry resolution at all.
+    // the registry answered, at native-code privilege. Both lockfiles this
+    // module reads (bun.lock, npm's package-lock.json) record a sha512 for
+    // every registry package, so a missing one means the entry is not a
+    // registry resolution at all.
     if (!pkg.integrity?.startsWith("sha512-")) {
         throw new UsageError(
             `Refusing to fetch '${pkg.name}@${pkg.version}': its lockfile entry has no sha512 integrity to verify the download against.\n\n` +
-                "Reinstall from the registry (`bun install --save-text-lockfile`) so the\n" +
-                "lockfile carries one, and rebuild.",
+                "Reinstall from the registry (`npm install`, or `bun install\n" +
+                "--save-text-lockfile`) so the lockfile carries one, and rebuild.",
         );
     }
     const tmp = mkdtempSync(join(tmpdir(), "knext-img-fetch-"));
@@ -1143,7 +1145,8 @@ function pickFetchVersion(
         throw new UsageError(
             `The installed sharp@${resolvedSharp.version} pins '${name}' at ${pinned}, but ${lockfilePath} pins only ${formatLockedVersions([...versions])}.\n\n` +
                 "The store and the lockfile disagree about what is installed. Reinstall with\n" +
-                "`bun install --frozen-lockfile` and rebuild rather than shipping the difference.",
+                "`npm install` (or `bun install --frozen-lockfile`) and rebuild rather than\n" +
+                "shipping the difference.",
         );
     }
     process.stderr.write(

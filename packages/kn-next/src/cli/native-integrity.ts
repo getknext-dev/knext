@@ -14,14 +14,17 @@
  * ## Two claims, of different strength, both recorded
  *
  *   1. **Provenance, from the lockfile.** Every staged `@img` package must have
- *      an entry in `bun.lock` for exactly the `name@version` on disk. No entry,
- *      or a different version, is a BUILD FAILURE — not a skip. The entry's
- *      integrity string is copied into the manifest.
+ *      an entry in the app's lockfile — `bun.lock` (bun) or `package-lock.json`
+ *      (npm, #1864: a vinext × node app has no reason to have bun on PATH, so
+ *      `knext create`'s own documented `npm install` must be a supported
+ *      source of truth here, not just bun's) — for exactly the `name@version`
+ *      on disk. No entry, or a different version, is a BUILD FAILURE — not a
+ *      skip. The entry's integrity string is copied into the manifest.
  *
- *      Be precise about what this is not: bun records the integrity of the
- *      packed TARBALL, and what ships is the EXTRACTED tree. The two are not
- *      comparable by construction, so this pins *which package* was staged, not
- *      *which bytes*.
+ *      Be precise about what this is not: both lockfiles record the integrity
+ *      of the packed TARBALL, and what ships is the EXTRACTED tree. The two are
+ *      not comparable by construction, so this pins *which package* was
+ *      staged, not *which bytes*.
  *
  *   2. **Bytes, from knext.** A sha256 per staged file, computed here and
  *      written to `native/.integrity.json`, which the dlopen shim re-checks
@@ -41,7 +44,7 @@ import {
     statSync,
     writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { UsageError } from "./shared";
 
 /** Lives inside the tree, so shipping the tree ships the manifest. */
@@ -125,11 +128,13 @@ export function writeNativeIntegrityManifest(
     if (staged.length > 0) {
         if (!lockfilePath || !existsSync(lockfilePath)) {
             throw new UsageError(
-                "knext staged native packages but found no bun.lock to pin them against.\n\n" +
+                "knext staged native packages but found no lockfile (bun.lock or " +
+                    "package-lock.json) to pin them against.\n\n" +
                     `  staged: ${staged.map((p) => `${p.name}@${p.version}`).join(", ")}\n\n` +
                     "Those packages are dlopened at native-code privilege in the image, so the build\n" +
-                    "refuses to ship them unverified. Run `bun install --save-text-lockfile` in the\n" +
-                    "app (a binary bun.lockb carries no readable integrity records).",
+                    "refuses to ship them unverified. Run `npm install` (or `bun install\n" +
+                    "--save-text-lockfile`) in the app — a binary bun.lockb carries no readable\n" +
+                    "integrity records.",
             );
         }
         const locked = readLockfilePackages(lockfilePath);
@@ -140,7 +145,8 @@ export function writeNativeIntegrityManifest(
                     `The native package '${pkg.name}' is staged for the image but ${lockfilePath} pins no such package.\n\n` +
                         "An @img package on disk that the lockfile never resolved is exactly the\n" +
                         "injected-dependency case, so this is a build failure rather than a skip.\n" +
-                        "Reinstall from the lockfile (`bun install --frozen-lockfile`) and rebuild.",
+                        "Reinstall from the lockfile (`npm install`, or `bun install --frozen-lockfile`)\n" +
+                        "and rebuild.",
                 );
             }
             // Matched by name AND version: a lockfile can legitimately pin the
@@ -153,7 +159,8 @@ export function writeNativeIntegrityManifest(
                 throw new UsageError(
                     `The native package '${pkg.name}' is staged at ${pkg.version} but ${lockfilePath} pins only ${formatLockedVersions(versions)}.\n\n` +
                         "The store and the lockfile disagree about what is installed. Reinstall with\n" +
-                        "`bun install --frozen-lockfile` and rebuild rather than shipping the difference.",
+                        "`npm install` (or `bun install --frozen-lockfile`) and rebuild rather than\n" +
+                        "shipping the difference.",
                 );
             }
             packages[pkg.name] = {
@@ -186,12 +193,25 @@ export function writeNativeIntegrityManifest(
     );
 }
 
-/** Nearest `bun.lock` at or above `cwd`, or `undefined`. */
+/**
+ * Lockfile basenames this module can read, in preference order. `bun.lock` is
+ * checked first at every directory level so an app that happens to carry both
+ * (e.g. a bun install run once over an npm-created tree) keeps today's
+ * behaviour unchanged; `package-lock.json` is npm's — the installer
+ * `knext create`'s own `partingLine()` tells every scaffold to run, `--runtime
+ * node` included, so it must be a readable source of pins, not just bun's
+ * (#1864).
+ */
+const LOCKFILE_BASENAMES = ["bun.lock", "package-lock.json"] as const;
+
+/** Nearest `bun.lock` or `package-lock.json` at or above `cwd`, or `undefined`. */
 export function findLockfile(cwd: string): string | undefined {
     let dir = cwd;
     for (;;) {
-        const candidate = join(dir, "bun.lock");
-        if (existsSync(candidate)) return candidate;
+        for (const name of LOCKFILE_BASENAMES) {
+            const candidate = join(dir, name);
+            if (existsSync(candidate)) return candidate;
+        }
         const parent = dirname(dir);
         if (parent === dir) return undefined;
         dir = parent;
@@ -216,6 +236,23 @@ export function formatLockedVersions(versions: LockedPackage[]): string {
 }
 
 /**
+ * `lockfilePath`'s pinned packages, keyed by package name — each name mapping
+ * to EVERY distinct version the lockfile pins for it, canonical resolution
+ * first. Dispatches on the lockfile's basename (#1864): `package-lock.json`
+ * (npm's own format, structurally different from bun's) goes to
+ * {@link readNpmLockfilePackages}; everything {@link findLockfile} can return
+ * otherwise is a `bun.lock`, read by {@link readBunLockfilePackages}.
+ */
+export function readLockfilePackages(
+    lockfilePath: string,
+): Map<string, LockedPackage[]> {
+    if (basename(lockfilePath) === "package-lock.json") {
+        return readNpmLockfilePackages(lockfilePath);
+    }
+    return readBunLockfilePackages(lockfilePath);
+}
+
+/**
  * `bun.lock`'s `packages` map, keyed by package name — each name mapping to
  * EVERY distinct version the lockfile pins for it, canonical resolution first.
  *
@@ -237,7 +274,7 @@ export function formatLockedVersions(versions: LockedPackage[]): string {
  * FALLBACK for callers that need one representative version, never an answer
  * to "which version does this app use".
  */
-export function readLockfilePackages(
+function readBunLockfilePackages(
     lockfilePath: string,
 ): Map<string, LockedPackage[]> {
     const raw = readFileSync(lockfilePath, "utf8");
@@ -278,6 +315,100 @@ export function readLockfilePackages(
         else entries.push({ version, integrity });
     }
     return out;
+}
+
+/**
+ * npm's `package-lock.json` `packages` map (lockfileVersion 2/3), keyed by
+ * package PATH rather than bun's `name@version` descriptor — each key's
+ * trailing `node_modules/` segment identifies the package
+ * (`"node_modules/@img/sharp-linuxmusl-x64"` -> `@img/sharp-linuxmusl-x64`),
+ * since a nested/non-hoisted install keys an entry by its full ancestry
+ * (`"node_modules/foo/node_modules/@img/sharp-linuxmusl-x64"`).
+ *
+ * This is the #1864 fix: npm's lockfile pins EVERY platform of an
+ * `optionalDependencies` package it resolved — including ones the current
+ * host never downloaded, because npm skips an os/cpu/libc-mismatched optional
+ * download but still records its resolution, so the SAME lockfile works on a
+ * different host (measured — `npm install` on a darwin host still writes a
+ * full `@img/sharp-linuxmusl-x64` entry, version + sha512 integrity, into
+ * `package-lock.json`, even though nothing of that name ever reaches
+ * `node_modules/@img` on disk there). That is exactly the pin a vinext × node
+ * build run anywhere but a musl host needs, and it was unreachable before
+ * this function existed: {@link findLockfile} found no `bun.lock` for an app
+ * whose `node_modules` came from `npm install` (`knext create`'s own
+ * documented install step), so the fetch fallback in `vinext-build.ts` had no
+ * lockfile to read and refused outright, for `--runtime node` apps
+ * specifically — the ones with the least reason to also have bun on PATH.
+ *
+ * Root's own entry is keyed `""` and carries no package name — skipped.
+ * Ordering mirrors {@link readBunLockfilePackages}: the canonical (hoisted,
+ * single `node_modules/` segment) resolution is unshifted to the front when
+ * present, matching npm's own meaning of "canonical" (`npm ls`'s notion of
+ * the de-duped top-level install).
+ */
+function readNpmLockfilePackages(
+    lockfilePath: string,
+): Map<string, LockedPackage[]> {
+    const raw = readFileSync(lockfilePath, "utf8");
+    let doc: { packages?: Record<string, unknown> };
+    try {
+        doc = JSON.parse(raw);
+    } catch (error) {
+        throw new UsageError(
+            `Could not parse ${lockfilePath} while pinning the native tree's provenance.\n` +
+                `  ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+
+    const out = new Map<string, LockedPackage[]>();
+    for (const [key, value] of Object.entries(doc.packages ?? {})) {
+        if (key === "" || !key.includes("node_modules/")) continue;
+        if (
+            value === null ||
+            typeof value !== "object" ||
+            typeof (value as { version?: unknown }).version !== "string"
+        ) {
+            continue;
+        }
+        const name = packageNameFromNpmKey(key);
+        if (!name) continue;
+        const version = (value as { version: string }).version;
+        const integrityRaw = (value as { integrity?: unknown }).integrity;
+        const integrity =
+            typeof integrityRaw === "string" ? integrityRaw : null;
+        // The hoisted/top-level entry has exactly one `node_modules/`
+        // segment; a nested (non-hoisted) install's key has more than one,
+        // from the ancestor chain `lastIndexOf` would otherwise find.
+        const canonical = key.lastIndexOf("node_modules/") === 0;
+
+        const entries = out.get(name) ?? [];
+        if (entries.length === 0) out.set(name, entries);
+        const existing = entries.findIndex((e) => e.version === version);
+        if (existing !== -1 && !canonical) continue;
+        if (existing !== -1) entries.splice(existing, 1);
+        if (canonical) entries.unshift({ version, integrity });
+        else entries.push({ version, integrity });
+    }
+    return out;
+}
+
+/**
+ * The package name a `package-lock.json` `packages` key identifies — its
+ * final `node_modules/` segment, scope-aware (`@img/sharp-linuxmusl-x64` is
+ * two path segments, not one, so splitting on the first `/` after
+ * `node_modules/` would cut a scoped name in half).
+ */
+function packageNameFromNpmKey(key: string): string | undefined {
+    const marker = "node_modules/";
+    const idx = key.lastIndexOf(marker);
+    if (idx === -1) return undefined;
+    const rest = key.slice(idx + marker.length);
+    if (rest.length === 0) return undefined;
+    const parts = rest.split("/");
+    if (parts[0].startsWith("@") && parts.length > 1) {
+        return `${parts[0]}/${parts[1]}`;
+    }
+    return parts[0];
 }
 
 /**

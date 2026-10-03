@@ -1639,6 +1639,17 @@ jobs:
       - name: vinext × node e2e — custom healthCheckPath build-arg (#1273)
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/vinext-node-custom-health-path.docker-e2e.test.ts
 
+      # #1864 — the e2e above installs with `bun install --linker isolated`,
+      # which writes a bun.lock; `knext create`'s own documented install step
+      # is `npm install` (--runtime node included), and that path had no
+      # readable lockfile for the sharp native-addon fetch fallback at all
+      # before #1864's fix, so a `--runtime node` app following the
+      # documented steps failed the IMAGE BUILD ("Could not load the sharp
+      # module using the linuxmusl-x64 runtime"). npm ships with the Node
+      # setup above; no extra toolchain install needed.
+      - name: vinext × node e2e — npm install (not bun), sharp still loads (#1864)
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/vinext-node-npm-install-image.docker-e2e.test.ts
+
   # ---------------------------------------------------------------------------
   # The compile-cache diagnostic's Bun probe (#309).
   #
