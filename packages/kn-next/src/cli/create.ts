@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { DEFAULT_RUNTIME_ID } from "../adapters/artifact-contract";
 import { createLogger } from "../utils/logger";
 import {
     checkPinsPublished,
@@ -322,6 +323,38 @@ export interface RenderOptions {
     templates?: Map<string, string>;
     /** Which build target to scaffold (#1342). Defaults to `"default"` (standalone). */
     builder?: BuilderChoice;
+    /**
+     * Which runtime the app will run on (#1843) — the seam the `knext create`
+     * prompts set. Defaults to `DEFAULT_RUNTIME_ID`. `"node"` adds the Redis
+     * client the node cache handler imports (`ioredis`) to the app's
+     * dependencies; the bun handler uses Bun's built-in client.
+     */
+    runtime?: RuntimeChoice;
+}
+
+/** The runtimes `knext create` can scaffold for. */
+export type RuntimeChoice = "bun" | "node";
+
+/**
+ * Add `ioredis` to a NODE app's dependencies, at `@getknext/core`'s own range
+ * so the two never disagree. Parses and re-serializes in the template's own
+ * format (2-space JSON, trailing newline); every other key keeps its place.
+ */
+export function withNodeRedisClient(packageJson: string): string {
+    const pkg = JSON.parse(packageJson) as {
+        dependencies?: Record<string, string>;
+    };
+    const core = JSON.parse(
+        readFileSync(join(packageRoot(), "package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    const range = core.dependencies?.ioredis;
+    if (range === undefined) {
+        throw new Error(
+            "@getknext/core's package.json declares no ioredis dependency — the node cache handler cannot load its Redis client",
+        );
+    }
+    pkg.dependencies = { ...pkg.dependencies, ioredis: range };
+    return `${JSON.stringify(pkg, null, 2)}\n`;
 }
 
 /**
@@ -364,6 +397,10 @@ export function renderScaffold(opts: RenderOptions): Map<string, string> {
             rel === GITIGNORE_TEMPLATE_KEY ? GITIGNORE_TARGET_KEY : rel;
         rendered.set(targetRel, out);
     }
+    const pkg = rendered.get("package.json");
+    if ((opts.runtime ?? DEFAULT_RUNTIME_ID) === "node" && pkg !== undefined) {
+        rendered.set("package.json", withNodeRedisClient(pkg));
+    }
     return rendered;
 }
 
@@ -376,6 +413,8 @@ export interface ScaffoldOptions {
     version?: string;
     /** Which build target to scaffold (#1342). Defaults to `"default"` (standalone). */
     builder?: BuilderChoice;
+    /** Which runtime to scaffold for (#1843) — see {@link RenderOptions.runtime}. */
+    runtime?: RuntimeChoice;
 }
 
 /**
@@ -394,6 +433,7 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
         version: opts.version ?? cliVersion(),
         templates: opts.templates,
         builder: opts.builder,
+        runtime: opts.runtime,
     });
 
     // Checked even under --force, because --force is REQUIRED for any pre-existing app

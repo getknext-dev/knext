@@ -91,6 +91,13 @@ export default defineConfig([
       'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
       // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
+      // #1843: the per-runtime cache handlers the knext adapter points
+      // `cacheHandler` at, chosen by the configured runtime. Plain untyped ESM
+      // like cache-handler, which they extend. The node one keeps its literal
+      // `import('ioredis')` (ioredis stays external — a dependency), so Next's
+      // standalone tracing copies the client into the node image.
+      'adapters/cache-handler-node': 'src/adapters/cache-handler-node.js',
+      'adapters/cache-handler-bun': 'src/adapters/cache-handler-bun.js',
       // The sharp addon shim. Plain untyped ESM, like cache-handler: it is
       // pulled in by a BUNDLER ALIAS (apps/*/vite.config.ts) rather than
       // imported by name, so it needs its own entry or it never reaches dist and

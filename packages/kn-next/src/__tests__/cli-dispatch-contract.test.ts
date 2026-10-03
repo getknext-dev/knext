@@ -195,6 +195,9 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "knext scaffold templates not found",
             "unknown template variable",
             "unsubstituted template placeholder",
+            // #1843: the installed @getknext/core manifest lacks its own
+            // ioredis dependency — a packaging defect, never argv.
+            "declares no ioredis dependency",
         ],
         // Cluster/build state: schema preflight, BUILD_ID skew, CR apply.
         "deploy.ts": [
