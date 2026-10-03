@@ -59,6 +59,19 @@ const config: KnativeNextConfig = {
 compiled Bun executable — its renderer's font and image-decoding files are embedded in the binary
 rather than left behind on the machine that built it.
 
+**Note:** `@vercel/og` 1.0.0–1.0.3 — the version `vinext` 1.0.1 installs by default — is itself
+published without one of its WebAssembly files, so `next/og` fails on every runtime (compiled or
+not, Bun or Node) until that is fixed upstream. Until then, add an override pinning `@vercel/og`
+to `0.11.1`:
+
+```json title="package.json"
+{
+  "overrides": {
+    "@vercel/og": "0.11.1"
+  }
+}
+```
+
 The third target is the same standalone output, produced with webpack instead of Turbopack as the
 bundler. Select it with `build: 'webpack'`; everything else about it — the entry, the supervisor,
 the `runtime` choice, the bytecode caching — is identical to the `turbopack` target, because both
