@@ -401,31 +401,29 @@ jobs:
         working-directory: app
         run: node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
 
-      # vinext/Vite (Rolldown) output keeps ESM import specifiers as literal
-      # text, unlike Turbopack/webpack's numbered module registry, so the
-      # `react/compiler-runtime` import string survives here. Still require
-      # it to appear alongside `localeCompare` (a method name from the test
-      # component's own source) in the SAME file, for the same reason as
-      # the official-adapter check: proving the call site is inside the
-      # component this lane injected, not merely that the import exists
-      # somewhere in the bundle.
+      # Measured on this lane's own run (#1829 round 3): the simple,
+      # no-props counter produced a SINGLE client chunk, so the literal
+      # `react/compiler-runtime` import specifier and the component's code
+      # landed in the same file — but once swapped to the richer, eligible
+      # component, vinext/Vite code-splits into separate `index-*.js` /
+      # `counter-*.js` chunks, and the import specifier does not survive
+      # as literal text in either. Same fix as the official-adapter check:
+      # `useMemoCache` (a property name, survives both minification and
+      # code-splitting) intersected with `localeCompare` (the test
+      # component's own method call) in the SAME file.
       - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
         run: |
           set -euo pipefail
-          echo "--- debug: files with react/compiler-runtime ---"
-          grep -rl 'react/compiler-runtime' .output/public dist/client .nitro/dist build 2>/dev/null || echo "(none)"
-          echo "--- debug: files with localeCompare ---"
-          grep -rl 'localeCompare' .output/public dist/client .nitro/dist build 2>/dev/null || echo "(none)"
           MATCH=""
           while IFS= read -r f; do
             if grep -q 'localeCompare' "${f}"; then
               MATCH="${f}"
               break
             fi
-          done < <(grep -rl 'react/compiler-runtime' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          done < <(grep -rl 'useMemoCache' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
           if [ -z "${MATCH}" ]; then
-            echo "::error::no client build artifact has react/compiler-runtime AND localeCompare together — compiler did not transform the test component" >&2
+            echo "::error::no client build artifact has useMemoCache AND localeCompare together — compiler did not transform the test component" >&2
             find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
             exit 1
           fi
@@ -565,8 +563,10 @@ jobs:
         run: node_modules/.bin/knext build 2>&1 | tee build.log
 
       # Same reasoning as the vinext x bun job's identical step: require
-      # react/compiler-runtime AND localeCompare (the test component's own
-      # method call) together in one file, not just the import's presence.
+      # useMemoCache AND localeCompare (the test component's own method
+      # call) together in one file — not the react/compiler-runtime import
+      # specifier, which does not survive vinext's code-splitting for this
+      # (multi-chunk) component shape.
       - name: Assert the compiler actually ran (client chunk evidence)
         working-directory: app
         run: |
@@ -577,9 +577,9 @@ jobs:
               MATCH="${f}"
               break
             fi
-          done < <(grep -rl 'react/compiler-runtime' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
+          done < <(grep -rl 'useMemoCache' .output/public dist/client .nitro/dist build 2>/dev/null | sort -u)
           if [ -z "${MATCH}" ]; then
-            echo "::error::no client build artifact has react/compiler-runtime AND localeCompare together — compiler did not transform the test component" >&2
+            echo "::error::no client build artifact has useMemoCache AND localeCompare together — compiler did not transform the test component" >&2
             find . -maxdepth 2 -type d -not -path './node_modules*' -not -path './.git*'
             exit 1
           fi
