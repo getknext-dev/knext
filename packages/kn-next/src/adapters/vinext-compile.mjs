@@ -47,10 +47,18 @@
  * `.output/server/index.mjs`, so sharp only enters a module graph now.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+    existsSync,
+    readdirSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    statSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
+import { allowlistedPackageRoot, rewriteAssetAnchors } from "./entry-asset-anchor.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -348,6 +356,73 @@ function selfContainedEntryExprs(entryRelDir) {
     };
 }
 
+/** Hard cap on an embedded asset-anchor sibling's size — a build error, never a silent skip. */
+const ASSET_ANCHOR_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * A `new URL(<literal>, import.meta.url)` anchor in the ALLOWLISTED module at
+ * `modulePath` resolves to a real on-disk sibling, or it does not (cluster
+ * C4 — see entry-asset-anchor.mjs's docstring for the full mechanism: nitro
+ * already staged the sibling next to the module that reads it, and a
+ * bundled module's `import.meta.url` under `--bytecode` is the BUILD
+ * machine's path, not a portable one). `rewriteAssetAnchors` already
+ * confines CALLS here to an allowlisted module (`modulePath` is always
+ * `allowlistedPackageRoot`-eligible) — this function's own job is the parts
+ * that need a real filesystem:
+ *
+ *   - existence: a literal that resolves to nothing is left untouched,
+ *     never an error (absent-and-unused is fine, same as sharp);
+ *   - CONTAINMENT: the candidate's REAL path (symlinks resolved) must stay
+ *     inside the allowlisted package's own REAL root. A `../../../etc/x`
+ *     literal, or a symlink inside the package pointing outside it, is
+ *     refused — a raw string-prefix check on the un-resolved path would miss
+ *     the symlink case, which is why both sides are `realpathSync`'d before
+ *     comparing;
+ *   - SIZE: over `ASSET_ANCHOR_MAX_BYTES` fails the build with a named
+ *     reason, never a silent cap-and-truncate.
+ *
+ * Containment and size violations THROW (Bun.build's own `onLoad` failure
+ * path — the same convention `sharpAddonDlopen`/`selfContainedEmbed` use in
+ * this file — so they surface through `result.success === false` and the
+ * printed `result.logs`, not a bespoke `process.exit`).
+ */
+function resolveAssetAnchor(literal, modulePath) {
+    const packageRoot = allowlistedPackageRoot(modulePath);
+    if (packageRoot === undefined) return undefined; // belt-and-suspenders; rewriteAssetAnchors already gates this
+    const abs = resolve(dirname(modulePath), literal);
+    if (!existsSync(abs)) return undefined;
+    let realAbs;
+    let realRoot;
+    try {
+        realAbs = realpathSync(abs);
+        realRoot = realpathSync(packageRoot);
+    } catch {
+        return undefined;
+    }
+    if (realAbs !== realRoot && !realAbs.startsWith(`${realRoot}${sep}`)) {
+        throw new Error(
+            `[knext compile] asset anchor ${JSON.stringify(literal)} in ${modulePath} resolves to ` +
+                `${realAbs}, outside its own package (${realRoot}) — refusing to embed a file that ` +
+                "escapes the package it was found in (a '..' literal, or a symlink pointing outside it)",
+        );
+    }
+    const size = statSync(realAbs).size;
+    if (size > ASSET_ANCHOR_MAX_BYTES) {
+        throw new Error(
+            `[knext compile] asset anchor ${JSON.stringify(literal)} in ${modulePath} is ${size} bytes, ` +
+                `over the ${ASSET_ANCHOR_MAX_BYTES}-byte asset-anchor cap (${realAbs}) — refusing to embed it`,
+        );
+    }
+    return realAbs;
+}
+
+/** `import <id> from <path> with { type: "file" };` lines, one per embedded asset. */
+function assetAnchorImports(assets) {
+    return assets
+        .map((a) => `import ${a.id} from ${JSON.stringify(a.absPath)} with { type: "file" };\n`)
+        .join("");
+}
+
 /**
  * Injects the keep-alive guard import into the nitro entry AND rewrites
  * `import.meta.*` so `--bytecode`'s CommonJS output can hold it. Both act on the
@@ -360,16 +435,41 @@ const importMetaToCjs = {
         build.onLoad({ filter: /\.m?js$/ }, async (args) => {
             const path = resolve(args.path);
             if (path !== ENTRY) {
-                // A chunk of the server output: wrap its require bindings only.
-                // Bun rewrites a bundled chunk's own `import.meta` itself; the
-                // guard imports and the import.meta rewrite below belong to the
+                // Any other module reaching the compile — a chunk of the server
+                // output, OR a server-external that stayed bundled because its
+                // entry is ESM (`@vercel/og`, cluster C4 — see
+                // entry-asset-anchor.mjs). The asset-anchor rewrite runs for
+                // BOTH, but is a no-op for everything except an ALLOWLISTED
+                // module (`rewriteAssetAnchors` gates on `path` itself) — the
+                // entry is never one of those, which is why this call is not
+                // duplicated below for the entry branch. The require-binding
+                // wrap stays confined to the server output proper (the only
+                // place `PLAN.modules` has an analysis) — Bun rewrites a
+                // bundled chunk's own `import.meta` itself; the guard imports
+                // and the entry's import.meta rewrite below belong to the
                 // entry alone.
-                const analysis = PLAN.modules.get(path);
-                if (!analysis || !isServerOutputModule(path)) return undefined;
                 const raw = await Bun.file(path).text();
-                const wrapped = wrapRequireBindings(raw, analysis.aliases, [...PLAN.embed.keys()]);
-                return wrapped.count > 0 ? { contents: wrapped.contents, loader: "js" } : undefined;
+                const assetRewrite = rewriteAssetAnchors(raw, path, (literal) =>
+                    resolveAssetAnchor(literal, path),
+                );
+                let contents = assetRewrite.contents;
+                let changed = assetRewrite.assets.length > 0;
+                const analysis = PLAN.modules.get(path);
+                if (analysis && isServerOutputModule(path)) {
+                    const wrapped = wrapRequireBindings(contents, analysis.aliases, [...PLAN.embed.keys()]);
+                    contents = wrapped.contents;
+                    changed = changed || wrapped.count > 0;
+                }
+                if (!changed) return undefined;
+                return {
+                    contents: assetAnchorImports(assetRewrite.assets) + contents,
+                    loader: "js",
+                };
             }
+            // The entry is never one of ALLOWLISTED_PACKAGES (it is nitro's own
+            // generated `index.mjs`), so it never carries an asset anchor this
+            // rewrite would touch — no call to rewriteAssetAnchors here, by
+            // construction; see entry-asset-anchor.mjs's docstring on scope.
             const raw = await Bun.file(args.path).text();
             // Prepend the guard imports FIRST, always — independent of whether the
             // entry uses import.meta. `import "<abs>";` is bundled + evaluated

@@ -55,6 +55,10 @@ const config: KnativeNextConfig = {
 };
 ```
 
+`next/og`'s `ImageResponse` (for example a dynamic `opengraph-image` route) works on this target's
+compiled Bun executable — its renderer's font and image-decoding files are embedded in the binary
+rather than left behind on the machine that built it.
+
 The third target is the same standalone output, produced with webpack instead of Turbopack as the
 bundler. Select it with `build: 'webpack'`; everything else about it — the entry, the supervisor,
 the `runtime` choice, the bytecode caching — is identical to the `turbopack` target, because both
