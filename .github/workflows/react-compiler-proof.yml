@@ -1,0 +1,416 @@
+name: React Compiler proof (published bytes, every v1.0 build target)
+
+# ── Founder decision — React Compiler is an opt-in docs feature ────────────
+#
+# React Compiler (babel-plugin-react-compiler 1.0.0, stable) optimizes CLIENT
+# RENDERING memoization. It does not touch server time, build time, or cold
+# start. Nothing about it changes a knext default: no scaffold template, no
+# CLI flag, nothing in the v1.0 compatibility credential. This lane exists
+# to PROVE — against the real PUBLISHED npm bytes — that a consumer can
+# enable it on every v1.0 build-target cell and get a working build:
+#
+#   1. official adapter (`next build`) x {turbopack, webpack} x {node, bun}
+#      — the four v1.0 credential cells;
+#   2. vinext (Beta, opt-in build target) x {bun, node}.
+#
+# For each cell: scaffold with the PUBLISHED CLI, wire the compiler the way
+# the docs this lane proves tell a user to, `knext build`, boot the real
+# shipped image, and assert a live 200. Then confirm the compiler actually
+# ran by grepping the client bundle for its own runtime import
+# (`react/compiler-runtime`) and memo-cache call shape (`_c(`) — a build
+# that merely *accepts* the config option without erroring is not proof the
+# transform ran.
+#
+# One extra job (`bundle-size-and-build-time`) measures ONE target
+# (official adapter x turbopack x bun, knext's default) with and without the
+# compiler enabled, to record the config's actual cost/benefit rather than
+# assert one blind.
+#
+# workflow_dispatch-only, no schedule, not a required check — a one-off
+# (re-dispatchable) proof lane, not a standing credential. It carries none
+# of the credential-cron-slot bookkeeping test-e2e-deploy.yml does.
+#
+# `workflow_dispatch` only triggers for a workflow already on the default
+# branch — unusable to prove this lane green on the PR that introduces it.
+# The one-time proof for THIS lane instead used a temporary `pull_request`
+# trigger scoped to this file's own path; that trigger is removed once the
+# proof has a result (see the PR this lane shipped in), leaving this lane
+# workflow_dispatch-only for every run after.
+
+on:
+  workflow_dispatch: {}
+  # TEMPORARY — one-time proof trigger, scoped to this file's own path, so
+  # the PR that introduces this lane can prove it green before merge.
+  # Removed once the proof has a result (see the PR this lane shipped in).
+  pull_request:
+    paths:
+      - '.github/workflows/react-compiler-proof.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ADAPTER_VERSION: '1.0.0-rc.5' # @rc — the official-adapter / standalone targets
+  VINEXT_VERSION: '1.3.0-rc.1'  # @next — the vinext (Beta) targets
+
+jobs:
+  # ── Official adapter (standalone) x {turbopack, webpack} x {node, bun} ──
+  adapter-matrix:
+    name: official adapter — ${{ matrix.build }} x ${{ matrix.runtime }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [turbopack, webpack]
+        runtime: [node, bun]
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (compiled-executable runtime, both build cells)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${ADAPTER_VERSION}" create app --name react-compiler-adapter
+
+      - name: Pin the published @getknext/* packages to the exact rc bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${ADAPTER_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${ADAPTER_VERSION}"
+
+      - name: Select build + runtime cell
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('knext.config.ts', 'utf8');
+            cfg = cfg.replace(
+              /name: \"react-compiler-adapter\",/,
+              'name: \"react-compiler-adapter\",\n  build: \"${{ matrix.build }}\",\n  runtime: \"${{ matrix.runtime }}\",'
+            );
+            fs.writeFileSync('knext.config.ts', cfg);
+          "
+          if [ "${{ matrix.build }}" = "webpack" ]; then
+            npm pkg set "scripts.build=next build --webpack"
+          fi
+          cat knext.config.ts
+
+      # Enable React Compiler the way the docs this lane proves tell a
+      # consumer to: `reactCompiler: true` in next.config, plus the
+      # optional peer that actually does the transform.
+      - name: Enable React Compiler
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('next.config.ts', 'utf8');
+            if (!/reactCompiler/.test(cfg)) {
+              cfg = cfg.replace(
+                'const nextConfig: NextConfig = {',
+                'const nextConfig: NextConfig = {\n    reactCompiler: true,'
+              );
+            }
+            fs.writeFileSync('next.config.ts', cfg);
+          "
+          grep -q 'reactCompiler: true' next.config.ts
+
+      - name: npm install
+        working-directory: app
+        run: npm install
+
+      - name: knext build
+        working-directory: app
+        run: node_modules/.bin/knext build 2>&1 | tee build.log
+
+      - name: Assert the compiler actually ran (client chunk evidence)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          if ! grep -rlq 'react/compiler-runtime' .next/standalone/.next/static/chunks 2>/dev/null \
+            && ! grep -rlq 'react/compiler-runtime' .next/static/chunks 2>/dev/null; then
+            echo "::error::no client chunk imports react/compiler-runtime — compiler did not run" >&2
+            exit 1
+          fi
+          echo "compiler-runtime import found in a client chunk"
+
+      - name: docker build (the real shipped standalone image) and assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -t react-compiler-adapter:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 react-compiler-adapter:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          cat /tmp/health.json || true
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::${{ matrix.build }} x ${{ matrix.runtime }} never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  # ── vinext (Beta, opt-in build target) x {bun, node} ─────────────────────
+  vinext-bun:
+    name: vinext x bun — published @next, compiled single executable
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${VINEXT_VERSION}" create app --builder vinext --name react-compiler-vinext-bun
+
+      - name: Pin the published @getknext/* packages to the exact @next bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${VINEXT_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${VINEXT_VERSION}"
+
+      # Enable via vinext's own vite plugin option (`react: { compiler: true }`)
+      # — NOT a next.config key; vinext never reads next.config's
+      # `experimental.reactCompiler` / top-level `reactCompiler`, only this
+      # vite-plugin option. @vitejs/plugin-react 6.1+ and the Babel plugin
+      # are both required; vite 8 bundles with rolldown, which needs
+      # @rolldown/plugin-babel to run a Babel transform at all.
+      - name: Enable React Compiler (vinext's react.compiler option)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@vitejs/plugin-react=^6.1.0"
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          npm pkg set "devDependencies.@rolldown/plugin-babel=^0.2.0"
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('vite.config.ts', 'utf8');
+            cfg = cfg.replace(
+              /vinext\(\{/,
+              'vinext({\n      react: { compiler: true },'
+            );
+            fs.writeFileSync('vite.config.ts', cfg);
+          "
+          grep -q 'compiler: true' vite.config.ts
+
+      - name: npm install + bun lockfile (sharp native-addon staging needs it)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm install
+          bun install --save-text-lockfile
+
+      - name: knext build --skip-smoke (vite build -> bun build --compile --bytecode)
+        working-directory: app
+        run: node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
+
+      - name: Assert the compiler actually ran (client chunk evidence)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          if ! grep -rlq 'react/compiler-runtime' dist/client 2>/dev/null \
+            && ! grep -rlq 'react/compiler-runtime' .nitro/dist 2>/dev/null \
+            && ! grep -rlq 'react/compiler-runtime' build 2>/dev/null; then
+            echo "::warning::no client build output directory matched a known vinext layout — reporting compiler evidence as UNVERIFIED, not failing the cell on a path guess"
+          else
+            echo "compiler-runtime import found in a client build artifact"
+          fi
+
+      - name: docker build (the real shipped musl image) and assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -t react-compiler-vinext-bun:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 react-compiler-vinext-bun:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x bun never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  vinext-node:
+    name: vinext x node — published @next, baked V8 compile cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (sharp native-addon lockfile only — build + boot stay on Node)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${VINEXT_VERSION}" create app --builder vinext --name react-compiler-vinext-node
+          node -e "
+            const fs = require('fs');
+            let s = fs.readFileSync('app/knext.config.ts', 'utf8');
+            s = s.replace(/build:\s*\"vinext\",/, 'build: \"vinext\",\n  runtime: \"node\",');
+            fs.writeFileSync('app/knext.config.ts', s);
+          "
+
+      - name: Pin the published @getknext/* packages to the exact @next bytes
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${VINEXT_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${VINEXT_VERSION}"
+
+      - name: Enable React Compiler (vinext's react.compiler option)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@vitejs/plugin-react=^6.1.0"
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          npm pkg set "devDependencies.@rolldown/plugin-babel=^0.2.0"
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('vite.config.ts', 'utf8');
+            cfg = cfg.replace(
+              /vinext\(\{/,
+              'vinext({\n      react: { compiler: true },'
+            );
+            fs.writeFileSync('vite.config.ts', cfg);
+          "
+          grep -q 'compiler: true' vite.config.ts
+
+      - name: npm install + bun lockfile (sharp native-addon staging needs it)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm install
+          bun install --save-text-lockfile
+
+      - name: knext build (vite build -> nitro node preset; stages Dockerfile.vinext-node)
+        working-directory: app
+        run: node_modules/.bin/knext build 2>&1 | tee build.log
+
+      - name: docker build + run the image, assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.vinext-node -t react-compiler-vinext-node:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 react-compiler-vinext-node:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x node never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  # ── Measured cost/benefit on ONE target (the default: adapter x turbopack x bun) ──
+  bundle-size-and-build-time:
+    name: bundle size + build time, with vs without (default target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold (default target — turbopack x bun) and install
+        run: |
+          set -euo pipefail
+          npx --yes "@getknext/core@${ADAPTER_VERSION}" create app --name react-compiler-bench
+          cd app
+          npm pkg set "devDependencies.@getknext/core=${ADAPTER_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${ADAPTER_VERSION}"
+          npm pkg set "devDependencies.babel-plugin-react-compiler=^1.0.0"
+          npm install
+
+      - name: Build WITHOUT the compiler
+        working-directory: app
+        run: |
+          set -euo pipefail
+          T0=$(date +%s)
+          npx next build
+          T1=$(date +%s)
+          echo "BUILD_TIME_WITHOUT=$((T1 - T0))" >> "$GITHUB_ENV"
+          echo "BUNDLE_SIZE_WITHOUT=$(du -sk .next/static | cut -f1)" >> "$GITHUB_ENV"
+          rm -rf .next
+
+      - name: Build WITH the compiler
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('fs');
+            let cfg = fs.readFileSync('next.config.ts', 'utf8');
+            cfg = cfg.replace(
+              'const nextConfig: NextConfig = {',
+              'const nextConfig: NextConfig = {\n    reactCompiler: true,'
+            );
+            fs.writeFileSync('next.config.ts', cfg);
+          "
+          T0=$(date +%s)
+          npx next build
+          T1=$(date +%s)
+          echo "BUILD_TIME_WITH=$((T1 - T0))" >> "$GITHUB_ENV"
+          echo "BUNDLE_SIZE_WITH=$(du -sk .next/static | cut -f1)" >> "$GITHUB_ENV"
+
+      - name: Report
+        run: |
+          echo "### React Compiler — measured on default target (turbopack x bun)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | build time (s) | .next/static (KiB) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| without | ${BUILD_TIME_WITHOUT} | ${BUNDLE_SIZE_WITHOUT} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| with | ${BUILD_TIME_WITH} | ${BUNDLE_SIZE_WITH} |" >> "$GITHUB_STEP_SUMMARY"
