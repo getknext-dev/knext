@@ -8,8 +8,8 @@ runs on a terminal with no flags. Each question has a flag (`--runtime`, `--buil
 `--storage`, `--react-compiler`), and `--yes` skips them all. With any flag, `CI` set, or no
 terminal, it asks nothing and uses the defaults, which scaffold exactly the same app as before.
 
-Choosing `node` with a Redis cache adds `ioredis` to the app's dependencies, at the same range
-`@getknext/core` uses. A Bun app gets nothing extra, because Bun has a Redis client built in.
+Choosing `node` adds `ioredis` to the app's dependencies, at the same range `@getknext/core` uses.
+A Bun app gets nothing extra, because Bun has a Redis client built in.
 `--builder` now accepts `turbopack` and `webpack`; `default` still works and means `turbopack`.
 
 New apps now have React Compiler turned on by default, on every builder. On turbopack/webpack,

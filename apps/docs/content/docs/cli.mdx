@@ -96,9 +96,9 @@ equivalent flags, so you can repeat the same scaffold in CI.
 
 | Question | Choices | Default | What changes |
 |---|---|---|---|
-| Runtime | `bun`, `node` | `bun` | `node` writes `runtime: "node"` to `knext.config.ts`. |
+| Runtime | `bun`, `node` | `bun` | `node` writes `runtime: "node"` to `knext.config.ts` and adds the Node Redis client, `ioredis`, to the app's dependencies. Bun has a Redis client built in, so a Bun app gets nothing extra. |
 | Builder | `turbopack`, `webpack`, `vinext` (Beta) | `turbopack` | `webpack` sets the `build` script to `next build --webpack` and writes `build: "webpack"`; `vinext` scaffolds the compiled single-executable shape. |
-| ISR / data cache | `none` (in memory, per pod), `redis` | `none` | `redis` writes a `cache` block that reads `REDIS_URL`. With `node`, it also adds `ioredis` to the app's dependencies; Bun has a Redis client built in, so a Bun app gets nothing extra. |
+| ISR / data cache | `none` (in memory, per pod), `redis` | `none` | `redis` writes a `cache` block that reads `REDIS_URL`. |
 | Object storage | `none`, `gcs`, `s3`, `minio`, `azure` | `none` | Writes a `storage` block for that provider, with `<placeholders>` for you to fill in. |
 | React Compiler | yes / no | **yes** | On `turbopack`/`webpack`: writes `reactCompiler: true` to `next.config.ts` and adds `babel-plugin-react-compiler` to `devDependencies`. On `vinext`: writes `react: { compiler: true }` to the vinext plugin in `vite.config.ts` and adds the four packages it needs. Answer `n`, or pass `--no-react-compiler`, to leave it off. See [React Compiler](/docs/react-compiler). |
 

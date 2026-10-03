@@ -3,20 +3,22 @@
  * `knext create`'s choices: runtime, builder, cache, storage provider and
  * React Compiler — asked interactively on a TTY, or given as flags.
  *
- * The rule that keeps this safe: the option layer ({@link applyCreateChoices})
- * is the IDENTITY at {@link DEFAULT_CREATE_CHOICES}. The defaults scaffold
- * exactly what the templates render, byte for byte, so `knext create` with no
- * answers (CI, no TTY, `--yes`) is unchanged. Every non-default answer is a
- * small, anchored edit of a rendered file, and an anchor that is missing or
- * appears twice THROWS — a template edit that moves an anchor fails the tests
- * instead of silently dropping the user's choice.
+ * The rule that keeps this safe: every answer that differs from the template
+ * is a small, anchored edit of a rendered file ({@link applyCreateChoices}),
+ * and an anchor that is missing or appears twice THROWS — a template edit that
+ * moves an anchor fails the tests instead of silently dropping the user's
+ * choice. With React Compiler off and everything else at its default, the
+ * layer is the identity: the scaffold is exactly what the templates render.
+ * React Compiler is ON by default, so the default scaffold is the template
+ * rendering plus exactly those edits.
+ *
+ * The runtime is NOT applied here. It is passed to `renderScaffold`'s `runtime`
+ * option, which is the single place the Node Redis client (`ioredis`) is added.
  *
  * Prompts are a minimal `node:readline/promises` loop, not a dependency: the
  * CLI is published, runs under plain Node, and must work offline.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { BuilderChoice } from "./create";
 import { UsageError } from "./shared";
@@ -410,28 +412,16 @@ const STORAGE_BLOCKS: Record<Exclude<CreateStorage, "none">, string> = {
 };
 
 /**
- * The dependency ranges @getknext/core itself declares (read from its own
- * package.json under `packageRoot`) — so the Redis client an app pins and the
- * one the Node runtime image installs come from one source.
- */
-export function coreDependencyRanges(
-    packageRoot: string,
-): Record<string, string> {
-    const manifest = JSON.parse(
-        readFileSync(join(packageRoot, "package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string> };
-    return manifest.dependencies ?? {};
-}
-
-/**
- * Apply `choices` to a rendered scaffold. Returns a new map; the identity at
- * {@link DEFAULT_CREATE_CHOICES}. `coreDependencies` is
- * {@link coreDependencyRanges}.
+ * Apply `choices` to a scaffold that `renderScaffold` already rendered for
+ * `choices.builder` and `choices.runtime`. Returns a new map; with React
+ * Compiler off and every other answer at its default, it is the identity.
+ *
+ * The runtime's Redis client is NOT added here: `renderScaffold`'s `runtime`
+ * option owns that (one seam, so the two can never disagree).
  */
 export function applyCreateChoices(
     rendered: Map<string, string>,
     choices: CreateChoices,
-    coreDependencies: Record<string, string>,
 ): Map<string, string> {
     const files = new Map(rendered);
     const cfg = "knext.config.ts";
@@ -486,19 +476,8 @@ export function applyCreateChoices(
                 m,
             ].join("\n"),
         );
-        if (choices.runtime === "node") {
-            // Node loads the Redis client from the app's own dependencies;
-            // Bun has one built in, so a Bun app needs nothing extra.
-            const range = coreDependencies.ioredis;
-            if (!range) {
-                throw new Error(
-                    "knext create: @getknext/core declares no ioredis dependency to pin the Node Redis client to",
-                );
-            }
-            editPackageJson(files, (pkg) => {
-                pkg.dependencies.ioredis = range;
-            });
-        }
+        // The Node Redis client (`ioredis`) is already in package.json for a
+        // node app: renderScaffold's `runtime` option adds it. Bun has one built in.
     }
 
     if (choices.storage !== "none") {

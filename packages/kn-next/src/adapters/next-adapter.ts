@@ -23,11 +23,13 @@
  * Out of scope: request routing, bun --compile, operator changes.
  */
 import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import type { NextAdapter } from "next";
 // AdapterOutputs is not re-exported from the 'next' public barrel; import directly.
 import type { AdapterOutputs } from "next/dist/build/adapter/build-complete";
+import { KNEXT_RUNTIME_ENV } from "./runtime-env";
 import { healBunExportTargets } from "./standalone-bun-exports";
 
 /** The onBuildComplete ctx as typed by the installed next (16.2.x): carries `routing`. */
@@ -67,8 +69,10 @@ const KNEXT_CACHE_HANDLER_SPECIFIER = "@getknext/core/adapters/cache-handler";
 function isKnextCacheHandler(cacheHandlerPath: string): boolean {
     const p = cacheHandlerPath.replaceAll("\\", "/");
     if (
-        /\/@getknext\/core\/.*\/cache-handler\.[cm]?js$/.test(p) ||
-        /\/kn-next\/src\/adapters\/cache-handler\.js$/.test(p)
+        /\/@getknext\/core\/.*\/cache-handler(-node|-bun)?\.[cm]?js$/.test(p) ||
+        /\/kn-next\/(src|dist)\/adapters\/cache-handler(-node|-bun)?\.js$/.test(
+            p,
+        )
     ) {
         return true;
     }
@@ -79,6 +83,45 @@ function isKnextCacheHandler(cacheHandlerPath: string): boolean {
     } catch {
         return false;
     }
+}
+
+/** The per-runtime cache handler entries, by runtime id (#1843). */
+const RUNTIME_CACHE_HANDLERS: Record<string, string> = {
+    node: "@getknext/core/internal/cache-handler-node",
+    bun: "@getknext/core/internal/cache-handler-bun",
+};
+
+/**
+ * Point a knext `cacheHandler` at the entry for the configured runtime (#1843).
+ *
+ * The generic handler picks its Redis client at runtime, and on Node it loads
+ * ioredis through a computed specifier that Next's standalone tracing cannot
+ * follow — so the node image shipped with no Redis client and the cache ran
+ * from memory in silence. The per-runtime entries pick statically: the node
+ * one imports ioredis LITERALLY (traced into `.next/standalone`), the bun one
+ * uses Bun's native client and imports no ioredis at all.
+ *
+ * Applied only when the CLI exported a known runtime and the app's handler is
+ * knext's; `next dev`, a plain `next build` and a user's own handler are left
+ * alone. Next records the chosen path relative to `distDir` and traces it as a
+ * root, so it lands in the standalone tree like any other handler.
+ */
+function runtimeCacheHandler(
+    config: Parameters<NonNullable<NextAdapter["modifyConfig"]>>[0],
+): { cacheHandler?: string } {
+    const runtime = process.env[KNEXT_RUNTIME_ENV];
+    const specifier =
+        runtime !== undefined && Object.hasOwn(RUNTIME_CACHE_HANDLERS, runtime)
+            ? RUNTIME_CACHE_HANDLERS[runtime]
+            : undefined;
+    if (specifier === undefined) return {};
+    const handler = config.cacheHandler;
+    if (typeof handler !== "string" || !isKnextCacheHandler(handler)) return {};
+    // Self-reference by package name: resolves through `exports` to this
+    // package's own dist, wherever the app's package manager put it.
+    return {
+        cacheHandler: createRequire(import.meta.url).resolve(specifier),
+    };
 }
 
 /**
@@ -163,10 +206,16 @@ const adapter: NextAdapter = {
         // app on the webpack bundler. Pinned by `adapter-dev-edge-fence.test.ts`
         // (real dev server) and `adapter-edge-ignore-plugin.test.ts` (unit).
         const appWebpack = config.webpack;
-        return {
+        // #1843: the runtime's own cache handler first, so the image routing
+        // below judges the handler that will actually run.
+        const withRuntimeHandler = {
             ...config,
+            ...runtimeCacheHandler(config),
+        };
+        return {
+            ...withRuntimeHandler,
             ...(isProductionBuild ? { output: "standalone" as const } : {}),
-            ...imageCacheThroughHandler(config),
+            ...imageCacheThroughHandler(withRuntimeHandler),
             webpack(webpackConfig, ctx) {
                 const cfg = appWebpack
                     ? appWebpack(webpackConfig, ctx)

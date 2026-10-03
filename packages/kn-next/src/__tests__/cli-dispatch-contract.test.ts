@@ -155,13 +155,12 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "unexpected line in hunk",
         ],
         // `knext create`'s answers are applied as anchored edits of knext's
-        // OWN bundled templates; a missing anchor (or a core manifest with no
-        // ioredis range) is a knext packaging defect, caught by
-        // create-options.test.ts before release — never something a user typed.
+        // OWN bundled templates; a missing anchor is a knext packaging defect,
+        // caught by create-options.test.ts before release — never something a
+        // user typed.
         "create-options.ts": [
             "knext create: expected a",
             "copies of the anchor for",
-            "declares no ioredis dependency",
         ],
         // Injectable exec boundary. Empty argv is a programming error inside
         // knext, never something a user types.
@@ -204,6 +203,9 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "knext scaffold templates not found",
             "unknown template variable",
             "unsubstituted template placeholder",
+            // #1843: the installed @getknext/core manifest lacks its own
+            // ioredis dependency — a packaging defect, never argv.
+            "declares no ioredis dependency",
         ],
         // Cluster/build state: schema preflight, BUILD_ID skew, CR apply.
         "deploy.ts": [

@@ -9,8 +9,9 @@
  *    feature does not touch): the option layer must be the identity at the
  *    defaults, for both template families.
  * 2. MAPPING — each non-default answer changes exactly the files it should,
- *    and nothing else. Node + Redis adds `ioredis` (at the range
- *    @getknext/core itself declares); Bun + Redis adds nothing.
+ *    and nothing else. A Node app gets `ioredis` (at the range
+ *    @getknext/core itself declares) through renderScaffold's `runtime`
+ *    option — the one seam for it; a Bun app gets nothing extra.
  * 3. NO HANG — no TTY, `CI`, `--yes` or any flag means no prompt, ever. Proven
  *    in-process (an asker that throws if called) AND with a real subprocess
  *    whose stdin is an open pipe that is never written: if it prompted, it
@@ -77,8 +78,11 @@ function render(choices: Partial<CreateChoices> = {}): Map<string, string> {
         name: "hello-knext",
         version: "1.3.0",
         builder: templateBuilderFor(c.builder),
+        // The runtime goes through renderScaffold's own option — the single
+        // seam that adds the Node Redis client — exactly as writeScaffold does.
+        runtime: c.runtime,
     });
-    return applyCreateChoices(files, c, CORE_MANIFEST.dependencies);
+    return applyCreateChoices(files, c);
 }
 
 function pkgOf(files: Map<string, string>): {
@@ -160,11 +164,11 @@ describe("golden: the defaults are today's scaffold plus React Compiler, nothing
 
         it(`${builder}: with React Compiler off, the option layer is the identity`, () => {
             const base = raw();
-            const out = applyCreateChoices(
-                new Map(base),
-                { ...DEFAULT_CREATE_CHOICES, builder, reactCompiler: false },
-                CORE_MANIFEST.dependencies,
-            );
+            const out = applyCreateChoices(new Map(base), {
+                ...DEFAULT_CREATE_CHOICES,
+                builder,
+                reactCompiler: false,
+            });
             expect([...out.keys()].sort()).toEqual([...base.keys()].sort());
             for (const [rel, content] of base)
                 expect(out.get(rel)).toBe(content);
@@ -172,11 +176,10 @@ describe("golden: the defaults are today's scaffold plus React Compiler, nothing
 
         it(`${builder}: the defaults change only the React Compiler files`, () => {
             const base = raw();
-            const out = applyCreateChoices(
-                new Map(base),
-                { ...DEFAULT_CREATE_CHOICES, builder },
-                CORE_MANIFEST.dependencies,
-            );
+            const out = applyCreateChoices(new Map(base), {
+                ...DEFAULT_CREATE_CHOICES,
+                builder,
+            });
             const changed = [...out.keys()]
                 .filter((rel) => out.get(rel) !== base.get(rel))
                 .sort();
@@ -209,11 +212,7 @@ describe("golden: the defaults are today's scaffold plus React Compiler, nothing
         });
         expect(raw.size).toBeGreaterThan(10);
         // …plus the React Compiler edits in exactly these two files.
-        const withRc = applyCreateChoices(
-            raw,
-            DEFAULT_CREATE_CHOICES,
-            CORE_MANIFEST.dependencies,
-        );
+        const withRc = applyCreateChoices(raw, DEFAULT_CREATE_CHOICES);
         for (const [rel, content] of raw) {
             const got = readFileSync(join(appDir, rel), "utf8");
             if ((RC_FILES.turbopack as readonly string[]).includes(rel)) {
@@ -244,7 +243,7 @@ describe("golden: the defaults are today's scaffold plus React Compiler, nothing
 describe("mapping: each answer changes exactly what it should", () => {
     it("each answer touches only its own files", () => {
         const cases: [Partial<CreateChoices>, string[]][] = [
-            [{ runtime: "node" }, ["knext.config.ts"]],
+            [{ runtime: "node" }, ["knext.config.ts", "package.json"]],
             [{ cache: "redis" }, ["knext.config.ts"]],
             [
                 { runtime: "node", cache: "redis" },
@@ -292,23 +291,38 @@ describe("mapping: each answer changes exactly what it should", () => {
         ).toHaveLength(1);
     });
 
-    it("node + redis adds ioredis at the range @getknext/core declares", () => {
+    it("node (with or without the redis cache) gets ioredis at the range @getknext/core declares", () => {
         const range = CORE_MANIFEST.dependencies.ioredis;
         expect(range).toMatch(/^\^5\./);
-        const pkg = pkgOf(render({ runtime: "node", cache: "redis" }));
-        expect(pkg.dependencies.ioredis).toBe(range);
+        for (const cache of ["redis", "none"] as const) {
+            const pkg = pkgOf(render({ runtime: "node", cache }));
+            expect(pkg.dependencies.ioredis).toBe(range);
+        }
     });
 
-    it("bun + redis adds nothing extra; node without redis adds nothing", () => {
+    it("bun adds nothing extra, with or without the redis cache", () => {
         const base = pkgOf(render());
-        for (const c of [
-            { runtime: "bun", cache: "redis" },
-            { runtime: "node", cache: "none" },
-        ] as const) {
-            const pkg = pkgOf(render(c));
+        for (const cache of ["redis", "none"] as const) {
+            const pkg = pkgOf(render({ runtime: "bun", cache }));
             expect(pkg.dependencies.ioredis).toBeUndefined();
             expect(pkg.dependencies).toEqual(base.dependencies);
         }
+    });
+
+    it("one seam: the option layer never adds ioredis itself", () => {
+        // Rendered for bun (no client), then given node + redis answers: if the
+        // option layer had its own ioredis path, it would add the client here.
+        const bunRendered = renderScaffold({
+            name: "hello-knext",
+            version: "1.3.0",
+            runtime: "bun",
+        });
+        const out = applyCreateChoices(bunRendered, {
+            ...DEFAULT_CREATE_CHOICES,
+            runtime: "node",
+            cache: "redis",
+        });
+        expect(pkgOf(out).dependencies.ioredis).toBeUndefined();
     });
 
     it("node + redis on vinext also gets ioredis and a node start script", () => {
@@ -430,12 +444,12 @@ describe("mapping: each answer changes exactly what it should", () => {
             cfg.replace(registry, ""),
         );
         const node = { ...DEFAULT_CREATE_CHOICES, runtime: "node" as const };
-        expect(() =>
-            applyCreateChoices(twice, node, CORE_MANIFEST.dependencies),
-        ).toThrow(/2 copies of the anchor/);
-        expect(() =>
-            applyCreateChoices(none, node, CORE_MANIFEST.dependencies),
-        ).toThrow(/0 copies of the anchor/);
+        expect(() => applyCreateChoices(twice, node)).toThrow(
+            /2 copies of the anchor/,
+        );
+        expect(() => applyCreateChoices(none, node)).toThrow(
+            /0 copies of the anchor/,
+        );
     });
 
     it("vinext's React Compiler packages match the documented recipe", () => {
@@ -803,7 +817,7 @@ describe("e2e scaffold: runtime × cache (files only, no deploy)", () => {
                     cache === "redis" ? 1 : 0,
                 );
                 expect(pkg.dependencies.ioredis).toBe(
-                    runtime === "node" && cache === "redis"
+                    runtime === "node"
                         ? CORE_MANIFEST.dependencies.ioredis
                         : undefined,
                 );
