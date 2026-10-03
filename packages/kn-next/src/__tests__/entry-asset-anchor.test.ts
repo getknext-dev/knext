@@ -1,17 +1,27 @@
 /**
  * Pure unit tests for entry-asset-anchor.mjs (cluster C4). The integration
  * proof that this actually fixes `next/og`'s ImageResponse inside the
- * compiled single executable lives in vinext-compile-og-exec.test.ts and
- * vinext-compile-entry-asset-anchor.test.ts; this file is the fast, no-fs,
- * no-bun-compile guard on the rewrite logic itself.
+ * compiled single executable lives in vinext-compile-og-exec.test.ts; the
+ * containment/size-cap proof (real filesystem, real `resolveAssetAnchor`)
+ * lives in vinext-compile-asset-anchor-containment.test.ts. This file is the
+ * fast, no-fs, no-bun-compile guard on the rewrite logic and its TWO scoping
+ * layers (package allowlist, code-vs-comment/string position) in isolation.
  */
 import { describe, expect, it } from "bun:test";
 import {
+    allowlistedPackageRoot,
     findAssetAnchors,
+    isAllowlistedAssetAnchorModule,
     rewriteAssetAnchors,
 } from "../adapters/entry-asset-anchor.mjs";
 
-describe("findAssetAnchors", () => {
+const OG_PATH = "/app/node_modules/@vercel/og/dist/index.node.js";
+const OG_SIDECAR_PATH =
+    "/app/.output/server/node_modules/@vercel/og/dist/index.node.js";
+const OTHER_PATH = "/app/node_modules/some-other-pkg/dist/worker-entry.js";
+const ENTRY_PATH = "/app/.output/server/index.mjs";
+
+describe("findAssetAnchors (unscoped detector)", () => {
     it('finds a `new URL("./x", import.meta.url)` anchor', () => {
         const src = 'const p = new URL("./resvg.wasm", import.meta.url);';
         expect(findAssetAnchors(src)).toEqual([{ literal: "./resvg.wasm" }]);
@@ -48,19 +58,55 @@ describe("findAssetAnchors", () => {
         const src = 'new URL(\n  "./x.wasm" ,\n  import.meta.url\n)';
         expect(findAssetAnchors(src)).toEqual([{ literal: "./x.wasm" }]);
     });
+
+    it("finds the anchor even inside `new Worker(...)` — the detector is UNSCOPED on purpose; scoping is rewriteAssetAnchors's job", () => {
+        const src = 'new Worker(new URL("./w.js", import.meta.url))';
+        expect(findAssetAnchors(src)).toEqual([{ literal: "./w.js" }]);
+    });
 });
 
-describe("rewriteAssetAnchors", () => {
-    it("leaves source untouched when the resolver finds nothing", () => {
-        const src = 'new URL("./x.wasm", import.meta.url)';
-        const { contents, assets } = rewriteAssetAnchors(src, () => undefined);
-        expect(contents).toBe(src);
-        expect(assets).toEqual([]);
+describe("isAllowlistedAssetAnchorModule / allowlistedPackageRoot", () => {
+    it("allowlists a real install of @vercel/og", () => {
+        expect(isAllowlistedAssetAnchorModule(OG_PATH)).toBe(true);
+        expect(allowlistedPackageRoot(OG_PATH)).toBe(
+            "/app/node_modules/@vercel/og",
+        );
     });
 
-    it("rewrites a resolved anchor to pathToFileURL(<embedded id>)", () => {
+    it("allowlists nitro's staged SIDECAR copy of @vercel/og, not only a real install", () => {
+        expect(isAllowlistedAssetAnchorModule(OG_SIDECAR_PATH)).toBe(true);
+        expect(allowlistedPackageRoot(OG_SIDECAR_PATH)).toBe(
+            "/app/.output/server/node_modules/@vercel/og",
+        );
+    });
+
+    it("rejects an unrelated package", () => {
+        expect(isAllowlistedAssetAnchorModule(OTHER_PATH)).toBe(false);
+        expect(allowlistedPackageRoot(OTHER_PATH)).toBeUndefined();
+    });
+
+    it("rejects the compiled ENTRY (never one of the allowlisted packages)", () => {
+        expect(isAllowlistedAssetAnchorModule(ENTRY_PATH)).toBe(false);
+        expect(allowlistedPackageRoot(ENTRY_PATH)).toBeUndefined();
+    });
+
+    it("rejects a path with no node_modules segment at all", () => {
+        expect(isAllowlistedAssetAnchorModule("/app/src/index.ts")).toBe(false);
+    });
+
+    it("does not allowlist an UNSCOPED package merely sharing @vercel/og's final segment", () => {
+        expect(
+            isAllowlistedAssetAnchorModule(
+                "/app/node_modules/og/dist/index.js",
+            ),
+        ).toBe(false);
+    });
+});
+
+describe("rewriteAssetAnchors — package allowlist scope", () => {
+    it("rewrites a resolved anchor in an ALLOWLISTED module", () => {
         const src = 'fileURLToPath(new URL("./resvg.wasm", import.meta.url))';
-        const { contents, assets } = rewriteAssetAnchors(src, (lit) =>
+        const { contents, assets } = rewriteAssetAnchors(src, OG_PATH, (lit) =>
             lit === "./resvg.wasm" ? "/abs/resvg.wasm" : undefined,
         );
         expect(assets).toEqual([
@@ -71,6 +117,122 @@ describe("rewriteAssetAnchors", () => {
         );
     });
 
+    it("leaves a NON-ALLOWLISTED module's `new Worker(new URL(...))` anchor completely untouched", () => {
+        const src = 'new Worker(new URL("./w.js", import.meta.url))';
+        let resolverCalls = 0;
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OTHER_PATH,
+            () => {
+                resolverCalls++;
+                return "/abs/w.js"; // would answer yes if ever asked
+            },
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+        expect(
+            resolverCalls,
+            "the resolver must never run for a non-allowlisted module",
+        ).toBe(0);
+    });
+
+    it("leaves the compiled ENTRY's own anchor untouched, even with a resolvable sibling", () => {
+        const src =
+            'readFileSync(fileURLToPath(new URL("./sibling.txt", import.meta.url)))';
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            ENTRY_PATH,
+            () => "/abs/sibling.txt",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
+    it("leaves source untouched when the resolver finds nothing, even in an allowlisted module", () => {
+        const src = 'new URL("./x.wasm", import.meta.url)';
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OG_PATH,
+            () => undefined,
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+});
+
+describe("rewriteAssetAnchors — code-position scope (comments and string literals)", () => {
+    it("leaves an anchor inside a `//` line comment untouched", () => {
+        const src =
+            '// new URL("./resvg.wasm", import.meta.url) — old approach, kept for reference\nconst x = 1;';
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OG_PATH,
+            () => "/abs/resvg.wasm",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
+    it("leaves an anchor inside a `/* */` block comment untouched", () => {
+        const src =
+            '/* new URL("./resvg.wasm", import.meta.url) */\nconst x = 1;';
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OG_PATH,
+            () => "/abs/resvg.wasm",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
+    it("leaves an anchor inside a single-quoted STRING LITERAL untouched (the outer quote, not the inner one, is what matters)", () => {
+        const src =
+            "const warning = 'new URL(\"./resvg.wasm\", import.meta.url) is unsupported here';";
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OG_PATH,
+            () => "/abs/resvg.wasm",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
+    it("leaves an anchor inside a template-literal LITERAL part untouched, but still rewrites one inside a `${...}` interpolation", () => {
+        const src =
+            'const doc = `see new URL("./resvg.wasm", import.meta.url) in the docs`;\n' +
+            'const live = `${new URL("./resvg.wasm", import.meta.url)}`;';
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OG_PATH,
+            () => "/abs/resvg.wasm",
+        );
+        expect(assets).toEqual([
+            { id: "__knextAssetAnchor0", absPath: "/abs/resvg.wasm" },
+        ]);
+        expect(contents).toBe(
+            'const doc = `see new URL("./resvg.wasm", import.meta.url) in the docs`;\n' +
+                'const live = `${require("node:url").pathToFileURL(__knextAssetAnchor0)}`;',
+        );
+    });
+
+    it("still rewrites a REAL (code-position) anchor elsewhere in the same allowlisted module that also has a commented-out one", () => {
+        const src =
+            '// new URL("./old.wasm", import.meta.url)\n' +
+            'const resvg = fs.readFileSync(fileURLToPath(new URL("./resvg.wasm", import.meta.url)));';
+        const { contents, assets } = rewriteAssetAnchors(src, OG_PATH, (lit) =>
+            lit === "./resvg.wasm" ? "/abs/resvg.wasm" : undefined,
+        );
+        expect(assets).toEqual([
+            { id: "__knextAssetAnchor0", absPath: "/abs/resvg.wasm" },
+        ]);
+        expect(contents).toBe(
+            '// new URL("./old.wasm", import.meta.url)\n' +
+                'const resvg = fs.readFileSync(fileURLToPath(require("node:url").pathToFileURL(__knextAssetAnchor0)));',
+        );
+    });
+});
+
+describe("rewriteAssetAnchors — dedup and pass-through", () => {
     it("gives two DISTINCT anchors two distinct ids, in first-seen order", () => {
         const src =
             'a(new URL("./a.wasm", import.meta.url));\n' +
@@ -79,7 +241,7 @@ describe("rewriteAssetAnchors", () => {
             "./a.wasm": "/abs/a.wasm",
             "./b.ttf": "/abs/b.ttf",
         };
-        const { assets } = rewriteAssetAnchors(src, (lit) => map[lit]);
+        const { assets } = rewriteAssetAnchors(src, OG_PATH, (lit) => map[lit]);
         expect(assets).toEqual([
             { id: "__knextAssetAnchor0", absPath: "/abs/a.wasm" },
             { id: "__knextAssetAnchor1", absPath: "/abs/b.ttf" },
@@ -92,6 +254,7 @@ describe("rewriteAssetAnchors", () => {
             'b(new URL("./x.wasm", import.meta.url));';
         const { contents, assets } = rewriteAssetAnchors(
             src,
+            OG_PATH,
             () => "/abs/x.wasm",
         );
         expect(assets).toEqual([
@@ -107,7 +270,7 @@ describe("rewriteAssetAnchors", () => {
         const src =
             'a(new URL("./known.wasm", import.meta.url));\n' +
             'b(new URL("./unknown.wasm", import.meta.url));';
-        const { contents, assets } = rewriteAssetAnchors(src, (lit) =>
+        const { contents, assets } = rewriteAssetAnchors(src, OG_PATH, (lit) =>
             lit === "./known.wasm" ? "/abs/known.wasm" : undefined,
         );
         expect(assets).toEqual([
@@ -122,7 +285,7 @@ describe("rewriteAssetAnchors", () => {
     it("passes the resolver the literal exactly as written, unresolved", () => {
         const src = 'new URL("./nested/dir/x.wasm", import.meta.url)';
         let seen: string | undefined;
-        rewriteAssetAnchors(src, (lit) => {
+        rewriteAssetAnchors(src, OG_PATH, (lit) => {
             seen = lit;
             return undefined;
         });
