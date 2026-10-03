@@ -29,8 +29,7 @@ import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -72,7 +71,9 @@ function harnessScript(shard = '1/16'): string {
   const run = harnessStep().run;
   if (!run) throw new Error('the harness step has no run: block');
   if (!/\$\{\{\s*matrix\.shard\s*\}\}/.test(run)) {
-    throw new Error('expected ${{ matrix.shard }} in the harness step — selector or step drifted');
+    throw new Error(
+      'expected the matrix.shard GHA expression in the harness step — selector or step drifted',
+    );
   }
   return run.replace(/\$\{\{\s*matrix\.shard\s*\}\}/g, shard);
 }
