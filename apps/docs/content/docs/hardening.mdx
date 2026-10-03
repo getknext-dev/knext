@@ -101,15 +101,6 @@ the scaffolded `knext-bun-entry.mjs` and `knext-node-entry.mjs` read it.
 - **Default: `8388608` bytes (8 MiB).** Chosen against the memory limit and `containerConcurrency`
   (20 in-flight × 8 MiB stays far inside a 1Gi pod), and deliberately above Next's 1 MB Server
   Action limit so the two never answer at the same threshold.
-
-<Callout type="warn">
-**Apps created with `knext create` before 1.0.1 have `containerConcurrency: 100` in their
-`knext.config.ts`** — five times the `20` this cap's sizing assumes. At `100`, concurrent large
-uploads can buffer far more request-body bytes than a 1Gi pod's memory limit allows, which can get
-the pod OOM-killed instead of cleanly answering `413`. If your app predates 1.0.1, either delete
-that line (the operator's default of `20` then applies) or set it to `20` or lower. Apps created
-with 1.0.1 or later do not set this line.
-</Callout>
 - **The runtime counts bytes.** A body sent with chunked transfer encoding and no `Content-Length`
   is refused at the same size as one that declares its length. `Content-Length` is never trusted on
   its own.
@@ -136,6 +127,15 @@ with 1.0.1 or later do not set this line.
   ```
 
   With the cap removed it reads `REQUEST_BYTE_CAP:none (uncapped)`.
+
+<Callout type="warn">
+**Apps created with `knext create` before 1.0.1 have `containerConcurrency: 100` in their
+`knext.config.ts`** — five times the `20` this cap's sizing assumes. At `100`, concurrent large
+uploads can buffer far more request-body bytes than a 1Gi pod's memory limit allows, which can get
+the pod OOM-killed instead of cleanly answering `413`. If your app predates 1.0.1, either delete
+that line (the operator's default of `20` then applies) or set it to `20` or lower. Apps created
+with 1.0.1 or later will not set this line.
+</Callout>
 
 Change it per app with an environment variable — in `knext.config.ts`:
 
