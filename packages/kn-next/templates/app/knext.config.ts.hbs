@@ -35,7 +35,10 @@ const config: KnativeNextConfig = {
   scaling: {
     minScale: 0,
     maxScale: 10,
-    containerConcurrency: 100,
+    // containerConcurrency omitted => the operator's default of 20 applies
+    // (ADR-0028). That default is what the 8 MiB request-body cap (ADR-0044)
+    // is sized for; raising it without also raising the cap's memory headroom
+    // lets concurrent large uploads buffer enough bytes to OOM-kill a 1Gi pod.
     // Keep the last pod routable for 5 minutes after traffic stops: requests in
     // that window skip the cold start entirely (~50 ms vs seconds). Costs one
     // idle pod (and its idle DB connections) for the window after every burst —

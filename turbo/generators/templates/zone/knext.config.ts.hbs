@@ -35,7 +35,10 @@ const config: KnativeNextConfig = {
   scaling: {
     minScale: 1,
     maxScale: 10,
-    containerConcurrency: 100,
+    // containerConcurrency omitted => the operator's default of 20 applies
+    // (ADR-0028). That default is what the 8 MiB request-body cap (ADR-0044)
+    // is sized for; raising it without also raising the cap's memory headroom
+    // lets concurrent large uploads buffer enough bytes to OOM-kill a 1Gi pod.
   },
 
   // Bring-your-own database binding (optional). knext provisions no
