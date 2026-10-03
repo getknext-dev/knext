@@ -36,7 +36,7 @@
  * when unset, this is a no-op and Next falls back to pod-local caching.
  */
 
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, promises as fs, constants as fsConstants } from "node:fs";
 import { dirname, join } from "node:path";
 
 /**
@@ -107,6 +107,26 @@ const DEFAULT_PREFIX = "image-cache";
 
 function defaultCacheDir(): string {
     return join(process.cwd(), ".next", "cache", "images");
+}
+
+/**
+ * Whether the build that owns `cacheDir` (`<distDir>/cache/images`) stores
+ * optimized images through the cache handler — read from the same
+ * `<distDir>/required-server-files.json` the standalone server starts from.
+ * Unreadable = no (the sync keeps its old behaviour).
+ */
+async function imagesRoutedThroughHandler(cacheDir: string): Promise<boolean> {
+    try {
+        const rsf = JSON.parse(
+            await fs.readFile(
+                join(cacheDir, "..", "..", "required-server-files.json"),
+                "utf-8",
+            ),
+        ) as { config?: { images?: { customCacheHandler?: unknown } } };
+        return rsf.config?.images?.customCacheHandler === true;
+    } catch {
+        return false;
+    }
 }
 
 /** Build the object key for a local cache file: `<prefix>/<cacheKey>/<file>`. */
@@ -433,10 +453,36 @@ export async function startImageCacheSync(
         return { stop: () => {} };
     }
 
+    const cacheDir = env.IMAGE_CACHE_DIR || defaultCacheDir();
+
+    // Write-free runtime: a build whose optimized images go through the
+    // knext cache handler (`images.customCacheHandler`, set by the adapter)
+    // never writes this directory, so there is nothing to restore or push.
+    if (await imagesRoutedThroughHandler(cacheDir)) {
+        log.info(
+            "[image-cache-sync] disabled: optimized images are stored through the cache handler, not on disk",
+        );
+        return { stop: () => {} };
+    }
+    // A read-only root filesystem with no writable volume here: restore and
+    // watch would both `mkdir` into it and throw EROFS on every wake. Stand
+    // down instead; Next logs its own (non-fatal) write failure and
+    // re-optimizes per request.
+    try {
+        await fs.mkdir(cacheDir, { recursive: true });
+        await fs.access(cacheDir, fsConstants.W_OK);
+    } catch (err) {
+        log.warn(
+            `[image-cache-sync] disabled: ${cacheDir} is not writable (${String(err)}) — ` +
+                "optimized images are not persisted to the object store",
+        );
+        return { stop: () => {} };
+    }
+
     const opts: ImageCacheSyncOptions = {
         bucket,
         prefix: env.IMAGE_CACHE_PREFIX || DEFAULT_PREFIX,
-        cacheDir: env.IMAGE_CACHE_DIR || undefined,
+        cacheDir,
         store: deps.store ?? (await defaultStore()) ?? undefined,
         log,
     };

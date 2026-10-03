@@ -86,6 +86,7 @@ import {
     withKubeContext,
 } from "./shared";
 import { requireBuildContext } from "./tracing-root";
+import { readImageCacheRouted, type WriteFreeFacts } from "./write-free";
 
 const log = createLogger({ module: "deploy" });
 
@@ -376,6 +377,7 @@ async function runPrunePreflight(
     namespace: string,
     buildId: string,
     context?: string,
+    writeFreeFacts?: WriteFreeFacts,
 ): Promise<void> {
     const { writeFileSync, mkdirSync } = await import("node:fs");
     const crPath = join(process.cwd(), ".output", "nextapp-preflight-cr.yaml");
@@ -387,6 +389,8 @@ async function runPrunePreflight(
             preflightImageRef(`${config.registry}/${config.name}:preflight`),
             namespace,
             buildId,
+            undefined,
+            writeFreeFacts,
         ),
         "utf-8",
     );
@@ -571,6 +575,12 @@ export async function deploy() {
             options.namespace,
             buildId,
             options.context,
+            // The build has not run yet, so assume the image cache WILL be
+            // routed: the preflight CR then carries a superset of the applied
+            // CR's fields, and an operator CRD that predates
+            // the write-free field (security.writeFree) is reported here, before any side
+            // effect, rather than at the real apply.
+            { builtThisRun: !options.skipBuild, imageCacheRouted: true },
         );
     }
 
@@ -1035,11 +1045,24 @@ export async function deploy() {
     // `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
     // The operator reconciles all cluster resources from this CR.
     // In dry-run mode imageRef is the mutable tag (acceptable for preview only).
+    //
+    // The write-free field, security.writeFree (no writable volume needed), is stated only
+    // for an image THIS run built; for a standalone build, whether the image
+    // cache is handler-routed is read back from this build's own output
+    // (see write-free.ts).
+    const writeFreeFacts: WriteFreeFacts | undefined = options.skipBuild
+        ? undefined
+        : {
+              builtThisRun: true,
+              imageCacheRouted: readImageCacheRouted(process.cwd(), buildId),
+          };
     const crYaml = renderNextAppCR(
         config,
         imageRef,
         options.namespace,
         buildId,
+        undefined,
+        writeFreeFacts,
     );
     const crPath = join(process.cwd(), ".output", "nextapp-cr.yaml");
 

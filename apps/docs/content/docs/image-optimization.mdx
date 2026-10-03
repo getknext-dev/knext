@@ -25,17 +25,37 @@ Optimizing an image is CPU-expensive, and under Knative scale-to-zero every cold
 empty local cache. Without intervention, each freshly-woken pod would re-optimize images another pod
 already produced — burning the cold-start CPU budget on redundant work.
 
-knext closes this with an **object-store sync** for the optimized-variant cache. The optimized
-variants persist to the object store (GCS / S3 / MinIO / Azure — knext's data plane), so a variant computed
-once is reused by every later pod. This is the same "survives the cold start" property as the
-[bytecode cache](/docs/bytecode): the work outlives the pod that did it.
+knext keeps optimized variants outside the pod, so a variant computed once is reused by every later
+pod. This is the same "survives the cold start" property as the [bytecode cache](/docs/bytecode):
+the work outlives the pod that did it.
 
-### How the sync works
+### Stored through the cache handler (default)
 
-Next.js writes optimized variants to a **pod-local** directory
+When your app uses the knext cache handler (every `knext create` app does), the knext adapter turns
+on Next's `images.customCacheHandler` option at build time. Next then stores each optimized variant
+through the cache handler instead of writing it to local disk:
+
+- **On the Bun runtime with Redis configured**, variants live in Redis next to your ISR entries,
+  so every pod shares them and they survive scale-to-zero.
+- **On the Node runtime**, the standalone image cannot reach Redis yet, so the cache handler falls
+  back to the per-pod memory cache below. Variants are re-optimized after each scale-to-zero.
+- **Without Redis**, variants are kept in each pod's memory, capped at 32 MiB by default. Least
+  recently used variants are dropped first. Set `KNEXT_IMAGE_CACHE_MEMORY_BYTES` to change the cap.
+
+Because nothing is written to disk, the app needs no writable volume for images, which keeps a
+scratch volume off every cold start (see
+[Read-only root filesystem](/docs/security#read-only-root-filesystem)).
+
+To keep Next's on-disk image cache instead, build with `KNEXT_IMAGE_CACHE_HANDLER=0` and set
+`spec.security.writableCache: true` on your `NextApp`. The object-store sync below then applies.
+
+### Object-store sync (disk cache)
+
+When images are cached on disk (the opt-out above, a custom `cacheHandler`, or a Next.js version
+without `images.customCacheHandler`), knext syncs that directory to the object store (GCS / S3 /
+MinIO / Azure). Next.js writes optimized variants to a **pod-local** directory
 (`.next/cache/images/<cacheKey>/...`), where `cacheKey` is a content hash of `(src, width, quality,
-mimeType)`. On the pinned Next.js version the image-optimizer cache is **not** pluggable through
-`cacheHandler`, so knext syncs the directory Next already writes rather than intercepting it:
+mimeType)`, and knext syncs the directory Next already writes rather than intercepting it:
 
 | Phase | Behavior |
 |---|---|
@@ -43,8 +63,9 @@ mimeType)`. On the pinned Next.js version the image-optimizer cache is **not** p
 | **Watch + push** (runtime) | Watches the cache dir; when Next writes a new variant, the (debounced) variant directory is uploaded to the store under `<prefix>/<cacheKey>/`. |
 
 The sync is guarded by `STORAGE_BUCKET`: when it is unset, the sync is a no-op and Next falls back
-to pod-local caching. Both restore and push are **best-effort** — a store outage degrades to
-local-only optimization rather than crashing the pod.
+to pod-local caching. It also stands down when images are stored through the cache handler, or
+when the cache directory is not writable. Both restore and push are **best-effort** — a store
+outage degrades to local-only optimization rather than crashing the pod.
 
 ## Shipping sharp with your image
 
