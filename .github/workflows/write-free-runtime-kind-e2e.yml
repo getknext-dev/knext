@@ -29,17 +29,13 @@ name: Write-free runtime — kind e2e (no writable volume)
 # The vinext disk-mode leg of the same change is proved by the file-manager
 # platform e2e (a vinext app), which asserts the same no-volume rendering.
 #
-# Dispatch-only in practice: no schedule, non-required. The pull_request
-# trigger is path-filtered to THIS file alone, because GitHub refuses to
-# dispatch a workflow that is not yet on the default branch — it fires on the
-# PR that introduces or edits the lane, never on ordinary PRs. Ephemeral kind
-# on the runner only — never OKE/GKE.
+# Dispatch-only: no schedule, no PR trigger, non-required. (GitHub cannot
+# dispatch a workflow that is not on the default branch yet, so the PR that
+# introduced this lane ran it once through a temporary pull_request trigger.)
+# Ephemeral kind on the runner only — never OKE/GKE.
 
 on:
   workflow_dispatch: {}
-  pull_request:
-    paths:
-      - '.github/workflows/write-free-runtime-kind-e2e.yml'
 
 permissions:
   contents: read
