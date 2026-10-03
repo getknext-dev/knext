@@ -321,18 +321,6 @@ async function importPatched<T>(rel: string): Promise<T> {
     return (await import(pathToFileURL(join(patched, rel)).href)) as T;
 }
 
-/**
- * Same as `importPatched`, but with a cache-busting query string so the
- * module is re-evaluated (re-reads `process.env`) instead of returning a
- * namespace object cached from an earlier test's import of the same path.
- * Needed for dist/shims/image.js, which reads `__VINEXT_TRAILING_SLASH` at
- * module scope.
- */
-async function importPatchedFresh<T>(rel: string): Promise<T> {
-    const href = pathToFileURL(join(patched, rel)).href;
-    return (await import(`${href}?t=${Date.now()}-${Math.random()}`)) as T;
-}
-
 describe("the bundled patches against the published tarball", () => {
     it("every patch applies cleanly to the installed vinext, then is idempotent", () => {
         const first = applyVinextPatches(patched);
@@ -568,26 +556,55 @@ describe("the bundled patches against the published tarball", () => {
         expect(evalExpr(false, false, ["sqlite3"], {})).toEqual({});
     });
 
-    it("vinext#3686: the image optimizer path honours trailingSlash", async () => {
+    it("vinext#3686: the image optimizer path honours trailingSlash (both branches)", async () => {
         applyVinextPatches(patched);
-        // bun's module cache keys on the resolved path, not the full URL, so
-        // a query-string cache-buster does not force re-evaluation here —
-        // set the env var before this suite's ONLY import of this path.
-        process.env.__VINEXT_TRAILING_SLASH = "true";
+        // bun's module cache keys on the resolved path (a query-string
+        // cache-buster does not force re-evaluation), and __trailingSlash is
+        // read from process.env once at module scope — so each branch needs
+        // its OWN file path, not just its own import call, or the first
+        // branch's value sticks for the second import too.
+        const srcPath = join(patched, "dist", "shims", "image.js");
+        const truePath = join(
+            patched,
+            "dist",
+            "shims",
+            "image.trailingslash-true-probe.js",
+        );
+        const falsePath = join(
+            patched,
+            "dist",
+            "shims",
+            "image.trailingslash-false-probe.js",
+        );
+        cpSync(srcPath, truePath);
+        cpSync(srcPath, falsePath);
+        type ImageModule = {
+            imageOptimizationUrl: (
+                src: string,
+                width: number,
+                quality?: number,
+            ) => string;
+        };
         try {
-            const mod = await importPatchedFresh<{
-                imageOptimizationUrl: (
-                    src: string,
-                    width: number,
-                    quality?: number,
-                ) => string;
-            }>("dist/shims/image.js");
-            expect(mod.imageOptimizationUrl("/test.jpg", 828, 75)).toBe(
+            process.env.__VINEXT_TRAILING_SLASH = "true";
+            const trueMod = (await import(
+                pathToFileURL(truePath).href
+            )) as ImageModule;
+            expect(trueMod.imageOptimizationUrl("/test.jpg", 828, 75)).toBe(
                 "/_next/image/?url=%2Ftest.jpg&w=828&q=75",
             );
         } finally {
             delete process.env.__VINEXT_TRAILING_SLASH;
         }
+        // Unset: the pre-existing default-path behaviour, in its own fresh
+        // module instance (process.env.__VINEXT_TRAILING_SLASH is already
+        // deleted above, before this import).
+        const falseMod = (await import(
+            pathToFileURL(falsePath).href
+        )) as ImageModule;
+        expect(falseMod.imageOptimizationUrl("/test.jpg", 828, 75)).toBe(
+            "/_next/image?url=%2Ftest.jpg&w=828&q=75",
+        );
     });
 
     it("vinext#3686: a custom loader prop gets the built-in loader's per-breakpoint srcSet, with quality passed through unforced", async () => {
