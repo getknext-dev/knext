@@ -1,0 +1,167 @@
+---
+title: "Advanced: in-cluster pull-through mirror"
+description: An optional, cluster-level recipe that cuts cold-start image pulls when imagePrewarm cannot cover every node — the setup, the measured numbers, and the operational risks.
+---
+
+<Callout type="info">
+Read [Cold starts & image caching](/docs/image-caching) first. `imagePrewarm` is the primary
+answer to a cold-start image pull: it is faster, it needs no node configuration, and it stays on
+by default once you turn it on per app. This page is for the gap `imagePrewarm` leaves —
+an image that was never pre-pulled: a brand-new node, a node that scaled in after the prewarm
+DaemonSet last ran, or more applications than you want to pin an image-holding pod to on every
+node.
+</Callout>
+
+A pull-through mirror is a registry that sits between your nodes and your upstream registry. The
+first pull of any image goes through the mirror and out to the upstream registry, same as a direct
+pull. Every pull after that — from any node, for any application — is served from the mirror
+instead, so the image never has to cross the slower hop to the upstream registry again.
+
+**knext does not install, run, or manage this mirror.** It is cluster infrastructure, the same
+category as your CNI or your node pool's bootstrap image — not a knext config field or CR. The
+rest of this page is a recipe you apply at the cluster level, independent of any knext app.
+
+## What it is worth
+
+Measured on a two-node cluster (CRI-O 1.34.8, Oracle Linux 8), pulling a 78 MB image from a registry
+in a different region from the cluster, 12 cold starts per configuration:
+
+| configuration | cold start, median | p95 |
+|---|---|---|
+| direct pull from the upstream registry | 10.95 s | 17.8 s |
+| in-cluster pull-through mirror (already holding the image) | 5.73 s | 7.6 s |
+| `imagePrewarm` (image already resident, no pull) | 2.25 s | 2.8 s |
+
+Three things to take from that table, not just the headline number:
+
+- **`imagePrewarm` stays faster** than a mirror hit by roughly 2.5×, because it skips the pull
+  entirely rather than shortening it. If you can prewarm the app, prewarming beats mirroring.
+- **The mirror's advantage narrows with registry distance.** The gap above is for an upstream
+  registry remote from the cluster's region. A registry in the same region as your cluster closes
+  much of that gap on its own — in an earlier same-region measurement, a direct pull of a larger
+  image added about 2.3 seconds at the median, nowhere near the 10-second direct-pull figure
+  above. Quote the mirror's benefit against your own registry's distance, not against this table.
+- **The mirror only helps once an image has already been pulled through it once.** The first pull
+  of any new build — the miss — costs **about 0.8 seconds more** than pulling the same image
+  directly, because the mirror has to fetch from upstream and relay to the node at the same time.
+  A cluster that rebuilds images constantly, with few repeat pulls of the same digest, sees less
+  benefit than one that reuses the same image across many pods and nodes.
+
+A side effect, observed during the same measurement: because the mirror holds its own upstream
+credentials, a pod that pulls through it is unaffected by a node's own pull-secret failing — a
+failure mode that otherwise shows up as an intermittent `ImagePullBackOff` on the direct path.
+That is a side benefit of running a mirror, not a reason to run one on its own.
+
+## CRI-O setup
+
+This recipe uses the CNCF [`distribution`](https://github.com/distribution/distribution) registry
+(the `registry:2` image) in **proxy mode**, which answers pulls from its own cache and falls back
+to a configured upstream on a miss.
+
+### 1. Run the mirror as a proxy
+
+Deploy `registry:2` with a pull-through configuration pointed at your upstream registry, holding
+the upstream's own credentials (see [Risks](#risks) below — this makes the mirror a credential
+holder in its own right):
+
+```yaml
+proxy:
+  remoteurl: https://your-upstream-registry.example.com
+  username: <upstream-username>
+  password: <upstream-password>
+```
+
+Give it persistent storage sized for the images you expect it to cache — an `emptyDir` loses the
+cache on every reschedule, which turns every pull after a reschedule back into a miss.
+
+### 2. Point CRI-O at it with a registries.conf.d drop-in
+
+CRI-O reads registry configuration from `/etc/containers/registries.conf.d/`. Add a drop-in file
+scoped to the specific registry host **and the specific repository prefix** you want mirrored —
+not a bare registry host, and not a wildcard — so a typo or an overly broad match cannot silently
+redirect pulls for images that have nothing to do with the one you meant to mirror. This is not
+a stylistic preference: the measurement this recipe is based on scoped its `[[registry]]` entry
+to one repository alias specifically to prove that no unrelated image ref could match it, and the
+recipe should carry the same discipline forward:
+
+```toml
+# /etc/containers/registries.conf.d/99-knext-pull-through-mirror.conf
+[[registry]]
+prefix = "your-upstream-registry.example.com/your-org"
+location = "your-upstream-registry.example.com/your-org"
+
+[[registry.mirror]]
+location = "mirror.internal.svc.cluster.local:5000/your-org"
+```
+
+### 3. Reload CRI-O — do not restart it
+
+```bash
+systemctl reload crio
+```
+
+`reload` sends CRI-O a `SIGHUP`, which re-reads `registries.conf.d/` without restarting the CRI-O
+process or any running pod. A `restart` is unnecessary and disruptive; use `reload`. CRI-O falls
+back to the upstream `location` when the mirror is unreachable — we observed this behavior during
+the measurement above, but did not drill a mirror outage deliberately, so verify the fallback on
+your own cluster before relying on it rather than taking it as proven here.
+
+## containerd setup
+
+containerd uses a different mechanism: a per-registry `hosts.toml` under a certs.d directory.
+
+```toml
+# /etc/containerd/certs.d/your-upstream-registry.example.com/hosts.toml
+server = "https://your-upstream-registry.example.com"
+
+[host."https://mirror.internal.svc.cluster.local:5000"]
+  capabilities = ["pull", "resolve"]
+```
+
+containerd picks this up without a config reload on most distributions; confirm the behavior on
+whichever Kubernetes distribution provisioned your nodes, since the exact containerd version and
+packaging vary.
+
+<Callout type="info">
+If your cluster runs containerd, **[Spegel](https://github.com/spegel-org/spegel)** is a
+containerd-only peer-to-peer alternative worth evaluating instead of a centralized proxy registry:
+nodes serve cached layers to each other directly, with no separate stateful registry to run. It
+has no CRI-O equivalent, so it is not an option on a CRI-O cluster.
+</Callout>
+
+## Risks
+
+<Callout type="warn">
+This is cluster-level infrastructure with cluster-wide blast radius. Read this section before you
+apply it, not after.
+</Callout>
+
+- **The node configuration does not survive a node replacement.** A drop-in file (CRI-O) or a
+  certs.d entry (containerd) lives on the node's local filesystem. A new node — from a scale-up
+  event, a node-pool upgrade, or a replacement after a failure — comes up without it, and pulls go
+  direct until something re-applies the file. The durable fix is to bake the file into your node
+  pool's bootstrap process or cloud-init, not to apply it by hand to running nodes. If you apply it
+  by hand, treat every new node as unconfigured until you have verified otherwise.
+- **The mirror is a stateful component you now operate.** It needs storage sized for your working
+  set, an availability story (what happens to pulls while it is down — degraded to direct, per the
+  CRI-O fallback above, but only if the fallback path is configured correctly), and monitoring like
+  any other piece of cluster infrastructure. It is one more thing that can fail, and it needs
+  someone to own it.
+- **The mirror holds upstream registry credentials of its own.** Configuring it in proxy mode
+  means giving it a real credential for your upstream registry, stored wherever you run it (a
+  Kubernetes Secret, if it runs in-cluster). That credential's blast radius is now the mirror's
+  blast radius — treat it with the same care as any other registry credential, and do not assume
+  the mirror's own access controls match your upstream registry's.
+- **Scope the registry-host match narrowly.** An unscoped mirror entry for an entire registry host
+  affects every image pulled from that host, on every pod on the node — including images that have
+  nothing to do with the application you were trying to speed up.
+
+## When to reach for this instead of `imagePrewarm`
+
+- You have more applications than you are willing to spend a prewarm pod-per-node on.
+- Your node pool scales in and out, so new nodes routinely arrive without a prewarmed image.
+- You are willing to own a stateful registry and a node-level configuration change, and you have a
+  way to apply that change durably (node-pool bootstrap or cloud-init), not just by hand once.
+
+If none of those apply, `imagePrewarm` is simpler, faster, and needs no node-level change at all —
+stay with it.

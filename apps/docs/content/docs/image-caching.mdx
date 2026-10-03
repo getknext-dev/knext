@@ -126,6 +126,15 @@ Set `imagePrewarm: false` (or remove it) and redeploy. The cached copies and the
 from every node; nothing else about the app changes. Cold starts go back to pulling the image when
 the node does not happen to have it.
 
+## When `imagePrewarm` cannot cover every node
+
+`imagePrewarm` is per app and needs the prewarm DaemonSet to have already run on a node. A node
+that joins the cluster after that, or an app you are not willing to prewarm, still pays the pull.
+If that gap matters to you, [an optional in-cluster pull-through mirror](/docs/pull-through-mirror)
+is a cluster-level recipe that shortens the pull itself — it is slower than `imagePrewarm`, needs
+its own node configuration, and knext does not install or manage it, but it covers every app and
+every node once an image has been pulled through it once.
+
 ## What it does not do
 
 - **It does not keep a pod of your app warm.** The app still scales to zero and still cold-starts;
