@@ -190,3 +190,58 @@ describe('testFiles resolution (R1) — run AS SHELL against a synthetic test/ t
     }
   });
 });
+
+describe('testFiles across the FULL 16-shard matrix — each matched file runs exactly once total', () => {
+  // The defect this guards: every shard ran the SAME resolved file list
+  // (16x the work, each shard rebuilding+recompiling+booting the same 3
+  // fixtures) — run 37140399796 needed the coordinator to cancel 9
+  // still-running shards after the 7 finished ones already gave a conclusive
+  // result. Simulate all 16 real shard values against 16 INDEPENDENT
+  // sandboxes (one run-tests.js invocation touches one sandbox's argv.json;
+  // isolation matters because two shards racing the same file would hide a
+  // double-count), and assert over the UNION: no file is invoked zero times
+  // (nothing silently dropped) and no file is invoked more than once
+  // (nothing silently duplicated) — the literal shape of "runs exactly once",
+  // independent of which shard(s) happen to carry it.
+  it('N files matched, 16 shards simulated: the union of run-tests.js invocations covers each file exactly once', () => {
+    const shards = Array.from({ length: 16 }, (_, i) => `${i + 1}/16`);
+    const dirs = shards.map(() => makeSandbox(FIXTURES));
+    const tally = new Map<string, number>();
+    let invokedShardCount = 0;
+    try {
+      shards.forEach((shard, i) => {
+        const dir = dirs[i] as string;
+        const r = spawnSync('bash', ['-c', harnessScript(shard)], {
+          cwd: dir,
+          env: { ...process.env, TEST_FILES: 'turbopack-reports, twoslash, fallback-shells' },
+          encoding: 'utf8',
+          timeout: 30000,
+        });
+        expect(r.status, `shard ${shard} failed: ${r.stderr}`).toBe(0);
+        let argv: string[];
+        try {
+          argv = JSON.parse(readFileSync(join(dir, 'argv.json'), 'utf8')) as string[];
+        } catch {
+          return; // this shard skipped — never invoked the fake run-tests.js
+        }
+        invokedShardCount += 1;
+        for (const a of argv) {
+          if (a.endsWith('.test.ts')) tally.set(a, (tally.get(a) ?? 0) + 1);
+        }
+      });
+    } finally {
+      for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    }
+    // At least one shard must actually run them (not zero total — that would
+    // be the "aborted everywhere" failure mode, equally wrong).
+    expect(invokedShardCount).toBeGreaterThan(0);
+    // The three requested files, each exactly once across the WHOLE matrix.
+    const counts = [...tally.values()];
+    expect(counts.length).toBe(3);
+    expect(counts.every((n) => n === 1)).toBe(true);
+    const names = [...tally.keys()];
+    expect(names.some((n) => n.includes('turbopack-reports'))).toBe(true);
+    expect(names.some((n) => n.includes('twoslash'))).toBe(true);
+    expect(names.some((n) => n.includes('fallback-shells'))).toBe(true);
+  });
+});
