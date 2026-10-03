@@ -51,6 +51,11 @@
       "file": "vinext-3684-bare-double-slash-not-open-redirect.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3684",
       "summary": "A bare `//` (in any literal/percent-encoded form, with nothing after it) is no longer treated as an open-redirect shape, matching Next.js serving it as the index route."
+    },
+    {
+      "file": "vinext-3686-image-trailingslash-loader-srcset.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3686",
+      "summary": "next/image: the optimizer path honours `trailingSlash`, and a custom `loader` prop gets the built-in loader's per-breakpoint `srcSet` treatment (quality passed through as given, not forced to 75). The upstream PR also wires up `images.loaderFile`; that part is not bundled (see the patch header) and `loaderFile` remains ignored until the upstream release."
     }
   ],
   "pristine": {
@@ -61,6 +66,7 @@
     "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a",
     "dist/server/app-rsc-handler.js": "b4a18a7636263b24b06ecaf48f88c85a975853f1c83805beb88cdbf779d9a9da",
     "dist/server/app-segment-config.js": "13ca8d09a6a7baa5c19551b68c76f1e0a6fe15f98a40c0e0d1988c215ba14242",
-    "dist/server/open-redirect.js": "4e62ca39cf91cdc92ec9cb4d269a1fb0c64f3c48c6a90e1f7b8bb5efeb5cf475"
+    "dist/server/open-redirect.js": "4e62ca39cf91cdc92ec9cb4d269a1fb0c64f3c48c6a90e1f7b8bb5efeb5cf475",
+    "dist/shims/image.js": "f498afc199ba102be93b93ae2098f6ed79bcae261485f6a807438efbe134f0b3"
   }
 }
