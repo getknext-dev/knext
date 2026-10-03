@@ -202,7 +202,6 @@ function __resetEnvForTests() {
   connectPromise = undefined;
   useRedis = !!REDIS_URL;
   unhealthyUntil = 0;
-  redisClientUnavailableReported = false;
   CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
   COMMAND_TIMEOUT_MS = envMs('REDIS_COMMAND_TIMEOUT_MS', 2000);
   RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
@@ -392,14 +391,11 @@ let redisClient = RUNTIME_DETECTED;
  * but a configured Redis that is never used is a deployment defect, not a
  * transient fault, so it is reported at error level rather than left for
  * someone to infer from log suffixes. The constructor attempts the connection
- * eagerly, so this lands at startup. Once per process: `useRedis` is cleared
- * alongside it, so nothing retries the load.
+ * eagerly, so this lands at startup. Once per process without a flag: the load
+ * is single-flight (`clientLoad`), and `useRedis` is cleared alongside the
+ * report, so nothing retries it.
  */
-let redisClientUnavailableReported = false;
-
 function reportRedisClientUnavailable(err) {
-  if (redisClientUnavailableReported) return;
-  redisClientUnavailableReported = true;
   console.error(
     `[CacheHandler] Redis client unavailable: REDIS_URL is set but the ` +
       `${redisClient.name} Redis client could not be loaded ` +
