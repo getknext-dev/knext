@@ -997,6 +997,21 @@ describe("vinext runtime paths default VINEXT_NEXT_DEPLOY_CACHE_CONTROL=1", () =
             ...compileCode.matchAll(/`import \$\{JSON\.stringify\((\w+)\)\};/g),
         ].map((m) => m[1]);
         return ids.map((id) => {
+            // #1863: ARP_PRIMER_FILE resolves a SINGLE fixed path
+            // (`join(compileHere, "arp-primer.cjs")`), not an array +
+            // `.find(existsSync)` like the other injected preloads below — it
+            // has one candidate, same extension in dist and the source tree
+            // (see vinext-compile.mjs's own comment on why). Matched first,
+            // on its own shape, rather than falling through to the array
+            // regex: that regex is unanchored to its OWN declaration's `]`,
+            // so on a declaration with no `[` at all it silently overruns
+            // into the NEXT `const … = [` and extracts the wrong module.
+            const single = compileCode.match(
+                new RegExp(`const ${id} = join\\(compileHere, "([\\w.-]+)"\\)`),
+            );
+            if (single?.[1]) {
+                return join(REPO, "packages/kn-next/src/adapters", single[1]);
+            }
             const decl = compileCode.match(
                 new RegExp(`const ${id} = \\[([\\s\\S]*?)\\]`),
             );

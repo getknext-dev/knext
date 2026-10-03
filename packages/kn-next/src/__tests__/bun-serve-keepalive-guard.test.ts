@@ -16,8 +16,11 @@
  *
  * Two wirings ship the guard, and each is guarded here (mutation-proved):
  *   1. the COMPILED single executable — vinext-compile.mjs injects an `import`
- *      of the guard as the entry's FIRST statement (a `bun --preload` cannot
- *      reach a compiled binary);
+ *      of the guard as the entry's first statement AFTER the #1863
+ *      ARP/neighbour-table primer (`ARP_PRIMER_FILE` — see
+ *      `arp-primer-entry-order.test.ts` for ITS own mutation anchor), which
+ *      is baked in first of all; a `bun --preload` cannot reach a compiled
+ *      binary, so both have to be injected imports;
  *   2. the UNCOMPILED diagnostic boot — e2e-deploy-vinext.sh `bun --preload`s it.
  */
 
@@ -237,13 +240,17 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
         expect(s).toContain("process.exit(1)");
     });
 
-    it("injects the guard as the entry’s FIRST import (mutation anchor)", () => {
+    it("injects the guard as the first import AFTER the ARP primer (mutation anchor)", () => {
         // The compiled entry's source is built as a list of injected imports
         // followed by the #1309/#1314 require-wrapped entry: `const src = \`import
-        // ${JSON.stringify(A)};\n\` + … + wrapped.contents;`. The guard must be
-        // the FIRST injected import so it patches Bun.serve before srvx/bun calls
-        // it; later injections (the sidecar resolver, the Cache-Control
-        // normalization) run after it, in that order.
+        // ${JSON.stringify(A)};\n\` + … + wrapped.contents;`. #1863 bakes the
+        // ARP/neighbour-table primer in FIRST OF ALL (own mutation anchor in
+        // `arp-primer-entry-order.test.ts`) — it has to be the earliest thing
+        // in the process, ahead of even this guard. THIS test's invariant is
+        // the guard's own position: immediately after the primer, so it still
+        // patches Bun.serve before srvx/bun calls it; later injections (the
+        // sidecar resolver, the Cache-Control normalization) run after it, in
+        // that order.
         const s = src();
         const block = s.match(/const src =([\s\S]*?)wrapped\.contents;/);
         expect(
@@ -255,12 +262,20 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
                 /import \$\{JSON\.stringify\((\w+)\)\};/g,
             ),
         ].map((m) => m[1]);
-        // mutation anchor: the guard is first, exactly once
-        expect(injected[0]).toBe("GUARD_FILE");
+        // mutation anchor: the guard is the import immediately after the
+        // primer, exactly once. Removing GUARD_FILE's injection drops it from
+        // `injected` entirely, so `injected[arpIndex + 1]` becomes whatever
+        // comes next (SIDECAR_INSTALL_FILE, or undefined) and this reds.
+        const arpIndex = injected.indexOf("ARP_PRIMER_FILE");
+        expect(arpIndex, "ARP_PRIMER_FILE must be injected").toBeGreaterThan(
+            -1,
+        );
+        expect(injected[arpIndex + 1]).toBe("GUARD_FILE");
         expect(injected.filter((x) => x === "GUARD_FILE")).toHaveLength(1);
         expect(new Set(injected).size).toBe(injected.length);
         // known later injections keep their relative order
         const order = [
+            "ARP_PRIMER_FILE",
             "GUARD_FILE",
             "SIDECAR_INSTALL_FILE",
             "CACHE_CONTROL_FILE",
@@ -269,17 +284,30 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
         expect(known).toEqual(
             [...known].sort((a, b) => order.indexOf(a) - order.indexOf(b)),
         );
-        // every injected module is resolved beside vinext-compile and fails closed
+        // every injected module is resolved beside vinext-compile and fails
+        // closed. GUARD_FILE/SIDECAR_INSTALL_FILE/CACHE_CONTROL_FILE share one
+        // `[...].find(existsSync)` + `if (!NAME)` shape; ARP_PRIMER_FILE
+        // resolves a single fixed path and fails closed via
+        // `if (!existsSync(NAME))` instead (see `arp-primer-entry-order
+        // .test.ts` for that guard's own mutation anchor), so it is checked
+        // against its own shape rather than forced through the shared regex.
         for (const name of injected) {
+            if (name === "ARP_PRIMER_FILE") {
+                expect(s, `${name} must fail closed when missing`).toMatch(
+                    /if \(!existsSync\(ARP_PRIMER_FILE\)\) \{[\s\S]*?process\.exit\(1\);/,
+                );
+                continue;
+            }
             expect(s, `${name} must fail closed when missing`).toMatch(
                 new RegExp(
                     `if \\(!${name}\\) \\{[\\s\\S]*?process\\.exit\\(1\\);`,
                 ),
             );
         }
-        // nothing may be prepended outside the list: the injections come first
+        // nothing may be prepended outside the list: the injections come
+        // first, primer immediately followed by the guard
         expect(s).toMatch(
-            /const src =\s*`import \$\{JSON\.stringify\(GUARD_FILE\)\};\\n`/,
+            /const src =\s*`import \$\{JSON\.stringify\(ARP_PRIMER_FILE\)\};\\n`\s*\+\s*`import \$\{JSON\.stringify\(GUARD_FILE\)\};\\n`/,
         );
     });
 
@@ -287,11 +315,27 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
         // Recover and run the source's own resolution block (no duplication, so
         // drift cannot pass silently), with a stubbed __dirname = the real adapters
         // dir, and assert it lands on the guard that exists.
-        const block = src().match(
-            /const compileHere =[\s\S]*?\.find\(\(c\) => existsSync\(c\)\);/,
+        //
+        // Extracted as TWO pieces — `compileHere`'s own assignment, then
+        // GUARD_FILE's resolution — rather than one greedy span between them,
+        // because #1863 put the ARP_PRIMER_FILE resolution AND its fail-closed
+        // `if (!existsSync(ARP_PRIMER_FILE)) { …; process.exit(1); }` check in
+        // between the two. A single `/const compileHere =[\s\S]*?\.find\(...\)/`
+        // span would sweep that check in too, and running it through
+        // `new Function` with the stubbed `existsSync` below (which only
+        // recognises the guard's own filename) makes it a REAL `process.exit(1)`
+        // — not a thrown assertion — killing the whole test worker. Skipping
+        // straight from `compileHere` to `GUARD_FILE` avoids executing it at all.
+        const compileHereLine = src().match(/const compileHere = [^\n]+;/);
+        const guardBlock = src().match(
+            /const GUARD_FILE = \[[\s\S]*?\.find\(\(c\) => existsSync\(c\)\);/,
         );
         expect(
-            block,
+            compileHereLine,
+            "the compileHere assignment moved — re-anchor",
+        ).not.toBeNull();
+        expect(
+            guardBlock,
             "the GUARD_FILE resolution block moved — re-anchor",
         ).not.toBeNull();
         const resolved = new Function(
@@ -300,10 +344,10 @@ describe("wiring 1/2 — the COMPILED binary bakes the guard in (vinext-compile.
             "join",
             "fileURLToPath",
             "import_meta_url",
-            `${(block as RegExpMatchArray)[0].replace(
+            `${(compileHereLine as RegExpMatchArray)[0].replace(
                 "dirname(fileURLToPath(import.meta.url))",
                 "dirname(fileURLToPath(import_meta_url))",
-            )}\nreturn GUARD_FILE;`,
+            )}\n${(guardBlock as RegExpMatchArray)[0]}\nreturn GUARD_FILE;`,
         )(
             (p: string) => p.endsWith("bun-serve-keepalive-guard.mjs"), // only the source name exists here
             (p: string) => p.split("/").slice(0, -1).join("/"),

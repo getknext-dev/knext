@@ -123,15 +123,45 @@ if (!existsSync(ENTRY)) {
     process.exit(1);
 }
 
-// The Bun.serve keep-alive guard, injected as the FIRST import of the nitro
-// entry so it patches `globalThis.Bun.serve` BEFORE srvx/bun calls it (ESM
-// evaluates a module's imports depth-first in source order, so the first import
-// runs first). This is how the mitigation reaches the COMPILED binary: a
-// `bun --preload` cannot touch a compiled executable, so the guard has to be in
-// the bundle. See bun-serve-keepalive-guard.mjs for the root cause (#silent-reset,
-// the Bun.serve sibling of the node-lane #188 reset). Resolved beside THIS file:
-// shipped as `.js` in dist, `.mjs` in the source tree (dev/tests) — try both.
 const compileHere = dirname(fileURLToPath(import.meta.url));
+
+// The ARP/neighbour-table primer (#1760, #1863), injected as the VERY FIRST
+// import of the nitro entry — ahead of the keep-alive guard below (ESM
+// evaluates a module's imports depth-first in source order, so the first
+// import runs first; same mechanism the keep-alive guard's own comment relies
+// on). On a flannel-VXLAN node (OKE) a stale neighbour entry for a recycled
+// pod IP can black-hole a freshly-started pod for ~8.5s until it sends an
+// outbound packet of its own — see arp-primer.cjs's header for the mechanism
+// and the measurement. This stage has no supervisor in front of it the way
+// `node-server.ts` does for the standalone targets (it requires the primer as
+// its OWN first action instead — see its ENTRYPOINT comment), and
+// `standalone-compile.mjs` bakes the same primer in first for the compiled
+// standalone-on-Bun target — so this compiled vinext executable is the one
+// remaining place it has to be wired in explicitly. Resolved beside THIS
+// file, same extension in both dist and the source tree (tsup emits `.cjs`
+// for format:cjs under `"type": "module"` — no dist/src split to try both
+// extensions for, unlike the `.mjs`-sourced guards below).
+const ARP_PRIMER_FILE = join(compileHere, "arp-primer.cjs");
+if (!existsSync(ARP_PRIMER_FILE)) {
+    // Fail CLOSED, matching every other preload below: a binary built
+    // without it silently reintroduces the flannel cold-start stall this
+    // fix exists to remove, with no signal until someone measures a cluster.
+    console.error(
+        "[knext compile] the ARP/neighbour-table primer is missing beside vinext-compile " +
+            `(looked for arp-primer.cjs in ${compileHere}) — the installed @getknext/core is incomplete`,
+    );
+    process.exit(1);
+}
+
+// The Bun.serve keep-alive guard, injected as the nitro entry's SECOND import
+// (right after the ARP primer above) so it patches `globalThis.Bun.serve`
+// BEFORE srvx/bun calls it (ESM evaluates a module's imports depth-first in
+// source order, so an earlier import runs first). This is how the mitigation
+// reaches the COMPILED binary: a `bun --preload` cannot touch a compiled
+// executable, so the guard has to be in the bundle. See
+// bun-serve-keepalive-guard.mjs for the root cause (#silent-reset, the
+// Bun.serve sibling of the node-lane #188 reset). Resolved beside THIS file:
+// shipped as `.js` in dist, `.mjs` in the source tree (dev/tests) — try both.
 const GUARD_FILE = [
     join(compileHere, "bun-serve-keepalive-guard.js"),
     join(compileHere, "bun-serve-keepalive-guard.mjs"),
@@ -471,9 +501,10 @@ const importMetaToCjs = {
             // rewrite would touch — no call to rewriteAssetAnchors here, by
             // construction; see entry-asset-anchor.mjs's docstring on scope.
             const raw = await Bun.file(args.path).text();
-            // Prepend the guard imports FIRST, always — independent of whether the
-            // entry uses import.meta. `import "<abs>";` is bundled + evaluated
-            // before the rest of the entry's imports, patching Bun.serve in time.
+            // Prepend the preload imports FIRST, always — independent of whether
+            // the entry uses import.meta. `import "<abs>";` is bundled + evaluated
+            // before the rest of the entry's imports, firing the ARP primer and
+            // patching Bun.serve in time.
             //
             // Then wrap the entry's `createRequire(import.meta.url)` bindings so
             // the EXTERNAL packages nitro reaches through them are bundled
@@ -488,7 +519,14 @@ const importMetaToCjs = {
             // resolve from, and a `node_modules` planted beside the binary must
             // not be able to answer a require), and `.output/public` embedded
             // through a generated module of file imports.
+            //
+            // ARP_PRIMER_FILE is FIRST of all — before the keep-alive guard,
+            // before the sidecar resolver, before the cache-control
+            // normalization, before `import.meta` even exists as a concept in
+            // this entry — because it is the earliest point anything in this
+            // compiled process can send the one outbound packet #1760 needs.
             const src =
+                `import ${JSON.stringify(ARP_PRIMER_FILE)};\n` +
                 `import ${JSON.stringify(GUARD_FILE)};\n` +
                 (SELF_CONTAINED ? "" : `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n`) +
                 `import ${JSON.stringify(CACHE_CONTROL_FILE)};\n` +
@@ -498,7 +536,7 @@ const importMetaToCjs = {
                     : "") +
                 wrapped.contents;
             console.log(
-                "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",
+                "[knext compile] injected the ARP primer (#1760) and the Bun.serve keep-alive guard as the entry's first imports",
             );
             const before = (src.match(/import\.meta\.(url|filename|dirname)/g) ?? [])
                 .length;
