@@ -1,0 +1,104 @@
+---
+title: React Compiler
+description: An opt-in config change you make in your app — React Compiler optimizes client-side rendering memoization. It does not change server time, cold start, or any knext default.
+---
+
+[React Compiler](https://react.dev/learn/react-compiler) is a build-time optimization for React
+itself. This page covers how to turn it on for a knext app, on every build target knext supports,
+and what it does and does not affect.
+
+## What it does, and does not, affect
+
+React Compiler automatically memoizes components and values during the build, so your app does
+less unnecessary re-rendering **in the browser**. It is a **client-rendering** optimization.
+
+It does **not** change:
+
+- server response time — nothing it does runs on the server;
+- cold start — knext's cold start is dominated by pod scheduling and process boot, neither of
+  which this touches (see [Scale to zero](/docs/scale-to-zero));
+- knext's build pipeline, runtime image, or any default. Enabling it is entirely a change inside
+  your app's own `next.config.ts` (or `vite.config.ts` on the vinext target) — knext's scaffold,
+  CLI, and CRD are unaware of it.
+
+## Official adapter target (`build: 'turbopack'` or `'webpack'`)
+
+Add `reactCompiler: true` to `next.config.ts`, and install the optional Babel plugin that
+actually performs the transform:
+
+```ts title="next.config.ts"
+const nextConfig: NextConfig = {
+  // ...your existing config
+  reactCompiler: true,
+};
+```
+
+```bash title="install the transform"
+npm install -D babel-plugin-react-compiler
+```
+
+This works identically on both bundlers (`build: 'turbopack'` and `build: 'webpack'`) and both
+runtimes (`runtime: 'bun'` and `runtime: 'node'`) — the four credentialed v1.0 cells. Nothing
+else in your `knext.config.ts` changes.
+
+## vinext target (`build: 'vinext'`, Beta)
+
+On the [vinext build target](/docs/build-pipeline#the-vinext-pipeline), React Compiler is **not**
+a `next.config.ts` key — vinext does not read `reactCompiler` from there. It is an option on
+vinext's own Vite plugin, in `vite.config.ts`:
+
+```ts title="vite.config.ts"
+import vinext from 'vinext';
+
+export default defineConfig({
+  plugins: [
+    vinext({
+      react: { compiler: true },
+      // ...your existing vinext options
+    }),
+    // ...
+  ],
+});
+```
+
+This needs four packages, not one — vinext resolves `@vitejs/plugin-react` itself but only
+registers the compiler when that package is 6.1 or newer; the transform itself needs the Babel
+plugin, a Rolldown-compatible Babel bridge (vinext's Vite dependency is Vite 8, which bundles with
+Rolldown), and `@vitejs/plugin-react` 6.1's own required peer for the non-compiler JSX transform
+path it also uses:
+
+```bash title="install"
+npm install -D @vitejs/plugin-react@^6.1.0 babel-plugin-react-compiler @rolldown/plugin-babel oxc-transform-react
+```
+
+Leaving out `oxc-transform-react` fails the build outright (not a silent no-op, unlike the other
+cases on this page): `@vitejs/plugin-react` errors with "React Compiler requires the optional
+`oxc-transform-react` package" the moment `react: { compiler: true }` is set without it installed.
+
+This is the same option and the same four packages on both vinext runtimes
+(`runtime: 'bun'` and `runtime: 'node'`).
+
+## Measured conditions
+
+Measured on knext's default target (official adapter, `build: 'turbopack'`, `runtime: 'bun'`),
+one app, one CI runner, `next build` only (no deploy/cold-start numbers — see the caveat above for
+why those are unaffected):
+
+| | build time | `.next/static` size |
+|---|---|---|
+| without the compiler | — | — |
+| with the compiler | — | — |
+
+<!-- knext-docs: react-compiler-measured-conditions -->
+
+## Known limits
+
+- Enabling `reactCompiler: true` without `babel-plugin-react-compiler` installed silently leaves
+  the compiler **disabled** on the official adapter target — there is no build error. Check a
+  built client chunk for a `react/compiler-runtime` import if you need to confirm it actually ran.
+- On the vinext target, asking for `react: { compiler: true }` with an `@vitejs/plugin-react`
+  older than 6.1 installed is also silently ignored, for the same reason — but a missing
+  `oxc-transform-react` fails the build loudly instead (see above).
+- This page covers knext's own build targets only. React Compiler's own eslint plugin, incremental
+  adoption, and per-component opt-out are the same as in any other React project — see the
+  [React Compiler docs](https://react.dev/learn/react-compiler) for those.

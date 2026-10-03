@@ -20,6 +20,7 @@
     "bun-runtime",
     "tuning-cold-start",
     "image-optimization",
+    "react-compiler",
     "typescript",
     "---Deploy lifecycle---",
     "versioning",

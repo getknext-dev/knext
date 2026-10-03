@@ -180,6 +180,10 @@ jobs:
         working-directory: app
         run: |
           set -euo pipefail
+          echo "--- debug: .next/static tree ---"
+          find .next/static -type f 2>/dev/null | head -50
+          echo "--- debug: does any static chunk mention Counter/setCount? ---"
+          grep -rl 'setCount\|Counter' .next/static 2>/dev/null || echo "(no match)"
           if ! grep -rlq 'react/compiler-runtime' .next/standalone/.next/static/chunks 2>/dev/null \
             && ! grep -rlq 'react/compiler-runtime' .next/static/chunks 2>/dev/null; then
             echo "::error::no client chunk imports react/compiler-runtime — compiler did not run" >&2
