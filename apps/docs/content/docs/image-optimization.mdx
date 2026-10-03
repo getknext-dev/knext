@@ -132,6 +132,14 @@ smaller than the source. The check also tests itself against a deliberately brok
 so it cannot pass by accident.
 </Callout>
 
+<Callout type="warn">
+**On the vinext build target, `images.loaderFile` is not supported yet.** A custom `loader` prop
+on an individual `next/image` works, but `next.config.ts`'s `images: { loader: 'custom', loaderFile:
+'...' }` — a project-wide custom loader — is silently ignored; the built-in `/_next/image` endpoint
+is used instead. This is unrelated to the sharp/native-library concerns above. The default
+standalone build target is unaffected.
+</Callout>
+
 ## Related
 
 - [Scale to zero](/docs/scale-to-zero) — why a cold pod must not re-do work, and the autoscaling model.
