@@ -16,6 +16,7 @@
     "warm-floors",
     "isr-caching",
     "image-caching",
+    "pull-through-mirror",
     "bytecode",
     "bun-runtime",
     "tuning-cold-start",
