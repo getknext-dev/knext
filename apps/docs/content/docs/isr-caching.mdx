@@ -67,6 +67,14 @@ Redis, this block is the first thing to check.
   exactly at the revalidate window there would be nothing left to serve stale.
 - When `REDIS_URL` is unset (local dev), the handler falls back to in-memory caching, so `vinext
   dev` and local builds work without a Redis.
+- The Redis client depends on the runtime in your deploy config. On `node` the handler uses
+  `ioredis`, which the build copies into the image. On `bun` it uses Bun's built-in Redis client.
+  `knext build`, `knext deploy` and `knext preview` pick the right one for you.
+- When `REDIS_URL` is set but the Redis client cannot be loaded in the pod, the handler still
+  serves from memory, but it logs one error at startup that starts with
+  `[CacheHandler] Redis client unavailable`. If you see it, cache entries are not shared between
+  pods and do not survive scale-to-zero. Check that you built the image with `knext deploy` or
+  `knext build` for the same runtime you deploy.
 
 <Callout type="warn">
 **On the standalone build's Node runtime, the Redis-backed handler can silently fall back to a

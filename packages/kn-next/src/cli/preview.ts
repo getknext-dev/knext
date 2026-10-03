@@ -33,7 +33,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -43,6 +46,7 @@ import {
 import { createLogger } from "../utils/logger";
 import { compileArtifactForDeploy } from "./build-artifact";
 import { exportBuildIdEnv } from "./build-id-env";
+import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -396,6 +400,7 @@ export async function defaultBuildAndPush(
     runProjectBuild({
         requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
         builderId: config.build ?? DEFAULT_BUILDER_ID,
+        runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
     });
 
     // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile for
@@ -406,8 +411,15 @@ export async function defaultBuildAndPush(
     // stale binary already sitting in this checkout. Shares the EXACT compile
     // step `knext build` uses (build-artifact.ts) — preview has no
     // `--skip-build` flag, so this always runs fresh here, right after the
-    // project build that just produced what it compiles from.
-    compileArtifactForDeploy(config, process.cwd());
+    // project build that just produced what it compiles from. The opt-in
+    // patched Bun toolchain is resolved (downloaded + sha256-verified) first;
+    // the default config resolves to nothing and the call is unchanged.
+    const toolchain = await resolveCompileToolchain(config);
+    compileArtifactForDeploy(
+        config,
+        process.cwd(),
+        ...(toolchain.bin ? [{ toolchain }] : []),
+    );
 
     const taggedRef = `${config.registry}/${previewName}:${tag}`;
     const metadataFilePath = join(

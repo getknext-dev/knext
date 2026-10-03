@@ -15,6 +15,16 @@ export declare function verifyBytecodeExec(
 export declare function routeMarker(marker: string, n: number): string;
 
 /**
+ * The `compile.include` proof: the banner heads at least `minModules` modules
+ * (the entry and every included module), each under a `@bytecode` pragma.
+ */
+export declare function verifyBytecodeModules(
+    bytes: Uint8Array,
+    marker: string,
+    minModules: number,
+): { ok: true } | { ok: false; reason: string };
+
+/**
  * The self-contained proof: every module the build's banner heads carries
  * bytecode, and route chunks `0 .. routeCount-1` each do by their own marker.
  */

@@ -1,0 +1,88 @@
+{
+  "$comment": "Fixes knext bundles for vinext ahead of upstream releases. `vinext` is the ONLY version these patches were validated against; `pristine` records the sha256 of each target file in that published tarball. Bumping the vinext pin without re-porting and re-validating every patch fails vinext-patches.test.ts.",
+  "vinext": "1.0.1",
+  "patches": [
+    {
+      "file": "vinext-3472-pages-data-request-url.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3472",
+      "summary": "Pages Router: a `/_next/data/...` request reaches getServerSideProps with the original data URL as `req.url` (Next.js parity), not the normalized page path."
+    },
+    {
+      "file": "vinext-3423-require-condition-noexternal.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3423",
+      "summary": "Server builds: a `require()` of a CommonJS dependency resolves the package's `require` export condition even when Vite would externalize that package."
+    },
+    {
+      "file": "vinext-3226-nitro-resolve-extensions.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3226",
+      "summary": "Nitro builds: a `turbopack.resolveExtensions` list without `.mjs` no longer hides Nitro's own preset entry (the build failed to resolve it)."
+    },
+    {
+      "file": "vinext-3424-nitro-rsc-bundle-deps.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3424",
+      "summary": "Nitro builds: dependencies of the RSC environment are bundled, so a package's `react-server` export condition is honoured."
+    },
+    {
+      "file": "vinext-3241-worker-deployment-id.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3241",
+      "summary": "Web Worker bundles: `process.env.NEXT_DEPLOYMENT_ID` is inlined, as it is in the rest of the app."
+    },
+    {
+      "file": "vinext-3436-nitro-output-file-tracing.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3436",
+      "summary": "Nitro builds: `outputFileTracingIncludes` / `outputFileTracingExcludes` from next.config are applied to the traced server dependencies."
+    },
+    {
+      "file": "vinext-3681-lightningcss-custom-media-drafts.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3681",
+      "summary": "`experimental.lightningCssFeatures.include`'s `custom-media-queries` entry now also turns on lightningcss's `drafts.customMedia` parser flag, so `@custom-media` can parse at all."
+    },
+    {
+      "file": "vinext-3682-subresource-sec-fetch-dest-404.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3682",
+      "summary": "App Router: a GET/HEAD request for an unmatched path whose `Sec-Fetch-Dest` is a non-HTML subresource destination (image, font, script, ...) gets a plain-text 404 instead of the rendered not-found page."
+    },
+    {
+      "file": "vinext-3683-edge-runtime-deprecated-warning.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3683",
+      "summary": "Warn once, matching Next.js, when a route's resolved `runtime` is `edge`/`experimental-edge` — the Edge Runtime deprecation notice was never emitted."
+    },
+    {
+      "file": "vinext-3684-bare-double-slash-not-open-redirect.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3684",
+      "summary": "A bare `//` (in any literal/percent-encoded form, with nothing after it) is no longer treated as an open-redirect shape, matching Next.js serving it as the index route."
+    },
+    {
+      "file": "vinext-3686-image-trailingslash-loader-srcset.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3686",
+      "summary": "next/image: the optimizer path honours `trailingSlash`, and a custom `loader` prop gets the built-in loader's per-breakpoint `srcSet` treatment (quality passed through as given, not forced to 75). The upstream PR also wires up `images.loaderFile`; that part is not bundled (see the patch header) and `loaderFile` remains ignored until the upstream release."
+    },
+    {
+      "file": "vinext-3687-config-function-form-default-config.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3687",
+      "summary": "A function-form `next.config.js`/`.ts` is called with its real `defaultConfig.pageExtensions` (matching Next's own default), not an empty object — a config that reads `defaultConfig.pageExtensions` (Next's custom-page-extension e2e fixture) previously threw `defaultConfig.pageExtensions is not iterable`."
+    },
+    {
+      "file": "vinext-3688-commonjs-hashbang.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3688",
+      "summary": "A hashbang-prefixed module (`#!/usr/bin/env node`) that also uses CommonJS syntax no longer fails to build — the CJS interop transform's prepended runtime facade used to push `#!` out of byte position 0, which the bundler's parser then rejected."
+    },
+    {
+      "file": "vinext-3689-action-redirect-fetch-status.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3689",
+      "summary": "A server action's redirect, when invoked via fetch (the client-side router path), now always answers HTTP 200 like Next.js does — it previously fell back to 303 unless the action had already been forwarded, the target was an ancestor/stale-sibling route, or the target ran on a different runtime. The no-JS, progressive-enhancement form-POST redirect path is unchanged and still answers 303."
+    }
+  ],
+  "pristine": {
+    "dist/config/next-config.js": "4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
+    "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
+    "dist/plugins/require-condition-resolution.js": "f8776d98dfc63c228810a8f6d3691fb0f8f7c7b42f700e6ed40c3501607a8321",
+    "dist/plugins/worker-image-imports.js": "529c659ee78c07dc2e5b97e15f597434ac4024e65c238e90d633be4a405ff281",
+    "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a",
+    "dist/server/app-rsc-handler.js": "b4a18a7636263b24b06ecaf48f88c85a975853f1c83805beb88cdbf779d9a9da",
+    "dist/server/app-segment-config.js": "13ca8d09a6a7baa5c19551b68c76f1e0a6fe15f98a40c0e0d1988c215ba14242",
+    "dist/server/open-redirect.js": "4e62ca39cf91cdc92ec9cb4d269a1fb0c64f3c48c6a90e1f7b8bb5efeb5cf475",
+    "dist/shims/image.js": "f498afc199ba102be93b93ae2098f6ed79bcae261485f6a807438efbe134f0b3",
+    "dist/server/app-server-action-execution.js": "05fdfc733fdc48f805f6661d3e909a8d0a82693391439ead238d50fbef506c5e"
+  }
+}

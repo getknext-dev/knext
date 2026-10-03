@@ -21,10 +21,11 @@ have with a maintainer.
 
 ## Supported versions
 
-knext has not reached a `1.0.0` release. Pre-1.0, there is **no long-term-support branch** — only
-the latest published `1.0.0-rc.*` on the npm `@getknext/*` scope receives fixes, including security
-fixes. Report against the version you are actually running; if it predates the current `rc`, the
-first response will usually be "upgrade and confirm."
+knext has not reached a `1.0.0` release. Pre-1.0, there is **no long-term-support branch**. Two
+prerelease lines on the npm `@getknext/*` scope receive fixes, including security fixes: the latest
+published `1.0.0-rc.*` (npm dist-tag `rc`) and the latest published `1.3.0-rc.*` (npm dist-tag
+`next`). Report against the version you are actually running; if it predates the current release
+candidate on its line, the first response will usually be "upgrade and confirm."
 
 Once `1.0.0` ships, this section will name which major version lines receive security fixes.
 

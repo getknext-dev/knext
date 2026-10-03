@@ -1261,14 +1261,14 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         // #1535: the exact, zero-K8s-jargon sentence — no stack trace, no
         // searched-paths dump. That detail lives behind --verbose (below).
         expect(checks.cluster.detail).toBe(
-            "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
+            "No Kubernetes cluster configured. See https://knext-platform.dev/docs/first-cluster.",
         );
         expect(checks.cluster.detail).not.toContain("/home/dev/.kube/config");
         // #1535 round 2 (N1): the hint points at the SAME first-cluster
         // walkthrough as `detail`, not the general getting-started guide —
         // two different links on one no-cluster row was the bug.
         expect(checks.cluster.hint).toContain(
-            "https://knext.dev/docs/first-cluster",
+            "https://knext-platform.dev/docs/first-cluster",
         );
         expect(checks.cluster.hint).toMatch(
             /don't have a Kubernetes cluster connected yet/,
@@ -1298,7 +1298,7 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         );
         const checks = byId(report.checks);
         expect(checks.cluster.detail).toStartWith(
-            "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
+            "No Kubernetes cluster configured. See https://knext-platform.dev/docs/first-cluster.",
         );
         expect(checks.cluster.detail).toContain("/home/dev/.kube/config");
         expect(checks.cluster.detail).toMatch(/no kubeconfig/i);
@@ -1316,12 +1316,12 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
         const checks = byId(report.checks);
         expect(checks.cluster.status).toBe("warn");
         expect(checks.cluster.detail).toBe(
-            "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
+            "No Kubernetes cluster configured. See https://knext-platform.dev/docs/first-cluster.",
         );
         expect(checks.cluster.detail).not.toContain("/home/dev/.kube/config");
         // #1535 round 2 (N1): same first-cluster link as `detail`.
         expect(checks.cluster.hint).toContain(
-            "https://knext.dev/docs/first-cluster",
+            "https://knext-platform.dev/docs/first-cluster",
         );
         expect(checks.cluster.hint).toMatch(
             /don't have a Kubernetes cluster connected yet/,
@@ -1369,7 +1369,7 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
                 /local cluster .* not running/i,
             );
             expect(checks.cluster.hint).toContain(
-                "https://knext.dev/docs/getting-started",
+                "https://knext-platform.dev/docs/getting-started",
             );
             expect(
                 `${checks.cluster.detail} ${checks.cluster.hint}`,
@@ -1428,14 +1428,14 @@ describe("runDoctor — finding 1c: no-cluster-configured is not a 'flake'", () 
             const checks = byId(report.checks);
             expect(checks.cluster.status).toBe("warn");
             expect(checks.cluster.detail).toBe(
-                "No Kubernetes cluster configured. See https://knext.dev/docs/first-cluster.",
+                "No Kubernetes cluster configured. See https://knext-platform.dev/docs/first-cluster.",
             );
             expect(checks.cluster.hint).toMatch(
                 /don't have a Kubernetes cluster connected yet/,
             );
             // #1535 round 2 (N1): same first-cluster link as `detail`.
             expect(checks.cluster.hint).toContain(
-                "https://knext.dev/docs/first-cluster",
+                "https://knext-platform.dev/docs/first-cluster",
             );
         } finally {
             unstubAllEnvs();

@@ -37,11 +37,17 @@ describe('root SECURITY.md', () => {
   });
 
   it('names the real pre-1.0 published version line (1.0.0-rc)', () => {
-    // Sourced from packages/kn-next/package.json — never invent a version.
+    expect(content).toContain('1.0.0-rc');
+  });
+
+  it('names the release line the tree is on (sourced from packages/kn-next/package.json)', () => {
+    // Never invent a version. On integration/v1.3 the tree is 1.3.0-rc.N
+    // (dist-tag `next`) while the 1.0 line keeps publishing 1.0.0-rc.N on `rc`.
     const pkg = JSON.parse(
       readFileSync(resolve(ROOT, 'packages/kn-next/package.json'), 'utf-8'),
     ) as { version: string };
-    expect(pkg.version).toMatch(/^1\.0\.0-rc\./);
-    expect(content).toContain('1.0.0-rc');
+    const line = /^(\d+\.\d+\.\d+-rc)\.\d+$/.exec(pkg.version)?.[1];
+    expect(line, `tree version ${pkg.version} is not an X.Y.Z-rc.N prerelease`).toBeDefined();
+    expect(content).toContain(`${line}`);
   });
 });

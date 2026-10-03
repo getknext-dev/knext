@@ -20,7 +20,10 @@ import { readFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -43,6 +46,7 @@ import {
     KNEXT_BUILD_ID_ENV,
     NEXT_DEPLOYMENT_ID_ENV,
 } from "./build-id-env";
+import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -85,6 +89,7 @@ import {
     withKubeContext,
 } from "./shared";
 import { requireBuildContext } from "./tracing-root";
+import { readImageCacheRouted, type WriteFreeFacts } from "./write-free";
 
 const log = createLogger({ module: "deploy" });
 
@@ -375,6 +380,7 @@ async function runPrunePreflight(
     namespace: string,
     buildId: string,
     context?: string,
+    writeFreeFacts?: WriteFreeFacts,
 ): Promise<void> {
     const { writeFileSync, mkdirSync } = await import("node:fs");
     const crPath = join(process.cwd(), ".output", "nextapp-preflight-cr.yaml");
@@ -386,6 +392,8 @@ async function runPrunePreflight(
             preflightImageRef(`${config.registry}/${config.name}:preflight`),
             namespace,
             buildId,
+            undefined,
+            writeFreeFacts,
         ),
         "utf-8",
     );
@@ -570,6 +578,12 @@ export async function deploy() {
             options.namespace,
             buildId,
             options.context,
+            // The build has not run yet, so assume the image cache WILL be
+            // routed: the preflight CR then carries a superset of the applied
+            // CR's fields, and an operator CRD that predates
+            // the write-free field (security.writeFree) is reported here, before any side
+            // effect, rather than at the real apply.
+            { builtThisRun: !options.skipBuild, imageCacheRouted: true },
         );
     }
 
@@ -610,6 +624,7 @@ export async function deploy() {
         runProjectBuild({
             requireEsm: isVinextBuild,
             builderId: resolvedBuild,
+            runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
         });
         log.info(
             isVinextBuild
@@ -652,8 +667,15 @@ export async function deploy() {
         // tree the project build just produced and staleness cannot occur on
         // THIS path by construction. The `--skip-build` leg below instead
         // fails closed via `assertCompiledArtifactFresh`, since nothing
-        // rebuilds anything there.
-        compileArtifactForDeploy(config, process.cwd());
+        // rebuilds anything there. The opt-in patched Bun toolchain is
+        // resolved (downloaded + sha256-verified) first; the default config
+        // resolves to nothing and the call is exactly what it was.
+        const toolchain = await resolveCompileToolchain(config);
+        compileArtifactForDeploy(
+            config,
+            process.cwd(),
+            ...(toolchain.bin ? [{ toolchain }] : []),
+        );
     } else {
         // `--skip-build`: nothing above ran, so nothing recompiled the exec
         // either. Fail closed rather than silently shipping whatever happens
@@ -1027,11 +1049,24 @@ export async function deploy() {
     // `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
     // The operator reconciles all cluster resources from this CR.
     // In dry-run mode imageRef is the mutable tag (acceptable for preview only).
+    //
+    // The write-free field, security.writeFree (no writable volume needed), is stated only
+    // for an image THIS run built; for a standalone build, whether the image
+    // cache is handler-routed is read back from this build's own output
+    // (see write-free.ts).
+    const writeFreeFacts: WriteFreeFacts | undefined = options.skipBuild
+        ? undefined
+        : {
+              builtThisRun: true,
+              imageCacheRouted: readImageCacheRouted(process.cwd(), buildId),
+          };
     const crYaml = renderNextAppCR(
         config,
         imageRef,
         options.namespace,
         buildId,
+        undefined,
+        writeFreeFacts,
     );
     const crPath = join(process.cwd(), ".output", "nextapp-cr.yaml");
 
@@ -1233,6 +1268,10 @@ if (isEntrypoint(import.meta.url)) {
             // equivalent (init-ci --provider gitlab's .gitlab-ci.yml).
             const { ciPreflightMain } = await import("./ci/ci-preflight-cmd");
             process.exit(await ciPreflightMain(process.argv.slice(3)));
+        } else if (sub === "vinext-patches") {
+            // Bundled upstream vinext fixes; a vinext app's postinstall runs it.
+            const { vinextPatchesMain } = await import("./vinext-patches");
+            process.exit(await vinextPatchesMain(process.argv.slice(3)));
         } else if (sub === "doctor") {
             const { doctorMain } = await import("./doctor");
             process.exit(await doctorMain(process.argv.slice(3)));

@@ -280,6 +280,27 @@ jobs:
           kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s nextapp/file-manager \
             || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe nextapp file-manager; exit 1)
 
+      # Write-free runtime: file-manager is a vinext DISK-MODE binary (sharp
+      # loads from the image's read-only native/ tree), so `kn-next deploy`
+      # marks the CR `spec.security.writeFree` and the operator renders NO
+      # writable volume — not even the /tmp emptyDir vinext builds used to
+      # get. The platform checks below (images, ISR, uploads) then run against
+      # that volume-free pod.
+      - name: Write-free runtime - no writable volume rendered for the vinext app
+        run: |
+          set -euo pipefail
+          wf="$(kubectl -n "$APP_NS" get nextapp file-manager -o jsonpath='{.spec.security.writeFree}')"
+          echo "spec.security.writeFree=${wf}"
+          [ "$wf" = "true" ] || { echo "::error::NextApp spec.security.writeFree is '${wf}', want true"; exit 1; }
+          ksvc="$(kubectl -n "$APP_NS" get ksvc file-manager -o json)"
+          vols="$(echo "$ksvc" | jq -c '.spec.template.spec.volumes // []')"
+          mounts="$(echo "$ksvc" | jq -c '[.spec.template.spec.containers[].volumeMounts // []] | add // []')"
+          rorfs="$(echo "$ksvc" | jq -r '.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem')"
+          echo "volumes=${vols} mounts=${mounts} readOnlyRootFilesystem=${rorfs}"
+          [ "$vols" = "[]" ] || { echo "::error::ksvc template renders volumes: ${vols}"; exit 1; }
+          [ "$mounts" = "[]" ] || { echo "::error::ksvc template renders volumeMounts: ${mounts}"; exit 1; }
+          [ "$rorfs" = "true" ] || { echo "::error::readOnlyRootFilesystem is '${rorfs}', want true"; exit 1; }
+
       - name: Reach the cluster (kourier-internal + MinIO port-forwards)
         run: |
           set -euo pipefail
@@ -304,6 +325,17 @@ jobs:
         run: |
           export PLATFORM_E2E_SUMMARY="$GITHUB_STEP_SUMMARY"
           node apps/file-manager/scripts/platform-e2e.mjs
+
+      - name: Write-free runtime - the vinext app logged no read-only write failure
+        run: |
+          set -euo pipefail
+          found=0
+          for p in $(kubectl -n "$APP_NS" get pods -l serving.knative.dev/service=file-manager -o name); do
+            if kubectl -n "$APP_NS" logs "$p" -c user-container 2>&1 | grep -Ei 'EROFS|read-only file system'; then
+              found=1
+            fi
+          done
+          [ "$found" = 0 ] || { echo "::error::file-manager logged a read-only filesystem write failure"; exit 1; }
 
       # D. storage-mode leg (#1292). A SECOND NextApp, storage configured
       # against the SAME in-cluster MinIO the app-functionality leg already

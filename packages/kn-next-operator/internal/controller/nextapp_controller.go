@@ -876,6 +876,12 @@ func isSelfContainedShape(nextApp *appsv1alpha1.NextApp) bool {
 //     original #1778 write-up described — storage does not remove this
 //     local write, it only adds a step that depends on it succeeding.
 //
+// `writeFree: true` (set by the CLI for an image it built and knows is
+// write-free — a vinext disk-mode binary, a self-contained standalone
+// executable, or a standalone build whose image cache is routed through the
+// knext cache handler) drops BOTH shape-inferred mounts above, so such an app
+// gets no emptyDir at all.
+//
 // `writableCache: true` additionally provisions both mounts unconditionally
 // (the pre-#1778 behaviour) for an app that wants guaranteed local writes
 // outside the two cases above — e.g. an app with no `cacheHandler` that
@@ -892,11 +898,16 @@ func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool, wr
 
 	selfContained := isSelfContainedShape(nextApp)
 	storageConfigured := nextApp.Spec.Storage != nil && nextApp.Spec.Storage.Provider != ""
+	// spec.security.writeFree: the CLI that built this image states its
+	// runtime writes nothing to local disk, so neither shape-inferred mount
+	// below is needed. writableCache (the user's escape hatch) still wins.
+	writeFree := nextApp.Spec.Security != nil && nextApp.Spec.Security.WriteFree != nil &&
+		*nextApp.Spec.Security.WriteFree
 
-	mountTmp := writableCache || selfContained
+	mountTmp := writableCache || (selfContained && !writeFree)
 	// `.next/cache` never applies to a self-contained image — it has no
 	// `.next/standalone` tree at all (see isSelfContainedShape).
-	mountNextCache := !selfContained && (writableCache || storageConfigured)
+	mountNextCache := !selfContained && (writableCache || (storageConfigured && !writeFree))
 
 	if !mountTmp && !mountNextCache {
 		return nil, nil

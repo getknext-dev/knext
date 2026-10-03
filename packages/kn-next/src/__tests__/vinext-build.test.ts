@@ -365,6 +365,14 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         "@img/sharp-libvips-darwin-arm64": VIPS_V,
         "@img/sharp-linuxmusl-x64": SHARP_V,
         "@img/sharp-libvips-linuxmusl-x64": VIPS_V,
+        // #1814 — sharp lists EVERY platform's addon as an optionalDependency
+        // (measured: `node_modules/sharp/package.json` on this repo), so a
+        // real `bun.lock` pins the glibc linux pair too, not only the musl
+        // one this image ships — these back the smoke-only `-gnu` twin.
+        "@img/sharp-linux-x64": SHARP_V,
+        "@img/sharp-libvips-linux-x64": VIPS_V,
+        "@img/sharp-linux-arm64": SHARP_V,
+        "@img/sharp-libvips-linux-arm64": VIPS_V,
         "@img/sharp-wasm32": SHARP_V,
     };
 
@@ -930,36 +938,87 @@ describe("#949 stageSharpNative stages the image target's platform, not the host
         expect(manifest.files).toEqual({});
     });
 
-    it("maps EVERY compile arch to a sharp platform id, musl matching the -musl triples", () => {
+    it("maps EVERY compile arch (shippable AND smoke-only) to a sharp platform id, musl only on the SHIPPABLE -musl triples", () => {
         // Scanned, not enumerated: the known-arch list is read out of
-        // compileArgv's own refusal, so an arch added to one map but not the
-        // other fails here instead of at a user's build.
-        let known: string[] = [];
+        // compileArgv's own refusal (both halves — shippable and smoke-only),
+        // so an arch added to one map but not the other fails here instead of
+        // at a user's build.
+        let shippable: string[] = [];
+        let smokeOnly: string[] = [];
         try {
             compileArgv("__not_an_arch__", "e", "o");
         } catch (e) {
-            // Post-#956 wording: the refusal separates shippable targets from
-            // the smoke-only -gnu keys. The sharp map must cover exactly the
-            // SHIPPABLE set — the gnu smoke binaries reuse the host/image
-            // addons the shim disambiguates at runtime, so they need no row.
-            known =
-                /Shippable targets: (.*?)\.\n/
-                    .exec((e as Error).message)?.[1]
-                    ?.split(", ") ?? [];
+            const msg = (e as Error).message;
+            shippable =
+                /Shippable targets: (.*?)\.\n/.exec(msg)?.[1]?.split(", ") ??
+                [];
+            // #1814 (round 2) — the smoke-only `-gnu` archs ALSO need a row:
+            // the compiled entry's sharp-addon-dlopen shim calls
+            // `process.dlopen` at the TOP LEVEL of sharp's module slot outside
+            // `--self-contained` mode (measured — never deferred behind
+            // `lazySharp()` there), so a route graph that merely INCLUDES the
+            // image-optimizer route evaluates it at boot. The earlier belief
+            // that the smoke-only twin "reuses the host/image addons the shim
+            // disambiguates at runtime" was wrong — it dlopens a fixed path
+            // beside the binary, and nothing is there unless staged.
+            const smokeMatch = /\((.*?) also compile, but exist ONLY/.exec(msg);
+            smokeOnly = smokeMatch?.[1]?.split(", ") ?? [];
         }
-        expect(known.length).toBeGreaterThan(0);
-        expect(Object.keys(SHARP_PLATFORM_IDS).sort()).toEqual(known.sort());
+        expect(shippable.length).toBeGreaterThan(0);
+        expect(smokeOnly.length).toBeGreaterThan(0);
+        expect(Object.keys(SHARP_PLATFORM_IDS).sort()).toEqual(
+            [...shippable, ...smokeOnly].sort(),
+        );
 
-        // The default image is alpine and the linux triples are `-musl`: the
-        // staged sharp set must match the runtime libc, one-word `linuxmusl`
-        // (the spelling this repo has already guessed wrong once).
+        // The default image is alpine and the SHIPPABLE linux triples are
+        // `-musl`: their staged sharp set must match the runtime libc,
+        // one-word `linuxmusl` (the spelling this repo has already guessed
+        // wrong once). The smoke-only `-gnu` twins are glibc-linked and must
+        // map to sharp's plain (non-musl) linux id instead.
         for (const [arch, id] of Object.entries(SHARP_PLATFORM_IDS)) {
-            if (arch.startsWith("linux-")) {
+            if (arch.endsWith("-gnu")) {
+                expect(id).toBe(arch.slice(0, -"-gnu".length));
+            } else if (arch.startsWith("linux-")) {
                 expect(id).toBe(`linuxmusl-${arch.slice("linux-".length)}`);
             } else {
                 expect(id).toBe(arch);
             }
         }
+    });
+
+    // #1814 — before this fix, `stageSharpNative` threw `Unknown build arch`
+    // for the smoke-only glibc twin (`linux-x64-gnu` / `linux-arm64-gnu`),
+    // which broke `knext build --builder vinext` for EVERY sharp-using app on
+    // every glibc Linux host (every scaffolded vinext app ships sharp).
+    // Round 2, discovered on a real glibc CI runner (jev-informed round 1
+    // ["skip staging, nothing dlopens it"] was WRONG — see the test above):
+    // the fix must STAGE REAL glibc sharp addons, not merely avoid throwing,
+    // or the smoke binary dlopen-crashes before it can print its startup
+    // line. Mirrors the darwin-host test above, fetching the GLIBC pair
+    // instead of the musl one.
+    it.each([
+        "linux-x64-gnu",
+        "linux-arm64-gnu",
+    ] as const)("#1814 stages the real glibc sharp pair for the smoke-only twin arch '%s'", (arch) => {
+        const cwd = darwinAppTree();
+        const { calls, fetch } = recordingFetch();
+
+        stageSharpNative(cwd, { arch, fetchPackage: fetch });
+
+        const glibcId = arch.slice(0, -"-gnu".length); // "linux-x64" | "linux-arm64"
+        const staged = readdirSync(join(cwd, "native")).sort();
+        expect(staged).toContain(`sharp-${glibcId}`);
+        expect(staged).toContain(`sharp-libvips-${glibcId}`);
+        expect(staged).not.toContain("sharp-darwin-arm64");
+        expect(staged).not.toContain("sharp-wasm32");
+        expect(calls.map((c) => c.name).sort()).toEqual(
+            [`@img/sharp-${glibcId}`, `@img/sharp-libvips-${glibcId}`].sort(),
+        );
+
+        // The darwin host's own addons must never leak into a glibc target.
+        expect(existsSync(join(cwd, "native", "sharp-darwin-arm64"))).toBe(
+            false,
+        );
     });
 });
 

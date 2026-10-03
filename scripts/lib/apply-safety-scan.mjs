@@ -2666,6 +2666,30 @@ export const REMOTE_FETCH_ALLOWLIST = [
     // applies nothing to any cluster.
     segment: /^git remote add origin https:\/\/github\.com\/oven-sh\/bun\.git$/,
   },
+  {
+    id: 'bun-patched-upstream-source',
+    // deploy/bun-patched/build.sh (Cloud Build only, #1822): names the upstream Bun repository as
+    // `upstream` in a fresh local clone; the fetch that follows asks for the `bun-v1.4.2` tag and
+    // is checked by `test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"` (the commit pinned in
+    // deploy/bun-patched/UPSTREAM). The tree is compiled into the opt-in patched Bun toolchain; the
+    // script applies nothing to any cluster.
+    segment: /^git remote add upstream https:\/\/github\.com\/oven-sh\/bun\.git$/,
+  },
+  {
+    id: 'bun-patched-release-assets',
+    // .github/workflows/bun-patched-release.yml (#1822): downloads THIS repo's draft release of the
+    // patched Bun toolchain; the very next step checks every binary against
+    // deploy/bun-patched/RELEASE.sha256 at the tagged commit (fail closed) before anything is signed
+    // or published. Nothing is applied to any cluster.
+    segment: /^gh release download "\$TAG" -R "\$GITHUB_REPOSITORY" -D out$/,
+  },
+  {
+    id: 'bun-patched-release-assets-publish',
+    // .github/workflows/bun-patched-release.yml, publish job: re-downloads the same draft (the
+    // gates ran in other jobs) and re-checks every binary against RELEASE.sha256 at the tagged
+    // commit before signing, attesting or publishing it. Nothing is applied to any cluster.
+    segment: /^gh release download "\$TAG" -R "\$GITHUB_REPOSITORY" -D out --pattern '\*'$/,
+  },
   // #1715 (followScripts enabled for workflow `run:` steps): the four
   // entries below are file-manager-platform-e2e.yml#platform-e2e findings
   // that only exist because `followScripts` can now see workflow steps at
@@ -2730,6 +2754,51 @@ export const REMOTE_FETCH_ALLOWLIST = [
     // fetched/attacker content — to verify the already-deployed rc app.
     // Writes nothing any apply could read.
     segment: /^node scripts\/rc-scaffold-platform-e2e\.mjs$/,
+  },
+  {
+    id: 'write-free-e2e-http-check',
+    // .github/workflows/write-free-runtime-kind-e2e.yml#write-free-e2e reuses
+    // the SAME assertion script as rc-scaffold-platform-e2e-http-check above
+    // (invoked as `./scripts/…` so each call site matches exactly one entry),
+    // with the same justification: HTTP only to the Kourier/MinIO
+    // port-forwards this job stood up, host read back from the NextApp's own
+    // status. The job's only apply is its own redis/minio heredoc, which
+    // reads nothing this script writes (it writes nothing at all).
+    segment: /^node \.\/scripts\/rc-scaffold-platform-e2e\.mjs$/,
+  },
+  {
+    id: 'write-free-e2e-knext-create',
+    // .github/workflows/write-free-runtime-kind-e2e.yml: `kn-next create` from
+    // this commit's build output scaffolds the app under test into
+    // $RUNNER_TEMP. `dist/` is untracked build output, so `resolveSource`
+    // cannot read it and it fails closed as "could not be resolved" (same as
+    // platform-e2e-knext-deploy-image-leg). What it does is published
+    // @getknext/core behavior: render templates to local files. It applies
+    // nothing to any cluster and fetches nothing an apply reads.
+    segment:
+      /^node packages\/kn-next\/dist\/cli\/kn-next\.js create "\$APP_DIR" --name "\$APP_NAME"$/,
+  },
+  {
+    id: 'node-redis-e2e-http-check',
+    // .github/workflows/runtime-redis-cache-kind-e2e.yml#node-redis-e2e reuses
+    // the SAME assertion script as the two http-check entries above (invoked
+    // as `scripts/./…` so each call site matches exactly one entry), with the
+    // same justification: HTTP only to the Kourier/MinIO port-forwards this
+    // job stood up, host read back from the NextApp's own status. The job's
+    // only apply is its own redis/minio heredoc, which reads nothing this
+    // script writes (it writes nothing at all).
+    segment: /^node scripts\/\.\/rc-scaffold-platform-e2e\.mjs$/,
+  },
+  {
+    id: 'node-redis-e2e-knext-create',
+    // .github/workflows/runtime-redis-cache-kind-e2e.yml: the same `kn-next
+    // create` from this commit's untracked build output as
+    // write-free-e2e-knext-create above (spelled `./packages/…` so each call
+    // site matches exactly one entry). It renders templates to local files
+    // under $RUNNER_TEMP, applies nothing to any cluster and fetches nothing
+    // an apply reads.
+    segment:
+      /^node \.\/packages\/kn-next\/dist\/cli\/kn-next\.js create "\$APP_DIR" --name "\$APP_NAME"$/,
   },
   {
     id: 'release-audit-npm-closure-fetch',

@@ -37,7 +37,7 @@
 export const INTERNAL_ONLY_VERBS = ["preview", "loadtest"] as const;
 
 /** Where a user with no Kubernetes background is sent for the long version. */
-export const DOCS_URL = "https://knext.dev";
+export const DOCS_URL = "https://knext-platform.dev";
 
 /** One row of the help's command list. */
 export interface CliCommand {
@@ -148,13 +148,19 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
         ],
     },
     {
-        heading: "CI internals",
+        heading: "Internals",
         commands: [
             {
                 verb: "ci-preflight",
                 display: "ci-preflight",
                 summary:
                     "the credential preflight generated CI pipelines run before any cluster call (not usually run by hand)",
+            },
+            {
+                verb: "vinext-patches",
+                display: "vinext-patches",
+                summary:
+                    "apply the vinext fixes knext bundles ahead of upstream releases (runs from postinstall and build; not usually run by hand)",
             },
         ],
     },

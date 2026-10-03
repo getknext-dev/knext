@@ -47,7 +47,7 @@ import {
     rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import {
@@ -136,6 +136,12 @@ export function compileArgv(
     arch: string,
     entry: string,
     outFile: string,
+    include: readonly string[] = [],
+    /**
+     * The opt-in knext-patched Bun (`compile.bun`, resolved + sha256-verified
+     * by bun-toolchain.ts). Absent: plain `bun` on PATH, argv unchanged.
+     */
+    compilerBin?: string,
 ): string[] {
     const target = bunCompileTarget(arch);
     // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and
@@ -152,7 +158,7 @@ export function compileArgv(
     // treatment knext's own reference app does rather than a second copy that
     // drifts.
     return [
-        "bun",
+        compilerBin ?? "bun",
         "run",
         compileScriptPath(),
         "--entry",
@@ -161,7 +167,20 @@ export function compileArgv(
         outFile,
         "--target",
         target,
+        // `compile.include` (knext.config.ts): appended only when set, so the
+        // default argv is exactly what it always was.
+        ...includeArgv(include),
+        // The patched toolchain embeds the SAME checked plan through its
+        // native `compile.include` (compile-embed.mjs nativeIncludePaths).
+        ...(compilerBin && include.length > 0 ? ["--include-native", "1"] : []),
     ];
+}
+
+/** `--include-json <json>` for the compile script, only when there are globs. */
+export function includeArgv(include: readonly string[] = []): string[] {
+    return include.length > 0
+        ? ["--include-json", JSON.stringify(include)]
+        : [];
 }
 
 /**
@@ -347,6 +366,34 @@ export interface VinextBuildOptions {
      * compile argv and the step order are exactly what they were.
      */
     readonly selfContained?: boolean;
+    /**
+     * #1814 round 3 — where to stage sharp's native tree, ABSOLUTE, defaulting
+     * to `<cwd>/native` (the dir the Dockerfile `COPY`s). The caller that sets
+     * this is `smokeCompiledBinary`'s host-arch TWIN compile: that twin is a
+     * SECOND `buildVinextExecutable` call for a DIFFERENT arch than the ship
+     * build, into the SAME `cwd`. Staging both into the shared `native/`
+     * clobbers whichever ran first — `stageSharpNative` clears its
+     * destination before writing, so the twin's glibc pair silently replaced
+     * the ship's musl pair in a real run (#1814, measured on a live glibc CI
+     * runner: the SHIPPED alpine image then failed to dlopen a glibc `.node`
+     * it never should have carried). Must sit under `cwd` in self-contained
+     * mode — `vinext-compile.mjs` refuses a `--native-dir` outside the app
+     * root — so the twin uses a cwd-nested sibling, never a dir rooted
+     * elsewhere.
+     */
+    readonly nativeDir?: string;
+    /**
+     * `compile.include` globs (knext.config.ts), relative to the app root:
+     * JS/TS modules embedded in the executable and loaded on their first
+     * import. Absent or empty: the compile argv is unchanged.
+     */
+    readonly include?: readonly string[];
+    /**
+     * The opt-in knext-patched Bun that runs the compile script
+     * (`compile.bun: 'knext-patched'`, resolved and sha256-verified by
+     * bun-toolchain.ts). Absent: stock `bun` on PATH.
+     */
+    readonly compilerBin?: string;
 }
 
 /**
@@ -375,7 +422,7 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     const arch = opts.arch ?? "linux-x64";
     const outFile = opts.outFile ?? `knext-exec-${arch}`;
 
-    const version = opts.bunVersion ?? detectBunVersion(run);
+    const version = opts.bunVersion ?? detectBunVersion(run, opts.compilerBin);
     if (!bunMeetsFloor(version)) {
         throw new UsageError(
             `The vinext single-executable target requires Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}.0 or newer; found '${version}'.\n\n` +
@@ -399,28 +446,41 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
         );
     }
 
+    // #1814 round 3 — see VinextBuildOptions.nativeDir's doc: default to the
+    // ship path (`<cwd>/native`), honoured verbatim (relative or absolute) so
+    // a caller staging a SECOND arch into this same `cwd` (the post-compile
+    // smoke's host-arch twin) can point it somewhere that does not clobber
+    // the ship build's already-staged tree.
+    const nativeDirArg = opts.nativeDir ?? "native";
+
     if (opts.selfContained) {
         // Self-contained: stage sharp's native tree for the target arch FIRST
         // (the compile embeds it, and it is unpacked on the first image
         // request), then compile with it. Nothing is left for the image to
         // copy beside the binary.
-        stageSharpNative(opts.cwd, { arch });
+        stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
         run([
-            ...compileArgv(arch, entry, outFile),
+            ...compileArgv(
+                arch,
+                entry,
+                outFile,
+                opts.include,
+                opts.compilerBin,
+            ),
             "--self-contained",
             "1",
             "--native-dir",
-            "native",
+            nativeDirArg,
         ]);
         return outFile;
     }
 
     // 2. compile + bytecode
-    run(compileArgv(arch, entry, outFile));
+    run(compileArgv(arch, entry, outFile, opts.include, opts.compilerBin));
 
     // 3. stage sharp's native module beside the binary — for the arch being
     // compiled, which is NOT necessarily the host's (#949).
-    stageSharpNative(opts.cwd, { arch });
+    stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
 
     return outFile;
 }
@@ -440,6 +500,18 @@ export const SHARP_PLATFORM_IDS: Record<string, string> = {
     "linux-arm64": "linuxmusl-arm64",
     "darwin-arm64": "darwin-arm64",
     "darwin-x64": "darwin-x64",
+    // #1814 — the smoke-only glibc twin (`linux-x64-gnu` / `linux-arm64-gnu`,
+    // COMPILE_TARGETS' SMOKE_ONLY_ARCHES) DOES need a row, even though nothing
+    // SHIPS that binary: the compiled entry's sharp-addon-dlopen shim calls
+    // `process.dlopen` at the TOP LEVEL of sharp's module slot (measured — it
+    // is not deferred behind a `lazySharp()` wrapper outside `--self-contained`
+    // mode), so a Next.js route graph that merely INCLUDES the image-optimizer
+    // route evaluates it at boot, before any request — "it never hits
+    // next/image" was the wrong model; the smoke binary crashes loading sharp
+    // before it can even print its startup line if nothing is staged. sharp's
+    // own glibc (non-musl) package id has no `linuxmusl` prefix.
+    "linux-x64-gnu": "linux-x64",
+    "linux-arm64-gnu": "linux-arm64",
 };
 
 export interface StageSharpNativeOptions {
@@ -450,6 +522,18 @@ export interface StageSharpNativeOptions {
         pkg: { name: string; version: string; integrity: string | null },
         destDir: string,
     ) => void;
+    /**
+     * #1814 round 3 — staging destination, relative-to-`cwd` or absolute;
+     * defaults to `<cwd>/native` (the Dockerfile's `COPY native` source). A
+     * caller staging a SECOND arch into the same `cwd` (the post-compile
+     * smoke's host-arch twin, built alongside the ship binary) MUST pass a
+     * different directory here, or this function's own clear-before-write
+     * silently replaces whatever the ship build already staged — the exact
+     * clobber measured on a live glibc CI runner (the shipped image then
+     * carried a glibc `.node` it could never dlopen, where the ship's own
+     * musl pair used to be).
+     */
+    readonly nativeDir?: string;
 }
 
 /**
@@ -489,7 +573,9 @@ export function stageSharpNative(
         );
     }
 
-    const dest = join(cwd, "native");
+    const dest = opts.nativeDir
+        ? resolve(cwd, opts.nativeDir)
+        : join(cwd, "native");
     clearStagedNative(dest);
     mkdirSync(dest, { recursive: true });
 
@@ -1080,13 +1166,14 @@ function pickFetchVersion(
  */
 export function detectBunVersion(
     run: (argv: readonly string[]) => void,
+    bin = "bun",
 ): string {
     // `runQuiet` does not capture stdout, so the version is read via
     // execFileSync directly. The unused seam parameter stays so the injection
     // point remains explicit rather than pretending.
     void run;
     try {
-        return execFileSync("bun", ["--version"], {
+        return execFileSync(bin, ["--version"], {
             encoding: "utf8",
             // stderr is CAPTURED, never inherited: a failing bun's own words
             // must land IN the error message below (which the docs promise),

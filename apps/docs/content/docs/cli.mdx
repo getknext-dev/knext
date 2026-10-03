@@ -88,8 +88,33 @@ recipe for the optional `--self-contained` single-executable build (see
 target never scaffolds that file, since `--self-contained` only applies to the vinext build. See
 [the adapter and the compiled build](/docs/official-adapter) for the trade-off between the two.
 
+### The questions `create` asks
+
+Run on a terminal with no flags, `create` asks five questions. Press Enter on each to take the
+default: the scaffold described above, with React Compiler turned on. At the end it prints the
+equivalent flags, so you can repeat the same scaffold in CI.
+
+| Question | Choices | Default | What changes |
+|---|---|---|---|
+| Runtime | `bun`, `node` | `bun` | `node` writes `runtime: "node"` to `knext.config.ts` and adds the Node Redis client, `ioredis`, to the app's dependencies. Bun has a Redis client built in, so a Bun app gets nothing extra. |
+| Builder | `turbopack`, `webpack`, `vinext` (Beta) | `turbopack` | `webpack` sets the `build` script to `next build --webpack` and writes `build: "webpack"`; `vinext` scaffolds the compiled single-executable shape. |
+| ISR / data cache | `none` (in memory, per pod), `redis` | `none` | `redis` writes a `cache` block that reads `REDIS_URL`. |
+| Object storage | `none`, `gcs`, `s3`, `minio`, `azure` | `none` | Writes a `storage` block for that provider, with `<placeholders>` for you to fill in. |
+| React Compiler | yes / no | **yes** | On `turbopack`/`webpack`: writes `reactCompiler: true` to `next.config.ts` and adds `babel-plugin-react-compiler` to `devDependencies`. On `vinext`: writes `react: { compiler: true }` to the vinext plugin in `vite.config.ts` and adds the four packages it needs. Answer `n`, or pass `--no-react-compiler`, to leave it off. See [React Compiler](/docs/react-compiler). |
+
+With a Redis cache, set `REDIS_URL` when you run `knext deploy`, and keep the value in a Kubernetes
+Secret or your CI secrets rather than in the file. `knext deploy` stops with an error while it is
+empty. With a storage provider, `knext deploy` names any placeholder you have not filled in.
+
+`create` never asks when it cannot expect an answer: with any flag, with `--yes`, when `CI` is set,
+or when stdin or stdout is not a terminal, it uses the default for every choice you did not pass.
+A pipe or a CI job never waits on a question.
+
 ```bash title="shell"
-knext create my-app                    # standalone target (default)
+knext create my-app                    # asks the questions on a terminal; defaults elsewhere
+knext create my-app --yes              # defaults, no questions
+knext create my-app --runtime node --cache redis   # Node + Redis, no questions
+knext create my-app --no-react-compiler            # without React Compiler
 knext create my-app --builder vinext   # compiled single-executable target
 knext create my-app --dry-run          # list the files it would write, write nothing
 ```
@@ -97,13 +122,19 @@ knext create my-app --dry-run          # list the files it would write, write no
 | Flag | Notes |
 |---|---|
 | `--name <name>` | App name. Defaults to the directory name. |
-| `--builder <default\|vinext>` | Target to scaffold. `default` is the standalone shape; `vinext` is the compiled single-executable shape. **Experimental** — see [Stability tiers](/docs/stability). Any other value is an error. |
+| `--runtime <bun\|node>` | Server runtime. Default `bun`. |
+| `--builder <turbopack\|webpack\|vinext>` | Build target. Default `turbopack`, the standalone shape; `default` is accepted as `turbopack`. `vinext` is the compiled single-executable shape, **Experimental** — see [Stability tiers](/docs/stability). |
+| `--cache <none\|redis>` | ISR / data cache. Default `none`. |
+| `--storage <none\|gcs\|s3\|minio\|azure>` | Object storage for static assets. Default `none`: assets are served from the container image. |
+| `--react-compiler`, `--no-react-compiler` | Turn React Compiler on or off. Default on, for every builder. Passing both is an error. |
+| `-y`, `--yes` | Ask nothing; use the defaults for every choice not given as a flag. |
 | `--force` | Overwrite existing files. |
 | `--dry-run` | List the files that would be written and write nothing. |
 | `-h`, `--help` | Show the usage help. |
 
 **Exit code:** `0` on success (including `--dry-run` and `--help`); `1` on a usage error (an
-unrecognized `--builder` value, an unexpected extra argument) or a scaffold failure (for example an
+unrecognized `--runtime`, `--builder`, `--cache` or `--storage` value, both `--react-compiler`
+and `--no-react-compiler`, an unexpected extra argument, or a cancelled question) or a scaffold failure (for example an
 invalid app name, or an existing file without `--force`).
 
 The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the
@@ -201,6 +232,42 @@ knext ci-preflight --namespace my-app
 namespace "<ns>".` when the credential passes; `1` on a usage error (missing `--namespace`, no
 kubeconfig configured) or any refusal, printing the reason — never the kubeconfig's bytes — to
 stderr.
+
+## `knext vinext-patches`
+
+Applies the vinext fixes knext bundles ahead of upstream vinext releases to the vinext installed
+for this app, so you do not wait for those fixes to ship upstream. An app created with
+`knext create --builder vinext` runs it from its `postinstall` script, and `knext build` runs it
+again before the vinext build, so it is not typically run by hand.
+
+The fixes are tied to one exact vinext version (the one `knext create` pins). With any other vinext
+version installed it changes nothing and says so. Re-running it is safe: fixes that are already in
+place are left alone. If a fix neither applies cleanly nor is already present — vinext's files were
+modified some other way — it refuses rather than half-applying; reinstall your dependencies and run
+it again. Applying is all-or-nothing per fix: if writing any of a fix's files fails (for example a
+read-only `node_modules`), the files it already changed are restored and the command exits `1`.
+
+The `postinstall` script skips this step quietly when `@getknext/core` is not installed, as in a
+production-only install (`npm ci --omit=dev`), because it is a development dependency.
+
+To turn the bundled fixes off, for example because you patch vinext yourself, set
+`KNEXT_VINEXT_PATCHES=0`. Both the `postinstall` step and `knext build` then leave vinext untouched
+and print a line saying the fixes were not applied.
+
+```bash
+knext vinext-patches          # apply
+knext vinext-patches --check  # report only, change nothing
+```
+
+| Flag | Notes |
+|---|---|
+| `--check` | Report whether every fix is applied without changing any file; exit `1` when one is missing. |
+| `KNEXT_VINEXT_PATCHES=0` (env) | Skip the bundled fixes entirely, here and in `knext build`. |
+| `-h`, `--help` | Show the usage help. |
+
+**Exit code:** `0` (including `--help`, and when vinext is not installed or is a different version);
+`1` on a usage error, a fix that conflicts with the installed vinext, or `--check` finding a fix not
+yet applied.
 
 ## `knext deploy` (default)
 

@@ -98,7 +98,7 @@ describe("validateMain — verdicts", () => {
         expect(r.stdout).toBe("");
         expect(r.stderr).toContain("registry");
         expect(r.stderr).toContain("ghcr.io/<your-user>");
-        expect(r.stderr).toContain("https://knext.dev");
+        expect(r.stderr).toContain("https://knext-platform.dev");
         expect(r.stderr).not.toContain("FATAL");
         expect(r.stderr).not.toMatch(/\n\s+at\s/);
     });

@@ -390,6 +390,43 @@ native addon, copy that directory into the image next to the binary (as `/app/.o
 and build it on the platform the image runs on, because a native addon only loads on the operating
 system and CPU it was compiled for.
 
+### Bundled vinext fixes
+
+knext ships some vinext fixes before vinext itself releases them, so you do not wait on an upstream
+release. They are applied to the vinext installed for your app by `knext vinext-patches`, which a
+vinext app created by `knext create` runs from its `postinstall` script; `knext build` applies them
+again before building, so an app created before the script existed is covered too. The fixes
+target the exact vinext version `knext create` pins. With a different vinext version installed they
+are skipped, with a message saying so. Set `KNEXT_VINEXT_PATCHES=0` to turn them off, for example
+if you patch vinext yourself. Each fix is removed from knext once a vinext release includes it.
+
+The fixes bundled with vinext 1.0.1:
+
+- **Pages Router data requests:** `getServerSideProps` sees the original `/_next/data/…` URL as
+  `req.url`, as in Next.js, instead of the normalized page path.
+- **`require()` of CommonJS dependencies in server code** resolves the package's `require` export
+  condition, even for a package Vite would otherwise leave external.
+- **`turbopack.resolveExtensions` without `.mjs`** no longer breaks the build by hiding the server
+  preset's own entry file.
+- **Packages with a `react-server` export condition** get that condition in Server Components, because
+  their dependencies are now bundled into the server build.
+- **Web Workers** see `process.env.NEXT_DEPLOYMENT_ID` inlined, like the rest of the app.
+- **`outputFileTracingIncludes` / `outputFileTracingExcludes`** in `next.config` are applied to the
+  dependency files copied next to the server build.
+- **A `next.config.js`/`.ts` exported as a function** (`module.exports = (phase, { defaultConfig }) =>
+  ({...})`) now receives the real default page extensions in `defaultConfig.pageExtensions`, instead
+  of an empty object — a config that reads it (for example, to append a custom page extension) no
+  longer fails to build.
+- **A file that starts with a `#!` shebang line and also uses `module.exports`/`require()`** (for
+  example, a CLI-style script imported by your app) no longer fails to build with an "Invalid
+  Character" parse error.
+- **A server action's `redirect()` called from client-invoked (fetch) code** now answers `200`,
+  matching current Next.js, instead of sometimes falling back to `303`. The redirect target still
+  reaches the browser the same way (an `x-action-redirect` header, no `Location` header); only the
+  response's own status code changes, so this only matters if your own code inspects
+  `response.status` on a server action call. A no-JS `<form>` submission's redirect is unaffected
+  and still answers `303`.
+
 ## Requirements
 
 ### For vinext: your app must be an ES module
@@ -428,6 +465,137 @@ tells you how to install it.
 CI and container builds get Bun the same way; the requirement is only on whoever runs the build, not
 on anyone deploying an already-built image.
 
+## Including extra files in the compiled executable (experimental)
+
+The compiled vinext executable carries the modules your server code imports statically. A module
+your code loads by a path the bundler cannot follow — a plugin whose file name is chosen at
+runtime, say — is not in it, and on a cluster there is nothing beside the binary to load it from. List such modules in `compile.include`:
+
+```ts title="knext.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  build: 'vinext',
+  compile: {
+    include: ['plugins/*.js'],   // globs, relative to the app root
+  },
+};
+```
+
+Each matching module is embedded in the executable at `/$bunfs/root/<its path relative to the app
+root>` — `plugins/greet.js` becomes `/$bunfs/root/plugins/greet.js` (a `.ts`, `.mjs` or `.cjs`
+source is embedded with a `.js` extension). It is **not run at startup**; it loads from inside the
+executable the first time your code imports it, and nothing needs to sit beside the binary. It is
+compiled to bytecode like the rest of the server, and `knext build` checks that it was. This works
+with the stock Bun on your `PATH`; no special toolchain is involved.
+
+Import an included module by its embedded path, from code the bundler does not rewrite. Vite turns
+an `import()` whose specifier it cannot analyse into a stub that fails at runtime, so build the
+call at runtime instead:
+
+```ts
+const load = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<any>;
+const plugin = await load(`/$bunfs/root/plugins/${name}.js`);
+```
+
+**Limits.** The build fails, naming the offending pattern or file, rather than embedding less than
+you asked for:
+
+- only JavaScript and TypeScript modules (`.js .mjs .cjs .ts .mts .cts .jsx .tsx`) can be included —
+  a glob that matches a JSON file, an image or any other file fails the build;
+- a native addon (`.node`, `.so`, `.dylib`, `.dll`) is refused, whether a glob matches it or you
+  name it exactly: an addon inside the executable cannot be loaded. Load it with a plain static
+  `require("./native/addon.node")` instead, which Bun embeds and loads itself;
+- a pattern that matches nothing fails the build;
+- patterns are relative to the app root: an absolute pattern, or one containing `..`, fails the
+  build;
+- every match must really be inside the app root — a file or directory that is a symlink to
+  somewhere outside it fails the build (a glob does not follow a symlinked file at all), and
+  `node_modules` is never searched — a directory pattern such as `plugins` embeds every module below
+  it except anything under a `node_modules` directory;
+- files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_*`) are never picked up by a glob —
+  the build fails and names them; list one by its exact path if it really belongs in the executable;
+- a file whose name contains a backslash cannot be included — the build fails and names it;
+- `compile.include` applies only to the compiled vinext executable (`build: 'vinext'` on the Bun
+  runtime); the config check rejects it for every other target.
+
+It is experimental: the option may change in a minor release.
+
+## Optional patched Bun toolchain (experimental)
+
+By default the compile step runs the Bun on your `PATH`, and `compile.include` works as described
+above. As an **opt-in**, knext can run that one step with a knext-published build of **Bun 1.4.2
+plus `--compile --include`**, an option that is not in a Bun release yet:
+
+```ts title="knext.config.ts"
+compile: {
+  bun: 'knext-patched',        // default: 'stock' (the Bun on PATH)
+  include: ['plugins/*.js'],   // optional; exactly the same option as above
+},
+```
+
+**Same option, same checks, same paths.** `include` is expanded and checked by knext exactly as on
+stock Bun — every limit in the list above applies unchanged — and the resulting list of files (never
+your raw globs) is handed to the patched Bun's `--include`, with any glob characters in a file name
+(`[ ] { } * ?`, as in `[id].js`) escaped so that exactly that file is embedded. Each module lands at
+the same `/$bunfs/root/<its path relative to the app root>` and is imported the same way. If the compiler
+does not actually embed a listed module, the build fails rather than shipping a binary without it.
+
+**How it is verified.** The first `knext build` on a machine downloads the toolchain from the knext
+GitHub release into a cache directory (`$KNEXT_CACHE_DIR`, else `$XDG_CACHE_HOME/knext`, else
+`~/.cache/knext`) and checks its **sha256 against a value pinned inside the knext version you
+installed**. A mismatch, an HTTP error or a network error **fails the build** — it never falls back
+to stock Bun, and nothing unverified is cached. A cached copy is re-hashed on every build, so a
+modified cache file is discarded and downloaded again.
+
+The release is published only after its own gates pass: the binaries are checked against the
+pinned checksums, smoke-tested on x64 and on a real arm64 machine, and used for an end-to-end
+`knext build` that boots the image and loads an included module. Its checksum file is **signed**
+(cosign, keyless, by the knext release workflow) and each binary carries a **GitHub build-provenance
+attestation**. `knext build` does not check either — the pinned sha256 is the binding check — but
+you can, with the release tag the knext version you installed pins:
+
+```sh
+TAG=bun-patched-1.4.2-knext.2
+gh release download "$TAG" -R getknext-dev/knext
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.2-knext.2" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify bun-linux-x64 -R getknext-dev/knext \
+  --cert-identity "https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.2-knext.2" \
+  --source-ref "refs/tags/$TAG"
+```
+
+The signature and the attestation show that the knext release workflow, at that tag, checked and
+published those exact bytes. They do not attest the machine that compiled Bun itself: that build
+runs outside GitHub, from the recipe in the knext repository.
+
+**What it changes, and what it does not.** The patched Bun runs the **compile step only**. The
+shipped executable targets linux-musl, which Bun builds on its own stock Bun base for that target,
+so the binary you deploy still runs on stock Bun. The toolchain is published for **Linux build
+machines with glibc, x64 and arm64** (such as GitHub-hosted runners); on a musl-based (Alpine)
+machine, macOS or Windows the build stops with an error that says so. Remove `bun`, or set
+`bun: 'stock'`, to go back to the Bun on your `PATH`.
+
+**Known limits.** Read these before relying on it:
+
+- **No cluster-deploy proof yet.** It is tested by building the real container image with it,
+  booting that image and loading an included module, on x64 and arm64 build machines. A full
+  `knext deploy` to a Kubernetes cluster with this toolchain has not been run.
+- **Thin SBOM.** Each binary's SBOM records only the file and its digest, with no component list.
+  The separate source SBOM lists the Bun source tree's components but does not record the added
+  patch.
+- **Build identity.** The binaries are compiled on Google Cloud Build under the project's default
+  build service account, not a dedicated least-privilege one. The signature and attestation cover
+  the release workflow's checks and publication, not that build machine.
+- **A slower compiler.** It is not built with link-time optimisation, so the compile step runs
+  about 4–5% slower than stock Bun. The executable you ship is unaffected.
+
+**Not covered by the compatibility credential.** The verified results on this site were earned
+with stock Bun. Treat this toolchain as experimental: its shape may change in a minor release, and
+it will be **removed once a stock Bun release ships `--compile --include`**.
+
 ## Optional vinext build
 
 `build: 'vinext'` is an **opt-in** build target, enabled by setting that one field in
@@ -446,19 +614,15 @@ credential (the 14-consecutive-night gate the four default-target cells carry �
 [verified compatibility](/docs/compat-suite)). vinext has its own, separate, not-yet-complete
 credentialing track.
 
-**Known gap on the Bun runtime: the build's own boot check can fail on Linux build machines.**
-After compiling, `knext build` on this target boots the executable itself to confirm it serves
-and drains correctly before finishing. On a glibc-based Linux machine — most Linux CI runners
-(including GitHub-hosted ones) and most Linux desktops; macOS is unaffected — that check
-currently fails with an "unknown build arch" error for any app that depends on `sharp` (every app
-`knext create --builder vinext` scaffolds does, for image optimization). The compiled binary
-itself is fine; the gap is in how the check stages a native addon for that one case.
-
-Until this is fixed, build on an affected Linux machine with `knext build --skip-smoke`, which
-skips that check and says so loudly. Do not skip verification outright: build the image your
-`Dockerfile` defines (the one `knext build` already generated — the real binary you will ship)
-and run it, and confirm it answers your configured health route, before you deploy. Track current
-known gaps on the project's public issue tracker.
+**Fixed from this release on: the build's own boot check used to fail on glibc Linux build
+machines for apps that depend on `sharp`.** After compiling, `knext build` on this target boots
+the executable itself to confirm it serves and drains correctly before finishing. On a
+glibc-based Linux machine — most Linux CI runners (including GitHub-hosted ones) and most Linux
+desktops; macOS was unaffected — that check used to fail with an "unknown build arch" error for
+any app that depends on `sharp` (every app `knext create --builder vinext` scaffolds does, for
+image optimization). The boot check now stages a real `sharp` native addon for that check's own
+binary too, the same way the binary you ship always has, so the check boots cleanly. The compiled
+binary you ship was never affected; only this build-time check was.
 
 ## Compatibility, stated honestly
 

@@ -203,7 +203,7 @@ describe("knext create --builder — CLI flag validation", () => {
             return true;
         }) as typeof process.stderr.write;
         try {
-            const code = await createMain(argv);
+            const code = await createMain(argv, { stdinIsTTY: false });
             return { code, err };
         } finally {
             process.stderr.write = orig;

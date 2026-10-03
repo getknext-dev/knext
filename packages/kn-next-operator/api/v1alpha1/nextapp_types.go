@@ -361,6 +361,32 @@ type SecuritySpec struct {
 	// provisioned unconditionally.
 	// +optional
 	WritableCache *bool `json:"writableCache,omitempty"`
+
+	// WriteFree states that the image's runtime writes nothing to local disk,
+	// so the operator provisions NO writable volume for it under
+	// ReadOnlyRootFilesystem — not even the two shape-inferred mounts
+	// described above (`/tmp` for a vinext/self-contained build,
+	// `.next/standalone/.next/cache` for a storage-configured standalone
+	// build). Each emptyDir costs pod-sandbox setup time on every cold wake,
+	// so dropping the last one is a cold-start win.
+	//
+	// The knext CLI sets this only for an image it built itself in the same
+	// deploy, and only when that build is write-free: a vinext disk-mode
+	// binary (sharp loads from the image's read-only `native/` tree), a
+	// self-contained standalone executable (no native addons), or a
+	// standalone build whose optimized-image cache is routed through the
+	// knext cache handler (`images.customCacheHandler`, Redis or bounded
+	// memory) instead of `.next/cache/images`. A vinext self-contained binary
+	// unpacks sharp into `$TMPDIR` and never gets this field.
+	//
+	// WritableCache: true still wins: it provisions both mounts regardless.
+	//
+	// Semantics: nil (unset) or false => today's shape-inferred mounts
+	// (DEFAULT, so a CR written by an older CLI renders unchanged); true =>
+	// no mounts unless WritableCache is true. Ignored when
+	// ReadOnlyRootFilesystem is false.
+	// +optional
+	WriteFree *bool `json:"writeFree,omitempty"`
 }
 
 // DatabaseSpec is the author-facing surface of the app's database. knext is
