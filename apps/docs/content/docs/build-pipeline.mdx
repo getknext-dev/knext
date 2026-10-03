@@ -406,6 +406,13 @@ The fixes bundled with vinext 1.0.1:
 - **Web Workers** see `process.env.NEXT_DEPLOYMENT_ID` inlined, like the rest of the app.
 - **`outputFileTracingIncludes` / `outputFileTracingExcludes`** in `next.config` are applied to the
   dependency files copied next to the server build.
+- **A `next.config.js`/`.ts` exported as a function** (`module.exports = (phase, { defaultConfig }) =>
+  ({...})`) now receives the real default page extensions in `defaultConfig.pageExtensions`, instead
+  of an empty object — a config that reads it (for example, to append a custom page extension) no
+  longer fails to build.
+- **A file that starts with a `#!` shebang line and also uses `module.exports`/`require()`** (for
+  example, a CLI-style script imported by your app) no longer fails to build with an "Invalid
+  Character" parse error.
 - **A server action's `redirect()` called from client-invoked (fetch) code** now answers `200`,
   matching current Next.js, instead of sometimes falling back to `303`. The redirect target still
   reaches the browser the same way (an `x-action-redirect` header, no `Location` header); only the

@@ -1,0 +1,39 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3688
+What it fixes: A module that starts with a hashbang line
+(`#!/usr/bin/env node`) and also contains CommonJS syntax (`module.exports`,
+`require(...)`) is routed through vite-plugin-commonjs's CJS->ESM interop
+transform, which prepends a `module`/`exports` runtime facade to the source
+it rewrites. That prepend pushes `#!` out of byte position 0 -- Hashbang
+grammar is only valid there -- so the bundler's own parser later throws on
+the stray `#!` ("Invalid Character '!'"), failing the whole build. This is
+exactly Next's hashbang e2e fixture (a .js module with a shebang that also
+does `module.exports = ...`). Strips the hashbang from the source before
+handing it to the CJS transform and splices it back onto whatever the
+transform returns (a string, a `{ code, map }` object, or either wrapped in
+a promise -- the transform is async).
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3688.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1161,7 +1161,16 @@
+ 			transformProjectLocalCommonJs = projectLocal && isDev;
+ 			transformBundledCommonJsDependencies = bundledDependency;
+ 			try {
+-				return commonJsTransform.call(this, code, id, ...args);
++				const hashbangMatch = /^#![^\n]*\n/.exec(code);
++				if (!hashbangMatch) return commonJsTransform.call(this, code, id, ...args);
++				const hashbang = hashbangMatch[0];
++				const transformed = commonJsTransform.call(this, code.slice(hashbang.length), id, ...args);
++				return Promise.resolve(transformed).then((result) => {
++					if (result == null) return result;
++					if (typeof result === "string") return hashbang + result;
++					if (typeof result === "object" && typeof result.code === "string") return { ...result, code: hashbang + result.code };
++					return result;
++				});
+ 			} finally {
+ 				transformProjectLocalCommonJs = previousProjectLocal;
+ 				transformBundledCommonJsDependencies = previous;

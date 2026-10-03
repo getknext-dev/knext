@@ -29,6 +29,7 @@ import {
     realpathSync,
     renameSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -877,6 +878,146 @@ describe("the bundled patches against the published tarball", () => {
         expect(response?.headers.get("location")).toBeNull();
         expect(await response!.text()).toBe("");
     });
+
+    it("vinext#3687 (site A, resolveConfigValue): a CJS function-form next.config gets the real pageExtensions default, not an empty object", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            loadNextConfig: (
+                root: string,
+            ) => Promise<{ pageExtensions?: string[] } | null>;
+        }>("dist/config/next-config.js");
+        const tmpDir = mkdtempSync(join(tmpdir(), "knext-vp-pageext-cjs-"));
+        try {
+            // Ported from Next.js: test/e2e/custom-page-extension/next.config.js
+            // A plain CommonJS next.config.js: vinext's Vite-runner virtual-module
+            // loader (site B, below) throws evaluating `module.exports` as ESM and
+            // falls back to `loadConfigViaRequire` -> `resolveConfigValue` (site A),
+            // so this exercises ONLY site A's `{ defaultConfig: {} }` call.
+            writeFileSync(
+                join(tmpDir, "next.config.js"),
+                "module.exports = (phase, { defaultConfig }) => ({\n" +
+                    "  pageExtensions: [...defaultConfig.pageExtensions, 'page.js'],\n" +
+                    "});\n",
+            );
+            const config = await mod.loadNextConfig(tmpDir);
+            expect(config?.pageExtensions).toEqual([
+                "tsx",
+                "ts",
+                "jsx",
+                "js",
+                "page.js",
+            ]);
+        } finally {
+            rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it("vinext#3687 (site B, the virtual-module loader): a .ts function-form next.config gets the real pageExtensions default, not an empty object", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            loadNextConfig: (
+                root: string,
+            ) => Promise<{ pageExtensions?: string[] } | null>;
+        }>("dist/config/next-config.js");
+        const tmpDir = mkdtempSync(join(tmpdir(), "knext-vp-pageext-ts-"));
+        try {
+            symlinkSync(
+                join(PKG_ROOT, "node_modules"),
+                join(tmpDir, "node_modules"),
+                "junction",
+            );
+            writeFileSync(
+                join(tmpDir, "package.json"),
+                JSON.stringify({ type: "module" }),
+            );
+            // A .ts function-form config is valid ESM (unlike the CJS .js
+            // fixture above), so vinext's Vite-runner `runnerImport` of the
+            // generated virtual module (site B) succeeds on its own and never
+            // falls back to `loadConfigViaRequire` -- this exercises ONLY
+            // site B's embedded `{ defaultConfig: {} }` template literal.
+            writeFileSync(
+                join(tmpDir, "next.config.ts"),
+                "export default (phase: string, { defaultConfig }: { defaultConfig: { pageExtensions?: string[] } }) => ({\n" +
+                    '  pageExtensions: [...(defaultConfig.pageExtensions ?? []), "page.ts"],\n' +
+                    "});\n",
+            );
+            const config = await mod.loadNextConfig(tmpDir);
+            expect(config?.pageExtensions).toEqual([
+                "tsx",
+                "ts",
+                "jsx",
+                "js",
+                "page.ts",
+            ]);
+        } finally {
+            rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it("vinext#3688: a page that imports a hashbang-prefixed CJS module builds", async () => {
+        applyVinextPatches(patched);
+        // `patched` is a full copy of the installed vinext package (a
+        // sibling of the real one inside the same node_modules directory),
+        // so a bridge file written INSIDE it resolves the bare `vite`
+        // specifier exactly as vinext's own code does — see the comment on
+        // `patched` above.
+        const bridgePath = join(patched, "dist", "__knext_vite_bridge.mjs");
+        writeFileSync(bridgePath, 'export { build } from "vite";\n');
+        const { build } = await importPatched<{
+            build: (config: unknown) => Promise<unknown>;
+        }>("dist/__knext_vite_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+
+        const tmpDir = mkdtempSync(join(tmpdir(), "knext-vp-hashbang-"));
+        try {
+            // React resolves through the monorepo root's node_modules, the
+            // same way resolve-alias-build.test.ts's fixture does.
+            symlinkSync(
+                join(PKG_ROOT, "node_modules"),
+                join(tmpDir, "node_modules"),
+                "junction",
+            );
+            writeFileSync(
+                join(tmpDir, "package.json"),
+                JSON.stringify({ type: "module" }),
+            );
+            writeFileSync(
+                join(tmpDir, "next.config.mjs"),
+                "export default {};\n",
+            );
+            // Ported from Next.js: test/e2e/hashbang/src/cases/js.js — a
+            // module that starts with a hashbang and also uses
+            // module.exports, so it goes through the CJS interop transform.
+            writeFileSync(
+                join(tmpDir, "cjs-case.js"),
+                "#!/usr/env node\n\nmodule.exports = 123\n",
+            );
+            mkdirSync(join(tmpDir, "pages"), { recursive: true });
+            writeFileSync(
+                join(tmpDir, "pages", "index.js"),
+                'import val from "../cjs-case.js";\nexport default function Home() { return `JS: ${val}`; }\n',
+            );
+            await expect(
+                build({
+                    root: tmpDir,
+                    configFile: false,
+                    plugins: [vinextMod.default({ disableAppRouter: true })],
+                    logLevel: "silent",
+                    build: {
+                        outDir: join(tmpDir, "dist", "server"),
+                        ssr: "virtual:vinext-server-entry",
+                        rolldownOptions: {
+                            output: { entryFileNames: "entry.js" },
+                        },
+                    },
+                }),
+            ).resolves.toBeDefined();
+        } finally {
+            rmSync(tmpDir, { recursive: true, force: true });
+        }
+    }, 60_000);
 });
 
 // ---------------------------------------------------------------------------

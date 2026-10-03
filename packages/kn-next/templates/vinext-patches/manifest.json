@@ -58,6 +58,16 @@
       "summary": "next/image: the optimizer path honours `trailingSlash`, and a custom `loader` prop gets the built-in loader's per-breakpoint `srcSet` treatment (quality passed through as given, not forced to 75). The upstream PR also wires up `images.loaderFile`; that part is not bundled (see the patch header) and `loaderFile` remains ignored until the upstream release."
     },
     {
+      "file": "vinext-3687-config-function-form-default-config.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3687",
+      "summary": "A function-form `next.config.js`/`.ts` is called with its real `defaultConfig.pageExtensions` (matching Next's own default), not an empty object — a config that reads `defaultConfig.pageExtensions` (Next's custom-page-extension e2e fixture) previously threw `defaultConfig.pageExtensions is not iterable`."
+    },
+    {
+      "file": "vinext-3688-commonjs-hashbang.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3688",
+      "summary": "A hashbang-prefixed module (`#!/usr/bin/env node`) that also uses CommonJS syntax no longer fails to build — the CJS interop transform's prepended runtime facade used to push `#!` out of byte position 0, which the bundler's parser then rejected."
+    },
+    {
       "file": "vinext-3689-action-redirect-fetch-status.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3689",
       "summary": "A server action's redirect, when invoked via fetch (the client-side router path), now always answers HTTP 200 like Next.js does — it previously fell back to 303 unless the action had already been forwarded, the target was an ancestor/stale-sibling route, or the target ran on a different runtime. The no-JS, progressive-enhancement form-POST redirect path is unchanged and still answers 303."

@@ -1,0 +1,37 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3687
+What it fixes: A next.config.js/.ts exported as a function is invoked with
+`(phase, { defaultConfig })` per the Next.js config API. vinext always passed
+an empty object for `defaultConfig`, so a config that reads a field off it
+(e.g. Next's own custom-page-extension e2e fixture, which does
+`pageExtensions: [...defaultConfig.pageExtensions, 'page.js']`) throws
+`TypeError: defaultConfig.pageExtensions is not iterable` at build time.
+Passes `defaultConfig.pageExtensions` (vinext's own default list, which
+matches Next's config-shared.js `defaultConfig.pageExtensions`) at both call
+sites: the direct function-config path, and the generated virtual-module
+loader used for .ts configs.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3687.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/config/next-config.js
++++ b/dist/config/next-config.js
+@@ -188,7 +188,7 @@
+ * (Next.js supports `module.exports = (phase, opts) => config`).
+ */
+ async function resolveConfigValue(config, phase = DEFAULT_PHASE) {
+-	if (typeof config === "function") return await config(phase, { defaultConfig: {} });
++	if (typeof config === "function") return await config(phase, { defaultConfig: { pageExtensions: ["tsx", "ts", "jsx", "js"] } });
+ 	return config;
+ }
+ /**
+@@ -436,7 +436,7 @@
+ 					},
+ 					load(id) {
+ 						if (id !== resolvedVirtualConfigId) return;
+-						return `import * as configModule from ${configPathLiteral};\nconst cjsModule = configModule[${JSON.stringify(VINEXT_CJS_EXPORTS_KEY)}];\nconst cjsInitial = configModule[${JSON.stringify(VINEXT_CJS_INITIAL_KEY)}];\nconst cjsExports = cjsModule && cjsModule.exports;\nconst cjsValue = cjsExports != null && (cjsExports !== cjsInitial || (typeof cjsExports === "object" && Object.keys(cjsExports).length > 0)) ? cjsExports : undefined;\nconst value = cjsValue ?? configModule.default ?? configModule;\nexport default typeof value === "function" ? await value(${phaseLiteral}, { defaultConfig: {} }) : value;\n`;
++						return `import * as configModule from ${configPathLiteral};\nconst cjsModule = configModule[${JSON.stringify(VINEXT_CJS_EXPORTS_KEY)}];\nconst cjsInitial = configModule[${JSON.stringify(VINEXT_CJS_INITIAL_KEY)}];\nconst cjsExports = cjsModule && cjsModule.exports;\nconst cjsValue = cjsExports != null && (cjsExports !== cjsInitial || (typeof cjsExports === "object" && Object.keys(cjsExports).length > 0)) ? cjsExports : undefined;\nconst value = cjsValue ?? configModule.default ?? configModule;\nexport default typeof value === "function" ? await value(${phaseLiteral}, { defaultConfig: { pageExtensions: ["tsx", "ts", "jsx", "js"] } }) : value;\n`;
+ 					}
+ 				},
+ 				...isTypeScriptConfig ? [cjsGlobalsInjectorPlugin(configPath)] : [],
