@@ -91,7 +91,7 @@ target never scaffolds that file, since `--self-contained` only applies to the v
 ### The questions `create` asks
 
 Run on a terminal with no flags, `create` asks five questions. Press Enter on each to take the
-default; the defaults give exactly the scaffold described above. At the end it prints the
+default: the scaffold described above, with React Compiler turned on. At the end it prints the
 equivalent flags, so you can repeat the same scaffold in CI.
 
 | Question | Choices | Default | What changes |
@@ -100,7 +100,7 @@ equivalent flags, so you can repeat the same scaffold in CI.
 | Builder | `turbopack`, `webpack`, `vinext` (Beta) | `turbopack` | `webpack` sets the `build` script to `next build --webpack` and writes `build: "webpack"`; `vinext` scaffolds the compiled single-executable shape. |
 | ISR / data cache | `none` (in memory, per pod), `redis` | `none` | `redis` writes a `cache` block that reads `REDIS_URL`. With `node`, it also adds `ioredis` to the app's dependencies; Bun has a Redis client built in, so a Bun app gets nothing extra. |
 | Object storage | `none`, `gcs`, `s3`, `minio`, `azure` | `none` | Writes a `storage` block for that provider, with `<placeholders>` for you to fill in. |
-| React Compiler | yes / no | no | Writes `reactCompiler: true` to `next.config.ts` and adds `babel-plugin-react-compiler` to `devDependencies`. Not offered for `vinext`, which configures it in `vite.config.ts` instead. |
+| React Compiler | yes / no | **yes** | On `turbopack`/`webpack`: writes `reactCompiler: true` to `next.config.ts` and adds `babel-plugin-react-compiler` to `devDependencies`. On `vinext`: writes `react: { compiler: true }` to the vinext plugin in `vite.config.ts` and adds the four packages it needs. Answer `n`, or pass `--no-react-compiler`, to leave it off. See [React Compiler](/docs/react-compiler). |
 
 With a Redis cache, set `REDIS_URL` when you run `knext deploy`, and keep the value in a Kubernetes
 Secret or your CI secrets rather than in the file. `knext deploy` stops with an error while it is
@@ -114,6 +114,7 @@ A pipe or a CI job never waits on a question.
 knext create my-app                    # asks the questions on a terminal; defaults elsewhere
 knext create my-app --yes              # defaults, no questions
 knext create my-app --runtime node --cache redis   # Node + Redis, no questions
+knext create my-app --no-react-compiler            # without React Compiler
 knext create my-app --builder vinext   # compiled single-executable target
 knext create my-app --dry-run          # list the files it would write, write nothing
 ```
@@ -125,15 +126,15 @@ knext create my-app --dry-run          # list the files it would write, write no
 | `--builder <turbopack\|webpack\|vinext>` | Build target. Default `turbopack`, the standalone shape; `default` is accepted as `turbopack`. `vinext` is the compiled single-executable shape, **Experimental** — see [Stability tiers](/docs/stability). |
 | `--cache <none\|redis>` | ISR / data cache. Default `none`. |
 | `--storage <none\|gcs\|s3\|minio\|azure>` | Object storage for static assets. Default `none`: assets are served from the container image. |
-| `--react-compiler` | Turn on React Compiler. Default off. Not available with `--builder vinext`. |
+| `--react-compiler`, `--no-react-compiler` | Turn React Compiler on or off. Default on, for every builder. Passing both is an error. |
 | `-y`, `--yes` | Ask nothing; use the defaults for every choice not given as a flag. |
 | `--force` | Overwrite existing files. |
 | `--dry-run` | List the files that would be written and write nothing. |
 | `-h`, `--help` | Show the usage help. |
 
 **Exit code:** `0` on success (including `--dry-run` and `--help`); `1` on a usage error (an
-unrecognized `--runtime`, `--builder`, `--cache` or `--storage` value, `--react-compiler` with
-`--builder vinext`, an unexpected extra argument, or a cancelled question) or a scaffold failure (for example an
+unrecognized `--runtime`, `--builder`, `--cache` or `--storage` value, both `--react-compiler`
+and `--no-react-compiler`, an unexpected extra argument, or a cancelled question) or a scaffold failure (for example an
 invalid app name, or an existing file without `--force`).
 
 The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the

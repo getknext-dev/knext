@@ -40,7 +40,9 @@ export const DEFAULT_CREATE_CHOICES: Readonly<CreateChoices> = Object.freeze({
     builder: "turbopack",
     cache: "none",
     storage: "none",
-    reactCompiler: false,
+    // On by default for new apps (founder-directed, 1.3 line);
+    // `--no-react-compiler` turns it off.
+    reactCompiler: true,
 });
 
 const RUNTIMES: readonly CreateRuntime[] = ["bun", "node"];
@@ -67,6 +69,7 @@ export interface ChoiceFlagValues {
     cache?: string;
     storage?: string;
     "react-compiler"?: boolean;
+    "no-react-compiler"?: boolean;
 }
 
 function oneOf<T extends string>(
@@ -96,10 +99,20 @@ export function parseChoiceFlags(values: ChoiceFlagValues): CreateChoices {
         builder: oneOf("builder", builderValue, BUILDERS, d.builder),
         cache: oneOf("cache", values.cache, CACHES, d.cache),
         storage: oneOf("storage", values.storage, STORAGES, d.storage),
-        reactCompiler: values["react-compiler"] ?? d.reactCompiler,
+        reactCompiler: reactCompilerFlag(values) ?? d.reactCompiler,
     };
-    assertSupported(choices);
     return choices;
+}
+
+function reactCompilerFlag(values: ChoiceFlagValues): boolean | undefined {
+    if (values["react-compiler"] && values["no-react-compiler"]) {
+        throw new UsageError(
+            "--react-compiler and --no-react-compiler contradict each other — pass one",
+        );
+    }
+    if (values["no-react-compiler"]) return false;
+    if (values["react-compiler"]) return true;
+    return undefined;
 }
 
 /** The flags that reproduce `c` without prompting (printed after the prompts). */
@@ -109,18 +122,8 @@ export function choicesToFlags(c: CreateChoices): string {
         `--builder ${c.builder}`,
         `--cache ${c.cache}`,
         `--storage ${c.storage}`,
-        ...(c.reactCompiler ? ["--react-compiler"] : []),
+        c.reactCompiler ? "--react-compiler" : "--no-react-compiler",
     ].join(" ");
-}
-
-function assertSupported(c: CreateChoices): void {
-    if (c.reactCompiler && c.builder === "vinext") {
-        throw new UsageError(
-            "--react-compiler is not scaffolded for the vinext builder: vinext " +
-                "reads it from its own Vite plugin options, not next.config.ts. " +
-                "Scaffold without it and enable it in vite.config.ts by hand.",
-        );
-    }
 }
 
 // ─── when to prompt ─────────────────────────────────────────────────────────
@@ -261,11 +264,11 @@ export async function promptCreateChoices(
         ],
         STORAGES.indexOf(d.storage),
     );
-    // Not offered on vinext: it is configured in vite.config.ts there.
-    const reactCompiler =
-        builder === "vinext"
-            ? false
-            : await confirm(io, "Enable React Compiler?", d.reactCompiler);
+    const reactCompiler = await confirm(
+        io,
+        "Enable React Compiler? (memoizes components at build time)",
+        d.reactCompiler,
+    );
     return { runtime, builder, cache, storage, reactCompiler };
 }
 
@@ -357,6 +360,22 @@ function editPackageJson(
     files.set("package.json", `${JSON.stringify(pkg, null, 2)}\n`);
 }
 
+/** The Babel plugin that performs the React Compiler transform. */
+const REACT_COMPILER_BABEL_PLUGIN = "^1.0.0";
+
+/**
+ * vinext's React Compiler recipe: `@vitejs/plugin-react` 6.1+ (older ones
+ * ignore `react.compiler` silently), the Babel plugin, a Rolldown Babel bridge,
+ * and the peer `@vitejs/plugin-react` needs (without it the build fails).
+ */
+export const VINEXT_REACT_COMPILER_DEV_DEPS: Readonly<Record<string, string>> =
+    Object.freeze({
+        "@vitejs/plugin-react": "^6.1.0",
+        "babel-plugin-react-compiler": REACT_COMPILER_BABEL_PLUGIN,
+        "@rolldown/plugin-babel": "^0.2.0",
+        "oxc-transform-react": "^0.145.0",
+    });
+
 const REGISTRY_ANCHOR = '  registry: "ghcr.io/<your-user>",\n';
 const SCALING_ANCHOR = "  // Knative autoscaling.";
 const STORAGE_PARAGRAPH =
@@ -414,7 +433,6 @@ export function applyCreateChoices(
     choices: CreateChoices,
     coreDependencies: Record<string, string>,
 ): Map<string, string> {
-    assertSupported(choices);
     const files = new Map(rendered);
     const cfg = "knext.config.ts";
 
@@ -498,7 +516,24 @@ export function applyCreateChoices(
         );
     }
 
-    if (choices.reactCompiler) {
+    if (choices.reactCompiler && choices.builder === "vinext") {
+        // vinext does not read next.config's `reactCompiler`; the switch is its
+        // own Vite plugin option, and the transform needs these four packages.
+        editOnce(files, "vite.config.ts", "    vinext({\n", (m) =>
+            [
+                m.trimEnd(),
+                "      // React Compiler: memoizes components at build time (client",
+                "      // rendering only). Needs the four packages in devDependencies:",
+                "      // @vitejs/plugin-react 6.1+, babel-plugin-react-compiler,",
+                "      // @rolldown/plugin-babel and oxc-transform-react.",
+                "      react: { compiler: true },",
+                "",
+            ].join("\n"),
+        );
+        editPackageJson(files, (pkg) => {
+            Object.assign(pkg.devDependencies, VINEXT_REACT_COMPILER_DEV_DEPS);
+        });
+    } else if (choices.reactCompiler) {
         editOnce(files, "next.config.ts", '    output: "standalone",\n', (m) =>
             [
                 m.trimEnd(),
@@ -509,7 +544,8 @@ export function applyCreateChoices(
             ].join("\n"),
         );
         editPackageJson(files, (pkg) => {
-            pkg.devDependencies["babel-plugin-react-compiler"] = "^1.0.0";
+            pkg.devDependencies["babel-plugin-react-compiler"] =
+                REACT_COMPILER_BABEL_PLUGIN;
         });
     }
 

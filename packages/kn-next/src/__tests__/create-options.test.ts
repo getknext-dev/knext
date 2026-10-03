@@ -46,6 +46,7 @@ import {
     promptCreateChoices,
     shouldPrompt,
     templateBuilderFor,
+    VINEXT_REACT_COMPILER_DEV_DEPS,
 } from "../cli/create-options";
 import { validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
@@ -138,49 +139,102 @@ const NEVER_ASK: PromptIO = {
     },
 };
 
-describe("golden: the defaults reproduce today's scaffold exactly", () => {
+/**
+ * Re-baselined (founder-directed, 1.3 line): React Compiler is ON by default,
+ * so the default scaffold is today's scaffold PLUS exactly the React Compiler
+ * edits — and with it off, byte-identical to today's.
+ */
+const RC_FILES = {
+    turbopack: ["next.config.ts", "package.json"],
+    vinext: ["package.json", "vite.config.ts"],
+} as const;
+
+describe("golden: the defaults are today's scaffold plus React Compiler, nothing else", () => {
     for (const builder of ["turbopack", "vinext"] as const) {
-        it(`${builder}: the option layer is the identity at the defaults`, () => {
-            const raw = renderScaffold({
+        const raw = () =>
+            renderScaffold({
                 name: "hello-knext",
                 version: "1.3.0",
                 builder: templateBuilderFor(builder),
             });
+
+        it(`${builder}: with React Compiler off, the option layer is the identity`, () => {
+            const base = raw();
             const out = applyCreateChoices(
-                new Map(raw),
+                new Map(base),
+                { ...DEFAULT_CREATE_CHOICES, builder, reactCompiler: false },
+                CORE_MANIFEST.dependencies,
+            );
+            expect([...out.keys()].sort()).toEqual([...base.keys()].sort());
+            for (const [rel, content] of base)
+                expect(out.get(rel)).toBe(content);
+        });
+
+        it(`${builder}: the defaults change only the React Compiler files`, () => {
+            const base = raw();
+            const out = applyCreateChoices(
+                new Map(base),
                 { ...DEFAULT_CREATE_CHOICES, builder },
                 CORE_MANIFEST.dependencies,
             );
-            expect([...out.keys()].sort()).toEqual([...raw.keys()].sort());
-            for (const [rel, content] of raw)
-                expect(out.get(rel)).toBe(content);
+            const changed = [...out.keys()]
+                .filter((rel) => out.get(rel) !== base.get(rel))
+                .sort();
+            expect(changed).toEqual([...RC_FILES[builder]]);
         });
     }
 
-    it("the default choices are bun / turbopack / no cache / no storage / no React Compiler", () => {
+    it("the default choices are bun / turbopack / no cache / no storage / React Compiler on", () => {
         expect(DEFAULT_CREATE_CHOICES).toEqual({
             runtime: "bun",
             builder: "turbopack",
             cache: "none",
             storage: "none",
-            reactCompiler: false,
+            reactCompiler: true,
         });
     });
 
-    it("createMain with no flags and no TTY writes exactly the raw template rendering", async () => {
+    it("createMain with no flags and no TTY writes the raw rendering plus React Compiler", async () => {
         const appDir = join(root, "golden-app");
         mkdirSync(appDir);
         // No flags at all (the name comes from the directory), no TTY.
         const { code } = await capture([appDir]);
         expect(code).toBe(0);
-        // Exactly what the pre-feature CLI wrote: the raw template rendering
-        // with the same name, version pin and install command.
+        // What the pre-feature CLI wrote: the raw template rendering with the
+        // same name, version pin and install command…
         const raw = renderScaffold({
             name: "golden-app",
             version: cliVersion(),
             installCmd: resolveLayout(appDir).installCmd,
         });
         expect(raw.size).toBeGreaterThan(10);
+        // …plus the React Compiler edits in exactly these two files.
+        const withRc = applyCreateChoices(
+            raw,
+            DEFAULT_CREATE_CHOICES,
+            CORE_MANIFEST.dependencies,
+        );
+        for (const [rel, content] of raw) {
+            const got = readFileSync(join(appDir, rel), "utf8");
+            if ((RC_FILES.turbopack as readonly string[]).includes(rel)) {
+                expect(got).not.toBe(content);
+                expect(got).toBe(withRc.get(rel) ?? "");
+            } else {
+                expect(got).toBe(content);
+            }
+        }
+    });
+
+    it("createMain --no-react-compiler writes exactly the raw template rendering", async () => {
+        const appDir = join(root, "golden-off");
+        mkdirSync(appDir);
+        const { code } = await capture([appDir, "--no-react-compiler"]);
+        expect(code).toBe(0);
+        const raw = renderScaffold({
+            name: "golden-off",
+            version: cliVersion(),
+            installCmd: resolveLayout(appDir).installCmd,
+        });
         for (const [rel, content] of raw) {
             expect(readFileSync(join(appDir, rel), "utf8")).toBe(content);
         }
@@ -200,17 +254,22 @@ describe("mapping: each answer changes exactly what it should", () => {
             [{ storage: "gcs" }, ["knext.config.ts"]],
             [{ reactCompiler: true }, ["next.config.ts", "package.json"]],
             [
+                { builder: "vinext", reactCompiler: true },
+                ["package.json", "vite.config.ts"],
+            ],
+            [
                 { builder: "vinext", runtime: "node" },
                 ["knext.config.ts", "package.json"],
             ],
         ];
         for (const [choice, expected] of cases) {
-            // Compared against the all-defaults render of the same template
-            // family (webpack shares turbopack's).
+            // Compared against the all-defaults render (React Compiler off) of
+            // the same template family (webpack shares turbopack's).
             const base = render({
                 builder: choice.builder === "vinext" ? "vinext" : "turbopack",
+                reactCompiler: false,
             });
-            const out = render(choice);
+            const out = render({ reactCompiler: false, ...choice });
             const changed = [...out.keys()]
                 .filter((rel) => out.get(rel) !== base.get(rel))
                 .sort();
@@ -311,19 +370,51 @@ describe("mapping: each answer changes exactly what it should", () => {
         ).toBeNull();
     });
 
-    it("React Compiler turns on reactCompiler and adds the Babel plugin", () => {
-        const files = render({ reactCompiler: true });
-        expect(
-            activeKey(files.get("next.config.ts") ?? "", "reactCompiler"),
-        ).toHaveLength(1);
-        expect(
-            pkgOf(files).devDependencies["babel-plugin-react-compiler"],
-        ).toBe("^1.0.0");
-        const off = render();
-        expect(off.get("next.config.ts")).not.toContain("reactCompiler");
-        expect(
-            pkgOf(off).devDependencies["babel-plugin-react-compiler"],
-        ).toBeUndefined();
+    for (const builder of ["turbopack", "webpack"] as const) {
+        it(`${builder}: React Compiler (on by default) sets reactCompiler and adds the Babel plugin`, () => {
+            const files = render({ builder });
+            expect(
+                activeKey(files.get("next.config.ts") ?? "", "reactCompiler"),
+            ).toHaveLength(1);
+            expect(files.get("next.config.ts")).toContain(
+                "    reactCompiler: true,\n",
+            );
+            expect(
+                pkgOf(files).devDependencies["babel-plugin-react-compiler"],
+            ).toBe("^1.0.0");
+            const off = render({ builder, reactCompiler: false });
+            expect(off.get("next.config.ts")).not.toContain("reactCompiler");
+            expect(
+                pkgOf(off).devDependencies["babel-plugin-react-compiler"],
+            ).toBeUndefined();
+        });
+    }
+
+    it("vinext: React Compiler (on by default) uses the vite plugin option and the four packages", () => {
+        const files = render({ builder: "vinext" });
+        const vite = files.get("vite.config.ts") ?? "";
+        expect(vite.match(/^\s*react: \{ compiler: true \},$/gm)).toHaveLength(
+            1,
+        );
+        // Inside the vinext(...) plugin call, not some other object.
+        expect(vite).toMatch(
+            /vinext\(\{\n(\s*\/\/.*\n)*\s*react: \{ compiler: true \},/,
+        );
+        const dev = pkgOf(files).devDependencies;
+        expect(dev["@vitejs/plugin-react"]).toBe("^6.1.0");
+        expect(dev["babel-plugin-react-compiler"]).toBe("^1.0.0");
+        expect(dev["@rolldown/plugin-babel"]).toBe("^0.2.0");
+        expect(dev["oxc-transform-react"]).toBe("^0.145.0");
+        // vinext ignores next.config's key, so it is not written there.
+        expect(files.get("next.config.ts")).not.toContain("reactCompiler");
+
+        const off = render({ builder: "vinext", reactCompiler: false });
+        expect(off.get("vite.config.ts")).not.toContain("compiler: true");
+        const offDev = pkgOf(off).devDependencies;
+        expect(offDev["@vitejs/plugin-react"]).toBe("^6.0.0");
+        expect(offDev["babel-plugin-react-compiler"]).toBeUndefined();
+        expect(offDev["@rolldown/plugin-babel"]).toBeUndefined();
+        expect(offDev["oxc-transform-react"]).toBeUndefined();
     });
 
     it("a template anchor that is missing or duplicated fails loudly instead of dropping the answer", () => {
@@ -347,10 +438,28 @@ describe("mapping: each answer changes exactly what it should", () => {
         ).toThrow(/0 copies of the anchor/);
     });
 
-    it("React Compiler on vinext is refused, not silently ignored", () => {
-        expect(() =>
-            render({ builder: "vinext", reactCompiler: true }),
-        ).toThrow(/vinext/);
+    it("vinext's React Compiler packages match the documented recipe", () => {
+        expect(VINEXT_REACT_COMPILER_DEV_DEPS).toEqual({
+            "@vitejs/plugin-react": "^6.1.0",
+            "babel-plugin-react-compiler": "^1.0.0",
+            "@rolldown/plugin-babel": "^0.2.0",
+            "oxc-transform-react": "^0.145.0",
+        });
+        const doc = readFileSync(
+            join(
+                PKG_ROOT,
+                "..",
+                "..",
+                "apps",
+                "docs",
+                "content",
+                "docs",
+                "react-compiler.mdx",
+            ),
+            "utf8",
+        );
+        for (const name of Object.keys(VINEXT_REACT_COMPILER_DEV_DEPS))
+            expect(doc).toContain(name);
     });
 
     it("every emitted package.json is valid JSON ending in a newline", () => {
@@ -468,32 +577,41 @@ describe("prompts", () => {
         expect(io.asked).toHaveLength(6);
     });
 
-    it("vinext skips the React Compiler question (it is not offered there)", async () => {
-        const io = scripted(["", "vinext", "", ""]);
+    it("the React Compiler question is asked on vinext too, defaulting to yes", async () => {
+        const io = scripted(["", "vinext", "", "", ""]);
         const c = await promptCreateChoices(io);
         expect(c.builder).toBe("vinext");
-        expect(c.reactCompiler).toBe(false);
-        expect(io.asked).toHaveLength(4);
+        expect(c.reactCompiler).toBe(true);
+        expect(io.asked).toHaveLength(5);
+        expect(io.asked[4]).toContain("[Y/n]");
     });
 
-    it("the equivalent flags reproduce the answers non-interactively", () => {
-        const c: CreateChoices = {
-            runtime: "node",
-            builder: "webpack",
-            cache: "redis",
-            storage: "s3",
-            reactCompiler: true,
-        };
-        const flags = choicesToFlags(c).split(" ");
-        const parsed = parseChoiceFlags({
-            runtime: flags[1],
-            builder: flags[3],
-            cache: flags[5],
-            storage: flags[7],
-            "react-compiler": flags[8] === "--react-compiler",
-        });
-        expect(parsed).toEqual(c);
+    it("answering n turns React Compiler off", async () => {
+        const c = await promptCreateChoices(scripted(["", "", "", "", "n"]));
+        expect(c.reactCompiler).toBe(false);
     });
+
+    for (const reactCompiler of [true, false]) {
+        it(`the equivalent flags reproduce the answers non-interactively (React Compiler ${reactCompiler ? "on" : "off"})`, () => {
+            const c: CreateChoices = {
+                runtime: "node",
+                builder: "webpack",
+                cache: "redis",
+                storage: "s3",
+                reactCompiler,
+            };
+            const flags = choicesToFlags(c).split(" ");
+            const parsed = parseChoiceFlags({
+                runtime: flags[1],
+                builder: flags[3],
+                cache: flags[5],
+                storage: flags[7],
+                "react-compiler": flags[8] === "--react-compiler",
+                "no-react-compiler": flags[8] === "--no-react-compiler",
+            });
+            expect(parsed).toEqual(c);
+        });
+    }
 });
 
 describe("flags", () => {
@@ -517,6 +635,24 @@ describe("flags", () => {
         });
     }
 
+    it("React Compiler defaults on; --no-react-compiler turns it off; both together is an error", async () => {
+        expect(parseChoiceFlags({}).reactCompiler).toBe(true);
+        expect(parseChoiceFlags({ "react-compiler": true }).reactCompiler).toBe(
+            true,
+        );
+        expect(
+            parseChoiceFlags({ "no-react-compiler": true }).reactCompiler,
+        ).toBe(false);
+        const { code, err } = await capture([
+            root,
+            "--react-compiler",
+            "--no-react-compiler",
+        ]);
+        expect(code).toBe(1);
+        expect(err).toContain("--no-react-compiler");
+        expect(existsSync(join(root, "package.json"))).toBe(false);
+    });
+
     it("--help documents every prompt flag and --yes", async () => {
         const { code, out } = await capture(["--help"]);
         expect(code).toBe(0);
@@ -526,6 +662,7 @@ describe("flags", () => {
             "--cache",
             "--storage",
             "--react-compiler",
+            "--no-react-compiler",
             "--yes",
         ])
             expect(out).toContain(f);

@@ -77,8 +77,9 @@ from the package root. `@getknext/db` exports `getDb()` / `getDbRO()` plus the w
 **Starting a new app instead?** `npx @getknext/core create my-app` scaffolds one with all of the
 steps below already done. On a terminal it asks five questions — runtime (`bun` or `node`),
 builder (`turbopack`, `webpack`, or `vinext`), cache (`none` or `redis`), object storage (`none`,
-`gcs`, `s3`, `minio`, or `azure`), and React Compiler — and Enter takes the default each time.
-Every question has a flag, and `--yes` skips them all, so CI never waits:
+`gcs`, `s3`, `minio`, or `azure`), and React Compiler (on by default; `--no-react-compiler`
+leaves it off). Enter takes the default each time. Every question has a flag, and `--yes` skips
+them all, so CI never waits:
 
 ```bash title="shell"
 npx @getknext/core create my-app --runtime node --cache redis --yes

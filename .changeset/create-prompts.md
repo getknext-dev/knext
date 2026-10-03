@@ -11,3 +11,9 @@ terminal, it asks nothing and uses the defaults, which scaffold exactly the same
 Choosing `node` with a Redis cache adds `ioredis` to the app's dependencies, at the same range
 `@getknext/core` uses. A Bun app gets nothing extra, because Bun has a Redis client built in.
 `--builder` now accepts `turbopack` and `webpack`; `default` still works and means `turbopack`.
+
+New apps now have React Compiler turned on by default, on every builder. On turbopack/webpack,
+`next.config.ts` gets `reactCompiler: true` and `babel-plugin-react-compiler`. On vinext,
+`vite.config.ts` gets `react: { compiler: true }` plus the four packages it needs. Pass
+`--no-react-compiler` (or answer `n`) to leave it off, which scaffolds exactly the same app as
+before.

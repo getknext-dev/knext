@@ -584,7 +584,9 @@ Options:
   --storage <none|gcs|s3|minio|azure>
                             Object storage for static assets (default: none,
                             served from the image).
-  --react-compiler         Turn on React Compiler (default: off; not on vinext)
+  --react-compiler, --no-react-compiler
+                            React Compiler on or off (default: on, for every
+                            builder)
   -y, --yes                Do not ask; use the defaults for anything not given
   --force                  Overwrite existing files
   --dry-run                List the files that would be written, write nothing
@@ -649,6 +651,7 @@ export async function createMain(
         cache?: string;
         storage?: string;
         "react-compiler"?: boolean;
+        "no-react-compiler"?: boolean;
         yes?: boolean;
         force?: boolean;
         "dry-run"?: boolean;
@@ -665,6 +668,7 @@ export async function createMain(
                 cache: { type: "string" },
                 storage: { type: "string" },
                 "react-compiler": { type: "boolean" },
+                "no-react-compiler": { type: "boolean" },
                 yes: { type: "boolean", short: "y" },
                 force: { type: "boolean", default: false },
                 "dry-run": { type: "boolean", default: false },

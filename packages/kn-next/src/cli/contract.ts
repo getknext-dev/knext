@@ -59,6 +59,7 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
             "--cache",
             "--storage",
             "--react-compiler",
+            "--no-react-compiler",
             "-y",
             "--yes",
             "--force",
