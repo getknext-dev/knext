@@ -35,6 +35,19 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
 import {
+    applyCreateChoices,
+    type CreateChoices,
+    choicesToFlags,
+    coreDependencyRanges,
+    DEFAULT_CREATE_CHOICES,
+    type PromptIO,
+    parseChoiceFlags,
+    promptCreateChoices,
+    shouldPrompt,
+    templateBuilderFor,
+    terminalPromptIO,
+} from "./create-options";
+import {
     checkPinsPublished,
     scaffoldGetknextPins,
     unpublishedPinsWarning,
@@ -376,6 +389,12 @@ export interface ScaffoldOptions {
     version?: string;
     /** Which build target to scaffold (#1342). Defaults to `"default"` (standalone). */
     builder?: BuilderChoice;
+    /**
+     * The `knext create` answers (runtime, builder, cache, storage, React
+     * Compiler). When set, `builder` is derived from it and the answers are
+     * applied to the rendered files; the defaults leave them untouched.
+     */
+    choices?: CreateChoices;
 }
 
 /**
@@ -388,13 +407,22 @@ export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
     const appDir = resolve(opts.appDir);
     const name = opts.name ?? appDir.split(sep).filter(Boolean).pop() ?? "app";
     const layout = resolveLayout(appDir);
-    const files = renderScaffold({
+    const rendered = renderScaffold({
         name,
         installCmd: layout.installCmd,
         version: opts.version ?? cliVersion(),
         templates: opts.templates,
-        builder: opts.builder,
+        builder: opts.choices
+            ? templateBuilderFor(opts.choices.builder)
+            : opts.builder,
     });
+    const files = opts.choices
+        ? applyCreateChoices(
+              rendered,
+              opts.choices,
+              coreDependencyRanges(packageRoot()),
+          )
+        : rendered;
 
     // Checked even under --force, because --force is REQUIRED for any pre-existing app
     // (a bare `create` refuses on `package.json`), which makes this the default path for
@@ -537,13 +565,27 @@ By default scaffolds the standalone target (ADR-0058): plain \`next build\`,
 \`adapterPath\`. \`knext build\`/\`deploy\` stage the matching runtime image
 automatically — this command emits no Dockerfile for that target.
 
+On a terminal with no flags, it asks for each choice below (press Enter for
+the default). With any flag, --yes, CI set, or no terminal, it asks nothing
+and uses the defaults for anything not given.
+
 Options:
   --name <name>            App name (default: the directory name)
-  --builder <default|vinext>
-                            Build target to scaffold (default: "default", the
-                            standalone shape). "vinext" scaffolds the compiled
+  --runtime <bun|node>     Server runtime (default: bun). node + --cache redis
+                            also adds ioredis to the app's dependencies.
+  --builder <turbopack|webpack|vinext>
+                            Build target (default: turbopack, the standalone
+                            shape; "default" is accepted as turbopack).
+                            "vinext" (Beta) scaffolds the compiled
                             single-executable shape instead (its own
                             Dockerfile, vite.config.ts, \`build: 'vinext'\`).
+  --cache <none|redis>     ISR/data cache (default: none, in-memory per pod).
+                            redis reads REDIS_URL when you deploy.
+  --storage <none|gcs|s3|minio|azure>
+                            Object storage for static assets (default: none,
+                            served from the image).
+  --react-compiler         Turn on React Compiler (default: off; not on vinext)
+  -y, --yes                Do not ask; use the defaults for anything not given
   --force                  Overwrite existing files
   --dry-run                List the files that would be written, write nothing
   -h, --help                Show this help
@@ -568,10 +610,46 @@ export function partingLine(dir: string): string {
     );
 }
 
-export async function createMain(argv: string[]): Promise<number> {
+/**
+ * What a non-default answer leaves the user to do. Empty at the defaults, so
+ * the default scaffold's output is unchanged.
+ */
+export function choicesNote(c: CreateChoices): string {
+    const lines: string[] = [];
+    if (c.cache === "redis") {
+        lines.push(
+            "Set REDIS_URL when you run `knext deploy` — the Redis cache is not used without it.",
+        );
+    }
+    if (c.storage !== DEFAULT_CREATE_CHOICES.storage) {
+        lines.push(
+            "Fill in the <placeholders> in knext.config.ts's storage block before you deploy.",
+        );
+    }
+    return lines.length ? `\n${lines.join("\n")}\n` : "";
+}
+
+/** What `createMain` reads from its environment — injectable for tests. */
+export interface CreateMainDeps {
+    stdinIsTTY?: boolean;
+    stdoutIsTTY?: boolean;
+    env?: Record<string, string | undefined>;
+    /** Where the prompts read answers; defaults to the terminal. */
+    prompt?: PromptIO;
+}
+
+export async function createMain(
+    argv: string[],
+    deps: CreateMainDeps = {},
+): Promise<number> {
     let values: {
         name?: string;
         builder?: string;
+        runtime?: string;
+        cache?: string;
+        storage?: string;
+        "react-compiler"?: boolean;
+        yes?: boolean;
         force?: boolean;
         "dry-run"?: boolean;
         help?: boolean;
@@ -583,6 +661,11 @@ export async function createMain(argv: string[]): Promise<number> {
             options: {
                 name: { type: "string" },
                 builder: { type: "string" },
+                runtime: { type: "string" },
+                cache: { type: "string" },
+                storage: { type: "string" },
+                "react-compiler": { type: "boolean" },
+                yes: { type: "boolean", short: "y" },
                 force: { type: "boolean", default: false },
                 "dry-run": { type: "boolean", default: false },
                 help: { type: "boolean", short: "h", default: false },
@@ -600,18 +683,16 @@ export async function createMain(argv: string[]): Promise<number> {
         return 0;
     }
 
-    // Reject rather than guess: an unrecognised --builder value silently
-    // falling back to "default" would scaffold the OPPOSITE shape from what
-    // a typo'd `--builder vinetx` asked for, with no error at all.
-    let builder: BuilderChoice = "default";
-    if (values.builder !== undefined) {
-        if (values.builder !== "default" && values.builder !== "vinext") {
-            process.stderr.write(
-                `unrecognised --builder '${values.builder}' — expected "default" or "vinext"\n\n${HELP}`,
-            );
-            return 1;
-        }
-        builder = values.builder;
+    // Reject rather than guess: an unrecognised --builder (or --runtime,
+    // --cache, --storage) value silently falling back to the default would
+    // scaffold something other than what a typo'd `--builder vinetx` asked
+    // for, with no error at all.
+    let choices: CreateChoices;
+    try {
+        choices = parseChoiceFlags(values);
+    } catch (err) {
+        process.stderr.write(`${(err as Error).message}\n\n${HELP}`);
+        return 1;
     }
 
     if (positionals.length > 1) {
@@ -625,11 +706,39 @@ export async function createMain(argv: string[]): Promise<number> {
     }
 
     const appDir = resolve(positionals[0] ?? ".");
+    // Any flag at all means "I said what I want": only a bare
+    // `knext create [dir]` on a terminal asks.
+    const flagsGiven = argv.some((a) => a.startsWith("-"));
+    let promptedFlags = "";
+    if (
+        shouldPrompt({
+            flagsGiven,
+            stdinIsTTY: deps.stdinIsTTY ?? process.stdin.isTTY === true,
+            stdoutIsTTY: deps.stdoutIsTTY ?? process.stdout.isTTY === true,
+            env: deps.env ?? process.env,
+        })
+    ) {
+        const terminal = deps.prompt ? null : terminalPromptIO();
+        try {
+            choices = await promptCreateChoices(
+                deps.prompt ?? (terminal as PromptIO),
+            );
+        } catch (err) {
+            if (handleUsageError(err, (t) => void process.stderr.write(t))) {
+                return 1;
+            }
+            throw err;
+        } finally {
+            terminal?.close();
+        }
+        promptedFlags = choicesToFlags(choices);
+    }
+
     try {
         const files = writeScaffold({
             appDir,
             name: values.name,
-            builder,
+            choices,
             force: values.force,
             dryRun: values["dry-run"],
         });
@@ -667,6 +776,10 @@ export async function createMain(argv: string[]): Promise<number> {
             `${values["dry-run"] ? "Would create" : "Created"} ${rels.length} file(s) in ${appDir}:\n` +
                 `${rels.map((r) => `  ${r}\n`).join("")}` +
                 gitignoreNote +
+                (promptedFlags
+                    ? `\nTo scaffold the same app without the questions (e.g. in CI):\n  knext create ${promptedFlags}\n`
+                    : "") +
+                choicesNote(choices) +
                 (values["dry-run"] ? "" : partingLine(positionals[0] ?? ".")),
         );
         // #950 honesty check, AFTER the success output so it reads as the last

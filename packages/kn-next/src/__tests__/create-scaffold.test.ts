@@ -590,7 +590,7 @@ describe("knext create — the CLI entry (createMain)", () => {
             },
         );
         try {
-            const code = await createMain(argv);
+            const code = await createMain(argv, { stdinIsTTY: false });
             return { code, out, err };
         } finally {
             outSpy.mockRestore();
