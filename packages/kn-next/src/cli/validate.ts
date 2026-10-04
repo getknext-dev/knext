@@ -351,6 +351,19 @@ export function validateConfig(
         errors.push("'selfContained' must be a boolean (true or false)");
     }
 
+    // networking.visibility (#1865): must be exactly the enum value the CRD
+    // accepts — a typo here would otherwise surface only as a cluster-side
+    // admission rejection at deploy time instead of a local, fast config error.
+    if (
+        config.networking?.visibility !== undefined &&
+        config.networking.visibility !== "public" &&
+        config.networking.visibility !== "cluster-local"
+    ) {
+        errors.push(
+            `'networking.visibility' must be "public" or "cluster-local", got "${config.networking.visibility}"`,
+        );
+    }
+
     // compile (extra files embedded in the compiled executable).
     errors.push(...validateCompileConfig(config));
 

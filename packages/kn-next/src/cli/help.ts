@@ -204,6 +204,7 @@ export const CLI_HELP = `${[
     "                  for a custom in-image-build Dockerfile whose server",
     "                  layout differs from the scaffolded templates",
     "  --dry-run       Print the NextApp CR without applying it",
+    "  --private       Deploy with the Knative Route cluster-local only — no public ingress",
     "  -h, --help      Show this help",
     "  -v, --version   Print the knext version",
     "",

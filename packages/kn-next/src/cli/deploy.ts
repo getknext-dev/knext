@@ -126,6 +126,16 @@ interface DeployOptions {
      * runtime (ADR-0011 lock-step). See the fail-fast block in `deploy()`.
      */
     image?: string;
+    /**
+     * #1865: deploy with the Knative Route cluster-local only (no public
+     * ingress) — equivalent to setting `networking: { visibility:
+     * "cluster-local" }` in `knext.config.ts`. Wins over the config when
+     * both are set (see `applyOverrides`). An app with mutating endpoints
+     * (uploads, deletes, admin) and no auth of its own can use this instead
+     * of an out-of-band `kubectl label`, which the operator's next
+     * reconcile would revert (ADR-0001).
+     */
+    private: boolean;
 }
 
 /**
@@ -167,6 +177,7 @@ function parseCliArgs(): DeployOptions {
         "skip-image-lockstep-check"?: boolean;
         "dry-run"?: boolean;
         image?: string;
+        private?: boolean;
         help?: boolean;
         version?: boolean;
     };
@@ -187,6 +198,7 @@ function parseCliArgs(): DeployOptions {
                 },
                 "dry-run": { type: "boolean", default: false },
                 image: { type: "string" },
+                private: { type: "boolean", default: false },
                 help: { type: "boolean", short: "h", default: false },
                 version: { type: "boolean", short: "v", default: false },
             },
@@ -248,6 +260,7 @@ function parseCliArgs(): DeployOptions {
         skipImageLockstepCheck: values["skip-image-lockstep-check"] ?? false,
         dryRun: values["dry-run"] ?? false,
         image: values.image || process.env.KN_IMAGE,
+        private: values.private ?? false,
     };
 }
 
@@ -273,6 +286,16 @@ function applyOverrides(
             );
         }
         overridden.storage = { ...overridden.storage, bucket: options.bucket };
+    }
+
+    // #1865: --private wins over whatever knext.config.ts says, the same
+    // precedence --registry/--bucket already follow — a flag is the
+    // deployer's explicit, per-run intent.
+    if (options.private) {
+        overridden.networking = {
+            ...overridden.networking,
+            visibility: "cluster-local",
+        };
     }
 
     if (process.env.KN_REDIS_URL && overridden.cache?.provider === "redis") {
