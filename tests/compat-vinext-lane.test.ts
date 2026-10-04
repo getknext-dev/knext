@@ -491,9 +491,15 @@ describe('fixture normalization is EXPLICIT and bounded to the ESM app contract 
       />>?\s*"?[^"\n;|&<>\s]*\.(tsx?|jsx?|cjs)\b/,
     );
 
-    // (4) The deploy script must NOT touch the shared corpus manifest — narrowing
+    // (4) The deploy script must NOT touch the shared CORPUS manifest — narrowing
     // it here would inflate the number while still looking like the node lane's.
-    expect(e, 'the deploy script never references the corpus manifest').not.toMatch(/manifest/i);
+    // #1780: matches the corpus manifest's own filename stem specifically, not
+    // the bare word "manifest" — the script legitimately reads knext's OWN,
+    // unrelated `templates/vinext-patches/manifest.json` (the bundled-patch
+    // index) now, which is a different file entirely and not a softening.
+    expect(e, 'the deploy script never references the shared corpus manifest').not.toMatch(
+      /deploy-tests-manifest/i,
+    );
 
     // (5) EXACTLY ONE `mv` — the next.config.js → .cjs rename. #1042's review
     // (both reviewers) flagged that `mv` is a NEW verb the deletion-shape scan
@@ -797,5 +803,74 @@ describe('the lane restores fixture-shipped node_modules the toolchain reify pru
     ).toBe(true);
     // Guarded restore: only copy back an entry the reify actually removed.
     expect(src).toMatch(/if \[ ! -e "\$\{NM_DIR\}\/\$\{entry\}" \]/);
+  });
+});
+
+describe('the lane applies knext’s bundled vinext patches before building (#1780)', () => {
+  // #1780: the lane used to install a bare vinext pin and NEVER run
+  // `knext vinext-patches` at all — every patch in
+  // packages/kn-next/templates/vinext-patches/ measured "not working" in a
+  // compat run for a reason that had nothing to do with the patch itself.
+  // This is a SCAN of the live script text, not an enumerated line number, so
+  // moving the invocation inside the script does not defeat the guard — only
+  // removing it does.
+  const src = code(DEPLOY_SCRIPT);
+  const iInstall = src.search(/npm\s+install\s+--no-audit[\s\S]*?vinext@/);
+  // An actual invocation: the CLI's dispatcher file, invoked with the
+  // `vinext-patches` verb — not merely the string "vinext-patches" appearing
+  // in a header comment (comments are already stripped by `code()`, but this
+  // also rules out the string showing up only inside an error MESSAGE).
+  const invokePattern =
+    /node\s+"[^"]*@getknext\/core\/dist\/cli\/kn-next\.js"\s+vinext-patches(?![\w-])/;
+  const iApply = src.search(invokePattern);
+
+  it('invokes `knext vinext-patches` (the SAME verb/code path `knext build` uses)', () => {
+    expect(
+      iApply,
+      'no `knext vinext-patches` invocation found in the deploy script',
+    ).toBeGreaterThan(-1);
+  });
+
+  it('applies the patches AFTER the toolchain install (vinext must be on disk first)', () => {
+    expect(iInstall, 'could not locate the toolchain npm install').toBeGreaterThan(-1);
+    expect(
+      iApply > iInstall,
+      'the patch step must run AFTER the toolchain npm install (vinext is not installed before it)',
+    ).toBe(true);
+  });
+
+  it('checks the applied patches with `--check` right after applying them', () => {
+    const checkPattern =
+      /node\s+"[^"]*@getknext\/core\/dist\/cli\/kn-next\.js"\s+vinext-patches\s+--check\b/;
+    const iCheck = src.search(checkPattern);
+    expect(iCheck, 'no `knext vinext-patches --check` verification found').toBeGreaterThan(-1);
+    expect(iCheck > iApply, '--check must run AFTER the plain apply, not before it').toBe(true);
+  });
+
+  it('fails loudly (never silently) on a version mismatch between installed vinext and the manifest', () => {
+    // The manifest's `vinext` field is the ONLY version these patches were
+    // validated against (vinext-patches.ts's own EnsureResult). The CLI verb
+    // itself is non-fatal on a mismatch (correct for a real app); the harness
+    // must not inherit that default silently.
+    expect(src).toMatch(/installedPkg\.version\s*!==\s*manifest\.vinext/);
+    expect(src).toContain('process.exit(1)');
+  });
+
+  it('the scanner itself is not vacuously true (self-test)', () => {
+    const real = 'node "${APP_DIR}/node_modules/@getknext/core/dist/cli/kn-next.js" vinext-patches';
+    const realWithCheck = `${real} --check`;
+    expect(invokePattern.test(real)).toBe(true);
+    expect(invokePattern.test(realWithCheck)).toBe(true);
+    // A near-miss verb name must NOT match — "vinext-patches" is a prefix of
+    // "vinext-patches-disabled", and a lazier pattern (`\b` alone) would
+    // wrongly accept it, since `-` is a non-word character and already forms
+    // a word boundary right after "patches".
+    expect(
+      invokePattern.test(
+        'node "${APP_DIR}/node_modules/@getknext/core/dist/cli/kn-next.js" vinext-patches-disabled',
+      ),
+    ).toBe(false);
+    // Mentioning the verb without actually invoking the CLI must not match.
+    expect(invokePattern.test('echo "run knext vinext-patches later"')).toBe(false);
   });
 });
