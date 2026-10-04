@@ -269,6 +269,26 @@ export interface SecretsConfig {
     envMap?: Record<string, SecretRef>; // Map of explicit ENV_VAR -> { name, key } Secret mapping
 }
 
+// Network exposure (#1865): whether the app's Knative Route is reachable from
+// outside the cluster.
+export interface NetworkingConfig {
+    /**
+     * "public" (default) keeps today's behavior: the app's Knative Route is
+     * reachable from outside the cluster. "cluster-local" renders the
+     * Knative `networking.knative.dev/visibility: cluster-local` label,
+     * keeping the Route off the external gateway — reachable only from
+     * inside the cluster (e.g. port-forwarding to `kourier-internal` with
+     * the right Host header). This is the platform way to deploy an app
+     * with mutating endpoints (uploads, deletes, admin) and no auth of its
+     * own, without an out-of-band `kubectl label` the next reconcile can
+     * revert.
+     *
+     * Also settable per-deploy with `knext deploy --private` (equivalent to
+     * `visibility: "cluster-local"`); the flag wins when both are set.
+     */
+    visibility?: "public" | "cluster-local";
+}
+
 // Main Knative-Next config (subset of OpenNext we support)
 export interface KnativeNextConfig {
     name: string;
@@ -413,4 +433,9 @@ export interface KnativeNextConfig {
     // K_REVISION, K_CONFIGURATION) are rejected by the operator's CRD
     // validation, and operator-managed system env always wins on collision.
     env?: Record<string, string>;
+    // Network exposure (#1865): unset/"public" keeps today's behavior (a
+    // public Knative Route). "cluster-local" is the platform way to deploy
+    // an app with mutating endpoints and no auth of its own without an
+    // out-of-band label the operator's next reconcile would revert.
+    networking?: NetworkingConfig;
 }

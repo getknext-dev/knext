@@ -1,0 +1,108 @@
+---
+title: Private apps
+description: Deploy an app with its Knative Route reachable only from inside the cluster — no public ingress at all.
+---
+
+By default, every app you deploy gets a public URL. **Private (cluster-local) deployment** is the
+platform-provided way to keep an app off the public internet entirely instead — no public route is
+created for it at all.
+
+## When to use it
+
+Use it for an app whose mutating endpoints (uploads, deletes, admin actions) have **no auth of
+their own**. The [Network isolation](/docs/security#network-isolation) section covers knext's
+default-on `NetworkPolicy`, which restricts *who inside the cluster* can reach your app's pods
+directly — but that still leaves a normal public Route serving the app to the whole internet.
+Cluster-local visibility is the stronger guarantee: there is no public Route to reach in the first
+place. Think of it as a complement to real authentication, not a replacement for it — if the app
+can add a real auth check, do that too; cluster-local deployment is what you reach for when it
+can't (yet), or when the app is purely an internal tool nobody outside the cluster should ever see.
+
+An app that previously had to rely on someone hand-labelling its Knative Service after every deploy
+can use this instead — that kind of manual label gets silently reverted the next time the app is
+reconciled, because the platform's control loop doesn't know about it.
+
+## How to deploy one
+
+**Set it in your `knext.config.ts`** — this is the persistent setting, and the one you should
+actually use:
+
+```ts title="knext.config.ts"
+const config = {
+  name: "my-app",
+  registry: "my-registry.example.com",
+  networking: {
+    visibility: "cluster-local",
+  },
+  // ...
+};
+
+export default config;
+```
+
+Leaving `networking` out entirely (or setting `visibility: "public"`) keeps today's behavior: a
+normal, publicly reachable app.
+
+`knext deploy --private` also exists, as a **per-run override** of the config — useful for a
+one-off deploy, or for scripting — but it is not remembered between runs. If you deploy with
+`--private` once and then later run a plain `knext deploy` with no flag, and your config never set
+`visibility: "cluster-local"`, that later deploy is **not** silently allowed to undo the private
+setting: it refuses, telling you to either add `networking.visibility` to your config (the
+persistent fix) or pass `--public` to confirm you really do want to make the app public again.
+`--public` is the only way to move a currently-private app back to public — it exists specifically
+so that going public is always a deliberate, explicit action, never an accident of a forgotten
+flag.
+
+<Callout type="warn">
+**Upgrade the operator and its CRD first, then the CLI.** This option is a new, additive field on
+the deployment resource the operator reconciles. A cluster running an operator from before this
+feature existed does not recognize the field, and the deploy is **rejected outright with a clear
+schema error** rather than silently ignored — the safe failure mode, but still one you avoid by
+upgrading the operator (and its CRD) before deploying with a CLI version that sets this field.
+</Callout>
+
+## Previews
+
+A per-PR preview deployment follows the same `networking.visibility` setting as a normal deploy,
+but there is one difference: **a preview has no `--public` override.**
+
+Every time a preview redeploys — on every new commit to that pull request — its visibility is
+whatever `networking.visibility` says in `knext.config.ts` on that branch, at that commit. There
+is no separate "preview mode" for this setting and nothing to remember between commits: if the
+branch's config currently says `"cluster-local"`, the preview is private; if the config says
+`"public"` or omits `networking` entirely, the preview is public.
+
+Because there is no flag to override it, the downgrade protection only has one answer. If a
+preview is currently private and a later commit on that branch would make it public again — most
+often because `networking.visibility` was accidentally dropped from the config — that deploy is
+refused rather than carried out. The fix is a commit on the branch that puts
+`networking.visibility: "cluster-local"` back; there is no flag that confirms the change instead.
+
+## How to reach it
+
+A private app has no public URL, so reaching it means going through the cluster's internal gateway
+service instead of the public one. Port-forward to it and send the app's hostname in the `Host`
+header:
+
+```bash title="shell"
+kubectl -n kourier-system port-forward svc/kourier-internal 8080:80
+```
+
+```bash title="shell"
+curl -H "Host: <your-app-host>" http://127.0.0.1:8080/
+```
+
+(`<your-app-host>` is the hostname from the app's own status — the same hostname it would have used
+for its public URL, had it been public.)
+
+<Callout type="info">
+**A real browser can't do this directly.** A browser always sends the *real* hostname in its `Host`
+header — it has no "pretend to be `<your-app-host>` while actually connecting to `127.0.0.1`" mode.
+To open a private app in an actual browser, put a small local reverse proxy in front of the
+port-forward: something that listens on a local port, rewrites the `Host` header to your app's
+hostname before forwarding, and lets you browse to the proxy's port instead.
+
+**If your app checks the `Origin` header too** — a common CSRF defense — rewrite `Origin` the same
+way, not just `Host`. A proxy that only fixes `Host` will still fail those checks, because the
+browser's `Origin` keeps reflecting whatever hostname you typed into the address bar.
+</Callout>

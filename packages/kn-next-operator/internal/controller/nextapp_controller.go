@@ -941,6 +941,23 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	ksvc.Labels["app"] = nextApp.Name
 	ksvc.Labels["generated-by"] = "kn-next-operator"
 
+	// Visibility (#1865): spec.networking.visibility == "cluster-local" renders
+	// the Knative label that keeps this ksvc's Route off the external gateway —
+	// the platform way to satisfy "no unauthenticated mutating endpoints" for an
+	// app with no auth of its own. The operator is the label's sole writer
+	// (ADR-0001), so it is re-asserted on every reconcile; explicitly DELETED
+	// (not just left unset) so toggling visibility back to "public" on an
+	// existing app removes a previously-rendered label rather than leaving it
+	// stale. Unset/"public" => absent, byte-identical to every CR written
+	// before this field existed. Set before the preview override below (#770's
+	// disposition list), deliberately NOT special-cased there: a preview of a
+	// private app stays private, and vice versa.
+	if nextApp.Spec.Networking != nil && nextApp.Spec.Networking.Visibility == appsv1alpha1.VisibilityClusterLocal {
+		ksvc.Labels["networking.knative.dev/visibility"] = "cluster-local"
+	} else {
+		delete(ksvc.Labels, "networking.knative.dev/visibility")
+	}
+
 	annotations := map[string]string{
 		"autoscaling.knative.dev/min-scale": "0",
 		"autoscaling.knative.dev/max-scale": "10",

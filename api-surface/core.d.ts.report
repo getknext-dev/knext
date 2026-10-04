@@ -55,6 +55,7 @@ interface KnativeNextConfig {
   imagePullSecrets?: string[] | undefined
   infrastructure?: InfrastructureConfig | undefined
   name: string
+  networking?: NetworkingConfig | undefined
   observability?: ObservabilityConfig | undefined
   queue?: QueueConfig | undefined
   registry: string
@@ -70,6 +71,10 @@ interface MinioInfraConfig {
   enabled: boolean
   secretKey?: string | undefined
   storage?: string | undefined
+}
+
+interface NetworkingConfig {
+  visibility?: "public" | "cluster-local" | undefined
 }
 
 interface NoQueueConfig {

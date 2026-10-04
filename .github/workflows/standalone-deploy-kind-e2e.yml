@@ -1,4 +1,4 @@
-name: Standalone deploy — kind e2e (build-id lock-step)
+name: Standalone deploy — kind e2e (build-id lock-step, private visibility)
 
 # #1417: every `kn-next deploy` of the DEFAULT standalone target (turbopack)
 # on Next >= 16.2.11 died on the `.next/BUILD_ID == tag` guard, because knext
@@ -19,6 +19,16 @@ name: Standalone deploy — kind e2e (build-id lock-step)
 # fixture staged outside the repo, same local-registry + certs.d recipe as
 # `file-manager-platform-e2e-nightly.yml`. Both runtimes AND both default
 # builders (turbopack, webpack) run, since all four are v1.0 cells (#1733).
+#
+# #1865: this lane also carries the private-visibility (cluster-local)
+# coverage — a SECOND `kn-next deploy` on the SAME already-warm cluster,
+# reusing the already-pushed digest via `--image` (no rebuild), with
+# `--private`. It asserts the rendered ksvc carries the Knative cluster-local
+# label, that the external Kourier gateway (svc/kourier, not
+# svc/kourier-internal) has no route for it (404), and that it IS reachable
+# from inside the cluster through kourier-internal with the Host header. No
+# new workflow, no new cluster — same reasoning as the build-id check above:
+# reuse the infrastructure this lane already stands up.
 #
 # Scheduled weekly on top of the path-filtered PR/push triggers (#1733): the
 # path filters above only fire this lane when one of the listed files
@@ -45,6 +55,11 @@ on:
       - 'packages/kn-next/src/cli/project-build.ts'
       - 'packages/kn-next/src/cli/build-artifact.ts'
       - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/src/cli/validate.ts'
+      - 'packages/kn-next/src/cli/help.ts'
+      - 'packages/kn-next/src/config.ts'
+      - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
       - 'packages/kn-next/templates/app/next.config.ts.hbs'
       - 'packages/kn-next/templates/runtime-standalone/**'
       - 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/**'
@@ -59,6 +74,11 @@ on:
       - 'packages/kn-next/src/cli/project-build.ts'
       - 'packages/kn-next/src/cli/build-artifact.ts'
       - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/src/cli/validate.ts'
+      - 'packages/kn-next/src/cli/help.ts'
+      - 'packages/kn-next/src/config.ts'
+      - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
       - 'packages/kn-next/templates/app/next.config.ts.hbs'
       - 'packages/kn-next/templates/runtime-standalone/**'
       - 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/**'
@@ -72,7 +92,7 @@ jobs:
   standalone-deploy-e2e:
     name: standalone (${{ matrix.builder }}, ${{ matrix.runtime }}) through kn-next deploy on kind
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -326,16 +346,170 @@ jobs:
             echo "::error::/api/health returned $code, want 200"; exit 1
           fi
 
+      # #1865: a SECOND NextApp, deployed `--private`, reusing the image the
+      # first deploy already pushed (via `--image`, which implies
+      # --skip-build/--skip-upload — no rebuild). Its own minimal
+      # knext.config.ts mirrors the fixture's runtime/build so the operator
+      # renders the same containerCommand for the SAME image digest.
+      - name: Deploy a second, cluster-local NextApp (--private)
+        run: |
+          set -euo pipefail
+          img="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.image}')"
+          if [ -z "$img" ]; then
+            echo "::error::could not resolve spec.image from nextapp/$APP_NAME"; exit 1
+          fi
+          echo "reusing image: $img"
+
+          PRIVATE_APP_NAME="${APP_NAME}-private"
+          PRIVATE_APP_DIR="${RUNNER_TEMP}/standalone-app-private"
+          mkdir -p "$PRIVATE_APP_DIR"
+          cd "$PRIVATE_APP_DIR"
+          if [ "${{ matrix.builder }}" = "webpack" ]; then
+            BUILD_KEY_LINE='build: "webpack",'
+          else
+            BUILD_KEY_LINE=''
+          fi
+          cat > knext.config.ts <<EOF
+          const config = {
+            name: "${PRIVATE_APP_NAME}",
+            runtime: "${{ matrix.runtime }}",
+            ${BUILD_KEY_LINE}
+            registry: "localhost:5001",
+            healthCheckPath: "/api/health",
+            scaling: { minScale: 0, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+          };
+          export default config;
+          EOF
+
+          node "${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" deploy \
+            --image "$img" --namespace "$APP_NS" --tag "${DEPLOY_TAG}-private" --private
+
+          echo "PRIVATE_APP_NAME=${PRIVATE_APP_NAME}" >> "$GITHUB_ENV"
+
+      - name: Wait for the private NextApp to go Ready, and assert the cluster-local label
+        run: |
+          set -euo pipefail
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=120s "nextapp/$PRIVATE_APP_NAME" \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$PRIVATE_APP_NAME"; exit 1)
+
+          label="$(kubectl -n "$APP_NS" get ksvc "$PRIVATE_APP_NAME" -o jsonpath='{.metadata.labels.networking\.knative\.dev/visibility}')"
+          echo "ksvc networking.knative.dev/visibility = ${label}"
+          if [ "$label" != "cluster-local" ]; then
+            echo "::error::ksvc/$PRIVATE_APP_NAME is missing the cluster-local visibility label (got '${label}')"; exit 1
+          fi
+
+      - name: Assert the private app is UNREACHABLE from outside the cluster (external Kourier -> 404)
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier 8081:80 >/tmp/pf-kourier-external.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8081) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          host="$(kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          if [ -z "$host" ]; then
+            echo "::error::private nextapp status.url is empty"; kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" -o yaml; exit 1
+          fi
+          code="$(curl -s -o /tmp/private-external-body.txt -w '%{http_code}' -H "Host: ${host}" http://127.0.0.1:8081/api/health)"
+          echo "external GET /api/health (private app) -> $code"
+          cat /tmp/private-external-body.txt
+          kill "$pf_pid" 2>/dev/null || true
+          trap - EXIT
+          if [ "$code" != "404" ]; then
+            echo "::error::external Kourier route for the PRIVATE app returned $code, want 404 (no public route for a cluster-local-only app)"; exit 1
+          fi
+
+      - name: Assert the private app IS reachable from inside the cluster (kourier-internal -> 200)
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier-internal 8082:80 >/tmp/pf-kourier-internal-private.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8082) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          host="$(kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          code="$(curl -s -o /tmp/private-internal-body.json -w '%{http_code}' -H "Host: ${host}" http://127.0.0.1:8082/api/health)"
+          echo "internal (kourier-internal) GET /api/health (private app) -> $code"
+          cat /tmp/private-internal-body.json
+          kill "$pf_pid" 2>/dev/null || true
+          trap - EXIT
+          if [ "$code" != "200" ]; then
+            echo "::error::kourier-internal route for the PRIVATE app returned $code, want 200"; exit 1
+          fi
+
+      # #1865 round 2 (spec review): a LATER plain redeploy (no --private,
+      # and this fixture's knext.config.ts never sets networking.visibility)
+      # must REFUSE rather than silently make the app public again — see
+      # assertVisibilityDowngradeIsExplicit in deploy.ts. Proves the guard
+      # against the REAL CLI + a REAL live NextApp, not just the hermetic TS
+      # unit test.
+      - name: A plain redeploy (no --private) of the now-private app MUST REFUSE
+        run: |
+          set -euo pipefail
+          img="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.image}')"
+          cd "${RUNNER_TEMP}/standalone-app-private"
+          set +e
+          node "${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" deploy \
+            --image "$img" --namespace "$APP_NS" --tag "${DEPLOY_TAG}-private-redeploy" \
+            >/tmp/plain-redeploy.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/plain-redeploy.log
+          if [ "$code" -eq 0 ]; then
+            echo "::error::a plain redeploy with no --private succeeded — it should have REFUSED to silently make the private app public"; exit 1
+          fi
+          grep -qi -- '--public' /tmp/plain-redeploy.log || {
+            echo "::error::the refusal message does not mention --public"; exit 1
+          }
+
+      - name: After the refused redeploy, the private app is STILL unreachable from outside
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier 8083:80 >/tmp/pf-kourier-external-recheck.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8083) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          host="$(kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          code="$(curl -s -o /tmp/private-external-recheck-body.txt -w '%{http_code}' -H "Host: ${host}" http://127.0.0.1:8083/api/health)"
+          echo "external GET /api/health (private app, after the refused redeploy) -> $code"
+          cat /tmp/private-external-recheck-body.txt
+          kill "$pf_pid" 2>/dev/null || true
+          trap - EXIT
+          if [ "$code" != "404" ]; then
+            echo "::error::after the refused redeploy the external Kourier route returned $code, want 404 — the app must have stayed private"; exit 1
+          fi
+          label="$(kubectl -n "$APP_NS" get ksvc "$PRIVATE_APP_NAME" -o jsonpath='{.metadata.labels.networking\.knative\.dev/visibility}')"
+          if [ "$label" != "cluster-local" ]; then
+            echo "::error::ksvc/$PRIVATE_APP_NAME lost its cluster-local label after the refused redeploy (got '${label}')"; exit 1
+          fi
+
       - name: Diagnostics on failure
         if: failure()
         run: |
           kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods -o wide 2>&1 || true
           kubectl -n "$APP_NS" get "nextapp/$APP_NAME" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          if [ -n "${PRIVATE_APP_NAME:-}" ]; then
+            kubectl -n "$APP_NS" get "nextapp/$PRIVATE_APP_NAME" -o yaml 2>&1 || true
+            kubectl -n "$APP_NS" get "nextapp/$PRIVATE_APP_NAME" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          fi
           kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
           kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
           for p in $(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o name 2>/dev/null); do
             kubectl -n "$APP_NS" logs "$p" --all-containers --tail=80 2>&1 || true
           done
+          if [ -n "${PRIVATE_APP_NAME:-}" ]; then
+            for p in $(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$PRIVATE_APP_NAME" -o name 2>/dev/null); do
+              kubectl -n "$APP_NS" logs "$p" --all-containers --tail=80 2>&1 || true
+            done
+          fi
+          cat /tmp/plain-redeploy.log 2>&1 || true
 
       - name: Tear down
         if: always()

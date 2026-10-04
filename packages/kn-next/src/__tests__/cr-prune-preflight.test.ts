@@ -490,6 +490,7 @@ describe("preview deploy runs the same preflight BEFORE it builds", () => {
                     capture: () => "",
                     buildAndPush,
                     preflight,
+                    visibilityGuard: async () => {},
                 },
             ),
         ).rejects.toThrow(/roSecretRef/);

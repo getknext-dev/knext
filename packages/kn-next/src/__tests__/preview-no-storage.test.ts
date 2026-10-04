@@ -87,6 +87,8 @@ function makeDeps() {
         ),
         buildAndPush: mock(async (_name: string) => digestImage),
         preflight: () => {},
+        // #1865: not under test here — a no-op stub, same posture as preflight.
+        visibilityGuard: async () => {},
     };
 }
 
