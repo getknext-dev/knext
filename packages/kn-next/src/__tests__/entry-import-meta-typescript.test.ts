@@ -60,7 +60,9 @@ afterAll(() => {
 function temp(prefix: string): string {
     // realpath: macOS tmpdir is a /var -> /private/var symlink, and
     // vinext-compile matches server modules by resolved path.
-    return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+    const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+    temps.push(d);
+    return d;
 }
 
 describe("vinext-compile over a bundled typescript (cluster C4b, #3424 regression shape)", () => {
