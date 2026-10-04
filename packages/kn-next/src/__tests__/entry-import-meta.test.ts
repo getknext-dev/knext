@@ -109,6 +109,23 @@ describe("findRealImportMeta (unit)", () => {
         expect(uses[0].prop).toBe("url");
     });
 
+    it("restores the ENCLOSING template's own quote after a substitution that opens a real string (round-2 review, #1877)", () => {
+        // Real typescript source: `` `False expression: ${message}` `` closes
+        // fine, but the PREVIOUS statement's pattern — a substitution whose
+        // expression itself contains a string literal, `` `${message ||
+        // "Unexpected node."}…` `` — overwrites the single shared `quote`
+        // variable with `"` while inside the substitution. Without restoring
+        // it on exit, the OUTER template then waits for ANOTHER `"` instead
+        // of its own backtick, silently swallowing everything after it,
+        // including a real import.meta.
+        const src =
+            // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal JS source under test, not a template
+            'const m = `${a || "fallback"}after`; const u = import.meta.url;';
+        const uses = findRealImportMeta(src);
+        expect(uses).toHaveLength(1);
+        expect(uses[0].prop).toBe("url");
+    });
+
     it("does not resume template mode too early on a nested object literal inside a substitution", () => {
         // `{a:1}` inside the substitution must not be mistaken for the
         // substitution's own closing brace.
@@ -163,6 +180,22 @@ describe("findRealImportMeta (unit)", () => {
         it("a `/` inside a regex character class does not end the regex early", () => {
             const src =
                 "const f = (s) => s.replace(/[/]/g, enc); const u = import.meta.url;";
+            const uses = findRealImportMeta(src);
+            expect(uses).toHaveLength(1);
+            expect(uses[0].prop).toBe("url");
+        });
+
+        it("a `/` AND a quote together inside a character class do not desync the scanner (mutation-kills a skip-tracking regression the lone-quote and lone-slash cases above cannot)", () => {
+            // Mutation-proof target: if character-class tracking is disabled,
+            // the internal "/" ends the "regex" early, and the quote right
+            // after it (now outside what was treated as the regex) opens a
+            // REAL fake string that swallows everything after it — including
+            // the import.meta probe. Neither the lone-quote test (no "/"
+            // inside its class) nor the lone-"/" test (no quote after the
+            // class, so nothing left to desync) can detect that regression on
+            // its own; this one needs both in the same character class.
+            const src =
+                "const f = (s) => s.replace(/[/']/g, enc); const u = import.meta.url;";
             const uses = findRealImportMeta(src);
             expect(uses).toHaveLength(1);
             expect(uses[0].prop).toBe("url");
