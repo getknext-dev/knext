@@ -59,10 +59,12 @@ const config: KnativeNextConfig = {
 compiled Bun executable — its renderer's font and image-decoding files are embedded in the binary
 rather than left behind on the machine that built it.
 
-**Note:** `@vercel/og` 1.0.0–1.0.3 — the version `vinext` 1.0.1 installs by default — is itself
-published without one of its WebAssembly files, so `next/og` fails on every runtime (compiled or
-not, Bun or Node) until that is fixed upstream. Until then, add an override pinning `@vercel/og`
-to `0.11.1`:
+**Note:** `vinext` 1.0.1 installs `@vercel/og` 1.0.3, whose published package is missing one of its
+WebAssembly files. `vinext` works around that itself, but in this build Nitro keeps `@vercel/og` as
+an external package, which bypasses that workaround — so `next/og` answers a 500 error, compiled or
+not. New apps from `knext create --builder vinext` already pin `@vercel/og` to `0.11.1` through an
+`overrides` entry in `package.json` (it is plain JSON, so the entry carries no comment). An existing
+app adds the same entry by hand and reinstalls:
 
 ```json title="package.json"
 {
@@ -71,6 +73,10 @@ to `0.11.1`:
   }
 }
 ```
+
+`overrides` is honoured by npm and Bun. pnpm reads it from `pnpm.overrides` instead, and Yarn from
+`resolutions`. Remove the entry once a `vinext` release ships a working `@vercel/og`; until then
+leave it in place.
 
 The third target is the same standalone output, produced with webpack instead of Turbopack as the
 bundler. Select it with `build: 'webpack'`; everything else about it — the entry, the supervisor,

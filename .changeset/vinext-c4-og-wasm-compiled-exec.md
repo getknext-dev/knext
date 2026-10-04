@@ -10,11 +10,13 @@ looked for the image renderer's WASM and fallback-font files at a path that
 only ever existed on the machine that built it. `ImageResponse` now works
 the same way in the compiled binary as it does uncompiled.
 
-**Note:** `@vercel/og` 1.0.0–1.0.3 — the version `vinext` 1.0.1 installs by
-default — is itself published without one of its WebAssembly files, so
-`next/og` fails on every runtime (compiled or not, Bun or Node) until that
-is fixed upstream. Until then, add an override pinning `@vercel/og` to
-`0.11.1`:
+**Note:** `vinext` 1.0.1 installs `@vercel/og` 1.0.3, whose published
+package is missing one of its WebAssembly files. `vinext` works around that
+itself, but in this build Nitro keeps `@vercel/og` as an external package,
+which bypasses that workaround, so `next/og` answers a 500 error (compiled or
+not). Apps created with `knext create --builder vinext` now pin `@vercel/og`
+to `0.11.1` through an `overrides` entry in `package.json`. An existing app
+adds the same entry by hand:
 
 ```json
 {
@@ -23,3 +25,7 @@ is fixed upstream. Until then, add an override pinning `@vercel/og` to
   }
 }
 ```
+
+`package.json` is plain JSON and cannot carry a comment, so the reason for the
+pin lives here and in the build-pipeline docs. Remove the entry once a `vinext`
+release ships a working `@vercel/og`.
