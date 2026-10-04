@@ -61,6 +61,23 @@ schema error** rather than silently ignored — the safe failure mode, but still
 upgrading the operator (and its CRD) before deploying with a CLI version that sets this field.
 </Callout>
 
+## Previews
+
+A per-PR preview deployment follows the same `networking.visibility` setting as a normal deploy,
+but there is one difference: **a preview has no `--public` override.**
+
+Every time a preview redeploys — on every new commit to that pull request — its visibility is
+whatever `networking.visibility` says in `knext.config.ts` on that branch, at that commit. There
+is no separate "preview mode" for this setting and nothing to remember between commits: if the
+branch's config currently says `"cluster-local"`, the preview is private; if the config says
+`"public"` or omits `networking` entirely, the preview is public.
+
+Because there is no flag to override it, the downgrade protection only has one answer. If a
+preview is currently private and a later commit on that branch would make it public again — most
+often because `networking.visibility` was accidentally dropped from the config — that deploy is
+refused rather than carried out. The fix is a commit on the branch that puts
+`networking.visibility: "cluster-local"` back; there is no flag that confirms the change instead.
+
 ## How to reach it
 
 A private app has no public URL, so reaching it means going through the cluster's internal gateway
