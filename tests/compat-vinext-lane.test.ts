@@ -493,10 +493,11 @@ describe('fixture normalization is EXPLICIT and bounded to the ESM app contract 
 
     // (4) The deploy script must NOT touch the shared CORPUS manifest — narrowing
     // it here would inflate the number while still looking like the node lane's.
-    // #1780: matches the corpus manifest's own filename stem specifically, not
-    // the bare word "manifest" — the script legitimately reads knext's OWN,
-    // unrelated `templates/vinext-patches/manifest.json` (the bundled-patch
-    // index) now, which is a different file entirely and not a softening.
+    // Matches the corpus manifest's own filename stem specifically, not the
+    // bare word "manifest" — the compat lane's patch step (below) legitimately
+    // reads knext's OWN, unrelated `templates/vinext-patches/manifest.json`
+    // (the bundled-patch index) now, which is a different file entirely and
+    // not a softening.
     expect(e, 'the deploy script never references the shared corpus manifest').not.toMatch(
       /deploy-tests-manifest/i,
     );
@@ -806,8 +807,8 @@ describe('the lane restores fixture-shipped node_modules the toolchain reify pru
   });
 });
 
-describe('the lane applies knext’s bundled vinext patches before building (#1780)', () => {
-  // #1780: the lane used to install a bare vinext pin and NEVER run
+describe('the lane applies knext’s bundled vinext patches before building (#1812)', () => {
+  // #1812: the lane used to install a bare, stale vinext pin and NEVER run
   // `knext vinext-patches` at all — every patch in
   // packages/kn-next/templates/vinext-patches/ measured "not working" in a
   // compat run for a reason that had nothing to do with the patch itself.

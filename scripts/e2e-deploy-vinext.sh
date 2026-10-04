@@ -100,7 +100,7 @@ fi
 # attributable to a vinext release rather than to knext, which is the same
 # mistake the bun lane made with `bun-version: latest` and had to undo.
 #
-# #1780: VINEXT_VERSION's default is READ FROM
+# #1812: VINEXT_VERSION's default is READ FROM
 # packages/kn-next/package.json's devDependencies.vinext AT RUNTIME — never
 # hardcoded here. This used to be a bare literal (1.0.0-beta.12) that had
 # drifted behind @getknext/core's own published pin (already 1.0.1): every
@@ -260,9 +260,10 @@ fi
 # installed CLI's dispatcher dynamically imports
 # (packages/kn-next/src/cli/vinext-patches.ts's `ensureVinextPatches` /
 # `applyVinextPatches`), which is also what project-build.ts calls right
-# before `vite build` on the vinext target. Until #1780, this lane never ran
-# this step at all, so every bundled fix measured "not working" for a reason
-# that had nothing to do with the fix.
+# before `vite build` on the vinext target. Until this fix to the compat
+# lane's vinext pin and patch step, this lane never ran this step at all, so
+# every bundled fix measured "not working" for a reason that had nothing to
+# do with the fix.
 #
 # `ensureVinextPatches` is DELIBERATELY non-fatal on a version mismatch for a
 # real app — a user who pinned a different vinext than knext's manifest gets

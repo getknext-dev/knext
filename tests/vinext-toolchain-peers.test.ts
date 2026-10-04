@@ -51,7 +51,7 @@
  * drifts from the version these ranges describe, forcing a maintainer to
  * re-read the peers when vinext bumps.
  *
- * #1780: this file used to resolve the script's pinned vinext version by
+ * #1812: this file used to resolve the script's pinned vinext version by
  * regex-parsing a hardcoded `VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-<v>}"`
  * literal out of the script text. That default is now a runtime read of
  * packages/kn-next/package.json (never hardcoded — the whole point of the
@@ -74,7 +74,7 @@ const DEPLOY_SCRIPT = 'scripts/e2e-deploy-vinext.sh';
  * `npm view vinext@<v> peerDependencies` and update BOTH the ranges and
  * PEER_VINEXT_VERSION below.
  *
- * Re-verified for beta.11 (#1309), beta.12 (#1324), and 1.0.1 (#1780): the
+ * Re-verified for beta.11 (#1309), beta.12 (#1324), and 1.0.1 (#1812): the
  * ranges below are UNCHANGED from beta.9 — `npm view vinext@1.0.1
  * peerDependencies` returns the identical set for every package this lane
  * pins (vinext's manifest also declares `@mdx-js/rollup@^3.0.0` and
@@ -194,7 +194,7 @@ function caretSatisfies(version: string, range: string): boolean {
 
 /** The repo's current vinext pin — packages/kn-next/package.json's own
  *  devDependencies.vinext, the SAME file the deploy script's VINEXT_VERSION
- *  default reads at runtime (#1780; see tests/vinext-pin-lockstep.test.ts). */
+ *  default reads at runtime (#1812; see tests/vinext-pin-lockstep.test.ts). */
 function repoVinextVersion(): string {
   const pkg = JSON.parse(
     readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
@@ -208,7 +208,7 @@ describe('the vinext toolchain install satisfies every vinext peer', () => {
   it('pins vinext at the version these peer ranges were read from', () => {
     // If vinext bumps, the hardcoded VINEXT_PEER_RANGES may be stale — force a
     // re-read rather than silently validating pins against an old range set.
-    // #1780: the deploy script's own VINEXT_VERSION default is a runtime read
+    // #1812: the deploy script's own VINEXT_VERSION default is a runtime read
     // of packages/kn-next/package.json now (never a literal in the script),
     // so the comparison is against that file directly rather than against
     // script text.

@@ -19,7 +19,7 @@
  * `packages/kn-next/src/__tests__/vinext-isr-redis-wiring.test.ts`), and the
  * spike fixtures under `docs/wayfinder/`, which record what a spike measured.
  *
- * #1780 (FOLDED BACK, as the pre-existing header here anticipated):
+ * #1812 (FOLDED BACK, as the pre-existing header here anticipated):
  * `scripts/e2e-deploy-vinext.sh` used to be a THIRD, hardcoded exception —
  * frozen on `1.0.0-beta.12` behind the v1.0.0-rc.5 credential window
  * (`frozenFileSet()`, `.github/compat-credential-ref.json`) while every other
@@ -58,7 +58,7 @@ const VERSION_BLOCK_END = '# END vinext-version-resolution';
  * sentinel comments in `scripts/e2e-deploy-vinext.sh` — a SCAN for the
  * markers rather than an enumeration of line numbers, so moving the block
  * within the script does not break this test; only deleting or duplicating a
- * marker does, which is exactly the signal wanted (#1780).
+ * marker does, which is exactly the signal wanted (#1812).
  */
 export function vinextVersionResolutionBlock(script: string): string {
   const beginCount = script.split(VERSION_BLOCK_BEGIN).length - 1;
@@ -83,7 +83,7 @@ export function vinextVersionResolutionBlock(script: string): string {
  * bash subprocess, and returns the resulting `VINEXT_VERSION`. This proves
  * the REAL runtime value a script edit produces (per the task: "read it at
  * runtime"), not a regex's guess at a literal — which is exactly the mode
- * that went stale under #1780, since the old guard parsed a bare
+ * that went stale under #1812, since the old guard parsed a bare
  * `VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-<v>}"` default out of the script
  * text, and that default is now a `$(node …)` read of package.json with
  * nothing literal left to parse.
@@ -154,14 +154,14 @@ function repoVinextVersion(): string {
 }
 
 describe('vinext pin lockstep', () => {
-  it('the deploy script carries exactly one version-resolution block (#1780)', () => {
+  it('the deploy script carries exactly one version-resolution block (#1812)', () => {
     const script = readFileSync(resolve(repoRoot, DEPLOY_SCRIPT), 'utf8');
     expect(() => vinextVersionResolutionBlock(script)).not.toThrow();
   });
 
   it(
     'the deploy script resolves VINEXT_VERSION, AT RUNTIME, to the repo pin — no override, ' +
-      'no drift possible (#1780 fold-back)',
+      'no drift possible (#1812 fold-back)',
     () => {
       expect(resolveHarnessVinextVersion()).toBe(repoVinextVersion());
     },
