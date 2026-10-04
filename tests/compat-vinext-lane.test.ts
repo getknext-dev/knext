@@ -856,6 +856,51 @@ describe('the lane applies knext’s bundled vinext patches before building (#17
     expect(src).toContain('process.exit(1)');
   });
 
+  it(
+    'refuses to run (exit 1) when KNEXT_VINEXT_PATCHES is set to a disabling value — ' +
+      'never silently skips (code-review finding on #1879)',
+    () => {
+      // vinextPatchesDisabled (vinext-patches.ts) treats 0/false/off/no
+      // (trimmed, case-insensitive) as disabling. In that state `vinext-patches`
+      // AND `--check` BOTH short-circuit to {kind: "disabled"} and exit 0
+      // WITHOUT ever touching the installed version — so neither invocation
+      // below, nor the version-mismatch check above (which only reads
+      // package.json files), can ever catch it. The harness must check this
+      // env var itself, BEFORE the apply invocation, or it would log "fully
+      // applied" having applied nothing.
+      const envRefIdx = src.search(/KNEXT_VINEXT_PATCHES\b/);
+      expect(envRefIdx, 'the deploy script never references KNEXT_VINEXT_PATCHES').toBeGreaterThan(
+        -1,
+      );
+      expect(
+        envRefIdx < iApply,
+        'the KNEXT_VINEXT_PATCHES disabling check must run BEFORE the vinext-patches invocation',
+      ).toBe(true);
+
+      const disableCheckRegion = src.slice(envRefIdx, iApply);
+      // Every disabling value vinextPatchesDisabled recognizes, not just one —
+      // an enumerated SUBSET is exactly how the next one gets missed.
+      for (const value of ['0', 'false', 'off', 'no']) {
+        expect(
+          disableCheckRegion,
+          `the pre-apply region never checks for the disabling value "${value}"`,
+        ).toMatch(new RegExp(`\\b${value}\\b`));
+      }
+      expect(disableCheckRegion, 'the disabling branch never exits non-zero').toMatch(/exit 1\b/);
+    },
+  );
+
+  it('the disabling-value scan is not vacuous (self-test)', () => {
+    const full = 'case "$x" in 0 | false | off | no) exit 1 ;; esac';
+    for (const value of ['0', 'false', 'off', 'no']) {
+      expect(new RegExp(`\\b${value}\\b`).test(full)).toBe(true);
+    }
+    const missingNo = full.replace(/\bno\b/, 'XX');
+    expect(/\bno\b/.test(missingNo)).toBe(false);
+    expect(/exit 1\b/.test(full)).toBe(true);
+    expect(/exit 1\b/.test('exit 0 ;; esac')).toBe(false);
+  });
+
   it('the scanner itself is not vacuously true (self-test)', () => {
     const real = 'node "${APP_DIR}/node_modules/@getknext/core/dist/cli/kn-next.js" vinext-patches';
     const realWithCheck = `${real} --check`;

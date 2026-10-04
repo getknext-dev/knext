@@ -272,6 +272,23 @@ fi
 # silent skip here would measure an unpatched build and report it as the
 # patched one. So the harness checks the versions itself, BEFORE calling the
 # CLI, and fails loudly instead of silently skipping.
+#
+# The SAME applies to `KNEXT_VINEXT_PATCHES` (vinext-patches.ts's own
+# `vinextPatchesDisabled`): set to `0`/`false`/`off`/`no`, `vinext-patches`
+# (and `--check`) both short-circuit to `{kind: "disabled"}` and exit 0
+# WITHOUT touching the version at all — the version-match check below would
+# still pass, the CLI calls would still exit 0, and the harness would log
+# "fully applied" having applied nothing. Refuse up front if it is set to a
+# disabling value, rather than let it defeat every check below silently.
+if [ -n "${KNEXT_VINEXT_PATCHES+x}" ]; then
+  KNEXT_VINEXT_PATCHES_NORMALIZED="$(printf '%s' "${KNEXT_VINEXT_PATCHES}" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "${KNEXT_VINEXT_PATCHES_NORMALIZED}" in
+    0 | false | off | no)
+      log "ERROR: KNEXT_VINEXT_PATCHES=${KNEXT_VINEXT_PATCHES} disables knext's bundled vinext patches (vinext-patches.ts's vinextPatchesDisabled) — refusing to boot a deliberately unpatched vinext build on this lane. Unset KNEXT_VINEXT_PATCHES, or set it to a non-disabling value, to run this lane."
+      exit 1
+      ;;
+  esac
+fi
 VINEXT_PATCH_MANIFEST="${APP_DIR}/node_modules/@getknext/core/templates/vinext-patches/manifest.json"
 VINEXT_INSTALLED_PKG="${APP_DIR}/node_modules/vinext/package.json"
 if [ ! -f "${VINEXT_PATCH_MANIFEST}" ]; then
