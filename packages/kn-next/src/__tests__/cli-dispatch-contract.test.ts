@@ -235,6 +235,14 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // Dockerfile (wire the ARGs into the build step), not the CLI
             // invocation.
             "In-image build lock-step check failed:",
+            // #1865 — assertVisibilityDowngradeIsExplicit's fail-closed reads
+            // of the LIVE NextApp before applying. A kubectl read failing for
+            // a reason other than NotFound (RBAC, network) or returning
+            // unparseable JSON is cluster/environment state, never something
+            // the user typed — same classification as status.ts's own
+            // "cluster unreachable" entry below.
+            "Could not read the current NextApp",
+            "Could not parse kubectl's response for NextApp",
         ],
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],
