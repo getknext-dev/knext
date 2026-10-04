@@ -220,6 +220,12 @@ type NextAppSpec struct {
 	// +optional
 	Security *SecuritySpec `json:"security,omitempty"`
 
+	// Networking controls the app's network exposure (#1865): whether the
+	// rendered Knative Service's Route is reachable from outside the cluster
+	// (the default) or cluster-local only.
+	// +optional
+	Networking *NetworkingSpec `json:"networking,omitempty"`
+
 	// Traffic pins which Knative Revision serves traffic (issue #92 — rollback).
 	// nil => serve the latest-ready revision (DEFAULT, byte-identical back-compat).
 	// +optional
@@ -387,6 +393,42 @@ type SecuritySpec struct {
 	// ReadOnlyRootFilesystem is false.
 	// +optional
 	WriteFree *bool `json:"writeFree,omitempty"`
+}
+
+// VisibilityClusterLocal is the NextAppSpec.Networking.Visibility value that
+// renders the Knative cluster-local visibility label (#1865).
+const VisibilityClusterLocal = "cluster-local"
+
+// NetworkingSpec controls the app's network exposure.
+type NetworkingSpec struct {
+	// Visibility selects whether the app's Knative Route is reachable from
+	// outside the cluster. "public" (the default; same as leaving this
+	// unset) keeps today's exact behavior — the Route is reachable through
+	// the cluster's external gateway (e.g. Kourier). "cluster-local" renders
+	// the Knative `networking.knative.dev/visibility: cluster-local` label
+	// on the Knative Service, which Knative's networking layer uses to keep
+	// the Route off the external gateway entirely — reachable only from
+	// inside the cluster (e.g. through kourier-internal with the right Host
+	// header).
+	//
+	// This is the PLATFORM way to satisfy "no unauthenticated mutating
+	// endpoints" (security.md) for an app that has no auth of its own
+	// (uploads, deletes, admin routes): instead of an out-of-band `kubectl
+	// label` the next reconcile can revert (ADR-0001 — the operator is the
+	// single source of truth), the operator itself renders and re-asserts
+	// the label on every reconcile.
+	//
+	// Additive and optional (ADR-0017 discipline): unset, or "public",
+	// means the label is absent — byte-identical to every NextApp CR
+	// written before this field existed. #548 upgrade-order hazard applies
+	// as usual: an operator/CRD that predates this field rejects a CR that
+	// sets it under --validate=strict (every CLI apply passes that flag),
+	// and the CLI's deploy preflight (preflightCRSchema) reports the
+	// unknown field before the cluster is touched — loud, not silent.
+	// Upgrade the operator/CRD first, then the CLI.
+	// +optional
+	// +kubebuilder:validation:Enum=public;cluster-local
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // DatabaseSpec is the author-facing surface of the app's database. knext is
