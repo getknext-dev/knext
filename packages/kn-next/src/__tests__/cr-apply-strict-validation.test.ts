@@ -696,6 +696,7 @@ describe("preview deploy — the OTHER NextApp CR apply (same CR, same skew)", (
                 // cr-prune-preflight.test.ts. Here it is stubbed so this suite
                 // keeps asserting the APPLY argv and nothing else.
                 preflight: () => {},
+                visibilityGuard: async () => {},
             },
         );
         return (apply.mock.calls[0]?.[0] ?? []) as string[];

@@ -80,7 +80,6 @@ import {
     preflightImageRef,
 } from "./schema/preflight";
 import {
-    excerpt,
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
@@ -90,6 +89,7 @@ import {
     withKubeContext,
 } from "./shared";
 import { requireBuildContext } from "./tracing-root";
+import { assertVisibilityDowngradeIsExplicit } from "./visibility-guard";
 import { readImageCacheRouted, type WriteFreeFacts } from "./write-free";
 
 const log = createLogger({ module: "deploy" });
@@ -349,81 +349,6 @@ function applyOverrides(
     }
 
     return overridden;
-}
-
-/**
- * #1865 (review round 2) — the fail-open fix. `--private` is a per-invocation
- * override, not a persistent setting (`knext.config.ts`'s `networking.
- * visibility` is the source of truth across runs). That means a LATER plain
- * `knext deploy` — no `--private`, and a config that never set
- * `networking.visibility` — renders a CR with no `spec.networking` at all.
- * `kubectl apply` removes a field it previously applied when the new
- * manifest omits it, so the live ksvc's cluster-local label would be
- * silently REVERTED to public. That makes "private" meaningless the moment
- * anyone forgets a flag that was never meant to be remembered forever, so
- * the deploy REFUSES rather than let it happen quietly.
- *
- * Reads the LIVE NextApp (if any) and compares its CURRENT visibility
- * against what THIS deploy is about to render:
- *  - no live NextApp yet (NotFound) → nothing to protect, proceed.
- *  - live is already cluster-local, and this deploy would not keep it
- *    cluster-local, and `--public` was not passed → REFUSE.
- *  - anything else (live is public/absent, or this deploy also sets
- *    cluster-local, or `--public` was passed) → proceed.
- *
- * FAILS CLOSED on any OTHER read error (RBAC, network, a malformed
- * response): an error here must never read as "safe to downgrade" just
- * because the live state could not be confirmed.
- */
-async function assertVisibilityDowngradeIsExplicit(
-    namespace: string,
-    name: string,
-    context: string | undefined,
-    willBeClusterLocal: boolean,
-    explicitPublic: boolean,
-): Promise<void> {
-    if (willBeClusterLocal || explicitPublic) return;
-
-    const result = captureKubectl(
-        withKubeContext(
-            ["kubectl", "get", "nextapp", name, "-n", namespace, "-o", "json"],
-            context,
-        ),
-    );
-    if (!result.ok) {
-        const stderr = result.stderr.trim();
-        if (/notfound|not found/i.test(stderr)) {
-            return; // first deploy: no live object to protect
-        }
-        throw new Error(
-            `Could not read the current NextApp "${name}" in namespace "${namespace}" ` +
-                "before deploying, so knext cannot confirm whether this would change its " +
-                "network visibility. Failing closed rather than risking a silent public " +
-                `downgrade of a private app. (${excerpt(stderr) || "kubectl failed with no stderr"})\n` +
-                "Check your kubeconfig/context; `knext doctor` diagnoses cluster prereqs.",
-        );
-    }
-
-    let live: { spec?: { networking?: { visibility?: string } } };
-    try {
-        live = JSON.parse(result.stdout);
-    } catch {
-        throw new Error(
-            `Could not parse kubectl's response for NextApp "${name}" before deploying — ` +
-                "failing closed rather than risking a silent public downgrade of a private app.",
-        );
-    }
-
-    if (live.spec?.networking?.visibility === "cluster-local") {
-        throw new UsageError(
-            `"${name}" in namespace "${namespace}" is currently deployed cluster-local ` +
-                "(private), but this deploy would make it PUBLIC — no --private flag, and " +
-                'knext.config.ts has no `networking: { visibility: "cluster-local" }`.\n' +
-                "If that is what you want, re-run with --public to confirm. If it is not, " +
-                'add `networking: { visibility: "cluster-local" }` to knext.config.ts (the ' +
-                "persistent setting) or pass --private again.",
-        );
-    }
 }
 
 /**
@@ -1237,16 +1162,21 @@ export async function deploy() {
     }
 
     // #1865: refuse a silent public downgrade BEFORE the apply that would
-    // cause it — see assertVisibilityDowngradeIsExplicit's doc comment.
-    // Skipped under --dry-run above: nothing is applied there, so there is
-    // nothing to protect against yet.
-    await assertVisibilityDowngradeIsExplicit(
-        options.namespace,
-        config.name,
-        options.context,
-        config.networking?.visibility === "cluster-local",
-        options.public,
-    );
+    // cause it — see visibility-guard.ts's doc comment (shared with
+    // preview.ts, which renders/applies the SAME NextApp CR kind). Skipped
+    // under --dry-run above: nothing is applied there, so there is nothing
+    // to protect against yet.
+    await assertVisibilityDowngradeIsExplicit({
+        namespace: options.namespace,
+        name: config.name,
+        context: options.context,
+        willBeClusterLocal: config.networking?.visibility === "cluster-local",
+        explicitPublic: options.public,
+        remediation:
+            "If that is what you want, re-run with --public to confirm. If it is not, " +
+            'add `networking: { visibility: "cluster-local" }` to knext.config.ts (the ' +
+            "persistent setting) or pass --private again.",
+    });
 
     // Write CR to .output/ and apply it — only CR apply, operator handles the rest.
     const { writeFileSync, mkdirSync } = await import("node:fs");

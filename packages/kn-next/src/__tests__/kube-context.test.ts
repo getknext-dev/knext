@@ -197,6 +197,7 @@ describe("preview honours --context (#978)", () => {
                 preflight: (_crPath, _ns, ctx) => {
                     expect(ctx).toBe(CTX);
                 },
+                visibilityGuard: async () => {},
             },
         );
         const kubectlCalls = captured.filter((a) => a[0] === "kubectl");
