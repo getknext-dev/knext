@@ -577,3 +577,81 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
         }, 120_000);
     }
 });
+
+/**
+ * Cluster C11 (`streaming-ssr`): a THIRD require-binding shape, measured
+ * against a real `vite build` (vinext 1.0.1, nitro's bun preset, code
+ * splitting disabled) of the official `streaming-ssr` pages-router
+ * edge-runtime fixture. When rolldown merges several originally-separate
+ * modules into one chunk and more than one of them calls
+ * `createRequire(import.meta.url)`, a later module's own `import.meta.url`
+ * is hoisted into a per-module getter instead of surviving as a bare token:
+ *
+ *     var __require = createRequire({get value(){return t.url}}.value);
+ *
+ * The package reached this way (`react`, for the edge-runtime SSR path) was
+ * never traced into `.output/server/node_modules` — nitro bundled it
+ * directly elsewhere in the SAME output, so no sidecar copy exists at all —
+ * yet the dynamic require still only reaches it at RUNTIME, invisibly to
+ * `Bun.build`'s static graph. Before the fix: the binding shape was not
+ * recognized at all, so the call was invisible to the whole analysis (no
+ * warning, no error) and the compiled binary crashed every request with
+ * `Cannot find module 'react'` the moment it was reached. The fix recognizes
+ * the shape AND resolves the package from the entry's own directory even
+ * without a sidecar — covering the case where the require is reached only
+ * dynamically but the package itself is ordinarily resolvable.
+ */
+describe("vinext-compile bundles the getter-indirection require shape with no sidecar (cluster C11)", () => {
+    it("embeds and runs a package that exists ONLY in the app's regular node_modules, never traced to .output/server/node_modules", () => {
+        const work = temp("knext-c11-");
+        const server = join(work, ".output", "server");
+        // The package lives in the APP ROOT's regular node_modules — NOT
+        // under `.output/server/node_modules` (no sidecar at all exists for
+        // this test; `existsSync(join(server, "node_modules"))` is false
+        // throughout). Resolvable only by walking up from dirname(ENTRY).
+        cjsPackage(
+            join(work, "node_modules"),
+            "fake-react",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                "var r = __require(`fake-react`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+        expect(existsSync(join(server, "node_modules"))).toBe(false);
+
+        const build = compile(work, server);
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        expect(build.stdout).toContain("fake-react (index.mjs)");
+        expect(build.stderr).not.toContain("WARNING");
+
+        // Deployed with NO sidecar beside it at all (deployAndRun's default):
+        // the embedded copy is the only way this can possibly work.
+        const run = deployAndRun(work, build.exe);
+        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(run.stdout).toContain(`RESULT:${A}`);
+    }, 120_000);
+
+    it("a missing package reached only through the getter-indirection shape is still reported, never silently invisible", () => {
+        const work = temp("knext-c11-missing-");
+        const server = join(work, ".output", "server");
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                `var f = () => { try { return __require(${JSON.stringify(MISSING)}); } catch { return "absent"; } };\n` +
+                'console.log("RESULT:" + f());\n',
+        );
+        const build = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(build.status, `${build.stdout}\n${build.stderr}`).not.toBe(0);
+        expect(build.stderr).toContain(MISSING);
+        expect(build.stderr).toContain("KNEXT_COMPILE_STRICT_REQUIRES=1");
+    }, 60_000);
+});

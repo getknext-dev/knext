@@ -23,6 +23,15 @@
  * binary. An earlier attempt used `__filename`, which is undefined in that
  * scope: the binary built and then died at boot inside `pathToFileURL(undefined)`.
  *
+ * The rewrite itself (entry-import-meta.mjs) is a real lexer, not a text-only
+ * scan: a naive `.replaceAll` + "did anything survive" regex cannot tell a
+ * real `import.meta` apart from a STRING LITERAL that merely spells the words
+ * "import.meta" — which is exactly what aborted the `twoslash` fixture's
+ * compile (cluster C4b) when #3424's regression bundled `typescript` into the
+ * entry: three of its own diagnostic MESSAGES name the language feature
+ * verbatim ("The 'import.meta' meta-property is only allowed when…"), with
+ * zero real `import.meta` syntax among them.
+ *
  * ### 2. `--compile` cannot resolve `sharp`, and no flag makes it
  *
  * Measured on bun 1.4.0, every resolution route fails inside the binary, and
@@ -71,6 +80,7 @@ import {
     analyzeServerModule,
     wrapRequireBindings,
 } from "./entry-require-staticize.mjs";
+import { rewriteImportMeta } from "./entry-import-meta.mjs";
 import { verifyBytecodeExec, verifyBytecodeModules } from "./bytecode-exec-verify.mjs";
 import {
     embedBuildOptions,
@@ -265,11 +275,19 @@ function listServerOutputModules(dir) {
  * Bun.build runs, because rolldown puts the `createRequire(import.meta.url)`
  * binding in one module and the `__require("<pkg>")` calls in others.
  *
- *  - `embed`: bare literals passed to calls anywhere in the output whose
- *    package nitro traced into `.output/server/node_modules` and that resolve.
+ *  - `embed`: bare literals passed to a RECOGNISED require binding (local, or
+ *    imported from the module that defines it) that resolve from the entry's
+ *    own directory — either nitro's traced `.output/server/node_modules`
+ *    sidecar (#1309/#1314: Node's upward node_modules walk from there reaches
+ *    the sidecar directly) OR, when nitro bundled the package directly instead
+ *    of leaving it external, the app's regular `node_modules` (cluster C11,
+ *    `streaming-ssr`'s edge-runtime pages: a require reached only through the
+ *    per-module-merge getter-indirection binding shape — see
+ *    entry-require-staticize.mjs's header — for a package Bun's own static
+ *    graph already bundled elsewhere, just not through THIS runtime call).
  *    Every require binding is wrapped to load these from the bundle.
- *  - `unresolved`: literals passed to a RECOGNISED require binding (local, or
- *    imported from the module that defines it) that are not embedded.
+ *  - `unresolved`: literals passed to a RECOGNISED require binding that do not
+ *    resolve at all (not embeddable, from anywhere).
  *  - `dynamic`: modules calling a recognised require binding with a
  *    non-literal specifier (`__require(name)`): what it loads is known only at
  *    runtime, so it cannot be embedded.
@@ -299,22 +317,6 @@ function planRuntimeRequires() {
     const name = (path) => relative(dirname(ENTRY), path);
 
     const embed = new Map();
-    for (const [path, analysis] of modules) {
-        for (const specs of analysis.literalCalls.values()) {
-            for (const spec of specs) {
-                if (!existsSync(join(SIDECAR_NODE_MODULES, packageNameOf(spec)))) continue;
-                try {
-                    Bun.resolveSync(spec, dirname(ENTRY));
-                } catch {
-                    continue;
-                }
-                const users = embed.get(spec) ?? new Set();
-                users.add(name(path));
-                embed.set(spec, users);
-            }
-        }
-    }
-
     const unresolved = new Map();
     const ambiguousUnresolved = new Map();
     const dynamic = [];
@@ -345,8 +347,26 @@ function planRuntimeRequires() {
                 (ambiguous ? ambiguousDynamic : dynamic).push(name(path));
             }
             for (const spec of analysis.literalCalls.get(callee) ?? []) {
-                if (embed.has(spec)) continue;
-                const target = ambiguous ? ambiguousUnresolved : unresolved;
+                if (embed.has(spec)) {
+                    embed.get(spec).add(name(path));
+                    continue;
+                }
+                // Resolvable from the entry's own directory covers BOTH cases
+                // a confirmed require binding can reach: the sidecar (nitro
+                // traced it to .output/server/node_modules, which Node's
+                // upward node_modules walk from dirname(ENTRY) finds directly
+                // — #1309/#1314) and, when nitro bundled the package directly
+                // instead (cluster C11), the app's regular node_modules, found
+                // the same way by walking further up. Either way this is a
+                // real, embeddable file; which tree it came from is not this
+                // decision's business.
+                let resolvable;
+                try {
+                    resolvable = Boolean(Bun.resolveSync(spec, dirname(ENTRY)));
+                } catch {
+                    resolvable = false;
+                }
+                const target = resolvable ? embed : ambiguous ? ambiguousUnresolved : unresolved;
                 const users = target.get(spec) ?? new Set();
                 users.add(name(path));
                 target.set(spec, users);
@@ -538,9 +558,6 @@ const importMetaToCjs = {
             console.log(
                 "[knext compile] injected the ARP primer (#1760) and the Bun.serve keep-alive guard as the entry's first imports",
             );
-            const before = (src.match(/import\.meta\.(url|filename|dirname)/g) ?? [])
-                .length;
-            if (before === 0) return { contents: src, loader: "js" };
             // These must reconstruct the ORIGINAL entry path
             // (<dirname(execPath)>/.output/server/index.mjs), NOT process.execPath
             // itself. nitro's bun preset resolves public assets as
@@ -562,22 +579,20 @@ const importMetaToCjs = {
             const exprs = SELF_CONTAINED
                 ? selfContainedEntryExprs(relative(APP_ROOT, ENTRY_DIR).split(sep).join("/"))
                 : { entryFileExpr, entryDirExpr, entryUrlExpr };
-            const out = src
-                .replaceAll("import.meta.filename", exprs.entryFileExpr)
-                .replaceAll("import.meta.dirname", exprs.entryDirExpr)
-                .replaceAll("import.meta.url", exprs.entryUrlExpr);
-            const after = (out.match(/import\.meta/g) ?? []).length;
-            if (after > 0) {
-                // Bytecode would fail anyway; failing here says WHY, and names
-                // the form that was not handled.
-                const sample = out.match(/import\.meta\.\w+/)?.[0] ?? "import.meta";
-                throw new Error(
-                    `[knext compile] ${after} import.meta use(s) survived the rewrite ` +
-                        `(e.g. ${sample}); --bytecode cannot compile them`,
-                );
-            }
+            // #C4b: a real single-pass lexer (entry-import-meta.mjs), not a
+            // naive text-only scan — a naive scan's "did anything survive"
+            // check cannot tell a real import.meta apart from a STRING LITERAL
+            // that merely spells "import.meta" (typescript's own compiler ships
+            // diagnostic messages naming the feature verbatim; bundling it,
+            // #3424's regression, aborted the twoslash fixture's compile over
+            // three string literals, not one real unhandled use). A genuine
+            // bare `import.meta` (no .url/.filename/.dirname) is rewritten to
+            // an inline object literal carrying all three, which stays valid
+            // wherever import.meta was — never aborts the build.
+            const { contents: out, rewritten } = rewriteImportMeta(src, exprs);
+            if (rewritten === 0) return { contents: src, loader: "js" };
             console.log(
-                `[knext compile] rewrote ${before} import.meta use(s) for bytecode`,
+                `[knext compile] rewrote ${rewritten} import.meta use(s) for bytecode`,
             );
             return { contents: out, loader: "js" };
         });

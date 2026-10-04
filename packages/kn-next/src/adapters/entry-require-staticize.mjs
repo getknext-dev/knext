@@ -18,6 +18,25 @@
  * throws `Cannot find module '<pkg>'` once `.output/server/node_modules` is not
  * beside it.
  *
+ * A THIRD shape (cluster C11, `streaming-ssr`'s pages-router edge-runtime
+ * pages): when rolldown merges several originally-separate modules into one
+ * chunk (nitro's `inlineDynamicImports`/no-code-splitting output) and more than
+ * one of them calls `createRequire(import.meta.url)`, each module's OWN
+ * `import.meta.url` cannot survive the merge as a bare token — it is hoisted
+ * into a per-module getter so each merged module keeps its own file identity:
+ *
+ *     var __require = e({ get value() { return t.url } }.value);
+ *
+ * (`t.url` stands in for that one module's `import.meta.url`). The binding
+ * created this way is just as real a `require` as the other two shapes — it is
+ * recognized as one, and its creation expression is wrapped the same way — but
+ * nothing about the PACKAGE it is later called with (`react`, bundled directly
+ * by nitro rather than traced to `.output/server/node_modules`, since nitro
+ * never left it external here) was ever staged beside the binary. See
+ * `planRuntimeRequires` in vinext-compile.mjs for the embed side of this: a
+ * spec reached through any of the three binding shapes is embeddable once it
+ * resolves from the entry's own directory, sidecar or not.
+ *
  * ## Why the BINDING is rewritten, not the call sites
  *
  * The calls live in other modules than the binding (the multi-chunk case), and
@@ -217,14 +236,19 @@ export function analyzeServerModule(src) {
         }
     }
 
-    // Bindings: `X = alias(import.meta.url)` and rolldown's
-    // `X = (() => alias(import.meta.url))()`, with optional comments.
+    // Bindings: `X = alias(import.meta.url)`, rolldown's
+    // `X = (() => alias(import.meta.url))()`, and the per-module-merge getter
+    // indirection (cluster C11 — see this file's header): `X =
+    // alias({get value(){return <ident>.url}}.value)`.
     const requireBindings = new Set();
     let recognized = 0;
     for (const alias of aliases) {
         const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
+        const getterCall =
+            `${escapeRe(alias)}${GAP}\\(${GAP}\\{${GAP}get${GAP}value${GAP}\\(${GAP}\\)` +
+            `${GAP}\\{${GAP}return${GAP}${IDENT}${GAP}\\.${GAP}url${GAP}\\}${GAP}\\}${GAP}\\.${GAP}value${GAP}\\)`;
         const bindingRe = new RegExp(
-            `(?<![\\w$.])(${IDENT})${GAP}=${GAP}(?:\\(${GAP}\\(${GAP}\\)${GAP}=>${GAP}${call}${GAP}\\)${GAP}\\(${GAP}\\)|${call})`,
+            `(?<![\\w$.])(${IDENT})${GAP}=${GAP}(?:\\(${GAP}\\(${GAP}\\)${GAP}=>${GAP}${call}${GAP}\\)${GAP}\\(${GAP}\\)|${call}|${getterCall})`,
             "g",
         );
         for (const m of src.matchAll(bindingRe)) {
@@ -232,14 +256,16 @@ export function analyzeServerModule(src) {
             recognized++;
         }
     }
-    // Any alias(import.meta.url) call the binding patterns did not account for
-    // is a shape this analysis cannot see through.
+    // Any alias(import.meta.url) (or alias(getter-indirection)) call the
+    // binding patterns did not account for is a shape this analysis cannot
+    // see through.
     let aliasCalls = 0;
     for (const alias of aliases) {
-        const anyCall = new RegExp(
-            `(?<![\\w$.])${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`,
-            "g",
-        );
+        const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
+        const getterCall =
+            `${escapeRe(alias)}${GAP}\\(${GAP}\\{${GAP}get${GAP}value${GAP}\\(${GAP}\\)` +
+            `${GAP}\\{${GAP}return${GAP}${IDENT}${GAP}\\.${GAP}url${GAP}\\}${GAP}\\}${GAP}\\.${GAP}value${GAP}\\)`;
+        const anyCall = new RegExp(`(?<![\\w$.])(?:${call}|${getterCall})`, "g");
         aliasCalls += [...src.matchAll(anyCall)].length;
     }
 
@@ -343,8 +369,10 @@ export function analyzeServerModule(src) {
 }
 
 /**
- * Wrap every `<alias>(import.meta.url)` in a require that statically embeds
- * `embed` specifiers and forwards the rest to the original require.
+ * Wrap every `<alias>(import.meta.url)` — or its per-module-merge getter-
+ * indirection form (cluster C11), `<alias>({get value(){return <ident>.url}}.value)`
+ * — in a require that statically embeds `embed` specifiers and forwards the
+ * rest to the original require.
  *
  * @param {string} src
  * @param {string[]} aliases createRequire local names (analyzeServerModule)
@@ -360,10 +388,11 @@ export function wrapRequireBindings(src, aliases, embed) {
     let contents = src;
     let count = 0;
     for (const alias of aliases) {
-        const re = new RegExp(
-            `(?<![\\w$.])${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`,
-            "g",
-        );
+        const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
+        const getterCall =
+            `${escapeRe(alias)}${GAP}\\(${GAP}\\{${GAP}get${GAP}value${GAP}\\(${GAP}\\)` +
+            `${GAP}\\{${GAP}return${GAP}${IDENT}${GAP}\\.${GAP}url${GAP}\\}${GAP}\\}${GAP}\\.${GAP}value${GAP}\\)`;
+        const re = new RegExp(`(?<![\\w$.])(?:${call}|${getterCall})`, "g");
         contents = contents.replace(re, (whole) => {
             count++;
             return (

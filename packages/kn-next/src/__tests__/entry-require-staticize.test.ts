@@ -260,6 +260,81 @@ describe("analyzeServerModule (unit)", () => {
         expect(a.requireBindings).toEqual([]);
         expect(a.unrecognizedBinding).toBe(false);
     });
+
+    describe("the per-module-merge getter-indirection binding shape (cluster C11)", () => {
+        // The EXACT shape measured against a real `vite build` (vinext 1.0.1,
+        // nitro's bun preset, code-splitting disabled) of the `streaming-ssr`
+        // fixture: when rolldown merges several originally-separate modules
+        // into one chunk and more than one of them calls
+        // `createRequire(import.meta.url)`, a later module's own
+        // `import.meta.url` cannot survive the merge as a bare token, so
+        // rolldown hoists it into a per-module getter instead:
+        //   wT = n({get value(){return t.url}}.value)
+        // This is just as real a require binding as the other two shapes —
+        // recognizing it is what lets `wT('react')` reach `PLAN.embed`
+        // instead of silently resolving to nothing at runtime (the "Cannot
+        // find module 'react'" crash).
+        const GETTER_SRC =
+            'import{createRequire as n}from"node:module";' +
+            "var t=import.meta;" +
+            "var wT=n({get value(){return t.url}}.value);" +
+            "var r=wT(`react`);";
+
+        it("recognizes the getter-indirection binding and its literal call", () => {
+            const a = analyzeServerModule(GETTER_SRC);
+            expect(a.aliases).toEqual(["n"]);
+            expect(a.requireBindings).toEqual(["wT"]);
+            expect([...(a.literalCalls.get("wT") ?? [])]).toEqual(["react"]);
+            expect(a.unrecognizedBinding).toBe(false);
+        });
+
+        it("tolerates whitespace/comments between every token of the getter shape", () => {
+            const spaced =
+                'import{createRequire as n}from"node:module";' +
+                "var t=import.meta;" +
+                "var wT = n( { get value ( ) { return t /* anchor */ . url } } . value ) ;" +
+                "var r=wT(`react`);";
+            const a = analyzeServerModule(spaced);
+            expect(a.requireBindings).toEqual(["wT"]);
+        });
+
+        it("does not false-positive on an unrelated getter named value returning an unrelated .url", () => {
+            // The whole call must still be `<alias>(...)`; a getter object
+            // with the identical shape, passed to something else entirely,
+            // must not be recognized as a require binding.
+            const a = analyzeServerModule(
+                'import{createRequire as n}from"node:module";' +
+                    "var t={url:1};" +
+                    "var notARequire=unrelated({get value(){return t.url}}.value);",
+            );
+            expect(a.requireBindings).toEqual([]);
+        });
+
+        it("wrapRequireBindings wraps the WHOLE getter-indirection expression, call sites untouched", () => {
+            const out = wrapRequireBindings(GETTER_SRC, ["n"], ["react"]);
+            expect(out.count).toBe(1);
+            expect(out.contents).toContain(
+                'case "react":return require("react");',
+            );
+            // the call site is untouched: wT(`react`) keeps calling wT, which
+            // is now bound to the wrapped require function.
+            expect(out.contents).toContain("var r=wT(`react`);");
+            // the original getter-indirection expression is still the
+            // argument the IIFE wraps (the real createRequire call still
+            // executes; only its RESULT is intercepted).
+            expect(out.contents).toContain(
+                "(n({get value(){return t.url}}.value))",
+            );
+            expect(out.contents).toContain("return __knextBase(__knextSpec)");
+        });
+
+        it("wrapRequireBindings is a no-op when nothing matches the getter shape", () => {
+            const unrelated = "var x = n({get value(){return t.other}}.value);";
+            expect(wrapRequireBindings(unrelated, ["n"], ["react"]).count).toBe(
+                0,
+            );
+        });
+    });
 });
 
 describe("wrapRequireBindings (unit)", () => {
