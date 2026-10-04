@@ -13,6 +13,10 @@ operator (and its CRD) that supports this field; upgrade the operator before dep
 that sets it, or the deploy is rejected with a clear schema error. See the "Private apps" docs page
 for how to deploy one and how to reach it afterward.
 
+`--private` is a per-run override, not a persistent setting, so a later plain `knext deploy` with
+no flag now REFUSES to silently make a currently-private app public again — it names the new
+`knext deploy --public` flag as the only way to confirm that downgrade.
+
 Escalation trigger acknowledged: this is an additive, optional field on both the deployment
 resource the operator reconciles and the `knext.config.ts` schema / CLI surface — unset is
 byte-identical to today's behavior.

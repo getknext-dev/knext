@@ -441,6 +441,55 @@ jobs:
             echo "::error::kourier-internal route for the PRIVATE app returned $code, want 200"; exit 1
           fi
 
+      # #1865 round 2 (spec review): a LATER plain redeploy (no --private,
+      # and this fixture's knext.config.ts never sets networking.visibility)
+      # must REFUSE rather than silently make the app public again — see
+      # assertVisibilityDowngradeIsExplicit in deploy.ts. Proves the guard
+      # against the REAL CLI + a REAL live NextApp, not just the hermetic TS
+      # unit test.
+      - name: A plain redeploy (no --private) of the now-private app MUST REFUSE
+        run: |
+          set -euo pipefail
+          img="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.image}')"
+          cd "${RUNNER_TEMP}/standalone-app-private"
+          set +e
+          node "${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" deploy \
+            --image "$img" --namespace "$APP_NS" --tag "${DEPLOY_TAG}-private-redeploy" \
+            >/tmp/plain-redeploy.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/plain-redeploy.log
+          if [ "$code" -eq 0 ]; then
+            echo "::error::a plain redeploy with no --private succeeded — it should have REFUSED to silently make the private app public"; exit 1
+          fi
+          grep -qi -- '--public' /tmp/plain-redeploy.log || {
+            echo "::error::the refusal message does not mention --public"; exit 1
+          }
+
+      - name: After the refused redeploy, the private app is STILL unreachable from outside
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier 8083:80 >/tmp/pf-kourier-external-recheck.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8083) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          host="$(kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          code="$(curl -s -o /tmp/private-external-recheck-body.txt -w '%{http_code}' -H "Host: ${host}" http://127.0.0.1:8083/api/health)"
+          echo "external GET /api/health (private app, after the refused redeploy) -> $code"
+          cat /tmp/private-external-recheck-body.txt
+          kill "$pf_pid" 2>/dev/null || true
+          trap - EXIT
+          if [ "$code" != "404" ]; then
+            echo "::error::after the refused redeploy the external Kourier route returned $code, want 404 — the app must have stayed private"; exit 1
+          fi
+          label="$(kubectl -n "$APP_NS" get ksvc "$PRIVATE_APP_NAME" -o jsonpath='{.metadata.labels.networking\.knative\.dev/visibility}')"
+          if [ "$label" != "cluster-local" ]; then
+            echo "::error::ksvc/$PRIVATE_APP_NAME lost its cluster-local label after the refused redeploy (got '${label}')"; exit 1
+          fi
+
       - name: Diagnostics on failure
         if: failure()
         run: |
@@ -460,6 +509,7 @@ jobs:
               kubectl -n "$APP_NS" logs "$p" --all-containers --tail=80 2>&1 || true
             done
           fi
+          cat /tmp/plain-redeploy.log 2>&1 || true
 
       - name: Tear down
         if: always()

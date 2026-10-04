@@ -24,7 +24,8 @@ reconciled, because the platform's control loop doesn't know about it.
 
 ## How to deploy one
 
-Set it in your `knext.config.ts`:
+**Set it in your `knext.config.ts`** — this is the persistent setting, and the one you should
+actually use:
 
 ```ts title="knext.config.ts"
 const config = {
@@ -39,17 +40,18 @@ const config = {
 export default config;
 ```
 
-Or pass it per-deploy, without touching the config file:
-
-```bash title="shell"
-knext deploy --private
-```
-
-`--private` wins when both are set — handy for deploying the same app privately from one pipeline
-and publicly from another, without branching the config.
-
 Leaving `networking` out entirely (or setting `visibility: "public"`) keeps today's behavior: a
 normal, publicly reachable app.
+
+`knext deploy --private` also exists, as a **per-run override** of the config — useful for a
+one-off deploy, or for scripting — but it is not remembered between runs. If you deploy with
+`--private` once and then later run a plain `knext deploy` with no flag, and your config never set
+`visibility: "cluster-local"`, that later deploy is **not** silently allowed to undo the private
+setting: it refuses, telling you to either add `networking.visibility` to your config (the
+persistent fix) or pass `--public` to confirm you really do want to make the app public again.
+`--public` is the only way to move a currently-private app back to public — it exists specifically
+so that going public is always a deliberate, explicit action, never an accident of a forgotten
+flag.
 
 <Callout type="warn">
 **Upgrade the operator and its CRD first, then the CLI.** This option is a new, additive field on
