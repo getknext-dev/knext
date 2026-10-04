@@ -29,12 +29,24 @@
  * `url`/`filename`/`dirname`, which is always valid wherever a MetaProperty
  * expression was (the same grammar slot), rather than aborting the build.
  *
- * Not a full JS parser, by design: regex literals are not specially detected,
- * which can only make this scanner treat MORE text as "code" than a real
- * parser would — never less — so it cannot HIDE a real `import.meta` inside
- * what is actually a regex body (the one failure mode that would matter here).
- * String and template literals ARE tracked, because that is the one place a
- * false positive was actually observed.
+ * Regex literals ARE lexed (round-2 review, #1877): a `/` in code position is
+ * disambiguated from division by the usual heuristic — what the previous
+ * SIGNIFICANT token was — and a real regex body is skipped wholesale (escapes
+ * and character classes honoured, so a `/` or a quote INSIDE `[...]` does not
+ * end anything). Measured on the real file-manager build: a character class
+ * containing a quote (`/[!'()*]/g`, S3's URI-escape helper) made the OLD,
+ * regex-blind version of this scanner enter fake "string" mode at that `'`
+ * and never correctly recover — silently swallowing several REAL
+ * `import.meta.filename`/`.dirname` uses elsewhere in the same bundle as "text
+ * inside a string", which then survived uncompiled into the bytecode step and
+ * crashed the binary at boot (`SyntaxError: import.meta is only valid inside
+ * modules`) despite `vinext-compile.mjs` logging a successful rewrite. When
+ * the regex/division call is genuinely AMBIGUOUS from the previous token alone
+ * (the one real case: a bare `}`, which can end either a block statement or an
+ * object/arrow-body expression — telling those apart needs a real parser) or a
+ * guessed regex body cannot be closed before a raw newline, this throws rather
+ * than guess: per this file's own history, a silent wrong guess is far worse
+ * than a loud failure.
  */
 
 const IMPORT_META = "import.meta";
@@ -45,8 +57,54 @@ function isIdentChar(ch) {
 }
 
 /**
+ * Keywords after which a following `/` starts a regex literal, never
+ * division — the operand position of a unary/control keyword, not the tail
+ * of a value-producing expression.
+ */
+const REGEX_ALLOWED_KEYWORDS = new Set([
+    "return",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "new",
+    "delete",
+    "void",
+    "throw",
+    "case",
+    "yield",
+    "do",
+    "else",
+]);
+
+/**
+ * Past a regex literal's closing (unescaped, outside a character class) `/`,
+ * returning the index right after it; or `-1` if a raw `\n` or end of source
+ * is reached first (not a real regex after all, or malformed — either way
+ * this scanner cannot safely continue past it silently).
+ */
+function skipRegexLiteral(src, i) {
+    let inClass = false;
+    for (let j = i + 1; j < src.length; j++) {
+        const c = src[j];
+        if (c === "\\") {
+            j++;
+            continue;
+        }
+        if (c === "\n") return -1;
+        if (inClass) {
+            if (c === "]") inClass = false;
+            continue;
+        }
+        if (c === "[") inClass = true;
+        else if (c === "/") return j + 1;
+    }
+    return -1;
+}
+
+/**
  * Every REAL `import.meta` token in `src` (never one spelled inside a string
- * literal or a comment).
+ * literal, a comment, or a regex-literal body).
  *
  * @param {string} src
  * @returns {{ start: number, end: number, propEnd: number, prop: string | null }[]}
@@ -62,11 +120,26 @@ export function findRealImportMeta(src) {
     let mode = "code";
     let quote = "";
     // Nested `${…}` inside a template literal re-enters "code" mode; this stack
-    // records the brace-depth (relative to the braces counted below) at which
-    // each pending substitution must close, so a nested `{…}` object literal
-    // inside the substitution does not prematurely resume template mode.
+    // records, per pending substitution, the brace-depth at which it must
+    // close (so a nested `{…}` object literal inside the substitution does
+    // not prematurely resume template mode) AND the enclosing template's OWN
+    // delimiter — always "`", but RESTORING it matters: a substitution's
+    // expression can itself open a real string (`${a || "b"}`), which
+    // overwrites the single shared `quote` variable, and without restoring
+    // it here the scanner would then wait for ANOTHER `"` to close the
+    // template instead of its real backtick — silently swallowing
+    // everything after it, including a real `import.meta` (measured: this
+    // exact shape, `` `${message || "Unexpected node."}…` ``, is real
+    // typescript source).
     const templateReturnDepth = [];
     let braceDepth = 0;
+    // Whether the previous SIGNIFICANT (non-whitespace, non-comment) token in
+    // code position was value-producing — i.e. a following bare `/` means
+    // division, not a regex literal's start. `null` only at the very start of
+    // `src` (before anything), where a regex is allowed, same as real JS.
+    // `"ambiguous"` marks the one case a token-level heuristic cannot resolve:
+    // a bare `}` (block-statement end vs. object/arrow-body-expression end).
+    let lastValue = null;
     for (let i = 0; i < src.length; i++) {
         const c = src[i];
         if (mode === "line") {
@@ -86,13 +159,17 @@ export function findRealImportMeta(src) {
                 continue;
             }
             if (mode === "template" && c === "$" && src[i + 1] === "{") {
-                templateReturnDepth.push(braceDepth);
+                templateReturnDepth.push({ depth: braceDepth, quote });
                 braceDepth++;
                 mode = "code";
+                lastValue = false; // `${` opens an expression position
                 i++;
                 continue;
             }
-            if (c === quote) mode = "code";
+            if (c === quote) {
+                mode = "code";
+                lastValue = true; // a string/template literal is a value
+            }
             continue;
         }
         // mode === "code"
@@ -121,12 +198,69 @@ export function findRealImportMeta(src) {
                 braceDepth++;
             } else if (c === "}") {
                 braceDepth--;
-                if (braceDepth === templateReturnDepth[templateReturnDepth.length - 1]) {
+                const pending = templateReturnDepth[templateReturnDepth.length - 1];
+                if (braceDepth === pending.depth) {
                     templateReturnDepth.pop();
                     mode = "template";
+                    quote = pending.quote; // restore — see the stack's own comment
                     continue;
                 }
             }
+        }
+        // Whitespace is not a token: it must never change `lastValue` (a
+        // value followed by " / " is still division, not a regex restart).
+        if (c === " " || c === "\t" || c === "\n" || c === "\r") continue;
+        if (c === "/") {
+            if (lastValue === "ambiguous") {
+                throw new Error(
+                    `[knext compile] cannot tell whether "/" at offset ${i} starts a regex literal ` +
+                        "or is division — the preceding \"}\" could end either a block statement or an " +
+                        "expression, and this scanner is not a full parser; refusing to guess",
+                );
+            }
+            if (lastValue === true) {
+                // Division/compound-assignment operator: an ordinary
+                // character, not entered specially (matches the
+                // `lastValue = false` default fallthrough below for any
+                // other operator character).
+                lastValue = false;
+                continue;
+            }
+            const end = skipRegexLiteral(src, i);
+            if (end < 0) {
+                throw new Error(
+                    `[knext compile] a "/" at offset ${i} looks like a regex literal (the preceding ` +
+                        "token does not produce a value) but no closing \"/\" was found before a raw " +
+                        "newline or the end of the source — refusing to guess whether this is really " +
+                        "division or a malformed regex",
+                );
+            }
+            i = end - 1;
+            lastValue = true; // a regex literal is a value
+            continue;
+        }
+        if (c === ")" || c === "]") {
+            lastValue = true;
+            continue;
+        }
+        if (c === "}") {
+            lastValue = "ambiguous";
+            continue;
+        }
+        if (isIdentChar(c)) {
+            // Only the START of a word decides lastValue; mid-word characters
+            // fall through to the import.meta check below unaffected. A
+            // number (starts with a digit) is always a value; a letter/_/$
+            // word is a value UNLESS it is one of the keywords a regex can
+            // follow.
+            if (!isIdentChar(src[i - 1])) {
+                let k = i;
+                while (isIdentChar(src[k])) k++;
+                const word = src.slice(i, k);
+                lastValue = !REGEX_ALLOWED_KEYWORDS.has(word);
+            }
+        } else {
+            lastValue = false;
         }
         if (
             c === "i" &&
@@ -151,13 +285,26 @@ export function findRealImportMeta(src) {
 
 /**
  * Rewrite every real `import.meta` in `src`:
- *   - `.url` / `.filename` / `.dirname` → the matching runtime expression;
- *   - anything else (bare `import.meta`, or an unrecognized property like
- *     `.resolve`/`.env`) → an inline object literal carrying all three, so the
- *     expression stays valid wherever `import.meta` was.
+ *   - a BARE `import.meta` (no property at all) → an inline object literal
+ *     carrying `url`/`filename`/`dirname`, valid wherever a MetaProperty
+ *     expression was (e.g. `typeof import.meta !== "undefined"`);
+ *   - `.url` / `.filename` / `.dirname` → the matching runtime expression.
  *
- * A false positive inside a string or comment (cluster C4b) is left untouched
- * — `findRealImportMeta` never reports one.
+ * Any OTHER property (`.main`, `.env`, `.resolve`, …) is a loud build error
+ * naming the property, never a silent rewrite (round-2 review, #1877): an
+ * object literal has no such property, so `import.meta.main` would silently
+ * become `undefined` and `import.meta.env.MODE` would throw at runtime on a
+ * request path nobody tested at compile time — exactly the kind of failure
+ * this whole rewrite exists to turn into a build-time one instead.
+ *
+ * A false positive inside a string, comment or regex-literal body (cluster
+ * C4b) is left untouched — `findRealImportMeta` never reports one.
+ *
+ * Fails closed: after rewriting, the OUTPUT is re-scanned, and the presence
+ * of even one real `import.meta` there aborts the build rather than shipping
+ * a binary bytecode cannot compile (round-2 review, #1877 — a bundled
+ * dependency's own `import.meta` the lexer still cannot see through, for
+ * whatever reason, must not reach `Bun.build` silently).
  *
  * @param {string} src
  * @param {{ entryUrlExpr: string, entryFileExpr: string, entryDirExpr: string }} exprs
@@ -176,17 +323,36 @@ export function rewriteImportMeta(src, exprs) {
     let last = 0;
     for (const use of uses) {
         out += src.slice(last, use.start);
-        const isKnownProp = use.prop !== null && known[use.prop] !== undefined;
-        // A known property (.url/.filename/.dirname): splice out THROUGH the
-        // property name too, replacing "import.meta.url" wholesale with the
-        // expression — never just "import.meta", which would leave a stray
-        // ".url" appended after the replacement expression. An unknown or
-        // absent property splices out only "import.meta" itself, so a
-        // trailing ".resolve"/".env" (or nothing) applies to the synthesized
-        // object afterwards.
-        out += isKnownProp ? known[use.prop] : bareExpr;
-        last = isKnownProp ? use.propEnd : use.end;
+        if (use.prop === null) {
+            out += bareExpr;
+            last = use.end;
+        } else if (known[use.prop] !== undefined) {
+            // Splice out THROUGH the property name too, replacing
+            // "import.meta.url" wholesale with the expression — never just
+            // "import.meta", which would leave a stray ".url" appended after
+            // the replacement expression.
+            out += known[use.prop];
+            last = use.propEnd;
+        } else {
+            throw new Error(
+                `[knext compile] import.meta.${use.prop} cannot be compiled for --bytecode ` +
+                    "(only a bare import.meta and .url/.filename/.dirname are rewritten; found " +
+                    `${JSON.stringify(src.slice(use.start, use.propEnd))})`,
+            );
+        }
     }
     out += src.slice(last);
+    // Fail closed: re-scan the OUTPUT, not just trust that every reported
+    // `use` was handled above (it was) — this is the belt to that
+    // suspenders' braces: whatever `findRealImportMeta` still finds here is,
+    // BY DEFINITION, real `import.meta` syntax `--bytecode` cannot hold.
+    const remaining = findRealImportMeta(out);
+    if (remaining.length > 0) {
+        const sample = out.slice(remaining[0].start, remaining[0].propEnd);
+        throw new Error(
+            `[knext compile] ${remaining.length} import.meta use(s) survived the rewrite ` +
+                `(e.g. ${JSON.stringify(sample)}); --bytecode cannot compile them`,
+        );
+    }
     return { contents: out, rewritten: uses.length };
 }

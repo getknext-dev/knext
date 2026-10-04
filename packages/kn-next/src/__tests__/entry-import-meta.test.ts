@@ -142,6 +142,82 @@ describe("findRealImportMeta (unit)", () => {
         expect(uses).toHaveLength(1);
         expect(uses[0].prop).toBe("url");
     });
+
+    describe("regex literals are lexed, not mistaken for strings (round-2 review, #1877)", () => {
+        it("a quote INSIDE a regex character class does not open a fake string (the exact file-manager false positive: /[!'()*]/)", () => {
+            const src =
+                "const f = (s) => s.replace(/[!'()*]/g, enc); const u = import.meta.url;";
+            const uses = findRealImportMeta(src);
+            expect(uses).toHaveLength(1);
+            expect(uses[0].prop).toBe("url");
+        });
+
+        it("a double quote inside a regex character class does not open a fake string", () => {
+            const src =
+                'const f = (s) => s.replace(/["]/g, enc); const u = import.meta.url;';
+            const uses = findRealImportMeta(src);
+            expect(uses).toHaveLength(1);
+            expect(uses[0].prop).toBe("url");
+        });
+
+        it("a `/` inside a regex character class does not end the regex early", () => {
+            const src =
+                "const f = (s) => s.replace(/[/]/g, enc); const u = import.meta.url;";
+            const uses = findRealImportMeta(src);
+            expect(uses).toHaveLength(1);
+            expect(uses[0].prop).toBe("url");
+        });
+
+        it("a division expression does not get mistaken for a regex literal", () => {
+            // `a / b` after a value — division, not a regex; must not swallow
+            // anything that follows it.
+            const src = "const x = a / b; const u = import.meta.url;";
+            const uses = findRealImportMeta(src);
+            expect(uses).toHaveLength(1);
+            expect(uses[0].prop).toBe("url");
+        });
+
+        it("a regex literal right after a value-producing `)` is division, not a regex (no false regex-skip)", () => {
+            const src = "const x = foo() / 2; const u = import.meta.url;";
+            const uses = findRealImportMeta(src);
+            expect(uses).toHaveLength(1);
+            expect(uses[0].prop).toBe("url");
+        });
+
+        it("a regex literal is correctly recognized after keywords that allow one (return/typeof/case)", () => {
+            for (const src of [
+                "function f(){return /x/.test(import.meta.url)}",
+                "const t = typeof /x/;const u=import.meta.url;",
+                "switch(x){case /y/.test(z):break}const u=import.meta.url;",
+            ]) {
+                const uses = findRealImportMeta(src);
+                expect(uses.some((u) => u.prop === "url")).toBe(true);
+            }
+        });
+
+        it("an escaped slash inside a regex does not end it early", () => {
+            const src =
+                "const f = (s) => s.replace(/a\\/b/g, enc); const u = import.meta.url;";
+            const uses = findRealImportMeta(src);
+            expect(uses).toHaveLength(1);
+            expect(uses[0].prop).toBe("url");
+        });
+
+        it("throws, never guesses, when a `/` is ambiguous (the previous token is a bare `}`)", () => {
+            // A `}` can end either a block statement (regex-ok next) or an
+            // object/arrow-body expression (division next) — a token-level
+            // heuristic cannot tell them apart.
+            expect(() =>
+                findRealImportMeta("x={}/y/;const u=import.meta.url;"),
+            ).toThrow(/cannot tell whether/);
+        });
+
+        it("throws, never guesses, when a presumed regex literal cannot be closed before a newline", () => {
+            const src =
+                "const x = a.b(\n  /unterminated\n);\nconst u = import.meta.url;";
+            expect(() => findRealImportMeta(src)).toThrow(/no closing/);
+        });
+    });
 });
 
 describe("rewriteImportMeta (unit)", () => {
@@ -165,14 +241,18 @@ describe("rewriteImportMeta (unit)", () => {
         );
     });
 
-    it("rewrites an unrecognized property by substituting only the bare part, keeping the trailing property access", () => {
-        const { contents, rewritten } = rewriteImportMeta(
-            "import.meta.resolve('x')",
-            EXPRS,
+    it("throws a build error naming an unrecognized property, never silently rewriting it (round-2 review, #1877)", () => {
+        // import.meta.main / import.meta.env.MODE would otherwise silently
+        // become undefined (or throw at runtime on an untested request path)
+        // instead of a loud build-time failure.
+        expect(() =>
+            rewriteImportMeta("import.meta.resolve('x')", EXPRS),
+        ).toThrow(/import\.meta\.resolve cannot be compiled/);
+        expect(() => rewriteImportMeta("import.meta.main", EXPRS)).toThrow(
+            /import\.meta\.main cannot be compiled/,
         );
-        expect(rewritten).toBe(1);
-        expect(contents).toBe(
-            "({url:__URL__,filename:__FILE__,dirname:__DIR__}).resolve('x')",
+        expect(() => rewriteImportMeta("import.meta.env.MODE", EXPRS)).toThrow(
+            /import\.meta\.env cannot be compiled/,
         );
     });
 
@@ -209,5 +289,22 @@ describe("rewriteImportMeta (unit)", () => {
         expect(contents).toBe(
             "__URL__+__FILE__+({url:__URL__,filename:__FILE__,dirname:__DIR__})+__DIR__",
         );
+    });
+
+    it("fails closed: re-scans the OUTPUT and aborts if a real import.meta still remains there (round-2 review, #1877)", () => {
+        // A deliberately bad `exprs` value simulates whatever the real lexer
+        // missing something would look like: the rewrite "succeeds" by its
+        // own bookkeeping (one use found, one substituted), but the SUBSTITUTED
+        // text itself still contains a real import.meta. The post-rewrite
+        // re-scan is what catches this rather than shipping it to Bun's
+        // bytecode compiler silently.
+        const badExprs = {
+            entryUrlExpr: "import.meta.url",
+            entryFileExpr: "__FILE__",
+            entryDirExpr: "__DIR__",
+        };
+        expect(() =>
+            rewriteImportMeta("const u = import.meta.url;", badExprs),
+        ).toThrow(/survived the rewrite/);
     });
 });

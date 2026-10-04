@@ -67,6 +67,15 @@ const IDENT = "[A-Za-z_$][\\w$]*";
 const COMMENT = "/\\*[^*]*\\*+(?:[^*/][^*]*\\*+)*/";
 const GAP = `(?:\\s|${COMMENT})*`;
 
+/**
+ * A synthetic `requireBindings`/`literalCalls`/`nonLiteralCallees` key for a
+ * create-and-immediately-call site (`createRequire(getterShape)("spec")`,
+ * measured on the real file-manager build — no named binding at all exists
+ * to key on). NUL-prefixed: no real JS identifier can ever spell it, so it
+ * can never collide with a real callee name, however the module is minified.
+ */
+const DIRECT_CALL_MARKER = "\0knext-direct-require-call";
+
 function escapeRe(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -241,7 +250,24 @@ export function analyzeServerModule(src) {
     // indirection (cluster C11 — see this file's header): `X =
     // alias({get value(){return <ident>.url}}.value)`.
     const requireBindings = new Set();
-    let recognized = 0;
+    // The FULL span of every recognized `IDENT = <create-expr>` match
+    // (including the IIFE wrapper's own parens in that shape), so the
+    // classification loop below can tell "this occurrence is the one INSIDE
+    // a recognized assignment" apart from "this occurrence sits bare,
+    // without one" — a plain look at what comes right AFTER the bare
+    // create-expression cannot do that: the IIFE shape's create-expression
+    // is immediately followed by `)` (its own wrapper's close), the exact
+    // same character that follows a create-expression handed bare to an
+    // ENCLOSING call (`use(createRequire(x))`) — which must NOT be treated
+    // as recognized (#1877 round-2 review: that was flagged as recognized
+    // too, before this span check existed).
+    const bindingRanges = [];
+    // Populated here, before the general literal-call scan below, so a
+    // CREATE-AND-IMMEDIATELY-CALL site (no named binding at all — see
+    // DIRECT_CALL_MARKER below) lands in the SAME map the general scan adds
+    // to, under a marker no real identifier can ever spell.
+    const literalCalls = new Map();
+    const nonLiteralCallees = new Set();
     for (const alias of aliases) {
         const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
         const getterCall =
@@ -253,21 +279,82 @@ export function analyzeServerModule(src) {
         );
         for (const m of src.matchAll(bindingRe)) {
             requireBindings.add(m[1]);
-            recognized++;
+            bindingRanges.push([m.index, m.index + m[0].length]);
         }
     }
-    // Any alias(import.meta.url) (or alias(getter-indirection)) call the
-    // binding patterns did not account for is a shape this analysis cannot
-    // see through.
+    // Every `alias(import.meta.url)` / `alias(getter-indirection)` call NOT
+    // already inside a `bindingRanges` span, classified by what immediately
+    // follows it. Real rolldown output (measured against the real
+    // file-manager build) creates and uses the require function in the SAME
+    // expression, with no named binding at all:
+    //   - `createRequire(getterShape)(` SPEC `)`         — direct call
+    //   - `createRequire(getterShape).resolve(` SPEC `)` — direct resolve
+    //   - `createRequire(getterShape)` alone, discarded in a comma/sequence
+    //     expression or a block's last statement — rolldown's per-chunk
+    //     module-init boilerplate sets one up defensively whether or not
+    //     THIS chunk ends up calling it — inert, nothing to embed, not a gap
+    // A shape matching none of these — including one HANDED to an enclosing
+    // call this analysis cannot see into (`use(createRequire(x))`) — is the
+    // one case left unaccounted for, and THAT is what `unrecognizedBinding`
+    // must mean.
     let aliasCalls = 0;
+    let accountedFor = 0;
+    const literalArgRe = new RegExp(`^${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`);
+    const invokeRe = new RegExp(`^${GAP}\\(`);
+    const resolveInvokeRe = new RegExp(`^${GAP}\\.${GAP}resolve${GAP}\\(`);
+    // `,`/`;`/`}` (or end of source): the value was discarded at STATEMENT
+    // level — a sequence-expression continuation, an expression-statement's
+    // end, or a block's last statement with no trailing semicolon (ASI).
+    // `)` and `]` are deliberately EXCLUDED: a bare (non-assignment,
+    // non-invoked) create-expression followed by either can only be sitting
+    // inside an ENCLOSING call or array literal — handed somewhere this
+    // analysis cannot see, so it must stay "unrecognized", not be waved
+    // through as safe.
+    const discardedRe = new RegExp(`^(?:${GAP}[,;}]|$)`);
     for (const alias of aliases) {
         const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
         const getterCall =
             `${escapeRe(alias)}${GAP}\\(${GAP}\\{${GAP}get${GAP}value${GAP}\\(${GAP}\\)` +
             `${GAP}\\{${GAP}return${GAP}${IDENT}${GAP}\\.${GAP}url${GAP}\\}${GAP}\\}${GAP}\\.${GAP}value${GAP}\\)`;
         const anyCall = new RegExp(`(?<![\\w$.])(?:${call}|${getterCall})`, "g");
-        aliasCalls += [...src.matchAll(anyCall)].length;
+        for (const m of src.matchAll(anyCall)) {
+            aliasCalls++;
+            if (bindingRanges.some(([s, e]) => m.index >= s && m.index < e)) {
+                accountedFor++;
+                continue;
+            }
+            const after = src.slice(m.index + m[0].length);
+            let argStart = -1;
+            const invoke = invokeRe.exec(after);
+            if (invoke) argStart = invoke[0].length;
+            else {
+                const resolve = resolveInvokeRe.exec(after);
+                if (resolve) argStart = resolve[0].length;
+            }
+            if (argStart >= 0) {
+                accountedFor++;
+                const lit = literalArgRe.exec(after.slice(argStart));
+                if (lit) {
+                    const spec = lit[2];
+                    if (isBareNonBuiltin(spec)) {
+                        requireBindings.add(DIRECT_CALL_MARKER);
+                        const set = literalCalls.get(DIRECT_CALL_MARKER) ?? new Set();
+                        set.add(spec);
+                        literalCalls.set(DIRECT_CALL_MARKER, set);
+                    }
+                } else {
+                    requireBindings.add(DIRECT_CALL_MARKER);
+                    nonLiteralCallees.add(DIRECT_CALL_MARKER);
+                }
+                continue;
+            }
+            if (discardedRe.test(after)) {
+                accountedFor++;
+                continue;
+            }
+        }
     }
+    const recognized = accountedFor;
 
     // `export { a as b }` → a → [b]
     const exportsMap = new Map();
@@ -289,8 +376,8 @@ export function analyzeServerModule(src) {
         imports.push({ from: m[3], names: new Map(parseSpecifierList(m[1])) });
     }
 
-    // `callee(<literal bare spec>)` → callee → specs
-    const literalCalls = new Map();
+    // `callee(<literal bare spec>)` → callee → specs (merges into the map
+    // DIRECT_CALL_MARKER entries were already added to, above).
     const callRe = new RegExp(
         `(?<![\\w$.])(${IDENT})${GAP}\\(${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\2${GAP}\\)`,
         "g",
@@ -309,17 +396,16 @@ export function analyzeServerModule(src) {
     // the require binding is a one-letter name that bundled libraries reuse for
     // their own functions and parameters, so a hit on such a name is NOT proof
     // of a dynamic require. declarationCounts below lets the caller tell the
-    // two apart.
-    const nonLiteralCallees = new Set();
+    // two apart. (merges into the set DIRECT_CALL_MARKER was already added to, above.)
     // Sticky, positioned at each call's `(`: no per-call copy of a multi-MB bundle.
-    const literalArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
+    const stickyLiteralArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
     // Not every `name(` is a call, but only a POSITIVELY identified definition
     // head is skipped (isDefinitionHead): anything else — `extends __require(n) {`,
     // `x = __require(n)`, a call followed by a block on the next line — is a call.
     for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}\\(`, "g"))) {
         if (isDefinitionHead(src, m.index, m.index + m[0].length - 1)) continue;
-        literalArgRe.lastIndex = m.index + m[0].length;
-        if (!literalArgRe.test(src)) nonLiteralCallees.add(m[1]);
+        stickyLiteralArgRe.lastIndex = m.index + m[0].length;
+        if (!stickyLiteralArgRe.test(src)) nonLiteralCallees.add(m[1]);
     }
 
     // How often each name is DECLARED in this module: var/let/const entries

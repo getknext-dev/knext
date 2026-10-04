@@ -358,11 +358,20 @@ function planRuntimeRequires() {
                 // — #1309/#1314) and, when nitro bundled the package directly
                 // instead (cluster C11), the app's regular node_modules, found
                 // the same way by walking further up. Either way this is a
-                // real, embeddable file; which tree it came from is not this
-                // decision's business.
+                // real, embeddable file — AS LONG AS that walk stayed inside
+                // the app's own root (`isWithinAppRoot`, round-2 review): the
+                // SAME upward walk has no bound, so it can resolve a package
+                // that is not this app's dependency at all, on the build
+                // machine's own disk. A resolved-but-outside-root spec is
+                // treated the SAME as an ordinary unresolvable one (warn by
+                // default, fail only under KNEXT_COMPILE_STRICT_REQUIRES=1) —
+                // never embedded silently, never a special hard failure
+                // either: jev 0.99 picked consistency with the existing
+                // unresolved-package handling over a bespoke always-fail path.
                 let resolvable;
                 try {
-                    resolvable = Boolean(Bun.resolveSync(spec, dirname(ENTRY)));
+                    const resolved = Bun.resolveSync(spec, dirname(ENTRY));
+                    resolvable = Boolean(resolved) && isWithinAppRoot(resolved);
                 } catch {
                     resolvable = false;
                 }
@@ -714,6 +723,38 @@ const EMBEDDED_PREFIX = "knext-embedded:";
 // Unique per build, so a stale binary cannot pass the bytecode proof.
 const BYTECODE_MARKER = `knext-vinext-exec:${randomBytes(12).toString("hex")}`;
 const APP_ROOT = dirname(dirname(ENTRY_DIR));
+// Round-2 review (#1877): `planRuntimeRequires`'s embed computation resolves
+// a confirmed require's spec via `Bun.resolveSync(spec, dirname(ENTRY))` —
+// but Node's module resolution walks UPWARD through ancestor `node_modules`
+// directories with NO bound, so that alone can succeed by finding a package
+// that is not a dependency of this app at all (two directories above the app
+// root on the BUILD MACHINE's own disk, say). Embedding that would make the
+// binary's contents depend on the build machine's disk layout instead of the
+// app's own declared dependencies. `isWithinAppRoot` is the containment
+// check: realpath-compared (symlink-safe, same technique as
+// sidecar-runtime.mjs's `isInside`), so a resolved path outside `APP_ROOT`
+// (its own `node_modules` or the `.output/server` sidecar) is refused.
+let appRootRealCache;
+function appRootReal() {
+    if (appRootRealCache === undefined) {
+        try {
+            appRootRealCache = realpathSync(APP_ROOT);
+        } catch {
+            appRootRealCache = null;
+        }
+    }
+    return appRootRealCache;
+}
+function isWithinAppRoot(resolvedPath) {
+    const root = appRootReal();
+    if (root === null) return false;
+    try {
+        const real = realpathSync(resolvedPath);
+        return real === root || real.startsWith(`${root}${sep}`);
+    } catch {
+        return false;
+    }
+}
 // knext.config.ts `compile.include` → `--include-json` (stock Bun): the matched
 // JS/TS modules ride along as EXTRA entrypoints (compile-embed.mjs), embedded
 // unexecuted at `$bunfs/root/<path relative to the app root>` and loaded on

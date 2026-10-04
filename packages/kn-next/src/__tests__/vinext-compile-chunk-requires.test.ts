@@ -636,6 +636,55 @@ describe("vinext-compile bundles the getter-indirection require shape with no si
         expect(run.stdout).toContain(`RESULT:${A}`);
     }, 120_000);
 
+    it("does NOT embed a package resolved only outside the app root (round-2 review, #1877: ancestor node_modules containment)", () => {
+        // Node's upward node_modules walk from dirname(ENTRY) has no bound —
+        // Bun.resolveSync alone would find a package installed ABOVE the app
+        // root (here: one level above `work`, which is OUTSIDE the app
+        // entirely, standing in for an unrelated package elsewhere on the
+        // BUILD MACHINE's disk) just as readily as one inside it. Embedding
+        // that would make the binary's contents depend on the build
+        // machine's disk layout. The app root itself (`work/app`) has NO
+        // node_modules of its own at all, so the ONLY way this spec could
+        // resolve is by escaping it.
+        const base = temp("knext-c11-escape-base-");
+        const work = join(base, "app");
+        mkdirSync(work, { recursive: true });
+        const server = join(work, ".output", "server");
+        cjsPackage(
+            join(base, "node_modules"),
+            "escaping-pkg",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                "var r = __require(`escaping-pkg`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+        expect(existsSync(join(work, "node_modules"))).toBe(false);
+
+        const build = compile(work, server);
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        // Never silently embedded — and never silently dropped either: it is
+        // reported the same way an ordinary unresolvable package already is.
+        expect(build.stdout).not.toContain("escaping-pkg");
+        expect(build.stderr).toContain("escaping-pkg");
+
+        // Under strict mode, it fails the build — the SAME outcome an
+        // ordinary unresolvable package already gets (jev 0.99: consistency
+        // over a bespoke always-fail path for this specific case).
+        const strictBuild = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(
+            strictBuild.status,
+            `${strictBuild.stdout}\n${strictBuild.stderr}`,
+        ).not.toBe(0);
+        expect(strictBuild.stderr).toContain("escaping-pkg");
+    }, 120_000);
+
     it("a missing package reached only through the getter-indirection shape is still reported, never silently invisible", () => {
         const work = temp("knext-c11-missing-");
         const server = join(work, ".output", "server");
