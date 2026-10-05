@@ -1,5 +1,101 @@
 # @getknext/core
 
+## 1.3.0-rc.3
+
+### Minor Changes
+
+- 1d06599: Add a `networking.visibility` option to `knext.config.ts` and a matching `knext deploy --private`
+  flag, so an app can be deployed with its route reachable only from inside the cluster instead of
+  always getting a public one. This is the platform way to deploy an app whose mutating endpoints
+  (uploads, deletes, admin actions) have no auth of their own, without relying on a manual label the
+  next deploy would silently undo.
+  
+  Leaving `networking` unset keeps today's behavior exactly — a public route, as before. Requires an
+  operator (and its CRD) that supports this field; upgrade the operator before deploying with a CLI
+  that sets it, or the deploy is rejected with a clear schema error. See the "Private apps" docs page
+  for how to deploy one and how to reach it afterward.
+  
+  `--private` is a per-run override, not a persistent setting, so a later plain `knext deploy` with
+  no flag now REFUSES to silently make a currently-private app public again — it names the new
+  `knext deploy --public` flag as the only way to confirm that downgrade. The same guard now covers
+  preview deploys too (the `preview.js deploy` entry), which reuse one CR name across every commit of a PR: previews have no
+  `--public` override, so an accidental downgrade is fixed with a `knext.config.ts` change on that PR's branch, and a private preview that should become public is removed first and then redeployed.
+  
+  Also: `knext deploy --image <ref>` (deploying a pre-built, digest-pinned image) no longer requires
+  a lockfile in the current directory. It already skipped the build; it was incorrectly still
+  checking for one first.
+
+### Patch Changes
+
+- e46b37a: Bundles a fix ahead of its upstream vinext release (`cloudflare/vinext#3689`):
+  when a server action's `redirect()` is invoked through the client-side router
+  (a fetch request, not a plain `<form>` submission), the response now always
+  answers HTTP `200`, matching current Next.js. It previously fell back to
+  `303` unless the redirect target had already been forwarded, was an
+  ancestor/stale-sibling route, or ran on a different runtime than the current
+  route.
+  
+  This only changes the response's status code — the redirect target still
+  reaches the browser the same way it always did, through the
+  `x-action-redirect` header (no `Location` header is set either before or
+  after this fix), so no open-redirect behaviour is introduced. A no-JS
+  `<form>` submission's redirect is unaffected and still answers `303`.
+- b167fd4: Fixed a cold-start regression on the vinext build target (both the compiled single-executable and the Node runtime): on some clusters, apps deployed with `build: 'vinext'` woke up to around 8 seconds slower than the standalone target, because the networking-stall mitigation described in the scale-to-zero docs was not wired into this build target. It now sends the same best-effort outbound packet as early as possible at process start, like every other knext runtime. The compiled executable picks it up on rebuild; a vinext app on the Node runtime also needs the new `knext-node-entry.mjs` from a freshly created app copied in (`knext doctor` reports a stale one). Opt out with `KNEXT_ARP_PRIMER=0` if you need to.
+- ee45ef3: Fixes `next/og`'s `ImageResponse` (e.g. a dynamic `opengraph-image` route)
+  answering a 500 error when built as a `bun build --compile --bytecode`
+  single executable (the `vinext` build target's compiled-binary shape). It
+  previously failed every time with `ENOENT`, because the compiled binary
+  looked for the image renderer's WASM and fallback-font files at a path that
+  only ever existed on the machine that built it. `ImageResponse` now works
+  the same way in the compiled binary as it does uncompiled.
+  
+  **Note:** `vinext` 1.0.1 installs `@vercel/og` 1.0.3, whose published
+  package is missing one of its WebAssembly files. `vinext` works around that
+  itself, but in this build Nitro keeps `@vercel/og` as an external package,
+  which bypasses that workaround, so `next/og` answers a 500 error (compiled or
+  not). Apps created with `knext create --builder vinext` now pin `@vercel/og`
+  to `0.11.1` through an `overrides` entry in `package.json`. An existing app
+  adds the same entry by hand:
+  
+  ```json
+  {
+    "overrides": {
+      "@vercel/og": "0.11.1"
+    }
+  }
+  ```
+  
+  `package.json` is plain JSON and cannot carry a comment, so the reason for the
+  pin lives here and in the build-pipeline docs. Remove the entry once a `vinext`
+  release ships a working `@vercel/og`.
+- 0cddde7: Fixed a `build: 'vinext'` + `runtime: 'node'` image build failure after the documented `npm install` step: `knext build`/`knext deploy` could not stage sharp's native addon for the deployed image unless the app also had a `bun.lock`, so an app installed with plain `npm install` (no bun involved at all, which is the normal case for a `--runtime node` app) failed with sharp's own "Could not load the sharp module using the linuxmusl-x64 runtime" during the image build. The staging step now also reads npm's `package-lock.json`, so `npm install` is sufficient — Node remains a first-class option alongside Bun. No action needed; rebuild and redeploy to pick up the fix.
+- 598441e: `knext create --builder vinext` now pins `@vercel/og` to `0.11.1` through an
+  `overrides` entry in the generated `package.json`, so `next/og`'s
+  `ImageResponse` (for example a dynamic `opengraph-image` route) renders in a
+  new app on both the Bun and Node runtimes without manual setup. Without the
+  pin, `vinext` 1.0.1 installs `@vercel/og` 1.0.3, which answers a 500 error in
+  this build. Apps created before this change add the entry by hand; see the
+  build-pipeline docs. Other builders are unchanged.
+- b679600: Fixed `npm install` failing in every new app created with `knext create --builder vinext` (React
+  Compiler is on by default). `@vitejs/plugin-react` 6.1.2, published on 2026-10-05, requires a newer
+  `oxc-transform-react` than the scaffold pinned, so npm refused to install with an `ERESOLVE` peer
+  dependency error. New vinext scaffolds now pin `@vitejs/plugin-react` to exactly `6.1.2` and
+  `oxc-transform-react` to `^0.152.0`, so the two only change together.
+  
+  An existing vinext app that hits the error updates the same two `devDependencies` in its
+  `package.json`:
+  
+  ```json
+  {
+    "devDependencies": {
+      "@vitejs/plugin-react": "6.1.2",
+      "oxc-transform-react": "^0.152.0"
+    }
+  }
+  ```
+- @getknext/db@1.3.0-rc.3
+  - @getknext/lib@1.3.0-rc.3
+
 ## 1.3.0-rc.2
 
 ### Minor Changes
