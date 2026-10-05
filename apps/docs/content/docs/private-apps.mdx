@@ -80,11 +80,16 @@ refused rather than carried out. The fix is a commit on the branch that puts
 
 This also applies when you *mean* to make a private preview public: changing the config to
 `"public"` is refused the same way. Remove the private preview first, then redeploy it with the
-new config:
+new config by pushing a commit or re-running your preview workflow. Pass the same namespace the
+preview was deployed to; in any other namespace the command finds nothing to remove and the next
+deploy is still refused:
 
 ```bash title="shell"
-knext preview destroy --pr <n>
+node node_modules/@getknext/core/dist/cli/preview.js destroy --pr <n> -n <namespace>
 ```
+
+Removing a preview also deletes its uploaded assets and clears its cache keyspace, as on a normal
+teardown; see [Preview environments](/docs/previews).
 
 ## How to reach it
 
