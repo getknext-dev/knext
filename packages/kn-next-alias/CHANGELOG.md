@@ -10,6 +10,7 @@
 - Updated dependencies [ee45ef3]
 - Updated dependencies [0cddde7]
 - Updated dependencies [598441e]
+- Updated dependencies [b679600]
   - @getknext/core@1.3.0-rc.3
 
 ## 1.3.0-rc.2

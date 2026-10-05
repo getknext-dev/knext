@@ -76,6 +76,23 @@
   pin, `vinext` 1.0.1 installs `@vercel/og` 1.0.3, which answers a 500 error in
   this build. Apps created before this change add the entry by hand; see the
   build-pipeline docs. Other builders are unchanged.
+- b679600: Fixed `npm install` failing in every new app created with `knext create --builder vinext` (React
+  Compiler is on by default). `@vitejs/plugin-react` 6.1.2, published on 2026-10-05, requires a newer
+  `oxc-transform-react` than the scaffold pinned, so npm refused to install with an `ERESOLVE` peer
+  dependency error. New vinext scaffolds now pin `@vitejs/plugin-react` to exactly `6.1.2` and
+  `oxc-transform-react` to `^0.152.0`, so the two only change together.
+  
+  An existing vinext app that hits the error updates the same two `devDependencies` in its
+  `package.json`:
+  
+  ```json
+  {
+    "devDependencies": {
+      "@vitejs/plugin-react": "6.1.2",
+      "oxc-transform-react": "^0.152.0"
+    }
+  }
+  ```
 - @getknext/db@1.3.0-rc.3
   - @getknext/lib@1.3.0-rc.3
 
