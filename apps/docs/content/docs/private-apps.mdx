@@ -78,6 +78,14 @@ often because `networking.visibility` was accidentally dropped from the config â
 refused rather than carried out. The fix is a commit on the branch that puts
 `networking.visibility: "cluster-local"` back; there is no flag that confirms the change instead.
 
+This also applies when you *mean* to make a private preview public: changing the config to
+`"public"` is refused the same way. Remove the private preview first, then redeploy it with the
+new config:
+
+```bash title="shell"
+knext preview destroy --pr <n>
+```
+
 ## How to reach it
 
 A private app has no public URL, so reaching it means going through the cluster's internal gateway
@@ -106,3 +114,28 @@ hostname before forwarding, and lets you browse to the proxy's port instead.
 way, not just `Host`. A proxy that only fixes `Host` will still fail those checks, because the
 browser's `Origin` keeps reflecting whatever hostname you typed into the address bar.
 </Callout>
+
+## Custom domains
+
+<Callout type="warn">
+**Do not add a custom domain to a private app.** Private deployment marks the app's Knative Service
+as cluster-local, but a Knative `DomainMapping` that points at that Service is routed through the
+**public** load balancer anyway, even if you label the `DomainMapping` itself
+`networking.knative.dev/visibility: cluster-local`. Adding one silently makes the app reachable
+from the internet, with whatever auth it has, which for a private app is usually none.
+</Callout>
+
+To give a private app a real hostname, keep it off the public gateway and put an authenticating
+layer in front of the cluster's internal gateway instead. For example, run a tunnel (such as a
+Cloudflare Tunnel) inside the cluster that forwards to
+`http://kourier-internal.kourier-system.svc.cluster.local:80`, rewrites the `Host` header to the
+app's own hostname, and sits behind an identity-aware proxy (such as Cloudflare Access) so only the
+people you choose can reach it. That is the same `Host` rewrite as the local proxy above, run inside
+the cluster with authentication in front of it.
+
+To check whether any app already has a custom domain mapped, list the `DomainMapping`s in the
+cluster and remove any that point at a private app:
+
+```bash title="shell"
+kubectl get domainmappings.serving.knative.dev -A
+```
