@@ -18,7 +18,7 @@
   `--private` is a per-run override, not a persistent setting, so a later plain `knext deploy` with
   no flag now REFUSES to silently make a currently-private app public again — it names the new
   `knext deploy --public` flag as the only way to confirm that downgrade. The same guard now covers
-  `knext preview deploy` too, which reuses one CR name across every commit of a PR: previews have no
+  preview deploys too (the `preview.js deploy` entry), which reuse one CR name across every commit of a PR: previews have no
   `--public` override, so the fix there is always a `knext.config.ts` change on that PR's branch.
   
   Also: `knext deploy --image <ref>` (deploying a pre-built, digest-pinned image) no longer requires
