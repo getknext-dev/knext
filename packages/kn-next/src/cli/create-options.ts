@@ -369,13 +369,19 @@ const REACT_COMPILER_BABEL_PLUGIN = "^1.0.0";
  * vinext's React Compiler recipe: `@vitejs/plugin-react` 6.1+ (older ones
  * ignore `react.compiler` silently), the Babel plugin, a Rolldown Babel bridge,
  * and the peer `@vitejs/plugin-react` needs (without it the build fails).
+ *
+ * The plugin is pinned EXACTLY, and `oxc-transform-react` to the minor that
+ * exact version declares as its peer: the plugin moves that 0.x minor in patch
+ * releases (6.1.2 went from `^0.145.0` to `^0.152.0`), so a caret on the
+ * plugin made `npm install` fail with ERESOLVE on every new vinext app the
+ * moment such a patch was published. Bump the two together.
  */
 export const VINEXT_REACT_COMPILER_DEV_DEPS: Readonly<Record<string, string>> =
     Object.freeze({
-        "@vitejs/plugin-react": "^6.1.0",
+        "@vitejs/plugin-react": "6.1.2",
         "babel-plugin-react-compiler": REACT_COMPILER_BABEL_PLUGIN,
         "@rolldown/plugin-babel": "^0.2.0",
-        "oxc-transform-react": "^0.145.0",
+        "oxc-transform-react": "^0.152.0",
     });
 
 const REGISTRY_ANCHOR = '  registry: "ghcr.io/<your-user>",\n';
