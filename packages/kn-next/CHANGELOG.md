@@ -19,7 +19,7 @@
   no flag now REFUSES to silently make a currently-private app public again — it names the new
   `knext deploy --public` flag as the only way to confirm that downgrade. The same guard now covers
   preview deploys too (the `preview.js deploy` entry), which reuse one CR name across every commit of a PR: previews have no
-  `--public` override, so the fix there is always a `knext.config.ts` change on that PR's branch.
+  `--public` override, so an accidental downgrade is fixed with a `knext.config.ts` change on that PR's branch, and a private preview that should become public is removed first and then redeployed.
   
   Also: `knext deploy --image <ref>` (deploying a pre-built, digest-pinned image) no longer requires
   a lockfile in the current directory. It already skipped the build; it was incorrectly still
@@ -40,7 +40,7 @@
   `x-action-redirect` header (no `Location` header is set either before or
   after this fix), so no open-redirect behaviour is introduced. A no-JS
   `<form>` submission's redirect is unaffected and still answers `303`.
-- b167fd4: Fixed a cold-start regression on the vinext build target (both the compiled single-executable and the Node runtime): on some clusters, apps deployed with `build: 'vinext'` woke up to around 8 seconds slower than the standalone target, because the networking-stall mitigation described in the scale-to-zero docs was not wired into this build target. It now sends the same best-effort outbound packet as early as possible at process start, like every other knext runtime. No configuration changes needed; opt out with `KNEXT_ARP_PRIMER=0` if you need to.
+- b167fd4: Fixed a cold-start regression on the vinext build target (both the compiled single-executable and the Node runtime): on some clusters, apps deployed with `build: 'vinext'` woke up to around 8 seconds slower than the standalone target, because the networking-stall mitigation described in the scale-to-zero docs was not wired into this build target. It now sends the same best-effort outbound packet as early as possible at process start, like every other knext runtime. The compiled executable picks it up on rebuild; a vinext app on the Node runtime also needs the new `knext-node-entry.mjs` from a freshly created app copied in (`knext doctor` reports a stale one). Opt out with `KNEXT_ARP_PRIMER=0` if you need to.
 - ee45ef3: Fixes `next/og`'s `ImageResponse` (e.g. a dynamic `opengraph-image` route)
   answering a 500 error when built as a `bun build --compile --bytecode`
   single executable (the `vinext` build target's compiled-binary shape). It
