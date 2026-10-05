@@ -415,10 +415,10 @@ describe("mapping: each answer changes exactly what it should", () => {
             /vinext\(\{\n(\s*\/\/.*\n)*\s*react: \{ compiler: true \},/,
         );
         const dev = pkgOf(files).devDependencies;
-        expect(dev["@vitejs/plugin-react"]).toBe("^6.1.0");
+        expect(dev["@vitejs/plugin-react"]).toBe("6.1.2");
         expect(dev["babel-plugin-react-compiler"]).toBe("^1.0.0");
         expect(dev["@rolldown/plugin-babel"]).toBe("^0.2.0");
-        expect(dev["oxc-transform-react"]).toBe("^0.145.0");
+        expect(dev["oxc-transform-react"]).toBe("^0.152.0");
         // vinext ignores next.config's key, so it is not written there.
         expect(files.get("next.config.ts")).not.toContain("reactCompiler");
 
@@ -454,10 +454,10 @@ describe("mapping: each answer changes exactly what it should", () => {
 
     it("vinext's React Compiler packages match the documented recipe", () => {
         expect(VINEXT_REACT_COMPILER_DEV_DEPS).toEqual({
-            "@vitejs/plugin-react": "^6.1.0",
+            "@vitejs/plugin-react": "6.1.2",
             "babel-plugin-react-compiler": "^1.0.0",
             "@rolldown/plugin-babel": "^0.2.0",
-            "oxc-transform-react": "^0.145.0",
+            "oxc-transform-react": "^0.152.0",
         });
         const doc = readFileSync(
             join(
@@ -474,6 +474,23 @@ describe("mapping: each answer changes exactly what it should", () => {
         );
         for (const name of Object.keys(VINEXT_REACT_COMPILER_DEV_DEPS))
             expect(doc).toContain(name);
+    });
+
+    // @vitejs/plugin-react declares `oxc-transform-react` as a peer at one
+    // 0.x MINOR (a caret on 0.x pins the minor), and has moved that minor in
+    // a PATCH release (6.1.1 -> 6.1.2 went ^0.145.0 -> ^0.152.0). A caret on
+    // the plugin therefore lets npm pick a newer patch whose peer range no
+    // longer accepts the scaffold's oxc pin, and `npm install` fails with
+    // ERESOLVE on every new vinext app. Pin the plugin exactly so the pair
+    // only moves together, in a reviewed change.
+    it("vinext's React Compiler pins @vitejs/plugin-react exactly, since its oxc-transform-react peer is a 0.x minor", () => {
+        const plugin = VINEXT_REACT_COMPILER_DEV_DEPS["@vitejs/plugin-react"];
+        expect(plugin).toMatch(/^\d+\.\d+\.\d+$/);
+        expect(VINEXT_REACT_COMPILER_DEV_DEPS["oxc-transform-react"]).toMatch(
+            /^\^0\.\d+\.\d+$/,
+        );
+        const dev = pkgOf(render({ builder: "vinext" })).devDependencies;
+        expect(dev["@vitejs/plugin-react"]).toBe(plugin);
     });
 
     it("every emitted package.json is valid JSON ending in a newline", () => {

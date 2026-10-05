@@ -95,8 +95,14 @@ Rolldown), and `@vitejs/plugin-react` 6.1's own required peer for the non-compil
 path it also uses:
 
 ```bash title="install"
-npm install -D @vitejs/plugin-react@^6.1.0 babel-plugin-react-compiler @rolldown/plugin-babel oxc-transform-react
+npm install -D @vitejs/plugin-react@6.1.2 babel-plugin-react-compiler @rolldown/plugin-babel oxc-transform-react@^0.152.0
 ```
+
+Keep `@vitejs/plugin-react` and `oxc-transform-react` in step. The plugin requires one specific
+`0.x` minor of `oxc-transform-react` and has changed which one in patch releases, so a range on
+the plugin can pull in a version whose requirement no longer matches, and `npm install` then fails
+with an `ERESOLVE` peer dependency error. New apps from `knext create --builder vinext` pin the
+plugin exactly for this reason. If an existing app hits that error, set both to the versions above.
 
 Leaving out `oxc-transform-react` fails the build outright (not a silent no-op): `@vitejs/plugin-react`
 errors with "React Compiler requires the optional `oxc-transform-react` package" the moment
