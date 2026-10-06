@@ -299,12 +299,17 @@ export async function runPreviewDeploy(
         context: options.context,
         willBeClusterLocal:
             previewConfig.networking?.visibility === "cluster-local",
-        explicitPublic: false,
+        // An EXPLICIT `visibility: "public"` in the branch config is the
+        // deliberate opt-out (a config change, not a flag); an omitted
+        // block/field is NOT — that is the accidental-drop case the guard
+        // exists for.
+        explicitPublic: previewConfig.networking?.visibility === "public",
         remediation:
-            "Previews have no --public override — the fix is in knext.config.ts: " +
-            'add `networking: { visibility: "cluster-local" }` back to this PR\'s ' +
-            "branch and redeploy the preview. If this preview SHOULD be public, " +
-            "that is also a config change, not a flag.",
+            "Previews have no --public override — the fix is in knext.config.ts. " +
+            'To keep it private, add `networking: { visibility: "cluster-local" }` ' +
+            "back to this PR's branch. To make it public on purpose, set " +
+            '`networking: { visibility: "public" }` explicitly — omitting the ' +
+            "networking block is not enough. Then redeploy the preview.",
     });
 
     // `--validate=strict` is asserted here for the same reason as on the prod
