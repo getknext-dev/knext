@@ -143,9 +143,12 @@ describe('run', () => {
     expect(logs.some((l) => l.includes('enum narrowed'))).toBe(true);
   });
 
-  it('passes (nothing to compare) when there is no v* tag at all', () => {
+  it('passes (nothing to compare) when there is no v* tag at all, outside CI', () => {
     const logs: string[] = [];
     const exit = run([], {
+      // Hermetic: outside CI this warns and passes; under CI it fails closed
+      // (covered by crd-schema-diff-fail-closed.test.ts).
+      env: {},
       log: (m: string) => logs.push(m),
       execFileSyncFn: fakeExec({
         'git tag --list v* --merged HEAD --sort=-v:refname': '',
