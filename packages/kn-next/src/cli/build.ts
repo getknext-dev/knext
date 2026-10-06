@@ -65,6 +65,7 @@ import {
     buildVinextExecutable,
     hostSmokeArch,
     smokeBinaryPlan,
+    stageOgHarfbuzzForVinextNode,
     stageSharpForVinextNode,
 } from "./vinext-build";
 import { assertNodePresetOutput } from "./vinext-node-build";
@@ -538,6 +539,17 @@ export async function build(options: BuildOptions = {}) {
                 "Staged sharp's linuxmusl-x64 package into the vinext-node image's .output/server/node_modules",
             );
         }
+        // next/og: @vercel/og 1.x ships no hb.wasm and its HarfBuzz loader
+        // cannot start under plain Node ESM — stage the version-pinned binary
+        // where both loaders (pages + app router) read it.
+        const og = stageOgHarfbuzzForVinextNode(process.cwd());
+        if (og.staged.length > 0) {
+            log.info(
+                { staged: og.staged },
+                "Staged HarfBuzz's hb.wasm for next/og into .output/server",
+            );
+        }
+        for (const warning of og.warnings) log.warn(warning);
     }
 
     // 2e. Stage the standalone docker build context — the SAME function

@@ -58,7 +58,16 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
-import { allowlistedPackageRoot, rewriteAssetAnchors } from "./entry-asset-anchor.mjs";
+import {
+    ogHarfbuzzWarning,
+    resolvePinnedHarfbuzzWasm,
+    vinextOgPackageJson,
+} from "./og-harfbuzz.mjs";
+import {
+    allowlistedPackageRoot,
+    rewriteAssetAnchors,
+    rewriteEntryHarfbuzzAnchors,
+} from "./entry-asset-anchor.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -446,6 +455,59 @@ function resolveAssetAnchor(literal, modulePath) {
     return realAbs;
 }
 
+/**
+ * Where an Emscripten `locateFile("<name>.wasm")` call in the ALLOWLISTED
+ * module at `modulePath` should read from inside the compiled executable
+ * (#1872), or `undefined` to leave the call alone.
+ *
+ * 1. A real sibling of the module (an `@vercel/og` release that ships its
+ *    `hb.wasm`) — same containment + size rules as `resolveAssetAnchor`.
+ * 2. `hb.wasm` only: `@vercel/og` 1.x inlines harfbuzzjs's glue but 1.0.3 ships
+ *    no `dist/hb.wasm` (vercel/satori#801). nitro externalizes `@vercel/og`, so
+ *    vinext's own `vinext:og-harfbuzz` transform — which loads the binary from
+ *    `harfbuzzjs` — never runs on the copy this compile bundles. The matching
+ *    binary is the one in the exact-pinned chain the glue was built from:
+ *    `@vercel/og` → `satori` → `harfbuzzjs/hb.wasm` (the same chain vinext
+ *    resolves). nitro's staged copy carries no `satori`, so the chain is
+ *    resolved from the module's own location, then the app's install, then
+ *    vinext's (which depends on `@vercel/og`) — and ONLY accepted when every
+ *    link matches the EXACT pin of the link before it: `satori` at the staged
+ *    `@vercel/og`'s `dependencies.satori`, `harfbuzzjs` at that satori's
+ *    `dependencies.harfbuzzjs`. A glue/binary mismatch is never embedded.
+ */
+function resolveEmscriptenWasm(name, modulePath) {
+    const sibling = resolveAssetAnchor(`./${name}`, modulePath);
+    if (sibling !== undefined || name !== "hb.wasm") return sibling;
+    const packageRoot = allowlistedPackageRoot(modulePath);
+    if (packageRoot === undefined) return undefined;
+    const ogPkg = join(packageRoot, "package.json");
+    const startPoints = [ogPkg, join(APP_ROOT, "package.json")];
+    const vinextOg = vinextOgPackageJson(APP_ROOT);
+    if (vinextOg !== undefined) startPoints.push(vinextOg);
+    return harfbuzzOrSignal(resolvePinnedHarfbuzzWasm(ogPkg, startPoints), modulePath);
+}
+
+const HARFBUZZ_WARNED = new Set();
+
+/**
+ * A HarfBuzz resolution result -> the path to embed, or the build-time signal
+ * when the loader IS in the bundle but no version-matched binary exists
+ * (#1872): a loud warning by default — an app that never renders next/og is
+ * unaffected, and vinext ships the og shim either way — and a FAILED build
+ * under strict requires (`KNEXT_COMPILE_STRICT_REQUIRES=1` / self-contained),
+ * the same split this compile already applies to unbundlable requires.
+ */
+function harfbuzzOrSignal(result, where) {
+    if ("path" in result) return result.path;
+    const body = `${ogHarfbuzzWarning(result.reason)} (in ${where})`;
+    if (STRICT_REQUIRES) throw new Error(`[knext compile] ${body}`);
+    if (!HARFBUZZ_WARNED.has(body)) {
+        HARFBUZZ_WARNED.add(body);
+        console.warn(`[knext compile] ${body}`);
+    }
+    return undefined;
+}
+
 /** `import <id> from <path> with { type: "file" };` lines, one per embedded asset. */
 function assetAnchorImports(assets) {
     return assets
@@ -479,8 +541,11 @@ const importMetaToCjs = {
                 // and the entry's import.meta rewrite below belong to the
                 // entry alone.
                 const raw = await Bun.file(path).text();
-                const assetRewrite = rewriteAssetAnchors(raw, path, (literal) =>
-                    resolveAssetAnchor(literal, path),
+                const assetRewrite = rewriteAssetAnchors(
+                    raw,
+                    path,
+                    (literal) => resolveAssetAnchor(literal, path),
+                    (name) => resolveEmscriptenWasm(name, path),
                 );
                 let contents = assetRewrite.contents;
                 let changed = assetRewrite.assets.length > 0;
@@ -500,7 +565,28 @@ const importMetaToCjs = {
             // generated `index.mjs`), so it never carries an asset anchor this
             // rewrite would touch — no call to rewriteAssetAnchors here, by
             // construction; see entry-asset-anchor.mjs's docstring on scope.
-            const raw = await Bun.file(args.path).text();
+            // The ONE exception is HarfBuzz's binary, below (#1872).
+            const rawEntry = await Bun.file(args.path).text();
+            // #1872 (app router / middleware): the vinext-rewritten HarfBuzz
+            // read nitro inlined here points at a file it never shipped —
+            // embed the version-matched binary instead (see
+            // rewriteEntryHarfbuzzAnchors). Only HarfBuzz's own anchor; nothing
+            // else in the entry is touched. Runs BEFORE the import.meta rewrite.
+            const hbRewrite = rewriteEntryHarfbuzzAnchors(rawEntry, () => {
+                const vinextOg = vinextOgPackageJson(APP_ROOT);
+                return harfbuzzOrSignal(
+                    vinextOg === undefined
+                        ? { reason: "vinext's @vercel/og is not resolvable from the app" }
+                        : resolvePinnedHarfbuzzWasm(vinextOg, [vinextOg]),
+                    ENTRY,
+                );
+            });
+            if (hbRewrite.assets.length > 0) {
+                console.log(
+                    `[knext compile] embedded HarfBuzz hb.wasm for next/og (${hbRewrite.assets[0].absPath})`,
+                );
+            }
+            const raw = assetAnchorImports(hbRewrite.assets) + hbRewrite.contents;
             // Prepend the preload imports FIRST, always — independent of whether
             // the entry uses import.meta. `import "<abs>";` is bundled + evaluated
             // before the rest of the entry's imports, firing the ARP primer and
