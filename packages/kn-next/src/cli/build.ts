@@ -267,7 +267,7 @@ export async function build(options: BuildOptions = {}) {
 
     // 1. Load config (validates at load time)
     log.info("Loading configuration...");
-    const config = await loadConfig();
+    const config = await loadConfig({ phase: "build" });
     log.info(
         {
             app: config.name,

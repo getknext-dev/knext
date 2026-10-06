@@ -240,7 +240,15 @@ export function validateConfig(
     config: KnativeNextConfig,
     /** Test seam for the pairing check — see `checkPairing`. */
     contract: PairingContract = SHIPPED_CONTRACT,
+    /**
+     * `build` skips requirements that only matter at deploy time (the redis
+     * `cache.url`, which the scaffold supplies via REDIS_URL at deploy). The
+     * default is the strict `deploy` phase so every other caller keeps the
+     * full gate.
+     */
+    options: { phase?: "build" | "deploy" } = {},
 ): void {
+    const phase = options.phase ?? "deploy";
     const errors: string[] = [];
 
     // Removed keys first: if the author is working from a stale config, say so before
@@ -298,9 +306,15 @@ export function validateConfig(
                     `Omit 'cache' for the in-memory dev fallback.`,
             );
         }
-        if (cacheProvider === "redis" && !config.cache.url) {
+        if (
+            phase === "deploy" &&
+            cacheProvider === "redis" &&
+            !config.cache.url
+        ) {
             errors.push(
-                "'cache.url' is required when using Redis cache provider",
+                "'cache.url' is required when using Redis cache provider — " +
+                    "set REDIS_URL in your environment when you run `knext deploy` " +
+                    "(it is not needed at build time)",
             );
         }
     }
