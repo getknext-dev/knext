@@ -95,6 +95,30 @@ describe("redis cache.url is a deploy-time requirement", () => {
                     "redis://override:6379",
                 );
             });
+            it("overrides a non-empty config cache.url", async () => {
+                dir = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                writeFileSync(
+                    join(dir, "knext.config.ts"),
+                    `export default ${JSON.stringify({ ...redisNoUrl, cache: { provider: "redis", url: "redis://cfg:6379" } })};\n`,
+                );
+                process.chdir(dir);
+                process.env.KN_REDIS_URL = "redis://override:6379";
+                const cfg = await loadConfig();
+                expect((cfg.cache as { url?: string }).url).toBe(
+                    "redis://override:6379",
+                );
+            });
+            it("does not invent a cache block when the config has none", async () => {
+                dir = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                writeFileSync(
+                    join(dir, "knext.config.ts"),
+                    `export default ${JSON.stringify({ ...redisNoUrl, cache: undefined })};\n`,
+                );
+                process.chdir(dir);
+                process.env.KN_REDIS_URL = "redis://override:6379";
+                const cfg = await loadConfig();
+                expect(cfg.cache).toBeUndefined();
+            });
             it("still refuses when neither is set, naming both env vars", async () => {
                 setup();
                 delete process.env.REDIS_URL;
