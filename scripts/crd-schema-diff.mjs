@@ -27,9 +27,11 @@
  * sort — matches how `docs/adr/0020-*.md`'s release tooling already orders
  * tags). Exits 0 when the new schema is a strict additive superset of the
  * base schema's; exits 1 and prints every violation otherwise. A base ref
- * that resolves to NO `v*` tag at all (e.g. a fresh fork with none pushed
- * yet) is treated as "nothing to compare against" and passes — there is no
- * prior contract to have broken. A base ref that IS named but whose CRD file
+ * that resolves to NO reachable `v*` tag FAILS CLOSED when `CI` is set (a
+ * shallow or tagless checkout would otherwise silently skip the check; fix
+ * with fetch-depth: 0 + fetch-tags: true). Outside CI it warns and passes.
+ * Set CRD_DIFF_ALLOW_NO_BASELINE=1 to deliberately opt out for a branch that
+ * truly predates the first tag. A base ref that IS named but whose CRD file
  * does not exist there (a pre-CRD tag) is likewise nothing-to-compare and
  * passes, rather than failing closed on a file that legitimately did not
  * exist yet.
@@ -121,13 +123,32 @@ export function run(
     execFileSyncFn = execFileSync,
     readFileSyncFn = readFileSync,
     resolveLatestVTagFn = resolveLatestVTag,
+    env = process.env,
   } = {},
 ) {
   const opts = parseArgs(argv);
   const baseRef = opts.baseRef ?? resolveLatestVTagFn(execFileSyncFn);
 
   if (!baseRef) {
-    log('[crd-schema-diff] no v* tag found — nothing to compare against, passing.');
+    if (env.CRD_DIFF_ALLOW_NO_BASELINE === '1') {
+      log(
+        '[crd-schema-diff] no v* tag reachable from HEAD — CRD_DIFF_ALLOW_NO_BASELINE=1, passing.',
+      );
+      return 0;
+    }
+    if (env.CI) {
+      log(
+        '[crd-schema-diff] FAIL: no v* tag is reachable from HEAD, so there is no baseline to ' +
+          'diff against. Likely cause: a shallow clone or missing tags — check out with ' +
+          '`fetch-depth: 0` and `fetch-tags: true`. If this branch truly predates the first ' +
+          'tag, set CRD_DIFF_ALLOW_NO_BASELINE=1 deliberately.',
+      );
+      return 1;
+    }
+    log(
+      '[crd-schema-diff] WARNING: no v* tag found — nothing to compare against, passing locally. ' +
+        'CI fails closed here.',
+    );
     return 0;
   }
 
