@@ -62,7 +62,8 @@ Redis, this block is the first thing to check.
 - **Within the revalidate window** requests are served `HIT` from Redis — including the first
   request after the app scales up from zero, for pages generated at request time as well as
   prerendered ones. Each entry carries its own revalidate window, so a freshly started pod does not
-  need to have rendered the page to know it is still fresh.
+  need to have rendered the page to know it is still fresh. That applies only to entries written by
+  the same build; after a redeploy, entries from the previous build are revalidated as usual.
 - **Past the window** requests are served `STALE` from Redis while a background render replaces the
   entry — stale-while-revalidate, not a blocking re-render.
 - The Redis entry's TTL is deliberately **longer than the revalidate window** (it is the route's

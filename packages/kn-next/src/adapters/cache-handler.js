@@ -29,7 +29,9 @@ import { trackWrite } from './cache-write-registry.js';
 // slow (TCP connect vs the ready-check INFO). No timer, no budget, no verdict —
 // see the header of slow-dep-log.js.
 import { instrumentConnectTiming } from './slow-dep-log.js';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
 // ─── Cache Event Logger ───
 
@@ -1021,25 +1023,82 @@ function withCacheState(entry, now = Date.now()) {
 // So on a read, hand the persisted cacheControl back the only way Next accepts
 // it: seed the shared Map — and only when this process has learnt nothing for
 // the route itself, so a window from a write here (always the newest) wins.
+//
+// BUILD-SCOPED. Redis keys are scoped by app, not by build, so entries outlive
+// a redeploy. Before this seed, the new build read an old build's entry STALE
+// and regenerated it; seeding the old build's window would serve it FRESH for
+// that whole window (forever for `revalidate: false`) and ignore a changed
+// `revalidate`. So `set` records the writer's build id with the entry, and the
+// seed applies only when it equals this process's build id. An entry without
+// one (written before build ids were recorded) is never seeded.
+//
 // `shared-cache-controls.external` is the module Next keeps OUT of its route
 // bundles precisely so every copy shares one Map; it is resolved from `next`,
-// the same file the server and route chunks load. The literal `require(...)`
-// is deliberate: the standalone-on-Bun compile's disk-closure scan follows it.
-// Fail-open: no `next` (vinext), or a shape this does not recognise, and the
-// read proceeds exactly as before.
+// the same file the server and route chunks load. Do not count on the
+// standalone-on-Bun compile's disk-closure scan to see this require: the
+// package build renames `require` (tsup emits `require2(...)`), which the
+// scan's literal `require(` pattern does not match. The module stays on disk —
+// one instance — because Next's own `*.runtime.prod.js` requires it literally.
+// Fail-open: no `next`, or a shape this does not recognise, and the read
+// proceeds exactly as before — with one warning per process, so a Next release
+// that renames the module is visible rather than a silent return of #1888.
 let sharedCacheControlsMap;
+const SHARED_CACHE_CONTROLS_MODULE =
+  'next/dist/server/lib/incremental-cache/shared-cache-controls.external.js';
 function nextSharedCacheControls() {
   if (sharedCacheControlsMap !== undefined) return sharedCacheControlsMap;
   sharedCacheControlsMap = null;
+  let reason;
   try {
     const require = createRequire(import.meta.url);
-    const mod = require('next/dist/server/lib/incremental-cache/shared-cache-controls.external.js');
+    const mod = require(SHARED_CACHE_CONTROLS_MODULE);
     const map = mod?.SharedCacheControls?.cacheControls;
     if (map instanceof Map) sharedCacheControlsMap = map;
-  } catch {
-    // Next is not resolvable from here — nothing to seed.
+    else reason = 'SharedCacheControls.cacheControls is not a Map';
+  } catch (err) {
+    reason = err?.message || String(err);
+  }
+  if (reason) {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        source: 'knext-cache-handler',
+        event: 'next_cache_controls_unavailable',
+        module: SHARED_CACHE_CONTROLS_MODULE,
+        reason,
+        impact:
+          'ISR pages generated at request time may be served STALE on the first request after a cold start',
+      }),
+    );
   }
   return sharedCacheControlsMap;
+}
+
+/**
+ * This process's build id — `.next/BUILD_ID`, read from where Next reads it
+ * (`next-server.js`: `join(distDir, BUILD_ID_FILE)`, distDir being the parent
+ * of the `serverDistDir` Next hands every cache handler). On the self-contained
+ * compiled executable the same `fs` read is aliased to the embedded file.
+ * `undefined` when Next did not pass `serverDistDir` (vinext) or the file is
+ * unreadable — and then nothing is recorded and nothing is seeded.
+ */
+let currentBuildId;
+// Next constructs an IncrementalCache — and so this handler — PER REQUEST
+// (`route-module.js` `getIncrementalCache`), so the file is read once per
+// `serverDistDir`, not once per request.
+const buildIdByDistDir = new Map();
+function resolveBuildId(options) {
+  const serverDistDir = options?.serverDistDir;
+  if (typeof serverDistDir !== 'string' || serverDistDir.length === 0) return undefined;
+  if (buildIdByDistDir.has(serverDistDir)) return buildIdByDistDir.get(serverDistDir);
+  let id;
+  try {
+    id = readFileSync(join(dirname(serverDistDir), 'BUILD_ID'), 'utf8').trim() || undefined;
+  } catch {
+    id = undefined;
+  }
+  buildIdByDistDir.set(serverDistDir, id);
+  return id;
 }
 
 /** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
@@ -1053,6 +1112,8 @@ function seedNextCacheControl(key, entry, ctx) {
   if (ctx?.kind === 'FETCH' || entry?.value?.kind === 'FETCH') return;
   const revalidate = entry?.cacheControl?.revalidate;
   if (!(revalidate === false || (typeof revalidate === 'number' && revalidate >= 0))) return;
+  // Only this build's own windows — see BUILD-SCOPED above.
+  if (currentBuildId === undefined || entry?.buildId !== currentBuildId) return;
   const map = nextSharedCacheControls();
   if (!map) return;
   const route = nextRoute(key);
@@ -1072,6 +1133,10 @@ class CacheHandler {
     this.options = options;
     // The entry Next loaded decides the Redis client (see `redisClient`).
     redisClient = new.target.redisClient;
+    // Never UN-set it: a construction without `serverDistDir` must not drop
+    // the id a Next-constructed handler already resolved for this process.
+    const buildId = resolveBuildId(options);
+    if (buildId !== undefined) currentBuildId = buildId;
     ensureConnected().catch(() => {});
   }
 
@@ -1161,6 +1226,7 @@ class CacheHandler {
           lastModified: Date.now(),
           tags,
           cacheControl,
+          ...(currentBuildId !== undefined && { buildId: currentBuildId }),
         };
 
         // ─── ATOMICITY GUARD (T13) ───
@@ -1208,6 +1274,7 @@ class CacheHandler {
           lastModified: Date.now(),
           tags,
           cacheControl,
+          ...(currentBuildId !== undefined && { buildId: currentBuildId }),
         };
         if (isImageValue(data)) {
           // Byte-bounded, separately from ISR/data entries (see imageMemory).

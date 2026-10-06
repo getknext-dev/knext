@@ -28,12 +28,19 @@
  * The REAL Next `IncrementalCache` (the version pinned here), with the shared
  * Map cleared to model a freshly woken process, reading through knext's
  * handler on its Redis path (fake client, the shape #886's tests use).
+ *
+ * The seed is BUILD-SCOPED: Redis keys outlive a redeploy, and an old build's
+ * window must not make the new build serve its entry fresh. Only an entry whose
+ * recorded build id equals this process's `.next/BUILD_ID` is seeded.
  */
 // The cache handler's mutating test seams fail closed on a published subpath.
 process.env.KNEXT_TEST_SEAMS = "1";
 
 import { beforeEach, describe, expect, it, setSystemTime } from "bun:test";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
 const { IncrementalCache } =
@@ -73,9 +80,28 @@ function emptyManifest() {
     };
 }
 
-/** A Redis entry as knext's `set` writes it, `ageMs` before now. */
-function storedEntry(cacheControl: Record<string, unknown>, ageMs: number) {
+/** A `.next` with `BUILD_ID` = `id`; returns the `serverDistDir` Next would pass. */
+function distWithBuildId(id: string): string {
+    const next = join(mkdtempSync(join(tmpdir(), "knext-1888-")), ".next");
+    mkdirSync(join(next, "server"), { recursive: true });
+    writeFileSync(join(next, "BUILD_ID"), `${id}\n`);
+    return join(next, "server");
+}
+const THIS_BUILD = "build-B";
+const OTHER_BUILD = "build-A";
+const THIS_DIST = distWithBuildId(THIS_BUILD);
+
+/**
+ * A Redis entry as knext's `set` writes it, `ageMs` before now, by build
+ * `buildId` (`null` = an entry written before build ids were recorded).
+ */
+function storedEntry(
+    cacheControl: Record<string, unknown>,
+    ageMs: number,
+    buildId: string | null = THIS_BUILD,
+) {
     return JSON.stringify({
+        ...(buildId !== null && { buildId }),
         value: {
             kind: "APP_PAGE",
             html: "<p>stamp</p>",
@@ -89,7 +115,11 @@ function storedEntry(cacheControl: Record<string, unknown>, ageMs: number) {
 }
 
 /** A woken pod: a fresh IncrementalCache over knext's handler, Redis holding `stored`. */
-async function wokenPod(stored: string) {
+async function wokenPod(
+    stored: string,
+    /** `null` = Next passed no serverDistDir (an explicit `undefined` would take the default). */
+    serverDistDir: string | null = THIS_DIST,
+) {
     const mod = (await import(
         `../adapters/cache-handler.js?wake=${Math.random()}`
     )) as {
@@ -118,6 +148,7 @@ async function wokenPod(stored: string) {
         requestHeaders: {},
         getPrerenderManifest: emptyManifest,
         CurCacheHandler: Handler,
+        serverDistDir: serverDistDir ?? undefined,
     });
 }
 
@@ -169,6 +200,105 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(entry?.isStale).toBeFalsy();
     });
 
+    it("does NOT seed an entry another build wrote: an old window stays stale after a redeploy", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: 3600, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+                OTHER_BUILD,
+            ),
+        );
+        const entry = await cache.get("/isr/redeploy", PAGE);
+        expect(entry, "the body is still served").not.toBeNull();
+        expect(
+            entry?.isStale,
+            "the previous build's window must not apply",
+        ).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/isr/redeploy")).toBe(
+            false,
+        );
+    });
+
+    it("does NOT seed another build's revalidate=false (it would be fresh forever)", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: false, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+                OTHER_BUILD,
+            ),
+        );
+        const entry = await cache.get("/static/old", PAGE);
+        expect(entry?.isStale).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/static/old")).toBe(
+            false,
+        );
+    });
+
+    it("does NOT seed a legacy entry that carries no build id", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: 3600, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+                null,
+            ),
+        );
+        const entry = await cache.get("/isr/legacy", PAGE);
+        expect(entry?.isStale).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/isr/legacy")).toBe(
+            false,
+        );
+    });
+
+    it("does NOT seed when this process has no build id (no serverDistDir), even for a legacy entry", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: 3600, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+                null,
+            ),
+            null,
+        );
+        const entry = await cache.get("/isr/nobuild", PAGE);
+        expect(entry?.isStale).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/isr/nobuild")).toBe(
+            false,
+        );
+    });
+
+    it("records this build's id on a Redis write", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakewrite=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                set: (k: string, d: unknown, c: unknown) => Promise<void>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const sent: string[][] = [];
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return null;
+            },
+            async send(command: string, args: string[] = []) {
+                sent.push([command, ...args]);
+                return command === "EXEC" ? [] : "OK";
+            },
+        });
+        await handler.set(
+            "/isr/write",
+            { kind: "APP_PAGE", html: "x", headers: {}, status: 200 },
+            { cacheControl: { revalidate: 3600 } },
+        );
+        const set = sent.find((c) => c[0] === "SET");
+        expect(set, `no SET issued: ${JSON.stringify(sent)}`).toBeTruthy();
+        expect(JSON.parse((set as string[])[2]).buildId).toBe(THIS_BUILD);
+    });
+
     it("does not override a window this process already knows", async () => {
         SharedCacheControls.cacheControls.set("/isr/c", {
             revalidate: 10,
@@ -201,17 +331,20 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         const mod = (await import(
             `../adapters/cache-handler.js?wakefetch=${Math.random()}`
         )) as {
-            default: new () => {
+            default: new (
+                o: unknown,
+            ) => {
                 get: (k: string, ctx?: unknown) => Promise<unknown>;
             };
             __setRedisClientForTests: (c: unknown) => void;
         };
-        const handler = new mod.default();
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
         mod.__setRedisClientForTests({
             connected: true,
             async connect() {},
             async get() {
                 return JSON.stringify({
+                    buildId: THIS_BUILD,
                     value: { kind: "FETCH", data: {}, revalidate: 30 },
                     lastModified: Date.now(),
                     tags: [],
@@ -242,6 +375,7 @@ describe("the in-memory path (no REDIS_URL) gets the same treatment", () => {
                 requestHeaders: {},
                 getPrerenderManifest: emptyManifest,
                 CurCacheHandler: mod.default,
+                serverDistDir: THIS_DIST,
             }) as unknown as {
                 set: (k: string, d: unknown, c: unknown) => Promise<void>;
                 get: (
