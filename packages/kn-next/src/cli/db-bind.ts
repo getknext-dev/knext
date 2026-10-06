@@ -34,6 +34,7 @@
 import { readFileSync, writeSync } from "node:fs";
 import YAML from "yaml";
 import type { KnativeNextConfig } from "../config";
+import { setLogDestination } from "../utils/log-destination";
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
 import {
@@ -478,6 +479,9 @@ Run \`knext db <subcommand> --help\` for subcommand options.
 
 /** Entry for the `knext db …` subcommand family. */
 export async function dbMain(argv: readonly string[]): Promise<void> {
+    // --dry-run prints the merge-patch on stdout; keep every log line off that
+    // stream. FIRST, before anything (config load, validation) can log.
+    if (argv.includes("--dry-run")) setLogDestination("stderr");
     const [sub, ...rest] = argv;
     if (sub === undefined || sub === "-h" || sub === "--help") {
         writeSync(1, DB_HELP);
@@ -531,8 +535,6 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
         );
     }
 
-    // --dry-run prints the merge-patch on stdout; keep logs off that stream.
-    if (opts.dryRun) process.env.KN_LOG_DESTINATION = "stderr";
     log.info(
         { app: appName, namespace: opts.namespace, dryRun: opts.dryRun },
         "knext db bind (CR merge-patch only — the operator reconciles the env wiring)",
