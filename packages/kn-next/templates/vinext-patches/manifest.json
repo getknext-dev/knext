@@ -71,6 +71,11 @@
       "file": "vinext-3689-action-redirect-fetch-status.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3689",
       "summary": "A server action's redirect, when invoked via fetch (the client-side router path), now always answers HTTP 200 like Next.js does — it previously fell back to 303 unless the action had already been forwarded, the target was an ancestor/stale-sibling route, or the target ran on a different runtime. The no-JS, progressive-enhancement form-POST redirect path is unchanged and still answers 303."
+    },
+    {
+      "file": "vinext-3734-image-x-nextjs-cache.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3734",
+      "summary": "`/_next/image` responses now carry `x-nextjs-cache: MISS` like Next.js does (vinext has no image cache, so every successful response is a fresh optimization); error responses carry no header."
     }
   ],
   "pristine": {
@@ -83,6 +88,7 @@
     "dist/server/app-segment-config.js": "13ca8d09a6a7baa5c19551b68c76f1e0a6fe15f98a40c0e0d1988c215ba14242",
     "dist/server/open-redirect.js": "4e62ca39cf91cdc92ec9cb4d269a1fb0c64f3c48c6a90e1f7b8bb5efeb5cf475",
     "dist/shims/image.js": "f498afc199ba102be93b93ae2098f6ed79bcae261485f6a807438efbe134f0b3",
-    "dist/server/app-server-action-execution.js": "05fdfc733fdc48f805f6661d3e909a8d0a82693391439ead238d50fbef506c5e"
+    "dist/server/app-server-action-execution.js": "05fdfc733fdc48f805f6661d3e909a8d0a82693391439ead238d50fbef506c5e",
+    "dist/server/image-optimization.js": "1df1b64dfd46c463ec290b135c32cfbc66be88612ccf6310fc91e3d29f274f3c"
   }
 }

@@ -1,0 +1,23 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3734
+What it fixes: vinext's `/_next/image` handler never sent `x-nextjs-cache`. Next.js sends it
+on every successful image response (next-server.ts selects MISS/HIT/STALE,
+image-optimizer.ts setResponseHeaders writes it), and Next's own og-api e2e asserts
+`x-nextjs-cache: MISS` on the first optimized request. vinext keeps no image cache, so
+every 200 it builds is a MISS; the header is set where the other image security headers are,
+which covers the transformed, passthrough and SVG-passthrough paths and leaves 400/404 bare.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3734.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/server/image-optimization.js
++++ b/dist/server/image-optimization.js
+@@ -178,6 +178,7 @@
+ * When an ImageConfig is provided, uses its values for CSP and Content-Disposition.
+ */
+ function setImageSecurityHeaders(headers, config) {
++	headers.set("x-nextjs-cache", "MISS");
+ 	headers.set("Content-Security-Policy", config?.contentSecurityPolicy ?? "script-src 'none'; frame-src 'none'; sandbox;");
+ 	headers.set("X-Content-Type-Options", "nosniff");
+ 	headers.set("Content-Disposition", config?.contentDispositionType === "attachment" ? "attachment" : "inline");

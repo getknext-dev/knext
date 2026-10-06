@@ -711,6 +711,80 @@ describe("the bundled patches against the published tarball", () => {
         expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
     });
 
+    it("vinext#3734: /_next/image success responses carry x-nextjs-cache: MISS, errors carry none", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            handleImageOptimization: (
+                request: Request,
+                handlers: {
+                    fetchAsset: (p: string, r: Request) => Promise<Response>;
+                    transformImage?: (
+                        body: ReadableStream,
+                        o: { width: number; format: string; quality: number },
+                    ) => Promise<Response>;
+                },
+                allowedWidths?: number[],
+                imageConfig?: { dangerouslyAllowSVG?: boolean },
+            ) => Promise<Response>;
+        }>("dist/server/image-optimization.js");
+        const url = "http://localhost/_next/image?url=%2Fimg.jpg&w=640&q=75";
+        const jpeg = () =>
+            new Response("img", {
+                status: 200,
+                headers: { "Content-Type": "image/jpeg" },
+            });
+        const svg = () =>
+            new Response("<svg/>", {
+                status: 200,
+                headers: { "Content-Type": "image/svg+xml" },
+            });
+        const passthrough = await mod.handleImageOptimization(
+            new Request(url),
+            {
+                fetchAsset: async () => jpeg(),
+            },
+        );
+        expect(passthrough.headers.get("x-nextjs-cache")).toBe("MISS");
+        const transformed = await mod.handleImageOptimization(
+            new Request(url),
+            {
+                fetchAsset: async () => jpeg(),
+                transformImage: async () =>
+                    new Response("t", {
+                        status: 200,
+                        headers: {
+                            "Content-Type": "image/webp",
+                            "x-nextjs-cache": "HIT",
+                        },
+                    }),
+            },
+        );
+        expect(transformed.headers.get("x-nextjs-cache")).toBe("MISS");
+        const svgOk = await mod.handleImageOptimization(
+            new Request(url),
+            { fetchAsset: async () => svg() },
+            undefined,
+            { dangerouslyAllowSVG: true },
+        );
+        expect(svgOk.headers.get("x-nextjs-cache")).toBe("MISS");
+        const bad = await mod.handleImageOptimization(
+            new Request("http://localhost/_next/image"),
+            { fetchAsset: async () => jpeg() },
+        );
+        expect(bad.status).toBe(400);
+        expect(bad.headers.has("x-nextjs-cache")).toBe(false);
+        const missing = await mod.handleImageOptimization(new Request(url), {
+            fetchAsset: async () => new Response("", { status: 404 }),
+        });
+        expect(missing.status).toBe(404);
+        expect(missing.headers.has("x-nextjs-cache")).toBe(false);
+        const blocked = await mod.handleImageOptimization(new Request(url), {
+            fetchAsset: async () => svg(),
+        });
+        expect(blocked.status).toBe(400);
+        expect(blocked.headers.has("x-nextjs-cache")).toBe(false);
+    });
+
     // Shared by all three vinext#3689 cases below: the full option surface
     // `handleServerActionRscRequest` requires. Modeled on vinext's own
     // fixture (tests/app-server-action-execution.test.ts's
