@@ -442,6 +442,36 @@ The fixes bundled with vinext 1.0.1:
   `response.status` on a server action call. A no-JS `<form>` submission's redirect is unaffected
   and still answers `303`.
 
+## Build the image on your own builder (Cloud Build / CI)
+
+`knext build` leaves a ready docker build context in your project, so you can
+build the image on a remote builder instead of local docker. For the standalone
+targets (Node and Bun, including the compiled single executable) it writes
+`Dockerfile.standalone`, its `.dockerignore`, and the entry shims, and prints the
+context path and the `docker buildx build` command. They are the same files
+`knext deploy` stages before its own image build.
+
+```bash
+knext build
+gcloud builds submit --tag "$REGISTRY/my-app:v1"   # or your CI's docker build
+knext deploy --image "$REGISTRY/my-app@sha256:..."
+```
+
+Two things to watch on a remote builder:
+
+- **Ignore files.** A scaffolded ignore file hides the compiled `knext-exec*`
+  binaries, and `gcloud builds submit` falls back to the VCS ignore file when
+  there is no `.gcloudignore`. Add a `.gcloudignore` that keeps `knext-exec*`,
+  `.next/standalone`, `.next/static` and `public`, or the build fails with a
+  missing `COPY` source.
+- **Context size.** The uploaded context holds the compiled executable and the
+  standalone tree, often well over 100 MB. Keep `node_modules` and other
+  unneeded directories out of it with the ignore file.
+
+If the project has no lockfile, `knext build` skips staging (and says so), since
+the build context cannot be anchored; add one, as `knext deploy` also requires.
+vinext apps use their own scaffolded Dockerfile and are not staged this way.
+
 ## Requirements
 
 ### For vinext: your app must be an ES module
