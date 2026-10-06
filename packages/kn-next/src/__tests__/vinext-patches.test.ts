@@ -785,7 +785,7 @@ describe("the bundled patches against the published tarball", () => {
         expect(blocked.headers.has("x-nextjs-cache")).toBe(false);
     });
 
-    it("vinext#3734: in a Nitro build the App Router handler serves /_next/image itself instead of redirecting", () => {
+    it("vinext#3734: the App Router handler hands /_next/image to the Nitro app instead of redirecting", () => {
         applyVinextPatches(patched);
         const handler = readFileSync(
             join(patched, "dist", "server", "app-rsc-handler.js"),
@@ -795,12 +795,92 @@ describe("the bundled patches against the published tarball", () => {
             "const nitroFetch = options.isDev ? void 0 : getNitroAppFetch();",
         );
         expect(handler).toContain(
-            "return handleConfiguredImageOptimization(request, (assetPath) => nitroFetch(new Request(new URL(assetPath, url.origin)))",
+            "return handleNitroImageOptimization(request, nitroFetch,",
         );
         expect(handler).toContain("globalThis.__nitro__?.default");
         // Dev (and hosts without Nitro) keep the redirect.
         expect(handler).toContain(
             "return Response.redirect(assetUrl.href, 302);",
+        );
+    });
+
+    it("vinext#3734: the Nitro image path answers 200 with Next-style headers and never forwards Set-Cookie", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            handleNitroImageOptimization: (
+                request: Request,
+                nitroFetch: (request: Request) => Promise<Response>,
+                allowedWidths?: number[],
+                imageConfig?: unknown,
+                basePath?: string,
+            ) => Promise<Response>;
+        }>("dist/server/image-optimization.js");
+        const seen: Request[] = [];
+        const nitroFetch = (source: Response) => async (req: Request) => {
+            seen.push(req);
+            return source;
+        };
+        const imageUrl = (u: string) =>
+            new Request(`http://localhost/_next/image?url=${u}&w=640&q=75`, {
+                headers: { cookie: "user=1", authorization: "Bearer x" },
+            });
+        const jpeg = () =>
+            new Response("img", {
+                status: 200,
+                headers: {
+                    "Content-Type": "image/jpeg",
+                    "Set-Cookie": "session=abc",
+                    "X-Middleware": "1",
+                    "Cache-Control": "public, max-age=0",
+                },
+            });
+
+        const ok = await mod.handleNitroImageOptimization(
+            imageUrl("%2Fimg.jpg"),
+            nitroFetch(jpeg()),
+        );
+        expect(ok.status).toBe(200); // not a 302
+        expect(ok.headers.get("location")).toBeNull();
+        expect(ok.headers.get("x-nextjs-cache")).toBe("MISS");
+        expect(ok.headers.get("Cache-Control")).toBe(
+            "public, max-age=14400, must-revalidate",
+        );
+        expect(ok.headers.has("set-cookie")).toBe(false);
+        expect(ok.headers.has("x-middleware")).toBe(false);
+        expect(await ok.text()).toBe("img");
+        expect(seen[0]?.url).toBe("http://localhost/img.jpg");
+        expect(seen[0]?.headers.has("cookie")).toBe(false);
+        expect(seen[0]?.headers.has("authorization")).toBe(false);
+
+        // A route answering with a non-image is rejected, not proxied.
+        const route = await mod.handleNitroImageOptimization(
+            imageUrl("%2Fapi%2Fx"),
+            nitroFetch(
+                new Response("{}", {
+                    status: 200,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Set-Cookie": "s=1",
+                    },
+                }),
+            ),
+        );
+        expect(route.status).toBe(400);
+        expect(route.headers.has("set-cookie")).toBe(false);
+        expect(route.headers.has("x-nextjs-cache")).toBe(false);
+
+        // Hashed build media is content-addressed, so it stays immutable.
+        const hashed = await mod.handleNitroImageOptimization(
+            imageUrl("%2F_next%2Fstatic%2Fmedia%2Fa.abc.png"),
+            nitroFetch(
+                new Response("img", {
+                    status: 200,
+                    headers: { "Content-Type": "image/png" },
+                }),
+            ),
+        );
+        expect(hashed.headers.get("Cache-Control")).toBe(
+            "public, max-age=31536000, immutable",
         );
     });
 
