@@ -59,7 +59,11 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
-import { allowlistedPackageRoot, rewriteAssetAnchors } from "./entry-asset-anchor.mjs";
+import {
+    allowlistedPackageRoot,
+    rewriteAssetAnchors,
+    rewriteEntryHarfbuzzAnchors,
+} from "./entry-asset-anchor.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -472,22 +476,45 @@ function resolveEmscriptenWasm(name, modulePath) {
     if (sibling !== undefined || name !== "hb.wasm") return sibling;
     const packageRoot = allowlistedPackageRoot(modulePath);
     if (packageRoot === undefined) return undefined;
-    const readJson = (p) => JSON.parse(readFileSync(p, "utf8"));
-    const EXACT = /^\d+\.\d+\.\d+$/;
+    const ogPkg = join(packageRoot, "package.json");
+    const startPoints = [ogPkg, join(APP_ROOT, "package.json")];
+    const vinextOg = vinextOgPackageJson();
+    if (vinextOg !== undefined) startPoints.push(vinextOg);
+    return resolvePinnedHarfbuzzWasm(ogPkg, startPoints, modulePath);
+}
+
+const readJson = (p) => JSON.parse(readFileSync(p, "utf8"));
+const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
+
+/** vinext's own `@vercel/og/package.json` (the copy its og plugins resolve), or undefined. */
+function vinextOgPackageJson() {
+    try {
+        // vinext is ESM-only (an "import"-only export, no "./package.json"
+        // export), so a CommonJS `require.resolve` cannot see it — resolve with
+        // the import condition, the way vite itself loads it.
+        const vinextEntry = Bun.resolveSync("vinext", APP_ROOT);
+        return createRequire(vinextEntry).resolve("@vercel/og/package.json");
+    } catch {
+        return undefined; // vinext (or its @vercel/og) not resolvable from the app — fine
+    }
+}
+
+/**
+ * `harfbuzzjs/hb.wasm` matching the HarfBuzz glue inlined in the `@vercel/og`
+ * described by `ogPkg`: `satori` is resolved from each of `startPoints` in turn
+ * and accepted only at `ogPkg`'s exact `dependencies.satori` pin, then
+ * `harfbuzzjs` only at that satori's exact pin. Undefined when no start point
+ * yields the exact chain; throws on a containment or size violation.
+ */
+function resolvePinnedHarfbuzzWasm(ogPkg, startPoints, modulePath) {
+    const name = "hb.wasm"; // for the error messages below
     let expectedSatori;
     try {
-        expectedSatori = readJson(join(packageRoot, "package.json")).dependencies?.satori;
+        expectedSatori = readJson(ogPkg).dependencies?.satori;
     } catch {
         return undefined;
     }
-    if (typeof expectedSatori !== "string" || !EXACT.test(expectedSatori)) return undefined;
-    const startPoints = [join(packageRoot, "package.json"), join(APP_ROOT, "package.json")];
-    try {
-        const vinextEntry = createRequire(join(APP_ROOT, "package.json")).resolve("vinext");
-        startPoints.push(createRequire(vinextEntry).resolve("@vercel/og/package.json"));
-    } catch {
-        // vinext (or its @vercel/og) not resolvable from the app — fine
-    }
+    if (typeof expectedSatori !== "string" || !EXACT_VERSION.test(expectedSatori)) return undefined;
     for (const start of startPoints) {
         let hbWasm;
         try {
@@ -495,7 +522,7 @@ function resolveEmscriptenWasm(name, modulePath) {
             const satori = readJson(satoriPkg);
             if (satori.version !== expectedSatori) continue;
             const expectedHb = satori.dependencies?.harfbuzzjs;
-            if (typeof expectedHb !== "string" || !EXACT.test(expectedHb)) continue;
+            if (typeof expectedHb !== "string" || !EXACT_VERSION.test(expectedHb)) continue;
             const hbPkg = createRequire(satoriPkg).resolve("harfbuzzjs/package.json");
             if (readJson(hbPkg).version !== expectedHb) continue;
             hbWasm = realpathSync(join(dirname(hbPkg), "hb.wasm"));
@@ -586,7 +613,25 @@ const importMetaToCjs = {
             // generated `index.mjs`), so it never carries an asset anchor this
             // rewrite would touch — no call to rewriteAssetAnchors here, by
             // construction; see entry-asset-anchor.mjs's docstring on scope.
-            const raw = await Bun.file(args.path).text();
+            // The ONE exception is HarfBuzz's binary, below (#1872).
+            const rawEntry = await Bun.file(args.path).text();
+            // #1872 (app router / middleware): the vinext-rewritten HarfBuzz
+            // read nitro inlined here points at a file it never shipped —
+            // embed the version-matched binary instead (see
+            // rewriteEntryHarfbuzzAnchors). Only HarfBuzz's own anchor; nothing
+            // else in the entry is touched. Runs BEFORE the import.meta rewrite.
+            const hbRewrite = rewriteEntryHarfbuzzAnchors(rawEntry, () => {
+                const vinextOg = vinextOgPackageJson();
+                return vinextOg === undefined
+                    ? undefined
+                    : resolvePinnedHarfbuzzWasm(vinextOg, [vinextOg], ENTRY);
+            });
+            if (hbRewrite.assets.length > 0) {
+                console.log(
+                    `[knext compile] embedded HarfBuzz hb.wasm for next/og (${hbRewrite.assets[0].absPath})`,
+                );
+            }
+            const raw = assetAnchorImports(hbRewrite.assets) + hbRewrite.contents;
             // Prepend the preload imports FIRST, always — independent of whether
             // the entry uses import.meta. `import "<abs>";` is bundled + evaluated
             // before the rest of the entry's imports, firing the ARP primer and

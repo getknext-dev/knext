@@ -64,7 +64,23 @@ const GLUE = [
     "export const marker = readFileSync(findWasmBinary(), 'utf8');",
 ].join("\n");
 
-function buildApp(opts: { installedSatori: string }) {
+/**
+ * The app-router shape: vinext bundles @vercel/og into the RSC chunk and its
+ * og-harfbuzz/og-assets plugins rewrite the read to a path relative to an
+ * intermediate RSC output dir; nitro inlines that chunk into the entry and
+ * ships no hb.wasm, so the URL resolves to nothing.
+ */
+const RSC_ENTRY = [
+    'import { readFileSync } from "node:fs";',
+    "const marker = readFileSync(new URL(`../../hb.wasm`, import.meta.url), 'utf8');",
+    `if (marker !== ${JSON.stringify(HB_MARKER)}) { console.error("wrong hb.wasm bytes"); process.exit(3); }`,
+    'console.log("hb ok");',
+].join("\n");
+
+function buildApp(opts: {
+    installedSatori: string;
+    shape?: "sidecar" | "rsc-entry";
+}) {
     const buildDir = temp("knext-og-hb-build-");
     const serverDir = join(buildDir, ".output", "server");
     // nitro's staged copy — JS only, no hb.wasm (1.0.3's real shape); nitro
@@ -79,12 +95,24 @@ function buildApp(opts: { installedSatori: string }) {
     writeFileSync(join(stagedOg, "dist", "index.node.js"), GLUE);
     writeFileSync(
         join(serverDir, "index.mjs"),
-        [
-            'import { marker } from "./node_modules/@vercel/og/dist/index.node.js";',
-            `if (marker !== ${JSON.stringify(HB_MARKER)}) { console.error("wrong hb.wasm bytes"); process.exit(3); }`,
-            'console.log("hb ok");',
-        ].join("\n"),
+        opts.shape === "rsc-entry"
+            ? RSC_ENTRY
+            : [
+                  'import { marker } from "./node_modules/@vercel/og/dist/index.node.js";',
+                  `if (marker !== ${JSON.stringify(HB_MARKER)}) { console.error("wrong hb.wasm bytes"); process.exit(3); }`,
+                  'console.log("hb ok");',
+              ].join("\n"),
     );
+    // vinext depends on @vercel/og; the RSC-entry chain is resolved through it
+    pkg(join(buildDir, "node_modules", "vinext"), {
+        name: "vinext",
+        version: "1.0.1",
+        type: "module",
+        // vinext 1.0.1 is ESM-only: an "import"-only export, no package.json export
+        exports: { ".": { types: "./index.d.ts", import: "./index.js" } },
+        dependencies: { "@vercel/og": "1.0.3" },
+    });
+    writeFileSync(join(buildDir, "node_modules", "vinext", "index.js"), "");
     // the app's own install: @vercel/og → satori → harfbuzzjs (hb.wasm lives here)
     const nm = join(buildDir, "node_modules");
     pkg(buildDir, { name: "app", version: "0.0.0", private: true });
@@ -142,6 +170,24 @@ describe("#1872 — @vercel/og's harfbuzz hb.wasm survives the compiled executab
 
     it("does NOT embed hb.wasm from a satori other than the staged @vercel/og's exact pin (the read still fails)", () => {
         const { buildDir, serverDir } = buildApp({ installedSatori: "0.30.0" });
+        const run = compileShipRun(buildDir, serverDir);
+        expect(run.status).not.toBe(0);
+    }, 120_000);
+
+    it("app-router shape: embeds hb.wasm for the vinext-rewritten new URL(../../hb.wasm) in the entry", () => {
+        const { buildDir, serverDir } = buildApp({
+            installedSatori: "0.33.5",
+            shape: "rsc-entry",
+        });
+        const run = compileShipRun(buildDir, serverDir);
+        expect(run.status, run.stdout + run.stderr).toBe(0);
+    }, 120_000);
+
+    it("app-router shape: does NOT embed hb.wasm from a satori off the exact pin (the read still fails)", () => {
+        const { buildDir, serverDir } = buildApp({
+            installedSatori: "0.30.0",
+            shape: "rsc-entry",
+        });
         const run = compileShipRun(buildDir, serverDir);
         expect(run.status).not.toBe(0);
     }, 120_000);

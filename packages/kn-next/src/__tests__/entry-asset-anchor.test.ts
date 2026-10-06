@@ -13,6 +13,7 @@ import {
     findAssetAnchors,
     isAllowlistedAssetAnchorModule,
     rewriteAssetAnchors,
+    rewriteEntryHarfbuzzAnchors,
 } from "../adapters/entry-asset-anchor.mjs";
 
 const OG_PATH = "/app/node_modules/@vercel/og/dist/index.node.js";
@@ -378,6 +379,87 @@ describe("rewriteAssetAnchors — Emscripten locateFile(<name>.wasm) (#1872)", (
     });
 
     it("is a no-op when no locateFile resolver is passed (the pre-#1872 three-argument call)", () => {
+        const { contents, assets } = rewriteAssetAnchors(
+            GLUE,
+            OG_PATH,
+            () => undefined,
+        );
+        expect(contents).toBe(GLUE);
+        expect(assets).toEqual([]);
+    });
+});
+
+// #1872, app router / middleware: with the RSC environment bundling its deps
+// under nitro, vinext's og-harfbuzz + og-assets plugins rewrite the glue to
+// `readFileSync(new URL(`../../hb.wasm`, import.meta.url))` — relative to an
+// intermediate RSC output dir nitro never ships. Once nitro inlines that chunk
+// into the server entry the URL points at a file that exists nowhere.
+describe("rewriteEntryHarfbuzzAnchors (#1872)", () => {
+    const VINEXT_RSC =
+        "function py(){return new WebAssembly.Module(f(new URL(`../../hb.wasm`,import.meta.url)))}";
+
+    it("replaces a backtick-quoted relative hb.wasm URL with the embedded asset", () => {
+        const { contents, assets } = rewriteEntryHarfbuzzAnchors(
+            VINEXT_RSC,
+            () => "/abs/harfbuzzjs/hb.wasm",
+        );
+        expect(assets).toEqual([
+            { id: "__knextHarfbuzzWasm0", absPath: "/abs/harfbuzzjs/hb.wasm" },
+        ]);
+        expect(contents).toBe(
+            'function py(){return new WebAssembly.Module(f(require("node:url").pathToFileURL(__knextHarfbuzzWasm0)))}',
+        );
+    });
+
+    it("also matches quoted literals and an og-assets hashed asset name", () => {
+        const src =
+            "a(new URL(\"./hb.wasm\", import.meta.url)); b(new URL('../_next/static/hb-Ab12_c.wasm', import.meta.url))";
+        const { contents, assets } = rewriteEntryHarfbuzzAnchors(
+            src,
+            () => "/abs/hb.wasm",
+        );
+        expect(assets).toHaveLength(1);
+        expect(contents).not.toContain("import.meta.url");
+    });
+
+    it("leaves every other wasm (resvg.wasm, yoga.wasm) alone", () => {
+        const src =
+            'new URL("./resvg.wasm", import.meta.url); new URL(`../../yoga.wasm`, import.meta.url)';
+        const { contents, assets } = rewriteEntryHarfbuzzAnchors(
+            src,
+            () => "/abs/hb.wasm",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
+    it("leaves the source untouched when the resolver finds nothing", () => {
+        const { contents, assets } = rewriteEntryHarfbuzzAnchors(
+            VINEXT_RSC,
+            () => undefined,
+        );
+        expect(contents).toBe(VINEXT_RSC);
+        expect(assets).toEqual([]);
+    });
+
+    it("still rewrites after a regex literal holding a quote (minified entries defeat a simple lexer)", () => {
+        // Measured on a real nitro entry: a comment/string mask derived from
+        // a simple forward scan treats everything after `/"/` as string data
+        // and silently skipped the real anchor. This rewrite is unmasked on
+        // purpose — its pattern is HarfBuzz's anchor and nothing else.
+        const src = `const re = /"/g; ${VINEXT_RSC}`;
+        const { contents, assets } = rewriteEntryHarfbuzzAnchors(
+            src,
+            () => "/abs/hb.wasm",
+        );
+        expect(assets).toHaveLength(1);
+        expect(contents).not.toContain("hb.wasm`");
+    });
+});
+
+describe("rewriteAssetAnchors — three-argument back-compat (#1872)", () => {
+    const GLUE = 'function findWasmBinary(){return locateFile("hb.wasm")}';
+    it("is a no-op for locateFile when no resolver is passed", () => {
         const { contents, assets } = rewriteAssetAnchors(
             GLUE,
             OG_PATH,
