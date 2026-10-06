@@ -38,6 +38,12 @@ WORKDIR /app
 ARG BINARY
 COPY ${BINARY} /app/server
 
+# HarfBuzz (Old MIT) and harfbuzzjs (MIT) require their notice to travel with
+# the binary that embeds hb.wasm. `knext build` writes it beside the binary only
+# when next/og's hb.wasm is embedded; the `[t]` glob makes its absence an empty
+# match (BuildKit) rather than a failed build.
+COPY knext-third-party-notices.tx[t] /app/
+
 # Non-root, matching `Dockerfile`. /tmp in the base image is world-writable with
 # the sticky bit; the binary unpacks into a private (0700) directory under it.
 USER 65532:65532

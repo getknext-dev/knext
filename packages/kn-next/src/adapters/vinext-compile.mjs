@@ -54,11 +54,14 @@ import {
     realpathSync,
     rmSync,
     statSync,
+    writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
 import {
+    HARFBUZZ_NOTICE_FILE,
+    harfbuzzNoticeText,
     ogHarfbuzzWarning,
     resolvePinnedHarfbuzzWasm,
     vinextOgPackageJson,
@@ -488,6 +491,8 @@ function resolveEmscriptenWasm(name, modulePath) {
 }
 
 const HARFBUZZ_WARNED = new Set();
+/** hb.wasm paths handed to the bundle: the notice is written iff this is non-empty. */
+const HARFBUZZ_EMBEDDED = new Set();
 
 /**
  * A HarfBuzz resolution result -> the path to embed, or the build-time signal
@@ -498,7 +503,10 @@ const HARFBUZZ_WARNED = new Set();
  * the same split this compile already applies to unbundlable requires.
  */
 function harfbuzzOrSignal(result, where) {
-    if ("path" in result) return result.path;
+    if ("path" in result) {
+        HARFBUZZ_EMBEDDED.add(result.path);
+        return result.path;
+    }
     const body = `${ogHarfbuzzWarning(result.reason)} (in ${where})`;
     if (STRICT_REQUIRES) throw new Error(`[knext compile] ${body}`);
     if (!HARFBUZZ_WARNED.has(body)) {
@@ -1046,6 +1054,13 @@ const result = await Bun.build(
 if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
+}
+if (HARFBUZZ_EMBEDDED.size > 0) {
+    // HarfBuzz (Old MIT) + harfbuzzjs (MIT) require their notice to ship with
+    // the binary that embeds hb.wasm; the image recipes COPY it beside it.
+    const noticePath = join(dirname(OUTFILE), HARFBUZZ_NOTICE_FILE);
+    writeFileSync(noticePath, harfbuzzNoticeText([...HARFBUZZ_EMBEDDED][0]));
+    console.log(`[knext compile] wrote the HarfBuzz/harfbuzzjs licence notice (${noticePath})`);
 }
 if (SELF_CONTAINED) {
     // Fail closed: a self-contained binary without bytecode boots and serves,

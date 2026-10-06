@@ -13,9 +13,37 @@
  * which stages it into `.output/server`). Runtime-agnostic: runs under Bun
  * and Node, so nothing here uses `Bun.*`.
  */
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, sep } from "node:path";
+
+/** The notice file written beside a compiled executable that embeds hb.wasm. */
+export const HARFBUZZ_NOTICE_FILE = "knext-third-party-notices.txt";
+
+/**
+ * Text of the third-party notice for an embedded `hb.wasm`: a header naming the
+ * components, then every licence file (LICENSE / COPYING*) shipped beside the
+ * binary in the harfbuzzjs package, verbatim.
+ *
+ * @param {string} hbWasm resolved path of harfbuzzjs's hb.wasm
+ */
+export function harfbuzzNoticeText(hbWasm) {
+    const dir = dirname(hbWasm);
+    const files = readdirSync(dir)
+        .filter((n) => /^(LICENSE|LICENCE|COPYING)(\..*)?$/i.test(n))
+        .sort();
+    const parts = [
+        "Third-party notices for this knext executable\n" +
+            "=============================================\n\n" +
+            "This executable embeds hb.wasm for next/og: HarfBuzz (Old MIT licence),\n" +
+            "compiled to WebAssembly and distributed by harfbuzzjs (MIT licence).\n" +
+            "The licence texts shipped with harfbuzzjs follow.\n",
+    ];
+    for (const n of files) {
+        parts.push(`\n----- harfbuzzjs/${n} -----\n\n${readFileSync(join(dir, n), "utf8")}`);
+    }
+    return parts.join("");
+}
 
 /** Hard cap on the embedded/staged binary — a build error, never a silent skip. */
 export const HARFBUZZ_MAX_BYTES = 16 * 1024 * 1024;
