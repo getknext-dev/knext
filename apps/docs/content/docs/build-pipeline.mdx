@@ -55,28 +55,33 @@ const config: KnativeNextConfig = {
 };
 ```
 
-`next/og`'s `ImageResponse` (for example a dynamic `opengraph-image` route) works on this target's
-compiled Bun executable — its renderer's font and image-decoding files are embedded in the binary
-rather than left behind on the machine that built it.
+`next/og`'s `ImageResponse` (for example a dynamic `opengraph-image` route) works on this target
+with both runtimes, in pages API routes, app route handlers (Edge or Node.js runtime) and
+middleware:
 
-**Note:** `vinext` 1.0.1 installs `@vercel/og` 1.0.3, whose published package is missing one of its
-WebAssembly files. `vinext` works around that itself, but in this build Nitro keeps `@vercel/og` as
-an external package, which bypasses that workaround — so `next/og` answers a 500 error, compiled or
-not. New apps from `knext create --builder vinext` already pin `@vercel/og` to `0.11.1` through an
-`overrides` entry in `package.json` (it is plain JSON, so the entry carries no comment). An existing
-app adds the same entry by hand and reinstalls:
+- **Bun (compiled executable):** the renderer's font and WebAssembly files are embedded in the
+  binary rather than left behind on the machine that built it.
+- **Node.js:** `knext build` copies the same files into `.output/server`, which the image ships.
 
-```json title="package.json"
-{
-  "overrides": {
-    "@vercel/og": "0.11.1"
-  }
-}
+This includes `@vercel/og` 1.0.3, the version `vinext` 1.0.1 installs. Its published package is
+missing the HarfBuzz text-shaping file (`hb.wasm`), so the build takes that file from the exact
+`satori` and `harfbuzzjs` versions `@vercel/og` was built against. On Node.js it is staged next to
+the `harfbuzzjs` MIT licence (`hb.wasm.LICENSE`).
+
+If those versions do not match, for example because an `overrides` or `resolutions` entry
+changed `satori` or `harfbuzzjs`, the build prints:
+
+```text
+WARNING: next/og will fail at runtime (ImageResponse answers 500): HarfBuzz's hb.wasm could not be bundled — …
 ```
 
-`overrides` is honoured by npm and Bun. pnpm reads it from `pnpm.overrides` instead, and Yarn from
-`resolutions`. Remove the entry once a `vinext` release ships a working `@vercel/og`; until then
-leave it in place.
+The build still succeeds, because an app that never renders `next/og` is unaffected. An app that
+does render it removes the override and reinstalls. Set `KNEXT_COMPILE_STRICT_REQUIRES=1` (or
+build with `--self-contained`) to make the compiled-executable build fail instead.
+
+New apps from `knext create --builder vinext` pin `@vercel/og` to `0.11.1` through an `overrides`
+entry in `package.json`. That pin is no longer required on either runtime. You can keep it or
+remove it and reinstall.
 
 The third target is the same standalone output, produced with webpack instead of Turbopack as the
 bundler. Select it with `build: 'webpack'`; everything else about it — the entry, the supervisor,

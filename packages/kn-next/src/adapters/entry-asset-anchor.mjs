@@ -256,52 +256,75 @@ function codeMask(src) {
 const LOCATE_FILE_RE = /\blocateFile\(\s*(["'])([\w.-]+\.wasm)\1\s*\)/g;
 
 /**
- * `new URL(<relative path ending in hb.wasm or og-assets' hashed hb-<hash>.wasm>,
- * import.meta.url)`, any quote style (vinext's build output uses backticks).
+ * vinext's OWN HarfBuzz loader, exactly as its `vinext:og-harfbuzz` plugin
+ * emits it (`function __vi_hb_module() { return new WebAssembly.Module(
+ * __vi_hb_readFileSync(new URL("./hb.wasm", import.meta.url))); }`), after
+ * `vinext:og-assets` re-pointed the path and the bundler minified the names —
+ * measured on a real nitro entry:
+ *
+ *     new WebAssembly.Module(f(new URL(`../../hb.wasm`,import.meta.url)))
+ *
+ * The `new WebAssembly.Module(<read>(new URL(...)))` wrapper is part of the
+ * pattern on purpose: the nitro entry inlines USER code too, and a user's own
+ * `new URL("./hb.wasm", import.meta.url)` (read, fetched, compiled some other
+ * way) must keep the user's file. Group 2 is the URL literal (relative path to
+ * `hb.wasm`, or og-assets' hashed `hb-<hash>.wasm` asset), group 1 its quote.
  */
-const ENTRY_HARFBUZZ_RE =
-    /new\s+URL\(\s*(["'`])((?:\.\/|\.\.\/)(?:[\w.-]+\/)*hb(?:-[\w-]+)?\.wasm)\1\s*,\s*import\.meta\.url\s*\)/g;
+const VINEXT_HB_RE =
+    /(?<=new\s+WebAssembly\.Module\(\s*[\w$.]+\(\s*)new\s+URL\(\s*(["'`])((?:\.\.?\/)+(?:[\w.-]+\/)*hb(?:-[\w-]+)?\.wasm)\1\s*,\s*import\.meta\.url\s*\)(?=\s*\)\s*\))/g;
 
 /**
- * The app-router half of #1872. With the RSC environment bundling its deps
- * under nitro (the bundled vinext fix for cloudflare/vinext#3424), vite
- * bundles `@vercel/og` into the RSC chunk and vinext's `vinext:og-harfbuzz` +
- * `vinext:og-assets` plugins rewrite the HarfBuzz read to
- * `new URL("../../hb.wasm", import.meta.url)` — relative to the intermediate
+ * Replace the `new URL(...)` inside every vinext HarfBuzz loader in `src` with
+ * `urlExpr` (an expression evaluating to the binary's URL). Pure; see
+ * `VINEXT_HB_RE` for exactly what matches — never a user's own anchor.
+ *
+ * Deliberately NOT run through `codeMask`: measured on a real nitro entry, the
+ * simple forward scan reads a minified regex literal holding a quote (`/"/`)
+ * as the start of a string and masked the real anchor out. The pattern is the
+ * scope instead: a string or comment would have to contain vinext's whole
+ * `new WebAssembly.Module(read(new URL(...)))` loader verbatim to match.
+ *
+ * @param {string} src
+ * @param {string} urlExpr
+ * @returns {{ contents: string, count: number }}
+ */
+export function rewriteVinextHarfbuzzAnchors(src, urlExpr) {
+    let count = 0;
+    const contents = src.replace(VINEXT_HB_RE, () => {
+        count++;
+        return urlExpr;
+    });
+    return { contents, count };
+}
+
+/**
+ * The app-router half of #1872 for the COMPILED executable. With the RSC
+ * environment bundling its deps under nitro (the bundled vinext fix for
+ * cloudflare/vinext#3424), vite bundles `@vercel/og` into the RSC chunk and
+ * vinext's og plugins rewrite the HarfBuzz read relative to the intermediate
  * RSC output dir, where og-assets copied the binary. nitro then inlines that
  * chunk into `.output/server/index.mjs` and ships no `hb.wasm`, so the URL
  * resolves to a file that exists nowhere (measured: `<app root>/hb.wasm`).
  *
- * This rewrites exactly that anchor — HarfBuzz's binary only, never another
- * wasm or asset — in the compiled ENTRY to an embedded copy of the binary the
- * caller resolves (the version-matched `harfbuzzjs/hb.wasm`). An unresolved
- * binary leaves the source untouched.
- *
- * Deliberately NOT run through `codeMask`: measured on a real nitro entry, the
- * simple forward scan reads a minified regex literal holding a quote (`/"/`)
- * as the start of a string and masked the real anchor out, so nothing was
- * rewritten. The pattern itself is the scope — HarfBuzz's own anchor and
- * nothing else — and a string that happened to contain it verbatim would only
- * have that text replaced, never another file embedded.
+ * Rewrites vinext's loader (only — see `VINEXT_HB_RE`) to an embedded copy of
+ * the binary `resolve` returns. `resolve` runs only when a loader is present,
+ * at most once; undefined leaves the source untouched.
  *
  * @param {string} src
  * @param {() => string | undefined} resolve absolute path of the hb.wasm to embed
  * @returns {{ contents: string, assets: { id: string, absPath: string }[] }}
  */
 export function rewriteEntryHarfbuzzAnchors(src, resolve) {
-    const assets = [];
-    let absPath;
-    let resolved = false;
-    const contents = src.replace(ENTRY_HARFBUZZ_RE, (whole) => {
-        if (!resolved) {
-            absPath = resolve();
-            resolved = true;
-            if (absPath !== undefined) assets.push({ id: "__knextHarfbuzzWasm0", absPath });
-        }
-        if (absPath === undefined) return whole;
-        return 'require("node:url").pathToFileURL(__knextHarfbuzzWasm0)';
-    });
-    return { contents, assets };
+    VINEXT_HB_RE.lastIndex = 0;
+    if (!VINEXT_HB_RE.test(src)) return { contents: src, assets: [] };
+    VINEXT_HB_RE.lastIndex = 0;
+    const absPath = resolve();
+    if (absPath === undefined) return { contents: src, assets: [] };
+    const { contents } = rewriteVinextHarfbuzzAnchors(
+        src,
+        'require("node:url").pathToFileURL(__knextHarfbuzzWasm0)',
+    );
+    return { contents, assets: [{ id: "__knextHarfbuzzWasm0", absPath }] };
 }
 
 /**

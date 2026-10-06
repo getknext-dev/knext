@@ -14,6 +14,7 @@ import {
     isAllowlistedAssetAnchorModule,
     rewriteAssetAnchors,
     rewriteEntryHarfbuzzAnchors,
+    rewriteVinextHarfbuzzAnchors,
 } from "../adapters/entry-asset-anchor.mjs";
 
 const OG_PATH = "/app/node_modules/@vercel/og/dist/index.node.js";
@@ -411,9 +412,9 @@ describe("rewriteEntryHarfbuzzAnchors (#1872)", () => {
         );
     });
 
-    it("also matches quoted literals and an og-assets hashed asset name", () => {
+    it("also matches vinext's shape with quoted literals and an og-assets hashed asset name", () => {
         const src =
-            "a(new URL(\"./hb.wasm\", import.meta.url)); b(new URL('../_next/static/hb-Ab12_c.wasm', import.meta.url))";
+            "function a(){return new WebAssembly.Module(r(new URL(\"./hb.wasm\", import.meta.url)))} function b(){return new WebAssembly.Module( x.readFileSync( new URL('../_next/static/hb-Ab12_c.wasm', import.meta.url) ) )}";
         const { contents, assets } = rewriteEntryHarfbuzzAnchors(
             src,
             () => "/abs/hb.wasm",
@@ -422,9 +423,33 @@ describe("rewriteEntryHarfbuzzAnchors (#1872)", () => {
         expect(contents).not.toContain("import.meta.url");
     });
 
+    it("leaves a USER's own hb.wasm URL alone — only vinext's WebAssembly.Module(read(new URL(...))) shape is rewritten", () => {
+        // The nitro entry inlines user code too; a user loading their own
+        // hb.wasm must keep their own file, never get vinext's pinned one.
+        const src =
+            'const mine = readFileSync(new URL("./hb.wasm", import.meta.url)); const m2 = new URL(`../../hb.wasm`, import.meta.url); const w = await WebAssembly.compile(readFileSync(new URL("../../hb.wasm", import.meta.url)));';
+        const { contents, assets } = rewriteEntryHarfbuzzAnchors(
+            src,
+            () => "/abs/hb.wasm",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
+    it("leaves a string literal that merely mentions the URL alone", () => {
+        const src =
+            "const doc = 'load it via new URL(\"../../hb.wasm\", import.meta.url)';";
+        const { contents, assets } = rewriteEntryHarfbuzzAnchors(
+            src,
+            () => "/abs/hb.wasm",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
     it("leaves every other wasm (resvg.wasm, yoga.wasm) alone", () => {
         const src =
-            'new URL("./resvg.wasm", import.meta.url); new URL(`../../yoga.wasm`, import.meta.url)';
+            'new WebAssembly.Module(f(new URL("./resvg.wasm", import.meta.url))); new WebAssembly.Module(f(new URL(`../../yoga.wasm`, import.meta.url)))';
         const { contents, assets } = rewriteEntryHarfbuzzAnchors(
             src,
             () => "/abs/hb.wasm",
@@ -454,6 +479,31 @@ describe("rewriteEntryHarfbuzzAnchors (#1872)", () => {
         );
         expect(assets).toHaveLength(1);
         expect(contents).not.toContain("hb.wasm`");
+    });
+});
+
+describe("rewriteVinextHarfbuzzAnchors — the node-preset rewrite (#1872)", () => {
+    it("re-points vinext's anchor at a sibling hb.wasm and counts it", () => {
+        const src =
+            "function py(){return new WebAssembly.Module(f(new URL(`../../hb.wasm`,import.meta.url)))}";
+        const { contents, count } = rewriteVinextHarfbuzzAnchors(
+            src,
+            'new URL("./hb.wasm", import.meta.url)',
+        );
+        expect(count).toBe(1);
+        expect(contents).toBe(
+            'function py(){return new WebAssembly.Module(f(new URL("./hb.wasm", import.meta.url)))}',
+        );
+    });
+
+    it("counts zero and changes nothing on a user's own anchor", () => {
+        const src = 'readFileSync(new URL("../../hb.wasm", import.meta.url))';
+        const { contents, count } = rewriteVinextHarfbuzzAnchors(
+            src,
+            'new URL("./hb.wasm", import.meta.url)',
+        );
+        expect(count).toBe(0);
+        expect(contents).toBe(src);
     });
 });
 

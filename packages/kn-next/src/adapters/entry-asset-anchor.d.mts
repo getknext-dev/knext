@@ -4,6 +4,11 @@ export function allowlistedPackageRoot(modulePath: string): string | undefined;
 
 export function findAssetAnchors(src: string): { literal: string }[];
 
+export function rewriteVinextHarfbuzzAnchors(
+    src: string,
+    urlExpr: string,
+): { contents: string; count: number };
+
 export function rewriteEntryHarfbuzzAnchors(
     src: string,
     resolve: () => string | undefined,
