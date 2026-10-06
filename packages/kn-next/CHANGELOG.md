@@ -1,5 +1,21 @@
 # @getknext/core
 
+## 1.3.0-rc.4
+
+### Patch Changes
+
+- 3c2348f: A private preview can now be made public by changing the branch's config. Setting
+  `networking: { visibility: "public" }` explicitly in `knext.config.ts` is accepted on the next
+  preview deploy; omitting the `networking` block is still refused so an accidental removal cannot
+  quietly expose a private preview. The refusal message now names both ways forward.
+- e1a5269: `knext build` no longer fails with "'cache.url' is required" for a Redis-cache app when `REDIS_URL` is not set at build time. The URL is now required only at `knext deploy`, and the error says to set `REDIS_URL` when you deploy.
+- e0238ad: ISR pages generated at request time (for example a dynamic route without `generateStaticParams`) are
+  no longer served as stale on the first request after the app scales up from zero. The Redis cache
+  handler now records which build wrote each entry, along with its revalidate window, and gives that
+  window back to Next.js when the same build reads the entry. A cached page inside its window is then
+  a cache hit after a cold start instead of triggering a regeneration. Entries written by a previous
+  deploy are still revalidated by the new build as before.
+
 ## 1.3.0-rc.3
 
 ### Minor Changes
