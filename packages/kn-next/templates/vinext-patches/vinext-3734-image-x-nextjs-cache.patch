@@ -61,7 +61,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +		});
  	}, allowedWidths, imageConfig);
 +	if (response.status !== 200) return response;
-+	const sourceUrl = new URL(request.url).searchParams.get("url") ?? "";
++	const sourceUrl = new URL(new URL(request.url).searchParams.get("url") ?? "", "http://n").pathname;
 +	const isStatic = sourceUrl.startsWith(`${basePath}/_next/static/media`) || sourceUrl.startsWith(`${basePath}/_next/static/immutable/media`);
 +	response.headers.set("Cache-Control", isStatic ? IMAGE_CACHE_CONTROL : `public, max-age=${Math.max(sourceMaxAge, DEFAULT_IMAGE_MINIMUM_CACHE_TTL)}, must-revalidate`);
 +	return response;

@@ -882,6 +882,25 @@ describe("the bundled patches against the published tarball", () => {
         expect(hashed.headers.get("Cache-Control")).toBe(
             "public, max-age=31536000, immutable",
         );
+
+        // A traversal out of the hashed directory is a plain public file.
+        for (const traversal of [
+            "%2F_next%2Fstatic%2Fmedia%2F..%2Fhero.jpg",
+            "%2F_next%2Fstatic%2Fmedia%2F%2e%2e%2Fhero.jpg",
+        ]) {
+            const escaped = await mod.handleNitroImageOptimization(
+                imageUrl(traversal),
+                nitroFetch(
+                    new Response("img", {
+                        status: 200,
+                        headers: { "Content-Type": "image/jpeg" },
+                    }),
+                ),
+            );
+            expect(escaped.headers.get("Cache-Control")).toBe(
+                "public, max-age=14400, must-revalidate",
+            );
+        }
     });
 
     // Shared by all three vinext#3689 cases below: the full option surface
