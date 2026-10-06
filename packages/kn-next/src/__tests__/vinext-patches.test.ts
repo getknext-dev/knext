@@ -711,6 +711,198 @@ describe("the bundled patches against the published tarball", () => {
         expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
     });
 
+    it("vinext#3734: /_next/image success responses carry x-nextjs-cache: MISS, errors carry none", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            handleImageOptimization: (
+                request: Request,
+                handlers: {
+                    fetchAsset: (p: string, r: Request) => Promise<Response>;
+                    transformImage?: (
+                        body: ReadableStream,
+                        o: { width: number; format: string; quality: number },
+                    ) => Promise<Response>;
+                },
+                allowedWidths?: number[],
+                imageConfig?: { dangerouslyAllowSVG?: boolean },
+            ) => Promise<Response>;
+        }>("dist/server/image-optimization.js");
+        const url = "http://localhost/_next/image?url=%2Fimg.jpg&w=640&q=75";
+        const jpeg = () =>
+            new Response("img", {
+                status: 200,
+                headers: { "Content-Type": "image/jpeg" },
+            });
+        const svg = () =>
+            new Response("<svg/>", {
+                status: 200,
+                headers: { "Content-Type": "image/svg+xml" },
+            });
+        const passthrough = await mod.handleImageOptimization(
+            new Request(url),
+            {
+                fetchAsset: async () => jpeg(),
+            },
+        );
+        expect(passthrough.headers.get("x-nextjs-cache")).toBe("MISS");
+        const transformed = await mod.handleImageOptimization(
+            new Request(url),
+            {
+                fetchAsset: async () => jpeg(),
+                transformImage: async () =>
+                    new Response("t", {
+                        status: 200,
+                        headers: {
+                            "Content-Type": "image/webp",
+                            "x-nextjs-cache": "HIT",
+                        },
+                    }),
+            },
+        );
+        expect(transformed.headers.get("x-nextjs-cache")).toBe("MISS");
+        const svgOk = await mod.handleImageOptimization(
+            new Request(url),
+            { fetchAsset: async () => svg() },
+            undefined,
+            { dangerouslyAllowSVG: true },
+        );
+        expect(svgOk.headers.get("x-nextjs-cache")).toBe("MISS");
+        const bad = await mod.handleImageOptimization(
+            new Request("http://localhost/_next/image"),
+            { fetchAsset: async () => jpeg() },
+        );
+        expect(bad.status).toBe(400);
+        expect(bad.headers.has("x-nextjs-cache")).toBe(false);
+        const missing = await mod.handleImageOptimization(new Request(url), {
+            fetchAsset: async () => new Response("", { status: 404 }),
+        });
+        expect(missing.status).toBe(404);
+        expect(missing.headers.has("x-nextjs-cache")).toBe(false);
+        const blocked = await mod.handleImageOptimization(new Request(url), {
+            fetchAsset: async () => svg(),
+        });
+        expect(blocked.status).toBe(400);
+        expect(blocked.headers.has("x-nextjs-cache")).toBe(false);
+    });
+
+    it("vinext#3734: the App Router handler hands /_next/image to the Nitro app instead of redirecting", () => {
+        applyVinextPatches(patched);
+        const handler = readFileSync(
+            join(patched, "dist", "server", "app-rsc-handler.js"),
+            "utf8",
+        );
+        expect(handler).toContain(
+            "const nitroFetch = options.isDev ? void 0 : getNitroAppFetch();",
+        );
+        expect(handler).toContain(
+            "return handleNitroImageOptimization(request, nitroFetch,",
+        );
+        expect(handler).toContain("globalThis.__nitro__?.default");
+        // Dev (and hosts without Nitro) keep the redirect.
+        expect(handler).toContain(
+            "return Response.redirect(assetUrl.href, 302);",
+        );
+    });
+
+    it("vinext#3734: the Nitro image path answers 200 with Next-style headers and never forwards Set-Cookie", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            handleNitroImageOptimization: (
+                request: Request,
+                nitroFetch: (request: Request) => Promise<Response>,
+                allowedWidths?: number[],
+                imageConfig?: unknown,
+                basePath?: string,
+            ) => Promise<Response>;
+        }>("dist/server/image-optimization.js");
+        const seen: Request[] = [];
+        const nitroFetch = (source: Response) => async (req: Request) => {
+            seen.push(req);
+            return source;
+        };
+        const imageUrl = (u: string) =>
+            new Request(`http://localhost/_next/image?url=${u}&w=640&q=75`, {
+                headers: { cookie: "user=1", authorization: "Bearer x" },
+            });
+        const jpeg = () =>
+            new Response("img", {
+                status: 200,
+                headers: {
+                    "Content-Type": "image/jpeg",
+                    "Set-Cookie": "session=abc",
+                    "X-Middleware": "1",
+                    "Cache-Control": "public, max-age=0",
+                },
+            });
+
+        const ok = await mod.handleNitroImageOptimization(
+            imageUrl("%2Fimg.jpg"),
+            nitroFetch(jpeg()),
+        );
+        expect(ok.status).toBe(200); // not a 302
+        expect(ok.headers.get("location")).toBeNull();
+        expect(ok.headers.get("x-nextjs-cache")).toBe("MISS");
+        expect(ok.headers.get("Cache-Control")).toBe(
+            "public, max-age=14400, must-revalidate",
+        );
+        expect(ok.headers.has("set-cookie")).toBe(false);
+        expect(ok.headers.has("x-middleware")).toBe(false);
+        expect(await ok.text()).toBe("img");
+        expect(seen[0]?.url).toBe("http://localhost/img.jpg");
+        expect(seen[0]?.headers.has("cookie")).toBe(false);
+        expect(seen[0]?.headers.has("authorization")).toBe(false);
+
+        // A route answering with a non-image is rejected, not proxied.
+        const route = await mod.handleNitroImageOptimization(
+            imageUrl("%2Fapi%2Fx"),
+            nitroFetch(
+                new Response("{}", {
+                    status: 200,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Set-Cookie": "s=1",
+                    },
+                }),
+            ),
+        );
+        expect(route.status).toBe(400);
+        expect(route.headers.has("set-cookie")).toBe(false);
+        expect(route.headers.has("x-nextjs-cache")).toBe(false);
+
+        // Hashed build media is content-addressed, so it stays immutable.
+        const hashed = await mod.handleNitroImageOptimization(
+            imageUrl("%2F_next%2Fstatic%2Fmedia%2Fa.abc.png"),
+            nitroFetch(
+                new Response("img", {
+                    status: 200,
+                    headers: { "Content-Type": "image/png" },
+                }),
+            ),
+        );
+        expect(hashed.headers.get("Cache-Control")).toBe(
+            "public, max-age=31536000, immutable",
+        );
+
+        // A traversal out of the hashed directory is a plain public file.
+        for (const traversal of [
+            "%2F_next%2Fstatic%2Fmedia%2F..%2Fhero.jpg",
+            "%2F_next%2Fstatic%2Fmedia%2F%2e%2e%2Fhero.jpg",
+        ]) {
+            const escaped = await mod.handleNitroImageOptimization(
+                imageUrl(traversal),
+                nitroFetch(
+                    new Response("img", {
+                        status: 200,
+                        headers: { "Content-Type": "image/jpeg" },
+                    }),
+                ),
+            );
+            expect(escaped.headers.get("Cache-Control")).toBe(
+                "public, max-age=14400, must-revalidate",
+            );
+        }
+    });
+
     // Shared by all three vinext#3689 cases below: the full option surface
     // `handleServerActionRscRequest` requires. Modeled on vinext's own
     // fixture (tests/app-server-action-execution.test.ts's

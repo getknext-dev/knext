@@ -1,0 +1,105 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3734
+What it fixes: vinext's `/_next/image` handler never sent `x-nextjs-cache`. Next.js sends it
+on every successful image response (next-server.ts selects MISS/HIT/STALE,
+image-optimizer.ts setResponseHeaders writes it), and Next's own og-api e2e asserts
+`x-nextjs-cache: MISS` on the first optimized request. vinext keeps no image cache, so
+every 200 it builds is a MISS; the header is set where the other image security headers are,
+which covers the transformed, passthrough and SVG-passthrough paths and leaves 400/404 bare.
+In a Nitro production build that handler is never reached: the App Router handler answers
+`/_next/image` with a 302 to the source asset (app-rsc-handler.js), so the response a client
+sees comes from Nitro's static handler. When Nitro's app is on globalThis.__nitro__.default the
+handler now serves the image itself through handleNitroImageOptimization, which follows Next.js:
+the source request carries no client headers, only Content-Type/Content-Length/ETag/
+Last-Modified/Cache-Control are kept from the source (never Set-Cookie), non-image sources are
+rejected, and Cache-Control is `public, max-age=<max(source max-age, 14400)>, must-revalidate`
+(immutable only for hashed /_next/static/media sources). Dev keeps the redirect.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3734.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/server/image-optimization.js
++++ b/dist/server/image-optimization.js
+@@ -178,6 +178,7 @@
+ * When an ImageConfig is provided, uses its values for CSP and Content-Disposition.
+ */
+ function setImageSecurityHeaders(headers, config) {
++	headers.set("x-nextjs-cache", "MISS");
+ 	headers.set("Content-Security-Policy", config?.contentSecurityPolicy ?? "script-src 'none'; frame-src 'none'; sandbox;");
+ 	headers.set("X-Content-Type-Options", "nosniff");
+ 	headers.set("Content-Disposition", config?.contentDispositionType === "attachment" ? "attachment" : "inline");
+@@ -284,7 +285,38 @@
+ 	return handleImageOptimization(request, {
+ 		fetchAsset,
+ 		transformImage: optimizer ? (body, options) => optimizer.transformImage(body, options) : void 0
++	}, allowedWidths, imageConfig);
++}
++const DEFAULT_IMAGE_MINIMUM_CACHE_TTL = 14400;
++const NITRO_IMAGE_SOURCE_HEADERS = [
++	"Content-Type",
++	"Content-Length",
++	"ETag",
++	"Last-Modified",
++	"Cache-Control"
++];
++async function handleNitroImageOptimization(request, nitroFetch, allowedWidths, imageConfig, basePath = "") {
++	const origin = new URL(request.url).origin;
++	let sourceMaxAge = 0;
++	const response = await handleConfiguredImageOptimization(request, async (assetPath) => {
++		const source = await nitroFetch(new Request(new URL(assetPath, origin)));
++		const headers = new Headers();
++		for (const name of NITRO_IMAGE_SOURCE_HEADERS) {
++			const value = source.headers.get(name);
++			if (value !== null) headers.set(name, value);
++		}
++		const match = /max-age=(\d+)/i.exec(headers.get("Cache-Control") ?? "");
++		sourceMaxAge = match ? Number.parseInt(match[1], 10) : 0;
++		return new Response(source.body, {
++			status: source.status,
++			headers
++		});
+ 	}, allowedWidths, imageConfig);
++	if (response.status !== 200) return response;
++	const sourceUrl = new URL(new URL(request.url).searchParams.get("url") ?? "", "http://n").pathname;
++	const isStatic = sourceUrl.startsWith(`${basePath}/_next/static/media`) || sourceUrl.startsWith(`${basePath}/_next/static/immutable/media`);
++	response.headers.set("Cache-Control", isStatic ? IMAGE_CACHE_CONTROL : `public, max-age=${Math.max(sourceMaxAge, DEFAULT_IMAGE_MINIMUM_CACHE_TTL)}, must-revalidate`);
++	return response;
+ }
+ //#endregion
+-export { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, IMAGE_CACHE_CONTROL, IMAGE_CONTENT_SECURITY_POLICY, IMAGE_OPTIMIZATION_PATH, VINEXT_IMAGE_OPTIMIZATION_PATH, getImageOptimizer, handleConfiguredImageOptimization, handleImageOptimization, isImageOptimizationPath, isSafeImageContentType, negotiateImageFormat, parseImageParams, resolveDevImageRedirect, setImageOptimizer };
++export { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, IMAGE_CACHE_CONTROL, IMAGE_CONTENT_SECURITY_POLICY, IMAGE_OPTIMIZATION_PATH, VINEXT_IMAGE_OPTIMIZATION_PATH, getImageOptimizer, handleConfiguredImageOptimization, handleNitroImageOptimization, handleImageOptimization, isImageOptimizationPath, isSafeImageContentType, negotiateImageFormat, parseImageParams, resolveDevImageRedirect, setImageOptimizer };
+--- a/dist/server/app-rsc-handler.js
++++ b/dist/server/app-rsc-handler.js
+@@ -24,7 +24,7 @@
+ import { getScriptNonceFromHeaderSources } from "./csp.js";
+ import { buildNextDataNotFoundResponse, normalizePagesDataRequest } from "./pages-data-route.js";
+ import { traceFindPageComponents } from "./pages-execution-tracing.js";
+-import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, isImageOptimizationPath, resolveDevImageRedirect } from "./image-optimization.js";
++import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleNitroImageOptimization, isImageOptimizationPath, resolveDevImageRedirect } from "./image-optimization.js";
+ import { parseCacheabilityManifest } from "./cacheability-manifest.js";
+ import { getRenderedConcreteUrlPathsForRoute } from "./pregenerated-concrete-paths.js";
+ import { VINEXT_RSC_CACHE_BUSTING_SEARCH_PARAM, canonicalizeLoadingShellRscRequestHeaders, canonicalizePrewarmableRscRequestHeaders, createCanonicalRscRequestUrl, createRscRedirectLocation, createRscRequestUrl, hasRscCacheBustingSearchParam, resolveInvalidRscCacheBustingRequest, stripRscCacheBustingSearchParam, stripRscSuffix } from "./app-rsc-cache-busting.js";
+@@ -224,6 +224,10 @@
+ 	}
+ 	return markedResponse;
+ }
++function getNitroAppFetch() {
++	const app = globalThis.__nitro__?.default;
++	return typeof app?.fetch === "function" ? app.fetch.bind(app) : void 0;
++}
+ async function handleAppRscRequest(options, request, preMiddlewareRequestContext, middlewareContext, isDataRequest, isMiddlewareDataRequest, pagesDataRequest, dispatchInternalRequest, allowInternalRscDocumentFallback, dispatchResponseStage, responseStageProbeMode = null, setInterceptionResponseUncacheable = () => {}) {
+ 	const handlerStart = process.env.NODE_ENV !== "production" ? performance.now() : 0;
+ 	if (process.env.NODE_ENV !== "production") {
+@@ -592,7 +596,10 @@
+ 	if (filesystemRouteEligible && isImageOptimizationPath(cleanPathname)) {
+ 		const imageRedirect = resolveDevImageRedirect(url, [...options.imageConfig?.deviceSizes ?? DEFAULT_DEVICE_SIZES, ...options.imageConfig?.imageSizes ?? DEFAULT_IMAGE_SIZES], options.imageConfig?.qualities, { isDev: options.isDev });
+ 		if (!imageRedirect) return new Response("Invalid image optimization parameters", { status: 400 });
+-		return Response.redirect(new URL(imageRedirect, url.origin).href, 302);
++		const nitroFetch = options.isDev ? void 0 : getNitroAppFetch();
++		const assetUrl = new URL(imageRedirect, url.origin);
++		if (nitroFetch && !isImageOptimizationPath(assetUrl.pathname)) return handleNitroImageOptimization(request, nitroFetch, [...options.imageConfig?.deviceSizes ?? DEFAULT_DEVICE_SIZES, ...options.imageConfig?.imageSizes ?? DEFAULT_IMAGE_SIZES], options.imageConfig, options.basePath);
++		return Response.redirect(assetUrl.href, 302);
+ 	}
+ 	const metadataRouteResponse = await renderMetadataRouteIfMatched();
+ 	if (metadataRouteResponse) return composeResponseStageResponse(metadataRouteResponse);
