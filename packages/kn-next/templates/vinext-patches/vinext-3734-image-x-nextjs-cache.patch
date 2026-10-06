@@ -6,6 +6,10 @@ image-optimizer.ts setResponseHeaders writes it), and Next's own og-api e2e asse
 `x-nextjs-cache: MISS` on the first optimized request. vinext keeps no image cache, so
 every 200 it builds is a MISS; the header is set where the other image security headers are,
 which covers the transformed, passthrough and SVG-passthrough paths and leaves 400/404 bare.
+In a Nitro production build that handler is never reached: the App Router handler answers
+`/_next/image` with a 302 to the source asset (app-rsc-handler.js), so the response a client
+sees comes from Nitro's static handler. The second file below makes that handler, when Nitro's
+app is on globalThis.__nitro__.default, serve the image itself through handleConfiguredImageOptimization.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3734.
 Ported by hand from the upstream src change to the published 1.0.1 dist files.
@@ -21,3 +25,37 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  	headers.set("Content-Security-Policy", config?.contentSecurityPolicy ?? "script-src 'none'; frame-src 'none'; sandbox;");
  	headers.set("X-Content-Type-Options", "nosniff");
  	headers.set("Content-Disposition", config?.contentDispositionType === "attachment" ? "attachment" : "inline");
+--- a/dist/server/app-rsc-handler.js
++++ b/dist/server/app-rsc-handler.js
+@@ -24,7 +24,7 @@
+ import { getScriptNonceFromHeaderSources } from "./csp.js";
+ import { buildNextDataNotFoundResponse, normalizePagesDataRequest } from "./pages-data-route.js";
+ import { traceFindPageComponents } from "./pages-execution-tracing.js";
+-import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, isImageOptimizationPath, resolveDevImageRedirect } from "./image-optimization.js";
++import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleConfiguredImageOptimization, isImageOptimizationPath, resolveDevImageRedirect } from "./image-optimization.js";
+ import { parseCacheabilityManifest } from "./cacheability-manifest.js";
+ import { getRenderedConcreteUrlPathsForRoute } from "./pregenerated-concrete-paths.js";
+ import { VINEXT_RSC_CACHE_BUSTING_SEARCH_PARAM, canonicalizeLoadingShellRscRequestHeaders, canonicalizePrewarmableRscRequestHeaders, createCanonicalRscRequestUrl, createRscRedirectLocation, createRscRequestUrl, hasRscCacheBustingSearchParam, resolveInvalidRscCacheBustingRequest, stripRscCacheBustingSearchParam, stripRscSuffix } from "./app-rsc-cache-busting.js";
+@@ -224,6 +224,10 @@
+ 	}
+ 	return markedResponse;
+ }
++function getNitroAppFetch() {
++	const app = globalThis.__nitro__?.default;
++	return typeof app?.fetch === "function" ? app.fetch.bind(app) : void 0;
++}
+ async function handleAppRscRequest(options, request, preMiddlewareRequestContext, middlewareContext, isDataRequest, isMiddlewareDataRequest, pagesDataRequest, dispatchInternalRequest, allowInternalRscDocumentFallback, dispatchResponseStage, responseStageProbeMode = null, setInterceptionResponseUncacheable = () => {}) {
+ 	const handlerStart = process.env.NODE_ENV !== "production" ? performance.now() : 0;
+ 	if (process.env.NODE_ENV !== "production") {
+@@ -592,7 +596,10 @@
+ 	if (filesystemRouteEligible && isImageOptimizationPath(cleanPathname)) {
+ 		const imageRedirect = resolveDevImageRedirect(url, [...options.imageConfig?.deviceSizes ?? DEFAULT_DEVICE_SIZES, ...options.imageConfig?.imageSizes ?? DEFAULT_IMAGE_SIZES], options.imageConfig?.qualities, { isDev: options.isDev });
+ 		if (!imageRedirect) return new Response("Invalid image optimization parameters", { status: 400 });
+-		return Response.redirect(new URL(imageRedirect, url.origin).href, 302);
++		const nitroFetch = options.isDev ? void 0 : getNitroAppFetch();
++		const assetUrl = new URL(imageRedirect, url.origin);
++		if (nitroFetch && !isImageOptimizationPath(assetUrl.pathname)) return handleConfiguredImageOptimization(request, (assetPath) => nitroFetch(new Request(new URL(assetPath, url.origin))), [...options.imageConfig?.deviceSizes ?? DEFAULT_DEVICE_SIZES, ...options.imageConfig?.imageSizes ?? DEFAULT_IMAGE_SIZES], options.imageConfig);
++		return Response.redirect(assetUrl.href, 302);
+ 	}
+ 	const metadataRouteResponse = await renderMetadataRouteIfMatched();
+ 	if (metadataRouteResponse) return composeResponseStageResponse(metadataRouteResponse);

@@ -785,6 +785,25 @@ describe("the bundled patches against the published tarball", () => {
         expect(blocked.headers.has("x-nextjs-cache")).toBe(false);
     });
 
+    it("vinext#3734: in a Nitro build the App Router handler serves /_next/image itself instead of redirecting", () => {
+        applyVinextPatches(patched);
+        const handler = readFileSync(
+            join(patched, "dist", "server", "app-rsc-handler.js"),
+            "utf8",
+        );
+        expect(handler).toContain(
+            "const nitroFetch = options.isDev ? void 0 : getNitroAppFetch();",
+        );
+        expect(handler).toContain(
+            "return handleConfiguredImageOptimization(request, (assetPath) => nitroFetch(new Request(new URL(assetPath, url.origin)))",
+        );
+        expect(handler).toContain("globalThis.__nitro__?.default");
+        // Dev (and hosts without Nitro) keep the redirect.
+        expect(handler).toContain(
+            "return Response.redirect(assetUrl.href, 302);",
+        );
+    });
+
     // Shared by all three vinext#3689 cases below: the full option surface
     // `handleServerActionRscRequest` requires. Modeled on vinext's own
     // fixture (tests/app-server-action-execution.test.ts's
