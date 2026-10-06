@@ -20,9 +20,9 @@ import (
 	"context"
 	"sort"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/serving/pkg/apis/serving"
 	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
@@ -69,19 +69,19 @@ func isPrivate(app *appsv1alpha1.NextApp) bool {
 }
 
 // ownerAppOf resolves which NextApp (== ksvc name) a DomainMapping ref
-// publishes, or "" when it addresses something else. A ref may point at any
-// addressable object in the namespace, and three shapes all reach the app
-// through the same public path:
-//   - the Knative Service (serving.knative.dev/v1 Service <app>);
-//   - the Route every ksvc creates under the same name (serving.knative.dev/v1
-//     Route <app>);
-//   - a core v1 Service: the ksvc placeholder (<app>) or a per-revision
-//     Service (<app>-00001), which carries the authoritative label
-//     serving.knative.dev/service=<app>. The label is read with a Get rather
-//     than guessing from a name prefix, which would false-match another app
-//     whose name merely starts with this one's.
+// publishes, or "" when it addresses something else. A ref may point at ANY
+// addressable object in the namespace (Knative Service, Route, Revision, a
+// core Service, ...), so the match is generic rather than a list of shapes:
+//   - the ksvc itself (serving.knative.dev/v1 Service) matches by name;
+//   - every other ref is fetched as unstructured (uncached) and matches by the
+//     label serving.knative.dev/service=<app>, which Knative stamps on the
+//     Routes, Revisions and Route-owned k8s Services of a ksvc. A label is
+//     authoritative where a name prefix would false-match a different app.
 //
-// err is non-nil only for a failed Get that is not a plain NotFound.
+// A Service/Route that does not exist yet still identifies the app by name
+// (the ksvc placeholder shares it). A failed Get (forbidden, unknown kind,
+// transient) returns the ref name alongside the error so the caller can
+// decide; the detector fails closed when that name equals the app's.
 func (r *NextAppReconciler) ownerAppOf(ctx context.Context, dm *servingv1beta1.DomainMapping) (string, error) {
 	ref := dm.Spec.Ref
 	if ref.Name == "" {
@@ -91,32 +91,29 @@ func (r *NextAppReconciler) ownerAppOf(ctx context.Context, dm *servingv1beta1.D
 	if ns == "" {
 		ns = dm.Namespace
 	}
-	switch {
-	case ref.APIVersion == "serving.knative.dev/v1" && (ref.Kind == "Service" || ref.Kind == "Route"):
-		return ref.Name, nil
-	case (ref.APIVersion == "v1" || ref.APIVersion == "") && ref.Kind == "Service":
-		svc := &corev1.Service{}
-		reader := r.APIReader
-		if reader == nil {
-			reader = r.Client
-		}
-		if reader == nil {
-			return ref.Name, nil
-		}
-		if err := reader.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, svc); err != nil {
-			if apierrors.IsNotFound(err) {
-				// No such Service to resolve: the ksvc placeholder shares the
-				// app's name, so the name itself still identifies the app.
-				return ref.Name, nil
-			}
-			return "", err
-		}
-		if app := svc.Labels[serving.ServiceLabelKey]; app != "" {
-			return app, nil
-		}
+	if ref.APIVersion == "serving.knative.dev/v1" && ref.Kind == "Service" {
 		return ref.Name, nil
 	}
-	return "", nil
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if reader == nil {
+		return ref.Name, nil
+	}
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion(ref.APIVersion)
+	obj.SetKind(ref.Kind)
+	if err := reader.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			if ref.Kind == "Service" || ref.Kind == "Route" {
+				return ref.Name, nil
+			}
+			return "", nil
+		}
+		return ref.Name, err
+	}
+	return obj.GetLabels()[serving.ServiceLabelKey], nil
 }
 
 // detectPrivateExposure lists DomainMappings in the app's namespace and returns
@@ -142,6 +139,14 @@ func (r *NextAppReconciler) detectPrivateExposure(ctx context.Context, app *apps
 		}
 		owner, err := r.ownerAppOf(ctx, dm)
 		if err != nil {
+			// Cannot resolve the ref (forbidden, unknown kind, transient). If its
+			// NAME equals the app's it is far more likely a leak than not, and a
+			// false positive is only a warning, so fail closed; otherwise keep
+			// the prior verdict rather than guess.
+			if dm.Spec.Ref.Name == app.Name {
+				st.domainMappings = append(st.domainMappings, dm.Name)
+				continue
+			}
 			st.unknown = true
 			return st
 		}
@@ -161,7 +166,12 @@ func (r *NextAppReconciler) domainMappingToNextAppRequests(ctx context.Context, 
 		return nil
 	}
 	owner, err := r.ownerAppOf(ctx, dm)
-	if err != nil || owner == "" {
+	if err != nil {
+		// A failed Get must not drop the event: enqueue the ref name (the
+		// reconcile re-runs detection and applies the same fail-closed rule).
+		owner = dm.Spec.Ref.Name
+	}
+	if owner == "" {
 		return nil
 	}
 	ns := dm.Spec.Ref.Namespace

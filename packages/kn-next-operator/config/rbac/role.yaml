@@ -112,6 +112,12 @@ rules:
 - apiGroups:
   - serving.knative.dev
   resources:
+  - routes
+  verbs:
+  - get
+- apiGroups:
+  - serving.knative.dev
+  resources:
   - services
   verbs:
   - create
