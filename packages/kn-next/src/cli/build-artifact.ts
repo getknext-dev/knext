@@ -26,7 +26,13 @@ import {
     readlinkSync,
     writeFileSync,
 } from "node:fs";
-import { join, relative, resolve as resolvePath } from "node:path";
+import {
+    basename,
+    dirname,
+    join,
+    relative,
+    resolve as resolvePath,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     BUILDERS,
@@ -35,6 +41,7 @@ import {
     DEFAULT_BUILDER_ID,
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
+import { HARFBUZZ_NOTICE_FILE } from "../adapters/og-harfbuzz.mjs";
 import {
     type HealResult,
     healBunExportTargets,
@@ -537,6 +544,20 @@ export function assertCompiledArtifactFresh(
             `${target.execPath} is missing, and --skip-build means knext will not compile it.\n\n` +
                 "Drop --skip-build, or run `knext build` first to produce it.",
         );
+    }
+
+    // The vinext image recipes COPY the third-party notice by exact name; the
+    // compile writes it beside the binary. A binary from an older compile has
+    // none, and `--skip-build` would otherwise fail later as an opaque COPY
+    // error inside docker.
+    if (basename(target.execPath).startsWith("knext-exec-")) {
+        const notice = join(dirname(target.execPath), HARFBUZZ_NOTICE_FILE);
+        if (!existsSync(notice)) {
+            throw new UsageError(
+                `${notice} is missing — the compile writes it beside ${target.execPath} and the image copies it, and --skip-build means knext will not recompile.\n\n` +
+                    "Drop --skip-build, or run `knext build` to recompile and regenerate it.",
+            );
+        }
     }
 
     const stampPath = buildStampPathFor(target.execPath);

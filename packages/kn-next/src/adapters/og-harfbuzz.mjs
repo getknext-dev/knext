@@ -20,15 +20,39 @@ import { dirname, join, sep } from "node:path";
 /** The notice file written beside a compiled executable that embeds hb.wasm. */
 export const HARFBUZZ_NOTICE_FILE = "knext-third-party-notices.txt";
 
-/** HarfBuzz's "Old MIT" terms (upstream COPYING), kept with the binary that embeds it. */
-const HARFBUZZ_OLD_MIT = `
------ HarfBuzz (Old MIT) -----
+/**
+ * HarfBuzz's licence, verbatim: harfbuzz/harfbuzz `COPYING` on its default
+ * branch, fetched 2026-10-07. harfbuzzjs's own LICENSE does not reproduce it
+ * and its package ships no COPYING; the exact HarfBuzz revision harfbuzzjs
+ * bundles is not recorded in the package, so this is main, not a pinned tag.
+ */
+const HARFBUZZ_COPYING = `
+----- HarfBuzz (Old MIT): harfbuzz/harfbuzz COPYING -----
 
-HarfBuzz is licensed under the so-called "Old MIT" license.
+HarfBuzz is licensed under the so-called "Old MIT" license.  Details follow.
+For parts of HarfBuzz that are licensed under different licenses see individual
+files names COPYING in subdirectories where applicable.
 
-Copyright (c) Google, Inc., Ebrahim Byagowi, Facebook, Inc., Mozilla Foundation,
-Behdad Esfahbod and the other HarfBuzz authors. For the full list of copyright
-notices see https://github.com/harfbuzz/harfbuzz/blob/main/COPYING
+Copyright © 2010-2022  Google, Inc.
+Copyright © 2015-2020  Ebrahim Byagowi
+Copyright © 2019,2020  Facebook, Inc.
+Copyright © 2012,2015  Mozilla Foundation
+Copyright © 2011  Codethink Limited
+Copyright © 2008,2010  Nokia Corporation and/or its subsidiary(-ies)
+Copyright © 2009  Keith Stribley
+Copyright © 2011  Martin Hosken and SIL International
+Copyright © 2007  Chris Wilson
+Copyright © 2005,2006,2020,2021,2022,2023  Behdad Esfahbod
+Copyright © 2004,2007,2008,2009,2010,2013,2021,2022,2023  Red Hat, Inc.
+Copyright © 1998-2005  David Turner and Werner Lemberg
+Copyright © 2016  Igalia S.L.
+Copyright © 2022  Matthias Clasen
+Copyright © 2018,2021  Khaled Hosny
+Copyright © 2018,2019,2020  Adobe, Inc
+Copyright © 2013-2015  Alexei Podtelezhnikov
+
+For full copyright notices consult the individual files in the package.
+
 
 Permission is hereby granted, without written agreement and without
 license or royalty fees, to use, copy, modify, and distribute this
@@ -44,7 +68,7 @@ DAMAGE.
 
 THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
 BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
-FITNESS FOR A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS
+FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
 ON AN "AS IS" BASIS, AND THE COPYRIGHT HOLDER HAS NO OBLIGATION TO
 PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
 `;
@@ -74,7 +98,7 @@ export function harfbuzzNoticeText(hbWasm) {
     // harfbuzzjs's own LICENSE covers harfbuzzjs only (it does not reproduce
     // HarfBuzz's licence and the package ships no COPYING), so HarfBuzz's
     // Old MIT terms are carried here.
-    parts.push(HARFBUZZ_OLD_MIT);
+    parts.push(HARFBUZZ_COPYING);
     return parts.join("");
 }
 

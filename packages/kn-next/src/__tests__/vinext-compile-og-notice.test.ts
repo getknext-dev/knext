@@ -56,6 +56,9 @@ describe("HarfBuzz notice ships with the compiled executable", () => {
             const text = readFileSync(notice, "utf8");
             expect(text).toContain("MIT for the rest of the project");
             expect(text).toContain("harfbuzzjs");
+            expect(text).toContain(
+                "Copyright © 2005,2006,2020,2021,2022,2023  Behdad Esfahbod",
+            );
             expect(text).toContain('"Old MIT" license');
             expect(text).toContain(
                 "THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS",
@@ -78,6 +81,27 @@ describe("HarfBuzz notice ships with the compiled executable", () => {
             expect(text).toContain("No third-party components");
         }, 120_000);
     }
+
+    it("the scaffolded .dockerignore does not exclude the notice from the build context", () => {
+        const lines = readFileSync(join(TEMPLATES, ".dockerignore.hbs"), "utf8")
+            .split("\n")
+            .map((l) => l.trim())
+            .filter(
+                (l) => l !== "" && !l.startsWith("#") && !l.startsWith("!"),
+            );
+        for (const pattern of lines) {
+            const re = new RegExp(
+                `^${pattern
+                    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+                    .replace(/\*\*/g, ".*")
+                    .replace(/\*/g, "[^/]*")
+                    .replace(/\?/g, ".")}$`,
+            );
+            expect(re.test(NOTICE), `.dockerignore pattern ${pattern}`).toBe(
+                false,
+            );
+        }
+    });
 
     for (const name of ["Dockerfile.hbs", "Dockerfile.self-contained.hbs"]) {
         it(`${name} COPYs the notice by exact name (never a lone glob)`, () => {
