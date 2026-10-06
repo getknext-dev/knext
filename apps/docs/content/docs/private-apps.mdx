@@ -129,13 +129,32 @@ as cluster-local, but a Knative `DomainMapping` that points at that Service is r
 from the internet, with whatever auth it has, which for a private app is usually none.
 </Callout>
 
+The operator watches for this. If a `DomainMapping` in the app's namespace targets a private app,
+the app gets a `PrivateExposure` condition (reason `DomainMappingPublishesPrivateApp`) and a
+Warning event that names the mapping. `Ready` is **not** changed, because the app itself is
+healthy, and the operator never edits or deletes your `DomainMapping`: removing it is up to you. The
+condition clears on its own once the mapping is gone.
+
+```bash title="shell"
+kubectl -n <namespace> get nextapp <name> -o jsonpath='{.status.conditions[?(@.type=="PrivateExposure")]}'
+```
+
+## Expose a private app safely
+
 To give a private app a real hostname, keep it off the public gateway and put an authenticating
-layer in front of the cluster's internal gateway instead. For example, run a tunnel (such as a
-Cloudflare Tunnel) inside the cluster that forwards to
-`http://kourier-internal.kourier-system.svc.cluster.local:80`, rewrites the `Host` header to the
-app's own hostname, and sits behind an identity-aware proxy (such as Cloudflare Access) so only the
-people you choose can reach it. That is the same `Host` rewrite as the local proxy above, run inside
-the cluster with authentication in front of it.
+layer in front of the cluster's internal gateway instead:
+
+1. **Run a tunnel inside the cluster** (such as a Cloudflare Tunnel) whose origin is
+   `http://kourier-internal.kourier-system.svc.cluster.local:80`.
+2. **Rewrite the `Host` header** to the app's in-cluster hostname,
+   `<app>.<namespace>.svc.cluster.local`, so the internal gateway routes to the right app. This is
+   the same `Host` rewrite as the local proxy above, run inside the cluster.
+3. **Put an identity-aware proxy in front of the tunnel** (such as Cloudflare Access) so only the
+   people you choose can reach the hostname. The tunnel gives the app a public name; the proxy is
+   what keeps it private.
+
+Do not create a `DomainMapping` for this hostname. The tunnel path never touches the public load
+balancer, which is the point.
 
 To check whether any app already has a custom domain mapped, list the `DomainMapping`s in the
 cluster and remove any that point at a private app:

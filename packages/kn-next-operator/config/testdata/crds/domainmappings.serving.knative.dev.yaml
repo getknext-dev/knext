@@ -1,0 +1,27 @@
+# Minimal Knative DomainMapping CRD fixture for envtest. Used only by the
+# PrivateExposure detection specs (a DomainMapping targeting a cluster-local
+# NextApp's ksvc); not for production deployment.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: domainmappings.serving.knative.dev
+spec:
+  group: serving.knative.dev
+  names:
+    kind: DomainMapping
+    listKind: DomainMappingList
+    plural: domainmappings
+    singular: domainmapping
+    shortNames:
+      - dm
+  scope: Namespaced
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true

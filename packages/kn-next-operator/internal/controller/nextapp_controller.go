@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -53,6 +54,7 @@ import (
 	"knative.dev/pkg/apis"
 	"knative.dev/serving/pkg/apis/serving"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
 	knativenetworking "knative.dev/serving/pkg/networking"
 )
 
@@ -316,6 +318,7 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // Revisions: READ-ONLY — the reconciler GETs the spec.traffic.revisionName pin to
 // surface a GC'd revision as PinnedRevisionNotFound (ADR-0014). Never written.
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=revisions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=serving.knative.dev,resources=domainmappings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
@@ -707,7 +710,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		np.verdict, np.evidence = r.detectNetworkPolicyEnforcement(ctx)
 	}
 
-	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, time.Now())
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, r.detectPrivateExposure(ctx, &nextApp), time.Now())
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -2084,7 +2087,7 @@ func (r *NextAppReconciler) revisionToNextAppRequests(_ context.Context, obj cli
 // Knative Service's /scale, and an external CronJob writer got reverted by the
 // operator every reconcile; single-writer is the correct model.)
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		// GenerationChangedPredicate on the PRIMARY (For) watch only: a
 		// status-only write (metadata.generation is unchanged for status
 		// subresource updates) no longer re-enqueues, which — together with the
@@ -2108,6 +2111,17 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&servingv1.Revision{},
 			handler.EnqueueRequestsFromMapFunc(r.revisionToNextAppRequests),
 		).
-		Named("nextapp").
-		Complete(r)
+		Named("nextapp")
+	// PrivateExposure: a newly created DomainMapping re-triggers reconcile of
+	// the NextApp it targets. The watch needs the DomainMapping CRD at start-up,
+	// so it is registered only when the kind resolves: a Knative install without
+	// domain-mapping must not stop the manager. (The condition itself is also
+	// re-evaluated on every reconcile, so a CRD installed later is picked up on
+	// the next reconcile or operator restart.)
+	if _, err := mgr.GetRESTMapper().RESTMapping(
+		schema.GroupKind{Group: "serving.knative.dev", Kind: "DomainMapping"}, "v1beta1"); err == nil {
+		b = b.Watches(&servingv1beta1.DomainMapping{},
+			handler.EnqueueRequestsFromMapFunc(r.domainMappingToNextAppRequests))
+	}
+	return b.Complete(r)
 }

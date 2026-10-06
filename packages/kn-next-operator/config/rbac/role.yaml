@@ -97,6 +97,7 @@ rules:
 - apiGroups:
   - serving.knative.dev
   resources:
+  - domainmappings
   - revisions
   verbs:
   - get
