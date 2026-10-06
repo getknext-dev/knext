@@ -1,5 +1,16 @@
 # @getknext/core
 
+## 1.3.0-rc.5
+
+### Patch Changes
+
+- 3a846a5: `knext build` now stages the standalone docker build context (`Dockerfile.standalone` and the entry shims) for the Node and Bun targets, the same files `knext deploy` stages, and prints the context path and build command, so the image can be built on a remote builder.
+- c22b079: `knext deploy --image <ref>@sha256:...` no longer fails on the scaffold's placeholder `registry` value. Nothing is built or pushed with a pre-built image, so the registry is not needed; every other placeholder (storage bucket, domains) still fails fast.
+- 4ef2382: `knext deploy` now honours `KN_REDIS_URL` before validating the config: it overrides the redis `cache.url`, including an empty one. Previously the override was applied after validation, so a deploy with only `KN_REDIS_URL` set was refused. The error for a missing URL now names both `REDIS_URL` and `KN_REDIS_URL`. `knext preview` now also applies `KN_REDIS_URL`; before, it ignored it.
+- 91f2150: The operator now warns when a Knative `DomainMapping` targets a private (cluster-local) app. Knative routes a `DomainMapping` through the public load balancer even when the mapping is labelled cluster-local, so the app silently becomes reachable from the internet. The app now carries a `PrivateExposure` condition and a Warning event naming the mapping. `Ready` is unchanged and the operator never modifies or deletes the `DomainMapping`. Upgrade the operator (its RBAC gains read access to `domainmappings`) before relying on it. The private-apps docs now explain how to expose a private app safely.
+- 4f3712e: `next/og` `ImageResponse` now works on the vinext target with `@vercel/og` 1.x (the version vinext pins), on both the Bun compiled executable and Node.js, in pages API routes, app route handlers (Edge or Node.js runtime) and middleware. The build ships the HarfBuzz `hb.wasm` binary from the exact `satori` → `harfbuzzjs` versions `@vercel/og` was built against: it is embedded in the Bun executable, and staged into `.output/server` with its MIT licence for Node.js. OG image routes no longer answer 500 or drop the connection with `ENOENT … hb.wasm`. When those versions do not match, the build prints a `WARNING: next/og will fail at runtime` line, and fails instead under `KNEXT_COMPILE_STRICT_REQUIRES=1` on either runtime (or a `--self-contained` Bun build).
+- 81329bb: The CRD-schema preflight now names only the unknown fields present in the NextApp CR being applied, not every field this CLI version can emit. A `--private` deploy against an older operator no longer also blames `spec.security.writeFree` when the CR carries no such field.
+
 ## 1.3.0-rc.4
 
 ### Patch Changes
