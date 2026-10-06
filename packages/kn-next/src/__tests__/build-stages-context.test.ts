@@ -202,6 +202,70 @@ describe("knext build stages the standalone docker build context", () => {
     });
 });
 
+describe("staged context is complete and failures are loud", () => {
+    /** COPY/ADD sources (non --from) of one Dockerfile stage. */
+    function copySources(dockerfile: string, target: string): string[] {
+        const out: string[] = [];
+        let inStage = false;
+        for (const raw of dockerfile.split("\n")) {
+            const line = raw.trim();
+            if (/^FROM\s/i.test(line)) {
+                inStage = new RegExp(`\\sAS\\s+${target}$`, "i").test(line);
+                continue;
+            }
+            if (!inStage || !/^(COPY|ADD)\s/i.test(line)) continue;
+            if (line.includes("--from")) continue;
+            const parts = line
+                .split(/\s+/)
+                .slice(1)
+                .filter((x) => !x.startsWith("--"));
+            out.push(...parts.slice(0, -1));
+        }
+        return out;
+    }
+
+    const cases: [string, Record<string, unknown>, string][] = [
+        ["node", { runtime: "node" }, "standalone-node"],
+        ["bun", { runtime: "bun" }, "standalone-bun"],
+        [
+            "self-contained",
+            { runtime: "bun", selfContained: true },
+            "standalone-bun-self-contained",
+        ],
+    ];
+    for (const [name, over, target] of cases) {
+        it(`every COPY source of the ${name} stage exists after knext build`, async () => {
+            writeFileSync(join(dir, "package-lock.json"), "{}");
+            mkdirSync(join(dir, ".next", "static"), { recursive: true });
+            mkdirSync(join(dir, "public"), { recursive: true });
+            mkdirSync(join(dir, "node_modules", "@getknext", "core"), {
+                recursive: true,
+            });
+            // the (mocked) compile's output
+            writeFileSync(join(dir, "knext-standalone-exec-linux-x64"), "");
+            loadConfig.mockResolvedValue(cfg(over));
+            await build({ skipNextBuild: true });
+            const sources = copySources(
+                readFileSync(join(dir, STANDALONE_DOCKERFILE_NAME), "utf8"),
+                target,
+            );
+            expect(sources.length).toBeGreaterThan(2);
+            const missing = sources.filter((s) => !existsSync(join(dir, s)));
+            expect(missing).toEqual([]);
+        });
+    }
+
+    it("fails the build (loudly) when staging throws", async () => {
+        writeFileSync(join(dir, "package-lock.json"), "{}");
+        // a directory where the Dockerfile must be written makes staging throw
+        mkdirSync(join(dir, STANDALONE_DOCKERFILE_NAME));
+        loadConfig.mockResolvedValue(cfg({ runtime: "node" }));
+        await expect(build({ skipNextBuild: true })).rejects.toThrow(
+            /Could not stage the docker build context/,
+        );
+    });
+});
+
 describe("deploy and preview behaviour is unchanged", () => {
     const cli = (f: string) =>
         readFileSync(join(import.meta.dir, "..", "cli", f), "utf8");

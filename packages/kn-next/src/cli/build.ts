@@ -285,17 +285,28 @@ function stageImageContext(config: Parameters<typeof selectRuntimeImage>[0]) {
         );
         return;
     }
-    const { dockerfile } = stageStandaloneBuildContext({
-        cwd: process.cwd(),
-        buildContext,
-    });
+    // A staging failure FAILS the build (not a warning): a user building the
+    // image on a remote builder relies on this context, and a silently
+    // missing/half-written one surfaces later as an opaque COPY error there.
+    let dockerfile: string;
+    try {
+        ({ dockerfile } = stageStandaloneBuildContext({
+            cwd: process.cwd(),
+            buildContext,
+        }));
+    } catch (err) {
+        throw new Error(
+            `Could not stage the docker build context: ${err instanceof Error ? err.message : String(err)}`,
+        );
+    }
     log.info(
         {
             buildContext,
             dockerfile,
-            command: `docker buildx build --platform linux/amd64 --target ${selection.target} -f ${dockerfile} ${buildContext}`,
+            // Template: substitute your registry/image ref; --push publishes it.
+            command: `docker buildx build --platform linux/amd64 --target ${selection.target} -f ${dockerfile} -t <image-ref> --push ${buildContext}`,
         },
-        "Staged the docker build context — build the image on your own builder from it",
+        "Staged the docker build context — build the image on your own builder from it (replace <image-ref>)",
     );
 }
 
