@@ -59,7 +59,10 @@ Redis, this block is the first thing to check.
 ## What the runtime guarantees
 
 - **First request** after a cold cache is a `MISS` and writes the rendered page to Redis.
-- **Within the revalidate window** requests are served `HIT` from Redis.
+- **Within the revalidate window** requests are served `HIT` from Redis — including the first
+  request after the app scales up from zero, for pages generated at request time as well as
+  prerendered ones. Each entry carries its own revalidate window, so a freshly started pod does not
+  need to have rendered the page to know it is still fresh.
 - **Past the window** requests are served `STALE` from Redis while a background render replaces the
   entry — stale-while-revalidate, not a blocking re-render.
 - The Redis entry's TTL is deliberately **longer than the revalidate window** (it is the route's

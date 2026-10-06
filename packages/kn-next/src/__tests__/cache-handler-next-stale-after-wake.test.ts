@@ -32,7 +32,7 @@
 // The cache handler's mutating test seams fail closed on a published subpath.
 process.env.KNEXT_TEST_SEAMS = "1";
 
-import { beforeEach, describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -225,6 +225,55 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         // A slash-led key, so the kind guard (not the key shape) is what is tested.
         await handler.get("/fetch-like", { kind: "FETCH" });
         expect(SharedCacheControls.cacheControls.size).toBe(0);
+    });
+});
+
+describe("the in-memory path (no REDIS_URL) gets the same treatment", () => {
+    it("a write 7 min ago by an earlier IncrementalCache reads FRESH after the shared map is lost", async () => {
+        delete process.env.REDIS_URL;
+        SharedCacheControls.cacheControls.clear();
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakemem=${Math.random()}`
+        )) as { default: new (o: unknown) => object };
+        const make = () =>
+            new IncrementalCache({
+                dev: false,
+                minimalMode: false,
+                requestHeaders: {},
+                getPrerenderManifest: emptyManifest,
+                CurCacheHandler: mod.default,
+            }) as unknown as {
+                set: (k: string, d: unknown, c: unknown) => Promise<void>;
+                get: (
+                    k: string,
+                    c: unknown,
+                ) => Promise<{ isStale?: unknown } | null>;
+            };
+        // The rendering pod writes through Next, 7 minutes ago.
+        setSystemTime(new Date(Date.now() - SEVEN_MINUTES_MS));
+        try {
+            await make().set(
+                "/isr/mem",
+                {
+                    kind: "APP_PAGE",
+                    html: "<p>x</p>",
+                    headers: {},
+                    status: 200,
+                },
+                {
+                    cacheControl: { revalidate: 3600, expire: ONE_YEAR_S },
+                    isRoutePPREnabled: false,
+                    isFallback: false,
+                },
+            );
+        } finally {
+            setSystemTime();
+        }
+        // The pod scaled to zero: Next's process-global map is gone.
+        SharedCacheControls.cacheControls.clear();
+        const entry = await make().get("/isr/mem", PAGE);
+        expect(entry).not.toBeNull();
+        expect(entry?.isStale).toBeFalsy();
     });
 });
 
