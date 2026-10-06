@@ -4,6 +4,7 @@ import {
   attachExactLanes,
   evaluateWatchdog,
   fetchScheduledRuns,
+  fetchWindowRuns,
 } from '../scripts/credential-slot-watchdog.mjs';
 import {
   anyLaneNeedsAlert,
@@ -962,5 +963,277 @@ describe('evaluateWatchdog — end to end, offline', () => {
         now: new Date('2026-09-29T20:00:00Z'),
       }),
     ).not.toThrow();
+  });
+});
+// ── #1895 — the 2026-10-05 false positive, replayed from the real run set ───
+//
+// Watchdog run 37356511131 (2026-10-05 18:30Z) reported all four night-4
+// credential lanes "missing" although their scheduled runs existed inside
+// their 8 h grace windows. The listing it got did not contain them (one
+// `event=schedule` response was observed returning a stale window — newest
+// run 2026-09-27 — while 179 runs existed). The fixture below is that run
+// set, with the four crowding `workflow_dispatch` runs at 17:08Z from the real
+// listing.
+
+type FixtureRun = {
+  id: number;
+  event: 'schedule' | 'workflow_dispatch';
+  created_at: string;
+  head_branch: string;
+  status: string;
+  html_url: string;
+  run_started_at: string | null;
+  // fixture-only: artifact markers (absent on dispatch runs in the real data)
+  markers: string[];
+};
+
+const fixtureRun = (
+  id: number,
+  event: FixtureRun['event'],
+  created_at: string,
+  markers: string[] = [],
+  head_branch = 'main',
+): FixtureRun => ({
+  id,
+  event,
+  created_at,
+  head_branch,
+  status: 'completed',
+  html_url: `https://github.com/getknext-dev/knext/actions/runs/${id}`,
+  run_started_at: created_at,
+  markers,
+});
+
+const CRED = (lane: string) => [`compat-lane-${lane}`, 'compat-mode-credential'];
+const EW = (lane: string) => [`compat-lane-${lane}`, 'compat-mode-early-warning'];
+
+const NIGHT4_NODE_WEBPACK = 37249321353;
+const NIGHT4_BUN_WEBPACK = 37255368185;
+const NIGHT4_NODE = 37276219808;
+const NIGHT4_BUN = 37311289929;
+// Early-warning runs (any lane) are not credential runs, but they carry no exact lane and are
+// attributed by timing, so one landing inside a credential slot's grace window satisfies it. A
+// credential run is only truly 'absent' once those are removed too.
+const isEarlyWarning = (r: FixtureRun) => r.markers.includes('compat-mode-early-warning');
+
+const NIGHT4_RUNS: FixtureRun[] = [
+  fixtureRun(37198322226, 'schedule', '2026-10-04T11:19:05Z', EW('bun')),
+  fixtureRun(NIGHT4_NODE_WEBPACK, 'schedule', '2026-10-05T00:54:39Z', CRED('node-webpack')),
+  fixtureRun(NIGHT4_BUN_WEBPACK, 'schedule', '2026-10-05T02:25:48Z', CRED('bun-webpack')),
+  fixtureRun(NIGHT4_NODE, 'schedule', '2026-10-05T07:10:09Z', CRED('node')),
+  fixtureRun(37292974381, 'workflow_dispatch', '2026-10-05T09:53:16Z', [], 'v1.0.0-rc.5'),
+  fixtureRun(37297035896, 'schedule', '2026-10-05T10:30:40Z', EW('node')),
+  fixtureRun(37305584727, 'schedule', '2026-10-05T11:51:03Z', EW('bun')),
+  fixtureRun(NIGHT4_BUN, 'schedule', '2026-10-05T12:41:30Z', CRED('bun')),
+  fixtureRun(37346137030, 'workflow_dispatch', '2026-10-05T17:08:04Z'),
+  fixtureRun(37346137726, 'workflow_dispatch', '2026-10-05T17:08:04Z'),
+  fixtureRun(37346138468, 'workflow_dispatch', '2026-10-05T17:08:05Z'),
+  fixtureRun(37346139474, 'workflow_dispatch', '2026-10-05T17:08:05Z'),
+];
+
+const WATCHDOG_NOW = new Date('2026-10-05T18:30:51Z');
+
+/** More dispatch runs than one API page holds, all newer than every credential run. */
+const crowd = (n: number): FixtureRun[] =>
+  Array.from({ length: n }, (_, i) =>
+    fixtureRun(
+      38_000_000 + i,
+      'workflow_dispatch',
+      new Date(Date.UTC(2026, 9, 5, 17, 9, 0) + i * 1000).toISOString(),
+    ),
+  );
+
+type ListingShape = 'schedule' | 'unfiltered';
+
+/**
+ * A `gh api` simulator over `runs` that honours what the real endpoints do:
+ * `event`, `created=>=`, `per_page` (capped at 100), `page`, newest-first order,
+ * plus the per-run artifacts listing. `hide` makes one listing shape omit runs,
+ * the way the incident's stale response did.
+ */
+function simGh(
+  runs: FixtureRun[],
+  {
+    hide = () => false,
+    fail = () => false,
+  }: {
+    hide?: (shape: ListingShape, r: FixtureRun) => boolean;
+    fail?: (shape: ListingShape) => boolean;
+  } = {},
+) {
+  const calls: string[] = [];
+  const gh = (args: string[]) => {
+    const url = args[1] ?? '';
+    calls.push(url);
+    const artifacts = /actions\/runs\/(\d+)\/artifacts/.exec(url);
+    if (artifacts) {
+      const found = runs.find((r) => r.id === Number(artifacts[1]));
+      return JSON.stringify({ artifacts: (found?.markers ?? []).map((name) => ({ name })) });
+    }
+    const q = new URLSearchParams(url.split('?')[1] ?? '');
+    const shape: ListingShape = q.get('event') === 'schedule' ? 'schedule' : 'unfiltered';
+    if (fail(shape)) throw new Error(`simulated ${shape} listing failure`);
+    const since = q.get('created')?.replace(/^>=/, '');
+    const perPage = Math.min(Number(q.get('per_page') ?? 30), 100);
+    const page = Number(q.get('page') ?? 1);
+    const matching = runs
+      .filter((r) => (shape === 'schedule' ? r.event === 'schedule' : true))
+      .filter((r) => !since || new Date(r.created_at) >= new Date(since))
+      .filter((r) => !hide(shape, r))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
+    const slice = matching.slice((page - 1) * perPage, page * perPage);
+    return JSON.stringify({ total_count: matching.length, workflow_runs: slice });
+  };
+  return { gh, calls };
+}
+
+const verdictsOf = (gh: (a: string[]) => string, now = WATCHDOG_NOW): Record<string, string> =>
+  Object.fromEntries(
+    evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 }).map((v) => [
+      v.lane,
+      v.verdict,
+    ]),
+  );
+
+const ALL_QUIET = {
+  node: 'quiet',
+  bun: 'quiet',
+  'node-webpack': 'quiet',
+  'bun-webpack': 'quiet',
+};
+
+describe('#1895 — night-4 replay: present late-but-in-grace runs are NOT flagged', () => {
+  it('is quiet on all four lanes for the exact run set (late runs 2.6-6.9 h after slot)', () => {
+    const { gh } = simGh(NIGHT4_RUNS);
+    expect(verdictsOf(gh)).toEqual(ALL_QUIET);
+  });
+
+  it('stays quiet when the event=schedule listing is STALE (the incident) — the unfiltered listing still carries the runs', () => {
+    const { gh } = simGh(NIGHT4_RUNS, { hide: (shape) => shape === 'schedule' });
+    expect(verdictsOf(gh)).toEqual(ALL_QUIET);
+  });
+
+  it('stays quiet when the UNFILTERED listing is the stale one — the schedule listing still carries the runs', () => {
+    const { gh } = simGh(NIGHT4_RUNS, { hide: (shape) => shape === 'unfiltered' });
+    expect(verdictsOf(gh)).toEqual(ALL_QUIET);
+  });
+
+  it('stays quiet when workflow_dispatch runs crowd more than one page AND the schedule listing is stale (pagination)', () => {
+    const { gh, calls } = simGh([...NIGHT4_RUNS, ...crowd(250)], {
+      hide: (shape) => shape === 'schedule',
+    });
+    expect(verdictsOf(gh)).toEqual(ALL_QUIET);
+    // The scheduled runs sit behind >2 pages of dispatch runs: only walking
+    // pages finds them.
+    const pages = calls
+      .filter((u) => u.includes('/runs?') && !u.includes('event=schedule'))
+      .map((u) => Number(new URLSearchParams(u.split('?')[1]).get('page')));
+    expect(Math.max(...pages)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('never fetches artifact markers for crowding dispatch runs', () => {
+    const { gh, calls } = simGh([...NIGHT4_RUNS, ...crowd(120)]);
+    verdictsOf(gh);
+    const dispatchIds = [37346137030, 37346137726, 37346138468, 37346139474, 37292974381];
+    for (const id of dispatchIds) {
+      expect(calls.some((u) => u.includes(`/runs/${id}/artifacts`))).toBe(false);
+    }
+  });
+
+  it('tolerates one listing failing outright (the other is enough)', () => {
+    const { gh } = simGh(NIGHT4_RUNS, { fail: (shape) => shape === 'schedule' });
+    expect(verdictsOf(gh)).toEqual(ALL_QUIET);
+  });
+
+  it('FAILS CLOSED when BOTH listings fail (never a silent quiet or empty list)', () => {
+    const { gh } = simGh(NIGHT4_RUNS, { fail: () => true });
+    expect(() => verdictsOf(gh)).toThrow(/simulated/);
+  });
+});
+
+describe('#1895 — night-4 replay: a truly absent run IS flagged', () => {
+  it.each([
+    ['node-webpack', NIGHT4_NODE_WEBPACK],
+    ['bun-webpack', NIGHT4_BUN_WEBPACK],
+    ['node', NIGHT4_NODE],
+    ['bun', NIGHT4_BUN],
+  ])('flags only %s when its run is absent from every listing', (lane, id) => {
+    const { gh } = simGh(NIGHT4_RUNS.filter((r) => r.id !== id && !isEarlyWarning(r)));
+    const verdicts = verdictsOf(gh);
+    expect(verdicts[lane]).not.toBe('quiet');
+    for (const [other, v] of Object.entries(verdicts)) {
+      if (other !== lane) expect(v).toBe('quiet');
+    }
+  });
+
+  it('flags all four (as "missing") when no credential run exists at all, crowded by dispatches', () => {
+    const credentialIds = [NIGHT4_NODE_WEBPACK, NIGHT4_BUN_WEBPACK, NIGHT4_NODE, NIGHT4_BUN];
+    const { gh } = simGh([
+      ...NIGHT4_RUNS.filter((r) => !credentialIds.includes(r.id) && !isEarlyWarning(r)),
+      ...crowd(250),
+    ]);
+    expect(verdictsOf(gh)).toEqual({
+      node: 'missing',
+      bun: 'missing',
+      'node-webpack': 'missing',
+      'bun-webpack': 'missing',
+    });
+  });
+});
+
+describe('#1895 — night-4 replay: a run outside its grace window IS flagged', () => {
+  it('flags node as queued-too-long when its run was created but never started within 8 h', () => {
+    const runs = NIGHT4_RUNS.map((r) =>
+      r.id === NIGHT4_NODE ? { ...r, status: 'queued', run_started_at: null } : r,
+    );
+    const { gh } = simGh(runs);
+    const verdicts = verdictsOf(gh);
+    expect(verdicts.node).toBe('queued-too-long');
+    expect(verdicts.bun).toBe('quiet');
+  });
+
+  it('flags a lane whose only evidence predates its slot (stale prior-cycle run)', () => {
+    const stale = NIGHT4_RUNS.map((r) =>
+      r.id === NIGHT4_NODE ? { ...r, created_at: '2026-10-04T07:10:09Z' } : r,
+    );
+    const { gh } = simGh(stale);
+    expect(verdictsOf(gh).node).not.toBe('quiet');
+  });
+
+  it('is quiet before grace elapses with no run, and flagged once it does (boundary)', () => {
+    const noNode = NIGHT4_RUNS.filter((r) => r.id !== NIGHT4_NODE);
+    const { gh } = simGh(noNode);
+    expect(verdictsOf(gh, new Date('2026-10-05T09:16:59Z')).node).toBe('quiet');
+    expect(verdictsOf(gh, new Date('2026-10-05T09:17:00Z')).node).toBe('missing');
+  });
+});
+
+describe('fetchScheduledRuns / fetchWindowRuns — pagination and union (#1895)', () => {
+  it('walks pages until a short page, returning every run across them', () => {
+    const { gh } = simGh(crowd(250));
+    const out = fetchScheduledRuns(gh, { event: null });
+    expect(out).toHaveLength(250);
+  });
+
+  it('stops paging once a page reaches below `since`, never walking the whole history', () => {
+    const { gh, calls } = simGh([...crowd(250), fixtureRun(1, 'schedule', '2026-01-01T00:00:00Z')]);
+    fetchScheduledRuns(gh, { event: null, since: '2026-10-05T17:09:00Z' });
+    expect(calls.length).toBeLessThanOrEqual(3);
+  });
+
+  it('fetchWindowRuns unions by id and drops runs older than `since` and non-schedule events', () => {
+    const { gh } = simGh(NIGHT4_RUNS);
+    const out = fetchWindowRuns(gh, { since: '2026-10-05T00:00:00Z' });
+    const ids = out.map((r) => r.id).sort();
+    expect(ids).toEqual(
+      [
+        NIGHT4_NODE_WEBPACK,
+        NIGHT4_BUN_WEBPACK,
+        NIGHT4_NODE,
+        NIGHT4_BUN,
+        37297035896,
+        37305584727,
+      ].sort(),
+    );
   });
 });

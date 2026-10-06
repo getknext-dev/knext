@@ -51,31 +51,99 @@ function runGh(args) {
   return r.stdout;
 }
 
-/**
- * List the workflow's own scheduled runs (read-only). Injectable `gh` for
- * offline testing.
- *
- * @param {(args: string[]) => string} gh
- * @param {{repo?: string, workflowFile?: string, perPage?: number}} [opts]
- */
-export function fetchScheduledRuns(
-  gh,
-  { repo = REPO, workflowFile = WORKFLOW_FILE, perPage = 50 } = {},
-) {
-  const raw = gh([
-    'api',
-    `repos/${repo}/actions/workflows/${workflowFile}/runs?event=schedule&per_page=${perPage}`,
-  ]);
-  const parsed = JSON.parse(raw);
-  const runs = Array.isArray(parsed.workflow_runs) ? parsed.workflow_runs : [];
-  return runs.map((r) => ({
+/** Per-listing page size (the API maximum) and the page cap that bounds the walk. */
+export const RUNS_PER_PAGE = 100;
+export const MAX_RUN_PAGES = 5;
+
+function mapRun(r) {
+  return {
     id: r.id,
     event: r.event,
     status: r.status,
     created_at: r.created_at,
     run_started_at: r.run_started_at ?? null,
     html_url: r.html_url,
-  }));
+  };
+}
+
+/**
+ * List the workflow's runs (read-only), newest first, walking pages until the
+ * window is exhausted. Injectable `gh` for offline testing.
+ *
+ * `event` defaults to `'schedule'` (the API's server-side event filter); pass
+ * `null` for the UNFILTERED listing. `since` (ISO time) bounds the walk with the
+ * API's `created` filter and stops paging once a page's oldest run predates it.
+ *
+ * @param {(args: string[]) => string} gh
+ * @param {{repo?: string, workflowFile?: string, perPage?: number, event?: string|null, since?: string|null, maxPages?: number}} [opts]
+ */
+export function fetchScheduledRuns(
+  gh,
+  {
+    repo = REPO,
+    workflowFile = WORKFLOW_FILE,
+    perPage = RUNS_PER_PAGE,
+    event = 'schedule',
+    since = null,
+    maxPages = MAX_RUN_PAGES,
+  } = {},
+) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const query = [`per_page=${perPage}`, `page=${page}`];
+    if (event) query.push(`event=${event}`);
+    if (since) query.push(`created=%3E%3D${since}`);
+    const raw = gh([
+      'api',
+      `repos/${repo}/actions/workflows/${workflowFile}/runs?${query.join('&')}`,
+    ]);
+    const parsed = JSON.parse(raw);
+    const runs = Array.isArray(parsed.workflow_runs) ? parsed.workflow_runs : [];
+    out.push(...runs.map(mapRun));
+    if (runs.length < perPage) break;
+    const oldest = runs[runs.length - 1]?.created_at;
+    if (since && oldest && new Date(oldest).getTime() < new Date(since).getTime()) break;
+  }
+  return out;
+}
+
+/**
+ * The runs that can satisfy a slot, from TWO independent listings unioned by
+ * run id: the server-side `event=schedule` listing and the UNFILTERED listing
+ * (filtered to schedule client-side). One listing is never authoritative: the
+ * 2026-10-05 false positive (all four night-4 lanes "missing" though their
+ * runs existed) came from a single `event=schedule` response that did not
+ * contain them, and a "missing" verdict is only safe when NEITHER listing has
+ * the run. The unfiltered walk is also paginated, so crowding by
+ * `workflow_dispatch` runs cannot push a scheduled run out of view. Either
+ * listing failing is tolerated; both failing throws (fail closed).
+ *
+ * @param {(args: string[]) => string} gh
+ * @param {{since?: string|null, repo?: string, workflowFile?: string}} [opts]
+ */
+export function fetchWindowRuns(gh, { since = null, ...rest } = {}) {
+  const listings = [];
+  const errors = [];
+  for (const event of ['schedule', null]) {
+    try {
+      listings.push(fetchScheduledRuns(gh, { ...rest, since, event }));
+    } catch (err) {
+      errors.push(err);
+    }
+  }
+  if (listings.length === 0) throw errors[0];
+
+  const seen = new Set();
+  const merged = [];
+  for (const run of listings.flat()) {
+    if (run.event && run.event !== 'schedule') continue;
+    if (since && new Date(run.created_at).getTime() < new Date(since).getTime()) continue;
+    const key = run.id ?? `${run.created_at}|${run.html_url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(run);
+  }
+  return merged;
 }
 
 /**
@@ -153,7 +221,8 @@ export function evaluateWatchdog({ workflowYamlText, gh, now = new Date(), grace
     allSlots = lanes.map(({ cron, hour, minute }) => ({ cron, hour, minute }));
   }
 
-  const rawRuns = fetchScheduledRuns(gh);
+  const since = lanes.map((l) => l.expectedSlotTime).sort()[0];
+  const rawRuns = fetchWindowRuns(gh, { since });
   const runsWithExactLane = attachExactLanes(gh, rawRuns);
   const { attributed, ambiguousLanes } = attributeRunsToLanes(runsWithExactLane, lanes, allSlots);
   return decideCredentialSlotVerdicts({ lanes, runs: attributed, now, ambiguousLanes });

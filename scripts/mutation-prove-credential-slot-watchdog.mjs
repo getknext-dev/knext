@@ -112,8 +112,34 @@ const MUTATIONS = [
   {
     label: 'fetchScheduledRuns: drop the event=schedule filter from the GitHub API query',
     subject: 'cli',
-    anchor: 'runs?event=schedule&per_page=',
-    replacement: 'runs?per_page=',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source text of the anchor line, not an interpolation
+    anchor: 'if (event) query.push(`event=${event}`);',
+    replacement: 'if (false) query.push(`event=${event}`);',
+  },
+  {
+    // #1895 - one listing must never be authoritative.
+    label: 'fetchWindowRuns: drop the unfiltered listing (single event=schedule listing again)',
+    subject: 'cli',
+    anchor: "for (const event of ['schedule', null]) {",
+    replacement: "for (const event of ['schedule']) {",
+  },
+  {
+    label: 'fetchScheduledRuns: stop after the first page regardless of how full it is',
+    subject: 'cli',
+    anchor: 'if (runs.length < perPage) break;',
+    replacement: 'if (true) break;',
+  },
+  {
+    label: 'fetchWindowRuns: stop dropping non-schedule runs from the unfiltered listing',
+    subject: 'cli',
+    anchor: "if (run.event && run.event !== 'schedule') continue;",
+    replacement: 'if (false) continue;',
+  },
+  {
+    label: 'fetchWindowRuns: do not throw when BOTH listings fail (fail open)',
+    subject: 'cli',
+    anchor: 'if (listings.length === 0) throw errors[0];',
+    replacement: 'if (listings.length === 0) return [];',
   },
   {
     // #1650 round 2, finding 2 — the cross-lane masking fix.
@@ -155,10 +181,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(14);
+declareMutations(18);
 
-if (MUTATIONS.length !== 14) {
-  console.error(`FATAL: declared 14 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 18) {
+  console.error(`FATAL: declared 18 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
