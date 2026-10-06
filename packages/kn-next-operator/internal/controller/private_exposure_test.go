@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -174,6 +175,7 @@ func fakeScheme() *runtime.Scheme {
 	_ = servingv1beta1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
 	_ = servingv1.AddToScheme(s)
+	_ = appsv1alpha1.AddToScheme(s)
 	return s
 }
 
@@ -332,16 +334,51 @@ func TestDetectPrivateExposure_UnresolvableRefFailsClosedOnNameElseUnknown(t *te
 	}
 }
 
-func TestDomainMappingToNextAppRequests_TransientGetErrorStillEnqueues(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithInterceptorFuncs(interceptor.Funcs{
-		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			return errors.New("apiserver timeout")
-		},
-	}).Build()
+func TestDetectPrivateExposure_UnresolvableDMDoesNotBlockLaterLeak(t *testing.T) {
+	app := privateApp()
+	app.Namespace = "team-a"
+	boom := interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+		return errors.New("forbidden")
+	}}
+	// "a-bad" sorts (and lists) BEFORE "z-leak".
+	bad := dm("team-a", "a-bad.example.com", "some-broker")
+	bad.Spec.Ref.Kind = "Broker"
+	bad.Spec.Ref.APIVersion = "eventing.knative.dev/v1"
+	leak := dm("team-a", "z-leak.example.com", app.Name)
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(bad, leak).WithInterceptorFuncs(boom).Build()
+	got := (&NextAppReconciler{Client: c}).detectPrivateExposure(context.Background(), app)
+	if got.unknown || len(got.domainMappings) != 1 || got.domainMappings[0] != "z-leak.example.com" {
+		t.Fatalf("exposure found must win over an unresolvable mapping: %+v", got)
+	}
+}
+
+func TestDomainMappingToNextAppRequests_FailedGetEnqueuesPrivateAppsOnly(t *testing.T) {
+	mk := func(name, ns string, private bool) *appsv1alpha1.NextApp {
+		a := &appsv1alpha1.NextApp{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+		if private {
+			a.Spec.Networking = &appsv1alpha1.NetworkingSpec{Visibility: appsv1alpha1.VisibilityClusterLocal}
+		}
+		return a
+	}
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).
+		WithObjects(mk("priv-1", "team-a", true), mk("priv-2", "team-a", true), mk("pub", "team-a", false), mk("priv-other-ns", "team-b", true)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return errors.New("apiserver timeout")
+			},
+		}).Build()
 	d := dm("team-a", "x.example.com", "my-app-00003")
 	d.Spec.Ref.APIVersion = "v1"
 	got := (&NextAppReconciler{Client: c}).domainMappingToNextAppRequests(context.Background(), d)
-	if len(got) != 1 || got[0].Name != "my-app-00003" || got[0].Namespace != "team-a" {
-		t.Fatalf("a failed Get must still enqueue the ref name, got %+v", got)
+	names := []string{}
+	for _, g := range got {
+		if g.Namespace != "team-a" {
+			t.Fatalf("wrong namespace enqueued: %+v", g)
+		}
+		names = append(names, g.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "priv-1,priv-2" {
+		t.Fatalf("want exactly the cluster-local apps of the namespace, got %v", names)
 	}
 }

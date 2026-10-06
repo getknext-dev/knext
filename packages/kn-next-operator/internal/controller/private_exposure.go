@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"sort"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -68,6 +69,9 @@ func isPrivate(app *appsv1alpha1.NextApp) bool {
 	return app.Spec.Networking != nil && app.Spec.Networking.Visibility == appsv1alpha1.VisibilityClusterLocal
 }
 
+// refGetTimeout bounds the per-DomainMapping uncached Get.
+const refGetTimeout = 5 * time.Second
+
 // ownerAppOf resolves which NextApp (== ksvc name) a DomainMapping ref
 // publishes, or "" when it addresses something else. A ref may point at ANY
 // addressable object in the namespace (Knative Service, Route, Revision, a
@@ -104,6 +108,10 @@ func (r *NextAppReconciler) ownerAppOf(ctx context.Context, dm *servingv1beta1.D
 	obj := &unstructured.Unstructured{}
 	obj.SetAPIVersion(ref.APIVersion)
 	obj.SetKind(ref.Kind)
+	// Bound the uncached Get so a slow apiserver cannot stall a reconcile or
+	// the watch map func.
+	ctx, cancel := context.WithTimeout(ctx, refGetTimeout)
+	defer cancel()
 	if err := reader.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, obj); err != nil {
 		if apierrors.IsNotFound(err) {
 			if ref.Kind == "Service" || ref.Kind == "Route" {
@@ -132,6 +140,10 @@ func (r *NextAppReconciler) detectPrivateExposure(ctx context.Context, app *apps
 		st.unknown = true
 		return st
 	}
+	// One unresolvable mapping must not stop the scan: a persistently failing
+	// ref (say, Forbidden every time) would otherwise blind detection for every
+	// private app in the namespace. Exposure found wins over unknowns.
+	unresolved := false
 	for i := range list.Items {
 		dm := &list.Items[i]
 		if dm.Namespace != app.Namespace {
@@ -147,14 +159,17 @@ func (r *NextAppReconciler) detectPrivateExposure(ctx context.Context, app *apps
 				st.domainMappings = append(st.domainMappings, dm.Name)
 				continue
 			}
-			st.unknown = true
-			return st
+			unresolved = true
+			continue
 		}
 		if owner == app.Name && (dm.Spec.Ref.Namespace == "" || dm.Spec.Ref.Namespace == app.Namespace) {
 			st.domainMappings = append(st.domainMappings, dm.Name)
 		}
 	}
 	sort.Strings(st.domainMappings)
+	if len(st.domainMappings) == 0 && unresolved {
+		st.unknown = true
+	}
 	return st
 }
 
@@ -167,9 +182,22 @@ func (r *NextAppReconciler) domainMappingToNextAppRequests(ctx context.Context, 
 	}
 	owner, err := r.ownerAppOf(ctx, dm)
 	if err != nil {
-		// A failed Get must not drop the event: enqueue the ref name (the
-		// reconcile re-runs detection and applies the same fail-closed rule).
-		owner = dm.Spec.Ref.Name
+		// A failed Get must not drop the event, and the ref name need not be a
+		// NextApp (a Revision or Service name is not): enqueue every
+		// cluster-local NextApp in the namespace, whose reconcile re-runs
+		// detection with the same fail-closed rule. Public apps are skipped.
+		apps := &appsv1alpha1.NextAppList{}
+		if lerr := r.List(ctx, apps, client.InNamespace(dm.Namespace)); lerr != nil {
+			return nil
+		}
+		var reqs []reconcile.Request
+		for i := range apps.Items {
+			if isPrivate(&apps.Items[i]) {
+				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+					Name: apps.Items[i].Name, Namespace: apps.Items[i].Namespace}})
+			}
+		}
+		return reqs
 	}
 	if owner == "" {
 		return nil
