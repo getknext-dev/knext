@@ -168,6 +168,44 @@ export function unknownEmittedFields(
 }
 
 /**
+ * Emitted paths that appear on a CR only when a FEATURE is in play, with the
+ * sentence `doctor` uses to say which feature needs the newer operator. One
+ * source of truth for `doctor` and the deploy preflight: every path here is
+ * also in the generated emitted-field vocabulary (a test pins it), and the
+ * preflight needs no copy because it already narrows to the fields of the CR
+ * actually being applied — a conditional field only reaches it when it is sent.
+ *
+ * Everything NOT listed is treated as always-emitted and a missing one is a
+ * hard failure.
+ */
+export const CONDITIONALLY_EMITTED_FIELDS: Readonly<Record<string, string>> = {
+    "spec.security.writeFree":
+        "needed for write-free pods when `knext deploy` builds the image",
+    "spec.networking": "needed for private apps",
+};
+
+export interface PartitionedMissingFields {
+    /** Missing fields every deploy may emit — a hard failure. */
+    required: string[];
+    /** Missing fields only a specific feature emits — a warning. */
+    conditional: { path: string; feature: string }[];
+}
+
+/** Split `unknownEmittedFields` output into required vs conditional. */
+export function partitionMissingFields(
+    missing: readonly string[],
+): PartitionedMissingFields {
+    const required: string[] = [];
+    const conditional: { path: string; feature: string }[] = [];
+    for (const path of missing) {
+        const feature = CONDITIONALLY_EMITTED_FIELDS[path];
+        if (feature === undefined) required.push(path);
+        else conditional.push({ path, feature });
+    }
+    return { required, conditional };
+}
+
+/**
  * Narrow the emitted-path vocabulary to the paths a CONCRETE CR actually
  * carries (`*` matches any map key or array index). The static list is every
  * field this CLI version CAN emit; a refusal must name only what THIS apply

@@ -486,6 +486,11 @@ cluster wired up are each a single actionable line by default — no raw kubectl
   says so as `operator behind CLI: the installed CRD is missing N field(s) this CLI emits — they
   would be dropped. Upgrade the operator first (operator, then CLI).` — the full field list (for
   filing a ticket or debugging) is available with `--verbose`.
+- **CRD predates an optional feature.** If the only missing fields are ones the CLI emits just
+  for a specific feature, doctor warns instead of failing and names the feature — for example
+  `spec.security.writeFree — needed for write-free pods when `knext deploy` builds the image;
+  upgrade the operator to use it`, or `spec.networking — needed for private apps`. Deploys that
+  don't use those features are unaffected; one that does is refused before anything is uploaded.
 - **Registry auth failure.** When an app's image can't be pulled anonymously and no credential is
   attached, doctor names the missing Secret/`imagePullSecrets` fix directly in the check's line,
   with a pointer to [private registries](/docs/private-registries).
