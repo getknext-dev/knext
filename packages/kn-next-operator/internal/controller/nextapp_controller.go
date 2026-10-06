@@ -256,6 +256,10 @@ func pinnedRevisionMissingStalled(revisionNotFound bool, ksvc *servingv1.Service
 type NextAppReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader is an uncached reader used for the rare per-DomainMapping Get of
+	// a core Service (PrivateExposure detection), so that does not start a
+	// cluster-wide Service informer. Falls back to the cached Client when nil.
+	APIReader client.Reader
 	// Recorder emits Kubernetes Events attached to the NextApp so operators can see
 	// reconcile transitions via `kubectl describe`. May be nil in unit tests.
 	Recorder record.EventRecorder
@@ -319,6 +323,7 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // surface a GC'd revision as PinnedRevisionNotFound (ADR-0014). Never written.
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=revisions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=domainmappings,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete

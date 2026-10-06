@@ -172,6 +172,7 @@ func dm(ns, name, refName string) *servingv1beta1.DomainMapping {
 func fakeScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = servingv1beta1.AddToScheme(s)
+	_ = corev1.AddToScheme(s)
 	return s
 }
 
@@ -183,17 +184,42 @@ func TestDetectPrivateExposure_MatchesOnlyThisAppsKsvc(t *testing.T) {
 	hit := dm("team-a", "app.example.com", app.Name)
 	k8sSvcRef := dm("team-a", "svc.example.com", app.Name)
 	k8sSvcRef.Spec.Ref.APIVersion = "v1"
-	notSvc := dm("team-a", "route.example.com", app.Name)
-	notSvc.Spec.Ref.Kind = "Route"
+	notSvc := dm("team-a", "dep.example.com", app.Name)
+	notSvc.Spec.Ref.Kind = "Deployment"
 
-	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(other, otherNS, hit, k8sSvcRef, notSvc).Build()
+	// Route of this app (same name as the ksvc) and a revision's core Service.
+	route := dm("team-a", "route.example.com", app.Name)
+	route.Spec.Ref.Kind = "Route"
+	otherRoute := dm("team-a", "other-route.example.com", "someone-else")
+	otherRoute.Spec.Ref.Kind = "Route"
+	revSvc := dm("team-a", "rev.example.com", app.Name+"-00001")
+	revSvc.Spec.Ref.APIVersion = "v1"
+	otherRevSvc := dm("team-a", "other-rev.example.com", "someone-else-00001")
+	otherRevSvc.Spec.Ref.APIVersion = "v1"
+	// A different app whose name merely starts with this one's must NOT match.
+	prefixSvc := dm("team-a", "prefix.example.com", app.Name+"-v2-00001")
+	prefixSvc.Spec.Ref.APIVersion = "v1"
+	unlabelled := dm("team-a", "plain.example.com", "unrelated-svc")
+	unlabelled.Spec.Ref.APIVersion = "v1"
+	coreSvc := func(name, owner string) *corev1.Service {
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a"}}
+		if owner != "" {
+			svc.Labels = map[string]string{"serving.knative.dev/service": owner}
+		}
+		return svc
+	}
+
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(other, otherNS, hit, k8sSvcRef, notSvc,
+		route, otherRoute, revSvc, otherRevSvc, prefixSvc, unlabelled,
+		coreSvc(app.Name+"-00001", app.Name), coreSvc("someone-else-00001", "someone-else"),
+		coreSvc(app.Name+"-v2-00001", app.Name+"-v2"), coreSvc("unrelated-svc", "")).Build()
 	r := &NextAppReconciler{Client: c}
 	got := r.detectPrivateExposure(context.Background(), app)
 
 	if !got.private || got.unknown {
 		t.Fatalf("state: %+v", got)
 	}
-	want := []string{"app.example.com", "svc.example.com"}
+	want := []string{"app.example.com", "rev.example.com", "route.example.com", "svc.example.com"}
 	if strings.Join(got.domainMappings, ",") != strings.Join(want, ",") {
 		t.Fatalf("domainMappings: got %v, want %v (same-ns, ref -> this ksvc only, sorted)", got.domainMappings, want)
 	}
@@ -248,6 +274,22 @@ func TestDomainMappingToNextAppRequests(t *testing.T) {
 	}
 	if got := r.domainMappingToNextAppRequests(context.Background(), &servingv1.Service{}); got != nil {
 		t.Fatalf("non-DomainMapping must enqueue nothing")
+	}
+	// Route ref and a revision-Service ref both map back to the owning app.
+	route := dm("team-a", "r.example.com", "my-app")
+	route.Spec.Ref.Kind = "Route"
+	if got := r.domainMappingToNextAppRequests(context.Background(), route); len(got) != 1 || got[0] != want {
+		t.Fatalf("route ref: got %+v want %+v", got, want)
+	}
+	rc := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app-00003", Namespace: "team-a",
+			Labels: map[string]string{"serving.knative.dev/service": "my-app"}},
+	}).Build()
+	rr := &NextAppReconciler{Client: rc}
+	rev := dm("team-a", "rev.example.com", "my-app-00003")
+	rev.Spec.Ref.APIVersion = "v1"
+	if got := rr.domainMappingToNextAppRequests(context.Background(), rev); len(got) != 1 || got[0] != want {
+		t.Fatalf("revision service ref: got %+v want %+v", got, want)
 	}
 	empty := dm("team-a", "x", "")
 	if got := r.domainMappingToNextAppRequests(context.Background(), empty); got != nil {

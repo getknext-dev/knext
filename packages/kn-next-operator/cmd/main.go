@@ -183,6 +183,7 @@ func main() {
 	if err := (&controller.NextAppReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
+		APIReader: mgr.GetAPIReader(),
 		Recorder: mgr.GetEventRecorderFor("nextapp-controller"),
 		Cleaner:  controller.NewDefaultCleaner(),
 	}).SetupWithManager(mgr); err != nil {

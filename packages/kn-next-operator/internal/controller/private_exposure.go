@@ -20,8 +20,11 @@ import (
 	"context"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"knative.dev/serving/pkg/apis/serving"
 	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -65,19 +68,55 @@ func isPrivate(app *appsv1alpha1.NextApp) bool {
 	return app.Spec.Networking != nil && app.Spec.Networking.Visibility == appsv1alpha1.VisibilityClusterLocal
 }
 
-// refTargetsKsvc reports whether a DomainMapping ref addresses the Service
-// named like the NextApp (the ksvc name == the NextApp name). Both the Knative
-// Service ref and a plain Kubernetes Service ref of that name resolve to the
-// same routable name, so both count.
-func refTargetsKsvc(dm *servingv1beta1.DomainMapping, app *appsv1alpha1.NextApp) bool {
+// ownerAppOf resolves which NextApp (== ksvc name) a DomainMapping ref
+// publishes, or "" when it addresses something else. A ref may point at any
+// addressable object in the namespace, and three shapes all reach the app
+// through the same public path:
+//   - the Knative Service (serving.knative.dev/v1 Service <app>);
+//   - the Route every ksvc creates under the same name (serving.knative.dev/v1
+//     Route <app>);
+//   - a core v1 Service: the ksvc placeholder (<app>) or a per-revision
+//     Service (<app>-00001), which carries the authoritative label
+//     serving.knative.dev/service=<app>. The label is read with a Get rather
+//     than guessing from a name prefix, which would false-match another app
+//     whose name merely starts with this one's.
+//
+// err is non-nil only for a failed Get that is not a plain NotFound.
+func (r *NextAppReconciler) ownerAppOf(ctx context.Context, dm *servingv1beta1.DomainMapping) (string, error) {
 	ref := dm.Spec.Ref
-	if ref.Name != app.Name || ref.Kind != "Service" {
-		return false
+	if ref.Name == "" {
+		return "", nil
 	}
-	if ref.Namespace != "" && ref.Namespace != app.Namespace {
-		return false
+	ns := ref.Namespace
+	if ns == "" {
+		ns = dm.Namespace
 	}
-	return ref.APIVersion == "v1" || ref.APIVersion == "serving.knative.dev/v1" || ref.APIVersion == ""
+	switch {
+	case ref.APIVersion == "serving.knative.dev/v1" && (ref.Kind == "Service" || ref.Kind == "Route"):
+		return ref.Name, nil
+	case (ref.APIVersion == "v1" || ref.APIVersion == "") && ref.Kind == "Service":
+		svc := &corev1.Service{}
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		if reader == nil {
+			return ref.Name, nil
+		}
+		if err := reader.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, svc); err != nil {
+			if apierrors.IsNotFound(err) {
+				// No such Service to resolve: the ksvc placeholder shares the
+				// app's name, so the name itself still identifies the app.
+				return ref.Name, nil
+			}
+			return "", err
+		}
+		if app := svc.Labels[serving.ServiceLabelKey]; app != "" {
+			return app, nil
+		}
+		return ref.Name, nil
+	}
+	return "", nil
 }
 
 // detectPrivateExposure lists DomainMappings in the app's namespace and returns
@@ -97,8 +136,17 @@ func (r *NextAppReconciler) detectPrivateExposure(ctx context.Context, app *apps
 		return st
 	}
 	for i := range list.Items {
-		if refTargetsKsvc(&list.Items[i], app) {
-			st.domainMappings = append(st.domainMappings, list.Items[i].Name)
+		dm := &list.Items[i]
+		if dm.Namespace != app.Namespace {
+			continue
+		}
+		owner, err := r.ownerAppOf(ctx, dm)
+		if err != nil {
+			st.unknown = true
+			return st
+		}
+		if owner == app.Name && (dm.Spec.Ref.Namespace == "" || dm.Spec.Ref.Namespace == app.Namespace) {
+			st.domainMappings = append(st.domainMappings, dm.Name)
 		}
 	}
 	sort.Strings(st.domainMappings)
@@ -107,14 +155,18 @@ func (r *NextAppReconciler) detectPrivateExposure(ctx context.Context, app *apps
 
 // domainMappingToNextAppRequests maps a DomainMapping to the NextApp (== ksvc
 // name) it targets, so creating one re-triggers reconcile promptly.
-func (r *NextAppReconciler) domainMappingToNextAppRequests(_ context.Context, obj client.Object) []reconcile.Request {
+func (r *NextAppReconciler) domainMappingToNextAppRequests(ctx context.Context, obj client.Object) []reconcile.Request {
 	dm, ok := obj.(*servingv1beta1.DomainMapping)
-	if !ok || dm.Spec.Ref.Name == "" {
+	if !ok {
+		return nil
+	}
+	owner, err := r.ownerAppOf(ctx, dm)
+	if err != nil || owner == "" {
 		return nil
 	}
 	ns := dm.Spec.Ref.Namespace
 	if ns == "" {
 		ns = dm.Namespace
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: dm.Spec.Ref.Name, Namespace: ns}}}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: owner, Namespace: ns}}}
 }
