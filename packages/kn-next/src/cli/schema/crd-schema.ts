@@ -167,6 +167,29 @@ export function unknownEmittedFields(
     return missing.filter((p) => !hasMissingAncestor(p)).sort();
 }
 
+/**
+ * Narrow the emitted-path vocabulary to the paths a CONCRETE CR actually
+ * carries (`*` matches any map key or array index). The static list is every
+ * field this CLI version CAN emit; a refusal must name only what THIS apply
+ * contains, or the user is told to upgrade for fields they never sent.
+ */
+export function presentEmittedPaths(
+    emitted: readonly string[],
+    cr: unknown,
+): string[] {
+    const has = (node: unknown, parts: readonly string[]): boolean => {
+        if (parts.length === 0) return node !== undefined && node !== null;
+        if (typeof node !== "object" || node === null) return false;
+        const [head, ...rest] = parts;
+        const entries: unknown[] =
+            head === "*"
+                ? Object.values(node as Record<string, unknown>)
+                : [(node as Record<string, unknown>)[head as string]];
+        return entries.some((child) => has(child, rest));
+    };
+    return emitted.filter((p) => has(cr, p.split(".")));
+}
+
 /** The v1alpha1 structural schema out of a `kubectl get crd -o json` object. */
 export function crdSchemaFromCrdObject(
     crd: unknown,
