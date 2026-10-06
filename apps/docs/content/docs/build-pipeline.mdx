@@ -69,7 +69,8 @@ missing the HarfBuzz text-shaping file (`hb.wasm`), so the build takes that file
 the `harfbuzzjs` MIT licence (`hb.wasm.LICENSE`).
 
 If those versions do not match, for example because an `overrides` or `resolutions` entry
-changed `satori` or `harfbuzzjs`, the build prints:
+changed `satori` or `harfbuzzjs`, the build prints this warning (the Bun build prefixes it with
+`[knext compile]`):
 
 ```text
 WARNING: next/og will fail at runtime (ImageResponse answers 500): HarfBuzz's hb.wasm could not be bundled — …

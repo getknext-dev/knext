@@ -18,7 +18,7 @@
  */
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, rmSync } from "node:fs";
+import { existsSync, renameSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildOgApp, cleanupTemps, temp } from "./og-harfbuzz-fixture";
 
@@ -60,7 +60,9 @@ function shipAndRun(appDir: string, outFile: string) {
     expect(existsSync(outFile)).toBe(true);
     const shipDir = temp("knext-og-hb-ship-");
     const shipped = join(shipDir, "og-hb-exec");
-    cpSync(outFile, shipped);
+    // rename, not copy: same tmpfs, and it keeps this suite's disk I/O down
+    // (each binary is tens of MB, and CI runs files in parallel)
+    renameSync(outFile, shipped);
     rmSync(appDir, { recursive: true, force: true });
     return spawnSync(shipped, [], {
         cwd: shipDir,

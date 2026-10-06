@@ -499,11 +499,11 @@ const HARFBUZZ_WARNED = new Set();
  */
 function harfbuzzOrSignal(result, where) {
     if ("path" in result) return result.path;
-    const message = `[knext compile] ${ogHarfbuzzWarning(result.reason)} (in ${where})`;
-    if (STRICT_REQUIRES) throw new Error(message);
-    if (!HARFBUZZ_WARNED.has(message)) {
-        HARFBUZZ_WARNED.add(message);
-        console.warn(message);
+    const body = `${ogHarfbuzzWarning(result.reason)} (in ${where})`;
+    if (STRICT_REQUIRES) throw new Error(`[knext compile] ${body}`);
+    if (!HARFBUZZ_WARNED.has(body)) {
+        HARFBUZZ_WARNED.add(body);
+        console.warn(`[knext compile] ${body}`);
     }
     return undefined;
 }
