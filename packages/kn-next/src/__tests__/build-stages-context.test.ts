@@ -113,6 +113,7 @@ mock.module("../cli/postcompile-smoke", () => ({
 
 import { build } from "../cli/build";
 import {
+    dockerignoreExcludes,
     STANDALONE_DOCKERFILE_NAME,
     stageStandaloneBuildContext,
 } from "../cli/runtime-image";
@@ -254,6 +255,36 @@ describe("staged context is complete and failures are loud", () => {
             expect(missing).toEqual([]);
         });
     }
+
+    it("the documented .gcloudignore excludes none of the staged Dockerfile's COPY sources", async () => {
+        const mdx = readFileSync(
+            join(
+                import.meta.dir,
+                "../../../../apps/docs/content/docs/build-pipeline.mdx",
+            ),
+            "utf8",
+        );
+        const m = mdx.match(/```text title="\.gcloudignore"\n([\s\S]*?)```/);
+        expect(m).not.toBeNull();
+        const ignore = (m as RegExpMatchArray)[1];
+        for (const [, over, target] of cases) {
+            writeFileSync(join(dir, "package-lock.json"), "{}");
+            loadConfig.mockResolvedValue(cfg(over));
+            await build({ skipNextBuild: true });
+            const sources = [
+                ...copySources(
+                    readFileSync(join(dir, STANDALONE_DOCKERFILE_NAME), "utf8"),
+                    target,
+                ),
+                STANDALONE_DOCKERFILE_NAME,
+            ];
+            expect(sources.length).toBeGreaterThan(3);
+            const dropped = sources.filter((s) =>
+                dockerignoreExcludes(ignore, s),
+            );
+            expect(dropped).toEqual([]);
+        }
+    });
 
     it("fails the build (loudly) when staging throws", async () => {
         writeFileSync(join(dir, "package-lock.json"), "{}");

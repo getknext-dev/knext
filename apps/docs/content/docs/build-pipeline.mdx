@@ -490,14 +490,26 @@ from the project root after `knext build`.
 **Ignore files.** `gcloud builds submit` uses a `.gcloudignore`, falls back to
 your `.gitignore` when there is none, and does not read the `.dockerignore`
 sidecar. A scaffolded `.gitignore` hides the compiled `knext-exec*` binaries, so
-add a `.gcloudignore` that keeps `knext-exec*`, `knext-standalone-exec*`,
-`.next/standalone`, `.next/static`, `public` and `node_modules/@getknext/core`; otherwise the build fails with a
-missing `COPY` source. Plain docker and buildx read the `.dockerignore` sidecar
-instead.
+without a `.gcloudignore` the build fails with a missing `COPY` source. Do not
+copy the sidecar into `.gcloudignore`: it is written for docker's root-anchored
+matching and also excludes `Dockerfile*`, `dist` and `build`, which under
+gitignore matching would drop the recipe and files inside the standalone tree.
+Use this instead, which sends everything the recipe copies (the recipe, the
+three entry shims, the compiled executable, `.next/standalone`, `.next/static`,
+`public` and `node_modules/@getknext/core`) and trims the rest of `node_modules`:
+
+```text title=".gcloudignore"
+.git
+.next/cache
+node_modules/*
+!node_modules/@getknext
+```
+
+Plain docker and buildx read the `.dockerignore` sidecar instead.
 
 **Context size.** The uploaded context holds the compiled executable and the
-standalone tree, often well over 100 MB. Keep the rest of `node_modules` and other unneeded
-directories out of it with the ignore file.
+standalone tree, often well over 100 MB. Trim other unneeded directories the
+same way, in the ignore file.
 
 If the project has no lockfile, `knext build` skips staging (and says so), since
 the build context cannot be anchored; add one, as `knext deploy` also requires.
