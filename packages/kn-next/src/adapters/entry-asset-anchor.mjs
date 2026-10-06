@@ -244,11 +244,29 @@ function codeMask(src) {
 }
 
 /**
+ * `locateFile("<name>.wasm")` — the call Emscripten glue makes to find its
+ * WASM binary, resolving it as `scriptDirectory + name` where
+ * `scriptDirectory` is `__dirname + "/"` on Node (#1872). `@vercel/og` 1.x
+ * inlines harfbuzzjs's glue and reads `hb.wasm` this way, NOT through a
+ * `new URL(lit, import.meta.url)` anchor — and 1.0.3 does not even ship that
+ * file beside itself (vercel/satori#801). Captured name in group 2. Only a
+ * literal argument matches, so the glue's own `function locateFile(path)`
+ * definition is never touched.
+ */
+const LOCATE_FILE_RE = /\blocateFile\(\s*(["'])([\w.-]+\.wasm)\1\s*\)/g;
+
+/**
  * Rewrite every asset anchor in `src` into a reference to an embedded file
  * asset, scoped to `modulePath` being one of `ALLOWLISTED_PACKAGES` AND to
  * each match sitting in real code (not a comment or string) — everything
  * else is returned exactly as written, including when `modulePath` is not
  * allowlisted at all (in which case `resolve` is never even called).
+ *
+ * With `resolveLocateFile`, an Emscripten `locateFile("<name>.wasm")` call in
+ * the same scope is ALSO replaced — by the embedded asset's runtime path
+ * (a plain path, which is what the glue's `fs.readFileSync` reads) — when the
+ * resolver answers with a file to embed (#1872). Same allowlist, same
+ * code-position mask, same id space, same "never guess" rule.
  *
  * @param {string} src
  * @param {string} modulePath absolute path of the module `src` came from —
@@ -257,29 +275,45 @@ function codeMask(src) {
  *   absolute on-disk path to embed, or undefined to leave this anchor alone
  *   (the caller decides existence/containment/size; this function never
  *   touches the filesystem)
+ * @param {(name: string) => string | undefined} [resolveLocateFile] wasm
+ *   file name (e.g. `"hb.wasm"`) -> an absolute on-disk path to embed, or
+ *   undefined to leave that `locateFile(...)` call alone
  * @returns {{ contents: string, assets: { id: string, absPath: string }[] }}
  *   `assets`: one entry per DISTINCT resolved path, in first-seen order. The
  *   caller prepends `import <id> from <JSON.stringify(absPath)> with { type:
  *   "file" };` for each, ahead of `contents`.
  */
-export function rewriteAssetAnchors(src, modulePath, resolve) {
+export function rewriteAssetAnchors(src, modulePath, resolve, resolveLocateFile) {
     if (!isAllowlistedAssetAnchorModule(modulePath)) {
         return { contents: src, assets: [] };
     }
     const mask = codeMask(src);
     const assets = [];
     const idByPath = new Map();
-    const contents = src.replace(ASSET_ANCHOR_RE, (whole, _quote, literal, offset) => {
-        if (mask[offset] !== 1) return whole; // inside a comment or string literal — data, not code
-        const absPath = resolve(literal);
-        if (absPath === undefined) return whole;
+    const idFor = (absPath) => {
         let id = idByPath.get(absPath);
         if (id === undefined) {
             id = `__knextAssetAnchor${assets.length}`;
             idByPath.set(absPath, id);
             assets.push({ id, absPath });
         }
-        return `require("node:url").pathToFileURL(${id})`;
+        return id;
+    };
+    let contents = src.replace(ASSET_ANCHOR_RE, (whole, _quote, literal, offset) => {
+        if (mask[offset] !== 1) return whole; // inside a comment or string literal — data, not code
+        const absPath = resolve(literal);
+        if (absPath === undefined) return whole;
+        return `require("node:url").pathToFileURL(${idFor(absPath)})`;
     });
+    if (resolveLocateFile !== undefined) {
+        // Re-mask: the first pass may have changed offsets.
+        const mask2 = codeMask(contents);
+        contents = contents.replace(LOCATE_FILE_RE, (whole, _quote, name, offset) => {
+            if (mask2[offset] !== 1) return whole;
+            const absPath = resolveLocateFile(name);
+            if (absPath === undefined) return whole;
+            return `(${idFor(absPath)})`;
+        });
+    }
     return { contents, assets };
 }

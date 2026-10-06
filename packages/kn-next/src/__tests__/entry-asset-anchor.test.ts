@@ -292,3 +292,98 @@ describe("rewriteAssetAnchors — dedup and pass-through", () => {
         expect(seen).toBe("./nested/dir/x.wasm");
     });
 });
+
+// #1872: @vercel/og 1.x inlines harfbuzzjs's Emscripten glue, which reads its
+// WASM through `locateFile("hb.wasm")` (= `__dirname + "/hb.wasm"`) rather than
+// a `new URL(lit, import.meta.url)` anchor — and 1.0.3 does not even ship that
+// file. The optional fourth argument resolves such a name to an embeddable
+// file; the call is replaced by the embedded asset's runtime path.
+describe("rewriteAssetAnchors — Emscripten locateFile(<name>.wasm) (#1872)", () => {
+    const GLUE =
+        'var scriptDirectory = __dirname + "/"; function locateFile(path){return scriptDirectory+path} function findWasmBinary(){return locateFile("hb.wasm")}';
+
+    it('replaces locateFile("hb.wasm") in an ALLOWLISTED module with the embedded asset path', () => {
+        const { contents, assets } = rewriteAssetAnchors(
+            GLUE,
+            OG_SIDECAR_PATH,
+            () => undefined,
+            (name) =>
+                name === "hb.wasm" ? "/abs/harfbuzzjs/hb.wasm" : undefined,
+        );
+        expect(assets).toEqual([
+            { id: "__knextAssetAnchor0", absPath: "/abs/harfbuzzjs/hb.wasm" },
+        ]);
+        expect(contents).toContain(
+            "function findWasmBinary(){return (__knextAssetAnchor0)}",
+        );
+        // the locateFile DEFINITION (non-literal argument) is left alone
+        expect(contents).toContain(
+            "function locateFile(path){return scriptDirectory+path}",
+        );
+    });
+
+    it("shares ids with the import.meta.url anchors (no __knextAssetAnchor collision)", () => {
+        const src = `fileURLToPath(new URL("./resvg.wasm", import.meta.url)); ${GLUE}`;
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OG_PATH,
+            () => "/abs/resvg.wasm",
+            () => "/abs/hb.wasm",
+        );
+        expect(assets).toEqual([
+            { id: "__knextAssetAnchor0", absPath: "/abs/resvg.wasm" },
+            { id: "__knextAssetAnchor1", absPath: "/abs/hb.wasm" },
+        ]);
+        expect(contents).toContain("return (__knextAssetAnchor1)");
+    });
+
+    it("never consults the locateFile resolver for a NON-ALLOWLISTED module", () => {
+        let calls = 0;
+        const { contents, assets } = rewriteAssetAnchors(
+            GLUE,
+            OTHER_PATH,
+            () => undefined,
+            () => {
+                calls++;
+                return "/abs/hb.wasm";
+            },
+        );
+        expect(contents).toBe(GLUE);
+        expect(assets).toEqual([]);
+        expect(calls).toBe(0);
+    });
+
+    it('leaves locateFile("hb.wasm") untouched when the resolver finds nothing', () => {
+        const { contents, assets } = rewriteAssetAnchors(
+            GLUE,
+            OG_PATH,
+            () => undefined,
+            () => undefined,
+        );
+        expect(contents).toBe(GLUE);
+        expect(assets).toEqual([]);
+    });
+
+    it('skips a locateFile("hb.wasm") that sits inside a comment or string literal', () => {
+        const src =
+            '// locateFile("hb.wasm")\nconst s = \'locateFile("hb.wasm")\';';
+        const { contents, assets } = rewriteAssetAnchors(
+            src,
+            OG_PATH,
+            () => undefined,
+            () => "/abs/hb.wasm",
+        );
+        expect(contents).toBe(src);
+        expect(assets).toEqual([]);
+    });
+
+    it("is a no-op when no locateFile resolver is passed (the pre-#1872 three-argument call)", () => {
+        const { contents, assets } = rewriteAssetAnchors(
+            GLUE,
+            OG_PATH,
+            () => undefined,
+        );
+        expect(contents).toBe(GLUE);
+        expect(assets).toEqual([]);
+    });
+});

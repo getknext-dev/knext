@@ -47,6 +47,7 @@
  * `.output/server/index.mjs`, so sharp only enters a module graph now.
  */
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import {
     existsSync,
     readdirSync,
@@ -446,6 +447,88 @@ function resolveAssetAnchor(literal, modulePath) {
     return realAbs;
 }
 
+/**
+ * Where an Emscripten `locateFile("<name>.wasm")` call in the ALLOWLISTED
+ * module at `modulePath` should read from inside the compiled executable
+ * (#1872), or `undefined` to leave the call alone.
+ *
+ * 1. A real sibling of the module (an `@vercel/og` release that ships its
+ *    `hb.wasm`) — same containment + size rules as `resolveAssetAnchor`.
+ * 2. `hb.wasm` only: `@vercel/og` 1.x inlines harfbuzzjs's glue but 1.0.3 ships
+ *    no `dist/hb.wasm` (vercel/satori#801). nitro externalizes `@vercel/og`, so
+ *    vinext's own `vinext:og-harfbuzz` transform — which loads the binary from
+ *    `harfbuzzjs` — never runs on the copy this compile bundles. The matching
+ *    binary is the one in the exact-pinned chain the glue was built from:
+ *    `@vercel/og` → `satori` → `harfbuzzjs/hb.wasm` (the same chain vinext
+ *    resolves). nitro's staged copy carries no `satori`, so the chain is
+ *    resolved from the module's own location, then the app's install, then
+ *    vinext's (which depends on `@vercel/og`) — and ONLY accepted when every
+ *    link matches the EXACT pin of the link before it: `satori` at the staged
+ *    `@vercel/og`'s `dependencies.satori`, `harfbuzzjs` at that satori's
+ *    `dependencies.harfbuzzjs`. A glue/binary mismatch is never embedded.
+ */
+function resolveEmscriptenWasm(name, modulePath) {
+    const sibling = resolveAssetAnchor(`./${name}`, modulePath);
+    if (sibling !== undefined || name !== "hb.wasm") return sibling;
+    const packageRoot = allowlistedPackageRoot(modulePath);
+    if (packageRoot === undefined) return undefined;
+    const readJson = (p) => JSON.parse(readFileSync(p, "utf8"));
+    const EXACT = /^\d+\.\d+\.\d+$/;
+    let expectedSatori;
+    try {
+        expectedSatori = readJson(join(packageRoot, "package.json")).dependencies?.satori;
+    } catch {
+        return undefined;
+    }
+    if (typeof expectedSatori !== "string" || !EXACT.test(expectedSatori)) return undefined;
+    const startPoints = [join(packageRoot, "package.json"), join(APP_ROOT, "package.json")];
+    try {
+        const vinextEntry = createRequire(join(APP_ROOT, "package.json")).resolve("vinext");
+        startPoints.push(createRequire(vinextEntry).resolve("@vercel/og/package.json"));
+    } catch {
+        // vinext (or its @vercel/og) not resolvable from the app — fine
+    }
+    for (const start of startPoints) {
+        let hbWasm;
+        try {
+            const satoriPkg = createRequire(start).resolve("satori/package.json");
+            const satori = readJson(satoriPkg);
+            if (satori.version !== expectedSatori) continue;
+            const expectedHb = satori.dependencies?.harfbuzzjs;
+            if (typeof expectedHb !== "string" || !EXACT.test(expectedHb)) continue;
+            const hbPkg = createRequire(satoriPkg).resolve("harfbuzzjs/package.json");
+            if (readJson(hbPkg).version !== expectedHb) continue;
+            hbWasm = realpathSync(join(dirname(hbPkg), "hb.wasm"));
+        } catch {
+            continue;
+        }
+        const harfbuzzRoot = allowlistedHarfbuzzRoot(hbWasm);
+        if (harfbuzzRoot === undefined || hbWasm !== join(harfbuzzRoot, "hb.wasm")) {
+            throw new Error(
+                `[knext compile] ${name} for ${modulePath} resolved to ${hbWasm}, which is not ` +
+                    "harfbuzzjs's own hb.wasm — refusing to embed it",
+            );
+        }
+        const size = statSync(hbWasm).size;
+        if (size > ASSET_ANCHOR_MAX_BYTES) {
+            throw new Error(
+                `[knext compile] ${name} for ${modulePath} is ${size} bytes, over the ` +
+                    `${ASSET_ANCHOR_MAX_BYTES}-byte asset-anchor cap (${hbWasm}) — refusing to embed it`,
+            );
+        }
+        return hbWasm;
+    }
+    return undefined;
+}
+
+/** The real `…/node_modules/harfbuzzjs` directory `realPath` sits directly in, or undefined. */
+function allowlistedHarfbuzzRoot(realPath) {
+    const parts = realPath.split(sep);
+    const idx = parts.lastIndexOf("node_modules");
+    if (idx === -1 || parts[idx + 1] !== "harfbuzzjs") return undefined;
+    return parts.slice(0, idx + 2).join(sep);
+}
+
 /** `import <id> from <path> with { type: "file" };` lines, one per embedded asset. */
 function assetAnchorImports(assets) {
     return assets
@@ -479,8 +562,11 @@ const importMetaToCjs = {
                 // and the entry's import.meta rewrite below belong to the
                 // entry alone.
                 const raw = await Bun.file(path).text();
-                const assetRewrite = rewriteAssetAnchors(raw, path, (literal) =>
-                    resolveAssetAnchor(literal, path),
+                const assetRewrite = rewriteAssetAnchors(
+                    raw,
+                    path,
+                    (literal) => resolveAssetAnchor(literal, path),
+                    (name) => resolveEmscriptenWasm(name, path),
                 );
                 let contents = assetRewrite.contents;
                 let changed = assetRewrite.assets.length > 0;

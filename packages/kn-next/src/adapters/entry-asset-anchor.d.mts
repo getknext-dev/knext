@@ -8,4 +8,5 @@ export function rewriteAssetAnchors(
     src: string,
     modulePath: string,
     resolve: (literal: string) => string | undefined,
-): { contents: string; assets: { id: string; absPath: string }[] };
+    resolveLocateFile?: (name: string) => string | undefined,
+):{ contents: string; assets: { id: string; absPath: string }[] };
