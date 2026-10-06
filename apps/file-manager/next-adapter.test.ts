@@ -198,6 +198,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
 describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
   // Real temp dir with real files so existsSync + createReadStream work without
   // mocking node:fs (CJS interop makes node:fs hard to mock cleanly in Vitest).
+  const tempRoots: string[] = [];
   let tmpDir: string;
   let faviconPath: string;
   let mainJsPath: string;
@@ -205,6 +206,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
 
   beforeAll(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'knext-upload-test-'));
+    tempRoots.push(tmpDir);
     faviconPath = join(tmpDir, 'favicon.ico');
     mainJsPath = join(tmpDir, 'main.js');
     prerenderPath = join(tmpDir, 'time-based.html');
@@ -216,8 +218,21 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
   // Cleanup runs only after every test in this describe has finished, so it
   // cannot race the lazy createReadStream opens that happen during the tests.
   afterAll(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
   });
+
+  // The adapter hands putObject a lazily-opened fs.ReadStream. A mock that never
+  // consumes it leaves the async open() pending, which can land after afterAll
+  // removed the temp dir and surface as an unhandled ENOENT between tests.
+  // Destroy the stream and wait for it to close so nothing outlives the test.
+  const settleStream = async (stream: any) => {
+    if (!stream || stream.closed) return;
+    await new Promise<void>((resolve) => {
+      stream.once('close', () => resolve());
+      stream.once('error', () => resolve());
+      stream.destroy();
+    });
+  };
 
   const makeCtx = (overrides: Record<string, unknown> = {}) => ({
     buildId: 'upload-test-id',
@@ -287,7 +302,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
     // work without mocking node:fs (CJS interop makes that fragile in Vitest).
     // Destroy the stream immediately so no ENOENT fires after afterAll cleanup.
     const putObjectMock = mock().mockImplementation(async (_b, _k, stream: any) => {
-      stream?.destroy?.();
+      await settleStream(stream);
       return { etag: 'mock-etag' };
     });
     mock.module('@getknext/lib/clients', () => ({
@@ -337,7 +352,10 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
     __adapterGen += 1;
     process.env.STORAGE_BUCKET = 'test-bucket';
 
-    const putObjectMock = mock().mockResolvedValue({ etag: 'mock-etag' });
+    const putObjectMock = mock().mockImplementation(async (_b, _k, stream: any) => {
+      await settleStream(stream);
+      return { etag: 'mock-etag' };
+    });
     mock.module('@getknext/lib/clients', () => ({
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
