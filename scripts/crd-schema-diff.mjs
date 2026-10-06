@@ -47,7 +47,12 @@ const repoRoot = resolve(__dirname, '..');
 
 export const CRD_PATH = 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml';
 
-/** Highest `v*` tag REACHABLE FROM HEAD (`--merged HEAD`), or null. Release-line filter (ADR-0063): `v1.3.0-rc.*` tags live on integration/v1.3, whose CRD has fields main lacks; a tag on a line HEAD does not descend from must never be the baseline. */
+/**
+ * Highest `v*` tag REACHABLE FROM HEAD (`--merged HEAD`), or null. Release-line filter (ADR-0063): `v1.3.0-rc.*` tags live on integration/v1.3, whose CRD has fields main lacks; a tag on a line HEAD does not descend from must never be the baseline.
+ * @param {typeof execFileSync} [execFileSyncFn]
+ * @param {string} [cwd] directory whose HEAD defines reachability (default: this repo)
+ * @returns {string | null}
+ */
 export function resolveLatestVTag(execFileSyncFn = execFileSync, cwd = repoRoot) {
   let output;
   try {
