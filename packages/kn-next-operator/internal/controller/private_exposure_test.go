@@ -1,0 +1,384 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+)
+
+// A Knative DomainMapping for a cluster-local NextApp's ksvc renders its
+// KIngress with visibility ExternalIP EVEN WHEN labelled cluster-local, so the
+// private app becomes publicly reachable. The operator must say so honestly via
+// a Warning condition + Event (Ready unchanged), and must never delete or
+// mutate the user's DomainMapping.
+
+func privateApp() *appsv1alpha1.NextApp {
+	app := verdictApp()
+	app.Spec.Networking = &appsv1alpha1.NetworkingSpec{Visibility: appsv1alpha1.VisibilityClusterLocal}
+	return app
+}
+
+func verdictWithExposure(app *appsv1alpha1.NextApp, pe privateExposureState, now time.Time) statusVerdict {
+	return computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, pe, now)
+}
+
+func TestPrivateExposure_ConditionSetWarningEventReadyUnchanged(t *testing.T) {
+	now := time.Now()
+	v := verdictWithExposure(privateApp(), privateExposureState{private: true, domainMappings: []string{"app.example.com", "b.example.com"}}, now)
+
+	c := findVerdictCondition(t, v, ConditionPrivateExposure)
+	if c.Status != metav1.ConditionTrue || c.Reason != ReasonDomainMappingPublishesPrivateApp {
+		t.Fatalf("PrivateExposure: got %+v", c)
+	}
+	if !strings.Contains(c.Message, "app.example.com") || !strings.Contains(c.Message, "b.example.com") {
+		t.Fatalf("message must name the offending DomainMappings: %q", c.Message)
+	}
+	// Ready is NOT flipped: the workload is healthy; this is an exposure warning.
+	var readyCount int
+	for _, cc := range v.conditions {
+		if cc.Type == ConditionReady {
+			readyCount++
+			if cc.Status != metav1.ConditionTrue {
+				t.Fatalf("Ready must be unchanged by a PrivateExposure warning, got %+v", cc)
+			}
+		}
+	}
+	if readyCount != 1 {
+		t.Fatalf("exactly one Ready condition expected, got %d", readyCount)
+	}
+	var warned bool
+	for _, e := range v.events {
+		if e.reason == ReasonDomainMappingPublishesPrivateApp && e.eventType == corev1.EventTypeWarning {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected a Warning event on entry, got %+v", v.events)
+	}
+}
+
+func TestPrivateExposure_EventIsTransitionGated(t *testing.T) {
+	now := time.Now()
+	app := privateApp()
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionPrivateExposure, Status: metav1.ConditionTrue, Reason: ReasonDomainMappingPublishesPrivateApp,
+	}}
+	v := verdictWithExposure(app, privateExposureState{private: true, domainMappings: []string{"a.example.com"}}, now)
+	for _, e := range v.events {
+		if e.reason == ReasonDomainMappingPublishesPrivateApp {
+			t.Fatalf("event must not re-fire while the condition already stands: %+v", e)
+		}
+	}
+}
+
+func TestPrivateExposure_NoMappingsNoConditionAndClearsStale(t *testing.T) {
+	now := time.Now()
+	v := verdictWithExposure(privateApp(), privateExposureState{private: true}, now)
+	for _, c := range v.conditions {
+		if c.Type == ConditionPrivateExposure {
+			t.Fatalf("no DomainMapping => no condition, got %+v", c)
+		}
+	}
+	// Previously set, DM now gone => condition removed.
+	app := privateApp()
+	app.Status.Conditions = []metav1.Condition{{Type: ConditionPrivateExposure, Status: metav1.ConditionTrue, Reason: ReasonDomainMappingPublishesPrivateApp}}
+	v = verdictWithExposure(app, privateExposureState{private: true}, now)
+	if !containsStr(v.removeConditions, ConditionPrivateExposure) {
+		t.Fatalf("stale condition must be removed, removeConditions=%v", v.removeConditions)
+	}
+}
+
+func TestPrivateExposure_PublicAppNeverFlagged(t *testing.T) {
+	now := time.Now()
+	// private=false even if the detector were handed mappings.
+	v := verdictWithExposure(verdictApp(), privateExposureState{private: false, domainMappings: []string{"x"}}, now)
+	for _, c := range v.conditions {
+		if c.Type == ConditionPrivateExposure {
+			t.Fatalf("public app must never carry PrivateExposure, got %+v", c)
+		}
+	}
+	if containsStr(v.removeConditions, ConditionPrivateExposure) {
+		t.Fatalf("no prior condition => nothing to remove (conditions order stays byte-identical)")
+	}
+}
+
+func TestPrivateExposure_UnknownKeepsPriorVerdict(t *testing.T) {
+	now := time.Now()
+	app := privateApp()
+	app.Status.Conditions = []metav1.Condition{{Type: ConditionPrivateExposure, Status: metav1.ConditionTrue, Reason: ReasonDomainMappingPublishesPrivateApp, Message: "prior"}}
+	v := verdictWithExposure(app, privateExposureState{private: true, unknown: true}, now)
+	if containsStr(v.removeConditions, ConditionPrivateExposure) {
+		t.Fatalf("a transient list error is not evidence the DomainMapping is gone; must not clear")
+	}
+	c := findVerdictCondition(t, v, ConditionPrivateExposure)
+	if c.Message != "prior" {
+		t.Fatalf("prior condition must be carried through unchanged, got %+v", c)
+	}
+}
+
+func containsStr(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+func dm(ns, name, refName string) *servingv1beta1.DomainMapping {
+	return &servingv1beta1.DomainMapping{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: servingv1beta1.DomainMappingSpec{Ref: duckv1.KReference{
+			APIVersion: "serving.knative.dev/v1", Kind: "Service", Name: refName, Namespace: ns,
+		}},
+	}
+}
+
+func fakeScheme() *runtime.Scheme {
+	s := runtime.NewScheme()
+	_ = servingv1beta1.AddToScheme(s)
+	_ = corev1.AddToScheme(s)
+	_ = servingv1.AddToScheme(s)
+	_ = appsv1alpha1.AddToScheme(s)
+	return s
+}
+
+func TestDetectPrivateExposure_MatchesOnlyThisAppsKsvc(t *testing.T) {
+	app := privateApp()
+	app.Namespace = "team-a"
+	other := dm("team-a", "other.example.com", "someone-else")
+	otherNS := dm("team-b", "app.example.com", app.Name)
+	hit := dm("team-a", "app.example.com", app.Name)
+	k8sSvcRef := dm("team-a", "svc.example.com", app.Name)
+	k8sSvcRef.Spec.Ref.APIVersion = "v1"
+	notSvc := dm("team-a", "dep.example.com", app.Name)
+	notSvc.Spec.Ref.Kind = "Deployment"
+	notSvc.Spec.Ref.APIVersion = "apps/v1"
+	// A Revision of this app, referenced directly.
+	revRef := dm("team-a", "revref.example.com", app.Name+"-00002")
+	revRef.Spec.Ref.Kind = "Revision"
+	otherRevRef := dm("team-a", "other-revref.example.com", "someone-else-00002")
+	otherRevRef.Spec.Ref.Kind = "Revision"
+	rev := func(name, owner string) *servingv1.Revision {
+		return &servingv1.Revision{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a",
+			Labels: map[string]string{"serving.knative.dev/service": owner}}}
+	}
+
+	// Route of this app (same name as the ksvc) and a revision's core Service.
+	route := dm("team-a", "route.example.com", app.Name)
+	route.Spec.Ref.Kind = "Route"
+	otherRoute := dm("team-a", "other-route.example.com", "someone-else")
+	otherRoute.Spec.Ref.Kind = "Route"
+	revSvc := dm("team-a", "rev.example.com", app.Name+"-00001")
+	revSvc.Spec.Ref.APIVersion = "v1"
+	otherRevSvc := dm("team-a", "other-rev.example.com", "someone-else-00001")
+	otherRevSvc.Spec.Ref.APIVersion = "v1"
+	// A different app whose name merely starts with this one's must NOT match.
+	prefixSvc := dm("team-a", "prefix.example.com", app.Name+"-v2-00001")
+	prefixSvc.Spec.Ref.APIVersion = "v1"
+	unlabelled := dm("team-a", "plain.example.com", "unrelated-svc")
+	unlabelled.Spec.Ref.APIVersion = "v1"
+	coreSvc := func(name, owner string) *corev1.Service {
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a"}}
+		if owner != "" {
+			svc.Labels = map[string]string{"serving.knative.dev/service": owner}
+		}
+		return svc
+	}
+
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(other, otherNS, hit, k8sSvcRef, notSvc,
+		route, otherRoute, revRef, otherRevRef, rev(app.Name+"-00002", app.Name), rev("someone-else-00002", "someone-else"), revSvc, otherRevSvc, prefixSvc, unlabelled,
+		coreSvc(app.Name+"-00001", app.Name), coreSvc("someone-else-00001", "someone-else"),
+		coreSvc(app.Name+"-v2-00001", app.Name+"-v2"), coreSvc("unrelated-svc", "")).Build()
+	r := &NextAppReconciler{Client: c}
+	got := r.detectPrivateExposure(context.Background(), app)
+
+	if !got.private || got.unknown {
+		t.Fatalf("state: %+v", got)
+	}
+	want := []string{"app.example.com", "rev.example.com", "revref.example.com", "route.example.com", "svc.example.com"}
+	if strings.Join(got.domainMappings, ",") != strings.Join(want, ",") {
+		t.Fatalf("domainMappings: got %v, want %v (same-ns, ref -> this ksvc only, sorted)", got.domainMappings, want)
+	}
+}
+
+func TestDetectPrivateExposure_PublicAppSkipsTheList(t *testing.T) {
+	app := verdictApp()
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			t.Fatal("a public app must not trigger a DomainMapping list")
+			return nil
+		},
+	}).Build()
+	r := &NextAppReconciler{Client: c}
+	if got := r.detectPrivateExposure(context.Background(), app); got.private {
+		t.Fatalf("public app: %+v", got)
+	}
+}
+
+func TestDetectPrivateExposure_CRDAbsentIsNotAnError(t *testing.T) {
+	app := privateApp()
+	noMatch := &apimeta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "serving.knative.dev", Kind: "DomainMapping"}}
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error { return noMatch },
+	}).Build()
+	r := &NextAppReconciler{Client: c}
+	got := r.detectPrivateExposure(context.Background(), app)
+	if got.unknown || len(got.domainMappings) != 0 {
+		t.Fatalf("absent CRD must read as 'no mappings', not unknown: %+v", got)
+	}
+}
+
+func TestDetectPrivateExposure_TransientErrorIsUnknown(t *testing.T) {
+	app := privateApp()
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("apiserver timeout")
+		},
+	}).Build()
+	r := &NextAppReconciler{Client: c}
+	if got := r.detectPrivateExposure(context.Background(), app); !got.unknown {
+		t.Fatalf("transient error must be unknown: %+v", got)
+	}
+}
+
+func TestDomainMappingToNextAppRequests(t *testing.T) {
+	r := &NextAppReconciler{}
+	got := r.domainMappingToNextAppRequests(context.Background(), dm("team-a", "app.example.com", "my-app"))
+	want := reconcile.Request{NamespacedName: types.NamespacedName{Name: "my-app", Namespace: "team-a"}}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("got %+v want %+v", got, want)
+	}
+	if got := r.domainMappingToNextAppRequests(context.Background(), &servingv1.Service{}); got != nil {
+		t.Fatalf("non-DomainMapping must enqueue nothing")
+	}
+	// Route ref and a revision-Service ref both map back to the owning app.
+	route := dm("team-a", "r.example.com", "my-app")
+	route.Spec.Ref.Kind = "Route"
+	if got := r.domainMappingToNextAppRequests(context.Background(), route); len(got) != 1 || got[0] != want {
+		t.Fatalf("route ref: got %+v want %+v", got, want)
+	}
+	rc := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app-00003", Namespace: "team-a",
+			Labels: map[string]string{"serving.knative.dev/service": "my-app"}},
+	}).Build()
+	rr := &NextAppReconciler{Client: rc}
+	rev := dm("team-a", "rev.example.com", "my-app-00003")
+	rev.Spec.Ref.APIVersion = "v1"
+	if got := rr.domainMappingToNextAppRequests(context.Background(), rev); len(got) != 1 || got[0] != want {
+		t.Fatalf("revision service ref: got %+v want %+v", got, want)
+	}
+	empty := dm("team-a", "x", "")
+	if got := r.domainMappingToNextAppRequests(context.Background(), empty); got != nil {
+		t.Fatalf("empty ref must enqueue nothing")
+	}
+}
+
+func TestDetectPrivateExposure_UnresolvableRefFailsClosedOnNameElseUnknown(t *testing.T) {
+	app := privateApp()
+	app.Namespace = "team-a"
+	boom := interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+		return errors.New("forbidden")
+	}}
+	same := dm("team-a", "same.example.com", app.Name)
+	same.Spec.Ref.Kind = "Widget"
+	same.Spec.Ref.APIVersion = "example.dev/v1"
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(same).WithInterceptorFuncs(boom).Build()
+	got := (&NextAppReconciler{Client: c}).detectPrivateExposure(context.Background(), app)
+	if got.unknown || len(got.domainMappings) != 1 {
+		t.Fatalf("name == app must fail closed: %+v", got)
+	}
+	diff := dm("team-a", "diff.example.com", "other-thing")
+	diff.Spec.Ref.Kind = "Widget"
+	diff.Spec.Ref.APIVersion = "example.dev/v1"
+	c = fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(diff).WithInterceptorFuncs(boom).Build()
+	got = (&NextAppReconciler{Client: c}).detectPrivateExposure(context.Background(), app)
+	if !got.unknown {
+		t.Fatalf("unresolvable unrelated ref must be unknown: %+v", got)
+	}
+}
+
+func TestDetectPrivateExposure_UnresolvableDMDoesNotBlockLaterLeak(t *testing.T) {
+	app := privateApp()
+	app.Namespace = "team-a"
+	boom := interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+		return errors.New("forbidden")
+	}}
+	// "a-bad" sorts (and lists) BEFORE "z-leak".
+	bad := dm("team-a", "a-bad.example.com", "some-broker")
+	bad.Spec.Ref.Kind = "Broker"
+	bad.Spec.Ref.APIVersion = "eventing.knative.dev/v1"
+	leak := dm("team-a", "z-leak.example.com", app.Name)
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).WithObjects(bad, leak).WithInterceptorFuncs(boom).Build()
+	got := (&NextAppReconciler{Client: c}).detectPrivateExposure(context.Background(), app)
+	if got.unknown || len(got.domainMappings) != 1 || got.domainMappings[0] != "z-leak.example.com" {
+		t.Fatalf("exposure found must win over an unresolvable mapping: %+v", got)
+	}
+}
+
+func TestDomainMappingToNextAppRequests_FailedGetEnqueuesPrivateAppsOnly(t *testing.T) {
+	mk := func(name, ns string, private bool) *appsv1alpha1.NextApp {
+		a := &appsv1alpha1.NextApp{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+		if private {
+			a.Spec.Networking = &appsv1alpha1.NetworkingSpec{Visibility: appsv1alpha1.VisibilityClusterLocal}
+		}
+		return a
+	}
+	c := fake.NewClientBuilder().WithScheme(fakeScheme()).
+		WithObjects(mk("priv-1", "team-a", true), mk("priv-2", "team-a", true), mk("pub", "team-a", false), mk("priv-other-ns", "team-b", true)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return errors.New("apiserver timeout")
+			},
+		}).Build()
+	d := dm("team-a", "x.example.com", "my-app-00003")
+	d.Spec.Ref.APIVersion = "v1"
+	got := (&NextAppReconciler{Client: c}).domainMappingToNextAppRequests(context.Background(), d)
+	names := []string{}
+	for _, g := range got {
+		if g.Namespace != "team-a" {
+			t.Fatalf("wrong namespace enqueued: %+v", g)
+		}
+		names = append(names, g.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "priv-1,priv-2" {
+		t.Fatalf("want exactly the cluster-local apps of the namespace, got %v", names)
+	}
+}

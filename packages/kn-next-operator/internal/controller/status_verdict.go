@@ -146,6 +146,7 @@ func computeStatusVerdict(
 	ic imageCacheState,
 	np netpolEnforcementState,
 	envMapCollision envMapCollisionReport,
+	pe privateExposureState,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -628,6 +629,42 @@ func computeStatusVerdict(
 		v.conditions = append(v.conditions, cond)
 	case prevNetpol != nil:
 		v.removeConditions = append(v.removeConditions, ConditionNetworkPolicyEnforced)
+	}
+
+	// PrivateExposure (Warning-class; Ready untouched). A DomainMapping that
+	// targets a cluster-local app is routed on the PUBLIC ingress by Knative,
+	// so the private app is reachable from the internet. Appended LAST so the
+	// persisted conditions order of every other app stays byte-identical (#98).
+	// Detection is read-only: the user's DomainMapping is never touched.
+	prevExposure := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPrivateExposure)
+	switch {
+	case pe.unknown:
+		// A failed list is not evidence the exposure is gone: carry the prior
+		// condition through unchanged rather than flip-flopping on API hiccups.
+		if prevExposure != nil {
+			v.conditions = append(v.conditions, *prevExposure)
+		}
+	case pe.private && len(pe.domainMappings) > 0:
+		cond := metav1.Condition{
+			Type:               ConditionPrivateExposure,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonDomainMappingPublishesPrivateApp,
+			Message: fmt.Sprintf(
+				"this app is cluster-local (spec.networking.visibility), but DomainMapping(s) %s target it and "+
+					"Knative routes a DomainMapping on the PUBLIC ingress even when it is labelled cluster-local; "+
+					"the app is reachable from the internet. Delete the DomainMapping, or front the app with a "+
+					"tunnel to kourier-internal plus an identity-aware proxy. knext does not modify DomainMappings.",
+				strings.Join(pe.domainMappings, ", ")),
+		}
+		v.conditions = append(v.conditions, cond)
+		if prevExposure == nil {
+			v.events = append(v.events, verdictEvent{
+				corev1.EventTypeWarning, ReasonDomainMappingPublishesPrivateApp, cond.Message,
+			})
+		}
+	case prevExposure != nil:
+		v.removeConditions = append(v.removeConditions, ConditionPrivateExposure)
 	}
 
 	return v
