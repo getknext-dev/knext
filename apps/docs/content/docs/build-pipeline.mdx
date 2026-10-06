@@ -442,6 +442,80 @@ The fixes bundled with vinext 1.0.1:
   `response.status` on a server action call. A no-JS `<form>` submission's redirect is unaffected
   and still answers `303`.
 
+## Build the image on your own builder (Cloud Build / CI)
+
+`knext build` leaves a ready docker build context in your project, so you can
+build the image on a remote builder instead of local docker. For the standalone
+targets (Node and Bun, including the compiled single executable) it writes
+`Dockerfile.standalone`, its `.dockerignore` sidecar, and the entry shims, and
+prints the context path and a `docker buildx build` command template. They are
+the same files `knext deploy` stages before its own image build.
+
+The staged recipe is named `Dockerfile.standalone`, not `Dockerfile`, so
+`gcloud builds submit --tag` (which looks for a file named `Dockerfile`) does not
+work. Pass the file and target explicitly. The image must be `linux/amd64`, the
+platform the cluster runs. The `--target` is `standalone-bun`,
+`standalone-bun-self-contained` or `standalone-node`, matching your `runtime` and
+`selfContained` settings (the printed command already has the right one).
+
+**Cloud Build**: a minimal `cloudbuild.yaml` at the project root:
+
+```yaml
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform=linux/amd64
+      - -f
+      - Dockerfile.standalone
+      - --target
+      - standalone-bun
+      - -t
+      - $_IMAGE
+      - .
+images: [$_IMAGE]
+```
+
+```bash
+knext build
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions _IMAGE="$REGISTRY/my-app:v1"
+knext deploy --image "$REGISTRY/my-app@sha256:..."
+```
+
+**Any other CI**: run the printed command (`docker buildx build --platform
+linux/amd64 --target <target> -f Dockerfile.standalone -t <image-ref> --push .`)
+from the project root after `knext build`.
+
+**Ignore files.** `gcloud builds submit` uses a `.gcloudignore`, falls back to
+your `.gitignore` when there is none, and does not read the `.dockerignore`
+sidecar. A scaffolded `.gitignore` hides the compiled `knext-exec*` binaries, so
+without a `.gcloudignore` the build fails with a missing `COPY` source. Do not
+copy the sidecar into `.gcloudignore`: it is written for docker's root-anchored
+matching and also excludes `Dockerfile*`, `dist` and `build`, which under
+gitignore matching would drop the recipe and files inside the standalone tree.
+Use this instead, which sends everything the recipe copies (the recipe, the
+three entry shims, the compiled executable, `.next/standalone`, `.next/static`,
+`public` and `node_modules/@getknext/core`) and trims the rest of `node_modules`:
+
+```text title=".gcloudignore"
+.git
+.next/cache
+node_modules/*
+!node_modules/@getknext
+```
+
+Plain docker and buildx read the `.dockerignore` sidecar instead.
+
+**Context size.** The uploaded context holds the compiled executable and the
+standalone tree, often well over 100 MB. Trim other unneeded directories the
+same way, in the ignore file.
+
+If the project has no lockfile, `knext build` skips staging (and says so), since
+the build context cannot be anchored; add one, as `knext deploy` also requires.
+If staging itself fails, `knext build` fails with the reason. vinext apps use
+their own scaffolded Dockerfile and are not staged this way.
+
 ## Requirements
 
 ### For vinext: your app must be an ES module

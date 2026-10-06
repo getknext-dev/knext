@@ -49,13 +49,18 @@ import { type CompileToolchain, compileIncludeGlobs } from "./compile-config";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
-import { stageVinextNodeDockerfile } from "./runtime-image";
+import {
+    selectRuntimeImage,
+    stageStandaloneBuildContext,
+    stageVinextNodeDockerfile,
+} from "./runtime-image";
 import {
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
     UsageError,
 } from "./shared";
+import { requireBuildContext } from "./tracing-root";
 import {
     buildVinextExecutable,
     hostSmokeArch,
@@ -260,6 +265,49 @@ async function smokeCompiledBinary(
             rmSync(smokeNativeDir, { recursive: true, force: true });
         }
     }
+}
+
+/**
+ * Stage the standalone docker build context (Dockerfile.standalone + entry
+ * shims) and tell the user where it is and how to build it. Reuses
+ * `stageStandaloneBuildContext` exactly as `deploy` does — no second copy.
+ */
+function stageImageContext(config: Parameters<typeof selectRuntimeImage>[0]) {
+    const selection = selectRuntimeImage(config, process.cwd());
+    if (selection.kind !== "standalone") return;
+    let buildContext: string;
+    try {
+        buildContext = requireBuildContext(process.cwd());
+    } catch (err) {
+        log.warn(
+            { reason: err instanceof Error ? err.message.split("\n")[0] : err },
+            "Not staging the docker build context (no lockfile to anchor it); `knext deploy` will require one",
+        );
+        return;
+    }
+    // A staging failure FAILS the build (not a warning): a user building the
+    // image on a remote builder relies on this context, and a silently
+    // missing/half-written one surfaces later as an opaque COPY error there.
+    let dockerfile: string;
+    try {
+        ({ dockerfile } = stageStandaloneBuildContext({
+            cwd: process.cwd(),
+            buildContext,
+        }));
+    } catch (err) {
+        throw new Error(
+            `Could not stage the docker build context: ${err instanceof Error ? err.message : String(err)}`,
+        );
+    }
+    log.info(
+        {
+            buildContext,
+            dockerfile,
+            // Template: substitute your registry/image ref; --push publishes it.
+            command: `docker buildx build --platform linux/amd64 --target ${selection.target} -f ${dockerfile} -t <image-ref> --push ${buildContext}`,
+        },
+        "Staged the docker build context — build the image on your own builder from it (replace <image-ref>)",
+    );
 }
 
 export async function build(options: BuildOptions = {}) {
@@ -491,6 +539,15 @@ export async function build(options: BuildOptions = {}) {
             );
         }
     }
+
+    // 2e. Stage the standalone docker build context — the SAME function
+    //     `knext deploy`/`preview` call right before their local docker build —
+    //     so the image can be built on any builder (Cloud Build, CI) from the
+    //     directory printed below. Standalone targets only: vinext uses its own
+    //     scaffolded Dockerfile (app-dockerfile), which deploy does not stage
+    //     either. Soft when no lockfile fixes a build context: `build` has
+    //     never required one, and `deploy` still does.
+    stageImageContext(config);
 
     // 3. Upload static assets — only when a storage block is configured.
     if (hasStorage(config)) {
