@@ -1,0 +1,254 @@
+/**
+ * An ISR entry read STALE on the first request after a scale-to-zero wake,
+ * though it was well inside its revalidate window (#1888).
+ *
+ * ## Why (Next 16.3.6, `dist/server/lib/incremental-cache/index.js`)
+ *
+ * On the Next standalone path the handler does NOT decide freshness. Next's
+ * `IncrementalCache.get` takes only `lastModified` and `value` from what the
+ * handler returns and computes staleness itself:
+ *
+ *   - `calculateRevalidate` (:154-163) reads the route's window from
+ *     `this.cacheControls` — a `SharedCacheControls` (:130) whose backing Map is
+ *     a PROCESS-GLOBAL static, filled only by `IncrementalCache.set` (:537-538)
+ *     or, failing that, by the prerender manifest
+ *     (`shared-cache-controls.external.js` `get`, keyed by the CONCRETE route).
+ *   - With neither, it falls back to a 1-second window (:160), so
+ *     `isStale = revalidateAfter < now` (:451) is `true` for any entry older than
+ *     a second.
+ *
+ * A path rendered at runtime (`/isr/[id]` without `generateStaticParams`, the
+ * rc.2 report's `/isr/a`) is in no manifest. Its window lived only in the pod
+ * that rendered it; the woken pod's Map is empty, so the entry read STALE and
+ * regenerated. knext's handler persisted `cacheControl.revalidate` with the
+ * entry all along, but nothing handed it back to Next.
+ *
+ * ## What this asserts
+ *
+ * The REAL Next `IncrementalCache` (the version pinned here), with the shared
+ * Map cleared to model a freshly woken process, reading through knext's
+ * handler on its Redis path (fake client, the shape #886's tests use).
+ */
+// The cache handler's mutating test seams fail closed on a published subpath.
+process.env.KNEXT_TEST_SEAMS = "1";
+
+import { beforeEach, describe, expect, it } from "bun:test";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { IncrementalCache } =
+    require("next/dist/server/lib/incremental-cache/index.js") as {
+        IncrementalCache: new (
+            opts: Record<string, unknown>,
+        ) => {
+            get: (
+                key: string,
+                ctx: Record<string, unknown>,
+            ) => Promise<{
+                isStale?: boolean | -1;
+                cacheControl?: { revalidate: number | false; expire?: number };
+            } | null>;
+        };
+    };
+const { SharedCacheControls } =
+    require("next/dist/server/lib/incremental-cache/shared-cache-controls.external.js") as {
+        SharedCacheControls: { cacheControls: Map<string, unknown> };
+    };
+
+const SEVEN_MINUTES_MS = 7 * 60 * 1000;
+const ONE_YEAR_S = 31536000;
+
+/** An empty prerender manifest: the route was generated at runtime. */
+function emptyManifest() {
+    return {
+        version: 4,
+        routes: {},
+        dynamicRoutes: {},
+        notFoundRoutes: [],
+        preview: {
+            previewModeId: "x",
+            previewModeSigningKey: "y",
+            previewModeEncryptionKey: "z",
+        },
+    };
+}
+
+/** A Redis entry as knext's `set` writes it, `ageMs` before now. */
+function storedEntry(cacheControl: Record<string, unknown>, ageMs: number) {
+    return JSON.stringify({
+        value: {
+            kind: "APP_PAGE",
+            html: "<p>stamp</p>",
+            headers: {},
+            status: 200,
+        },
+        lastModified: Date.now() - ageMs,
+        tags: [],
+        cacheControl,
+    });
+}
+
+/** A woken pod: a fresh IncrementalCache over knext's handler, Redis holding `stored`. */
+async function wokenPod(stored: string) {
+    const mod = (await import(
+        `../adapters/cache-handler.js?wake=${Math.random()}`
+    )) as {
+        default: new (o: unknown) => object;
+        __setRedisClientForTests: (c: unknown) => void;
+    };
+    const client = {
+        connected: true,
+        async connect() {},
+        async get() {
+            return stored;
+        },
+        async send() {
+            return "OK";
+        },
+    };
+    class Handler extends mod.default {
+        constructor(options: unknown) {
+            super(options);
+            mod.__setRedisClientForTests(client);
+        }
+    }
+    return new IncrementalCache({
+        dev: false,
+        minimalMode: false,
+        requestHeaders: {},
+        getPrerenderManifest: emptyManifest,
+        CurCacheHandler: Handler,
+    });
+}
+
+const PAGE = { kind: "APP_PAGE", isRoutePPREnabled: false, isFallback: false };
+
+describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)", () => {
+    beforeEach(() => {
+        delete process.env.REDIS_URL;
+        // A freshly woken process: Next has learnt no route's window yet.
+        SharedCacheControls.cacheControls.clear();
+    });
+
+    it("reads a 7-min-old entry with revalidate=3600 as FRESH, not STALE", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: 3600, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+            ),
+        );
+        const entry = await cache.get("/isr/a", PAGE);
+        expect(entry, "the body is in Redis").not.toBeNull();
+        expect(
+            entry?.isStale,
+            "Next fell back to its 1 s default window: the persisted revalidate was never handed back",
+        ).toBeFalsy();
+        expect(entry?.cacheControl?.revalidate).toBe(3600);
+    });
+
+    it("still reads an entry past its persisted window as STALE (the other half)", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: 60, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+            ),
+        );
+        const entry = await cache.get("/isr/b", PAGE);
+        expect(entry?.isStale).toBe(true);
+        expect(entry?.cacheControl?.revalidate).toBe(60);
+    });
+
+    it("reads a revalidate=false entry as FRESH after a wake", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: false, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+            ),
+        );
+        const entry = await cache.get("/static/a", PAGE);
+        expect(entry?.isStale).toBeFalsy();
+    });
+
+    it("does not override a window this process already knows", async () => {
+        SharedCacheControls.cacheControls.set("/isr/c", {
+            revalidate: 10,
+            expire: ONE_YEAR_S,
+        });
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: 3600, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+            ),
+        );
+        const entry = await cache.get("/isr/c", PAGE);
+        expect(entry?.cacheControl?.revalidate).toBe(10);
+        expect(entry?.isStale).toBe(true);
+    });
+
+    it("maps Next's normalized `/index` key to the `/` route, as Next's toRoute does", async () => {
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: 3600, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+            ),
+        );
+        const entry = await cache.get("/", PAGE);
+        expect(entry?.isStale).toBeFalsy();
+        expect(SharedCacheControls.cacheControls.has("/")).toBe(true);
+    });
+
+    it("never seeds a window for a FETCH (data-cache) entry", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakefetch=${Math.random()}`
+        )) as {
+            default: new () => {
+                get: (k: string, ctx?: unknown) => Promise<unknown>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const handler = new mod.default();
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return JSON.stringify({
+                    value: { kind: "FETCH", data: {}, revalidate: 30 },
+                    lastModified: Date.now(),
+                    tags: [],
+                    cacheControl: { revalidate: 30 },
+                });
+            },
+            async send() {
+                return "OK";
+            },
+        });
+        // A slash-led key, so the kind guard (not the key shape) is what is tested.
+        await handler.get("/fetch-like", { kind: "FETCH" });
+        expect(SharedCacheControls.cacheControls.size).toBe(0);
+    });
+});
+
+describe("the vinext contract is unchanged by persisting revalidate=false", () => {
+    it("persists revalidate=false and labels the entry fresh (no cacheState)", async () => {
+        delete process.env.REDIS_URL;
+        const mod = (await import(
+            `../adapters/cache-handler.js?vinextfalse=${Math.random()}`
+        )) as {
+            default: new () => {
+                get: (k: string) => Promise<Record<string, unknown> | null>;
+                set: (k: string, d: unknown, c: unknown) => Promise<void>;
+            };
+        };
+        const handler = new mod.default();
+        await handler.set(
+            "never-revalidate",
+            { kind: "APP_PAGE" },
+            {
+                cacheControl: { revalidate: false },
+            },
+        );
+        const hit = await handler.get("never-revalidate");
+        expect(hit?.cacheControl).toEqual({ revalidate: false });
+        expect(hit?.cacheState).toBeUndefined();
+    });
+});

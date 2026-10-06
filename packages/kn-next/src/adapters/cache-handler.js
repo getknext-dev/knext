@@ -29,6 +29,7 @@ import { trackWrite } from './cache-write-registry.js';
 // slow (TCP connect vs the ready-check INFO). No timer, no budget, no verdict —
 // see the header of slow-dep-log.js.
 import { instrumentConnectTiming } from './slow-dep-log.js';
+import { createRequire } from 'node:module';
 
 // ─── Cache Event Logger ───
 
@@ -970,6 +971,9 @@ function writeCacheControl(ctx) {
   const cacheControl = {};
   if (typeof revalidate === 'number' && Number.isFinite(revalidate))
     cacheControl.revalidate = revalidate;
+  // `false` = never revalidate. Persisted so a woken process can hand it back
+  // to Next (see seedNextCacheControl); `withCacheState` treats it as fresh.
+  else if (ctx?.cacheControl?.revalidate === false) cacheControl.revalidate = false;
   const expire = cacheControlSeconds(ctx, 'expire');
   if (expire !== undefined) cacheControl.expire = expire;
   const stale = cacheControlSeconds(ctx, 'stale');
@@ -998,6 +1002,66 @@ function withCacheState(entry, now = Date.now()) {
   return entry;
 }
 
+// ─── Next's per-route revalidate window after a wake (#1888) ───
+//
+// On the Next standalone path freshness is NOT decided here. Next's
+// `IncrementalCache.get` (16.3.6 `dist/server/lib/incremental-cache/index.js`)
+// takes only `lastModified` + `value` from this handler and computes
+// `isStale` itself (:440-451), from a window `calculateRevalidate` (:154-163)
+// reads out of `SharedCacheControls` — a PROCESS-GLOBAL Map filled by
+// `IncrementalCache.set` (:537-538) or, failing that, the prerender manifest.
+// With neither it uses a 1-second window (:160).
+//
+// A path rendered at runtime (a dynamic route without generateStaticParams) is
+// in no manifest, so its window lived only in the process that rendered it.
+// After a scale-to-zero wake the Map is empty and every such entry older than
+// a second read STALE and regenerated, though this handler had persisted the
+// real window with the entry all along.
+//
+// So on a read, hand the persisted cacheControl back the only way Next accepts
+// it: seed the shared Map — and only when this process has learnt nothing for
+// the route itself, so a window from a write here (always the newest) wins.
+// `shared-cache-controls.external` is the module Next keeps OUT of its route
+// bundles precisely so every copy shares one Map; it is resolved from `next`,
+// the same file the server and route chunks load. The literal `require(...)`
+// is deliberate: the standalone-on-Bun compile's disk-closure scan follows it.
+// Fail-open: no `next` (vinext), or a shape this does not recognise, and the
+// read proceeds exactly as before.
+let sharedCacheControlsMap;
+function nextSharedCacheControls() {
+  if (sharedCacheControlsMap !== undefined) return sharedCacheControlsMap;
+  sharedCacheControlsMap = null;
+  try {
+    const require = createRequire(import.meta.url);
+    const mod = require('next/dist/server/lib/incremental-cache/shared-cache-controls.external.js');
+    const map = mod?.SharedCacheControls?.cacheControls;
+    if (map instanceof Map) sharedCacheControlsMap = map;
+  } catch {
+    // Next is not resolvable from here — nothing to seed.
+  }
+  return sharedCacheControlsMap;
+}
+
+/** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
+function nextRoute(key) {
+  return key.replace(/(?:\/index)?\/?$/, '') || '/';
+}
+
+function seedNextCacheControl(key, entry, ctx) {
+  if (typeof key !== 'string' || !key.startsWith('/')) return;
+  // Next never records a window for the data cache (`!ctx.fetchCache`, :537).
+  if (ctx?.kind === 'FETCH' || entry?.value?.kind === 'FETCH') return;
+  const revalidate = entry?.cacheControl?.revalidate;
+  if (!(revalidate === false || (typeof revalidate === 'number' && revalidate >= 0))) return;
+  const map = nextSharedCacheControls();
+  if (!map) return;
+  const route = nextRoute(key);
+  if (map.has(route)) return;
+  const cacheControl = { revalidate };
+  if (typeof entry.cacheControl.expire === 'number') cacheControl.expire = entry.cacheControl.expire;
+  map.set(route, cacheControl);
+}
+
 // ─── CacheHandler Class ───
 
 class CacheHandler {
@@ -1011,7 +1075,7 @@ class CacheHandler {
     ensureConnected().catch(() => {});
   }
 
-  async get(key) {
+  async get(key, ctx) {
     const startTime = Date.now();
     const client = await ensureConnected();
     const source = client ? 'redis' : 'memory';
@@ -1026,6 +1090,7 @@ class CacheHandler {
             return null;
           }
           const parsed = withCacheState(deserializeCacheValue(JSON.parse(data)));
+          seedNextCacheControl(key, parsed, ctx);
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
           });
@@ -1041,6 +1106,7 @@ class CacheHandler {
         return null;
       }
       const labelled = withCacheState(entry);
+      seedNextCacheControl(key, labelled, ctx);
       logCacheEvent(labelled?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
         durationMs: Date.now() - startTime,
       });
