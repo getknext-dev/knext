@@ -48,15 +48,15 @@ function crdWith(fields: Record<string, unknown>, required: string[] = []) {
 }
 
 describe('resolveLatestVTag', () => {
-  it('returns the first line of `git tag --list v* --sort=-v:refname`', () => {
+  it('returns the first line of `git tag --list v* --merged HEAD --sort=-v:refname`', () => {
     const exec = fakeExec({
-      'git tag --list v* --sort=-v:refname': 'v1.0.0-rc.2\nv1.0.0-rc.1\nv0.1.0\n',
+      'git tag --list v* --merged HEAD --sort=-v:refname': 'v1.0.0-rc.2\nv1.0.0-rc.1\nv0.1.0\n',
     });
     expect(resolveLatestVTag(exec as never)).toBe('v1.0.0-rc.2');
   });
 
   it('returns null when there are no v* tags', () => {
-    const exec = fakeExec({ 'git tag --list v* --sort=-v:refname': '' });
+    const exec = fakeExec({ 'git tag --list v* --merged HEAD --sort=-v:refname': '' });
     expect(resolveLatestVTag(exec as never)).toBeNull();
   });
 });
@@ -69,7 +69,7 @@ describe('run', () => {
     const exit = run([], {
       log: (m: string) => logs.push(m),
       execFileSyncFn: fakeExec({
-        'git tag --list v* --sort=-v:refname': 'v1.0.0-rc.2\n',
+        'git tag --list v* --merged HEAD --sort=-v:refname': 'v1.0.0-rc.2\n',
         [`git show v1.0.0-rc.2:${CRD_PATH}`]: stringify(oldCrd),
       }) as never,
       readFileSyncFn: (() => stringify(newCrd)) as never,
@@ -85,7 +85,7 @@ describe('run', () => {
     const exit = run([], {
       log: (m: string) => logs.push(m),
       execFileSyncFn: fakeExec({
-        'git tag --list v* --sort=-v:refname': 'v1.0.0-rc.2\n',
+        'git tag --list v* --merged HEAD --sort=-v:refname': 'v1.0.0-rc.2\n',
         [`git show v1.0.0-rc.2:${CRD_PATH}`]: stringify(oldCrd),
       }) as never,
       readFileSyncFn: (() => stringify(newCrd)) as never,
@@ -102,7 +102,7 @@ describe('run', () => {
     const exit = run([], {
       log: (m: string) => logs.push(m),
       execFileSyncFn: fakeExec({
-        'git tag --list v* --sort=-v:refname': 'v1.0.0-rc.2\n',
+        'git tag --list v* --merged HEAD --sort=-v:refname': 'v1.0.0-rc.2\n',
         [`git show v1.0.0-rc.2:${CRD_PATH}`]: stringify(oldCrd),
       }) as never,
       readFileSyncFn: (() => stringify(newCrd)) as never,
@@ -118,7 +118,7 @@ describe('run', () => {
     const exit = run([], {
       log: (m: string) => logs.push(m),
       execFileSyncFn: fakeExec({
-        'git tag --list v* --sort=-v:refname': 'v1.0.0-rc.2\n',
+        'git tag --list v* --merged HEAD --sort=-v:refname': 'v1.0.0-rc.2\n',
         [`git show v1.0.0-rc.2:${CRD_PATH}`]: stringify(oldCrd),
       }) as never,
       readFileSyncFn: (() => stringify(newCrd)) as never,
@@ -134,7 +134,7 @@ describe('run', () => {
     const exit = run([], {
       log: (m: string) => logs.push(m),
       execFileSyncFn: fakeExec({
-        'git tag --list v* --sort=-v:refname': 'v1.0.0-rc.2\n',
+        'git tag --list v* --merged HEAD --sort=-v:refname': 'v1.0.0-rc.2\n',
         [`git show v1.0.0-rc.2:${CRD_PATH}`]: stringify(oldCrd),
       }) as never,
       readFileSyncFn: (() => stringify(newCrd)) as never,
@@ -147,7 +147,9 @@ describe('run', () => {
     const logs: string[] = [];
     const exit = run([], {
       log: (m: string) => logs.push(m),
-      execFileSyncFn: fakeExec({ 'git tag --list v* --sort=-v:refname': '' }) as never,
+      execFileSyncFn: fakeExec({
+        'git tag --list v* --merged HEAD --sort=-v:refname': '',
+      }) as never,
       readFileSyncFn: (() => {
         throw new Error('readFileSyncFn should not be called when there is no base ref');
       }) as never,
@@ -164,7 +166,7 @@ describe('run', () => {
     const exit = run([], {
       log: (m: string) => logs.push(m),
       execFileSyncFn: fakeExec({
-        'git tag --list v* --sort=-v:refname': 'v0.1.0\n',
+        'git tag --list v* --merged HEAD --sort=-v:refname': 'v0.1.0\n',
         [`git show v0.1.0:${CRD_PATH}`]: notFoundErr,
       }) as never,
       readFileSyncFn: (() => {
@@ -177,7 +179,7 @@ describe('run', () => {
 
   it('surfaces a real git failure (bad ref / shallow checkout) as an error, not a silent pass', () => {
     const exec = fakeExec({
-      'git tag --list v* --sort=-v:refname': 'v1.0.0-rc.2\n',
+      'git tag --list v* --merged HEAD --sort=-v:refname': 'v1.0.0-rc.2\n',
       [`git show v1.0.0-rc.2:${CRD_PATH}`]: Object.assign(new Error('exit'), {
         stderr: 'fatal: ambiguous argument: unknown revision or path',
       }),
