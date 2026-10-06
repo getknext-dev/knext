@@ -447,6 +447,7 @@ async function runPrunePreflight(
     buildId: string,
     context?: string,
     writeFreeFacts?: WriteFreeFacts,
+    prebuiltImage?: string,
 ): Promise<void> {
     const { writeFileSync, mkdirSync } = await import("node:fs");
     const crPath = join(process.cwd(), ".output", "nextapp-preflight-cr.yaml");
@@ -455,7 +456,10 @@ async function runPrunePreflight(
         crPath,
         renderNextAppCR(
             config,
-            preflightImageRef(`${config.registry}/${config.name}:preflight`),
+            preflightImageRef(
+                // `--image`: use the real ref; config.registry may be a placeholder.
+                prebuiltImage ?? `${config.registry}/${config.name}:preflight`,
+            ),
             namespace,
             buildId,
             undefined,
@@ -531,7 +535,9 @@ export async function deploy() {
     // legitimately rescues a placeholder file, and a placeholder typed AS the
     // override is still caught. Throws through the UsageError family, so the
     // dispatcher renders it as a plain message, never a FATAL dump.
-    assertNoPlaceholders(config);
+    // `--image` builds and pushes nothing, so a placeholder `registry` alone is
+    // not an error there; every other placeholder still is.
+    assertNoPlaceholders(config, { imageProvided: Boolean(options.image) });
 
     // #1063: a pre-built image is the SOURCE OF TRUTH for both the server and
     // the static assets baked into it. Its server serves `_next/static/<baked
@@ -661,6 +667,7 @@ export async function deploy() {
             // the write-free field (security.writeFree) is reported here, before any side
             // effect, rather than at the real apply.
             { builtThisRun: !options.skipBuild, imageCacheRouted: true },
+            options.image,
         );
     }
 
