@@ -5,7 +5,7 @@
  * passes without a URL, and the deploy still refuses one.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,13 @@ import {
 import { loadConfig } from "../cli/shared";
 import { validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
+
+/** Temp roots the KN_REDIS_URL cases create, removed after the file runs. */
+const tempRoots: string[] = [];
+afterAll(() => {
+    for (const root of tempRoots)
+        rmSync(root, { recursive: true, force: true });
+});
 
 const redisNoUrl = {
     name: "my-app",
@@ -96,7 +103,9 @@ describe("redis cache.url is a deploy-time requirement", () => {
                 );
             });
             it("overrides a non-empty config cache.url", async () => {
-                dir = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                const root = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                tempRoots.push(root);
+                dir = root;
                 writeFileSync(
                     join(dir, "knext.config.ts"),
                     `export default ${JSON.stringify({ ...redisNoUrl, cache: { provider: "redis", url: "redis://cfg:6379" } })};\n`,
@@ -109,7 +118,9 @@ describe("redis cache.url is a deploy-time requirement", () => {
                 );
             });
             it("does not invent a cache block when the config has none", async () => {
-                dir = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                const root = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                tempRoots.push(root);
+                dir = root;
                 writeFileSync(
                     join(dir, "knext.config.ts"),
                     `export default ${JSON.stringify({ ...redisNoUrl, cache: undefined })};\n`,
