@@ -285,6 +285,11 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // known builder id — not a different command line. cr-1181 #3.
             "unrecognised build id",
         ],
+        // `knext build` staging the image context: the cause is the
+        // environment (a read-only or unwritable cwd) or a template the
+        // installed package failed to ship. No different command line fixes
+        // it, so it is not a usage mistake.
+        "build.ts": ["Could not stage the docker build context"],
     };
 
     /** Every .ts under src/cli, including subdirectories (schema/). */
