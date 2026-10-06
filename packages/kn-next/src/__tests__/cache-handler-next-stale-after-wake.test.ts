@@ -36,8 +36,15 @@
 // The cache handler's mutating test seams fail closed on a published subpath.
 process.env.KNEXT_TEST_SEAMS = "1";
 
-import { beforeEach, describe, expect, it, setSystemTime } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+    afterAll,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    setSystemTime,
+} from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,9 +88,18 @@ function emptyManifest() {
     };
 }
 
+/** Temp roots created by `distWithBuildId`, removed after the file runs. */
+const tempRoots: string[] = [];
+afterAll(() => {
+    for (const root of tempRoots)
+        rmSync(root, { recursive: true, force: true });
+});
+
 /** A `.next` with `BUILD_ID` = `id`; returns the `serverDistDir` Next would pass. */
 function distWithBuildId(id: string): string {
-    const next = join(mkdtempSync(join(tmpdir(), "knext-1888-")), ".next");
+    const root = mkdtempSync(join(tmpdir(), "knext-1888-"));
+    tempRoots.push(root);
+    const next = join(root, ".next");
     mkdirSync(join(next, "server"), { recursive: true });
     writeFileSync(join(next, "BUILD_ID"), `${id}\n`);
     return join(next, "server");

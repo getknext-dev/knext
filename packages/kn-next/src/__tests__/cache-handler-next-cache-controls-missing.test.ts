@@ -9,7 +9,7 @@
 process.env.KNEXT_TEST_SEAMS = "1";
 
 import { afterAll, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,8 +19,17 @@ mock.module(
     () => ({ SharedCacheControls: {} }),
 );
 
+/** Temp roots created by `distWithBuildId`, removed after the file runs. */
+const tempRoots: string[] = [];
+afterAll(() => {
+    for (const root of tempRoots)
+        rmSync(root, { recursive: true, force: true });
+});
+
 function distWithBuildId(id: string): string {
-    const next = join(mkdtempSync(join(tmpdir(), "knext-1888w-")), ".next");
+    const root = mkdtempSync(join(tmpdir(), "knext-1888w-"));
+    tempRoots.push(root);
+    const next = join(root, ".next");
     mkdirSync(join(next, "server"), { recursive: true });
     writeFileSync(join(next, "BUILD_ID"), id);
     return join(next, "server");
