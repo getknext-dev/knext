@@ -76,8 +76,9 @@ WARNING: next/og will fail at runtime (ImageResponse answers 500): HarfBuzz's hb
 ```
 
 The build still succeeds, because an app that never renders `next/og` is unaffected. An app that
-does render it removes the override and reinstalls. Set `KNEXT_COMPILE_STRICT_REQUIRES=1` (or
-build with `--self-contained`) to make the compiled-executable build fail instead.
+does render it removes the override and reinstalls. Set `KNEXT_COMPILE_STRICT_REQUIRES=1` to make
+the build fail instead, on both the Bun and the Node.js runtime. A `--self-contained` Bun build
+also fails.
 
 New apps from `knext create --builder vinext` pin `@vercel/og` to `0.11.1` through an `overrides`
 entry in `package.json`. That pin is no longer required on either runtime. You can keep it or

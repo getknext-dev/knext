@@ -10,7 +10,7 @@
  * stages, ships ONLY `.output` to a fresh dir, deletes the app dir, and runs
  * the entry with `node` — asserted by exit code.
  */
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -80,6 +80,48 @@ describe("#1872 — next/og's hb.wasm on vinext × node (staged into .output/ser
             expect(run.status).not.toBe(0);
         }, 60_000);
     }
+
+    // Strict mode is honoured on node exactly as in the compiled build: the
+    // build (which calls this with no options, so the env decides) FAILS.
+    describe("strict requires (KNEXT_COMPILE_STRICT_REQUIRES=1)", () => {
+        const saved = process.env.KNEXT_COMPILE_STRICT_REQUIRES;
+        afterEach(() => {
+            if (saved === undefined)
+                delete process.env.KNEXT_COMPILE_STRICT_REQUIRES;
+            else process.env.KNEXT_COMPILE_STRICT_REQUIRES = saved;
+        });
+
+        it("a pin mismatch THROWS the same actionable message under strict", () => {
+            process.env.KNEXT_COMPILE_STRICT_REQUIRES = "1";
+            const { appDir } = buildOgApp({
+                installedSatori: "0.30.0",
+                shape: "sidecar",
+            });
+            expect(() => stageOgHarfbuzzForVinextNode(appDir)).toThrow(
+                "next/og will fail at runtime",
+            );
+        });
+
+        it("strict off: the same mismatch only warns", () => {
+            delete process.env.KNEXT_COMPILE_STRICT_REQUIRES;
+            const { appDir } = buildOgApp({
+                installedSatori: "0.30.0",
+                shape: "sidecar",
+            });
+            expect(stageOgHarfbuzzForVinextNode(appDir).warnings.length).toBe(
+                1,
+            );
+        });
+
+        it("strict on with matching pins: stages normally, no throw", () => {
+            process.env.KNEXT_COMPILE_STRICT_REQUIRES = "1";
+            const { appDir } = buildOgApp({
+                installedSatori: "0.33.5",
+                shape: "sidecar",
+            });
+            expect(stageOgHarfbuzzForVinextNode(appDir).warnings).toEqual([]);
+        });
+    });
 
     it("is a no-op for an app with no next/og in its output", () => {
         const appDir = temp("knext-og-hb-none-");

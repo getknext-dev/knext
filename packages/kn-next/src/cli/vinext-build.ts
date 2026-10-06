@@ -807,6 +807,14 @@ export function stageOgHarfbuzzForVinextNode(cwd: string): {
         if (contents !== src) writeFileSync(file, contents);
         staged.push(dest);
     }
+    // Strict requires: the same split the compiled build applies — a loader
+    // with no version-matched binary FAILS the build instead of warning.
+    if (
+        warnings.size > 0 &&
+        process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1"
+    ) {
+        throw new UsageError([...warnings].join("\n"));
+    }
     return { staged, warnings: [...warnings] };
 }
 
