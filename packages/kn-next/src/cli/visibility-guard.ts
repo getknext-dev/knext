@@ -16,8 +16,9 @@
  * per-run override over it. A PREVIEW has no such override at all (see
  * `preview.ts`'s call site) — a preview's visibility is driven entirely by
  * whatever `networking.visibility` the PR branch's config carries at each
- * redeploy, so the only way to move a privately-deployed preview back to
- * public is a commit that puts `cluster-local` back, never a flag.
+ * redeploy. Moving a privately-deployed preview back to public is a commit
+ * that sets `visibility: "public"` EXPLICITLY (the caller passes that as
+ * `explicitPublic`); an omitted block stays refused. Never a flag.
  *
  * Reads the LIVE NextApp (if any) and compares its CURRENT visibility
  * against what THIS apply is about to render:

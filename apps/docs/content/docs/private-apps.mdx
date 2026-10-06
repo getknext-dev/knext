@@ -72,21 +72,20 @@ is no separate "preview mode" for this setting and nothing to remember between c
 branch's config currently says `"cluster-local"`, the preview is private; if the config says
 `"public"` or omits `networking` entirely, the preview is public.
 
-Because there is no flag to override it, the downgrade protection only has one answer. If a
-preview is currently private and a later commit on that branch would make it public again — most
-often because `networking.visibility` was accidentally dropped from the config — that deploy is
-refused rather than carried out. The fix is a commit on the branch that puts
-`networking.visibility: "cluster-local"` back; there is no flag that confirms the change instead.
+Because there is no flag to override it, the downgrade protection looks at the config itself. If a
+preview is currently private and a later commit on that branch would make it public again by
+*omitting* `networking.visibility` — most often an accidental drop — that deploy is refused rather
+than carried out. The fix is a commit on the branch that puts `networking.visibility:
+"cluster-local"` back.
 
-This also applies when you *mean* to make a private preview public: changing the config to
-`"public"` is refused the same way. Remove the private preview first, then redeploy it with the
-new config by pushing a commit or re-running your preview workflow. Pass the same namespace the
-preview was deployed to; in any other namespace the command finds nothing to remove and the next
-deploy is still refused:
+If you *mean* to make a private preview public, set it explicitly in the branch's config:
 
-```bash title="shell"
-node node_modules/@getknext/core/dist/cli/preview.js destroy --pr <n> -n <namespace>
+```ts title="knext.config.ts"
+networking: { visibility: "public" },
 ```
+
+An explicit `"public"` is treated as a deliberate choice and the next preview deploy goes ahead.
+Leaving `networking` out is not enough. You do not need to remove the preview first.
 
 Removing a preview also deletes its uploaded assets and clears its cache keyspace, as on a normal
 teardown; see [Preview environments](/docs/previews).

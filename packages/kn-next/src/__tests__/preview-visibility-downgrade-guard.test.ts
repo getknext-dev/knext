@@ -15,11 +15,9 @@
  * stand-in stub of the guard itself, which would stay green even if
  * `runPreviewDeploy` stopped calling it correctly.
  *
- * Previews have NO `--public` override (jev pick 0.97 vs 0.03 for adding
- * one, see preview.ts's call site comment): the only way to move a
- * currently-private preview back to public is a commit that puts
- * `networking.visibility: "cluster-local"` back in `knext.config.ts` for
- * that PR's branch.
+ * Previews have NO `--public` override. A currently-private preview goes
+ * public only via a commit that sets `networking.visibility: "public"`
+ * explicitly in `knext.config.ts`; an omitted block is refused.
  */
 
 import { beforeEach, describe, expect, it, jest, mock } from "bun:test";
@@ -154,6 +152,37 @@ describe("runPreviewDeploy visibility downgrade guard (#1865 round 3)", () => {
         await expect(deployPreview(baseConfig)).rejects.not.toThrow(
             /re-run with --public|pass --public/i,
         );
+    });
+
+    it("round trip, live PRIVATE: config says public is ALLOWED and applies", async () => {
+        captureKubectl.mockReturnValue(liveIsPrivate());
+        const { apply } = await deployPreview({
+            ...baseConfig,
+            networking: { visibility: "public" },
+        });
+        expect(apply).toHaveBeenCalledTimes(1);
+    });
+
+    it("round trip, live PRIVATE: config omits networking is REFUSED with an accurate message", async () => {
+        captureKubectl.mockReturnValue(liveIsPrivate());
+        const err = await deployPreview(baseConfig).then(
+            () => null,
+            (e: Error) => e,
+        );
+        expect(err).not.toBeNull();
+        const msg = (err as Error).message;
+        // names both working fixes: restore cluster-local, or write public explicitly
+        expect(msg).toMatch(/cluster-local/);
+        expect(msg).toMatch(/visibility: "public"/);
+        // must not claim that removing/omitting the block makes it public
+        expect(msg).not.toMatch(/also a config change, not a flag/);
+    });
+
+    it("round trip, live PRIVATE: config says cluster-local is unchanged (no live read, applies)", async () => {
+        captureKubectl.mockReturnValue(liveIsPrivate());
+        const { apply } = await deployPreview(privateConfig);
+        expect(apply).toHaveBeenCalledTimes(1);
+        expect(captureKubectl).not.toHaveBeenCalled();
     });
 
     it("the refusal message for a preview names knext.config.ts as the fix", async () => {
