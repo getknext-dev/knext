@@ -531,6 +531,8 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
         );
     }
 
+    // --dry-run prints the merge-patch on stdout; keep logs off that stream.
+    if (opts.dryRun) process.env.KN_LOG_DESTINATION = "stderr";
     log.info(
         { app: appName, namespace: opts.namespace, dryRun: opts.dryRun },
         "knext db bind (CR merge-patch only — the operator reconciles the env wiring)",

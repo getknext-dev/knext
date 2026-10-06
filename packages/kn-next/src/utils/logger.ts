@@ -50,21 +50,37 @@ export function __resetLoggerForTests(): void {
 /** Instantiate (once) the root pino logger with the framework's exact config. */
 function getRoot(): Logger {
     if (rootLogger === undefined) {
-        const pino = requirePino("pino") as PinoFactory;
-        rootLogger = pino({
-            name: "kn-next",
-            level: process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
-            transport: isProduction
-                ? undefined
-                : {
-                      target: "pino-pretty",
-                      options: {
-                          colorize: true,
-                          translateTime: "HH:MM:ss",
-                          ignore: "pid,hostname",
-                      },
-                  },
-        });
+        const pino = requirePino("pino") as PinoFactory & {
+            destination: (fd: number) => unknown;
+        };
+        // KN_LOG_DESTINATION=stderr keeps stdout reserved for a command's real
+        // output (`deploy --dry-run` prints the NextApp CR there). Default is
+        // unchanged: stdout.
+        const toStderr = process.env.KN_LOG_DESTINATION === "stderr";
+        const level =
+            process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug");
+        if (isProduction) {
+            rootLogger = toStderr
+                ? (pino as unknown as (o: LoggerOptions, d: unknown) => Logger)(
+                      { name: "kn-next", level },
+                      pino.destination(2),
+                  )
+                : pino({ name: "kn-next", level });
+        } else {
+            rootLogger = pino({
+                name: "kn-next",
+                level,
+                transport: {
+                    target: "pino-pretty",
+                    options: {
+                        colorize: !toStderr || process.stderr.isTTY === true,
+                        translateTime: "HH:MM:ss",
+                        ignore: "pid,hostname",
+                        ...(toStderr ? { destination: 2 } : {}),
+                    },
+                },
+            });
+        }
     }
     return rootLogger;
 }

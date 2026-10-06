@@ -282,6 +282,10 @@ function parseCliArgs(): DeployOptions {
         );
     }
 
+    // Under --dry-run stdout carries ONLY the rendered NextApp CR (so it pipes
+    // into `kubectl apply -f -`); route every log line to stderr. Set before
+    // the first log emit — the logger is lazy and reads this on first use.
+    if (values["dry-run"]) process.env.KN_LOG_DESTINATION = "stderr";
     return {
         registry: values.registry || process.env.KN_REGISTRY,
         bucket: values.bucket || process.env.KN_BUCKET,
