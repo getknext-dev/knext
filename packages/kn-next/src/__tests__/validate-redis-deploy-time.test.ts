@@ -75,6 +75,35 @@ describe("redis cache.url is a deploy-time requirement", () => {
             setup();
             await expect(loadConfig()).rejects.toThrow(/cache\.url/);
         });
+        describe("KN_REDIS_URL", () => {
+            const saved = {
+                KN_REDIS_URL: process.env.KN_REDIS_URL,
+                REDIS_URL: process.env.REDIS_URL,
+            };
+            afterEach(() => {
+                for (const [k, v] of Object.entries(saved)) {
+                    if (v === undefined) delete process.env[k];
+                    else process.env[k] = v;
+                }
+            });
+            it("passes the deploy check and yields that URL when only KN_REDIS_URL is set", async () => {
+                setup();
+                delete process.env.REDIS_URL;
+                process.env.KN_REDIS_URL = "redis://override:6379";
+                const cfg = await loadConfig();
+                expect((cfg.cache as { url?: string }).url).toBe(
+                    "redis://override:6379",
+                );
+            });
+            it("still refuses when neither is set, naming both env vars", async () => {
+                setup();
+                delete process.env.REDIS_URL;
+                delete process.env.KN_REDIS_URL;
+                await expect(loadConfig()).rejects.toThrow(
+                    /cache\.url.*REDIS_URL.*KN_REDIS_URL/s,
+                );
+            });
+        });
     });
 
     it("build.ts loads config with the build phase", async () => {

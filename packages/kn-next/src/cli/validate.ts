@@ -313,7 +313,7 @@ export function validateConfig(
         ) {
             errors.push(
                 "'cache.url' is required when using Redis cache provider — " +
-                    "set REDIS_URL in your environment when you run `knext deploy` " +
+                    "set REDIS_URL (or KN_REDIS_URL) in your environment when you run `knext deploy` " +
                     "(it is not needed at build time)",
             );
         }
