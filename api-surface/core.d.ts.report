@@ -343,4 +343,4 @@ class ConfigValidationError {
   stack?: string | undefined
 }
 
-function validateConfig(config: KnativeNextConfig, contract?: PairingContract): void
+function validateConfig(config: KnativeNextConfig, contract?: PairingContract, options?: { phase?: "build" | "deploy"; }): void
