@@ -35,6 +35,7 @@ import {
     verifyBuiltImageLockstep,
     verifyVinextStaticPrefix,
 } from "../utils/asset-upload";
+import { setLogDestination } from "../utils/log-destination";
 import { createLogger } from "../utils/logger";
 import {
     assertCompiledArtifactFresh,
@@ -282,6 +283,9 @@ function parseCliArgs(): DeployOptions {
         );
     }
 
+    // Under --dry-run stdout carries ONLY the rendered NextApp CR (so it pipes
+    // into `kubectl apply -f -`); route every log line to stderr.
+    if (values["dry-run"]) setLogDestination("stderr");
     return {
         registry: values.registry || process.env.KN_REGISTRY,
         bucket: values.bucket || process.env.KN_BUCKET,
