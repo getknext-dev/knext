@@ -66,7 +66,9 @@ middleware:
 This includes `@vercel/og` 1.0.3, the version `vinext` 1.0.1 installs. Its published package is
 missing the HarfBuzz text-shaping file (`hb.wasm`), so the build takes that file from the exact
 `satori` and `harfbuzzjs` versions `@vercel/og` was built against. On Node.js it is staged next to
-the `harfbuzzjs` MIT licence (`hb.wasm.LICENSE`).
+the `harfbuzzjs` MIT licence (`hb.wasm.LICENSE`). On the Bun single executable the file is embedded
+in the binary, so the build writes the licence notice (`knext-third-party-notices.txt`) beside it
+and the generated Dockerfiles copy it into the image.
 
 If those versions do not match, for example because an `overrides` or `resolutions` entry
 changed `satori` or `harfbuzzjs`, the build prints this warning (the Bun build prefixes it with

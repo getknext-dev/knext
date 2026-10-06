@@ -78,6 +78,9 @@ function standaloneServer(): void {
 function vinextOutput(): void {
     mkdirSync(join(dir, ".output", "server"), { recursive: true });
     writeFileSync(join(dir, ".output", "server", "index.mjs"), "");
+    // The real compile writes this beside the binary; the mocked
+    // buildVinextExecutable here does not.
+    writeFileSync(join(dir, "knext-third-party-notices.txt"), "notice");
 }
 
 beforeEach(() => {
@@ -319,6 +322,18 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         );
 
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).not.toThrow();
+    });
+
+    it("vinext --skip-build THROWS when the notice file beside the binary is missing (older compile) — the image's exact-name COPY would fail", () => {
+        vinextOutput();
+        const execPath = join(dir, "knext-exec-linux-x64");
+        writeFileSync(execPath, "");
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        rmSync(join(dir, "knext-third-party-notices.txt"));
+
+        expect(() =>
+            assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
+        ).toThrow(/knext-third-party-notices\.txt is missing/);
     });
 
     it("compileArtifactForDeploy writes a stamp assertCompiledArtifactFresh then accepts, end to end", () => {

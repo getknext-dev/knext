@@ -1,3 +1,7 @@
+export const HARFBUZZ_NOTICE_FILE: string;
+
+export function harfbuzzNoticeText(hbWasm: string): string;
+
 export const HARFBUZZ_MAX_BYTES: number;
 
 export function vinextOgPackageJson(appRoot: string): string | undefined;

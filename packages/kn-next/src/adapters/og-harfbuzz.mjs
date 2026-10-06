@@ -13,9 +13,94 @@
  * which stages it into `.output/server`). Runtime-agnostic: runs under Bun
  * and Node, so nothing here uses `Bun.*`.
  */
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, sep } from "node:path";
+
+/** The notice file written beside a compiled executable that embeds hb.wasm. */
+export const HARFBUZZ_NOTICE_FILE = "knext-third-party-notices.txt";
+
+/**
+ * HarfBuzz's licence, verbatim: harfbuzz/harfbuzz `COPYING` on its default
+ * branch, fetched 2026-10-07. harfbuzzjs's own LICENSE does not reproduce it
+ * and its package ships no COPYING; the exact HarfBuzz revision harfbuzzjs
+ * bundles is not recorded in the package, so this is main, not a pinned tag.
+ */
+const HARFBUZZ_COPYING = `
+----- HarfBuzz (Old MIT): harfbuzz/harfbuzz COPYING -----
+
+HarfBuzz is licensed under the so-called "Old MIT" license.  Details follow.
+For parts of HarfBuzz that are licensed under different licenses see individual
+files names COPYING in subdirectories where applicable.
+
+Copyright © 2010-2022  Google, Inc.
+Copyright © 2015-2020  Ebrahim Byagowi
+Copyright © 2019,2020  Facebook, Inc.
+Copyright © 2012,2015  Mozilla Foundation
+Copyright © 2011  Codethink Limited
+Copyright © 2008,2010  Nokia Corporation and/or its subsidiary(-ies)
+Copyright © 2009  Keith Stribley
+Copyright © 2011  Martin Hosken and SIL International
+Copyright © 2007  Chris Wilson
+Copyright © 2005,2006,2020,2021,2022,2023  Behdad Esfahbod
+Copyright © 2004,2007,2008,2009,2010,2013,2021,2022,2023  Red Hat, Inc.
+Copyright © 1998-2005  David Turner and Werner Lemberg
+Copyright © 2016  Igalia S.L.
+Copyright © 2022  Matthias Clasen
+Copyright © 2018,2021  Khaled Hosny
+Copyright © 2018,2019,2020  Adobe, Inc
+Copyright © 2013-2015  Alexei Podtelezhnikov
+
+For full copyright notices consult the individual files in the package.
+
+
+Permission is hereby granted, without written agreement and without
+license or royalty fees, to use, copy, modify, and distribute this
+software and its documentation for any purpose, provided that the
+above copyright notice and the following two paragraphs appear in
+all copies of this software.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE TO ANY PARTY FOR
+DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN
+IF THE COPYRIGHT HOLDER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ON AN "AS IS" BASIS, AND THE COPYRIGHT HOLDER HAS NO OBLIGATION TO
+PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+`;
+
+/**
+ * Text of the third-party notice for an embedded `hb.wasm`: a header naming the
+ * components, then every licence file (LICENSE / COPYING*) shipped beside the
+ * binary in the harfbuzzjs package, verbatim.
+ *
+ * @param {string} hbWasm resolved path of harfbuzzjs's hb.wasm
+ */
+export function harfbuzzNoticeText(hbWasm) {
+    const dir = dirname(hbWasm);
+    const files = readdirSync(dir)
+        .filter((n) => /^(LICENSE|LICENCE|COPYING)(\..*)?$/i.test(n))
+        .sort();
+    const parts = [
+        "Third-party notices for this knext executable\n" +
+            "=============================================\n\n" +
+            "This executable embeds hb.wasm for next/og: HarfBuzz (Old MIT licence),\n" +
+            "compiled to WebAssembly and distributed by harfbuzzjs (MIT licence).\n" +
+            "The licence texts shipped with harfbuzzjs follow.\n",
+    ];
+    for (const n of files) {
+        parts.push(`\n----- harfbuzzjs/${n} -----\n\n${readFileSync(join(dir, n), "utf8")}`);
+    }
+    // harfbuzzjs's own LICENSE covers harfbuzzjs only (it does not reproduce
+    // HarfBuzz's licence and the package ships no COPYING), so HarfBuzz's
+    // Old MIT terms are carried here.
+    parts.push(HARFBUZZ_COPYING);
+    return parts.join("");
+}
 
 /** Hard cap on the embedded/staged binary — a build error, never a silent skip. */
 export const HARFBUZZ_MAX_BYTES = 16 * 1024 * 1024;
