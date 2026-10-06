@@ -1055,12 +1055,20 @@ if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
 }
-if (HARFBUZZ_EMBEDDED.size > 0) {
+{
     // HarfBuzz (Old MIT) + harfbuzzjs (MIT) require their notice to ship with
-    // the binary that embeds hb.wasm; the image recipes COPY it beside it.
+    // the binary that embeds hb.wasm. The file is ALWAYS written beside the
+    // binary — the image recipes COPY it by exact name (a lone no-match glob
+    // fails the legacy docker builder) — and carries the licence text only
+    // when hb.wasm was actually embedded.
     const noticePath = join(dirname(OUTFILE), HARFBUZZ_NOTICE_FILE);
-    writeFileSync(noticePath, harfbuzzNoticeText([...HARFBUZZ_EMBEDDED][0]));
-    console.log(`[knext compile] wrote the HarfBuzz/harfbuzzjs licence notice (${noticePath})`);
+    writeFileSync(
+        noticePath,
+        HARFBUZZ_EMBEDDED.size > 0
+            ? harfbuzzNoticeText([...HARFBUZZ_EMBEDDED][0])
+            : "Third-party notices for this knext executable\n\nNo third-party components that require a notice are embedded.\n",
+    );
+    console.log(`[knext compile] wrote the third-party notices (${noticePath})`);
 }
 if (SELF_CONTAINED) {
     // Fail closed: a self-contained binary without bytecode boots and serves,

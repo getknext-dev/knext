@@ -20,6 +20,35 @@ import { dirname, join, sep } from "node:path";
 /** The notice file written beside a compiled executable that embeds hb.wasm. */
 export const HARFBUZZ_NOTICE_FILE = "knext-third-party-notices.txt";
 
+/** HarfBuzz's "Old MIT" terms (upstream COPYING), kept with the binary that embeds it. */
+const HARFBUZZ_OLD_MIT = `
+----- HarfBuzz (Old MIT) -----
+
+HarfBuzz is licensed under the so-called "Old MIT" license.
+
+Copyright (c) Google, Inc., Ebrahim Byagowi, Facebook, Inc., Mozilla Foundation,
+Behdad Esfahbod and the other HarfBuzz authors. For the full list of copyright
+notices see https://github.com/harfbuzz/harfbuzz/blob/main/COPYING
+
+Permission is hereby granted, without written agreement and without
+license or royalty fees, to use, copy, modify, and distribute this
+software and its documentation for any purpose, provided that the
+above copyright notice and the following two paragraphs appear in
+all copies of this software.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE TO ANY PARTY FOR
+DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN
+IF THE COPYRIGHT HOLDER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS
+ON AN "AS IS" BASIS, AND THE COPYRIGHT HOLDER HAS NO OBLIGATION TO
+PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+`;
+
 /**
  * Text of the third-party notice for an embedded `hb.wasm`: a header naming the
  * components, then every licence file (LICENSE / COPYING*) shipped beside the
@@ -42,6 +71,10 @@ export function harfbuzzNoticeText(hbWasm) {
     for (const n of files) {
         parts.push(`\n----- harfbuzzjs/${n} -----\n\n${readFileSync(join(dir, n), "utf8")}`);
     }
+    // harfbuzzjs's own LICENSE covers harfbuzzjs only (it does not reproduce
+    // HarfBuzz's licence and the package ships no COPYING), so HarfBuzz's
+    // Old MIT terms are carried here.
+    parts.push(HARFBUZZ_OLD_MIT);
     return parts.join("");
 }
 

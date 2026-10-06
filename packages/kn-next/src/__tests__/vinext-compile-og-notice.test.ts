@@ -56,26 +56,39 @@ describe("HarfBuzz notice ships with the compiled executable", () => {
             const text = readFileSync(notice, "utf8");
             expect(text).toContain("MIT for the rest of the project");
             expect(text).toContain("harfbuzzjs");
+            expect(text).toContain('"Old MIT" license');
+            expect(text).toContain(
+                "THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS",
+            );
             expect(text).toContain("HarfBuzz");
         }, 120_000);
 
-        it(`${shape}: hb.wasm not embedded -> no notice is written`, () => {
+        it(`${shape}: hb.wasm not embedded -> the notice file has no HarfBuzz licence text`, () => {
             const { appDir, serverDir } = buildOgApp({
                 installedSatori: "0.30.0",
                 shape,
             });
             const { build, outFile } = compile(appDir, serverDir);
             expect(build.status, build.stdout + build.stderr).toBe(0);
-            expect(existsSync(join(dirname(outFile), NOTICE))).toBe(false);
+            const notice = join(dirname(outFile), NOTICE);
+            // always written, so the Dockerfile's exact-name COPY never fails
+            expect(existsSync(notice)).toBe(true);
+            const text = readFileSync(notice, "utf8");
+            expect(text).not.toContain("MIT for the rest of the project");
+            expect(text).toContain("No third-party components");
         }, 120_000);
     }
 
     for (const name of ["Dockerfile.hbs", "Dockerfile.self-contained.hbs"]) {
-        it(`${name} COPYs the notice into the image (tolerating its absence)`, () => {
+        it(`${name} COPYs the notice by exact name (never a lone glob)`, () => {
             const text = readFileSync(join(TEMPLATES, name), "utf8");
-            // glob form: a bracket char class so a no-match is not a build error
+            // exact name: the compile always writes the file. A lone glob that
+            // matches nothing fails the legacy docker builder.
             expect(text).toMatch(
-                /^COPY knext-third-party-notices\.tx\[t\] \/app\/$/m,
+                /^COPY knext-third-party-notices\.txt \/app\/$/m,
+            );
+            expect(text).not.toMatch(
+                /^COPY [^\n]*[[*?][^\n]*knext-third-party/m,
             );
         });
     }

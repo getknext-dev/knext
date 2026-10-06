@@ -39,10 +39,10 @@ ARG BINARY
 COPY ${BINARY} /app/server
 
 # HarfBuzz (Old MIT) and harfbuzzjs (MIT) require their notice to travel with
-# the binary that embeds hb.wasm. `knext build` writes it beside the binary only
-# when next/og's hb.wasm is embedded; the `[t]` glob makes its absence an empty
-# match (BuildKit) rather than a failed build.
-COPY knext-third-party-notices.tx[t] /app/
+# the binary that embeds hb.wasm. `knext build` always writes the file beside the
+# binary (licence text when next/og's hb.wasm is embedded, a one-line statement
+# otherwise), so this exact-name COPY works on BuildKit and the legacy builder.
+COPY knext-third-party-notices.txt /app/
 
 # Non-root, matching `Dockerfile`. /tmp in the base image is world-writable with
 # the sticky bit; the binary unpacks into a private (0700) directory under it.
