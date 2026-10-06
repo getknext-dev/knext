@@ -357,7 +357,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
     });
 
     it("keeps the handler's copy of the constant in lockstep with the CLI's", async () => {
-        const mod = (await import("../adapters/cache-handler.js")) as {
+        const mod = (await import("../adapters/cache-handler.js")) as unknown as {
             __NEXT_CONSTANT_BUILD_ID: string;
         };
         expect(mod.__NEXT_CONSTANT_BUILD_ID).toBe(NEXT_CONSTANT_BUILD_ID);
