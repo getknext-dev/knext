@@ -62,8 +62,8 @@ function kubectl(): KubectlCapture {
 
 const dirs: string[] = [];
 afterEach(() => {
-    while (dirs.length)
-        rmSync(dirs.pop() as string, { recursive: true, force: true });
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs.length = 0;
 });
 
 function run(config: KnativeNextConfig, facts?: WriteFreeFacts): string[] {
