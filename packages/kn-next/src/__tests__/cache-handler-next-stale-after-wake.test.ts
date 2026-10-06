@@ -41,6 +41,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NEXT_CONSTANT_BUILD_ID } from "../cli/build-id-env";
 
 const require = createRequire(import.meta.url);
 const { IncrementalCache } =
@@ -297,6 +298,69 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         const set = sent.find((c) => c[0] === "SET");
         expect(set, `no SET issued: ${JSON.stringify(sent)}`).toBeTruthy();
         expect(JSON.parse((set as string[])[2]).buildId).toBe(THIS_BUILD);
+    });
+
+    it("does NOT seed when both the entry and this process carry Next's CONSTANT build id", async () => {
+        const constantDist = distWithBuildId(NEXT_CONSTANT_BUILD_ID);
+        const cache = await wokenPod(
+            storedEntry(
+                { revalidate: false, expire: ONE_YEAR_S },
+                SEVEN_MINUTES_MS,
+                NEXT_CONSTANT_BUILD_ID,
+            ),
+            constantDist,
+        );
+        const entry = await cache.get("/isr/constant", PAGE);
+        expect(
+            entry?.isStale,
+            "every deploy with a deployment id shares this id — it must not count as 'same build'",
+        ).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/isr/constant")).toBe(
+            false,
+        );
+    });
+
+    it("does NOT record Next's CONSTANT build id on a write", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?constwrite=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                set: (k: string, d: unknown, c: unknown) => Promise<void>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const sent: string[][] = [];
+        const handler = new mod.default({
+            serverDistDir: distWithBuildId(NEXT_CONSTANT_BUILD_ID),
+        });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return null;
+            },
+            async send(command: string, args: string[] = []) {
+                sent.push([command, ...args]);
+                return command === "EXEC" ? [] : "OK";
+            },
+        });
+        await handler.set(
+            "/isr/constwrite",
+            { kind: "APP_PAGE", html: "x", headers: {}, status: 200 },
+            { cacheControl: { revalidate: 3600 } },
+        );
+        const set = sent.find((c) => c[0] === "SET");
+        expect(set, `no SET issued: ${JSON.stringify(sent)}`).toBeTruthy();
+        expect(JSON.parse((set as string[])[2]).buildId).toBeUndefined();
+    });
+
+    it("keeps the handler's copy of the constant in lockstep with the CLI's", async () => {
+        const mod = (await import("../adapters/cache-handler.js")) as {
+            __NEXT_CONSTANT_BUILD_ID: string;
+        };
+        expect(mod.__NEXT_CONSTANT_BUILD_ID).toBe(NEXT_CONSTANT_BUILD_ID);
     });
 
     it("does not override a window this process already knows", async () => {

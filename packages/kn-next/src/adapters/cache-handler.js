@@ -1081,7 +1081,20 @@ function nextSharedCacheControls() {
  * compiled executable the same `fs` read is aliased to the embedded file.
  * `undefined` when Next did not pass `serverDistDir` (vinext) or the file is
  * unreadable — and then nothing is recorded and nothing is seeded.
+ *
+ * Next's CONSTANT id counts as no id. Next >= 16.2.11 writes the same
+ * `.next/BUILD_ID` for EVERY build whenever a deployment id is set, so two
+ * deploys would "match" and the previous build's window would be seeded after
+ * a redeploy (forever for `revalidate: false`). `knext deploy` refuses such a
+ * build, but `knext preview` and images built outside knext do not. This is
+ * the single point both sides go through: `set` records `currentBuildId` and
+ * the seed compares against it, so neither records nor seeds the constant.
+ *
+ * Duplicated from `NEXT_CONSTANT_BUILD_ID` in `src/cli/build-id-env.ts` — this
+ * plain-JS runtime module cannot import the CLI's TypeScript.
+ * `cache-handler-next-stale-after-wake.test.ts` asserts the two are equal.
  */
+const NEXT_CONSTANT_BUILD_ID = 'build-TfctsWXpff2fKS';
 let currentBuildId;
 // Next constructs an IncrementalCache — and so this handler — PER REQUEST
 // (`route-module.js` `getIncrementalCache`), so the file is read once per
@@ -1097,6 +1110,7 @@ function resolveBuildId(options) {
   } catch {
     id = undefined;
   }
+  if (id === NEXT_CONSTANT_BUILD_ID) id = undefined;
   buildIdByDistDir.set(serverDistDir, id);
   return id;
 }
@@ -1364,5 +1378,6 @@ export {
   budgetNativeClient as __budgetNativeClient,
   __redisTtlSeconds,
   execAtomic as __execAtomic,
+  NEXT_CONSTANT_BUILD_ID as __NEXT_CONSTANT_BUILD_ID,
   __setRedisClientForTests,
 };
