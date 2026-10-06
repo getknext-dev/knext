@@ -398,6 +398,51 @@ jobs:
             echo "::error::ksvc/$PRIVATE_APP_NAME is missing the cluster-local visibility label (got '${label}')"; exit 1
           fi
 
+      # A DomainMapping targeting a cluster-local app is routed on the PUBLIC
+      # ingress by Knative, so the operator must flag it with the
+      # PrivateExposure condition (read-only: it never touches the mapping) and
+      # clear it once the mapping is gone. The mapping is removed again BEFORE
+      # the unreachable-from-outside assertion below, so it cannot pollute it.
+      - name: Assert a DomainMapping on the private app raises PrivateExposure, and removing it clears it
+        run: |
+          set -euo pipefail
+          cat <<EOF | kubectl apply -f -
+          apiVersion: serving.knative.dev/v1beta1
+          kind: DomainMapping
+          metadata:
+            name: private-app.example.test
+            namespace: ${APP_NS}
+          spec:
+            ref:
+              apiVersion: serving.knative.dev/v1
+              kind: Service
+              name: ${PRIVATE_APP_NAME}
+              namespace: ${APP_NS}
+          EOF
+          cond() {
+            kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" \
+              -o jsonpath='{.status.conditions[?(@.type=="PrivateExposure")].status}'
+          }
+          ok=""
+          for _ in $(seq 1 60); do
+            if [ "$(cond)" = "True" ]; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::PrivateExposure=True never appeared for a DomainMapping targeting ${PRIVATE_APP_NAME}"
+            kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" -o yaml; exit 1
+          fi
+          kubectl -n "$APP_NS" delete domainmapping.serving.knative.dev private-app.example.test --wait=true
+          cleared=""
+          for _ in $(seq 1 60); do
+            if [ -z "$(cond)" ]; then cleared=1; break; fi
+            sleep 2
+          done
+          if [ -z "$cleared" ]; then
+            echo "::error::PrivateExposure was not cleared after the DomainMapping was deleted"
+            kubectl -n "$APP_NS" get nextapp "$PRIVATE_APP_NAME" -o yaml; exit 1
+          fi
+
       - name: Assert the private app is UNREACHABLE from outside the cluster (external Kourier -> 404)
         run: |
           set -euo pipefail

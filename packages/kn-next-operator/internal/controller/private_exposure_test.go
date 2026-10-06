@@ -69,8 +69,17 @@ func TestPrivateExposure_ConditionSetWarningEventReadyUnchanged(t *testing.T) {
 		t.Fatalf("message must name the offending DomainMappings: %q", c.Message)
 	}
 	// Ready is NOT flipped: the workload is healthy; this is an exposure warning.
-	if r := findVerdictCondition(t, v, ConditionReady); r.Status != metav1.ConditionTrue {
-		t.Fatalf("Ready must be unchanged by a PrivateExposure warning, got %+v", r)
+	var readyCount int
+	for _, cc := range v.conditions {
+		if cc.Type == ConditionReady {
+			readyCount++
+			if cc.Status != metav1.ConditionTrue {
+				t.Fatalf("Ready must be unchanged by a PrivateExposure warning, got %+v", cc)
+			}
+		}
+	}
+	if readyCount != 1 {
+		t.Fatalf("exactly one Ready condition expected, got %d", readyCount)
 	}
 	var warned bool
 	for _, e := range v.events {
