@@ -5,7 +5,7 @@
  * passes without a URL, and the deploy still refuses one.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,13 @@ import {
 import { loadConfig } from "../cli/shared";
 import { validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
+
+/** Temp roots the KN_REDIS_URL cases create, removed after the file runs. */
+const tempRoots: string[] = [];
+afterAll(() => {
+    for (const root of tempRoots)
+        rmSync(root, { recursive: true, force: true });
+});
 
 const redisNoUrl = {
     name: "my-app",
@@ -74,6 +81,63 @@ describe("redis cache.url is a deploy-time requirement", () => {
         it("loadConfig() (deploy) rejects a redis cache without a URL", async () => {
             setup();
             await expect(loadConfig()).rejects.toThrow(/cache\.url/);
+        });
+        describe("KN_REDIS_URL", () => {
+            const saved = {
+                KN_REDIS_URL: process.env.KN_REDIS_URL,
+                REDIS_URL: process.env.REDIS_URL,
+            };
+            afterEach(() => {
+                for (const [k, v] of Object.entries(saved)) {
+                    if (v === undefined) delete process.env[k];
+                    else process.env[k] = v;
+                }
+            });
+            it("passes the deploy check and yields that URL when only KN_REDIS_URL is set", async () => {
+                setup();
+                delete process.env.REDIS_URL;
+                process.env.KN_REDIS_URL = "redis://override:6379";
+                const cfg = await loadConfig();
+                expect((cfg.cache as { url?: string }).url).toBe(
+                    "redis://override:6379",
+                );
+            });
+            it("overrides a non-empty config cache.url", async () => {
+                const root = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                tempRoots.push(root);
+                dir = root;
+                writeFileSync(
+                    join(dir, "knext.config.ts"),
+                    `export default ${JSON.stringify({ ...redisNoUrl, cache: { provider: "redis", url: "redis://cfg:6379" } })};\n`,
+                );
+                process.chdir(dir);
+                process.env.KN_REDIS_URL = "redis://override:6379";
+                const cfg = await loadConfig();
+                expect((cfg.cache as { url?: string }).url).toBe(
+                    "redis://override:6379",
+                );
+            });
+            it("does not invent a cache block when the config has none", async () => {
+                const root = mkdtempSync(join(tmpdir(), "knext-1906-"));
+                tempRoots.push(root);
+                dir = root;
+                writeFileSync(
+                    join(dir, "knext.config.ts"),
+                    `export default ${JSON.stringify({ ...redisNoUrl, cache: undefined })};\n`,
+                );
+                process.chdir(dir);
+                process.env.KN_REDIS_URL = "redis://override:6379";
+                const cfg = await loadConfig();
+                expect(cfg.cache).toBeUndefined();
+            });
+            it("still refuses when neither is set, naming both env vars", async () => {
+                setup();
+                delete process.env.REDIS_URL;
+                delete process.env.KN_REDIS_URL;
+                await expect(loadConfig()).rejects.toThrow(
+                    /cache\.url.*REDIS_URL.*KN_REDIS_URL/s,
+                );
+            });
         });
     });
 

@@ -104,7 +104,8 @@ equivalent flags, so you can repeat the same scaffold in CI.
 
 With a Redis cache, set `REDIS_URL` when you run `knext deploy`, and keep the value in a Kubernetes
 Secret or your CI secrets rather than in the file. `knext deploy` stops with an error while it is
-empty. With a storage provider, `knext deploy` names any placeholder you have not filled in.
+empty. `KN_REDIS_URL` works too, at `knext deploy` and `knext preview`, and overrides `cache.url`
+when both are set. With a storage provider, `knext deploy` names any placeholder you have not filled in.
 
 `create` never asks when it cannot expect an answer: with any flag, with `--yes`, when `CI` is set,
 or when stdin or stdout is not a terminal, it uses the default for every choice you did not pass.
