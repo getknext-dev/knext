@@ -78,6 +78,11 @@
       "summary": "Nitro builds: `/_next/image` is served by vinext's image handler from the Nitro app (Next-style Cache-Control, a source-header allowlist, non-image sources rejected with 400, no Set-Cookie forwarding) instead of a 302 to the source asset, so a client sees the Next.js image headers. Split out of #3734 into its own upstream PR. Upstream #3741 differs from this port: it reads `images.minimumCacheTTL` from config and wires Nitro via a build-time `resolveImageSourceFetch` option; this patch keeps the behaviour knext shipped. Re-port to the final #3741 once it merges or is released."
     },
     {
+      "file": "vinext-3741-nitro-pages-image-optimizer.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3741",
+      "summary": "Nitro builds, Pages Router: `/_next/image` is served through the running Nitro app (the same handler the App Router uses with the patch above) instead of answering 404 for want of a Workers ASSETS binding, so an image left on the default optimizer — including one an `images.loaderFile` sends to `/_next/image/` — loads; a recursive `url` gets Next.js's 400. Upstream #3741 covers the App Router only. Applies on top of the patch above."
+    },
+    {
       "file": "vinext-3747-nitro-trace-react.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3747",
       "summary": "Nitro builds: React and react-dom are always traced into the server output, so a bundled CommonJS dependency such as styled-jsx (`<style jsx>`) shares the server's single React copy instead of loading a second one and failing with an invalid-hook-call error, including after the output directory is moved. Open upstream."

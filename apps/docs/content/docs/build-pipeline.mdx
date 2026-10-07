@@ -453,7 +453,8 @@ The fixes bundled with vinext 1.0.1:
   with a `308` redirect to the collapsed path, as in Next.js, instead of a `404`; a bare `//` serves
   the home page.
 - **`/_next/image` in a Nitro build** is served by the app itself with the Next.js image headers
-  (including `x-nextjs-cache: MISS`) instead of a redirect to the source file.
+  (including `x-nextjs-cache: MISS`) instead of a redirect to the source file. This covers Pages
+  Router apps too, where the endpoint used to answer 404.
 - **`images.loaderFile` in `next.config`** is honoured: `next/image` renders its `<img>` through
   your custom loader instead of silently using the built-in `/_next/image` endpoint. A missing
   file, or a `loader` other than `default`/`custom` set next to it, fails the build as in Next.js.
