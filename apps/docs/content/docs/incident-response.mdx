@@ -1,0 +1,145 @@
+---
+title: Incident response
+description: Alert-driven playbook for a knext app in production — scale-to-zero stuck, cold-start spikes, cache down, and bad releases.
+---
+
+The playbook for when an alert fires on a knext-deployed app. Each scenario is **detect, diagnose,
+remediate**, using the metrics and alerts knext ships (see [SLOs and alerting](/docs/slos-alerting)).
+For "my deploy is broken, which failure am I in?", start with [Troubleshooting](/docs/troubleshooting).
+
+Two facts shape every response below:
+
+1. **A scaled-to-zero app exports no metrics.** Its Grafana panels are blank — that is normal, not
+   an outage. Trust the alerts over a blank dashboard.
+2. **The operator is the single source of truth.** Change desired state by editing the `NextApp`
+   resource (or with `knext`, which only patches it) — never `kubectl edit` the Knative Service the
+   operator owns. Hand edits are reconciled away.
+
+## Alert quick reference
+
+| Alert | Start at |
+| --- | --- |
+| `KnextColdStartLatencyHigh` | [Cold-start latency spike](#cold-start-latency-spike) |
+| `KnextHighErrorRate` | [Cache or database down](#cache-or-database-down), then [Bad release](#bad-release) |
+| `KnextHighRequestLatency` | [Bad release](#bad-release) |
+| `KnextOperatorReconcileErrors`, `KnextOperatorReconcileSlow` | [Scale-to-zero stuck](#scale-to-zero-stuck) |
+| `KnextNextAppDegraded` | [Scale-to-zero stuck](#scale-to-zero-stuck) or [Bad release](#bad-release) |
+| `KnextAppMetricsTargetDown`, `KnextAppMetricsContractBroken` | Your monitoring is blind — fix the scrape before trusting any other alert (see [SLOs and alerting](/docs/slos-alerting#the-alerting-is-not-blind)) |
+| `KnextDeepHealthStuckWaking` | [Database unreachable](/docs/troubleshooting#database-wake-timeout) |
+
+## Scale-to-zero stuck
+
+The app will not scale up from zero (a cold request hangs or returns 503), or the operator will not
+roll out a new revision.
+
+**Detect.** Users report a hanging first request after idle, or the Knative activator returns 503.
+`KnextNextAppDegraded` fires while `knext_nextapp_condition{type="Degraded",status="True"}` holds.
+A blank dashboard with no alert and a fast first request is **not** an incident.
+
+**Diagnose.**
+
+```sh title="shell"
+kubectl get nextapp <app> -n <ns> -o jsonpath='{.status.conditions}' | jq
+kubectl get ksvc <app> -n <ns>
+kubectl get revision -n <ns> -l serving.knative.dev/service=<app>
+kubectl describe ksvc <app> -n <ns>
+```
+
+Common causes: an image digest that cannot be pulled, a failing readiness probe on a hard
+dependency, or the activator unable to reach the pod.
+
+**Remediate.**
+
+- **Image will not pull, or a bad revision:** [roll back](#bad-release).
+- **Readiness failing on a dependency:** fix the dependency ([next scenario](#cache-or-database-down));
+  the revision becomes Ready and the activator forwards the queued request.
+- **Operator wedged** (`knext_nextapp_reconcile_errors_total` climbing): read the operator log
+  (`kubectl logs -n kn-next-operator-system deploy/kn-next-operator-controller-manager`). A
+  transient apiserver error self-heals on requeue. Re-apply the `NextApp` so the operator
+  reconverges; do not hand-edit the Service.
+
+## Cold-start latency spike
+
+First-request latency after scale-from-zero regressed.
+
+**Detect.** `KnextColdStartLatencyHigh` fires when `max by (app) (knext_bunexec_startup_duration_seconds)`
+stays above 3 seconds for 15 minutes.
+
+**Diagnose.**
+
+- Compare against the previous revision's startup gauge. A step change right after a deploy points at
+  the new build (heavier module graph, a new eager import, a slower dependency connection).
+- Check whether image pull is the cost: a node that has not cached the image pays the pull on the
+  first wake. See [Image caching](/docs/image-caching) and [Tuning cold start](/docs/tuning-cold-start).
+- If your app emits `[slow-dep]` log lines, they name the dependency that stalled the first request
+  (see [Troubleshooting](/docs/troubleshooting#which-dependency-stalled-the-first-request)).
+
+**Remediate.** If the regression is in the new build, [roll back](#bad-release) to the previous
+revision. If it is image pull, pre-pull or mirror the image. Raising `minScale` above 0 removes the
+cold start entirely at the cost of an always-on pod — a deliberate trade, not a fix.
+
+## Cache or database down
+
+The Redis ISR cache or Postgres is unreachable. ISR reads and writes fail, and a deep health route
+(`/api/health`) returns 503.
+
+**Detect.** `KnextHighErrorRate` (5xx ratio above 5% for 10 minutes). The deep health 503 lands in the
+`5xx` slice. App logs show connection-refused or timeout errors against the cache or database host.
+
+**Diagnose.**
+
+```sh title="shell"
+kubectl get pods -n <ns>                      # is the dependency running?
+kubectl get secret -n <ns>                    # are the DATABASE_URL / REDIS_URL Secrets present?
+kubectl get networkpolicy <app>-allow-ingress -n <ns> -o yaml
+```
+
+The app reaches its stores through environment from Kubernetes Secrets. A rotated or missing Secret,
+a scaled-down Redis, or a changed NetworkPolicy are the usual causes.
+
+Postgres is a **hard** dependency: readiness fails closed when it is configured and unreachable. Redis
+used as a cache is a **soft** dependency: the app fails open, serves from origin, and reports
+`degraded` while staying Ready. See [the readiness taxonomy](/docs/slos-alerting#readiness-hard-and-soft-dependencies).
+
+**Remediate.**
+
+- Restore the dependency (restart it, or fail over the managed instance). Readiness recovers on its
+  own once `/api/health` returns 200.
+- If a Secret was rotated, update it, then re-apply the `NextApp` to roll a fresh revision that reads
+  the new value.
+- Do **not** disable the health check to silence the alert — that hides real ISR staleness or data
+  loss.
+
+## Bad release
+
+A new deploy is serving errors or latency regressions and must be reverted.
+
+**Detect.** `KnextHighErrorRate`, `KnextHighRequestLatency` or `KnextNextAppDegraded` shortly after a
+deploy. Correlate the alert start time with the rollout.
+
+**Diagnose.**
+
+```sh title="shell"
+kubectl get nextapp <app> -n <ns> -o jsonpath='{.status.currentTraffic}' | jq
+kubectl get revision -n <ns> -l serving.knative.dev/service=<app> \
+  --sort-by=.metadata.creationTimestamp
+```
+
+Identify the last-good revision (for example `<app>-00007`).
+
+**Remediate.** Pin traffic to it with the CLI, which only patches the `NextApp`:
+
+```sh title="shell"
+knext rollback <app> --to <app>-00007 -n <ns>               # 100% to the good revision
+knext rollback <app> --to <app>-00007 --canary 10 -n <ns>   # 10% to latest-ready, rest pinned
+knext rollback <app> -n <ns>                                # once fixed: clear the pin
+```
+
+Then confirm `status.currentTraffic` shows the pinned revision at the expected percentage and the
+alert clears within its `for:` window. The full mechanics are on [Rollback](/docs/rollback).
+
+## After the incident
+
+- Re-run `knext doctor` to confirm cluster prerequisites are healthy.
+- Record the alert, the root cause and the revision involved. A rollback pin is temporary — clear it
+  once the fixed build is deployed.

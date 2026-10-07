@@ -1,5 +1,7 @@
 # Runbook — Rollback
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/rollback> and <https://knext-platform.dev/docs/operator-upgrade>. Update both together; this file is the maintainer-level original.
+
 Two independent rollback paths:
 
 - **[Part A](#part-a--roll-back-a-bad-app-release-traffic-split)** — a bad **app**

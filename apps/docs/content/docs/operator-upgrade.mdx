@@ -1,0 +1,174 @@
+---
+title: Operator upgrade and rollback
+description: Roll a new operator and CRD onto a live cluster, verify it, and revert a bad operator upgrade.
+---
+
+How to upgrade the knext operator and its `NextApp` CRD on a live cluster, and how to revert it if the
+upgrade itself regresses. For the ordering rule between operator and CLI, see
+[Upgrading](/docs/upgrading). For reverting a bad **app** release, see [Rollback](/docs/rollback).
+
+The operator is the only writer of cluster state, and the CRD is served at one version only,
+`apps.kn-next.dev/v1alpha1` — there is no conversion webhook. An upgrade is therefore "apply a newer
+bundle and let the manager reconverge", not a multi-version migration.
+
+## Version-skew policy
+
+| Axis | Policy |
+| --- | --- |
+| CRD API version | Stays `v1alpha1`, single served and stored version, no conversion webhook. Kubernetes gives `vNalphaM` APIs no compatibility guarantee; breaking schema changes are allowed and called out in the release notes for that version. |
+| What you can build on | The **status contract**: `.status.conditions[Ready]` (gated on the child Knative Service's own readiness) and the `URL` / `Ready` / `Age` print columns. |
+| Operator and CLI | The CLI only emits intent (patches the `NextApp`). On a breaking CRD change, upgrade the operator **first**, then the CLI. |
+| Operator and Knative | The operator reconciles Knative Serving objects and does not pin a Knative version. Follow Knative's own skew policy. |
+| Assets and build IDs | Independent of the operator: clients on an older build keep working because assets are build-ID namespaced and uploads are additive. Upgrading the operator does not remove live builds. |
+
+Read the release notes for the target version first. If they list a breaking CRD change, treat the
+upgrade as a [schema migration](#crd-migration-breaking-change); otherwise it is a plain rolling image
+update.
+
+## Before you start
+
+```sh title="shell"
+kubectl config current-context                                   # right cluster?
+kubectl get pods -n cert-manager                                 # cert-manager present?
+kubectl get deploy kn-next-operator-controller-manager -n kn-next-operator-system \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'  # current image digest
+kubectl get crd nextapps.apps.kn-next.dev \
+  -o jsonpath='{.spec.versions[*].name}{"\n"}'                   # v1alpha1
+```
+
+Note the current image reference so you can compare after, and so you know what to roll back to.
+
+## Roll a new operator image
+
+Every operator release is published under an immutable tag, `operator-vX.Y.Z` (or
+`operator-vX.Y.Z-rc.N` for a release candidate), and its `install.yaml` is **digest-pinned** — the
+manager image is `ghcr.io/getknext-dev/kn-next-operator@sha256:…`, never `:latest`. Pin the exact
+version you tested:
+
+```sh title="shell"
+OPERATOR_TAG=operator-v1.2.3   # any published operator-vX.Y.Z tag
+curl -sL -o install-new.yaml \
+  "https://github.com/getknext-dev/knext/releases/download/${OPERATOR_TAG}/install.yaml"
+grep 'image: ghcr.io/getknext-dev/kn-next-operator' install-new.yaml   # note the @sha256 digest
+```
+
+Optionally verify the image signature before trusting the bundle. Images are signed keyless with
+Sigstore:
+
+```sh title="shell"
+cosign verify ghcr.io/getknext-dev/kn-next-operator@sha256:<digest> \
+  --certificate-identity-regexp 'https://github.com/getknext-dev/knext/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Apply with `--server-side`, as at install, so the Knative `config-network` and `config-features`
+ConfigMaps merge into Knative's copies rather than replacing them:
+
+```sh title="shell"
+kubectl apply --server-side -f install-new.yaml
+```
+
+### Watch the roll
+
+The manager runs **two replicas behind leader election**. A rolling update replaces one pod at a time
+and the standby holds the lease, so reconciliation never stops.
+
+```sh title="shell"
+kubectl rollout status deploy/kn-next-operator-controller-manager \
+  -n kn-next-operator-system --timeout=180s
+kubectl get lease -n kn-next-operator-system        # which replica leads
+```
+
+Readiness gates on the admission webhook by design. A new pod stays `NotReady` until cert-manager has
+issued and mounted the webhook certificate and the fail-closed validating webhook can admit
+`NextApp` resources. A slow certificate issuance only delays Ready; wait it out rather than forcing a
+restart.
+
+## CRD upgrade
+
+Applying the newer `install.yaml` already re-applies the CRD. A purely additive change (new optional
+fields, new print columns) needs no migration: existing `NextApp` objects stay valid. Use
+`--server-side` — the `NextApp` schema is large and a client-side apply can exceed the last-applied
+annotation size limit.
+
+### CRD migration (breaking change)
+
+Because there is no conversion webhook, a breaking schema change cannot be auto-migrated. When the
+release notes flag one:
+
+1. Read the migration section of the release notes — it lists renamed, removed and retyped fields.
+2. Back up what exists: `kubectl get nextapp -A -o yaml > nextapps-backup-$(date +%F).yaml`.
+3. Apply the new bundle: `kubectl apply --server-side -f install-new.yaml`.
+4. Re-apply each app's intent in the new shape — `knext deploy` from the app directory re-emits the
+   `NextApp`, or edit and `kubectl apply` it by hand.
+5. Verify (next section).
+
+## Verify the upgrade
+
+```sh title="shell"
+kubectl get deploy kn-next-operator-controller-manager -n kn-next-operator-system
+kubectl get crd nextapps.apps.kn-next.dev \
+  -o jsonpath='{.status.conditions[?(@.type=="Established")].status}{"\n"}'   # True
+kubectl get nextapp -A                                                      # URL / Ready / Age
+kubectl logs -n kn-next-operator-system \
+  deploy/kn-next-operator-controller-manager --tail=100 | grep -i error
+knext doctor
+```
+
+`knext doctor` re-checks the CRD, the operator Deployment, the cert-manager webhook and the CRD
+schema coverage against your CLI. If an app went `Ready=False` or `Degraded=True` after the upgrade,
+treat it as an incident — see [Incident response](/docs/incident-response).
+
+## Roll back a bad operator upgrade
+
+Use this when the upgrade itself regressed: the manager crash-loops, `reconcile_errors` floods, or a
+bad image reconciles apps wrongly. App rollback and operator rollback are independent — an app
+rollback is a `NextApp` field, an operator rollback is a Deployment change in
+`kn-next-operator-system`.
+
+**1. Confirm it is the operator, not an app.**
+
+```sh title="shell"
+kubectl get pods -n kn-next-operator-system
+kubectl logs -n kn-next-operator-system \
+  deploy/kn-next-operator-controller-manager --tail=200 | grep -i 'error\|panic\|leaderelection'
+```
+
+**2. Revert the manager image.**
+
+Fastest — the Deployment keeps its previous ReplicaSet, so this returns to the exact previous digest:
+
+```sh title="shell"
+kubectl rollout undo deploy/kn-next-operator-controller-manager -n kn-next-operator-system
+```
+
+Authoritative — re-apply the previous release's whole bundle so CRD, RBAC and manager revert
+together (use this if the bad upgrade changed the CRD or RBAC):
+
+```sh title="shell"
+kubectl apply --server-side -f \
+  https://github.com/getknext-dev/knext/releases/download/<last-good-tag>/install.yaml
+```
+
+If the bad upgrade included a breaking CRD change, reverting the CRD can reject objects written in the
+new shape. Re-apply your apps' intent after the revert, as in the migration steps above.
+
+**3. Hand over the lease if a wedged pod holds it.** Remove the wedged leader pod and the standby
+takes over within the lease window; the Deployment recreates the pod:
+
+```sh title="shell"
+kubectl get lease -n kn-next-operator-system -o wide
+kubectl delete pod <wedged-leader-pod> -n kn-next-operator-system
+```
+
+Never scale the manager to 0 to "reset" it: that removes every leader candidate and halts
+reconciliation for the whole cluster.
+
+**4. Verify recovery.** `kubectl rollout status` completes, the image is the known-good digest, a
+healthy replica holds the lease, `kubectl get nextapp -A` shows apps Ready, and the log is quiet.
+
+## Related
+
+- [Upgrading](/docs/upgrading) — why the operator goes before the CLI.
+- [Operator & the NextApp CRD](/docs/operator) — release channels and pinning.
+- [Rollback](/docs/rollback) — reverting an app release.

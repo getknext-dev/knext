@@ -1,0 +1,189 @@
+---
+title: SLOs and alerting
+description: The service-level objectives knext suggests for an app and its control plane, the PromQL behind each, and the alerts that ship.
+---
+
+Service-level objectives for a knext-deployed app and its control plane, with the PromQL that computes
+each indicator from series knext actually exports. The alerts that fire on a breach ship as a
+`PrometheusRule` in the operator's
+[`config/observability`](https://github.com/getknext-dev/knext/tree/main/packages/kn-next-operator/config/observability)
+overlay. The response to each alert is in [Incident response](/docs/incident-response). For the metric
+catalog and scrape setup see [Observability](/docs/observability); for logs see
+[Logging](/docs/logging).
+
+## Where the series come from
+
+| Series | Exported by |
+| --- | --- |
+| `knext_bunexec_http_requests_total{status_class}` | App runtime, on `:9464`. Request rate; the `5xx` slice is the error rate |
+| `knext_bunexec_http_request_duration_seconds_bucket` | App runtime. Request latency |
+| `knext_bunexec_http_inflight_requests` | App runtime. Saturation |
+| `knext_bunexec_startup_duration_seconds` | App runtime. Set once per process, when the listener binds — the cold-start signal |
+| `knext_bunexec_process_uptime_seconds`, `knext_bunexec_process_resident_memory_bytes` | App runtime |
+| `knext_nextapp_reconcile_total{result}`, `knext_nextapp_reconcile_errors_total`, `knext_nextapp_reconcile_duration_seconds_bucket`, `knext_nextapp_image_prewarm_errors_total` | Operator |
+| `workqueue_depth{name="nextapp"}` | Operator (control-plane saturation) |
+| `knext_nextapp_condition{type,status,namespace,name}` | kube-state-metrics, reading `NextApp.status.conditions` ([setup below](#kube-state-metrics)) |
+| `up{job="knext-nextapp"}` | Prometheus itself — scrape health, and the anchor for the meta-alerts |
+
+<Callout type="info">
+These are the series of the vinext build target. The default standalone build serves a different
+family (`knext_http_*`, `knext_coldstart_*`, `knext_db_wake_*`, `knext_deep_health_state`) that the
+shipped scrape does not reach unless you add your own — see [Observability](/docs/observability#metrics-prometheus).
+Alert rules written against a series nobody emits return an empty result: no error, no alert.
+</Callout>
+
+A scaled-to-zero app exports no app series and its panels go blank. Availability and latency
+indicators are therefore evaluated over rolling windows, and the control-plane objectives stay
+observable because the operator is always on.
+
+## The alerting is not blind [#the-alerting-is-not-blind]
+
+**Objective:** every indicator below is actually being measured.
+
+A query naming a series nobody emits returns an empty vector, so a healthy quiet system and a fully
+broken metrics pipeline look identical. Two rules close that gap, anchored on `up` rather than on an
+absent app series because an idle app is legitimately absent and an alert that fires nightly gets
+muted:
+
+```text
+up{job="knext-nextapp"} == 0
+```
+
+Alert `KnextAppMetricsTargetDown` (10 minutes, critical): the target is discovered but cannot be scraped.
+
+```text
+(up{job="knext-nextapp"} == 1)
+  unless on (namespace, pod) knext_bunexec_process_uptime_seconds
+```
+
+Alert `KnextAppMetricsContractBroken` (15 minutes, critical): the scrape succeeds but returns nothing
+these rules recognise — what a renamed metric looks like from Prometheus' side.
+
+## Availability
+
+**Objective:** at least 99.5% of server-handled requests succeed (non-5xx) over 28 days.
+
+```text
+sum(rate(knext_bunexec_http_requests_total{status_class="5xx"}[5m])) by (app)
+  /
+sum(rate(knext_bunexec_http_requests_total[5m])) by (app)
+```
+
+Alert `KnextHighErrorRate` fires when the 5-minute ratio exceeds 5% for 10 minutes. It also carries the
+backing-store signal: a deep `/api/health` route returns 503 when Redis or Postgres is unreachable, and
+that 503 lands in the `5xx` slice. The runtime emits no per-route label, because a route label is
+unbounded and one crawler would mint a series per URL.
+
+## Cold-start latency
+
+**Objective:** cold start of 3 seconds or less. Cold starts dominate the user-visible latency of a
+scale-to-zero app.
+
+```text
+max by (app) (knext_bunexec_startup_duration_seconds)
+```
+
+Alert `KnextColdStartLatencyHigh` fires above 3 seconds for 15 minutes. The gauge is set once per
+process, at the moment the listeners bind, so it covers the runtime bootstrap and every module
+evaluation a waking pod pays for. With one sample per pod, `max` or `quantile` over the fleet is the
+right aggregation — not `histogram_quantile`. Every start of the compiled executable is a cold start;
+there is no warm/cold split.
+
+Request latency on the warm path:
+
+```text
+histogram_quantile(0.95,
+  sum(rate(knext_bunexec_http_request_duration_seconds_bucket[5m])) by (le, app)
+)
+```
+
+Alert `KnextHighRequestLatency` fires when p95 exceeds 1 second for 15 minutes. Buckets run from 5 ms
+to 10 s, with five below 100 ms.
+
+## Reconcile errors (control plane)
+
+**Objective:** zero reconcile errors in steady state, and reconcile p95 of 30 seconds or less.
+
+```text
+increase(knext_nextapp_reconcile_errors_total[10m])
+```
+
+Alert `KnextOperatorReconcileErrors` (above 0 for 5 minutes, critical). The operator is the single
+source of truth, so a failing reconcile means cluster state may diverge from the `NextApp`.
+
+```text
+histogram_quantile(0.95,
+  sum(rate(knext_nextapp_reconcile_duration_seconds_bucket[10m])) by (le)
+)
+```
+
+Alert `KnextOperatorReconcileSlow` (p95 above 30 seconds for 15 minutes, warning). A related alert,
+`KnextImagePrewarmFailing` (warning), fires when image pre-warming errors persist for 15 minutes.
+
+## NextApp health (control plane)
+
+**Objective:** no `NextApp` stays `Degraded=True`.
+
+```text
+max by (namespace, name) (knext_nextapp_condition{type="Degraded",status="True"})
+```
+
+Alert `KnextNextAppDegraded` (critical).
+
+## kube-state-metrics [#kube-state-metrics]
+
+The reconciler populates `NextApp.status.conditions` (`Ready`, `Degraded`, `Reconciling`), but
+Prometheus only sees them if kube-state-metrics is configured to emit custom-resource conditions. The
+configuration ships as a ConfigMap in the operator's `config/observability` overlay. Apply it with
+`kubectl apply -k config/observability`, then point kube-state-metrics at the ConfigMap's
+`custom-resource-state.yaml` key (mount it, pass `--custom-resource-state-config-file`, and grant
+get/list/watch on `nextapps.apps.kn-next.dev`). The embedded configuration:
+
+```yaml title="custom-resource-state.yaml"
+kind: CustomResourceStateMetrics
+spec:
+  resources:
+    - groupVersionKind:
+        group: apps.kn-next.dev
+        version: v1alpha1
+        kind: NextApp
+      metricNamePrefix: knext_nextapp
+      metrics:
+        - name: condition
+          help: "NextApp .status.conditions"
+          each:
+            type: StateSet
+            stateSet:
+              labelName: status
+              path: [status, conditions]
+              valueFrom: [status]
+              # Capitalized to match the Kubernetes condition status verbatim — the
+              # match is case-sensitive, and lowercase would keep the alert silent.
+              list: ["True", "False", "Unknown"]
+```
+
+Until kube-state-metrics runs with this configuration, `knext_nextapp_condition` has no series and
+`KnextNextAppDegraded` cannot fire. Track the condition with
+`kubectl get nextapp -o jsonpath='{.items[*].status.conditions}'` in the meantime.
+
+## Readiness: hard and soft dependencies [#readiness-hard-and-soft-dependencies]
+
+The deep readiness probe (`checkDeepHealth` in `@getknext/lib`) backs the Knative readiness gate,
+which under scale-to-zero decides whether a pod keeps serving or is evicted. Its overall verdict
+follows dependency **severity**, not "any dependency down means down":
+
+- **Hard dependency, Postgres.** Configured and unreachable means overall `down`: readiness fails
+  closed. A slow-Postgres timeout is treated the same; a timed-out check is never left falsely `up`.
+- **Soft dependency, Redis as a cache.** The cache fails open — a miss still serves from origin.
+  Configured and unreachable means overall `degraded`, but the pod stays **Ready**. A cache blip must
+  not evict a pod that can serve cache misses.
+
+| postgres | redis (cache) | overall |
+| --- | --- | --- |
+| up or unconfigured | up or unconfigured | `ok` |
+| up or unconfigured | down | `degraded` |
+| down | up, down or unconfigured | `down` |
+| timeout | any | `down` |
+
+`degraded` is a Ready state, reserved for soft-dependency failures: it surfaces reduced capacity to
+observability and does not gate traffic.

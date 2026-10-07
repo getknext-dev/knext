@@ -1,0 +1,413 @@
+---
+title: Troubleshooting
+description: Symptom, cause and fix for the failure modes that keep a NextApp from deploying, scaling or serving.
+---
+
+A symptom-to-fix catalog for the failures that stop a `NextApp` from deploying, scaling or serving.
+Start here when a deploy is broken or an app misbehaves and you want to identify *which* failure mode
+you are in. For alert-driven response on a running app, see [Incident response](/docs/incident-response).
+
+Two facts shape every entry:
+
+1. **The operator is the single source of truth.** Change desired state by editing the `NextApp` (or
+   with `knext`, which only patches it) — never by `kubectl edit` on the Knative Service, Deployment or
+   NetworkPolicy the operator owns. Hand edits are reconciled away.
+2. **The operator narrates itself.** Every reconcile writes status **conditions** (`Ready`,
+   `Degraded`, `Reconciling`) and emits Kubernetes **events** with stable `reason` codes. Those two
+   surfaces, plus the [alerts](/docs/slos-alerting), are how you tell these failures apart.
+
+## First move: run the diagnostic
+
+`knext doctor` is read-only — every call is a `kubectl get` — and catches most "won't deploy" causes in
+one pass:
+
+```sh title="shell"
+knext doctor            # human-readable checklist
+knext doctor --json     # structured, exit 1 on any FAIL or ERROR
+```
+
+It checks the `NextApp` CRD, the operator Deployment, the cert-manager webhook prerequisite, the
+Knative ingress class, operator and app image pullability, Knative Serving, and more — see
+[`knext doctor`](/docs/cli#knext-doctor). A failing check prints a one-line repair hint. If doctor is
+green and you still have a problem, read the app's own narration:
+
+```sh title="shell"
+kubectl get nextapp <app> -n <ns> -o jsonpath='{.status.conditions}' | jq
+kubectl describe nextapp <app> -n <ns>       # events are at the bottom
+kubectl get events -n <ns> --field-selector involvedObject.name=<app> --sort-by=.lastTimestamp
+```
+
+## Reason to section map
+
+| Surfaced by | Reason or condition | Section |
+| --- | --- | --- |
+| Event, `Degraded=True` | `InvalidImage` | [Image rejected](#image-rejected) |
+| Event, `Degraded=True` | `ReconcileFailed` | [Reconcile failing](#reconcile-failing) |
+| `Ready=Unknown` or `False` | `IngressNotProgrammed` | [Route never programs](#route-never-programs) |
+| `Ready=False`, event | `PinnedRevisionNotFound` | [Pinned revision missing](#pinned-revision-missing) |
+| Event (warning) | `EnvVarIgnored` | [DATABASE_URL collision](#database-url-collision) |
+| Pod status | `ImagePullBackOff` | [ImagePullBackOff](#imagepullbackoff) |
+| Pod status | `CreateContainerConfigError` | [Secret missing](#secret-missing) |
+| Alert `KnextColdStartLatencyHigh` | — | [Cold-start latency](#cold-start-latency) |
+| App logs, database connect | — | [Database wake timeout](#database-wake-timeout) |
+| Activator 503, unreachable pod | — | [NetworkPolicy blocks the activator](#networkpolicy-blocks-the-activator) |
+| Every apply rejected | webhook, `failurePolicy: Fail` | [Webhook not ready](#webhook-not-ready) |
+| Crash loop on the metrics port | `EADDRINUSE` | [Metrics port](#metrics-port) |
+
+## Image rejected [#image-rejected]
+
+**Symptom.** The app never rolls out. `kubectl describe nextapp <app>` shows a Warning event with
+`reason: InvalidImage` and the status carries `Degraded=True` (`reason: InvalidSpec`). The message
+reads:
+
+```
+image "myapp:latest" uses the :latest tag which is forbidden:
+use a digest-pinned ref (e.g. myapp:v1@sha256:<hash>)
+```
+
+**Cause.** The operator and its admission webhook enforce **digest pinning**. A mutable reference would
+break the rollback guarantee, because a pinned revision could silently change. Rejected: `:latest`, any
+tag-only reference with no `@sha256:` digest, and a reference with neither tag nor digest. Only
+references containing `@sha256:` are accepted.
+
+**Fix.** Pin the image to its digest and re-apply:
+
+```sh title="shell"
+docker buildx imagetools inspect ghcr.io/you/myapp:v1 --format '{{json .Manifest.Digest}}'
+# set image: ghcr.io/you/myapp:v1@sha256:<hash> in the NextApp
+```
+
+`knext deploy` resolves the digest for you; if you author the `NextApp` by hand, the `@sha256:` suffix
+is mandatory. The check runs at admission and again in the reconciler, so a webhook that is down does
+not let a bad image through.
+
+## Reconcile failing [#reconcile-failing]
+
+**Symptom.** `Degraded=True` with `reason: ReconcileFailed`, and a Warning event naming the failing
+step ("Failed to reconcile child Service", "Failed to reconcile NetworkPolicy"). `KnextOperatorReconcileErrors`
+fires when `knext_nextapp_reconcile_errors_total` increases, and `KnextNextAppDegraded` fires while the
+condition holds.
+
+**Cause.** A child-object create or update, or an API-server call, failed inside the reconcile — a
+transient API-server or Knative hiccup, an RBAC gap, or a genuinely invalid child spec. The operator
+requeues with backoff, so a transient cause self-heals; a persistent one keeps `Degraded=True`.
+
+**Fix.**
+
+1. Read the message: `kubectl get nextapp <app> -n <ns> -o jsonpath='{.status.conditions}' | jq`.
+2. Read the operator log: `kubectl logs -n kn-next-operator-system deploy/kn-next-operator-controller-manager`.
+3. If transient, watch the error counter stop climbing.
+4. If persistent, fix the root cause (RBAC, CRD version skew, invalid spec) and re-apply the `NextApp`.
+   Do not hand-edit the child Service.
+
+## Route never programs [#route-never-programs]
+
+**Symptom.** The app deploys and the Service exists, but requests never reach it — DNS resolves, then
+the connection hangs or returns 404. `Ready` sits at `Unknown` or `False` with
+`reason: IngressNotProgrammed`, and a Warning event fires once the stall window elapses. `knext doctor`'s
+ingress check warns.
+
+**Cause.** This is the silent one. Knative's Route created an ingress object, but **no ingress
+controller serves the configured class**, so it is never programmed — no error, only an `Unknown`
+condition on the Service. The classic trigger: `config-network`'s `ingress-class` is the short form
+`kourier.knative.dev`, while net-kourier only serves `kourier.ingress.networking.knative.dev`.
+
+**Fix.**
+
+```sh title="shell"
+kubectl get configmap config-network -n knative-serving -o jsonpath='{.data.ingress-class}'
+kubectl get deploy net-kourier-controller -n knative-serving   # or kourier-system
+```
+
+Set the class to `kourier.ingress.networking.knative.dev` **where it is authored**. If a
+`KnativeServing` resource manages the cluster, edit it there — editing the ConfigMap directly gets
+overwritten. Confirm a Ready `net-kourier-controller` exists.
+
+## Pinned revision missing [#pinned-revision-missing]
+
+**Symptom.** After `knext rollback <app> --to <rev>`, `Ready=False` with
+`reason: PinnedRevisionNotFound` and a Warning event naming the revision.
+
+**Cause.** `spec.traffic.revisionName` names a Knative revision that no longer exists — garbage
+collected, or mistyped. The operator will not route traffic to a phantom revision, so it reports
+degraded rather than serve nothing. A transient API error does not trip this; only a real not-found
+after a short stall window does, so the condition does not flap.
+
+**Fix.** List the revisions that exist and pin to one, or clear the pin:
+
+```sh title="shell"
+kubectl get revision -n <ns> -l serving.knative.dev/service=<app> --sort-by=.metadata.creationTimestamp
+knext rollback <app> --to <app>-00007 -n <ns>   # a revision that exists
+knext rollback <app> -n <ns>                    # or clear the pin: latest-ready
+```
+
+## DATABASE_URL collision [#database-url-collision]
+
+**Symptom.** A Warning event with `reason: EnvVarIgnored`: a `spec.secrets.envMap[DATABASE_URL]` entry
+was dropped, and the DSN in effect is the one from `spec.database.secretRef`.
+
+**Cause.** `spec.database.secretRef` is the typed way to bind a Postgres DSN — it injects
+`DATABASE_URL`, and `roSecretRef` injects `DATABASE_URL_RO`. If you also wire `DATABASE_URL` in
+`spec.secrets.envMap`, the two collide; the operator keeps the typed binding and reports the duplicate
+as an event so it is not silent. Admission rejects a new `NextApp` that defines it in both places.
+
+**Fix.** Pick one source, preferably the typed binding, and remove the duplicate:
+
+```yaml title="nextapp.yaml"
+spec:
+  database:
+    secretRef:   { name: shop-db }   # injects DATABASE_URL
+    roSecretRef: { name: shop-db }   # injects DATABASE_URL_RO (optional)
+```
+
+See [Databases](/docs/databases) for the pool-idle and connect-timeout settings that go with it.
+
+## ImagePullBackOff [#imagepullbackoff]
+
+**Symptom.** The app (or the operator itself) is stuck in `ImagePullBackOff` or `ErrImagePull`, often
+only on newly added nodes while existing pods run fine. `knext doctor`'s image check warns that the
+image is not anonymously pullable, or fails because it does not exist on the registry.
+
+**Cause.** The image lives in a **private** registry package with no pull credential on the node, or
+the digest no longer exists and running pods survive only on a cached copy that new nodes cannot pull.
+
+**Fix.**
+
+```sh title="shell"
+kubectl describe pod -n <ns> <pod>   # confirm the pull error and which image
+knext doctor                         # the image check names the exact reference
+```
+
+Either make the registry package public, or attach a pull credential with `spec.imagePullSecrets`. If
+the digest is gone, re-push and re-pin. See [Private registries](/docs/private-registries).
+
+## Secret missing [#secret-missing]
+
+**Symptom.** The pod never becomes Ready; `kubectl get pod` shows `CreateContainerConfigError`.
+
+**Cause.** `spec.database.secretRef` or `spec.secrets.envMap` names a Secret (or key) that does not
+exist in the app's namespace. The binding is plain environment wiring, so the operator does not catch a
+missing Secret; it surfaces on the **pod**. A rotated or deleted Secret produces the same symptom on the
+next revision roll.
+
+**Fix.**
+
+```sh title="shell"
+kubectl get secret -n <ns>                                              # present?
+kubectl get secret shop-db -n <ns> -o jsonpath='{.data}' | jq 'keys'   # right key?
+```
+
+Create or repair the Secret with the expected key (`DATABASE_URL` or `DATABASE_URL_RO` by default),
+then re-apply the `NextApp` to force a fresh revision. If the Secret is fine but Postgres or Redis is
+down, see [Incident response](/docs/incident-response#cache-or-database-down): Postgres is a hard
+dependency and readiness fails closed; Redis as a cache is soft and fails open.
+
+## Cold-start latency [#cold-start-latency]
+
+**Symptom.** The first request after idle is slow or times out at the client, and
+`KnextColdStartLatencyHigh` fires (cold start above 3 seconds).
+
+**Cause.** A scale-to-zero app pays a cold start on the first request. Common contributors are image
+pull on a node that has not cached the image, heavy module initialisation, and a slow dependency on the
+first request. A genuine app-initialisation regression after a deploy also shows here.
+
+**Fix.** See [Incident response](/docs/incident-response#cold-start-latency-spike) and
+[Tuning cold start](/docs/tuning-cold-start). If the regression arrived with a deploy, roll back with
+`knext rollback`. Raise `minScale` above 0 only as a deliberate always-warm trade-off.
+
+### Which dependency stalled the first request? [#which-dependency-stalled-the-first-request]
+
+A cold start slowed by a *dependency* looks identical from outside whichever dependency it was: the
+page renders, nothing errors. The app names it instead. When a dependency operation on a request path
+takes longer than `SLOW_DEP_LOG_MS` (default **500 ms**), it emits exactly one structured line:
+
+```sh title="shell"
+kubectl logs <pod> -c user-container | grep '\[slow-dep\]'
+```
+
+| Line | Reading |
+| --- | --- |
+| `[slow-dep] {"dep":"pg","op":"pool.query"…,"cold":true}` | The Postgres pool's **first** acquisition on this pod was slow (database wake or connect). `"cold":false` means the pool was already awake — a different story |
+| `[slow-dep] {"dep":"pg","op":"pool.connect"…}` | The same, for an explicit `connect()` (the transaction path) |
+| `[slow-dep] {"dep":"redis-connect","op":"client.connect"…}` | The cache's **TCP handshake** was slow — a connect-phase problem such as a SYN retransmit, proxy programming or a loaded node |
+| `[slow-dep] {"dep":"redis-ready","op":"ready-check"…}` | The handshake was fast and the cache's **ready-check** was slow — Redis responsiveness, not the network |
+
+Each line carries `durationMs`, `thresholdMs` and, for Postgres, `role` (`writer` for `DATABASE_URL`,
+`reader` for `DATABASE_URL_RO`) and `outcome`. `cold` appears on writer lines only. No line carries the
+target: the dependency *class* is logged, never a DSN, host credentials or SQL text.
+
+The threshold is a plain environment variable, so you can lower it on a suspect deployment without a
+rebuild — **through the `NextApp`, never the Knative Service**:
+
+```sh title="shell"
+kubectl patch nextapp <app> -n <ns> --type merge -p \
+  '{"spec":{"env":{"SLOW_DEP_LOG_MS":"100"}}}'
+```
+
+Do not reach for `kubectl set env ksvc/<app>`. The operator reverts out-of-band Service edits, so the
+setting would vanish mid-incident — and a merge patch on a Service container drops any env, resources
+and probes you did not restate, while the revision still goes Ready, leaving a misconfigured pod that
+looks healthy. The patch rolls a new revision, so it applies to pods created afterwards, and the change
+itself costs a cold start. It moves no timeout or fail-open behavior, and readiness never gates on a
+dependency.
+
+If you see nothing at all, the stall was not in the app's Postgres pools or its ISR cache connection:
+look at the other cold-start contributors above. Your app's own direct clients to other services are not
+instrumented, so silence does not rule them out.
+
+## Database wake timeout [#database-wake-timeout]
+
+**Symptom.** The first database query after both the app *and* its database have been idle fails or is
+very slow; logs show a connect timeout or `connection refused`, and `KnextHighErrorRate` may fire.
+
+**Cause.** knext binds Postgres through a Secret DSN and builds no database machinery. When the DSN
+points at a scale-to-zero database's wake-on-connect gateway, a cold database takes a few seconds to
+wake. Two client-side settings cause the timeout:
+
+- the app's Postgres **pool idle timeout is at or above the gateway's 60-second idle window**, so the
+  pool holds sockets the gateway already closed and the first query after idle fails;
+- the client **connect timeout is under 10 seconds**, so it gives up before the wake completes.
+
+**Fix.** Set the pool idle timeout **below 60 seconds** and the connect timeout to **10 seconds or
+more**. This is a client configuration fix, not a cluster change. See [Databases](/docs/databases) and
+[Scale-to-zero database](/docs/learn/scale-to-zero-database).
+
+### Deep health stuck waking [#deep-health-stuck-waking]
+
+**Symptom.** `KnextDeepHealthStuckWaking` fires (critical): the gauge
+`knext_deep_health_state{dependency="overall",state="waking"}` has been `1` for over 2 minutes. This
+gauge belongs to the default standalone build's metric family.
+
+**Normal versus stuck.** The deep health check classifies a **connection-level** failure to Postgres —
+`ECONNREFUSED`, a connect timeout, dead DNS — as `waking`, not `down`, because a scale-to-zero database
+shows exactly that signature while it wakes. A real wake is brief, a few seconds, and does not page. A
+genuinely down database (host gone, dead DNS, a rotated `DATABASE_URL`) presents the *same* errors, so
+it sits at `waking` forever and never becomes `down`. The alert pages on `waking` sustained past the
+wake budget for this reason.
+
+**What it means.** The app cannot reach its database at the connection level for minutes. This is an
+outage, not a wake.
+
+**Act.**
+
+1. Check the database gateway and compute: is the compute scaling up, or stuck at 0 or crash-looping?
+2. Verify the app's `DATABASE_URL` Secret resolves to a live host and port. Dead DNS or a rotated DSN
+   is the common cause — see [Secret missing](#secret-missing).
+3. If the gateway is healthy but the app still cannot connect, check the NetworkPolicy to the database
+   host and the client connect timeout above.
+
+The alert resolves on its own once a scrape sees the database reachable.
+
+**Why this does not break scale-to-zero.** The gauge is refreshed on the metrics scrape by a real
+`SELECT 1` through the gateway, which would re-arm the database's idle timer every scrape and keep it
+awake forever. So the scrape probe is **activity-gated**: it runs only when the app used its writer
+pool within `DB_ACTIVITY_BUDGET_MS` (default 45 seconds, below the gateway's 60-second idle window). An
+idle app is never probed, its database sleeps normally, and the gauge holds its last value. That is safe
+for the alert, because a stuck-`waking` outage only matters when the app is actively using the database
+— exactly when the gate is open.
+
+## NetworkPolicy blocks the activator [#networkpolicy-blocks-the-activator]
+
+**Symptom.** The pod is Running but unreachable. Scale-from-zero requests return 503 at the Knative
+activator, or in-namespace callers reach the app while external paths cannot. Turning on
+`spec.security.networkPolicy` coincided with the break.
+
+**Cause.** The operator reconciles a default-on `NetworkPolicy`, `<app>-allow-ingress`, restricting
+ingress to the app's pods to `knative-serving` (the activator), `kourier-system` (the ingress gateway)
+and the app's own namespace — and, on the serving ports only, to those. If those namespaces are not
+labelled `kubernetes.io/metadata.name=<ns>`, or the activator runs elsewhere on a policy-enforcing CNI,
+legitimate traffic is dropped. The policy is layer 3/4 and a no-op on a CNI without NetworkPolicy
+support. See [Security](/docs/security#network-isolation).
+
+**Fix.**
+
+```sh title="shell"
+kubectl get networkpolicy <app>-allow-ingress -n <ns> -o yaml
+kubectl get ns knative-serving kourier-system \
+  -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.labels.kubernetes\.io/metadata\.name}{"\n"}{end}'
+```
+
+Make sure both namespaces carry the `kubernetes.io/metadata.name` label (Kubernetes 1.21 and later add
+it automatically). To opt out entirely, set `spec.security.networkPolicy: false` and the operator
+removes the policy. Do not hand-edit the policy: it is owner-referenced and reconciled.
+
+## Wakes got slower on one app
+
+**Symptom.** Wakes of a scale-to-zero app became uniformly slower — roughly 1 to 2 seconds added
+between the pod reporting Ready and the response arriving — with no deploy or config change. Warm
+requests are unaffected. There is no alert for this; it is found by decomposing wake latency.
+
+**Diagnose.** Look at what the activator's throttler logs for the revision on a cold wake:
+
+```sh title="shell"
+kubectl -n knative-serving logs -l app=activator --since=10m | grep "Updating Revision Throttler" | grep "<revision>"
+```
+
+- Healthy, pod-direct: `clusterIP = <nil>, trackers = 1, backends = 1`.
+- Degraded, fallback: `clusterIP = <ip>:80, trackers = 0, backends = 1`, preceded during the wake by a
+  `connection refused` retry loop against that cluster IP.
+
+**Cause.** The activator's per-revision watcher falls back from probing pod IPs to probing the
+revision's private Service cluster IP after a streak of pod-probe failures, for example a transient
+network fault. The fallback never retries pod-direct, so a healed network still pays the cluster-IP path,
+which waits on kube-proxy programming on every wake.
+
+**Fix.** Restart the activator so it re-evaluates pod addressability:
+
+```sh title="shell"
+kubectl -n knative-serving rollout restart deploy/activator
+```
+
+On one measured cluster the Ready-to-routable gap dropped from 1.6 to 1.9 seconds before the restart to
+0.1 to 0.9 seconds after, on the same revision. In-flight traffic to running pods is not interrupted,
+though a wake racing the restart may see one retry.
+
+## Webhook not ready [#webhook-not-ready]
+
+**Symptom.** `knext deploy` or `kubectl apply` of a `NextApp` fails with `failed calling webhook …
+connection refused` or an `x509` certificate error. **Nothing** deploys, even a valid resource.
+
+**Cause.** The operator ships a `ValidatingWebhookConfiguration` with `failurePolicy: Fail`, so a bad
+image can never slip past while the webhook is down. If the operator pod is not Ready, or cert-manager
+has not issued the webhook serving certificate, the API server cannot reach the webhook and rejects
+every write to `NextApp`.
+
+**Fix.**
+
+```sh title="shell"
+kubectl get deploy -n kn-next-operator-system              # controller-manager Ready?
+kubectl get validatingwebhookconfiguration kn-next-operator-validating-webhook-configuration
+kubectl get deploy cert-manager-webhook -n cert-manager    # cert-manager up?
+knext doctor                                               # checks both prerequisites
+```
+
+Bring the operator Deployment and cert-manager back to Ready, then re-apply.
+
+## Metrics port [#metrics-port]
+
+Two faces of the same fact: **the queue-proxy sidecar owns `:9091`** in every revision pod on a stock
+Knative install whose request-metrics protocol is Prometheus, so the app metrics port is **`:9464`**.
+
+- **Crash loop, log says `Failed to start server. Is port … in use?` or `EADDRINUSE` naming the
+  metrics port.** The pod is racing queue-proxy — either the image predates the `:9464` default, or the
+  `NextApp` pins `METRICS_PORT` onto a queue-proxy port (`8012`, `8013`, `8022`, `8112`, `9090`,
+  `9091`). Run `knext doctor` (the metrics-port check names the app and the governing ConfigMap key),
+  then redeploy with a current build or drop the override.
+- **Metrics went dark after an upgrade.** The scrape contract (annotation, NetworkPolicy, PodMonitor)
+  targets `:9464`, but a pod running a pre-upgrade image still binds `:9091` until redeployed, and any
+  scrape config you wrote yourself keeps pointing at the old port. Redeploy the app, repoint hand-rolled
+  scrape configs, then verify:
+
+```sh title="shell"
+kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | head -3
+```
+
+See [Upgrading](/docs/upgrading) for the ordered steps.
+
+## When none of these match
+
+- Re-run `knext doctor --json` and keep the output.
+- Capture the app's narration: `kubectl get nextapp <app> -n <ns> -o yaml` (conditions and events) and
+  the operator log.
+- Cross-reference the firing alert against [Incident response](/docs/incident-response) and
+  [SLOs and alerting](/docs/slos-alerting).

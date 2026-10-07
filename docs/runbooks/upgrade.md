@@ -1,5 +1,7 @@
 # Runbook — Operator + CRD upgrade
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/operator-upgrade>. Update both together; this file is the maintainer-level original.
+
 How to roll a new `kn-next-operator` image and CRD onto a live cluster safely.
 Grounded in the operator's real install path
 ([`docs/QUICKSTART.md` § Step 1](../QUICKSTART.md#step-1--install-the-operator)),

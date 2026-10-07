@@ -1,5 +1,7 @@
 # knext incident runbook (day-2)
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/incident-response>. Update both together; this file is the maintainer-level original.
+
 > Part of the [knext runbooks](./README.md). For planned day-2 operations rather
 > than incidents, see [upgrade.md](./upgrade.md) (operator/CRD upgrade),
 > [rollback.md](./rollback.md) (app + operator rollback), and

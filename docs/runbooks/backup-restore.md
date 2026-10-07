@@ -1,5 +1,7 @@
 # Runbook — Backup & restore
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/backup-restore>. Update both together; this file is the maintainer-level original.
+
 knext holds three classes of state, and the backup story is different for each.
 **Know which one you are protecting before you act:**
 

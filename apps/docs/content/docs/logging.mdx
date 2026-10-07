@@ -1,0 +1,122 @@
+---
+title: Logging and correlation IDs
+description: The structured JSON log schema, the request correlation-ID contract, and how to collect and join logs with traces.
+---
+
+knext apps log **line-delimited JSON** in production — one object per line — so a collector (Loki via
+Alloy or Promtail, Fluent Bit, Vector, Datadog, Elastic) ingests them without a regex parser. Every
+line emitted during a request can carry a correlation ID that joins it to the request's trace. In
+local development the same records are rendered by `pino-pretty` for humans.
+
+The runtime logger is `@getknext/lib/logger`. For metrics see [Observability](/docs/observability); for
+the alerts built on them see [SLOs and alerting](/docs/slos-alerting).
+
+## Log schema
+
+Every line carries these fields:
+
+| Field | Source | Meaning |
+| --- | --- | --- |
+| `level` | logger | `debug`, `info`, `warn`, `error` or `fatal` — always a string label, never a number |
+| `time` | logger | Epoch milliseconds |
+| `app` | `KN_APP_NAME` (falls back to a default name) | Which app emitted the line |
+| `env` | `NODE_ENV` | Deployment environment |
+| `msg` | call site | The human message |
+| `correlation_id` | request context | Present on every line emitted during a request, automatically when tracing is on |
+| `trace_id` | active OpenTelemetry span | Present when tracing is enabled and a span is active |
+
+Example line:
+
+```json
+{"level":"info","time":1731800000123,"app":"zone-checkout","env":"production","correlation_id":"7b1c2f9a-3e4d-4a1b-9c2e-0f5a6b7c8d9e","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","msg":"order placed","orderId":"ord_42"}
+```
+
+The logger redacts `req.headers.authorization`, `req.headers.cookie`, `password` and `token`, which
+serialize as `[Redacted]`. Redaction is a safety net, not permission: never log a `DATABASE_URL`, a
+bearer token or any secret value.
+
+### Levels
+
+| Level | Use for |
+| --- | --- |
+| `debug` | Verbose diagnostics for development; off in production by default |
+| `info` | Normal lifecycle — startup, request handled, scale events. The production default |
+| `warn` | Recoverable or degraded — a retry, a fallback, a non-fatal misconfiguration |
+| `error` | A request or operation failed |
+| `fatal` | The process cannot continue and is exiting |
+
+Set the floor with the `LOG_LEVEL` environment variable. Through the `NextApp`, use `spec.env`.
+
+## The correlation-ID contract
+
+- **Header:** `x-request-id`, lowercase.
+- **Adopt or generate.** An inbound `x-request-id` is adopted only when it is a safe token: 1 to 128
+  characters from `A-Z a-z 0-9 . _ -` (a UUID, ULID, W3C trace ID or short prefixed ID all qualify).
+  Anything else — whitespace, control characters, markup, an oversized or empty value — is not
+  trusted and a fresh UUID is generated instead, because an untrusted ID in a log field is a
+  log-injection and cardinality hazard.
+- **One ID per request**, ambient for the whole request, so you do not thread it through function
+  signatures.
+- **Joined to the trace.** When an OpenTelemetry span is active, the correlation ID is paired with its
+  `trace_id`, so a log query by `correlation_id` and a trace query by `trace_id` land on the same
+  request.
+
+### Automatic on the request path
+
+When tracing is enabled (`observability.tracing.enabled`, see [Tracing](/docs/observability#tracing-opentelemetry)),
+knext establishes the correlation ID for every inbound request. You do not wrap route handlers.
+
+- The ID is extracted from the inbound `x-request-id` (or generated) at the start of the request and
+  carried on the OpenTelemetry context, so it is present for log lines emitted under any span in that
+  request — including child spans such as the database wake.
+- The response carries `x-request-id` back to the client with the active ID, unless your app already
+  set that header (an app-set value always wins). An ID that fails the well-formedness rules is never
+  echoed; the header is left unset.
+- With tracing off, none of this runs: no overhead, and non-request and background logs stay clean.
+
+### Across the database hop
+
+Postgres is reached over a TCP wake-on-connect gateway that carries no HTTP headers, so the join key
+across that hop is the OpenTelemetry `trace_id`. The `correlation_id` and `trace_id` on your app's log
+lines around the database call tie the two layers together. Forward `x-request-id` on outbound HTTP
+calls so a request stays traceable app to downstream.
+
+### Using it explicitly
+
+For code paths you own — a custom server entry, a script — establish the context by hand with
+`@getknext/lib/context`. An explicit `runWithRequestContext` always takes precedence over the automatic
+provider.
+
+```ts title="handler.ts"
+import {
+  applyCorrelationHeader,
+  beginRequest,
+  correlationHeaders,
+  runWithRequestContext,
+} from '@getknext/lib/context';
+
+export async function handle(req: Request): Promise<Response> {
+  const ctx = beginRequest(req.headers); // adopt or generate x-request-id
+  return runWithRequestContext(ctx, async () => {
+    // Any logger call in here carries correlation_id.
+    const res = await doWork();
+    await fetch(downstreamUrl, { headers: correlationHeaders() }); // forward downstream
+    applyCorrelationHeader(res.headers); // echo on the response
+    return res;
+  });
+}
+```
+
+The logger reads the ambient context itself, so no extra argument is needed to get `correlation_id`
+onto a line, and nothing is added outside a request.
+
+## Collecting logs
+
+- **Loki with Grafana Alloy or Promtail** (or Fluent Bit or Vector): tail container stdout, parse the
+  JSON, and keep `level`, `app`, `env`, `correlation_id` and `trace_id` as fields. Do **not** promote
+  `correlation_id` to a Loki *label* — it is high-cardinality. Keep it a structured field or use
+  structured metadata.
+- **Trace join.** With the Grafana Loki and Tempo (or Jaeger) integration, click a line's `trace_id` to
+  open the trace, and the reverse. `correlation_id` gives the same join for requests that tracing
+  sampled out.
+- Keep exporters self-hostable and cluster-local. knext does not default to a SaaS backend.
