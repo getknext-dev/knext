@@ -112,10 +112,72 @@ describe("rewriteImportMetaUses", () => {
         expect(nodeChecks(rewriteCode(src).contents).ok).toBe(true);
     });
 
-    it("reports a use it cannot rewrite (bare import.meta, import.meta.resolve) as survived", () => {
-        const { survived } = rewriteCode(
-            "const m = import.meta; import.meta.resolve('x');",
-        );
-        expect(survived).toEqual(["import.meta", "import.meta.resolve"]);
+    it("reports a use it cannot rewrite (import.meta.resolve) as survived", () => {
+        const { survived } = rewriteCode("import.meta.resolve('x');");
+        expect(survived).toEqual(["import.meta.resolve"]);
+    });
+
+    it("rewrites a bare import.meta to an object literal carrying url/filename/dirname (#1877: rolldown's `var t = import.meta` getter shape)", () => {
+        const src = "var t = import.meta; console.log(t.url, t.dirname);";
+        const { contents, count, survived } = rewriteCode(src);
+        expect(survived).toEqual([]);
+        expect(count).toBe(1);
+        expect(contents).not.toContain("import.meta");
+        expect(contents).toContain(`url:${EXPRS.url}`);
+        expect(contents).toContain(`filename:${EXPRS.filename}`);
+        expect(contents).toContain(`dirname:${EXPRS.dirname}`);
+        expect(nodeChecks(contents).ok).toBe(true);
+    });
+
+    it("rewrites the rolldown getter shape (`{get value(){return t.url}}.value`) — reads solely via .url", () => {
+        const src =
+            "var t = import.meta; var w = n({ get value() { return t.url; } }.value);";
+        const { survived, count } = rewriteCode(src);
+        expect(survived).toEqual([]);
+        expect(count).toBe(1);
+    });
+
+    // A bare `import.meta` is only rewritten when it is provably an alias read
+    // solely via .url/.filename/.dirname. Every other bare use — an alias read
+    // through Bun's .dir/.path/.main/.env/.resolve, destructuring, a computed
+    // key, or the alias escaping into a call — must stay FATAL (survived), or
+    // the build silently ships `undefined` where Bun had a value.
+    it.each([
+        [
+            "an alias read via .dir",
+            "var t = import.meta; console.log(t.url, t.dir);",
+        ],
+        ["an alias read via .path", "var t = import.meta; f(t.path);"],
+        [
+            "an alias read via .resolve()",
+            "const t = import.meta; t.resolve('x');",
+        ],
+        [
+            "an alias read via a computed key",
+            "var t = import.meta; f(t['url']);",
+        ],
+        ["an alias passed to a function", "var t = import.meta; f(t);"],
+        [
+            "an alias that is reassigned",
+            "var t = import.meta; t = other; f(t.url);",
+        ],
+        ["an alias whose .url is written", "var t = import.meta; t.url = 'x';"],
+        ["an alias re-aliased", "var t = import.meta; var u = t; f(u.dir);"],
+        ["destructuring", "const { dir } = import.meta; f(dir);"],
+        [
+            "destructuring of an allowed key",
+            "const { url } = import.meta; f(url);",
+        ],
+        ["a computed key", "f(import.meta['resolve']);"],
+        ["a computed variable key", "const k = 'env'; f(import.meta[k]);"],
+        ["import.meta passed to a function", "f(import.meta);"],
+        [
+            "import.meta assigned to a property",
+            "o.m = import.meta; f(o.m.url);",
+        ],
+    ])("keeps %s fatal (survived)", (_label, src) => {
+        const { survived, count } = rewriteCode(src);
+        expect(survived).toEqual(["import.meta"]);
+        expect(count).toBe(0);
     });
 });

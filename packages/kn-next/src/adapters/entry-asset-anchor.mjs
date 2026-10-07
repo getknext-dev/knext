@@ -323,10 +323,11 @@ export function rewriteEntryHarfbuzzAnchors(src, resolve) {
  * page whose code sample mentions `import.meta.url`).
  *
  * @param {string} src
- * @param {{ start: number, end: number, prop: string | null }[]} uses
+ * @param {{ start: number, end: number, prop: string | null, alias?: boolean }[]} uses
  * @param {{ url: string, filename: string, dirname: string }} exprs
  * @returns {{ contents: string, count: number, survived: string[] }}
- *   `survived`: the uses it cannot rewrite (`import.meta`, `import.meta.<other>`)
+ *   `survived`: the uses it cannot rewrite (`import.meta.<other>`, and a
+ *   bare `import.meta` not proven a url/filename/dirname-only alias)
  */
 export function rewriteImportMetaUses(src, uses, exprs) {
     let contents = "";
@@ -334,8 +335,20 @@ export function rewriteImportMetaUses(src, uses, exprs) {
     let count = 0;
     const survived = [];
     for (const use of uses) {
+        // A bare `import.meta` the analyzer PROVED is an alias read solely
+        // via .url/.filename/.dirname (rolldown's per-module merge emits `var
+        // t = import.meta` and reads `t.url` through a getter) becomes an
+        // inline object carrying all three. Any other bare use (computed,
+        // destructured, escaping, or read via Bun's .dir/.resolve/...) stays
+        // survived — rewriting it would silently yield `undefined` at runtime.
         const expr =
-            use.prop !== null && Object.hasOwn(exprs, use.prop) ? exprs[use.prop] : undefined;
+            use.prop === null
+                ? use.alias === true
+                    ? `({url:${exprs.url},filename:${exprs.filename},dirname:${exprs.dirname}})`
+                    : undefined
+                : Object.hasOwn(exprs, use.prop)
+                  ? exprs[use.prop]
+                  : undefined;
         if (expr === undefined) {
             survived.push(use.prop === null ? "import.meta" : `import.meta.${use.prop}`);
             continue;

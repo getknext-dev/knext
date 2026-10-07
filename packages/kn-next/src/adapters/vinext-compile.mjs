@@ -279,11 +279,19 @@ function listServerOutputModules(dir) {
  * Bun.build runs, because rolldown puts the `createRequire(import.meta.url)`
  * binding in one module and the `__require("<pkg>")` calls in others.
  *
- *  - `embed`: bare literals passed to calls anywhere in the output whose
- *    package nitro traced into `.output/server/node_modules` and that resolve.
+ *  - `embed`: bare literals passed to a RECOGNISED require binding (local, or
+ *    imported from the module that defines it) that resolve from the entry's
+ *    own directory — either nitro's traced `.output/server/node_modules`
+ *    sidecar (#1309/#1314: Node's upward node_modules walk from there reaches
+ *    the sidecar directly) OR, when nitro bundled the package directly instead
+ *    of leaving it external, the app's regular `node_modules` (cluster C11,
+ *    `streaming-ssr`'s edge-runtime pages: a require reached only through the
+ *    per-module-merge getter-indirection binding shape — see
+ *    entry-require-staticize.mjs's header — for a package Bun's own static
+ *    graph already bundled elsewhere, just not through THIS runtime call).
  *    Every require binding is wrapped to load these from the bundle.
- *  - `unresolved`: literals passed to a RECOGNISED require binding (local, or
- *    imported from the module that defines it) that are not embedded.
+ *  - `unresolved`: literals passed to a RECOGNISED require binding that do not
+ *    resolve at all (not embeddable, from anywhere).
  *  - `dynamic`: modules calling a recognised require binding with a
  *    non-literal specifier (`__require(name)`): what it loads is known only at
  *    runtime, so it cannot be embedded.
@@ -313,22 +321,6 @@ function planRuntimeRequires() {
     const name = (path) => relative(dirname(ENTRY), path);
 
     const embed = new Map();
-    for (const [path, analysis] of modules) {
-        for (const specs of analysis.literalCalls.values()) {
-            for (const spec of specs) {
-                if (!existsSync(join(SIDECAR_NODE_MODULES, packageNameOf(spec)))) continue;
-                try {
-                    Bun.resolveSync(spec, dirname(ENTRY));
-                } catch {
-                    continue;
-                }
-                const users = embed.get(spec) ?? new Set();
-                users.add(name(path));
-                embed.set(spec, users);
-            }
-        }
-    }
-
     const unresolved = new Map();
     const ambiguousUnresolved = new Map();
     const dynamic = [];
@@ -359,8 +351,38 @@ function planRuntimeRequires() {
                 (ambiguous ? ambiguousDynamic : dynamic).push(name(path));
             }
             for (const spec of analysis.literalCalls.get(callee) ?? []) {
-                if (embed.has(spec)) continue;
-                const target = ambiguous ? ambiguousUnresolved : unresolved;
+                if (embed.has(spec)) {
+                    embed.get(spec).add(name(path));
+                    continue;
+                }
+                // Resolvable from the entry's own directory covers BOTH cases
+                // a confirmed require binding can reach: the sidecar (nitro
+                // traced it to .output/server/node_modules, which Node's
+                // upward node_modules walk from dirname(ENTRY) finds directly
+                // — #1309/#1314) and, when nitro bundled the package directly
+                // instead (cluster C11), the app's regular node_modules, found
+                // the same way by walking further up. Either way this is a
+                // real, embeddable file — AS LONG AS that walk stayed inside
+                // the app's own workspace (`isWithinAppRoot`, round-2 review;
+                // the boundary is the nearest ancestor `package.json` with a
+                // `workspaces` field, or the app root itself when there is
+                // none — see `findWorkspaceRoot`): the SAME upward walk has
+                // no bound, so it can resolve a package that is not this
+                // app's (or its workspace's) dependency at all, on the build
+                // machine's own disk. A resolved-but-outside-root spec is
+                // treated the SAME as an ordinary unresolvable one (warn by
+                // default, fail only under KNEXT_COMPILE_STRICT_REQUIRES=1) —
+                // never embedded silently, never a special hard failure
+                // either: jev 0.99 picked consistency with the existing
+                // unresolved-package handling over a bespoke always-fail path.
+                let resolvable;
+                try {
+                    const resolved = Bun.resolveSync(spec, dirname(ENTRY));
+                    resolvable = Boolean(resolved) && isWithinAppRoot(resolved);
+                } catch {
+                    resolvable = false;
+                }
+                const target = resolvable ? embed : ambiguous ? ambiguousUnresolved : unresolved;
                 const users = target.get(spec) ?? new Set();
                 users.add(name(path));
                 target.set(spec, users);
@@ -647,7 +669,8 @@ function entryImportMetaUses(src, path) {
             (u) =>
                 Number.isInteger(u?.start) &&
                 Number.isInteger(u.end) &&
-                (u.prop === null || typeof u.prop === "string"),
+                (u.prop === null || typeof u.prop === "string") &&
+                (u.alias === undefined || typeof u.alias === "boolean"),
         );
     if (!wellFormed) analyzerFailed(path, "printed JSON that is not an import.meta analysis");
     return found.uses;
@@ -802,9 +825,11 @@ const importMetaToCjs = {
             console.log(
                 "[knext compile] injected the ARP primer (#1760) and the Bun.serve keep-alive guard as the entry's first imports",
             );
-            const before = (src.match(/import\.meta\.(url|filename|dirname)/g) ?? [])
-                .length;
-            if (before === 0) return { contents: src, loader: "js" };
+            // Cheap pre-filter: no `import.meta` text at all means nothing to
+            // rewrite, so skip the out-of-process analyzer. Deliberately NOT
+            // `import.meta.(url|...)`: a bare `var t = import.meta` (rolldown's
+            // getter shape) carries no such member text but must be rewritten.
+            if (!src.includes("import.meta")) return { contents: src, loader: "js" };
             // These must reconstruct the ORIGINAL entry path
             // (<dirname(execPath)>/.output/server/index.mjs), NOT process.execPath
             // itself. nitro's bun preset resolves public assets as
@@ -968,6 +993,74 @@ const EMBEDDED_PREFIX = "knext-embedded:";
 // Unique per build, so a stale binary cannot pass the bytecode proof.
 const BYTECODE_MARKER = `knext-vinext-exec:${randomBytes(12).toString("hex")}`;
 const APP_ROOT = dirname(dirname(ENTRY_DIR));
+// Round-2 review (#1877): `planRuntimeRequires`'s embed computation resolves
+// a confirmed require's spec via `Bun.resolveSync(spec, dirname(ENTRY))` —
+// but Node's module resolution walks UPWARD through ancestor `node_modules`
+// directories with NO bound, so that alone can succeed by finding a package
+// that is not a dependency of this app at all (two directories above the app
+// root on the BUILD MACHINE's own disk, say). Embedding that would make the
+// binary's contents depend on the build machine's disk layout instead of the
+// app's own declared dependencies.
+//
+// The boundary is the WORKSPACE root, not `APP_ROOT` itself (measured: this
+// mattered on the real file-manager monorepo build). A workspace's own
+// package manager hoists dependencies to a SHARED root `node_modules`, often
+// reached from the app only through a symlink (bun: `apps/file-manager/
+// node_modules/minio -> ../../../node_modules/.bun/minio@.../node_modules/
+// minio`) — realpath-resolving that symlink (needed to be symlink-safe
+// against a REAL escape) lands outside `APP_ROOT`, so confining the check to
+// `APP_ROOT` alone rejected a real, declared, workspace-hoisted dependency as
+// if it were a stranger on the build machine's disk. A hoisted workspace
+// dependency is neither: every machine that `bun install`s the SAME
+// workspace gets the SAME package at the SAME relative position, which is
+// exactly the portability the ancestor-escape check exists to protect.
+// `findWorkspaceRoot` walks up from `APP_ROOT` for the nearest ancestor
+// `package.json` declaring a `workspaces` field (or a `pnpm-workspace.yaml`,
+// pnpm's own workspace declaration), falling back to `APP_ROOT`
+// itself (so a standalone, non-monorepo app keeps the tight original
+// boundary). `isWithinAppRoot` is the containment check: realpath-compared
+// (symlink-safe, same technique as sidecar-runtime.mjs's `isInside`), so a
+// resolved path outside that boundary is still refused.
+function findWorkspaceRoot(start) {
+    let dir = start;
+    for (;;) {
+        // pnpm declares its workspace in pnpm-workspace.yaml, not package.json.
+        if (existsSync(join(dir, "pnpm-workspace.yaml"))) return dir;
+        const pkgPath = join(dir, "package.json");
+        if (existsSync(pkgPath)) {
+            try {
+                if (JSON.parse(readFileSync(pkgPath, "utf8")).workspaces !== undefined) return dir;
+            } catch {
+                // Malformed package.json at this level — keep walking up.
+            }
+        }
+        const parent = dirname(dir);
+        if (parent === dir) return start; // filesystem root, no workspace found
+        dir = parent;
+    }
+}
+const CONTAINMENT_ROOT = findWorkspaceRoot(APP_ROOT);
+let containmentRootRealCache;
+function containmentRootReal() {
+    if (containmentRootRealCache === undefined) {
+        try {
+            containmentRootRealCache = realpathSync(CONTAINMENT_ROOT);
+        } catch {
+            containmentRootRealCache = null;
+        }
+    }
+    return containmentRootRealCache;
+}
+function isWithinAppRoot(resolvedPath) {
+    const root = containmentRootReal();
+    if (root === null) return false;
+    try {
+        const real = realpathSync(resolvedPath);
+        return real === root || real.startsWith(`${root}${sep}`);
+    } catch {
+        return false;
+    }
+}
 // knext.config.ts `compile.include` → `--include-json` (stock Bun): the matched
 // JS/TS modules ride along as EXTRA entrypoints (compile-embed.mjs), embedded
 // unexecuted at `$bunfs/root/<path relative to the app root>` and loaded on

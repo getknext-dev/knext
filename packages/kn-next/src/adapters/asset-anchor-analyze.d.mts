@@ -15,6 +15,10 @@ export interface AssetAnchorAnalysis {
 export function analyzeAssetAnchors(src: string): AssetAnchorAnalysis;
 
 export function findImportMetaUses(src: string): {
-    uses: { start: number; end: number; prop: string | null }[];
+    /**
+     * `alias` (bare uses only): true when the use is `X = import.meta` and X
+     * is provably read solely via .url/.filename/.dirname.
+     */
+    uses: { start: number; end: number; prop: string | null; alias?: boolean }[];
     parseError?: string;
 };
