@@ -16,5 +16,8 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19"
+  },
+  "overrides": {
+    "sharp": "^0.35.5"
   }
 }
