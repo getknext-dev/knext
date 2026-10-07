@@ -1734,6 +1734,78 @@ describe("the bundled patches against the published tarball", () => {
             rmSync(tmpDir, { recursive: true, force: true });
         }
     }, 60_000);
+    it("vinext#3753: text before a next/dynamic component gets no extra `<!-- -->` ahead of the boundary, and the preload hint is still emitted", async () => {
+        // Ported from Next.js: test/e2e/next-dynamic — `#foo`'s innerHTML must
+        // be `Index<!--$-->1<!--/$-->...`. A hoisted <link> right after text
+        // makes React write a text separator, so the preload hints render
+        // inside the boundary instead of in front of it.
+        applyVinextPatches(patched);
+        const { default: dynamic } = await importPatched<{
+            default: (
+                loader: () => Promise<unknown>,
+                options?: unknown,
+            ) => (props: object) => unknown;
+        }>("dist/shims/dynamic.js");
+        const { setPagesClientAssets } = await importPatched<{
+            setPagesClientAssets: (assets: unknown) => void;
+        }>("dist/server/pages-client-assets.js");
+        // @getknext/core has no React types; type just what the test uses.
+        const React = (await import(
+            pathToFileURL(join(patched, "..", "react", "index.js")).href
+        )) as {
+            createElement: (
+                type: unknown,
+                props: unknown,
+                ...children: unknown[]
+            ) => unknown;
+        };
+        const { renderToReadableStream } = (await import(
+            pathToFileURL(join(patched, "..", "react-dom", "server.edge.js"))
+                .href
+        )) as {
+            renderToReadableStream: (
+                element: unknown,
+            ) => Promise<
+                ReadableStream<Uint8Array> & { allReady: Promise<void> }
+            >;
+        };
+
+        const One = dynamic(async () => ({ default: () => "1" }), {
+            loadableGenerated: { modules: ["components/one.js"] },
+        });
+        const page = React.createElement(
+            "div",
+            { id: "foo" },
+            "Index",
+            React.createElement(One, null),
+        );
+        setPagesClientAssets({
+            dynamicPreloads: {
+                "components/one.js": ["_next/static/chunks/one.js"],
+            },
+        });
+        try {
+            const render = async () => {
+                const stream = await renderToReadableStream(page);
+                await stream.allReady;
+                return new Response(stream).text();
+            };
+            const cold = await render(); // the lazy import suspends once
+            const warm = await render();
+            for (const html of [cold, warm]) {
+                expect(html).toContain('<div id="foo">Index<!--$-->1');
+                expect(html).not.toContain("Index<!-- -->");
+                expect(html).toMatch(
+                    /<link rel="modulepreload" href="\/_next\/static\/chunks\/one\.js"[^>]*fetchPriority="low"/,
+                );
+            }
+            expect(warm).toContain(
+                '<div id="foo">Index<!--$-->1<!--/$--></div>',
+            );
+        } finally {
+            setPagesClientAssets(undefined);
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
