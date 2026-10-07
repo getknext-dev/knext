@@ -1,0 +1,176 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+
+package controller
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"knative.dev/pkg/apis"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+
+	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+)
+
+// PodCreationBlocked: a LimitRange / ResourceQuota admission rejection of the
+// pod the Knative revision's ReplicaSet tries to create. Knative already
+// propagates the Deployment's ReplicaFailure condition onto the Revision's
+// ResourcesAvailable condition (reason FailedCreate, message = the admission
+// error), so the operator reads the Revision — no Events RBAC, no pod mirror.
+
+const (
+	limitRangeMsg = `pods "shop-00001-deployment-abc" is forbidden: [maximum cpu usage per Container is 500m, but limit is 1, cpu max limit to request ratio per Container is 2, but provided ratio is 4.000000]`
+	quotaMsg      = `pods "shop-00001-deployment-abc" is forbidden: exceeded quota: team-quota, requested: limits.cpu=1, used: limits.cpu=3500m, limited: limits.cpu=4`
+)
+
+func blockedRevision(reason, msg string, status corev1.ConditionStatus) *servingv1.Revision {
+	rev := &servingv1.Revision{}
+	rev.Name = "shop-00001"
+	rev.Namespace = "prod"
+	rev.Status.Conditions = duckConds(servingv1.RevisionConditionResourcesAvailable, status, reason, msg)
+	return rev
+}
+
+func duckConds(t apis.ConditionType, s corev1.ConditionStatus, reason, msg string) []apis.Condition {
+	return []apis.Condition{{Type: t, Status: s, Reason: reason, Message: msg}}
+}
+
+func TestClassifyPodCreationBlock(t *testing.T) {
+	cases := []struct {
+		name    string
+		rev     *servingv1.Revision
+		blocked bool
+		reason  string
+	}{
+		{"limitrange", blockedRevision("FailedCreate", limitRangeMsg, corev1.ConditionFalse), true, ReasonLimitRangeRejected},
+		{"quota", blockedRevision("FailedCreate", quotaMsg, corev1.ConditionFalse), true, ReasonQuotaExceeded},
+		{"other FailedCreate (webhook) is out of scope", blockedRevision("FailedCreate", `admission webhook "x" denied the request`, corev1.ConditionFalse), false, ""},
+		{"other reason with quota text is out of scope", blockedRevision("ProgressDeadlineExceeded", quotaMsg, corev1.ConditionFalse), false, ""},
+		{"healthy", blockedRevision("", "", corev1.ConditionTrue), false, ""},
+		{"no conditions", &servingv1.Revision{}, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msg, reason, blocked := classifyPodCreationBlock(c.rev)
+			if blocked != c.blocked || reason != c.reason {
+				t.Fatalf("got blocked=%v reason=%q, want %v %q", blocked, reason, c.blocked, c.reason)
+			}
+			if blocked && msg == "" {
+				t.Fatal("blocked verdict must carry the admission message")
+			}
+		})
+	}
+}
+
+func verdictWithPodCreation(app *appsv1alpha1.NextApp, pc podCreationState, now time.Time) statusVerdict {
+	return computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, privateExposureState{}, pc, now)
+}
+
+func TestPodCreationBlocked_ConditionAndEventOnTransition(t *testing.T) {
+	now := time.Now()
+	pc := podCreationState{blocked: true, reason: ReasonLimitRangeRejected, revision: "shop-00001", message: limitRangeMsg}
+	v := verdictWithPodCreation(verdictApp(), pc, now)
+	c := findVerdictCondition(t, v, ConditionPodCreationBlocked)
+	if c.Status != metav1.ConditionTrue || c.Reason != ReasonLimitRangeRejected {
+		t.Fatalf("got %+v", c)
+	}
+	if !strings.Contains(c.Message, "maximum cpu usage per Container") || !strings.Contains(c.Message, "shop-00001") {
+		t.Fatalf("condition must carry revision + event message, got %q", c.Message)
+	}
+	if len(v.events) != 1 || v.events[0].eventType != corev1.EventTypeWarning || v.events[0].reason != ReasonLimitRangeRejected {
+		t.Fatalf("want one Warning event on entry, got %+v", v.events)
+	}
+
+	// Converged pass: same condition already present -> no repeat event (#98).
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{c}
+	v2 := verdictWithPodCreation(app, pc, now)
+	if len(v2.events) != 0 {
+		t.Fatalf("event must be transition-gated, got %+v", v2.events)
+	}
+}
+
+func TestPodCreationBlocked_ClearedRemovesConditionOnlyIfPresent(t *testing.T) {
+	now := time.Now()
+	v := verdictWithPodCreation(verdictApp(), podCreationState{}, now)
+	for _, c := range v.conditions {
+		if c.Type == ConditionPodCreationBlocked {
+			t.Fatalf("never-blocked app must not grow the condition: %+v", c)
+		}
+	}
+	if len(v.removeConditions) != 0 && containsStr(v.removeConditions, ConditionPodCreationBlocked) {
+		t.Fatalf("nothing to remove for a never-blocked app: %v", v.removeConditions)
+	}
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{{Type: ConditionPodCreationBlocked, Status: metav1.ConditionTrue, Reason: ReasonQuotaExceeded}}
+	v = verdictWithPodCreation(app, podCreationState{}, now)
+	if !containsStr(v.removeConditions, ConditionPodCreationBlocked) {
+		t.Fatalf("recovered app must drop the condition, got %v", v.removeConditions)
+	}
+}
+
+func TestPodCreationBlocked_UnknownKeepsPriorVerdict(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	prior := metav1.Condition{Type: ConditionPodCreationBlocked, Status: metav1.ConditionTrue, Reason: ReasonQuotaExceeded, Message: "m"}
+	app.Status.Conditions = []metav1.Condition{prior}
+	v := verdictWithPodCreation(app, podCreationState{unknown: true}, now)
+	c := findVerdictCondition(t, v, ConditionPodCreationBlocked)
+	if c.Reason != ReasonQuotaExceeded || c.Message != "m" {
+		t.Fatalf("API hiccup must not flip the condition, got %+v", c)
+	}
+	if containsStr(v.removeConditions, ConditionPodCreationBlocked) {
+		t.Fatal("unknown must not remove")
+	}
+}
+
+func TestDetectPodCreationBlocked_ReadsLatestCreatedRevision(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := servingv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	rev := blockedRevision("FailedCreate", quotaMsg, corev1.ConditionFalse)
+	r := &NextAppReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(rev).Build()}
+	ksvc := &servingv1.Service{}
+	ksvc.Status.LatestCreatedRevisionName = "shop-00001"
+	app := verdictApp()
+
+	st := r.detectPodCreationBlocked(context.Background(), app, ksvc)
+	if !st.blocked || st.reason != ReasonQuotaExceeded || st.revision != "shop-00001" {
+		t.Fatalf("got %+v", st)
+	}
+
+	// No revision created yet -> nothing to report, not an error.
+	st = r.detectPodCreationBlocked(context.Background(), app, &servingv1.Service{})
+	if st.blocked || st.unknown {
+		t.Fatalf("got %+v", st)
+	}
+	// Named revision missing -> NotFound is "not blocked", not unknown.
+	ksvc.Status.LatestCreatedRevisionName = "gone"
+	st = r.detectPodCreationBlocked(context.Background(), app, ksvc)
+	if st.blocked || st.unknown {
+		t.Fatalf("got %+v", st)
+	}
+}

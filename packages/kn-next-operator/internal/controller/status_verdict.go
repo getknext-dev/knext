@@ -147,6 +147,7 @@ func computeStatusVerdict(
 	np netpolEnforcementState,
 	envMapCollision envMapCollisionReport,
 	pe privateExposureState,
+	pc podCreationState,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -665,6 +666,42 @@ func computeStatusVerdict(
 		}
 	case prevExposure != nil:
 		v.removeConditions = append(v.removeConditions, ConditionPrivateExposure)
+	}
+
+	// PodCreationBlocked: LimitRange/quota admission rejection of the revision's
+	// pods. Appended LAST (after PrivateExposure) so every other app's persisted
+	// conditions order stays byte-identical (#98). The message embeds the
+	// admission error, which is stable per revision, so a converged pass is a
+	// no-op; the Warning event fires only on entry or when the message changes.
+	prevBlocked := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPodCreationBlocked)
+	switch {
+	case pc.unknown:
+		// A failed read is not evidence the block is gone: carry the prior verdict.
+		if prevBlocked != nil {
+			v.conditions = append(v.conditions, *prevBlocked)
+		}
+	case pc.blocked:
+		cond := metav1.Condition{
+			Type:               ConditionPodCreationBlocked,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             pc.reason,
+			Message: fmt.Sprintf(
+				"revision %s cannot create pods — the namespace's LimitRange/ResourceQuota rejected them: %s. "+
+					"Adjust spec.resources (cpuLimit/cpuRequest/memory) to fit, or change the namespace LimitRange/ResourceQuota.",
+				pc.revision, pc.message),
+		}
+		v.conditions = append(v.conditions, cond)
+		if prevBlocked == nil || prevBlocked.Reason != cond.Reason || prevBlocked.Message != cond.Message {
+			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, pc.reason, cond.Message})
+		}
+		// A blocked rollout never self-heals without a user change; keep
+		// re-evaluating so recovery clears the condition promptly.
+		if v.requeueAfter == 0 || v.requeueAfter > ksvcNotReadyRequeueAfter {
+			v.requeueAfter = ksvcNotReadyRequeueAfter
+		}
+	case prevBlocked != nil:
+		v.removeConditions = append(v.removeConditions, ConditionPodCreationBlocked)
 	}
 
 	return v

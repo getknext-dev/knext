@@ -55,7 +55,7 @@ func privateApp() *appsv1alpha1.NextApp {
 
 func verdictWithExposure(app *appsv1alpha1.NextApp, pe privateExposureState, now time.Time) statusVerdict {
 	return computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, pe, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, pe, podCreationState{}, now)
 }
 
 func TestPrivateExposure_ConditionSetWarningEventReadyUnchanged(t *testing.T) {
