@@ -4,6 +4,11 @@ name: Prerequisite bundle on kind
 # Kourier) on a fresh kind cluster with the one documented command, re-runs it
 # to prove idempotency, and asserts everything is Ready. A bad version pin or a
 # moved upstream release asset (checksum mismatch) fails the install step.
+#
+# scripts/prereqs/install.sh reaches the shared checksum + digest-pin helpers
+# scripts/kind-manifests/apply-cert-manager.sh and
+# scripts/kind-manifests/apply-knative-kourier.sh (tests/prereqs-bundle.test.ts
+# asserts that call chain), so the install-safety scan still covers every apply.
 on:
   pull_request:
     paths:

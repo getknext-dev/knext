@@ -35,6 +35,12 @@ describe('prerequisite bundle pins', () => {
     expect(read('apps/docs/content/docs/install.mdx')).toContain('scripts/prereqs/install.sh');
   });
 
+  it('installs only through the checksum-verified helpers', () => {
+    expect(bundle).toContain('"${HELPERS}/apply-cert-manager.sh"');
+    expect(bundle).toContain('"${HELPERS}/apply-knative-kourier.sh" "${KNATIVE_VERSION}"');
+    expect(bundle.replace(/^\s*#.*$/gm, '')).not.toMatch(/kubectl\s+apply/);
+  });
+
   it('--print reports the pins', () => {
     const r = spawnSync('bash', [join(ROOT, INSTALL), '--print'], { encoding: 'utf8' });
     expect(r.status).toBe(0);
