@@ -340,13 +340,13 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // rbac roles/rolebindings) was replaced because an external writer raced the
 // operator and got reverted every reconcile.
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// Secrets: needed to MIRROR the delegated database DSN (app-db-<app>) into the
-// app's own namespace (ADR-0006 §3b). Cross-ns SecretKeyRef is impossible, so the
-// operator writes a same-ns copy ownerRef'd to the NextApp. The read of the SOURCE
-// Secret in the scale-zero-pg namespace is additionally granted by the scoped Role
-// there (config/rbac/appdb_driver.yaml); the appdatabases verbs live in that same
-// scoped Role (namespaced, NOT cluster-wide) — least privilege, no storage-plane access.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// Secrets: NO grant, on purpose (least privilege). The operator never reads or
+// writes a core Secret: the managed-database mode that mirrored a DSN Secret was
+// removed (ADR-0025); spec.secrets.envFrom/envMap and image-pull secrets are only
+// NAME REFERENCES the kubelet resolves on the app pod's behalf; webhook/metrics
+// certs are mounted volumes. A cluster-wide Secrets rule would let a compromised
+// operator read every Secret in the cluster. rbac_secrets_guard_test.go fails if a
+// Secrets marker or role rule is reintroduced without a justified allowlist entry.
 // PersistentVolumeClaims: read-only. The controller-runtime cache watches
 // *v1.PersistentVolumeClaim (found live on EKS, #306/#1062); without a
 // cluster-scoped list/watch grant the manager's informer logs repeated
