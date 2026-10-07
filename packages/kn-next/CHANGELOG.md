@@ -1,5 +1,15 @@
 # @getknext/core
 
+## 1.3.0-rc.6
+
+### Patch Changes
+
+- 17b268f: `knext doctor` now warns, instead of failing, when the installed CRD lacks only fields the CLI emits for a specific feature (`spec.security.writeFree` for CLI-built images, `spec.networking` for private apps), and names the feature. A missing always-emitted field still fails.
+- 313f897: Bundled vinext fix: `/_next/image` responses now carry `x-nextjs-cache: MISS` on every successful image response, like Next.js. Error responses carry no header.
+- 35f4d48: The Bun single-executable build now writes the HarfBuzz and harfbuzzjs licence notice (`knext-third-party-notices.txt`) beside the binary whenever it embeds `hb.wasm` for `next/og`, and the generated Dockerfiles copy it into the image.
+- 546cad0: `knext deploy --dry-run` now writes its log lines to stderr, so stdout carries only the rendered `NextApp` YAML and `knext deploy --dry-run | kubectl apply -f -` works. `knext db bind --dry-run` does the same for the patch it prints.
+- 622f728: The vinext cache adapter now picks its Redis client per runtime, like the standalone build. New `@getknext/core/internal/vinext-cache-adapter-node` imports `ioredis` directly so a vinext on Node image ships it (it could previously run from memory, losing ISR on scale-to-zero), and `@getknext/core/internal/vinext-cache-adapter-bun` uses Bun's built-in Redis client. New apps are scaffolded with the one matching their runtime; existing apps can switch the specifier in `vite.config.ts`. The generic subpath keeps working. If `REDIS_URL` is set but the client cannot load, startup logs one error.
+
 ## 1.3.0-rc.5
 
 ### Patch Changes

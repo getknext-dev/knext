@@ -1,5 +1,16 @@
 # kn-next
 
+## 1.3.0-rc.6
+
+### Patch Changes
+
+- Updated dependencies [17b268f]
+- Updated dependencies [313f897]
+- Updated dependencies [35f4d48]
+- Updated dependencies [546cad0]
+- Updated dependencies [622f728]
+  - @getknext/core@1.3.0-rc.6
+
 ## 1.3.0-rc.5
 
 ### Patch Changes
