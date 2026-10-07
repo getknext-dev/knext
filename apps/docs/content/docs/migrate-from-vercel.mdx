@@ -1,0 +1,264 @@
+---
+title: Migrate from Vercel
+description: Move a Next.js app from Vercel to your own Kubernetes cluster with knext. A feature map with honest gaps, a step-by-step migration, and a cost worksheet you fill in with your own numbers.
+---
+
+This guide is for a platform engineer who knows Vercel and wants to run the same Next.js app on a
+Kubernetes cluster with Knative. It covers what maps across, what does not, how to move an app, and
+how to work out the cost for your own workload.
+
+It describes the **v1.0 line**. Where a later pre-release differs, the text says so.
+
+<Callout type="warn">
+**Read [What you lose](#what-you-lose) before you start.** knext is a Next.js adapter for Knative,
+not a managed platform. You get your own cluster, scale-to-zero compute and no per-seat or
+per-gigabyte metering. You give up Vercel's global edge network, its managed operations and its
+zero-ops workflow.
+</Callout>
+
+## Feature map
+
+| On Vercel | On knext | Status |
+|---|---|---|
+| Environment variables | `env` in `knext.config.ts` for plain values | Same idea, different place |
+| Encrypted / sensitive variables | Kubernetes Secrets, bound with `secrets.envMap` / `secrets.envFrom` | Different: you create the Secret yourself |
+| Custom domains and automatic TLS | A Knative `DomainMapping` plus a cert-manager certificate | Different: you wire DNS and certificates. See [Custom domains & TLS](/docs/custom-domains-tls) |
+| Preview deployments per pull request | A per-PR `NextApp` named `<app>-pr-<n>`, scale-to-zero. See [Previews](/docs/previews) | Supported, run from your CI. No automatic PR comment or built-in Git integration |
+| Instant rollback | `knext rollback`, plus canary traffic splits. See [Rollback](/docs/rollback) | Supported |
+| Skew protection | Build-id-pinned assets; with object storage, old builds' assets stay available. See [Skew protection](/docs/skew-protection) | Supported |
+| ISR and the data cache | A Redis-backed cache handler shared by all pods. See [ISR & the Redis cache](/docs/isr-caching) | Supported. You run the Redis |
+| `next/image` optimization | Served in your pod with sharp. Variants persist to object storage if you configure it. See [Image optimization](/docs/image-optimization) | Supported. It uses your CPU, not Vercel's image service |
+| Middleware (Node runtime) | Runs on the Node runtime | Supported |
+| Edge Middleware (Edge runtime) | Not supported | **Not supported.** It is not yet standardised for adapters. See [Compatibility matrix](/docs/compat-matrix) |
+| Edge Functions / Edge runtime routes | Not supported | **Not supported.** Move them to the Node runtime |
+| Global edge network and CDN | No equivalent | **Not supported.** Put a CDN in front yourself if you need one |
+| Partial Prerendering / Cache Components | Not supported | **Not supported** for now. Not yet standardised for adapters |
+| Cron Jobs | No knext feature | **Different.** Use a Kubernetes `CronJob` that calls an authenticated route handler |
+| Web Analytics / Speed Insights | Opt-in Web Vitals collection that you scrape and chart yourself. See [Observability](/docs/observability) | Different: no hosted dashboard |
+| Observability, logs, metrics | Prometheus metrics, Grafana dashboards, OpenTelemetry tracing, JSON logs. See [Observability](/docs/observability) and [Logging](/docs/logging) | Supported, self-hosted. Nothing is hosted for you |
+| Firewall / WAF / DDoS protection | Not provided. See [Request hardening](/docs/hardening) for what the platform does and the recipes for the rest | **Not supported.** Use your cloud's WAF or an ingress layer |
+| Vercel Postgres | Any Postgres you run, bound with `knext db bind`. See [Databases](/docs/databases) | Bring your own |
+| Vercel KV | Any Redis. The ISR cache already needs one | Bring your own |
+| Vercel Blob | Any S3-compatible store (S3, GCS, MinIO, Azure Blob) | Bring your own. Rewrite the SDK calls |
+| Edge Config | No equivalent | **Not supported.** Use `env` or a Secret for deploy-time values, or your database for runtime values |
+| Vercel Microfrontends | Separate `NextApp` zones. See [Self-contained systems and zones](/docs/scs-zones) | Different model |
+| Team seats, SSO, audit log | Your cluster's RBAC and your CI's access control | Different: no hosted team features |
+
+Anything that imports a `@vercel/*` package (KV, Blob, Postgres, Edge Config, Analytics) needs a
+code change. Search for it before you start:
+
+```bash title="shell"
+grep -rn "@vercel/" src package.json
+```
+
+### Cron jobs
+
+knext has no scheduler. Run a Kubernetes `CronJob` that calls a route handler in your app. The
+route changes state, so it must authenticate the caller (for example with a bearer token held in a
+Secret). Calling a scaled-to-zero app wakes it, so the first call of each run pays a cold start.
+
+## Migrate a sample app
+
+These steps move one Next.js 16 app. Every command here exists in the v1.0 CLI. Run the CLI as
+`npx @getknext/core <command>`, as in [Getting started](/docs/getting-started).
+
+### 0. Check the prerequisites
+
+You need a Kubernetes cluster with Knative Serving, a container registry you can push to, and
+`kubectl` pointed at the cluster. [Your first cluster](/docs/first-cluster) sets up a local one.
+
+```bash title="shell"
+npx @getknext/core doctor
+```
+
+`doctor` reads the cluster and reports anything missing. Fix its findings first.
+
+### 1. Install and wire the adapter
+
+```bash title="shell"
+npm i @getknext/core
+```
+
+```ts title="next.config.ts"
+import type { NextConfig } from 'next';
+
+const config: NextConfig = {
+  adapterPath: '@getknext/core/adapter',
+};
+
+export default config;
+```
+
+`adapterPath` is a top-level option on Next.js 16.2 and later. See [Getting started](/docs/getting-started#1--point-nextjs-at-the-adapter) for 16.0 and 16.1.
+
+### 2. Remove what knext does not run
+
+- Delete `export const runtime = 'edge'` from routes and move them to the Node runtime.
+- Replace `@vercel/kv`, `@vercel/blob`, `@vercel/postgres` and `@vercel/edge-config` with a Redis client, an S3-compatible client and a Postgres client.
+- Remove the `crons` block from `vercel.json`. You recreate each entry as a `CronJob` in step 8.
+- If you use Partial Prerendering or Cache Components, turn them off.
+
+### 3. Write the deploy config
+
+```ts title="knext.config.ts"
+import type { KnativeNextConfig } from '@getknext/core';
+
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  scaling: { minScale: 0, maxScale: 10 },
+  // Plain, non-secret values. These replace non-secret Vercel variables.
+  env: { FEATURE_NEW_CART: 'on' },
+  // Secrets: a Kubernetes Secret per value, bound to an environment variable.
+  secrets: {
+    envMap: {
+      STRIPE_SECRET_KEY: { name: 'acme-stripe', key: 'secret-key' },
+    },
+  },
+  // The ISR and data cache. Use your own Redis.
+  cache: { provider: 'redis', url: 'redis://redis.acme.svc.:6379' },
+};
+
+export default config;
+```
+
+Do not put secrets in `env`: its values are stored as plain text in the cluster resource. Values
+that start with `NEXT_PUBLIC_` are compiled into the browser bundle at build time and are public.
+See [Env vars and secrets](/docs/learn/configure-the-deploy#env-vars-and-secrets--envproduction-is-not-how-production-gets-them).
+
+Export your Vercel variables with `vercel env pull` and sort each one into `env`, a Secret or
+`NEXT_PUBLIC_`.
+
+### 4. Create the secrets
+
+```bash title="shell"
+kubectl create namespace acme
+kubectl -n acme create secret generic acme-stripe --from-literal=secret-key="$STRIPE_SECRET_KEY"
+```
+
+If your app has a Postgres database, create a Secret that holds its connection string and bind it
+as `DATABASE_URL`:
+
+```bash title="shell"
+npx @getknext/core db bind acme --secret acme-db -n acme
+```
+
+### 5. Validate, preview the resource, deploy
+
+```bash title="shell"
+npx @getknext/core validate
+npx @getknext/core deploy --dry-run -n acme    # prints the NextApp resource without applying it
+npx @getknext/core deploy -n acme
+npx @getknext/core status acme -n acme --watch
+```
+
+`status --watch` exits non-zero if the app does not become ready, so you can use it as a CI gate.
+The app is on the cluster's default domain after this step.
+
+### 6. Move the data
+
+knext does not move data for you.
+
+- **Database:** dump from your Vercel Postgres provider and restore into your own Postgres. If you use Drizzle, `npx @getknext/core db migrate` applies pending migrations once, against the writer.
+- **Blob files:** copy them to your object store with the store's own tooling, then update the stored URLs.
+- **Cache:** the Redis cache starts empty. ISR pages re-render on first request.
+
+### 7. Add your domain and certificate
+
+Follow [Custom domains & TLS](/docs/custom-domains-tls). Before cutover, lower the DNS TTL on the
+current record so a rollback to Vercel is quick.
+
+### 8. Recreate cron jobs and previews
+
+Create a `CronJob` per former Vercel cron entry that calls your authenticated route. For previews,
+follow [Previews](/docs/previews) and [Deploy from GitHub Actions](/docs/github-action) or
+[GitLab CI/CD](/docs/gitlab-ci).
+
+### 9. Cut over and keep a way back
+
+1. Test the app on the cluster's default domain, including a cold wake after it scales to zero.
+2. Switch the DNS record to the cluster.
+3. Keep the Vercel project for as long as your rollback window needs. Deleting it removes the fast way back.
+4. Use `npx @getknext/core rollback acme --to <revision>` to return to an earlier knext revision.
+
+## Cost worksheet
+
+This is a worksheet, not a comparison. Cost depends on your traffic, your cluster and how much of
+your time operations take. Fill in your own numbers. The only figures given here are published
+prices, with their sources, and one measured cold start.
+
+### Published inputs
+
+| Figure | Value | Source |
+|---|---|---|
+| Vercel Pro plan | $20 per seat per month | [vercel.com/pricing](https://vercel.com/pricing) |
+| Vercel Active CPU | $0.128 per CPU-hour | [vercel.com/pricing](https://vercel.com/pricing) |
+| Vercel data transfer beyond the included amount | $0.15 per GB | [vercel.com/pricing](https://vercel.com/pricing) |
+| Vercel Microfrontends, Pro | $250 per month per project beyond the 2 included | [vercel.com/docs/microfrontends](https://vercel.com/docs/microfrontends) |
+
+The Active CPU and data transfer rates were taken from a secondary source, not read from the pricing page: confirm them on vercel.com/pricing, because rates change. Check the pricing page on the day you do the sum. Your
+Vercel invoice is a better source for your own usage than any estimate: take the line items from
+the last three months.
+
+### Your inputs
+
+| Input | Symbol | Where to find it |
+|---|---|---|
+| Seats | `S` | Your Vercel team |
+| Vercel usage charges per month (compute, transfer, image, other meters) | `U` | Your Vercel invoice |
+| Cluster cost per month: nodes, load balancer, control plane | `C` | Your cloud bill, or your quote |
+| Redis, Postgres and object storage per month | `D` | Your cloud bill. You may already pay for the database on Vercel too |
+| Registry and egress charges on your cloud | `R` | Your cloud bill |
+| Operations time per month, in hours | `H` | Your own estimate. Include upgrades, on-call and certificate work |
+| Loaded hourly cost of that time | `L` | Your finance team |
+
+### Formulas
+
+```
+Vercel per month  = 20 * S  +  U
+knext per month   = C  +  D  +  R  +  H * L
+```
+
+Compare the two lines only after you have filled in every symbol. `H * L` is easy to leave out and
+is often the largest term.
+
+What moves each side:
+
+- **Vercel** charges per seat and per unit of usage, so its cost follows your team size and your traffic.
+- **knext** charges nothing for the software (it is Apache-2.0). Its cost is the cluster you already run or must now run. Scale-to-zero removes pod cost for idle apps, but nodes, load balancer and control plane are billed whether or not a pod is running. Scale-to-zero lowers the cost of many idle apps on shared nodes. It does not make a cluster free.
+- **Many small apps** change the sum: on Vercel Pro each microfrontend project beyond two is a monthly fee, while on a cluster idle apps share the same nodes.
+- **Egress** exists on both sides. The cloud that hosts your cluster bills it, at its own rate.
+
+### The cold start you are trading
+
+A scaled-to-zero app has to start a pod when a request arrives after an idle period. We measured
+this on a two-node Oracle Kubernetes Engine cluster, with a light app and the image already on the
+node. Across our measurements on that cluster the median time from the first request to a full page
+was **about 1.9 to 2.4 seconds**:
+
+- A four-cell run (10 wakes per runtime and build combination, images already pulled) gave medians of 2.1 to 2.4 seconds.
+- A later run on a 1.3 pre-release (22 wakes per build, two builds) gave medians of about 1.9 seconds (standalone build on Bun) and about 2.1 seconds (vinext build on Bun). Its slowest wakes were about 5.1 and 5.7 seconds.
+
+Individual wakes can take several times the median. See [Scale-to-zero & cold starts](/docs/scale-to-zero#measured-cold-start-by-runtime-and-builder)
+for the method and the full table.
+
+This is slower than a request to a warm server, and knext makes no claim to match or beat
+Vercel's behaviour for a request that finds no warm instance. If your users cannot tolerate a
+wake of a few seconds, set `minScale: 1` (or a [warm floor](/docs/warm-floors) for busy hours). A
+warm pod costs its CPU and memory all month, so that choice changes the `C` term above.
+
+Your numbers will differ. Measure your own app.
+
+## What you lose
+
+- **The global edge.** Vercel serves from many regions close to users. knext serves from the cluster you run, in the regions you build. A CDN in front of your cluster helps with static files and cacheable responses, but you set it up and pay for it.
+- **Edge runtime features.** Edge Middleware, Edge Functions and Partial Prerendering are not supported. Code that depends on them must change.
+- **A managed platform.** Nobody patches your cluster, upgrades Knative or the operator, rotates your certificates or carries the pager for you. See [Upgrading](/docs/upgrading) and [Incident response](/docs/incident-response).
+- **Zero ops.** Git push to production, automatic preview comments, automatic TLS and one dashboard are things you build from parts. A first migration takes real time.
+- **Hosted analytics and team features.** There is no hosted Web Analytics, Speed Insights, firewall, SSO or audit log.
+- **Cold-start parity.** A wake from zero takes seconds, as measured above.
+- **Verified parity on every feature.** Check [Compatibility matrix](/docs/compat-matrix) for what is verified. The default build passed the official Next.js test suite in a single run, but the multi-night credential run is still in progress, and the vinext build is not credentialed.
+
+Choose knext when you must run in your own cluster or region, you already operate Kubernetes, or
+you have many low-traffic apps. Stay on Vercel when your users need a global edge, or when you do
+not want to operate infrastructure.
