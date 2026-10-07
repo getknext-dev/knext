@@ -966,6 +966,149 @@ describe("the bundled patches against the published tarball", () => {
         );
     });
 
+    it("vinext#3750: a rewrite to a public/ file on Nitro goes back through the Nitro app (Pages wrapper, App SSR entry)", async () => {
+        applyVinextPatches(patched);
+        // Pages: the generated Nitro wrapper hands the request stage a
+        // public-file fetcher, on Node-like presets and `vite build` only.
+        const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
+        expect(index).toContain(
+            'const servesNitroPublicFiles = !isServeCommand && nitroHostRuntime === "node";',
+        );
+        expect(index).toContain(
+            '", publicFileFetcher: getNitroPublicFileFetcher()"',
+        );
+        expect(index).toContain(
+            'nitroPublicFiles: hasNitroPlugin && !isServeCommand && nitroHostRuntime === "node" ? NITRO_PUBLIC_FILES_MODULE : null',
+        );
+        // ...which the stage uses for every filesystem route but /_next/image
+        // (that branch stays with the #3741 Pages patch).
+        const stage = readFileSync(
+            join(patched, "dist", "server", "pages-request-stage-entry.js"),
+            "utf8",
+        );
+        expect(stage).toContain(
+            "const publicFileFetcher = assets ? void 0 : platformCtx?.publicFileFetcher;",
+        );
+        expect(stage).toContain(
+            "isImageOptimizationPath(requestPathname) ? serveFilesystemRoute(requestPathname, stagedHeaders, phase, resolvedUrl) : fetchWorkerFilesystemRoute(",
+        );
+        // The derived execution context keeps the fetcher.
+        const ctxMod = await importPatched<{
+            createWorkerRevalidationContext: (
+                base: unknown,
+                handle: unknown,
+                hostRuntime?: string,
+            ) => Record<string, unknown>;
+        }>("dist/server/worker-revalidation-context.js");
+        const fetcher = { fetch: () => new Response("x") };
+        expect(
+            ctxMod.createWorkerRevalidationContext(
+                { publicFileFetcher: fetcher },
+                async () => new Response(null),
+                "node",
+            ).publicFileFetcher,
+        ).toBe(fetcher);
+        // App: the SSR entry (Nitro's service) wraps its default export only
+        // when asked to.
+        const ssr = await importPatched<{
+            generateSsrEntry: (
+                hasPagesDir?: boolean,
+                options?: { nitroPublicFiles?: string | null },
+            ) => string;
+        }>("dist/entries/app-ssr-entry.js");
+        expect(ssr.generateSsrEntry(false)).toContain(
+            "export { default } from ",
+        );
+        const wrapped = ssr.generateSsrEntry(false, {
+            nitroPublicFiles: "/nitro-public-files.js",
+        });
+        expect(wrapped).not.toContain("export { default } from ");
+        expect(wrapped).toContain(
+            "return resolveNitroStaticFileSignal(await __ssrEntry.fetch(request), request);",
+        );
+    });
+
+    it("vinext#3750: a static-file signal is served by the Nitro app; a miss inside the sub-request is a 404, never a second fetch", async () => {
+        applyVinextPatches(patched);
+        type Signal = (
+            pathname: string,
+            context: { headers: Headers | null; status: number | null },
+        ) => Response;
+        const { createStaticFileSignal } = await importPatched<{
+            createStaticFileSignal: Signal;
+        }>("dist/server/static-file-signal.js");
+        const mod = await importPatched<{
+            getNitroPublicFileFetcher(): unknown;
+            resolveNitroStaticFileSignal(
+                response: Response,
+                request: Request,
+            ): Promise<Response>;
+        }>("dist/server/nitro-public-files.js");
+        const signal = (path: string, headers: Headers | null = null) =>
+            createStaticFileSignal(path, { headers, status: null });
+        const g = globalThis as { __nitro__?: unknown };
+        const previous = g.__nitro__;
+        const seen: string[] = [];
+        try {
+            // No Nitro app (dev, other hosts): the signal is left alone.
+            delete g.__nitro__;
+            expect(mod.getNitroPublicFileFetcher()).toBeUndefined();
+            const lone = signal("/file.txt");
+            expect(
+                await mod.resolveNitroStaticFileSignal(
+                    lone,
+                    new Request("http://app/before/file.txt"),
+                ),
+            ).toBe(lone);
+
+            g.__nitro__ = {
+                default: {
+                    async fetch(request: Request) {
+                        const path = new URL(request.url).pathname;
+                        seen.push(path);
+                        if (path === "/file.txt") {
+                            return new Response("public file", {
+                                headers: { "content-type": "text/plain" },
+                            });
+                        }
+                        // Nitro has no such file, so the sub-request reaches
+                        // vinext again, which signals the same file again.
+                        return mod.resolveNitroStaticFileSignal(
+                            signal(path),
+                            request,
+                        );
+                    },
+                },
+            };
+            const served = await mod.resolveNitroStaticFileSignal(
+                signal("/file.txt", new Headers({ "x-mw": "ran" })),
+                new Request("http://app/before/file.txt"),
+            );
+            expect(served.status).toBe(200);
+            expect(await served.text()).toBe("public file");
+            expect(served.headers.get("x-mw")).toBe("ran");
+
+            const missing = await mod.resolveNitroStaticFileSignal(
+                signal("/gone.txt"),
+                new Request("http://app/before/gone.txt"),
+            );
+            expect(missing.status).toBe(404);
+            // One sub-request per signal: the miss did not loop.
+            expect(seen).toEqual(["/file.txt", "/gone.txt"]);
+
+            const page = new Response("page");
+            expect(
+                await mod.resolveNitroStaticFileSignal(
+                    page,
+                    new Request("http://app/"),
+                ),
+            ).toBe(page);
+        } finally {
+            if (previous === undefined) delete g.__nitro__;
+            else g.__nitro__ = previous;
+        }
+    });
+
     it("vinext#3741: the App Router handler hands /_next/image to the Nitro app instead of redirecting", () => {
         applyVinextPatches(patched);
         const handler = readFileSync(
