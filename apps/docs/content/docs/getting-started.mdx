@@ -128,8 +128,7 @@ When that is a directory *above* your app, it writes the standalone server to
 const config: NextConfig = {
   adapterPath: '@getknext/core/adapter',
   output: 'standalone',
-  // This app's own directory. In a monorepo that shares dependencies, point both
-  // at the repository root instead, e.g. path.join(import.meta.dirname, '../..').
+  // This app's own directory.
   outputFileTracingRoot: import.meta.dirname,
   turbopack: { root: import.meta.dirname },
 };
@@ -137,6 +136,12 @@ const config: NextConfig = {
 
 or remove the lockfile you do not need. `knext deploy` reads `outputFileTracingRoot` too, to
 choose the directory it sends to `docker build`.
+
+**Monorepos are not supported yet.** knext looks for the standalone server at
+`.next/standalone/server.js`, which only exists when the tracing root is the app's own directory.
+An app in a workspace monorepo that shares dependencies from a root above it would need that root
+as its tracing root, and knext cannot package the nested layout that produces. Keep the root at the
+app, and install the app's dependencies in the app directory.
 </Callout>
 
 ## 2 · Write the deploy config

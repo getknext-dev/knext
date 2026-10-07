@@ -29,18 +29,18 @@
  *      front door as a stranger meets it TODAY.
  *
  *   3. STRANGER PATH UNDER A PARENT LOCKFILE: the whole documented walk, not
- *      just the install — `npm init` + `npm i @getknext/core` in a parent dir
- *      (which leaves a `package-lock.json` there, exactly as the getting-started
- *      page has a reader do), `knext create my-app`, `npm install`,
- *      `knext build`, `knext deploy --dry-run`. The parent lockfile is the
- *      point: Next.js infers the workspace root from it, and a scaffold that
- *      does not pin its own root builds into `.next/standalone/<app>/` and
- *      fails its first build. Phases 1-2 stop before the build, so they stayed
- *      green through exactly that front-door failure.
- *      Which package this walks is `KNEXT_STRANGER_SPECS` (space-separated npm
- *      specs; default the `next` dist-tag, the line under development — the
- *      `latest` tag lags it). Setting it to local tarballs is how the step is
- *      mutation-proved: tarballs of the OLD template must turn it red.
+ *      just the install: `npm init` + `npm i @getknext/core` in a parent dir
+ *      (which leaves a `package-lock.json` there, as the getting-started page
+ *      has a reader do), `knext create`, `npm install`, `knext build`,
+ *      `knext deploy --dry-run`, for the default target (Node runtime) and for
+ *      vinext. The parent lockfile is the point: Next.js infers the workspace
+ *      root from it, and a scaffold that does not pin its own root builds into
+ *      `.next/standalone/<app>/` and fails its first build. Phases 1-2 stop
+ *      before the build, so they stayed green through exactly that failure.
+ *      Phase 3 packs THIS CHECKOUT (see the block at its start), so it is green
+ *      on a healthy tree and red only on a real regression. Set
+ *      `KNEXT_STRANGER_SPECS` (space-separated npm specs) to walk a published
+ *      version instead.
  *
  * AN UNREACHABLE REGISTRY IS A FAILURE, NEVER A PASS — the ruling this repo
  * already made for `scripts/verify-action-pins.mjs`. Failures branch on EXIT
@@ -51,8 +51,9 @@
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { npmPackOne, rewriteWorkspaceRanges } from './lib/pack-publishable-group.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const failures = [];
@@ -164,64 +165,162 @@ try {
 }
 
 // ── Phase 3: the whole stranger path, from a parent that has a lockfile ─────
+//
+// Tests THIS CHECKOUT, not the registry: the CLI and the scaffold's @getknext/*
+// deps are tarballs packed from the working tree (the way `changeset publish`
+// packs), unless KNEXT_STRANGER_SPECS names other npm specs. Testing the
+// published tag instead would sit red from the merge of a fix until the
+// release carrying it ships, and a nightly that is red by construction is
+// ignored. As it stands it is red only when a change, or a new Next.js, breaks
+// the path. It rewrites `workspace:` ranges in the checkout's manifests (as
+// `install-smoke.mjs` does), so run it in CI or a disposable checkout.
+//
+// Two legs share one parent directory that carries a lockfile: the default
+// Next.js standalone target on Node, and the vinext target. The vinext build
+// shells out to `bun`, so that leg gets Bun on PATH from KNEXT_BUN; the node leg
+// never sees it.
 
 console.log('── phase 3: npm i -> create -> build -> deploy --dry-run (parent lockfile) ──');
-const strangerSpecs = (process.env.KNEXT_STRANGER_SPECS || '@getknext/core@next')
-  .split(/\s+/)
-  .filter(Boolean);
+
+/** Build + pack the three publishable packages from the working tree. */
+function packCheckout(dest) {
+  const bun = process.env.KNEXT_BUN || 'bun';
+  for (const pkg of ['@getknext/lib', '@getknext/db', '@getknext/core']) {
+    const r = spawnSync(bun, ['run', '--filter', pkg, 'build'], {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    if (r.status !== 0) throw new Error(`building ${pkg} exited ${r.status}`);
+  }
+  rewriteWorkspaceRanges(REPO_ROOT);
+  const dirs = [
+    ['@getknext/lib', 'packages/lib'],
+    ['@getknext/db', 'packages/db'],
+    ['@getknext/core', 'packages/kn-next'],
+  ];
+  return dirs.map(([name, dir]) => ({ name, tgz: npmPackOne(join(REPO_ROOT, dir), dest) }));
+}
+
+const packDest = mkdtempSync(join(tmpdir(), 'knext-stranger-pack-'));
 const work3 = mkdtempSync(join(tmpdir(), 'knext-stranger-path-'));
 try {
-  /** Run one step; record a failure (by exit code) and report whether to go on. */
-  const step = (label, cmd, args, cwd, timeout) => {
-    console.log(`$ ${cmd} ${args.join(' ')}   (in ${cwd})`);
-    const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout });
-    process.stdout.write(r.stdout || '');
-    process.stderr.write(r.stderr || '');
-    if (r.status !== 0) {
-      const tail = (r.stderr || r.stdout || '').trim().split('\n').slice(-12).join('\n');
-      fail('stranger-path', `${label} exited ${r.status}: ${tail.slice(0, 1200)}`);
-      return false;
+  let packed = null;
+  if (!process.env.KNEXT_STRANGER_SPECS) {
+    try {
+      packed = packCheckout(packDest);
+    } catch (err) {
+      fail('stranger-path', `could not build and pack this checkout: ${err.message}`);
     }
-    return true;
-  };
-  const appDir = join(work3, 'my-app');
-  const bin = join(work3, 'node_modules', '.bin', 'knext');
-  // The CLI runs from node_modules/.bin, never a bare `npx knext`: that name on
-  // the public registry is someone else's package.
-  const ok =
-    step('npm init', 'npm', ['init', '-y'], work3, 120_000) &&
-    step(
-      'npm i @getknext/core',
-      'npm',
-      ['i', '--no-audit', '--no-fund', ...strangerSpecs],
-      work3,
-      600_000,
-    ) &&
-    step('knext create', bin, ['create', 'my-app', '--runtime', 'node', '--yes'], work3, 300_000) &&
-    step('npm install (app)', 'npm', ['install', '--no-audit', '--no-fund'], appDir, 600_000);
-  if (ok) {
-    // A stranger replaces the registry placeholder before anything else works.
-    const cfgPath = join(appDir, 'knext.config.ts');
-    const cfg = readFileSync(cfgPath, 'utf8');
-    if (!cfg.includes('ghcr.io/<your-user>')) {
-      fail(
-        'stranger-path',
-        'knext.config.ts no longer carries the registry placeholder this step replaces',
+  }
+  const specs = process.env.KNEXT_STRANGER_SPECS
+    ? process.env.KNEXT_STRANGER_SPECS.split(/\s+/).filter(Boolean)
+    : (packed ?? []).map((p) => p.tgz);
+
+  if (specs.length > 0) {
+    /** Run one step; record a failure (by exit code) and report whether to go on. */
+    const step = (label, cmd, args, cwd, timeout, env = process.env) => {
+      console.log(`$ ${cmd} ${args.join(' ')}   (in ${cwd})`);
+      const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout, env });
+      process.stdout.write(r.stdout || '');
+      process.stderr.write(r.stderr || '');
+      if (r.status !== 0) {
+        const tail = (r.stderr || r.stdout || '').trim().split('\n').slice(-12).join('\n');
+        fail('stranger-path', `${label} exited ${r.status}: ${tail.slice(0, 1200)}`);
+        return false;
+      }
+      return true;
+    };
+    const bin = join(work3, 'node_modules', '.bin', 'knext');
+    // The CLI runs from node_modules/.bin, never a bare `npx knext`: that name on
+    // the public registry is someone else's package.
+    const base =
+      step('npm init', 'npm', ['init', '-y'], work3, 120_000) &&
+      step(
+        'npm i @getknext/core',
+        'npm',
+        ['i', '--no-audit', '--no-fund', ...specs],
+        work3,
+        600_000,
       );
-    } else {
+
+    const bunBin = process.env.KNEXT_BUN;
+    const withBun = bunBin
+      ? { ...process.env, PATH: `${dirname(bunBin)}${delimiter}${process.env.PATH}` }
+      : process.env;
+    const legs = [
+      { name: 'node', dir: 'my-app', createArgs: ['--runtime', 'node', '--yes'], env: process.env },
+      {
+        name: 'vinext',
+        dir: 'my-vinext',
+        createArgs: ['--builder', 'vinext', '--yes'],
+        env: withBun,
+      },
+    ];
+    for (const leg of base ? legs : []) {
+      const appDir = join(work3, leg.dir);
+      let ok = step(
+        `${leg.name}: knext create`,
+        bin,
+        ['create', leg.dir, ...leg.createArgs],
+        work3,
+        300_000,
+      );
+      if (ok && packed) {
+        // Point the app's own @getknext/* deps at the same tarballs, so the
+        // scaffold's pins resolve before this version is published.
+        const pkgPath = join(appDir, 'package.json');
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+        const byName = new Map(packed.map((p) => [p.name, p.tgz]));
+        for (const field of ['dependencies', 'devDependencies']) {
+          for (const dep of Object.keys(pkg[field] ?? {})) {
+            if (byName.has(dep)) pkg[field][dep] = `file:${byName.get(dep)}`;
+          }
+        }
+        pkg.overrides = Object.fromEntries(packed.map((p) => [p.name, `file:${p.tgz}`]));
+        writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+      }
+      ok =
+        ok &&
+        step(
+          `${leg.name}: npm install (app)`,
+          'npm',
+          ['install', '--no-audit', '--no-fund'],
+          appDir,
+          600_000,
+        );
+      if (!ok) continue;
+      // A stranger replaces the registry placeholder before anything else works.
+      const cfgPath = join(appDir, 'knext.config.ts');
+      const cfg = readFileSync(cfgPath, 'utf8');
+      if (!cfg.includes('ghcr.io/<your-user>')) {
+        fail(
+          'stranger-path',
+          `${leg.name}: knext.config.ts no longer carries the registry placeholder this step replaces`,
+        );
+        continue;
+      }
       writeFileSync(cfgPath, cfg.replace('ghcr.io/<your-user>', 'ghcr.io/knext-stranger'));
       if (
-        step('knext build', bin, ['build'], appDir, 900_000) &&
-        step('knext deploy --dry-run', bin, ['deploy', '--dry-run'], appDir, 900_000)
+        step(`${leg.name}: knext build`, bin, ['build'], appDir, 900_000, leg.env) &&
+        step(
+          `${leg.name}: knext deploy --dry-run`,
+          bin,
+          ['deploy', '--dry-run'],
+          appDir,
+          900_000,
+          leg.env,
+        )
       ) {
-        console.log('ok   npm i -> create -> build -> deploy --dry-run under a parent lockfile');
+        console.log(
+          `ok   ${leg.name}: npm i -> create -> build -> deploy --dry-run under a parent lockfile`,
+        );
       }
     }
   }
 } finally {
   rmSync(work3, { recursive: true, force: true });
+  rmSync(packDest, { recursive: true, force: true });
 }
-
 if (failures.length > 0) {
   console.error(`\n${failures.length} failure(s):`);
   for (const f of failures) console.error(`  ${f}`);

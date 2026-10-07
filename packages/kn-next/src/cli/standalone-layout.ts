@@ -94,6 +94,8 @@ export function diagnoseNestedStandalone(appDir: string): string | null {
         `${cause}\n\n` +
         "knext does not package that layout: the files Next traced can live outside the app directory, " +
         "and the image would start without them. `output: 'standalone'` is set correctly — the root is what is wrong.\n\n" +
+        "A root deliberately set ABOVE the app (a workspace monorepo that shares dependencies from its root) is not supported yet: " +
+        "knext expects the server at '.next/standalone/server.js'.\n\n" +
         "Fix it one of two ways:\n" +
         `  - set \`outputFileTracingRoot\` (and \`turbopack.root\`) in next.config to this app directory (${app}), or\n` +
         (atRoot

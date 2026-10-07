@@ -17,6 +17,7 @@ import { afterAll, describe, expect, it } from "bun:test";
 import {
     mkdirSync,
     mkdtempSync,
+    readFileSync,
     realpathSync,
     rmSync,
     writeFileSync,
@@ -90,5 +91,49 @@ describe("scaffolded next.config.ts pins the tracing root to the app dir", () =>
     it("vinext builder has no turbopack block (it never runs Turbopack)", () => {
         const { config } = appUnderParentLockfile("vinext", "bun");
         expect(config).not.toMatch(/turbopack\s*:/);
+    });
+});
+
+/**
+ * knext expects the standalone server at the fixed path
+ * `.next/standalone/server.js`, which only holds when the tracing root IS the
+ * app directory. Advice to point the root at a repo root would nest the output
+ * and trip the very error that tells the user to put the root back at the app.
+ */
+describe("no guidance pushes the tracing root above the app", () => {
+    const here = import.meta.dirname;
+    const template = readFileSync(
+        join(here, "..", "..", "templates", "app", "next.config.ts.hbs"),
+        "utf8",
+    );
+    const docs = readFileSync(
+        join(
+            here,
+            "..",
+            "..",
+            "..",
+            "..",
+            "apps",
+            "docs",
+            "content",
+            "docs",
+            "getting-started.mdx",
+        ),
+        "utf8",
+    );
+
+    it("the template does not suggest a parent or repo root", () => {
+        expect(template).not.toMatch(/\.\.\/\.\./);
+        expect(template).not.toMatch(/repo(sitory)? root/i);
+    });
+
+    it("the docs do not suggest a parent or repo root", () => {
+        expect(docs).not.toMatch(/import\.meta\.dirname,\s*['"]\.\.\/\.\./);
+        expect(docs).not.toMatch(/repo(sitory)? root instead/i);
+    });
+
+    it("the docs say plainly that a root above the app is not supported yet", () => {
+        expect(docs).toMatch(/monorepo/i);
+        expect(docs).toMatch(/not (yet )?supported/i);
     });
 });

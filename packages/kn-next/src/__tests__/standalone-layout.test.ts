@@ -84,6 +84,18 @@ describe("diagnoseNestedStandalone", () => {
         expect(msg).not.toMatch(/check .*output: ?'standalone'/i);
     });
 
+    it("says a root deliberately ABOVE the app (a workspace monorepo) is not supported yet, rather than implying it works", () => {
+        const base = tree({
+            "package-lock.json": "{}",
+            "app/.next/standalone/app/server.js": "// s\n",
+        });
+        const msg = diagnoseNestedStandalone(join(base, "app")) ?? "";
+        expect(msg).toMatch(/monorepo/i);
+        expect(msg).toMatch(/not (yet )?supported/i);
+        // The only fix on offer puts the root AT the app, never above it.
+        expect(msg).not.toMatch(/repo(sitory)? root|\.\.\/\.\./i);
+    });
+
     it("nested layout with NO lockfile found (root pinned some other way) -> still actionable", () => {
         const base = tree({
             "app/.next/standalone/app/server.js": "// s\n",
