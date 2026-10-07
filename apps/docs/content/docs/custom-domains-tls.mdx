@@ -100,8 +100,8 @@ The approach here is a per-hostname certificate: cert-manager writes a `Secret`,
 <Callout type="info">
 On a Kourier-only cluster, cert-manager's **HTTP-01** solver did not complete in testing, so this
 page does not offer it as a working path. It publishes the challenge as a standard Kubernetes
-`Ingress`, which Kourier does not serve, and the challenge stayed `pending` with
-`wrong status code '404', expected '200'`. DNS-01 and Knative's cert-manager integration for
+`Ingress`; in testing the challenge stayed `pending` with `wrong status code '404', expected '200'`,
+and the cause is not established. DNS-01 and Knative's cert-manager integration for
 cluster-wide auto-TLS are the alternatives; neither has been verified end to end on the reference
 cluster yet.
 </Callout>
@@ -319,7 +319,7 @@ kubectl -n prod describe challenge
 |---|---|---|
 | CertificateRequest | `Referenced "Issuer" not found` | `issuerRef` points at an issuer that does not exist, or has the wrong `kind` (`Issuer` vs `ClusterIssuer`). |
 | Issuer / ClusterIssuer | `READY False` | The ACME account did not register. `kubectl describe` it: usual causes are a bad `email`, no outbound access to the ACME endpoint, or a missing credentials Secret. |
-| Challenge (HTTP-01) | `wrong status code '404', expected '200'` | Kourier does not serve the solver's `Ingress`. Switch to DNS-01. |
+| Challenge (HTTP-01) | `wrong status code '404', expected '200'` | In testing on a Kourier-only cluster the solver path returned 404; the cause is not established. DNS-01 avoids the request path, so try it (not yet verified here). |
 | Challenge (DNS-01) | propagation or authentication error | The API token lacks permission on the zone, or the zone is not the one that serves the domain. |
 | Certificate | untrusted in the browser although `READY True` | The issuer is self-signed or the Let's Encrypt **staging** endpoint. Switch the issuer's `server` to production and re-issue. |
 
