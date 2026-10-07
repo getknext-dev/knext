@@ -1,173 +1,1644 @@
 knext bundled fix for vinext 1.0.1 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3436
 What it fixes: Nitro builds: `outputFileTracingIncludes` / `outputFileTracingExcludes` from next.config are applied to the traced server dependencies.
+This is the maintainer's version of the PR: Next.js route-key matching (per route, negated keys, generated metadata and
+parallel-slot entry names, root instrumentation/middleware entries), Next.js glob semantics (a ported minimatch/brace expansion,
+failing safe on unsupported shapes), the legacy `experimental.outputFileTracing*` keys, and a `writeBundle` copy for builds where
+Nitro skips its dependency trace. New modules: dist/build/{glob-match,trace-glob,nitro-trace-includes}.js.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3436.
 Ported by hand from the upstream src change to the published 1.0.1 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- /dev/null
-+++ b/dist/build/nitro-trace-includes.js
-@@ -0,0 +1,110 @@
-+import path, { toSlash } from "../deps/.pnpm/pathslash@0.1.0/deps/pathslash/dist/index.js";
-+import fs from "node:fs";
-+//#region src/build/nitro-trace-includes.ts
++++ b/dist/build/glob-match.js
+@@ -0,0 +1,403 @@
 +/**
-+* Apply Next.js `outputFileTracingIncludes` / `outputFileTracingExcludes` to
-+* Nitro's dependency trace.
-+*
-+* Nitro copies externalized packages into `.output/server/node_modules` using
-+* a file-level trace, so files a package only reads at runtime (for example
-+* TypeScript's `lib.*.d.ts`) are left out. Next.js lets apps add those files
-+* with `outputFileTracingIncludes`. Nitro exposes the traced package list
-+* through the `traceOpts.hooks.tracedPackages` hook before it writes the
-+* output, so included files inside `node_modules` are added there and
-+* excluded files are removed.
-+*
-+* Files outside `node_modules` are not part of Nitro's traced output and are
-+* ignored here.
-+*/
-+const NODE_MODULES_SEGMENT = "/node_modules/";
-+function globFiles(root, patterns) {
-+	if (patterns.length === 0) return [];
-+	const files = /* @__PURE__ */ new Set();
-+	for (const match of fs.globSync([...patterns], { cwd: root })) {
-+		const absolute = path.resolve(root, match);
-+		try {
-+			if (!fs.statSync(absolute).isFile()) continue;
-+			files.add(toSlash(fs.realpathSync(absolute)));
-+		} catch {}
++ * Include-glob semantics of Next.js's compiled `glob` (node-glob 7), which
++ * expands `outputFileTracingIncludes` in `collect-build-traces.ts`.
++ *
++ * node-glob 7 compiles each pattern with minimatch 3.1: braces are expanded
++ * with brace-expansion 1.1 (which uses balanced-match 1.0), the result is split
++ * on `/`, and each segment is compiled by minimatch's `parse` into a literal,
++ * a regular expression, or a globstar. This module ports those three steps
++ * statement by statement from the copies bundled in
++ * `next/dist/compiled/glob`, with the options Next.js passes (`dot: true`;
++ * node-glob also sets `nonegate`), so include globs select exactly the files
++ * Next.js selects, upstream quirks included. One deliberate difference: a
++ * brace range with a zero step (`{1..3..0}`) never terminates upstream, and
++ * steps by one here.
++ *
++ * The directory walk itself lives in `trace-glob.ts` (`globFiles`).
++ */
++function balancedRange(str) {
++	let open = str.indexOf("{");
++	let close = str.indexOf("}", open + 1);
++	let index = open;
++	let result;
++	if (open >= 0 && close > 0) {
++		const begins = [];
++		let left = str.length;
++		let right = 0;
++		while (index >= 0 && !result) {
++			if (index === open) {
++				begins.push(index);
++				open = str.indexOf("{", index + 1);
++			}
++			else if (begins.length === 1) {
++				result = [begins.pop(), close];
++			}
++			else {
++				const begin = begins.pop();
++				if (begin < left) {
++					left = begin;
++					right = close;
++				}
++				close = str.indexOf("}", index + 1);
++			}
++			index = open < close && open >= 0 ? open : close;
++		}
++		if (begins.length)
++			result = [left, right];
 +	}
-+	return [...files];
++	return result;
 +}
-+/** Split a real `node_modules` file path into its package name and root. */
++function balanced(str) {
++	const range = balancedRange(str);
++	return (range && {
++		pre: str.slice(0, range[0]),
++		body: str.slice(range[0] + 1, range[1]),
++		post: str.slice(range[1] + 1),
++	});
++}
++// --- brace-expansion 1.1 ----------------------------------------------------
++const ESC_SLASH = "\0SLASH\0";
++const ESC_OPEN = "\0OPEN\0";
++const ESC_CLOSE = "\0CLOSE\0";
++const ESC_COMMA = "\0COMMA\0";
++const ESC_PERIOD = "\0PERIOD\0";
++function numeric(str) {
++	const value = parseInt(str, 10);
++	return value === Number(str) ? value : str.charCodeAt(0);
++}
++function escapeBraces(str) {
++	return str
++		.split("\\\\")
++		.join(ESC_SLASH)
++		.split("\\{")
++		.join(ESC_OPEN)
++		.split("\\}")
++		.join(ESC_CLOSE)
++		.split("\\,")
++		.join(ESC_COMMA)
++		.split("\\.")
++		.join(ESC_PERIOD);
++}
++function unescapeBraces(str) {
++	return str
++		.split(ESC_SLASH)
++		.join("\\")
++		.split(ESC_OPEN)
++		.join("{")
++		.split(ESC_CLOSE)
++		.join("}")
++		.split(ESC_COMMA)
++		.join(",")
++		.split(ESC_PERIOD)
++		.join(".");
++}
++function parseCommaParts(str) {
++	if (!str)
++		return [""];
++	const match = balanced(str);
++	if (!match)
++		return str.split(",");
++	const parts = match.pre.split(",");
++	parts[parts.length - 1] += `{${match.body}}`;
++	const postParts = parseCommaParts(match.post);
++	if (match.post.length) {
++		parts[parts.length - 1] += postParts.shift();
++		parts.push(...postParts);
++	}
++	return parts;
++}
++const isPadded = (value) => /^-?0\d/.test(value);
++function expand(str, isTop) {
++	const match = balanced(str);
++	if (!match || match.pre.endsWith("$"))
++		return [str];
++	const isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(match.body);
++	const isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(match.body);
++	const isSequence = isNumericSequence || isAlphaSequence;
++	const isOptions = match.body.includes(",");
++	if (!isSequence && !isOptions) {
++		// {a},b}
++		if (/,.*\}/.test(match.post)) {
++			return expand(`${match.pre}{${match.body}${ESC_CLOSE}${match.post}`, false);
++		}
++		return [str];
++	}
++	let parts;
++	if (isSequence) {
++		parts = match.body.split(/\.\./);
++	}
++	else {
++		parts = parseCommaParts(match.body);
++		if (parts.length === 1) {
++			// x{{a,b}}y ==> x{a}y x{b}y
++			parts = expand(parts[0], false).map((part) => `{${part}}`);
++			if (parts.length === 1) {
++				const post = match.post.length ? expand(match.post, false) : [""];
++				return post.map((rest) => match.pre + parts[0] + rest);
++			}
++		}
++	}
++	const post = match.post.length ? expand(match.post, false) : [""];
++	let values;
++	if (isSequence) {
++		const start = numeric(parts[0]);
++		const end = numeric(parts[1]);
++		const width = Math.max(parts[0].length, parts[1].length);
++		let step = parts.length === 3 ? Math.abs(numeric(parts[2])) || 1 : 1;
++		const reverse = end < start;
++		if (reverse)
++			step *= -1;
++		const pad = parts.some(isPadded);
++		values = [];
++		for (let value = start; reverse ? value >= end : value <= end; value += step) {
++			let item;
++			if (isAlphaSequence) {
++				item = String.fromCharCode(value);
++				if (item === "\\")
++					item = "";
++			}
++			else {
++				item = String(value);
++				if (pad) {
++					const need = width - item.length;
++					if (need > 0) {
++						const zeros = "0".repeat(need);
++						item = value < 0 ? `-${zeros}${item.slice(1)}` : zeros + item;
++					}
++				}
++			}
++			values.push(item);
++		}
++	}
++	else {
++		values = parts.flatMap((part) => expand(part, false));
++	}
++	const expansions = [];
++	for (const value of values) {
++		for (const rest of post) {
++			const expansion = match.pre + value + rest;
++			if (!isTop || isSequence || expansion)
++				expansions.push(expansion);
++		}
++	}
++	return expansions;
++}
++/** minimatch 3.1 `braceExpand`: brace-expansion's `expandTop`, when braces are present. */
++export function braceExpand(pattern) {
++	if (!/\{(?:(?!\{).)*\}/.test(pattern))
++		return [pattern];
++	let str = pattern;
++	if (!str)
++		return [];
++	if (str.startsWith("{}"))
++		str = `\\{\\}${str.slice(2)}`;
++	return expand(escapeBraces(str), true).map(unescapeBraces);
++}
++const PATTERN_LIST_TYPES = {
++	"!": { open: "(?:(?!(?:", close: "))[^/]*?)" },
++	"?": { open: "(?:", close: ")?" },
++	"+": { open: "(?:", close: ")+" },
++	"*": { open: "(?:", close: ")*" },
++	"@": { open: "(?:", close: ")" },
++};
++const QMARK = "[^/]";
++const STAR = `${QMARK}*?`;
++const RE_SPECIALS = new Set("().*{}+?[]^$\\!");
++function globUnescape(value) {
++	return value.replace(/\\(.)/g, "$1");
++}
++function parseSource(pattern, isSub) {
++	let re = "";
++	let hasMagic = false;
++	let escaping = false;
++	const patternListStack = [];
++	const negativeLists = [];
++	let stateChar = "";
++	let inClass = false;
++	let reClassStart = -1;
++	let classStart = -1;
++	// `dot: true`: only `.` and `..` are excluded.
++	const patternStart = pattern.charAt(0) === "." ? "" : "(?!(?:^|\\/)\\.{1,2}(?:$|\\/))";
++	const clearStateChar = () => {
++		if (!stateChar)
++			return;
++		if (stateChar === "*") {
++			re += STAR;
++			hasMagic = true;
++		}
++		else if (stateChar === "?") {
++			re += QMARK;
++			hasMagic = true;
++		}
++		else {
++			re += `\\${stateChar}`;
++		}
++		stateChar = "";
++	};
++	for (let index = 0; index < pattern.length; index++) {
++		let char = pattern.charAt(index);
++		if (escaping && RE_SPECIALS.has(char)) {
++			re += `\\${char}`;
++			escaping = false;
++			continue;
++		}
++		switch (char) {
++			case "\\":
++				clearStateChar();
++				escaping = true;
++				continue;
++			case "?":
++			case "*":
++			case "+":
++			case "@":
++			case "!":
++				if (inClass) {
++					if (char === "!" && index === classStart + 1)
++						char = "^";
++					re += char;
++					continue;
++				}
++				clearStateChar();
++				stateChar = char;
++				continue;
++			case "(": {
++				if (inClass) {
++					re += "(";
++					continue;
++				}
++				if (!stateChar) {
++					re += "\\(";
++					continue;
++				}
++				const { open, close } = PATTERN_LIST_TYPES[stateChar];
++				patternListStack.push({ type: stateChar, reStart: re.length, open, close, reEnd: -1 });
++				re += stateChar === "!" ? "(?:(?!(?:" : "(?:";
++				stateChar = "";
++				continue;
++			}
++			case ")": {
++				if (inClass || !patternListStack.length) {
++					re += "\\)";
++					continue;
++				}
++				clearStateChar();
++				hasMagic = true;
++				const list = patternListStack.pop();
++				re += list.close;
++				if (list.type === "!")
++					negativeLists.push(list);
++				list.reEnd = re.length;
++				continue;
++			}
++			case "|":
++				if (inClass || !patternListStack.length || escaping) {
++					re += "\\|";
++					escaping = false;
++					continue;
++				}
++				clearStateChar();
++				re += "|";
++				continue;
++			case "[":
++				clearStateChar();
++				if (inClass) {
++					re += `\\${char}`;
++					continue;
++				}
++				inClass = true;
++				classStart = index;
++				reClassStart = re.length;
++				re += char;
++				continue;
++			case "]": {
++				if (index === classStart + 1 || !inClass) {
++					re += `\\${char}`;
++					escaping = false;
++					continue;
++				}
++				const classBody = pattern.substring(classStart + 1, index);
++				try {
++					new RegExp(`[${classBody}]`);
++				}
++				catch {
++					const sub = parseSource(classBody, true);
++					re = `${re.slice(0, reClassStart)}\\[${sub.source}\\]`;
++					hasMagic = hasMagic || sub.hasMagic;
++					inClass = false;
++					continue;
++				}
++				hasMagic = true;
++				inClass = false;
++				re += char;
++				continue;
++			}
++			default:
++				clearStateChar();
++				if (escaping)
++					escaping = false;
++				else if (RE_SPECIALS.has(char) && !(char === "^" && inClass))
++					re += "\\";
++				re += char;
++		}
++	}
++	// An unterminated class matches its `[` literally.
++	if (inClass) {
++		const sub = parseSource(pattern.slice(classStart + 1), true);
++		re = `${re.slice(0, reClassStart)}\\[${sub.source}`;
++		hasMagic = hasMagic || sub.hasMagic;
++	}
++	// An unterminated extglob matches its type character and `(` literally.
++	for (let list = patternListStack.pop(); list; list = patternListStack.pop()) {
++		let tail = re.slice(list.reStart + list.open.length);
++		tail = tail.replace(/((?:\\{2}){0,64})(\\?)\|/g, (_, slashes, escape) => `${slashes}${slashes}${escape || "\\"}|`);
++		const prefix = list.type === "*" ? STAR : list.type === "?" ? QMARK : `\\${list.type}`;
++		hasMagic = true;
++		re = `${re.slice(0, list.reStart)}${prefix}\\(${tail}`;
++	}
++	clearStateChar();
++	if (escaping)
++		re += "\\\\";
++	const addPatternStart = re.charAt(0) === "[" || re.charAt(0) === "." || re.charAt(0) === "(";
++	// A negated extglob must also fail together with what follows it.
++	for (let index = negativeLists.length - 1; index > -1; index--) {
++		const list = negativeLists[index];
++		const before = re.slice(0, list.reStart);
++		const first = re.slice(list.reStart, list.reEnd - 8);
++		let after = re.slice(list.reEnd);
++		const last = re.slice(list.reEnd - 8, list.reEnd) + after;
++		const openParensBefore = before.split("(").length - 1;
++		for (let count = 0; count < openParensBefore; count++)
++			after = after.replace(/\)[+*?]?/, "");
++		const dollar = after === "" && !isSub ? "$" : "";
++		re = before + first + after + dollar + last;
++	}
++	if (re !== "" && hasMagic)
++		re = `(?=.)${re}`;
++	if (addPatternStart)
++		re = patternStart + re;
++	return { source: re, hasMagic };
++}
++function parseSegment(segment) {
++	if (segment === "**")
++		return { kind: "globstar" };
++	if (segment === "")
++		return { kind: "literal", value: "" };
++	const { source, hasMagic } = parseSource(segment, false);
++	if (!hasMagic)
++		return { kind: "literal", value: globUnescape(segment) };
++	let regex;
++	try {
++		regex = new RegExp(`^${source}$`);
++	}
++	catch {
++		regex = /$./;
++	}
++	return { kind: "pattern", regex };
++}
++/**
++ * Compile an include glob the way node-glob 7 does (minimatch's `set`): one
++ * list of segments per brace expansion.
++ */
++export function compileGlob(pattern) {
++	return braceExpand(pattern).map((expanded) => expanded.split(/\/+/).map(parseSegment));
++}
+--- /dev/null
++++ b/dist/build/nitro-trace-includes.js
+@@ -0,0 +1,480 @@
++import fs from "node:fs";
++import path, { toSlash } from "../deps/.pnpm/pathslash@0.1.0/deps/pathslash/dist/index.js";
++import { createValidFileMatcher, findFileWithExtensions, } from "../routing/file-matcher.js";
++import { hasExportedName } from "./report.js";
++import { createContainsMatcher, createPathMatcher, globFiles, isTranslatedExactly, matchesWholeName, } from "./trace-glob.js";
++// Nitro's tracer reports forward-slash paths, so compare in that form.
++const NODE_MODULES_SEGMENT = "/node_modules/";
++function isGroupSegment(segment) {
++	return segment.startsWith("(") && segment.endsWith(")");
++}
++/** Port of Next.js `normalizeAppPath`. */
++function normalizeAppPath(entryName) {
++	const segments = entryName.split("/");
++	let pathname = "";
++	segments.forEach((segment, index) => {
++		if (!segment || isGroupSegment(segment) || segment.startsWith("@"))
++			return;
++		if ((segment === "page" || segment === "route") && index === segments.length - 1)
++			return;
++		pathname += `/${segment}`;
++	});
++	return pathname || "/";
++}
++/** Port of Next.js `normalizePagePath`. */
++function normalizePagePath(page, isDynamic) {
++	if (/^\/index(\/|$)/.test(page) && !isDynamic)
++		return `/index${page}`;
++	return page === "/" ? "/index" : page;
++}
++function generatesMultipleFiles(route) {
++	if (!route.isDynamic)
++		return false;
++	let code;
++	try {
++		code = fs.readFileSync(route.filePath, "utf8");
++	}
++	catch {
++		return false;
++	}
++	return (hasExportedName(code, "generateSitemaps") || hasExportedName(code, "generateImageMetadata"));
++}
++/**
++ * The entry name Next.js gives a metadata file (`createPagesMapping`):
++ * `normalizeMetadataRoute` adds `.txt` / `.webmanifest` to root robots and
++ * manifest files and a hash suffix under route groups and parallel routes,
++ * then `normalizeMetadataPageToRoute` adds `.xml` to sitemaps, or
++ * `[__metadata_id__]` when the file exports `generateSitemaps` or
++ * `generateImageMetadata`. Dynamic segments keep their names.
++ */
++function metadataRouteName(route, appDir, matcher, metadataRouteSuffix) {
++	let page = appEntryKey(toSlash(path.relative(appDir, route.filePath)), matcher);
++	let suffix = "";
++	if (page === "/robots")
++		page += ".txt";
++	else if (page === "/manifest")
++		page += ".webmanifest";
++	else
++		suffix = metadataRouteSuffix(page.split("/").slice(1, -1), route.type);
++	const { dir, name, ext } = path.parse(page);
++	let entry = path.join(dir, `${name}${suffix ? `-${suffix}` : ""}${ext}`);
++	if (generatesMultipleFiles(route))
++		entry += "/[__metadata_id__]";
++	else if (entry.endsWith("/sitemap"))
++		entry += ".xml";
++	return normalizeAppPath(`app${entry}/route`);
++}
++/**
++ * Next.js's App Router page key for a file relative to `appDir`
++ * (`createPagesMapping`), which turns `%5F` into `_`.
++ */
++function appEntryKey(file, matcher) {
++	return `/${matcher.stripExtension(file)}`.replace(/%5F/g, "_");
++}
++/**
++ * Whether `pages` has `_app`, `_document` or `_error`, which Next.js reads from
++ * `<name>.<ext>` or `<name>/index.<ext>` (`getPageFromPath`).
++ */
++function hasReservedPagesFile(pagesDir, matcher) {
++	return ["_app", "_document", "_error"].some((name) => findFileWithExtensions(path.join(pagesDir, name), matcher) ||
++		findFileWithExtensions(path.join(pagesDir, name, "index"), matcher));
++}
++/**
++ * Name each server route the way Next.js's build trace step does before
++ * matching route keys: the entry name normalized with `normalizeAppPath` for
++ * App Router entries (`app/(group)/api/hello/route` is `/app/api/hello`) and
++ * `normalizePagePath` for Pages Router entries (`/pages/index`,
++ * `/pages/api/hello`). Keys match anywhere in the name, so the documented
++ * `/api/hello` and `/*` forms work. The built-in entries Next.js emits
++ * (`discoverRoutes`) are included too: `_app`, `_document` and `_error` when
++ * there are pages, `_not-found` when there are app entries, and
++ * `_global-error` when there are no pages. Root server entries (`instrumentation`,
++ * `proxy` or `middleware`) keep their entry names.
++ */
++export async function collectTraceRouteNames(options) {
++	const { appDir, pagesDir } = options;
++	const matcher = createValidFileMatcher(options.pageExtensions);
++	const names = new Set();
++	let hasPages = false;
++	if (pagesDir) {
++		const { apiRouter, pagesRouter } = await import("../routing/pages-router.js");
++		const [pages, apis] = await Promise.all([
++			pagesRouter(pagesDir, options.pageExtensions, matcher),
++			apiRouter(pagesDir, options.pageExtensions, matcher),
++		]);
++		for (const route of [...pages, ...apis]) {
++			const relative = matcher.stripExtension(toSlash(path.relative(pagesDir, route.filePath)));
++			const page = `/${relative}`.replace(/\/index$/, "") || "/";
++			names.add(`/pages${normalizePagePath(page, route.isDynamic)}`);
++		}
++		hasPages = names.size > 0 || hasReservedPagesFile(pagesDir, matcher);
++		if (hasPages) {
++			for (const name of ["_app", "_document", "_error"])
++				names.add(`/pages/${name}`);
++		}
++	}
++	if (appDir) {
++		const { metadataRouteSuffix, scanMetadataFiles } = await import("../server/metadata-routes.js");
++		const appNames = new Set();
++		// Every page and route file is an entry, including pages that only fill
++		// a parallel route slot (`app/@modal/photo/page` is `/app/photo`).
++		for (const file of collectAppEntryFiles(appDir, matcher)) {
++			appNames.add(normalizeAppPath(`app${appEntryKey(file, matcher)}`));
++		}
++		for (const route of scanMetadataFiles(appDir)) {
++			appNames.add(metadataRouteName(route, appDir, matcher, metadataRouteSuffix));
++		}
++		// A root `not-found` file is an app entry too; it builds as `_not-found`.
++		if (appNames.size > 0 || findFileWithExtensions(path.join(appDir, "not-found"), matcher)) {
++			appNames.add("/app/_not-found");
++		}
++		if (!hasPages)
++			appNames.add("/app/_global-error");
++		for (const name of appNames)
++			names.add(name);
++	}
++	for (const name of options.rootEntries ?? [])
++		names.add(name);
++	return [...names];
++}
++/**
++ * App directory `page` and `route` files relative to `appDir`, like Next.js's
++ * `collectAppFiles`, which skips private (`_`-prefixed) folders.
++ */
++function collectAppEntryFiles(appDir, matcher) {
++	const files = [];
++	const walk = (dir, relative) => {
++		let entries;
++		try {
++			entries = fs.readdirSync(dir, { withFileTypes: true });
++		}
++		catch {
++			return;
++		}
++		for (const entry of entries) {
++			if (entry.name.startsWith("_"))
++				continue;
++			const file = relative ? `${relative}/${entry.name}` : entry.name;
++			const absolute = path.join(dir, entry.name);
++			const isDirectory = entry.isDirectory() || (entry.isSymbolicLink() && isDirectoryPath(absolute));
++			if (isDirectory)
++				walk(absolute, file);
++			else if (matcher.isAppRouterPage(file))
++				files.push(file);
++		}
++	};
++	walk(appDir, "");
++	return files;
++}
++function isDirectoryPath(file) {
++	try {
++		return fs.statSync(file).isDirectory();
++	}
++	catch {
++		return false;
++	}
++}
++function realPath(file) {
++	try {
++		return toSlash(fs.realpathSync(file));
++	}
++	catch {
++		return null;
++	}
++}
++function selectFiles(options) {
++	const { root, routes, includes, excludes } = options;
++	// Patterns vinext cannot match exactly fail safe: such an include key
++	// applies to every route, and such an exclude key or glob is ignored.
++	const inexact = new Set();
++	const keyMatcher = (key, fallback) => {
++		if (isTranslatedExactly(key))
++			return createContainsMatcher(key);
++		inexact.add(key);
++		return () => fallback;
++	};
++	const includeKeys = Object.keys(includes).map((key) => [key, keyMatcher(key, true)]);
++	const excludeKeys = Object.keys(excludes).map((key) => [key, keyMatcher(key, false)]);
++	const exactExcludes = (globs) => globs.filter((glob) => isTranslatedExactly(glob) || (inexact.add(glob), false));
++	// Routes that match the same keys select the same files.
++	const groups = new Map();
++	for (const route of routes) {
++		const matchedIncludes = includeKeys.filter(([, matches]) => matches(route)).map(([key]) => key);
++		const matchedExcludes = excludeKeys.filter(([, matches]) => matches(route)).map(([key]) => key);
++		groups.set(JSON.stringify([matchedIncludes, matchedExcludes]), {
++			includes: [...new Set(matchedIncludes.flatMap((key) => includes[key]))],
++			excludes: exactExcludes([...new Set(matchedExcludes.flatMap((key) => excludes[key]))]),
++		});
++	}
++	if (inexact.size > 0) {
++		options.warn(`[vinext] outputFileTracingIncludes/outputFileTracingExcludes pattern(s) ${[...inexact].join(", ")} ` +
++			"use glob syntax vinext does not match exactly like Next.js: " +
++			"such include keys apply to every route, and such excludes are ignored.");
++	}
++	// Nitro lists traced files by real path, so excludes also match from the
++	// project root's real path when the root is reached through a symlink.
++	const roots = [...new Set([path.resolve(root), realPath(root) ?? path.resolve(root)])];
++	const expanded = new Map();
++	const included = new Map();
++	const routeExcludes = [];
++	for (const group of groups.values()) {
++		const matchers = roots.map((base) => createPathMatcher(base, group.excludes));
++		const isExcluded = (file) => matchers.some((matches) => matches(file));
++		routeExcludes.push(isExcluded);
++		for (const glob of group.includes) {
++			let files = expanded.get(glob);
++			if (!files) {
++				// Like Next.js, read Windows separators (globs built with
++				// `path.relative`) as `/`.
++				files = globFiles(root, toSlash(glob));
++				expanded.set(glob, files);
++			}
++			for (const file of files) {
++				if (included.has(file) || isExcluded(file))
++					continue;
++				// Skips files removed during the build.
++				const real = realPath(file);
++				if (real)
++					included.set(file, real);
++			}
++		}
++	}
++	// Next.js keeps the server's own trace (`next-server.js.nft.json`) apart
++	// and applies only the excludes of keys matching `next-server` to it
++	// (`picomatch(key)('next-server')`). Nitro's trace also holds what the
++	// server and its runtime need, so the server is one more owner of each
++	// traced file.
++	const serverExcludes = exactExcludes([
++		...new Set(Object.keys(excludes)
++			.filter((key) => isTranslatedExactly(key) && matchesWholeName(key, "next-server"))
++			.flatMap((key) => excludes[key])),
++	]);
++	const serverMatchers = roots.map((base) => createPathMatcher(base, serverExcludes));
++	routeExcludes.push((file) => serverMatchers.some((matches) => matches(file)));
++	return {
++		included,
++		isTracedFileExcluded: (file, linked) => routeExcludes.every((isExcluded) => isExcluded(file) || (linked !== null && isExcluded(linked))),
++	};
++}
++/**
++ * Where a traced package is linked as `node_modules/<name>`, the path apps
++ * write excludes against, when Nitro lists it by another real path (pnpm's
++ * virtual store, wherever `virtualStoreDir` puts it). `null` otherwise.
++ */
++function linkedPackagePath(root, name, pkgPath) {
++	const linked = path.join(path.resolve(root), "node_modules", name);
++	if (path.resolve(pkgPath) === linked)
++		return null;
++	const real = realPath(linked);
++	return real !== null && real === realPath(pkgPath) ? linked : null;
++}
++function splitPackageName(segments) {
++	return segments[0]?.startsWith("@") ? segments.slice(0, 2) : segments.slice(0, 1);
++}
++/**
++ * Split a `node_modules` file path into its package name and root. A package
++ * inside another package's `node_modules` keeps that layout (`nested`), like
++ * Next.js's trace. pnpm's `.pnpm` store is the exception: nf3 writes those
++ * packages at the top level, so they are read from the last boundary.
++ */
 +function packageOfFile(file) {
-+	const index = file.lastIndexOf(NODE_MODULES_SEGMENT);
-+	if (index === -1) return null;
-+	const base = file.slice(0, index + NODE_MODULES_SEGMENT.length);
++	const first = file.indexOf(NODE_MODULES_SEGMENT);
++	if (first === -1)
++		return null;
++	const last = file.lastIndexOf(NODE_MODULES_SEGMENT);
++	const outerBase = file.slice(0, first + NODE_MODULES_SEGMENT.length);
++	const isPnpmStore = file.startsWith(".pnpm/", outerBase.length);
++	const base = file.slice(0, last + NODE_MODULES_SEGMENT.length);
 +	const segments = file.slice(base.length).split("/");
-+	const nameSegments = segments[0]?.startsWith("@") ? segments.slice(0, 2) : segments.slice(0, 1);
-+	if (nameSegments.length === 0 || nameSegments.length === segments.length) return null;
++	const nameSegments = splitPackageName(segments);
++	if (nameSegments.length === 0 || nameSegments.length === segments.length)
++		return null;
++	const pkgPath = path.join(base, ...nameSegments);
 +	return {
 +		name: nameSegments.join("/"),
-+		path: path.join(base, ...nameSegments)
++		path: pkgPath,
++		nested: first !== last && !isPnpmStore ? path.relative(outerBase, pkgPath) : null,
 +	};
 +}
 +function groupByPackage(files) {
-+	const packages = /* @__PURE__ */ new Map();
-+	for (const file of files) {
++	const packages = new Map();
++	let outsideNodeModules = 0;
++	for (const [file, real] of files) {
 +		const pkg = packageOfFile(file);
-+		if (!pkg) continue;
++		if (!pkg) {
++			outsideNodeModules++;
++			continue;
++		}
 +		let entry = packages.get(pkg.path);
 +		if (!entry) {
-+			entry = {
-+				...pkg,
-+				files: []
-+			};
++			entry = { ...pkg, files: [] };
 +			packages.set(pkg.path, entry);
 +		}
-+		entry.files.push(file);
++		entry.files.push({ path: file, real });
 +	}
-+	return [...packages.values()];
++	return { packages: [...packages.values()], outsideNodeModules };
 +}
-+function readPackageJson(packagePath) {
++/**
++ * Drop traced files that every route excludes, and the package versions left
++ * without files. Nitro writes a `package.json` for each version it keeps, so
++ * an excluded `package.json` alone does not remove it.
++ */
++function removeExcludedTracedFiles(tracedPackages, root, isExcluded) {
++	for (const [name, pkg] of Object.entries(tracedPackages)) {
++		for (const [version, entry] of Object.entries(pkg.versions)) {
++			const linkedBase = linkedPackagePath(root, name, entry.path);
++			entry.files = entry.files.filter((file) => {
++				const linked = linkedBase && path.join(linkedBase, path.relative(entry.path, file));
++				return !isExcluded(toSlash(file), linked && toSlash(linked));
++			});
++			if (entry.files.length === 0)
++				delete pkg.versions[version];
++		}
++		if (Object.keys(pkg.versions).length === 0)
++			delete tracedPackages[name];
++	}
++}
++// Same fallback nf3 uses for traced package directories without a
++// package.json, such as Prisma's generated `node_modules/.prisma`.
++function readPackageJson(pkg) {
 +	try {
-+		return JSON.parse(fs.readFileSync(path.join(packagePath, "package.json"), "utf8"));
-+	} catch {
-+		return null;
++		return JSON.parse(fs.readFileSync(path.join(pkg.path, "package.json"), "utf8"));
++	}
++	catch {
++		return { name: pkg.name, version: "0.0.0" };
 +	}
 +}
 +function samePath(a, b) {
 +	try {
 +		return toSlash(fs.realpathSync(a)) === toSlash(fs.realpathSync(b));
-+	} catch {
++	}
++	catch {
 +		return path.resolve(a) === path.resolve(b);
 +	}
 +}
 +/**
-+* Build a `tracedPackages` hook for Nitro's dependency trace, or `null` when
-+* neither option selects a file.
-+*/
-+function createNitroTraceIncludesHook(root, includes, excludes) {
-+	const included = groupByPackage(globFiles(root, includes));
-+	const excluded = new Set(globFiles(root, excludes));
-+	if (included.length === 0 && excluded.size === 0) return null;
-+	return (tracedPackages) => {
-+		for (const pkg of included) {
-+			const pkgJSON = readPackageJson(pkg.path);
-+			if (!pkgJSON) continue;
-+			const version = pkgJSON.version || "0.0.0";
-+			const traced = tracedPackages[pkg.name] ??= {
-+				name: pkg.name,
-+				versions: {}
-+			};
-+			const existing = traced.versions[version];
-+			if (!existing) {
-+				traced.versions[version] = {
-+					path: pkg.path,
-+					files: [...pkg.files],
-+					pkgJSON
++ * Build the Nitro hooks that apply `outputFileTracingIncludes` and
++ * `outputFileTracingExcludes`, or `null` when neither option has globs. Globs
++ * are expanded when the hooks run, after the server build.
++ */
++export function createNitroTraceIncludes(options) {
++	const { includes, excludes, warn } = options;
++	if (Object.keys(includes).length === 0 && Object.keys(excludes).length === 0)
++		return null;
++	let applied = false;
++	/** Included files to copy after Nitro writes, by output path. */
++	let pendingCopies = new Map();
++	const apply = (tracedPackages) => {
++		applied = true;
++		pendingCopies = new Map();
++		const { included, isTracedFileExcluded } = selectFiles(options);
++		const tracedFiles = new Map();
++		for (const pkg of Object.values(tracedPackages)) {
++			for (const version of Object.values(pkg.versions)) {
++				tracedFiles.set(version, new Set(version.files));
++			}
++		}
++		const { packages, outsideNodeModules } = groupByPackage(included);
++		if (outsideNodeModules > 0) {
++			warn(`[vinext] outputFileTracingIncludes matched ${outsideNodeModules} file(s) outside node_modules. ` +
++				"Nitro's traced output only contains node_modules, so these files are not copied.");
++		}
++		const otherCopies = [];
++		for (const pkg of packages) {
++			const versions = Object.values(tracedPackages[pkg.name]?.versions ?? {});
++			// nf3 links the first version without trace parents as the package
++			// root, so adding another copy could replace the copy the server bundle
++			// actually resolves. Extend a copy Nitro already traced, which nf3
++			// places where the bundle resolves it.
++			const existing = versions.find((version) => samePath(version.path, pkg.path));
++			if (existing) {
++				// nf3 lists real paths.
++				const existingFiles = new Set(existing.files);
++				for (const file of pkg.files) {
++					if (existingFiles.has(file.real))
++						continue;
++					existingFiles.add(file.real);
++					existing.files.push(file.path);
++				}
++				continue;
++			}
++			// nf3 writes every package it is given at the top level, so a nested
++			// package keeps its layout by being copied after Nitro writes instead.
++			if (pkg.nested !== null) {
++				for (const file of pkg.files) {
++					pendingCopies.set(path.join(pkg.nested, path.relative(pkg.path, file.path)), file.path);
++				}
++				continue;
++			}
++			if (versions.length === 0) {
++				const pkgJSON = readPackageJson(pkg);
++				tracedPackages[pkg.name] = {
++					name: pkg.name,
++					versions: {
++						[pkgJSON.version || "0.0.0"]: {
++							path: pkg.path,
++							files: pkg.files.map((file) => file.path),
++							pkgJSON,
++						},
++					},
 +				};
 +				continue;
 +			}
-+			if (!samePath(existing.path, pkg.path)) continue;
-+			for (const file of pkg.files) if (!existing.files.includes(file)) existing.files.push(file);
++			otherCopies.push(pkg.path);
 +		}
-+		if (excluded.size === 0) return;
-+		for (const traced of Object.values(tracedPackages)) for (const version of Object.values(traced.versions)) version.files = version.files.filter((file) => !excluded.has(file));
++		// Like Next.js, excludes apply to the traced files plus the includes, so
++		// a version whose traced files are all excluded keeps its included files.
++		removeExcludedTracedFiles(tracedPackages, options.root, isTracedFileExcluded);
++		// nf3 links a version under its parent through the parents of its traced
++		// files. A nested version left with only included files has none, so it
++		// is copied to its nested path after Nitro writes instead.
++		for (const [name, pkg] of Object.entries(tracedPackages)) {
++			for (const [version, entry] of Object.entries(pkg.versions)) {
++				const traced = tracedFiles.get(entry);
++				if (!traced || entry.files.some((file) => traced.has(file)))
++					continue;
++				const nested = packageOfFile(toSlash(path.join(entry.path, "package.json")))?.nested;
++				if (!nested)
++					continue;
++				for (const file of entry.files) {
++					pendingCopies.set(path.join(nested, path.relative(entry.path, file)), file);
++				}
++				delete pkg.versions[version];
++			}
++			if (Object.keys(pkg.versions).length === 0)
++				delete tracedPackages[name];
++		}
++		if (otherCopies.length > 0) {
++			warn(`[vinext] outputFileTracingIncludes matched files in ${otherCopies.join(", ")}, ` +
++				"but Nitro traced a different copy of the same package, so these files are not copied.");
++		}
++	};
++	const copy = (from, to) => {
++		fs.mkdirSync(path.dirname(to), { recursive: true });
++		fs.copyFileSync(from, to);
++	};
++	return {
++		tracedPackages: apply,
++		write(serverDir) {
++			const outDir = path.join(serverDir, "node_modules");
++			if (!applied) {
++				// Nitro did not trace, so write what nf3 would have written.
++				const tracedPackages = {};
++				apply(tracedPackages);
++				for (const pkg of Object.values(tracedPackages)) {
++					for (const version of Object.values(pkg.versions)) {
++						const files = new Set(version.files);
++						const packageJson = path.join(version.path, "package.json");
++						if (fs.existsSync(packageJson))
++							files.add(packageJson);
++						for (const file of files) {
++							copy(file, path.join(outDir, pkg.name, path.relative(version.path, file)));
++						}
++					}
++				}
++			}
++			for (const [target, file] of pendingCopies)
++				copy(file, path.join(outDir, target));
++		},
 +	};
 +}
-+//#endregion
-+export { createNitroTraceIncludesHook };
+--- /dev/null
++++ b/dist/build/trace-glob.js
+@@ -0,0 +1,637 @@
++import fs from "node:fs";
++import path from "../deps/.pnpm/pathslash@0.1.0/deps/pathslash/dist/index.js";
++import { compileGlob } from "./glob-match.js";
++/**
++ * Glob matching for `outputFileTracingIncludes` / `outputFileTracingExcludes`,
++ * following the options Next.js uses in `collect-build-traces.ts`:
++ *
++ * - Include globs are expanded with node-glob 7 (Next.js's compiled `glob`),
++ *   `glob(pattern, { cwd: dir, nodir: true, dot: true })` ({@link globFiles}).
++ *   Patterns compile through the minimatch port in `glob-match.ts`, and the
++ *   walk follows node-glob: wildcards and `**` match dot entries, directories
++ *   are never results, and a symlinked directory is read like any other
++ *   directory, except that `**` does not recurse below a symlinked directory
++ *   it reached itself (the link's direct children still match the rest of the
++ *   pattern).
++ * - Route keys and exclude globs are matched with picomatch 4,
++ *   `picomatch(pattern, { dot: true, contains: true })`
++ *   ({@link createContainsMatcher}, {@link createPathMatcher}): the pattern
++ *   may match anywhere in the route name or absolute file path. This
++ *   translates picomatch's output for the syntax below rather than porting
++ *   its parser.
++ *
++ * Supported picomatch syntax: `*`, `**`, `?`, `[...]` classes, `{a,b}` lists
++ * and `{a..b}` ranges, `(...)` groups and the `@()`, `?()`, `+()`, `*()` and
++ * `!()` extglobs within one path segment (optionally followed by a `?` or `+`
++ * quantifier), and backslash escapes. {@link isTranslatedExactly} detects
++ * the shapes this does not cover.
++ */
++const REGEX_SPECIAL_CHARS = /[\\^$.*+?()[\]{}|]/g;
++function escapeRegex(value) {
++	return value.replace(REGEX_SPECIAL_CHARS, "\\$&");
++}
++/**
++ * picomatch compiles `{a..b}` to the class of its sorted bounds (`[a-b]`), or
++ * to the literal bounds when that class is not a valid regex (`{01..03}`).
++ */
++function picomatchRange(body) {
++	if (!body.includes("..") || /[{},]/.test(body))
++		return null;
++	const bounds = body.split("..");
++	if (bounds.includes(""))
++		return null;
++	bounds.sort();
++	const range = `[${bounds.join("-")}]`;
++	try {
++		new RegExp(range);
++		return range;
++	}
++	catch {
++		return bounds.join("..").replace(/[\\*?[\]{}()!@+|^$]/g, "\\$&");
++	}
++}
++/** Expand picomatch `{a,b}` lists, and compile `{a..b}` ranges to a class. */
++function expandBraces(pattern) {
++	for (let open = 0; open < pattern.length; open++) {
++		if (pattern[open] === "\\") {
++			open++;
++			continue;
++		}
++		if (pattern[open] !== "{")
++			continue;
++		let depth = 0;
++		let close = -1;
++		const commas = [];
++		for (let index = open; index < pattern.length; index++) {
++			const char = pattern[index];
++			if (char === "\\")
++				index++;
++			else if (char === "{")
++				depth++;
++			else if (char === "}" && --depth === 0) {
++				close = index;
++				break;
++			}
++			else if (char === "," && depth === 1)
++				commas.push(index);
++		}
++		if (close === -1)
++			return [pattern];
++		const before = pattern.slice(0, open);
++		const after = pattern.slice(close + 1);
++		const body = pattern.slice(open + 1, close);
++		let options = null;
++		if (commas.length > 0) {
++			options = [];
++			let start = open + 1;
++			for (const end of [...commas, close]) {
++				options.push(pattern.slice(start, end));
++				start = end + 1;
++			}
++		}
++		else {
++			const range = picomatchRange(body);
++			if (range !== null)
++				options = [range];
++		}
++		if (!options) {
++			// A brace without a list or range (`{a}`) stays literal.
++			return expandBraces(body).flatMap((inner) => expandBraces(after).map((rest) => `${before}{${inner}}${rest}`));
++		}
++		return options.flatMap((option) => expandBraces(before + option + after));
++	}
++	return [pattern];
++}
++// picomatch accepts the bracket text itself (`[id]` matches `i`, `d` or
++// `[id]`) unless the class contains a range or other regex character, and
++// reads `!` literally (only `^` negates).
++const PICOMATCH_CLASS_REGEX_CHARS = /[-*+?.^${}(|)[\]]/;
++function parseClass(segment, open) {
++	let index = open + 1;
++	let negate = false;
++	if (segment[index] === "^") {
++		negate = true;
++		index++;
++	}
++	let body = "";
++	let raw = "";
++	for (let first = true; index < segment.length; index++, first = false) {
++		const char = segment[index];
++		if (char === "]" && !first) {
++			// picomatch adds the `/` after the body, so it never ends a range.
++			const source = negate ? `[^${body}/]` : `[${body}]`;
++			if (!negate && !PICOMATCH_CLASS_REGEX_CHARS.test(raw)) {
++				return { source: `(?:${escapeRegex(`[${raw}]`)}|${source})`, end: index };
++			}
++			return { source, end: index };
++		}
++		raw += char;
++		if (char === "\\" && index + 1 < segment.length) {
++			const escaped = segment[++index];
++			raw += escaped;
++			body += /[\]\\^-]/.test(escaped) ? `\\${escaped}` : escapeRegex(escaped);
++			continue;
++		}
++		// picomatch escapes a `-` that closes the class (`[^a-]` is `[^a\-/]`).
++		const isLiteral = char === "[" || char === "^" || char === "\\" || char === "]";
++		body += isLiteral || (char === "-" && segment[index + 1] === "]") ? `\\${char}` : char;
++	}
++	return null;
++}
++// The rest of a pattern that picomatch reads as an extension after a negative
++// extglob (`/^\.[^\\/.]+$/`), limited to literal text.
++const PLAIN_EXTENSION = /^\.[^\\/.*?+@![\](){}|,]+$/;
++const PICOMATCH_EXTENSION = /^\.[^\\/.]+$/;
++function parseExtglob(segment, start, endsPattern) {
++	const alternatives = [];
++	let index = start;
++	for (;;) {
++		const part = parseSegment(segment, index, endsPattern, true);
++		alternatives.push(part.source);
++		index = part.end;
++		if (index >= segment.length)
++			return null;
++		if (segment[index] === ")")
++			return { alternatives, end: index };
++		index++;
++	}
++}
++/**
++ * Translate one path segment (or, inside an extglob, one alternative) of a
++ * picomatch pattern into regex source. `endsPattern` is true for the last
++ * segment of the pattern, and `atPatternStart` for a segment the pattern
++ * starts with.
++ */
++function parseSegment(segment, start, endsPattern, inExtglob = false, atPatternStart = false) {
++	let source = "";
++	let index = start;
++	while (index < segment.length) {
++		const char = segment[index];
++		if (inExtglob && (char === "|" || char === ")"))
++			break;
++		if (char === "\\" && index + 1 < segment.length) {
++			source += escapeRegex(segment[index + 1]);
++			index += 2;
++			continue;
++		}
++		const isExtglob = "@?+*!".includes(char) && segment[index + 1] === "(";
++		if (isExtglob || char === "(") {
++			// A bare `(...)` is a regex group, like `@(...)`.
++			const kind = isExtglob ? char : "@";
++			const group = parseExtglob(segment, index + (isExtglob ? 2 : 1), endsPattern);
++			if (group) {
++				const alternatives = group.alternatives.join("|");
++				// picomatch makes an extglob that starts the pattern (other than
++				// `@()`, which it reads as a plain group) match at least one character.
++				if (atPatternStart && index === 0 && kind !== "@")
++					source += "(?=.)";
++				const rest = segment.slice(group.end + 1);
++				if (kind !== "!") {
++					source += `(?:${alternatives})${kind === "@" ? "" : kind}`;
++				}
++				else if (endsPattern && /^\)*$/.test(rest)) {
++					// picomatch only anchors the lookahead when nothing but closing
++					// parentheses follows in the pattern.
++					source += `(?:(?!(?:${alternatives})$))[^/]*?`;
++				}
++				else if (endsPattern &&
++					segment.slice(index, group.end).includes("*") &&
++					PLAIN_EXTENSION.test(rest)) {
++					// With a `*` inside, picomatch also checks the extension that ends
++					// the pattern in the lookahead (`!(*a).js`).
++					source += `(?:(?!(?:${alternatives})${escapeRegex(rest)})[^/]*?)`;
++				}
++				else {
++					source += `(?:(?!(?:${alternatives}))[^/]*?)`;
++				}
++				index = group.end + 1;
++				// A `?` or `+` right after the group quantifies it, unless it starts
++				// another extglob.
++				if ((segment[index] === "?" || segment[index] === "+") && segment[index + 1] !== "(") {
++					source += segment[index];
++					index++;
++				}
++				continue;
++			}
++		}
++		if (char === "*") {
++			// A segment-leading wildcard matches at least one character, unless it
++			// is a run of stars. Repeated stars collapse, except one that starts a
++			// `*()` extglob.
++			source += index === 0 && segment[1] !== "*" ? "(?=.)[^/]*" : "[^/]*";
++			while (segment[index + 1] === "*" && segment[index + 2] !== "(")
++				index++;
++			index++;
++			continue;
++		}
++		if (char === "?") {
++			source += "[^/]";
++			index++;
++			continue;
++		}
++		if (char === "[") {
++			const charClass = parseClass(segment, index);
++			if (charClass) {
++				source += charClass.source;
++				index = charClass.end + 1;
++				continue;
++			}
++		}
++		source += escapeRegex(char);
++		index++;
++	}
++	return { source, end: index };
++}
++/** Whether a segment's last token is a wildcard (`*`, `a*`, `@(a)*`). */
++function endsWithStar(segment) {
++	return segment !== undefined && /(?:^|[^\\])(?:\\\\)*\*$/.test(segment);
++}
++/**
++ * Regex source for a brace-free picomatch glob, unanchored (`contains`).
++ * `rooted` is false when the pattern continues a literal prefix, so a leading
++ * `/` is a separator rather than the start of the value.
++ */
++function containsSource(pattern, rooted) {
++	const segments = pattern
++		.split("/")
++		.filter((segment, index, all) => !(segment === "**" && all[index - 1] === "**"));
++	let source = "";
++	// Whether the next segment starts after a `/` this function adds.
++	let separate = false;
++	segments.forEach((segment, index) => {
++		if (segment === "**") {
++			separate = false;
++			if (segments.length === 1)
++				source += ".*";
++			// `**/x`: x at the start of the value or after any `/`.
++			else if (index === 0)
++				source += "(?:^|/)";
++			// picomatch does not let a globstar right after a leading `/`, or after
++			// a wildcard (`*/**`), match zero directories.
++			else if (index === 1 && rooted && segments[0] === "") {
++				source += "/.*";
++				separate = true;
++			}
++			else if (index === segments.length - 1) {
++				source += endsWithStar(segments[index - 1]) ? "/.*" : "(?:/.*|$)";
++			}
++			// `a/**/b`: b after `a/.../`, after `a/`, or (when b can match nothing)
++			// at the end of the value.
++			else
++				source += "(?:/.*/|/|$)";
++			return;
++		}
++		if (separate)
++			source += "/";
++		separate = true;
++		const endsPattern = index === segments.length - 1;
++		source += parseSegment(segment, 0, endsPattern, false, rooted && index === 0).source;
++	});
++	return source;
++}
++function toRegExp(source, literal) {
++	try {
++		return new RegExp(source);
++	}
++	catch {
++		// An invalid class such as `[z-a]` matches itself literally.
++		return new RegExp(escapeRegex(literal));
++	}
++}
++// Characters with a meaning in the grammar `isTranslatedExactly` accepts; any
++// other character is a literal.
++const GRAMMAR_CHARS = "\\*?+@![](){}|/";
++/**
++ * Whether {@link createContainsMatcher} and {@link createPathMatcher} match a
++ * pattern exactly like picomatch. This is an allowlist: the pattern may only
++ * use the grammar below, which `tests/trace-glob.test.ts` checks against
++ * picomatch. Anything else fails safe in the caller.
++ *
++ * - literal characters (including an unmatched `]`), and backslash escapes of
++ *   punctuation other than `/` and `\` (picomatch keeps regex escapes such
++ *   as `\d`);
++ * - `*` and `?`, and `**` as a whole path segment outside braces and groups;
++ * - classes (`[ab]`, `[^a-c]`) without escapes, `/`, braces or POSIX classes,
++ *   not followed by `+`;
++ * - `(...)` groups and `@()`, `?()`, `+()`, `*()` and `!()` extglobs, nested
++ *   or not, whose alternatives use this grammar without `/`, braces, `+` or a
++ *   leading `?`, optionally followed by one `?` or `+` quantifier; a `!()`
++ *   with a `*` inside that ends the pattern before an extension needs a
++ *   literal extension (`!(*a).js`);
++ * - top-level brace lists (`{a,b}`) of non-empty options that use this
++ *   grammar without `/`, groups, braces, `*`, `?`, `+`, `@`, `!` or `..`, and
++ *   are not `.`; not followed by `+`;
++ * - no trailing `/` (other than the pattern `/`).
++ */
++export function isTranslatedExactly(pattern) {
++	let index = 0;
++	const isBoundary = (at) => at < 0 || at >= pattern.length || pattern[at] === "/";
++	const parseClass = () => {
++		let at = index + 1;
++		if (pattern[at] === "^")
++			at++;
++		for (let first = true; at < pattern.length; at++, first = false) {
++			const char = pattern[at];
++			if (char === "\\" ||
++				char === "/" ||
++				char === "{" ||
++				char === "}" ||
++				(char === "[" && pattern[at + 1] === ":")) {
++				return false;
++			}
++			if (char === "]" && !first) {
++				index = at + 1;
++				return pattern[index] !== "+";
++			}
++		}
++		return false;
++	};
++	const parseGroup = (start) => {
++		index = start;
++		for (;;) {
++			if (pattern[index] === "?")
++				return false;
++			if (!parseSequence("group"))
++				return false;
++			if (pattern[index] === "|") {
++				index++;
++				continue;
++			}
++			if (pattern[index] !== ")")
++				return false;
++			index++;
++			break;
++		}
++		// picomatch checks an extension after `!(...*...)` in the lookahead; only
++		// a literal one is translated.
++		const rest = pattern.slice(index);
++		if (pattern[start - 2] === "!" &&
++			pattern.slice(start, index).includes("*") &&
++			PICOMATCH_EXTENSION.test(rest) &&
++			!PLAIN_EXTENSION.test(rest)) {
++			return false;
++		}
++		if ((pattern[index] === "?" || pattern[index] === "+") && pattern[index + 1] !== "(")
++			index++;
++		return true;
++	};
++	const parseBraces = () => {
++		index++;
++		for (;;) {
++			const start = index;
++			if (!parseSequence("brace"))
++				return false;
++			// Expansion would join an option with its neighbours into new tokens
++			// (`?{,a}(b)`, `@(a){?,b}`), and `path.join` would normalize a `.`
++			// option. picomatch also reads text around ranges (`{a..c}`) differently.
++			const option = pattern.slice(start, index);
++			if (option === "" || option === "." || option.includes("..") || /[*?+@!]/.test(option)) {
++				return false;
++			}
++			if (pattern[index] === ",") {
++				index++;
++				continue;
++			}
++			if (pattern[index] !== "}")
++				return false;
++			index++;
++			return pattern[index] !== "+";
++		}
++	};
++	function parseSequence(context) {
++		while (index < pattern.length) {
++			const char = pattern[index];
++			const next = pattern[index + 1];
++			if (context === "group" && (char === "|" || char === ")"))
++				return true;
++			if (context === "brace" && (char === "," || char === "}"))
++				return true;
++			if (!GRAMMAR_CHARS.includes(char) || char === "?" || char === "@" || char === "!") {
++				if ("?@!".includes(char) && next === "(") {
++					if (context === "brace" || !parseGroup(index + 2))
++						return false;
++				}
++				else {
++					index++;
++				}
++			}
++			else if (char === "\\") {
++				// picomatch keeps the backslash for regex escapes (`\d`), so only
++				// escaped punctuation is a literal.
++				if (next === undefined || next === "/" || next === "\\" || /\w/.test(next))
++					return false;
++				index += 2;
++			}
++			else if (char === "(" || ((char === "*" || char === "+") && next === "(")) {
++				if (context === "brace" || !parseGroup(index + (char === "(" ? 1 : 2)))
++					return false;
++			}
++			else if (char === "*") {
++				let end = index;
++				while (pattern[end] === "*")
++					end++;
++				// A run of stars only reads as a globstar where it fills a segment.
++				const isGlobstar = context === "top" && isBoundary(index - 1) && isBoundary(end);
++				if (end - index > 1 && !isGlobstar)
++					return false;
++				index = end;
++			}
++			else if (char === "+") {
++				// picomatch keeps `+` as a quantifier after a class, brace or group,
++				// and inside a group.
++				const previous = pattern[index - 1];
++				if (context !== "top" || (GRAMMAR_CHARS.includes(previous ?? "/") && previous !== "/")) {
++					return false;
++				}
++				index++;
++			}
++			else if (char === "[") {
++				if (!parseClass())
++					return false;
++			}
++			else if (char === "{") {
++				if (context !== "top" || !parseBraces())
++					return false;
++			}
++			else if (char === "/") {
++				if (context !== "top")
++					return false;
++				index++;
++			}
++			else if (char === "]") {
++				index++;
++			}
++			else {
++				// An unmatched `)`, `}` or `|`.
++				return false;
++			}
++		}
++		return context === "top";
++	}
++	// picomatch treats a trailing `/` specially.
++	if (pattern.length > 1 && pattern.endsWith("/"))
++		return false;
++	return parseSequence("top");
++}
++/**
++ * Whether `picomatch(pattern)` (default options) matches all of `name`. Only
++ * for names without `/` or a leading `.`, such as `next-server`, where those
++ * options make no difference.
++ */
++export function matchesWholeName(pattern, name) {
++	if (name === pattern)
++		return true;
++	const { negated, expansions } = parseNegation(pattern);
++	const matches = expansions.some((expanded) => toRegExp(`^(?:${containsSource(expanded, true)})$`, expanded).test(name));
++	return matches !== negated;
++}
++/**
++ * Leading `!`s (not starting a `!()` extglob) negate a picomatch pattern, and
++ * picomatch drops leading `./` prefixes.
++ */
++function parseNegation(pattern) {
++	let negated = false;
++	let body = pattern;
++	for (;;) {
++		if (body.startsWith("./")) {
++			body = body.slice(2);
++		}
++		else if (body.startsWith("!") && (body[1] !== "(" || body[2] === "?")) {
++			negated = !negated;
++			body = body.slice(1);
++		}
++		else {
++			break;
++		}
++	}
++	return { negated, expansions: expandBraces(body) };
++}
++/**
++ * Match a value against a glob anywhere in the string, like
++ * `picomatch(pattern, { dot: true, contains: true })`.
++ */
++export function createContainsMatcher(pattern) {
++	const { negated, expansions } = parseNegation(pattern);
++	if (negated) {
++		// picomatch then only rejects values the pattern matches at their start.
++		const sources = expansions.map((expanded) => containsSource(expanded, true));
++		const regex = toRegExp(`^(?!(?:${sources.join("|")})).*$`, pattern);
++		return (value) => value !== "" && (value === pattern || regex.test(value));
++	}
++	const regexes = expansions.map((expanded) => toRegExp(containsSource(expanded, true), expanded));
++	// picomatch also matches a value equal to the pattern itself.
++	// picomatch never matches an empty value.
++	return (value) => value !== "" && (value === pattern || regexes.some((regex) => regex.test(value)));
++}
++/**
++ * Match absolute file paths against project-relative globs. Like Next.js, each
++ * glob is joined to the project root (`path.join(dir, glob)`) and may match
++ * anywhere in the path. The root itself is matched literally, so a project
++ * path containing glob characters still works.
++ */
++export function createPathMatcher(root, patterns) {
++	const base = path.resolve(root);
++	const basePrefix = base.endsWith("/") ? base : `${base}/`;
++	const joined = patterns.map((pattern) => path.join(base, pattern));
++	const regexes = patterns.flatMap(expandBraces).map((pattern) => {
++		const absolute = path.join(base, pattern);
++		if (absolute.startsWith(basePrefix)) {
++			const rest = absolute.slice(basePrefix.length - 1);
++			return toRegExp(escapeRegex(base.replace(/\/$/, "")) + containsSource(rest, false), absolute);
++		}
++		return toRegExp(containsSource(absolute, true), absolute);
++	});
++	return (file) => joined.includes(file) || regexes.some((regex) => regex.test(file));
++}
++function readdirNames(dir) {
++	try {
++		return fs.readdirSync(dir);
++	}
++	catch {
++		return null;
++	}
++}
++function isSymlink(file) {
++	try {
++		return fs.lstatSync(file).isSymbolicLink();
++	}
++	catch {
++		return false;
++	}
++}
++function isFile(file) {
++	try {
++		return fs.statSync(file).isFile();
++	}
++	catch {
++		// Broken symlinks cannot be copied, so they are not results.
++		return false;
++	}
++}
++/**
++ * Expand a glob from `cwd` into absolute file paths, like node-glob 7's
++ * `glob.sync(pattern, { cwd, nodir: true, dot: true })`. Matched paths keep
++ * the symlink names they were reached through.
++ */
++export function globFiles(cwd, pattern) {
++	const results = new Set();
++	for (const parts of compileGlob(pattern)) {
++		// A trailing slash only matches directories, which `nodir` drops.
++		if (parts.length > 1 && isEmptyLiteral(parts[parts.length - 1]))
++			continue;
++		let literalCount = 0;
++		while (literalCount < parts.length && parts[literalCount].kind === "literal")
++			literalCount++;
++		const literalPrefix = parts
++			.slice(0, literalCount)
++			.map((part) => (part.kind === "literal" ? part.value : ""))
++			.join("/");
++		// Resolves absolute patterns (including drive letters) against cwd.
++		const base = path.resolve(cwd, literalPrefix === "" && isEmptyLiteral(parts[0]) ? "/" : literalPrefix || ".");
++		const visited = new Set();
++		const walk = (dir, index, inGlobStar) => {
++			const key = `${index}\0${inGlobStar ? 1 : 0}\0${dir}`;
++			if (visited.has(key))
++				return;
++			visited.add(key);
++			if (index === parts.length) {
++				if (isFile(dir))
++					results.add(dir);
++				return;
++			}
++			const part = parts[index];
++			if (part.kind === "literal") {
++				walk(path.join(dir, part.value), index + 1, inGlobStar);
++				return;
++			}
++			if (part.kind === "pattern") {
++				for (const name of readdirNames(dir) ?? []) {
++					if (part.regex.test(name))
++						walk(path.join(dir, name), index + 1, inGlobStar);
++				}
++				return;
++			}
++			// `**` only applies below a readable directory. It matches no
++			// directory, then each child either as the last directory it matches or
++			// as one more level to recurse into.
++			const names = readdirNames(dir);
++			if (!names)
++				return;
++			walk(dir, index + 1, false);
++			// node-glob does not recurse below a symlinked directory that `**`
++			// itself reached, so link cycles terminate.
++			if (inGlobStar && isSymlink(dir))
++				return;
++			for (const name of names) {
++				const child = path.join(dir, name);
++				walk(child, index + 1, true);
++				walk(child, index, true);
++			}
++		};
++		walk(base, literalCount, false);
++	}
++	return [...results];
++}
++function isEmptyLiteral(part) {
++	return part?.kind === "literal" && part.value === "";
++}
 --- a/dist/config/next-config.js
 +++ b/dist/config/next-config.js
-@@ -568,6 +568,11 @@
+@@ -567,6 +567,22 @@
+ }
  function readStringArray(value) {
  	return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
- }
-+/** Merge the glob lists of every route key of an `outputFileTracing*` map. */
-+function readOutputFileTracingGlobs(value) {
-+	if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-+	return [...new Set(Object.values(value).flatMap((globs) => readStringArray(globs)))];
 +}
++/**
++* Keep the route keys of an `outputFileTracing*` map whose value has string
++* globs, dropping malformed values.
++*/
++function readOutputFileTracingMap(value) {
++	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
++	return Object.fromEntries(Object.entries(value).map(([routeGlob, globs]) => [routeGlob, readStringArray(globs)]).filter(([, globs]) => globs.length > 0));
++}
++/**
++* Read an option that moved out of `experimental`. Like Next.js's
++* `warnOptionHasBeenMovedOutOfExperimental`, a value under the old
++* `experimental` key replaces the top-level one.
++*/
++function readMovedExperimentalOption(config, experimental, key) {
++	return experimental && key in experimental ? experimental[key] : config[key];
+ }
  /**
  * Convert lightningcss feature names from `experimental.lightningCssFeatures`
- * into a numeric bitmask consumable by the `lightningcss` `transform()` /
-@@ -783,6 +788,8 @@
+@@ -783,6 +799,8 @@
  			reactMaxHeadersLength: DEFAULT_REACT_MAX_HEADERS_LENGTH,
  			htmlLimitedBots: void 0,
  			serverExternalPackages: [],
-+			outputFileTracingIncludes: [],
-+			outputFileTracingExcludes: [],
++			outputFileTracingIncludes: {},
++			outputFileTracingExcludes: {},
  			cacheHandler: void 0,
  			cacheMaxMemorySize: void 0,
  			enablePrerenderSourceMaps: true,
-@@ -967,6 +974,8 @@
+@@ -967,6 +985,8 @@
  		reactMaxHeadersLength: typeof config.reactMaxHeadersLength === "number" ? config.reactMaxHeadersLength : DEFAULT_REACT_MAX_HEADERS_LENGTH,
  		htmlLimitedBots,
  		serverExternalPackages,
-+		outputFileTracingIncludes: readOutputFileTracingGlobs(config.outputFileTracingIncludes),
-+		outputFileTracingExcludes: readOutputFileTracingGlobs(config.outputFileTracingExcludes),
++		outputFileTracingIncludes: readOutputFileTracingMap(readMovedExperimentalOption(config, experimental, "outputFileTracingIncludes")),
++		outputFileTracingExcludes: readOutputFileTracingMap(readMovedExperimentalOption(config, experimental, "outputFileTracingExcludes")),
  		cacheHandler,
  		cacheMaxMemorySize,
  		enablePrerenderSourceMaps: config.enablePrerenderSourceMaps ?? true,
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -3794,6 +3794,17 @@
+@@ -878,6 +878,7 @@
+ 	let warnedInlineNextConfigOverride = false;
+ 	let hasNitroPlugin = false;
+ 	let nitroHostRuntime = "node";
++	let writeNitroTraceIncludes;
+ 	let resolvedServerExternalPackages = [];
+ 	let registerNodeOpenTelemetryLoader = false;
+ 	let pagesTsconfigAliases = {};
+@@ -3787,6 +3788,9 @@
+ 		},
+ 		{
+ 			name: "vinext:nitro-route-rules",
++			writeBundle() {
++				if (this.environment?.name === "nitro") writeNitroTraceIncludes?.();
++			},
+ 			nitro: { setup: async (nitro) => {
+ 				nitroBuildDir = nitro.options.buildDir ? path.resolve(root, nitro.options.buildDir) : void 0;
+ 				nitroHostRuntime = nitro.options.exportConditions?.includes("workerd") ? "worker" : "node";
+@@ -3794,6 +3798,31 @@
  				if (!hasAppDir && !hasPagesDir) return;
  				if (resolvedServerExternalPackages.length > 0) nitro.options.traceDeps = [.../* @__PURE__ */ new Set([...nitro.options.traceDeps ?? [], ...resolvedServerExternalPackages])];
  				if (nitro.options.dev) return;
-+				const { createNitroTraceIncludesHook } = await import("./build/nitro-trace-includes.js");
-+				const traceIncludesHook = createNitroTraceIncludesHook(root, nextConfig.outputFileTracingIncludes, nextConfig.outputFileTracingExcludes);
-+				if (traceIncludesHook) {
++				const { collectTraceRouteNames, createNitroTraceIncludes } = await import("./build/nitro-trace-includes.js");
++				const { outputFileTracingIncludes, outputFileTracingExcludes } = nextConfig;
++				const traceIncludes = Object.keys(outputFileTracingIncludes).length > 0 || Object.keys(outputFileTracingExcludes).length > 0 ? createNitroTraceIncludes({
++					root,
++					routes: await collectTraceRouteNames({
++						appDir: hasAppDir ? appDir : null,
++						pagesDir: hasPagesDir ? pagesDir : null,
++						pageExtensions: nextConfig.pageExtensions,
++						rootEntries: [...instrumentationPath ? ["instrumentation"] : [], ...middlewarePath ? [isProxyFile(middlewarePath) ? "proxy" : "middleware"] : []]
++					}),
++					includes: outputFileTracingIncludes,
++					excludes: outputFileTracingExcludes,
++					warn: nitro.logger?.warn ?? console.warn
++				}) : null;
++				if (traceIncludes) {
 +					const traceOpts = nitro.options.traceOpts ??= {};
 +					const hooks = traceOpts.hooks ??= {};
 +					const userTracedPackages = hooks.tracedPackages;
 +					hooks.tracedPackages = async (tracedPackages) => {
-+						traceIncludesHook(tracedPackages);
++						traceIncludes.tracedPackages(tracedPackages);
 +						await userTracedPackages?.(tracedPackages);
 +					};
++					const serverDir = nitro.options.output?.serverDir;
++					if (serverDir && nitro.options.node !== false && nitro.options.preset !== "nitro-prerender") writeNitroTraceIncludes = () => traceIncludes.write(serverDir);
 +				}
  				const { collectNitroRouteRules, mergeNitroRouteRules } = await import("./build/nitro-route-rules.js");
  				const generatedRouteRules = await collectNitroRouteRules({
  					appDir: hasAppDir ? appDir : null,
+--- a/dist/server/metadata-routes.js
++++ b/dist/server/metadata-routes.js
+@@ -440,4 +440,4 @@
+ 	}[ext] ?? fallback;
+ }
+ //#endregion
+-export { METADATA_FILE_MAP, fillStaticMetadataSegment, getMetadataImageRouteKind, getMetadataRouteKind, invalidateMetadataFileCache, isValidMetadataImageId, manifestToJson, matchMetadataFileBaseName, matchMetadataRoutePattern, robotsToText, scanMetadataFiles, sitemapToXml };
++export { METADATA_FILE_MAP, metadataRouteSuffix, fillStaticMetadataSegment, getMetadataImageRouteKind, getMetadataRouteKind, invalidateMetadataFileCache, isValidMetadataImageId, manifestToJson, matchMetadataFileBaseName, matchMetadataRoutePattern, robotsToText, scanMetadataFiles, sitemapToXml };

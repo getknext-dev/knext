@@ -14,7 +14,7 @@
  * either, or if any patch no longer applies cleanly to the installed copy.
  */
 
-import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -304,6 +304,7 @@ describe("manifest lockstep (a vinext bump must re-validate the patches)", () =>
 // ---------------------------------------------------------------------------
 
 let patched = "";
+const tempRoots: string[] = [];
 
 beforeAll(() => {
     patched = join(
@@ -316,6 +317,7 @@ beforeAll(() => {
 
 afterAll(() => {
     if (patched) rmSync(patched, { recursive: true, force: true });
+    for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
 });
 
 async function importPatched<T>(rel: string): Promise<T> {
@@ -334,6 +336,43 @@ describe("the bundled patches against the published tarball", () => {
         );
     });
 
+    it("every patched dist file is valid JavaScript to plain Node, and the patched entry point loads", () => {
+        // The vitest/bun transforms tolerate TS leftovers (a duplicated
+        // declaration, `export function` beside an export list, type
+        // annotations) that plain Node rejects, so run real Node over every
+        // file any patch touches.
+        applyVinextPatches(patched);
+        const files = new Set<string>();
+        for (const entry of manifest.patches) {
+            for (const fp of parseUnifiedPatch(
+                readFileSync(join(PATCHES_DIR, entry.file), "utf8"),
+            )) {
+                files.add(fp.path);
+            }
+        }
+        expect(files.size).toBeGreaterThan(0);
+        const broken: string[] = [];
+        for (const rel of [...files].sort()) {
+            const r = spawnSync("node", ["--check", join(patched, rel)], {
+                encoding: "utf8",
+            });
+            if (r.status !== 0)
+                broken.push(`${rel}: ${r.stderr.split("\n")[4] ?? r.stderr}`);
+        }
+        expect(broken).toEqual([]);
+        const load = spawnSync(
+            "node",
+            [
+                "--input-type=module",
+                "-e",
+                `await import(${JSON.stringify(pathToFileURL(join(patched, "dist", "index.js")).href)});`,
+            ],
+            { encoding: "utf8", cwd: dirname(patched) },
+        );
+        expect(load.stderr.split("\n").slice(0, 6).join("\n")).toBe("");
+        expect(load.status).toBe(0);
+    }, 60_000);
+
     it("the installed (pristine) copy is NOT already patched — each fix is real work", () => {
         const results = applyVinextPatches(INSTALLED_VINEXT, { check: true });
         expect(results.map((r) => r.status)).toEqual(
@@ -345,45 +384,26 @@ describe("the bundled patches against the published tarball", () => {
         }
     });
 
-    it("vinext#3241: worker bundles get NEXT_DEPLOYMENT_ID inlined", async () => {
-        applyVinextPatches(patched);
-        const mod = await importPatched<{
-            createWorkerDeploymentIdDefinePlugin?: (o: {
-                deploymentId?: string;
-            }) => {
-                transform: {
-                    handler: (
-                        code: string,
-                        id: string,
-                    ) => { code: string } | null;
-                };
-            };
-        }>("dist/plugins/worker-image-imports.js");
-        expect(typeof mod.createWorkerDeploymentIdDefinePlugin).toBe(
-            "function",
+    it("vinext#3241: no longer bundled — 1.0.1 already inlines NEXT_DEPLOYMENT_ID into every bundle, workers included", () => {
+        // The fix landed upstream as a no-op: vinext 1.0.1's own top-level
+        // `define` carries both identifiers, and Vite's worker build inherits it.
+        const index = readFileSync(
+            join(INSTALLED_VINEXT, "dist", "index.js"),
+            "utf8",
         );
-        const plugin = mod.createWorkerDeploymentIdDefinePlugin?.({
-            deploymentId: "dep-123",
-        });
-        const out = plugin?.transform.handler(
-            "self.postMessage(process.env.NEXT_DEPLOYMENT_ID);",
-            "/app/w.ts",
-        );
-        expect(out?.code).toBe('self.postMessage("dep-123");');
-        const unset = mod
-            .createWorkerDeploymentIdDefinePlugin?.({})
-            .transform.handler(
-                "self.postMessage(process.env.NEXT_DEPLOYMENT_ID);",
-                "/app/w.ts",
-            );
-        expect(unset?.code).toBe("self.postMessage(false);");
-        const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
         expect(index).toContain(
-            "createWorkerDeploymentIdDefinePlugin({ deploymentId: nextConfig.deploymentId })",
+            'defines["process.env.NEXT_DEPLOYMENT_ID"] = nextConfig.deploymentId ? JSON.stringify(nextConfig.deploymentId) : "false";',
         );
+        expect(index).toContain(
+            'defines["process.env.__VINEXT_DEPLOYMENT_ID"] = JSON.stringify(nextConfig.deploymentId ?? "");',
+        );
+        expect(manifest.patches.map((p) => p.file)).not.toContain(
+            "vinext-3241-worker-deployment-id.patch",
+        );
+        expect(index).not.toContain("createWorkerDeploymentIdDefinePlugin");
     });
 
-    it("vinext#3423: the require-condition resolvers are created with noExternal", async () => {
+    it("vinext#3423: require targets are pre-resolved with a bundling resolver pair, and only packages Vite would just externalize are taken over", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             createRequireConditionResolutionPlugin: (
@@ -401,15 +421,34 @@ describe("the bundled patches against the published tarball", () => {
                 return async () => undefined;
             },
             () => undefined,
+            () => [],
         );
         plugin.configResolved({});
+        // The default pair keeps Vite's externalization; the bundling pair
+        // (noExternal) is what resolves the `require` target of a package
+        // the environment would otherwise leave external.
         expect(seen).toEqual([
-            { isRequire: false, noExternal: true },
+            { isRequire: true },
+            { isRequire: false },
             { isRequire: true, noExternal: true },
+            { isRequire: false, noExternal: true },
         ]);
+
+        // vinext:transitive-externals marks a copy it forces into the bundle,
+        // so the resolver can tell it from a user plugin's own resolution.
+        const te = await importPatched<{
+            TRANSITIVE_EXTERNAL_META_KEY: string;
+        }>("dist/plugins/transitive-externals.js");
+        expect(te.TRANSITIVE_EXTERNAL_META_KEY).toBe(
+            "vinext:transitive-externals",
+        );
+        const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
+        expect(index).toContain(
+            "createRequireConditionResolutionPlugin(createIdResolver, commonjsTransformFilter, () => resolvedServerExternalPackages)",
+        );
     });
 
-    it("vinext#3436: next.config outputFileTracing* reach the resolved config, and the hook edits Nitro's trace", async () => {
+    it("vinext#3436: next.config outputFileTracing* reach the resolved config as route-keyed maps, and the hooks edit Nitro's trace", async () => {
         applyVinextPatches(patched);
         const cfg = await importPatched<{
             resolveNextConfig: (
@@ -422,64 +461,135 @@ describe("the bundled patches against the published tarball", () => {
                 outputFileTracingIncludes: {
                     "/*": ["node_modules/a/**"],
                     "/x": ["node_modules/a/**", "node_modules/b/x.txt"],
+                    "/bad": "not-an-array",
                 },
                 outputFileTracingExcludes: { "/*": ["node_modules/c/**"] },
             },
             tmpdir(),
         );
-        expect(resolved.outputFileTracingIncludes).toEqual([
-            "node_modules/a/**",
-            "node_modules/b/x.txt",
-        ]);
-        expect(resolved.outputFileTracingExcludes).toEqual([
-            "node_modules/c/**",
-        ]);
+        expect(resolved.outputFileTracingIncludes).toEqual({
+            "/*": ["node_modules/a/**"],
+            "/x": ["node_modules/a/**", "node_modules/b/x.txt"],
+        });
+        expect(resolved.outputFileTracingExcludes).toEqual({
+            "/*": ["node_modules/c/**"],
+        });
+        // A value under the legacy `experimental` key replaces the top-level one.
+        const legacy = await cfg.resolveNextConfig(
+            {
+                outputFileTracingIncludes: { "/*": ["top/**"] },
+                experimental: {
+                    outputFileTracingIncludes: { "/y": ["old/**"] },
+                },
+            },
+            tmpdir(),
+        );
+        expect(legacy.outputFileTracingIncludes).toEqual({ "/y": ["old/**"] });
+        const none = await cfg.resolveNextConfig({}, tmpdir());
+        expect(none.outputFileTracingIncludes).toEqual({});
+        expect(none.outputFileTracingExcludes).toEqual({});
 
         const traceRoot = mkdtempSync(join(tmpdir(), "knext-vp-trace-"));
+        tempRoots.push(traceRoot);
         const app = realpathSync(traceRoot);
-        try {
-            const lib = join(app, "node_modules", "lib-a");
-            mkdirSync(join(lib, "data"), { recursive: true });
-            writeFileSync(
-                join(lib, "package.json"),
-                JSON.stringify({ name: "lib-a", version: "1.2.3" }),
-            );
-            writeFileSync(join(lib, "data", "keep.txt"), "k");
-            writeFileSync(join(lib, "data", "drop.txt"), "d");
-            const { createNitroTraceIncludesHook } = await importPatched<{
-                createNitroTraceIncludesHook: (
-                    root: string,
-                    inc: string[],
-                    exc: string[],
-                ) =>
-                    | ((
-                          t: Record<
-                              string,
-                              {
-                                  name: string;
-                                  versions: Record<string, { files: string[] }>;
-                              }
-                          >,
-                      ) => void)
-                    | null;
-            }>("dist/build/nitro-trace-includes.js");
-            expect(createNitroTraceIncludesHook(app, [], [])).toBeNull();
-            const hook = createNitroTraceIncludesHook(
-                app,
-                ["node_modules/lib-a/data/*.txt"],
-                ["node_modules/lib-a/data/drop.txt"],
-            );
-            const traced: Record<
-                string,
-                { name: string; versions: Record<string, { files: string[] }> }
-            > = {};
-            hook?.(traced);
-            expect(traced["lib-a"]?.versions["1.2.3"]?.files.sort()).toEqual([
-                join(lib, "data", "keep.txt"),
-            ]);
-        } finally {
-            rmSync(traceRoot, { recursive: true, force: true });
-        }
+        const lib = join(app, "node_modules", "lib-a");
+        mkdirSync(join(lib, "data"), { recursive: true });
+        writeFileSync(
+            join(lib, "package.json"),
+            JSON.stringify({ name: "lib-a", version: "1.2.3" }),
+        );
+        writeFileSync(join(lib, "data", "keep.txt"), "k");
+        writeFileSync(join(lib, "data", "drop.txt"), "d");
+        type Traced = Record<
+            string,
+            {
+                name: string;
+                versions: Record<string, { path: string; files: string[] }>;
+            }
+        >;
+        const { createNitroTraceIncludes } = await importPatched<{
+            createNitroTraceIncludes: (o: {
+                root: string;
+                routes: string[];
+                includes: Record<string, string[]>;
+                excludes: Record<string, string[]>;
+                warn: (m: string) => void;
+            }) => {
+                tracedPackages: (t: Traced) => void;
+                write: (serverDir: string) => void;
+            } | null;
+        }>("dist/build/nitro-trace-includes.js");
+        const warn = () => {};
+        expect(
+            createNitroTraceIncludes({
+                root: app,
+                routes: ["/page"],
+                includes: {},
+                excludes: {},
+                warn,
+            }),
+        ).toBeNull();
+
+        // Nitro traced the package: included files are added, excluded ones removed.
+        const hooks = createNitroTraceIncludes({
+            root: app,
+            routes: ["/page"],
+            includes: { "/*": ["node_modules/lib-a/data/*.txt"] },
+            excludes: { "/*": ["node_modules/lib-a/data/drop.txt"] },
+            warn,
+        });
+        const traced: Traced = {
+            "lib-a": {
+                name: "lib-a",
+                versions: {
+                    "1.2.3": {
+                        path: lib,
+                        files: [join(lib, "package.json")],
+                    },
+                },
+            },
+        };
+        hooks?.tracedPackages(traced);
+        expect(traced["lib-a"]?.versions["1.2.3"]?.files.sort()).toEqual([
+            join(lib, "data", "keep.txt"),
+            join(lib, "package.json"),
+        ]);
+
+        // Nitro skipped its trace (nothing external): `write` copies the
+        // included files itself, after the bundle is written.
+        const outDir = mkdtempSync(join(tmpdir(), "knext-vp-trace-out-"));
+        tempRoots.push(outDir);
+        const writer = createNitroTraceIncludes({
+            root: app,
+            routes: ["/page"],
+            includes: { "/*": ["node_modules/lib-a/data/*.txt"] },
+            excludes: { "/*": ["node_modules/lib-a/data/drop.txt"] },
+            warn,
+        });
+        writer?.write(outDir);
+        expect(
+            readFileSync(
+                join(outDir, "node_modules", "lib-a", "data", "keep.txt"),
+                "utf8",
+            ),
+        ).toBe("k");
+        expect(
+            existsSync(
+                join(outDir, "node_modules", "lib-a", "data", "drop.txt"),
+            ),
+        ).toBe(false);
+
+        // A route key that does not match this route selects nothing.
+        const other = createNitroTraceIncludes({
+            root: app,
+            routes: ["/page"],
+            includes: { "/other-route": ["node_modules/lib-a/data/*.txt"] },
+            excludes: {},
+            warn,
+        });
+        const untouched: Traced = {};
+        other?.tracedPackages(untouched);
+        expect(untouched).toEqual({});
     });
 
     it("vinext#3424 / #3226 / #3472: the ported hunks are present in the patched dist", () => {
@@ -514,7 +624,7 @@ describe("the bundled patches against the published tarball", () => {
         applyVinextPatches(patched);
         const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
         expect(index).toContain(
-            '...(nextConfig.lightningCssFeatures.include & lightningCssFeatureNamesToMask(["custom-media-queries"])) !== 0 ? { drafts: { customMedia: true } } : {}',
+            '...(nextConfig.lightningCssFeatures.include & ~nextConfig.lightningCssFeatures.exclude & lightningCssFeatureNamesToMask(["custom-media-queries"])) !== 0 ? { drafts: { customMedia: true } } : {}',
         );
     });
 
@@ -541,39 +651,99 @@ describe("the bundled patches against the published tarball", () => {
         );
     });
 
-    it("vinext#3683: isEdgeRuntime warns once, matching Next.js' Log.warnOnce", async () => {
-        applyVinextPatches(patched);
-        const mod = await importPatched<{
-            isEdgeRuntime: (runtime: string | undefined) => boolean;
-        }>("dist/server/app-segment-config.js");
-        const warn = spyOn(console, "warn").mockImplementation(() => {});
-        try {
-            expect(mod.isEdgeRuntime("nodejs")).toBe(false);
-            expect(warn).not.toHaveBeenCalled();
-            expect(mod.isEdgeRuntime("edge")).toBe(true);
-            expect(warn).toHaveBeenCalledTimes(1);
-            expect(String(warn.mock.calls[0]?.[0])).toContain(
-                "The Edge Runtime is deprecated",
-            );
-            expect(mod.isEdgeRuntime("experimental-edge")).toBe(true);
-            expect(warn).toHaveBeenCalledTimes(1);
-        } finally {
-            warn.mockRestore();
-        }
+    it("vinext#3683: no longer bundled — upstream closed it (a log line with no behavioural effect)", () => {
+        expect(manifest.patches.map((p) => p.file)).not.toContain(
+            "vinext-3683-edge-runtime-deprecated-warning.patch",
+        );
+        const seg = readFileSync(
+            join(patched, "dist", "server", "app-segment-config.js"),
+            "utf8",
+        );
+        expect(seg).not.toContain("The Edge Runtime is deprecated");
     });
 
-    it("vinext#3684: a bare double slash is not an open-redirect shape", async () => {
+    it("vinext#3684: repeated slashes and backslashes get Next.js's 308 to the collapsed path; encoded and still-open-redirect shapes keep their 404", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             isOpenRedirectShaped: (rawPathname: string) => boolean;
+            getRepeatedSlashRedirect: (
+                rawUrl: string,
+            ) => { status: 308; location: string } | { status: 404 } | null;
+            repeatedSlashRedirectResponse: (rawUrl: string) => Response | null;
+            sendRepeatedSlashRedirect: (
+                rawUrl: string,
+                res: {
+                    writeHead(s: number, h?: Record<string, string>): unknown;
+                    end(body: string): unknown;
+                },
+            ) => boolean;
         }>("dist/server/open-redirect.js");
-        expect(mod.isOpenRedirectShaped("//")).toBe(false);
-        expect(mod.isOpenRedirectShaped("/\\")).toBe(false);
-        expect(mod.isOpenRedirectShaped("/%2F")).toBe(false);
-        expect(mod.isOpenRedirectShaped("/%5C")).toBe(false);
-        expect(mod.isOpenRedirectShaped("//evil.com")).toBe(true);
-        expect(mod.isOpenRedirectShaped("/\\evil.com")).toBe(true);
+        // A bare `//` is the index route, not a 404.
+        expect(mod.getRepeatedSlashRedirect("//")).toEqual({
+            status: 308,
+            location: "/",
+        });
+        expect(mod.getRepeatedSlashRedirect("//evil.com/x?a=1")).toEqual({
+            status: 308,
+            location: "/evil.com/x?a=1",
+        });
+        expect(mod.getRepeatedSlashRedirect("/\\evil.com")).toEqual({
+            status: 308,
+            location: "/evil.com",
+        });
+        expect(mod.getRepeatedSlashRedirect("/docs//")).toEqual({
+            status: 308,
+            location: "/docs/",
+        });
+        // Nothing to collapse: left alone (and a non-origin-form target too).
+        expect(mod.getRepeatedSlashRedirect("/a/b")).toBeNull();
+        expect(mod.getRepeatedSlashRedirect("http://h//x")).toBeNull();
+        // A collapsed path that is still protocol-relative shaped is never echoed.
+        expect(mod.getRepeatedSlashRedirect("//%2Fevil.com")).toEqual({
+            status: 404,
+        });
+        // Encoded leading delimiters are not touched by the redirect: they keep
+        // falling through to the open-redirect guard.
+        expect(mod.getRepeatedSlashRedirect("/%2F/evil.com")).toBeNull();
         expect(mod.isOpenRedirectShaped("/%2F/evil.com")).toBe(true);
+        expect(mod.isOpenRedirectShaped("//evil.com")).toBe(true);
+
+        const res = mod.repeatedSlashRedirectResponse("//a//b");
+        expect(res?.status).toBe(308);
+        expect(res?.headers.get("location")).toBe("/a/b");
+        expect(res?.headers.get("refresh")).toBe("0;url=/a/b");
+        expect(mod.repeatedSlashRedirectResponse("/ok")).toBeNull();
+
+        const sent: unknown[] = [];
+        const node = {
+            writeHead: (s: number, h?: Record<string, string>) =>
+                sent.push(["head", s, h]),
+            end: (b: string) => sent.push(["end", b]),
+        };
+        expect(mod.sendRepeatedSlashRedirect("//x", node)).toBe(true);
+        expect(sent).toEqual([
+            ["head", 308, { Location: "/x", Refresh: "0;url=/x" }],
+            ["end", "/x"],
+        ]);
+        expect(mod.sendRepeatedSlashRedirect("/fine", node)).toBe(false);
+
+        // The shared guard redirects first, then 404s the encoded shapes.
+        const pipeline = await importPatched<{
+            guardProtocolRelativeUrl: (
+                rawPathname: string,
+                search?: string,
+            ) => Response | null;
+        }>("dist/server/request-pipeline.js");
+        const guarded = pipeline.guardProtocolRelativeUrl(
+            "//evil.com/",
+            "?q=1",
+        );
+        expect(guarded?.status).toBe(308);
+        expect(guarded?.headers.get("location")).toBe("/evil.com/?q=1");
+        expect(pipeline.guardProtocolRelativeUrl("/%5Cevil.com/")?.status).toBe(
+            404,
+        );
+        expect(pipeline.guardProtocolRelativeUrl("/fine")).toBeNull();
     });
 
     it("vinext#3424 (R1 amendment): the Nitro RSC noExternal:true carries an explicit external list, so default-external packages (sqlite3's `bindings` helper, typescript) are never swept into the compiled executable", () => {
@@ -785,7 +955,7 @@ describe("the bundled patches against the published tarball", () => {
         expect(blocked.headers.has("x-nextjs-cache")).toBe(false);
     });
 
-    it("vinext#3734: the App Router handler hands /_next/image to the Nitro app instead of redirecting", () => {
+    it("vinext#3741: the App Router handler hands /_next/image to the Nitro app instead of redirecting", () => {
         applyVinextPatches(patched);
         const handler = readFileSync(
             join(patched, "dist", "server", "app-rsc-handler.js"),
@@ -804,7 +974,7 @@ describe("the bundled patches against the published tarball", () => {
         );
     });
 
-    it("vinext#3734: the Nitro image path answers 200 with Next-style headers and never forwards Set-Cookie", async () => {
+    it("vinext#3741: the Nitro image path answers 200 with Next-style headers and never forwards Set-Cookie", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             handleNitroImageOptimization: (
@@ -1114,6 +1284,112 @@ describe("the bundled patches against the published tarball", () => {
         expect(response?.headers.get("location")).toBeNull();
         expect(response?.headers.get("content-type")).toBeNull();
         expect(await response!.text()).toBe("");
+    });
+
+    it("vinext#3689 (maintainer follow-up): a header-only fetch-action redirect is marked config-headers-applied, so finalization does not repeat the source's headers at 200", async () => {
+        const redirect = await callHandleServerActionRscRequest(
+            "https://other.example/landing",
+            "push",
+        );
+        expect(redirect?.status).toBe(200);
+        const finalizer = await importPatched<{
+            finalizeAppRscResponse: (
+                response: Response,
+                request: Request,
+                options: Record<string, unknown>,
+            ) => Promise<Response>;
+        }>("dist/server/app-rsc-response-finalizer.js");
+        const options = {
+            basePath: "",
+            configHeaders: [
+                {
+                    source: "/dashboard",
+                    headers: [{ key: "x-from-config", value: "1" }],
+                },
+            ],
+            requestContext: {
+                headers: new Headers(),
+                cookies: {},
+                query: new URLSearchParams(),
+                host: "example.com",
+            },
+        };
+        const request = new Request("https://example.com/dashboard");
+        const finalized = await finalizer.finalizeAppRscResponse(
+            redirect as Response,
+            request,
+            options,
+        );
+        expect(finalized.headers.has("x-from-config")).toBe(false);
+        // An unmarked 200 still gets them: the guard discriminates.
+        const plain = await finalizer.finalizeAppRscResponse(
+            new Response(null, { status: 200 }),
+            request,
+            options,
+        );
+        expect(plain.headers.get("x-from-config")).toBe("1");
+    });
+
+    it("vinext#3686 (maintainer's head): a custom loader also serves fill images, skips inline sources, yields to overrideSrc, and a caller srcSet is ignored", async () => {
+        applyVinextPatches(patched);
+        const mod = await importPatched<{
+            getImageProps: (props: Record<string, unknown>) => {
+                props: {
+                    src: string;
+                    srcSet?: string;
+                    sizes?: string;
+                    [k: string]: unknown;
+                };
+            };
+        }>("dist/shims/image.js");
+        const loader = ({ src, width }: { src: string; width: number }) =>
+            `${src}?w=${width}`;
+        const fill = mod.getImageProps({
+            alt: "f",
+            src: "/logo.png",
+            fill: true,
+            loader,
+        }).props;
+        // No intrinsic width: every device size is offered and sizes defaults.
+        expect(fill.sizes).toBe("100vw");
+        expect(fill.srcSet?.split(", ").length).toBeGreaterThan(2);
+        expect(fill.srcSet).toContain("/logo.png?w=640 640w");
+        expect(fill.src.startsWith("/logo.png?w=")).toBe(true);
+
+        // data: and empty sources never reach the loader.
+        const inline = mod.getImageProps({
+            alt: "d",
+            src: "data:image/gif;base64,AAAA",
+            width: 10,
+            height: 10,
+            loader,
+        }).props;
+        expect(inline.src).toBe("data:image/gif;base64,AAAA");
+        expect(inline.srcSet).toBeUndefined();
+
+        const over = mod.getImageProps({
+            alt: "o",
+            src: "/logo.png",
+            width: 200,
+            height: 200,
+            loader,
+            overrideSrc: "/override.png",
+        }).props;
+        expect(over.src).toBe("/override.png");
+
+        const withSrcSet = mod.getImageProps({
+            alt: "s",
+            src: "/logo.png",
+            width: 200,
+            height: 200,
+            loader,
+            srcSet: "/caller.png 1x",
+        }).props;
+        expect(withSrcSet.srcSet).not.toContain("caller.png");
+        // src is emitted after srcSet/sizes, as in Next.js (Safari fetches
+        // `src` early otherwise).
+        const keys = Object.keys(withSrcSet);
+        expect(keys.indexOf("src")).toBeGreaterThan(keys.indexOf("srcSet"));
     });
 
     it("vinext#3687 (site A, resolveConfigValue): a CJS function-form next.config gets the real pageExtensions default, not an empty object", async () => {
