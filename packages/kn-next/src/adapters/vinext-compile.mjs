@@ -824,6 +824,11 @@ const importMetaToCjs = {
             console.log(
                 "[knext compile] injected the ARP primer (#1760) and the Bun.serve keep-alive guard as the entry's first imports",
             );
+            // Cheap pre-filter: no `import.meta` text at all means nothing to
+            // rewrite, so skip the out-of-process analyzer. Deliberately NOT
+            // `import.meta.(url|...)`: a bare `var t = import.meta` (rolldown's
+            // getter shape) carries no such member text but must be rewritten.
+            if (!src.includes("import.meta")) return { contents: src, loader: "js" };
             // These must reconstruct the ORIGINAL entry path
             // (<dirname(execPath)>/.output/server/index.mjs), NOT process.execPath
             // itself. nitro's bun preset resolves public assets as
