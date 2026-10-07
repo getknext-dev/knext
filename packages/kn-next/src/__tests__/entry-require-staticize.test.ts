@@ -334,6 +334,63 @@ describe("analyzeServerModule (unit)", () => {
                 0,
             );
         });
+
+        // Measured verbatim against the real file-manager build (#1877 round
+        // 3): `@getknext/lib`'s logger does
+        // `createRequire(import.meta.url).resolve('pino-pretty')`, wrapped in
+        // try/catch, SPECIFICALLY to probe for an optional, deliberately
+        // production-absent dev dependency — it never loads it. rolldown
+        // merges this into the SAME no-named-binding direct-call shape as a
+        // real require: `createRequire(getterShape).resolve(` SPEC `)`, with
+        // no intermediate variable at all. Before this fix, recognizing the
+        // getter shape also made `.resolve()` fatal exactly like a real
+        // `require()` call, so a correctly-and-intentionally unresolvable
+        // probe failed `--self-contained`/`KNEXT_COMPILE_STRICT_REQUIRES=1`
+        // the same way a genuinely missing load would — regressing the
+        // "Self-contained executable e2e (file-manager, webpack)" CI job.
+        it("a direct (unnamed) createRequire(...).resolve(spec) call is an existence probe, never embedded (#1877 round 3)", () => {
+            const src =
+                'import{createRequire as n}from"node:module";' +
+                "var t=import.meta;" +
+                "try{n({get value(){return t.url}}.value).resolve(`pino-pretty`)}catch{}";
+            const a = analyzeServerModule(src);
+            // Accounted for (never the unrecognized-binding error)...
+            expect(a.unrecognizedBinding).toBe(false);
+            // ...and the getter-indirection call itself is never recognized
+            // as a require BINDING at all (it's a `.resolve()` probe, not a
+            // create-and-load), so nothing from it ever reaches
+            // `planRuntimeRequires`'s per-binding embed/warn/strict-fail walk,
+            // which only iterates `requireBindings`.
+            expect(a.requireBindings).toEqual([]);
+            // ...and specifically: never embedded, never a reported dynamic
+            // require either (both buckets `planRuntimeRequires` consults,
+            // keyed off `requireBindings`, are untouched by this probe).
+            expect(a.literalCalls.size).toBe(0);
+        });
+
+        it("a direct (unnamed) .resolve(spec) probe does not mask a REAL direct call to the same alias elsewhere", () => {
+            // The probe's exemption must not swallow an actual load sharing
+            // the same createRequire alias — only the specific call
+            // continuation `.resolve(` is exempt, not the whole binding.
+            const src =
+                'import{createRequire as n}from"node:module";' +
+                "var t=import.meta;" +
+                "try{n({get value(){return t.url}}.value).resolve(`pino-pretty`)}catch{}" +
+                // A SEPARATE, unnamed, direct call-and-invoke of the same
+                // getter-indirection shape — exactly the real create-and-
+                // immediately-call pattern (no intermediate binding), so it
+                // is classified by the SAME anyCall loop as the probe above,
+                // just via the `invokeRe` branch instead of `resolveInvokeRe`.
+                "n({get value(){return t.url}}.value)(`minio`);";
+            const a = analyzeServerModule(src);
+            expect(a.unrecognizedBinding).toBe(false);
+            // DIRECT_CALL_MARKER itself is a private key, not exported — the
+            // real "minio" call must still land in SOME literalCalls bucket.
+            const allSpecs = [...a.literalCalls.values()].flatMap((set) => [
+                ...set,
+            ]);
+            expect(allSpecs).toEqual(["minio"]);
+        });
     });
 });
 

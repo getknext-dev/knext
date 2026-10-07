@@ -28,6 +28,7 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -683,6 +684,71 @@ describe("vinext-compile bundles the getter-indirection require shape with no si
             `${strictBuild.stdout}\n${strictBuild.stderr}`,
         ).not.toBe(0);
         expect(strictBuild.stderr).toContain("escaping-pkg");
+    }, 120_000);
+
+    it("DOES embed a monorepo-hoisted dependency reached only through a workspace-root symlink (round-2 review, #1877: workspace containment boundary)", () => {
+        // Measured on the real file-manager monorepo build: bun hoists a
+        // shared dependency to the WORKSPACE root's own store and leaves only
+        // a SYMLINK in the app's local `node_modules`
+        // (`apps/file-manager/node_modules/minio -> ../../../node_modules/
+        // .bun/minio@8.0.6/node_modules/minio`). Realpath-resolving that
+        // symlink — required to stay symlink-safe against the real ancestor
+        // escape the previous test guards — lands outside the APP root, but
+        // it is still inside the WORKSPACE: a `package.json` with a
+        // `workspaces` field sits above the app directory, and that is the
+        // boundary `isWithinAppRoot` must honour. Rejecting this is the bug
+        // this test pins: it broke "Self-contained executable e2e
+        // (file-manager, webpack)" in CI.
+        const base = temp("knext-c11-workspace-base-");
+        write(
+            join(base, "package.json"),
+            JSON.stringify({ name: "workspace-root", workspaces: ["apps/*"] }),
+        );
+        const work = join(base, "apps", "app");
+        mkdirSync(work, { recursive: true });
+        const server = join(work, ".output", "server");
+        // The real package lives in the workspace root's own store — never
+        // under the app directory at all.
+        cjsPackage(
+            join(base, "node_modules", ".store"),
+            "hoisted-pkg",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        // The app's own node_modules holds only a SYMLINK to it, exactly the
+        // shape bun's workspace hoisting produces.
+        mkdirSync(join(work, "node_modules"), { recursive: true });
+        symlinkSync(
+            join(base, "node_modules", ".store", "hoisted-pkg"),
+            join(work, "node_modules", "hoisted-pkg"),
+            "dir",
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                "var r = __require(`hoisted-pkg`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+
+        const build = compile(work, server);
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        expect(build.stdout).toContain("hoisted-pkg (index.mjs)");
+        expect(build.stderr).not.toContain("WARNING");
+
+        // Strict mode must ALSO pass — this is a legitimate, resolvable
+        // dependency, not an ambiguous or missing one.
+        const strictBuild = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(
+            strictBuild.status,
+            `${strictBuild.stdout}\n${strictBuild.stderr}`,
+        ).toBe(0);
+
+        const run = deployAndRun(work, build.exe);
+        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(run.stdout).toContain(`RESULT:${A}`);
     }, 120_000);
 
     it("a missing package reached only through the getter-indirection shape is still reported, never silently invisible", () => {

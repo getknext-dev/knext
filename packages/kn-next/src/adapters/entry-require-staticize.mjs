@@ -324,15 +324,10 @@ export function analyzeServerModule(src) {
                 continue;
             }
             const after = src.slice(m.index + m[0].length);
-            let argStart = -1;
             const invoke = invokeRe.exec(after);
-            if (invoke) argStart = invoke[0].length;
-            else {
-                const resolve = resolveInvokeRe.exec(after);
-                if (resolve) argStart = resolve[0].length;
-            }
-            if (argStart >= 0) {
+            if (invoke) {
                 accountedFor++;
+                const argStart = invoke[0].length;
                 const lit = literalArgRe.exec(after.slice(argStart));
                 if (lit) {
                     const spec = lit[2];
@@ -346,6 +341,25 @@ export function analyzeServerModule(src) {
                     requireBindings.add(DIRECT_CALL_MARKER);
                     nonLiteralCallees.add(DIRECT_CALL_MARKER);
                 }
+                continue;
+            }
+            // `.resolve(spec)` is an EXISTENCE PROBE, not a load: Node's own
+            // `require.resolve` idiom (`try { require.resolve(x) } catch {}`,
+            // measured verbatim in @getknext/lib's logger, probing for the
+            // optional, deliberately-production-absent `pino-pretty`) throws
+            // INSIDE the probe and is normally caught right there — unlike a
+            // bare call, the enclosing module does not crash merely because
+            // the target is missing. Treating it the same as a real call
+            // regressed the self-contained build (#1877 round 3): recognizing
+            // this shape at all made a correctly, intentionally unresolvable
+            // optional dependency's probe fail `--self-contained`/
+            // `KNEXT_COMPILE_STRICT_REQUIRES=1` the same way a REAL missing
+            // load would. So it is accounted for (never the unrecognized-
+            // binding error) but deliberately NOT fed into
+            // literalCalls/nonLiteralCallees: never embedded, never warned
+            // about, never strict-failed.
+            if (resolveInvokeRe.test(after)) {
+                accountedFor++;
                 continue;
             }
             if (discardedRe.test(after)) {

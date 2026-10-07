@@ -359,9 +359,12 @@ function planRuntimeRequires() {
                 // instead (cluster C11), the app's regular node_modules, found
                 // the same way by walking further up. Either way this is a
                 // real, embeddable file — AS LONG AS that walk stayed inside
-                // the app's own root (`isWithinAppRoot`, round-2 review): the
-                // SAME upward walk has no bound, so it can resolve a package
-                // that is not this app's dependency at all, on the build
+                // the app's own workspace (`isWithinAppRoot`, round-2 review;
+                // the boundary is the nearest ancestor `package.json` with a
+                // `workspaces` field, or the app root itself when there is
+                // none — see `findWorkspaceRoot`): the SAME upward walk has
+                // no bound, so it can resolve a package that is not this
+                // app's (or its workspace's) dependency at all, on the build
                 // machine's own disk. A resolved-but-outside-root spec is
                 // treated the SAME as an ordinary unresolvable one (warn by
                 // default, fail only under KNEXT_COMPILE_STRICT_REQUIRES=1) —
@@ -730,23 +733,56 @@ const APP_ROOT = dirname(dirname(ENTRY_DIR));
 // that is not a dependency of this app at all (two directories above the app
 // root on the BUILD MACHINE's own disk, say). Embedding that would make the
 // binary's contents depend on the build machine's disk layout instead of the
-// app's own declared dependencies. `isWithinAppRoot` is the containment
-// check: realpath-compared (symlink-safe, same technique as
-// sidecar-runtime.mjs's `isInside`), so a resolved path outside `APP_ROOT`
-// (its own `node_modules` or the `.output/server` sidecar) is refused.
-let appRootRealCache;
-function appRootReal() {
-    if (appRootRealCache === undefined) {
+// app's own declared dependencies.
+//
+// The boundary is the WORKSPACE root, not `APP_ROOT` itself (measured: this
+// mattered on the real file-manager monorepo build). A workspace's own
+// package manager hoists dependencies to a SHARED root `node_modules`, often
+// reached from the app only through a symlink (bun: `apps/file-manager/
+// node_modules/minio -> ../../../node_modules/.bun/minio@.../node_modules/
+// minio`) — realpath-resolving that symlink (needed to be symlink-safe
+// against a REAL escape) lands outside `APP_ROOT`, so confining the check to
+// `APP_ROOT` alone rejected a real, declared, workspace-hoisted dependency as
+// if it were a stranger on the build machine's disk. A hoisted workspace
+// dependency is neither: every machine that `bun install`s the SAME
+// workspace gets the SAME package at the SAME relative position, which is
+// exactly the portability the ancestor-escape check exists to protect.
+// `findWorkspaceRoot` walks up from `APP_ROOT` for the nearest ancestor
+// `package.json` declaring a `workspaces` field, falling back to `APP_ROOT`
+// itself (so a standalone, non-monorepo app keeps the tight original
+// boundary). `isWithinAppRoot` is the containment check: realpath-compared
+// (symlink-safe, same technique as sidecar-runtime.mjs's `isInside`), so a
+// resolved path outside that boundary is still refused.
+function findWorkspaceRoot(start) {
+    let dir = start;
+    for (;;) {
+        const pkgPath = join(dir, "package.json");
+        if (existsSync(pkgPath)) {
+            try {
+                if (JSON.parse(readFileSync(pkgPath, "utf8")).workspaces !== undefined) return dir;
+            } catch {
+                // Malformed package.json at this level — keep walking up.
+            }
+        }
+        const parent = dirname(dir);
+        if (parent === dir) return start; // filesystem root, no workspace found
+        dir = parent;
+    }
+}
+const CONTAINMENT_ROOT = findWorkspaceRoot(APP_ROOT);
+let containmentRootRealCache;
+function containmentRootReal() {
+    if (containmentRootRealCache === undefined) {
         try {
-            appRootRealCache = realpathSync(APP_ROOT);
+            containmentRootRealCache = realpathSync(CONTAINMENT_ROOT);
         } catch {
-            appRootRealCache = null;
+            containmentRootRealCache = null;
         }
     }
-    return appRootRealCache;
+    return containmentRootRealCache;
 }
 function isWithinAppRoot(resolvedPath) {
-    const root = appRootReal();
+    const root = containmentRootReal();
     if (root === null) return false;
     try {
         const real = realpathSync(resolvedPath);
