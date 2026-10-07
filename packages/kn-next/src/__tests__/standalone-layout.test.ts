@@ -51,6 +51,15 @@ describe("diagnoseNestedStandalone", () => {
         expect(diagnoseNestedStandalone(join(base, "app"))).toBeNull();
     });
 
+    it("normal layout wins even when a traced sub-directory also holds a server.js", () => {
+        const base = tree({
+            "package-lock.json": "{}",
+            "app/.next/standalone/server.js": "// s\n",
+            "app/.next/standalone/other/server.js": "// not the app\n",
+        });
+        expect(diagnoseNestedStandalone(join(base, "app"))).toBeNull();
+    });
+
     it("no standalone output at all -> no diagnosis", () => {
         const base = tree({
             "package-lock.json": "{}",
