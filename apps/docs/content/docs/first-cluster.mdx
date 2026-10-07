@@ -39,6 +39,9 @@ This starts a single-node Kubernetes cluster in a container and points your `kub
 `--wait` flag blocks until the node is actually ready, so when the command returns you have a
 working cluster.
 
+> Prefer one command? `scripts/prereqs/install.sh` (from a clone of the knext repository) performs
+> steps 2 to 4 with pinned, checksum-verified manifests and waits until everything is Ready.
+
 ## 2 · Install Knative Serving
 
 Knative Serving is what gives your apps scale-to-zero. Install its resource definitions, then its

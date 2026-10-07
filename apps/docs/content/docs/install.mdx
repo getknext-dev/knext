@@ -24,6 +24,20 @@ The per-cloud guides — [GKE](/docs/gke), [EKS](/docs/eks), [AKS](/docs/aks), [
 | 4 | The knext operator bundle | The control plane itself. |
 | 5 | A `NextApp` smoke test | Confirms the install works end to end. |
 
+## One-command prerequisites
+
+Steps 2 and 3 below (Knative Serving + Kourier, cert-manager) are available as one reviewed,
+version-pinned script. It verifies the sha256 of every manifest, pins images by digest, waits until
+everything is Ready, and is safe to re-run:
+
+```sh title="shell"
+git clone --depth 1 https://github.com/getknext-dev/knext.git && cd knext
+scripts/prereqs/install.sh
+```
+
+`scripts/prereqs/install.sh --verify` re-checks an existing cluster. The pinned versions are listed
+in the [Support matrix](/docs/support-matrix); continue with step 4 afterwards.
+
 ## 1 · Kubernetes cluster and kubectl
 
 You need a Kubernetes cluster (1.27+) and a configured `kubectl`. Any conformant distribution works;

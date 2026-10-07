@@ -1,0 +1,52 @@
+name: Prerequisite bundle on kind
+
+# Installs the pinned prerequisite bundle (cert-manager, Knative Serving,
+# Kourier) on a fresh kind cluster with the one documented command, re-runs it
+# to prove idempotency, and asserts everything is Ready. A bad version pin or a
+# moved upstream release asset (checksum mismatch) fails the install step.
+on:
+  pull_request:
+    paths:
+      - 'scripts/prereqs/**'
+      - 'scripts/kind-manifests/**'
+      - '.github/workflows/prereqs-bundle-kind.yml'
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  prereqs-bundle-kind:
+    name: Install the pinned prerequisite bundle on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions: {}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name prereqs-bundle --wait 120s
+
+      - name: Install the bundle
+        run: scripts/prereqs/install.sh
+
+      - name: Install again (idempotency)
+        run: scripts/prereqs/install.sh
+
+      - name: Assert everything is Ready
+        run: scripts/prereqs/install.sh --verify
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true
