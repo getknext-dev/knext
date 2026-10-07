@@ -1988,6 +1988,39 @@ describe("the bundled patches against the published tarball", () => {
                 undefined,
             ),
         ).toBeUndefined();
+        // A dead branch that declares a hoisted binding is left alone:
+        // blanking `var impl` would turn `impl || "node"` into a
+        // ReferenceError. Same for a function declaration.
+        const withVar =
+            'if (process.env.NEXT_RUNTIME === "edge") { var impl = require("./edge"); }\nexport default impl || "node";\n';
+        expect(
+            blankDeadNextRuntimeRequireBranches(withVar, "/app/a.js", "nodejs"),
+        ).toBeUndefined();
+        const withFunction =
+            'if (process.env.NEXT_RUNTIME === "edge") { function load() { return require("./edge"); } }\nexport default typeof load;\n';
+        expect(
+            blankDeadNextRuntimeRequireBranches(
+                withFunction,
+                "/app/a.js",
+                "nodejs",
+            ),
+        ).toBeUndefined();
+        // A var scoped to a nested function does not escape: still blanked.
+        expect(
+            blankDeadNextRuntimeRequireBranches(
+                'if (process.env.NEXT_RUNTIME === "edge") { (() => { var x = require("./edge"); })(); }\n',
+                "/app/a.js",
+                "nodejs",
+            ),
+        ).not.toContain("./edge");
+        // End to end: the build keeps the binding, and the module answers "node".
+        const varOut = await buildPagesFixture("knext-vp-next-runtime-var-", {
+            "lib/impl.js": withVar,
+            "lib/edge.js": 'export default "edge";\n',
+            "pages/index.js":
+                'import impl from "../lib/impl.js";\nexport default function Page() { return impl; }\nexport async function getServerSideProps() { return { props: {} }; }\n',
+        });
+        expect(varOut).toMatch(/\bimpl\b/);
     }, 60_000);
 });
 
