@@ -81,7 +81,7 @@ rather than replacing them):
 kubectl apply --server-side -f install-new.yaml
 ```
 
-> **Pin an exact release, not `operator-latest` (#1947).** Every `operator-vX.Y.Z` release
+> **Pin an exact release, not `operator-latest`.** Every `operator-vX.Y.Z` release
 > publishes the same digest-pinned bundle as `install-vX.Y.Z.yaml` (self-describing) and
 > `install.yaml`: `.../releases/download/operator-vX.Y.Z/install-vX.Y.Z.yaml`. The release is
 > immutable. The concrete upgrade is therefore:

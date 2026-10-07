@@ -367,21 +367,6 @@ jobs:
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Pushed ${IMAGE}@${DIGEST}"
 
-      # Version tags only (#1947): make the `vX.Y.Z` image tag the bundle will
-      # carry (hack/stamp-release-version.sh) a REAL registry tag on the exact
-      # gated digest, so `image: …:vX.Y.Z@sha256:…` is not a label that lies.
-      # The digest still decides what runs; the tag is for humans and `knext
-      # doctor`. Runs after the Trivy gate and the push — never before.
-      - name: Tag the pushed digest with the release version (version tags only, #1947)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-          VERSION: ${{ steps.channel.outputs.version }}
-        run: |
-          set -euo pipefail
-          crane tag "${IMAGE}@${DIGEST}" "v${VERSION}"
-          echo "Tagged ${IMAGE}@${DIGEST} as v${VERSION}"
-
       # The point of the OCI-layout + crane flow (#202): prove the buildkit
       # provenance attestation actually survived the push — and only sign
       # provenance-bearing images. Fails loud if the pushed index carries no
@@ -429,6 +414,24 @@ jobs:
           IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
           DIGEST: ${{ steps.push.outputs.digest }}
         run: bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
+
+      # Version tags only (#1947): make the `vX.Y.Z` image tag the bundle will
+      # carry (hack/stamp-release-version.sh) a REAL registry tag on the exact
+      # gated digest, so `image: …:vX.Y.Z@sha256:…` is not a label that lies.
+      # The digest still decides what runs; the tag is for humans and `knext
+      # doctor`. Runs only AFTER the Trivy gate, the push, the provenance check,
+      # the cosign sign AND the cosign verify: a version tag must never land on
+      # an unsigned or unverified digest, and (the release is immutable) a
+      # failed run therefore leaves no `:vX.Y.Z` behind for a re-run to re-point.
+      - name: Tag the verified digest with the release version (version tags only, #1947)
+        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          crane tag "${IMAGE}@${DIGEST}" "v${VERSION}"
+          echo "Tagged ${IMAGE}@${DIGEST} as v${VERSION}"
 
       # On the publish channel (main or an operator-v* tag): regenerate dist/install.yaml with the REAL pushed digest. This is
       # the bootstrap-resolution step — the placeholder all-zeros digest in the

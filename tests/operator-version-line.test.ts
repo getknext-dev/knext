@@ -177,6 +177,23 @@ describe('operator-supply-chain.yml publishes install-vX.Y.Z.yaml (#1947)', () =
     expect(code.slice(Math.max(0, tag - 600), tag)).toMatch(/is_version_tag\s*==\s*'true'/);
   });
 
+  it('the version tag lands only AFTER provenance check, cosign sign and cosign verify', () => {
+    // A tag on an unsigned digest is publicly visible, and a re-run would re-point
+    // the "immutable" version tag. Compare against the step bodies, not the prose.
+    const tag = idx(/crane tag /);
+    const provenance = idx(/Buildkit SLSA provenance present/);
+    const sign = idx(/cosign sign --yes/);
+    const verify = idx(/hack\/cosign-verify\.sh/);
+    for (const [name, pos] of [
+      ['provenance check', provenance],
+      ['cosign sign', sign],
+      ['cosign verify', verify],
+    ] as const) {
+      expect(pos, `workflow must contain the ${name} step`).toBeGreaterThanOrEqual(0);
+      expect(tag, `crane tag must come after the ${name}`).toBeGreaterThan(pos);
+    }
+  });
+
   it('writes a digest-pinned install-v<version>.yaml and attaches it to the per-version release', () => {
     expect(code).toMatch(
       /install-v\$\{VERSION\}\.yaml|install-v\$\{\{ steps\.channel\.outputs\.version \}\}\.yaml/,

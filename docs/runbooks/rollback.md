@@ -141,7 +141,7 @@ kubectl rollout status deploy/kn-next-operator-controller-manager \
 knext doctor   # "Operator version" now reports v${LAST_GOOD}
 ```
 
-`operator-vX.Y.Z` releases are immutable and digest-pinned (#1947), so this reverts to the exact
+`operator-vX.Y.Z` releases are immutable and digest-pinned, so this reverts to the exact
 bytes you ran before. If the version you were on predates the version line (no label), there is no
 versioned bundle for it: use Option A, which reverts to the previous pod template (and its
 recorded image digest) without needing a bundle.

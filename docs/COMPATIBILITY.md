@@ -24,7 +24,7 @@ knext ships three things that version on **separate** lines. Nothing forces them
 | Thing | Ships as | Version line |
 | --- | --- | --- |
 | `@getknext/core`, `@getknext/lib`, `@getknext/db` | npm packages | semver, **one shared number** across the three |
-| the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags (#1947) — **MAJOR.MINOR tracks the package set, patch is independent**; see "Operator versions" below |
+| the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags — **MAJOR.MINOR tracks the package set, patch is independent**; see "Operator versions" below |
 | the `NextApp` CRD | inside the operator bundle | the Kubernetes ladder: `v1alpha1` → `v1beta1` → `v1` |
 
 ## The matrix
