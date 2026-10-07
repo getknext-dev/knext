@@ -128,9 +128,11 @@ namespace.
 
 - `networking.internal.knative.dev` is Knative's internal API, not a user-facing contract. It can
   change between Knative releases; re-test this path when you upgrade Knative.
-- **Never create it for a hostname that a `DomainMapping` already serves.** Two rules for one
-  hostname make the gateway reject its route update, which can stall routing changes for every app on
-  the cluster. Delete the mapping first.
+- **Never create it for a hostname that a `DomainMapping` already serves.** Delete the mapping first.
+  Two routing rules for one hostname were not tested. The risk is that the gateway rejects the
+  conflicting route update, which could affect routing for other apps too.
+- Whether Knative or the knext operator ever reconciles or removes a hand-written rule like this was
+  not observed. In testing it persisted unchanged, but nothing owns it: you keep it in sync yourself.
 - Knative's hostname claims do not cover this object, so keep the `ClusterDomainClaim` from step 2 in
   place: it stops a `DomainMapping` in another namespace from taking the name.
 - Creating these objects usually needs cluster-admin rights.
