@@ -196,7 +196,7 @@ prices, with their sources, and one measured cold start.
 | Vercel data transfer beyond the included amount | $0.15 per GB | [vercel.com/pricing](https://vercel.com/pricing) |
 | Vercel Microfrontends, Pro | $250 per month per project beyond the 2 included | [vercel.com/docs/microfrontends](https://vercel.com/docs/microfrontends) |
 
-Vercel changes its prices and meters. Check the pricing page on the day you do the sum. Your
+The Active CPU and data transfer rates were taken from a secondary source, not read from the pricing page: confirm them on vercel.com/pricing, because rates change. Check the pricing page on the day you do the sum. Your
 Vercel invoice is a better source for your own usage than any estimate: take the line items from
 the last three months.
 
@@ -233,10 +233,13 @@ What moves each side:
 
 A scaled-to-zero app has to start a pod when a request arrives after an idle period. We measured
 this on a two-node Oracle Kubernetes Engine cluster, with a light app and the image already on the
-node. The median time from the first request to a full page was **2.1 to 2.4 seconds**, depending on
-runtime and build, and the slowest wake in that run took 10.4 seconds. A later pre-release on the 1.3
-line measured the same way showed the same picture: a median near 2 seconds, with some wakes
-at about 5 seconds. See [Scale-to-zero & cold starts](/docs/scale-to-zero#measured-cold-start-by-runtime-and-builder)
+node. Across our measurements on that cluster the median time from the first request to a full page
+was **about 1.9 to 2.4 seconds**:
+
+- A four-cell run (10 wakes per runtime and build combination, images already pulled) gave medians of 2.1 to 2.4 seconds.
+- A later run on a 1.3 pre-release (22 wakes per build, two builds) gave medians of about 1.9 seconds (standalone build on Bun) and about 2.1 seconds (vinext build on Bun). Its slowest wakes were about 5.1 and 5.7 seconds.
+
+Individual wakes can take several times the median. See [Scale-to-zero & cold starts](/docs/scale-to-zero#measured-cold-start-by-runtime-and-builder)
 for the method and the full table.
 
 This is slower than a request to a warm server, and knext makes no claim to match or beat
