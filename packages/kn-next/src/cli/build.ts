@@ -65,8 +65,6 @@ import {
     buildVinextExecutable,
     hostSmokeArch,
     smokeBinaryPlan,
-    stageOgHarfbuzzForVinextNode,
-    stageSharpForVinextNode,
 } from "./vinext-build";
 import { assertNodePresetOutput } from "./vinext-node-build";
 
@@ -530,19 +528,16 @@ export async function build(options: BuildOptions = {}) {
         );
         // #1298: nitro's own trace into `.output/server/node_modules` copies
         // the BUILD HOST's sharp addon (wrong platform for the alpine/musl
-        // image) and an incomplete JS package (missing the CJS entry sharp's
-        // own binding loader resolves to). Replace it with the real,
-        // complete, image-platform package before the assets/image build.
-        const sharpStaged = stageSharpForVinextNode(process.cwd());
-        if (sharpStaged.staged) {
+        // image). `compileArtifactForDeploy` above already replaced it with
+        // the image-platform package (and staged next/og's HarfBuzz binary),
+        // shared with deploy/preview; only the logging is here.
+        const sharpStaged = compileResult.vinextNode?.sharpStaged ?? false;
+        if (sharpStaged) {
             log.info(
                 "Staged sharp's linuxmusl-x64 package into the vinext-node image's .output/server/node_modules",
             );
         }
-        // next/og: @vercel/og 1.x ships no hb.wasm and its HarfBuzz loader
-        // cannot start under plain Node ESM — stage the version-pinned binary
-        // where both loaders (pages + app router) read it.
-        const og = stageOgHarfbuzzForVinextNode(process.cwd());
+        const og = compileResult.vinextNode?.og ?? { staged: [], warnings: [] };
         if (og.staged.length > 0) {
             log.info(
                 { staged: og.staged },

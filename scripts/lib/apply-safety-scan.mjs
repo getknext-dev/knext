@@ -2796,9 +2796,10 @@ export const REMOTE_FETCH_ALLOWLIST = [
     // write-free-e2e-knext-create above (spelled `./packages/…` so each call
     // site matches exactly one entry). It renders templates to local files
     // under $RUNNER_TEMP, applies nothing to any cluster and fetches nothing
-    // an apply reads.
+    // an apply reads. `--builder` is the workflow's own matrix literal
+    // (turbopack|vinext), not a fetched value.
     segment:
-      /^node \.\/packages\/kn-next\/dist\/cli\/kn-next\.js create "\$APP_DIR" --name "\$APP_NAME"$/,
+      /^node \.\/packages\/kn-next\/dist\/cli\/kn-next\.js create "\$APP_DIR" --name "\$APP_NAME" --builder "\$\{\{ matrix\.builder \}\}"$/,
   },
   {
     id: 'release-audit-npm-closure-fetch',

@@ -388,7 +388,16 @@ jobs:
             || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
           rt="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.runtime}')"
           echo "spec.runtime=${rt}"
-          [ "$rt" = "${{ matrix.runtime }}" ] || { echo "::error::NextApp spec.runtime is '${rt}', want ${{ matrix.runtime }}"; exit 1; }
+          if [ "${{ matrix.builder }}" = "vinext" ]; then
+            # The CLI deliberately omits spec.runtime for vinext (the runtime is
+            # fixed by the image: a compiled exec, or the node image), so assert
+            # the build field instead.
+            bld="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.build}')"
+            echo "spec.build=${bld} spec.runtime=${rt}"
+            [ "$bld" = "vinext" ] || { echo "::error::NextApp spec.build is '${bld}', want vinext"; exit 1; }
+          else
+            [ "$rt" = "${{ matrix.runtime }}" ] || { echo "::error::NextApp spec.runtime is '${rt}', want ${{ matrix.runtime }}"; exit 1; }
+          fi
 
       - name: Assert the build pointed cacheHandler at the runtime's own entry
         if: matrix.builder != 'vinext'
