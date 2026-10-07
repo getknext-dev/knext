@@ -87,6 +87,15 @@ New apps from `knext create --builder vinext` pin `@vercel/og` to `0.11.1` throu
 entry in `package.json`. That pin is no longer required on either runtime. You can keep it or
 remove it and reinstall.
 
+The same applies to any package, not only `@vercel/og`. When a dependency reads a file shipped
+next to its own code, as in `readFileSync(new URL('./data.wasm', import.meta.url))` (directly, or
+through `fileURLToPath`), the Bun build embeds that file in the binary. The binary still finds it
+after it is copied to another machine or into an image. The build log lists each embedded file
+(`[knext compile] embedded sibling asset …`). Only file reads are embedded. A URL passed to
+`new Worker(...)`, `fetch(...)` or a dynamic `import(...)` is left as written, because it loads
+code or makes a request rather than reading bytes. A file larger than 16 MiB, or one that resolves
+outside the package that reads it, fails the build instead of being embedded.
+
 The third target is the same standalone output, produced with webpack instead of Turbopack as the
 bundler. Select it with `build: 'webpack'`; everything else about it — the entry, the supervisor,
 the `runtime` choice, the bytecode caching — is identical to the `turbopack` target, because both
