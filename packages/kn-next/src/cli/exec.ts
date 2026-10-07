@@ -109,15 +109,32 @@ export interface RunQuietOptions {
      * (default) preserves the original fully-quiet behaviour byte for byte.
      */
     readonly surfaceStdoutPrefix?: string;
+    /**
+     * With {@link surfaceStdoutPrefix}: on SUCCESS print one
+     * `<prefix> N notes; rerun with --verbose for details` line instead of the
+     * N matching lines (nothing when N is 0). On a non-zero exit every
+     * matching line is still printed — the context a failure needs. Ignored
+     * without `surfaceStdoutPrefix`.
+     */
+    readonly summarizeSurfaced?: boolean;
 }
 
 /** Prints each line of `output` that starts with `prefix`, in order. */
-function surfacePrefixedLines(output: string, prefix: string): void {
-    for (const line of output.split("\n")) {
-        if (line.startsWith(prefix)) {
-            console.log(line);
+function surfacePrefixedLines(
+    output: string,
+    prefix: string,
+    summarize = false,
+): void {
+    const matching = output.split("\n").filter((l) => l.startsWith(prefix));
+    if (summarize) {
+        if (matching.length > 0) {
+            console.log(
+                `${prefix} ${matching.length} note${matching.length === 1 ? "" : "s"}; rerun with --verbose for details`,
+            );
         }
+        return;
     }
+    for (const line of matching) console.log(line);
 }
 
 /**
@@ -136,7 +153,7 @@ export function runQuiet(
     if (!cmd) {
         throw new Error("runQuiet: empty argv");
     }
-    const { surfaceStdoutPrefix } = options;
+    const { surfaceStdoutPrefix, summarizeSurfaced } = options;
     if (!surfaceStdoutPrefix) {
         execFileSync(cmd, args, {
             shell: false,
@@ -156,7 +173,7 @@ export function runQuiet(
             stdio: ["ignore", "pipe", "inherit"],
             maxBuffer: 64 * 1024 * 1024,
         });
-        surfacePrefixedLines(out, surfaceStdoutPrefix);
+        surfacePrefixedLines(out, surfaceStdoutPrefix, summarizeSurfaced);
     } catch (error) {
         // execFileSync attaches captured stdout to the thrown error even on
         // a non-zero exit (Node's child_process contract) — surface a

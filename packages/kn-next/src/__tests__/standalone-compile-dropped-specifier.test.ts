@@ -83,7 +83,7 @@ function syntheticProject(): { standalone: string; cleanup: () => void } {
 }
 
 describe("computeDiskClosure — a specifier that resolves nowhere is logged, not silently dropped", () => {
-    it("prints a [knext standalone-compile] warning naming the specifier, the resolving directory, and both resolution attempts", () => {
+    it("with --verbose, prints a [knext standalone-compile] warning naming the specifier, the resolving directory, and both resolution attempts", () => {
         const { standalone, cleanup } = syntheticProject();
         try {
             const outfile = join(standalone, "knext-standalone-exec");
@@ -97,7 +97,10 @@ describe("computeDiskClosure — a specifier that resolves nowhere is logged, no
                     "--outfile",
                     outfile,
                 ],
-                { encoding: "utf8" },
+                {
+                    encoding: "utf8",
+                    env: { ...process.env, KNEXT_VERBOSE: "1" },
+                },
             );
             const stderr = result.stderr ?? "";
             expect(stderr).toContain("[knext standalone-compile]");
@@ -132,6 +135,97 @@ describe("computeDiskClosure — a specifier that resolves nowhere is logged, no
                 { encoding: "utf8" },
             );
             expect(result.stderr ?? "").not.toContain("disk closure: dropping");
+        } finally {
+            cleanup();
+        }
+    }, 60_000);
+});
+
+describe("computeDiskClosure — the default build stays quiet", () => {
+    it("without --verbose, folds the dropped specifiers into ONE summary line that points at --verbose", () => {
+        const { standalone, cleanup } = syntheticProject();
+        try {
+            const env = { ...process.env };
+            delete env.KNEXT_VERBOSE;
+            delete env.KNEXT_STANDALONE_COMPILE_VERBOSE;
+            const result = spawnSync(
+                "bun",
+                [
+                    "run",
+                    COMPILE_SCRIPT,
+                    "--server",
+                    join(standalone, "server.js"),
+                    "--outfile",
+                    join(standalone, "knext-standalone-exec"),
+                ],
+                { encoding: "utf8", env },
+            );
+            expect(result.status).toBe(0);
+            const stderr = result.stderr ?? "";
+            expect(stderr).not.toContain(UNRESOLVABLE_SPECIFIER);
+            expect(stderr).not.toContain("Require stack");
+            const lines = stderr.split("\n").filter((l) => l.trim() !== "");
+            expect(lines).toHaveLength(1);
+            expect(lines[0]).toMatch(
+                /^\[knext standalone-compile\] 1 note; rerun with --verbose for details$/,
+            );
+        } finally {
+            cleanup();
+        }
+    }, 60_000);
+
+    it("prints nothing at all when there is nothing to note", () => {
+        const { standalone, cleanup } = syntheticProject();
+        try {
+            write(
+                join(standalone, ".next/server/chunk.js"),
+                "module.exports = () => require('path');",
+            );
+            const env = { ...process.env };
+            delete env.KNEXT_VERBOSE;
+            const result = spawnSync(
+                "bun",
+                [
+                    "run",
+                    COMPILE_SCRIPT,
+                    "--server",
+                    join(standalone, "server.js"),
+                    "--outfile",
+                    join(standalone, "knext-standalone-exec"),
+                ],
+                { encoding: "utf8", env },
+            );
+            expect(result.status).toBe(0);
+            expect(result.stderr ?? "").toBe("");
+        } finally {
+            cleanup();
+        }
+    }, 60_000);
+
+    it("a FAILED compile still prints the held notes in full, before the failure", () => {
+        const { standalone, cleanup } = syntheticProject();
+        try {
+            const env = { ...process.env };
+            delete env.KNEXT_VERBOSE;
+            const result = spawnSync(
+                "bun",
+                [
+                    "run",
+                    COMPILE_SCRIPT,
+                    "--server",
+                    join(standalone, "server.js"),
+                    "--outfile",
+                    join(standalone, "knext-standalone-exec"),
+                    // an unknown target makes Bun.build fail AFTER the closure scan
+                    "--target",
+                    "bun-no-such-target",
+                ],
+                { encoding: "utf8", env },
+            );
+            expect(result.status).not.toBe(0);
+            const stderr = result.stderr ?? "";
+            expect(stderr).toContain(UNRESOLVABLE_SPECIFIER);
+            expect(stderr).not.toContain("rerun with --verbose");
         } finally {
             cleanup();
         }

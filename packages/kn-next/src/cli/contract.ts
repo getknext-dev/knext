@@ -161,6 +161,7 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
             "--skip-next",
             "--skip-smoke",
             "--self-contained",
+            "--verbose",
             "-h",
             "--help",
         ],

@@ -607,6 +607,8 @@ Options:
                         route, metrics port, and SIGTERM drain. For CI that
                         cannot execute the binary (a foreign-arch runner). The
                         artifact ships UNVERIFIED and the build says so loudly.
+  --verbose             Print every compile/closure note instead of a one-line
+                        count. Real warnings and errors always print.
   --self-contained      Opt in to the self-contained single-executable mode
                         (overrides \`selfContained\` in knext.config.ts).
                         Experimental. Honoured by the standalone/node build
@@ -628,6 +630,7 @@ export const ACCEPTED_BUILD_FLAGS: ReadonlySet<string> = new Set([
     "--skip-next",
     "--skip-smoke",
     "--self-contained",
+    "--verbose",
 ]);
 
 /**
@@ -646,6 +649,9 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
         writeSync(1, BUILD_HELP);
         return 0;
     }
+    // The compile steps are child processes (inherited env): this is how the
+    // flag reaches them, and how an already-set KNEXT_VERBOSE=1 does too.
+    if (argv.includes("--verbose")) process.env.KNEXT_VERBOSE = "1";
     const KNOWN = ACCEPTED_BUILD_FLAGS;
     for (const a of argv) {
         if (!KNOWN.has(a)) {

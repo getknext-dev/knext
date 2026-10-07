@@ -650,6 +650,30 @@ export function partingLine(dir: string): string {
     );
 }
 
+const BUILD_TARGET_DETAIL: Record<CreateChoices["builder"], string> = {
+    turbopack: "Next.js `next build` with Turbopack",
+    webpack: "Next.js `next build --webpack`",
+    vinext: "vinext compiled to one executable",
+};
+
+const RUNTIME_DETAIL: Record<CreateChoices["runtime"], string> = {
+    bun: "compiled Bun executable",
+    node: "Node.js",
+};
+
+/**
+ * Names the build target and runtime this scaffold uses — defaults included,
+ * so nobody has to discover them from a build log — and how to change them.
+ */
+export function targetNote(c: CreateChoices): string {
+    return (
+        `\nBuild target: ${c.builder} (${BUILD_TARGET_DETAIL[c.builder]})\n` +
+        `Runtime: ${c.runtime} (${RUNTIME_DETAIL[c.runtime]})\n` +
+        "Pick others when scaffolding with --builder <turbopack|webpack|vinext> and\n" +
+        "--runtime <bun|node>, or later with `build` and `runtime` in knext.config.ts.\n"
+    );
+}
+
 /**
  * What a non-default answer leaves the user to do. Empty at the defaults, so
  * the default scaffold's output is unchanged.
@@ -821,6 +845,7 @@ export async function createMain(
                 (promptedFlags
                     ? `\nTo scaffold the same app without the questions (e.g. in CI):\n  knext create ${promptedFlags}\n`
                     : "") +
+                targetNote(choices) +
                 choicesNote(choices) +
                 (values["dry-run"] ? "" : partingLine(positionals[0] ?? ".")),
         );
