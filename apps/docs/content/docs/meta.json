@@ -33,6 +33,7 @@
     "operator",
     "multi-cloud",
     "private-registries",
+    "custom-domains-tls",
     "observability",
     "security",
     "hardening",
