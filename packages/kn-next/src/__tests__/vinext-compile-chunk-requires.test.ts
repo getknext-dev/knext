@@ -57,9 +57,11 @@ const LIVE = "KNEXT_1314_DEP_A_LIVE_SIDECAR_c91e";
 const MISSING = "knext-1314-not-installed";
 
 const temps: string[] = [];
+// Compiled executables are ~100MB each; removing many of them can exceed
+// bun's default 5s hook timeout on a slow CI disk.
 afterAll(() => {
     for (const d of temps) rmSync(d, { recursive: true, force: true });
-});
+}, 120_000);
 function temp(prefix: string): string {
     // realpath: macOS tmpdir is a /var -> /private/var symlink, and
     // vinext-compile matches server modules by resolved path.
