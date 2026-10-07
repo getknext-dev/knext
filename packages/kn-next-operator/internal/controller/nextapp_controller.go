@@ -325,6 +325,9 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=domainmappings,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=routes,verbs=get
+// Deployments: GET-only (uncached APIReader) to re-confirm an admission rejection is still
+// in force after Knative flips the revision reason to ProgressDeadlineExceeded (PodCreationBlocked).
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete

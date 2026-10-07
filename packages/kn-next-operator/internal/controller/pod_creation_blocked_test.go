@@ -22,11 +22,13 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -216,9 +218,22 @@ func TestPodCreationBlocked_StickyKeepsPriorVerdict(t *testing.T) {
 	}
 }
 
+func rejectingDeployment(replicaFailure corev1.ConditionStatus, reason, msg string) *appsv1.Deployment {
+	d := &appsv1.Deployment{}
+	d.Name = "shop-00001-deployment"
+	d.Namespace = "prod"
+	d.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type: appsv1.DeploymentReplicaFailure, Status: replicaFailure, Reason: reason, Message: msg,
+	}}
+	return d
+}
+
 func TestDetectPodCreationBlocked_StaysBlockedAfterProgressDeadline(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := servingv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	app := verdictApp()
@@ -228,34 +243,55 @@ func TestDetectPodCreationBlocked_StaysBlockedAfterProgressDeadline(t *testing.T
 	}}
 	ksvc := &servingv1.Service{}
 	ksvc.Status.LatestCreatedRevisionName = "shop-00001"
-	detect := func(rev *servingv1.Revision, ksvc *servingv1.Service) podCreationState {
-		r := &NextAppReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(rev).Build()}
+	detect := func(rev *servingv1.Revision, ksvc *servingv1.Service, extra ...client.Object) podCreationState {
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rev).WithObjects(extra...).Build()
+		r := &NextAppReconciler{Client: c, APIReader: c}
 		return r.detectPodCreationBlocked(context.Background(), app, ksvc)
 	}
-
-	// Same revision, reason flipped, still ResourcesAvailable=False -> sticky.
-	st := detect(blockedRevision("ProgressDeadlineExceeded", "Initial scale was never achieved", corev1.ConditionFalse), ksvc)
-	if !st.sticky || st.blocked {
-		t.Fatalf("want sticky, got %+v", st)
+	deadline := func() *servingv1.Revision {
+		return blockedRevision("ProgressDeadlineExceeded", "Initial scale was never achieved", corev1.ConditionFalse)
 	}
-	// Quota fixed, pods now fail for ANOTHER reason: must not keep blaming quota.
+
+	// Deadline flip while the Deployment STILL reports an admission rejection -> sticky.
+	st := detect(deadline(), ksvc, rejectingDeployment(corev1.ConditionTrue, "FailedCreate", quotaMsg))
+	if !st.sticky || st.blocked {
+		t.Fatalf("still rejecting must be sticky, got %+v", st)
+	}
+	// Quota fixed, pods now crash-loop: ReplicaFailure gone -> clear.
+	st = detect(deadline(), ksvc, rejectingDeployment(corev1.ConditionFalse, "", ""))
+	if st.sticky || st.blocked || st.unknown {
+		t.Fatalf("admission no longer rejecting must clear, got %+v", st)
+	}
+	// ReplicaFailure for a NON-admission cause (webhook) -> clear.
+	st = detect(deadline(), ksvc, rejectingDeployment(corev1.ConditionTrue, "FailedCreate", `admission webhook "x" denied the request`))
+	if st.sticky || st.blocked {
+		t.Fatalf("non-quota rejection must clear, got %+v", st)
+	}
+	// Deployment gone -> clear.
+	st = detect(deadline(), ksvc)
+	if st.sticky || st.blocked || st.unknown {
+		t.Fatalf("missing deployment must clear, got %+v", st)
+	}
+	// Quota fixed, pods fail for ANOTHER reason: must not keep blaming quota.
 	for _, reason := range []string{"ImagePullBackOff", "ContainerMissing", "Deploying"} {
-		st = detect(blockedRevision(reason, "boom", corev1.ConditionFalse), ksvc)
+		st = detect(blockedRevision(reason, "boom", corev1.ConditionFalse), ksvc,
+			rejectingDeployment(corev1.ConditionTrue, "FailedCreate", quotaMsg))
 		if st.sticky || st.blocked {
 			t.Fatalf("reason %q must clear the quota verdict, got %+v", reason, st)
 		}
 	}
 	// Recovered (True) -> cleared.
-	st = detect(blockedRevision("", "", corev1.ConditionTrue), ksvc)
+	st = detect(blockedRevision("", "", corev1.ConditionTrue), ksvc,
+		rejectingDeployment(corev1.ConditionTrue, "FailedCreate", quotaMsg))
 	if st.sticky || st.blocked || st.unknown {
 		t.Fatalf("recovery must clear, got %+v", st)
 	}
-	// A NEW latest revision (still False for another reason) -> not carried.
-	newRev := blockedRevision("ProgressDeadlineExceeded", "x", corev1.ConditionFalse)
+	// A NEW latest revision -> not carried.
+	newRev := deadline()
 	newRev.Name = "shop-00002"
 	ksvc2 := &servingv1.Service{}
 	ksvc2.Status.LatestCreatedRevisionName = "shop-00002"
-	st = detect(newRev, ksvc2)
+	st = detect(newRev, ksvc2, rejectingDeployment(corev1.ConditionTrue, "FailedCreate", quotaMsg))
 	if st.sticky || st.blocked {
 		t.Fatalf("new revision must not inherit the prior block, got %+v", st)
 	}

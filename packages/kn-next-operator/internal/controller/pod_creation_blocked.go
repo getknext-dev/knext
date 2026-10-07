@@ -20,6 +20,8 @@ import (
 	"context"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -76,7 +78,11 @@ func classifyPodCreationBlock(rev *servingv1.Revision) (message, reason string, 
 	if cond == nil || !cond.IsFalse() || cond.Reason != "FailedCreate" {
 		return "", "", false
 	}
-	msg := cond.Message
+	return classifyAdmissionMessage(cond.Message)
+}
+
+// classifyAdmissionMessage recognises a LimitRanger / ResourceQuota admission error.
+func classifyAdmissionMessage(msg string) (message, reason string, blocked bool) {
 	switch {
 	case strings.Contains(msg, "exceeded quota"),
 		strings.Contains(msg, "failed quota:"), // "must specify limits.cpu for: queue-proxy"
@@ -115,10 +121,53 @@ func (r *NextAppReconciler) detectPodCreationBlocked(ctx context.Context, app *a
 		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPodCreationBlocked)
 		if prev != nil && strings.HasPrefix(prev.Message, "revision "+name+" ") {
 			if ra := rev.Status.GetCondition(servingv1.RevisionConditionResourcesAvailable); ra != nil && ra.IsFalse() && ra.Reason == "ProgressDeadlineExceeded" {
-				return podCreationState{sticky: true}
+				// The deadline message ("Initial scale was never achieved") carries no
+				// admission text and is equally produced by a crash loop after the quota
+				// was fixed, so re-confirm admission is STILL rejecting from the owning
+				// Deployment's ReplicaFailure condition (the source Knative itself reads).
+				switch r.admissionStillRejecting(ctx, app.Namespace, name) {
+				case confirmYes:
+					return podCreationState{sticky: true}
+				case confirmUnknown:
+					return podCreationState{unknown: true}
+				}
 			}
 		}
 		return podCreationState{}
 	}
 	return podCreationState{blocked: true, reason: reason, revision: name, message: msg}
+}
+
+type admissionConfirm int
+
+const (
+	confirmNo admissionConfirm = iota
+	confirmYes
+	confirmUnknown
+)
+
+// admissionStillRejecting GETs the revision's Deployment (Knative names it
+// "<revision>-deployment") and checks ReplicaFailure=True/FailedCreate with a
+// LimitRange/quota message. Uses the uncached APIReader so a single-object GET
+// needs only `get` on deployments and starts no cluster-wide informer.
+func (r *NextAppReconciler) admissionStillRejecting(ctx context.Context, ns, revision string) admissionConfirm {
+	var reader client.Reader = r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	d := &appsv1.Deployment{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: revision + "-deployment"}, d); err != nil {
+		if apierrors.IsNotFound(err) {
+			return confirmNo
+		}
+		return confirmUnknown
+	}
+	for _, c := range d.Status.Conditions {
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue && c.Reason == "FailedCreate" {
+			if _, _, ok := classifyAdmissionMessage(c.Message); ok {
+				return confirmYes
+			}
+		}
+	}
+	return confirmNo
 }
