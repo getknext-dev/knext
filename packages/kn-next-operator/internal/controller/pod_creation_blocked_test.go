@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	knnames "knative.dev/serving/pkg/reconciler/revision/resources/names"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -327,5 +328,37 @@ func TestDetectPodCreationBlocked_DeploymentReadErrorKeepsPriorVerdict(t *testin
 	r := &NextAppReconciler{Client: c, APIReader: failing}
 	if st := r.detectPodCreationBlocked(context.Background(), app, ksvc); !st.unknown {
 		t.Fatalf("a failed Deployment read must keep the prior verdict (unknown), got %+v", st)
+	}
+}
+
+func TestDetectPodCreationBlocked_LongRevisionNameUsesKnativeChildName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := servingv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// A 58-char revision name: "<name>-deployment" exceeds 63, so Knative hashes it.
+	revName := strings.Repeat("a", 53) + "-00001"
+	rev := blockedRevision("ProgressDeadlineExceeded", "Initial scale was never achieved", corev1.ConditionFalse)
+	rev.Name = revName
+	depName := knnames.Deployment(rev)
+	if depName == revName+"-deployment" {
+		t.Fatalf("test precondition: name must be hashed, got %q", depName)
+	}
+	dep := rejectingDeployment(corev1.ConditionTrue, "FailedCreate", quotaMsg)
+	dep.Name = depName
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionPodCreationBlocked, Status: metav1.ConditionTrue, Reason: ReasonQuotaExceeded,
+		Message: "revision " + revName + " cannot create pods — rejected: x.",
+	}}
+	ksvc := &servingv1.Service{}
+	ksvc.Status.LatestCreatedRevisionName = revName
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rev, dep).Build()
+	r := &NextAppReconciler{Client: c, APIReader: c}
+	if st := r.detectPodCreationBlocked(context.Background(), app, ksvc); !st.sticky {
+		t.Fatalf("long revision name: the hashed Deployment must be found, got %+v", st)
 	}
 }

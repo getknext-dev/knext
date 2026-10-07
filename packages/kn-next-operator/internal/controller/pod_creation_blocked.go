@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	knnames "knative.dev/serving/pkg/reconciler/revision/resources/names"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -125,7 +126,7 @@ func (r *NextAppReconciler) detectPodCreationBlocked(ctx context.Context, app *a
 				// admission text and is equally produced by a crash loop after the quota
 				// was fixed, so re-confirm admission is STILL rejecting from the owning
 				// Deployment's ReplicaFailure condition (the source Knative itself reads).
-				switch r.admissionStillRejecting(ctx, app.Namespace, name) {
+				switch r.admissionStillRejecting(ctx, app.Namespace, knnames.Deployment(rev)) {
 				case confirmYes:
 					return podCreationState{sticky: true}
 				case confirmUnknown:
@@ -146,17 +147,17 @@ const (
 	confirmUnknown
 )
 
-// admissionStillRejecting GETs the revision's Deployment (Knative names it
-// "<revision>-deployment") and checks ReplicaFailure=True/FailedCreate with a
+// admissionStillRejecting GETs the revision's Deployment (named by Knative's
+// names.Deployment = kmeta.ChildName(rev, "-deployment"), which hashes long names) and checks ReplicaFailure=True/FailedCreate with a
 // LimitRange/quota message. Uses the uncached APIReader so a single-object GET
 // needs only `get` on deployments and starts no cluster-wide informer.
-func (r *NextAppReconciler) admissionStillRejecting(ctx context.Context, ns, revision string) admissionConfirm {
+func (r *NextAppReconciler) admissionStillRejecting(ctx context.Context, ns, deployment string) admissionConfirm {
 	var reader client.Reader = r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
 	d := &appsv1.Deployment{}
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: revision + "-deployment"}, d); err != nil {
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: deployment}, d); err != nil {
 		if apierrors.IsNotFound(err) {
 			return confirmNo
 		}
