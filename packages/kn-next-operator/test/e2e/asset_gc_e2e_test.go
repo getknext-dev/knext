@@ -1259,9 +1259,26 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			targets := gcCurrentTraffic(g)
 			g.Expect(targets).NotTo(BeEmpty(),
 				"reconcile did not resume: currentTraffic still empty after restore")
+			// SETTLED, not merely "first entry is rev2": the STALE split retained
+			// from the lagging phase is [{rev2 60},{rev3 40}], whose first entry is
+			// already rev2, so a targets[0]-only check passes instantly on STALE
+			// status. Restoring minScale:1 rolls a NEW latest revision, so the
+			// settled split is [{rev2 60},{new-latest 40}] and the second entry
+			// MOVES off rev3. gc planning against the stale set sees that move as
+			// drift and aborts [traffic-drift-during-plan] (nightly 2026-10-04).
+			// Wait until the stale latest (rev3) has left the split.
 			g.Expect(targets[0].RevisionName).To(Equal(rev2Name),
 				"restored live traffic must be the re-pinned rev2, got %+v", targets)
+			for _, t := range targets {
+				g.Expect(t.RevisionName).NotTo(Equal(rev3Name),
+					"reconcile has not settled: stale latest revision still in split, got %+v", targets)
+			}
 		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
+		settled := gcCurrentTrafficRaw(Default)
+		Consistently(func(g Gomega) {
+			g.Expect(gcCurrentTrafficRaw(g)).To(Equal(settled),
+				"currentTraffic moved after settling (gc would see drift)")
+		}, 10*time.Second, 2*time.Second).Should(Succeed())
 
 		assertEndpointIsTestMinIO()
 
