@@ -2,6 +2,11 @@
 
 Status: Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002
 
+> **Amended by ADR-0065 (Proposed, 2026-10-07):** adds a `flavour: model` `BackendService`
+> (HTTP/1.1, loopback-bound model server behind an auth sidecar) and an `external` variant of
+> `NextApp.spec.backends[]`. A binding to a `model`-flavour backend gets `KNEXT_AI_<NAME>_*` env
+> **instead of** `<NAME>_SERVICE_URL`; the default `grpc` flavour below is unchanged.
+
 ## Context
 Each polyglot backend must deploy as its own **scale-to-zero Knative service** (gRPC over
 **h2c**) and be discoverable by the `NextApp` gateway. Per ADR-0001 the operator is the only
