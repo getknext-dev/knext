@@ -329,6 +329,56 @@ describe("analyzeServerModule (unit)", () => {
         });
         // The EXACT shape measured in the real file-manager build: rolldown's
         // per-chunk __esmMin init sets up a require it may never call.
+        // A `;`, `{` or `}` inside a `//` line comment is NOT a statement
+        // boundary: the create below is the value of `const r = ...`
+        // (#1877 round 3 review).
+        it.each([
+            ["`;`", "const r = // note;\n e(import.meta.url);"],
+            ["`{`", "const r = // note {\n e(import.meta.url);"],
+            ["`}`", "const r = // note }\n e(import.meta.url);"],
+            [
+                "`;` after a sibling",
+                "const r = // x;\n a(), e(import.meta.url);",
+            ],
+            [
+                "`;` with a quote before the comment",
+                "const r = '//'; const s = // x;\n e(import.meta.url);",
+            ],
+        ])("a %s inside a line comment is not a statement boundary", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                true,
+            );
+        });
+        // A comment BETWEEN the boundary and the call is not skipped; the
+        // scan cannot prove the position, so it stays unrecognized (loud).
+        it.each([
+            ["a line comment", "a(); // note\n e(import.meta.url);"],
+            ["a block comment", "a(); /* x */\n e(import.meta.url);"],
+            [
+                "a `//` in a string earlier on the line",
+                'var u = "https://x.dev"; e(import.meta.url);',
+            ],
+        ])("conservative: a create after %s stays unrecognized", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                true,
+            );
+        });
+        it.each([
+            ["a real `;` on the previous line", "a();\n e(import.meta.url);"],
+            [
+                "a real `}` on the previous line",
+                "function g(){}\n e(import.meta.url);",
+            ],
+
+            [
+                "a real `{` after a division",
+                "function g(){var q = a / b; e(import.meta.url)}",
+            ],
+        ])("control: %s stays discarded", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                false,
+            );
+        });
         it("rolldown's real __esmMin init sequence (getter shape) is discarded", () => {
             const src =
                 GETTER_PRE +

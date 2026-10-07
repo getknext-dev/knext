@@ -258,8 +258,12 @@ function isDiscardedPosition(src, start) {
         if (i < 0) return true;
         if (i < floor) return false;
         const c = src[i];
-        if (c === ";" || c === "}") return true;
-        if (c === "{") return src[i - 1] !== "$";
+        if (c === ";" || c === "}" || c === "{") {
+            // A `;`/`{`/`}` inside a `//` comment is not a
+            // boundary (`const r = // note;\n e(x)` hands the value on).
+            if (!isOutsideLineComment(src, i)) return false;
+            return c !== "{" || src[i - 1] !== "$";
+        }
         if (c !== ",") return false;
         // A `,`: the previous sibling must be a plain call `a.b(...)`.
         i--;
@@ -295,6 +299,24 @@ function isDiscardedPosition(src, start) {
         }
         if (!sawIdent) return false;
     }
+}
+
+/**
+ * Whether `src[at]` is provably NOT inside a `//` line comment: true only
+ * when no `//` appears on its line before it. A `//` anywhere earlier on the
+ * line — a real comment, or one inside a string or regex this cannot tell
+ * apart (a line may begin inside a multi-line template, so lexing from the
+ * line start is not reliable either) — answers false: cannot tell. Only line
+ * comments need this: a `/* *\/` comment ends in `/`, which the scan meets
+ * (and bails on) before any `;`/`{`/`}` inside it.
+ *
+ * @param {string} src
+ * @param {number} at
+ * @returns {boolean}
+ */
+function isOutsideLineComment(src, at) {
+    const lineStart = src.lastIndexOf("\n", at - 1) + 1;
+    return !src.slice(lineStart, at).includes("//");
 }
 
 /** Words that, as a "callee", mean the call is not a plain sequence sibling. */
