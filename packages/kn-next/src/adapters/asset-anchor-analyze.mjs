@@ -340,12 +340,81 @@ export function analyzeAssetAnchors(src) {
     };
 }
 
-// Script mode: `bun asset-anchor-analyze.mjs < module.js` prints the analysis
-// as JSON. Only when run directly — importing this module has no side effect.
+/** `import.meta` (the MetaProperty node). */
+function isImportMeta(node) {
+    return (
+        node?.type === "MetaProperty" &&
+        node.meta.name === "import" &&
+        node.property.name === "meta"
+    );
+}
+
+/**
+ * Every CODE-position `import.meta` in `src`, in source order: `prop` is the
+ * member name of a non-computed `import.meta.<prop>` (the span covers the
+ * whole member expression), or `null` for any other use of `import.meta`
+ * (bare, computed, destructured — the span is `import.meta` itself).
+ *
+ * This is what the compiled entry's `import.meta` rewrite in vinext-compile.mjs
+ * splices (`rewriteImportMetaUses`). The text `import.meta.url` inside a
+ * string, template text, regex or comment is DATA and is never reported — a
+ * docs page whose code sample mentions it compiles to exactly such a string.
+ *
+ * @param {string} src
+ * @returns {{ uses: { start: number, end: number, prop: string | null }[], parseError?: string }}
+ */
+export function findImportMetaUses(src) {
+    if (!src.includes("import.meta")) return { uses: [] };
+    let ast;
+    try {
+        ast = parse(src, PARSE_OPTIONS);
+    } catch (err) {
+        return { uses: [], parseError: err instanceof Error ? err.message : String(err) };
+    }
+    const uses = [];
+    const stack = [ast];
+    while (stack.length > 0) {
+        const node = stack.pop();
+        if (
+            node.type === "MemberExpression" &&
+            isImportMeta(node.object) &&
+            !node.computed &&
+            node.property.type === "Identifier"
+        ) {
+            uses.push({ start: node.start, end: node.end, prop: node.property.name });
+            continue; // its `import.meta` is accounted for
+        }
+        if (isImportMeta(node)) {
+            uses.push({ start: node.start, end: node.end, prop: null });
+            continue;
+        }
+        for (const key in node) {
+            if (SKIP_KEYS.has(key)) continue;
+            const value = node[key];
+            if (value === null || typeof value !== "object") continue;
+            if (Array.isArray(value)) {
+                for (const child of value) {
+                    if (child !== null && typeof child?.type === "string") stack.push(child);
+                }
+            } else if (typeof value.type === "string") {
+                stack.push(value);
+            }
+        }
+    }
+    uses.sort((a, b) => a.start - b.start);
+    return { uses };
+}
+
+// Script mode: `bun asset-anchor-analyze.mjs [--import-meta] < module.js`
+// prints the analysis as JSON — `analyzeAssetAnchors` by default,
+// `findImportMetaUses` with `--import-meta`. Only when run directly —
+// importing this module has no side effect.
 if (import.meta.main) {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);
-    process.stdout.write(
-        JSON.stringify(analyzeAssetAnchors(Buffer.concat(chunks).toString("utf8"))),
-    );
+    const src = Buffer.concat(chunks).toString("utf8");
+    const analyse = process.argv.includes("--import-meta")
+        ? findImportMetaUses
+        : analyzeAssetAnchors;
+    process.stdout.write(JSON.stringify(analyse(src)));
 }

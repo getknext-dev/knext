@@ -71,6 +71,7 @@ import {
     assetAnchorPackageRoot,
     rewriteAssetAnchors,
     rewriteEntryHarfbuzzAnchors,
+    rewriteImportMetaUses,
 } from "./entry-asset-anchor.mjs";
 import {
     BUNDLED_PREFIX,
@@ -563,20 +564,42 @@ const ASSET_ANCHOR_ANALYZER_TIMEOUT_MS = 120_000;
  */
 function analyzeOutOfProcess(src, path) {
     ASSET_ANCHOR_STATS.analysed++;
-    const child = spawnSync(process.execPath, ["--no-install", ASSET_ANCHOR_ANALYZER], {
+    const analysis = runAnalyzer(src, path, []);
+    const wellFormed =
+        Array.isArray(analysis.anchors) &&
+        analysis.anchors.every(
+            (a) =>
+                typeof a?.literal === "string" &&
+                Number.isInteger(a.start) &&
+                Number.isInteger(a.end) &&
+                ["read", "excluded", "unknown"].includes(a.consumer),
+        );
+    if (!wellFormed) analyzerFailed(path, "printed JSON that is not an analysis");
+    return analysis;
+}
+
+/** Throw the build-failing analyzer error (see `analyzeOutOfProcess`). */
+function analyzerFailed(path, what) {
+    throw new Error(
+        `[knext compile] the asset-anchor analyzer (${ASSET_ANCHOR_ANALYZER}) ${what} while ` +
+            `analysing ${path} — refusing to build a binary whose packages' sibling files ` +
+            "(next/og's wasm and font among them) would not be embedded. This is a broken " +
+            "@getknext/core install (is its `acorn` dependency present?); reinstall it.",
+    );
+}
+
+/**
+ * Run the analyzer child on `src` (with `flags`) and return its parsed JSON
+ * object; any failure of the child itself throws via `analyzerFailed`.
+ */
+function runAnalyzer(src, path, flags) {
+    const child = spawnSync(process.execPath, ["--no-install", ASSET_ANCHOR_ANALYZER, ...flags], {
         input: src,
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
         timeout: ASSET_ANCHOR_ANALYZER_TIMEOUT_MS,
     });
-    const fail = (what) => {
-        throw new Error(
-            `[knext compile] the asset-anchor analyzer (${ASSET_ANCHOR_ANALYZER}) ${what} while ` +
-                `analysing ${path} — refusing to build a binary whose packages' sibling files ` +
-                "(next/og's wasm and font among them) would not be embedded. This is a broken " +
-                "@getknext/core install (is its `acorn` dependency present?); reinstall it.",
-        );
-    };
+    const fail = (what) => analyzerFailed(path, what);
     if (child.error !== undefined || child.status !== 0) {
         const how =
             child.error?.code === "ETIMEDOUT"
@@ -593,21 +616,41 @@ function analyzeOutOfProcess(src, path) {
     } catch {
         fail(`printed no JSON (${JSON.stringify(String(child.stdout).slice(0, 120))})`);
     }
-    const wellFormed =
-        analysis !== null &&
-        typeof analysis === "object" &&
-        Array.isArray(analysis.anchors) &&
-        analysis.anchors.every(
-            (a) =>
-                typeof a?.literal === "string" &&
-                Number.isInteger(a.start) &&
-                Number.isInteger(a.end) &&
-                ["read", "excluded", "unknown"].includes(a.consumer),
-        );
-    if (!wellFormed) {
+    if (analysis === null || typeof analysis !== "object") {
         fail(`printed JSON that is not an analysis (${String(child.stdout).slice(0, 120)})`);
     }
     return analysis;
+}
+
+/**
+ * The CODE-position `import.meta` uses of the compiled entry (acorn, out of
+ * process — see `findImportMetaUses`), so the bytecode rewrite never splices
+ * into a string that merely mentions `import.meta.url` (an MDX docs page's
+ * code sample compiles to exactly that). A child failure throws like any
+ * analyzer failure; an entry acorn cannot PARSE also fails the build (jev
+ * 0.98 over falling back to the old textual replace, which corrupts such
+ * strings) — Bun's own `--bytecode` step needs every use found, so a guess
+ * either way ships a broken binary.
+ */
+function entryImportMetaUses(src, path) {
+    const found = runAnalyzer(src, path, ["--import-meta"]);
+    if (found.parseError !== undefined) {
+        throw new Error(
+            `[knext compile] could not parse the server entry ${path} to locate its import.meta ` +
+                `uses (${found.parseError}) — refusing to rewrite it blind, since a textual rewrite ` +
+                "corrupts any string that mentions import.meta",
+        );
+    }
+    const wellFormed =
+        Array.isArray(found.uses) &&
+        found.uses.every(
+            (u) =>
+                Number.isInteger(u?.start) &&
+                Number.isInteger(u.end) &&
+                (u.prop === null || typeof u.prop === "string"),
+        );
+    if (!wellFormed) analyzerFailed(path, "printed JSON that is not an import.meta analysis");
+    return found.uses;
 }
 
 /**
@@ -783,22 +826,27 @@ const importMetaToCjs = {
             const exprs = SELF_CONTAINED
                 ? selfContainedEntryExprs(relative(APP_ROOT, ENTRY_DIR).split(sep).join("/"))
                 : { entryFileExpr, entryDirExpr, entryUrlExpr };
-            const out = src
-                .replaceAll("import.meta.filename", exprs.entryFileExpr)
-                .replaceAll("import.meta.dirname", exprs.entryDirExpr)
-                .replaceAll("import.meta.url", exprs.entryUrlExpr);
-            const after = (out.match(/import\.meta/g) ?? []).length;
-            if (after > 0) {
+            // CODE positions only (acorn, out of process): the text inside a
+            // string, template text or comment is data and stays as written.
+            const { contents: out, count, survived } = rewriteImportMetaUses(
+                src,
+                entryImportMetaUses(src, path),
+                {
+                    url: exprs.entryUrlExpr,
+                    filename: exprs.entryFileExpr,
+                    dirname: exprs.entryDirExpr,
+                },
+            );
+            if (survived.length > 0) {
                 // Bytecode would fail anyway; failing here says WHY, and names
                 // the form that was not handled.
-                const sample = out.match(/import\.meta\.\w+/)?.[0] ?? "import.meta";
                 throw new Error(
-                    `[knext compile] ${after} import.meta use(s) survived the rewrite ` +
-                        `(e.g. ${sample}); --bytecode cannot compile them`,
+                    `[knext compile] ${survived.length} import.meta use(s) survived the rewrite ` +
+                        `(e.g. ${survived[0]}); --bytecode cannot compile them`,
                 );
             }
             console.log(
-                `[knext compile] rewrote ${before} import.meta use(s) for bytecode`,
+                `[knext compile] rewrote ${count} import.meta use(s) for bytecode`,
             );
             return { contents: out, loader: "js" };
         });

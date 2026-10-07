@@ -35,3 +35,9 @@ export function rewriteAssetAnchors(
     skipped: { literal: string; reason: string }[];
     parseError?: string;
 };
+
+export function rewriteImportMetaUses(
+    src: string,
+    uses: { start: number; end: number; prop: string | null }[],
+    exprs: { url: string; filename: string; dirname: string },
+): { contents: string; count: number; survived: string[] };

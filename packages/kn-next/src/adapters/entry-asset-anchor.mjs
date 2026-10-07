@@ -312,6 +312,43 @@ export function rewriteEntryHarfbuzzAnchors(src, resolve) {
 }
 
 /**
+ * Splice the compiled entry's CODE-position `import.meta` uses (as
+ * asset-anchor-analyze.mjs's `findImportMetaUses` reports them) with the
+ * expressions that rebuild them inside the binary, so `--bytecode`'s CommonJS
+ * output can hold the entry. Pure.
+ *
+ * Only reported uses are touched: the text `import.meta.url` inside a string,
+ * template text or comment is data and stays byte-for-byte (the previous
+ * textual `replaceAll` rewrote it too and broke the quoting — e.g. an MDX docs
+ * page whose code sample mentions `import.meta.url`).
+ *
+ * @param {string} src
+ * @param {{ start: number, end: number, prop: string | null }[]} uses
+ * @param {{ url: string, filename: string, dirname: string }} exprs
+ * @returns {{ contents: string, count: number, survived: string[] }}
+ *   `survived`: the uses it cannot rewrite (`import.meta`, `import.meta.<other>`)
+ */
+export function rewriteImportMetaUses(src, uses, exprs) {
+    let contents = "";
+    let at = 0;
+    let count = 0;
+    const survived = [];
+    for (const use of uses) {
+        const expr =
+            use.prop !== null && Object.hasOwn(exprs, use.prop) ? exprs[use.prop] : undefined;
+        if (expr === undefined) {
+            survived.push(use.prop === null ? "import.meta" : `import.meta.${use.prop}`);
+            continue;
+        }
+        contents += src.slice(at, use.start) + expr;
+        at = use.end;
+        count++;
+    }
+    contents += src.slice(at);
+    return { contents, count, survived };
+}
+
+/**
  * The package whose Emscripten `locateFile("<name>.wasm")` calls are rewritten.
  * Not an anchor allowlist: `locateFile` is not a `new URL` anchor, and its
  * `hb.wasm` fallback (`resolveEmscriptenWasm` in vinext-compile.mjs) resolves

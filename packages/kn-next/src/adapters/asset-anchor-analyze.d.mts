@@ -13,3 +13,8 @@ export interface AssetAnchorAnalysis {
 }
 
 export function analyzeAssetAnchors(src: string): AssetAnchorAnalysis;
+
+export function findImportMetaUses(src: string): {
+    uses: { start: number; end: number; prop: string | null }[];
+    parseError?: string;
+};
