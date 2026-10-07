@@ -60,6 +60,7 @@ import {
     loadConfig,
     UsageError,
 } from "./shared";
+import { diagnoseNestedStandalone } from "./standalone-layout";
 import { requireBuildContext } from "./tracing-root";
 import {
     buildVinextExecutable,
@@ -390,6 +391,16 @@ export async function build(options: BuildOptions = {}) {
             // deploy time. UsageError (not a bare warn): this is a config
             // mistake the user can act on immediately, same family as
             // `resolveBuildArtifact`'s unknown-builder throw above.
+            // The commonest cause is not a missing `output: 'standalone'` but a
+            // parent lockfile that moved Next's workspace root, nesting the
+            // server one directory down. Say so, rather than blame a setting
+            // that is correctly set.
+            const nested = diagnoseNestedStandalone(process.cwd());
+            if (nested !== null) {
+                throw new UsageError(
+                    `The ${builder.id} build finished but '${artifact.entry}' is not there.\n\n${nested}`,
+                );
+            }
             throw new UsageError(
                 `The ${builder.id} build finished but '${artifact.entry}' is not there — the image ` +
                     "would start a server that does not exist. `build: 'turbopack'` requires this " +

@@ -19,6 +19,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
@@ -151,6 +152,37 @@ describe("buildStandaloneExecutable", () => {
                 run: (a) => ran.push([...a]),
             }),
         ).toThrow(/server\.js/);
+        expect(ran).toHaveLength(0);
+    });
+
+    it("a nested standalone layout names the workspace root and the fix instead of blaming output: standalone", () => {
+        const made = mkdtempSync(join(tmpdir(), "knext-standalone-nested-"));
+        tempDirs.push(made);
+        const base = realpathSync(made);
+        writeFileSync(join(base, "package-lock.json"), "{}");
+        const cwd = join(base, "my-app");
+        mkdirSync(join(cwd, ".next", "standalone", "my-app"), {
+            recursive: true,
+        });
+        writeFileSync(
+            join(cwd, ".next", "standalone", "my-app", "server.js"),
+            "// nested\n",
+        );
+        const ran: string[][] = [];
+        let message = "";
+        try {
+            buildStandaloneExecutable({
+                cwd,
+                arch: "linux-x64",
+                bunVersion: "1.4.2",
+                run: (a) => ran.push([...a]),
+            });
+        } catch (e) {
+            message = (e as Error).message;
+        }
+        expect(message).toContain(base);
+        expect(message).toContain("package-lock.json");
+        expect(message).toContain("outputFileTracingRoot");
         expect(ran).toHaveLength(0);
     });
 
