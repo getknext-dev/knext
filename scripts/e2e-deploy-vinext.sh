@@ -459,6 +459,12 @@ fi
 DEPLOYMENT_ID="${NEXT_DEPLOYMENT_ID:-knext-vinext-$(date +%s)-$$}"
 export NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}"
 
+# Next's deploy tests assert test-only client request metadata (e.g. the
+# next-test-fetch-priority header). vinext compiles that in only when
+# __NEXT_TEST_MODE is set at BUILD; the shard sets NEXT_TEST_MODE alone.
+# Same fix vinext's own deploy suite made (cloudflare/vinext#2875).
+export __NEXT_TEST_MODE=e2e
+
 # ── 4. vite build → the nitro bun-preset .output ──────────────────────────────
 log "running vite build (vinext → nitro bun preset; log → ${BUILD_LOG})"
 if ! NODE_ENV=production npx --no-install vite build >"${BUILD_LOG}" 2>&1; then
