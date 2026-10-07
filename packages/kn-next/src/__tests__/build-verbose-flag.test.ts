@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { ACCEPTED_BUILD_FLAGS, BUILD_HELP, buildMain } from "../cli/build";
 import { CLI_CONTRACT } from "../cli/contract";
 
+/** Read through a call so `delete` above does not narrow the value to `undefined`. */
+const verbose = (): string | undefined => process.env.KNEXT_VERBOSE;
 const saved = process.env.KNEXT_VERBOSE;
 afterEach(() => {
     if (saved === undefined) delete process.env.KNEXT_VERBOSE;
@@ -29,12 +31,12 @@ describe("knext build --verbose", () => {
         await expect(buildMain(["--verbose", "--bogus"])).rejects.toThrow(
             /unknown flag/,
         );
-        expect(process.env.KNEXT_VERBOSE).toBe("1");
+        expect(verbose()).toBe("1");
     });
 
     it("leaves KNEXT_VERBOSE alone when the flag is absent", async () => {
         delete process.env.KNEXT_VERBOSE;
         await expect(buildMain(["--bogus"])).rejects.toThrow(/unknown flag/);
-        expect(process.env.KNEXT_VERBOSE).toBeUndefined();
+        expect(verbose()).toBeUndefined();
     });
 });
