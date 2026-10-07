@@ -2147,6 +2147,157 @@ describe("the bundled patches against the published tarball", () => {
             rmSync(root, { recursive: true, force: true });
         }
     }, 120_000);
+
+    it("vinext#3766: Nitro serves the client bundles under an absolute assetPrefix's path, and nothing else changes", async () => {
+        // Ported from Next.js: test/e2e/app-dir/asset-prefix-absolute — with
+        // assetPrefix "https://example.vercel.sh/custom-asset-prefix" every
+        // bundle must also answer 200 at /custom-asset-prefix/_next/static/...
+        // on the app's own origin. The files are on disk at _next/static/, so
+        // the Nitro setup hook must publish that directory under the prefixed
+        // path (a fallthrough, so a miss still reaches vinext's 404).
+        applyVinextPatches(patched);
+        writeFileSync(
+            join(patched, "dist", "__knext_vite_resolve_bridge.mjs"),
+            'export { resolveConfig } from "vite";\n',
+        );
+        const { resolveConfig } = await importPatched<{
+            resolveConfig: (
+                config: unknown,
+                command: "build",
+            ) => Promise<{ plugins: readonly Record<string, unknown>[] }>;
+        }>("dist/__knext_vite_resolve_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+
+        type FakeNitro = {
+            options: {
+                dev: boolean;
+                output: { publicDir: string; serverDir: string };
+                publicAssets: Record<string, unknown>[];
+                routeRules: Record<string, Record<string, unknown>>;
+                traceDeps: string[];
+            };
+            logger: { warn: () => void };
+        };
+        const runSetup = async (
+            assetPrefix: string,
+            routeRules: FakeNitro["options"]["routeRules"] = {},
+        ) => {
+            const root = mkdtempSync(join(tmpdir(), "knext-vp-3766-"));
+            tempRoots.push(root);
+            symlinkSync(
+                dirname(INSTALLED_VINEXT),
+                join(root, "node_modules"),
+                "junction",
+            );
+            writeFileSync(
+                join(root, "package.json"),
+                JSON.stringify({ type: "module" }),
+            );
+            mkdirSync(join(root, "app"));
+            writeFileSync(
+                join(root, "app", "layout.tsx"),
+                "export default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n",
+            );
+            writeFileSync(
+                join(root, "app", "page.tsx"),
+                "export default function Page() {\n  return <p>home</p>;\n}\n",
+            );
+            const resolved = await resolveConfig(
+                {
+                    root,
+                    configFile: false,
+                    logLevel: "silent",
+                    plugins: [
+                        vinextMod.default({
+                            appDir: root,
+                            nextConfig: { assetPrefix },
+                        }),
+                    ],
+                },
+                "build",
+            );
+            const hook = resolved.plugins.find(
+                (p) => p.name === "vinext:nitro-route-rules",
+            ) as
+                | { nitro: { setup: (n: FakeNitro) => Promise<void> } }
+                | undefined;
+            if (!hook)
+                throw new Error("vinext:nitro-route-rules plugin not found");
+            const nitro: FakeNitro = {
+                options: {
+                    dev: false,
+                    output: {
+                        publicDir: join(root, ".output", "public"),
+                        serverDir: join(root, ".output", "server"),
+                    },
+                    publicAssets: [],
+                    routeRules,
+                    traceDeps: [],
+                },
+                logger: { warn: () => {} },
+            };
+            await hook.nitro.setup(nitro);
+            return { root, nitro };
+        };
+
+        const absolute = await runSetup(
+            "https://example.vercel.sh/custom-asset-prefix",
+        );
+        expect(absolute.nitro.options.publicAssets).toEqual([
+            {
+                dir: join(
+                    absolute.root,
+                    ".output",
+                    "public",
+                    "_next",
+                    "static",
+                ),
+                baseURL: "/custom-asset-prefix/_next/static",
+                fallthrough: true,
+                maxAge: 0,
+            },
+        ]);
+        expect(
+            absolute.nitro.options.routeRules[
+                "/custom-asset-prefix/_next/static/**"
+            ],
+        ).toEqual({
+            headers: { "cache-control": "public, max-age=31536000, immutable" },
+        });
+
+        // A user's own cache-control for that path wins.
+        const userRule = await runSetup(
+            "https://example.vercel.sh/custom-asset-prefix/",
+            {
+                "/custom-asset-prefix/_next/static/**": {
+                    headers: { "cache-control": "no-cache", "x-user": "1" },
+                },
+            },
+        );
+        expect(
+            userRule.nitro.options.routeRules[
+                "/custom-asset-prefix/_next/static/**"
+            ],
+        ).toEqual({ headers: { "cache-control": "no-cache", "x-user": "1" } });
+
+        // Plain origin (files already answer at /_next/static/) and a path
+        // prefix (files already on disk under the prefix): untouched.
+        for (const prefix of [
+            "https://example.vercel.sh/",
+            "/custom-asset-prefix",
+            "",
+        ]) {
+            const other = await runSetup(prefix);
+            expect(other.nitro.options.publicAssets).toEqual([]);
+            expect(
+                Object.keys(other.nitro.options.routeRules).filter((k) =>
+                    k.includes("_next/static"),
+                ),
+            ).toEqual([]);
+        }
+    }, 120_000);
 });
 
 // ---------------------------------------------------------------------------
