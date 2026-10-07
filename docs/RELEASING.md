@@ -464,6 +464,19 @@ Confirm every box before starting step 1 below:
    that `operator-latest` now points at the same digest. Add the operator version to the
    COMPATIBILITY.md row for the release. Only a stable tag does this; an `-rc.N` operator tag
    never moves `operator-latest`.
+   **Marketplace-bound variant.** The same `operator-vX.Y.Z` run also publishes
+   `ghcr.io/getknext-dev/kn-next-operator:vX.Y.Z-mp`: an image index over the **same platform
+   manifests** (same config and layer digests) with the buildkit attestation manifests removed,
+   because AWS Marketplace rejects an index that carries them. The GHCR `vX.Y.Z` image is
+   untouched — it keeps its provenance, SBOM and cosign signature. The `-mp` index is derived from
+   the Trivy-gated build output (`hack/marketplace-index-build.sh`, no rebuild), and
+   `hack/marketplace-index-assert.sh` proves against the registry — before the index is signed or the
+   `-mp` tag applied — that it has no attestation manifests and that every platform manifest's
+   config and layer digests equal the gated image's. The index digest differs from the gated one, so it
+   carries its own cosign signature. Confirm after a release:
+   `crane manifest ghcr.io/getknext-dev/kn-next-operator:vX.Y.Z-mp | jq '.manifests | map(.platform)'`
+   lists only real platforms (no `unknown/unknown`). Nothing is pushed to a Marketplace registry by
+   this workflow; that copy is a separate, manual step that copies this digest.
    **Fallback, only if this tag push is skipped for some reason:** `operator-latest` keeps
    republishing on every push to `main` regardless, so GA could ship against that rolling channel
    instead — but then record which operator commit SHA / image digest it carries in the GA release
