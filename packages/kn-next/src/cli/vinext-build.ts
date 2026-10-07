@@ -425,7 +425,15 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     const run =
         opts.run ??
         ((argv: readonly string[]) =>
-            runQuiet(argv, { surfaceStdoutPrefix: COMPILE_LOG_PREFIX }));
+            runQuiet(argv, {
+                surfaceStdoutPrefix: COMPILE_LOG_PREFIX,
+                // The informational lines are a count unless `knext build
+                // --verbose` (KNEXT_VERBOSE=1) asks for them; WARNING lines
+                // (stderr) and failures are unaffected.
+                ...(process.env.KNEXT_VERBOSE === "1"
+                    ? {}
+                    : { summarizeSurfaced: true }),
+            }));
     const arch = opts.arch ?? "linux-x64";
     const outFile = opts.outFile ?? `knext-exec-${arch}`;
 

@@ -111,6 +111,16 @@ when both are set. With a storage provider, `knext deploy` names any placeholder
 or when stdin or stdout is not a terminal, it uses the default for every choice you did not pass.
 A pipe or a CI job never waits on a question.
 
+When it finishes, `create` prints the build target and runtime it chose, defaults included, and how
+to change them:
+
+```text title="output"
+Build target: turbopack (Next.js `next build` with Turbopack)
+Runtime: bun (compiled Bun executable)
+Pick others when scaffolding with --builder <turbopack|webpack|vinext> and
+--runtime <bun|node>, or later with `build` and `runtime` in knext.config.ts.
+```
+
 ```bash title="shell"
 knext create my-app                    # asks the questions on a terminal; defaults elsewhere
 knext create my-app --yes              # defaults, no questions
@@ -367,6 +377,7 @@ underlying error — the two are never conflated. See [the Bun runtime](/docs/bu
 |---|---|
 | `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
 | `--skip-smoke` | Do not boot the compiled executable. For CI that cannot execute it (a foreign-architecture runner). The build prints a loud warning and the artifact ships unverified. |
+| `--verbose` | List every compile and closure note. By default they are folded into one line, such as `[knext standalone-compile] 12 notes; rerun with --verbose for details`. Warnings and errors always print in full. |
 | `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `knext.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. |
 | `-h`, `--help` | Show the usage help. |
 

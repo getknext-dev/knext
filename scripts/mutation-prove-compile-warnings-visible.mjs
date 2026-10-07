@@ -38,6 +38,8 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const EXEC_SPEC = 'packages/kn-next/src/__tests__/exec.test.ts';
+const VERBOSE_SPEC = 'packages/kn-next/src/__tests__/build-verbose-flag.test.ts';
+const DROP_SPEC = 'packages/kn-next/src/__tests__/standalone-compile-dropped-specifier.test.ts';
 const WIRING_SPEC = 'packages/kn-next/src/__tests__/vinext-build-compile-warnings.test.ts';
 const SCAN_SPEC = 'packages/kn-next/src/__tests__/vinext-compile-log-prefix.test.ts';
 
@@ -46,6 +48,8 @@ const PROOF = {
     execTs: 'packages/kn-next/src/cli/exec.ts',
     vinextBuildTs: 'packages/kn-next/src/cli/vinext-build.ts',
     vinextCompileMjs: 'packages/kn-next/src/adapters/vinext-compile.mjs',
+    buildTs: 'packages/kn-next/src/cli/build.ts',
+    standaloneCompileMjs: 'packages/kn-next/src/adapters/standalone-compile.mjs',
   },
 };
 
@@ -67,15 +71,16 @@ const MUTATIONS = [
     label: 'runQuiet: stop honouring surfaceStdoutPrefix at all (always fully quiet)',
     subject: 'execTs',
     spec: EXEC_SPEC,
-    anchor: '    const { surfaceStdoutPrefix } = options;\n    if (!surfaceStdoutPrefix) {',
-    replacement: '    const { surfaceStdoutPrefix } = options;\n    if (true) {',
+    anchor:
+      '    const { surfaceStdoutPrefix, summarizeSurfaced } = options;\n    if (!surfaceStdoutPrefix) {',
+    replacement: '    const { surfaceStdoutPrefix, summarizeSurfaced } = options;\n    if (true) {',
   },
   {
     label: 'surfacePrefixedLines: print EVERY line, not just ones matching the prefix',
     subject: 'execTs',
     spec: EXEC_SPEC,
-    anchor: 'if (line.startsWith(prefix)) {\n            console.log(line);\n        }',
-    replacement: 'console.log(line);',
+    anchor: 'const matching = output.split("\\n").filter((l) => l.startsWith(prefix));',
+    replacement: 'const matching = output.split("\\n");',
   },
   {
     label:
@@ -91,9 +96,8 @@ const MUTATIONS = [
       'buildVinextExecutable: default run falls back to the plain runQuiet (no surfacing wired)',
     subject: 'vinextBuildTs',
     spec: WIRING_SPEC,
-    anchor:
-      '    const run =\n        opts.run ??\n        ((argv: readonly string[]) =>\n            runQuiet(argv, { surfaceStdoutPrefix: COMPILE_LOG_PREFIX }));',
-    replacement: '    const run = opts.run ?? runQuiet;',
+    anchor: '                surfaceStdoutPrefix: COMPILE_LOG_PREFIX,\n',
+    replacement: '',
   },
   {
     label: 'COMPILE_LOG_PREFIX: drift from the real vinext-compile.mjs literal',
@@ -171,16 +175,58 @@ const MUTATIONS = [
       '    `wrote ${OUTFILE} (bytecode: on${TARGET ? `, target: ${TARGET}` : ""})\\n`,\n' +
       ');',
   },
+  {
+    label: 'runQuiet: summarizeSurfaced ignored (every note is listed again)',
+    subject: 'execTs',
+    spec: EXEC_SPEC,
+    anchor: '    if (summarize) {',
+    replacement: '    if (false) {',
+  },
+  {
+    label: 'buildVinextExecutable: never asks for the summary (notes listed by default)',
+    subject: 'vinextBuildTs',
+    spec: WIRING_SPEC,
+    anchor: ': { summarizeSurfaced: true }',
+    replacement: ': {}',
+  },
+  {
+    label: 'buildVinextExecutable: KNEXT_VERBOSE no longer lifts the summary',
+    subject: 'vinextBuildTs',
+    spec: WIRING_SPEC,
+    anchor: 'process.env.KNEXT_VERBOSE === "1"\n                    ? {}',
+    replacement: 'false\n                    ? {}',
+  },
+  {
+    label: 'knext build: --verbose no longer reaches the compile children',
+    subject: 'buildTs',
+    spec: VERBOSE_SPEC,
+    anchor: 'if (argv.includes("--verbose")) process.env.KNEXT_VERBOSE = "1";',
+    replacement: '',
+  },
+  {
+    label: 'standalone-compile: dropped-specifier notes always printed (default build noisy again)',
+    subject: 'standaloneCompileMjs',
+    spec: DROP_SPEC,
+    anchor: '    if (VERBOSE) {\n        console.error(line);',
+    replacement: '    if (true) {\n        console.error(line);',
+  },
+  {
+    label: 'standalone-compile: a FAILED compile no longer prints the held notes',
+    subject: 'standaloneCompileMjs',
+    spec: DROP_SPEC,
+    anchor: '    if (code !== 0) {\n        for (const line of QUIET_NOTES)',
+    replacement: '    if (false) {\n        for (const line of QUIET_NOTES)',
+  },
 ];
 
-declareMutations(9);
+declareMutations(15);
 
-if (MUTATIONS.length !== 9) {
-  console.error(`FATAL: declared 9 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 15) {
+  console.error(`FATAL: declared 15 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
-const ALL_SPECS = [EXEC_SPEC, WIRING_SPEC, SCAN_SPEC];
+const ALL_SPECS = [EXEC_SPEC, WIRING_SPEC, SCAN_SPEC, VERBOSE_SPEC, DROP_SPEC];
 
 console.log('Baseline: every spec must be GREEN before anything is mutated.');
 if (!ALL_SPECS.every((s) => specPasses(s))) {

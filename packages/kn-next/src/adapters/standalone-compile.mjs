@@ -376,12 +376,36 @@ const CACHE_HANDLER_ROOTS = cacheHandlerRoots();
 // instead of ~550 KB later as an unrelated bytecode-marker failure) without
 // scaling the noise with how many files happen to reference it.
 const WARNED_DROPPED_SPECIFIERS = new Set();
+
+// A default (hello-world) build drops a dozen dead optional specifiers from
+// Next's own server core; printing each one made a healthy build look broken.
+// So unless `knext build --verbose` (KNEXT_VERBOSE=1) asked for them, the notes
+// are held back and folded into ONE summary line at exit. A FAILED compile
+// still prints every held note first: a drop logged right before a failure is
+// exactly the context the reader needs. The prefix is kept either way.
+const VERBOSE =
+    process.env.KNEXT_VERBOSE === "1" ||
+    process.env.KNEXT_STANDALONE_COMPILE_VERBOSE === "1";
+const QUIET_NOTES = [];
+process.on("exit", (code) => {
+    if (QUIET_NOTES.length === 0) return;
+    if (code !== 0) {
+        for (const line of QUIET_NOTES) console.error(line);
+        return;
+    }
+    console.error(
+        `[knext standalone-compile] ${QUIET_NOTES.length} note${QUIET_NOTES.length === 1 ? "" : "s"}; rerun with --verbose for details`,
+    );
+});
 function warnDroppedSpecifier(spec, fromDir, err) {
     if (WARNED_DROPPED_SPECIFIERS.has(spec)) return;
     WARNED_DROPPED_SPECIFIERS.add(spec);
-    console.error(
-        `[knext standalone-compile] disk closure: dropping ${JSON.stringify(spec)} (required from ${fromDir}) — ${err instanceof Error ? err.message : String(err)}`,
-    );
+    const line = `[knext standalone-compile] disk closure: dropping ${JSON.stringify(spec)} (required from ${fromDir}) — ${err instanceof Error ? err.message : String(err)}`;
+    if (VERBOSE) {
+        console.error(line);
+    } else {
+        QUIET_NOTES.push(line);
+    }
 }
 
 function computeDiskClosure(extraRoots = []) {
