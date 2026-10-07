@@ -116,6 +116,11 @@
       "file": "vinext-2560-pages-root-import-order.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/2560",
       "summary": "Pages Router: the built server entry imports `_document`, then `_app`, then the page modules (Next.js module evaluation order), so side effects in a custom document run before the app's and the page's. Not yet merged upstream; retire when the pinned vinext includes cloudflare/vinext#2560."
+    },
+    {
+      "file": "vinext-3763-nitro-inline-css-manifest.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3763",
+      "summary": "Nitro builds, App Router: `experimental.inlineCss` inlines the stylesheets again. The inline-CSS manifest is read from the client environment's real output directory and injected into the RSC environment's real entry, instead of hard-coded `dist/client` and `dist/server` that Nitro never writes, so the Nitro server sets `globalThis.__VINEXT_INLINE_CSS__`. Open upstream (issue cloudflare/vinext#3762); retire when the pinned vinext includes cloudflare/vinext#3763."
     }
   ],
   "pristine": {
