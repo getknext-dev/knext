@@ -1,5 +1,11 @@
 # @getknext/db
 
+## 1.3.0-rc.8
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.8
+
 ## 1.3.0-rc.7
 
 ### Patch Changes
