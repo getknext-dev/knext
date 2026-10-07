@@ -1,5 +1,20 @@
 # kn-next
 
+## 1.3.0-rc.7
+
+### Patch Changes
+
+- Updated dependencies [c45f0303]
+- Updated dependencies [5d4915b8]
+- Updated dependencies [ca6080c1]
+- Updated dependencies [d27e4b10]
+- Updated dependencies [8933ef3b]
+- Updated dependencies [3600300f]
+- Updated dependencies [fd84b65e]
+- Updated dependencies [2722d392]
+- Updated dependencies [8f967355]
+  - @getknext/core@1.3.0-rc.7
+
 ## 1.3.0-rc.6
 
 ### Patch Changes

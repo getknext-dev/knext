@@ -1,5 +1,19 @@
 # @getknext/core
 
+## 1.3.0-rc.7
+
+### Patch Changes
+
+- c45f0303: New apps scaffolded by `knext create` now declare `sharp` `^0.35.5`, the first release with the fix for GHSA-wq5f-xc86-pv6w. The old `^0.35.2` range already resolved to a fixed version at install time, but the declared floor now excludes the vulnerable releases too.
+- 5d4915b8: The vinext target's Bun single executable now embeds a file that any dependency reads from beside its own code (`readFileSync(new URL('./x.wasm', import.meta.url))`, directly or through `fileURLToPath`). Previously only `@vercel/og` was covered, so another package with the same pattern failed with ENOENT once the binary left the build machine. The build decides by what the URL is used for: file reads are embedded, while `new Worker(...)`, `fetch(...)` and dynamic `import(...)` URLs are left unchanged. The build log lists each embedded file. `@getknext/core` now depends on `acorn`, which it uses to analyse those reads.
+- ca6080c1: On the vinext target, text followed by a `next/dynamic` component now server-renders like Next.js: the bundled vinext fixes no longer leave an extra `<!-- -->` marker between the text and the component's Suspense boundary. The dynamic component's preload hints are still emitted.
+- d27e4b10: `images.loaderFile` in `next.config` now works on the vinext target: `next/image` renders through your custom loader instead of silently using the built-in `/_next/image` endpoint. A missing loader file, or a `loader` other than `default`/`custom` set next to it, fails the build as in Next.js, and `images.loader: 'custom'` without a loader throws Next.js's missing-loader error. Delivered as a bundled vinext fix on top of the earlier `next/image` one, so apps that already carry that fix pick it up without reinstalling.
+- 8933ef3b: On the vinext target, a Pages Router app now serves `/_next/image` instead of answering 404, so images left on the built-in optimizer load — including ones an `images.loaderFile` loader sends to `/_next/image/`. A `url` that points back at `/_next/image` is rejected with a 400, as in Next.js. Delivered as a bundled vinext fix on top of the earlier `/_next/image` one, so apps that already carry that fix pick it up without reinstalling.
+- 3600300f: On the vinext target, a `next.config` rewrite (or a middleware rewrite) whose destination is a file in `public/` now serves that file instead of the 404 page. This covers the Pages Router in all three rewrite phases (`beforeFiles`, `afterFiles`, `fallback`) and the App Router's `beforeFiles` and middleware rewrites. Delivered as a bundled vinext fix until vinext ships it. Middleware still does not run for a direct request to a file in `public/` on this target.
+- fd84b65e: Pages that use `<style jsx>` now render on the vinext target instead of failing with an "Invalid hook call" error: the bundled vinext fixes make the Nitro build trace `react` and `react-dom`, so styled-jsx shares the server's single React copy (also after the `.output` directory is moved), on both the Node build and the compiled single executable.
+- 2722d392: Internal: the values of `KNEXT_VINEXT_PATCHES` that turn off the bundled vinext fixes (`0`, `false`, `off`, `no`) now come from one shared list. Behaviour is unchanged.
+- 8f967355: The vinext fixes knext bundles now match the upstream maintainers' latest versions: repeated slashes and backslashes in a request path redirect (`308`) like Next.js, a custom `next/image` loader also serves `fill` images and skips inline sources, `outputFileTracingIncludes`/`outputFileTracingExcludes` follow Next.js route and glob matching, and `x-nextjs-cache: MISS` on `/_next/image` is sent only with the image bytes. Two bundled fixes were dropped because vinext 1.0.1 already behaves that way or upstream declined them.
+
 ## 1.3.0-rc.6
 
 ### Patch Changes
