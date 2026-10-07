@@ -91,6 +91,11 @@
       "file": "vinext-3750-nitro-public-file-rewrites.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3750",
       "summary": "Nitro builds (node/bun presets): a rewrite whose destination is a `public/` file serves that file instead of the 404 page (Pages Router, all three rewrite phases) or an empty 200 (App Router, `beforeFiles` and middleware rewrites); the file is fetched back through the running Nitro app, whose static handler serves it. `/_next/image` is unchanged. Middleware on a direct literal public-file request is NOT covered (upstream #3217). Applies on top of vinext-3741-nitro-pages-image-optimizer.patch. Open upstream."
+    },
+    {
+      "file": "vinext-3753-next-dynamic-preload-text-separator.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3753",
+      "summary": "next/dynamic: the server render puts the preload hints inside the Suspense boundary, next to the lazy component (as Next.js renders <PreloadChunks>), instead of in front of it. A hoisted `<link rel=\"modulepreload\">` right after a text node made React write a `<!-- -->` text separator, so text followed by a dynamic() component rendered `Index<!-- --><!--$-->1` instead of Next.js's `Index<!--$-->1`. The hints are still hoisted. Open upstream (issue cloudflare/vinext#3751)."
     }
   ],
   "pristine": {
@@ -117,6 +122,7 @@
     "dist/server/metadata-routes.js": "66d9479ae1dc2da3d3a52aa7c59985982d77352f4916cf131e5ee8bb294c4f55",
     "dist/server/prod-server.js": "a024dcbc8d33d1ed77f889df6aec0fd74c38061bfcc40093f9cf7cd77766dfa2",
     "dist/server/request-pipeline.js": "f50f66325cbbddd0c42fd47053d34ccfaa06e2969abf3106db886b3c8736afc7",
-    "dist/server/worker-revalidation-context.js": "f28e0a44b8a49460a77db90594c23d118f33f9a740882faf061e1e4652fd46e7"
+    "dist/server/worker-revalidation-context.js": "f28e0a44b8a49460a77db90594c23d118f33f9a740882faf061e1e4652fd46e7",
+    "dist/shims/dynamic.js": "66caec229001994c1db53882fb893dc442135494df0aba462226bbab749f3b34"
   }
 }

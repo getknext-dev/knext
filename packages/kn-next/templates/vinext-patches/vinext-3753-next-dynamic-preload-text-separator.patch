@@ -1,0 +1,19 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3753
+What it fixes: next/dynamic's server render put the preload hints (`<link rel="modulepreload">`, hoisted into <head>) in front of the Suspense boundary. A hoisted link that follows a text node makes React's SSR write a `<!-- -->` text separator, so text followed by a dynamic() component rendered `Index<!-- --><!--$-->1<!--/$-->` instead of Next.js's `Index<!--$-->1<!--/$-->` (Next.js deploy test test/e2e/next-dynamic). The hints now render as the boundary's first child, next to the lazy component, as Next.js renders <PreloadChunks>; React still hoists them.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3753.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/shims/dynamic.js
++++ b/dist/shims/dynamic.js
+@@ -181,7 +181,7 @@
+ 					resetKey: 0
+ 				}, lazyElement);
+ 			}
+-			return React.createElement(React.Fragment, null, React.createElement(DynamicPreloadChunks, { moduleIds: preloadModuleIds }), React.createElement(React.Suspense, { fallback }, content));
++			return React.createElement(React.Suspense, { fallback }, React.createElement(DynamicPreloadChunks, { moduleIds: preloadModuleIds }), content);
+ 		};
+ 		ServerDynamic.displayName = "DynamicServer";
+ 		return ServerDynamic;
