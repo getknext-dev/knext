@@ -1,0 +1,163 @@
+---
+title: GitOps (Argo CD & Flux)
+description: Generate the NextApp CR with knext, commit it, and let Argo CD or Flux sync it, with the strict-validation caveat and how to guard against it.
+---
+
+knext's cluster contract is a single `NextApp` custom resource. That makes it a natural fit for
+GitOps: **CI builds and pushes the image and renders the CR; git holds the CR; Argo CD or Flux
+applies it; the operator reconciles it.** The knext CLI never needs cluster access in this flow.
+
+## 1. Render the CR without touching the cluster
+
+`knext deploy --dry-run` prints the `NextApp` CR to stdout and changes nothing. There is no
+output-file flag; redirect stdout. Set `LOG_LEVEL=silent` so stdout carries only the YAML (see the
+note under [`knext deploy`](/docs/cli#knext-deploy-default)).
+
+```bash title="shell"
+LOG_LEVEL=silent knext deploy --dry-run \
+  --image registry.example.com/shop/storefront@sha256:<digest> \
+  -n shop > deploy/storefront/nextapp.yaml
+```
+
+`--image` takes a pre-built, digest-pinned image, so nothing is built or pushed and the CR points at
+exactly the image your pipeline produced. Without `--image`, a dry run renders the mutable tag
+(fine for a preview, not for git).
+
+The rendered CR reflects your `knext.config.ts`. If your app does not serve `/api/health`, set
+`healthCheckPath` there; otherwise the revision never becomes ready.
+
+Review the diff, commit it, and open a pull request like any other change.
+
+<Callout type="warn">
+**Commit digests, never tags.** The CR's `spec.image` must end in `@sha256:…`. The operator rejects
+`:latest` and any unpinned reference, and a tag can change underneath a commit that did not change.
+</Callout>
+
+## 2. Sync it
+
+Point your GitOps controller at the directory holding the CR. The namespace in the CR
+(`metadata.namespace`) must already exist, or let the controller create it.
+
+### Argo CD
+
+```yaml title="argocd-application.yaml"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: storefront
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://git.example.com/acme/deploy.git
+    targetRevision: main
+    path: deploy/storefront
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shop
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+For many apps, an `ApplicationSet` with a git directory generator creates one `Application` per
+folder:
+
+```yaml title="argocd-applicationset.yaml"
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: knext-apps
+  namespace: argocd
+spec:
+  generators:
+    - git:
+        repoURL: https://git.example.com/acme/deploy.git
+        revision: main
+        directories:
+          - path: deploy/*
+  template:
+    metadata:
+      name: "{{path.basename}}"
+    spec:
+      project: default
+      source:
+        repoURL: https://git.example.com/acme/deploy.git
+        targetRevision: main
+        path: "{{path}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{path.basename}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+```
+
+### Flux
+
+```yaml title="flux-kustomization.yaml"
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: storefront
+  namespace: flux-system
+spec:
+  interval: 5m
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: deploy
+  path: ./deploy/storefront
+  targetNamespace: shop
+  healthChecks:
+    - apiVersion: apps.kn-next.dev/v1alpha1
+      kind: NextApp
+      name: storefront
+      namespace: shop
+```
+
+<Callout type="info">
+The Argo CD and Flux manifests above are standard, current-API examples. The generated CR itself
+was applied and reconciled to `Ready` on the reference cluster; **the Argo CD and Flux sync steps
+were not verified on the reference cluster**, which has neither controller installed.
+</Callout>
+
+## 3. The strict-validation caveat
+
+knext's own CLI applies the CR with `kubectl apply --validate=strict`, so a field the cluster's
+`NextApp` CRD does not know is **rejected** with a clear error. **Argo CD and Flux do not apply
+with strict validation.** If your CR was rendered by a newer CLI than the operator running in the
+cluster, an unknown field can be **silently pruned**: the sync succeeds, the app comes up, and the
+setting you wrote simply is not there.
+
+Two things keep you safe:
+
+1. **Upgrade order: operator and CRD first, then the CLI.** A newer CRD understands every field an
+   older CLI emits. See [Upgrading knext](/docs/upgrading).
+2. **Check in CI, before merge.** Run [`knext doctor`](/docs/cli#knext-doctor) against the target
+   cluster in the pipeline that renders the CR. Its CRD schema check reports any field your CLI
+   emits that the installed CRD does not define:
+
+   ```bash title="shell"
+   knext doctor --json
+   ```
+
+   Fail the pipeline if that check is not green. You can also reproduce the strict check yourself
+   on the rendered file:
+
+   ```bash title="shell"
+   kubectl apply --dry-run=server --validate=strict -f deploy/storefront/nextapp.yaml
+   ```
+
+## 4. Image digests
+
+The image in the committed CR is the source of truth for what runs. Pin it by digest
+(`registry/name@sha256:…`) and update it through a pull request: the digest changes, git records
+who changed it and when, and rolling back is a `git revert`. Tag-only references and `:latest` are
+refused by the operator.
