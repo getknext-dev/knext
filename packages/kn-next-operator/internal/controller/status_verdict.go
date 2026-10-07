@@ -675,8 +675,9 @@ func computeStatusVerdict(
 	// no-op; the Warning event fires only on entry or when the message changes.
 	prevBlocked := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPodCreationBlocked)
 	switch {
-	case pc.unknown:
-		// A failed read is not evidence the block is gone: carry the prior verdict.
+	case pc.unknown || pc.sticky:
+		// A failed read is not evidence the block is gone (nor is a reason flip on the
+		// same still-unavailable revision): carry the prior verdict.
 		if prevBlocked != nil {
 			v.conditions = append(v.conditions, *prevBlocked)
 		}
@@ -691,10 +692,17 @@ func computeStatusVerdict(
 					"Adjust spec.resources (cpuLimit/cpuRequest/memory) to fit, or change the namespace LimitRange/ResourceQuota.",
 				pc.revision, pc.message),
 		}
-		v.conditions = append(v.conditions, cond)
-		if prevBlocked == nil || prevBlocked.Reason != cond.Reason || prevBlocked.Message != cond.Message {
+		// Same reason on the same revision is not news: the admission message embeds
+		// live quota "used:" figures that drift, so freeze the message (no status
+		// rewrite) and stay quiet. Reason or revision change re-emits.
+		unchanged := prevBlocked != nil && prevBlocked.Reason == cond.Reason &&
+			strings.HasPrefix(prevBlocked.Message, "revision "+pc.revision+" ")
+		if unchanged {
+			cond.Message = prevBlocked.Message
+		} else {
 			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, pc.reason, cond.Message})
 		}
+		v.conditions = append(v.conditions, cond)
 		// A blocked rollout never self-heals without a user change; keep
 		// re-evaluating so recovery clears the condition promptly.
 		if v.requeueAfter == 0 || v.requeueAfter > ksvcNotReadyRequeueAfter {

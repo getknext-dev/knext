@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -57,8 +58,12 @@ const (
 // podCreationState carries the observation into computeStatusVerdict (which
 // does no I/O). Zero value = not blocked.
 type podCreationState struct {
-	blocked  bool
-	unknown  bool // read failed: keep the prior verdict rather than flip-flop
+	blocked bool
+	unknown bool // read failed: keep the prior verdict rather than flip-flop
+	// sticky: the SAME revision we already reported is still ResourcesAvailable=False
+	// but Knative changed the reason (FailedCreate -> ProgressDeadlineExceeded after
+	// the progress deadline). The pods are still blocked: carry the prior verdict.
+	sticky   bool
 	reason   string
 	revision string
 	message  string
@@ -73,7 +78,9 @@ func classifyPodCreationBlock(rev *servingv1.Revision) (message, reason string, 
 	}
 	msg := cond.Message
 	switch {
-	case strings.Contains(msg, "exceeded quota"):
+	case strings.Contains(msg, "exceeded quota"),
+		strings.Contains(msg, "failed quota:"), // "must specify limits.cpu for: queue-proxy"
+		strings.Contains(msg, "insufficient quota to consume"):
 		return msg, ReasonQuotaExceeded, true
 	case strings.Contains(msg, "usage per Container is"),
 		strings.Contains(msg, "usage per Pod is"),
@@ -101,6 +108,14 @@ func (r *NextAppReconciler) detectPodCreationBlocked(ctx context.Context, app *a
 	}
 	msg, reason, blocked := classifyPodCreationBlock(rev)
 	if !blocked {
+		// Knative flips the reason to ProgressDeadlineExceeded while the pods are
+		// still rejected. Keep reporting until THIS revision recovers or is replaced.
+		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPodCreationBlocked)
+		if prev != nil && strings.HasPrefix(prev.Message, "revision "+name+" ") {
+			if ra := rev.Status.GetCondition(servingv1.RevisionConditionResourcesAvailable); ra != nil && ra.IsFalse() {
+				return podCreationState{sticky: true}
+			}
+		}
 		return podCreationState{}
 	}
 	return podCreationState{blocked: true, reason: reason, revision: name, message: msg}

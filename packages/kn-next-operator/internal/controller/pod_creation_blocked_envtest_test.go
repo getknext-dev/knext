@@ -103,6 +103,12 @@ var _ = Describe("NextApp PodCreationBlocked from a rejected revision", func() {
 		Expect(c.Reason).To(Equal(ReasonQuotaExceeded))
 		Expect(c.Message).To(ContainSubstring("exceeded quota"))
 
+		// Knative flips the reason after the progress deadline; pods are still blocked.
+		setRevision(corev1.ConditionFalse, "ProgressDeadlineExceeded", "Initial scale was never achieved")
+		reconcileOnce()
+		Expect(blockedCond()).NotTo(BeNil())
+		Expect(blockedCond().Reason).To(Equal(ReasonQuotaExceeded))
+
 		setRevision(corev1.ConditionTrue, "", "")
 		reconcileOnce()
 		Expect(blockedCond()).To(BeNil())

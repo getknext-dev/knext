@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-
 package controller
 
 import (
@@ -26,9 +25,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
@@ -40,8 +39,10 @@ import (
 // error), so the operator reads the Revision — no Events RBAC, no pod mirror.
 
 const (
-	limitRangeMsg = `pods "shop-00001-deployment-abc" is forbidden: [maximum cpu usage per Container is 500m, but limit is 1, cpu max limit to request ratio per Container is 2, but provided ratio is 4.000000]`
-	quotaMsg      = `pods "shop-00001-deployment-abc" is forbidden: exceeded quota: team-quota, requested: limits.cpu=1, used: limits.cpu=3500m, limited: limits.cpu=4`
+	limitRangeMsg   = `pods "shop-00001-deployment-abc" is forbidden: [maximum cpu usage per Container is 500m, but limit is 1, cpu max limit to request ratio per Container is 2, but provided ratio is 4.000000]`
+	mustSpecifyMsg  = `pods "shop-00001-deployment-abc" is forbidden: failed quota: team-quota: must specify limits.cpu for: queue-proxy; limits.memory for: queue-proxy`
+	insufficientMsg = `pods "shop-00001-deployment-abc" is forbidden: insufficient quota to consume: pods`
+	quotaMsg        = `pods "shop-00001-deployment-abc" is forbidden: exceeded quota: team-quota, requested: limits.cpu=1, used: limits.cpu=3500m, limited: limits.cpu=4`
 )
 
 func blockedRevision(reason, msg string, status corev1.ConditionStatus) *servingv1.Revision {
@@ -65,6 +66,8 @@ func TestClassifyPodCreationBlock(t *testing.T) {
 	}{
 		{"limitrange", blockedRevision("FailedCreate", limitRangeMsg, corev1.ConditionFalse), true, ReasonLimitRangeRejected},
 		{"quota", blockedRevision("FailedCreate", quotaMsg, corev1.ConditionFalse), true, ReasonQuotaExceeded},
+		{"failed quota: must specify limits (queue-proxy has none)", blockedRevision("FailedCreate", mustSpecifyMsg, corev1.ConditionFalse), true, ReasonQuotaExceeded},
+		{"insufficient quota to consume", blockedRevision("FailedCreate", insufficientMsg, corev1.ConditionFalse), true, ReasonQuotaExceeded},
 		{"other FailedCreate (webhook) is out of scope", blockedRevision("FailedCreate", `admission webhook "x" denied the request`, corev1.ConditionFalse), false, ""},
 		{"other reason with quota text is out of scope", blockedRevision("ProgressDeadlineExceeded", quotaMsg, corev1.ConditionFalse), false, ""},
 		{"healthy", blockedRevision("", "", corev1.ConditionTrue), false, ""},
@@ -172,5 +175,81 @@ func TestDetectPodCreationBlocked_ReadsLatestCreatedRevision(t *testing.T) {
 	st = r.detectPodCreationBlocked(context.Background(), app, ksvc)
 	if st.blocked || st.unknown {
 		t.Fatalf("got %+v", st)
+	}
+}
+
+func TestPodCreationBlocked_UsedNumbersChurnIsQuiet(t *testing.T) {
+	now := time.Now()
+	first := podCreationState{blocked: true, reason: ReasonQuotaExceeded, revision: "shop-00001", message: quotaMsg}
+	v := verdictWithPodCreation(verdictApp(), first, now)
+	c := findVerdictCondition(t, v, ConditionPodCreationBlocked)
+
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{c}
+	drifted := first
+	drifted.message = strings.Replace(quotaMsg, "used: limits.cpu=3500m", "used: limits.cpu=3600m", 1)
+	v2 := verdictWithPodCreation(app, drifted, now)
+	if len(v2.events) != 0 {
+		t.Fatalf("a changed used: figure must not re-fire the event, got %+v", v2.events)
+	}
+	if got := findVerdictCondition(t, v2, ConditionPodCreationBlocked); got.Message != c.Message {
+		t.Fatalf("message must stay stable while reason+revision are unchanged (no status rewrite), got %q", got.Message)
+	}
+
+	// A different revision IS news.
+	other := drifted
+	other.revision = "shop-00002"
+	v3 := verdictWithPodCreation(app, other, now)
+	if len(v3.events) != 1 {
+		t.Fatalf("new revision must emit, got %+v", v3.events)
+	}
+}
+
+func TestPodCreationBlocked_StickyKeepsPriorVerdict(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	prior := metav1.Condition{Type: ConditionPodCreationBlocked, Status: metav1.ConditionTrue, Reason: ReasonQuotaExceeded, Message: "revision shop-00001 cannot create pods"}
+	app.Status.Conditions = []metav1.Condition{prior}
+	v := verdictWithPodCreation(app, podCreationState{sticky: true}, now)
+	if c := findVerdictCondition(t, v, ConditionPodCreationBlocked); c.Message != prior.Message || len(v.events) != 0 {
+		t.Fatalf("sticky must carry verbatim, got %+v / %+v", c, v.events)
+	}
+}
+
+func TestDetectPodCreationBlocked_StaysBlockedAfterProgressDeadline(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := servingv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionPodCreationBlocked, Status: metav1.ConditionTrue, Reason: ReasonQuotaExceeded,
+		Message: "revision shop-00001 cannot create pods — rejected: x.",
+	}}
+	ksvc := &servingv1.Service{}
+	ksvc.Status.LatestCreatedRevisionName = "shop-00001"
+	detect := func(rev *servingv1.Revision, ksvc *servingv1.Service) podCreationState {
+		r := &NextAppReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(rev).Build()}
+		return r.detectPodCreationBlocked(context.Background(), app, ksvc)
+	}
+
+	// Same revision, reason flipped, still ResourcesAvailable=False -> sticky.
+	st := detect(blockedRevision("ProgressDeadlineExceeded", "Initial scale was never achieved", corev1.ConditionFalse), ksvc)
+	if !st.sticky || st.blocked {
+		t.Fatalf("want sticky, got %+v", st)
+	}
+	// Recovered (True) -> cleared.
+	st = detect(blockedRevision("", "", corev1.ConditionTrue), ksvc)
+	if st.sticky || st.blocked || st.unknown {
+		t.Fatalf("recovery must clear, got %+v", st)
+	}
+	// A NEW latest revision (still False for another reason) -> not carried.
+	newRev := blockedRevision("ProgressDeadlineExceeded", "x", corev1.ConditionFalse)
+	newRev.Name = "shop-00002"
+	ksvc2 := &servingv1.Service{}
+	ksvc2.Status.LatestCreatedRevisionName = "shop-00002"
+	st = detect(newRev, ksvc2)
+	if st.sticky || st.blocked {
+		t.Fatalf("new revision must not inherit the prior block, got %+v", st)
 	}
 }
