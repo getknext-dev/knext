@@ -472,6 +472,11 @@ The fixes bundled with vinext 1.0.1:
   server's single React copy, including after you move the `.output` directory. If your app
   was scaffolded before this fix and you do not use the bundled fixes, add
   `traceDeps: ['react', 'react-dom']` to the `nitro({ ... })` options in `vite.config.ts`.
+- **A rewrite to a file in `public/`** (a `next.config` rewrite, or `NextResponse.rewrite()` in
+  middleware) serves that file instead of the 404 page. Pages Router apps get this for
+  `beforeFiles`, `afterFiles` and `fallback` rewrites, App Router apps for `beforeFiles` and
+  middleware rewrites. Middleware still does not run for a direct request to a file in `public/`:
+  the server answers those before your middleware.
 
 ## Build the image on your own builder (Cloud Build / CI)
 

@@ -86,11 +86,17 @@
       "file": "vinext-3747-nitro-trace-react.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3747",
       "summary": "Nitro builds: React and react-dom are always traced into the server output, so a bundled CommonJS dependency such as styled-jsx (`<style jsx>`) shares the server's single React copy instead of loading a second one and failing with an invalid-hook-call error, including after the output directory is moved. Open upstream."
+    },
+    {
+      "file": "vinext-3750-nitro-public-file-rewrites.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3750",
+      "summary": "Nitro builds (node/bun presets): a rewrite whose destination is a `public/` file serves that file instead of the 404 page (Pages Router, all three rewrite phases) or an empty 200 (App Router, `beforeFiles` and middleware rewrites); the file is fetched back through the running Nitro app, whose static handler serves it. `/_next/image` is unchanged. Middleware on a direct literal public-file request is NOT covered (upstream #3217). Applies on top of vinext-3741-nitro-pages-image-optimizer.patch. Open upstream."
     }
   ],
   "pristine": {
     "dist/build/client-build-config.js": "2d20d75032242188c751e310cb3b5c76be4bf17c37f5239c03a3e03c500d718c",
     "dist/check.js": "d408170d32517d2eb6f882f54c18c7f3417cd323dcdea3f4e1be2c794e672b50",
+    "dist/entries/app-ssr-entry.js": "6b025a80f17e7904229cf26502f074bd4770599224047b826b7781c76cd673bf",
     "dist/shims/public-shim-map.json.js": "46ffbbbacc08fc670e3d1998f91829842cb1abd3893854b2617ecd7ce9d9ea38",
     "dist/config/next-config.js":"4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
     "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
@@ -110,6 +116,7 @@
     "dist/server/app-ssr-entry.js": "db1e1d348fe418da332d940e13ab8d6c07ab78600b579f00430350cd40365470",
     "dist/server/metadata-routes.js": "66d9479ae1dc2da3d3a52aa7c59985982d77352f4916cf131e5ee8bb294c4f55",
     "dist/server/prod-server.js": "a024dcbc8d33d1ed77f889df6aec0fd74c38061bfcc40093f9cf7cd77766dfa2",
-    "dist/server/request-pipeline.js": "f50f66325cbbddd0c42fd47053d34ccfaa06e2969abf3106db886b3c8736afc7"
+    "dist/server/request-pipeline.js": "f50f66325cbbddd0c42fd47053d34ccfaa06e2969abf3106db886b3c8736afc7",
+    "dist/server/worker-revalidation-context.js": "f28e0a44b8a49460a77db90594c23d118f33f9a740882faf061e1e4652fd46e7"
   }
 }
