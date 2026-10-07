@@ -28,6 +28,7 @@
     "versioning",
     "upgrading",
     "rollback",
+    "gitops",
     "previews",
     "skew-protection",
     "---Platform---",
