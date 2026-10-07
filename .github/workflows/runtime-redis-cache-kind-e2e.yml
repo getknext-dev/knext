@@ -410,16 +410,18 @@ jobs:
             *) echo "::error::cacheHandler is '${handler}', want the ${{ matrix.runtime }} entry"; exit 1;;
           esac
 
-      - name: Assert the vinext node image ships ioredis (a literal import nitro traced)
+      - name: Assert the vinext node image carries ioredis (bundled into the nitro server, or a traced node_modules package)
         if: matrix.builder == 'vinext' && matrix.runtime == 'node'
         run: |
           set -euo pipefail
           img="$(kubectl -n "$APP_NS" get ksvc "$APP_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}')"
           echo "image=${img}"
           docker pull "$img" >/dev/null
-          # List through the image's own node: the runtime image has no shell tools.
-          docker run --rm --entrypoint node "$img" -e 'const {execSync}=require("node:child_process");try{const o=execSync("find / -type d -path \"*node_modules/ioredis\" -not -path \"/proc/*\" 2>/dev/null",{encoding:"utf8"});console.log(o);process.exit(o.trim()?0:1)}catch{process.exit(1)}' \
-            || { echo "::error::no node_modules/ioredis in the vinext node image, Redis would silently fall back to memory"; exit 1; }
+          # nitro bundles the literal ioredis import into .output/server/index.mjs
+          # (no node_modules/ioredis directory exists in that case). Accept either
+          # form; the `(redis)` cache lines below are the behavioural proof.
+          docker run --rm --entrypoint node "$img" -e 'const fs=require("node:fs");const src=fs.readFileSync("/app/.output/server/index.mjs","utf8");const bundled=src.includes("enableOfflineQueue")&&src.includes("cluster_state");const dir=fs.existsSync("/app/.output/server/node_modules/ioredis");console.log({bundled,dir});process.exit(bundled||dir?0:1)' \
+            || { echo "::error::ioredis is neither bundled into the vinext node server nor present as a package, Redis would silently fall back to memory"; exit 1; }
 
       - name: Assert the node image carries ioredis where the traced cache handler resolves it
         if: matrix.builder != 'vinext' && matrix.runtime == 'node'

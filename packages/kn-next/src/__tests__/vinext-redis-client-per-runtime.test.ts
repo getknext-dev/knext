@@ -201,3 +201,29 @@ describe("a configured Redis whose client cannot load is reported loudly, once",
         expect(hits).toBe(1);
     });
 });
+
+describe("nitro's bundle of the node adapter contains ioredis itself", () => {
+    it("bundling without --external ioredis inlines the client (nitro bundles it into .output/server; no node_modules/ioredis dir is needed)", () => {
+        const out = mkdtempSync(join(tmpdir(), "knext-1851-"));
+        tempRoots.push(out);
+        const res = spawnSync(
+            "bun",
+            [
+                "build",
+                join(ADAPTERS, "vinext-cache-adapter-node.mjs"),
+                "--target",
+                "node",
+                "--outdir",
+                out,
+            ],
+            { encoding: "utf8", cwd: PKG_ROOT },
+        );
+        expect(res.status).toBe(0);
+        const text = readFileSync(
+            join(out, "vinext-cache-adapter-node.js"),
+            "utf8",
+        );
+        expect(text).toContain("enableOfflineQueue");
+        expect(text).toContain("cluster_state");
+    });
+});
