@@ -121,6 +121,11 @@
       "file": "vinext-3763-nitro-inline-css-manifest.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3763",
       "summary": "Nitro builds, App Router: `experimental.inlineCss` inlines the stylesheets again. The inline-CSS manifest is read from the client environment's real output directory and injected into the RSC environment's real entry, instead of hard-coded `dist/client` and `dist/server` that Nitro never writes, so the Nitro server sets `globalThis.__VINEXT_INLINE_CSS__`. Open upstream (issue cloudflare/vinext#3762); retire when the pinned vinext includes cloudflare/vinext#3763."
+    },
+    {
+      "file": "vinext-3766-nitro-absolute-asset-prefix-path.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3766",
+      "summary": "Nitro builds: with an absolute-URL `assetPrefix` that has a path (`https://cdn.example.com/sub`), the client bundles also answer at `/sub/_next/static/...` on the deployment origin, as with `next start`. The Nitro setup hook publishes the on-disk `_next/static` directory under the prefixed path as a fallthrough public asset (misses still reach vinext's middleware and plain-text 404), with Nitro's immutable cache rule unless the user set one. Open upstream (issue cloudflare/vinext#3765); retire when the pinned vinext includes cloudflare/vinext#3766."
     }
   ],
   "pristine": {

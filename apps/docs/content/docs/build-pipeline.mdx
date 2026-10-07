@@ -62,6 +62,10 @@ before the app's and the page's.
 `experimental.inlineCss` in `next.config` works on this target with both runtimes: an App Router
 page inlines its stylesheets in `<style>` tags instead of linking them.
 
+An absolute-URL `assetPrefix` with a path (for example `https://cdn.example.com/assets`) works on
+this target with both runtimes: the app also serves its client bundles at `/assets/_next/static/...`
+on its own origin, so a CDN or proxy in front of it can fetch them from there.
+
 `next/og`'s `ImageResponse` (for example a dynamic `opengraph-image` route) works on this target
 with both runtimes, in pages API routes, app route handlers (Edge or Node.js runtime) and
 middleware:

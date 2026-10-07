@@ -1,0 +1,46 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3766 (issue https://github.com/cloudflare/vinext/issues/3765)
+What it fixes: with an absolute-URL `assetPrefix` that has a path component
+(`https://cdn.example.com/custom-asset-prefix`), a Nitro build (vinext() + nitro(), the knext
+scaffold on both the bun and node presets) emits `/custom-asset-prefix/_next/static/...` bundle
+URLs but writes the files to `_next/static/`. Nitro's static handler only knows the on-disk
+layout, so the bundles 404ed at their prefixed path on the deployment origin (Next.js deploy
+test `asset-prefix-absolute`); `vinext start` and `next start` both serve it. The Nitro setup
+hook now publishes `<output.publicDir>/_next/static` under `<prefix path>/_next/static` as a
+fallthrough public asset (a miss still reaches vinext's middleware and plain-text 404), with the
+immutable cache rule Nitro gives the client assetsDir unless the user set one. Path-prefix and
+plain-origin `assetPrefix` values are unchanged. Applies on top of every earlier patch in
+manifest order.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3766.
+Ported by hand from the upstream src change to the published 1.0.1 dist file.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -3917,6 +3917,26 @@
+ 					pagesDir: hasPagesDir ? pagesDir : null,
+ 					pageExtensions: nextConfig.pageExtensions
+ 				});
++				const { ASSET_PREFIX_URL_DIR, isAbsoluteAssetPrefix } = await import("./utils/asset-prefix.js");
++				const assetPrefix = nextConfig.assetPrefix ?? "";
++				const assetPathPrefix = assetPrefixPathname(assetPrefix);
++				if (isAbsoluteAssetPrefix(assetPrefix) && assetPathPrefix && nitro.options.output) {
++					const baseURL = `${assetPathPrefix}/${ASSET_PREFIX_URL_DIR}`;
++					nitro.options.publicAssets ??= [];
++					nitro.options.publicAssets.push({
++						dir: path.join(nitro.options.output.publicDir, ASSET_PREFIX_URL_DIR),
++						baseURL,
++						fallthrough: true,
++						maxAge: 0
++					});
++					nitro.options.routeRules ??= {};
++					const rule = nitro.options.routeRules[`${baseURL}/**`] ??= {};
++					const headers = rule.headers ?? {};
++					if (!headers["cache-control"]) rule.headers = {
++						...headers,
++						"cache-control": "public, max-age=31536000, immutable"
++					};
++				}
+ 				if (Object.keys(generatedRouteRules).length === 0) return;
+ 				const { routeRules, skippedRoutes } = mergeNitroRouteRules(nitro.options.routeRules, generatedRouteRules);
+ 				nitro.options.routeRules = routeRules;
