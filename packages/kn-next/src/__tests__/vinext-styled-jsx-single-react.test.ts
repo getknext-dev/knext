@@ -7,61 +7,32 @@
  * loads, the renderer's dispatcher is set on the other copy, and the page 500s
  * with `Invalid hook call` / a null dispatcher.
  *
- * This is a real build: install the pinned toolchain into a temp dir, apply
- * knext's bundled vinext patches, `vite build`, run `.output` under node and
- * request the page. It needs the npm registry (like the install-smoke gate).
+ * This is a real build: `bun install --frozen-lockfile` the committed fixture
+ * (exact pins + bun.lock) into a temp dir, apply knext's bundled vinext
+ * patches, `vite build`, run `.output` under node and request the page.
  */
 
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import {
-    cpSync,
-    mkdirSync,
-    mkdtempSync,
-    readFileSync,
-    rmSync,
-    writeFileSync,
-} from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import {
-    applyVinextPatches,
-    loadVinextPatchManifest,
-    vinextPatchesDir,
-} from "../cli/vinext-patches";
+import { join } from "node:path";
+import { applyVinextPatches } from "../cli/vinext-patches";
 
 const tempRoots: string[] = [];
 afterAll(() => {
     for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
 });
 
-const VINEXT = loadVinextPatchManifest(vinextPatchesDir()).vinext;
-
-function write(root: string, rel: string, body: string) {
-    mkdirSync(dirname(join(root, rel)), { recursive: true });
-    writeFileSync(join(root, rel), body);
-}
+const FIXTURE = join(import.meta.dir, "fixtures", "vinext-styled-jsx-app");
 
 describe("vinext x nitro: <style jsx> keeps a single React", () => {
     it("builds, runs under node, returns 200 and renders the page", async () => {
+        // The fixture carries exact pins plus a lockfile, so the install is
+        // reproducible; it is copied out and never built in place.
         const root = mkdtempSync(join(tmpdir(), "knext-styled-jsx-"));
         tempRoots.push(root);
-        write(
-            root,
-            "package.json",
-            '{"name":"sj","private":true,"type":"module"}\n',
-        );
-        write(
-            root,
-            "pages/index.js",
-            "export default function Home(){return (<div><p>hello-jsx</p><style jsx>{`p{color:red}`}</style></div>)}\n",
-        );
-        write(
-            root,
-            "vite.config.mjs",
-            "import { nitro } from 'nitro/vite';\nimport vinext from 'vinext';\nimport { defineConfig } from 'vite';\n" +
-                "export default defineConfig({plugins:[vinext(),nitro({preset:'node',rollupConfig:{output:{inlineDynamicImports:true}}})]});\n",
-        );
+        cpSync(FIXTURE, root, { recursive: true });
         const sh = (cmd: string, args: string[]) => {
             const r = spawnSync(cmd, args, { cwd: root, encoding: "utf8" });
             if (r.status !== 0)
@@ -69,15 +40,7 @@ describe("vinext x nitro: <style jsx> keeps a single React", () => {
                     `${cmd} ${args.join(" ")}\n${r.stdout}${r.stderr}`,
                 );
         };
-        sh("bun", [
-            "add",
-            `vinext@${VINEXT}`,
-            "vite@8.2.2",
-            "nitro@3.0.260610-beta",
-            "react@19.2.6",
-            "react-dom@19.2.6",
-            "next@16.3.6",
-        ]);
+        sh("bun", ["install", "--frozen-lockfile"]);
         applyVinextPatches(join(root, "node_modules", "vinext"));
         sh(join(root, "node_modules", ".bin", "vite"), ["build"]);
 
