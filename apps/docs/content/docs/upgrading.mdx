@@ -77,10 +77,15 @@ exactly the access a deploy already needs, so a restricted credential can still 
 
 ## Upgrading the operator
 
-Apply the operator release for the version you want, then confirm the CRD is in place:
+Apply the operator release for the version you want, then confirm the CRD is in place. Name the
+version rather than a moving address, so the same command is reproducible later and tells you
+what to roll back to (see [Pin, upgrade and roll back the operator](/docs/versioning#pin-upgrade-and-roll-back-the-operator)):
 
 ```bash
+kubectl apply --server-side -f \
+  https://github.com/getknext-dev/knext/releases/download/operator-vX.Y.Z/install-vX.Y.Z.yaml
 kubectl get crd nextapps.apps.kn-next.dev
+knext doctor   # the "Operator version" row confirms what is now running
 ```
 
 Once that reports the version you expect, upgrade the CLI:

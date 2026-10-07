@@ -131,9 +131,20 @@ also changed in the bad upgrade, re-apply the previous release's full bundle so
 CRD + RBAC + manager all revert together:
 
 ```sh
+# <LAST_GOOD> is the version you recorded before upgrading (see upgrade.md): the
+# `app.kubernetes.io/version` label / the `knext doctor` "Operator version" row.
+LAST_GOOD=X.Y.Z
 kubectl apply --server-side -f \
-  https://github.com/getknext-dev/knext/releases/download/<last-good-tag>/install.yaml
+  "https://github.com/getknext-dev/knext/releases/download/operator-v${LAST_GOOD}/install-v${LAST_GOOD}.yaml"
+kubectl rollout status deploy/kn-next-operator-controller-manager \
+  -n kn-next-operator-system --timeout=180s
+knext doctor   # "Operator version" now reports v${LAST_GOOD}
 ```
+
+`operator-vX.Y.Z` releases are immutable and digest-pinned (#1947), so this reverts to the exact
+bytes you ran before. If the version you were on predates the version line (no label), there is no
+versioned bundle for it: use Option A, which reverts to the previous pod template (and its
+recorded image digest) without needing a bundle.
 
 > If the bad upgrade included a **breaking CRD change**, reverting the CRD may
 > reject `NextApp` objects written in the new shape. Re-apply your apps' intent

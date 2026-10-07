@@ -33,9 +33,14 @@ or `operator-vX.Y.Z-rc.N` for a release candidate), so you can pin the exact ver
 against instead of tracking whatever is newest:
 
 ```sh title="shell"
-OPERATOR_TAG=operator-v1.2.3   # any published operator-vX.Y.Z(-rc.N) release tag
-kubectl apply --server-side -f "https://github.com/getknext-dev/knext/releases/download/${OPERATOR_TAG}/install.yaml"
+OPERATOR_VERSION=1.2.3   # any published operator-vX.Y.Z(-rc.N) release
+kubectl apply --server-side -f "https://github.com/getknext-dev/knext/releases/download/operator-v${OPERATOR_VERSION}/install-v${OPERATOR_VERSION}.yaml"
 ```
+
+Each release carries the same digest-pinned bundle under two names: `install-vX.Y.Z.yaml`
+(self-describing — the version is in the file name) and `install.yaml`. See
+[Versioning & compatibility](/docs/versioning#pin-upgrade-and-roll-back-the-operator) to check
+which version you run, upgrade to a specific one, and roll back.
 
 - **`operator-latest`** — the newest stable release; moves only on a stable cut.
 - **`operator-vX.Y.Z`** (and pre-release tags like `operator-vX.Y.Z-rc.1`) — cut once and never

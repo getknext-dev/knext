@@ -24,7 +24,7 @@ knext ships three things that version on **separate** lines. Nothing forces them
 | Thing | Ships as | Version line |
 | --- | --- | --- |
 | `@getknext/core`, `@getknext/lib`, `@getknext/db` | npm packages | semver, **one shared number** across the three |
-| the operator | a container image + an `install.yaml` bundle | **no semver line today** — see below |
+| the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags (#1947) — **MAJOR.MINOR tracks the package set, patch is independent**; see "Operator versions" below |
 | the `NextApp` CRD | inside the operator bundle | the Kubernetes ladder: `v1alpha1` → `v1beta1` → `v1` |
 
 ## The matrix
@@ -60,11 +60,41 @@ is additive-only, so no released package set has ever needed a *newer* CRD than 
 - **CRD `apiVersion`** — the value a hand-authored or GitOps-managed `NextApp` must carry, and the
   value the CLI emits. Verified mechanically against both the ADR that declares it and the CRD
   manifests the operator actually serves.
-- **Operator bundle** — where the matching operator comes from. Today there is exactly one address:
+- **Operator bundle** — where the matching operator comes from. The column still reads
+  `operator-latest` for every row cut before the operator had a version line; those rows were not
+  re-pointed, because `operator-latest` is a moving address and a past row cannot be made to name a
+  version nobody recorded. Two addresses exist:
 
   ```sh
-  kubectl apply -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
+  # pinned (preferred; immutable, digest-pinned)
+  kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-vX.Y.Z/install-vX.Y.Z.yaml
+  # moving: the newest STABLE operator release
+  kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
   ```
+
+  **For a row cut from the first versioned operator release onward, write `operator-vX.Y.Z`
+  here, not `operator-latest`.** Releases come from a pushed `operator-vX.Y.Z[-rc.N]` tag
+  (`operator-supply-chain.yml`): each is an immutable GitHub Release holding the same bundle as
+  `install-vX.Y.Z.yaml` and `install.yaml`; only a stable tag also re-points `operator-latest`; a
+  push to `main` moves only the rolling `operator-edge`.
+
+### Operator versions
+
+The operator's `operator-vX.Y.Z` is stamped on the manager Deployment as the
+`app.kubernetes.io/version` label and in the image tag (`…:vX.Y.Z@sha256:…`); a source or
+`operator-edge` build carries the sentinel `unreleased`. Pairing rule, applied by `knext doctor`
+(`src/cli/doctor/operator-version.ts`, a WARN row — never a failure; the deploy-time schema
+preflight stays the authoritative gate):
+
+- operator MAJOR must equal the CLI's;
+- operator MINOR must be **>=** the CLI's (an older CLI against a newer operator is always valid);
+- patch is independent; `-rc.N` suffixes are ignored on both sides.
+
+Why MAJOR.MINOR tracks the package set rather than the operator versioning on its own: the CRD is
+additive within `v1alpha1`, so "does this operator know the field my CLI emits" is exactly "is the
+operator at least as new as the CLI's minor". A fully independent number would force every user to
+keep a lookup table; lockstep on every npm release would cut an operator for each of the many rc
+tags even when the operator did not change.
 
 ### The drift, recorded rather than tidied away
 
@@ -105,10 +135,14 @@ side effect** if the cluster cannot store one, naming the field.
 
 **Not** checked, stated so nobody assumes otherwise:
 
-- **the operator has no semver release line.** Its images are tagged by commit SHA and pinned by
-  digest in the bundle; `operator-latest` is re-pointed at `main` on each publish. So "minimum
-  operator version" cannot be expressed as a number today, and the matrix cannot assert one. The
-  practical protection is the ordering rule plus the deploy-time preflight above — not this table.
+- **the operator version column is not machine-verified against a published release.** The
+  operator now has a semver line (`operator-vX.Y.Z`), but no operator release has been cut from it
+  yet, and the matrix cannot assert a "minimum operator version" for rows that predate it. The
+  pairing rule is enforced at runtime by `knext doctor` (unit-tested in
+  `src/__tests__/doctor-operator-version.test.ts`); the release workflow's stamping is
+  text-guarded in `tests/operator-version-line.test.ts`. Neither proves what a given cluster runs
+  — `doctor` against the cluster does. Operators installed before the version line report no
+  version.
 - **nothing here verifies a registry.** The guard reads this repo; it cannot confirm what is
   actually installed on npm or in a cluster.
 - **the prose is checked at heading and name level, not for correctness.** The policy and the
