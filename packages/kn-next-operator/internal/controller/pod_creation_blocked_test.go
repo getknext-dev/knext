@@ -238,6 +238,13 @@ func TestDetectPodCreationBlocked_StaysBlockedAfterProgressDeadline(t *testing.T
 	if !st.sticky || st.blocked {
 		t.Fatalf("want sticky, got %+v", st)
 	}
+	// Quota fixed, pods now fail for ANOTHER reason: must not keep blaming quota.
+	for _, reason := range []string{"ImagePullBackOff", "ContainerMissing", "Deploying"} {
+		st = detect(blockedRevision(reason, "boom", corev1.ConditionFalse), ksvc)
+		if st.sticky || st.blocked {
+			t.Fatalf("reason %q must clear the quota verdict, got %+v", reason, st)
+		}
+	}
 	// Recovered (True) -> cleared.
 	st = detect(blockedRevision("", "", corev1.ConditionTrue), ksvc)
 	if st.sticky || st.blocked || st.unknown {

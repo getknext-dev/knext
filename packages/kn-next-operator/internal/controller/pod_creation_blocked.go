@@ -109,10 +109,12 @@ func (r *NextAppReconciler) detectPodCreationBlocked(ctx context.Context, app *a
 	msg, reason, blocked := classifyPodCreationBlock(rev)
 	if !blocked {
 		// Knative flips the reason to ProgressDeadlineExceeded while the pods are
-		// still rejected. Keep reporting until THIS revision recovers or is replaced.
+		// still rejected. Keep reporting until THIS revision recovers or is replaced —
+		// but ONLY for that reason: any other False reason means the quota was fixed and
+		// something else is wrong, and blaming quota would be a false diagnosis.
 		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPodCreationBlocked)
 		if prev != nil && strings.HasPrefix(prev.Message, "revision "+name+" ") {
-			if ra := rev.Status.GetCondition(servingv1.RevisionConditionResourcesAvailable); ra != nil && ra.IsFalse() {
+			if ra := rev.Status.GetCondition(servingv1.RevisionConditionResourcesAvailable); ra != nil && ra.IsFalse() && ra.Reason == "ProgressDeadlineExceeded" {
 				return podCreationState{sticky: true}
 			}
 		}

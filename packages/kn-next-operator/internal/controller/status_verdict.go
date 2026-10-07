@@ -695,6 +695,9 @@ func computeStatusVerdict(
 		// Same reason on the same revision is not news: the admission message embeds
 		// live quota "used:" figures that drift, so freeze the message (no status
 		// rewrite) and stay quiet. Reason or revision change re-emits.
+		// Tradeoff: a same-reason change on the SAME revision (e.g. the LimitRange is
+		// edited from a cpu rule to a memory rule) keeps the FIRST message until the
+		// reason or revision changes. Accepted to avoid a status write per drift.
 		unchanged := prevBlocked != nil && prevBlocked.Reason == cond.Reason &&
 			strings.HasPrefix(prevBlocked.Message, "revision "+pc.revision+" ")
 		if unchanged {
