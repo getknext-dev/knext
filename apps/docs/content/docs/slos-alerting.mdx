@@ -45,13 +45,13 @@ broken metrics pipeline look identical. Two rules close that gap, anchored on `u
 absent app series because an idle app is legitimately absent and an alert that fires nightly gets
 muted:
 
-```promql
+```text
 up{job="knext-nextapp"} == 0
 ```
 
 Alert `KnextAppMetricsTargetDown` (10 minutes, critical): the target is discovered but cannot be scraped.
 
-```promql
+```text
 (up{job="knext-nextapp"} == 1)
   unless on (namespace, pod) knext_bunexec_process_uptime_seconds
 ```
@@ -63,7 +63,7 @@ these rules recognise — what a renamed metric looks like from Prometheus' side
 
 **Objective:** at least 99.5% of server-handled requests succeed (non-5xx) over 28 days.
 
-```promql
+```text
 sum(rate(knext_bunexec_http_requests_total{status_class="5xx"}[5m])) by (app)
   /
 sum(rate(knext_bunexec_http_requests_total[5m])) by (app)
@@ -79,7 +79,7 @@ unbounded and one crawler would mint a series per URL.
 **Objective:** cold start of 3 seconds or less. Cold starts dominate the user-visible latency of a
 scale-to-zero app.
 
-```promql
+```text
 max by (app) (knext_bunexec_startup_duration_seconds)
 ```
 
@@ -91,7 +91,7 @@ there is no warm/cold split.
 
 Request latency on the warm path:
 
-```promql
+```text
 histogram_quantile(0.95,
   sum(rate(knext_bunexec_http_request_duration_seconds_bucket[5m])) by (le, app)
 )
@@ -104,14 +104,14 @@ to 10 s, with five below 100 ms.
 
 **Objective:** zero reconcile errors in steady state, and reconcile p95 of 30 seconds or less.
 
-```promql
+```text
 increase(knext_nextapp_reconcile_errors_total[10m])
 ```
 
 Alert `KnextOperatorReconcileErrors` (above 0 for 5 minutes, critical). The operator is the single
 source of truth, so a failing reconcile means cluster state may diverge from the `NextApp`.
 
-```promql
+```text
 histogram_quantile(0.95,
   sum(rate(knext_nextapp_reconcile_duration_seconds_bucket[10m])) by (le)
 )
@@ -124,7 +124,7 @@ Alert `KnextOperatorReconcileSlow` (p95 above 30 seconds for 15 minutes, warning
 
 **Objective:** no `NextApp` stays `Degraded=True`.
 
-```promql
+```text
 max by (namespace, name) (knext_nextapp_condition{type="Degraded",status="True"})
 ```
 
