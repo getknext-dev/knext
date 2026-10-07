@@ -217,6 +217,93 @@ function isDefinitionHead(src, nameIndex, paren) {
     return close >= 0 && SAME_LINE_BRACE.test(src.slice(close + 1, close + 256));
 }
 
+/** The longest run of preceding sibling text `isDiscardedPosition` scans. */
+const MAX_SEQUENCE_SCAN = 4096;
+
+/**
+ * Whether the expression starting at `start` is in a position whose value is
+ * DISCARDED at statement level: an expression statement on its own, or an
+ * element of a statement-level comma sequence. Proven from the tokens before
+ * it, scanning backwards over preceding sequence siblings to the statement
+ * boundary:
+ *   - start of source, `;`, `{` (a block or arrow body — never `${`, a
+ *     template substitution whose value is used), or `}` ends the scan: the
+ *     expression starts a statement.
+ *   - `,` must be preceded by a plain call sibling `a.b(...)` (identifier
+ *     chain + balanced parens holding no string, template, regex or comment
+ *     — anything this scan cannot lex conservatively bails). Rolldown's real
+ *     per-chunk init is exactly this: `{init_a(),init_b(),createRequire(x),…}`.
+ *   - anything else — `return`, `=`, `:`, `(`, `[`, `?`, `=>`, a keyword, a
+ *     non-call sibling — is NOT provably discarded.
+ * Paired with a following `,`/`;`/`}`/end (the caller's `discardedRe`), an
+ * element that is NOT last is discarded by the comma operator and a last one
+ * is the value of an expression statement. Conservative by construction: a
+ * false "not discarded" only costs a warning (an error under strict mode);
+ * a false "discarded" would silently lose one.
+ *
+ * @param {string} src
+ * @param {number} start
+ * @returns {boolean}
+ */
+function isDiscardedPosition(src, start) {
+    const isWs = (c) => c === " " || c === "\t" || c === "\n" || c === "\r";
+    const isIdent = (c) => c !== undefined && /[\w$]/.test(c);
+    const floor = Math.max(0, start - MAX_SEQUENCE_SCAN);
+    let i = start - 1;
+    const skipWs = () => {
+        while (i >= floor && isWs(src[i])) i--;
+    };
+    for (;;) {
+        skipWs();
+        if (i < 0) return true;
+        if (i < floor) return false;
+        const c = src[i];
+        if (c === ";" || c === "}") return true;
+        if (c === "{") return src[i - 1] !== "$";
+        if (c !== ",") return false;
+        // A `,`: the previous sibling must be a plain call `a.b(...)`.
+        i--;
+        skipWs();
+        if (src[i] !== ")") return false;
+        let depth = 0;
+        for (; i >= floor; i--) {
+            const ch = src[i];
+            if (ch === '"' || ch === "'" || ch === "`" || ch === "/") return false;
+            if (ch === ")" || ch === "]" || ch === "}") depth++;
+            else if (ch === "(" || ch === "[" || ch === "{") {
+                depth--;
+                if (depth === 0) break;
+            }
+        }
+        if (i < floor) return false;
+        i--; // past the call's `(`
+        skipWs();
+        // The callee: an identifier chain `a.b.c`.
+        let sawIdent = false;
+        for (;;) {
+            const end = i;
+            while (i >= floor && isIdent(src[i])) i--;
+            if (i === end) return false;
+            const word = src.slice(i + 1, end + 1);
+            if (/^\d/.test(word) || SEQUENCE_STOP_WORDS.has(word)) return false;
+            sawIdent = true;
+            skipWs();
+            if (src[i] !== ".") break;
+            if (src[i - 1] === ".") return false; // `...spread`
+            i--;
+            skipWs();
+        }
+        if (!sawIdent) return false;
+    }
+}
+
+/** Words that, as a "callee", mean the call is not a plain sequence sibling. */
+const SEQUENCE_STOP_WORDS = new Set([
+    "return", "throw", "typeof", "void", "delete", "new", "await", "yield",
+    "in", "of", "instanceof", "case", "if", "while", "for", "switch", "catch",
+    "with", "function", "else", "do",
+]);
+
 /**
  * Static facts about one server-output module.
  *
@@ -302,14 +389,11 @@ export function analyzeServerModule(src) {
     const literalArgRe = new RegExp(`^${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`);
     const invokeRe = new RegExp(`^${GAP}\\(`);
     const resolveInvokeRe = new RegExp(`^${GAP}\\.${GAP}resolve${GAP}\\(`);
-    // `,`/`;`/`}` (or end of source): the value was discarded at STATEMENT
-    // level — a sequence-expression continuation, an expression-statement's
-    // end, or a block's last statement with no trailing semicolon (ASI).
-    // `)` and `]` are deliberately EXCLUDED: a bare (non-assignment,
-    // non-invoked) create-expression followed by either can only be sitting
-    // inside an ENCLOSING call or array literal — handed somewhere this
-    // analysis cannot see, so it must stay "unrecognized", not be waved
-    // through as safe.
+    // Followed by `,`/`;`/`}` (or end of source) is NECESSARY for a discarded
+    // value but not sufficient: `return e(x);`, `use(e(x), 1)` and
+    // `{r: e(x)}` all hand the require on. `isDiscardedPosition` supplies the
+    // other half — see it. `)` and `]` never qualify: a bare create followed
+    // by either sits inside an enclosing call, group or array literal.
     const discardedRe = new RegExp(`^(?:${GAP}[,;}]|$)`);
     for (const alias of aliases) {
         const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
@@ -362,7 +446,7 @@ export function analyzeServerModule(src) {
                 accountedFor++;
                 continue;
             }
-            if (discardedRe.test(after)) {
+            if (discardedRe.test(after) && isDiscardedPosition(src, m.index)) {
                 accountedFor++;
                 continue;
             }

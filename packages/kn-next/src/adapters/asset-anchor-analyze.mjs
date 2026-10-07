@@ -353,7 +353,9 @@ function isImportMeta(node) {
  * Every CODE-position `import.meta` in `src`, in source order: `prop` is the
  * member name of a non-computed `import.meta.<prop>` (the span covers the
  * whole member expression), or `null` for any other use of `import.meta`
- * (bare, computed, destructured — the span is `import.meta` itself).
+ * (bare, computed, destructured — the span is `import.meta` itself). A
+ * `null` use also carries `alias`: true only for a `X = import.meta` whose X
+ * is provably read solely via .url/.filename/.dirname (see `isUrlOnlyAlias`).
  *
  * This is what the compiled entry's `import.meta` rewrite in vinext-compile.mjs
  * splices (`rewriteImportMetaUses`). The text `import.meta.url` inside a
@@ -361,7 +363,7 @@ function isImportMeta(node) {
  * docs page whose code sample mentions it compiles to exactly such a string.
  *
  * @param {string} src
- * @returns {{ uses: { start: number, end: number, prop: string | null }[], parseError?: string }}
+ * @returns {{ uses: { start: number, end: number, prop: string | null, alias?: boolean }[], parseError?: string }}
  */
 export function findImportMetaUses(src) {
     if (!src.includes("import.meta")) return { uses: [] };
@@ -385,7 +387,7 @@ export function findImportMetaUses(src) {
             continue; // its `import.meta` is accounted for
         }
         if (isImportMeta(node)) {
-            uses.push({ start: node.start, end: node.end, prop: null });
+            uses.push({ start: node.start, end: node.end, prop: null, node });
             continue;
         }
         for (const key in node) {
@@ -401,8 +403,87 @@ export function findImportMetaUses(src) {
             }
         }
     }
+    // A bare use is marked `alias: true` only when it is PROVABLY a plain
+    // alias read solely via .url/.filename/.dirname (rolldown's per-module
+    // merge emits `var t = import.meta` and reads `t.url` through a getter).
+    // Every other bare use — computed, destructured, escaping, or read via
+    // Bun's .dir/.path/.main/.env/.resolve — stays `alias: false`, so the
+    // rewrite reports it as survived and the build fails loudly.
+    const bare = uses.filter((u) => u.prop === null);
+    const ctx = bare.length > 0 ? index(ast) : undefined;
+    for (const use of bare) {
+        use.alias = isUrlOnlyAlias(use.node, ctx);
+    }
     uses.sort((a, b) => a.start - b.start);
-    return { uses };
+    return { uses: uses.map(({ node, ...use }) => use) };
+}
+
+/** The `import.meta` members the entry rewrite can rebuild. */
+const ALIAS_READABLE = new Set(["url", "filename", "dirname"]);
+
+/** An Identifier that names a property/key rather than referencing a binding. */
+function isNonReference(id, parents) {
+    const p = parents.get(id);
+    if (p === undefined) return false;
+    if (p.type === "MemberExpression") return p.property === id && !p.computed;
+    if (p.type === "Property" || p.type === "MethodDefinition" || p.type === "PropertyDefinition") {
+        return p.key === id && !p.computed && !(p.shorthand && p.value === id);
+    }
+    return false;
+}
+
+/**
+ * Whether `meta` (a bare `import.meta`) is `var|let|const X = import.meta`
+ * where every reference to X in its scope is a non-computed READ of
+ * `.url`/`.filename`/`.dirname` — never written, deleted, called on another
+ * key, passed on, re-aliased or reassigned. Name-based within the scope: a
+ * shadowing inner binding of the same name is counted too, which can only
+ * make the answer MORE conservative.
+ */
+function isUrlOnlyAlias(meta, ctx) {
+    const declarator = ctx.parents.get(meta);
+    if (
+        declarator?.type !== "VariableDeclarator" ||
+        declarator.init !== meta ||
+        declarator.id.type !== "Identifier"
+    ) {
+        return false;
+    }
+    const scope = bindingScope(declarator, ctx.parents);
+    if (scope === undefined) return false;
+    const refs = (ctx.identifiers.get(declarator.id.name) ?? []).filter(
+        (id) =>
+            id !== declarator.id &&
+            id.start >= scope.start &&
+            id.end <= scope.end &&
+            !isNonReference(id, ctx.parents),
+    );
+    return refs.every((id) => {
+        const member = ctx.parents.get(id);
+        if (
+            member?.type !== "MemberExpression" ||
+            member.object !== id ||
+            member.computed ||
+            member.property.type !== "Identifier" ||
+            !ALIAS_READABLE.has(member.property.name)
+        ) {
+            return false;
+        }
+        const use = ctx.parents.get(member);
+        if (use?.type === "AssignmentExpression" && use.left === member) return false;
+        if (use?.type === "UpdateExpression") return false;
+        if (use?.type === "UnaryExpression" && use.operator === "delete") return false;
+        // `for (t.url of xs)` / `[t.url] = xs` / `({ a: t.url } = o)` write it too.
+        if (use?.type === "ForOfStatement" || use?.type === "ForInStatement") {
+            return use.left !== member;
+        }
+        if (use?.type === "ArrayPattern" || use?.type === "RestElement") return false;
+        if (use?.type === "AssignmentPattern" && use.left === member) return false;
+        if (use?.type === "Property" && ctx.parents.get(use)?.type === "ObjectPattern") {
+            return false;
+        }
+        return true;
+    });
 }
 
 // Script mode: `bun asset-anchor-analyze.mjs [--import-meta] < module.js`

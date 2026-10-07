@@ -753,6 +753,48 @@ describe("vinext-compile bundles the getter-indirection require shape with no si
         expect(run.stdout).toContain(`RESULT:${A}`);
     }, 120_000);
 
+    it("a pnpm workspace root (pnpm-workspace.yaml, no `workspaces` field) is the containment boundary too", () => {
+        // pnpm declares its workspace in pnpm-workspace.yaml, not package.json;
+        // without detecting it, a hoisted dependency reached through the app's
+        // symlink is refused as an ancestor escape (a warning, an error under
+        // strict mode) on every pnpm monorepo.
+        const base = temp("knext-c11-pnpm-base-");
+        write(
+            join(base, "package.json"),
+            JSON.stringify({ name: "pnpm-root" }),
+        );
+        write(join(base, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
+        const work = join(base, "apps", "app");
+        mkdirSync(work, { recursive: true });
+        const server = join(work, ".output", "server");
+        cjsPackage(
+            join(base, "node_modules", ".pnpm"),
+            "hoisted-pkg",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        mkdirSync(join(work, "node_modules"), { recursive: true });
+        symlinkSync(
+            join(base, "node_modules", ".pnpm", "hoisted-pkg"),
+            join(work, "node_modules", "hoisted-pkg"),
+            "dir",
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var __require = createRequire(import.meta.url);\n" +
+                "var r = __require(`hoisted-pkg`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+        const strictBuild = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(
+            strictBuild.status,
+            `${strictBuild.stdout}\n${strictBuild.stderr}`,
+        ).toBe(0);
+        expect(strictBuild.stdout).toContain("hoisted-pkg (index.mjs)");
+    }, 120_000);
+
     it("a missing package reached only through the getter-indirection shape is still reported, never silently invisible", () => {
         const work = temp("knext-c11-missing-");
         const server = join(work, ".output", "server");

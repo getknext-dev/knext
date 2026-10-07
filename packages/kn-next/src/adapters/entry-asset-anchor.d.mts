@@ -38,6 +38,6 @@ export function rewriteAssetAnchors(
 
 export function rewriteImportMetaUses(
     src: string,
-    uses: { start: number; end: number; prop: string | null }[],
+    uses: { start: number; end: number; prop: string | null; alias?: boolean }[],
     exprs: { url: string; filename: string; dirname: string },
 ): { contents: string; count: number; survived: string[] };

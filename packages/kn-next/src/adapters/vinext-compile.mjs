@@ -669,7 +669,8 @@ function entryImportMetaUses(src, path) {
             (u) =>
                 Number.isInteger(u?.start) &&
                 Number.isInteger(u.end) &&
-                (u.prop === null || typeof u.prop === "string"),
+                (u.prop === null || typeof u.prop === "string") &&
+                (u.alias === undefined || typeof u.alias === "boolean"),
         );
     if (!wellFormed) analyzerFailed(path, "printed JSON that is not an import.meta analysis");
     return found.uses;
@@ -1014,7 +1015,8 @@ const APP_ROOT = dirname(dirname(ENTRY_DIR));
 // workspace gets the SAME package at the SAME relative position, which is
 // exactly the portability the ancestor-escape check exists to protect.
 // `findWorkspaceRoot` walks up from `APP_ROOT` for the nearest ancestor
-// `package.json` declaring a `workspaces` field, falling back to `APP_ROOT`
+// `package.json` declaring a `workspaces` field (or a `pnpm-workspace.yaml`,
+// pnpm's own workspace declaration), falling back to `APP_ROOT`
 // itself (so a standalone, non-monorepo app keeps the tight original
 // boundary). `isWithinAppRoot` is the containment check: realpath-compared
 // (symlink-safe, same technique as sidecar-runtime.mjs's `isInside`), so a
@@ -1022,6 +1024,8 @@ const APP_ROOT = dirname(dirname(ENTRY_DIR));
 function findWorkspaceRoot(start) {
     let dir = start;
     for (;;) {
+        // pnpm declares its workspace in pnpm-workspace.yaml, not package.json.
+        if (existsSync(join(dir, "pnpm-workspace.yaml"))) return dir;
         const pkgPath = join(dir, "package.json");
         if (existsSync(pkgPath)) {
             try {

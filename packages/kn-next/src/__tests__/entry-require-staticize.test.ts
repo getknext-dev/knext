@@ -253,6 +253,91 @@ describe("analyzeServerModule (unit)", () => {
         expect(a.unrecognizedBinding).toBe(true);
     });
 
+    // A create call is "discarded" (inert, not a gap) ONLY when its value is
+    // provably thrown away at statement level. A create HANDED ON — returned,
+    // passed as an argument, stored in a property, or the value of an
+    // enclosing expression — must stay unrecognized, or the strict-mode
+    // failure and the warning are silently lost (#1877 round 2 review).
+    describe("discarded vs handed-on create calls", () => {
+        const PRE = 'import{createRequire as e}from"node:module";';
+        const GETTER_PRE = PRE + "var t=import.meta;";
+        const G = "e({get value(){return t.url}}.value)";
+        it.each([
+            ["returned", "function f(){return e(import.meta.url);}"],
+            [
+                "returned, last statement (no semicolon)",
+                "function f(){return e(import.meta.url)}",
+            ],
+            ["passed as a non-last argument", "use(e(import.meta.url), 1);"],
+            [
+                "passed after a call argument",
+                "use(a(), e(import.meta.url), 1);",
+            ],
+            [
+                "stored in an object property",
+                "var o = {r: e(import.meta.url)};",
+            ],
+            [
+                "stored as the last object property",
+                "x({q: 1, r: e(import.meta.url)});",
+            ],
+            ["stored in an array", "var l = [a(), e(import.meta.url), 1];"],
+            [
+                "the value of a parenthesised sequence",
+                "var v = (a(), e(import.meta.url));",
+            ],
+            ["the value of an arrow body", "var f = () => e(import.meta.url);"],
+            [
+                "returned in a sequence",
+                "function f(){return a(), e(import.meta.url);}",
+            ],
+            [
+                "the argument of a conditional",
+                "var v = c ? e(import.meta.url) : 0;",
+            ],
+            ["inside template text", "var s = `${a(), e(import.meta.url)}`;"],
+        ])("a create %s stays unrecognized", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                true,
+            );
+        });
+        it("a getter-shape create returned stays unrecognized", () => {
+            expect(
+                analyzeServerModule(`${GETTER_PRE}function f(){return ${G};}`)
+                    .unrecognizedBinding,
+            ).toBe(true);
+        });
+        it.each([
+            ["a bare expression statement", "e(import.meta.url);"],
+            [
+                "a bare statement, last in a block (ASI)",
+                "function f(){e(import.meta.url)}",
+            ],
+            [
+                "the first element of a statement-level sequence",
+                "e(import.meta.url), a();",
+            ],
+            [
+                "a block-level sequence element after plain calls",
+                "function f(){a(),b.c(),e(import.meta.url),d=1}",
+            ],
+            ["after a closing brace", "function g(){}e(import.meta.url);"],
+        ])("a create as %s is discarded (recognized)", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                false,
+            );
+        });
+        // The EXACT shape measured in the real file-manager build: rolldown's
+        // per-chunk __esmMin init sets up a require it may never call.
+        it("rolldown's real __esmMin init sequence (getter shape) is discarded", () => {
+            const src =
+                GETTER_PRE +
+                "var f$6,init_chunk_NWCAEW5Y=__esmMin((()=>{init_chunk_5MU5Z6L3()," +
+                `${G},f$6=fileURLToPath(t.url)}));`;
+            expect(analyzeServerModule(src).unrecognizedBinding).toBe(false);
+        });
+    });
+
     it("does not treat a createRequire anchored anywhere but import.meta.url as a require binding (sharp's own loader)", () => {
         const a = analyzeServerModule(
             'import{createRequire as e}from"node:module";let Rh=e(join(p,`x`));Rh(`sharp`);',
