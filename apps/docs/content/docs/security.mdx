@@ -262,6 +262,10 @@ sources it manages, and read-only access to PersistentVolumeClaims and Knative R
 Anyone allowed to create a `NextApp` can reference a Secret **in their own namespace** by name, so
 restrict who may create `NextApp` resources with ordinary namespace RBAC.
 
+This removes the operator's *direct* access to Secrets, not every path to them: because it can
+create workloads cluster-wide, a compromised operator could still reach a Secret through a pod it
+creates. Install the operator per namespace, or add an admission policy, to close that path.
+
 <Callout type="info">
 **Honest scope — not yet shipped.** Service-to-service **mTLS/authz** between the gateway and
 backends, and the **cluster-local** gRPC backend services with no public ingress, are designed but

@@ -307,10 +307,13 @@ The operator is also the policy boundary:
   only if it contains `@sha256:`.
 - **Mutating endpoints require auth.** App-level cache-invalidation routes require a signed bearer
   token; nothing mutating is open by default.
-- **No access to your Secrets.** The operator's ClusterRole grants no permission on Kubernetes
-  Secrets at all. `envFrom` / `envMap` / `spec.database` only write *references* (Secret name and
-  key) into your app's Pod spec; the kubelet resolves them when the pod starts, so a compromised
-  operator cannot read Secret values. See [Security](/docs/security#operator-permissions).
+- **No direct access to your Secrets.** The operator's ClusterRole grants no permission on
+  Kubernetes Secrets at all. `envFrom` / `envMap` / `spec.database` only write *references*
+  (Secret name and key) into your app's Pod spec; the kubelet resolves them when the pod starts.
+  This is not a complete barrier: because the operator can create workloads cluster-wide, a
+  compromised operator could still reach a Secret indirectly through a pod it creates. Install
+  the operator per namespace or add an admission policy to close that path. See
+  [Security](/docs/security#operator-permissions).
 - **Default-on NetworkPolicy.** `spec.security.networkPolicy` reconciles an internal-only network
   policy for the app.
 - **Cluster-local backends (design-stage).** The planned gRPC backend layer is `cluster-local`

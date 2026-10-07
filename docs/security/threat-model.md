@@ -85,8 +85,12 @@ cache is required.
 namespace by name; the kubelet, not the operator, resolves it — restrict `NextApp` create/update
 with namespace RBAC. (b) The operator still holds broad write on the objects it owns
 (Knative Services, ServiceAccounts, NetworkPolicies, DaemonSets) cluster-wide; per-namespace
-operator install is the next narrowing step and is not done. (c) Pod-level Secret exposure via a
-tenant-crafted Knative Service is bounded by the namespace boundary, not by operator RBAC.
+operator install is the next narrowing step and is not done. (c) **Indirect Secret access remains.**
+Dropping the Secrets rule removes the operator's *direct* access only. Because the operator can
+create Knative Services (and thus pods) cluster-wide, a compromised operator can still reach any
+Secret by creating a pod that mounts or exposes it; a namespace boundary does not bound a
+cluster-wide operator. Mitigations: per-namespace operator install, or an admission policy
+restricting which Secrets operator-created workloads may reference.
 
 ## 2. Gateway ↔ backend calls
 
