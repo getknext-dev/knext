@@ -42,13 +42,13 @@ jobs:
         run: kind create cluster --name prereqs-bundle --wait 120s
 
       - name: Install the bundle
-        run: scripts/prereqs/install.sh
+        run: scripts/prereqs/install.sh --context kind-prereqs-bundle --yes
 
       - name: Install again (idempotency)
-        run: scripts/prereqs/install.sh
+        run: scripts/prereqs/install.sh --context kind-prereqs-bundle --yes
 
       - name: Assert everything is Ready
-        run: scripts/prereqs/install.sh --verify
+        run: scripts/prereqs/install.sh --context kind-prereqs-bundle --yes --verify
 
       - name: Dump state on failure
         if: failure()

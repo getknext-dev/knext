@@ -12,11 +12,18 @@
 # a cluster that already has the prerequisites converges and exits 0.
 #
 # Usage:
-#   scripts/prereqs/install.sh            # install + wait until Ready
-#   scripts/prereqs/install.sh --verify   # only assert everything is Ready
-#   scripts/prereqs/install.sh --print    # print the pinned versions and exit
+#   scripts/prereqs/install.sh --context <name>   # install into that cluster
+#   scripts/prereqs/install.sh --yes              # install into the CURRENT context (CI)
+#   scripts/prereqs/install.sh                    # interactive: shows the context, asks to confirm
+#   ... --verify   only assert everything is Ready
+#   scripts/prereqs/install.sh --print            # print the pinned versions and exit
 #
-# Needs: kubectl (current context = target cluster), curl, jq, sha256sum.
+# Wrong-cluster protection: a non-interactive run needs --context or --yes; the
+# target context is always printed first. --context is applied to every kubectl
+# call (including the helpers') via a PATH shim, never by switching your
+# current context.
+#
+# Needs: kubectl, curl, jq, and sha256sum or shasum (macOS).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,21 +52,91 @@ verify() {
   echo "prereqs: cert-manager ${CERT_MANAGER_VERSION}, Knative Serving ${KNATIVE_VERSION} and Kourier are Ready"
 }
 
-case "${1:-}" in
-  --print)
-    echo "knative=${KNATIVE_VERSION} cert-manager=${CERT_MANAGER_VERSION}"
-    exit 0
-    ;;
-  --verify)
-    verify
-    exit 0
-    ;;
-  "") ;;
-  *)
-    echo "usage: install.sh [--verify|--print]" >&2
-    exit 2
-    ;;
-esac
+MODE=install
+CTX=""
+YES=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --print)
+      echo "knative=${KNATIVE_VERSION} cert-manager=${CERT_MANAGER_VERSION}"
+      exit 0
+      ;;
+    --verify) MODE=verify ;;
+    --yes) YES=1 ;;
+    --context)
+      CTX="${2:?--context needs a name}"
+      shift
+      ;;
+    --context=*) CTX="${1#--context=}" ;;
+    *)
+      echo "usage: install.sh [--context <name>] [--yes] [--verify|--print]" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+# Gate first, before touching anything: no silent installs into whatever the
+# current context happens to be.
+if [ -z "$CTX" ] && [ "$YES" != 1 ] && ! [ -t 0 ]; then
+  echo "prereqs: refusing to run non-interactively without --context <name> or --yes (target would be the current kubectl context)" >&2
+  exit 2
+fi
+
+for tool in kubectl curl jq; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "prereqs: required tool '$tool' not found on PATH" >&2
+    exit 3
+  }
+done
+
+SHIMS="$(mktemp -d)"
+trap 'rm -r "$SHIMS"' EXIT
+REAL_KUBECTL="$(command -v kubectl)"
+
+# macOS (and some minimal images) have no sha256sum; shasum -a 256 verifies the
+# same "<hash>  <file>" lines, so the checksums stay enforced either way.
+if [ "${PREREQS_FORCE_SHA_FALLBACK:-}" = 1 ] || ! command -v sha256sum >/dev/null 2>&1; then
+  if ! command -v shasum >/dev/null 2>&1; then
+    echo "prereqs: neither sha256sum nor shasum found; one is required to verify the pinned manifest checksums" >&2
+    exit 3
+  fi
+  REAL_SHASUM="$(command -v shasum)"
+  printf '#!/bin/sh\nexec "%s" -a 256 "$@"\n' "$REAL_SHASUM" >"$SHIMS/sha256sum"
+  chmod +x "$SHIMS/sha256sum"
+fi
+
+if [ -n "$CTX" ]; then
+  printf '#!/bin/sh\nexec "%s" --context "%s" "$@"\n' "$REAL_KUBECTL" "$CTX" >"$SHIMS/kubectl"
+  chmod +x "$SHIMS/kubectl"
+fi
+PATH="$SHIMS:$PATH"
+export PATH
+
+TARGET="$CTX"
+[ -n "$TARGET" ] || TARGET="$(kubectl config current-context 2>/dev/null || true)"
+echo "prereqs: target kubectl context: ${TARGET:-<none>}" >&2
+[ -n "$TARGET" ] || {
+  echo "prereqs: no kubectl context selected" >&2
+  exit 2
+}
+
+if [ -z "$CTX" ] && [ "$YES" != 1 ]; then
+  printf 'Install into context "%s"? [y/N] ' "$TARGET" >&2
+  read -r answer
+  case "$answer" in
+    y | Y | yes) ;;
+    *)
+      echo "prereqs: aborted" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [ "$MODE" = verify ]; then
+  verify
+  exit 0
+fi
 
 "${HELPERS}/apply-cert-manager.sh"
 "${HELPERS}/apply-knative-kourier.sh" "${KNATIVE_VERSION}"

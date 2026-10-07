@@ -32,10 +32,10 @@ everything is Ready, and is safe to re-run:
 
 ```sh title="shell"
 git clone --depth 1 https://github.com/getknext-dev/knext.git && cd knext
-scripts/prereqs/install.sh
+scripts/prereqs/install.sh --context <your-cluster-context>
 ```
 
-`scripts/prereqs/install.sh --verify` re-checks an existing cluster. The pinned versions are listed
+The script prints the target context and never switches your current one; pass `--context` (or confirm the prompt). `--verify` re-checks an existing cluster. The pinned versions are listed
 in the [Support matrix](/docs/support-matrix); continue with step 4 afterwards.
 
 ## 1 · Kubernetes cluster and kubectl
