@@ -116,7 +116,7 @@ const config: KnativeNextConfig = {
     },
   },
   // The ISR and data cache. Use your own Redis.
-  cache: { provider: 'redis', url: 'redis://redis.acme.svc:6379' },
+  cache: { provider: 'redis', url: 'redis://redis.acme.svc.:6379' },
 };
 
 export default config;
