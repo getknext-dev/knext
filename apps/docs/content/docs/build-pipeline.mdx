@@ -477,6 +477,15 @@ The fixes bundled with vinext 1.0.1:
   `beforeFiles`, `afterFiles` and `fallback` rewrites, App Router apps for `beforeFiles` and
   middleware rewrites. Middleware still does not run for a direct request to a file in `public/`:
   the server answers those before your middleware.
+- **A tsconfig `paths` entry with several targets** (`"@lib/*": ["lib/a/*", "lib/b/*"]`) falls back
+  to the later targets when the first one does not resolve, and a `.d.ts` target is never used as
+  a module, as in TypeScript and Next.js. Before, only the first target was used.
+- **`import data from "./data" with { type: "json" }`** loads the file as JSON even when it has no
+  `.json` extension, instead of failing the build with a parse error.
+- **A `require()` in a branch that `process.env.NEXT_RUNTIME` rules out** (for example, an
+  instrumentation file that requires a module only when the runtime is neither `nodejs` nor
+  `edge`) is no longer resolved, so the build no longer fails on a module that branch could never
+  load.
 
 ## Build the image on your own builder (Cloud Build / CI)
 

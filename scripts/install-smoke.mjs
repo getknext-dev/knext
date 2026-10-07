@@ -45,7 +45,6 @@ import {
   copyFileSync,
   existsSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -136,37 +135,6 @@ function gitignoreReallyIgnores(gitignoreContent, relPath) {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-/**
- * Find `server.js` under `.next/standalone`, at whatever depth Next actually put
- * it. `node-server.ts` documents WHY there is no single fixed depth: a
- * single-app repo gets `.next/standalone/server.js`, but Next's own
- * `outputFileTracingRoot` workspace inference nests it under the app's relative
- * path (`.next/standalone/<app>/server.js`) the moment it sees more than one
- * lockfile above the app dir — exactly install-smoke's own scaffold-root
- * layout (a placeholder lockfile one level up, so `create` has a real tracing
- * root to derive its install command from). Asserting a hardcoded flat path
- * here would fail on the harness's OWN legitimate layout, not on a knext
- * defect — this mirrors `STANDALONE_SERVER_PATH`'s monorepo tolerance instead
- * of hardcoding depth.
- */
-function findStandaloneServer(standaloneDir) {
-  if (!existsSync(standaloneDir)) return undefined;
-  const stack = [standaloneDir];
-  while (stack.length > 0) {
-    const dir = stack.pop();
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === 'node_modules') continue;
-        stack.push(full);
-      } else if (entry.name === 'server.js') {
-        return full;
-      }
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -917,12 +885,21 @@ try {
         'the app `kn-next create` generates does not build (see getknext-dev/knext#1372)',
     );
   }
-  const standaloneServer = findStandaloneServer(join(defaultScaffoldDir, '.next', 'standalone'));
-  if (!standaloneServer) {
+  // The FLAT path, exactly. This scaffold sits under a parent lockfile (the
+  // harness's `scaffoldRoot`), which is the documented getting-started layout.
+  // Next.js nests the server at `.next/standalone/<app>/server.js` when it infers
+  // the workspace root from that lockfile, and the scaffold's pinned
+  // `outputFileTracingRoot` is what prevents it. A walker that accepted any depth
+  // used to live here and let that regression through; knext's build and image
+  // staging look only at the flat path, so this must too.
+  const standaloneServer = join(defaultScaffoldDir, '.next', 'standalone', 'server.js');
+  if (!existsSync(standaloneServer)) {
     finish(
       FAIL,
-      'the default-builder scaffolded build produced no .next/standalone/**/server.js — the ' +
-        'runtime image has nothing to COPY (see runtime-image.ts)',
+      'the default-builder scaffolded build produced no .next/standalone/server.js — with a ' +
+        'lockfile above the app, Next.js nests it under the inferred workspace root unless the ' +
+        "scaffold's next.config pins outputFileTracingRoot, and the runtime image has nothing " +
+        'to COPY (see runtime-image.ts)',
     );
   }
   console.log(`[install-smoke] standalone server.js at ${standaloneServer}`);

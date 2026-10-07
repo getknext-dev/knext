@@ -46,6 +46,13 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
     assetPrefix: process.env.ASSET_PREFIX || "",
     generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
+    // Pins the project root to THIS app. vinext does not read it (there is no
+    // Next file tracing on this build target); `knext deploy` does — it takes
+    // the Docker build context from this value before it falls back to
+    // walking up to the outermost lockfile. Without it, an app scaffolded
+    // under a directory that has a lockfile would send that PARENT directory
+    // to `docker build`.
+    outputFileTracingRoot: import.meta.dirname,
     // NOT the live ISR wiring on this build target. vinext never reads
     // `cacheHandler` — it is a webpack/turbopack mechanism, like `adapterPath`
     // above — so for a while every request was a MISS and the provisioned

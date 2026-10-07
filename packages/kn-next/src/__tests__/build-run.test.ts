@@ -448,6 +448,36 @@ describe("build()", () => {
         expect(uploadAssets).not.toHaveBeenCalled();
     });
 
+    it("a parent lockfile that nests the standalone output fails with the REAL cause, not 'check output: standalone'", async () => {
+        // Next infers the workspace root from a lockfile ABOVE the app and
+        // writes `.next/standalone/<app>/server.js`. knext must refuse to
+        // package that, and say why, naming the root and the lockfile.
+        const root = realpathSync(dir);
+        writeFileSync(join(root, "package-lock.json"), "{}");
+        const app = join(root, "my-app");
+        mkdirSync(join(app, ".next", "standalone", "my-app"), {
+            recursive: true,
+        });
+        writeFileSync(
+            join(app, ".next", "standalone", "my-app", "server.js"),
+            "// nested\n",
+        );
+        process.chdir(app);
+        loadConfig.mockResolvedValue(cfg());
+
+        const err = await build({}).then(
+            () => null,
+            (e: unknown) => e as Error,
+        );
+
+        expect(err).not.toBeNull();
+        expect(err?.message).toContain(root);
+        expect(err?.message).toContain(join(root, "package-lock.json"));
+        expect(err?.message).toContain("outputFileTracingRoot");
+        expect(err?.message).toContain(".next/standalone/my-app/server.js");
+        expect(uploadAssets).not.toHaveBeenCalled();
+    });
+
     it("proceeds past the missing-artifact check when turbopack's .next/standalone IS present", async () => {
         loadConfig.mockResolvedValue(cfg());
         writeStandaloneServer();

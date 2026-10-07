@@ -98,6 +98,21 @@
       "summary": "next/dynamic: the server render puts the preload hints inside the Suspense boundary, next to the lazy component (as Next.js renders <PreloadChunks>), instead of in front of it. A hoisted `<link rel=\"modulepreload\">` right after a text node made React write a `<!-- -->` text separator, so text followed by a dynamic() component rendered `Index<!-- --><!--$-->1` instead of Next.js's `Index<!--$-->1`. The hints are still hoisted. Open upstream (issue cloudflare/vinext#3751)."
     },
     {
+      "file": "vinext-3759-tsconfig-paths-fallback-targets.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3759",
+      "summary": "tsconfig `paths` with several targets: when the first target does not resolve, the alias resolver tries the remaining targets in order (an import that only exists under `lib/b/*` of `\"@lib/*\": [\"lib/a/*\", \"lib/b/*\"]` used to fail the build), and a `.d.ts` target is never used as a module, as in TypeScript and Next.js. Open upstream (issue cloudflare/vinext#3756)."
+    },
+    {
+      "file": "vinext-3760-json-import-attributes.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3760",
+      "summary": "`import data from \"./data\" with { type: \"json\" }` on a file without a `.json` extension builds and loads the file as JSON, as webpack and Turbopack do (it used to fail with a parse error): a pre-transform appends `?lang.json` to such specifiers so Vite's JSON plugin handles them. Static imports, re-exports and dynamic imports. Open upstream (issue cloudflare/vinext#3757)."
+    },
+    {
+      "file": "vinext-3761-next-runtime-dead-require.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3761",
+      "summary": "A `require()` in an `if`/`?:` branch that the environment's `process.env.NEXT_RUNTIME` define makes dead is no longer resolved (an instrumentation file with `else { await require(\"this should fail\") }` used to fail the build): the CommonJS interop wrapper blanks such branches, keeping every offset, before vite-plugin-commonjs hoists their requires. Open upstream (issue cloudflare/vinext#3758)."
+    },
+    {
       "file": "vinext-2560-pages-root-import-order.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/2560",
       "summary": "Pages Router: the built server entry imports `_document`, then `_app`, then the page modules (Next.js module evaluation order), so side effects in a custom document run before the app's and the page's. Not yet merged upstream; retire when the pinned vinext includes cloudflare/vinext#2560."
