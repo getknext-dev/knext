@@ -28,6 +28,7 @@ import {
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
+import { diagnoseNestedStandalone } from "./standalone-layout";
 import {
     bunCompileTarget,
     bunMeetsFloor,
@@ -145,6 +146,12 @@ export function buildStandaloneExecutable(
     const root = join(opts.cwd, ".next", "standalone");
     const server = join(root, "server.js");
     if (!existsSync(server)) {
+        const nested = diagnoseNestedStandalone(opts.cwd);
+        if (nested !== null) {
+            throw new UsageError(
+                `The standalone build finished but '${server}' is not there.\n\n${nested}`,
+            );
+        }
         throw new UsageError(
             `The standalone build finished but '${server}' is not there.\n\n` +
                 "That server is what gets compiled into the executable. Check that next.config sets output: 'standalone'.",

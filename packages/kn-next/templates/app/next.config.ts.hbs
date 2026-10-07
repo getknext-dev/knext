@@ -50,6 +50,17 @@ const nextConfig: NextConfig = {
     // null in `next dev` falls back to Next's default id.
     generateBuildId: () => process.env.KNEXT_BUILD_ID || process.env.NEXT_DEPLOYMENT_ID || null,
     output: "standalone",
+    // Pin the file-tracing root to THIS app. Without it Next.js infers the
+    // workspace root by walking up to the outermost lockfile, so an app
+    // scaffolded into a directory under a `package-lock.json` / `pnpm-lock.yaml`
+    // (a parent where you ran `npm i @getknext/core`, or a monorepo) gets its
+    // standalone server at `.next/standalone/<app>/server.js` and the build
+    // fails. `knext deploy` reads this same value to choose the Docker build
+    // context. In a monorepo that shares dependencies across apps, point it at
+    // the repo root instead (e.g. `path.join(import.meta.dirname, "../..")`).
+    // `turbopack.root` must agree with it, or Next.js warns.
+    outputFileTracingRoot: import.meta.dirname,
+    turbopack: { root: import.meta.dirname },
     // Redis-backed cache handler for Knative (multi-pod consistency).
     // Falls back to in-memory when REDIS_URL is not set.
     cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,

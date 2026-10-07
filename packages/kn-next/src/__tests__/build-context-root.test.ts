@@ -653,3 +653,29 @@ describe("create resolves the root exactly as deploy does (#860, #861)", () => {
         expect(resolveLayout(appDir).root).toBe(appDir);
     });
 });
+
+describe("scaffold form: a bare import.meta.dirname / __dirname", () => {
+    it("evaluates `outputFileTracingRoot: import.meta.dirname` to the app directory", () => {
+        const root = repo({
+            "pnpm-lock.yaml": "",
+            "apps/web/package.json": "{}",
+            "apps/web/next.config.ts":
+                "export default { outputFileTracingRoot: import.meta.dirname };\n",
+        });
+        expect(requireBuildContext(join(root, "apps", "web"), () => {})).toBe(
+            join(root, "apps", "web"),
+        );
+    });
+
+    it("evaluates a bare `__dirname` to the app directory", () => {
+        const root = repo({
+            "pnpm-lock.yaml": "",
+            "apps/web/package.json": "{}",
+            "apps/web/next.config.ts":
+                "export default { turbopack: { root: __dirname } };\n",
+        });
+        expect(requireBuildContext(join(root, "apps", "web"), () => {})).toBe(
+            join(root, "apps", "web"),
+        );
+    });
+});

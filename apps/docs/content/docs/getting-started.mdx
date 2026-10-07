@@ -86,6 +86,11 @@ npx @getknext/core create my-app --runtime node --cache redis --yes
 ```
 
 See [`knext create`](/docs/cli) for what each answer writes.
+
+You do not need to run the `npm i` above first: `npx @getknext/core create my-app` works from
+any directory. If you did install into a parent directory, that is fine too — the scaffolded
+`next.config.ts` pins Next.js's file-tracing root to the app itself
+(`outputFileTracingRoot`), so a `package-lock.json` in the parent does not move the root.
 </Callout>
 
 ## 1 · Point Next.js at the adapter
@@ -109,6 +114,29 @@ export default config;
 **Next.js 16.0.x–16.1.x:** the option lives under `experimental` on those versions
 (`experimental: { adapterPath: '@getknext/core/adapter' }`). Next.js 16.2+ auto-migrates the old
 `experimental` key with a warning; 16.0.x does **not** recognize the top-level form.
+</Callout>
+
+<Callout type="warn">
+**An app below a lockfile.** Next.js picks its file-tracing root by walking up to the outermost
+lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) or `pnpm-workspace.yaml`.
+When that is a directory *above* your app, it writes the standalone server to
+`.next/standalone/<your-app>/server.js` instead of `.next/standalone/server.js`, and
+`knext build` stops with an error that names the inferred root and the lockfile responsible.
+`output: 'standalone'` is not the problem. Fix it by pinning the root in `next.config.ts`:
+
+```ts title="next.config.ts"
+const config: NextConfig = {
+  adapterPath: '@getknext/core/adapter',
+  output: 'standalone',
+  // This app's own directory. In a monorepo that shares dependencies, point both
+  // at the repository root instead, e.g. path.join(import.meta.dirname, '../..').
+  outputFileTracingRoot: import.meta.dirname,
+  turbopack: { root: import.meta.dirname },
+};
+```
+
+or remove the lockfile you do not need. `knext deploy` reads `outputFileTracingRoot` too, to
+choose the directory it sends to `docker build`.
 </Callout>
 
 ## 2 · Write the deploy config

@@ -61,7 +61,9 @@ jobs:
   scaffold-install:
     name: Scaffold with the published CLI and npm-install as a stranger
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30, not 20: phase 3 walks the whole path (two installs, a build, a dry-run
+    # deploy) on top of phases 1-2.
+    timeout-minutes: 30
     permissions: {}
     steps:
       # `persist-credentials: false` for the same measured reason the sibling
@@ -75,6 +77,8 @@ jobs:
       # No install step: the script is dependency-free ESM on the runner's
       # built-in Node + npm, so the check cannot itself depend on the
       # workspace's dependency tree resolving.
+      # Phase 3 of the script is the stranger path from a parent directory that
+      # has a lockfile: npm i -> create -> build -> deploy --dry-run.
       - name: Resolve template pins and walk the quickstart against the registry
         run: node scripts/verify-scaffold-install.mjs
 
