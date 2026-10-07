@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
@@ -294,5 +296,36 @@ func TestDetectPodCreationBlocked_StaysBlockedAfterProgressDeadline(t *testing.T
 	st = detect(newRev, ksvc2, rejectingDeployment(corev1.ConditionTrue, "FailedCreate", quotaMsg))
 	if st.sticky || st.blocked {
 		t.Fatalf("new revision must not inherit the prior block, got %+v", st)
+	}
+}
+
+func TestDetectPodCreationBlocked_DeploymentReadErrorKeepsPriorVerdict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := servingv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionPodCreationBlocked, Status: metav1.ConditionTrue, Reason: ReasonQuotaExceeded,
+		Message: "revision shop-00001 cannot create pods — rejected: x.",
+	}}
+	ksvc := &servingv1.Service{}
+	ksvc.Status.LatestCreatedRevisionName = "shop-00001"
+	rev := blockedRevision("ProgressDeadlineExceeded", "Initial scale was never achieved", corev1.ConditionFalse)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rev).Build()
+	failing := interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*appsv1.Deployment); ok {
+				return errors.New("apiserver hiccup")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	r := &NextAppReconciler{Client: c, APIReader: failing}
+	if st := r.detectPodCreationBlocked(context.Background(), app, ksvc); !st.unknown {
+		t.Fatalf("a failed Deployment read must keep the prior verdict (unknown), got %+v", st)
 	}
 }
