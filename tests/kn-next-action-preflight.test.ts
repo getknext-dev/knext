@@ -1,6 +1,17 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
@@ -31,6 +42,37 @@ function tempDir(prefix: string): string {
 afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+/**
+ * #1883: make a freshly written fake `kubectl` shim EXECUTABLE-BY-CONSTRUCTION
+ * before any child can resolve it. `writeFileSync` + `chmodSync` alone leaves a
+ * window in which `execve` of the just-written script can fail (`ETXTBSY` while
+ * a write fd is still open anywhere in a fork-happy process, or a not-yet-visible
+ * mode). preflight.mjs maps ANY exec failure of `kubectl` to the generic
+ * "Could not determine what this credential can do" refusal with none of the
+ * shim's stderr — exactly the flake's symptom. So: chmod, fsync+close through an
+ * explicit fd, then PROBE-exec the shim, retrying only the transient exec errors,
+ * so the real run below can never be the first exec of a half-ready file.
+ */
+function sealShim(bin: string): void {
+  chmodSync(bin, 0o755);
+  const fd = openSync(bin, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const probe = spawnSync(bin, ['--knext-shim-probe'], { input: '', timeout: 10_000 });
+    const code = (probe.error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === undefined) return;
+    if (code !== 'ETXTBSY' && code !== 'EACCES' && code !== 'ENOENT') {
+      throw new Error(`shim ${bin} is not executable: ${code}`);
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  throw new Error(`shim ${bin} never became executable (ETXTBSY/EACCES/ENOENT for 2s)`);
+}
 
 /**
  * `#1533`/`#1495`: preflight.mjs now also issues `SelfSubjectAccessReview`
@@ -66,7 +108,7 @@ function fakeKubectlDir(): string {
       '',
     ].join('\n'),
   );
-  chmodSync(bin, 0o755);
+  sealShim(bin);
   return dir;
 }
 
@@ -357,7 +399,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
       '',
     ].join('\n');
     writeFileSync(bin, script);
-    chmodSync(bin, 0o755);
+    sealShim(bin);
     return dir;
   }
 
@@ -461,10 +503,14 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
   it('(d) kubectl has NEITHER working form (no `--raw`, no fallback) → refused, message names the cause', () => {
     const dir = tempDir('knext-preflight-1500-bin-d-');
     const bin = join(dir, 'kubectl');
+    const marker = join(dir, 'shim-ran');
     writeFileSync(
       bin,
       [
         '#!/bin/sh',
+        'cat >/dev/null', // drain stdin: never exit before the caller's write lands
+        // only the real call counts, not sealShim's probe invocation
+        `[ "$1" = "create" ] && echo ran >> '${marker}'`,
         'if [ "$1" = "create" ] && [ "$2" = "--raw" ]; then',
         '  echo "error: unknown flag: --raw" >&2',
         '  exit 1',
@@ -474,8 +520,14 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
         '',
       ].join('\n'),
     );
-    chmodSync(bin, 0o755);
+    sealShim(bin);
     const r = run(appWithWildcardAwareCore(), dir);
+    // The shim must have actually been exec'd — otherwise the generic refusal below
+    // is the real code path running WITHOUT the shim (the #1883 flake), not a pass.
+    // Diagnose a recurrence: if the shim never ran, say so WITH the run's output
+    // instead of a bare ENOENT from reading the marker.
+    expect(existsSync(marker), `shim never ran — ${describeResult(r)}`).toBe(true);
+    expect(readFileSync(marker, 'utf8'), describeResult(r)).toContain('ran');
     expect(r.status, describeResult(r)).toBe(1);
     expect(r.stderr).toContain('Could not determine what this credential can do');
     expect(r.stderr).toContain('unknown command');
@@ -560,7 +612,7 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
         '',
       ].join('\n'),
     );
-    chmodSync(bin, 0o755);
+    sealShim(bin);
     const r = run(appWithWildcardAwareCore(), dir);
     expect(r.status, describeResult(r)).toBe(0);
   });
