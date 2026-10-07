@@ -434,7 +434,6 @@ The fixes bundled with vinext 1.0.1:
   preset's own entry file.
 - **Packages with a `react-server` export condition** get that condition in Server Components, because
   their dependencies are now bundled into the server build.
-- **Web Workers** see `process.env.NEXT_DEPLOYMENT_ID` inlined, like the rest of the app.
 - **`outputFileTracingIncludes` / `outputFileTracingExcludes`** in `next.config` are applied to the
   dependency files copied next to the server build.
 - **A `next.config.js`/`.ts` exported as a function** (`module.exports = (phase, { defaultConfig }) =>
@@ -450,6 +449,11 @@ The fixes bundled with vinext 1.0.1:
   response's own status code changes, so this only matters if your own code inspects
   `response.status` on a server action call. A no-JS `<form>` submission's redirect is unaffected
   and still answers `303`.
+- **Repeated slashes and backslashes in a request path** (`//`, `/docs//`, `//example.com`) are answered
+  with a `308` redirect to the collapsed path, as in Next.js, instead of a `404`; a bare `//` serves
+  the home page.
+- **`/_next/image` in a Nitro build** is served by the app itself with the Next.js image headers
+  (including `x-nextjs-cache: MISS`) instead of a redirect to the source file.
 
 ## Build the image on your own builder (Cloud Build / CI)
 

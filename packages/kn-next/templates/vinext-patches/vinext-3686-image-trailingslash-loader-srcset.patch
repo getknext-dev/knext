@@ -14,13 +14,14 @@ dist file cannot resolve outside vinext's own Vite plugin pipeline, and is
 better delivered as a small, separate dist/index.js patch once proven.
 `images.loaderFile` remains ignored until the upstream release; the `loader`
 prop fix above is independent of it and fully bundled. Tracked as #1857.
+Updated to the maintainer's head of the PR: a custom loader also applies to fill images (full device-size srcSet, sizes defaulting to 100vw), data:/blob:/empty sources skip the loader, overrideSrc wins, a caller srcSet is ignored, and src is emitted after srcSet/sizes.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3686.
 Ported by hand from the upstream src change to the published 1.0.1 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
---- a/dist/shims/image.js	2026-10-03 21:09:23
-+++ b/dist/shims/image.js	2026-10-03 21:15:27
+--- a/dist/shims/image.js
++++ b/dist/shims/image.js
 @@ -85,6 +85,7 @@
  */
  const __dangerouslyAllowLocalIP = process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP === "true";
@@ -39,12 +40,12 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  }
  function preloadImageResource(input) {
  	if (!input.shouldPreload) return;
-@@ -289,22 +291,32 @@
+@@ -289,23 +291,49 @@
  function getImageWidths(width) {
  	return [...new Set([width, width * 2].map((targetWidth) => ALL_IMAGE_WIDTHS.find((configuredWidth) => configuredWidth >= targetWidth) ?? ALL_IMAGE_WIDTHS[ALL_IMAGE_WIDTHS.length - 1]))];
  }
 -function generateImageAttributes(src, width, quality = 75, sizes) {
-+function generateAttributesWithResolver(resolveUrl, src, width, quality, sizes) {
++function generateImageAttributes(resolveUrl, src, width, quality, sizes) {
  	if (sizes) {
  		const viewportPercentages = Array.from(sizes.matchAll(/(^|\s)(1?\d?\d)vw/g), (match) => Number.parseInt(match[2], 10));
  		const minimumWidth = viewportPercentages.length > 0 ? RESPONSIVE_WIDTHS[0] * (Math.min(...viewportPercentages) * .01) : 0;
@@ -53,9 +54,15 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 -			src: imageOptimizationUrl(src, candidates[candidates.length - 1], quality),
 -			srcSet: candidates.map((candidateWidth) => `${imageOptimizationUrl(src, candidateWidth, quality)} ${candidateWidth}w`).join(", ")
 +			src: resolveUrl(src, candidates[candidates.length - 1], quality),
-+			srcSet: candidates.map((candidateWidth) => `${resolveUrl(src, candidateWidth, quality)} ${candidateWidth}w`).join(", ")
++			srcSet: candidates.map((candidateWidth) => `${resolveUrl(src, candidateWidth, quality)} ${candidateWidth}w`).join(", "),
++			sizes
  		};
  	}
++	if (width === void 0) return {
++		src: resolveUrl(src, RESPONSIVE_WIDTHS[RESPONSIVE_WIDTHS.length - 1], quality),
++		srcSet: RESPONSIVE_WIDTHS.map((candidateWidth) => `${resolveUrl(src, candidateWidth, quality)} ${candidateWidth}w`).join(", "),
++		sizes: "100vw"
++	};
  	const widths = getImageWidths(width);
  	return {
 -		src: imageOptimizationUrl(src, widths[widths.length - 1], quality),
@@ -63,50 +70,141 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +		src: resolveUrl(src, widths[widths.length - 1], quality),
 +		srcSet: widths.map((candidateWidth, index) => `${resolveUrl(src, candidateWidth, quality)} ${index + 1}x`).join(", ")
  	};
-+}
-+function generateImageAttributes(src, width, quality = 75, sizes) {
-+	return generateAttributesWithResolver(imageOptimizationUrl, src, width, quality, sizes);
  }
++/**
++* Same per-width srcSet treatment as the built-in loader, but routed
++* through a user-supplied loader (the `loader` prop) instead of the built-in
++* /_next/image endpoint. Unlike the built-in loader, `quality` is passed
++* through as given, including `undefined`, so a custom loader's own default
++* (if any) applies, matching Next.js: the forced quality=75 default is
++* specific to the built-in loader.
++*/
 +function generateLoaderAttributes(loader, src, width, quality, sizes) {
-+	return generateAttributesWithResolver((loaderSrc, loaderWidth, loaderQuality) => loader({
++	return generateImageAttributes((loaderSrc, loaderWidth, loaderQuality) => loader({
 +		src: loaderSrc,
 +		width: loaderWidth,
 +		quality: loaderQuality
 +	}), src, width, quality, sizes);
 +}
++/** Sources Next.js always treats as unoptimized (empty, data: and blob:). */
++function isInlineSrc(src) {
++	return !src || src.startsWith("data:") || src.startsWith("blob:");
++}
  const Image = forwardRef(function Image({ src: srcProp, alt, width, height, fill, preload, priority, quality, placeholder, blurDataURL, loader, sizes, className, style, onLoad, onLoadingComplete, onError, unoptimized: _unoptimized, overrideSrc, loading, ...rest }, ref) {
++	delete rest.srcSet;
  	const lastLoadedSrcRef = useRef(void 0);
  	const lastErrorSrcRef = useRef(void 0);
-@@ -423,15 +435,18 @@
- 		});
- 	}
- 	if (loader) {
--		const resolvedQuality = typeof quality === "string" ? Number(quality) : quality ?? 75;
--		const resolvedSrc = loader({
-+		const resolvedQuality = typeof quality === "string" ? Number(quality) : quality;
-+		const loaderAttributes = imgWidth && !fill ? generateLoaderAttributes(loader, src, imgWidth, resolvedQuality, sizes) : void 0;
-+		const resolvedSrc = loaderAttributes ? loaderAttributes.src : loader({
- 			src,
- 			width: imgWidth ?? 0,
- 			quality: resolvedQuality
- 		});
-+		const resolvedSrcSet = loaderAttributes?.srcSet;
+ 	const didInsertRef = useRef(false);
+@@ -388,8 +416,10 @@
+ 		lastErrorSrcRef.current = src;
+ 		markBlurComplete();
+ 	} : void 0;
+-	if (_unoptimized === true || __globallyUnoptimized) {
+-		const renderedSrc = overrideSrc || src;
++	const unoptimized = (_unoptimized === true || __globallyUnoptimized) || !!loader && isInlineSrc(src);
++	if (unoptimized || loader) {
++		const loaderAttributes = loader && !unoptimized ? generateLoaderAttributes(loader, src, fill ? void 0 : imgWidth, typeof quality === "string" ? Number(quality) : quality, sizes) : void 0;
++		const resolvedSrc = overrideSrc || (loaderAttributes ? loaderAttributes.src : src);
+ 		const sanitizedBlur = imgBlurDataURL ? sanitizeBlurDataURL(imgBlurDataURL) : void 0;
+ 		const blurStyle = !blurComplete && placeholder === "blur" && sanitizedBlur ? {
+ 			backgroundImage: `url(${sanitizedBlur})`,
+@@ -399,18 +429,22 @@
+ 		} : void 0;
  		preloadImageResource({
  			shouldPreload,
- 			src: resolvedSrc,
-+			srcSet: resolvedSrcSet,
- 			sizes,
+-			src: renderedSrc,
++			src: resolvedSrc,
++			srcSet: loaderAttributes?.srcSet,
++			sizes: loaderAttributes?.sizes,
  			fetchPriority: priorityFetchPriority
  		});
-@@ -443,6 +458,7 @@
+ 		return /* @__PURE__ */ jsx("img", {
+ 			ref: mergedRef,
+-			src: renderedSrc,
+ 			alt,
+ 			width: fill ? void 0 : imgWidth,
  			height: fill ? void 0 : imgHeight,
  			loading: imageLoading,
+ 			fetchPriority: priorityFetchPriority,
  			decoding: "async",
-+			srcSet: resolvedSrcSet,
- 			sizes,
++			srcSet: loaderAttributes?.srcSet,
++			sizes: loaderAttributes?.sizes,
++			src: resolvedSrc,
  			className,
+ 			"data-nimg": fill ? "fill" : "1",
  			onLoad: handleLoad,
-@@ -613,16 +629,27 @@
+@@ -422,35 +456,6 @@
+ 			...rest
+ 		});
+ 	}
+-	if (loader) {
+-		const resolvedQuality = typeof quality === "string" ? Number(quality) : quality ?? 75;
+-		const resolvedSrc = loader({
+-			src,
+-			width: imgWidth ?? 0,
+-			quality: resolvedQuality
+-		});
+-		preloadImageResource({
+-			shouldPreload,
+-			src: resolvedSrc,
+-			sizes,
+-			fetchPriority: priorityFetchPriority
+-		});
+-		return /* @__PURE__ */ jsx("img", {
+-			ref: mergedRef,
+-			src: resolvedSrc,
+-			alt,
+-			width: fill ? void 0 : imgWidth,
+-			height: fill ? void 0 : imgHeight,
+-			loading: imageLoading,
+-			decoding: "async",
+-			sizes,
+-			className,
+-			onLoad: handleLoad,
+-			onError: handleError,
+-			style: fill ? getFillStyle(style) : style,
+-			...rest
+-		});
+-	}
+ 	if (isRemoteUrl(src)) {
+ 		const validation = validateRemoteUrl(src);
+ 		if (!validation.allowed) {
+@@ -521,7 +526,7 @@
+ 	}
+ 	const imgQuality = typeof quality === "string" ? Number(quality) : quality ?? 75;
+ 	const skipOptimization = isSvgUrl(src) && !__dangerouslyAllowSVG;
+-	const optimizedAttributes = imgWidth && !fill && !skipOptimization ? generateImageAttributes(src, imgWidth, imgQuality, sizes) : void 0;
++	const optimizedAttributes = imgWidth && !fill && !skipOptimization ? generateImageAttributes(imageOptimizationUrl, src, imgWidth, imgQuality, sizes) : void 0;
+ 	const srcSet = optimizedAttributes ? optimizedAttributes.srcSet : imgWidth && !fill ? RESPONSIVE_WIDTHS.filter((w) => w <= imgWidth * 2).map((w) => `${src} ${w}w`).join(", ") || `${src} ${imgWidth}w` : void 0;
+ 	const optimizedSrc = skipOptimization ? src : optimizedAttributes ? optimizedAttributes.src : imageOptimizationUrl(src, RESPONSIVE_WIDTHS[0], imgQuality);
+ 	const sanitizedLocalBlur = imgBlurDataURL ? sanitizeBlurDataURL(imgBlurDataURL) : void 0;
+@@ -567,6 +572,7 @@
+ */
+ function getImageProps(props) {
+ 	const { src: srcProp, alt, width, height, fill, preload: _preload, priority, quality: _quality, placeholder, blurDataURL: blurDataURLProp, loader, sizes, className, style, onLoad: _onLoad, onLoadingComplete: _onLoadingComplete, unoptimized: _unoptimized, overrideSrc, loading, ...rest } = props;
++	delete rest.srcSet;
+ 	const { src, width: imgWidth, height: imgHeight, blurDataURL: imgBlurDataURL } = resolveImageSource({
+ 		src: srcProp,
+ 		width,
+@@ -574,7 +580,7 @@
+ 		blurDataURL: blurDataURLProp
+ 	});
+ 	const shouldPreload = _preload === true || priority === true;
+-	if (_unoptimized === true || __globallyUnoptimized) {
++	if (_unoptimized === true || __globallyUnoptimized || !!loader && isInlineSrc(src)) {
+ 		const renderedSrc = overrideSrc || src;
+ 		const sanitizedBlurURL = imgBlurDataURL ? sanitizeBlurDataURL(imgBlurDataURL) : void 0;
+ 		const blurStyle = placeholder === "blur" && sanitizedBlurURL ? {
+@@ -603,7 +609,7 @@
+ 		return { props: Object.assign(imageProps, { "data-nimg": fill ? "fill" : "1" }) };
+ 	}
+ 	let blockedInProd = false;
+-	if (isRemoteUrl(src)) {
++	if (!loader && isRemoteUrl(src)) {
+ 		const validation = validateRemoteUrl(src);
+ 		if (!validation.allowed) {
+ 			if (__isDev) console.warn(`[next/image] ${validation.reason}`);
+@@ -613,16 +619,23 @@
  			}
  		}
  	}
@@ -127,20 +225,32 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +		optimizedSrc = "";
 +		srcSet = void 0;
 +	} else if (loader) {
-+		const loaderAttributes = imgWidth && !fill ? generateLoaderAttributes(loader, src, imgWidth, imgQuality, sizes) : void 0;
-+		optimizedSrc = loaderAttributes ? loaderAttributes.src : loader({
-+			src,
-+			width: imgWidth ?? 0,
-+			quality: imgQuality
-+		});
-+		srcSet = loaderAttributes?.srcSet;
++		const loaderAttributes = generateLoaderAttributes(loader, src, fill ? void 0 : imgWidth, imgQuality, sizes);
++		optimizedSrc = overrideSrc || loaderAttributes.src;
++		srcSet = loaderAttributes.srcSet;
 +	} else {
 +		const resolvedQuality = imgQuality ?? 75;
 +		const skipOpt = isSvgUrl(src) && !__dangerouslyAllowSVG || isRemoteUrl(src);
-+		const optimizedAttributes = imgWidth && !fill && !skipOpt ? generateImageAttributes(src, imgWidth, resolvedQuality, sizes) : null;
++		const optimizedAttributes = imgWidth && !fill && !skipOpt ? generateImageAttributes(imageOptimizationUrl, src, imgWidth, resolvedQuality, sizes) : null;
 +		optimizedSrc = skipOpt ? src : optimizedAttributes ? optimizedAttributes.src : imageOptimizationUrl(src, RESPONSIVE_WIDTHS[0], resolvedQuality);
 +		srcSet = optimizedAttributes?.srcSet;
 +	}
  	const sanitizedBlurURL = imgBlurDataURL ? sanitizeBlurDataURL(imgBlurDataURL) : void 0;
  	const blurStyle = placeholder === "blur" && sanitizedBlurURL ? {
  		backgroundImage: `url(${sanitizedBlurURL})`,
+@@ -631,7 +644,6 @@
+ 		backgroundPosition: "center"
+ 	} : void 0;
+ 	const imageProps = {
+-		src: optimizedSrc,
+ 		alt,
+ 		width: fill ? void 0 : imgWidth,
+ 		height: fill ? void 0 : imgHeight,
+@@ -640,6 +652,7 @@
+ 		decoding: "async",
+ 		srcSet,
+ 		sizes: sizes ?? (fill ? "100vw" : void 0),
++		src: optimizedSrc,
+ 		className,
+ 		style: fill ? getFillStyle(style, blurStyle) : {
+ 			...blurStyle,
