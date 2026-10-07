@@ -16,7 +16,8 @@
   (polyglot business-logic layer, design-now/build-later), ADR-0003 (Connect + buf), ADR-0004
   (`BackendService` CRD — **this ADR extends it**), ADR-0012 (default-off, self-hostable, no SaaS
   lock-in by default), ADR-0019 (`spec.database.secretRef` — the typed-sugar-over-`envMap`
-  precedent this ADR reuses), ADR-0044 (ingress hardening, CNI-conditional enforcement), ADR-0064
+  precedent this ADR reuses), ADR-0044 (ingress hardening — the pod-IP bypass of a sidecar-fronted port, and CNI-conditional
+  enforcement), ADR-0064
   (platform layer and image prewarm — the weight-caching lever).
 
 ## Context
@@ -83,6 +84,10 @@ security invariants (auth on every path, Secret-only credentials, content loggin
   GPU quota. A `BackendService` may *request* an extended resource on nodes the user already runs
   (D5); provisioning them is the user's or the cloud's job;
 - run **multi-tenant inference as a service** for third parties, metering, or billing;
+- run a **vector database or RAG store**: no embeddings index, no document ingestion, no retrieval
+  pipeline. An app that needs one binds its own store, the same way it binds its own database;
+- run an **AI gateway**: no response caching, no rate limiting, no cost or token metering, no
+  provider failover or routing layer between the app and the model. The binding is a direct call;
 - **create or own KServe objects** (`InferenceService`, `LocalModelCache`, …). A user who runs
   KServe binds to it by reference (D3);
 - ship or claim to replicate **TypeSafe Jev** or any other vendor's model. knext defines how an app
@@ -187,8 +192,16 @@ spec:
 What the operator does, and only the operator (ADR-0001 unchanged):
 
 - `flavour: model` → a Knative Service with `networking.knative.dev/visibility: cluster-local`, the
-  model server container, an **auth sidecar** that owns the only exposed port, the per-binding token
-  Secret, and the ingress NetworkPolicy (D6).
+  model server container **bound to `127.0.0.1` only**, an **auth sidecar** that is the serving
+  container (the only port declared to Knative and the only listener on the pod IP), the
+  per-binding token Secret, and the ingress NetworkPolicy (D6 §1 explains why the loopback bind,
+  not the NetworkPolicy, is what closes the pod-IP bypass).
+- `spec.backends[].service` (an in-cluster binding) → the four `KNEXT_AI_<NAME>_*` vars **instead
+  of** ADR-0004's `<NAME>_SERVICE_URL`, not in addition: one binding, one set of env vars, so the
+  app cannot pick up a tokenless URL by mistake. `KNEXT_AI_<NAME>_BASE_URL` is the backend's
+  cluster-local URL plus the server's API prefix; `KNEXT_AI_<NAME>_API_KEY` is the binding token.
+  A `grpc`-flavour `BackendService` keeps ADR-0004's `<NAME>_SERVICE_URL` unchanged. ADR-0004
+  carries an "Amended by ADR-0065" note recording this.
 - `spec.backends[].external` → the four env vars, the key through `secretKeyRef` — typed sugar over
   `envMap`, exactly the ADR-0019 shape, including "no namespace field": a `NextApp` can only bind a
   Secret in its own namespace.
@@ -252,9 +265,20 @@ proto is drafted when ADR-0002's build starts, not here.
    behaviour, so it gets the bar the "no unauthenticated mutating endpoints" rule sets. jev
    **auth sidecar on every path + NetworkPolicy 0.99** / NetworkPolicy only 0.01 / the server's
    own key 0.00 (conf 0.98):
-   - the **operator-injected auth sidecar** owns the only exposed port and requires the
-     per-binding bearer token on **every path** — because vLLM's `--api-key` leaves `/invocations`
-     and others open and Ollama ignores keys;
+   - the **operator-injected auth sidecar** requires the per-binding bearer token on **every
+     path** — because vLLM's `--api-key` leaves `/invocations` and others open and Ollama ignores
+     keys;
+   - **the model server binds `127.0.0.1` only.** Declaring the sidecar as Knative's port does
+     not stop a co-resident pod dialling the model server directly at `<pod-IP>:8000` (vLLM's
+     default listener is all interfaces), and on flannel no NetworkPolicy stops it either. That
+     is the same bypass ADR-0044 closed for the app's container port behind queue-proxy — and
+     ADR-0044's fix is a port-restricted NetworkPolicy, which is CNI-conditional. Here the fix
+     must hold on flannel, so it is the **listener address**, not the policy: containers in a pod
+     share the network namespace, so the sidecar reaches `127.0.0.1:8000` and nothing off-pod
+     can. The operator renders the bind for the servers it has presets for (vLLM `--host
+     127.0.0.1`, Ollama `OLLAMA_HOST=127.0.0.1:<port>`); for any other image the loopback bind is
+     a stated contract the operator **cannot verify from the spec**, so the A4 drill is what
+     proves it (`<pod-IP>:8000` → connection refused);
    - `visibility: cluster-local` — no public route;
    - an ingress **NetworkPolicy** limited to the Knative/Kourier data path. It **cannot** name the
      calling app: cluster-local traffic arrives from the activator/gateway, not the caller's pod.
@@ -262,11 +286,20 @@ proto is drafted when ADR-0002's build starts, not here.
      (OKE, OrbStack) the policy is declarative only**; `doctor` reports that through the existing
      enforcement detection.
 2. **Secrets in Kubernetes Secrets only.** Provider keys and binding tokens are `secretKeyRef`s.
-   Slice A1's guard **rejects** a `*_API_KEY`/`*_TOKEN` name in plain `env`, and a base URL with
-   userinfo or a key-shaped query parameter.
+   Slice A1's guard is **scoped to the `KNEXT_AI_` prefix**: it rejects `KNEXT_AI_<NAME>_API_KEY`
+   in plain `env` (it must come from `secrets.envMap`), and a `KNEXT_AI_<NAME>_BASE_URL` with
+   userinfo or a key-shaped query parameter. It deliberately does **not** match `*_API_KEY` or
+   `*_TOKEN` generally — existing apps legitimately carry names like `STRIPE_API_KEY`, and a
+   blanket rule would break them on upgrade. The guard runs **in the CLI's config validation
+   only**: a CR applied by GitOps or by hand bypasses it, so it is a seatbelt for the documented
+   path, not an enforcement point. (A CRD-level CEL rule could cover every writer; it is not
+   proposed here because it would pin a naming policy into every cluster's CRD.)
 3. **Prompt and response content logging is OFF by default** — jev **off, opt-in per app with
-   redaction guidance 1.00** (conf 1.00). knext's own telemetry records model id, latency, status
-   and token counts, never content. Opting in is per app and documented as a PII decision.
+   redaction guidance 1.00** (conf 1.00). knext adds **no** model telemetry of its own: it does not
+   wrap SDKs (D2) and does not sit in the request path (D1, no gateway), so nothing in knext sees
+   prompts, responses or token counts. The rule binds what knext *does* own — the auth sidecar logs
+   status, path and latency, never bodies — and the docs page tells the app to keep content out of
+   its own logs and spans unless it opts in, as a PII decision.
 4. **Egress for the external mode** — jev **document now; opt-in, CIDR-based egress policy later,
    never default-on 1.00** / default-on 0.00 / say nothing 0.00 (conf 1.00). A default-on egress
    policy would break every existing app's database, cache and storage traffic. Core
@@ -331,8 +364,9 @@ entry with a cluster-local URL.
 
 | Failure | Effect | Mitigation |
 |---|---|---|
-| Key placed in plain `env` or in the base URL | Key visible in the CR, `kubectl get`, GitOps diffs | A1 guard rejects it at config validation; docs show only `envMap` |
-| Model server path left open behind the sidecar (port mis-wired) | Unauthenticated inference | Sidecar owns the only container port; kind drill hits every known unauthenticated vLLM path and requires 401 (A4) |
+| Key placed in plain `env` or in the base URL | Key visible in the CR, `kubectl get`, GitOps diffs | A1 guard rejects `KNEXT_AI_*` misuse in CLI config validation; a GitOps or hand-applied CR bypasses it, so docs show only `envMap` |
+| Model server path left open behind the sidecar | Unauthenticated inference via a path the server does not protect | Sidecar checks the token on every path; A4 drill hits every known unauthenticated vLLM path through the sidecar and requires 401 |
+| Model server listens on all interfaces | A co-resident pod reaches `<pod-IP>:8000` directly, skipping the sidecar; no NetworkPolicy stops it on flannel (the ADR-0044 bypass) | Server binds `127.0.0.1` (operator-rendered for preset servers, a stated contract otherwise); A4 drill requires `<pod-IP>:8000` → connection refused |
 | NetworkPolicy not enforced (flannel) | No L3 defence in depth | Token still required; `doctor` reports non-enforcement; docs carry the caveat |
 | GPU model scaled to zero | First request waits for a weight load, may hit the progress deadline or the client timeout | `minScale ≥ 1` default for GPU; scale-to-zero opt-in requires a measured start and matching deadlines |
 | External provider outage or rate limit | App errors | App-level concern; docs recommend timeouts and fallbacks; knext adds no retry layer |
@@ -357,10 +391,10 @@ Each item is independently shippable. None starts before v1.0 GA.
 
 | # | Item | Depends on | Exit criteria |
 |---|---|---|---|
-| **A1** | **Env contract + external-mode docs page + guard** (no CRD change) | v1.0 GA | Docs page "Call an AI model from your app" uses `createOpenAICompatible` with `KNEXT_AI_<NAME>_*` via `secrets.envMap` + `env`; config validation rejects a `*_API_KEY`/`*_TOKEN` key in plain `env` and a base URL with userinfo or a key-shaped query parameter (mutation-proved); a kind test binds an app to a stub OpenAI-compatible server and shows the key absent from `kubectl get nextapp -o yaml` |
+| **A1** | **Env contract + external-mode docs page + guard** (no CRD change) | v1.0 GA | Docs page "Call an AI model from your app" uses `createOpenAICompatible` with `KNEXT_AI_<NAME>_*` via `secrets.envMap` + `env`; CLI config validation rejects `KNEXT_AI_<NAME>_API_KEY` in plain `env` and a `KNEXT_AI_<NAME>_BASE_URL` with userinfo or a key-shaped query parameter, and still accepts an unrelated `STRIPE_API_KEY` in `env` (both halves mutation-proved); docs state the guard does not cover GitOps or hand-applied CRs; a kind test binds an app to a stub OpenAI-compatible server and shows the key absent from `kubectl get nextapp -o yaml` |
 | A2 | Egress posture doc + design note for an opt-in egress policy | A1 | Docs state the posture, the no-FQDN limit and the CNI caveat; the opt-in policy is filed as its own ADR-0044 amendment, not built here |
 | A3 | `BackendService` CRD base (ADR-0004) | v1.0 GA | ADR-0004's own action items; verified on kind and OKE |
-| A4 | `flavour: model`, CPU only: auth sidecar, per-binding token, cluster-local, NetworkPolicy, scale-to-zero | A3 | kind drill: every path of a vLLM CPU server (including `/invocations`) returns 401 without the token, 200 with it; the bound app works; scale-to-zero and the wake time measured and recorded |
+| A4 | `flavour: model`, CPU only: model server bound to `127.0.0.1`, auth sidecar, per-binding token, cluster-local, NetworkPolicy, scale-to-zero | A3 | kind drill on a **non-enforcing CNI** (so the result cannot lean on NetworkPolicy): every path of a vLLM CPU server (including `/invocations`) returns 401 through the sidecar without the token, 200 with it; a co-resident pod dialling `<pod-IP>:8000` gets **connection refused** (mutation-proved: drop the loopback bind and the drill goes red); the bound app works; scale-to-zero and the wake time measured and recorded |
 | A5 | `NextApp.spec.backends[].external` typed binding + `doctor` check | A3 | Typed sugar over `envMap` (ADR-0019 shape, same-namespace only); status via `computeStatusVerdict`; CRD-schema preflight covers the new field |
 | A6 | GPU passthrough + weights as an OCI image, measured | A4 + founder Q1 | `resources.extended` + placement; cold start measured on one GPU node; `minScale ≥ 1` stays the default unless the measurement says otherwise |
 | A7 | `knext.ai.decision.v1` proto + a CPU classifier template | ADR-0002 build | Proto under `buf breaking`; the template passes a decision round trip in-cluster; docs make no calibration claim |
