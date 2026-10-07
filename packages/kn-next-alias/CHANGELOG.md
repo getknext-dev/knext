@@ -9,6 +9,7 @@
 - Updated dependencies [35f4d48]
 - Updated dependencies [546cad0]
 - Updated dependencies [622f728]
+- Updated dependencies [92c4896]
   - @getknext/core@1.3.0-rc.6
 
 ## 1.3.0-rc.5
