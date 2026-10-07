@@ -336,6 +336,43 @@ describe("the bundled patches against the published tarball", () => {
         );
     });
 
+    it("every patched dist file is valid JavaScript to plain Node, and the patched entry point loads", () => {
+        // The vitest/bun transforms tolerate TS leftovers (a duplicated
+        // declaration, `export function` beside an export list, type
+        // annotations) that plain Node rejects, so run real Node over every
+        // file any patch touches.
+        applyVinextPatches(patched);
+        const files = new Set<string>();
+        for (const entry of manifest.patches) {
+            for (const fp of parseUnifiedPatch(
+                readFileSync(join(PATCHES_DIR, entry.file), "utf8"),
+            )) {
+                files.add(fp.path);
+            }
+        }
+        expect(files.size).toBeGreaterThan(0);
+        const broken: string[] = [];
+        for (const rel of [...files].sort()) {
+            const r = spawnSync("node", ["--check", join(patched, rel)], {
+                encoding: "utf8",
+            });
+            if (r.status !== 0)
+                broken.push(`${rel}: ${r.stderr.split("\n")[4] ?? r.stderr}`);
+        }
+        expect(broken).toEqual([]);
+        const load = spawnSync(
+            "node",
+            [
+                "--input-type=module",
+                "-e",
+                `await import(${JSON.stringify(pathToFileURL(join(patched, "dist", "index.js")).href)});`,
+            ],
+            { encoding: "utf8", cwd: dirname(patched) },
+        );
+        expect(load.stderr.split("\n").slice(0, 6).join("\n")).toBe("");
+        expect(load.status).toBe(0);
+    }, 60_000);
+
     it("the installed (pristine) copy is NOT already patched — each fix is real work", () => {
         const results = applyVinextPatches(INSTALLED_VINEXT, { check: true });
         expect(results.map((r) => r.status)).toEqual(
