@@ -1,4 +1,4 @@
-name: Runtime Redis cache — kind e2e (node + bun)
+name: Runtime Redis cache — kind e2e (turbopack + vinext, node + bun)
 
 # Proof lane for the standalone runtimes' ISR/data cache: a freshly scaffolded
 # app on turbopack x node AND turbopack x bun, with `cache.provider: redis`,
@@ -39,13 +39,20 @@ permissions:
 
 jobs:
   node-redis-e2e:
-    name: ${{ matrix.runtime }} runtime reaches Redis through kn-next deploy on kind
+    name: ${{ matrix.builder }} x ${{ matrix.runtime }} reaches Redis through kn-next deploy on kind
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        runtime: [node, bun]
+        include:
+          - { builder: turbopack, runtime: node }
+          - { builder: turbopack, runtime: bun }
+          # vinext: the adapter picks its Redis client per runtime (a literal
+          # ioredis import on node so nitro ships it, Bun's built-in client on
+          # bun). Same assertions, plus the vinext-specific image check below.
+          - { builder: vinext, runtime: node }
+          - { builder: vinext, runtime: bun }
     env:
       CLUSTER: node-redis-e2e
       APP_NS: node-redis-e2e
@@ -262,7 +269,7 @@ jobs:
         run: |
           set -euo pipefail
           APP_DIR="${RUNNER_TEMP}/node-redis-app"
-          node ./packages/kn-next/dist/cli/kn-next.js create "$APP_DIR" --name "$APP_NAME"
+          node ./packages/kn-next/dist/cli/kn-next.js create "$APP_DIR" --name "$APP_NAME" --builder "${{ matrix.builder }}"
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
 
       - name: Add an ISR page and an authenticated invalidate route
@@ -328,12 +335,15 @@ jobs:
       - name: Write the kind-cluster knext.config.ts (turbopack x the matrix runtime, Redis cache)
         run: |
           set -euo pipefail
+          BUILD_LINE=""
+          if [ "${{ matrix.builder }}" = "vinext" ]; then BUILD_LINE='build: "vinext",'; fi
           cat > "$APP_DIR/knext.config.ts" <<TS
           import type { KnativeNextConfig } from "@getknext/core";
 
           const config: KnativeNextConfig = {
             name: "$APP_NAME",
             runtime: "${{ matrix.runtime }}",
+            ${BUILD_LINE}
             registry: "localhost:5001",
             cache: {
               provider: "redis",
@@ -378,9 +388,19 @@ jobs:
             || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
           rt="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.runtime}')"
           echo "spec.runtime=${rt}"
-          [ "$rt" = "${{ matrix.runtime }}" ] || { echo "::error::NextApp spec.runtime is '${rt}', want ${{ matrix.runtime }}"; exit 1; }
+          if [ "${{ matrix.builder }}" = "vinext" ]; then
+            # The CLI deliberately omits spec.runtime for vinext (the runtime is
+            # fixed by the image: a compiled exec, or the node image), so assert
+            # the build field instead.
+            bld="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.build}')"
+            echo "spec.build=${bld} spec.runtime=${rt}"
+            [ "$bld" = "vinext" ] || { echo "::error::NextApp spec.build is '${bld}', want vinext"; exit 1; }
+          else
+            [ "$rt" = "${{ matrix.runtime }}" ] || { echo "::error::NextApp spec.runtime is '${rt}', want ${{ matrix.runtime }}"; exit 1; }
+          fi
 
       - name: Assert the build pointed cacheHandler at the runtime's own entry
+        if: matrix.builder != 'vinext'
         run: |
           set -euo pipefail
           handler="$(node -e "const r=require(process.argv[1]); process.stdout.write(String(r.config.cacheHandler))" "$APP_DIR/.next/required-server-files.json")"
@@ -390,8 +410,21 @@ jobs:
             *) echo "::error::cacheHandler is '${handler}', want the ${{ matrix.runtime }} entry"; exit 1;;
           esac
 
+      - name: Assert the vinext node image carries ioredis (bundled into the nitro server, or a traced node_modules package)
+        if: matrix.builder == 'vinext' && matrix.runtime == 'node'
+        run: |
+          set -euo pipefail
+          img="$(kubectl -n "$APP_NS" get ksvc "$APP_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "image=${img}"
+          docker pull "$img" >/dev/null
+          # nitro bundles the literal ioredis import into .output/server/index.mjs
+          # (no node_modules/ioredis directory exists in that case). Accept either
+          # form; the `(redis)` cache lines below are the behavioural proof.
+          docker run --rm --entrypoint node "$img" -e 'const fs=require("node:fs");const src=fs.readFileSync("/app/.output/server/index.mjs","utf8");const bundled=src.includes("enableOfflineQueue")&&src.includes("cluster_state");const dir=fs.existsSync("/app/.output/server/node_modules/ioredis");console.log({bundled,dir});process.exit(bundled||dir?0:1)' \
+            || { echo "::error::ioredis is neither bundled into the vinext node server nor present as a package, Redis would silently fall back to memory"; exit 1; }
+
       - name: Assert the node image carries ioredis where the traced cache handler resolves it
-        if: matrix.runtime == 'node'
+        if: matrix.builder != 'vinext' && matrix.runtime == 'node'
         run: |
           set -euo pipefail
           img="$(kubectl -n "$APP_NS" get ksvc "$APP_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}')"

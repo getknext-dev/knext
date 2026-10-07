@@ -138,6 +138,10 @@ export default defineConfig([
       // vinext's generated registration module imports it at the app's build
       // time. Plain untyped ESM like cache-handler (which it wraps).
       'adapters/vinext-cache-adapter': 'src/adapters/vinext-cache-adapter.mjs',
+      // Per-runtime twins: the ioredis import stays LITERAL on node (so nitro's
+      // tracing ships it) and absent on bun (built-in client).
+      'adapters/vinext-cache-adapter-node': 'src/adapters/vinext-cache-adapter-node.mjs',
+      'adapters/vinext-cache-adapter-bun': 'src/adapters/vinext-cache-adapter-bun.mjs',
       // The in-flight cache-write registry (`./internal/cache-drain`).
       // Measured, not assumed: tsup hoists it into a SHARED chunk that both
       // this entry and adapters/cache-handler.js import, so the published

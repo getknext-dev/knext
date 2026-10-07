@@ -347,12 +347,12 @@ function markUnhealthy(reason) {
  * The generic entry's runtime detection: Bun's native client under Bun,
  * ioredis under Node.
  *
- * TODO(#1843): the ioredis specifier here is still NON-LITERAL, so the vinext
- * `bun build --compile` path never bundles ioredis. That also hides it from
- * Next's file tracing, which is exactly why knext-driven standalone builds no
- * longer come through here (they get `cache-handler-node.js`, whose import is
- * literal). Retiring this path means routing vinext and `next dev` through a
- * per-runtime entry too.
+ * The ioredis specifier here is deliberately NON-LITERAL, so this path never
+ * bundles ioredis into a compiled Bun executable. That also hides it from
+ * bundler tracing, which is why knext-driven builds do not come through here:
+ * standalone builds get `cache-handler-node.js`/`-bun.js`, and the vinext
+ * scaffold gets `vinext-cache-adapter-node`/`-bun`. What remains on this path
+ * is `next dev` and apps scaffolded before the per-runtime adapters.
  *
  * `KNEXT_CACHE_REDIS_CLIENT=ioredis` forces ioredis even on Bun: the same
  * escape hatch `KNEXT_DB_DRIVER` provides for the Postgres driver, and the way

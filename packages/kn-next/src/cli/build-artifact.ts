@@ -57,7 +57,11 @@ import {
     buildStandaloneExecutable,
     standaloneExecFileName,
 } from "./standalone-exec-build";
-import { buildVinextExecutable } from "./vinext-build";
+import {
+    buildVinextExecutable,
+    stageOgHarfbuzzForVinextNode,
+    stageSharpForVinextNode,
+} from "./vinext-build";
 
 export interface ResolvedBuild {
     readonly builder: BuilderAdapter;
@@ -150,6 +154,15 @@ export interface CompileForDeployResult {
      * (not run) is itself informative to a caller deciding what to log.
      */
     readonly healed?: HealResult;
+    /**
+     * vinext × node only: what staging the IMAGE platform's payload did.
+     * `knext build` logs it; `deploy`/`preview` get the staging for free,
+     * which they need because they run no `knext build` (see the call site).
+     */
+    readonly vinextNode?: {
+        readonly sharpStaged: boolean;
+        readonly og: ReturnType<typeof stageOgHarfbuzzForVinextNode>;
+    };
 }
 
 /**
@@ -277,6 +290,17 @@ export function compileArtifactForDeploy(
             runtimeId,
         });
         return { compiled: true, binaryPath };
+    }
+
+    // vinext × node: replace nitro's traced sharp (the BUILD HOST's addon,
+    // wrong platform for the alpine/musl image) with the image platform's, and
+    // stage next/og's wasm. This is shared by build/deploy/preview because
+    // only `knext build` used to do it, so a glibc or macOS host deploying
+    // shipped an image whose compile-cache bake dies loading sharp.
+    if (artifact.shape === "nitro-output-node") {
+        const sharpStaged = stageSharpForVinextNode(cwd).staged;
+        const og = stageOgHarfbuzzForVinextNode(cwd);
+        return { compiled: false, vinextNode: { sharpStaged, og } };
     }
 
     // node runtime (standalone), or vinext × node: nothing to compile —

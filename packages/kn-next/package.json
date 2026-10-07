@@ -51,6 +51,8 @@
     "./internal/cache-handler-node": "./dist/adapters/cache-handler-node.js",
     "./internal/cache-handler-bun": "./dist/adapters/cache-handler-bun.js",
     "./internal/vinext-cache-adapter": "./dist/adapters/vinext-cache-adapter.js",
+    "./internal/vinext-cache-adapter-node": "./dist/adapters/vinext-cache-adapter-node.js",
+    "./internal/vinext-cache-adapter-bun": "./dist/adapters/vinext-cache-adapter-bun.js",
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
     "./internal/request-body-cap": "./dist/adapters/request-body-cap.cjs",

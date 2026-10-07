@@ -37,13 +37,23 @@ export default defineConfig({
   plugins: [
     vinext({
       cache: {
-        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+        data: {
+          // `-node` on `runtime: 'node'`, `-bun` on the default Bun runtime.
+          adapter: '@getknext/core/internal/vinext-cache-adapter-bun',
+        },
       },
     }),
     // …nitro(…)
   ],
 });
 ```
+
+The adapter is picked per runtime so the Redis client is resolved at build time: the `-node`
+adapter imports `ioredis` directly, so the build ships it in the image, and the `-bun` adapter uses
+Bun's built-in Redis client. If `REDIS_URL` is set but the client cannot be loaded, the app logs one
+`Redis client unavailable` error at startup and serves from memory — ISR is then not shared between
+pods and is lost on scale-to-zero. The generic `…/vinext-cache-adapter` subpath still works for apps
+scaffolded earlier, but it cannot be traced by the build, so switch it to the one for your runtime.
 
 At build time, vinext generates a registration module from this option and runs it in every server
 entry, so the Redis-backed handler is registered before any route executes. Page-level ISR

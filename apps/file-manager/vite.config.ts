@@ -63,7 +63,7 @@ export default defineConfig({
       // registered data cache. Without it the app silently falls back to a
       // per-pod in-memory cache and the provisioned Redis stays empty.
       cache: {
-        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+        data: { adapter: '@getknext/core/internal/vinext-cache-adapter-bun' },
       },
     }),
     nitro({
