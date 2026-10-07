@@ -15,6 +15,7 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
+    cpSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
@@ -80,37 +81,61 @@ describe("vinext x nitro: <style jsx> keeps a single React", () => {
         applyVinextPatches(join(root, "node_modules", "vinext"));
         sh(join(root, "node_modules", ".bin", "vite"), ["build"]);
 
-        const port = 20000 + Math.floor(Math.random() * 20000);
-        const srv = spawn("node", [".output/server/index.mjs"], {
-            cwd: root,
-            env: {
-                ...process.env,
-                PORT: String(port),
-                NITRO_PORT: String(port),
-            },
-        });
-        let log = "";
-        srv.stdout.on("data", (d) => {
-            log += d;
-        });
-        srv.stderr.on("data", (d) => {
-            log += d;
-        });
-        try {
-            let res: Response | undefined;
-            for (let i = 0; i < 40 && !res; i++) {
-                try {
-                    res = await fetch(`http://127.0.0.1:${port}/`);
-                } catch {
-                    await new Promise((r) => setTimeout(r, 250));
+        const serve = async (
+            cwd: string,
+        ): Promise<{ status?: number; body: string; log: string }> => {
+            const port = 20000 + Math.floor(Math.random() * 20000);
+            const srv = spawn("node", [".output/server/index.mjs"], {
+                cwd,
+                env: {
+                    ...process.env,
+                    PORT: String(port),
+                    NITRO_PORT: String(port),
+                },
+            });
+            let log = "";
+            srv.stdout.on("data", (d) => {
+                log += d;
+            });
+            srv.stderr.on("data", (d) => {
+                log += d;
+            });
+            try {
+                let res: Response | undefined;
+                for (let i = 0; i < 40 && !res; i++) {
+                    try {
+                        res = await fetch(`http://127.0.0.1:${port}/`);
+                    } catch {
+                        await new Promise((r) => setTimeout(r, 250));
+                    }
                 }
+                return {
+                    status: res?.status,
+                    body: (await res?.text()) ?? "",
+                    log,
+                };
+            } finally {
+                srv.kill("SIGKILL");
             }
-            expect(res?.status).toBe(200);
-            expect(await res?.text()).toContain("hello-jsx");
-            expect(log).not.toContain("Invalid hook call");
-        } finally {
-            srv.kill("SIGKILL");
-        }
+        };
+
+        const here = await serve(root);
+        expect(here.status).toBe(200);
+        expect(here.body).toContain("hello-jsx");
+        expect(here.log).not.toContain("Invalid hook call");
+
+        // The output must be self-contained: relocated away from the project's
+        // node_modules it still serves (a runtime `require('react')` would die
+        // with "Cannot find module 'react'").
+        const moved = mkdtempSync(join(tmpdir(), "knext-styled-jsx-moved-"));
+        tempRoots.push(moved);
+        cpSync(join(root, ".output"), join(moved, ".output"), {
+            recursive: true,
+        });
+        const there = await serve(moved);
+        expect(there.status).toBe(200);
+        expect(there.body).toContain("hello-jsx");
+
         // Single React: the built server must not resolve `react` through a
         // runtime createRequire the tracer cannot see.
         expect(

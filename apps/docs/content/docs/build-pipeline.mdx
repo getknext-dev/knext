@@ -454,6 +454,11 @@ The fixes bundled with vinext 1.0.1:
   the home page.
 - **`/_next/image` in a Nitro build** is served by the app itself with the Next.js image headers
   (including `x-nextjs-cache: MISS`) instead of a redirect to the source file.
+- **A page with `<style jsx>` in a Nitro build** renders instead of failing with an "Invalid hook
+  call" error. The build now always traces `react` and `react-dom`, so styled-jsx shares the
+  server's single React copy, including after you move the `.output` directory. If your app
+  was scaffolded before this fix and you do not use the bundled fixes, add
+  `traceDeps: ['react', 'react-dom']` to the `nitro({ ... })` options in `vite.config.ts`.
 
 ## Build the image on your own builder (Cloud Build / CI)
 
