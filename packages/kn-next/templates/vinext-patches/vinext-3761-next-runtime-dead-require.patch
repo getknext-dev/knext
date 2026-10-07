@@ -153,4 +153,4 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +	}
 +}
 +//#endregion
-+export { blankDeadNextRuntimeRequireBranches, definedNextRuntime, evaluateNextRuntimeTest };
++export { blankDeadNextRuntimeRequireBranches, definedNextRuntime };
