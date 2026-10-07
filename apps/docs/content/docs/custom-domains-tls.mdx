@@ -98,13 +98,141 @@ The approach here is a per-hostname certificate: cert-manager writes a `Secret`,
 ### Choose how the certificate is issued
 
 <Callout type="info">
-On a Kourier-only cluster, cert-manager's **HTTP-01** solver did not complete in testing, so this
-page does not offer it as a working path. It publishes the challenge as a standard Kubernetes
-`Ingress`; in testing the challenge stayed `pending` with `wrong status code '404', expected '200'`,
-and the cause is not established. DNS-01 and Knative's cert-manager integration for
-cluster-wide auto-TLS are the alternatives; neither has been verified end to end on the reference
-cluster yet.
+**Why cert-manager's default HTTP-01 setup returns 404 on a Kourier-only cluster.** The HTTP-01
+solver publishes the challenge path with a standard Kubernetes `Ingress`
+(`networking.k8s.io/v1`). Kourier does not read those: it only serves Knative's own networking
+`Ingress` (`networking.internal.knative.dev`), and a Kourier-only cluster has no controller for the
+standard kind. Setting `ingressClassName: kourier.ingress.networking.knative.dev` on the solver does not
+change that. The challenge stays `pending` with `wrong status code '404', expected '200'`, even though
+the solver pod answers correctly when reached directly.
 </Callout>
+
+Three ways to issue a trusted certificate, by what they need:
+
+| Path | Scope | Status on the reference cluster |
+|---|---|---|
+| [HTTP-01 through a Knative routing rule](#http-01-on-a-kourier-only-cluster) | One namespace | **Verified**: Let's Encrypt staging, then production, served on the hostname |
+| [DNS-01](#dns-01) | One namespace | Not yet verified |
+| [Cluster-wide auto-TLS](#cluster-wide-auto-tls) | Whole cluster, admin-owned | Not yet verified |
+
+### HTTP-01 on a Kourier-only cluster
+
+This path makes the challenge reachable through Kourier itself. You write one Knative networking
+`Ingress` for the hostname that sends `/.well-known/acme-challenge/` to cert-manager's solver and
+everything else to your app, and that also serves the certificate. It **replaces** the
+`DomainMapping` for that hostname (steps 3 and 4's `tls.secretName`). Everything stays in your
+namespace.
+
+<Callout type="warn">
+**Read these before using it.**
+
+- `networking.internal.knative.dev` is Knative's internal API, not a user-facing contract. It can
+  change between Knative releases; re-test this path when you upgrade Knative.
+- **Never create it for a hostname that a `DomainMapping` already serves.** Two rules for one
+  hostname make the gateway reject its route update, which can stall routing changes for every app on
+  the cluster. Delete the mapping first.
+- Knative's hostname claims do not cover this object, so keep the `ClusterDomainClaim` from step 2 in
+  place: it stops a `DomainMapping` in another namespace from taking the name.
+- Creating these objects usually needs cluster-admin rights.
+- Certificate renewal uses the same path, but a renewal has not been observed on the reference cluster
+  yet.
+</Callout>
+
+An issuer whose solver pods carry a label you choose, and a `Service` that selects them. The
+`Ingress` cert-manager still creates for the solver is ignored on this cluster, which is harmless:
+
+```yaml title="issuer-http01.yaml"
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt-http01
+  namespace: prod
+spec:
+  acme:
+    # Start on staging (untrusted certificates, generous rate limits), then switch to
+    # https://acme-v02.api.letsencrypt.org/directory and re-issue.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: you@example.com
+    privateKeySecretRef:
+      name: letsencrypt-http01-account-key
+    solvers:
+      - http01:
+          ingress:
+            serviceType: ClusterIP
+            podTemplate:
+              metadata:
+                labels:
+                  acme-solver-for: app.example.com
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: acme-solver
+  namespace: prod
+spec:
+  selector:
+    acme-solver-for: app.example.com
+  ports:
+    - port: 80
+      targetPort: 8089   # the port cert-manager's solver listens on
+```
+
+The routing rule. The second path is the same rule a `DomainMapping` would generate for the app
+`acme`:
+
+```yaml title="route-app-example-com.yaml"
+apiVersion: networking.internal.knative.dev/v1alpha1
+kind: Ingress
+metadata:
+  name: app-example-com
+  namespace: prod
+  annotations:
+    networking.knative.dev/ingress.class: kourier.ingress.networking.knative.dev
+spec:
+  httpOption: Enabled          # keep port 80 open: HTTP-01 is validated over plain HTTP
+  rules:
+    - hosts:
+        - app.example.com
+      visibility: ExternalIP
+      http:
+        paths:
+          - path: /.well-known/acme-challenge/
+            splits:
+              - percent: 100
+                serviceName: acme-solver
+                serviceNamespace: prod
+                servicePort: 80
+          - rewriteHost: acme.prod.svc.cluster.local
+            splits:
+              - percent: 100
+                appendHeaders:
+                  K-Original-Host: app.example.com
+                serviceName: acme
+                serviceNamespace: prod
+                servicePort: 80
+  tls:
+    - hosts:
+        - app.example.com
+      secretName: app-example-com-tls
+      secretNamespace: prod
+```
+
+Apply the claim from step 2, then the issuer and the routing rule, then the `Certificate` from
+[Request the certificate](#request-the-certificate-and-reference-it) with
+`issuerRef: {name: letsencrypt-http01, kind: Issuer}`:
+
+```bash
+kubectl apply --validate=strict -f claim.yaml -f issuer-http01.yaml -f route-app-example-com.yaml
+kubectl apply --validate=strict -f certificate.yaml
+kubectl -n prod get certificate app-example-com   # READY True, about a minute on staging
+curl -v https://app.example.com/ 2>&1 | grep -E 'issuer:|SSL certificate verify'
+```
+
+Until the `Secret` exists the routing rule serves plain HTTP only, which is all the challenge needs.
+On the reference cluster, staging issued in about a minute; after switching the issuer to production
+and re-issuing, `curl -v` reported `issuer: C=US; O=Let's Encrypt` and `SSL certificate verify ok`.
+
+### DNS-01
 
 **DNS-01 (does not depend on the ingress).** cert-manager proves control of the domain by writing a
 DNS record, so the request path through Kourier is not involved. The example uses Cloudflare; pick the
@@ -114,7 +242,7 @@ solver for your DNS provider from the cert-manager documentation and keep the re
 **Not yet verified on the reference cluster.** The Cloudflare issuer below follows the cert-manager
 documentation but has not been run end to end here. What has been verified is everything after the
 issuer: a `Certificate` writing a `Secret` that a `DomainMapping` serves (tested with a self-signed
-issuer), and that the Let's Encrypt staging account registers.
+issuer), and Let's Encrypt issuing through the HTTP-01 path above.
 </Callout>
 
 ```yaml title="clusterissuer.yaml"
@@ -212,7 +340,10 @@ Two behaviours to plan for:
 
 Knative can also issue a certificate for every mapping on its own. That is a cluster-level switch (the
 cert-manager integration for Knative plus `external-domain-tls` in `config-network`) that the
-cluster admin owns, not something an app deploys. Until it is enabled, a mapping reports
+cluster admin owns, not something an app deploys. With it enabled, Knative adds the HTTP-01
+challenge path to the mapping's own routing rule, so the mapping keeps working and renewals need no
+extra objects. It is the supported long-term way to do HTTP-01 with Kourier, but it has not been
+verified on the reference cluster yet. Until it is enabled, a mapping reports
 `CertificateProvisioned: TLSNotEnabled` — that is expected when you supply the Secret yourself.
 
 ## Private apps
@@ -319,7 +450,8 @@ kubectl -n prod describe challenge
 |---|---|---|
 | CertificateRequest | `Referenced "Issuer" not found` | `issuerRef` points at an issuer that does not exist, or has the wrong `kind` (`Issuer` vs `ClusterIssuer`). |
 | Issuer / ClusterIssuer | `READY False` | The ACME account did not register. `kubectl describe` it: usual causes are a bad `email`, no outbound access to the ACME endpoint, or a missing credentials Secret. |
-| Challenge (HTTP-01) | `wrong status code '404', expected '200'` | In testing on a Kourier-only cluster the solver path returned 404; the cause is not established. DNS-01 avoids the request path, so try it (not yet verified here). |
+| Challenge (HTTP-01) | `wrong status code '404', expected '200'` | Kourier does not serve the standard `Ingress` cert-manager creates for the solver. Use [HTTP-01 on a Kourier-only cluster](#http-01-on-a-kourier-only-cluster). If you already do: check the solver `Service` has an endpoint (`kubectl -n prod get endpointslices`) and its selector matches the issuer's `podTemplate` label. |
+| Challenge (HTTP-01) | solver log says `invalid host` | Something rewrote the `Host` header before the solver, for example a `DomainMapping` pointing at the solver `Service`. The solver only answers for the challenge hostname; route the path without a host rewrite, as above. |
 | Challenge (DNS-01) | propagation or authentication error | The API token lacks permission on the zone, or the zone is not the one that serves the domain. |
 | Certificate | untrusted in the browser although `READY True` | The issuer is self-signed or the Let's Encrypt **staging** endpoint. Switch the issuer's `server` to production and re-issue. |
 
@@ -368,6 +500,14 @@ kubectl -n prod delete certificate app-example-com
 
 Removing the `Certificate` does not remove its Secret; delete `app-example-com-tls` as well when you
 are done with it.
+
+If you used the HTTP-01 routing rule instead of a mapping:
+
+```bash
+kubectl -n prod delete ingresses.networking.internal.knative.dev app-example-com
+kubectl -n prod delete service acme-solver
+kubectl -n prod delete issuer letsencrypt-http01
+```
 
 ## Related
 
