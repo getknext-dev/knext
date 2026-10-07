@@ -1,5 +1,7 @@
 # knext troubleshooting guide (failure playbooks)
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/troubleshooting>. Update both together; this file is the maintainer-level original.
+
 A consolidated **symptom → cause → fix** catalog for the failure modes that keep
 a `NextApp` from deploying, scaling, or serving. It is the day-2 companion to the
 [incident runbook](./incident.md) (the 3am alert-driven playbook): start here

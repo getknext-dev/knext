@@ -1,5 +1,7 @@
 # knext structured logging + correlation IDs
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/logging>. Update both together; this file is the maintainer-level original.
+
 How knext logs are shaped so they are machine-parseable, correlated by a request
 id, and joinable to traces (ADR-0012). This is the standard for both the runtime
 (app) and the operator; the correlation layer ships in `@getknext/lib`.

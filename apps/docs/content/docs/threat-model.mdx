@@ -1,0 +1,196 @@
+---
+title: Threat model
+description: What knext protects, the trust boundaries it reviews, the mitigations in place, and the residual risks stated plainly.
+---
+
+A short STRIDE-style threat model for knext's real components — not a generic web-application
+checklist. It is written for the platform and security teams who have to decide whether to run knext,
+and it states residual risk instead of implying it away. Each mitigation links to the page that
+documents the behavior: [Security](/docs/security), [Hardening](/docs/hardening) and
+[Operator & the NextApp CRD](/docs/operator).
+
+STRIDE: **S**poofing, **T**ampering, **R**epudiation, **I**nformation disclosure, **D**enial of
+service, **E**levation of privilege.
+
+## What is protected
+
+- **Cluster state.** `NextApp` resources and the Knative Services and NetworkPolicies the operator
+  reconciles from them. The operator is the single source of truth, so corrupting it corrupts every
+  deploy.
+- **Published images.** The operator image and your application images, plus their base images. They
+  are signed and run in your cluster.
+- **Secrets.** The cache-invalidation token, database DSNs and registry credentials. They live only in
+  Kubernetes Secrets and environment.
+- **The ISR and data cache.** Redis-backed; poisoning it serves wrong content.
+
+## Trust boundaries
+
+1. The **operator reconcile path**: API server, then the controller, then Knative and NetworkPolicy
+   objects.
+2. **Gateway to backend calls.**
+3. The **cache-invalidation endpoint**.
+4. The **supply chain**: base image, build, SBOM and scan, registry, cluster pull.
+5. The **metrics scrape**: Prometheus to the operator and to each app pod.
+6. **Request ingress** to an app pod.
+
+## 1. Operator reconcile path
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **S** | A workload forges a `NextApp` to make the operator stand up a Service it should not. | Kubernetes RBAC on the CRD. The operator runs under its own ServiceAccount with token automount disabled for app pods. | Who may create `NextApp` resources is your RBAC decision; grant it narrowly. |
+| **T** | An untrusted resource sets a mutable or `:latest` image and drifts the vulnerability surface. | The operator and its fail-closed admission webhook reject any image that is not digest-pinned. | None for the image reference; the registry's own access control still applies. |
+| **R** | No record of what the reconciler changed. | Every reconcile writes status conditions and emits Kubernetes events with stable reasons. | Events are retained only as long as your cluster retains them; ship them to your log store if you need an audit trail. |
+| **I** | Secret values leak into `status` or logs. | Secrets are referenced by name, never inlined into status, and the operator does not log values. | The operator's role can read and write Secrets in the namespaces it manages, so treat the operator as a highly privileged component. |
+| **D** | A flood of resources or requeues starves the controller. | A rate-limited work queue with backoff. Knative scales the data plane to zero. Reconcile error and latency alerts ship. | No per-tenant limit on how many `NextApp` resources one user can create. |
+| **E** | An over-broad role lets a compromised resource escalate. | The operator uses a ClusterRole limited to the resource kinds it reconciles, and no cluster-admin. | Review the role in the install bundle against your own policy before installing. |
+
+## 2. Gateway to backend calls
+
+<Callout type="warn">
+Service-to-service authentication between a gateway and backend services is **designed but not yet
+shipped**, as is the cluster-local backend service resource. The rows below describe the intended
+posture and the controls that exist today.
+</Callout>
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **S** | A pod impersonates the gateway to call a backend directly. | The intended design uses cluster-local visibility with no public ingress, plus a shared signed token. | Mutual TLS through a mesh is the planned upgrade. Until then, plaintext HTTP/2 inside the cluster is a gap. |
+| **T** | An in-cluster attacker rewrites a request. | The default NetworkPolicy limits who can reach the pod. | Enforced only on a CNI that implements NetworkPolicy. |
+| **E** | Implicit pod-to-pod trust. | No implicit trust: a token is required and the NetworkPolicy defaults to deny. | Depends on the CNI, as above. |
+
+## 3. Cache-invalidation endpoint
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **S**, **E** | An unauthenticated caller clears or invalidates the cache. | `POST /api/cache/invalidate` and `DELETE /api/cache/events` require a Bearer `CACHE_INVALIDATE_TOKEN` and fail closed when it is unset. There is no `GET` variant, so the token cannot leak through a URL or prefetch. | Protect the token like any credential and rotate it. |
+| **T** | Cache poisoning through a crafted tag. | The endpoint is token-gated and only revalidates tags. | — |
+| **R** | No audit of who invalidated. | Requests are logged. | Caller identity is not yet part of the log line. |
+| **I** | The token appears in logs or URLs. | The token travels in a header only and is never logged. | — |
+| **D** | Repeated invalidation thrashes Redis and the origin. | Token-gated, so not anonymous. | Add rate limits at your front proxy; see [Hardening](/docs/hardening). |
+
+## 4. Supply chain
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **T** | An upstream re-pushes a base image tag and changes the bytes that get built. | Every base image reference in the shipped Dockerfiles is pinned by `@sha256:` digest. | Digests are refreshed deliberately on bumps. |
+| **T** | A malicious or tampered image is deployed. | Images are signed keyless with cosign on the pushed digest and carry an SBOM attestation. | Verify the signature before deploying; knext does not enforce verification in your cluster. See [Installing knext](/docs/install#4--install-the-operator). |
+| **I** | Vulnerable dependencies ship silently. | A syft SBOM is produced per image, and Trivy fails the build on HIGH and CRITICAL findings **before** the image is pushed, so a failing image is never pullable at a stable tag and never signed. | Unfixed findings are not gated; see the next section on base-image patching. |
+| **R** | You cannot prove which source built an image. | A cosign SBOM attestation plus a signature, and BuildKit SLSA provenance that the pipeline verifies survived the push. | Provenance records build arguments, so the build never takes a secret build argument. |
+| **Reproducibility** | Two builds of one commit differ, weakening provenance. | Not claimed. | Builds are **not** bit-for-bit reproducible: dependency install ordering and native prebuilt binaries vary. knext does not claim reproducible builds. |
+
+### Base-image patching
+
+Runtime stages of the shipped Alpine images run a whole-base `apk upgrade` on top of a
+digest-pinned base. That pulls only fixes already published on the same pinned Alpine branch — it
+cannot move the base to a different release. The trust anchor for what shipped is the **scanned and
+signed output digest**, not the input.
+
+### The vinext build target: scanning a compiled binary
+
+The opt-in vinext target compiles to one executable with every JavaScript dependency inlined. An image
+scan of such an image can read the operating-system packages but nothing inside the binary, so a clean
+image scan there is clean because there is nothing left to scan. The mitigation is to scan the
+dependency tree that feeds the compiler, before it is compiled: knext's CI generates an SBOM over the
+installed tree and fails on HIGH and CRITICAL findings.
+
+Two honest limits. The scan gates the **reference example** application, not yours: an application you
+build on the vinext target has no equivalent closure gate yet, so run your own SBOM and vulnerability
+scan over your installed dependencies before compiling. And the closure SBOM is a build artifact, not
+yet attached to the image as a signed attestation.
+
+### Native image-processing libraries
+
+A vinext image ships the image-optimization native addon and its libvips libraries beside the
+executable, because a compiled binary cannot load native code from inside itself. That is the one
+place native code is neither compiled in nor covered by an SBOM, so it is pinned two ways:
+
+- **Provenance, at build time.** Every staged native package must appear in the lockfile at exactly the
+  version on disk, or the build fails. This pins *which package*, not *which bytes*.
+- **Bytes, at load time.** The build writes a per-file SHA-256 manifest, and the loader re-hashes every
+  native file it lists — libvips included — before loading. A mismatch, or an unlisted file, is fatal.
+
+**Residual risk.** An image with *no* manifest warns and loads, because failing closed on absence would
+break images built before the manifest existed. The template Dockerfile fails the build if the manifest
+is missing, which narrows the window to an image modified after build. To close it today, set
+`KNEXT_REQUIRE_NATIVE_INTEGRITY`:
+
+| Value | Behavior |
+| --- | --- |
+| `1`, `true`, `yes`, `on` (any case) | **Fail closed**: an absent manifest refuses to load |
+| `0`, `false`, `no`, `off`, empty or unset | An absent manifest warns and loads |
+| anything else | **The process refuses to start** |
+
+The last row is deliberate: a value the runtime cannot parse is neither read as "on" nor as "off",
+because guessing either way fails silently. A typo surfaces as a crash loop that names the accepted
+values. Set it from a reviewed manifest, not by hand on a live workload.
+
+## 5. Metrics scrape
+
+The operator exposes its metrics over HTTPS with a **self-signed certificate** by default, and the
+shipped `ServiceMonitor` scrapes with `insecureSkipVerify: true`. The endpoint requires authentication
+and authorization, so anonymous scrapes are rejected.
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **S** | A rogue in-cluster endpoint impersonates the metrics server. | Targets are label-selected on the operator's own Service and stay cluster-local. | With certificate verification skipped, the server's identity is not verified, so a man in the middle on the pod network could impersonate it. |
+| **I** | The scrape's ServiceAccount token is captured. | The metrics are non-sensitive counters on the cluster-local network. | With verification skipped, the endpoint is not verified back to Prometheus, so a man in the middle could capture the token. |
+| **T** | Metrics are altered in transit. | HTTPS protects against passive tampering. | Active tampering needs verified TLS. |
+| **D** | Anonymous scrapes exhaust the operator. | Authentication and authorization are required. | — |
+
+**Decision.** Skipping verification is accepted for the default install: the endpoint is cluster-local
+and read-only, the scrape is authenticated, and the metrics carry no secrets. To close the residual
+risk, enable cert-manager and the metrics TLS patch shipped with the operator, which references a
+serving-certificate Secret instead of skipping verification.
+
+## 6. Request ingress to an app pod
+
+Two paths reach a knext app and they are bounded differently. **External** traffic passes the load
+balancer, the Kourier gateway (Envoy), the activator and queue-proxy, then your container — three HTTP
+parsers, with `containerConcurrency` enforced. **In-cluster** traffic is a co-resident pod dialling the
+app pod directly. The default NetworkPolicy closes the second path by admitting only the queue-proxy
+and metrics ports (see [Security](/docs/security#network-isolation)), and a request-body cap is
+enforced inside the app on every build.
+
+| STRIDE | Threat | Mitigation | Residual risk |
+| --- | --- | --- | --- |
+| **D** (memory) | One request whose body a handler buffers exhausts the pod's memory. | An in-process request-body cap on every build, `KNEXT_MAX_REQUEST_BYTES`, default 8 MiB, counting bytes including chunked bodies and returning `413` before the handler runs. Server Actions are capped at 1 MB by default and `spec.timeoutSeconds` bounds how long a request holds a slot. | Bounded, not eliminated: the worst case is concurrency times the cap in buffered bodies. Setting the cap to `0`, or a cap times concurrency above the memory limit, reopens it. |
+| **D** (OOM) | Repeated out-of-memory kills degrade availability. | None specific. | **Open.** An OOM kill is SIGKILL: it bypasses the SIGTERM drain, so in-flight work, `after()` callbacks and connection-pool cleanup are skipped, leaked database connections count against your connection budget, and each restart pays a cold start. |
+| **D** (rate) | A client floods the app, and autoscaling bills you for it. | Bounded by `maxScale` (default 10) times pod memory — a ceiling, not an absence of cost. | **Open.** There is no per-client rate limiting. Put a proxy in front; note that proxy rate-limit counters are per replica unless the proxy shares state. See [Hardening](/docs/hardening). |
+| **E**, lateral | A co-resident pod, including another zone, reaches the app container directly and bypasses the queue-proxy. | The NetworkPolicy port allowlist, and the same-namespace peer scoped to metrics only. | **Conditional on your CNI.** flannel — used on OKE and OrbStack — has no NetworkPolicy controller, so there the object is declarative only and enforces nothing. Enforcement needs Calico or Cilium. `knext doctor` reports which case you are in. |
+| **S**, **T** | Malformed HTTP reaches application code. | Three HTTP parsers on the external path and Node's 16 KB header cap on both paths. | On the in-cluster path only Node's parser stands in front of your code. |
+
+### Scraping across namespaces
+
+The default policy admits only `knative-serving`, `kourier-system` and the app's own namespace. A
+Prometheus in another namespace is admitted on the **app metrics port only** (`9464`) once that
+namespace carries the label `knext.dev/metrics-scrape=true`. A cluster that labels nothing keeps the
+stricter posture.
+
+This is namespace RBAC, **not** a per-app privilege boundary. The label is on a cluster-scoped
+Namespace object, so whoever holds `update namespaces` can grant it — on a platform with self-service
+namespaces a tenant can grant itself. Once labelled, *every* pod in that namespace can scrape `9464` on
+*every* knext app, which on a shared cluster is cross-tenant metric disclosure. What is exposed is the
+exporter's six series, enumerated:
+
+- `knext_bunexec_http_requests_total`, `knext_bunexec_http_request_duration_seconds`,
+  `knext_bunexec_http_inflight_requests`, `knext_bunexec_startup_duration_seconds`,
+  `knext_bunexec_process_resident_memory_bytes` and `knext_bunexec_process_uptime_seconds`.
+- No route, path, query, payload or method labels. The request counter carries only a `status_class`
+  with five fixed values.
+- From these an observer can infer request volume and error ratio, restart and scale-to-zero timing
+  (and from it traffic patterns), and a coarse memory-load signal.
+
+`:9464` serves `GET /metrics` and nothing else. You cannot narrow the grant by adding a second
+NetworkPolicy, because policies are additive. To express a tighter grant, set
+`spec.security.networkPolicy: false` and write your own policy. Two operability gaps: a mistyped label
+value fails silently with scraping simply denied, and an app owner gets no signal that their app is
+being scraped from another namespace. Revocation applies to new connections; established keep-alive
+connections can outlive unlabelling.
+
+## Out of scope
+
+- **Global edge, WAF and CDN-layer DDoS protection.** knext does not own the edge.
+- **Vulnerabilities in your application's business logic.** knext secures the platform surface, not the
+  tenant's code.
+- **Cross-zone data sovereignty.** A zone owning its data and never reading another's is an
+  architectural rule covered in [SCS and zones](/docs/scs-zones).

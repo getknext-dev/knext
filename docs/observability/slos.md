@@ -1,5 +1,7 @@
 # knext SLOs / SLIs
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/slos-alerting>. Update both together; this file is the maintainer-level original.
+
 Service-level objectives for a knext-deployed app and its control plane, with the
 PromQL that computes each SLI from series this codebase actually exports. The
 alerts that fire on a breach live in

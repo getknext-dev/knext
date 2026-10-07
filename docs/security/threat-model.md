@@ -1,5 +1,7 @@
 # knext threat model (STRIDE-lite)
 
+> **Published version:** a user-facing copy of this page is on the docs site at <https://knext-platform.dev/docs/threat-model>. Update both together; this file is the maintainer-level original.
+
 > Closes the explicit `.claude/rules/security.md` requirement: *"Maintain a short threat model in
 > `docs/security/`."* Companion to the mutating-endpoint audit (`mutating-endpoints.md`). Scope is
 > knext's **real** components today — not a generic web-app checklist. Keep current when a trust

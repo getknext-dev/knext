@@ -1,0 +1,122 @@
+---
+title: Backup and restore
+description: What state a knext platform holds, which of it needs a backup, and how each part is restored.
+---
+
+A knext deployment holds three classes of state, and the backup story is different for each. Know
+which one you are protecting before you act.
+
+| State | System of record? | Backup story | Recovery objective |
+| --- | --- | --- | --- |
+| **Postgres** (scale-zero-pg, or your own) | **Yes** — user data | Continuous WAL plus a backup job to object storage; full disaster recovery follows the database's own runbook | RPO is the last WAL flushed to the bucket: seconds to minutes of writes can be lost. RTO scales with bucket size. |
+| **Redis** (ISR and data cache) | No — a rebuildable copy of origin renders | None needed. Optionally persist it for a warmer restart | RPO: a full cache flush is acceptable by design. RTO: immediate. |
+| **Object store** (static assets) | No — regenerable by redeploying, retained for skew protection | Bucket durability and versioning. Restore is a redeploy | Losing it is a latency or skew event, not user-data loss |
+
+The one thing that needs a real backup is **Postgres**. Do not spend recovery time on a cache you can
+rebuild for free. The cache and asset-store behavior is described in more depth on
+[ISR caching](/docs/isr-caching) and [Skew protection](/docs/skew-protection).
+
+## Postgres
+
+If your database is a [scale-zero-pg](/docs/learn/scale-to-zero-database) database, its durability
+lives in the storage plane: safekeeper WAL plus pageserver layers offloaded to object storage. A
+scheduled backup job copies that plane's bucket to a second object store.
+
+### Check that the backup is running
+
+There is no manual step in steady state. Confirm the job exists, is succeeding, and that the target
+bucket has recent objects:
+
+```sh title="shell"
+kubectl get cronjob -n scale-zero-pg
+kubectl get jobs -n scale-zero-pg --sort-by=.metadata.creationTimestamp | tail
+```
+
+Then list the backup bucket with your object-store client and check the newest objects are recent.
+
+### What a backup can and cannot recover
+
+A backup is trustworthy only for writes the pageserver had already flushed to the bucket. A restore
+stands up fresh, empty safekeepers, so the last seconds to minutes of WAL-only writes are **not**
+recoverable. This is intrinsic to the architecture, not a defect — plan your recovery point around it.
+
+### Restore
+
+Do not improvise a Postgres restore. The step-by-step disaster-recovery procedure — a fresh namespace
+and secrets, seeding object storage from the backup, re-attaching the storage plane at the next
+generation, read-only versus writable promotion, cutting the gateway back over, and restoring
+individual app databases — is maintained alongside the database code:
+[scale-zero-pg disaster recovery runbook](https://github.com/getknext-dev/knext/blob/main/packages/scale-zero-pg/docs/runbook-dr.md).
+
+Set expectations before you start:
+
+- **Two recovery regimes.** If a single pageserver pod or node dies, the failover controller promotes
+  a warm standby on its own — on the order of seconds for a pod death and tens of seconds for a node
+  death. That needs no restore. The disaster-recovery procedure is only for an actual loss of the
+  plane or its bucket.
+- **Recovery time scales with bucket size**, because two bucket copies dominate it. Quote it as a
+  function of size, not a fixed number.
+- **A read-only restore is the minimum-time, always-safe path.** Promoting to writable adds a bounded
+  delta that does not depend on data size.
+- **Every app database is a branch on one shared plane**, and the same restore brings all branches
+  back.
+
+### How the app finds the restored database
+
+Apps bind Postgres only through a Kubernetes Secret (`DATABASE_URL`) referenced from the `NextApp`
+resource. If the restore keeps the same gateway Service name, the app needs no change. If it lands
+behind a new host or credentials, update the Secret the `NextApp` references, then roll a fresh
+revision so the pod re-reads its environment:
+
+```sh title="shell"
+kubectl get nextapp <app> -n <ns> -o jsonpath='{.spec.database}{"\n"}'   # which Secret and key
+# update that Secret, then, from the app directory:
+knext deploy
+```
+
+## Redis
+
+The Redis cache backs Incremental Static Regeneration and the data cache. It is a derivative of origin
+renders, and no user data lives in it, so there is nothing to back up:
+
+- **On total loss the cache is flushed, and that is acceptable by design.**
+- **Recovery is immediate.** The app keeps serving the instant Redis is gone (cache miss, render at
+  origin) and the cache refills lazily. A cold cache is a latency and CPU event — more origin renders
+  and, for scale-to-zero apps, more cold starts — not an availability incident.
+
+You can make a *restart* warmer, not safer:
+
+- **Managed Redis (recommended)** with multi-zone replica failover, referenced through the `REDIS_URL`
+  Secret.
+- **Self-managed with append-only persistence** (`appendonly yes`, `appendfsync everysec`) on a
+  durable volume, plus a replica and Sentinel to survive a zone loss.
+
+If Redis is *down* rather than lost, that is an incident, not a restore — see
+[Incident response](/docs/incident-response#cache-or-database-down).
+
+## Object store (static assets)
+
+The object store holds each build's static assets under an app-namespaced, build-ID prefix
+(`<app>/_next/static/<build-id>/…`) plus public files. Two properties make its backup story simple:
+
+- **Uploads are additive and build-ID namespaced.** A new deploy never overwrites a previous build's
+  chunks, which is what lets a canary or rollback keep serving the older build.
+- **It is regenerable.** The assets are a deterministic output of the app build, and `knext deploy`
+  uploads them again.
+
+So:
+
+- **Backup** is the bucket's own durability, plus object versioning if your provider offers it, so an
+  accidental delete is recoverable.
+- **Restore** is a redeploy. If a bucket or prefix is lost, `knext deploy` re-uploads the current
+  build's assets. Older builds that are no longer in your CI history are gone, but only clients still
+  running exactly those builds are affected, and they recover on their next navigation.
+- **Retention is governed, not manual.** `knext gc` reaps old build prefixes and is fail-safe: it
+  over-keeps rather than over-deletes, and it treats any revision named in `status.currentTraffic` as
+  live. Do not hand-delete asset prefixes. See [`knext gc`](/docs/cli#knext-gc).
+
+## Related
+
+- [Databases](/docs/databases) — how apps bind Postgres.
+- [Incident response](/docs/incident-response) — when a dependency is down rather than lost.
+- [Skew protection](/docs/skew-protection) — why old builds keep their assets.
