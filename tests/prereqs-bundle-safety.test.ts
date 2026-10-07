@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -16,10 +16,16 @@ const ROOT = join(import.meta.dirname, '..');
 const script = join(ROOT, 'scripts/prereqs/install.sh');
 const bash = Bun.which('bash') as string;
 
+const tempRoots: string[] = [];
+afterAll(() => {
+  for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
+});
+
 // Fake kubectl logs its args, answers the ingress-class / current-context
 // queries, and probes `sha256sum` so the checksum shim is observable.
 function sandbox() {
   const dir = mkdtempSync(join(tmpdir(), 'prereqs-'));
+  tempRoots.push(dir);
   const log = join(dir, 'calls.log');
   writeFileSync(
     join(dir, 'kubectl'),
