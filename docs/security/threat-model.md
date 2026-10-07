@@ -41,7 +41,52 @@ knext is the scale-to-zero Next.js adapter for Knative. The assets worth protect
 | **R**epudiate | No record of what the reconciler changed. | Reconcile emits K8s Events + `status.Conditions`. | Conditions population is partial (CLAUDE.md §9) — finish it. |
 | **I**nfo disclosure | Secret values echoed into CR `status` / logs. | Operator reads secrets by reference, never inlines them; never logs values. | Lint guard `block-secrets.sh`. |
 | **D**oS | A flood of CRs / requeues starves the controller. | Single-threaded workqueue with backoff; Knative scales the data plane to zero. | Consider a reconcile-rate alert. |
-| **E**lev. of priv. | Operator over-broad RBAC lets a compromised CR escalate. | Namespaced, least-privilege Role; no cluster-admin. | Periodic RBAC review. |
+| **E**lev. of priv. | Operator over-broad RBAC lets a compromised CR escalate. | Least-privilege ClusterRole (`config/rbac/role.yaml`, generated from `+kubebuilder:rbac` markers); no cluster-admin; **no access to core Secrets at all** (see below). | Periodic RBAC review. |
+
+### Operator RBAC: Secrets (#1966)
+
+**Finding.** The manager ClusterRole used to carry `get;list;watch;create;update;patch;delete` on
+core `secrets` cluster-wide. That is the widest read primitive in the cluster: a compromised
+operator pod (or its ServiceAccount token) could read every Secret in every namespace, including
+other tenants' and the cloud-provider credentials stored there.
+
+**Inventory (file:line of the operator's Secret handling, as of this change).** The Go source
+under `packages/kn-next-operator` has **no** Secret `Get`/`List`/`Watch`/`Create`/`Update`/`Delete`,
+no `Owns(&corev1.Secret{})`, no `Watches` on Secrets, and no typed or unstructured Secret client:
+
+| Surface | What the operator actually does | Who touches the Secret |
+|---|---|---|
+| `spec.secrets.envFrom` / `envMap` (`nextapp_controller.go` env assembly) | Emits `envFrom.secretRef` / `valueFrom.secretKeyRef` **by name** into the Knative Service | The **kubelet** resolves it when the pod starts |
+| `spec.database.secretRef` / `roSecretRef` (`database_binding.go`) | Rewrites those names onto `DATABASE_URL(_RO)` `secretKeyRef` entries, in memory | The **kubelet** |
+| Image pull (`image_prewarm.go`) | Reads the app **ServiceAccount**'s `imagePullSecrets` (a list of names) | The **kubelet** pulls |
+| Webhook / metrics serving certs | Mounted as volumes (cert-manager) | The **kubelet** |
+| Managed-database DSN mirroring | **Removed** (ADR-0025); this was the only code that ever needed Secret read/write | n/a |
+
+The grant was a leftover from the removed mirroring path, never exercised.
+
+**Decision (least privilege, scored with `jev`: drop 1.00 vs resourceNames / namespaced Roles /
+get-only 0.00).** Remove the Secrets rule entirely. `resourceNames` and per-namespace Roles were
+rejected because the operator has no fixed Secret names and no code path to protect with them;
+narrowing a grant nothing uses only leaves a smaller dormant one. A controller-runtime cache
+would only need list/watch on Secrets if the code read them; it does not, so no label-filtered
+cache is required.
+
+**Enforcement (both halves).**
+- `internal/controller/rbac_secrets_guard_test.go` parses every Role/ClusterRole under
+  `config/rbac/` **and** scans every `+kubebuilder:rbac` marker (wildcards `*` included); any
+  core-Secrets grant fails unless it has a justified entry in `secretsGrantAllowlist` (empty
+  today), and a justified ClusterRole grant still cannot carry cluster-wide `list`/`watch`.
+- `internal/controller/rbac_narrowed_envtest_test.go` runs the real controller wiring as a
+  client-cert identity bound to exactly the shipped `role.yaml`: a NextApp that references
+  Secrets by name converges (Knative Service, finalizer, status) while that identity is denied
+  every Secrets verb, cluster-wide and namespaced (with positive and negative RBAC controls).
+
+**Residual.** (a) Anyone who may create a `NextApp` can still *reference* any Secret in their own
+namespace by name; the kubelet, not the operator, resolves it — restrict `NextApp` create/update
+with namespace RBAC. (b) The operator still holds broad write on the objects it owns
+(Knative Services, ServiceAccounts, NetworkPolicies, DaemonSets) cluster-wide; per-namespace
+operator install is the next narrowing step and is not done. (c) Pod-level Secret exposure via a
+tenant-crafted Knative Service is bounded by the namespace boundary, not by operator RBAC.
 
 ## 2. Gateway ↔ backend calls
 

@@ -242,6 +242,26 @@ Secrets live in **Kubernetes Secrets / env only** — never in config files, sou
 images, or URLs. knext provisions them (via `spec.secrets` — `envFrom` / `envMap`) and the app
 reads them from the environment.
 
+## Operator permissions
+
+The operator runs with a least-privilege `ClusterRole` (`config/rbac/role.yaml` in the install
+bundle) and, in particular, **no permission on core Secrets** — no `get`, `list`, `watch`, or any
+write verb, cluster-wide or in any namespace. Your `spec.secrets` entries are passed to the
+kubelet as references (`envFrom.secretRef`, `valueFrom.secretKeyRef`), and the kubelet reads the
+Secret when your pod starts. You can verify what an installed operator may do:
+
+```sh
+kubectl auth can-i list secrets --all-namespaces \
+  --as=system:serviceaccount:kn-next-operator-system:kn-next-operator-controller-manager
+# no
+```
+
+What the operator *does* still hold, so you can size the risk accurately: create/update/delete on
+the Knative Services, ServiceAccounts, NetworkPolicies, image-prewarm DaemonSets, and Kafka
+sources it manages, and read-only access to PersistentVolumeClaims and Knative Revisions.
+Anyone allowed to create a `NextApp` can reference a Secret **in their own namespace** by name, so
+restrict who may create `NextApp` resources with ordinary namespace RBAC.
+
 <Callout type="info">
 **Honest scope — not yet shipped.** Service-to-service **mTLS/authz** between the gateway and
 backends, and the **cluster-local** gRPC backend services with no public ingress, are designed but
