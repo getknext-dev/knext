@@ -143,7 +143,7 @@
     },
     "packages/db": {
       "name": "@getknext/db",
-      "version": "1.3.0-rc.5",
+      "version": "1.3.0-rc.6",
       "dependencies": {
         "@getknext/lib": "workspace:^",
         "drizzle-orm": "^0.45.2",
@@ -164,7 +164,7 @@
     },
     "packages/kn-next": {
       "name": "@getknext/core",
-      "version": "1.3.0-rc.5",
+      "version": "1.3.0-rc.6",
       "bin": {
         "knext": "./dist/cli/kn-next.js",
         "kn-next": "./dist/cli/kn-next.js",
@@ -206,7 +206,7 @@
     },
     "packages/kn-next-alias": {
       "name": "kn-next",
-      "version": "1.3.0-rc.5",
+      "version": "1.3.0-rc.6",
       "bin": {
         "kn-next": "bin/kn-next.js",
       },
@@ -216,7 +216,7 @@
     },
     "packages/lib": {
       "name": "@getknext/lib",
-      "version": "1.3.0-rc.5",
+      "version": "1.3.0-rc.6",
       "dependencies": {
         "@cerbos/grpc": "^0.23.5",
         "ioredis": "^5.9.3",
