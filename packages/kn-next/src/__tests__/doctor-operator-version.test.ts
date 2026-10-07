@@ -21,6 +21,7 @@ import {
 } from "../cli/doctor";
 import {
     classifyOperatorCompat,
+    type OperatorCompat,
     parseSemver,
     resolveOperatorVersion,
 } from "../cli/doctor/operator-version";
@@ -170,7 +171,7 @@ describe("resolveOperatorVersion", () => {
 });
 
 describe("classifyOperatorCompat (operator/CRD first, then CLI)", () => {
-    const cases: [string, string, string][] = [
+    const cases: [string, string, OperatorCompat][] = [
         ["1.0.0", "1.0.0", "ok"],
         ["1.0.7", "1.0.0", "ok"], // patch is independent
         ["1.3.0", "1.0.5", "ok"], // newer operator, older CLI: always valid
