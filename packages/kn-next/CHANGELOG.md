@@ -1,5 +1,47 @@
 # @getknext/core
 
+## 1.3.0-rc.8
+
+### Patch Changes
+
+- 2ae980cf: `knext doctor` now has an "Operator version" row. It reads the installed operator's release version (the `app.kubernetes.io/version` label on the manager Deployment, falling back to a semver image tag), prints it with the image digest, and warns — without failing the preflight — when the operator is older than the CLI (the operator's major.minor must be equal or newer), when the majors differ, when the operator is an unreleased build, or when it predates operator versions and reports none. Operator releases (`operator-vX.Y.Z`) now also publish a digest-pinned `install-vX.Y.Z.yaml` alongside `install.yaml`, so an operator version can be pinned, upgraded to and rolled back to by name; `operator-latest` is unchanged.
+- 9c15795d: A scaffolded app now builds on the first try when a lockfile sits in a parent directory, as it does after the documented `npm i @getknext/core` followed by `knext create`. The scaffolded `next.config.ts` pins the file-tracing root to the app (`outputFileTracingRoot`, plus `turbopack.root` on the default builder), so Next.js no longer moves the workspace root up and nests the standalone server. `knext build` also recognises that nested layout when it still happens, for example in an existing app, and fails with the real cause: it names the inferred root and the lockfile behind it, and says to set `outputFileTracingRoot` to the app or remove the lockfile. Before, it blamed `output: 'standalone'`, which was set correctly. A root deliberately set above the app, as in a workspace monorepo that shares dependencies, is not supported yet, and the error and the docs say so. The vinext scaffold pins `outputFileTracingRoot` only, so `knext deploy` takes its Docker build context from the app instead of a parent directory. The monorepo zone generator template (`turbo/generators/templates/zone`) is deliberately unchanged: its Docker context is the monorepo root, which pinning it to the app would break.
+- dee9c178: Three more apps now build on the vinext target, through new bundled vinext fixes:
+
+  - A tsconfig `paths` entry with several targets now falls back to the later targets when the first one does not resolve, and a `.d.ts` target is never used as a module, as in TypeScript and Next.js.
+  - `import data from "./data" with { type: "json" }` now loads the file as JSON even when it has no `.json` extension. This previously failed with a parse error.
+  - A `require()` in a branch that `process.env.NEXT_RUNTIME` rules out is no longer resolved. For example, an instrumentation file that requires a module only in its non-Node.js branch no longer fails the build.
+- 217111fe: Fixes cases where `kn-next build --target=vinext` (the Bun single-executable
+  compile step) could fail or crash a compiled app that would otherwise work fine:
+
+  - A server bundle that aliases the bare `import.meta` object (`var t = import.meta`)
+    made the compile fail with an "import.meta use(s) survived the rewrite" error.
+    The compile step now rewrites it to an equivalent inline object.
+  - A page or route whose server code reaches a package only through a runtime
+    `require()` call that Bun's bundler cannot see statically could compile
+    successfully but then crash every request with `Cannot find module '<pkg>'`.
+    The compile step now recognizes this call shape and bundles the package the
+    same way it already does for other runtime requires, so the compiled binary
+    no longer crashes on it.
+  - In a monorepo, a dependency hoisted to the workspace root and reached from
+    the app only through a symlink (common with npm/pnpm/bun workspaces) could
+    be wrongly treated as unresolvable and left out of the compiled binary,
+    even though it is a real, declared dependency. The compile step now
+    recognizes any workspace-hoisted dependency as in-scope, while still
+    refusing to silently bundle an unrelated package that merely happens to sit
+    higher up on the build machine's own disk.
+  - Code that merely CHECKS whether an optional package is installed (the
+    common `try { require.resolve('pkg') } catch { ... }` pattern, used for an
+    optional dependency that is not expected to be present in production)
+    could now fail the whole build with `--self-contained` or
+    `KNEXT_COMPILE_STRICT_REQUIRES=1`, even though the check already handles
+    the package being absent at runtime. The compile step now recognizes this
+    as a plain existence check, not a load, and leaves it alone.
+
+  No config, CLI flag, or public API changed.
+- c4d065c6: `experimental.inlineCss` now works for App Router apps on the vinext target, on both runtimes. Pages render their stylesheets inline in `<style>` tags instead of `<link rel="stylesheet">`, as they do with `next start`. Before this, the build looked for the stylesheets in a directory that the knext build never writes, so the setting had no effect.
+- 98c011a8: A Pages Router app on the vinext target now loads `_document` first, then `_app`, then the page modules, matching the order Next.js evaluates them in, so side effects at the top of a custom document run before the app's and the page's.
+
 ## 1.3.0-rc.7
 
 ### Patch Changes
