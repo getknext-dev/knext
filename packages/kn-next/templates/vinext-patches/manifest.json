@@ -96,9 +96,15 @@
       "file": "vinext-3753-next-dynamic-preload-text-separator.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3753",
       "summary": "next/dynamic: the server render puts the preload hints inside the Suspense boundary, next to the lazy component (as Next.js renders <PreloadChunks>), instead of in front of it. A hoisted `<link rel=\"modulepreload\">` right after a text node made React write a `<!-- -->` text separator, so text followed by a dynamic() component rendered `Index<!-- --><!--$-->1` instead of Next.js's `Index<!--$-->1`. The hints are still hoisted. Open upstream (issue cloudflare/vinext#3751)."
+    },
+    {
+      "file": "vinext-2560-pages-root-import-order.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/2560",
+      "summary": "Pages Router: the built server entry imports `_document`, then `_app`, then the page modules (Next.js module evaluation order), so side effects in a custom document run before the app's and the page's. Not yet merged upstream; retire when the pinned vinext includes cloudflare/vinext#2560."
     }
   ],
   "pristine": {
+    "dist/entries/pages-server-entry.js": "52a3536059bd41fefe8b28551fa8d100baa171e7542671186e5a1d768df7fab2",
     "dist/build/client-build-config.js": "2d20d75032242188c751e310cb3b5c76be4bf17c37f5239c03a3e03c500d718c",
     "dist/check.js": "d408170d32517d2eb6f882f54c18c7f3417cd323dcdea3f4e1be2c794e672b50",
     "dist/entries/app-ssr-entry.js": "6b025a80f17e7904229cf26502f074bd4770599224047b826b7781c76cd673bf",

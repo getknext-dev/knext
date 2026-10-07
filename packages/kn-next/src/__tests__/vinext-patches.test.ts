@@ -1806,6 +1806,52 @@ describe("the bundled patches against the published tarball", () => {
             setPagesClientAssets(undefined);
         }
     });
+    it("vinext#2560: the generated Pages server entry imports _document, then _app, then the pages", async () => {
+        // Ported from Next.js: test/e2e/app-document-import-order — a custom
+        // _document is evaluated before _app and the page.
+        applyVinextPatches(patched);
+        const { generateServerEntry } = await importPatched<{
+            generateServerEntry: (
+                pagesDir: string,
+                nextConfig: unknown,
+                matcher: unknown,
+                middlewarePath: string | null,
+                instrumentationPath: string | null,
+            ) => Promise<string>;
+        }>("dist/entries/pages-server-entry.js");
+        const { createValidFileMatcher } = await importPatched<{
+            createValidFileMatcher: (exts?: string[]) => unknown;
+        }>("dist/routing/file-matcher.js");
+        const root = mkdtempSync(join(tmpdir(), "knext-vp-2560-"));
+        try {
+            const pages = join(root, "pages");
+            mkdirSync(pages, { recursive: true });
+            for (const f of ["_document", "_app", "index"]) {
+                writeFileSync(
+                    join(pages, `${f}.js`),
+                    "export default function X() { return null; }\n",
+                );
+            }
+            const code = await generateServerEntry(
+                pages,
+                {},
+                createValidFileMatcher(),
+                null,
+                null,
+            );
+            const at = (needle: string) => code.indexOf(needle);
+            const doc = at("as DocumentComponent }");
+            const app = at("as AppComponent }");
+            const page = at("import * as page_0 from");
+            expect(doc).toBeGreaterThan(-1);
+            expect(app).toBeGreaterThan(-1);
+            expect(page).toBeGreaterThan(-1);
+            expect(doc).toBeLessThan(app);
+            expect(app).toBeLessThan(page);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
