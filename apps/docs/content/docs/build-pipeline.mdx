@@ -59,6 +59,9 @@ On this target a Pages Router app loads `_document` first, then `_app`, then you
 the same order Next.js evaluates them in, so top-level side effects in a custom document run
 before the app's and the page's.
 
+`experimental.inlineCss` in `next.config` works on this target with both runtimes: an App Router
+page inlines its stylesheets in `<style>` tags instead of linking them.
+
 `next/og`'s `ImageResponse` (for example a dynamic `opengraph-image` route) works on this target
 with both runtimes, in pages API routes, app route handlers (Edge or Node.js runtime) and
 middleware:

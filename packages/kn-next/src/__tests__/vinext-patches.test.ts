@@ -2068,6 +2068,85 @@ describe("the bundled patches against the published tarball", () => {
             rmSync(root, { recursive: true, force: true });
         }
     });
+
+    it("vinext#3763: the inline-CSS manifest follows the environments' real output directories (where Nitro moves them)", async () => {
+        // Ported from Next.js: test/e2e/app-dir/app-inline-css — with
+        // experimental.inlineCss the server must know every stylesheet's
+        // text. A Nitro build writes the client to .output/public and the RSC
+        // entry under Nitro's build directory, never to dist/; the plugin
+        // below moves both the same way, so this needs no Nitro install.
+        applyVinextPatches(patched);
+        writeFileSync(
+            join(patched, "dist", "__knext_vite_builder_bridge.mjs"),
+            'export { createBuilder } from "vite";\n',
+        );
+        const { createBuilder } = await importPatched<{
+            createBuilder: (config: unknown) => Promise<{
+                buildApp: () => Promise<unknown>;
+            }>;
+        }>("dist/__knext_vite_builder_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+
+        const root = mkdtempSync(join(tmpdir(), "knext-vp-3763-"));
+        try {
+            // react, react-dom, react-server-dom-webpack, vite and the
+            // @vitejs plugins are installed beside vinext itself.
+            symlinkSync(
+                dirname(INSTALLED_VINEXT),
+                join(root, "node_modules"),
+                "junction",
+            );
+            writeFileSync(
+                join(root, "package.json"),
+                JSON.stringify({ type: "module" }),
+            );
+            mkdirSync(join(root, "app"));
+            writeFileSync(
+                join(root, "app", "global.css"),
+                ".knext-inline-css-marker { color: rgb(1, 2, 3); }\n",
+            );
+            writeFileSync(
+                join(root, "app", "layout.tsx"),
+                'import "./global.css";\nexport default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n',
+            );
+            writeFileSync(
+                join(root, "app", "page.tsx"),
+                'export default function Page() {\n  return <p className="knext-inline-css-marker">home</p>;\n}\n',
+            );
+            const rscOutDir = join(root, ".nitro", "services", "rsc");
+            const moveOutDirsLikeNitro = {
+                name: "knext-test:move-out-dirs-like-nitro",
+                config: () => ({
+                    environments: {
+                        client: { build: { outDir: ".output/public" } },
+                        rsc: { build: { outDir: rscOutDir } },
+                    },
+                }),
+            };
+            const builder = await createBuilder({
+                root,
+                configFile: false,
+                logLevel: "silent",
+                plugins: [
+                    vinextMod.default({
+                        appDir: root,
+                        nextConfig: { experimental: { inlineCss: true } },
+                    }),
+                    moveOutDirsLikeNitro,
+                ],
+            });
+            await builder.buildApp();
+
+            expect(existsSync(join(root, "dist", "client"))).toBe(false);
+            const entry = readFileSync(join(rscOutDir, "index.js"), "utf8");
+            expect(entry).toMatch(/globalThis\.__VINEXT_INLINE_CSS__ = \{/);
+            expect(entry).toContain(".knext-inline-css-marker");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 120_000);
 });
 
 // ---------------------------------------------------------------------------
