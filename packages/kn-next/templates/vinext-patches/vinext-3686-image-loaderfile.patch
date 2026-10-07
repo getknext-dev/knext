@@ -1,0 +1,182 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3686
+What it fixes: `images.loaderFile` in next.config was silently ignored on the
+vinext target, so a custom image loader configured that way was never used
+(the Next.js deploy tests next-image-new/loader-config and
+next-image-new/loader-config-edge-runtime fail their loaderFile cases).
+This patch ports the loaderFile half of the upstream PR: the vinext plugin
+aliases the `vinext/shims/image-loader-file` slot to the user's file
+(validated like Next.js: it must exist, and `images.loader` must be unset,
+"default" or "custom"), `next/image` is served by a new `image-external`
+shim that applies that loader to every image, and `images.loader: "custom"`
+without a loader now throws Next.js's missing-loader error.
+Companion: this is the second half of the #3686 port; the first half (the
+trailingSlash path and per-width custom-loader srcSet) is
+vinext-3686-image-trailingslash-loader-srcset.patch, which MUST apply first
+(this patch's image.js hunks sit on top of it). It is a separate file so an
+install that already carries the first half still applies cleanly.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3686.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/build/client-build-config.js
++++ b/dist/build/client-build-config.js
+@@ -6,6 +6,7 @@
+ 	"dynamic-preload-chunks",
+ 	"form",
+ 	"image",
++	"image-external",
+ 	"internal/hybrid-client-route-owner",
+ 	"layout-segment-context",
+ 	"legacy-image",
+--- a/dist/check.js
++++ b/dist/check.js
+@@ -198,7 +198,7 @@
+ 	env: { status: "supported" },
+ 	images: {
+ 		status: "partial",
+-		detail: "remotePatterns, deviceSizes/imageSizes, qualities and SVG/CSP options honoured; resizing needs an optimizer via vinext({ images: { optimizer } }), images are served as-is otherwise; loader/loaderFile are ignored"
++		detail: "remotePatterns, deviceSizes/imageSizes, qualities, SVG/CSP options and loaderFile honoured; resizing needs an optimizer via vinext({ images: { optimizer } }), images are served as-is otherwise; the imgix/cloudinary/akamai loader presets are ignored"
+ 	},
+ 	allowedDevOrigins: {
+ 		status: "supported",
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -751,7 +751,22 @@
+ const _appRscCombinedHandlerPath = resolveShimModulePath(_serverDir, "app-rsc-combined-handler");
+ const _appRscHandlerPath = resolveShimModulePath(_serverDir, "app-rsc-handler");
+ const _pagesClientAssetsPath = resolveShimModulePath(_serverDir, "pages-client-assets");
++const _imageLoaderFilePath = resolveShimModulePath(_shimsDir, "image-loader-file");
+ const _canExternalizeAppRscHandler = _appRscHandlerPath.endsWith(".js") && _appRscCombinedHandlerPath.endsWith(".js");
++/**
++* Resolve the module behind `vinext/shims/image-loader-file`. Ported from
++* Next.js's `images.loaderFile` normalization in server/config.ts: the file
++* is used when `images.loader` is unset, "default" or "custom", and must exist.
++*/
++function resolveImageLoaderFile(images, root) {
++	const loaderFile = images?.loaderFile;
++	if (!loaderFile) return _imageLoaderFilePath;
++	const loader = images.loader ?? "default";
++	if (loader !== "default" && loader !== "custom") throw new Error(`Specified images.loader property (${loader}) cannot be used with images.loaderFile property. Please set images.loader to "custom".`);
++	const absolutePath = path.join(root, loaderFile);
++	if (!fs.existsSync(absolutePath)) throw new Error(`Specified images.loaderFile does not exist at "${absolutePath}".`);
++	return absolutePath;
++}
+ function isValidExportIdentifier(name) {
+ 	return /^[$A-Z_a-z][$\w]*$/.test(name);
+ }
+@@ -1463,6 +1478,8 @@
+ 				defines["process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_SVG"] = JSON.stringify(String(nextConfig.images?.dangerouslyAllowSVG ?? false));
+ 				defines["process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP"] = JSON.stringify(String(nextConfig.images?.dangerouslyAllowLocalIP ?? false));
+ 				defines["process.env.__VINEXT_IMAGE_UNOPTIMIZED"] = JSON.stringify(String(nextConfig.images?.unoptimized === true));
++				defines["process.env.__VINEXT_IMAGE_CUSTOM_LOADER"] = JSON.stringify(String(nextConfig.images?.loader === "custom"));
++				defines["process.env.__VINEXT_IMAGE_LOADER_FILE"] = JSON.stringify(String(Boolean(nextConfig.images?.loaderFile)));
+ 				defines["process.env.__VINEXT_BUILD_ID"] = JSON.stringify(nextConfig.buildId);
+ 				defines["process.env.__VINEXT_RSC_COMPATIBILITY_ID"] = JSON.stringify(rscCompatibilityId);
+ 				defines["process.env.__VINEXT_RSC_BUILD_IDENTITY"] = JSON.stringify(rscBuildIdentity ?? "");
+@@ -1629,7 +1646,8 @@
+ 							...tsconfigPathAliases,
+ 							...nextConfig.aliases,
+ 							...nextShimMap,
+-							"vinext/server/pages-client-assets": _pagesClientAssetsPath
++							"vinext/server/pages-client-assets": _pagesClientAssetsPath,
++							"vinext/shims/image-loader-file": resolveImageLoaderFile(nextConfig.images, root)
+ 						}, tsconfigPathAliases, {
+ 							...nextConfig.aliases,
+ 							...nextShimMap
+--- a/dist/shims/image.js
++++ b/dist/shims/image.js
+@@ -357,6 +357,7 @@
+ 		height,
+ 		blurDataURL
+ 	});
++	if (!loader && __customImageLoader && !(_unoptimized === true || __globallyUnoptimized) && !isInlineSrc(src)) throw missingLoaderError(src);
+ 	const shouldPreload = preload === true || priority === true;
+ 	const priorityFetchPriority = priority ? "high" : void 0;
+ 	const imageLoading = priority ? "eager" : shouldPreload ? loading : loading ?? "lazy";
+@@ -663,4 +664,10 @@
+ 	return { props: Object.assign(imageProps, { "data-nimg": fill ? "fill" : "1" }) };
+ }
+ //#endregion
+-export { Image as default, getImageProps, imageOptimizationUrl };
++/** `images.loader: "custom"`: optimized images need a loader prop. */
++const __customImageLoader = process.env.__VINEXT_IMAGE_CUSTOM_LOADER === "true";
++/** Internal: also thrown by shims/image-external.js for next/image. */
++function missingLoaderError(src) {
++	return /* @__PURE__ */ new Error(`Image with src "${src}" is missing "loader" prop.\nRead more: https://nextjs.org/docs/messages/next-image-missing-loader`);
++}
++export { Image as default, getImageProps, imageOptimizationUrl, missingLoaderError };
+--- a/dist/shims/public-shim-map.json.js
++++ b/dist/shims/public-shim-map.json.js
+@@ -17,7 +17,7 @@
+ 		"types": "upstream"
+ 	},
+ 	"next/image": {
+-		"shim": "image",
++		"shim": "image-external",
+ 		"types": "upstream"
+ 	},
+ 	"next/legacy/image": {
+--- /dev/null
++++ b/dist/shims/image-external.js
+@@ -0,0 +1,43 @@
++"use client";
++import ImageWithoutLoaderFile, { getImageProps as getImagePropsWithoutLoaderFile, missingLoaderError } from "./image.js";
++import { forwardRef } from "react";
++import { jsx } from "react/jsx-runtime";
++import * as imageLoaderFileModule from "vinext/shims/image-loader-file";
++//#region src/shims/image-external.tsx
++/**
++* next/image entry: the shared shim in ./image.tsx plus `images.loaderFile`.
++*
++* Mirrors Next.js, where next/image (shared/lib/image-external.tsx) imports
++* the default image-loader module that `images.loaderFile` is aliased over,
++* while next/legacy/image never imports it. shims/legacy-image.tsx imports
++* ./image.tsx directly, so legacy-only pages never evaluate the loader file.
++*/
++const configuredImageLoader = imageLoaderFileModule.default;
++/** `images.loaderFile` is set, so `configuredImageLoader` must be its default export. */
++const __hasImageLoaderFile = process.env.__VINEXT_IMAGE_LOADER_FILE === "true";
++/** `images.loader: "custom"`: images need a loader prop or `images.loaderFile`. */
++const __customImageLoader = process.env.__VINEXT_IMAGE_CUSTOM_LOADER === "true";
++/** Ported from the loader checks at the top of Next.js's getImgProps. */
++function withConfiguredLoader(props) {
++	if (__hasImageLoaderFile && typeof configuredImageLoader === "undefined") throw new Error("images.loaderFile detected but the file is missing default export.\nRead more: https://nextjs.org/docs/messages/invalid-images-config");
++	const loader = props.loader || configuredImageLoader;
++	if (!loader && __customImageLoader) {
++		const { src } = props;
++		throw missingLoaderError(typeof src === "string" ? src : ("default" in src ? src.default : src).src);
++	}
++	return loader === props.loader ? props : {
++		...props,
++		loader
++	};
++}
++const ImageWithLoaderFile = forwardRef(function Image(props, ref) {
++	return /* @__PURE__ */ jsx(ImageWithoutLoaderFile, {
++		...withConfiguredLoader(props),
++		ref
++	});
++});
++function getImageProps(props) {
++	return getImagePropsWithoutLoaderFile(withConfiguredLoader(props));
++}
++//#endregion
++export { ImageWithLoaderFile as default, getImageProps };
+--- /dev/null
++++ b/dist/shims/image-loader-file.js
+@@ -0,0 +1,13 @@
++//#region src/shims/image-loader-file.ts
++/**
++* The `images.loaderFile` slot imported by shims/image-external.js (next/image).
++*
++* This module exports `undefined` (no configured loader file, so the built-in
++* /_next/image loader applies). When next.config.js sets `images.loaderFile`,
++* the vinext plugin aliases `vinext/shims/image-loader-file` to that file
++* instead (see the `resolve.alias` entries in index.js's `config()` hook),
++* mirroring how Next.js aliases `next/dist/shared/lib/image-loader` to it.
++*/
++const loader = void 0;
++//#endregion
++export { loader as default };

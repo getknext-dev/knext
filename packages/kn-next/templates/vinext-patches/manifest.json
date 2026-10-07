@@ -45,7 +45,12 @@
     {
       "file": "vinext-3686-image-trailingslash-loader-srcset.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3686",
-      "summary": "next/image: the optimizer path honours `trailingSlash`, and a custom `loader` prop gets the built-in loader's per-breakpoint `srcSet` treatment (quality passed through as given, not forced to 75; fill images, inline sources and overrideSrc handled like Next.js). The upstream PR also wires up `images.loaderFile`; that part is not bundled (see the patch header) and `loaderFile` remains ignored until the upstream release."
+      "summary": "next/image: the optimizer path honours `trailingSlash`, and a custom `loader` prop gets the built-in loader's per-breakpoint `srcSet` treatment (quality passed through as given, not forced to 75; fill images, inline sources and overrideSrc handled like Next.js). The upstream PR's `images.loaderFile` half is vinext-3686-image-loaderfile.patch."
+    },
+    {
+      "file": "vinext-3686-image-loaderfile.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3686",
+      "summary": "next/image: `images.loaderFile` in next.config is honoured (the vinext plugin aliases the loader slot to the file, `next/image` applies it to every image, and a missing file or an incompatible `images.loader` fails the build like Next.js); `images.loader: \"custom\"` without a loader throws Next.js's missing-loader error. Applies on top of the patch above."
     },
     {
       "file": "vinext-3687-config-function-form-default-config.patch",
@@ -79,7 +84,10 @@
     }
   ],
   "pristine": {
-    "dist/config/next-config.js": "4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
+    "dist/build/client-build-config.js": "2d20d75032242188c751e310cb3b5c76be4bf17c37f5239c03a3e03c500d718c",
+    "dist/check.js": "d408170d32517d2eb6f882f54c18c7f3417cd323dcdea3f4e1be2c794e672b50",
+    "dist/shims/public-shim-map.json.js": "46ffbbbacc08fc670e3d1998f91829842cb1abd3893854b2617ecd7ce9d9ea38",
+    "dist/config/next-config.js":"4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
     "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
     "dist/plugins/require-condition-resolution.js": "f8776d98dfc63c228810a8f6d3691fb0f8f7c7b42f700e6ed40c3501607a8321",
     "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a",

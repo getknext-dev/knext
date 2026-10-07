@@ -7,13 +7,11 @@ What it fixes: next/image's image optimizer path ignored `trailingSlash: true`
 This patch fixes the trailingSlash path and gives a custom loader the same
 per-breakpoint srcSet treatment as the built-in loader, passing `quality`
 through as given (including undefined) rather than forcing 75.
-Scope note: the upstream PR also wires up `images.loaderFile` (previously
-ignored entirely) via a build-time resolve.alias entry in index.ts; that
-part is NOT bundled here because it would add a cross-module import this
-dist file cannot resolve outside vinext's own Vite plugin pipeline, and is
-better delivered as a small, separate dist/index.js patch once proven.
-`images.loaderFile` remains ignored until the upstream release; the `loader`
-prop fix above is independent of it and fully bundled. Tracked as #1857.
+Scope note: the upstream PR's `images.loaderFile` half (a build-time
+resolve.alias entry in index.js plus a new next/image entry shim) is
+delivered by the companion vinext-3686-image-loaderfile.patch, which applies
+after this one. Keeping it separate means an install that already carries
+this patch still applies the companion cleanly.
 Updated to the maintainer's head of the PR: a custom loader also applies to fill images (full device-size srcSet, sizes defaulting to 100vw), data:/blob:/empty sources skip the loader, overrideSrc wins, a caller srcSet is ignored, and src is emitted after srcSet/sizes.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3686.

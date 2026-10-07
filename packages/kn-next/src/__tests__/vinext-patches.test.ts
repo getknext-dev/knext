@@ -1341,6 +1341,55 @@ describe("the bundled patches against the published tarball", () => {
         expect(plain.headers.get("x-from-config")).toBe("1");
     });
 
+    it("vinext#3686 (loaderFile): applies on top of an install that already carries the first half of the port, and the first half still recognises itself afterwards", () => {
+        // An app installed with a release that only had the trailingSlash /
+        // srcSet patch must pick up the loaderFile patch without a reinstall,
+        // and re-running must not call either half a conflict.
+        const LOADERFILE = "vinext-3686-image-loaderfile.patch";
+        const dir = mkdtempSync(join(tmpdir(), "knext-vp-old-install-"));
+        tempRoots.push(dir);
+        const withoutNew = {
+            ...manifest,
+            patches: manifest.patches.filter((p) => p.file !== LOADERFILE),
+        };
+        const oldDir = join(dir, "old-patches");
+        mkdirSync(oldDir);
+        for (const p of withoutNew.patches) {
+            cpSync(join(PATCHES_DIR, p.file), join(oldDir, p.file));
+        }
+        writeFileSync(
+            join(oldDir, "manifest.json"),
+            JSON.stringify(withoutNew),
+        );
+        const copy = join(
+            dirname(INSTALLED_VINEXT),
+            `.knext-vinext-old-install-${process.pid}`,
+        );
+        rmSync(copy, { recursive: true, force: true });
+        cpSync(INSTALLED_VINEXT, copy, { recursive: true });
+        try {
+            applyVinextPatches(copy, { patchesDir: oldDir });
+            const results = applyVinextPatches(copy);
+            expect(
+                Object.fromEntries(results.map((r) => [r.file, r.status])),
+            ).toEqual(
+                Object.fromEntries(
+                    manifest.patches.map((p) => [
+                        p.file,
+                        p.file === LOADERFILE ? "applied" : "already-applied",
+                    ]),
+                ),
+            );
+            expect(
+                applyVinextPatches(copy).every(
+                    (r) => r.status === "already-applied",
+                ),
+            ).toBe(true);
+        } finally {
+            rmSync(copy, { recursive: true, force: true });
+        }
+    });
+
     it("vinext#3686 (maintainer's head): a custom loader also serves fill images, skips inline sources, yields to overrideSrc, and a caller srcSet is ignored", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
