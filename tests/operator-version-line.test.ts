@@ -56,9 +56,8 @@ describe('release-channel.sh reports the bare version (#1947)', () => {
 describe('stamp-release-version.sh (#1947)', () => {
   const made: string[] = [];
   afterEach(() => {
-    while (made.length > 0) {
-      const d = made.pop();
-      if (d) rmSync(d, { recursive: true, force: true });
+    for (const d of made.splice(0)) {
+      rmSync(d, { recursive: true, force: true });
     }
   });
 
