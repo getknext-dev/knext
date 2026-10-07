@@ -137,7 +137,9 @@ so it cannot pass by accident.
 'custom', loaderFile: './image-loader.js' }` in `next.config.ts` (the file's default export is the
 loader) and every `next/image` uses it, with a per-width `srcSet`, instead of the built-in
 `/_next/image` endpoint. A missing file, or a `loader` other than `default`/`custom` next to
-`loaderFile`, fails the build, as in Next.js.
+`loaderFile`, fails the build, as in Next.js. Your loader can still return `/_next/image` URLs
+for some images (`/_next/image/?url=${src}&w=${width}&q=${quality}`) to keep them on the built-in
+optimizer; those are served in both the App Router and the Pages Router.
 </Callout>
 
 ## Related
