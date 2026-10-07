@@ -1806,6 +1806,222 @@ describe("the bundled patches against the published tarball", () => {
             setPagesClientAssets(undefined);
         }
     });
+
+    /**
+     * SSR-builds a Pages Router fixture with the patched vinext (the same
+     * build shape as the #3688 test) and returns the emitted server entry.
+     * A resolve or parse failure rejects, which is what the unpatched
+     * vinext 1.0.1 does for each fixture below.
+     */
+    async function buildPagesFixture(
+        prefix: string,
+        files: Record<string, string>,
+    ): Promise<string> {
+        applyVinextPatches(patched);
+        const bridgePath = join(patched, "dist", "__knext_vite_bridge.mjs");
+        writeFileSync(bridgePath, 'export { build } from "vite";\n');
+        const { build } = await importPatched<{
+            build: (config: unknown) => Promise<unknown>;
+        }>("dist/__knext_vite_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+        const tmpDir = mkdtempSync(join(tmpdir(), prefix));
+        tempRoots.push(tmpDir);
+        symlinkSync(
+            join(PKG_ROOT, "node_modules"),
+            join(tmpDir, "node_modules"),
+            "junction",
+        );
+        writeFileSync(
+            join(tmpDir, "package.json"),
+            JSON.stringify({ type: "module" }),
+        );
+        writeFileSync(join(tmpDir, "next.config.mjs"), "export default {};\n");
+        for (const [rel, content] of Object.entries(files)) {
+            mkdirSync(dirname(join(tmpDir, rel)), { recursive: true });
+            writeFileSync(join(tmpDir, rel), content);
+        }
+        const outDir = join(tmpDir, "dist", "server");
+        await build({
+            root: tmpDir,
+            configFile: false,
+            plugins: [vinextMod.default({ disableAppRouter: true })],
+            logLevel: "silent",
+            build: {
+                outDir,
+                minify: false,
+                ssr: "virtual:vinext-server-entry",
+                rolldownOptions: { output: { entryFileNames: "entry.js" } },
+            },
+        });
+        return readdirSync(outDir, { recursive: true })
+            .map(String)
+            .filter((f) => /\.m?js$/.test(f))
+            .map((f) => readFileSync(join(outDir, f), "utf8"))
+            .join("\n");
+    }
+
+    it("vinext#3759: a tsconfig paths alias falls back to its later targets and never resolves a .d.ts target", async () => {
+        // Ported from Next.js: test/e2e/typescript-paths ("should resolve the
+        // second item in as a fallback", "should not resolve to .d.ts files").
+        const out = await buildPagesFixture("knext-vp-tspaths-", {
+            "tsconfig.json": JSON.stringify({
+                compilerOptions: {
+                    jsx: "react-jsx",
+                    paths: {
+                        "@lib/*": ["./lib/a/*", "./lib/b/*"],
+                        "d-ts-alias": [
+                            "./components/alias-to-d-ts.d.ts",
+                            "./components/alias-to-d-ts.js",
+                        ],
+                    },
+                },
+            }),
+            "lib/a/api.js": 'export default () => "api-from-a";\n',
+            "lib/b/api.js": 'export default () => "api-from-b";\n',
+            "lib/b/b-only.js": 'export default () => "only-in-b";\n',
+            "components/alias-to-d-ts.d.ts": "export default () => any;\n",
+            "components/alias-to-d-ts.js":
+                'export default () => "not-the-d-ts-file";\n',
+            "pages/index.js":
+                'import api from "@lib/api";\nimport bOnly from "@lib/b-only";\nimport notDts from "d-ts-alias";\n' +
+                'export default function Home() { return [api(), bOnly(), notDts()].join(" "); }\n',
+        });
+        expect(out).toContain("api-from-a");
+        expect(out).not.toContain("api-from-b");
+        expect(out).toContain("only-in-b");
+        expect(out).toContain("not-the-d-ts-file");
+    }, 60_000);
+
+    it('vinext#3760: an extensionless file imported with `with { type: "json" }` builds as JSON', async () => {
+        // Ported from Next.js: test/e2e/import-attributes (pages/es.js).
+        const out = await buildPagesFixture("knext-vp-json-attrs-", {
+            data: '{\n  "foo": "foo-from-extensionless-json"\n}\n',
+            "pages/index.js":
+                'import data from "../data" with { type: "json" };\nexport default function Es() { return data.foo; }\n',
+        });
+        expect(out).toContain("foo-from-extensionless-json");
+        const { collectJsonAttributeImports } = await importPatched<{
+            collectJsonAttributeImports: (
+                code: string,
+                id: string,
+            ) => { value: string }[];
+        }>("dist/plugins/json-import-attributes.js");
+        const found = (code: string) =>
+            collectJsonAttributeImports(code, "/app/page.js").map(
+                (s) => s.value,
+            );
+        expect(
+            found(
+                'import a from "./a" with { type: "json" };\nexport * from "./b" with { type: "json" };\nawait import("./c", { with: { type: "json" } });\n',
+            ),
+        ).toEqual(["./a", "./b", "./c"]);
+        expect(
+            found(
+                'import a from "./a.json" with { type: "json" };\nimport b from "./b" with { type: "css" };\nimport c from "./c";\n',
+            ),
+        ).toEqual([]);
+    }, 60_000);
+
+    it("vinext#3761: a require() in a branch NEXT_RUNTIME makes dead is not resolved", async () => {
+        // Ported from Next.js: test/e2e/instrumentation-hook/with-esm-import.
+        const instrumentation = [
+            "export async function register() {",
+            '  if (process.env.NEXT_RUNTIME === "edge") {',
+            '    globalThis.knextRuntime = "edge";',
+            '  } else if (process.env.NEXT_RUNTIME === "nodejs") {',
+            '    globalThis.knextRuntime = "nodejs";',
+            "  } else {",
+            '    await require("this should fail");',
+            "  }",
+            "}",
+            "",
+        ].join("\n");
+        const out = await buildPagesFixture("knext-vp-next-runtime-", {
+            "instrumentation.js": instrumentation,
+            "pages/index.js":
+                "export default function Page() { return String(globalThis.knextRuntime); }\nexport async function getServerSideProps() { return { props: {} }; }\n",
+        });
+        expect(out).toContain('globalThis.knextRuntime = "nodejs"');
+        expect(out).not.toContain("this should fail");
+
+        const { blankDeadNextRuntimeRequireBranches } = await importPatched<{
+            blankDeadNextRuntimeRequireBranches: (
+                code: string,
+                id: string,
+                runtime: string | undefined,
+            ) => string | undefined;
+        }>("dist/plugins/next-runtime-dead-branches.js");
+        const blanked = blankDeadNextRuntimeRequireBranches(
+            instrumentation,
+            "/app/instrumentation.js",
+            "nodejs",
+        );
+        expect(blanked).toHaveLength(instrumentation.length);
+        expect(blanked?.split("\n").length).toBe(
+            instrumentation.split("\n").length,
+        );
+        expect(blanked).not.toContain("this should fail");
+        // Under the edge define the edge-only branch is the live one.
+        const edgeOnly =
+            'if (process.env.NEXT_RUNTIME !== "edge") { require("node-only"); } else { require("edge-only"); }\n';
+        const edge = blankDeadNextRuntimeRequireBranches(
+            edgeOnly,
+            "/app/a.js",
+            "edge",
+        );
+        expect(edge).not.toContain("node-only");
+        expect(edge).toContain('require("edge-only")');
+        // An undecidable test, or no define, leaves the module alone.
+        expect(
+            blankDeadNextRuntimeRequireBranches(
+                'if (process.env.NEXT_RUNTIME === flag) { require("x"); }\n',
+                "/app/a.js",
+                "nodejs",
+            ),
+        ).toBeUndefined();
+        expect(
+            blankDeadNextRuntimeRequireBranches(
+                instrumentation,
+                "/app/a.js",
+                undefined,
+            ),
+        ).toBeUndefined();
+        // A dead branch that declares a hoisted binding is left alone:
+        // blanking `var impl` would turn `impl || "node"` into a
+        // ReferenceError. Same for a function declaration.
+        const withVar =
+            'if (process.env.NEXT_RUNTIME === "edge") { var impl = require("./edge"); }\nexport default impl || "node";\n';
+        expect(
+            blankDeadNextRuntimeRequireBranches(withVar, "/app/a.js", "nodejs"),
+        ).toBeUndefined();
+        const withFunction =
+            'if (process.env.NEXT_RUNTIME === "edge") { function load() { return require("./edge"); } }\nexport default typeof load;\n';
+        expect(
+            blankDeadNextRuntimeRequireBranches(
+                withFunction,
+                "/app/a.js",
+                "nodejs",
+            ),
+        ).toBeUndefined();
+        // A var scoped to a nested function does not escape: still blanked.
+        expect(
+            blankDeadNextRuntimeRequireBranches(
+                'if (process.env.NEXT_RUNTIME === "edge") { (() => { var x = require("./edge"); })(); }\n',
+                "/app/a.js",
+                "nodejs",
+            ),
+        ).not.toContain("./edge");
+        // End to end: the build keeps the binding, and the module answers "node".
+        const varOut = await buildPagesFixture("knext-vp-next-runtime-var-", {
+            "lib/impl.js": withVar,
+            "lib/edge.js": 'export default "edge";\n',
+            "pages/index.js":
+                'import impl from "../lib/impl.js";\nexport default function Page() { return impl; }\nexport async function getServerSideProps() { return { props: {} }; }\n',
+        });
+        expect(varOut).toMatch(/\bimpl\b/);
+    }, 60_000);
 });
 
 // ---------------------------------------------------------------------------
