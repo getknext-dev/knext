@@ -188,51 +188,95 @@ function bindingScope(declarator, parents) {
     return cur;
 }
 
-function combine(verdicts) {
-    if (verdicts.includes(EXCLUDED)) return EXCLUDED;
-    if (verdicts.includes(READ)) return READ;
-    return UNKNOWN;
+function combine(verdicts, name) {
+    if (verdicts.some((v) => v.consumer === EXCLUDED)) return { consumer: EXCLUDED };
+    if (verdicts.some((v) => v.consumer === READ)) return { consumer: READ };
+    if (verdicts.length === 0) {
+        return { consumer: UNKNOWN, reason: `it is bound to \`${name}\`, which is never used` };
+    }
+    return { consumer: UNKNOWN, reason: `through \`${name}\`: ${verdicts[0].reason}` };
 }
 
-/** Follow a value (the anchor, or a reference to a binding holding it) to its consumer. */
+/** A readable name for a callee in a reason: `readStream()`, or "a computed call". */
+function callDescription(callee, prefix = "") {
+    const name = calleeName(callee);
+    return name === undefined ? `a computed ${prefix}call` : `${prefix}${name}()`;
+}
+
+/** Why the value stopped at `p` without reaching a recognised consumer. */
+function unknownReason(p, cur) {
+    switch (p.type) {
+        case "CallExpression":
+            return p.arguments[0] === cur
+                ? `it is passed to ${callDescription(p.callee)}, which is not a file read the build recognises (readFileSync, readFile)`
+                : `it is not the first argument of ${callDescription(p.callee)}`;
+        case "NewExpression":
+            return `it is passed to ${callDescription(p.callee, "new ")}`;
+        case "MemberExpression":
+            return "a property of the URL other than .href or .pathname is used";
+        case "VariableDeclarator":
+            return "it is destructured, or flows through more than three variables";
+        case "AssignmentExpression":
+            return "it is assigned to an existing variable or property";
+        case "Property":
+            return "it is stored in an object property";
+        case "ArrayExpression":
+            return "it is stored in an array";
+        case "TemplateLiteral":
+            return "it is interpolated into a string";
+        case "ReturnStatement":
+        case "ExportDefaultDeclaration":
+            return "it is returned or exported, so its use is not visible here";
+        default:
+            return `it is used in a ${p.type}, not passed to a file read`;
+    }
+}
+
+/**
+ * Follow a value (the anchor, or a reference to a binding holding it) to its
+ * consumer. Returns `{ consumer, reason }`; `reason` explains an `"unknown"`.
+ */
 function classifyValue(start, ctx, hops) {
+    const unknown = (reason) => ({ consumer: UNKNOWN, reason });
     let cur = start;
     for (;;) {
         const p = ctx.parents.get(cur);
-        if (p === undefined) return UNKNOWN;
+        if (p === undefined) return unknown("its value is never used");
         switch (p.type) {
             case "CallExpression": {
-                if (p.arguments[0] !== cur) return UNKNOWN;
+                if (p.arguments[0] !== cur) return unknown(unknownReason(p, cur));
                 const name = calleeName(p.callee);
-                if (EXCLUDED_CALLEES.has(name)) return EXCLUDED;
-                if (READ_CALLEES.has(name)) return READ;
+                if (EXCLUDED_CALLEES.has(name)) return { consumer: EXCLUDED };
+                if (READ_CALLEES.has(name)) return { consumer: READ };
                 if (PATH_CALLEES.has(name)) {
                     cur = p;
                     continue;
                 }
-                return feedsWebAssembly(p, ctx.parents) ? READ : UNKNOWN;
+                return feedsWebAssembly(p, ctx.parents)
+                    ? { consumer: READ }
+                    : unknown(unknownReason(p, cur));
             }
             case "NewExpression":
                 return p.arguments[0] === cur && WORKER_CTORS.has(calleeName(p.callee))
-                    ? EXCLUDED
-                    : UNKNOWN;
+                    ? { consumer: EXCLUDED }
+                    : unknown(unknownReason(p, cur));
             case "ImportExpression":
-                return EXCLUDED;
+                return { consumer: EXCLUDED };
             case "MemberExpression":
                 if (p.object === cur && !p.computed && URL_PATH_MEMBERS.has(p.property.name)) {
                     cur = p;
                     continue;
                 }
-                return UNKNOWN;
+                return unknown(unknownReason(p, cur));
             case "ChainExpression":
                 cur = p;
                 continue;
             case "VariableDeclarator":
                 if (p.init !== cur || p.id.type !== "Identifier" || hops >= MAX_BINDING_HOPS)
-                    return UNKNOWN;
+                    return unknown(unknownReason(p, cur));
                 return classifyBinding(p, ctx, hops + 1);
             default:
-                return UNKNOWN;
+                return unknown(unknownReason(p, cur));
         }
     }
 }
@@ -245,11 +289,15 @@ function classifyValue(start, ctx, hops) {
  */
 function classifyBinding(declarator, ctx, hops) {
     const scope = bindingScope(declarator, ctx.parents);
-    if (scope === undefined) return UNKNOWN;
+    if (scope === undefined)
+        return { consumer: UNKNOWN, reason: "its variable's scope is unclear" };
     const uses = (ctx.identifiers.get(declarator.id.name) ?? []).filter(
         (id) => id !== declarator.id && id.start >= scope.start && id.end <= scope.end,
     );
-    return combine(uses.map((id) => classifyValue(id, ctx, hops)));
+    return combine(
+        uses.map((id) => classifyValue(id, ctx, hops)),
+        declarator.id.name,
+    );
 }
 
 const PARSE_OPTIONS = {
@@ -270,7 +318,9 @@ const PARSE_OPTIONS = {
  * caller leaves the module as written.
  *
  * @param {string} src
- * @returns {{ anchors: { literal: string, start: number, end: number, consumer: "read" | "excluded" | "unknown" }[], parseError?: string }}
+ * @returns {{ anchors: { literal: string, start: number, end: number, consumer: "read" | "excluded" | "unknown", reason?: string }[], parseError?: string }}
+ *   `reason` (unknown anchors only): why the URL was not recognised as a read,
+ *   for the build log.
  */
 export function analyzeAssetAnchors(src) {
     if (!hasAssetAnchorCandidate(src)) return { anchors: [] };
@@ -282,12 +332,11 @@ export function analyzeAssetAnchors(src) {
     }
     const ctx = index(ast);
     return {
-        anchors: ctx.anchors.map(({ node, literal }) => ({
-            literal,
-            start: node.start,
-            end: node.end,
-            consumer: classifyValue(node, ctx, 0),
-        })),
+        anchors: ctx.anchors.map(({ node, literal }) => {
+            const { consumer, reason } = classifyValue(node, ctx, 0);
+            const anchor = { literal, start: node.start, end: node.end, consumer };
+            return consumer === UNKNOWN ? { ...anchor, reason } : anchor;
+        }),
     };
 }
 

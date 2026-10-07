@@ -20,7 +20,18 @@ export function rewriteAssetAnchors(
     resolve: (literal: string) => string | undefined,
     resolveLocateFile?: (name: string) => string | undefined,
     analyze?: (src: string) => {
-        anchors: { literal: string; start: number; end: number; consumer: string }[];
+        anchors: {
+            literal: string;
+            start: number;
+            end: number;
+            consumer: string;
+            reason?: string;
+        }[];
         parseError?: string;
     },
-): { contents: string; assets: { id: string; absPath: string }[]; parseError?: string };
+): {
+    contents: string;
+    assets: { id: string; absPath: string }[];
+    skipped: { literal: string; reason: string }[];
+    parseError?: string;
+};

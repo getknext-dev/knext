@@ -350,15 +350,18 @@ const LOCATE_FILE_PACKAGE = "@vercel/og";
  *   a package whose text holds a candidate anchor (`hasAssetAnchorCandidate`)
  *   — never for the entry or an anchor-free module. Without it, no `new URL`
  *   anchor is rewritten (never guess).
- * @returns {{ contents: string, assets: { id: string, absPath: string }[], parseError?: string }}
+ * @returns {{ contents: string, assets: { id: string, absPath: string }[], skipped: { literal: string, reason: string }[], parseError?: string }}
  *   `assets`: one entry per DISTINCT resolved path, in first-seen order. The
  *   caller prepends `import <id> from <JSON.stringify(absPath)> with { type:
- *   "file" };` for each, ahead of `contents`. `parseError`: the module did
- *   not parse, so no anchor in it was rewritten.
+ *   "file" };` for each, ahead of `contents`. `skipped`: every anchor NOT
+ *   embedded for a reason a user may want to know (an unrecognised use, or a
+ *   read of a file that does not exist) — Worker/fetch/import anchors are
+ *   deliberate and not listed. `parseError`: the module did not parse, so no
+ *   anchor in it was rewritten.
  */
 export function rewriteAssetAnchors(src, modulePath, resolve, resolveLocateFile, analyze) {
     if (assetAnchorPackageRoot(modulePath) === undefined) {
-        return { contents: src, assets: [] };
+        return { contents: src, assets: [], skipped: [] };
     }
     const assets = [];
     const idByPath = new Map();
@@ -373,12 +376,25 @@ export function rewriteAssetAnchors(src, modulePath, resolve, resolveLocateFile,
     };
     const { anchors, parseError } =
         analyze !== undefined && hasAssetAnchorCandidate(src) ? analyze(src) : { anchors: [] };
+    const skipped = [];
     let contents = "";
     let at = 0;
     for (const anchor of anchors) {
+        if (anchor.consumer === "unknown") {
+            skipped.push({
+                literal: anchor.literal,
+                reason: anchor.reason ?? "its use is not recognised",
+            });
+        }
         if (anchor.consumer !== "read") continue;
         const absPath = resolve(anchor.literal);
-        if (absPath === undefined) continue;
+        if (absPath === undefined) {
+            skipped.push({
+                literal: anchor.literal,
+                reason: "it is read, but no such file exists beside the module",
+            });
+            continue;
+        }
         contents += `${src.slice(at, anchor.start)}require("node:url").pathToFileURL(${idFor(absPath)})`;
         at = anchor.end;
     }
@@ -392,5 +408,7 @@ export function rewriteAssetAnchors(src, modulePath, resolve, resolveLocateFile,
             return `(${idFor(absPath)})`;
         });
     }
-    return parseError === undefined ? { contents, assets } : { contents, assets, parseError };
+    return parseError === undefined
+        ? { contents, assets, skipped }
+        : { contents, assets, skipped, parseError };
 }

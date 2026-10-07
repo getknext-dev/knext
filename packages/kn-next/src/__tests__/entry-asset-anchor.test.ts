@@ -732,3 +732,75 @@ describe("rewriteAssetAnchors — three-argument back-compat (#1872)", () => {
         expect(assets).toEqual([]);
     });
 });
+
+describe("unknown anchors carry a reason, and the rewrite reports what it skipped", () => {
+    const reasonOf = (src: string) =>
+        analyzeAssetAnchors(src).anchors.map((a) => a.reason);
+
+    it.each([
+        [
+            "createReadStream",
+            'createReadStream(new URL("./a.bin", import.meta.url))',
+            /passed to createReadStream\(\)/,
+        ],
+        [
+            "openSync",
+            'fs.openSync(new URL("./a.bin", import.meta.url))',
+            /passed to openSync\(\)/,
+        ],
+        [
+            "an object property",
+            'const o = { u: new URL("./a.bin", import.meta.url) };',
+            /object property/,
+        ],
+        [
+            "a later function argument",
+            'f(x, new URL("./a.bin", import.meta.url))',
+            /not the first argument of f\(\)/,
+        ],
+        [
+            "assign-after-declare",
+            'let u; u = new URL("./a.bin", import.meta.url);',
+            /assigned to an existing variable/,
+        ],
+        [
+            "an unused binding",
+            'const u = new URL("./a.bin", import.meta.url);',
+            /bound to `u`, which is never used/,
+        ],
+    ])("%s", (_name, src, why) => {
+        const [reason] = reasonOf(src);
+        expect(reason).toMatch(why);
+    });
+
+    it("a read or excluded anchor has no reason", () => {
+        expect(
+            reasonOf(
+                'readFileSync(new URL("./a.bin", import.meta.url)); new Worker(new URL("./w.js", import.meta.url));',
+            ),
+        ).toEqual([undefined, undefined]);
+    });
+
+    it("lists unknown anchors and reads of a missing file in `skipped`, never Worker/fetch/import ones", () => {
+        const src = [
+            'createReadStream(new URL("./a.bin", import.meta.url));',
+            'readFileSync(new URL("./missing.bin", import.meta.url));',
+            'readFileSync(new URL("./ok.bin", import.meta.url));',
+            'new Worker(new URL("./w.js", import.meta.url));',
+        ].join("\n");
+        const { assets, skipped } = rewrite(src, ACME_PATH, (lit) =>
+            lit === "./ok.bin" ? "/abs/ok.bin" : undefined,
+        );
+        expect(assets).toEqual([
+            { id: "__knextAssetAnchor0", absPath: "/abs/ok.bin" },
+        ]);
+        expect(skipped.map((s) => s.literal)).toEqual([
+            "./a.bin",
+            "./missing.bin",
+        ]);
+        expect(skipped[0].reason).toMatch(/createReadStream/);
+        expect(skipped[1].reason).toMatch(
+            /no such file exists beside the module/,
+        );
+    });
+});

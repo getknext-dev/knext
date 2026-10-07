@@ -542,32 +542,81 @@ if (!ASSET_ANCHOR_ANALYZER) {
     process.exit(1);
 }
 
-/** `analyzeAssetAnchors(src)` in a child `bun` process (source on stdin, JSON on stdout). */
-function analyzeOutOfProcess(src) {
+/** How long one analyzer process may take before the build gives up on it. */
+const ASSET_ANCHOR_ANALYZER_TIMEOUT_MS = 120_000;
+
+/**
+ * `analyzeAssetAnchors(src)` for the module at `path`, in a child `bun`
+ * process (source on stdin, JSON on stdout).
+ *
+ * A failure of the CHILD — it crashed, was killed (incl. the timeout), could
+ * not load acorn, or printed something that is not an analysis — THROWS, which
+ * fails the build (Bun.build's onLoad failure path). That is a broken knext
+ * install, not a property of the app, and carrying on would silently drop
+ * every embedded sibling (next/og's wasm and font included) and ship a binary
+ * that ENOENTs. A module acorn cannot PARSE is different: the child reports it
+ * as `parseError` and exits 0, and the caller warns and leaves that one module
+ * as written.
+ *
+ * `--no-install`: with no `node_modules` above the analyzer, Bun would
+ * otherwise auto-install a missing `acorn` from the registry at build time.
+ */
+function analyzeOutOfProcess(src, path) {
     ASSET_ANCHOR_STATS.analysed++;
-    const child = spawnSync(process.execPath, [ASSET_ANCHOR_ANALYZER], {
+    const child = spawnSync(process.execPath, ["--no-install", ASSET_ANCHOR_ANALYZER], {
         input: src,
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
-        timeout: 120_000,
+        timeout: ASSET_ANCHOR_ANALYZER_TIMEOUT_MS,
     });
-    if (child.status !== 0) {
-        return {
-            anchors: [],
-            parseError: `the analyzer exited ${child.status ?? child.signal}: ${String(child.stderr ?? child.error).trim()}`,
-        };
+    const fail = (what) => {
+        throw new Error(
+            `[knext compile] the asset-anchor analyzer (${ASSET_ANCHOR_ANALYZER}) ${what} while ` +
+                `analysing ${path} — refusing to build a binary whose packages' sibling files ` +
+                "(next/og's wasm and font among them) would not be embedded. This is a broken " +
+                "@getknext/core install (is its `acorn` dependency present?); reinstall it.",
+        );
+    };
+    if (child.error !== undefined || child.status !== 0) {
+        const how =
+            child.error?.code === "ETIMEDOUT"
+                ? `timed out after ${ASSET_ANCHOR_ANALYZER_TIMEOUT_MS} ms`
+                : child.status === null
+                  ? `was killed by ${child.signal ?? child.error}`
+                  : `exited ${child.status}`;
+        const stderr = String(child.stderr ?? "").trim();
+        fail(`${how}${stderr ? ` (${stderr.split("\n").slice(-3).join(" | ")})` : ""}`);
     }
+    let analysis;
     try {
-        return JSON.parse(child.stdout);
-    } catch (err) {
-        return { anchors: [], parseError: `the analyzer printed no JSON (${err})` };
+        analysis = JSON.parse(child.stdout);
+    } catch {
+        fail(`printed no JSON (${JSON.stringify(String(child.stdout).slice(0, 120))})`);
     }
+    const wellFormed =
+        analysis !== null &&
+        typeof analysis === "object" &&
+        Array.isArray(analysis.anchors) &&
+        analysis.anchors.every(
+            (a) =>
+                typeof a?.literal === "string" &&
+                Number.isInteger(a.start) &&
+                Number.isInteger(a.end) &&
+                ["read", "excluded", "unknown"].includes(a.consumer),
+        );
+    if (!wellFormed) {
+        fail(`printed JSON that is not an analysis (${String(child.stdout).slice(0, 120)})`);
+    }
+    return analysis;
 }
 
 /**
  * `rewriteAssetAnchors` for one non-entry module, timed and reported: every
- * embedded sibling is logged once, and a module the parser cannot read is a
- * named warning (left as written — never guessed at).
+ * embedded sibling is logged once, every anchor left unembedded for a reason a
+ * user may care about (an unrecognised use, a missing file) gets one line, and
+ * a module the parser cannot read is a named warning (left as written — never
+ * guessed at). A failure of the analyzer PROCESS throws (see
+ * `analyzeOutOfProcess`).
  */
 function rewriteModuleAssetAnchors(raw, path) {
     const t0 = performance.now();
@@ -576,15 +625,19 @@ function rewriteModuleAssetAnchors(raw, path) {
         path,
         (literal) => resolveAssetAnchor(literal, path),
         (name) => resolveEmscriptenWasm(name, path),
-        analyzeOutOfProcess,
+        (src) => analyzeOutOfProcess(src, path),
     );
     ASSET_ANCHOR_STATS.ms += performance.now() - t0;
     ASSET_ANCHOR_STATS.modules++;
     if (rewrite.parseError !== undefined) {
         console.warn(
             `[knext compile] could not parse ${path} to analyse its asset anchors ` +
-                `(${rewrite.parseError}) — left as written; a sibling file it reads will not be embedded`,
+                `(${rewrite.parseError}) — left as written; NONE of its new URL(..., import.meta.url) ` +
+                "sibling files were embedded, so a read of one fails once the binary leaves this machine",
         );
+    }
+    for (const skip of rewrite.skipped) {
+        console.log(`[knext compile] did not embed ${skip.literal} for ${path}: ${skip.reason}`);
     }
     for (const asset of rewrite.assets) {
         if (ASSET_ANCHOR_STATS.embedded.has(asset.absPath)) continue;
