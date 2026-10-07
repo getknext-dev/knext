@@ -111,12 +111,27 @@ export const VINEXT_PATCHES_ENV = "KNEXT_VINEXT_PATCHES";
 
 const OPT_OUT_HINT = `To build without knext's bundled vinext fixes instead, set ${VINEXT_PATCHES_ENV}=0.`;
 
+/**
+ * The disabling values, lowercased. Single source of truth: the compat-lane
+ * deploy script's bash `case` is held in lockstep with this by
+ * tests/compat-vinext-lane.test.ts.
+ */
+export const VINEXT_PATCHES_DISABLE_VALUES = [
+    "0",
+    "false",
+    "off",
+    "no",
+] as const;
+
 /** `KNEXT_VINEXT_PATCHES=0` (or `false`/`off`/`no`) disables the bundled fixes. */
 export function vinextPatchesDisabled(
     env: Record<string, string | undefined> = process.env,
 ): boolean {
     const v = env[VINEXT_PATCHES_ENV]?.trim().toLowerCase();
-    return v === "0" || v === "false" || v === "off" || v === "no";
+    return (
+        v !== undefined &&
+        (VINEXT_PATCHES_DISABLE_VALUES as readonly string[]).includes(v)
+    );
 }
 
 /** Where the bundled patches live inside the installed @getknext/core. */

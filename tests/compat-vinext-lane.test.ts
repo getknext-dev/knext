@@ -42,6 +42,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { VINEXT_PATCHES_DISABLE_VALUES } from '../packages/kn-next/src/cli/vinext-patches';
 import { summarize } from '../scripts/e2e-summary.mjs';
 
 const { X_OK } = constants;
@@ -881,7 +882,7 @@ describe('the lane applies knext’s bundled vinext patches before building (#18
       const disableCheckRegion = src.slice(envRefIdx, iApply);
       // Every disabling value vinextPatchesDisabled recognizes, not just one —
       // an enumerated SUBSET is exactly how the next one gets missed.
-      for (const value of ['0', 'false', 'off', 'no']) {
+      for (const value of VINEXT_PATCHES_DISABLE_VALUES) {
         expect(
           disableCheckRegion,
           `the pre-apply region never checks for the disabling value "${value}"`,
@@ -890,6 +891,13 @@ describe('the lane applies knext’s bundled vinext patches before building (#18
       expect(disableCheckRegion, 'the disabling branch never exits non-zero').toMatch(/exit 1\b/);
     },
   );
+
+  it('the deploy script case pattern lists EXACTLY VINEXT_PATCHES_DISABLE_VALUES (lockstep)', () => {
+    const m = src.match(/case "\$\{KNEXT_VINEXT_PATCHES_NORMALIZED\}" in\s*\n\s*([^)\n]+)\)/);
+    expect(m, 'the KNEXT_VINEXT_PATCHES_NORMALIZED case pattern was not found').not.toBeNull();
+    const inScript = (m?.[1] ?? '').split('|').map((v) => v.trim());
+    expect([...inScript].sort()).toEqual([...VINEXT_PATCHES_DISABLE_VALUES].sort());
+  });
 
   it('the disabling-value scan is not vacuous (self-test)', () => {
     const full = 'case "$x" in 0 | false | off | no) exit 1 ;; esac';
