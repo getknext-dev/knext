@@ -455,8 +455,15 @@ Confirm every box before starting step 1 below:
    ```sh
    git tag operator-v1.0.0 <operator-main-sha-to-ship> && git push origin operator-v1.0.0
    ```
-   Then confirm the resulting `operator-v1.0.0` release exists, its `install.yaml` resolves to a
-   real signed image digest, and `operator-latest` now points at the same digest.
+   The operator's MAJOR.MINOR tracks the npm package set's (a `1.0.x` operator pairs with the
+   `1.0.x` packages; the patch is independent), per [COMPATIBILITY.md](COMPATIBILITY.md#operator-versions).
+   Then confirm the resulting `operator-v1.0.0` release exists, carries **both** `install.yaml`
+   and `install-v1.0.0.yaml` (same digest-pinned bytes), that the bundle's image is
+   `…kn-next-operator:v1.0.0@sha256:<digest>` with the `app.kubernetes.io/version: "1.0.0"` label,
+   that `crane manifest ghcr.io/getknext-dev/kn-next-operator:v1.0.0` resolves to that digest, and
+   that `operator-latest` now points at the same digest. Add the operator version to the
+   COMPATIBILITY.md row for the release. Only a stable tag does this; an `-rc.N` operator tag
+   never moves `operator-latest`.
    **Fallback, only if this tag push is skipped for some reason:** `operator-latest` keeps
    republishing on every push to `main` regardless, so GA could ship against that rolling channel
    instead — but then record which operator commit SHA / image digest it carries in the GA release

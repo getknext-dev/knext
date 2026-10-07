@@ -242,6 +242,7 @@ describe("runDoctor — healthy cluster", () => {
             "crd",
             "crd-schema",
             "operator",
+            "operator-version",
             "cert-manager",
             "ingress",
             "image",
@@ -251,6 +252,15 @@ describe("runDoctor — healthy cluster", () => {
             "netpol",
         ]);
         for (const c of report.checks) {
+            // operator-version (#1947): this fixture's operator image is a
+            // digest-only ref with no version label — a bundle from before the
+            // operator version line. It is reported as a WARN ("no release
+            // version"), never a failure; the versioned cases are pinned in
+            // doctor-operator-version.test.ts.
+            if (c.id === "operator-version") {
+                expect(c.status, `${c.id}: ${c.detail}`).toBe("warn");
+                continue;
+            }
             // storage-mode is LOCAL (ADR-0047): with no knext.config.ts in
             // the test's cwd it reports skip — an informational state, never
             // a failure, and never a reason for a healthy cluster to exit 1.

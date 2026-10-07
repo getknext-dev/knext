@@ -415,6 +415,24 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
 
+      # Version tags only (#1947): make the `vX.Y.Z` image tag the bundle will
+      # carry (hack/stamp-release-version.sh) a REAL registry tag on the exact
+      # gated digest, so `image: …:vX.Y.Z@sha256:…` is not a label that lies.
+      # The digest still decides what runs; the tag is for humans and `knext
+      # doctor`. Runs only AFTER the Trivy gate, the push, the provenance check,
+      # the cosign sign AND the cosign verify: a version tag must never land on
+      # an unsigned or unverified digest, and (the release is immutable) a
+      # failed run therefore leaves no `:vX.Y.Z` behind for a re-run to re-point.
+      - name: Tag the verified digest with the release version (version tags only, #1947)
+        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          crane tag "${IMAGE}@${DIGEST}" "v${VERSION}"
+          echo "Tagged ${IMAGE}@${DIGEST} as v${VERSION}"
+
       # On the publish channel (main or an operator-v* tag): regenerate dist/install.yaml with the REAL pushed digest. This is
       # the bootstrap-resolution step — the placeholder all-zeros digest in the
       # committed manifests is replaced here with the digest cosign just signed.
@@ -422,6 +440,18 @@ jobs:
       # this step only runs after the Trivy gate + push + sign + verify all passed,
       # so a scan-failed run can never refresh the operator-latest release asset.
       # This `run:` step runs at repo root, so it cd's into the operator package.
+      # Version tags only (#1947): write the release version into the two
+      # places a client can read it back from the cluster — the image tag in the
+      # kustomization and the app.kubernetes.io/version label on the manager
+      # Deployment. MUST run before the render below. Fails loud (and changes
+      # nothing) if either anchor has drifted. `main` / operator-edge builds keep
+      # the committed `unreleased` sentinel: they never claim a version.
+      - name: Stamp the release version into the bundle sources (version tags only, #1947)
+        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: bash packages/kn-next-operator/hack/stamp-release-version.sh "${VERSION}"
+
       - name: Build installer + pin real digest (publish channel)
         if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
         env:
@@ -431,8 +461,11 @@ jobs:
           cd packages/kn-next-operator
           # Pin the real digest into the manager kustomization (single combined
           # newTag form, so hack/check-no-latest.sh stays happy), then render.
+          # The tag part is matched loosely (`v[^@ ]+`) so a prerelease tag
+          # (v1.2.3-rc.1) is re-pinned too — the strict vN.N.N form silently
+          # skipped it. `sed -i` here is GNU (ubuntu runner).
           sed -i -E \
-            "s|(newTag: v[0-9]+\.[0-9]+\.[0-9]+@sha256:)[0-9a-f]{64}|\\1${DIGEST#sha256:}|" \
+            "s|(newTag: v[^@[:space:]]+@sha256:)[0-9a-f]{64}|\\1${DIGEST#sha256:}|" \
             config/manager/kustomization.yaml
           make build-installer
           echo "Pinned operator image digest ${DIGEST} into dist/install.yaml:"
@@ -447,6 +480,35 @@ jobs:
           # If the re-pin silently failed we'd otherwise publish a bundle pointing at
           # a non-existent image — this fails the run instead.
           bash hack/check-published-digest.sh dist/install.yaml
+
+      # Version tags only (#1947): the per-release, self-describing asset
+      # `install-vX.Y.Z.yaml` — the same digest-pinned bytes as `install.yaml`
+      # (kept under both names so existing `…/install.yaml` URLs keep working),
+      # re-checked here so the file a client pins is itself proven digest-pinned
+      # and to carry the version it is named for. The step output feeds the
+      # release step's `files:`; for operator-edge it is empty (no extra asset).
+      - name: Write install-vX.Y.Z.yaml (version tags only, #1947)
+        id: versioned_asset
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          VERSION: ${{ steps.channel.outputs.version }}
+          IS_VERSION_TAG: ${{ steps.channel.outputs.is_version_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${IS_VERSION_TAG}" != "true" ]]; then
+            echo "path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cd packages/kn-next-operator
+          cp dist/install.yaml "dist/install-v${VERSION}.yaml"
+          bash hack/check-published-digest.sh "dist/install-v${VERSION}.yaml"
+          grep -q "kn-next-operator:v${VERSION}@${DIGEST}" "dist/install-v${VERSION}.yaml" || {
+            echo "::error::dist/install-v${VERSION}.yaml does not carry image tag v${VERSION} pinned to ${DIGEST}"; exit 1; }
+          # kustomize may or may not quote the scalar when it renders the bundle.
+          grep -Eq "app\.kubernetes\.io/version: \"?${VERSION//./\\.}\"?\$" "dist/install-v${VERSION}.yaml" || {
+            echo "::error::dist/install-v${VERSION}.yaml does not carry the version label ${VERSION}"; exit 1; }
+          echo "path=packages/kn-next-operator/dist/install-v${VERSION}.yaml" >> "$GITHUB_OUTPUT"
 
       # Transient CI artifact (auth-gated) — handy for inspecting the exact bundle a
       # run produced, but NOT the user-facing install path.
@@ -480,7 +542,11 @@ jobs:
           tag_name: ${{ steps.channel.outputs.release_tag }}
           name: kn-next-operator ${{ steps.channel.outputs.release_tag }}
           make_latest: "false"
-          files: packages/kn-next-operator/dist/install.yaml
+          # install.yaml (compat name) + install-vX.Y.Z.yaml (version tags only;
+          # the blank line is the operator-edge case and is ignored).
+          files: |
+            packages/kn-next-operator/dist/install.yaml
+            ${{ steps.versioned_asset.outputs.path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
