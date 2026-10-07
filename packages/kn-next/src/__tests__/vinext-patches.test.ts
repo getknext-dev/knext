@@ -955,6 +955,17 @@ describe("the bundled patches against the published tarball", () => {
         expect(blocked.headers.has("x-nextjs-cache")).toBe(false);
     });
 
+    it("vinext#3747: the Nitro setup hook traces react + react-dom, and the server-externals union from #3436 is untouched", () => {
+        applyVinextPatches(patched);
+        const index = readFileSync(join(patched, "dist/index.js"), "utf8");
+        expect(index).toContain(
+            'nitro.options.traceDeps = [.../* @__PURE__ */ new Set([...nitro.options.traceDeps ?? [], "react", "react-dom"])];',
+        );
+        expect(index).toContain(
+            "...nitro.options.traceDeps ?? [], ...resolvedServerExternalPackages",
+        );
+    });
+
     it("vinext#3741: the App Router handler hands /_next/image to the Nitro app instead of redirecting", () => {
         applyVinextPatches(patched);
         const handler = readFileSync(
