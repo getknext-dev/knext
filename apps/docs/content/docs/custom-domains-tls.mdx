@@ -98,15 +98,24 @@ The approach here is a per-hostname certificate: cert-manager writes a `Secret`,
 ### Choose how the certificate is issued
 
 <Callout type="info">
-On a Kourier-only cluster, cert-manager's **HTTP-01** solver cannot complete. It publishes the
-challenge as a standard Kubernetes `Ingress`, which Kourier does not serve, so the challenge stays
-`pending` with `wrong status code '404', expected '200'`. Use **DNS-01**, or install Knative's
-cert-manager integration for cluster-wide auto-TLS.
+On a Kourier-only cluster, cert-manager's **HTTP-01** solver did not complete in testing, so this
+page does not offer it as a working path. It publishes the challenge as a standard Kubernetes
+`Ingress`, which Kourier does not serve, and the challenge stayed `pending` with
+`wrong status code '404', expected '200'`. DNS-01 and Knative's cert-manager integration for
+cluster-wide auto-TLS are the alternatives; neither has been verified end to end on the reference
+cluster yet.
 </Callout>
 
-**DNS-01 (works with Kourier).** cert-manager proves control of the domain by writing a DNS record,
-so the ingress is not involved. The example uses Cloudflare; pick the solver for your DNS provider
-from the cert-manager documentation and keep the rest unchanged.
+**DNS-01 (does not depend on the ingress).** cert-manager proves control of the domain by writing a
+DNS record, so the request path through Kourier is not involved. The example uses Cloudflare; pick the
+solver for your DNS provider from the cert-manager documentation and keep the rest unchanged.
+
+<Callout type="warn">
+**Not yet verified on the reference cluster.** The Cloudflare issuer below follows the cert-manager
+documentation but has not been run end to end here. What has been verified is everything after the
+issuer: a `Certificate` writing a `Secret` that a `DomainMapping` serves (tested with a self-signed
+issuer), and that the Let's Encrypt staging account registers.
+</Callout>
 
 ```yaml title="clusterissuer.yaml"
 apiVersion: cert-manager.io/v1
@@ -250,8 +259,7 @@ To keep an app private:
 
    - **A tunnel** (for example Cloudflare Tunnel) running in the cluster. Point its origin at the
      internal Kourier service and rewrite the `Host` header to the app's cluster-local name. Without
-     the header, Knative cannot tell which app the request is for, and a scaled-to-zero app would
-     never wake:
+     the header, Knative cannot tell which app the request is for:
 
      ```yaml
      # cloudflared config (sketch)
@@ -263,8 +271,9 @@ To keep an app private:
        - service: http_status:404
      ```
 
-     The origin side is the part you can prove from inside the cluster; this returns `200` and wakes a
-     scaled-to-zero app:
+     Only the in-cluster origin was tested: this request from inside the cluster returns `200`. The
+     tunnel itself and the public hostname in front of it are unverified, so treat the config above as
+     a starting point:
 
      ```bash
      curl -H 'Host: acme.prod.svc.cluster.local' \
