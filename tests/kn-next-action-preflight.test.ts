@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   closeSync,
+  existsSync,
   fsyncSync,
   mkdirSync,
   mkdtempSync,
@@ -523,6 +524,9 @@ describe('#1500 — SelfSubjectRulesReview via `kubectl create --raw <path> -f -
     const r = run(appWithWildcardAwareCore(), dir);
     // The shim must have actually been exec'd — otherwise the generic refusal below
     // is the real code path running WITHOUT the shim (the #1883 flake), not a pass.
+    // Diagnose a recurrence: if the shim never ran, say so WITH the run's output
+    // instead of a bare ENOENT from reading the marker.
+    expect(existsSync(marker), `shim never ran — ${describeResult(r)}`).toBe(true);
     expect(readFileSync(marker, 'utf8'), describeResult(r)).toContain('ran');
     expect(r.status, describeResult(r)).toBe(1);
     expect(r.stderr).toContain('Could not determine what this credential can do');
