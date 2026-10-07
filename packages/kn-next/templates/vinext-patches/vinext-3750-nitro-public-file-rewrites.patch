@@ -1,0 +1,169 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3750
+What it fixes: On a Nitro build for a Node-like preset (node, bun), a rewrite whose destination
+is a file in `public/` was not served. Nitro serves `public/` with its own static handler ahead
+of vinext and gives vinext no ASSETS binding, so the Pages Router answered the 404 page for
+`beforeFiles`, `afterFiles` and `fallback` rewrites (the Next.js deploy tests
+custom-routes-catchall and i18n-ignore-rewrite-source-locale), and the App Router answered an
+empty 200 for a `beforeFiles` or middleware rewrite.
+Such a file is now fetched back through the running Nitro app (`globalThis.__nitro__.default`),
+whose static handler serves it: the Pages wrapper passes a `publicFileFetcher` on the execution
+context, and the App Router SSR entry (Nitro's service) resolves the static-file signal through
+it. Only `vite build` on a non-workerd Nitro preset emits this; `/_next/image` is unchanged. A
+sub-request that reaches vinext again (Nitro has no such file) ends in a 404, never a loop.
+Not covered (upstream either): middleware still does not run for a DIRECT request to a literal
+public file on Nitro (cloudflare/vinext#3217, a design question), and App Router `afterFiles` /
+`fallback` rewrites to a public file need cloudflare/vinext#3429.
+Port difference: upstream edits the body of the Pages `serveFilesystemRoute`; here the Pages
+hunk wraps that function from outside, because vinext-3741-nitro-pages-image-optimizer.patch
+already rewrote its first branch and must keep recognising itself as applied. Same behaviour:
+with no ASSETS binding, a non-`/_next/image` filesystem route goes through the Nitro fetcher.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3750.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -713,6 +713,7 @@
+ const APP_RESPONSE_STAGE_ENTRY = resolveRuntimeEntryModule("app-response-stage-entry");
+ const PAGES_REQUEST_STAGE_ENTRY = resolveRuntimeEntryModule("pages-request-stage-entry");
+ const PAGES_RESPONSE_STAGE_ENTRY = resolveRuntimeEntryModule("pages-response-stage-entry");
++const NITRO_PUBLIC_FILES_MODULE = resolveRuntimeEntryModule("nitro-public-files");
+ const WORKER_ROUTER_ENTRIES = /* @__PURE__ */ new Set([resolveRuntimeEntryModule("app-router-entry"), resolveRuntimeEntryModule("pages-router-entry")]);
+ /** Virtual module that registers config-driven cache adapters (see VinextOptions.cache). */
+ const RESOLVED_CACHE_ADAPTERS = "\0" + VIRTUAL_CACHE_ADAPTERS;
+@@ -2156,12 +2157,16 @@
+ 							""
+ 						].join("\n");
+ 						const entry = hasAppDir ? "vinext/server/app-router-entry" : "vinext/server/pages-router-entry";
+-						if (!hasAppDir && hasNitroPlugin) return [
+-							`import worker from ${JSON.stringify(entry)};`,
+-							"export default { fetch(request, env, ctx) {",
+-							`  return worker.fetch(request, env, { ...ctx, hostRuntime: ${JSON.stringify(nitroHostRuntime)} });`,
+-							"} };"
+-						].join("\n");
++						if (!hasAppDir && hasNitroPlugin) {
++							const servesNitroPublicFiles = !isServeCommand && nitroHostRuntime === "node";
++							return [
++								`import worker from ${JSON.stringify(entry)};`,
++								...servesNitroPublicFiles ? [`import { getNitroPublicFileFetcher } from ${JSON.stringify(NITRO_PUBLIC_FILES_MODULE)};`] : [],
++								"export default { fetch(request, env, ctx) {",
++								`  return worker.fetch(request, env, { ...ctx, hostRuntime: ${JSON.stringify(nitroHostRuntime)}${servesNitroPublicFiles ? ", publicFileFetcher: getNitroPublicFileFetcher()" : ""} });`,
++								"} };"
++							].join("\n");
++						}
+ 						return `export { default } from ${JSON.stringify(entry)};`;
+ 					}
+ 					if (id === RESOLVED_REQUEST_STAGE) return `export { handleRequestStage } from ${JSON.stringify(hasAppDir ? APP_REQUEST_STAGE_ENTRY : PAGES_REQUEST_STAGE_ENTRY)};\n`;
+@@ -2255,7 +2260,7 @@
+ 					if (id === RESOLVED_IMAGE_ADAPTERS) return generateImageAdaptersModule(options.images);
+ 					if (id === RESOLVED_APP_SSR_ENTRY && hasAppDir) {
+ 						recordServerEntryLoad(this.environment?.name, id);
+-						return generateSsrEntry(hasPagesDir);
++						return generateSsrEntry(hasPagesDir, { nitroPublicFiles: hasNitroPlugin && !isServeCommand && nitroHostRuntime === "node" ? NITRO_PUBLIC_FILES_MODULE : null });
+ 					}
+ 					if (id === RESOLVED_APP_BROWSER_ENTRY && hasAppDir) {
+ 						const graph = await appRouteGraph(appDir, nextConfig?.pageExtensions, fileMatcher);
+--- a/dist/entries/app-ssr-entry.js
++++ b/dist/entries/app-ssr-entry.js
+@@ -10,12 +10,24 @@
+ * entry also re-exports selected Pages server entry hooks from
+ * `virtual:vinext-server-entry` so the RSC bundle can access Pages Router
+ * route metadata and fallback dispatchers via `import("./ssr/index.js")`.
++*
++* When `nitroPublicFiles` is set (a Nitro build for a Node-like preset), the
++* default export serves a public file that the RSC handler reached through a
++* rewrite by fetching it back through the Nitro app, whose static handler
++* runs before vinext.
+ */
+-function generateSsrEntry(hasPagesDir = false) {
++function generateSsrEntry(hasPagesDir = false, options = {}) {
+ 	const entryPath = resolveRuntimeEntryModule("app-ssr-entry");
++	const defaultExport = options.nitroPublicFiles ? `import __ssrEntry from ${JSON.stringify(entryPath)};
++import { resolveNitroStaticFileSignal } from ${JSON.stringify(options.nitroPublicFiles)};
++export default {
++  async fetch(request) {
++    return resolveNitroStaticFileSignal(await __ssrEntry.fetch(request), request);
++  },
++};` : `export { default } from ${JSON.stringify(entryPath)};`;
+ 	return `
+ export * from ${JSON.stringify(entryPath)};
+-export { default } from ${JSON.stringify(entryPath)};
++${defaultExport}
+ ${hasPagesDir ? `
+ export {
+   __ensureInstrumentation,
+--- a/dist/server/worker-revalidation-context.js
++++ b/dist/server/worker-revalidation-context.js
+@@ -11,6 +11,7 @@
+ 		hostRuntime: base?.hostRuntime ?? defaultHostRuntime,
+ 		...base?.cache === void 0 ? {} : { cache: base.cache },
+ 		...base?.assets === void 0 ? {} : { assets: base.assets },
++		...base?.publicFileFetcher === void 0 ? {} : { publicFileFetcher: base.publicFileFetcher },
+ 		...base?.trustedRevalidateOrigin === void 0 ? {} : { trustedRevalidateOrigin: base.trustedRevalidateOrigin },
+ 		dispatchPagesRevalidate,
+ 		isInternalPagesRevalidation
+--- a/dist/server/pages-request-stage-entry.js
++++ b/dist/server/pages-request-stage-entry.js
+@@ -320,6 +320,11 @@
+ 				return fetchWorkerFilesystemRoute(request, requestPathname, phase, (assetRequest) => Promise.resolve(assets.fetch(assetRequest)), publicFiles, basePath, assetPathPrefix);
+ 			}
+ 		};
++		const publicFileFetcher = assets ? void 0 : platformCtx?.publicFileFetcher;
++		if (publicFileFetcher) {
++			const serveFilesystemRoute = deps.serveFilesystemRoute;
++			deps.serveFilesystemRoute = (requestPathname, stagedHeaders, phase, resolvedUrl) => isImageOptimizationPath(requestPathname) ? serveFilesystemRoute(requestPathname, stagedHeaders, phase, resolvedUrl) : fetchWorkerFilesystemRoute(request, requestPathname, phase, (assetRequest) => Promise.resolve(publicFileFetcher.fetch(assetRequest)), publicFiles, basePath, assetPathPrefix);
++		}
+ 		const result = await runPagesRequest(request, deps);
+ 		if (result.type === "response") {
+ 			let response = result.response;
+--- /dev/null
++++ b/dist/server/nitro-public-files.js
+@@ -0,0 +1,47 @@
++import { notFoundResponse } from "./http-error-responses.js";
++import { isStaticFileSignal } from "./static-file-signal.js";
++import { createStaticAssetRequest, resolveStaticAssetSignal } from "./worker-utils.js";
++import { AsyncLocalStorage } from "node:async_hooks";
++//#region src/server/nitro-public-files.ts
++/**
++* Public files for vinext services hosted by Nitro on Node-like presets.
++*
++* Nitro serves `public/` with its own static handler, which runs before the
++* vinext service, and gives the service no ASSETS-style binding. A request
++* that reaches a public file only after a rewrite (a next.config rewrite or a
++* middleware rewrite) is therefore fetched back through the running Nitro
++* app, where that static handler answers it.
++*/
++const publicFileSubrequest = new AsyncLocalStorage();
++function getNitroApp() {
++	const app = globalThis.__nitro__?.default;
++	return typeof app?.fetch === "function" ? app : void 0;
++}
++/**
++* A fetcher for `public/` files backed by the running Nitro app. Undefined
++* when no Nitro app is running, or inside one of its own sub-requests.
++*/
++function getNitroPublicFileFetcher() {
++	if (publicFileSubrequest.getStore()) return void 0;
++	const app = getNitroApp();
++	if (!app) return void 0;
++	return { fetch(request) {
++		return publicFileSubrequest.run(true, () => app.fetch(request));
++	} };
++}
++/**
++* Serve the public file an App Router static-file signal points at. Any other
++* response is returned unchanged.
++*/
++async function resolveNitroStaticFileSignal(response, request) {
++	if (!isStaticFileSignal(response)) return response;
++	if (publicFileSubrequest.getStore()) {
++		response.body?.cancel().catch(() => {});
++		return notFoundResponse();
++	}
++	const fetcher = getNitroPublicFileFetcher();
++	if (!fetcher) return response;
++	return await resolveStaticAssetSignal(response, { fetchAsset: (assetPath) => Promise.resolve(fetcher.fetch(createStaticAssetRequest(assetPath, request))) }) ?? response;
++}
++//#endregion
++export { getNitroPublicFileFetcher, resolveNitroStaticFileSignal };

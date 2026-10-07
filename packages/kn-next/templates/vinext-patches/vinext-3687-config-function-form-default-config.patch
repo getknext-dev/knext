@@ -17,21 +17,55 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 
 --- a/dist/config/next-config.js
 +++ b/dist/config/next-config.js
-@@ -188,7 +188,7 @@
+@@ -1,5 +1,5 @@
+ import path, { toSlash } from "../deps/.pnpm/pathslash@0.1.0/deps/pathslash/dist/index.js";
+-import { normalizePageExtensions } from "../routing/file-matcher.js";
++import { DEFAULT_PAGE_EXTENSIONS, normalizePageExtensions } from "../routing/file-matcher.js";
+ import { loadCommonJsModule, shouldRetryAsCommonJs } from "../utils/commonjs-loader.js";
+ import { isUnknownRecord } from "../utils/record.js";
+ import { PHASE_DEVELOPMENT_SERVER, PHASE_PRODUCTION_BUILD } from "../shims/constants.js";
+@@ -182,13 +182,23 @@
+ 	console.error(`[vinext] Failed to load ${filename}: ${msg}`);
+ 	console.log();
+ 	if (isNextIntlPlugin) console.warn("[vinext] Hint: createNextIntlPlugin() is not needed with vinext. Remove the next-intl/plugin wrapper from your next.config — vinext auto-detects next-intl and registers the i18n config alias automatically.");
++}
++/**
++* The `defaultConfig` handed to a function-form next.config. Next.js passes
++* its full `defaultConfig` (packages/next/src/server/config-shared.ts); vinext
++* passes the subset configs are known to read, with values matching Next.js,
++* so `[...defaultConfig.pageExtensions, "page.js"]` works. Fresh per call so a
++* config that mutates it cannot leak into later loads.
++*/
++function createFunctionConfigDefaults() {
++	return { pageExtensions: [...DEFAULT_PAGE_EXTENSIONS] };
+ }
+ /**
+ * Resolve a Next-style config value, calling it if it's a function-form config
  * (Next.js supports `module.exports = (phase, opts) => config`).
  */
  async function resolveConfigValue(config, phase = DEFAULT_PHASE) {
 -	if (typeof config === "function") return await config(phase, { defaultConfig: {} });
-+	if (typeof config === "function") return await config(phase, { defaultConfig: { pageExtensions: ["tsx", "ts", "jsx", "js"] } });
++	if (typeof config === "function") return await config(phase, { defaultConfig: createFunctionConfigDefaults() });
  	return config;
  }
  /**
-@@ -436,7 +436,7 @@
+@@ -436,7 +446,7 @@
  					},
  					load(id) {
  						if (id !== resolvedVirtualConfigId) return;
 -						return `import * as configModule from ${configPathLiteral};\nconst cjsModule = configModule[${JSON.stringify(VINEXT_CJS_EXPORTS_KEY)}];\nconst cjsInitial = configModule[${JSON.stringify(VINEXT_CJS_INITIAL_KEY)}];\nconst cjsExports = cjsModule && cjsModule.exports;\nconst cjsValue = cjsExports != null && (cjsExports !== cjsInitial || (typeof cjsExports === "object" && Object.keys(cjsExports).length > 0)) ? cjsExports : undefined;\nconst value = cjsValue ?? configModule.default ?? configModule;\nexport default typeof value === "function" ? await value(${phaseLiteral}, { defaultConfig: {} }) : value;\n`;
-+						return `import * as configModule from ${configPathLiteral};\nconst cjsModule = configModule[${JSON.stringify(VINEXT_CJS_EXPORTS_KEY)}];\nconst cjsInitial = configModule[${JSON.stringify(VINEXT_CJS_INITIAL_KEY)}];\nconst cjsExports = cjsModule && cjsModule.exports;\nconst cjsValue = cjsExports != null && (cjsExports !== cjsInitial || (typeof cjsExports === "object" && Object.keys(cjsExports).length > 0)) ? cjsExports : undefined;\nconst value = cjsValue ?? configModule.default ?? configModule;\nexport default typeof value === "function" ? await value(${phaseLiteral}, { defaultConfig: { pageExtensions: ["tsx", "ts", "jsx", "js"] } }) : value;\n`;
++						return `import * as configModule from ${configPathLiteral};\nconst cjsModule = configModule[${JSON.stringify(VINEXT_CJS_EXPORTS_KEY)}];\nconst cjsInitial = configModule[${JSON.stringify(VINEXT_CJS_INITIAL_KEY)}];\nconst cjsExports = cjsModule && cjsModule.exports;\nconst cjsValue = cjsExports != null && (cjsExports !== cjsInitial || (typeof cjsExports === "object" && Object.keys(cjsExports).length > 0)) ? cjsExports : undefined;\nconst value = cjsValue ?? configModule.default ?? configModule;\nexport default typeof value === "function" ? await value(${phaseLiteral}, { defaultConfig: ${JSON.stringify(createFunctionConfigDefaults())} }) : value;\n`;
  					}
  				},
  				...isTypeScriptConfig ? [cjsGlobalsInjectorPlugin(configPath)] : [],
+--- a/dist/routing/file-matcher.js
++++ b/dist/routing/file-matcher.js
+@@ -3,7 +3,7 @@
+ import { existsSync } from "node:fs";
+ import { glob } from "node:fs/promises";
+ //#region src/routing/file-matcher.ts
+-const DEFAULT_PAGE_EXTENSIONS = [
++export const DEFAULT_PAGE_EXTENSIONS = [
+ 	"tsx",
+ 	"ts",
+ 	"jsx",

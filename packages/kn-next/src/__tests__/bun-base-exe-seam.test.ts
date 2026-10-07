@@ -68,9 +68,13 @@ const ADAPTERS = resolve(import.meta.dir, "..", "adapters");
 const SRC = resolve(import.meta.dir, "..");
 
 const tempDirs: string[] = [];
+// Explicit timeout: every `verifiedBase()` copies the whole bun binary, so this
+// hook deletes well over a gigabyte. Under a parallel CI worker pool that is
+// I/O-bound and measured past bun's 5 s default hook timeout (an "(unnamed)"
+// failure after every test had passed).
 afterAll(() => {
     for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
-});
+}, 60_000);
 function tmp(prefix: string): string {
     // realpath: on macOS TMPDIR is under /var → /private/var, and compile-embed compares the
     // entry's path with the realpath'd embed root.

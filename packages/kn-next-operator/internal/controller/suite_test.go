@@ -35,6 +35,7 @@ import (
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -66,6 +67,8 @@ var _ = BeforeSuite(func() {
 
 	// Register Knative Serving scheme so the reconciler can create/get ksvc objects.
 	err = servingv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = servingv1beta1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme

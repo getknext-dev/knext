@@ -132,12 +132,14 @@ smaller than the source. The check also tests itself against a deliberately brok
 so it cannot pass by accident.
 </Callout>
 
-<Callout type="warn">
-**On the vinext build target, `images.loaderFile` is not supported yet.** A custom `loader` prop
-on an individual `next/image` works, but `next.config.ts`'s `images: { loader: 'custom', loaderFile:
-'...' }` — a project-wide custom loader — is silently ignored; the built-in `/_next/image` endpoint
-is used instead. This is unrelated to the sharp/native-library concerns above. The default
-standalone build target is unaffected.
+<Callout>
+**A project-wide custom loader works on the vinext build target too.** Set `images: { loader:
+'custom', loaderFile: './image-loader.js' }` in `next.config.ts` (the file's default export is the
+loader) and every `next/image` uses it, with a per-width `srcSet`, instead of the built-in
+`/_next/image` endpoint. A missing file, or a `loader` other than `default`/`custom` next to
+`loaderFile`, fails the build, as in Next.js. Your loader can still return `/_next/image` URLs
+for some images (`/_next/image/?url=${src}&w=${width}&q=${quality}`) to keep them on the built-in
+optimizer; those are served in both the App Router and the Pages Router.
 </Callout>
 
 ## Related

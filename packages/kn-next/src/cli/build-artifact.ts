@@ -26,7 +26,13 @@ import {
     readlinkSync,
     writeFileSync,
 } from "node:fs";
-import { join, relative, resolve as resolvePath } from "node:path";
+import {
+    basename,
+    dirname,
+    join,
+    relative,
+    resolve as resolvePath,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     BUILDERS,
@@ -35,6 +41,7 @@ import {
     DEFAULT_BUILDER_ID,
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
+import { HARFBUZZ_NOTICE_FILE } from "../adapters/og-harfbuzz.mjs";
 import {
     type HealResult,
     healBunExportTargets,
@@ -50,7 +57,11 @@ import {
     buildStandaloneExecutable,
     standaloneExecFileName,
 } from "./standalone-exec-build";
-import { buildVinextExecutable } from "./vinext-build";
+import {
+    buildVinextExecutable,
+    stageOgHarfbuzzForVinextNode,
+    stageSharpForVinextNode,
+} from "./vinext-build";
 
 export interface ResolvedBuild {
     readonly builder: BuilderAdapter;
@@ -143,6 +154,15 @@ export interface CompileForDeployResult {
      * (not run) is itself informative to a caller deciding what to log.
      */
     readonly healed?: HealResult;
+    /**
+     * vinext × node only: what staging the IMAGE platform's payload did.
+     * `knext build` logs it; `deploy`/`preview` get the staging for free,
+     * which they need because they run no `knext build` (see the call site).
+     */
+    readonly vinextNode?: {
+        readonly sharpStaged: boolean;
+        readonly og: ReturnType<typeof stageOgHarfbuzzForVinextNode>;
+    };
 }
 
 /**
@@ -270,6 +290,17 @@ export function compileArtifactForDeploy(
             runtimeId,
         });
         return { compiled: true, binaryPath };
+    }
+
+    // vinext × node: replace nitro's traced sharp (the BUILD HOST's addon,
+    // wrong platform for the alpine/musl image) with the image platform's, and
+    // stage next/og's wasm. This is shared by build/deploy/preview because
+    // only `knext build` used to do it, so a glibc or macOS host deploying
+    // shipped an image whose compile-cache bake dies loading sharp.
+    if (artifact.shape === "nitro-output-node") {
+        const sharpStaged = stageSharpForVinextNode(cwd).staged;
+        const og = stageOgHarfbuzzForVinextNode(cwd);
+        return { compiled: false, vinextNode: { sharpStaged, og } };
     }
 
     // node runtime (standalone), or vinext × node: nothing to compile —
@@ -537,6 +568,20 @@ export function assertCompiledArtifactFresh(
             `${target.execPath} is missing, and --skip-build means knext will not compile it.\n\n` +
                 "Drop --skip-build, or run `knext build` first to produce it.",
         );
+    }
+
+    // The vinext image recipes COPY the third-party notice by exact name; the
+    // compile writes it beside the binary. A binary from an older compile has
+    // none, and `--skip-build` would otherwise fail later as an opaque COPY
+    // error inside docker.
+    if (basename(target.execPath).startsWith("knext-exec-")) {
+        const notice = join(dirname(target.execPath), HARFBUZZ_NOTICE_FILE);
+        if (!existsSync(notice)) {
+            throw new UsageError(
+                `${notice} is missing — the compile writes it beside ${target.execPath} and the image copies it, and --skip-build means knext will not recompile.\n\n` +
+                    "Drop --skip-build, or run `knext build` to recompile and regenerate it.",
+            );
+        }
     }
 
     const stampPath = buildStampPathFor(target.execPath);

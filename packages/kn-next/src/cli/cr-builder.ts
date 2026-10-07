@@ -416,6 +416,20 @@ export function buildNextAppCRObject(
               }
             : undefined;
 
+    // spec.networking.visibility (#1865): the platform way to keep an app's
+    // Knative Route off the external gateway when it has mutating endpoints
+    // and no auth of its own. Emitted ONLY when explicitly "cluster-local" —
+    // never for "public"/absent, so a default config's CR stays
+    // byte-identical to every CR written before this field existed. #548
+    // upgrade order: an operator/CRD that predates this field rejects it
+    // under --validate=strict (every CLI apply passes that flag) and
+    // deploy's preflightCRSchema reports the unknown field before the
+    // cluster is touched. Upgrade operator/CRD first, then CLI.
+    const networking =
+        config.networking?.visibility === "cluster-local"
+            ? { visibility: "cluster-local" as const }
+            : undefined;
+
     const spec: Record<string, unknown> = {
         image,
         // #794/#952 private-registry pull secrets: config names Secrets, the CRD
@@ -449,6 +463,7 @@ export function buildNextAppCRObject(
         ...(build ? { build } : {}),
         ...(selfContained ? { selfContained } : {}),
         ...(writeFree ? { security: { writeFree: true } } : {}),
+        ...(networking ? { networking } : {}),
         // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
         // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
         ...(buildId ? { buildId } : {}),

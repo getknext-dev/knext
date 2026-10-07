@@ -33,6 +33,12 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+- apiGroups:
   - apps
   resources:
   - daemonsets
@@ -44,6 +50,12 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
 - apiGroups:
   - apps.kn-next.dev
   resources:
@@ -97,11 +109,18 @@ rules:
 - apiGroups:
   - serving.knative.dev
   resources:
+  - domainmappings
   - revisions
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - serving.knative.dev
+  resources:
+  - routes
+  verbs:
+  - get
 - apiGroups:
   - serving.knative.dev
   resources:

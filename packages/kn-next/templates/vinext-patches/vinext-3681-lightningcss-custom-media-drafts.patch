@@ -17,13 +17,13 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  import { normalizePathnameForRouteMatchStrict } from "./routing/utils.js";
  import { hasBasePath, stripBasePath } from "./utils/base-path.js";
  import { appRouteGraph, appRouter, invalidateAppRouteCache, matchAppRoute } from "./routing/app-router.js";
-@@ -1643,7 +1643,8 @@
+@@ -1644,7 +1644,8 @@
  							transformer: "lightningcss",
  							lightningcss: {
  								...nextConfig.lightningCssFeatures.include ? { include: nextConfig.lightningCssFeatures.include } : {},
 -								...nextConfig.lightningCssFeatures.exclude ? { exclude: nextConfig.lightningCssFeatures.exclude } : {}
 +								...nextConfig.lightningCssFeatures.exclude ? { exclude: nextConfig.lightningCssFeatures.exclude } : {},
-+								...(nextConfig.lightningCssFeatures.include & lightningCssFeatureNamesToMask(["custom-media-queries"])) !== 0 ? { drafts: { customMedia: true } } : {}
++								...(nextConfig.lightningCssFeatures.include & ~nextConfig.lightningCssFeatures.exclude & lightningCssFeatureNamesToMask(["custom-media-queries"])) !== 0 ? { drafts: { customMedia: true } } : {}
  							}
  						} : {},
  						...postcssOverride ? { postcss: postcssOverride } : {},

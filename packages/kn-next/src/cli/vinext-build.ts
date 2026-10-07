@@ -45,9 +45,16 @@ import {
     readdirSync,
     readFileSync,
     rmSync,
+    writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { rewriteVinextHarfbuzzAnchors } from "../adapters/entry-asset-anchor.mjs";
+import {
+    ogHarfbuzzWarning,
+    resolvePinnedHarfbuzzWasm,
+    vinextOgPackageJson,
+} from "../adapters/og-harfbuzz.mjs";
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import {
@@ -675,6 +682,140 @@ export function stageSharpNative(
         rmSync(join(dest, INTEGRITY_MANIFEST_NAME), { force: true });
         throw error;
     }
+}
+
+/** First line of the ESM shim prepended to nitro's externalized @vercel/og (idempotency marker). */
+const OG_NODE_SHIM_MARKER = "/* knext: next/og HarfBuzz node shim */";
+
+/**
+ * Gives @vercel/og 1.x's inlined Emscripten glue the two CommonJS globals it
+ * reads under Node: esbuild's `__require("fs")` (which throws "Dynamic require
+ * of \"fs\" is not supported" in plain ESM) and `__dirname` (where
+ * `locateFile("hb.wasm")` looks). Both resolve to the module's own location,
+ * so the staged `dist/hb.wasm` beside it is what gets read.
+ */
+const OG_NODE_SHIM = [
+    OG_NODE_SHIM_MARKER,
+    'import { createRequire as __knextCreateRequire } from "node:module";',
+    'import { fileURLToPath as __knextFileURLToPath } from "node:url";',
+    'import { dirname as __knextDirname } from "node:path";',
+    "const require = __knextCreateRequire(import.meta.url);",
+    "const __dirname = __knextDirname(__knextFileURLToPath(import.meta.url));",
+    "",
+].join("\n");
+
+/** Every .js/.mjs file under `dir`, skipping `node_modules`. */
+function serverOutputScripts(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules") continue;
+        const p = join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...serverOutputScripts(p));
+        else if (/\.m?js$/.test(entry.name)) out.push(p);
+    }
+    return out;
+}
+
+/** Copy the binary (and harfbuzzjs's MIT licence beside it, as `<dest>.LICENSE`). */
+function stageHarfbuzzFile(
+    found: { path: string; license: string | undefined },
+    dest: string,
+): void {
+    cpSync(found.path, dest);
+    if (found.license !== undefined) cpSync(found.license, `${dest}.LICENSE`);
+}
+
+/**
+ * next/og on vinext × node (#1872). `.output/server` runs directly under
+ * Node, so the compiled-executable embed (vinext-compile.mjs) does not apply,
+ * and both places @vercel/og 1.x's HarfBuzz loader lands are broken there:
+ *
+ *   1. nitro's externalized copy (`.output/server/node_modules/@vercel/og`,
+ *      the pages router): its glue reads `locateFile("hb.wasm")` =
+ *      `__dirname + "/hb.wasm"` through `__require("fs")` — neither global
+ *      exists in Node ESM, and 1.0.3 ships no `dist/hb.wasm` anyway
+ *      (vercel/satori#801). Fixed by staging the binary into `dist/` and
+ *      prepending a two-global shim (`OG_NODE_SHIM`).
+ *   2. vinext's own loader in the server output (the app router, with the
+ *      bundled vinext #3424 fix): `new WebAssembly.Module(read(new URL(
+ *      "../../hb.wasm", import.meta.url)))` relative to an intermediate RSC dir
+ *      nitro never ships. Fixed by re-pointing exactly that loader (never a
+ *      user's own anchor — see `rewriteVinextHarfbuzzAnchors`) at a sibling
+ *      `hb.wasm` and staging it there.
+ *
+ * The binary is the version-pinned `harfbuzzjs/hb.wasm` (`resolvePinnedHarfbuzzWasm`),
+ * staged with its MIT licence. When a loader IS present but no binary matches
+ * its pins, nothing is staged and a warning is returned for the caller to
+ * print — the app still builds (one that never renders next/og is unaffected).
+ * No-op when the output has no HarfBuzz loader. Idempotent.
+ */
+export function stageOgHarfbuzzForVinextNode(cwd: string): {
+    staged: string[];
+    warnings: string[];
+} {
+    const serverDir = join(cwd, ".output", "server");
+    const staged: string[] = [];
+    const warnings = new Set<string>();
+    if (!existsSync(serverDir)) return { staged, warnings: [] };
+    const vinextOg = vinextOgPackageJson(cwd);
+
+    // 1. nitro's externalized @vercel/og
+    const ogRoot = join(serverDir, "node_modules", "@vercel", "og");
+    const ogEntry = join(ogRoot, "dist", "index.node.js");
+    if (existsSync(ogEntry)) {
+        const src = readFileSync(ogEntry, "utf8");
+        if (/\blocateFile\(\s*["']hb\.wasm["']\s*\)/.test(src)) {
+            const ogPkg = join(ogRoot, "package.json");
+            const found = resolvePinnedHarfbuzzWasm(ogPkg, [
+                ogPkg,
+                join(cwd, "package.json"),
+                ...(vinextOg === undefined ? [] : [vinextOg]),
+            ]);
+            if ("path" in found) {
+                const dest = join(ogRoot, "dist", "hb.wasm");
+                stageHarfbuzzFile(found, dest);
+                if (!src.startsWith(OG_NODE_SHIM_MARKER)) {
+                    writeFileSync(ogEntry, OG_NODE_SHIM + src);
+                }
+                staged.push(dest);
+            } else {
+                warnings.add(ogHarfbuzzWarning(found.reason));
+            }
+        }
+    }
+
+    // 2. vinext's own loader, inlined into the server output
+    for (const file of serverOutputScripts(serverDir)) {
+        const src = readFileSync(file, "utf8");
+        const { contents, count } = rewriteVinextHarfbuzzAnchors(
+            src,
+            'new URL("./hb.wasm", import.meta.url)',
+        );
+        if (count === 0) continue;
+        const found =
+            vinextOg === undefined
+                ? {
+                      reason: "vinext's @vercel/og is not resolvable from the app",
+                  }
+                : resolvePinnedHarfbuzzWasm(vinextOg, [vinextOg]);
+        if (!("path" in found)) {
+            warnings.add(ogHarfbuzzWarning(found.reason));
+            continue;
+        }
+        const dest = join(dirname(file), "hb.wasm");
+        stageHarfbuzzFile(found, dest);
+        if (contents !== src) writeFileSync(file, contents);
+        staged.push(dest);
+    }
+    // Strict requires: the same split the compiled build applies — a loader
+    // with no version-matched binary FAILS the build instead of warning.
+    if (
+        warnings.size > 0 &&
+        process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1"
+    ) {
+        throw new UsageError([...warnings].join("\n"));
+    }
+    return { staged, warnings: [...warnings] };
 }
 
 export interface StageSharpForNodeOptions {

@@ -277,7 +277,9 @@ export function resolveKubeContext(flag?: string): string | undefined {
  * so the caller can print one actionable "rename the file" error rather than
  * silently continuing on the old name.
  */
-export async function loadConfig(): Promise<KnativeNextConfig> {
+export async function loadConfig(
+    options: { phase?: "build" | "deploy" } = {},
+): Promise<KnativeNextConfig> {
     const cwd = process.cwd();
     const configPath = resolve(cwd, CONFIG_FILE);
 
@@ -290,9 +292,20 @@ export async function loadConfig(): Promise<KnativeNextConfig> {
     }
 
     const module = await import(configPath);
-    const config: KnativeNextConfig = module.default;
+    let config: KnativeNextConfig = module.default;
 
-    validateConfig(config);
+    // KN_REDIS_URL is a documented deploy-time override of a redis
+    // `cache.url`. It must land BEFORE validation: the scaffold's config
+    // reads `REDIS_URL ?? ""`, so a user supplying only KN_REDIS_URL would
+    // otherwise be refused for a URL they did provide.
+    if (process.env.KN_REDIS_URL && config?.cache?.provider === "redis") {
+        config = {
+            ...config,
+            cache: { ...config.cache, url: process.env.KN_REDIS_URL },
+        };
+    }
+
+    validateConfig(config, undefined, options);
 
     return config;
 }

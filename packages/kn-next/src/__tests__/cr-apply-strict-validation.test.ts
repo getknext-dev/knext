@@ -696,6 +696,7 @@ describe("preview deploy — the OTHER NextApp CR apply (same CR, same skew)", (
                 // cr-prune-preflight.test.ts. Here it is stubbed so this suite
                 // keeps asserting the APPLY argv and nothing else.
                 preflight: () => {},
+                visibilityGuard: async () => {},
             },
         );
         return (apply.mock.calls[0]?.[0] ?? []) as string[];
@@ -764,6 +765,11 @@ describe("strict-validation prose — every cited spec field is one the CLI emit
             secretRef: { name: "app-db" },
             roSecretRef: { name: "app-db", key: "DATABASE_URL_RO" },
         },
+        // #1865 — networking.visibility is emitted only when explicitly
+        // "cluster-local"; include it so `spec.networking` prose citations
+        // (deploy.ts's downgrade-guard comments) are checked against a CR
+        // that actually carries the field.
+        networking: { visibility: "cluster-local" },
     };
 
     async function builtCR(): Promise<Record<string, unknown>> {

@@ -146,6 +146,8 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
             "--skip-upload",
             "--skip-image-lockstep-check",
             "--dry-run",
+            "--private",
+            "--public",
             "-h",
             "--help",
             "-v",

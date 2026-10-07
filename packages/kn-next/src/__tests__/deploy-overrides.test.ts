@@ -225,6 +225,42 @@ describe("deploy() applyOverrides", () => {
             "redis://override:6379",
         );
     });
+
+    // #1865
+    it("--private sets networking.visibility to cluster-local even when the config had none", async () => {
+        setArgv(["deploy", "--tag", "deploytag", "--private"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        const cfg = renderNextAppCR.mock.calls.at(-1)?.[0] as KnativeNextConfig;
+        expect(cfg.networking?.visibility).toBe("cluster-local");
+    });
+
+    it("--private wins over a config that explicitly says public", async () => {
+        loadConfig.mockResolvedValue({
+            ...baseConfig,
+            networking: { visibility: "public" },
+        });
+        setArgv(["deploy", "--tag", "deploytag", "--private"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        const cfg = renderNextAppCR.mock.calls.at(-1)?.[0] as KnativeNextConfig;
+        expect(cfg.networking?.visibility).toBe("cluster-local");
+    });
+
+    it("without --private, a config's own networking.visibility is left untouched", async () => {
+        loadConfig.mockResolvedValue({
+            ...baseConfig,
+            networking: { visibility: "cluster-local" },
+        });
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        const cfg = renderNextAppCR.mock.calls.at(-1)?.[0] as KnativeNextConfig;
+        expect(cfg.networking?.visibility).toBe("cluster-local");
+    });
 });
 
 describe("deploy() post-apply retention GC (best-effort)", () => {

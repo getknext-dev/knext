@@ -83,11 +83,18 @@ const stageSharpForVinextNode = (() =>
     mock((_cwd: string, _opts?: { arch?: string }): { staged: boolean } => ({
         staged: true,
     })))();
+// #1872: same wiring guard for the next/og HarfBuzz staging on vinext × node.
+const stageOgHarfbuzzForVinextNode = (() =>
+    mock((_cwd: string): { staged: string[]; warnings: string[] } => ({
+        staged: [],
+        warnings: [],
+    })))();
 const __knextRealVinext = { ...(await import("../cli/vinext-build")) };
 mock.module("../cli/vinext-build", () => ({
     ...__knextRealVinext,
     buildVinextExecutable,
     stageSharpForVinextNode,
+    stageOgHarfbuzzForVinextNode,
 }));
 
 // The post-compile smoke (#894) BOOTS the compiled binary, and these cases mock
@@ -156,6 +163,7 @@ beforeEach(() => {
     healBunExportTargets.mockReturnValue({ copied: [], skipped: [] });
     buildVinextExecutable.mockReturnValue("knext-exec-linux-x64");
     stageSharpForVinextNode.mockReturnValue({ staged: true });
+    stageOgHarfbuzzForVinextNode.mockReturnValue({ staged: [], warnings: [] });
 });
 
 afterEach(() => {
@@ -604,5 +612,22 @@ describe("build() — vinext × node", () => {
             stageOrder,
             "sharp must be staged before assets upload",
         ).toBeLessThan(uploadOrder);
+    });
+
+    // #1872: next/og on vinext × node needs the version-pinned hb.wasm staged
+    // into .output/server — pin that build() calls it, before the upload.
+    it("stages next/og's HarfBuzz binary, BEFORE assets upload, on every nitro-output-node build", async () => {
+        loadConfig.mockResolvedValue(nodeCfg());
+        nitroOutput("node-server");
+
+        await build({ skipNextBuild: true });
+
+        expect(stageOgHarfbuzzForVinextNode).toHaveBeenCalledTimes(1);
+        expect(stageOgHarfbuzzForVinextNode.mock.calls[0]?.[0]).toBe(
+            realpathSync(dir),
+        );
+        expect(
+            stageOgHarfbuzzForVinextNode.mock.invocationCallOrder[0],
+        ).toBeLessThan(uploadAssets.mock.invocationCallOrder[0]);
     });
 });

@@ -146,6 +146,8 @@ func computeStatusVerdict(
 	ic imageCacheState,
 	np netpolEnforcementState,
 	envMapCollision envMapCollisionReport,
+	pe privateExposureState,
+	pc podCreationState,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -628,6 +630,89 @@ func computeStatusVerdict(
 		v.conditions = append(v.conditions, cond)
 	case prevNetpol != nil:
 		v.removeConditions = append(v.removeConditions, ConditionNetworkPolicyEnforced)
+	}
+
+	// PrivateExposure (Warning-class; Ready untouched). A DomainMapping that
+	// targets a cluster-local app is routed on the PUBLIC ingress by Knative,
+	// so the private app is reachable from the internet. Appended LAST so the
+	// persisted conditions order of every other app stays byte-identical (#98).
+	// Detection is read-only: the user's DomainMapping is never touched.
+	prevExposure := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPrivateExposure)
+	switch {
+	case pe.unknown:
+		// A failed list is not evidence the exposure is gone: carry the prior
+		// condition through unchanged rather than flip-flopping on API hiccups.
+		if prevExposure != nil {
+			v.conditions = append(v.conditions, *prevExposure)
+		}
+	case pe.private && len(pe.domainMappings) > 0:
+		cond := metav1.Condition{
+			Type:               ConditionPrivateExposure,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonDomainMappingPublishesPrivateApp,
+			Message: fmt.Sprintf(
+				"this app is cluster-local (spec.networking.visibility), but DomainMapping(s) %s target it and "+
+					"Knative routes a DomainMapping on the PUBLIC ingress even when it is labelled cluster-local; "+
+					"the app is reachable from the internet. Delete the DomainMapping, or front the app with a "+
+					"tunnel to kourier-internal plus an identity-aware proxy. knext does not modify DomainMappings.",
+				strings.Join(pe.domainMappings, ", ")),
+		}
+		v.conditions = append(v.conditions, cond)
+		if prevExposure == nil {
+			v.events = append(v.events, verdictEvent{
+				corev1.EventTypeWarning, ReasonDomainMappingPublishesPrivateApp, cond.Message,
+			})
+		}
+	case prevExposure != nil:
+		v.removeConditions = append(v.removeConditions, ConditionPrivateExposure)
+	}
+
+	// PodCreationBlocked: LimitRange/quota admission rejection of the revision's
+	// pods. Appended LAST (after PrivateExposure) so every other app's persisted
+	// conditions order stays byte-identical (#98). The message embeds the
+	// admission error, which is stable per revision, so a converged pass is a
+	// no-op; the Warning event fires only on entry or when the message changes.
+	prevBlocked := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPodCreationBlocked)
+	switch {
+	case pc.unknown || pc.sticky:
+		// A failed read is not evidence the block is gone (nor is a reason flip on the
+		// same still-unavailable revision): carry the prior verdict.
+		if prevBlocked != nil {
+			v.conditions = append(v.conditions, *prevBlocked)
+		}
+	case pc.blocked:
+		cond := metav1.Condition{
+			Type:               ConditionPodCreationBlocked,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             pc.reason,
+			Message: fmt.Sprintf(
+				"revision %s cannot create pods — the namespace's LimitRange/ResourceQuota rejected them: %s. "+
+					"Adjust spec.resources (cpuLimit/cpuRequest/memory) to fit, or change the namespace LimitRange/ResourceQuota.",
+				pc.revision, pc.message),
+		}
+		// Same reason on the same revision is not news: the admission message embeds
+		// live quota "used:" figures that drift, so freeze the message (no status
+		// rewrite) and stay quiet. Reason or revision change re-emits.
+		// Tradeoff: a same-reason change on the SAME revision (e.g. the LimitRange is
+		// edited from a cpu rule to a memory rule) keeps the FIRST message until the
+		// reason or revision changes. Accepted to avoid a status write per drift.
+		unchanged := prevBlocked != nil && prevBlocked.Reason == cond.Reason &&
+			strings.HasPrefix(prevBlocked.Message, "revision "+pc.revision+" ")
+		if unchanged {
+			cond.Message = prevBlocked.Message
+		} else {
+			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, pc.reason, cond.Message})
+		}
+		v.conditions = append(v.conditions, cond)
+		// A blocked rollout never self-heals without a user change; keep
+		// re-evaluating so recovery clears the condition promptly.
+		if v.requeueAfter == 0 || v.requeueAfter > ksvcNotReadyRequeueAfter {
+			v.requeueAfter = ksvcNotReadyRequeueAfter
+		}
+	case prevBlocked != nil:
+		v.removeConditions = append(v.removeConditions, ConditionPodCreationBlocked)
 	}
 
 	return v

@@ -74,7 +74,7 @@ describe("runPreviewDeploy — default preflight (deps.preflight NOT injected, #
             baseConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
             // preflight intentionally OMITTED — exercises defaultPreflight.
-            { apply, capture, buildAndPush },
+            { apply, capture, buildAndPush, visibilityGuard: async () => {} },
         );
 
         expect(url).toBe("https://my-app-pr-42.previews.example.com");
@@ -107,7 +107,7 @@ describe("runPreviewDeploy — default preflight (deps.preflight NOT injected, #
             },
             // preflight intentionally OMITTED — exercises defaultPreflight's
             // OWN withKubeContext wiring, not a caller-supplied stub's.
-            { apply, capture, buildAndPush },
+            { apply, capture, buildAndPush, visibilityGuard: async () => {} },
         );
 
         expect(captureKubectl).toHaveBeenCalledTimes(1);
@@ -130,7 +130,12 @@ describe("runPreviewDeploy — default preflight (deps.preflight NOT injected, #
             runPreviewDeploy(
                 baseConfig,
                 { prId: "42", branch: "feat/x", namespace: "previews" },
-                { apply, capture, buildAndPush },
+                {
+                    apply,
+                    capture,
+                    buildAndPush,
+                    visibilityGuard: async () => {},
+                },
             ),
         ).rejects.toThrow();
 
@@ -155,7 +160,13 @@ describe("runPreviewDeploy — buildId falls back to a timestamp when the image 
         await runPreviewDeploy(
             baseConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
-            { apply, capture, buildAndPush, preflight: () => {} },
+            {
+                apply,
+                capture,
+                buildAndPush,
+                preflight: () => {},
+                visibilityGuard: async () => {},
+            },
         );
         const after = Date.now();
 
@@ -184,7 +195,13 @@ describe("runPreviewDeploy — buildId falls back to a timestamp when the image 
         await runPreviewDeploy(
             baseConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
-            { apply, capture, buildAndPush, preflight: () => {} },
+            {
+                apply,
+                capture,
+                buildAndPush,
+                preflight: () => {},
+                visibilityGuard: async () => {},
+            },
         );
 
         const crPath = join(

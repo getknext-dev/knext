@@ -1,0 +1,321 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3684
+What it fixes: A request path with a repeated slash or a backslash (`//`, `/docs//`, `//evil.com`) gets Next.js's 308 to the collapsed path (query kept, Location always same-origin) instead of a 404 or a thrown URL parse. A bare `//` therefore redirects to `/` and serves the index route. Percent-encoded leading `%2F`/`%5C` and any collapsed path that is still open-redirect shaped keep their 404.
+This is the maintainer's version of the PR (it replaced the earlier "bare // is not an open redirect"
+change): new redirect helpers in open-redirect.js, wired into the App Router / Pages / SSR request
+entries, the Node production server, and the dev server (after its origin check, before the
+public/_next conflict guard).
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3684.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -26,7 +26,7 @@
+ import { validateMiddlewareMatcherPatterns } from "./server/middleware-matcher-pattern.js";
+ import { methodNotAllowedResponse, notFoundStaticAssetResponse } from "./server/http-error-responses.js";
+ import { isOpenRedirectShaped } from "./server/open-redirect.js";
+-import { canonicalizeRequestUrlPathname, filterInternalHeaders, normalizeTrailingSlash } from "./server/request-pipeline.js";
++import { canonicalizeRequestUrlPathname, filterInternalHeaders, normalizeTrailingSlash, sendRepeatedSlashRedirect } from "./server/request-pipeline.js";
+ import { resolvePagesI18nRequest, stripI18nLocaleForApiRoute } from "./server/pages-i18n.js";
+ import { findInstrumentationClientFile, findInstrumentationFile, runInstrumentation } from "./server/instrumentation.js";
+ import { findMiddlewareFile, isProxyFile, runMiddleware } from "./server/middleware.js";
+@@ -2589,19 +2589,6 @@
+ 					delete req.headers[VINEXT_MW_CTX_HEADER];
+ 					next();
+ 				});
+-				server.middlewares.use((req, _res, next) => {
+-					try {
+-						assertNoPublicNextRequestConflict({
+-							root: server.config.root,
+-							publicDir: server.config.publicDir === "" ? null : server.config.publicDir,
+-							basePath: nextConfig.basePath ?? "",
+-							requestUrl: req.url ?? "/"
+-						});
+-						next();
+-					} catch (error) {
+-						next(error);
+-					}
+-				});
+ 				const pageExtensions = fileMatcher.extensionRegex;
+ 				let pagesRunner = null;
+ 				const getTrustedDevRevalidateOrigin = () => {
+@@ -2899,6 +2886,22 @@
+ 					next();
+ 				});
+ 				server.middlewares.use((req, res, next) => {
++					if (!sendRepeatedSlashRedirect(req.url ?? "/", res)) next();
++				});
++				server.middlewares.use((req, _res, next) => {
++					try {
++						assertNoPublicNextRequestConflict({
++							root: server.config.root,
++							publicDir: server.config.publicDir === "" ? null : server.config.publicDir,
++							basePath: nextConfig.basePath ?? "",
++							requestUrl: req.url ?? "/"
++						});
++						next();
++					} catch (error) {
++						next(error);
++					}
++				});
++				server.middlewares.use((req, res, next) => {
+ 					if (!hasPagesDir || !handlePagesMiddleware || !isUnsupportedDevPublicRequest(req)) return next();
+ 					handlePagesMiddleware(req, res, next).catch(next);
+ 				});
+--- a/dist/server/app-request-stage-independent-entry.js
++++ b/dist/server/app-request-stage-independent-entry.js
+@@ -3,9 +3,8 @@
+ import "./server-globals.js";
+ import "./app-rsc-vary.js";
+ import { VINEXT_CACHEABILITY_PROBE_QUERY_PARAM, VINEXT_EXPECTED_WORKER_VERSION_HEADER } from "./headers.js";
+-import { badRequestResponse, notFoundResponse } from "./http-error-responses.js";
+-import { isOpenRedirectShaped } from "./open-redirect.js";
+-import { cloneRequestWithHeaders, filterInternalHeaders } from "./request-pipeline.js";
++import { badRequestResponse } from "./http-error-responses.js";
++import { cloneRequestWithHeaders, filterInternalHeaders, guardProtocolRelativeUrl } from "./request-pipeline.js";
+ import { getExplicitCdnCacheAdapter } from "../shims/cdn-cache-state.js";
+ import { applyCdnResponseIdentityHeaders, validateCdnRequest } from "./cache-control.js";
+ import { registerLazyDataCacheHandler } from "../shims/cache-handler.js";
+@@ -71,7 +70,8 @@
+ 	}
+ 	const url = new URL(request.url);
+ 	if (isImageOptimizationPath(url.pathname) && assets && getImageOptimizer()) return handleConfiguredImageOptimization(request, (assetPath) => Promise.resolve(assets.fetch(new Request(new URL(assetPath, request.url)))), __imageAllowedWidths, __imageConfig);
+-	if (isOpenRedirectShaped(url.pathname)) return notFoundResponse();
++	const protocolRelativeGuard = guardProtocolRelativeUrl(url.pathname, url.search);
++	if (protocolRelativeGuard) return protocolRelativeGuard;
+ 	try {
+ 		decodeURIComponent(url.pathname);
+ 	} catch {
+--- a/dist/server/app-router-entry.js
++++ b/dist/server/app-router-entry.js
+@@ -5,8 +5,7 @@
+ import "./app-rsc-vary.js";
+ import { VINEXT_CACHEABILITY_PROBE_QUERY_PARAM } from "./headers.js";
+ import { badRequestResponse, notFoundResponse, notFoundStaticAssetResponse } from "./http-error-responses.js";
+-import { isOpenRedirectShaped } from "./open-redirect.js";
+-import { cloneRequestWithHeaders, filterInternalHeaders } from "./request-pipeline.js";
++import { cloneRequestWithHeaders, filterInternalHeaders, guardProtocolRelativeUrl } from "./request-pipeline.js";
+ import { getCdnCacheAdapter } from "../shims/cdn-cache.js";
+ import { applyCdnResponseIdentityHeaders, validateCdnRequest } from "./cache-control.js";
+ import { getImageOptimizer, handleConfiguredImageOptimization, isImageOptimizationPath } from "./image-optimization.js";
+@@ -83,7 +82,8 @@
+ 	if (cdnValidationResponse) return cdnValidationResponse;
+ 	const url = new URL(request.url);
+ 	if (isImageOptimizationPath(url.pathname) && assets && getImageOptimizer()) return handleConfiguredImageOptimization(request, (assetPath) => Promise.resolve(assets.fetch(new Request(new URL(assetPath, request.url)))), __imageAllowedWidths, __imageConfig);
+-	if (isOpenRedirectShaped(url.pathname)) return notFoundResponse();
++	const protocolRelativeGuard = guardProtocolRelativeUrl(url.pathname, url.search);
++	if (protocolRelativeGuard) return protocolRelativeGuard;
+ 	try {
+ 		decodeURIComponent(url.pathname);
+ 	} catch {
+--- a/dist/server/app-rsc-request-normalization.js
++++ b/dist/server/app-rsc-request-normalization.js
+@@ -91,7 +91,7 @@
+ */
+ function normalizeRscRequest(request, basePath, allowOutsideBasePath = false, assetPrefix = "") {
+ 	const url = new URL(request.url);
+-	const protoGuard = guardProtocolRelativeUrl(url.pathname);
++	const protoGuard = guardProtocolRelativeUrl(url.pathname, url.search);
+ 	if (protoGuard) return protoGuard;
+ 	let decoded;
+ 	try {
+--- a/dist/server/app-ssr-entry.js
++++ b/dist/server/app-ssr-entry.js
+@@ -1,6 +1,6 @@
+ import "./server-globals.js";
+ import { notFoundResponse } from "./http-error-responses.js";
+-import { isOpenRedirectShaped } from "./open-redirect.js";
++import { isOpenRedirectShaped, repeatedSlashRedirectResponse } from "./open-redirect.js";
+ import { AppElementsWire } from "./app-elements-wire.js";
+ import "./app-elements.js";
+ import { isPprFallbackShellAbortError } from "../shims/ppr-fallback-shell.js";
+@@ -357,6 +357,8 @@
+ }
+ var app_ssr_entry_default = { async fetch(request) {
+ 	const url = new URL(request.url);
++	const slashRedirect = repeatedSlashRedirectResponse(url.pathname + url.search);
++	if (slashRedirect) return slashRedirect;
+ 	if (isOpenRedirectShaped(url.pathname)) return notFoundResponse();
+ 	const result = await (await import.meta.viteRsc.loadModule("rsc", "index")).default(request);
+ 	if (result instanceof Response) return result;
+--- a/dist/server/open-redirect.js
++++ b/dist/server/open-redirect.js
+@@ -1,4 +1,5 @@
+ //#region src/server/open-redirect.ts
++import { notFoundResponse } from "./http-error-responses.js";
+ /**
+ * Returns true if a request pathname looks like a protocol-relative open
+ * redirect, in either literal or percent-encoded form.
+@@ -17,5 +18,79 @@
+ 	}
+ 	return false;
+ }
++const REPEATED_SLASH_OR_BACKSLASH_RE = /\\|\/\//;
++const REDIRECT_LOCATION_BASE = "http://vinext.invalid";
++/**
++ * Returns Next.js's redirect for a raw request path containing a backslash or
++ * a repeated slash, or `null` when the path needs no change.
++ *
++ * Ported from Next.js's request entry (`base-server.ts` / `resolve-routes.ts`,
++ * via `normalizeRepeatedSlashes` in `shared/lib/utils.ts`): backslashes in the
++ * path become `/`, runs of slashes collapse to one and the query is kept.
++ * `next start` then builds the Location with `url.format(parseUrl(...))` in
++ * `router-server.ts`, so the result is serialized through a WHATWG URL here
++ * too (`/a/%2e%2e//b` → `/b`, `?q="x"` → `?q=%22x%22`, as observed). It runs
++ * before basePath handling, so `//` → `/`, `/docs//` → `/docs/` and
++ * `//evil.com` → `/evil.com`. Percent-encoded `%2F`/`%5C` are not touched and
++ * keep falling through to `isOpenRedirectShaped` (404), as in Next.js.
++ *
++ * The Location is always same-origin. Absolute-form request targets
++ * (`GET http://host//x`) are left alone. A collapsed path that still starts
++ * with an encoded slash or backslash (`//%2Fevil.com`, `/.//%2Fevil.com`) is
++ * never echoed into a Location or routed: it gets a 404 instead.
++ *
++ * @param rawUrl - The raw request target: pathname plus optional `?query`
++ */
++function getRepeatedSlashRedirect(rawUrl) {
++	if (!rawUrl.startsWith("/"))
++		return null;
++	const urlParts = rawUrl.split("?");
++	const pathname = urlParts[0];
++	if (!REPEATED_SLASH_OR_BACKSLASH_RE.test(pathname))
++		return null;
++	// Same as Next.js: the query is kept only when its first `?`-separated part
++	// is non-empty, so `//??next=1` redirects to `/`.
++	const cleanUrl = pathname.replaceAll("\\", "/").replace(/\/\/+/g, "/") +
++		(urlParts[1] ? `?${urlParts.slice(1).join("?")}` : "");
++	const parsed = new URL(REDIRECT_LOCATION_BASE + cleanUrl);
++	const location = parsed.pathname + parsed.search + parsed.hash;
++	return isOpenRedirectShaped(location) ? { status: 404 } : { status: 308, location };
++}
++function repeatedSlashRedirectHeaders(location) {
++	return { Location: location, Refresh: `0;url=${location}` };
++}
++/**
++ * Build the Response for a raw request path containing a backslash or a
++ * repeated slash. See `getRepeatedSlashRedirect`.
++ */
++function repeatedSlashRedirectResponse(rawUrl) {
++	const redirect = getRepeatedSlashRedirect(rawUrl);
++	if (!redirect)
++		return null;
++	if (redirect.status === 404)
++		return notFoundResponse();
++	return new Response(redirect.location, {
++		status: 308,
++		headers: repeatedSlashRedirectHeaders(redirect.location),
++	});
++}
++/**
++ * Node `ServerResponse` counterpart of `repeatedSlashRedirectResponse`, for
++ * entries that see the raw request target (dev and `vinext start`). Returns
++ * true when a response was sent.
++ */
++function sendRepeatedSlashRedirect(rawUrl, res) {
++	const redirect = getRepeatedSlashRedirect(rawUrl);
++	if (!redirect)
++		return false;
++	if (redirect.status === 404) {
++		res.writeHead(404);
++		res.end("This page could not be found");
++		return true;
++	}
++	res.writeHead(308, repeatedSlashRedirectHeaders(redirect.location));
++	res.end(redirect.location);
++	return true;
++}
+ //#endregion
+-export { isOpenRedirectShaped };
++export { getRepeatedSlashRedirect, isOpenRedirectShaped, repeatedSlashRedirectResponse, sendRepeatedSlashRedirect };
+--- a/dist/server/pages-request-stage-entry.js
++++ b/dist/server/pages-request-stage-entry.js
+@@ -6,8 +6,7 @@
+ import { runWithExecutionContext } from "../shims/request-context.js";
+ import { VINEXT_CACHEABILITY_PROBE_QUERY_PARAM, VINEXT_EXPECTED_WORKER_VERSION_HEADER } from "./headers.js";
+ import { notFoundStaticAssetResponse } from "./http-error-responses.js";
+-import { isOpenRedirectShaped } from "./open-redirect.js";
+-import { attachRequestCfMetadata, cloneRequestWithHeaders, cloneRequestWithUrl, filterInternalHeaders } from "./request-pipeline.js";
++import { attachRequestCfMetadata, cloneRequestWithHeaders, cloneRequestWithUrl, filterInternalHeaders, guardProtocolRelativeUrl } from "./request-pipeline.js";
+ import { normalizeDefaultLocalePathname } from "./pages-i18n.js";
+ import { getExplicitCdnCacheAdapter } from "../shims/cdn-cache-state.js";
+ import { CACHEABILITY_REQUEST_STATE } from "../shims/cacheability-classification.js";
+@@ -148,7 +147,8 @@
+ 			requestHost: url.host,
+ 			stagedHeaders: null
+ 		}, { cache: "bypass" }, env, ctx);
+-		if (isOpenRedirectShaped(pathname)) return new Response("This page could not be found", { status: 404 });
++		const protocolRelativeGuard = guardProtocolRelativeUrl(pathname, url.search);
++		if (protocolRelativeGuard) return protocolRelativeGuard;
+ 		try {
+ 			normalizePathnameForRouteMatchStrict(pathname);
+ 		} catch {
+--- a/dist/server/prod-server.js
++++ b/dist/server/prod-server.js
+@@ -10,7 +10,7 @@
+ import { notFoundResponse } from "./http-error-responses.js";
+ import { isOpenRedirectShaped } from "./open-redirect.js";
+ import { readStaticFileSignal } from "./static-file-signal.js";
+-import { canonicalizeRequestPathname, filterInternalHeaders } from "./request-pipeline.js";
++import { canonicalizeRequestPathname, filterInternalHeaders, sendRepeatedSlashRedirect } from "./request-pipeline.js";
+ import { parseHttpDate } from "./http-date.js";
+ import { evaluateStaticPreconditions } from "./http-conditional.js";
+ import { buildNextDataNotFoundResponse, encodeUrlParserIgnoredCharacters, isNextDataPathname, normalizeNextDataPagePathname, parseNextDataPathname, shouldAddTrailingSlashToPagesDataPath, urlParserCreatesPagesDataPath } from "./pages-data-route.js";
+@@ -1048,6 +1048,7 @@
+ 	const handleRequestImpl = async (req, res) => {
+ 		const rawUrl = req.url ?? "/";
+ 		const rawPathname = rawUrl.split("?")[0];
++		if (sendRepeatedSlashRedirect(rawUrl, res)) return;
+ 		if (isOpenRedirectShaped(rawPathname)) {
+ 			res.writeHead(404);
+ 			res.end("This page could not be found");
+@@ -1149,7 +1150,7 @@
+ 			},
+ 			getStatus: () => res.statusCode,
+ 			headers,
+-			isRsc: new URL(target, "http://localhost").pathname.endsWith(".rsc") || headers.get("RSC") === "1",
++			isRsc: target.split("?", 1)[0].endsWith(".rsc") || headers.get("RSC") === "1",
+ 			method: req.method ?? "GET",
+ 			target
+ 		});
+@@ -1261,6 +1262,7 @@
+ 	const handleRequestImpl = async (req, res) => {
+ 		const rawUrl = req.url ?? "/";
+ 		const rawPagesPathnameBeforeNormalize = rawUrl.split("?")[0];
++		if (sendRepeatedSlashRedirect(rawUrl, res)) return;
+ 		if (isOpenRedirectShaped(rawPagesPathnameBeforeNormalize)) {
+ 			res.writeHead(404);
+ 			res.end("This page could not be found");
+--- a/dist/server/request-pipeline.js
++++ b/dist/server/request-pipeline.js
+@@ -3,7 +3,7 @@
+ import { hasBasePath, removeTrailingSlash, stripBasePath } from "../utils/base-path.js";
+ import { INTERNAL_HEADERS, VINEXT_INTERNAL_HEADERS } from "./headers.js";
+ import { forbiddenResponse, methodNotAllowedResponse, notFoundResponse } from "./http-error-responses.js";
+-import { isOpenRedirectShaped } from "./open-redirect.js";
++import { getRepeatedSlashRedirect, isOpenRedirectShaped, repeatedSlashRedirectResponse, sendRepeatedSlashRedirect } from "./open-redirect.js";
+ import { createStaticFileSignal } from "./static-file-signal.js";
+ //#region src/server/request-pipeline.ts
+ const PATHNAME_CANONICALIZATION_BASE = new URL("http://vinext.invalid/");
+@@ -64,9 +64,12 @@
+ * `isOpenRedirectShaped` for the full list of rejected leading-segment forms.
+ *
+ * @param rawPathname - The raw pathname from the URL, before any normalization
+-* @returns A 404 Response if the path is protocol-relative, or null to continue
++* @param search - The raw query string (including `?`), kept in the 308 Location
++* @returns A 308 or 404 Response, or null to continue
+ */
+-function guardProtocolRelativeUrl(rawPathname) {
++function guardProtocolRelativeUrl(rawPathname, search = "") {
++	const slashRedirect = repeatedSlashRedirectResponse(rawPathname + search);
++	if (slashRedirect) return slashRedirect;
+ 	if (isOpenRedirectShaped(rawPathname)) return notFoundResponse();
+ 	return null;
+ }
+@@ -418,4 +421,4 @@
+ 	return attachRequestCfMetadata(cloned, request);
+ }
+ //#endregion
+-export { INTERNAL_HEADERS, VINEXT_INTERNAL_HEADERS, attachRequestCfMetadata, canonicalizeRequestPathname, canonicalizeRequestUrlPathname, cloneRequestWithHeaders, cloneRequestWithUrl, createStaticFileSignal, filterInternalHeaders, guardProtocolRelativeUrl, hasBasePath, isOpenRedirectShaped, isOriginAllowed, normalizeTrailingSlash, normalizeTrailingSlashPathname, processMiddlewareHeaders, resolvePublicFileRoute, stripBasePath, validateCsrfOrigin, validateServerActionPayload };
++export { INTERNAL_HEADERS, VINEXT_INTERNAL_HEADERS, attachRequestCfMetadata, canonicalizeRequestPathname, canonicalizeRequestUrlPathname, cloneRequestWithHeaders, cloneRequestWithUrl, createStaticFileSignal, filterInternalHeaders, getRepeatedSlashRedirect, guardProtocolRelativeUrl, hasBasePath, isOpenRedirectShaped, isOriginAllowed, normalizeTrailingSlash, normalizeTrailingSlashPathname, processMiddlewareHeaders, resolvePublicFileRoute, sendRepeatedSlashRedirect, stripBasePath, validateCsrfOrigin, validateServerActionPayload };

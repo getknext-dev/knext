@@ -1,5 +1,35 @@
 # @getknext/db
 
+## 1.3.0-rc.7
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.7
+
+## 1.3.0-rc.6
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.6
+
+## 1.3.0-rc.5
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.5
+
+## 1.3.0-rc.4
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.4
+
+## 1.3.0-rc.3
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.3
+
 ## 1.3.0-rc.2
 
 ### Patch Changes

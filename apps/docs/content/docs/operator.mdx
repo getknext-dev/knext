@@ -217,7 +217,7 @@ URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who 
 | Field | Notes |
 |---|---|
 | `url` | The resolved Knative Service URL. |
-| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady`, `EnvMapCollision` — see below. |
+| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady`, `EnvMapCollision`, `PodCreationBlocked` — see below. |
 | `currentTraffic` | Mirror of the ksvc traffic split. |
 
 The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own
@@ -232,7 +232,7 @@ binds a Secret, a successfully bound app shows `DatabaseReady: True` with reason
 knext binds an existing Secret, it does not provision or manage the database. When `spec.database`
 is empty the condition is not set.
 
-Two otherwise-silent failure modes get first-class diagnoses:
+Three otherwise-silent failure modes get first-class diagnoses:
 
 - **Ingress never programs.** If the Knative Service reports its ingress as not-yet-configured for
   more than two minutes, the operator flips `Ready` to `False` with reason `IngressNotProgrammed`
@@ -248,6 +248,17 @@ Two otherwise-silent failure modes get first-class diagnoses:
   `Degraded` with reason `PinnedRevisionNotFound`, plus a Warning event telling you to list the
   surviving revisions and re-pin (or clear `spec.traffic`). See
   [Rollback & traffic split](/docs/rollback).
+- **The namespace rejects the app's pods.** A `LimitRange` (for example a `max.cpu` ceiling or a
+  `maxLimitRequestRatio`) or a `ResourceQuota` can refuse to create the pod for a new revision. The
+  Knative Service then never becomes Ready, and the reason used to be visible only in
+  `kubectl get events`. The operator now sets `PodCreationBlocked: True` on the NextApp, with reason
+  `LimitRangeRejected` or `QuotaExceeded`, naming the revision and carrying the admission message,
+  plus a Warning event. Read it with
+  `kubectl get nextapp <name> -o jsonpath='{.status.conditions[?(@.type=="PodCreationBlocked")].message}'`.
+  The fix is on your side: lower `spec.resources.cpuLimit` / `cpuRequest` / memory to fit the
+  `LimitRange`, or raise the namespace limits (`kubectl describe limitrange,resourcequota -n <ns>`).
+  The condition clears by itself once pods can be created. Only these two kinds of rejection are
+  reported; other pod failures keep surfacing through `Ready`.
 
 ## ISR revalidation & the Kafka queue
 

@@ -42,8 +42,16 @@ const buildVinextExecutable = mock<AnyFn>(
     (opts: { cwd: string; arch: string }) =>
         join(opts.cwd, `knext-exec-${opts.arch}`),
 );
+const stageSharpForVinextNode = mock<AnyFn>(() => ({ staged: true }));
+const stageOgHarfbuzzForVinextNode = mock<AnyFn>(() => ({
+    staged: [],
+    warnings: [],
+}));
 mock.module("../cli/vinext-build", () => ({
     buildVinextExecutable: (...a: unknown[]) => buildVinextExecutable(...a),
+    stageSharpForVinextNode: (...a: unknown[]) => stageSharpForVinextNode(...a),
+    stageOgHarfbuzzForVinextNode: (...a: unknown[]) =>
+        stageOgHarfbuzzForVinextNode(...a),
 }));
 
 const healBunExportTargets = mock<AnyFn>(() => ({ copied: [], skipped: [] }));
@@ -78,6 +86,9 @@ function standaloneServer(): void {
 function vinextOutput(): void {
     mkdirSync(join(dir, ".output", "server"), { recursive: true });
     writeFileSync(join(dir, ".output", "server", "index.mjs"), "");
+    // The real compile writes this beside the binary; the mocked
+    // buildVinextExecutable here does not.
+    writeFileSync(join(dir, "knext-third-party-notices.txt"), "notice");
 }
 
 beforeEach(() => {
@@ -227,6 +238,24 @@ describe("compileArtifactForDeploy", () => {
         expect(buildVinextExecutable).not.toHaveBeenCalled();
         expect(buildStandaloneExecutable).not.toHaveBeenCalled();
     });
+
+    it("stages the image-platform (musl) sharp and next/og's wasm for vinext × node, which `deploy` otherwise ships as the BUILD HOST's addon", () => {
+        stageSharpForVinextNode.mockClear();
+        stageOgHarfbuzzForVinextNode.mockClear();
+        compileArtifactForDeploy(
+            cfg({ build: "vinext", runtime: "node" }),
+            dir,
+        );
+        expect(stageSharpForVinextNode).toHaveBeenCalledTimes(1);
+        expect(stageSharpForVinextNode).toHaveBeenCalledWith(dir);
+        expect(stageOgHarfbuzzForVinextNode).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not stage the node-image sharp for vinext × bun", () => {
+        stageSharpForVinextNode.mockClear();
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        expect(stageSharpForVinextNode).not.toHaveBeenCalled();
+    });
 });
 
 describe("compiledExecPathFor", () => {
@@ -319,6 +348,18 @@ describe("assertCompiledArtifactFresh — the --skip-build fail-closed guard (#1
         );
 
         expect(() => assertCompiledArtifactFresh(cfg(), dir)).not.toThrow();
+    });
+
+    it("vinext --skip-build THROWS when the notice file beside the binary is missing (older compile) — the image's exact-name COPY would fail", () => {
+        vinextOutput();
+        const execPath = join(dir, "knext-exec-linux-x64");
+        writeFileSync(execPath, "");
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        rmSync(join(dir, "knext-third-party-notices.txt"));
+
+        expect(() =>
+            assertCompiledArtifactFresh(cfg({ build: "vinext" }), dir),
+        ).toThrow(/knext-third-party-notices\.txt is missing/);
     });
 
     it("compileArtifactForDeploy writes a stamp assertCompiledArtifactFresh then accepts, end to end", () => {

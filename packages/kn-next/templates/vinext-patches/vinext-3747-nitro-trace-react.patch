@@ -1,0 +1,22 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3747
+What it fixes: In a Nitro build, vinext bundles styled-jsx (CommonJS) into the server output while React stays external, so styled-jsx's `require('react')` becomes a runtime createRequire Nitro's tracer cannot see. A second React copy loads and any page using `<style jsx>` fails with an invalid-hook-call error (or `Cannot find module 'react'` once `.output` is moved).
+vinext's Nitro setup hook now always adds `react` and `react-dom` to `nitro.options.traceDeps` (merged with the existing list; the later server-external-packages union from the vinext-3436 patch is untouched, which keeps that patch re-applicable), so every import form resolves the one traced copy.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3747.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`), after the vinext-3436 and vinext-3741 patches.
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -3809,6 +3809,12 @@
+ 				nitroBuildDir = nitro.options.buildDir ? path.resolve(root, nitro.options.buildDir) : void 0;
+ 				nitroHostRuntime = nitro.options.exportConditions?.includes("workerd") ? "worker" : "node";
+ 				if (!nextConfig) return;
++				// React stays external in the server environment output. A bundled CommonJS
++				// dependency (styled-jsx, for example) reaches it through a runtime
++				// `createRequire(...)("react")` call Nitro cannot see; if Nitro inlined React for
++				// the ESM imports, that call would load a second copy (or fail once the output
++				// is moved). Tracing React keeps every import form on one copy.
++				nitro.options.traceDeps = [.../* @__PURE__ */ new Set([...nitro.options.traceDeps ?? [], "react", "react-dom"])];
+ 				if (!hasAppDir && !hasPagesDir) return;
+ 				if (resolvedServerExternalPackages.length > 0) nitro.options.traceDeps = [.../* @__PURE__ */ new Set([...nitro.options.traceDeps ?? [], ...resolvedServerExternalPackages])];
+ 				if (nitro.options.dev) return;

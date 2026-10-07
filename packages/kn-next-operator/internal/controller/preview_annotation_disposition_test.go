@@ -282,6 +282,11 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		TimeoutSeconds: 111,
 		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS, WritableCache: &writableCache, WriteFree: &writeFree},
 		BuildID:        "build-1",
+		// Networking (#1865) is a ksvc.Labels entry, not an
+		// autoscaling.knative.dev/* annotation or a RevisionSpec field, so it
+		// is outside both scans in this file by construction — it only needs
+		// to be non-zero here to satisfy the fixture-completeness leaf walk.
+		Networking: &appsv1alpha1.NetworkingSpec{Visibility: appsv1alpha1.VisibilityClusterLocal},
 	}
 }
 

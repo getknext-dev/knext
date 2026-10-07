@@ -44,9 +44,19 @@
  * falls back to `--legacy-peer-deps`/`--force`.
  *
  * vinext's peer ranges are hardcoded below because `vinext` is not resolvable in
- * the unit test env. They are keyed to `VINEXT_VERSION`; the guard fails if the
- * script's pinned vinext version drifts from the version these ranges describe,
- * forcing a maintainer to re-read the peers when vinext bumps.
+ * the unit test env. They are keyed to `PEER_VINEXT_VERSION`; the guard fails if
+ * the REPO's pinned vinext version (packages/kn-next/package.json's
+ * devDependencies.vinext — the same source the deploy script's own
+ * VINEXT_VERSION default reads at runtime, see tests/vinext-pin-lockstep.test.ts)
+ * drifts from the version these ranges describe, forcing a maintainer to
+ * re-read the peers when vinext bumps.
+ *
+ * #1812: this file used to resolve the script's pinned vinext version by
+ * regex-parsing a hardcoded `VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-<v>}"`
+ * literal out of the script text. That default is now a runtime read of
+ * packages/kn-next/package.json (never hardcoded — the whole point of the
+ * fix), so there is no literal left to parse; the version these peer ranges
+ * were read from is compared against the package.json pin directly instead.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -58,16 +68,20 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEPLOY_SCRIPT = 'scripts/e2e-deploy-vinext.sh';
 
 /**
- * vinext@1.0.0-beta.12's declared `peerDependencies` (from `npm view vinext@…`),
- * restricted to the packages `e2e-deploy-vinext.sh` installs. When VINEXT_VERSION
- * bumps, re-run `npm view vinext@<v> peerDependencies` and update BOTH the ranges
- * and PEER_VINEXT_VERSION below.
+ * vinext@1.0.1's declared `peerDependencies` (from `npm view vinext@…`),
+ * restricted to the packages `e2e-deploy-vinext.sh` installs. When the repo's
+ * vinext pin (packages/kn-next/package.json) bumps, re-run
+ * `npm view vinext@<v> peerDependencies` and update BOTH the ranges and
+ * PEER_VINEXT_VERSION below.
  *
- * Re-verified for beta.11 (#1309) and beta.12 (#1324): the ranges below are
- * UNCHANGED from beta.9 — `npm view vinext@1.0.0-beta.12 peerDependencies`
- * returns the identical set.
+ * Re-verified for beta.11 (#1309), beta.12 (#1324), and 1.0.1 (#1812): the
+ * ranges below are UNCHANGED from beta.9 — `npm view vinext@1.0.1
+ * peerDependencies` returns the identical set for every package this lane
+ * pins (vinext's manifest also declares `@mdx-js/rollup@^3.0.0` and
+ * `@vitejs/plugin-react@^5.1.4 || ^6.0.0` as peers, but the lane does not pin
+ * `@vitejs/plugin-react` explicitly, so it is out of scope for this guard).
  */
-const PEER_VINEXT_VERSION = '1.0.0-beta.12';
+const PEER_VINEXT_VERSION = '1.0.1';
 const VINEXT_PEER_RANGES: Record<string, string> = {
   vite: '^8.0.0',
   react: '^19.2.6',
@@ -178,13 +192,29 @@ function caretSatisfies(version: string, range: string): boolean {
   return vMaj === 0 && vMin === 0 && vPat === cPat;
 }
 
+/** The repo's current vinext pin — packages/kn-next/package.json's own
+ *  devDependencies.vinext, the SAME file the deploy script's VINEXT_VERSION
+ *  default reads at runtime (#1812; see tests/vinext-pin-lockstep.test.ts). */
+function repoVinextVersion(): string {
+  const pkg = JSON.parse(
+    readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
+  ) as { devDependencies?: Record<string, string> };
+  const v = pkg.devDependencies?.vinext;
+  if (!v) throw new Error('packages/kn-next/package.json has no devDependencies.vinext pin');
+  return v;
+}
+
 describe('the vinext toolchain install satisfies every vinext peer', () => {
   it('pins vinext at the version these peer ranges were read from', () => {
     // If vinext bumps, the hardcoded VINEXT_PEER_RANGES may be stale — force a
     // re-read rather than silently validating pins against an old range set.
+    // #1812: the deploy script's own VINEXT_VERSION default is a runtime read
+    // of packages/kn-next/package.json now (never a literal in the script),
+    // so the comparison is against that file directly rather than against
+    // script text.
     expect(
-      pinnedVersion('vinext'),
-      `VINEXT_VERSION in ${DEPLOY_SCRIPT} != ${PEER_VINEXT_VERSION}: re-run ` +
+      repoVinextVersion(),
+      `packages/kn-next/package.json's vinext pin != ${PEER_VINEXT_VERSION}: re-run ` +
         '`npm view vinext@<v> peerDependencies` and update VINEXT_PEER_RANGES',
     ).toBe(PEER_VINEXT_VERSION);
   });

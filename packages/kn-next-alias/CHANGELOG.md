@@ -1,5 +1,66 @@
 # kn-next
 
+## 1.3.0-rc.7
+
+### Patch Changes
+
+- Updated dependencies [c45f0303]
+- Updated dependencies [5d4915b8]
+- Updated dependencies [ca6080c1]
+- Updated dependencies [d27e4b10]
+- Updated dependencies [8933ef3b]
+- Updated dependencies [3600300f]
+- Updated dependencies [fd84b65e]
+- Updated dependencies [2722d392]
+- Updated dependencies [8f967355]
+  - @getknext/core@1.3.0-rc.7
+
+## 1.3.0-rc.6
+
+### Patch Changes
+
+- Updated dependencies [17b268f]
+- Updated dependencies [313f897]
+- Updated dependencies [35f4d48]
+- Updated dependencies [546cad0]
+- Updated dependencies [622f728]
+- Updated dependencies [92c4896]
+  - @getknext/core@1.3.0-rc.6
+
+## 1.3.0-rc.5
+
+### Patch Changes
+
+- Updated dependencies [3a846a5]
+- Updated dependencies [c22b079]
+- Updated dependencies [4ef2382]
+- Updated dependencies [91f2150]
+- Updated dependencies [4f3712e]
+- Updated dependencies [81329bb]
+  - @getknext/core@1.3.0-rc.5
+
+## 1.3.0-rc.4
+
+### Patch Changes
+
+- Updated dependencies [3c2348f]
+- Updated dependencies [e1a5269]
+- Updated dependencies [e0238ad]
+  - @getknext/core@1.3.0-rc.4
+
+## 1.3.0-rc.3
+
+### Patch Changes
+
+- Updated dependencies [1d06599]
+- Updated dependencies [e46b37a]
+- Updated dependencies [b167fd4]
+- Updated dependencies [ee45ef3]
+- Updated dependencies [0cddde7]
+- Updated dependencies [598441e]
+- Updated dependencies [b679600]
+  - @getknext/core@1.3.0-rc.3
+
 ## 1.3.0-rc.2
 
 ### Patch Changes

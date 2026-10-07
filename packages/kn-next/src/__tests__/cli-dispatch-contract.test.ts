@@ -239,6 +239,17 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],
         "preflight.ts": ["formatPreflightFailure(outcome"],
+        // #1865 — assertVisibilityDowngradeIsExplicit's fail-closed reads of
+        // the LIVE NextApp before applying (shared by deploy.ts AND
+        // preview.ts, which both apply the same NextApp CR kind). A kubectl
+        // read failing for a reason other than NotFound (RBAC, network) or
+        // returning unparseable JSON is cluster/environment state, never
+        // something the user typed — same classification as status.ts's own
+        // "cluster unreachable" entry below.
+        "visibility-guard.ts": [
+            "Could not read the current NextApp",
+            "Could not parse kubectl's response for NextApp",
+        ],
         // Build-time source extraction over cr-builder.ts — an internal
         // invariant of the repo's own tooling.
         "extract-emitted-fields.ts": [
@@ -274,6 +285,11 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // known builder id — not a different command line. cr-1181 #3.
             "unrecognised build id",
         ],
+        // `knext build` staging the image context: the cause is the
+        // environment (a read-only or unwritable cwd) or a template the
+        // installed package failed to ship. No different command line fixes
+        // it, so it is not a usage mistake.
+        "build.ts": ["Could not stage the docker build context"],
     };
 
     /** Every .ts under src/cli, including subdirectories (schema/). */

@@ -1,11 +1,43 @@
-export function isAllowlistedAssetAnchorModule(modulePath: string): boolean;
-
-export function allowlistedPackageRoot(modulePath: string): string | undefined;
+export function assetAnchorPackageRoot(modulePath: string): string | undefined;
 
 export function findAssetAnchors(src: string): { literal: string }[];
+
+export function hasAssetAnchorCandidate(src: string): boolean;
+
+export function rewriteVinextHarfbuzzAnchors(
+    src: string,
+    urlExpr: string,
+): { contents: string; count: number };
+
+export function rewriteEntryHarfbuzzAnchors(
+    src: string,
+    resolve: () => string | undefined,
+): { contents: string; assets: { id: string; absPath: string }[] };
 
 export function rewriteAssetAnchors(
     src: string,
     modulePath: string,
     resolve: (literal: string) => string | undefined,
-): { contents: string; assets: { id: string; absPath: string }[] };
+    resolveLocateFile?: (name: string) => string | undefined,
+    analyze?: (src: string) => {
+        anchors: {
+            literal: string;
+            start: number;
+            end: number;
+            consumer: string;
+            reason?: string;
+        }[];
+        parseError?: string;
+    },
+): {
+    contents: string;
+    assets: { id: string; absPath: string }[];
+    skipped: { literal: string; reason: string }[];
+    parseError?: string;
+};
+
+export function rewriteImportMetaUses(
+    src: string,
+    uses: { start: number; end: number; prop: string | null }[],
+    exprs: { url: string; filename: string; dirname: string },
+): { contents: string; count: number; survived: string[] };
