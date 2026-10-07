@@ -1,0 +1,377 @@
+---
+title: Custom domains & TLS
+description: Put a knext app on your own hostname with a Knative DomainMapping and a cert-manager certificate, keep private apps private, and debug the usual failures.
+---
+
+A fresh deploy is reachable on the cluster's default domain (for example
+`acme.prod.203.0.113.10.sslip.io`). Production traffic wants `app.example.com` and a certificate a
+browser trusts. Both are Knative and cert-manager objects that sit next to your `NextApp` — knext
+does not need to know about them, and they survive new deploys because they point at the app by name.
+
+```
+DNS  app.example.com  ──►  Kourier load balancer  ──►  DomainMapping  ──►  Knative Service (your NextApp)
+                                  ▲                          │
+                          TLS terminates here          tls.secretName
+                       (certificate from cert-manager) ◄──── Secret
+```
+
+**Prerequisites:** Knative Serving with the Kourier ingress, cert-manager, a deployed `NextApp`
+(this page uses `acme` in namespace `prod`), and permission to create a `ClusterDomainClaim`
+(cluster-scoped, usually an admin).
+
+<Callout type="warn">
+**A `DomainMapping` always publishes the hostname on the public load balancer.** Labelling it
+`networking.knative.dev/visibility: cluster-local` does not change that. Never use a
+`DomainMapping` for an app that must stay private — see [Private apps](#private-apps).
+</Callout>
+
+## 1. Point DNS at the cluster
+
+Find the address Kourier is listening on:
+
+```bash
+kubectl -n kourier-system get svc kourier \
+  -o jsonpath='{.status.loadBalancer.ingress[0]}{"\n"}'
+```
+
+- The result has an `ip` (OCI, GKE): create an **A record** `app.example.com → <ip>`.
+- The result has a `hostname` (AWS): create a **CNAME** `app.example.com → <hostname>`.
+
+Check it from your machine:
+
+```bash
+dig +short app.example.com
+```
+
+No domain to hand? `<anything>-<ip-with-dashes>.sslip.io` is a public DNS name that resolves to the
+IP in it, so `app-203-0-113-10.sslip.io` points at `203.0.113.10` with no DNS setup. Use the dashed
+form so the name does not sit under your cluster's default-domain suffix.
+
+## 2. Claim the hostname
+
+Knative makes a hostname exclusive to one namespace with a `ClusterDomainClaim`. Unless your cluster
+admin enabled automatic claims, create it **before** the mapping:
+
+```yaml title="claim.yaml"
+apiVersion: networking.internal.knative.dev/v1alpha1
+kind: ClusterDomainClaim
+metadata:
+  name: app.example.com
+spec:
+  namespace: prod
+```
+
+## 3. Map the hostname to the app
+
+The Knative Service the operator creates has the same name as your `NextApp`, so `ref.name` is the
+`NextApp` name:
+
+```yaml title="domainmapping.yaml"
+apiVersion: serving.knative.dev/v1beta1
+kind: DomainMapping
+metadata:
+  name: app.example.com
+  namespace: prod
+spec:
+  ref:
+    apiVersion: serving.knative.dev/v1
+    kind: Service
+    name: acme
+```
+
+```bash
+kubectl apply --validate=strict -f claim.yaml -f domainmapping.yaml
+kubectl -n prod get domainmapping app.example.com
+# NAME              URL                        READY
+# app.example.com   http://app.example.com     True
+curl -i http://app.example.com/
+```
+
+The app still scales to zero behind the mapping: the first request after idle wakes it, and the
+mapping keeps working across new deploys and revisions.
+
+## 4. Add TLS
+
+The approach here is a per-hostname certificate: cert-manager writes a `Secret`, and the
+`DomainMapping` serves it. It changes nothing cluster-wide and needs no extra Knative component.
+
+### Choose how the certificate is issued
+
+<Callout type="info">
+On a Kourier-only cluster, cert-manager's **HTTP-01** solver did not complete in testing, so this
+page does not offer it as a working path. It publishes the challenge as a standard Kubernetes
+`Ingress`; in testing the challenge stayed `pending` with `wrong status code '404', expected '200'`,
+and the cause is not established. DNS-01 and Knative's cert-manager integration for
+cluster-wide auto-TLS are the alternatives; neither has been verified end to end on the reference
+cluster yet.
+</Callout>
+
+**DNS-01 (does not depend on the ingress).** cert-manager proves control of the domain by writing a
+DNS record, so the request path through Kourier is not involved. The example uses Cloudflare; pick the
+solver for your DNS provider from the cert-manager documentation and keep the rest unchanged.
+
+<Callout type="warn">
+**Not yet verified on the reference cluster.** The Cloudflare issuer below follows the cert-manager
+documentation but has not been run end to end here. What has been verified is everything after the
+issuer: a `Certificate` writing a `Secret` that a `DomainMapping` serves (tested with a self-signed
+issuer), and that the Let's Encrypt staging account registers.
+</Callout>
+
+```yaml title="clusterissuer.yaml"
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns01
+spec:
+  acme:
+    # Start on the staging endpoint (untrusted certificates, generous rate limits),
+    # then switch to https://acme-v02.api.letsencrypt.org/directory.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: you@example.com
+    privateKeySecretRef:
+      name: letsencrypt-dns01-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token   # in the cert-manager namespace
+              key: api-token
+```
+
+A `ClusterIssuer` reads its credentials from the `cert-manager` namespace. Use a namespaced
+`Issuer` (same `spec`, `kind: Issuer` in the certificate's `issuerRef`) to keep everything in `prod`.
+
+**Self-signed (to test the wiring).** No DNS provider needed; browsers will not trust the result:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned
+  namespace: prod
+spec:
+  selfSigned: {}
+```
+
+### Request the certificate and reference it
+
+```yaml title="certificate.yaml"
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app-example-com
+  namespace: prod            # must be the DomainMapping's namespace
+spec:
+  secretName: app-example-com-tls
+  dnsNames:
+    - app.example.com
+  issuerRef:
+    name: letsencrypt-dns01  # or: selfsigned
+    kind: ClusterIssuer      # or: Issuer
+```
+
+Add `tls.secretName` to the mapping you created in step 3:
+
+```yaml title="domainmapping.yaml"
+apiVersion: serving.knative.dev/v1beta1
+kind: DomainMapping
+metadata:
+  name: app.example.com
+  namespace: prod
+spec:
+  ref:
+    apiVersion: serving.knative.dev/v1
+    kind: Service
+    name: acme
+  tls:
+    secretName: app-example-com-tls
+```
+
+```bash
+kubectl apply --validate=strict -f certificate.yaml -f domainmapping.yaml
+kubectl -n prod get certificate app-example-com        # READY True
+kubectl -n prod get domainmapping app.example.com      # URL now https://…, READY True
+curl -i https://app.example.com/
+```
+
+Check what the load balancer actually presents for your hostname:
+
+```bash
+openssl s_client -connect app.example.com:443 -servername app.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -ext subjectAltName -dates
+```
+
+Two behaviours to plan for:
+
+- **Plain HTTP keeps working.** Adding a certificate does not redirect `http://` to `https://`.
+  Redirect at your edge (CDN, WAF) if you need it.
+- **Without the Secret the mapping does not go Ready.** It reports `ReconcileIngressFailed` until the
+  Secret exists, so apply the `Certificate` first and wait for it to be `READY True`.
+
+### Cluster-wide auto-TLS
+
+Knative can also issue a certificate for every mapping on its own. That is a cluster-level switch (the
+cert-manager integration for Knative plus `external-domain-tls` in `config-network`) that the
+cluster admin owns, not something an app deploys. Until it is enabled, a mapping reports
+`CertificateProvisioned: TLSNotEnabled` — that is expected when you supply the Secret yourself.
+
+## Private apps
+
+A private app is one only reachable inside the cluster, such as an internal tool or a backend. Do not
+publish one with a `DomainMapping`.
+
+Measured on a Knative + Kourier cluster, with a Knative Service labelled
+`networking.knative.dev/visibility: cluster-local`:
+
+| What was requested | Result |
+|---|---|
+| The app's default-domain URL from outside | `404` (private, as intended) |
+| `DomainMapping` with no label, public DNS name | `200` — **published** |
+| `DomainMapping` labelled `cluster-local`, public DNS name | `200` — **published** |
+| Same, raw request: `curl -H 'Host: app.example.com' http://<load-balancer-ip>/` | `200` — **published** |
+
+The mapping's own ingress rule is always external, so the label on the mapping is ignored. Labelling
+the Knative Service is what keeps the *default* route private, and nothing more.
+
+To keep an app private:
+
+1. **Mark the Knative Service cluster-local.** The `NextApp` spec has no visibility field today, so set
+   the label on the Knative Service the operator created:
+
+   ```bash
+   kubectl -n prod label ksvc acme networking.knative.dev/visibility=cluster-local
+   ```
+
+   The label survived new revisions and `NextApp` updates in testing. Re-apply it if the Knative
+   Service is ever recreated.
+
+2. **Reach it in-cluster** at `http://acme.prod.svc.cluster.local`.
+
+3. **Check from outside with a raw request**, not a browser, to prove nothing publishes it:
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' \
+     -H 'Host: acme.prod.svc.cluster.local' http://<load-balancer-ip>/
+   # 404
+   ```
+
+4. **For people or other networks, front it with something you control**, not a `DomainMapping`:
+
+   - **A tunnel** (for example Cloudflare Tunnel) running in the cluster. Point its origin at the
+     internal Kourier service and rewrite the `Host` header to the app's cluster-local name. Without
+     the header, Knative cannot tell which app the request is for:
+
+     ```yaml
+     # cloudflared config (sketch)
+     ingress:
+       - hostname: tools.example.com
+         service: http://kourier-internal.kourier-system.svc.cluster.local:80
+         originRequest:
+           httpHostHeader: acme.prod.svc.cluster.local
+       - service: http_status:404
+     ```
+
+     Only the in-cluster origin was tested: this request from inside the cluster returns `200`. The
+     tunnel itself and the public hostname in front of it are unverified, so treat the config above as
+     a starting point:
+
+     ```bash
+     curl -H 'Host: acme.prod.svc.cluster.local' \
+       http://kourier-internal.kourier-system.svc.cluster.local/
+     ```
+
+   - **A private (internal) load balancer** in front of a second Kourier Service, using your cloud's
+     internal-load-balancer annotation. Nothing is exposed to the internet, and your VPN or peering
+     reaches it.
+
+Whichever you pick, authenticate at that layer too: private is a network property, not an access
+control.
+
+## Troubleshooting
+
+Start with the object that is not Ready, and read its conditions:
+
+```bash
+kubectl -n prod get domainmapping app.example.com \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+```
+
+### The DomainMapping is not Ready
+
+| Condition | Cause | Fix |
+|---|---|---|
+| `DomainClaimed=False` `DomainAlreadyClaimed`: *the domain name is already in use by another DomainMapping* | No `ClusterDomainClaim` for this hostname in this namespace (the message is misleading), or a different namespace holds it. | `kubectl get clusterdomainclaim app.example.com -o yaml`, then create or correct the claim. Once it exists the mapping recovers on its own, usually within a minute. |
+| `ReferenceResolved=False` `ResolveFailed`: *services.serving.knative.dev "…" not found* | `ref.name` is not a Knative Service in the mapping's namespace. | `kubectl -n prod get ksvc`; the name is the `NextApp` name. The mapping and the app must share a namespace. |
+| `IngressReady=Unknown` `ReconcileIngressFailed`: *failed to fetch secret* | `tls.secretName` names a Secret that does not exist in this namespace. | Wait for the `Certificate` to be Ready, or fix the name. |
+| `CertificateProvisioned=True` `TLSNotEnabled` | Informational: cluster-wide auto-TLS is off. | Nothing to fix when you supply `tls.secretName`. |
+
+### The certificate is not Ready
+
+cert-manager works through four objects. Walk down them until one explains it:
+
+```bash
+kubectl -n prod describe certificate app-example-com
+kubectl -n prod get certificaterequest,order,challenge
+kubectl -n prod describe challenge
+```
+
+| Where | Message | Cause and fix |
+|---|---|---|
+| CertificateRequest | `Referenced "Issuer" not found` | `issuerRef` points at an issuer that does not exist, or has the wrong `kind` (`Issuer` vs `ClusterIssuer`). |
+| Issuer / ClusterIssuer | `READY False` | The ACME account did not register. `kubectl describe` it: usual causes are a bad `email`, no outbound access to the ACME endpoint, or a missing credentials Secret. |
+| Challenge (HTTP-01) | `wrong status code '404', expected '200'` | In testing on a Kourier-only cluster the solver path returned 404; the cause is not established. DNS-01 avoids the request path, so try it (not yet verified here). |
+| Challenge (DNS-01) | propagation or authentication error | The API token lacks permission on the zone, or the zone is not the one that serves the domain. |
+| Certificate | untrusted in the browser although `READY True` | The issuer is self-signed or the Let's Encrypt **staging** endpoint. Switch the issuer's `server` to production and re-issue. |
+
+### The hostname does not resolve, or resolves somewhere else
+
+```bash
+dig +short app.example.com                       # your record
+kubectl -n kourier-system get svc kourier \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'   # the load balancer
+```
+
+The two must match. A cached or not-yet-propagated record is the usual cause: query the zone's own
+name servers (`dig +short NS example.com`, then `dig @<ns> app.example.com`) to separate "not
+published" from "not propagated". Proxying records through a CDN also changes the answer to the CDN's
+addresses; that is expected, and it matters for challenges (below).
+
+To separate DNS from routing, bypass DNS and send the hostname straight to the load balancer:
+
+```bash
+curl -i --resolve app.example.com:443:<load-balancer-ip> https://app.example.com/
+curl -i -H 'Host: app.example.com' http://<load-balancer-ip>/
+```
+
+A `200` here with a failing public name is DNS. A `404` from Kourier means the load balancer is
+reached but no mapping serves that hostname: check the mapping is Ready and the name matches exactly.
+
+### The challenge fails behind a proxy or CDN
+
+An ACME challenge must reach the cluster unmodified. These break HTTP-01:
+
+- A CDN or proxy in front of the record that answers on its own, caches, or challenges the request.
+- A forced redirect from HTTP to HTTPS, because the challenge URL is requested over plain HTTP on
+  port 80 and is expected to answer `200` directly there.
+- A WAF or bot rule that blocks the ACME validation servers.
+
+Use DNS-01, which does not depend on the request path, or turn the proxy off for the record while the
+certificate issues.
+
+## Clean up
+
+```bash
+kubectl -n prod delete domainmapping app.example.com
+kubectl delete clusterdomainclaim app.example.com
+kubectl -n prod delete certificate app-example-com
+```
+
+Removing the `Certificate` does not remove its Secret; delete `app-example-com-tls` as well when you
+are done with it.
+
+## Related
+
+- [Security](/docs/security) — what is and is not exposed by default.
+- [Hardening](/docs/hardening) — rate limiting and payload limits in front of the app.
+- [Scale to zero](/docs/scale-to-zero) — why the first request after idle is slower.
+- [Oracle Cloud (OKE)](/docs/oke), [GKE](/docs/gke), [EKS](/docs/eks) — cluster setup.
