@@ -218,7 +218,7 @@ func TestComputeStatusVerdict_EnvMapCollision_OperatorWins_ConditionAndEvent(t *
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{operatorWins: []string{"HOSTNAME"}}, privateExposureState{}, now)
+		envMapCollisionReport{operatorWins: []string{"HOSTNAME"}}, privateExposureState{}, podCreationState{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvVarIgnored {
@@ -244,7 +244,7 @@ func TestComputeStatusVerdict_EnvMapCollision_UserWins_ConditionAndEvent(t *test
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, privateExposureState{}, now)
+		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, privateExposureState{}, podCreationState{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapUserOverride {
@@ -281,7 +281,7 @@ func TestComputeStatusVerdict_EnvMapCollision_ExemptOnly_NormalEventAndInformati
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWinsExempt: []string{"REDIS_URL"}}, privateExposureState{}, now)
+		envMapCollisionReport{userWinsExempt: []string{"REDIS_URL"}}, privateExposureState{}, podCreationState{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionTrue || c.Reason != ReasonEnvMapExpectedOverride {
@@ -320,7 +320,7 @@ func TestComputeStatusVerdict_EnvMapCollision_ExemptPlusGrandfathered_StillWarni
 		envMapCollisionReport{
 			userWinsExempt:        []string{"REDIS_URL"},
 			userWinsGrandfathered: []string{"NODE_ENV"},
-		}, privateExposureState{}, now)
+		}, privateExposureState{}, podCreationState{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Reason != ReasonEnvMapUserOverride {
@@ -359,7 +359,7 @@ func TestComputeStatusVerdict_ExemptPlusOperatorWins_StillWarning(t *testing.T) 
 		envMapCollisionReport{
 			userWinsExempt: []string{"REDIS_URL"},
 			operatorWins:   []string{"HOSTNAME"},
-		}, privateExposureState{}, now)
+		}, privateExposureState{}, podCreationState{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Reason != ReasonEnvVarIgnored {
@@ -388,7 +388,7 @@ func TestComputeStatusVerdict_NoEnvMapCollision_ConditionFalse(t *testing.T) {
 	app := verdictApp()
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, privateExposureState{}, now)
+		revisionCheck{}, imageCacheState{}, netpolEnforcementState{}, envMapCollisionReport{}, privateExposureState{}, podCreationState{}, now)
 
 	c := findVerdictCondition(t, v, ConditionEnvMapCollision)
 	if c.Status != metav1.ConditionFalse {
@@ -418,7 +418,7 @@ func TestComputeStatusVerdict_EnvMapCollision_TransitionGated(t *testing.T) {
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, netpolEnforcementState{},
-		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, privateExposureState{}, now)
+		envMapCollisionReport{userWinsGrandfathered: []string{"NODE_ENV"}}, privateExposureState{}, podCreationState{}, now)
 
 	if len(v.events) != 0 {
 		t.Fatalf("events: got %+v, want none — the collision set is UNCHANGED from the prior reconcile", v.events)
