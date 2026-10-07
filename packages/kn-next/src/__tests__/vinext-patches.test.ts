@@ -1749,13 +1749,26 @@ describe("the bundled patches against the published tarball", () => {
         const { setPagesClientAssets } = await importPatched<{
             setPagesClientAssets: (assets: unknown) => void;
         }>("dist/server/pages-client-assets.js");
+        // @getknext/core has no React types; type just what the test uses.
         const React = (await import(
             pathToFileURL(join(patched, "..", "react", "index.js")).href
-        )) as typeof import("react");
+        )) as {
+            createElement: (
+                type: unknown,
+                props: unknown,
+                ...children: unknown[]
+            ) => unknown;
+        };
         const { renderToReadableStream } = (await import(
             pathToFileURL(join(patched, "..", "react-dom", "server.edge.js"))
                 .href
-        )) as typeof import("react-dom/server.edge");
+        )) as {
+            renderToReadableStream: (
+                element: unknown,
+            ) => Promise<
+                ReadableStream<Uint8Array> & { allReady: Promise<void> }
+            >;
+        };
 
         const One = dynamic(async () => ({ default: () => "1" }), {
             loadableGenerated: { modules: ["components/one.js"] },
@@ -1764,7 +1777,7 @@ describe("the bundled patches against the published tarball", () => {
             "div",
             { id: "foo" },
             "Index",
-            React.createElement(One as React.FC),
+            React.createElement(One, null),
         );
         setPagesClientAssets({
             dynamicPreloads: {
