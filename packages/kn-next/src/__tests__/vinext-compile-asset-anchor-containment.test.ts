@@ -1,10 +1,11 @@
 /**
  * Containment + size-cap guards for the C4 asset-anchor fix
- * (entry-asset-anchor.mjs's allowlist + vinext-compile.mjs's
+ * (entry-asset-anchor.mjs's package scope + vinext-compile.mjs's
  * `resolveAssetAnchor`) — code-review round 2.
  *
  * Each case hand-builds a MINIMAL `.output/server` tree with a module at
- * `node_modules/@vercel/og/dist/index.node.js` (the one allowlisted shape),
+ * `node_modules/@vercel/og/dist/index.node.js` (any package qualifies now;
+ * og's path is kept as the real-world shape), whose anchor FEEDS A READ,
  * compiles it for real through the SHIPPED script, and asserts by EXIT CODE
  * ONLY (never output-grep — a prior mutation-harness bug here certified 14
  * decorative mutations all-green by grepping colored terminal output
@@ -50,8 +51,9 @@ function hostTarget(): string {
 }
 
 /**
- * A minimal `.output/server` tree in @vercel/og's allowlisted shape, with ONE
- * `new URL(<anchorLiteral>, import.meta.url)` anchor in its module. The
+ * A minimal `.output/server` tree in @vercel/og's package shape, with ONE
+ * `new URL(<anchorLiteral>, import.meta.url)` anchor in its module, read
+ * through a `const` binding (the consumer analysis follows it). The
  * entry statically imports the module's `marker` export, so Bun's bundler
  * reaches it the same way it reaches the real og package.
  */

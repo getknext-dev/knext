@@ -107,6 +107,11 @@ export default defineConfig([
       // `kn-next build`, not imported, because it needs `Bun.build` plugins and
       // the published CLI runs under node.
       'adapters/vinext-compile': 'src/adapters/vinext-compile.mjs',
+      // The asset-anchor consumer analysis. vinext-compile SPAWNS it (`bun
+      // <path>`) beside itself rather than importing it, keeping its parser
+      // (acorn) out of the compile script's node-builtins-only import closure;
+      // it fails closed when absent, so it must ship in dist beside it.
+      'adapters/asset-anchor-analyze': 'src/adapters/asset-anchor-analyze.mjs',
       // The compiled standalone-on-Bun build (`build: turbopack` + `runtime:
       // bun`): `next build`'s server.js -> a bytecode single executable.
       // Spawned as a SCRIPT (`bun run …`) like vinext-compile, for the same
@@ -220,6 +225,9 @@ export default defineConfig([
       'prom-client',
       'kafkajs',
       '@google-cloud/storage',
+      // The asset-anchor analysis parser (entry-asset-anchor.mjs) — a runtime
+      // dependency, not vendored, so it stays visible to the SBOM + npm audit.
+      'acorn',
       // bun-serve-cache-control.mjs imports the Cache-Control rule from the CJS
       // preload, which the CJS pass below ships as its own file. Inlining it here
       // would turn its lazy `require('node:http')` into an ESM `__require("http")`

@@ -46,6 +46,7 @@
  * because nitro externalizes sharp: `import sharp from "sharp"` survives into
  * `.output/server/index.mjs`, so sharp only enters a module graph now.
  */
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
     existsSync,
@@ -67,7 +68,7 @@ import {
     vinextOgPackageJson,
 } from "./og-harfbuzz.mjs";
 import {
-    allowlistedPackageRoot,
+    assetAnchorPackageRoot,
     rewriteAssetAnchors,
     rewriteEntryHarfbuzzAnchors,
 } from "./entry-asset-anchor.mjs";
@@ -402,20 +403,20 @@ function selfContainedEntryExprs(entryRelDir) {
 const ASSET_ANCHOR_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
- * A `new URL(<literal>, import.meta.url)` anchor in the ALLOWLISTED module at
- * `modulePath` resolves to a real on-disk sibling, or it does not (cluster
- * C4 — see entry-asset-anchor.mjs's docstring for the full mechanism: nitro
- * already staged the sibling next to the module that reads it, and a
- * bundled module's `import.meta.url` under `--bytecode` is the BUILD
- * machine's path, not a portable one). `rewriteAssetAnchors` already
- * confines CALLS here to an allowlisted module (`modulePath` is always
- * `allowlistedPackageRoot`-eligible) — this function's own job is the parts
- * that need a real filesystem:
+ * A `new URL(<literal>, import.meta.url)` anchor that FEEDS A READ in the
+ * package module at `modulePath` resolves to a real on-disk sibling, or it
+ * does not (cluster C4 — see entry-asset-anchor.mjs's docstring for the full
+ * mechanism: nitro already staged the sibling next to the module that reads
+ * it, and a bundled module's `import.meta.url` under `--bytecode` is the
+ * BUILD machine's path, not a portable one). `rewriteAssetAnchors` already
+ * confines CALLS here to read anchors in a module inside some package
+ * (`assetAnchorPackageRoot` is defined) — this function's own job is the
+ * parts that need a real filesystem:
  *
  *   - existence: a literal that resolves to nothing is left untouched,
  *     never an error (absent-and-unused is fine, same as sharp);
  *   - CONTAINMENT: the candidate's REAL path (symlinks resolved) must stay
- *     inside the allowlisted package's own REAL root. A `../../../etc/x`
+ *     inside the module's own package's REAL root. A `../../../etc/x`
  *     literal, or a symlink inside the package pointing outside it, is
  *     refused — a raw string-prefix check on the un-resolved path would miss
  *     the symlink case, which is why both sides are `realpathSync`'d before
@@ -429,7 +430,7 @@ const ASSET_ANCHOR_MAX_BYTES = 16 * 1024 * 1024;
  * printed `result.logs`, not a bespoke `process.exit`).
  */
 function resolveAssetAnchor(literal, modulePath) {
-    const packageRoot = allowlistedPackageRoot(modulePath);
+    const packageRoot = assetAnchorPackageRoot(modulePath);
     if (packageRoot === undefined) return undefined; // belt-and-suspenders; rewriteAssetAnchors already gates this
     const abs = resolve(dirname(modulePath), literal);
     if (!existsSync(abs)) return undefined;
@@ -459,7 +460,7 @@ function resolveAssetAnchor(literal, modulePath) {
 }
 
 /**
- * Where an Emscripten `locateFile("<name>.wasm")` call in the ALLOWLISTED
+ * Where an Emscripten `locateFile("<name>.wasm")` call in the `@vercel/og`
  * module at `modulePath` should read from inside the compiled executable
  * (#1872), or `undefined` to leave the call alone.
  *
@@ -481,7 +482,7 @@ function resolveAssetAnchor(literal, modulePath) {
 function resolveEmscriptenWasm(name, modulePath) {
     const sibling = resolveAssetAnchor(`./${name}`, modulePath);
     if (sibling !== undefined || name !== "hb.wasm") return sibling;
-    const packageRoot = allowlistedPackageRoot(modulePath);
+    const packageRoot = assetAnchorPackageRoot(modulePath);
     if (packageRoot === undefined) return undefined;
     const ogPkg = join(packageRoot, "package.json");
     const startPoints = [ogPkg, join(APP_ROOT, "package.json")];
@@ -516,6 +517,83 @@ function harfbuzzOrSignal(result, where) {
     return undefined;
 }
 
+/** The asset-anchor pass's cost and yield, printed once after the build. */
+const ASSET_ANCHOR_STATS = { modules: 0, analysed: 0, ms: 0, embedded: new Set() };
+
+/**
+ * The asset-anchor consumer analysis (asset-anchor-analyze.mjs), run as its
+ * own `bun` process: it parses with acorn, a third-party package, and this
+ * script's import closure must stay node-builtins-only (it holds the Bun
+ * base-executable seal of bun-base-exe.mjs — see asset-anchor-analyze.mjs's
+ * header). Resolved beside THIS file: `.js` in dist, `.mjs` in the source
+ * tree. Fail CLOSED when absent:
+ * without it every package's sibling-asset read (next/og's wasm and font
+ * included) would silently ENOENT in the shipped binary.
+ */
+const ASSET_ANCHOR_ANALYZER = [
+    join(compileHere, "asset-anchor-analyze.js"),
+    join(compileHere, "asset-anchor-analyze.mjs"),
+].find((c) => existsSync(c));
+if (!ASSET_ANCHOR_ANALYZER) {
+    console.error(
+        "[knext compile] the asset-anchor analyzer is missing beside vinext-compile " +
+            `(looked for asset-anchor-analyze.{js,mjs} in ${compileHere}) — the installed @getknext/core is incomplete`,
+    );
+    process.exit(1);
+}
+
+/** `analyzeAssetAnchors(src)` in a child `bun` process (source on stdin, JSON on stdout). */
+function analyzeOutOfProcess(src) {
+    ASSET_ANCHOR_STATS.analysed++;
+    const child = spawnSync(process.execPath, [ASSET_ANCHOR_ANALYZER], {
+        input: src,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 120_000,
+    });
+    if (child.status !== 0) {
+        return {
+            anchors: [],
+            parseError: `the analyzer exited ${child.status ?? child.signal}: ${String(child.stderr ?? child.error).trim()}`,
+        };
+    }
+    try {
+        return JSON.parse(child.stdout);
+    } catch (err) {
+        return { anchors: [], parseError: `the analyzer printed no JSON (${err})` };
+    }
+}
+
+/**
+ * `rewriteAssetAnchors` for one non-entry module, timed and reported: every
+ * embedded sibling is logged once, and a module the parser cannot read is a
+ * named warning (left as written — never guessed at).
+ */
+function rewriteModuleAssetAnchors(raw, path) {
+    const t0 = performance.now();
+    const rewrite = rewriteAssetAnchors(
+        raw,
+        path,
+        (literal) => resolveAssetAnchor(literal, path),
+        (name) => resolveEmscriptenWasm(name, path),
+        analyzeOutOfProcess,
+    );
+    ASSET_ANCHOR_STATS.ms += performance.now() - t0;
+    ASSET_ANCHOR_STATS.modules++;
+    if (rewrite.parseError !== undefined) {
+        console.warn(
+            `[knext compile] could not parse ${path} to analyse its asset anchors ` +
+                `(${rewrite.parseError}) — left as written; a sibling file it reads will not be embedded`,
+        );
+    }
+    for (const asset of rewrite.assets) {
+        if (ASSET_ANCHOR_STATS.embedded.has(asset.absPath)) continue;
+        ASSET_ANCHOR_STATS.embedded.add(asset.absPath);
+        console.log(`[knext compile] embedded sibling asset ${asset.absPath} (read by ${path})`);
+    }
+    return rewrite;
+}
+
 /** `import <id> from <path> with { type: "file" };` lines, one per embedded asset. */
 function assetAnchorImports(assets) {
     return assets
@@ -539,9 +617,10 @@ const importMetaToCjs = {
                 // output, OR a server-external that stayed bundled because its
                 // entry is ESM (`@vercel/og`, cluster C4 — see
                 // entry-asset-anchor.mjs). The asset-anchor rewrite runs for
-                // BOTH, but is a no-op for everything except an ALLOWLISTED
-                // module (`rewriteAssetAnchors` gates on `path` itself) — the
-                // entry is never one of those, which is why this call is not
+                // BOTH, but only touches a module inside some package, and
+                // only an anchor that feeds a file read (`rewriteAssetAnchors`
+                // gates on `path` and on each anchor's consumer) — the entry is
+                // never inside a package, which is why this call is not
                 // duplicated below for the entry branch. The require-binding
                 // wrap stays confined to the server output proper (the only
                 // place `PLAN.modules` has an analysis) — Bun rewrites a
@@ -549,12 +628,7 @@ const importMetaToCjs = {
                 // and the entry's import.meta rewrite below belong to the
                 // entry alone.
                 const raw = await Bun.file(path).text();
-                const assetRewrite = rewriteAssetAnchors(
-                    raw,
-                    path,
-                    (literal) => resolveAssetAnchor(literal, path),
-                    (name) => resolveEmscriptenWasm(name, path),
-                );
+                const assetRewrite = rewriteModuleAssetAnchors(raw, path);
                 let contents = assetRewrite.contents;
                 let changed = assetRewrite.assets.length > 0;
                 const analysis = PLAN.modules.get(path);
@@ -569,9 +643,9 @@ const importMetaToCjs = {
                     loader: "js",
                 };
             }
-            // The entry is never one of ALLOWLISTED_PACKAGES (it is nitro's own
-            // generated `index.mjs`), so it never carries an asset anchor this
-            // rewrite would touch — no call to rewriteAssetAnchors here, by
+            // The entry is never inside a package (it is nitro's own generated
+            // `index.mjs`), so it never carries an asset anchor this rewrite
+            // would touch — no call to rewriteAssetAnchors here, by
             // construction; see entry-asset-anchor.mjs's docstring on scope.
             // The ONE exception is HarfBuzz's binary, below (#1872).
             const rawEntry = await Bun.file(args.path).text();
@@ -1055,6 +1129,11 @@ if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
 }
+console.log(
+    `[knext compile] asset anchors: embedded ${ASSET_ANCHOR_STATS.embedded.size} sibling file(s); ` +
+        `parsed ${ASSET_ANCHOR_STATS.analysed} of ${ASSET_ANCHOR_STATS.modules} module(s); ` +
+        `${ASSET_ANCHOR_STATS.ms.toFixed(1)} ms`,
+);
 {
     // HarfBuzz (Old MIT) + harfbuzzjs (MIT) require their notice to ship with
     // the binary that embeds hb.wasm. The file is ALWAYS written beside the
