@@ -247,6 +247,9 @@ export function attachExactLanes(gh, runs, { repo = REPO } = {}) {
  *     was reset and its creation was not. A full listing that old is beyond
  *     WATCHDOG_MAX_WINDOW_HOURS, so `watchdogWindow` clamps it and raises
  *     `coverage-gap`.
+ *   * An EMPTY listing on a scheduled run throws like a failed one (round 5): a
+ *     correct listing always holds the run itself, and the lookback it would
+ *     fall back to can skip a crash streak's fires.
  *   * A listing that FAILS throws (round 4) — the CLI exits 1, the pinned
  *     alert names the window it did not check, and the run is no anchor. It
  *     must not fall back to the lookback: that reaches back 24 h, not to the
@@ -271,6 +274,15 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(
       `cannot list this workflow's own scheduled runs to anchor the window: ${message}`,
+    );
+  }
+  // A correct `event=schedule` listing seen by a scheduled run always holds
+  // that run, so an EMPTY one is a bad read (a malformed 200 body is coerced to
+  // []), never a first run: treat it like a failed listing. A time-stale
+  // listing still holds earlier runs and never reaches this branch.
+  if (runs.length === 0) {
+    throw new Error(
+      "cannot list this workflow's own scheduled runs to anchor the window: the listing was empty",
     );
   }
   const own = runs.find((r) => runId != null && String(r.id) === String(runId));

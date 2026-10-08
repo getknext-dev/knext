@@ -399,6 +399,15 @@ const MUTATIONS = [
     replacement: '    void err;\n    return fallback;\n',
   },
   {
+    label: 'an empty listing falls back to the lookback',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'round 5: an empty workflow_runs array on a scheduled run crashes (exit 1, no anchor); the next run reaches back to the last success',
+    subject: 'watchdog',
+    anchor: '  if (runs.length === 0) {\n',
+    replacement: '  if (runs.length === 0 && false) {\n',
+  },
+  {
     label: 'a crash with no anchor stops naming the window it did not check',
     spec: WATCHDOG_SPEC,
     expect:
@@ -485,10 +494,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(42);
+declareMutations(43);
 
-if (MUTATIONS.length !== 42) {
-  console.error(`FATAL: declared 42 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 43) {
+  console.error(`FATAL: declared 43 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

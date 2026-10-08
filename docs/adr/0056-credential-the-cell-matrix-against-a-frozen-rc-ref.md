@@ -906,7 +906,8 @@ skipped, and the next window reaches back over its fires; the crash still raises
 naming the window it did not check. Only a **first attempt** anchors (`run_attempt` 1): a re-run
 resets the run's start time, so a re-run of a failed alert job would anchor hours after its check.
 A scheduled run that cannot list its own previous runs crashes rather than fall back to the
-lookback, which after a crash streak would skip fires. With no previous run at all the window is the last 24 hours: at least the
+lookback, which after a crash streak would skip fires; so does an **empty** listing (a correct
+scheduled-event listing always contains the run itself, so zero runs is a bad read, never a first run). With no previous run at all the window is the last 24 hours: at least the
 watchdog period plus the worst measured delay (8 + 7.4 h), and one dropped watchdog run
 (2 × 8 + 7.4 h); it may repeat a check, never skip one. A previous run more than 72 hours back raises a
 `coverage-gap` alert. Each fire is judged in its own context (every lane's slot at that fire), so

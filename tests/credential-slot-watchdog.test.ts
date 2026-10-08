@@ -2511,6 +2511,56 @@ describe('round 4: a failed listing crashes, and only a first-attempt success an
     for (const f of UNCHECKED) expect(firesIn(atF)).toContain(f);
   });
 
+  it.each([
+    ['an empty workflow_runs array', JSON.stringify({ total_count: 0, workflow_runs: [] })],
+    ['a malformed 200 body coerced to []', JSON.stringify({ message: 'oops' })],
+  ])('round 5: %s on a scheduled run crashes (exit 1, no anchor); the next run reaches back to the last success', (_name, body) => {
+    const A = run(28, '2026-10-09T07:00:00Z');
+    const crashed = [
+      run(31, '2026-10-10T07:00:00Z', 'completed', 'failure'),
+      run(30, '2026-10-09T23:00:00Z', 'completed', 'failure'),
+      run(29, '2026-10-09T15:00:00Z', 'completed', 'failure'),
+    ];
+    const outputs: Record<string, string> = {};
+    const errors: string[] = [];
+    const ghE = (args: string[]) => {
+      if ((args[1] ?? '').includes('credential-slot-watchdog.yml/runs')) return body;
+      return simGh([]).gh(args);
+    };
+    const code = runCli({
+      workflowYamlText: REAL_WORKFLOW,
+      gh: ghE,
+      now: new Date('2026-10-10T15:00:30Z'),
+      env: { GITHUB_RUN_ID: '32', GITHUB_EVENT_NAME: 'schedule', WATCHDOG_GRACE_HOURS: '8' },
+      writeOutput: (name: string, value: string) => {
+        outputs[name] = value;
+        return true;
+      },
+      log: () => {},
+      error: (m: string) => errors.push(m),
+    });
+    expect(code).toBe(1);
+    expect(outputs.alert).toBeUndefined();
+    expect(errors.join('\n')).toContain(`did NOT check the credential fires in ${outputs.window}`);
+    expect(errors.join('\n')).toContain('listing was empty');
+    // A dispatch never lists, so it keeps the lookback.
+    expect(
+      resolveCheckAnchors(ghE, {
+        runId: '32',
+        eventName: 'workflow_dispatch',
+        now: new Date('2026-10-10T15:00:30Z'),
+      }).previousCheckAt,
+    ).toBeNull();
+
+    const E = run(32, '2026-10-10T15:00:00Z', 'completed', 'failure');
+    const atF = resolveCheckAnchors(
+      listing([run(33, '2026-10-10T23:00:00Z', 'in_progress', null), E, ...crashed, A]),
+      { runId: '33', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(atF.previousCheckAt?.toISOString()).toBe('2026-10-09T07:00:00.000Z');
+    for (const f of UNCHECKED) expect(firesIn(atF)).toContain(f);
+  });
+
   it('a partial re-run (attempt 2) is never an anchor: the next window reaches back to the last attempt-1 success', () => {
     // 29 checked at 15:00 (window ending 07:00); its alert job failed, and a
     // re-run of that job alone at 21:00 turned it `success`, attempt 2, with
