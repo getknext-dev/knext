@@ -189,7 +189,7 @@ const MUTATIONS = [
   {
     label: 'C: the v1.3 tracker runs before the last slot’s 10 h grace has elapsed',
     subject: 'trackerWorkflow',
-    anchor: "    - cron: '23 5 * * *'",
+    anchor: "    - cron: '31 5 * * *'",
     replacement: "    - cron: '53 1 * * *'",
   },
 
