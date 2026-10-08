@@ -112,8 +112,8 @@ gate, not the official suite — the official suite has its own row, own workflo
   `if: always()` summarize/upload ledger always emits — the *job* verdict is the gate's). A failed
   *scheduled* run then makes the `nightly-red-alert` job create-or-update a **per-lane** "Compat
   nightly RED" / "Compat CREDENTIAL RED (`<lane>`, RC tag)" issue carrying the run link, the
-  named per-shard failures and (for a credential night) the restart cause (idempotent — one open
-  alert issue per lane, a comment per red night). Both links in the chain are guard-tested in
+  named per-shard failures and (for a credential run) the restart cause (idempotent — one open
+  alert issue per lane, a comment per red run). Both links in the chain are guard-tested in
   `tests/compat-suite-workflow.test.ts`. Policy: the alert issue opens → triage the shard logs →
   if the red persists, **flip this row back to ❌ citing the red run**. The matrix guard enforces
   evidence only in the ✅ direction (evidence IFF ✅), so the honest flip-back is always free.
@@ -129,16 +129,16 @@ gate, not the official suite — the official suite has its own row, own workflo
   it unpins any CLOSED issue already holding one of GitHub's 3 slots (never an OPEN one — that
   could be someone else's legitimate pin), then FAILS THE JOB if it still can't get pinned, rather
   than the silent warn-and-continue an earlier round shipped. It also refuses to publish a matrix
-  that looks like a fetch failure (every wired cell reading 0 nights / all-unresolved) rather than
+  that looks like a fetch failure (every wired cell reading 0 runs / all-unresolved) rather than
   a real credential-program state — that shape is far more likely a permissions regression on the
   tracker job itself (`actions: read` missing) than every lane's window actually collapsing.
-  **Recovery is symmetric with alerting**: a fully green scheduled credential night closes that
+  **Recovery is symmetric with alerting**: a fully green scheduled credential run closes that
   lane's own open `credential-reset` issue with a "recovered" comment, so a false positive doesn't
   sit open forever. A `simulate_red` `workflow_dispatch` input on `test-e2e-deploy.yml` proves the
   alert mechanics (label + create, never pin) live, against a real, clearly `[alert-test]`-prefixed
   issue that closes itself in the same run — never a fake/dry-run code path, and never runs on a
   schedule.
-- **A credential night requires bytecode caching proven LIVE, in every cell.** Bytecode caching is
+- **A credential run requires bytecode caching proven LIVE, in every cell.** Bytecode caching is
   mandatory in every supported runtime×builder cell. A run counts toward a cell's 14-run window
   only if **every shard** proves that **every deploy** had live caching at runtime. Being configured
   is not enough.
@@ -170,7 +170,7 @@ gate, not the official suite — the official suite has its own row, own workflo
   2. `scripts/e2e-summary.mjs --boot-ledger` folds those lines into each shard summary's `bytecode`
      block.
   3. The block rides unchanged into `compat-run-ledger`.
-  4. `scripts/compat-window-audit.mjs` (rule 7) disqualifies a credential night where any shard's
+  4. `scripts/compat-window-audit.mjs` (rule 7) disqualifies a credential run where any shard's
      block is missing, is for the wrong runtime, or has `live < deploys`. Missing evidence
      disqualifies too (fail closed).
 
