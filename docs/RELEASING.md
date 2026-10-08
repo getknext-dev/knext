@@ -229,7 +229,7 @@ Beta on both lines and is not credentialed. The two windows share nothing a red 
 | pin | `.github/compat-credential-ref.json` | `.github/compat-credential-ref-v1.3.json` (`line: "v1.3"`) |
 | resolver | `scripts/compat-credential-ref.mjs` | `scripts/compat-credential-line.mjs --line v1.3` (refuses any tag that is not `v1.3.N-rc.M`) |
 | workflow | `test-e2e-deploy.yml` | `compat-credential-v1.3.yml` — **generated**, see below |
-| credential crons (UTC) | 01:17 node, 05:47 bun, 22:17 node-webpack, 23:47 bun-webpack | 11:17 node, 12:47 bun, 14:17 node-webpack, 15:47 bun-webpack |
+| credential crons (UTC) | 01:17 node, 05:47 bun, 22:17 node-webpack, 23:47 bun-webpack | 14:17 node, 15:47 bun, 17:17 node-webpack, 18:47 bun-webpack |
 | per-cell red issue | `Compat CREDENTIAL RED (<lane>, RC tag)`, label `credential-reset` | `Compat v1.3 CREDENTIAL RED (<lane>, RC tag)`, label `credential-reset-v1.3` |
 | tracker | `compat-matrix-tracker-nightly.yml` → the pinned v1.0 tracker | `compat-credential-v1.3-tracker.yml` → **Compat v1.3 credential matrix tracker** (unpinned) |
 
@@ -267,20 +267,42 @@ v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.
 
    If the new tag changed its own workflow so that an anchor moved, `--write` fails and names the
    anchor; update `lineSubstitutions` deliberately (its expected counts are part of the proof).
-4. Open the PR with only those two files (plus a `lineSubstitutions` change, if step 3 required one).
+4. Open the PR with only those two files (plus a `lineSubstitutions` change, if step 3 required one;
+   a guard-script edit regenerates the same workflow the same way).
    It merges through the merge queue like any PR; the next v1.3 slot runs the new tag and every v1.3
    cell's window restarts (its fingerprint moved). The v1.0 windows do not move.
 
-**What is not built for v1.3 yet.** There is no PR-time freeze guard for the v1.3 harness (the v1.0
-one protects v1.0's files only): a PR that edits `compat-credential-v1.3.yml` or the three v1.3
-scripts mid-window is not refused — it restarts the v1.3 windows through the fingerprint instead, and
-an edit that breaks the derivation refuses the next night. There is also no late-slot watchdog for
-the v1.3 crons; a dropped v1.3 night shows up as a missing night in the v1.3 tracker.
+**What protects the v1.3 harness mid-window.** There is no PR-time freeze guard for the v1.3 harness
+(the v1.0 one protects v1.0's files only), so protection is the fingerprint plus the PR-time spec:
+
+- The v1.3 night's fingerprint hashes the RC tag's checkout and the **executing workflow file**
+  `compat-credential-v1.3.yml`. A PR that edits that file mid-window is not refused, but it restarts
+  the v1.3 windows (and the next night refuses it unless it is still exactly the derivation).
+- The three `main`-side scripts that resolve and grade the line — `scripts/compat-credential-line.mjs`
+  (resolver, off-line refusal, cron map), `scripts/compat-line-workflow.mjs` (the byte-equality gate)
+  and `scripts/compat-line-tracker.mjs` (the audit) — are in neither the v1.0 frozen set nor the
+  fingerprint's checkout. So their sha256 digests are written into the generated header of
+  `compat-credential-v1.3.yml` (`# guard-script-sha256: …`). Editing one of them makes the committed
+  workflow stale: the PR-time spec and the run-time `--check` both refuse it until it is regenerated
+  (`node scripts/compat-line-workflow.mjs --write …`, same command as a pin bump), and the regenerated
+  file has different bytes — a different fingerprint — so every v1.3 cell's window restarts. A
+  guard-script edit can therefore never keep banking nights on the old window. This is mutation-proved
+  by exit code in `scripts/mutation-prove-compat-credential-line.mjs`.
+
+There is no late-slot watchdog for the v1.3 crons; a dropped v1.3 night shows up as a missing night
+in the v1.3 tracker.
 
 **Capacity.** Eight credential cells now run per day (four per line), each 16 shards at up to 8 in
-parallel. The v1.3 slots sit between v1.0's last (05:47) and first (22:17) slots so the two lines do
-not compete for runners; GitHub can start a scheduled run hours late, so overlap is still possible on
-a bad day.
+parallel. GitHub starts v1.0's scheduled runs hours late, every day: measured on 2026-10-07 and
+2026-10-08, the 22:17 slot started at about 01:30-01:55, the 01:17 slot at about 07:20-07:30, the two
+early-warning runs at about 10:20-12:40 and the 05:47 bun credential night at about 12:00-13:00 UTC;
+every v1.0 run of a day had finished by about 13:10 UTC. The v1.3 slots (14:17, 15:47, 17:17, 18:47)
+therefore start after that tail and 90 minutes apart. That is a measurement, not a guarantee: GitHub
+can delay any schedule in either line, so overlap remains possible. Overlap means **queueing** (a
+night starts late), never cancellation — the two workflows have different names, so their concurrency
+groups never collide. Because the v1.3 slots fall in the daytime, a running v1.3 night (16 shards, up
+to 8 in parallel) can also slow daytime PR CI and the merge queue. If that bites, move the slots in
+`CREDENTIAL_LINES['v1.3'].cronMap`, regenerate the workflow, and expect the v1.3 windows to restart.
 
 ## First publish — DONE (2026-07-26)
 

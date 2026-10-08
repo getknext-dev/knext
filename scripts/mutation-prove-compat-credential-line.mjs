@@ -9,6 +9,11 @@
  *   B. the v1.0 lane is unchanged and nothing collides with it: put a v1.3
  *      file into the v1.0 frozen set, move a v1.0 cron, point the v1.0 audit
  *      at the v1.3 workflow, or give the v1.3 lane a v1.0 name — RED.
+ *   C. the v1.3 slots stay clear of v1.0's measured late-start tail (start
+ *      >= 14:00 UTC, >= 90 min apart, tracker after the last slot's grace);
+ *   D. the main-side guard scripts (resolver, derivation gate, tracker) are
+ *      folded into the fingerprinted executing file, so editing one restarts
+ *      the window — drop the digest, the header check or a script: RED.
  *
  * Shared harness, same rules as every prover here:
  *   * `mutate` asserts the anchor occurs exactly once and aborts otherwise;
@@ -38,6 +43,7 @@ const PROOF = {
     derive: 'scripts/compat-line-workflow.mjs',
     tracker: 'scripts/compat-line-tracker.mjs',
     derived: '.github/workflows/compat-credential-v1.3.yml',
+    trackerWorkflow: '.github/workflows/compat-credential-v1.3-tracker.yml',
     v10workflow: '.github/workflows/test-e2e-deploy.yml',
     v10audit: 'scripts/compat-window-audit.mjs',
     freezeGuard: 'scripts/compat-credential-freeze-guard.mjs',
@@ -145,7 +151,7 @@ const MUTATIONS = [
   {
     label: 'B: a v1.3 credential cron lands on a v1.0 slot',
     subject: 'line',
-    anchor: "      '17 1 * * *': '17 11 * * *',",
+    anchor: "      '17 1 * * *': '17 14 * * *',",
     replacement: "      '17 1 * * *': '17 3 * * *',",
   },
   {
@@ -166,9 +172,50 @@ const MUTATIONS = [
     anchor: "    trackerLabel: 'credential-matrix-tracker-v1.3',",
     replacement: "    trackerLabel: 'credential-matrix-tracker',",
   },
+
+  // ── C. the v1.3 slots stay clear of v1.0's measured late-start tail ──────
+  {
+    label: 'C: a v1.3 credential cron moves back inside v1.0’s late-start tail (before 14:00 UTC)',
+    subject: 'line',
+    anchor: "      '17 1 * * *': '17 14 * * *',",
+    replacement: "      '17 1 * * *': '17 11 * * *',",
+  },
+  {
+    label: 'C: two v1.3 crons closer than 90 min (the bun slot 30 min after node)',
+    subject: 'line',
+    anchor: "      '47 5 * * *': '47 15 * * *',",
+    replacement: "      '47 5 * * *': '47 14 * * *',",
+  },
+  {
+    label: 'C: the v1.3 tracker runs before the last slot’s 10 h grace has elapsed',
+    subject: 'trackerWorkflow',
+    anchor: "    - cron: '23 5 * * *'",
+    replacement: "    - cron: '53 1 * * *'",
+  },
+
+  // ── D. the main-side guard scripts are folded into the fingerprinted bytes ─
+  {
+    label: 'D: the guard digests stop reading the scripts (an edit no longer moves the header)',
+    subject: 'derive',
+    anchor: "    sha256(readFileSync(join(repoRoot, path), 'utf8')),",
+    replacement: '    sha256(path),',
+  },
+  {
+    label: 'D: the header no longer has to record every guard script (a dropped line parses)',
+    subject: 'derive',
+    anchor: '  if (JSON.stringify(guards.map(([p]) => p)) !== JSON.stringify(spec.guardScripts)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label: 'D: a guard script is dropped from the line’s guard list (tracker edits go unseen)',
+    subject: 'line',
+    anchor:
+      "      'scripts/compat-line-workflow.mjs',\n      'scripts/compat-line-tracker.mjs',\n    ]),",
+    replacement: "      'scripts/compat-line-workflow.mjs',\n    ]),",
+  },
 ];
 
-declareMutations(19);
+declareMutations(25);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -181,8 +228,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 19) {
-  console.error(`FATAL: declared 19 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 25) {
+  console.error(`FATAL: declared 25 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
