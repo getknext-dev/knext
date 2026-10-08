@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   decidePublishedBytesScope,
+  isUnfrozenLineBaseRef,
   OVERRIDE_MARKER_FIELD,
   overrideMarkerIntroducedByPr,
   overrideMarkerValidity,
@@ -352,5 +353,41 @@ describe('decidePublishedBytesScope', () => {
     });
     expect(d.action).toBe('skip');
     expect(d.reason).toMatch(/rcTag is null at this PR's base/);
+  });
+});
+
+describe('base-ref scope (#2004): the pin guards ONE line; PRs into another release line are not measured against it', () => {
+  const pinned = { rcTag: 'v1.0.0-rc.5' };
+  const args = {
+    basePin: pinned,
+    headPin: pinned,
+    changedFiles: ['packages/kn-next/src/index.ts'],
+    packageDirs,
+    now: NOW,
+  };
+
+  it('isUnfrozenLineBaseRef: integration/* (bare or refs/heads/-qualified) is another line; main and stacked feature branches are not', () => {
+    expect(isUnfrozenLineBaseRef('integration/v1.3')).toBe(true);
+    expect(isUnfrozenLineBaseRef('refs/heads/integration/v1.3')).toBe(true);
+    expect(isUnfrozenLineBaseRef('main')).toBe(false);
+    expect(isUnfrozenLineBaseRef('refs/heads/main')).toBe(false);
+    expect(isUnfrozenLineBaseRef('feat/stacked-on-main')).toBe(false);
+    expect(isUnfrozenLineBaseRef('not-integration/x')).toBe(false);
+    expect(isUnfrozenLineBaseRef(undefined)).toBe(false);
+    expect(isUnfrozenLineBaseRef('')).toBe(false);
+  });
+
+  it('SKIPS with a visible reason for a published-bytes change whose base is integration/v1.3', () => {
+    const d = decidePublishedBytesScope({ ...args, baseRef: 'integration/v1.3' });
+    expect(d.action).toBe('skip');
+    expect(d.reason).toMatch(/base integration\/v1\.3 is not the frozen line/);
+  });
+
+  it('still PROCEEDS for the same change on a main base (the v1.0 protection is intact)', () => {
+    expect(decidePublishedBytesScope({ ...args, baseRef: 'main' }).action).toBe('proceed');
+  });
+
+  it('still PROCEEDS when no baseRef is supplied (fail closed: unknown base is guarded)', () => {
+    expect(decidePublishedBytesScope(args).action).toBe('proceed');
   });
 });

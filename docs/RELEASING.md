@@ -192,6 +192,13 @@ head — mirroring `compat-credential-freeze-guard.yml`'s own rule for `rcTag`/`
 PR cannot skip the check by clearing `rcTag` in the same diff that also changes published bytes; the
 window was still open at base, so the check still runs.
 
+The pin guards **one release line** — the one `main` carries. A PR whose base is an
+`integration/*` branch (for example `integration/v1.3`) is on a different line, whose published
+bytes are the next line's release candidate and so can never equal the pinned tag; measuring it
+would make the check red on every such PR. Those PRs are skipped with the visible reason
+"base integration/v1.3 is not the frozen line". `main`, stacked branches, and an unknown base ref
+stay guarded, and the guard applies to the 1.3 line's bytes again once it merges into `main`.
+
 An **intentional** rc.N+1 — real content is expected to differ from the currently-pinned rc — is
 authorized the same way `rcBumpMarker` authorizes touching the credential harness mid-window: add a
 dated, reviewed `publishedBytesBumpMarker: { date, expires, reason }` to the pin file in the same

@@ -392,3 +392,39 @@ describe('defaultTagResolves — resolves against a REAL git tag, not a mock', (
     expect(defaultTagResolves(dir, 'v9.9.9-rc.9')).toBe(false);
   });
 });
+
+describe('main — base ref scope (#2004)', () => {
+  it('integration/v1.3 base: SKIP announced with the reason, no tag lookup, no diff', () => {
+    const root = buildFixtureRoot();
+    let touched = false;
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.5'),
+      headPin: pin('v1.0.0-rc.5'),
+      baseRef: 'integration/v1.3',
+      tagResolves: () => {
+        touched = true;
+        return true;
+      },
+      runDiff: () => {
+        touched = true;
+        return 1;
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(touched).toBe(false);
+    expect(r.summary).toContain('SKIP');
+    expect(r.out).toContain('base integration/v1.3 is not the frozen line');
+  });
+
+  it('main base: a published-bytes change with no marker still FAILS when the diff fails', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.5'),
+      headPin: pin('v1.0.0-rc.5'),
+      baseRef: 'main',
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+    expect(r.summary).toContain('FAIL');
+  });
+});
