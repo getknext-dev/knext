@@ -5,6 +5,8 @@ import {
   evaluateWatchdog,
   fetchScheduledRuns,
   fetchWindowRuns,
+  resolveCheckAnchors,
+  runWatchdogFromEnv,
 } from '../scripts/credential-slot-watchdog.mjs';
 import {
   anyLaneNeedsAlert,
@@ -14,6 +16,7 @@ import {
   DEFAULT_GRACE_HOURS,
   decideCredentialSlotVerdicts,
   detectAmbiguousAttribution,
+  dueFiresInWindow,
   extractScheduleCrons,
   mostRecentFireAtOrBefore,
   mostRecentSlotAtOrBefore,
@@ -21,6 +24,9 @@ import {
   parseSimpleDailyCron,
   resolveCredentialLaneCrons,
   resolveCredentialLanes,
+  WATCHDOG_LOOKBACK_HOURS,
+  WATCHDOG_MAX_WINDOW_HOURS,
+  watchdogWindow,
 } from '../scripts/lib/credential-slot-watchdog.mjs';
 
 /**
@@ -910,6 +916,17 @@ describe('evaluateWatchdog — end to end, offline', () => {
 
   it('is fully quiet when every lane ran on time', () => {
     const { gh } = fakeGh([
+      // The night before's bun-webpack run. These runs carry no lane markers,
+      // so node's 01:18 run is placed by timing — and it is only unambiguously
+      // node's when the fire just before it (bun-webpack 09-28 23:47) has its
+      // own run. Each fire is judged in its own context (round 2), so it is
+      // that fire's run that counts, not bun-webpack's later 09-29 run.
+      {
+        event: 'schedule',
+        status: 'completed',
+        created_at: '2026-09-28T23:48:00Z',
+        run_started_at: '2026-09-28T23:49:00Z',
+      },
       {
         event: 'schedule',
         status: 'completed',
@@ -1371,6 +1388,7 @@ describe('three fires a day — the live schedule (ADR-0056 Amendment 5)', () =>
       workflowYamlText: REAL_WORKFLOW,
       gh,
       now: new Date('2026-10-10T02:05:00Z'),
+      previousCheckAt: new Date('2026-10-09T18:05:00Z'),
       graceHours: 8,
     }).find((v) => v.lane === 'node');
     expect(node?.verdict).toBe('missing');
@@ -1383,6 +1401,7 @@ describe('three fires a day — the live schedule (ADR-0056 Amendment 5)', () =>
       workflowYamlText: REAL_WORKFLOW,
       gh,
       now: new Date('2026-10-10T02:05:00Z'),
+      previousCheckAt: new Date('2026-10-09T18:05:00Z'),
       graceHours: 8,
     }).find((v) => v.lane === 'node');
     expect(node?.verdict).toBe('quiet');
@@ -1416,7 +1435,7 @@ describe('three fires a day — the live schedule (ADR-0056 Amendment 5)', () =>
     expect(attributed.find((r) => r.created_at === '2026-10-10T09:20:00Z')?.lane).toBe('node');
   });
 
-  it("the watchdog's own schedule checks every fire of every lane exactly once", () => {
+  it("the watchdog's own schedule, on time, checks every fire of every lane exactly once", () => {
     const watchdogCrons = extractScheduleCrons(WATCHDOG_WORKFLOW).map(parseSimpleDailyCron);
     const lanes = resolveCredentialLanes(REAL_WORKFLOW);
     const checks: Date[] = [];
@@ -1425,20 +1444,23 @@ describe('three fires a day — the live schedule (ADR-0056 Amendment 5)', () =>
     }
     checks.sort((a, b) => a.getTime() - b.getTime());
     const checked: string[] = [];
-    for (const t of checks) {
-      const due = new Date(t.getTime() - DEFAULT_GRACE_HOURS * H);
-      for (const l of computeExpectedSlots(lanes, due)) {
-        checked.push(`${l.lane}@${l.expectedSlotTime}`);
-      }
-    }
+    checks.forEach((t, i) => {
+      const w = watchdogWindow({
+        checkAt: t,
+        previousCheckAt: i === 0 ? null : checks[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const f of dueFiresInWindow(lanes, w)) checked.push(`${f.lane}@${f.fire.toISOString()}`);
+    });
     // No fire is checked twice …
     expect(new Set(checked).size).toBe(checked.length);
-    // … and every fire between the first and last check's due point is checked.
-    const first = (checks[0] as Date).getTime() - DEFAULT_GRACE_HOURS * H - 8 * H;
+    // … and every fire from the first check's lookback to the last check's due point is checked.
+    const first =
+      (checks[0] as Date).getTime() - (DEFAULT_GRACE_HOURS + WATCHDOG_LOOKBACK_HOURS) * H;
     const last = (checks.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H;
     let covered = 0;
     for (const l of lanes) {
-      for (const day of ['2026-10-09', '2026-10-10', '2026-10-11']) {
+      for (const day of ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11']) {
         for (const h of l.hours) {
           const fire = at(day, h, l.minute);
           if (fire.getTime() > first && fire.getTime() <= last) {
@@ -1449,5 +1471,469 @@ describe('three fires a day — the live schedule (ADR-0056 Amendment 5)', () =>
       }
     }
     expect(covered).toBe(checked.length);
+  });
+});
+// ── Jittered watchdog starts — every fire checked once (PR #2013 round 2) ───
+//
+// GitHub starts this watchdog's scheduled runs late, and by a DIFFERENT amount
+// each time (measured 4.9-6.6 h; the e2e credential runs it watches start
+// 2.3-7.4 h late). A watchdog that checks only "the latest fire at or before
+// now - grace" skips a fire whenever two consecutive runs' delays differ enough
+// (and checks another twice). The fix checks EVERY fire in the window since the
+// previous watchdog run: (previous start - grace, this start - grace]. These
+// tests replay jittered start times, seeded so a failure reproduces.
+
+describe('jittered watchdog starts — every fire is checked exactly once', () => {
+  const H = 3_600_000;
+  const WATCHDOG_WORKFLOW = readFileSync(
+    new URL('../.github/workflows/credential-slot-watchdog.yml', import.meta.url),
+    'utf8',
+  );
+  const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+  const watchdogCrons = extractScheduleCrons(WATCHDOG_WORKFLOW).map(parseSimpleDailyCron);
+  const WATCHDOG_PERIOD_HOURS = 24 / watchdogCrons.reduce((n, c) => n + c.hours.length, 0);
+  // Measured 2026-10-01..08: the watchdog's own scheduled runs, and the
+  // credential e2e runs it watches.
+  const WATCHDOG_DELAY_HOURS: [number, number] = [4.9, 6.6];
+  const E2E_DELAY_HOURS: [number, number] = [2.3, 7.4];
+  const DAYS = Array.from({ length: 10 }, (_, i) =>
+    new Date(Date.UTC(2026, 9, 10 + i)).toISOString().slice(0, 10),
+  );
+
+  /** mulberry32 — a tiny seeded PRNG, so a red seed reproduces exactly. */
+  const prng = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const uniform = (rand: () => number, [lo, hi]: [number, number]) => lo + (hi - lo) * rand();
+  const nominal = (day: string, hour: number, minute: number) =>
+    new Date(`${day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`);
+
+  /** The watchdog's scheduled starts over DAYS, each delayed by a random amount in `delay`. */
+  function jitteredStarts(rand: () => number, delay: [number, number]): Date[] {
+    const starts: Date[] = [];
+    for (const day of DAYS) {
+      for (const c of watchdogCrons) {
+        for (const h of c.hours) {
+          starts.push(
+            new Date(nominal(day, h, c.minute).getTime() + Math.round(uniform(rand, delay) * H)),
+          );
+        }
+      }
+    }
+    return starts.sort((a, b) => a.getTime() - b.getTime());
+  }
+
+  /** Every credential fire in (from, to]. */
+  function firesBetween(from: number, to: number): string[] {
+    const out: string[] = [];
+    for (const day of ['2026-10-08', '2026-10-09', ...DAYS]) {
+      for (const l of lanes) {
+        for (const h of l.hours) {
+          const t = nominal(day, h, l.minute).getTime();
+          if (t > from && t <= to) out.push(`${l.lane}@${new Date(t).toISOString()}`);
+        }
+      }
+    }
+    return out.sort();
+  }
+
+  /** How many times each fire is checked, when run i anchors on run i-1's start. */
+  function coverage(starts: Date[]): Map<string, number> {
+    const checked = new Map<string, number>();
+    starts.forEach((checkAt, i) => {
+      const w = watchdogWindow({
+        checkAt,
+        previousCheckAt: i === 0 ? null : starts[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const f of dueFiresInWindow(lanes, w)) {
+        const key = `${f.lane}@${f.fire.toISOString()}`;
+        checked.set(key, (checked.get(key) ?? 0) + 1);
+      }
+    });
+    return checked;
+  }
+
+  function expectExactlyOnce(starts: Date[]) {
+    const checked = coverage(starts);
+    const expected = firesBetween(
+      (starts[0] as Date).getTime() - (DEFAULT_GRACE_HOURS + WATCHDOG_LOOKBACK_HOURS) * H,
+      (starts.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H,
+    );
+    expect(expected.length).toBeGreaterThanOrEqual(7 * 12); // ≥ 7 days of 12 fires
+    expect([...checked.keys()].sort()).toEqual(expected);
+    expect([...checked.values()].every((n) => n === 1)).toBe(true);
+  }
+
+  it('the no-previous-run lookback covers the watchdog period plus the worst measured delay', () => {
+    // A run must reach back past the previous run's window end; consecutive starts
+    // can be as far apart as one period plus the delay spread. 24 h also covers
+    // ONE dropped watchdog run (2 periods + the worst e2e delay = 23.4 h).
+    expect(WATCHDOG_PERIOD_HOURS).toBe(8);
+    expect(WATCHDOG_LOOKBACK_HOURS).toBeGreaterThanOrEqual(
+      WATCHDOG_PERIOD_HOURS + Math.max(WATCHDOG_DELAY_HOURS[1], E2E_DELAY_HOURS[1]),
+    );
+    expect(WATCHDOG_LOOKBACK_HOURS).toBeGreaterThanOrEqual(
+      2 * WATCHDOG_PERIOD_HOURS + E2E_DELAY_HOURS[1],
+    );
+    expect(WATCHDOG_MAX_WINDOW_HOURS).toBeGreaterThan(WATCHDOG_LOOKBACK_HOURS);
+  });
+
+  it('watchdogWindow: (previous start - grace, this start - grace]; the lookback only without a previous run', () => {
+    const checkAt = new Date('2026-10-10T15:00:00Z');
+    expect(
+      watchdogWindow({
+        checkAt,
+        previousCheckAt: new Date('2026-10-10T06:30:00Z'),
+        graceHours: 8,
+      }),
+    ).toEqual({
+      start: new Date('2026-10-09T22:30:00Z'),
+      end: new Date('2026-10-10T07:00:00Z'),
+      anchored: true,
+      gap: false,
+    });
+    expect(watchdogWindow({ checkAt, previousCheckAt: null, graceHours: 8 })).toEqual({
+      start: new Date(new Date('2026-10-10T07:00:00Z').getTime() - WATCHDOG_LOOKBACK_HOURS * H),
+      end: new Date('2026-10-10T07:00:00Z'),
+      anchored: false,
+      gap: false,
+    });
+    // A previous run that is not before this one is no anchor (clock skew, a re-run).
+    expect(watchdogWindow({ checkAt, previousCheckAt: checkAt, graceHours: 8 }).anchored).toBe(
+      false,
+    );
+  });
+
+  it('watchdogWindow: a previous run older than the maximum window is clamped and flagged as a gap', () => {
+    const checkAt = new Date('2026-10-20T15:00:00Z');
+    const w = watchdogWindow({
+      checkAt,
+      previousCheckAt: new Date('2026-10-10T06:30:00Z'),
+      graceHours: 8,
+    });
+    expect(w.gap).toBe(true);
+    expect(w.end.getTime() - w.start.getTime()).toBe(WATCHDOG_MAX_WINDOW_HOURS * H);
+  });
+
+  it('dueFiresInWindow: start exclusive, end inclusive, every listed hour', () => {
+    const fires = dueFiresInWindow(lanes, {
+      start: new Date('2026-10-10T01:17:00Z'),
+      end: new Date('2026-10-10T09:17:00Z'),
+    }).map((f) => `${f.lane}@${f.fire.toISOString().slice(11, 16)}`);
+    expect(fires).toEqual(['bun@05:47', 'node-webpack@06:17', 'bun-webpack@07:47', 'node@09:17']);
+  });
+
+  it("the reviewer's reproduction: delays 6.6 h, 4.9 h, 6.6 h skip nothing and repeat nothing", () => {
+    // 09:25 + 6.6 h, 17:25 + 4.9 h, 01:25 + 6.6 h. Checking only the latest due
+    // fire, bun-webpack 07:47 is checked by the first two runs and 15:47 by
+    // none. Anchoring on the previous run's start checks each exactly once.
+    const starts = [
+      new Date('2026-10-10T16:01:00Z'),
+      new Date('2026-10-10T22:19:00Z'),
+      new Date('2026-10-11T08:01:00Z'),
+    ];
+    const checked = coverage(starts);
+    expect(checked.get('bun-webpack@2026-10-10T07:47:00.000Z')).toBe(1);
+    expect(checked.get('bun-webpack@2026-10-10T15:47:00.000Z')).toBe(1);
+    expect(checked.get('bun-webpack@2026-10-10T23:47:00.000Z')).toBe(1);
+  });
+
+  it("the reviewer's reproduction, end to end: a missing bun-webpack 15:47 run alerts exactly once", () => {
+    // Every fire 10-09..10-11 has its credential run (2 h late) except
+    // bun-webpack 10-10 15:47. Watchdog runs start 16:01, 22:19 and 08:01 the
+    // next day (09:25 + 6.6 h, 17:25 + 4.9 h, 01:25 + 6.6 h), each anchored on
+    // the one before. Checking only the latest due fire never looks at 15:47.
+    const runs: FixtureRun[] = [];
+    let id = 1;
+    for (const day of ['2026-10-09', '2026-10-10', '2026-10-11']) {
+      for (const l of lanes) {
+        for (const h of l.hours) {
+          const fire = nominal(day, h, l.minute);
+          if (l.lane === 'bun-webpack' && fire.toISOString() === '2026-10-10T15:47:00.000Z') {
+            continue;
+          }
+          const created = new Date(fire.getTime() + 2 * H).toISOString();
+          runs.push(fixtureRun(id++, 'schedule', created, CRED(l.lane)));
+        }
+      }
+    }
+    const starts = [
+      new Date('2026-10-10T09:00:00Z'),
+      new Date('2026-10-10T16:01:00Z'),
+      new Date('2026-10-10T22:19:00Z'),
+      new Date('2026-10-11T08:01:00Z'),
+    ];
+    const alerts: string[] = [];
+    starts.forEach((checkAt, i) => {
+      if (i === 0) return; // the first start is only the anchor
+      const { gh } = simGh(runs.filter((r) => new Date(r.created_at) <= checkAt));
+      const verdicts = evaluateWatchdog({
+        workflowYamlText: REAL_WORKFLOW,
+        gh,
+        now: checkAt,
+        checkAt,
+        previousCheckAt: starts[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const v of verdicts) {
+        if (v.verdict !== 'quiet') alerts.push(`${v.lane}@${v.slot}:${v.verdict}`);
+      }
+    });
+    expect(alerts).toEqual(['bun-webpack@2026-10-10T15:47:00.000Z:missing']);
+  });
+
+  it.each(
+    Array.from({ length: 25 }, (_, i) => i + 1),
+  )('seed %i: measured watchdog delays (4.9-6.6 h) over 10 days — every fire checked exactly once', (seed) => {
+    expectExactlyOnce(jitteredStarts(prng(seed), WATCHDOG_DELAY_HOURS));
+  });
+
+  it.each(
+    Array.from({ length: 25 }, (_, i) => i + 101),
+  )('seed %i: stress — e2e-wide delays (2.3-7.4 h) and one dropped watchdog run — every fire checked exactly once', (seed) => {
+    const rand = prng(seed);
+    const starts = jitteredStarts(rand, E2E_DELAY_HOURS);
+    starts.splice(1 + Math.floor(rand() * (starts.length - 2)), 1);
+    expectExactlyOnce(starts);
+  });
+
+  it.each(
+    Array.from({ length: 8 }, (_, i) => i + 201),
+  )('seed %i: end to end — alerts exactly the dropped credential runs, each exactly once', (seed) => {
+    const rand = prng(seed);
+    const starts = jitteredStarts(rand, WATCHDOG_DELAY_HOURS);
+    const runs: FixtureRun[] = [];
+    const dropped = new Set<string>();
+    let id = 1;
+    for (const day of ['2026-10-08', '2026-10-09', ...DAYS]) {
+      for (const l of lanes) {
+        for (const h of l.hours) {
+          const fire = nominal(day, h, l.minute);
+          if (rand() < 0.15) {
+            dropped.add(`${l.lane}@${fire.toISOString()}`);
+            continue;
+          }
+          const created = new Date(fire.getTime() + uniform(rand, E2E_DELAY_HOURS) * H);
+          runs.push(fixtureRun(id++, 'schedule', created.toISOString(), CRED(l.lane)));
+        }
+      }
+      // The two early-warning runs share the run list and are just as late.
+      for (const [hh, mm, lane] of [
+        [3, 17, 'node'],
+        [4, 47, 'bun'],
+      ] as const) {
+        const created = new Date(
+          nominal(day, hh, mm).getTime() + uniform(rand, E2E_DELAY_HOURS) * H,
+        );
+        runs.push(fixtureRun(id++, 'schedule', created.toISOString(), EW(lane)));
+      }
+    }
+    const alerted = new Map<string, number>();
+    starts.forEach((checkAt, i) => {
+      const { gh } = simGh(runs.filter((r) => new Date(r.created_at) <= checkAt));
+      const verdicts = evaluateWatchdog({
+        workflowYamlText: REAL_WORKFLOW,
+        gh,
+        now: new Date(checkAt.getTime() + 60_000),
+        checkAt,
+        previousCheckAt: i === 0 ? null : starts[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const v of verdicts.filter((x) => x.verdict !== 'quiet')) {
+        const key = `${v.lane}@${v.slot}`;
+        alerted.set(key, (alerted.get(key) ?? 0) + 1);
+      }
+    });
+    const inRange = new Set(
+      firesBetween(
+        (starts[0] as Date).getTime() - (DEFAULT_GRACE_HOURS + WATCHDOG_LOOKBACK_HOURS) * H,
+        (starts.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H,
+      ),
+    );
+    const expected = [...dropped].filter((k) => inRange.has(k)).sort();
+    expect(expected.length).toBeGreaterThan(0);
+    expect([...alerted.keys()].sort()).toEqual(expected);
+    expect([...alerted.values()].every((n) => n === 1)).toBe(true);
+  });
+
+  it('evaluateWatchdog alerts a coverage gap when its previous run is older than the maximum window', () => {
+    const { gh } = simGh([]);
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-20T15:00:00Z'),
+      previousCheckAt: new Date('2026-10-10T06:30:00Z'),
+      graceHours: 8,
+    });
+    expect(verdicts.some((v) => v.verdict === 'coverage-gap')).toBe(true);
+  });
+
+  it('every verdict names the fire it checked', () => {
+    const { gh } = simGh([]);
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-10T15:00:00Z'),
+      previousCheckAt: new Date('2026-10-10T07:00:00Z'),
+      graceHours: 8,
+    });
+    // (10-09 23:00, 10-10 07:00]: bun-webpack 23:47, node 01:17, bun 05:47, node-webpack 06:17.
+    expect(verdicts.map((v) => `${v.lane}@${v.slot}`).sort()).toEqual(
+      [
+        'bun-webpack@2026-10-09T23:47:00.000Z',
+        'node@2026-10-10T01:17:00.000Z',
+        'bun@2026-10-10T05:47:00.000Z',
+        'node-webpack@2026-10-10T06:17:00.000Z',
+      ].sort(),
+    );
+    expect(verdicts.every((v) => v.verdict === 'missing')).toBe(true);
+  });
+});
+
+describe('resolveCheckAnchors — this run and the previous one, from the Actions API', () => {
+  const watchdogRun = (
+    id: number,
+    started: string,
+    status = 'completed',
+    conclusion: string | null = 'success',
+    event = 'schedule',
+  ) => ({
+    id,
+    event,
+    status,
+    conclusion,
+    created_at: started,
+    run_started_at: started,
+    html_url: `https://x/${id}`,
+  });
+  const listing = (runs: unknown[]) => {
+    const calls: string[] = [];
+    const gh = (args: string[]) => {
+      calls.push(args.join(' '));
+      return JSON.stringify({ total_count: runs.length, workflow_runs: runs });
+    };
+    return { gh, calls };
+  };
+  const now = new Date('2026-10-10T15:00:30Z');
+
+  it("anchors on this run's own start and the newest completed scheduled run before it", () => {
+    const { gh, calls } = listing([
+      watchdogRun(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      watchdogRun(29, '2026-10-10T06:30:00Z', 'completed', 'failure'),
+      watchdogRun(28, '2026-10-09T23:10:00Z'),
+    ]);
+    const a = resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now });
+    expect(a.checkAt.toISOString()).toBe('2026-10-10T15:00:00.000Z');
+    // A failure is an alerting run: it evaluated its window.
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-10T06:30:00.000Z');
+    expect(calls[0]).toContain('actions/workflows/credential-slot-watchdog.yml/runs');
+    expect(calls[0]).toContain('event=schedule');
+  });
+
+  it('skips a cancelled previous run (it may not have evaluated), reaching back to the one before', () => {
+    const { gh } = listing([
+      watchdogRun(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      watchdogRun(29, '2026-10-10T06:30:00Z', 'completed', 'cancelled'),
+      watchdogRun(28, '2026-10-09T23:10:00Z'),
+    ]);
+    const a = resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now });
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-09T23:10:00.000Z');
+  });
+
+  it('a dispatch is never anchored (full lookback; it never alerts anyway)', () => {
+    const { gh, calls } = listing([watchdogRun(28, '2026-10-09T23:10:00Z')]);
+    const a = resolveCheckAnchors(gh, { runId: '31', eventName: 'workflow_dispatch', now });
+    expect(a).toEqual({ checkAt: now, previousCheckAt: null });
+    expect(calls).toEqual([]);
+  });
+
+  it('an unreadable listing degrades to the full lookback (may repeat a check, never skips one)', () => {
+    const gh = () => {
+      throw new Error('api down');
+    };
+    expect(resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now })).toEqual({
+      checkAt: now,
+      previousCheckAt: null,
+    });
+  });
+
+  it('runWatchdogFromEnv wires GITHUB_RUN_ID / GITHUB_EVENT_NAME into the window', () => {
+    const watchdogRuns = [
+      watchdogRun(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      watchdogRun(29, '2026-10-10T07:00:00Z', 'completed', 'success'),
+    ];
+    const gh = (args: string[]) => {
+      const url = args[1] ?? '';
+      if (url.includes('credential-slot-watchdog.yml/runs'))
+        return JSON.stringify({ total_count: 2, workflow_runs: watchdogRuns });
+      if (url.includes('/artifacts')) return JSON.stringify({ artifacts: [] });
+      return JSON.stringify({ total_count: 0, workflow_runs: [] });
+    };
+    const verdicts = runWatchdogFromEnv({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now,
+      env: { GITHUB_RUN_ID: '30', GITHUB_EVENT_NAME: 'schedule', WATCHDOG_GRACE_HOURS: '8' },
+    });
+    // Exactly the four fires in (10-09 23:00, 10-10 07:00] — not the 24 h lookback's twelve.
+    expect(verdicts).toHaveLength(4);
+  });
+});
+// ── An early-warning run never stands in for a credential run (round 2) ────
+//
+// Found by the jittered end-to-end replay above (seed 203): two late
+// early-warning runs vouched for each other. The 03:17 one, delayed past bun's
+// 05:47 fire, was heuristically placed on bun and counted as bun's "own
+// evidence"; that let the 04:47 one, delayed past node-webpack's 06:17 fire, be
+// credited to node-webpack — whose real credential run was missing. A run whose
+// own mode marker reads `early-warning` is certainly not a credential run, so it
+// is dropped before attribution. Only a run with NO readable mode marker falls
+// back to the timing heuristic.
+
+describe('a run marked early-warning is never attributed to a credential lane', () => {
+  it('attachExactLanes flags a run whose mode marker reads early-warning', () => {
+    const gh = () =>
+      JSON.stringify({
+        artifacts: [{ name: 'compat-lane-bun' }, { name: 'compat-mode-early-warning' }],
+      });
+    const [run] = attachExactLanes(gh, [
+      { id: 7, event: 'schedule', status: 'completed', created_at: 'x', run_started_at: null },
+    ]);
+    expect(run.exactLane).toBeNull();
+    expect(run.earlyWarning).toBe(true);
+  });
+
+  it('attachExactLanes does not flag a run whose mode marker is missing (it may be a credential run)', () => {
+    const gh = () => JSON.stringify({ artifacts: [{ name: 'compat-lane-bun' }] });
+    const [run] = attachExactLanes(gh, [
+      { id: 7, event: 'schedule', status: 'completed', created_at: 'x', run_started_at: null },
+    ]);
+    expect(run.earlyWarning).toBeUndefined();
+  });
+
+  it('the seed-203 shape: two late early-warning runs cannot cover a missing node-webpack run', () => {
+    const runs = [
+      fixtureRun(1, 'schedule', '2026-10-11T01:30:00Z', CRED('node')),
+      fixtureRun(2, 'schedule', '2026-10-11T06:00:00Z', EW('node')), // 03:17 + 2.7 h, after bun 05:47
+      fixtureRun(3, 'schedule', '2026-10-11T06:40:00Z', CRED('bun')),
+      fixtureRun(4, 'schedule', '2026-10-11T07:00:00Z', EW('bun')), // 04:47 + 2.2 h, after node-webpack 06:17
+      // node-webpack's 06:17 credential run is MISSING.
+      fixtureRun(5, 'schedule', '2026-10-10T23:50:00Z', CRED('bun-webpack')),
+    ];
+    const { gh } = simGh(runs);
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-11T15:00:00Z'),
+      previousCheckAt: new Date('2026-10-11T07:00:00Z'),
+      graceHours: 8,
+    });
+    const nodeWebpack = verdicts.find((v) => v.lane === 'node-webpack');
+    expect(nodeWebpack?.slot).toBe('2026-10-11T06:17:00.000Z');
+    expect(nodeWebpack?.verdict).toBe('missing');
   });
 });

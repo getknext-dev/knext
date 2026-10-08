@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { lineSpec } from '../scripts/compat-credential-line.mjs';
 import { auditLine, fetchLineLedgers } from '../scripts/compat-line-tracker.mjs';
+import {
+  deriveLineWorkflow,
+  sourceShapeOf,
+  underiveLineWorkflow,
+} from '../scripts/compat-line-workflow.mjs';
 import {
   auditWindow,
   credentialCronForLane,
@@ -444,5 +450,160 @@ describe('v1.0 and v1.3 stay separated under the runs model', () => {
     expect(auditLine(clean, { line: 'v1.3', workflowText: V13_WORKFLOW, now }).cells.node.met).toBe(
       true,
     );
+  });
+});
+// ── PR #2013 round 2 — spacing never shields a failure ─────────────────────
+
+describe('a RED run is never excused by spacing (the anti-escape property)', () => {
+  it('a RED run that STARTED < 2 h after the previous counted run still RESETS the streak', () => {
+    // Run 6 was delayed 7 h (started 7 h after its fire), so run 7 — on time at
+    // the next fire — started 1 h after the previous COUNTED run. Run 7 is red.
+    // Spacing only ever skips a GREEN run; a red one inside the spacing floor
+    // must still reset, or a failure that lands close to a counted run would
+    // escape: runs 0-6 and 8-14 would read as one 14-run streak.
+    const runs = runsOnFires(15, {
+      delayMin: (i) => (i === 6 ? 7 * 60 : 0),
+      over: (i) =>
+        i === 7
+          ? {
+              shards: run().shards.map((s, j) => (j === 0 ? { ...s, failed: 1, passed: 48 } : s)),
+            }
+          : {},
+    });
+    const gapMs = Date.parse(String(runs[7].startedAt)) - Date.parse(String(runs[6].startedAt));
+    expect(gapMs).toBeLessThan(MIN_RUN_SPACING_HOURS * 60 * 60 * 1000);
+    const a = auditAt(runs, 14);
+    expect(a.calendarChecked).toBe(true);
+    expect(a.missingNights).toEqual([]);
+    expect(a.streaks.map((s: { nights: number }) => s.nights)).toEqual([7, 7]);
+    expect(a.longest.nights).toBe(7);
+    expect(a.met).toBe(false);
+    expect(a.restartsByCause).toEqual({ 'night-disqualified': 1 });
+    expect(a.spacingSkipped).toEqual([]);
+  });
+});
+
+// ── PR #2013 round 2 — fresh caches: a credential run restores no cache ────
+//
+// The founder required fresh caches for every counted run. Every step of the
+// two credential workflows is SCANNED (never enumerated) and classified by its
+// cache behaviour; a step using an action this table does not classify fails,
+// so a new cache surface cannot slip in unclassified.
+
+const COLD_ON_CREDENTIAL_IF = "env.KNEXT_COMPAT_MODE != 'credential'";
+const NO_CACHE_ON_CREDENTIAL = "${{ env.KNEXT_COMPAT_MODE == 'credential' }}";
+
+type WorkflowStep = { name?: string; uses?: string; if?: string; with?: Record<string, unknown> };
+
+/** Each action the credential workflows use -> why its step restores no cache on a credential run (null = fine). */
+const CACHE_RULES: Record<string, (step: WorkflowStep) => string | null> = {
+  'actions/cache': (s) =>
+    s.if === COLD_ON_CREDENTIAL_IF || String(s.if ?? '').startsWith(`${COLD_ON_CREDENTIAL_IF} && `)
+      ? null
+      : `actions/cache must be skipped on credential runs (if: ${COLD_ON_CREDENTIAL_IF})`,
+  'actions/cache/restore': (s) => CACHE_RULES['actions/cache']?.(s) ?? null,
+  'oven-sh/setup-bun': (s) =>
+    s.with?.['no-cache'] === NO_CACHE_ON_CREDENTIAL
+      ? null
+      : `setup-bun restores the Bun binary from the Actions cache unless no-cache: ${NO_CACHE_ON_CREDENTIAL}`,
+  'actions/setup-node': (s) =>
+    s.with?.cache === undefined && String(s.with?.['package-manager-cache']) === 'false'
+      ? null
+      : 'setup-node must set no `cache` and package-manager-cache: false',
+  'pnpm/action-setup': (s) =>
+    s.with?.cache === undefined || String(s.with?.cache) === 'false'
+      ? null
+      : 'pnpm/action-setup must not cache the store',
+  // No cache surface: the checkout is the tag's commit; artifacts are this run's own handoff.
+  'actions/checkout': () => null,
+  'actions/upload-artifact': () => null,
+  'actions/download-artifact': () => null,
+};
+
+function credentialCacheViolations(text: string): string[] {
+  const wf = parseYaml(text) as { jobs: Record<string, { uses?: string; steps?: WorkflowStep[] }> };
+  const out: string[] = [];
+  for (const [jobId, job] of Object.entries(wf.jobs)) {
+    if (job.uses) out.push(`${jobId}: a reusable workflow (${job.uses}) is not classified`);
+    for (const step of job.steps ?? []) {
+      if (!step.uses) continue;
+      const action = step.uses.split('@')[0] as string;
+      const rule = CACHE_RULES[action];
+      const why = rule ? rule(step) : `${action} is not classified — decide its cache behaviour`;
+      if (why) out.push(`${jobId} / ${step.name ?? action}: ${why}`);
+    }
+  }
+  return out;
+}
+
+describe('fresh caches — a credential run restores no Actions cache (ADR-0056 Amendment 5, D11)', () => {
+  const v10 = readFileSync(
+    join(import.meta.dir, '../.github/workflows/test-e2e-deploy.yml'),
+    'utf8',
+  );
+  const v13 = readFileSync(
+    join(import.meta.dir, '../.github/workflows/compat-credential-v1.3.yml'),
+    'utf8',
+  );
+
+  it('v1.0: no step of test-e2e-deploy.yml restores a cache on a credential run', () => {
+    expect(credentialCacheViolations(v10)).toEqual([]);
+  });
+
+  it('v1.3: no step of the derived compat-credential-v1.3.yml restores a cache on a credential run', () => {
+    expect(credentialCacheViolations(v13)).toEqual([]);
+  });
+
+  it('the scan sees every cache step (there are cache steps to see, and a dispatch keeps them)', () => {
+    for (const text of [v10, v13]) {
+      const wf = parseYaml(text) as { jobs: Record<string, { steps?: WorkflowStep[] }> };
+      const caches = Object.values(wf.jobs)
+        .flatMap((j) => j.steps ?? [])
+        .filter((s) => String(s.uses ?? '').startsWith('actions/cache'));
+      expect(caches.length).toBe(4);
+    }
+  });
+
+  it('the scan reds on a planted warm cache, and on an unclassified action', () => {
+    const warm = v10.replace(
+      `        if: ${COLD_ON_CREDENTIAL_IF}\n        uses: actions/cache@`,
+      '        uses: actions/cache@',
+    );
+    expect(warm).not.toBe(v10);
+    expect(credentialCacheViolations(warm)).toHaveLength(1);
+    const unknown = v10.replace('uses: actions/upload-artifact@', 'uses: some/cacheing-action@');
+    expect(credentialCacheViolations(unknown).join('\n')).toMatch(
+      /some\/cacheing-action is not classified/,
+    );
+  });
+
+  it('the Prepare job does not warm the Playwright cache on a credential run (nothing would save it)', () => {
+    const wf = parseYaml(v10) as { jobs: Record<string, { steps?: WorkflowStep[] }> };
+    const warm = Object.values(wf.jobs)
+      .flatMap((j) => j.steps ?? [])
+      .filter((s) =>
+        String(s.name ?? '').startsWith('Install Playwright chromium (warm the cache'),
+      );
+    expect(warm).toHaveLength(1);
+    expect(warm[0]?.if).toContain(COLD_ON_CREDENTIAL_IF);
+  });
+
+  it('the v1.3 derivation applies the cold-cache rule to a tag that predates it (rc.9, `nights` shape)', () => {
+    const { sourceText, shape } = underiveLineWorkflow(v13, { line: 'v1.3' });
+    expect(shape).toBe('nights');
+    // The tag's own harness restores caches; the derived file does not.
+    expect(credentialCacheViolations(sourceText).length).toBeGreaterThan(0);
+    expect(
+      credentialCacheViolations(
+        deriveLineWorkflow(sourceText, { line: 'v1.3', tag: 'v1.3.0-rc.9' }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('…and to a tag cut after it (`runs` shape: the tag already carries the rule)', () => {
+    expect(sourceShapeOf(v10)).toBe('runs');
+    expect(
+      credentialCacheViolations(deriveLineWorkflow(v10, { line: 'v1.3', tag: 'v1.3.0-rc.10' })),
+    ).toEqual([]);
   });
 });

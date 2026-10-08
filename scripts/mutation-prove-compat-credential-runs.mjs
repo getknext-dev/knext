@@ -13,7 +13,12 @@
  *     closed (missing + duplicate), never inflating a streak;
  *   * v1.0 and v1.3 stay separated (each audit lists only its own workflow, the
  *     two lines share no fire, an off-line tag never banks);
- *   * the late-slot watchdog checks the latest DUE fire.
+ *   * a red run inside the spacing floor still resets (spacing never shields
+ *     a failure);
+ *   * the late-slot watchdog checks only DUE fires, every one of them since its
+ *     previous run (jittered starts never skip or repeat a fire), never counts
+ *     an early-warning run, and alerts a coverage gap;
+ *   * fresh caches: a credential run restores no cache, on both lines.
  *
  * ATTRIBUTION — each mutation names the ONE test (`expect`) in its `spec` that
  * it must turn red. Per mutation: apply it, run that spec through the shared
@@ -57,7 +62,10 @@ const PROOF = {
     audit: 'scripts/compat-window-audit.mjs',
     lineTracker: 'scripts/compat-line-tracker.mjs',
     v13workflow: '.github/workflows/compat-credential-v1.3.yml',
+    v10workflow: '.github/workflows/test-e2e-deploy.yml',
+    lineWorkflow: 'scripts/compat-line-workflow.mjs',
     watchdog: 'scripts/credential-slot-watchdog.mjs',
+    watchdogLib: 'scripts/lib/credential-slot-watchdog.mjs',
   },
 };
 
@@ -206,21 +214,131 @@ const MUTATIONS = [
     replacement: "    - cron: '17 1,9,17 * * *'",
   },
 
-  // ── the late-slot watchdog checks the latest DUE fire ───────────────────
+  // ── spacing never shields a failure (round 2) ───────────────────────────
   {
-    label: 'the watchdog checks the latest fire at or before NOW (never due, never alerts)',
+    label: 'a red run inside the spacing floor is skipped instead of resetting (the escape)',
+    spec: RUNS_SPEC,
+    expect: 'a RED run that STARTED < 2 h after the previous counted run still RESETS the streak',
+    subject: 'audit',
+    anchor: '    if (!night.eligible) {\n',
+    replacement:
+      '    if (!night.eligible) {\n' +
+      "      if (scope === 'credential' && open && Date.parse(String(night.startedAt ?? '')) - openLastStartMs < MIN_RUN_SPACING_HOURS * 60 * 60 * 1000) continue;\n",
+  },
+
+  // ── the late-slot watchdog (round 2: every due fire since the previous run) ─
+  {
+    label:
+      "the watchdog's window ends at NOW, not at the due point (checks fires before they are due)",
     spec: WATCHDOG_SPEC,
-    expect: 'checks the latest DUE fire: a run of a LATER, not-yet-due fire never satisfies it',
+    expect: 'every verdict names the fire it checked',
+    subject: 'watchdogLib',
+    anchor: '  const end = checkMs - graceMs;',
+    replacement: '  const end = checkMs;',
+  },
+  {
+    label: 'the watchdog checks only each lane latest due fire (the round-1 design)',
+    spec: WATCHDOG_SPEC,
+    expect:
+      "the reviewer's reproduction, end to end: a missing bun-webpack 15:47 run alerts exactly once",
     subject: 'watchdog',
-    anchor: '    new Date(nowDate.getTime() - resolvedGraceHours * 60 * 60 * 1000),',
-    replacement: '    nowDate,',
+    anchor:
+      '  const fireTimes = [\n    ...new Set(dueFiresInWindow(laneDefs, window).map((f) => f.fire.toISOString())),\n  ];',
+    replacement:
+      '  const fireTimes = [\n    ...new Set(computeExpectedSlots(laneDefs, window.end).map((l) => l.expectedSlotTime)),\n  ];',
+  },
+  {
+    label: 'the window assumes the nominal 8 h period instead of the previous run',
+    spec: WATCHDOG_SPEC,
+    expect:
+      "the reviewer's reproduction: delays 6.6 h, 4.9 h, 6.6 h skip nothing and repeat nothing",
+    subject: 'watchdogLib',
+    anchor: '  const start = prevMs - graceMs;',
+    replacement: '  const start = end - 8 * HOUR_MS;',
+  },
+  {
+    label: 'a cancelled previous watchdog run anchors the window',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'skips a cancelled previous run (it may not have evaluated), reaching back to the one before',
+    subject: 'watchdog',
+    anchor: "!['success', 'failure'].includes(r.conclusion)",
+    replacement: "!['success', 'failure', 'cancelled'].includes(r.conclusion)",
+  },
+  {
+    label: 'an early-warning run is credited to a credential lane again',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'the seed-203 shape: two late early-warning runs cannot cover a missing node-webpack run',
+    subject: 'watchdogLib',
+    anchor: '    if (run.earlyWarning) continue;',
+    replacement: '    void run.earlyWarning;',
+  },
+  {
+    label: 'a watchdog silent for longer than the maximum window raises no coverage gap',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'evaluateWatchdog alerts a coverage gap when its previous run is older than the maximum window',
+    subject: 'watchdogLib',
+    anchor: '    gap: start < earliest,',
+    replacement: '    gap: false,',
+  },
+
+  // ── fresh caches: a credential run restores no cache (round 2) ──────────
+  {
+    label: 'v1.0: the pnpm-store cache restores on a credential run',
+    spec: RUNS_SPEC,
+    expect: 'v1.0: no step of test-e2e-deploy.yml restores a cache on a credential run',
+    subject: 'v10workflow',
+    anchor:
+      "      - name: Cache next.js pnpm store\n        if: env.KNEXT_COMPAT_MODE != 'credential'\n",
+    replacement: '      - name: Cache next.js pnpm store\n',
+  },
+  {
+    label: 'v1.0: setup-bun restores the Bun binary from the cache on a credential run',
+    spec: RUNS_SPEC,
+    expect: 'v1.0: no step of test-e2e-deploy.yml restores a cache on a credential run',
+    subject: 'v10workflow',
+    anchor:
+      "          no-cache: ${{ env.KNEXT_COMPAT_MODE == 'credential' }}\n          bun-version: '1.4.2'\n",
+    replacement: "          bun-version: '1.4.2'\n",
+  },
+  {
+    label: 'v1.0: the Prepare job warms Playwright on a credential run',
+    spec: RUNS_SPEC,
+    expect:
+      'the Prepare job does not warm the Playwright cache on a credential run (nothing would save it)',
+    subject: 'v10workflow',
+    anchor:
+      "        if: steps.pw-cache.outputs.cache-hit != 'true' && env.KNEXT_COMPAT_MODE != 'credential'\n",
+    replacement: "        if: steps.pw-cache.outputs.cache-hit != 'true'\n",
+  },
+  {
+    label: 'v1.3: the derived Playwright cache restores on a credential run',
+    spec: RUNS_SPEC,
+    expect:
+      'v1.3: no step of the derived compat-credential-v1.3.yml restores a cache on a credential run',
+    subject: 'v13workflow',
+    anchor:
+      "        id: pw-cache\n        if: env.KNEXT_COMPAT_MODE != 'credential'\n        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: ~/.cache/ms-playwright\n          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}\n          restore-keys: |\n",
+    replacement:
+      '        id: pw-cache\n        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: ~/.cache/ms-playwright\n          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}\n          restore-keys: |\n',
+  },
+  {
+    label: 'the v1.3 derivation drops the cold-cache rule for a pre-amendment tag',
+    spec: RUNS_SPEC,
+    expect:
+      'the v1.3 derivation applies the cold-cache rule to a tag that predates it (rc.9, `nights` shape)',
+    subject: 'lineWorkflow',
+    anchor: '    ...sourceShape.coldCaches,',
+    replacement: '    ...[],',
   },
 ];
 
-declareMutations(16);
+declareMutations(27);
 
-if (MUTATIONS.length !== 16) {
-  console.error(`FATAL: declared 16 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 27) {
+  console.error(`FATAL: declared 27 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

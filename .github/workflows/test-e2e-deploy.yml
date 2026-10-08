@@ -504,6 +504,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
+          package-manager-cache: false
           node-version: '24'
 
       - name: Setup pnpm
@@ -523,6 +524,7 @@ jobs:
       - name: Setup Bun (knext workspace)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
+          no-cache: ${{ env.KNEXT_COMPAT_MODE == 'credential' }}
           bun-version: '1.4.2'
 
       - name: Install knext deps
@@ -641,6 +643,7 @@ jobs:
         if: env.KNEXT_RUNTIME == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
+          no-cache: ${{ env.KNEXT_COMPAT_MODE == 'credential' }}
           # LOCKSTEP: keep byte-identical to the deploy-tests `Setup Bun (bun
           # lane only)` step. Bumping one alone reds compat-bun-lane-lockstep.
           bun-version: ${{ github.event.inputs.bun-version || '1.4.2' }}
@@ -751,7 +754,16 @@ jobs:
       # for a different ref); the lockfile hash invalidates it on a dep change.
       # This is the pnpm STORE only — the turbo BUILD cache stays gone (no source
       # build to persist).
+      #
+      # FRESH CACHES ON CREDENTIAL RUNS (ADR-0056 Amendment 5, D11): every
+      # counted credential run starts cold. Each actions/cache step in this file
+      # is skipped when KNEXT_COMPAT_MODE is 'credential' (so it neither restores
+      # nor saves), the Prepare job does not warm Playwright for a cache nothing
+      # will save, setup-bun runs with no-cache and setup-node with
+      # package-manager-cache: false. Early-warning runs and dispatches keep the
+      # caches. tests/compat-credential-runs.test.ts scans every step for it.
       - name: Cache next.js pnpm store
+        if: env.KNEXT_COMPAT_MODE != 'credential'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
@@ -868,6 +880,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: pw-cache
+        if: env.KNEXT_COMPAT_MODE != 'credential'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
@@ -878,7 +891,7 @@ jobs:
       # Warm install (cache miss only). NON-FATAL: the shards retry themselves;
       # a throttled CDN here must not kill the whole run's preparation.
       - name: Install Playwright chromium (warm the cache; retry + timeout, NON-FATAL)
-        if: steps.pw-cache.outputs.cache-hit != 'true'
+        if: steps.pw-cache.outputs.cache-hit != 'true' && env.KNEXT_COMPAT_MODE != 'credential'
         working-directory: next.js
         env:
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
@@ -1029,6 +1042,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
+          package-manager-cache: false
           node-version: '24'
 
       - name: Setup pnpm
@@ -1058,6 +1072,7 @@ jobs:
         if: env.KNEXT_RUNTIME == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
+          no-cache: ${{ env.KNEXT_COMPAT_MODE == 'credential' }}
           # #188 — the dispatch-only bun-version knob (e.g. `canary` to prove the
           # remaining red files are Bun-version-gated). On the weekly schedule
           # github.event.inputs is empty, so the fallback below IS the weekly
@@ -1160,6 +1175,7 @@ jobs:
         run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Restore next.js pnpm store
+        if: env.KNEXT_COMPAT_MODE != 'credential'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
@@ -1235,6 +1251,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: pw-cache
+        if: env.KNEXT_COMPAT_MODE != 'credential'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright

@@ -201,9 +201,21 @@ hours apart, in both release lines:
 **Budget.** 24 credential runs plus the 2 v1.0 early-warning runs a day, about
 21 pool run-hours a day: roughly one full run active every hour, 8 of the 20
 jobs. The two lines interleave so exactly one credential fire lands in each
-clock hour. Overlap costs queueing, never cancellation (scheduled runs keep the
-per-`run_id` concurrency group of §4). PR CI and the merge queue share the
-pool, so expect slower PR feedback while a credential run is active.
+clock hour.
+
+**Overlap, stated honestly.** The fires are an hour apart, but GitHub's delay
+(2.3-7.4 h measured) spreads them by up to 5.1 h, and a run lasts 36-66 min. So
+runs from different hours bunch up: two or three credential runs are often
+active at once, which is 16-24 shard jobs against the pool of 20 (and the
+measured spread allows more in the worst case). At three runs the pool is over
+capacity. Credential shards then queue behind each other, and every PR CI job
+and merge-queue check queues behind them. That can **stall** PR CI and the
+merge queue for the length of a run or longer, not just slow feedback down.
+Nothing is cancelled (scheduled runs keep the per-`run_id` concurrency group of
+§4), and a stalled credential shard only waits. Fresh caches (ADR-0056
+Amendment 5, D11) add about a minute to each run. If the merge queue stalls
+repeatedly, that is the trigger to revisit N (the ADR's action items) or move
+the v1.3 lane's slots.
 
 **Why three, not four.** At four a day the fires of one cell are 6 h apart,
 less than the measured 7.4 h worst delay. The audit places a run on the latest
@@ -219,6 +231,8 @@ nearly every hour neither could hold; the measured delay spread and
 `max-parallel: 8` are what bound contention. No two crons across all workflows
 share a UTC minute (§1, unchanged).
 
-**Watchdog.** `credential-slot-watchdog.yml` now fires every 8 h
-(`25 1,9,17 * * *`) and checks each lane's latest fire that is past its grace,
-so every fire is checked exactly once.
+**Watchdog.** `credential-slot-watchdog.yml` fires every 8 h
+(`25 1,9,17 * * *`), and GitHub starts it 4.9-6.6 h late by a different amount
+each time. Each scheduled run checks every credential fire that came due since
+the previous scheduled watchdog run (window `(previous start - grace, this
+start - grace]`), so every fire is checked exactly once whatever the delays.

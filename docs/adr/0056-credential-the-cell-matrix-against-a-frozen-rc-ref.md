@@ -849,18 +849,31 @@ under the measured delay spread, above the two-hour spacing floor.
 - **Every existing rule stands.** Wrong tag, dispatch, rerun, short ledger, bytecode not live, mode
   missing, fingerprint change, lost ledger, the bounded VOID bridge (now one per open streak of runs).
 
-#### D11 — Independence: what the harness already guarantees, and what it does not record
+#### D11 — Independence: a separate runner and fresh caches for every counted run
 
 - **A separate runner per run:** every job runs on an ephemeral GitHub-hosted VM, and scheduled runs
   get a concurrency group keyed on `run_id`, so no two runs share a runner or cancel each other.
-- **Fresh caches:** the only `actions/cache` entries in the harness are the next.js harness's pnpm
-  content-addressed store (keyed on `NEXTJS_REF` + lockfile) and the Playwright browser binaries
-  (keyed on the Playwright version). They hold exact-version dependency bytes, not test, build or
-  server state: the knext tarballs are rebuilt from the RC tag on every run, and every fixture app is
-  created and built fresh per test. A warm entry cannot make a flaky test pass. The ledger records no
-  cache-hit field, so the audit grades none; adding one would only take effect at the next RC cut,
-  because the ledger script runs from the tag (jev: keep and document 0.93, disable on credential runs
-  0.05, record and grade 0.02).
+- **Fresh caches:** every credential run starts cold. On a credential run
+  (`KNEXT_COMPAT_MODE == 'credential'`, which only a credential cron can produce) every `actions/cache`
+  step is skipped, so it neither restores nor saves: the next.js harness's pnpm store and the
+  Playwright browsers are downloaded fresh. The Prepare job does not warm Playwright for a cache that
+  nothing will save, `oven-sh/setup-bun` runs with `no-cache`, and `actions/setup-node` with
+  `package-manager-cache: false`. Early-warning runs and dispatches keep the caches. The v1.3 lane
+  gets the same rule from its derivation: a tag cut before this amendment (`nights` shape, rc.9) has
+  the lines added by declared substitutions, and a later tag carries them itself.
+  `tests/compat-credential-runs.test.ts` scans every step of both credential workflows, classifies
+  each action by its cache behaviour, and fails on an unclassified action.
+- **Cost (measured, then estimated).** On the 2026-10-08 01:54 run, whose caches had been evicted,
+  the Prepare job's cold harness install took 27 s against 11-15 s warm, and the Playwright
+  download 22 s; across four cold runs (2026-10-03..08) the download took 21-24 s. A shard skips a
+  3-11 s cache restore and pays the same download and install, so each shard costs about 20-30 s more
+  and the Prepare job about the same as before. With 16 shards run 8 at a time that is about one
+  minute of wall clock and about seven job-minutes per run, against a median run of 48 minutes.
+- **Risk.** Each credential run now downloads Chromium once per shard (up to 8 at once) instead of
+  once per cache key. In an earlier throttled-network incident concurrent downloads timed out and
+  the browser-driving tests failed. The download step retries four times with a 15-minute limit per
+  attempt, and is non-fatal, so a CDN outage now reads as a red credential run, which resets the cell.
+  That is the price of fresh caches, accepted rather than hidden.
 
 #### D12 — The v1.3 lane gets the same schedule now, not at its next pin bump
 
@@ -874,12 +887,26 @@ shapes derive to the same v1.3 crons and the same "14-run" alert prose. Underivi
 and keeps the one whose recovered source hashes to the recorded digest. The run-time `--check`
 against `v1.3.0-rc.9` passes byte for byte.
 
-#### D13 — The late-slot watchdog checks the latest DUE fire
+#### D13 — The late-slot watchdog checks every fire that came due since its previous run
 
 With fires eight hours apart and an eight-hour grace, "the latest fire at or before now" is never
-past its grace, so a watchdog keyed on it could never alert. The watchdog now checks each lane's
-latest fire at or before `now − grace`, and runs every eight hours (`25 1,9,17 * * *`), so each check
-covers exactly one fire per lane and every fire is checked exactly once.
+past its grace, so a watchdog keyed on it could never alert. A fire is therefore checked only once it
+is due (at or before its start minus the grace).
+
+GitHub starts the watchdog late too, by a different amount each run (measured 4.9-6.6 h), so a
+watchdog that checks only each lane's latest due fire skips a fire whenever two consecutive runs'
+delays differ enough, and checks another twice. Each scheduled run (`25 1,9,17 * * *`) instead
+checks **every** fire in `(previous scheduled watchdog run's start − grace, this run's start − grace]`,
+both starts read from the Actions API. Consecutive windows meet exactly whatever the delays, so every
+fire is checked once and a missing run alerts once. A cancelled previous run is skipped (it may not
+have evaluated). Without a readable previous run the window is the last 24 hours: at least the
+watchdog period plus the worst measured delay (8 + 7.4 h), and one dropped watchdog run
+(2 × 8 + 7.4 h); it may repeat a check, never skip one. A previous run more than 72 hours back raises a
+`coverage-gap` alert. Each fire is judged in its own context (every lane's slot at that fire), so
+attribution and the ambiguity rule are unchanged per fire, and a run whose own mode marker reads
+early-warning is never credited to a credential lane. A seeded simulation over ten days, with the
+measured delays and with wider ones plus a dropped watchdog run, checks every fire exactly once and
+alerts exactly the dropped runs, once each.
 
 ### Options considered
 
@@ -897,8 +924,8 @@ Sub-decisions, each scored with `jev pick` on the measured numbers above:
 | Slot attribution | **one multi-hour literal per cell, attribute by time (0.88)**, one literal per fire + run-name (0.12), nearest fire of any cron (0.00) | multi-hour literal |
 | Slot grid | **keep each v1.0 fire, v1.3 fills free hours at :32 (0.93)**, strict alternation (0.06), line blocks (0.01) | keep v1.0 fires |
 | Delay past the next fire | **strict reset (0.77)**, repair by reassignment (0.23) | strict |
-| Caches | **keep and document (0.93)**, disable on credential runs (0.05), record and grade (0.02) | keep and document |
-| Watchdog slot | **latest due fire, every 8 h (0.97)**, per-lane offset (0.02), latest fire (0.01) | latest due fire |
+| Caches | **disable on credential runs (0.97)**, keep and document (first scored 0.93 for keep, before the review held the founder's fresh-cache requirement) | disable on credential runs |
+| Watchdog window | **every due fire since the previous watchdog run (0.99)**, fixed lookback without de-duplication (0.01), latest due fire only (0.00; first chosen at 0.97, it skips fires under jittered starts) | every due fire since the previous run |
 | In-file cron stagger test | **relax to ≥ 30 min, drop the 08:30 rule (0.72)**, re-grid to keep ≥ 60 min (0.28) | relax |
 
 ### Consequences
@@ -911,6 +938,8 @@ Sub-decisions, each scored with `jev pick` on the measured numbers above:
   relaxed from 60 to 30 minutes inside `test-e2e-deploy.yml`, and the 08:30 UTC pile-up rule is
   dropped: with a fire in nearly every hour neither can hold, and the measured 2.3–7.4 h delay plus
   `max-parallel: 8` are what bound contention.
+- **Fresh caches** cost about one minute of wall clock and about seven job-minutes per credential run
+  (D11), and make a Playwright CDN outage a red credential run.
 - **The fetch horizon** doubles (`DEFAULT_FETCH_LIMIT` 100 → 200): the workflow now fires 14
   scheduled runs a day.
 - **The v1.0 rc.6 window:** this amendment edits `test-e2e-deploy.yml`, whose executing-workflow
@@ -940,11 +969,13 @@ Sub-decisions, each scored with `jev pick` on the measured numbers above:
       "14-run window". Fresh `rcBumpMarker` for the frozen files touched.
 - [x] v1.3: `cronMap` keyed by cell, `SOURCE_SHAPES` in `compat-line-workflow.mjs`, regenerated
       workflow, `--check` against `v1.3.0-rc.9`.
-- [x] Watchdog: hours-aware slots, latest-due-fire semantics, `25 1,9,17 * * *`.
+- [x] Watchdog: hours-aware slots, `25 1,9,17 * * *`, every due fire since the previous watchdog
+      run (seeded jittered simulation in `tests/credential-slot-watchdog.test.ts`).
+- [x] Fresh caches on credential runs, both lines; scanned by `tests/compat-credential-runs.test.ts`.
 - [x] Trackers: "run N of 14" and "14 consecutive green runs" wording, both lines.
 - [x] Mutation prover: `scripts/mutation-prove-compat-credential-runs.mjs`.
-- [ ] User docs pages that `release/prepare-v1.0.0` also edits (`stability`, `compat-matrix`,
-      `compat-suite`, `docs/RELEASING.md`, `docs/release/v1.0.0.md`) still say nights; they are
-      reworded after that branch merges, to avoid a conflicting edit.
+- [ ] User docs pages that `release/prepare-v1.0.0` also edits (`README.md`, `stability`,
+      `compat-matrix`, `compat-suite`, `docs/RELEASING.md`, `docs/release/v1.0.0.md`) still say
+      nights; they are reworded after that branch merges, to avoid a conflicting edit (#ISSUE).
 - [ ] Measure the actual spacing and delay distribution after the first full week on the new grid,
       and revisit N if the pool is saturated or delays exceed eight hours.

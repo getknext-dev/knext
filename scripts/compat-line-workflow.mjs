@@ -87,11 +87,27 @@ function count(hay, needle) {
  *
  * Exactly one shape must match a source (`sourceShapeOf`), and either shape
  * derives to the SAME v1.3 crons (`spec.cronMap`, keyed by lane) and the same
- * prose. That is how the v1.3 lane runs three times a day from the moment its
+ * prose.
+ *
+ * FRESH CACHES (ADR-0056 Amendment 5, D11). A `runs` tag already skips every
+ * cache restore on a credential run (its actions/cache steps carry
+ * `if: env.KNEXT_COMPAT_MODE != 'credential'`, setup-bun `no-cache`,
+ * setup-node `package-manager-cache: false`, and the Prepare job does not warm
+ * Playwright). A `nights` tag predates that, so its `coldCaches` substitutions
+ * add exactly those lines — the v1.3 lane runs cold from the moment it is
+ * regenerated, like the v1.0 lane. tests/compat-credential-runs.test.ts scans
+ * the derived file for any cache restore on a credential run. That is how the v1.3 lane runs three times a day from the moment its
  * workflow is regenerated, without waiting for its pin to reach a tag that
  * carries the new schedule. Underiving tries each shape and keeps the one
  * whose recovered source hashes to the header digest.
  */
+/** The pinned action lines the `nights` shape's cold-cache substitutions anchor on. */
+const CACHE_USES = '        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0';
+const SETUP_BUN_USES =
+  '        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0';
+const SETUP_NODE_USES =
+  '        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0';
+
 export const SOURCE_SHAPES = Object.freeze({
   nights: Object.freeze({
     crons: Object.freeze({
@@ -127,6 +143,36 @@ export const SOURCE_SHAPES = Object.freeze({
         count: 1,
       },
     ],
+    coldCaches: Object.freeze([
+      {
+        id: 'cold-cache actions/cache',
+        from: `${CACHE_USES}\n`,
+        to: `        if: env.KNEXT_COMPAT_MODE != 'credential'\n${CACHE_USES}\n`,
+        count: 4,
+      },
+      {
+        id: 'cold-cache playwright warm-up',
+        from:
+          '      - name: Install Playwright chromium (warm the cache; retry + timeout, NON-FATAL)\n' +
+          "        if: steps.pw-cache.outputs.cache-hit != 'true'\n",
+        to:
+          '      - name: Install Playwright chromium (warm the cache; retry + timeout, NON-FATAL)\n' +
+          "        if: steps.pw-cache.outputs.cache-hit != 'true' && env.KNEXT_COMPAT_MODE != 'credential'\n",
+        count: 1,
+      },
+      {
+        id: 'cold-cache setup-bun',
+        from: `${SETUP_BUN_USES}\n        with:\n`,
+        to: `${SETUP_BUN_USES}\n        with:\n          no-cache: \${{ env.KNEXT_COMPAT_MODE == 'credential' }}\n`,
+        count: 3,
+      },
+      {
+        id: 'cold-cache setup-node',
+        from: `${SETUP_NODE_USES}\n        with:\n`,
+        to: `${SETUP_NODE_USES}\n        with:\n          package-manager-cache: false\n`,
+        count: 2,
+      },
+    ]),
   }),
   runs: Object.freeze({
     crons: Object.freeze({
@@ -139,6 +185,7 @@ export const SOURCE_SHAPES = Object.freeze({
     prose: (v) => [
       { id: 'window-prose', from: 'v1.0 14-run window', to: `${v} 14-run window`, count: 3 },
     ],
+    coldCaches: Object.freeze([]),
   }),
 });
 
@@ -284,6 +331,7 @@ export function lineSubstitutions(spec, shape = 'runs') {
       to: `The single aggregate view for this line is the (unpinned) **${spec.trackerTitle}** issue, refreshed daily by \\\`${spec.trackerWorkflow}\\\`.`,
       count: 1,
     },
+    ...sourceShape.coldCaches,
   );
   return subs;
 }
