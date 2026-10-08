@@ -52,6 +52,10 @@ import {
     vinextPatchesDir,
     vinextPatchesMain,
 } from "../cli/vinext-patches";
+import type {
+    HarnessOptions,
+    HarnessOutcome,
+} from "./helpers/vinext-scroll-harness";
 
 const PKG_ROOT = join(import.meta.dir, "..", "..");
 const PATCHES_DIR = join(PKG_ROOT, "templates", "vinext-patches");
@@ -2299,6 +2303,168 @@ describe("the bundled patches against the published tarball", () => {
             ).toEqual([]);
         }
     }, 120_000);
+
+    describe("vinext#3768: the Next.js 16.3 scroll and focus handler", () => {
+        // The scenarios run in a child process (helpers/vinext-scroll-harness.ts)
+        // against the REAL patched app-router-scroll module and scroll-intent
+        // state, in a happy-dom tree. See that file for why they cannot share
+        // this process.
+        function navigate(options: HarnessOptions): HarnessOutcome {
+            applyVinextPatches(patched);
+            const r = spawnSync(
+                process.execPath,
+                [
+                    join(
+                        import.meta.dir,
+                        "helpers",
+                        "vinext-scroll-harness.ts",
+                    ),
+                    patched,
+                    JSON.stringify(options),
+                ],
+                {
+                    encoding: "utf8",
+                    env: { ...process.env, NODE_ENV: "development" },
+                },
+            );
+            if (r.status !== 0) {
+                throw new Error(
+                    `scroll harness failed (${r.status}): ${r.stderr}`,
+                );
+            }
+            return JSON.parse(r.stdout) as HarnessOutcome;
+        }
+
+        it("scrolls the route content into view and leaves focus on the clicked link", () => {
+            const outcome = navigate({
+                route: [{ id: "page", documentTop: 2000 }],
+                scrollY: 500,
+            });
+            expect(outcome.scrollY).toBe(2000);
+            // The legacy handler called target.focus() on the route's element.
+            expect(outcome.activeElementId).toBe("clicked-link");
+            expect(outcome.pendingIntent).toBeNull();
+        });
+
+        it("measures the route against the root scroll-padding-top, not the viewport edge", () => {
+            // The page top sits 50px below the viewport top: visible, unless the
+            // root reserves 100px for a sticky header.
+            const route = [{ id: "page", documentTop: 100 }];
+            const padded = navigate({
+                route,
+                scrollY: 50,
+                padding: "100px",
+            });
+            expect(padded.scrollY).toBe(0);
+            const unpadded = navigate({ route, scrollY: 50 });
+            expect(unpadded.scrollY).toBe(50);
+            // Percentages resolve against the viewport height (800 * 50% = 400).
+            const percent = navigate({
+                route: [{ id: "page", documentTop: 300 }],
+                scrollY: 0,
+                padding: "50%",
+            });
+            expect(percent.scrollY).toBe(300);
+        });
+
+        it("targets the highest box across the route content, so a box-less first child does not decide the target", () => {
+            const outcome = navigate({
+                route: [
+                    { id: "hidden-first", documentTop: null },
+                    { id: "content", documentTop: 1000 },
+                ],
+                scrollY: 1500,
+            });
+            expect(outcome.scrollY).toBe(1000);
+            expect(outcome.activeElementId).toBe("clicked-link");
+            expect(outcome.pendingIntent).toBeNull();
+        });
+
+        it("measures every box of the route content, so a fixed first child does not make the page look already in view", () => {
+            // A fixed header sits at 100px for the whole navigation. The page
+            // content itself is above the viewport, so the page must scroll:
+            // judging only the first box (the header) would leave scrollY at 1500.
+            const outcome = navigate({
+                route: [
+                    { id: "fixed-header", documentTop: null, viewportTop: 100 },
+                    { id: "content", documentTop: 1000 },
+                ],
+                scrollY: 1500,
+            });
+            expect(outcome.scrollY).toBe(0);
+            expect(outcome.activeElementId).toBe("clicked-link");
+            expect(outcome.pendingIntent).toBeNull();
+        });
+
+        it("does not treat a resource React hoists into <head> as the route content, and leaves the intent for the document-top fallback", () => {
+            const outcome = navigate({
+                route: [{ id: "page", documentTop: 2900 }],
+                scrollY: 100,
+                hoistedStyleFirst: true,
+            });
+            expect(outcome.pendingIntent).not.toBeNull();
+            // The legacy handler marked the intent as hoisted, which made the
+            // fallback decline to scroll.
+            expect(outcome.pendingIntent?.targetHoistedInHead).toBeFalsy();
+            expect(outcome.activeElementId).toBe("clicked-link");
+        });
+
+        it("hands an intercepted navigation's scroll to the parallel slot: the retained page neither scrolls nor blurs, and the intent is consumed", () => {
+            const route = [{ id: "retained-page", documentTop: 2000 }];
+            const owned = navigate({
+                route,
+                scrollY: 500,
+                claim: { parallelSlotOwned: true },
+            });
+            expect(owned.scrollY).toBe(500);
+            expect(owned.activeElementId).toBe("clicked-link");
+            // Consumed, so the document-top fallback has nothing to act on.
+            expect(owned.pendingIntent).toBeNull();
+
+            // The same page scrolls when the navigation is not an interception.
+            const ordinary = navigate({ route, scrollY: 500 });
+            expect(ordinary.scrollY).toBe(2000);
+        });
+
+        it("still scrolls a real hash target from the retained page of an intercepted navigation, and consumes a missing one without scrolling", () => {
+            const route = [
+                { id: "retained-page", documentTop: 0 },
+                { id: "hash-target", documentTop: 3000 },
+            ];
+            const found = navigate({
+                route,
+                scrollY: 500,
+                hash: "#hash-target",
+                claim: { parallelSlotOwned: true },
+            });
+            expect(found.scrollY).toBe(3000);
+            expect(found.activeElementId).toBe("clicked-link");
+            expect(found.pendingIntent).toBeNull();
+
+            const missing = navigate({
+                route,
+                scrollY: 500,
+                hash: "#missing-target",
+                claim: { parallelSlotOwned: true },
+            });
+            expect(missing.scrollY).toBe(500);
+            expect(missing.activeElementId).toBe("clicked-link");
+            expect(missing.pendingIntent).toBeNull();
+        });
+
+        it("the navigation controller marks a committed interception as parallel-slot owned", () => {
+            const rel = "dist/server/app-browser-navigation-controller.js";
+            const wiring =
+                "claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId, { parallelSlotOwned: approvedCommit.interception !== null })";
+            // The published controller never passes the ownership flag ...
+            expect(
+                readFileSync(join(INSTALLED_VINEXT, rel), "utf8"),
+            ).not.toContain("parallelSlotOwned");
+            // ... and the patched one derives it from the committed interception.
+            applyVinextPatches(patched);
+            expect(readFileSync(join(patched, rel), "utf8")).toContain(wiring);
+        });
+    });
     it("vinext#3769: on Nitro, a public file the middleware matcher covers goes to vinext first; the setup hook registers the plugin", async () => {
         // Ported from Next.js: test/e2e/middleware-static-files — a matcher
         // that lists `/file.svg` must make middleware answer that request.
@@ -2510,6 +2676,38 @@ export default function middleware() { return NextResponse.json({ middleware: tr
                 "nitro:GET:/open.txt:handling",
                 "nitro:GET:/_next/static/chunks/a.js:handling",
                 "nitro:GET:/file%2esvg/x:handling",
+            ]);
+
+            // An encoded slash is not a path separator: Nitro's static handler
+            // keeps `%2F` un-decoded, so `/a%2Fb.svg` is not the covered public
+            // file `/a/b.svg` and must stay on the static fast path.
+            const slashSource = source.replace(
+                /new Set\(\[.*?\]\)/,
+                'new Set(["/a/b.svg"])',
+            );
+            expect(slashSource).not.toBe(source);
+            const slashFile = join(withMatcher.root, "nitro-plugin-slash.mjs");
+            writeFileSync(
+                slashFile,
+                slashSource.replace(
+                    'import { fetchViteEnv } from "nitro/vite/runtime";',
+                    "const fetchViteEnv = (name, request) => globalThis.__knextFetchViteEnv(name, request);",
+                ),
+            );
+            const slashPlugin = (
+                (await import(pathToFileURL(slashFile).href)) as {
+                    default: (a: typeof app) => void;
+                }
+            ).default;
+            slashPlugin(app);
+            seen.length = 0;
+            await hit("/a/b.svg");
+            await hit("/a%2Fb.svg");
+            await hit("/a%2fb.svg");
+            expect(seen).toEqual([
+                "vinext:ssr:GET:/a/b.svg:forwarded",
+                "nitro:GET:/a%2Fb.svg:handling",
+                "nitro:GET:/a%2fb.svg:handling",
             ]);
         } finally {
             delete g.__knextFetchViteEnv;

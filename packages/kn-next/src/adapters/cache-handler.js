@@ -1117,6 +1117,11 @@ function resolveBuildId(options) {
 
 /** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
 function nextRoute(key) {
+  // Next >= 16.3.7 scopes every non-FETCH entry to its source route and keys
+  // BOTH the shared Map (`set`: storageKey) and this handler by the same
+  // `/route-cache/<kind>/<sha256>/$<path>` string — no toRoute normalisation,
+  // so the handler's key is already the Map key and must be used verbatim.
+  if (key.startsWith('/route-cache/')) return key;
   return key.replace(/(?:\/index)?\/?$/, '') || '/';
 }
 

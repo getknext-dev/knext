@@ -169,7 +169,27 @@ async function wokenPod(
     });
 }
 
-const PAGE = { kind: "APP_PAGE", isRoutePPREnabled: false, isFallback: false };
+// Next >= 16.3.7 scopes every non-FETCH entry to its source route: `get` throws
+// without `ctx.route`, and the storage key (and the shared Map key) becomes
+// `/route-cache/<kind>/<sha256(sourceRoute)>/$<path>`. Older Nexts ignore it.
+const PAGE = {
+    kind: "APP_PAGE",
+    isRoutePPREnabled: false,
+    isFallback: false,
+    route: { kind: "APP_PAGE", sourceRoute: "/isr/[id]" },
+};
+
+/** The key Next 16.3.7+ files a route's window under in the shared Map. */
+const { getRouteCacheKey } =
+    require("next/dist/server/lib/route-cache-key.js") as {
+        getRouteCacheKey: (
+            pathname: string,
+            owner: typeof PAGE.route,
+        ) => string;
+    };
+function mapKey(path: string): string {
+    return getRouteCacheKey(path, PAGE.route);
+}
 
 describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)", () => {
     beforeEach(() => {
@@ -231,9 +251,9 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             entry?.isStale,
             "the previous build's window must not apply",
         ).toBe(true);
-        expect(SharedCacheControls.cacheControls.has("/isr/redeploy")).toBe(
-            false,
-        );
+        expect(
+            SharedCacheControls.cacheControls.has(mapKey("/isr/redeploy")),
+        ).toBe(false);
     });
 
     it("does NOT seed another build's revalidate=false (it would be fresh forever)", async () => {
@@ -246,9 +266,9 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         );
         const entry = await cache.get("/static/old", PAGE);
         expect(entry?.isStale).toBe(true);
-        expect(SharedCacheControls.cacheControls.has("/static/old")).toBe(
-            false,
-        );
+        expect(
+            SharedCacheControls.cacheControls.has(mapKey("/static/old")),
+        ).toBe(false);
     });
 
     it("does NOT seed a legacy entry that carries no build id", async () => {
@@ -261,9 +281,9 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         );
         const entry = await cache.get("/isr/legacy", PAGE);
         expect(entry?.isStale).toBe(true);
-        expect(SharedCacheControls.cacheControls.has("/isr/legacy")).toBe(
-            false,
-        );
+        expect(
+            SharedCacheControls.cacheControls.has(mapKey("/isr/legacy")),
+        ).toBe(false);
     });
 
     it("does NOT seed when this process has no build id (no serverDistDir), even for a legacy entry", async () => {
@@ -277,9 +297,9 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         );
         const entry = await cache.get("/isr/nobuild", PAGE);
         expect(entry?.isStale).toBe(true);
-        expect(SharedCacheControls.cacheControls.has("/isr/nobuild")).toBe(
-            false,
-        );
+        expect(
+            SharedCacheControls.cacheControls.has(mapKey("/isr/nobuild")),
+        ).toBe(false);
     });
 
     it("records this build's id on a Redis write", async () => {
@@ -331,9 +351,9 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             entry?.isStale,
             "every deploy with a deployment id shares this id — it must not count as 'same build'",
         ).toBe(true);
-        expect(SharedCacheControls.cacheControls.has("/isr/constant")).toBe(
-            false,
-        );
+        expect(
+            SharedCacheControls.cacheControls.has(mapKey("/isr/constant")),
+        ).toBe(false);
     });
 
     it("does NOT record Next's CONSTANT build id on a write", async () => {
@@ -382,7 +402,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
     });
 
     it("does not override a window this process already knows", async () => {
-        SharedCacheControls.cacheControls.set("/isr/c", {
+        SharedCacheControls.cacheControls.set(mapKey("/isr/c"), {
             revalidate: 10,
             expire: ONE_YEAR_S,
         });
@@ -397,7 +417,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(entry?.isStale).toBe(true);
     });
 
-    it("maps Next's normalized `/index` key to the `/` route, as Next's toRoute does", async () => {
+    it("seeds the `/` route under the exact key Next files it under (its `/index` form)", async () => {
         const cache = await wokenPod(
             storedEntry(
                 { revalidate: 3600, expire: ONE_YEAR_S },
@@ -406,7 +426,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         );
         const entry = await cache.get("/", PAGE);
         expect(entry?.isStale).toBeFalsy();
-        expect(SharedCacheControls.cacheControls.has("/")).toBe(true);
+        expect(SharedCacheControls.cacheControls.has(mapKey("/"))).toBe(true);
     });
 
     it("never seeds a window for a FETCH (data-cache) entry", async () => {
@@ -440,6 +460,38 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         // A slash-led key, so the kind guard (not the key shape) is what is tested.
         await handler.get("/fetch-like", { kind: "FETCH" });
         expect(SharedCacheControls.cacheControls.size).toBe(0);
+    });
+
+    it("seeds a pre-16.3.7 `/index` key under Next's toRoute form `/` (older-Next branch)", async () => {
+        // Peer floor is next >= 16.0.0: those Nexts hand the handler the bare
+        // `/index` key (no `/route-cache/` prefix) and file the window under `/`.
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakeold=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                get: (k: string, ctx?: unknown) => Promise<unknown>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return storedEntry(
+                    { revalidate: 3600, expire: ONE_YEAR_S },
+                    SEVEN_MINUTES_MS,
+                );
+            },
+            async send() {
+                return "OK";
+            },
+        });
+        await handler.get("/index", { kind: "APP_PAGE" });
+        expect(SharedCacheControls.cacheControls.has("/")).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/index")).toBe(false);
     });
 });
 
@@ -480,6 +532,7 @@ describe("the in-memory path (no REDIS_URL) gets the same treatment", () => {
                     cacheControl: { revalidate: 3600, expire: ONE_YEAR_S },
                     isRoutePPREnabled: false,
                     isFallback: false,
+                    route: PAGE.route,
                 },
             );
         } finally {
