@@ -1715,38 +1715,49 @@ describe('jittered watchdog starts — every fire is checked exactly once', () =
   )('seed %i: crashed, timed-out and in-progress watchdog runs — every fire is still checked', (seed) => {
     const rand = prng(seed);
     const starts = jitteredStarts(rand, WATCHDOG_DELAY_HOURS);
-    type Outcome = 'success' | 'failure' | 'cancelled' | 'slow';
+    // `slow` / `slow-crash`: still in progress when the next run lists it,
+    // then concludes success / failure.
+    type Outcome = 'success' | 'failure' | 'cancelled' | 'slow' | 'slow-crash';
+    const evaluates = (o: Outcome) => o === 'success' || o === 'slow';
     const outcomes: Outcome[] = [];
     let streak = 0;
     starts.forEach((_, i) => {
       const r = rand();
       let o: Outcome =
-        r < 0.12 ? 'failure' : r < 0.24 ? 'cancelled' : r < 0.36 ? 'slow' : 'success';
+        r < 0.1
+          ? 'failure'
+          : r < 0.2
+            ? 'cancelled'
+            : r < 0.3
+              ? 'slow'
+              : r < 0.4
+                ? 'slow-crash'
+                : 'success';
       // Keep a run of non-evaluating runs well inside the 72 h maximum window,
       // and end on a run that evaluated (the range below ends at its due point).
-      if (o !== 'success' && o !== 'slow' && (streak >= 3 || i === starts.length - 1))
-        o = 'success';
+      if (!evaluates(o) && (streak >= 3 || i === starts.length - 1)) o = 'success';
       // Every seed starts with each kind once: the very first run crashes (so
       // the next has no successful run in view), the second is still in
-      // progress when the third lists it, the third times out.
-      if (i < 3) o = (['failure', 'slow', 'cancelled'] as const)[i];
-      streak = o === 'failure' || o === 'cancelled' ? streak + 1 : 0;
+      // progress when the third lists it, the third times out, and the fourth
+      // is in progress when the fifth lists it and then crashes.
+      if (i < 4) o = (['failure', 'slow', 'cancelled', 'slow-crash'] as const)[i];
+      streak = evaluates(o) ? 0 : streak + 1;
       outcomes.push(o);
     });
-    expect(outcomes.filter((o) => o === 'failure').length).toBeGreaterThan(0);
-    expect(outcomes.filter((o) => o === 'cancelled').length).toBeGreaterThan(0);
-    expect(outcomes.filter((o) => o === 'slow').length).toBeGreaterThan(0);
+    for (const kind of ['failure', 'cancelled', 'slow', 'slow-crash'] as const) {
+      expect(outcomes.filter((o) => o === kind).length).toBeGreaterThan(0);
+    }
 
-    /** Run j as run i's listing shows it: a `slow` run is still in progress for the next run. */
+    /** Run j as run i's listing shows it: a slow run is still in progress for the next run. */
     const asSeenBy = (i: number, j: number) => {
       const iso = (starts[j] as Date).toISOString();
       const o = outcomes[j] as Outcome;
-      const live = j === i || (o === 'slow' && j === i - 1);
+      const live = j === i || ((o === 'slow' || o === 'slow-crash') && j === i - 1);
       return {
         id: 1000 + j,
         event: 'schedule',
         status: live ? 'in_progress' : 'completed',
-        conclusion: live ? null : o === 'slow' ? 'success' : o,
+        conclusion: live ? null : o === 'slow' ? 'success' : o === 'slow-crash' ? 'failure' : o,
         created_at: iso,
         run_started_at: iso,
         html_url: `https://x/${1000 + j}`,
@@ -1770,8 +1781,7 @@ describe('jittered watchdog starts — every fire is checked exactly once', () =
         now: new Date(checkAt.getTime() + 60_000),
       });
       expect(anchors.checkAt.getTime()).toBe(checkAt.getTime());
-      const o = outcomes[i];
-      if (o === 'failure' || o === 'cancelled') return; // crashed: evaluated nothing
+      if (!evaluates(outcomes[i] as Outcome)) return; // crashed: evaluated nothing
       const w = watchdogWindow({ ...anchors, graceHours: DEFAULT_GRACE_HOURS });
       expect(w.gap).toBe(false);
       for (const f of dueFiresInWindow(lanes, w)) {

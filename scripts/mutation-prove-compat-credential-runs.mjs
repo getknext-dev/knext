@@ -358,7 +358,9 @@ const MUTATIONS = [
     subject: 'watchdogWorkflow',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
     anchor: '      alert: ${{ steps.check.outputs.alert }}\n',
-    replacement: '',
+    // A whole line, not '': the harness appends its residue marker to a
+    // newline-free replacement, which would comment out the NEXT line too.
+    replacement: "      alert: ''\n",
   },
   {
     label: 'the alert issue stops naming the window a crashed check did not check',
@@ -367,7 +369,7 @@ const MUTATIONS = [
     subject: 'watchdogWorkflow',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
     anchor: '          WINDOW: ${{ needs.check-credential-slots.outputs.window }}\n',
-    replacement: '',
+    replacement: "          WINDOW: ''\n",
   },
 
   // ── fresh caches: a credential run restores no cache (round 2) ──────────
