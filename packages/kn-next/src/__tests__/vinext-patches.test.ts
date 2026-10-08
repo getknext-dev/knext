@@ -2379,6 +2379,22 @@ describe("the bundled patches against the published tarball", () => {
             expect(outcome.pendingIntent).toBeNull();
         });
 
+        it("measures every box of the route content, so a fixed first child does not make the page look already in view", () => {
+            // A fixed header sits at 100px for the whole navigation. The page
+            // content itself is above the viewport, so the page must scroll:
+            // judging only the first box (the header) would leave scrollY at 1500.
+            const outcome = navigate({
+                route: [
+                    { id: "fixed-header", documentTop: null, viewportTop: 100 },
+                    { id: "content", documentTop: 1000 },
+                ],
+                scrollY: 1500,
+            });
+            expect(outcome.scrollY).toBe(0);
+            expect(outcome.activeElementId).toBe("clicked-link");
+            expect(outcome.pendingIntent).toBeNull();
+        });
+
         it("does not treat a resource React hoists into <head> as the route content, and leaves the intent for the document-top fallback", () => {
             const outcome = navigate({
                 route: [{ id: "page", documentTop: 2900 }],

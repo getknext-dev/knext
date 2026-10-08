@@ -22,8 +22,15 @@ import { pathToFileURL } from "node:url";
 import { Window } from "happy-dom";
 
 export type HarnessOptions = {
-    /** Route elements in DOM order; documentTop null = no box (display: none). */
-    route: { id: string; documentTop: number | null }[];
+    /**
+     * Route elements in DOM order. documentTop null = no box (display: none);
+     * viewportTop pins the rect to the viewport (position: fixed with a top).
+     */
+    route: {
+        id: string;
+        documentTop: number | null;
+        viewportTop?: number;
+    }[];
     scrollY: number;
     claim?: { parallelSlotOwned?: boolean };
     hash?: string | null;
@@ -87,11 +94,14 @@ async function main(): Promise<HarnessOutcome> {
             scrollY = v;
         },
     });
-    const topOf = (node: { id: string }) =>
-        options.route.find((r) => r.id === node.id)?.documentTop;
+    const specOf = (node: { id: string }) =>
+        options.route.find((r) => r.id === node.id);
     Object.defineProperty(win.HTMLElement.prototype, "getClientRects", {
         value(this: { id: string }) {
-            const top = topOf(this);
+            const spec = specOf(this);
+            if (spec?.viewportTop !== undefined)
+                return [{ top: spec.viewportTop }];
+            const top = spec?.documentTop;
             return top === null || top === undefined
                 ? []
                 : [{ top: top - scrollY }];
@@ -99,7 +109,7 @@ async function main(): Promise<HarnessOutcome> {
     });
     Object.defineProperty(win.HTMLElement.prototype, "scrollIntoView", {
         value(this: { id: string }) {
-            const top = topOf(this);
+            const top = specOf(this)?.documentTop;
             if (top !== null && top !== undefined) scrollY = top;
         },
     });
