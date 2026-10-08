@@ -427,6 +427,7 @@ describe('marketplace-index-assert.sh (#1954)', () => {
       );
       const r = run(join(mpDir, 'blobs/sha256'), idx.digest);
       expect(r.code).toBe(1);
+      expect(r.err).toContain('in-toto layer');
     } finally {
       rmSync(root, { recursive: true });
     }
@@ -499,7 +500,9 @@ describe('marketplace-index-assert.sh (#1954)', () => {
       const { run } = setup(root);
       const empty = join(root, 'empty');
       mkdirSync(empty);
-      expect(run(empty).code).toBe(1);
+      const r = run(empty);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain('could not fetch manifest');
     } finally {
       rmSync(root, { recursive: true });
     }
@@ -521,7 +524,7 @@ describe('operator-supply-chain.yml wires the Marketplace variant (#1954)', () =
     expect(s).toContain('marketplace-index-build.sh operator-oci operator-oci-mp');
     expect(text.match(/docker\/build-push-action@/g)?.length).toBe(1);
     // the GHCR build keeps provenance
-    expect(text).toContain('provenance: mode=max');
+    expect(text).toMatch(/\n\s+provenance: mode=max\n/);
   });
 
   it('pushes, asserts, signs and tags only on version tags, after the Trivy gate', () => {
@@ -560,7 +563,7 @@ describe('operator-supply-chain.yml wires the Marketplace variant (#1954)', () =
 
   it('runs the assertion script against the pushed gated digest and the pushed Marketplace digest', () => {
     const s = step('Assert Marketplace index has no attestations and identical bits (#1954)');
-    expect(s).toContain('marketplace-index-assert.sh');
+    expect(s).toMatch(/\n\s+run: bash \S*marketplace-index-assert\.sh /);
     expect(s).toContain('steps.push.outputs.digest');
     expect(s).toContain('steps.push_mp.outputs.digest');
   });
