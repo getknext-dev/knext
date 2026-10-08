@@ -136,6 +136,11 @@
       "file": "vinext-3769-nitro-middleware-public-files.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3769",
       "summary": "Nitro builds (node/bun presets): middleware runs before a `public/` file its matcher covers, as with `next start` (Next.js deploy test middleware-static-files). The setup hook lists the covered files and registers a Nitro runtime plugin that sends a GET/HEAD for one of them to the vinext service ahead of Nitro's static handler; once middleware lets it continue, the file is fetched back through the Nitro app (vinext-3750's fetcher), where the static handler serves it. `/_next/static/` and uncovered files keep the static fast path. Middleware without a matcher now runs for every public file. Applies on top of vinext-3750-nitro-public-file-rewrites.patch. Open upstream (issue cloudflare/vinext#3217); retire when the pinned vinext includes cloudflare/vinext#3769."
+    },
+    {
+      "file": "vinext-3771-hybrid-pages-not-found.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3771",
+      "summary": "Hybrid app/ + pages/: a Pages route that resolves to `notFound` (getStaticProps/getServerSideProps `notFound`, or a `fallback: false` miss) renders the App Router not-found instead of pages/404, keeping the source route Cache-Control, as Next.js does when the app directory is enabled (Next.js deploy tests not-found-with-pages-i18n and pages-router-app-not-found). Production only; dev is unchanged. Open upstream (issue cloudflare/vinext#3428); retire when the pinned vinext includes cloudflare/vinext#3771."
     }
   ],
   "pristine": {
@@ -168,6 +173,8 @@
     "dist/shims/app-router-scroll-state.js": "1c31a7ccc19ac69ecc50f6f2d07fc718c7e7ec2f4600bb1cf2af18d50e02984e",
     "dist/shims/app-router-scroll.js": "0a43b02e382a6b4c3fcca38e8afb12e689b9b6a877e459b01bfd0a6f480053de",
     "dist/server/app-browser-navigation-controller.js": "88d86bd6a56ca60617ca8607b3112b5d70bf6c5449d6b5be43a461050a9124a2",
-    "dist/server/pages-request-pipeline.js": "28e0b1a13966c2ccdcc43461927c7e49beb869fa9f70c2cca9cf2924ab8093ea"
+    "dist/server/pages-request-pipeline.js": "28e0b1a13966c2ccdcc43461927c7e49beb869fa9f70c2cca9cf2924ab8093ea",
+    "dist/server/app-pages-bridge.js": "5a6a66420eb53e8813c0169b7fa92f0334fbdfbcf5f6c1b59259fb695e89aa2c",
+    "dist/server/pages-page-handler.js": "bb70d235225807fe8357c1f3e055b47677c39666878e653eb07901d8cdcbbe17"
   }
 }
