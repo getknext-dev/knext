@@ -33,8 +33,14 @@ too, rather than left implied.
 
 ## Knative Serving
 
-- **`knative-v1.16.0`** is the version the kind-based operator/e2e workflows install and test
-  against (`net-kourier` as the ingress).
+- **`knative-v1.16.0`** is the pinned version. It is what the
+  [prerequisite bundle](/docs/install#one-command-prerequisites) installs
+  (`scripts/prereqs/install.sh` is the source of truth for the pins, with sha256-verified
+  manifests), and what the kind-based operator and end-to-end workflows install and test against
+  (`net-kourier` as the ingress).
+- The 2026-09 EKS validation run used Knative Serving and Kourier **v1.18**, installed by hand, so
+  the EKS record shows a deploy working on a newer Knative than the pinned one. The pinned bundle
+  is the tested configuration; re-validating EKS on the pinned version is part of the next EKS run.
 - Any Knative Serving install that satisfies the operator's Kubernetes client version above should
   work, but `knative-v1.16.0` is the only version CI actually exercises.
 
