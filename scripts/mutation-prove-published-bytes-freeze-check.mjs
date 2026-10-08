@@ -52,6 +52,7 @@ const SPECS = [
   'tests/published-bytes-freeze-check.test.ts',
   'tests/published-bytes-freeze-check-cli.test.ts',
   'tests/dependabot-published-bytes-pause.test.ts',
+  'tests/published-bytes-freeze-guard-workflow.test.ts',
 ];
 
 /** The files every mutation below lands in, repo-relative. */
@@ -60,6 +61,7 @@ const PROOF = {
     lib: 'scripts/lib/published-bytes-freeze-check.mjs',
     cli: 'scripts/published-bytes-freeze-check.mjs',
     dependabot: 'scripts/dependabot-published-bytes-pause.mjs',
+    workflow: '.github/workflows/published-bytes-freeze-guard.yml',
   },
 };
 
@@ -191,9 +193,35 @@ const MUTATIONS = [
     anchor: "  const shouldClose = decision.action === 'proceed';",
     replacement: '  const shouldClose = false;',
   },
+
+  // ── #2004: base-ref scope (1.3-line PRs skip; main-line PRs stay guarded) ──
+  {
+    label: 'base-ref: never skip an integration/* base (the always-red 1.3 job returns)',
+    subject: 'lib',
+    anchor: '  if (isUnfrozenLineBaseRef(baseRef)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label: 'base-ref: skip EVERY base (a main-base PR changing published bytes escapes the freeze)',
+    subject: 'lib',
+    anchor: ".startsWith('integration/');",
+    replacement: '.length >= 0;',
+  },
+  {
+    label: 'base-ref: CLI stops passing baseRef to the decision',
+    subject: 'cli',
+    anchor: '    packageDirs,\n    baseRef,\n    now,\n  });',
+    replacement: '    packageDirs,\n    now,\n  });',
+  },
+  {
+    label: 'base-ref: workflow stops passing --base-ref to the check',
+    subject: 'workflow',
+    anchor: ' \\\n            --base-ref "${BASE_REF}"',
+    replacement: '',
+  },
 ];
 
-declareMutations(17);
+declareMutations(21);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -206,8 +234,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 17) {
-  console.error(`FATAL: declared 17 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 21) {
+  console.error(`FATAL: declared 21 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

@@ -84,6 +84,11 @@ jobs:
     env:
       BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
+      # #2004 — the branch this PR merges INTO. The pin guards main's release
+      # line; a PR into integration/* is another line and is skipped (with a
+      # stated reason) by the check itself. merge_group carries it as a
+      # refs/heads/-qualified ref; the check normalises both shapes.
+      BASE_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.event.pull_request.base.ref }}
     steps:
       # fetch-depth: 0 + fetch-tags: true — the diff, when it runs, resolves
       # the pinned rc tag via `git worktree add --detach` (inside
@@ -170,4 +175,5 @@ jobs:
             --changed-files-file changed-files.txt \
             --base-pin-file base-pin.json \
             --head-pin-file head-pin.json \
-            --merge-base-pin-file merge-base-pin.json
+            --merge-base-pin-file merge-base-pin.json \
+            --base-ref "${BASE_REF}"
